@@ -161,6 +161,16 @@ def test_refine_centroids_rejects_a_zero_binning():
         seiza.refine_centroids([], np.zeros((32, 32), np.float32), binning=0)
 
 
+def test_a_catalog_without_proper_motions_solves_the_same_at_any_epoch():
+    catalog, stars, truth = synthetic_field()
+    assert not catalog.has_proper_motions
+    kwargs = dict(ra=CENTER[0], dec=CENTER[1], scale_arcsec_px=SCALE)
+    as_written = seiza.solve(stars, catalog, WIDTH, HEIGHT, **kwargs)
+    dated = seiza.solve(stars, catalog, WIDTH, HEIGHT, epoch=2010.0, **kwargs)
+    assert dated.wcs.crval == as_written.wcs.crval
+    assert dated.matched_stars == as_written.matched_stars
+
+
 def test_wcs_transform_round_trip():
     wcs = seiza.Wcs.from_center_scale_rotation((10.0, -45.0), (500.0, 400.0), 1.5, 33.0)
     ra, dec = wcs.pixel_to_world(123.0, 456.0)

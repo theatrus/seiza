@@ -107,15 +107,59 @@ impl From<DetectedStar> for Star {
 }
 
 enum CatalogBackend {
-    Tiles(seiza::catalog::TileCatalog),
+    /// A star tile file, and the proper motions beside it when it has them.
+    Tiles(
+        seiza::catalog::TileCatalog,
+        Option<seiza::catalog::ProperMotions>,
+    ),
     Memory(MemoryCatalog),
 }
 
 impl CatalogBackend {
     fn as_trait(&self) -> &(dyn StarCatalogTrait + Sync) {
         match self {
-            Self::Tiles(catalog) => catalog,
+            Self::Tiles(catalog, _) => catalog,
             Self::Memory(catalog) => catalog,
+        }
+    }
+
+    /// The catalog a solve searches: moved to `epoch` (a Julian year) when
+    /// the star file has proper motions and an epoch is given.
+    fn at_epoch(&self, epoch: Option<f64>) -> SearchedCatalog<'_> {
+        match self {
+            Self::Tiles(catalog, motions) => SearchedCatalog::Dated(
+                seiza::catalog::DatedCatalog::new(catalog, motions.as_ref(), epoch),
+            ),
+            Self::Memory(catalog) => SearchedCatalog::Memory(catalog),
+        }
+    }
+}
+
+/// [`CatalogBackend::at_epoch`]'s catalog.
+enum SearchedCatalog<'a> {
+    Dated(seiza::catalog::DatedCatalog<'a>),
+    Memory(&'a MemoryCatalog),
+}
+
+impl StarCatalogTrait for SearchedCatalog<'_> {
+    fn cone_search(&self, ra: f64, dec: f64, radius_deg: f64, limit: usize) -> Vec<CatalogStar> {
+        match self {
+            Self::Dated(catalog) => catalog.cone_search(ra, dec, radius_deg, limit),
+            Self::Memory(catalog) => catalog.cone_search(ra, dec, radius_deg, limit),
+        }
+    }
+
+    fn star_count(&self) -> u64 {
+        match self {
+            Self::Dated(catalog) => catalog.star_count(),
+            Self::Memory(catalog) => catalog.star_count(),
+        }
+    }
+
+    fn all_brighter_than(&self, mag_limit: f32) -> Vec<CatalogStar> {
+        match self {
+            Self::Dated(catalog) => catalog.all_brighter_than(mag_limit),
+            Self::Memory(catalog) => catalog.all_brighter_than(mag_limit),
         }
     }
 }
@@ -133,6 +177,9 @@ impl PyStarCatalog {
     /// catalog inside is picked), or omitted to search the standard
     /// locations (`SEIZA_STAR_DATA`, files next to the program, and the
     /// `seiza setup` directories) — the same rules as the CLI's `--data`.
+    /// The proper motions beside the file (`stars-gaia.pm.bin` beside
+    /// `stars-gaia.bin`) are opened too when it has them; see
+    /// :attr:`has_proper_motions`.
     #[staticmethod]
     #[pyo3(signature = (path=None))]
     fn open(path: Option<PathBuf>) -> PyResult<Self> {
@@ -140,9 +187,23 @@ impl PyStarCatalog {
             .map_err(|error| PyFileNotFoundError::new_err(error.to_string()))?;
         let catalog = seiza::catalog::TileCatalog::open(&path)
             .map_err(|error| PyIOError::new_err(format!("{}: {error}", path.display())))?;
+        let motions =
+            seiza::catalog::ProperMotions::open_beside(&path, &catalog).map_err(|error| {
+                PyIOError::new_err(format!(
+                    "the proper motions beside {}: {error}",
+                    path.display()
+                ))
+            })?;
         Ok(Self {
-            backend: CatalogBackend::Tiles(catalog),
+            backend: CatalogBackend::Tiles(catalog, motions),
         })
+    }
+
+    /// Whether the catalog has proper motions, so that a solve given an
+    /// ``epoch`` searches it moved to that date.
+    #[getter]
+    fn has_proper_motions(&self) -> bool {
+        matches!(self.backend, CatalogBackend::Tiles(_, Some(_)))
     }
 
     /// Build an in-memory catalog from `(ra_deg, dec_deg, mag)` tuples.
@@ -742,9 +803,14 @@ fn refine_centroids(
 }
 
 /// Plate solve with an approximate position and pixel-scale hint.
+/// ``epoch``, a Julian year such as ``2024.92``, moves a catalog with proper
+/// motions (:attr:`StarCatalog.has_proper_motions`) to that date before it
+/// is searched; leave it ``None`` to search the catalog as written. The
+/// same keyword does the same for :func:`solve_blind` and
+/// :func:`solve_with_prior`.
 #[pyfunction]
 #[pyo3(signature = (stars, catalog, width, height, *, ra, dec, scale_arcsec_px,
-    radius_deg=2.0, scale_tolerance=0.2, sip_order=0, time_limit=None, cancel=None))]
+    radius_deg=2.0, scale_tolerance=0.2, sip_order=0, time_limit=None, cancel=None, epoch=None))]
 #[allow(clippy::too_many_arguments)]
 fn solve(
     py: Python<'_>,
@@ -760,6 +826,7 @@ fn solve(
     sip_order: u8,
     time_limit: Option<f64>,
     cancel: Option<Py<PyAny>>,
+    epoch: Option<f64>,
 ) -> PyResult<PySolution> {
     if sip_order > 5 {
         return Err(PyValueError::new_err("sip_order must be between 0 and 5"));
@@ -777,7 +844,7 @@ fn solve(
     let solution = py.detach(|| {
         seiza::solve::solve_with_limits(
             &stars,
-            catalog.backend.as_trait(),
+            &catalog.backend.at_epoch(epoch),
             &hint,
             (width, height),
             &limits.limits,
@@ -790,7 +857,7 @@ fn solve(
 #[pyfunction]
 #[pyo3(signature = (stars, catalog, index, width, height, *,
     min_scale_arcsec_px=0.1, max_scale_arcsec_px=20.0, sip_order=0, time_limit=None,
-    cancel=None))]
+    cancel=None, epoch=None))]
 #[allow(clippy::too_many_arguments)]
 fn solve_blind(
     py: Python<'_>,
@@ -804,6 +871,7 @@ fn solve_blind(
     sip_order: u8,
     time_limit: Option<f64>,
     cancel: Option<Py<PyAny>>,
+    epoch: Option<f64>,
 ) -> PyResult<PySolution> {
     if sip_order > 5 {
         return Err(PyValueError::new_err("sip_order must be between 0 and 5"));
@@ -821,7 +889,7 @@ fn solve_blind(
     let solution = py.detach(|| {
         seiza::blind::solve_blind_with_limits(
             &stars,
-            catalog.backend.as_trait(),
+            &catalog.backend.at_epoch(epoch),
             &index.index,
             &params,
             (width, height),
@@ -1004,7 +1072,7 @@ fn read_solve_prior(py: Python<'_>, path: PathBuf) -> PyResult<Py<PyDict>> {
 #[pyfunction]
 #[pyo3(signature = (stars, catalog, width, height, prior, *, index=None,
     min_scale_arcsec_px=0.1, max_scale_arcsec_px=20.0, sip_order=0, time_limit=None,
-    cancel=None))]
+    cancel=None, epoch=None))]
 #[allow(clippy::too_many_arguments)]
 fn solve_with_prior(
     py: Python<'_>,
@@ -1019,6 +1087,7 @@ fn solve_with_prior(
     sip_order: u8,
     time_limit: Option<f64>,
     cancel: Option<Py<PyAny>>,
+    epoch: Option<f64>,
 ) -> PyResult<PySolution> {
     if sip_order > 5 {
         return Err(PyValueError::new_err("sip_order must be between 0 and 5"));
@@ -1058,7 +1127,7 @@ fn solve_with_prior(
     let found = py.detach(|| {
         seiza::prior::solve_with_prior(
             &stars,
-            catalog.backend.as_trait(),
+            &catalog.backend.at_epoch(epoch),
             index.map(|index| &index.index),
             &prior,
             &params,

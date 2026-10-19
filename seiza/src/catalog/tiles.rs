@@ -153,12 +153,16 @@ pub(super) fn unpack_mag(q: u16) -> f32 {
     q as f32 / 1000.0 - MAG_OFFSET
 }
 
-/// Accumulates stars in memory, then writes a `SEIZAST2` tile file.
+/// Accumulates stars in memory, then writes a `SEIZAST2` tile file, and
+/// optionally its [`super::motion`] sidecar.
 pub struct TileSetBuilder {
     grid: Grid,
     epoch: f64,
     attribution: String,
     tiles: Vec<Vec<(u32, u32, u16)>>,
+    /// Each star's proper motion, in the same places as `tiles`, once any
+    /// star has been added with one.
+    motions: Option<Vec<Vec<[i16; 2]>>>,
     count: u64,
 }
 
@@ -174,13 +178,35 @@ impl TileSetBuilder {
             epoch,
             attribution: attribution.to_string(),
             tiles,
+            motions: None,
             count: 0,
         }
     }
 
     pub fn add(&mut self, ra: f64, dec: f64, mag: f32) {
-        let tile = self.grid.tile_of(ra, dec);
-        self.tiles[tile as usize].push((pack_ra(ra), pack_dec(dec), pack_mag(mag)));
+        self.add_moving(ra, dec, mag, None);
+    }
+
+    /// [`Self::add`], with the star's proper motion in mas/yr (`pmra`
+    /// times cos(dec), then `pmdec`) for the sidecar
+    /// [`Self::write_with_motions`] writes. `None` records a star without
+    /// one, such as a Gaia two-parameter source.
+    pub fn add_moving(&mut self, ra: f64, dec: f64, mag: f32, motion: Option<(f64, f64)>) {
+        let tile = self.grid.tile_of(ra, dec) as usize;
+        self.tiles[tile].push((pack_ra(ra), pack_dec(dec), pack_mag(mag)));
+        if motion.is_some() && self.motions.is_none() {
+            let lengths = self
+                .tiles
+                .iter()
+                .enumerate()
+                .map(|(index, stars)| stars.len() - usize::from(index == tile));
+            self.motions = Some(lengths.map(|length| vec![[NO_MOTION; 2]; length]).collect());
+        }
+        if let Some(motions) = &mut self.motions {
+            motions[tile].push(motion.map_or([NO_MOTION; 2], |(pmra, pmdec)| {
+                [pack_motion(pmra), pack_motion(pmdec)]
+            }));
+        }
         self.count += 1;
     }
 
@@ -188,7 +214,18 @@ impl TileSetBuilder {
         self.count
     }
 
-    pub fn write_to(mut self, path: &Path) -> io::Result<()> {
+    pub fn write_to(self, path: &Path) -> io::Result<()> {
+        self.write(path, None)
+    }
+
+    /// [`Self::write_to`], and the proper motions of its stars to `motions`,
+    /// in the star file's own order (see [`super::motion`]). Stars added
+    /// without a motion, or by [`Self::add`], have none there.
+    pub fn write_with_motions(self, stars: &Path, motions: &Path) -> io::Result<()> {
+        self.write(stars, Some(motions))
+    }
+
+    fn write(self, path: &Path, motions_path: Option<&Path>) -> io::Result<()> {
         let mut out = BufWriter::new(File::create(path)?);
         out.write_all(MAGIC_V2)?;
         out.write_all(&self.grid.n_bands.to_le_bytes())?;
@@ -204,31 +241,118 @@ impl TileSetBuilder {
         out.write_all(&vec![0u8; pad as usize])?;
         position += pad;
 
+        // Brightest first within each tile; the sort is stable, so stars of
+        // equal magnitude keep the order they were added in.
+        let orders: Vec<Vec<u32>> = self
+            .tiles
+            .iter()
+            .map(|tile| {
+                let mut order: Vec<u32> = (0..tile.len() as u32).collect();
+                order.sort_by_key(|&index| tile[index as usize].2);
+                order
+            })
+            .collect();
         let n_tiles = self.grid.n_tiles() as u64;
         let mut offset = position + n_tiles * 12;
-        for tile in &mut self.tiles {
-            tile.sort_by_key(|&(_, _, mag)| mag);
-            out.write_all(&offset.to_le_bytes())?;
-            out.write_all(&(tile.len() as u32).to_le_bytes())?;
+        let mut fingerprint = IndexFingerprint::new();
+        for tile in &self.tiles {
+            let entry = index_entry(offset, tile.len() as u32);
+            fingerprint.add(&entry);
+            out.write_all(&entry)?;
             let data = tile.len() as u64 * 10;
             offset += data.next_multiple_of(4);
         }
-        for tile in &self.tiles {
+        for (tile, order) in self.tiles.iter().zip(&orders) {
             // Columnar: all RA, then all Dec, then all magnitudes
-            for &(ra, _, _) in tile {
-                out.write_all(&ra.to_le_bytes())?;
+            for &index in order {
+                out.write_all(&tile[index as usize].0.to_le_bytes())?;
             }
-            for &(_, dec, _) in tile {
-                out.write_all(&dec.to_le_bytes())?;
+            for &index in order {
+                out.write_all(&tile[index as usize].1.to_le_bytes())?;
             }
-            for &(_, _, mag) in tile {
-                out.write_all(&mag.to_le_bytes())?;
+            for &index in order {
+                out.write_all(&tile[index as usize].2.to_le_bytes())?;
             }
             let data = tile.len() as u64 * 10;
             let pad = data.next_multiple_of(4) - data;
             out.write_all(&vec![0u8; pad as usize])?;
         }
+        out.flush()?;
+
+        let Some(motions_path) = motions_path else {
+            return Ok(());
+        };
+        let none = Vec::new();
+        let mut out = BufWriter::new(File::create(motions_path)?);
+        super::motion::write_header(
+            &mut out,
+            self.grid.n_bands,
+            self.epoch,
+            self.count,
+            fingerprint.finish(),
+        )?;
+        for (tile, order) in orders.iter().enumerate() {
+            let motions = self
+                .motions
+                .as_ref()
+                .map_or(&none, |motions| &motions[tile]);
+            let motion = |index: u32| {
+                motions
+                    .get(index as usize)
+                    .copied()
+                    .unwrap_or([NO_MOTION; 2])
+            };
+            for &index in order {
+                out.write_all(&motion(index)[0].to_le_bytes())?;
+            }
+            for &index in order {
+                out.write_all(&motion(index)[1].to_le_bytes())?;
+            }
+        }
         out.flush()
+    }
+}
+
+/// A proper motion the sidecar cannot hold: none was measured.
+pub(super) const NO_MOTION: i16 = i16::MIN;
+
+/// Mas/yr to the sidecar's whole mas/yr, clamped short of [`NO_MOTION`].
+/// Barnard's Star, the fastest, moves 10.4″ a year.
+fn pack_motion(mas_per_year: f64) -> i16 {
+    if !mas_per_year.is_finite() {
+        return NO_MOTION;
+    }
+    mas_per_year
+        .round()
+        .clamp(-f64::from(i16::MAX), f64::from(i16::MAX)) as i16
+}
+
+/// One tile's index entry as the file stores it: data offset, then count.
+fn index_entry(offset: u64, count: u32) -> [u8; 12] {
+    let mut entry = [0u8; 12];
+    entry[..8].copy_from_slice(&offset.to_le_bytes());
+    entry[8..].copy_from_slice(&count.to_le_bytes());
+    entry
+}
+
+/// FNV-1a over a star file's tile index, which a sidecar records so it
+/// pairs only with the star file it was written with.
+pub(super) struct IndexFingerprint(u64);
+
+impl IndexFingerprint {
+    pub(super) fn new() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+
+    pub(super) fn add(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.0 ^= u64::from(byte);
+            self.0 = self.0.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+
+    pub(super) fn finish(&self) -> u64 {
+        self.0
     }
 }
 
@@ -411,85 +535,35 @@ impl TileCatalog {
         &self.attribution
     }
 
-    /// Visit every star in a tile. Decoding runs over contiguous columns in
-    /// the mapped file for the v2 layout.
-    /// Visit stars in a tile until the callback returns false. Records are
-    /// brightest-first, enabling early exit at a magnitude limit.
-    fn for_each_in_tile_while(&self, tile: u32, mut visit: impl FnMut(CatalogStar) -> bool) {
-        let (offset, count) = self.index[tile as usize];
-        let (offset, count) = (offset as usize, count as usize);
-        match self.layout {
-            Layout::V1Interleaved => {
-                let end = offset + count * V1_RECORD_SIZE;
-                let Some(data) = self.map.get(offset..end) else {
-                    return;
-                };
-                for r in data.chunks_exact(V1_RECORD_SIZE) {
-                    let keep_going = visit(CatalogStar {
-                        ra: unpack_ra(u32::from_le_bytes(r[0..4].try_into().unwrap())),
-                        dec: unpack_dec(u32::from_le_bytes(r[4..8].try_into().unwrap())),
-                        mag: unpack_mag(u16::from_le_bytes(r[8..10].try_into().unwrap())),
-                    });
-                    if !keep_going {
-                        return;
-                    }
-                }
-            }
-            Layout::V2Columnar => {
-                let ra_end = offset + count * 4;
-                let dec_end = ra_end + count * 4;
-                let mag_end = dec_end + count * 2;
-                let Some(_) = self.map.get(offset..mag_end) else {
-                    return;
-                };
-                let ra = &self.map[offset..ra_end];
-                let dec = &self.map[ra_end..dec_end];
-                let mag = &self.map[dec_end..mag_end];
-                for i in 0..count {
-                    let keep_going = visit(CatalogStar {
-                        ra: unpack_ra(u32::from_le_bytes(ra[i * 4..i * 4 + 4].try_into().unwrap())),
-                        dec: unpack_dec(u32::from_le_bytes(
-                            dec[i * 4..i * 4 + 4].try_into().unwrap(),
-                        )),
-                        mag: unpack_mag(u16::from_le_bytes(
-                            mag[i * 2..i * 2 + 2].try_into().unwrap(),
-                        )),
-                    });
-                    if !keep_going {
-                        return;
-                    }
-                }
-            }
+    pub(super) fn n_bands(&self) -> u32 {
+        self.grid.n_bands
+    }
+
+    /// Stars in each tile, in tile order.
+    pub(super) fn tile_counts(&self) -> impl Iterator<Item = u32> + '_ {
+        self.index.iter().map(|&(_, count)| count)
+    }
+
+    /// The [`IndexFingerprint`] of this file's tile index.
+    pub(super) fn index_fingerprint(&self) -> u64 {
+        let mut fingerprint = IndexFingerprint::new();
+        for &(offset, count) in &self.index {
+            fingerprint.add(&index_entry(offset, count));
         }
-    }
-}
-
-fn invalid_data(message: &'static str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message)
-}
-
-impl StarCatalog for TileCatalog {
-    fn star_count(&self) -> u64 {
-        self.star_count()
+        fingerprint.finish()
     }
 
-    fn all_brighter_than(&self, mag_limit: f32) -> Vec<CatalogStar> {
-        // Tiles store brightest-first: stop at the first fainter record
-        let mut found = Vec::new();
-        for tile in 0..self.grid.n_tiles() {
-            self.for_each_in_tile_while(tile, |star| {
-                if star.mag <= mag_limit {
-                    found.push(star);
-                    true
-                } else {
-                    false
-                }
-            });
-        }
-        found
-    }
-
-    fn cone_search(&self, ra: f64, dec: f64, radius_deg: f64, limit: usize) -> Vec<CatalogStar> {
+    /// [`StarCatalog::cone_search`], with each star passed through `moved`
+    /// (given its tile and its place there) before the cone test: how
+    /// [`super::motion::EpochCatalog`] applies proper motions.
+    pub(super) fn cone_search_moved(
+        &self,
+        ra: f64,
+        dec: f64,
+        radius_deg: f64,
+        limit: usize,
+        moved: impl Fn(u32, usize, CatalogStar) -> CatalogStar,
+    ) -> Vec<CatalogStar> {
         if limit == 0 {
             return Vec::new();
         }
@@ -525,10 +599,11 @@ impl StarCatalog for TileCatalog {
         let (center_sin_dec, center_cos_dec) = dec.to_radians().sin_cos();
         let cos_radius = radius_deg.to_radians().cos();
         for tile in self.grid.cone_tiles(ra, dec, radius_deg) {
-            self.for_each_in_tile_while(tile, |star| {
+            self.for_each_indexed_in_tile_while(tile, |index, star| {
                 if heap.len() == limit && star.mag.total_cmp(&heap.peek().unwrap().0.mag).is_ge() {
                     return false;
                 }
+                let star = moved(tile, index, star);
                 let (star_sin_dec, star_cos_dec) = star.dec.to_radians().sin_cos();
                 let dot = center_sin_dec * star_sin_dec
                     + center_cos_dec * star_cos_dec * (star.ra.to_radians() - center_ra).cos();
@@ -544,6 +619,105 @@ impl StarCatalog for TileCatalog {
         let mut found: Vec<CatalogStar> = heap.into_iter().map(|s| s.0).collect();
         found.sort_by(|a, b| a.mag.total_cmp(&b.mag));
         found
+    }
+
+    /// Visit every star in a tile. Decoding runs over contiguous columns in
+    /// the mapped file for the v2 layout.
+    /// Visit stars in a tile until the callback returns false. Records are
+    /// brightest-first, enabling early exit at a magnitude limit.
+    fn for_each_in_tile_while(&self, tile: u32, mut visit: impl FnMut(CatalogStar) -> bool) {
+        self.for_each_indexed_in_tile_while(tile, |_, star| visit(star));
+    }
+
+    /// [`Self::for_each_in_tile_while`], with each star's place in its tile.
+    fn for_each_indexed_in_tile_while(
+        &self,
+        tile: u32,
+        mut visit: impl FnMut(usize, CatalogStar) -> bool,
+    ) {
+        let (offset, count) = self.index[tile as usize];
+        let (offset, count) = (offset as usize, count as usize);
+        match self.layout {
+            Layout::V1Interleaved => {
+                let end = offset + count * V1_RECORD_SIZE;
+                let Some(data) = self.map.get(offset..end) else {
+                    return;
+                };
+                for (i, r) in data.chunks_exact(V1_RECORD_SIZE).enumerate() {
+                    let keep_going = visit(
+                        i,
+                        CatalogStar {
+                            ra: unpack_ra(u32::from_le_bytes(r[0..4].try_into().unwrap())),
+                            dec: unpack_dec(u32::from_le_bytes(r[4..8].try_into().unwrap())),
+                            mag: unpack_mag(u16::from_le_bytes(r[8..10].try_into().unwrap())),
+                        },
+                    );
+                    if !keep_going {
+                        return;
+                    }
+                }
+            }
+            Layout::V2Columnar => {
+                let ra_end = offset + count * 4;
+                let dec_end = ra_end + count * 4;
+                let mag_end = dec_end + count * 2;
+                let Some(_) = self.map.get(offset..mag_end) else {
+                    return;
+                };
+                let ra = &self.map[offset..ra_end];
+                let dec = &self.map[ra_end..dec_end];
+                let mag = &self.map[dec_end..mag_end];
+                for i in 0..count {
+                    let keep_going = visit(
+                        i,
+                        CatalogStar {
+                            ra: unpack_ra(u32::from_le_bytes(
+                                ra[i * 4..i * 4 + 4].try_into().unwrap(),
+                            )),
+                            dec: unpack_dec(u32::from_le_bytes(
+                                dec[i * 4..i * 4 + 4].try_into().unwrap(),
+                            )),
+                            mag: unpack_mag(u16::from_le_bytes(
+                                mag[i * 2..i * 2 + 2].try_into().unwrap(),
+                            )),
+                        },
+                    );
+                    if !keep_going {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn invalid_data(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
+impl StarCatalog for TileCatalog {
+    fn star_count(&self) -> u64 {
+        self.star_count()
+    }
+
+    fn all_brighter_than(&self, mag_limit: f32) -> Vec<CatalogStar> {
+        // Tiles store brightest-first: stop at the first fainter record
+        let mut found = Vec::new();
+        for tile in 0..self.grid.n_tiles() {
+            self.for_each_in_tile_while(tile, |star| {
+                if star.mag <= mag_limit {
+                    found.push(star);
+                    true
+                } else {
+                    false
+                }
+            });
+        }
+        found
+    }
+
+    fn cone_search(&self, ra: f64, dec: f64, radius_deg: f64, limit: usize) -> Vec<CatalogStar> {
+        self.cone_search_moved(ra, dec, radius_deg, limit, |_, _, star| star)
     }
 }
 

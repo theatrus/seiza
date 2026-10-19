@@ -8,7 +8,7 @@
 use anyhow::{Context, Result};
 use image::ImageEncoder;
 use seiza::blind::{BlindIndex, BlindParams, solve_blind_with_limits};
-use seiza::catalog::TileCatalog;
+use seiza::catalog::{DatedCatalog, TileCatalog};
 use seiza::solve::{Solution, SolveHint, solve_with_limits};
 use seiza::{CancelSignal, DetectBackend, DetectConfig, SolveLimits, Wcs};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -386,6 +386,8 @@ fn read_request_line<R: BufRead>(reader: &mut R) -> io::Result<RequestLine> {
 
 struct LocalSolver {
     catalog: TileCatalog,
+    /// The proper motions beside the star file, when it has them.
+    motions: Option<seiza::catalog::ProperMotions>,
     index: Option<BlindIndex>,
     detection_backend: DetectBackend,
     detection_fallback: crate::DetectionFallback,
@@ -575,9 +577,11 @@ impl LocalSolver {
         if let Some(index) = &index {
             warn_on_index_catalog_mismatch(index, &catalog);
         }
+        let motions = crate::open_motions(data_path, &catalog)?;
 
         Ok(Self {
             catalog,
+            motions,
             index,
             detection_backend,
             detection_fallback,
@@ -631,6 +635,7 @@ impl LocalSolver {
             self.detection_fallback,
         );
         let detect_elapsed = detect_started.elapsed();
+        let epoch = crate::capture_epoch(&params.image_path);
 
         let mut index_elapsed = Duration::ZERO;
         let solution = match params.mode {
@@ -643,9 +648,9 @@ impl LocalSolver {
                     scale_tolerance: hint.scale_tolerance,
                     sip_order: hint.sip_order,
                 };
-                invocation.solve(|stars| {
-                    solve_with_limits(stars, &self.catalog, &hint, dimensions, limits)
-                })?
+                let dated = DatedCatalog::new(&self.catalog, self.motions.as_ref(), epoch);
+                invocation
+                    .solve(|stars| solve_with_limits(stars, &dated, &hint, dimensions, limits))?
             }
             SolveMode::Blind => {
                 let blind = params.blind.clone().unwrap_or_default();
@@ -665,6 +670,7 @@ impl LocalSolver {
                 }
                 index_elapsed = index_started.elapsed();
                 let index = self.index.as_ref().expect("blind index initialized");
+                let dated = DatedCatalog::new(&self.catalog, self.motions.as_ref(), epoch);
                 blind_params.index_mag_limit = index.index_mag_limit();
                 blind_params.max_pattern_deg = index.max_pattern_deg();
 
@@ -677,7 +683,7 @@ impl LocalSolver {
                     );
                     solve_blind_with_limits(
                         stars,
-                        &self.catalog,
+                        &dated,
                         index,
                         &attempt_params,
                         dimensions,

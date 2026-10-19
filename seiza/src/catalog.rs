@@ -5,9 +5,11 @@
 //! proper-motion-corrected to a fixed epoch at build time.
 //! [`MemoryCatalog`] provides the same interface from an in-memory list for
 //! tests and synthetic solves. [`distances`] holds distances to the objects
-//! in the object catalog.
+//! in the object catalog. [`motion`] holds the proper motions of a tile
+//! file's stars, to move it to an image's date.
 
 pub mod distances;
+pub mod motion;
 pub mod photometry;
 pub mod star_distances;
 pub mod tiles;
@@ -16,6 +18,7 @@ pub use distances::{
     CatalogMismatch, DistanceBasis, DistanceEntry, DistanceMethod, DistanceSource, KindDistance,
     ObjectAtPixel, ObjectDistance, ObjectDistances, ObjectDistancesBuilder, typical_distance,
 };
+pub use motion::{DatedCatalog, EpochCatalog, ProperMotions, julian_year};
 pub use photometry::{
     PhotometricStar, PhotometryCatalog, PhotometryCatalogBuilder, propagate_proper_motion,
 };

@@ -5932,7 +5932,9 @@ fn refine_on_linear_samples(
 /// fits. A raster converted from 8-bit colour is
 /// detected again in float. A raster's EXIF focal length gives the first
 /// scale to try. Only when the second detection also fails does an
-/// unchecked header WCS stand.
+/// unchecked header WCS stand. When the star file has a proper-motion
+/// sidecar (`stars-gaia.pm.bin` beside `stars-gaia.bin`) and the image a
+/// capture time, the solve searches the catalog moved to that date.
 fn blind_solve_path(
     path: &Path,
     catalog_directory: Option<&Path>,
@@ -6007,6 +6009,20 @@ fn blind_solve_path(
         })?;
     let catalog = TileCatalog::open(&star_path)
         .map_err(|error| format!("failed to open {}: {error}", star_path.display()))?;
+    // With proper motions beside the star file and a capture time, the
+    // solve searches the catalog as it was when the image was taken.
+    let motions =
+        seiza::catalog::ProperMotions::open_beside(&star_path, &catalog).map_err(|error| {
+            format!(
+                "failed to open the proper motions beside {}: {error}",
+                star_path.display()
+            )
+        })?;
+    let epoch = capture_time
+        .as_deref()
+        .and_then(seiza::field_objects::capture_julian_date)
+        .map(seiza::catalog::julian_year);
+    let dated = seiza::catalog::DatedCatalog::new(&catalog, motions.as_ref(), epoch);
     let index = BlindIndex::open(&index_path)
         .map_err(|error| format!("failed to open {}: {error}", index_path.display()))?;
 
@@ -6023,7 +6039,7 @@ fn blind_solve_path(
     let solve = |stars: &[seiza::DetectedStar], params: &BlindParams| {
         seiza::prior::solve_with_prior(
             stars,
-            &catalog,
+            &dated,
             Some(&index),
             &prior,
             params,

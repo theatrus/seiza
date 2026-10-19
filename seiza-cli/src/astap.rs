@@ -152,6 +152,12 @@ fn solve(args: &AstapArgs, image_path: &Path) -> Result<Vec<String>> {
     let star_data = resolve_star_data()?;
     let catalog = seiza::catalog::TileCatalog::open(&star_data)
         .with_context(|| format!("cannot open star catalog {}", star_data.display()))?;
+    let motions = crate::open_motions(&star_data, &catalog)?;
+    let dated = seiza::catalog::DatedCatalog::new(
+        &catalog,
+        motions.as_ref(),
+        crate::capture_epoch(image_path),
+    );
 
     let image = crate::load_image(image_path, args.detection_backend)?;
     let dims = image.dimensions();
@@ -183,7 +189,7 @@ fn solve(args: &AstapArgs, image_path: &Path) -> Result<Vec<String>> {
             .solve(|stars| {
                 seiza::solve::solve(
                     stars,
-                    &catalog,
+                    &dated,
                     &seiza::solve::SolveHint {
                         center,
                         radius_deg: args.radius_deg.clamp(0.5, 3.0),
@@ -242,7 +248,7 @@ fn solve(args: &AstapArgs, image_path: &Path) -> Result<Vec<String>> {
                     args.detection_fallback_hypotheses,
                     pass,
                 );
-                seiza::blind::solve_blind(stars, &catalog, &index, &attempt_params, dims)
+                seiza::blind::solve_blind(stars, &dated, &index, &attempt_params, dims)
             })?
         }
     };

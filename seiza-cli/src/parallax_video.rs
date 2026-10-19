@@ -1206,8 +1206,11 @@ fn solve(args: &ParallaxVideoArgs, path: &Path) -> Result<(Wcs, (u32, u32))> {
         crate::SolveInvocation::new(path, &image, config, options.detection_fallback);
     let catalog = seiza::catalog::TileCatalog::open(&data)
         .with_context(|| format!("failed to open {}", data.display()))?;
+    // A parallax video's stars sit at their Gaia distances, not at the
+    // image's date, so the catalog is searched as written.
     let (solution, elapsed, _) = crate::blind_solve_invocation(
         &mut invocation,
+        &catalog,
         &catalog,
         &search,
         &options,

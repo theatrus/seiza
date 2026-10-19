@@ -4078,7 +4078,16 @@ pub fn build_gaia_photometry(
 
 /// Build star tiles from Gaia DR3 TAP CSV chunks (download-data gaia).
 /// Positions are epoch J2016.0; proper motions are applied to `epoch`.
-pub fn build_gaia(input: &Path, output: &Path, epoch: f64, max_mag: f32, bands: u32) -> Result<()> {
+/// Build a star tile file from Gaia DR3 TAP chunks, and with `motions` its
+/// proper-motion sidecar.
+pub fn build_gaia(
+    input: &Path,
+    output: &Path,
+    motions: Option<&Path>,
+    epoch: f64,
+    max_mag: f32,
+    bands: u32,
+) -> Result<()> {
     let mut parts: Vec<_> = std::fs::read_dir(input)
         .with_context(|| format!("cannot read {}", input.display()))?
         .filter_map(|e| e.ok())
@@ -4127,12 +4136,18 @@ pub fn build_gaia(input: &Path, output: &Path, epoch: f64, max_mag: f32, bands: 
             let cos_dec = dec.to_radians().cos().max(1e-6);
             let ra = (ra + pmra.unwrap_or(0.0) * dt / 3_600_000.0 / cos_dec).rem_euclid(360.0);
             let dec = (dec + pmdec.unwrap_or(0.0) * dt / 3_600_000.0).clamp(-90.0, 90.0);
-            builder.add(ra, dec, mag);
+            builder.add_moving(ra, dec, mag, pmra.zip(pmdec));
         }
     }
 
     let count = builder.star_count();
-    builder.write_to(output)?;
+    match motions {
+        Some(motions) => {
+            builder.write_with_motions(output, motions)?;
+            println!("proper motions written to {}", motions.display());
+        }
+        None => builder.write_to(output)?,
+    }
     println!(
         "{count} stars written to {} (epoch {epoch}, {too_faint} fainter than {max_mag})",
         output.display()

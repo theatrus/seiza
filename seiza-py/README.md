@@ -50,6 +50,19 @@ catalog = seiza.StarCatalog.open("data")   # directory
 catalog = seiza.StarCatalog.open()         # after seiza setup
 ```
 
+Star files hold positions at one epoch, 2025.5 for the published Gaia files.
+When a proper-motion sidecar sits beside one (`stars-gaia.pm.bin` beside
+`stars-gaia.bin`, written by `seiza build-data gaia --motions`), `open`
+reads it too, and `catalog.has_proper_motions` is true. Pass a solve the
+image's date as a Julian year, and it searches the stars where they were then:
+
+```python
+solution = seiza.solve(stars, catalog, w, h, ra=..., dec=...,
+                       scale_arcsec_px=..., epoch=2024.92)
+```
+
+Without a sidecar, or with `epoch=None`, the catalog is searched as written.
+
 A solution is only as exact as the star positions it fits. When the array
 you detect on is stretched, or the sky has a gradient, measure the stars
 again on the image's linear samples before solving. `refine_centroids` fits

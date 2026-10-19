@@ -1154,6 +1154,11 @@ enum BuildDataSource {
         /// Output tile file
         #[arg(long)]
         output: PathBuf,
+        /// Also write the stars' proper motions to this sidecar (by
+        /// convention the output with `.pm.bin` for `.bin`), so solves can
+        /// move the catalog to an image's date
+        #[arg(long)]
+        motions: Option<PathBuf>,
         /// Epoch to apply proper motions to, Julian year
         #[arg(long, default_value_t = 2025.5)]
         epoch: f64,
@@ -1495,10 +1500,11 @@ fn main() -> Result<()> {
             BuildDataSource::Gaia {
                 input,
                 output,
+                motions,
                 epoch,
                 max_mag,
                 bands,
-            } => build_data::build_gaia(&input, &output, epoch, max_mag, bands),
+            } => build_data::build_gaia(&input, &output, motions.as_deref(), epoch, max_mag, bands),
             BuildDataSource::GaiaPhotometry {
                 input,
                 output,
@@ -3318,6 +3324,8 @@ fn solve_command(
 
     let catalog =
         TileCatalog::open(data).with_context(|| format!("failed to open {}", data.display()))?;
+    let motions = open_motions(data, &catalog)?;
+    let dated = seiza::catalog::DatedCatalog::new(&catalog, motions.as_ref(), capture_epoch(path));
     let hint = SolveHint {
         center,
         radius_deg: radius,
@@ -3328,7 +3336,7 @@ fn solve_command(
     let started = std::time::Instant::now();
     let limits = time_limit.map(SolveLimits::within).unwrap_or_default();
     let solution = invocation
-        .solve(|stars| seiza::solve::solve_with_limits(stars, &catalog, &hint, dims, &limits))?;
+        .solve(|stars| seiza::solve::solve_with_limits(stars, &dated, &hint, dims, &limits))?;
     let elapsed = started.elapsed();
 
     let wcs = &solution.wcs;
@@ -3981,9 +3989,33 @@ fn dms(dec: f64) -> String {
 /// Load the blind pattern index beside `catalog` (or build one) and
 /// blind-solve `invocation`'s stars over each of `search`'s pixel-scale
 /// ranges, printing the index's size as `solve-blind` does.
+/// The proper motions beside `star_file`, which `catalog` was opened from,
+/// or `None` when it has none.
+pub(crate) fn open_motions(
+    star_file: &std::path::Path,
+    catalog: &TileCatalog,
+) -> Result<Option<seiza::catalog::ProperMotions>> {
+    seiza::catalog::ProperMotions::open_beside(star_file, catalog).with_context(|| {
+        format!(
+            "failed to open the proper motions beside {}",
+            star_file.display()
+        )
+    })
+}
+
+/// When the image at `path` was taken, as a Julian year, from its headers
+/// or EXIF; `None` when it does not say.
+pub(crate) fn capture_epoch(path: &std::path::Path) -> Option<f64> {
+    let time = seiza_image_io::read_capture_time(path).ok().flatten()?;
+    seiza::field_objects::capture_julian_date(&time).map(seiza::catalog::julian_year)
+}
+
+/// `catalog` builds or checks the blind index; `stars`, the same catalog,
+/// perhaps moved to the image's date, is what the solve searches.
 fn blind_solve_invocation(
     invocation: &mut SolveInvocation<'_>,
     catalog: &TileCatalog,
+    stars: &(dyn StarCatalog + Sync),
     search: &ScaleSearch,
     options: &SolveBlindOptions<'_>,
     can_retry_f32: bool,
@@ -4043,7 +4075,7 @@ fn blind_solve_invocation(
         // An unchecked header WCS is a last resort: hold it back while a
         // second detection may still solve.
         let mut unchecked = None;
-        let found = invocation.solve_with_pass(|stars, pass| {
+        let found = invocation.solve_with_pass(|detected, pass| {
             let attempt_params = BlindParams {
                 min_scale_arcsec_px: search.ranges[0].0,
                 max_scale_arcsec_px: search.ranges[0].1,
@@ -4055,8 +4087,8 @@ fn blind_solve_invocation(
                 )
             };
             let found = solve_with_prior(
+                detected,
                 stars,
-                catalog,
                 Some(&index),
                 &prior,
                 &attempt_params,
@@ -4093,7 +4125,7 @@ fn blind_solve_invocation(
         }
         return Ok((found.solution, started.elapsed(), found.source));
     }
-    let solution = invocation.solve_with_pass(|stars, pass| {
+    let solution = invocation.solve_with_pass(|detected, pass| {
         let mut attempt_params = blind_params_for_detection_pass(
             &params,
             can_retry_f32,
@@ -4103,7 +4135,7 @@ fn blind_solve_invocation(
         solve_over_ranges(&search.ranges, |(min, max)| {
             attempt_params.min_scale_arcsec_px = min;
             attempt_params.max_scale_arcsec_px = max;
-            solve_blind_with_limits(stars, catalog, &index, &attempt_params, dims, &limits)
+            solve_blind_with_limits(detected, stars, &index, &attempt_params, dims, &limits)
         })
     })?;
     Ok((solution, started.elapsed(), SolveSource::Blind))
@@ -4256,9 +4288,18 @@ fn solve_blind_command(
 
     let catalog =
         TileCatalog::open(data).with_context(|| format!("failed to open {}", data.display()))?;
+    let motions = open_motions(data, &catalog)?;
+    let dated = seiza::catalog::DatedCatalog::new(&catalog, motions.as_ref(), capture_epoch(path));
+    if dated.is_moved() {
+        println!(
+            "catalog moved to {:.2} by its proper motions",
+            dated.epoch()
+        );
+    }
     let (solution, elapsed, source) = blind_solve_invocation(
         &mut invocation,
         &catalog,
+        &dated,
         &search,
         &options,
         can_retry_f32,

@@ -118,6 +118,8 @@ class StarCatalog:
     @staticmethod
     def from_stars(stars: Sequence[tuple[float, float, float]]) -> StarCatalog: ...
     def star_count(self) -> int: ...
+    @property
+    def has_proper_motions(self) -> bool: ...
     def cone_search(
         self, ra: float, dec: float, radius_deg: float, limit: int = 100
     ) -> list[tuple[float, float, float]]: ...
@@ -1128,6 +1130,7 @@ def solve(
     sip_order: int = 0,
     time_limit: float | None = None,
     cancel: Callable[[], bool] | None = None,
+    epoch: float | None = None,
 ) -> Solution: ...
 def solve_blind(
     stars: Sequence[StarInput],
@@ -1141,6 +1144,7 @@ def solve_blind(
     sip_order: int = 0,
     time_limit: float | None = None,
     cancel: Callable[[], bool] | None = None,
+    epoch: float | None = None,
 ) -> Solution: ...
 def read_solve_prior(path: str | Path) -> dict[str, Any]: ...
 def read_capture_time(path: str | Path) -> str | None: ...
@@ -1165,6 +1169,7 @@ def solve_with_prior(
     sip_order: int = 0,
     time_limit: float | None = None,
     cancel: Callable[[], bool] | None = None,
+    epoch: float | None = None,
 ) -> Solution: ...
 def fetch_catalogs(
     datasets: str | Sequence[str] | None = None,
