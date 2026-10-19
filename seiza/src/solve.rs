@@ -164,6 +164,18 @@ pub fn solve_with_limits(
     dimensions: (u32, u32),
     limits: &SolveLimits,
 ) -> Result<Solution, crate::Error> {
+    let solution = solve_accepted(stars, catalog, hint, dimensions, limits)?;
+    Ok(deepen(solution, stars, catalog, hint.sip_order, dimensions))
+}
+
+/// The solution [`solve_with_limits`] accepts, before [`deepen`] refines it.
+fn solve_accepted(
+    stars: &[DetectedStar],
+    catalog: &dyn StarCatalog,
+    hint: &SolveHint,
+    dimensions: (u32, u32),
+    limits: &SolveLimits,
+) -> Result<Solution, crate::Error> {
     limits.check()?;
     // Mount coordinates are usually already inside the image. Try that one
     // FOV-sized window before constructing triangles for every window in the
@@ -536,7 +548,14 @@ fn refine_to_solution(
             let Some(candidate) = fit_sip(hint.sip_order, &wcs, &fit_set, dimensions) else {
                 break;
             };
-            let matched = match_sky_pairs(&candidate, stars, cat, &recentre, dimensions);
+            let matched = match_sky_pairs(
+                &candidate,
+                stars,
+                cat,
+                &recentre,
+                dimensions,
+                MATCH_TOLERANCE_PX,
+            );
             if matched.len() < MIN_INLIERS || matched.len() < fit_set.len() {
                 break;
             }
@@ -598,6 +617,120 @@ fn refine_to_solution(
         rms_arcsec,
         false_match_probability,
     })
+}
+
+/// Catalog stars [`deepen`] asks for per detected star: enough that every
+/// detection with a counterpart has one, since detections reach fainter
+/// than the brightest catalog stars do in a crowded field.
+const DEEP_CATALOG_PER_DETECTION: usize = 3;
+/// The fewest and most catalog stars [`deepen`] asks for.
+const DEEP_CATALOG_RANGE: (usize, usize) = (500, 6000);
+/// Rounds of matching and fitting in [`deepen`].
+const DEEP_ITERATIONS: usize = 3;
+
+/// Refine an accepted `solution` against every catalog star in its frame.
+///
+/// A solve's own catalog cone holds the few hundred brightest stars around
+/// the hint, which is right for finding the field but leaves its fit, and a
+/// SIP polynomial most of all, resting on a hundred-odd stars, so the
+/// polynomial strays between them. Here every detection is matched against
+/// a cone deep enough for all of them, the linear solution and then SIP at
+/// `sip_order` are refitted, and the match radius tightens to three times
+/// the pixel residual, so outliers drop out as the fit improves.
+///
+/// The false-match probability stays that of the acceptance, which this
+/// does not revisit. Unless more stars match than the solution already had,
+/// it is returned unchanged: with no more stars to rest on, a refit at a
+/// tighter radius has nothing to gain.
+pub(crate) fn deepen(
+    solution: Solution,
+    stars: &[DetectedStar],
+    catalog: &dyn StarCatalog,
+    sip_order: u8,
+    dimensions: (u32, u32),
+) -> Solution {
+    let (width, height) = (dimensions.0 as f64, dimensions.1 as f64);
+    let middle = crate::wcs::image_center(dimensions.0, dimensions.1);
+    let center = solution.wcs.pixel_to_world(middle.0, middle.1);
+    let radius_deg = width.hypot(height) * 0.5 * solution.wcs.scale_arcsec_per_px() / 3600.0 * 1.05;
+    let limit = (stars.len() * DEEP_CATALOG_PER_DETECTION)
+        .clamp(DEEP_CATALOG_RANGE.0, DEEP_CATALOG_RANGE.1);
+    let recentre = tangent_wcs(center);
+    let cat: Vec<(f64, f64, CatalogStar)> = catalog
+        .cone_search(center.0, center.1, radius_deg, limit)
+        .into_iter()
+        .filter_map(|star| {
+            recentre
+                .world_to_pixel(star.ra, star.dec)
+                .map(|(x, y)| (x, y, star))
+        })
+        .collect();
+
+    let mut wcs = solution.wcs.clone();
+    let mut tolerance_px = MATCH_TOLERANCE_PX;
+    let mut matched = Vec::new();
+    for _ in 0..DEEP_ITERATIONS {
+        let pairs = match_sky_pairs(&wcs, stars, &cat, &recentre, dimensions, tolerance_px);
+        if pairs.len() < MIN_INLIERS.max(solution.matched_stars) {
+            break;
+        }
+        let fit_pairs: Vec<PointPair> = pairs
+            .iter()
+            .map(|pair| (pair.pixel, pair.tangent))
+            .collect();
+        let Some(affine) = Affine::fit(&fit_pairs) else {
+            break;
+        };
+        let Some(crpix) = affine.zero_point() else {
+            break;
+        };
+        let linear = Wcs {
+            crval: center,
+            crpix,
+            cd: [[affine.a, affine.b], [affine.d, affine.e]],
+            sip: None,
+        };
+        let fitted = if sip_order >= 2 {
+            fit_sip(sip_order, &linear, &fit_pairs, dimensions).unwrap_or(linear)
+        } else {
+            linear
+        };
+        let residual_px = (pairs
+            .iter()
+            .map(|pair| {
+                fitted
+                    .world_to_pixel(pair.sky.0, pair.sky.1)
+                    .map_or(f64::INFINITY, |(x, y)| {
+                        (x - pair.pixel.0).powi(2) + (y - pair.pixel.1).powi(2)
+                    })
+            })
+            .sum::<f64>()
+            / pairs.len() as f64)
+            .sqrt();
+        if !residual_px.is_finite() {
+            break;
+        }
+        wcs = fitted;
+        matched = pairs;
+        tolerance_px = (3.0 * residual_px).clamp(1.0, MATCH_TOLERANCE_PX);
+    }
+    if matched.len() <= solution.matched_stars.max(MIN_INLIERS) {
+        return solution;
+    }
+    let sum_sq: f64 = matched
+        .iter()
+        .map(|pair| {
+            let (ra, dec) = wcs.pixel_to_world(pair.pixel.0, pair.pixel.1);
+            let sep = angular_separation_deg(ra, dec, pair.sky.0, pair.sky.1) * 3600.0;
+            sep * sep
+        })
+        .sum();
+    Solution {
+        wcs,
+        matched_stars: matched.len(),
+        rms_arcsec: (sum_sq / matched.len() as f64).sqrt(),
+        false_match_probability: solution.false_match_probability,
+    }
 }
 
 /// What decides how often detections land on catalog stars by accident.
@@ -1051,9 +1184,10 @@ fn match_sky_pairs(
     cat: &[(f64, f64, CatalogStar)],
     recentre: &Wcs,
     dimensions: (u32, u32),
+    tolerance_px: f64,
 ) -> Vec<SkyPair> {
     let (width, height) = (dimensions.0 as f64, dimensions.1 as f64);
-    let margin = 2.0 * MATCH_TOLERANCE_PX;
+    let margin = 2.0 * tolerance_px;
     let mut proposals: Vec<(f64, usize, usize)> = Vec::new();
     for (cat_index, &(_, _, star)) in cat.iter().enumerate() {
         let Some((sx, sy)) = wcs.world_to_pixel(star.ra, star.dec) else {
@@ -1068,7 +1202,7 @@ fn match_sky_pairs(
             .map(|(star_index, s)| ((s.x - sx).hypot(s.y - sy), star_index))
             .min_by(|a, b| a.0.total_cmp(&b.0));
         if let Some((distance, star_index)) = nearest
-            && distance <= MATCH_TOLERANCE_PX
+            && distance <= tolerance_px
         {
             proposals.push((distance, star_index, cat_index));
         }
@@ -2091,9 +2225,10 @@ mod tests {
 
         let solution = solve(&detected, &catalog, &hint, dims).unwrap();
         assert_solution_matches(&truth, &solution, dims);
+        // The center window's search, then deepen's of the accepted frame.
         assert_eq!(
             catalog.searches.get(),
-            1,
+            2,
             "a strong center solution should not search the fallback grid"
         );
     }
@@ -2182,6 +2317,108 @@ mod tests {
             sip_order: 0,
         };
         assert!(solve(&[], &catalog, &hint, (100, 100)).is_err());
+    }
+
+    /// A crowded 4000 x 3000 field at 2"/px with radial distortion of 4 px
+    /// at the corners: far more catalog stars than the solve's own cone
+    /// holds, and detections of most of them.
+    fn distorted_crowded_field(rng: &mut Lcg) -> (Wcs, MemoryCatalog, Vec<DetectedStar>) {
+        let s = 2.0 / 3600.0;
+        let dims = (4000.0, 3000.0);
+        let truth = Wcs {
+            crval: (150.0, 33.0),
+            crpix: (1999.5, 1499.5),
+            cd: [[-s, 0.0], [0.0, s]],
+            sip: None,
+        };
+        let mut catalog = Vec::new();
+        let mut detected = Vec::new();
+        for _ in 0..6000 {
+            let ra = 150.0 + (rng.next() - 0.5) * 3.6;
+            let dec = 33.0 + (rng.next() - 0.5) * 3.0;
+            let mag = (6.0 + rng.next() * 10.0) as f32;
+            catalog.push(CatalogStar { ra, dec, mag });
+            let Some((x, y)) = truth.world_to_pixel(ra, dec) else {
+                continue;
+            };
+            let (u, v) = (x - truth.crpix.0, y - truth.crpix.1);
+            let factor = 1.0 + 3e-10 * (u * u + v * v);
+            let (x, y) = (truth.crpix.0 + u * factor, truth.crpix.1 + v * factor);
+            if x < 0.0 || y < 0.0 || x >= dims.0 || y >= dims.1 || rng.next() < 0.2 {
+                continue;
+            }
+            detected.push(DetectedStar {
+                x: x + (rng.next() - 0.5) * 0.2,
+                y: y + (rng.next() - 0.5) * 0.2,
+                flux: 10f64.powf(-0.4 * mag as f64) * 1e6,
+                peak: 0.5,
+                area: 20,
+            });
+        }
+        detected.sort_by(|a, b| b.flux.total_cmp(&a.flux));
+        detected.truncate(1500);
+        (truth, MemoryCatalog::new(catalog), detected)
+    }
+
+    #[test]
+    fn a_distorted_crowded_field_is_fitted_on_all_of_its_stars() {
+        let mut rng = Lcg(0xACC0_0001);
+        let (truth, catalog, detected) = distorted_crowded_field(&mut rng);
+        let hint = SolveHint {
+            center: truth.crval,
+            radius_deg: 0.0,
+            scale_arcsec_px: 2.0,
+            scale_tolerance: 0.05,
+            sip_order: 3,
+        };
+        let solution = solve(&detected, &catalog, &hint, (4000, 3000)).unwrap();
+        // The solve's own cone holds 250 stars; the frame has over 1000
+        // detections of catalog stars.
+        assert!(solution.matched_stars > 900, "{}", solution.matched_stars);
+        // Every detection lands where its catalog star is, corners included.
+        let cat = catalog.cone_search(150.0, 33.0, 5.0, usize::MAX);
+        let mut sum_sq = 0.0;
+        let mut count = 0usize;
+        for star in &detected {
+            let (ra, dec) = solution.wcs.pixel_to_world(star.x, star.y);
+            let nearest = cat
+                .iter()
+                .map(|c| angular_separation_deg(ra, dec, c.ra, c.dec) * 3600.0)
+                .fold(f64::INFINITY, f64::min);
+            if nearest < 2.0 {
+                sum_sq += nearest * nearest;
+                count += 1;
+            }
+        }
+        let rms = (sum_sq / count as f64).sqrt();
+        assert!(count > 1000, "{count}");
+        assert!(rms < 0.25, "{rms}");
+    }
+
+    #[test]
+    fn deepen_keeps_a_solution_it_cannot_better() {
+        let mut rng = Lcg(0xACC0_0002);
+        let (truth, catalog, detected) = distorted_crowded_field(&mut rng);
+        let hint = SolveHint {
+            center: truth.crval,
+            radius_deg: 0.0,
+            scale_arcsec_px: 2.0,
+            scale_tolerance: 0.05,
+            sip_order: 3,
+        };
+        let solution = solve_accepted(
+            &detected,
+            &catalog,
+            &hint,
+            (4000, 3000),
+            &SolveLimits::default(),
+        )
+        .unwrap();
+        let empty = MemoryCatalog::new(Vec::new());
+        let kept = deepen(solution.clone(), &detected, &empty, 3, (4000, 3000));
+        assert_eq!(kept.matched_stars, solution.matched_stars);
+        assert_eq!(kept.rms_arcsec, solution.rms_arcsec);
+        assert_eq!(kept.wcs.crval, solution.wcs.crval);
     }
 }
 
