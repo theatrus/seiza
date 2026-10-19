@@ -17,6 +17,235 @@ pub struct DetectedStar {
     pub area: u32,
 }
 
+/// Measure each of `stars` again on an image's linear samples, for the
+/// positions a plate solve fits.
+///
+/// Detection finds stars as connected regions above a per-tile background,
+/// often in a stretched 8-bit copy, and places each at the flux-weighted
+/// mean of its region. That centroid is biased: the stretch is not linear,
+/// a halo can spread over thousands of pixels, and a vignetting gradient
+/// across a flat tile background pulls stars toward the brighter side, so
+/// a wide field's positions shrink toward a point. Here each star is
+/// measured much as Asterion measures its stars: the background is a plane
+/// fitted to an annulus around it, so a gradient's slope goes too, the width
+/// comes from the pixels above half the peak, and the centroid is iterated
+/// with a Gaussian weight 0.6 times that width.
+///
+/// `sample(x, y)` reads a `width` × `height` grid of linear samples
+/// covering the image in blocks of `binning` × `binning` pixels (see
+/// `seiza_fits::LinearSampler`); NaN samples are skipped. A star that
+/// cannot be measured, or whose centroid wanders off its peak, keeps its
+/// position. Flux, peak and area are left as detected.
+pub fn refine_centroids(
+    stars: &mut [DetectedStar],
+    width: usize,
+    height: usize,
+    binning: usize,
+    sample: &(dyn Fn(usize, usize) -> f32 + Sync),
+) {
+    use rayon::prelude::*;
+
+    if width < 16 || height < 16 || binning == 0 {
+        return;
+    }
+    let bin = binning as f64;
+    let centre = (bin - 1.0) / 2.0;
+    stars.par_iter_mut().for_each(|star| {
+        let seed = ((star.x - centre) / bin, (star.y - centre) / bin);
+        if let Some((x, y)) =
+            measure_centroid(seed, star.area as f64 / (bin * bin), width, height, sample)
+        {
+            star.x = x * bin + centre;
+            star.y = y * bin + centre;
+        }
+    });
+}
+
+/// The plane `[a, b, c]`, value `a + b dx + c dy`, that fits `samples` of
+/// `(dx, dy, value)` by least squares, fitted again without the samples more
+/// than three MADs off, such as other stars in the annulus.
+fn background_plane(samples: &[(f64, f64, f64)]) -> Option<[f64; 3]> {
+    let fit = |samples: &mut dyn Iterator<Item = &(f64, f64, f64)>| -> Option<[f64; 3]> {
+        let mut normal = [[0.0f64; 3]; 3];
+        let mut target = [0.0f64; 3];
+        for &(dx, dy, value) in samples {
+            let row = [1.0, dx, dy];
+            for i in 0..3 {
+                for j in 0..3 {
+                    normal[i][j] += row[i] * row[j];
+                }
+                target[i] += row[i] * value;
+            }
+        }
+        solve3x3(normal, target)
+    };
+    let first = fit(&mut samples.iter())?;
+    let residual =
+        |&(dx, dy, value): &(f64, f64, f64)| value - (first[0] + first[1] * dx + first[2] * dy);
+    let mut deviations: Vec<f64> = samples
+        .iter()
+        .map(|sample| residual(sample).abs())
+        .collect();
+    deviations.sort_by(f64::total_cmp);
+    let limit = 3.0 * 1.4826 * deviations[deviations.len() / 2];
+    let kept: Vec<&(f64, f64, f64)> = samples
+        .iter()
+        .filter(|sample| residual(sample).abs() <= limit)
+        .collect();
+    if kept.len() < 12 {
+        return Some(first);
+    }
+    fit(&mut kept.into_iter()).or(Some(first))
+}
+
+/// The solution of a 3 x 3 linear system by Cramer's rule, or `None` when it
+/// is singular.
+fn solve3x3(m: [[f64; 3]; 3], b: [f64; 3]) -> Option<[f64; 3]> {
+    let det = |m: &[[f64; 3]; 3]| {
+        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+            - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+    };
+    let d = det(&m);
+    if d.abs() < 1e-12 {
+        return None;
+    }
+    let mut out = [0.0; 3];
+    for (column, value) in out.iter_mut().enumerate() {
+        let mut replaced = m;
+        for row in 0..3 {
+            replaced[row][column] = b[row];
+        }
+        *value = det(&replaced) / d;
+    }
+    Some(out)
+}
+
+/// [`refine_centroids`] for one star seeded at grid position `seed`, with
+/// its detected `area` in grid samples.
+fn measure_centroid(
+    seed: (f64, f64),
+    area: f64,
+    width: usize,
+    height: usize,
+    sample: &(dyn Fn(usize, usize) -> f32 + Sync),
+) -> Option<(f64, f64)> {
+    let inside = |x: i64, y: i64| x >= 0 && y >= 0 && (x as usize) < width && (y as usize) < height;
+    let read = |x: i64, y: i64| -> Option<f64> {
+        if !inside(x, y) {
+            return None;
+        }
+        let value = sample(x as usize, y as usize);
+        value.is_finite().then_some(value as f64)
+    };
+
+    // Background: a plane fitted to an annulus clear of the star and its
+    // halo. A flat level would leave a sky gradient's slope under the star,
+    // and with only positive excess counted, the uphill side would pull the
+    // centroid toward it.
+    let radius = (area / std::f64::consts::PI).sqrt().clamp(1.0, 20.0);
+    let inner = (3.0 * radius).max(5.0);
+    let outer = inner + 4.0;
+    let (sx, sy) = (seed.0.round() as i64, seed.1.round() as i64);
+    let reach = outer.ceil() as i64;
+    let mut ring = Vec::new();
+    for y in sy - reach..=sy + reach {
+        for x in sx - reach..=sx + reach {
+            let d = ((x - sx) as f64).hypot((y - sy) as f64);
+            if d >= inner
+                && d <= outer
+                && let Some(value) = read(x, y)
+            {
+                ring.push(((x - sx) as f64, (y - sy) as f64, value));
+            }
+        }
+    }
+    if ring.len() < 12 {
+        return None;
+    }
+    let plane = background_plane(&ring)?;
+    let excess = |x: i64, y: i64| {
+        read(x, y).map(|value| {
+            value - (plane[0] + plane[1] * (x - sx) as f64 + plane[2] * (y - sy) as f64)
+        })
+    };
+
+    // The peak, within a pixel of the seed.
+    let (mut mx, mut my, mut peak) = (sx, sy, excess(sx, sy)?);
+    for y in sy - 1..=sy + 1 {
+        for x in sx - 1..=sx + 1 {
+            if let Some(value) = excess(x, y)
+                && value > peak
+            {
+                (mx, my, peak) = (x, y, value);
+            }
+        }
+    }
+    if peak <= 0.0 || mx < 2 || my < 2 || mx as usize + 2 >= width || my as usize + 2 >= height {
+        return None;
+    }
+
+    // Width: the pixels above half the peak, in a window that grows until
+    // it holds the star.
+    let half = peak / 2.0;
+    let mut window = 4i64;
+    let count = loop {
+        let mut count = 0usize;
+        for y in my - window..=my + window {
+            for x in mx - window..=mx + window {
+                if excess(x, y).is_some_and(|value| value > half) {
+                    count += 1;
+                }
+            }
+        }
+        let side = (2 * window + 1) as usize;
+        if window < 32 && count > side * side / 2 {
+            window *= 2;
+        } else {
+            break count;
+        }
+    };
+    let fwhm = 2.0 * (count as f64 / std::f64::consts::PI).sqrt();
+
+    // Gaussian-weighted centroid. For a Gaussian star, a Gaussian window of
+    // its own size halves the measured shift, so each step doubles it.
+    let sigma = (0.6 * fwhm).max(1.0);
+    let reach = (3.0 * sigma).ceil().min(40.0) as i64;
+    let inverse = 1.0 / (2.0 * sigma * sigma);
+    let (mut cx, mut cy) = (mx as f64, my as f64);
+    for _ in 0..8 {
+        let (rx, ry) = (cx.round() as i64, cy.round() as i64);
+        let (mut sum, mut sum_x, mut sum_y) = (0.0, 0.0, 0.0);
+        for y in ry - reach..=ry + reach {
+            let dy = y as f64 - cy;
+            let weight_y = (-dy * dy * inverse).exp();
+            for x in rx - reach..=rx + reach {
+                let Some(value) = excess(x, y).filter(|value| *value > 0.0) else {
+                    continue;
+                };
+                let dx = x as f64 - cx;
+                let weight = value * weight_y * (-dx * dx * inverse).exp();
+                sum += weight;
+                sum_x += weight * dx;
+                sum_y += weight * dy;
+            }
+        }
+        if sum <= 0.0 {
+            return None;
+        }
+        let (shift_x, shift_y) = (2.0 * sum_x / sum, 2.0 * sum_y / sum);
+        cx += shift_x;
+        cy += shift_y;
+        if (cx - mx as f64).abs() > reach as f64 || (cy - my as f64).abs() > reach as f64 {
+            return None;
+        }
+        if shift_x * shift_x + shift_y * shift_y < 1e-5 {
+            break;
+        }
+    }
+    Some((cx, cy))
+}
+
 /// Numeric representation used by the star detector.
 ///
 /// `Auto` keeps 8-bit inputs compact and preserves higher-precision inputs by
@@ -637,6 +866,80 @@ mod tests {
             };
             assert_eq!(out.to_bits(), expected.to_bits(), "pixel {i}");
         }
+    }
+
+    /// A Gaussian star of `sigma` pixels at `truth` with `peak` counts, on
+    /// a sky of 1000 rising `slope` counts a pixel to the right.
+    fn star_on_a_gradient(
+        width: usize,
+        height: usize,
+        truth: (f64, f64),
+        sigma: f64,
+        peak: f64,
+        slope: f64,
+    ) -> Vec<f32> {
+        let mut pixels = vec![0f32; width * height];
+        for y in 0..height {
+            for x in 0..width {
+                let d2 = (x as f64 - truth.0).powi(2) + (y as f64 - truth.1).powi(2);
+                let star = peak * (-d2 / (2.0 * sigma * sigma)).exp();
+                pixels[y * width + x] = (1000.0 + slope * x as f64 + star) as f32;
+            }
+        }
+        pixels
+    }
+
+    fn seeded(x: f64, y: f64) -> DetectedStar {
+        DetectedStar {
+            x,
+            y,
+            flux: 1.0,
+            peak: 1.0,
+            area: 30,
+        }
+    }
+
+    #[test]
+    fn refined_centroids_find_a_star_on_a_sky_gradient() {
+        let (width, height) = (96, 80);
+        let truth = (47.3, 38.6);
+        // A gradient of 4 counts a pixel against a 2,000-count star: the
+        // background changes by a tenth of the peak across the star.
+        let pixels = star_on_a_gradient(width, height, truth, 1.5, 2000.0, 4.0);
+        let mut stars = [seeded(truth.0 + 0.7, truth.1 - 0.6)];
+        refine_centroids(&mut stars, width, height, 1, &|x, y| pixels[y * width + x]);
+        let off = (stars[0].x - truth.0).hypot(stars[0].y - truth.1);
+        assert!(off < 0.03, "{off} px from the truth: {:?}", stars[0]);
+    }
+
+    #[test]
+    fn refined_centroids_on_binned_samples_return_full_resolution_positions() {
+        let (width, height) = (192, 160);
+        let truth = (95.8, 77.2);
+        let pixels = star_on_a_gradient(width, height, truth, 3.0, 2000.0, 2.0);
+        // 2 x 2 sums, as a raw colour mosaic is read.
+        let binned = |x: usize, y: usize| {
+            let at = |dx: usize, dy: usize| pixels[(2 * y + dy) * width + 2 * x + dx];
+            at(0, 0) + at(1, 0) + at(0, 1) + at(1, 1)
+        };
+        let mut stars = [seeded(truth.0 - 0.9, truth.1 + 0.8)];
+        stars[0].area = 120;
+        refine_centroids(&mut stars, width / 2, height / 2, 2, &binned);
+        let off = (stars[0].x - truth.0).hypot(stars[0].y - truth.1);
+        assert!(off < 0.05, "{off} px from the truth: {:?}", stars[0]);
+    }
+
+    #[test]
+    fn a_star_that_cannot_be_measured_keeps_its_position() {
+        let (width, height) = (64, 64);
+        let flat = vec![500f32; width * height];
+        let mut stars = [seeded(30.4, 31.7)];
+        refine_centroids(&mut stars, width, height, 1, &|x, y| flat[y * width + x]);
+        assert_eq!((stars[0].x, stars[0].y), (30.4, 31.7));
+        // Too close to the edge for an annulus.
+        let mut edge = [seeded(1.0, 1.0)];
+        refine_centroids(&mut edge, width, height, 1, &|x, y| flat[y * width + x]);
+        assert_eq!((edge[0].x, edge[0].y), (1.0, 1.0));
     }
 
     #[test]

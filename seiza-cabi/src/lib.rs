@@ -5903,6 +5903,23 @@ struct BlindSolved {
     source: SolveSource,
 }
 
+/// Measure `stars` again on `image`'s linear samples, for the positions a
+/// solve fits; see `seiza::detect::refine_centroids`.
+fn refine_on_linear_samples(
+    image: &seiza_fits::FitsImage,
+    mut stars: Vec<seiza::DetectedStar>,
+) -> Vec<seiza::DetectedStar> {
+    let sampler = image.linear_sampler();
+    seiza::detect::refine_centroids(
+        &mut stars,
+        sampler.width(),
+        sampler.height(),
+        sampler.binning(),
+        &|x, y| sampler.get(x, y),
+    );
+    stars
+}
+
 /// Solve the image at `path`, a FITS, XISF or raster file, with what the
 /// file says about itself (see [`seiza::prior`]): its own WCS checked, else
 /// a hinted solve around its pointing and scale, else blind; and, when
@@ -5910,7 +5927,9 @@ struct BlindSolved {
 ///
 /// FITS and XISF images are detected first on an MTF stretch, as the CLI
 /// does, which suits processed images, and again on their linear samples
-/// when that does not solve; a raster converted from 8-bit colour is
+/// when that does not solve. Either way the stars found are measured again
+/// on the linear samples, as the CLI's are, for the positions the solve
+/// fits. A raster converted from 8-bit colour is
 /// detected again in float. A raster's EXIF focal length gives the first
 /// scale to try. Only when the second detection also fails does an
 /// unchecked header WCS stand.
@@ -5944,6 +5963,7 @@ fn blind_solve_path(
         let stars = image::GrayImage::from_raw(width, height, stretched)
             .map(|gray| detect_stars(&DynamicImage::ImageLuma8(gray), &detection_config))
             .unwrap_or_default();
+        let stars = refine_on_linear_samples(&image, stars);
         (
             width,
             height,
@@ -6032,9 +6052,10 @@ fn blind_solve_path(
         (first, Retry::None) => (first.map_err(|error| error.to_string())?, first_stars),
         (first, retry) => {
             let stars = match retry {
-                Retry::Linear(image) => {
-                    detect_stars_luma_f32(&image.to_luma_f32(), width, height, &detection_config)
-                }
+                Retry::Linear(image) => refine_on_linear_samples(
+                    &image,
+                    detect_stars_luma_f32(&image.to_luma_f32(), width, height, &detection_config),
+                ),
                 Retry::Float(image) => detect_stars(
                     &image,
                     &DetectConfig {

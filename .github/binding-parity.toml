@@ -724,6 +724,7 @@ seiza_stretch_output_version = "STRETCH_OUTPUT_VERSION"
 # solving
 Star = { none = "a detected star; C hosts receive stars as JSON" }
 detect = { none = "C hosts solve a file, and seiza_solve_image_json detects its stars; Python detects and solves in steps" }
+refine_centroids = { none = "C hosts solve a file, and seiza_solve_image_json measures its stars again on its linear samples; Python detects, refines and solves in steps" }
 solve = { none = "C hosts solve a file (seiza_solve_image_json); Python solves stars it detected, near a given position" }
 solve_blind = { none = "C hosts solve a file (seiza_solve_image_json); Python solves stars it detected" }
 read_solve_prior = { none = "seiza_solve_image_json reads the prior itself" }

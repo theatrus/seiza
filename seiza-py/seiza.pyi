@@ -876,6 +876,12 @@ def detect(
     max_elongation: float = 2.5,
     ignore_border: int = 0,
 ) -> list[Star]: ...
+def refine_centroids(
+    stars: Sequence[StarInput],
+    image: npt.NDArray[np.float32] | npt.NDArray[np.uint16],
+    *,
+    binning: int = 1,
+) -> list[Star]: ...
 def detect_measured_stars(
     image: npt.NDArray[np.uint16],
     *,
