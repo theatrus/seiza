@@ -792,7 +792,13 @@ pub fn solve_blind_with_limits(
     };
     let solution = across_fields(solution);
     if params.sip_order < 2 {
-        return Ok(solution);
+        return Ok(crate::solve::deepen(
+            solution,
+            stars,
+            catalog,
+            params.sip_order,
+            dimensions,
+        ));
     }
     // Hypothesis verification deliberately stays linear so acceptance
     // thresholds keep their meaning across the whole-sky search; the one
