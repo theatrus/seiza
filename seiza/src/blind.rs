@@ -134,6 +134,13 @@ const INDEX_HEADER_SIZE: usize = 64;
 const PATTERN_RECORD_SIZE: usize = 11 * size_of::<f32>();
 const SERIALIZE_BATCH: usize = 65_536;
 const INDEX_TIER_SCHEMA: u32 = 1;
+/// Header offset of the index's flags, zero in indexes written before
+/// there were any. Readers that predate a flag ignore it.
+const INDEX_FLAGS_OFFSET: usize = 56;
+/// Flag: each key's patterns are stored together, in key order, so the
+/// candidate array counts up from zero and a lookup's patterns are one
+/// contiguous run. Indexes written without it still read the same.
+const INDEX_FLAG_KEY_ORDER: u32 = 1;
 
 #[derive(Clone, Copy)]
 struct Pattern {
@@ -306,6 +313,8 @@ struct MappedIndex {
     keys_len: usize,
     candidates_len: usize,
     patterns_len: usize,
+    /// [`INDEX_FLAG_KEY_ORDER`]: candidate `i` is pattern `i`.
+    key_order: bool,
 }
 
 impl BlindIndex {
@@ -344,6 +353,7 @@ impl BlindIndex {
     fn candidate_at(&self, index: usize) -> u32 {
         match &self.storage {
             BlindIndexStorage::Built { candidates, .. } => candidates[index],
+            BlindIndexStorage::Mapped(mapped) if mapped.key_order => index as u32,
             BlindIndexStorage::Mapped(mapped) => read_u32(
                 &mapped.map,
                 mapped.candidates_offset + index * size_of::<u32>(),
@@ -546,18 +556,22 @@ impl BlindIndex {
             }
         }
 
+        // Each key's patterns together, in key order, and within a key in
+        // the order they were built: a lookup reads one contiguous run.
         entries.par_sort_unstable();
         let mut keys = Vec::new();
         let mut starts = vec![0u32];
-        let mut candidates = Vec::with_capacity(entries.len());
+        let mut ordered = Vec::with_capacity(entries.len());
         for (key, index) in entries {
             if keys.last() != Some(&key) {
                 keys.push(key);
-                starts.push(candidates.len() as u32);
+                starts.push(ordered.len() as u32);
             }
-            candidates.push(index);
-            *starts.last_mut().unwrap() = candidates.len() as u32;
+            ordered.push(patterns[index as usize]);
+            *starts.last_mut().unwrap() = ordered.len() as u32;
         }
+        let candidates = (0..ordered.len() as u32).collect();
+        let patterns = ordered;
 
         Self {
             index_mag_limit: params.index_mag_limit,
@@ -605,6 +619,13 @@ impl BlindIndex {
         if candidates_len > u32::MAX as usize || patterns_len > u32::MAX as usize {
             return Err(invalid_index(path, "index arrays exceed the format limits"));
         }
+        let key_order = read_u32(&map, INDEX_FLAGS_OFFSET) & INDEX_FLAG_KEY_ORDER != 0;
+        if key_order && candidates_len != patterns_len {
+            return Err(invalid_index(
+                path,
+                "a key-ordered index needs one candidate per pattern",
+            ));
+        }
 
         let Some((keys_offset, starts_offset, candidates_offset, patterns_offset, end)) =
             index_layout(keys_len, candidates_len, patterns_len)
@@ -631,6 +652,7 @@ impl BlindIndex {
                 keys_len,
                 candidates_len,
                 patterns_len,
+                key_order,
             }),
         })
     }
@@ -686,18 +708,25 @@ impl BlindIndex {
 
     /// Persist the index in the little-endian `SEIZABI1` format. The
     /// resulting file is suitable for memory-mapped reuse and CDN hosting.
+    ///
+    /// Patterns are written in key order ([`INDEX_FLAG_KEY_ORDER`]), from an
+    /// index in any order: one opened from an older file is rewritten with
+    /// the same lookups, each now reading one contiguous run of patterns.
     pub fn write_to(&self, path: &Path) -> io::Result<()> {
         let mut out = BufWriter::with_capacity(4 * 1024 * 1024, File::create(path)?);
         let mut header = [0u8; INDEX_HEADER_SIZE];
         header[..8].copy_from_slice(INDEX_MAGIC);
         header[8..16].copy_from_slice(&(self.keys_len() as u64).to_le_bytes());
         header[16..24].copy_from_slice(&(self.candidates_len() as u64).to_le_bytes());
-        header[24..32].copy_from_slice(&(self.pattern_count() as u64).to_le_bytes());
+        // One pattern per candidate, in candidate order.
+        header[24..32].copy_from_slice(&(self.candidates_len() as u64).to_le_bytes());
         header[32..36].copy_from_slice(&self.index_mag_limit.to_le_bytes());
         header[36..40].copy_from_slice(&self.max_pattern_deg.to_le_bytes());
         header[40..44].copy_from_slice(&(BINS as u32).to_le_bytes());
         header[44..48].copy_from_slice(&INDEX_TIER_SCHEMA.to_le_bytes());
         header[48..56].copy_from_slice(&self.source_star_count.to_le_bytes());
+        header[INDEX_FLAGS_OFFSET..INDEX_FLAGS_OFFSET + 4]
+            .copy_from_slice(&INDEX_FLAG_KEY_ORDER.to_le_bytes());
         out.write_all(&header)?;
 
         let mut buffer = Vec::with_capacity(SERIALIZE_BATCH * PATTERN_RECORD_SIZE);
@@ -718,14 +747,21 @@ impl BlindIndex {
         for start in (0..self.candidates_len()).step_by(SERIALIZE_BATCH) {
             buffer.clear();
             for index in start..(start + SERIALIZE_BATCH).min(self.candidates_len()) {
-                buffer.extend_from_slice(&self.candidate_at(index).to_le_bytes());
+                buffer.extend_from_slice(&(index as u32).to_le_bytes());
             }
             out.write_all(&buffer)?;
         }
-        for start in (0..self.pattern_count()).step_by(SERIALIZE_BATCH) {
+        for start in (0..self.candidates_len()).step_by(SERIALIZE_BATCH) {
             buffer.clear();
-            for index in start..(start + SERIALIZE_BATCH).min(self.pattern_count()) {
-                let pattern = self.pattern_at(index);
+            for index in start..(start + SERIALIZE_BATCH).min(self.candidates_len()) {
+                let candidate = self.candidate_at(index) as usize;
+                if candidate >= self.pattern_count() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "candidate refers past the pattern array",
+                    ));
+                }
+                let pattern = self.pattern_at(candidate);
                 for (x, y) in pattern.points {
                     buffer.extend_from_slice(&x.to_le_bytes());
                     buffer.extend_from_slice(&y.to_le_bytes());
@@ -2054,6 +2090,95 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    /// Each key's patterns, in lookup order.
+    fn patterns_by_key(index: &BlindIndex) -> Vec<(u64, Vec<[f32; 11]>)> {
+        (0..index.keys_len())
+            .map(|i| {
+                let key = index.key_at(i);
+                let patterns = index
+                    .lookup(key)
+                    .unwrap()
+                    .map(|c| {
+                        let p = index
+                            .checked_pattern_at(index.checked_candidate_at(c).unwrap() as usize);
+                        let p = p.unwrap();
+                        let [a, b, c, d] = p.points;
+                        [
+                            a.0,
+                            a.1,
+                            b.0,
+                            b.1,
+                            c.0,
+                            c.1,
+                            d.0,
+                            d.1,
+                            p.center.0,
+                            p.center.1,
+                            p.max_edge_deg,
+                        ]
+                    })
+                    .collect();
+                (key, patterns)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_index_in_any_order_is_written_in_key_order() {
+        let mut rng = Lcg(7);
+        let catalog = whole_sky_catalog(&mut rng);
+        let built = BlindIndex::build(&catalog, &BlindParams::default());
+        assert!(built.pattern_count() > 1000);
+        let BlindIndexStorage::Built {
+            keys,
+            starts,
+            candidates,
+            patterns,
+        } = &built.storage
+        else {
+            unreachable!("built in memory");
+        };
+        assert!(candidates.iter().enumerate().all(|(i, &c)| c as usize == i));
+
+        // The same index with its patterns stored back to front, as an
+        // older build order would leave them: the same lookups.
+        let n = patterns.len() as u32;
+        let shuffled = BlindIndex {
+            index_mag_limit: built.index_mag_limit,
+            max_pattern_deg: built.max_pattern_deg,
+            source_star_count: built.source_star_count,
+            storage: BlindIndexStorage::Built {
+                keys: keys.clone(),
+                starts: starts.clone(),
+                candidates: candidates.iter().map(|&c| n - 1 - c).collect(),
+                patterns: patterns.iter().rev().copied().collect(),
+            },
+        };
+        assert_eq!(patterns_by_key(&shuffled), patterns_by_key(&built));
+
+        let dir = tempfile::tempdir().unwrap();
+        let (ordered_path, shuffled_path) = (dir.path().join("a.idx"), dir.path().join("b.idx"));
+        built.write_to(&ordered_path).unwrap();
+        shuffled.write_to(&shuffled_path).unwrap();
+        let bytes = std::fs::read(&ordered_path).unwrap();
+        assert!(
+            bytes == std::fs::read(&shuffled_path).unwrap(),
+            "both write the same file"
+        );
+        assert_eq!(read_u32(&bytes, INDEX_FLAGS_OFFSET), INDEX_FLAG_KEY_ORDER);
+
+        let opened = BlindIndex::open(&ordered_path).unwrap();
+        opened.validate().unwrap();
+        assert_eq!(patterns_by_key(&opened), patterns_by_key(&built));
+        // An older reader ignores the flag and reads the candidate array,
+        // which counts up from zero: the same lookups.
+        let mut unflagged = bytes;
+        unflagged[INDEX_FLAGS_OFFSET..INDEX_FLAGS_OFFSET + 4].fill(0);
+        std::fs::write(&shuffled_path, unflagged).unwrap();
+        let old_reader = BlindIndex::open(&shuffled_path).unwrap();
+        assert_eq!(patterns_by_key(&old_reader), patterns_by_key(&built));
+    }
+
     #[test]
     fn open_defers_exhaustive_blind_index_validation() {
         let dir = std::env::temp_dir().join(format!(
@@ -2078,6 +2203,14 @@ pub(crate) mod tests {
             },
         };
         built.write_to(&path).unwrap();
+        // As an index written before patterns were stored in key order,
+        // whose readers use the candidate array.
+        let clear_flags = |path: &Path| {
+            let mut bytes = std::fs::read(path).unwrap();
+            bytes[INDEX_FLAGS_OFFSET..INDEX_FLAGS_OFFSET + 4].fill(0);
+            std::fs::write(path, bytes).unwrap();
+        };
+        clear_flags(&path);
 
         let mut bytes = std::fs::read(&path).unwrap();
         let starts_offset = INDEX_HEADER_SIZE + size_of::<u64>();
@@ -2090,6 +2223,7 @@ pub(crate) mod tests {
         drop(index);
 
         built.write_to(&path).unwrap();
+        clear_flags(&path);
         let mut bytes = std::fs::read(&path).unwrap();
         let candidates_offset = starts_offset + 2 * size_of::<u32>();
         bytes[candidates_offset..candidates_offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
