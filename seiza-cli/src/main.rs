@@ -74,10 +74,13 @@ fn read_astronomy_headers(
 pub(crate) enum LoadedImage {
     Dynamic(image::DynamicImage),
     /// A FITS or XISF image's compact 8-bit stretch, which detection runs
-    /// on, and the image itself, whose linear samples the detected stars are
-    /// measured again on (see [`refine_on_source`]).
+    /// on, `binning` image pixels to a sample along each axis
+    /// (`seiza_fits::FitsImage::detection_u8`), and the image itself, whose
+    /// linear samples the detected stars are measured again on (see
+    /// [`refine_on_source`]).
     Astronomy {
-        gray: image::GrayImage,
+        detection: image::DynamicImage,
+        binning: u32,
         source: Box<seiza_fits::FitsImage>,
     },
     LinearF32 {
@@ -111,7 +114,7 @@ impl LoadedImage {
     pub(crate) fn dimensions(&self) -> (u32, u32) {
         match self {
             Self::Dynamic(image) => (image.width(), image.height()),
-            Self::Astronomy { gray, .. } => gray.dimensions(),
+            Self::Astronomy { source, .. } => (source.width as u32, source.height as u32),
             Self::LinearF32 { width, height, .. } => (*width, *height),
         }
     }
@@ -119,11 +122,25 @@ impl LoadedImage {
     pub(crate) fn detect_stars(&self, config: &DetectConfig) -> Vec<DetectedStar> {
         match self {
             Self::Dynamic(image) => seiza::detect_stars(image, config),
-            Self::Astronomy { gray, source } => {
-                // Detection reads the image; the clone of its 8-bit buffer
-                // is what DynamicImage needs to own.
-                let image = image::DynamicImage::ImageLuma8(gray.clone());
-                refine_on_source(source, seiza::detect_stars(&image, config))
+            Self::Astronomy {
+                detection,
+                binning,
+                source,
+            } => {
+                let config = DetectConfig {
+                    ignore_border: config.ignore_border.div_ceil(*binning),
+                    ..config.clone()
+                };
+                let mut stars = seiza::detect_stars(detection, &config);
+                // From the binned grid to image pixels: a sample covers
+                // `binning` pixels each way, centred half a block in.
+                let (bin, centre) = (f64::from(*binning), f64::from(*binning - 1) / 2.0);
+                for star in &mut stars {
+                    star.x = star.x * bin + centre;
+                    star.y = star.y * bin + centre;
+                    star.area *= binning * binning;
+                }
+                refine_on_source(source, stars)
             }
             Self::LinearF32 {
                 luma,
@@ -154,7 +171,7 @@ impl LoadedImage {
     fn to_rgb8(&self) -> image::RgbImage {
         match self {
             Self::Dynamic(image) => image.to_rgb8(),
-            Self::Astronomy { gray, .. } => image::DynamicImage::ImageLuma8(gray.clone()).to_rgb8(),
+            Self::Astronomy { .. } => image::DynamicImage::ImageLuma8(self.to_luma8()).to_rgb8(),
             Self::LinearF32 {
                 luma,
                 width,
@@ -175,7 +192,18 @@ impl LoadedImage {
     fn to_luma8(&self) -> image::GrayImage {
         match self {
             Self::Dynamic(image) => image.to_luma8(),
-            Self::Astronomy { gray, .. } => gray.clone(),
+            // The full-resolution stretch, as drawings and previews need,
+            // whatever detection ran on.
+            Self::Astronomy {
+                detection,
+                binning: 1,
+                ..
+            } => detection.to_luma8(),
+            Self::Astronomy { source, .. } => {
+                let stretched = source.stretch_to_u8(&seiza_fits::StretchParams::default());
+                image::GrayImage::from_raw(source.width as u32, source.height as u32, stretched)
+                    .expect("stretch dimensions match the image")
+            }
             Self::LinearF32 {
                 luma,
                 width,
@@ -211,11 +239,14 @@ pub(crate) fn load_image(path: &std::path::Path, backend: DetectBackend) -> Resu
                 source: Some(Box::new(image)),
             });
         }
-        let stretched = image.stretch_to_u8(&seiza_fits::StretchParams::default());
-        let gray = image::GrayImage::from_raw(width, height, stretched)
-            .ok_or_else(|| anyhow::anyhow!("image dimensions mismatch"))?;
+        let (pixels, detection_width, detection_height, binning) =
+            image.detection_u8(&seiza_fits::StretchParams::default());
+        let detection =
+            image::GrayImage::from_raw(detection_width as u32, detection_height as u32, pixels)
+                .ok_or_else(|| anyhow::anyhow!("image dimensions mismatch"))?;
         return Ok(LoadedImage::Astronomy {
-            gray,
+            detection: image::DynamicImage::ImageLuma8(detection),
+            binning: binning as u32,
             source: Box::new(image),
         });
     }
@@ -4945,6 +4976,77 @@ mod cli_tests {
         assert!(auto_can_retry_f32(xisf, &luma, DetectBackend::Auto));
         assert_eq!(astronomy_image_format(xisf), Some(ImageFormat::Xisf));
         assert!(!is_fits_path(xisf));
+    }
+
+    #[test]
+    fn a_raw_colour_frame_is_detected_binned_and_placed_in_its_own_pixels() {
+        const CARD: usize = 80;
+        let card = |keyword: &str, value: &str| {
+            let mut card = [b' '; CARD];
+            card[..keyword.len()].copy_from_slice(keyword.as_bytes());
+            card[8] = b'=';
+            card[9] = b' ';
+            card[10..10 + value.len()].copy_from_slice(value.as_bytes());
+            card
+        };
+        let (width, height) = (320usize, 240usize);
+        let stars = [(101.3, 77.6), (240.8, 160.2), (60.5, 190.4)];
+        let mut bytes = Vec::new();
+        for (keyword, value) in [
+            ("SIMPLE", "T"),
+            ("BITPIX", "16"),
+            ("NAXIS", "2"),
+            ("NAXIS1", "320"),
+            ("NAXIS2", "240"),
+            ("BZERO", "32768"),
+            ("BSCALE", "1"),
+            ("BAYERPAT", "'RGGB'"),
+        ] {
+            bytes.extend_from_slice(&card(keyword, value));
+        }
+        let mut end = [b' '; CARD];
+        end[..3].copy_from_slice(b"END");
+        bytes.extend_from_slice(&end);
+        bytes.resize(bytes.len().next_multiple_of(2880), b' ');
+        // A grey sky with Gaussian stars, the same in every colour, so the
+        // mosaic's sites differ only by its noise-free levels.
+        for y in 0..height {
+            for x in 0..width {
+                let mut value = 1500.0 + 0.5 * x as f64;
+                for &(sx, sy) in &stars {
+                    let d2 = (x as f64 - sx).powi(2) + (y as f64 - sy).powi(2);
+                    value += 20_000.0 * (-d2 / (2.0 * 2.0 * 2.0)).exp();
+                }
+                bytes.extend_from_slice(&((value as u16) ^ 0x8000).to_be_bytes());
+            }
+        }
+        bytes.resize(bytes.len().next_multiple_of(2880), 0);
+        let path = std::env::temp_dir().join(format!(
+            "seiza-cli-binned-detection-{}-{}.fits",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, bytes).unwrap();
+        let image = load_image(&path, DetectBackend::Auto).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        assert!(matches!(image, LoadedImage::Astronomy { binning: 2, .. }));
+        assert_eq!(image.dimensions(), (320, 240));
+        assert_eq!(image.to_luma8().dimensions(), (320, 240));
+        let found = image.detect_stars(&DetectConfig::default());
+        for &(sx, sy) in &stars {
+            let nearest = found
+                .iter()
+                .map(|star| (star.x - sx).hypot(star.y - sy))
+                .fold(f64::INFINITY, f64::min);
+            assert!(
+                nearest < 0.1,
+                "({sx}, {sy}) found {nearest} px off: {found:?}"
+            );
+        }
     }
 
     #[test]

@@ -95,6 +95,16 @@ pub enum Pixels {
     F64(Vec<f64>),
 }
 
+/// Whether [`FitsImage::detection_u8`] bins an image 2 × 2: a raw colour
+/// mosaic, or a mono image over 20 megapixels, at least 32 pixels each way.
+fn bins_for_detection(width: usize, height: usize, planes: usize, mosaic: bool) -> bool {
+    const BIN_ABOVE_PIXELS: usize = 20_000_000;
+    planes == 1
+        && width >= 32
+        && height >= 32
+        && (mosaic || width.saturating_mul(height) > BIN_ABOVE_PIXELS)
+}
+
 /// An image's linear samples on a grid fit for measuring stars, read from
 /// the stored pixels without a copy.
 ///
@@ -728,6 +738,36 @@ fn fold_be_u16(raw: &[u8], flip: u16, out: &mut Vec<u16>) {
     );
 }
 
+/// The near-universal camera case of [`decode_pixels`], BITPIX 16 with
+/// BSCALE 1 and BZERO 32768 or 0, decoded from a whole data unit in memory:
+/// byte-swapped in parallel chunks into a buffer the threads fault in as
+/// they write it. The same samples as the streaming decode; `None` for any
+/// other kind of data.
+fn decode_camera_u16_in_parallel(payload: &[u8], spec: ImageSpec) -> Option<Pixels> {
+    let offset = spec.bzero as i64;
+    if spec.bitpix != 16 || spec.bscale != 1.0 || !(offset == 32768 || offset == 0) {
+        return None;
+    }
+    let flip = if offset == 32768 { 0x8000 } else { 0 };
+    let mut out = vec![0u16; spec.count];
+    out.par_chunks_mut(PARALLEL_CHUNK)
+        .zip(payload.par_chunks(2 * PARALLEL_CHUNK))
+        .for_each(|(out, raw)| swap_be_u16(raw, flip, out));
+    if flip == 0 && out.par_iter().any(|&bits| bits & 0x8000 != 0) {
+        return signed_u16_bits_to_f32(&out, spec.blank)
+            .ok()
+            .map(Pixels::F32);
+    }
+    Some(Pixels::U16(out))
+}
+
+#[multiversion::multiversion(targets("x86_64+avx2", "x86_64+sse4.1", "aarch64+neon"))]
+fn swap_be_u16(raw: &[u8], flip: u16, out: &mut [u16]) {
+    for (out, chunk) in out.iter_mut().zip(raw.chunks_exact(2)) {
+        *out = u16::from_be_bytes([chunk[0], chunk[1]]) ^ flip;
+    }
+}
+
 /// Signed 16-bit samples, given as their raw bits, as physical values with
 /// blank samples as NaN.
 fn signed_u16_bits_to_f32(bits: &[u16], blank: Option<i64>) -> Result<Vec<f32>, FitsError> {
@@ -843,7 +883,14 @@ impl FitsImage {
     /// the first image extension's, with the headers [`read_header`] gives.
     pub fn open(path: &Path) -> Result<FitsImage, FitsError> {
         let mut file = std::fs::File::open(path)?;
-        Self::read_from(&mut file, None)
+        // Mapped, the data unit is decoded straight from the file's pages,
+        // in parallel, instead of copied through a read buffer first.
+        // Safety: the file is opened read-only; concurrent truncation would
+        // fault, which is acceptable for locally-managed image files.
+        match unsafe { memmap2::Mmap::map(&file) } {
+            Ok(map) => Self::from_bytes(&map),
+            Err(_) => Self::read_from(&mut file, None),
+        }
     }
 
     /// Decode an in-memory FITS image through the same bounded conversion
@@ -851,7 +898,32 @@ impl FitsImage {
     /// input slice, so this entry point does not reduce its memory footprint.
     pub fn from_bytes(data: &[u8]) -> Result<FitsImage, FitsError> {
         let mut reader = std::io::Cursor::new(data);
-        Self::read_from(&mut reader, Some(data.len() as u64))
+        let hdu = locate_image(&mut reader, true)?;
+        if hdu.table.is_some() {
+            let mut reader = std::io::Cursor::new(data);
+            return Self::read_from(&mut reader, Some(data.len() as u64));
+        }
+        let headers = hdu.header.cards;
+        let spec = ImageSpec::from_headers(&headers)?;
+        let start = usize::try_from(hdu.data_start)
+            .map_err(|_| FitsError::Malformed("data runs past EOF".into()))?;
+        let end = usize::try_from(spec.payload_bytes())
+            .ok()
+            .and_then(|bytes| start.checked_add(bytes))
+            .filter(|&end| end <= data.len())
+            .ok_or_else(|| FitsError::Malformed("data runs past EOF".into()))?;
+        let payload = &data[start..end];
+        let pixels = match decode_camera_u16_in_parallel(payload, spec) {
+            Some(pixels) => pixels,
+            None => decode_pixels(&mut &payload[..], spec)?,
+        };
+        Ok(FitsImage {
+            width: spec.width,
+            height: spec.height,
+            planes: spec.planes,
+            pixels,
+            headers,
+        })
     }
 
     fn read_from<R: Read + Seek>(
@@ -1092,6 +1164,49 @@ impl FitsImage {
         stretch_u16_to_u8(&data, &stats, params)
     }
 
+    /// An 8-bit image to find stars in, with the image pixels each of its
+    /// samples covers along each axis: `(pixels, width, height, binning)`.
+    ///
+    /// A raw one-shot-colour mosaic, and a mono image over 20 megapixels, are
+    /// averaged in 2 × 2 blocks before [`Self::stretch_to_u8`]'s MTF stretch:
+    /// every 2 × 2 block of a Bayer mosaic holds one red, one blue and two
+    /// green pixels, so its mean is a brightness without a debayer, and a
+    /// quarter of the pixels is a quarter of the stretch's and the
+    /// detector's work. Stars found in it are for measuring again on the
+    /// image's own samples ([`Self::linear_sampler`]), so the binning costs
+    /// no precision. Any other image is [`Self::stretch_to_u8`] itself.
+    pub fn detection_u8(&self, params: &StretchParams) -> (Vec<u8>, usize, usize, usize) {
+        let bin = bins_for_detection(
+            self.width,
+            self.height,
+            self.planes,
+            self.bayer_pattern().is_some(),
+        );
+        if !bin {
+            return (self.stretch_to_u8(params), self.width, self.height, 1);
+        }
+        let (width, height) = (self.width / 2, self.height / 2);
+        let data = self.to_u16();
+        let stride = self.width;
+        let mut binned = vec![0u16; width * height];
+        binned
+            .par_chunks_mut(width)
+            .enumerate()
+            .for_each(|(y, row)| {
+                let top = &data[2 * y * stride..2 * y * stride + 2 * width];
+                let bottom = &data[(2 * y + 1) * stride..(2 * y + 1) * stride + 2 * width];
+                for (x, out) in row.iter_mut().enumerate() {
+                    let sum = u32::from(top[2 * x])
+                        + u32::from(top[2 * x + 1])
+                        + u32::from(bottom[2 * x])
+                        + u32::from(bottom[2 * x + 1]);
+                    *out = (sum / 4) as u16;
+                }
+            });
+        let stats = statistics_u16(&binned);
+        (stretch_u16_to_u8(&binned, &stats, params), width, height, 2)
+    }
+
     /// N.I.N.A.-compatible MTF autostretch to full-range 16-bit grayscale.
     /// Raw one-shot-color mosaics are debayered to luminance first.
     pub fn stretch_to_u16(&self, params: &StretchParams) -> Vec<u16> {
@@ -1324,6 +1439,63 @@ fn scale_to_f32(values: impl Iterator<Item = f64> + Clone) -> Vec<f32> {
 #[cfg(test)]
 mod conversion_tests {
     use super::*;
+
+    fn mono_u16(width: usize, height: usize, value: impl Fn(usize, usize) -> u16) -> FitsImage {
+        FitsImage {
+            width,
+            height,
+            planes: 1,
+            pixels: Pixels::U16(
+                (0..width * height)
+                    .map(|i| value(i % width, i / width))
+                    .collect(),
+            ),
+            headers: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_small_mono_image_is_detected_on_its_own_stretch() {
+        let image = mono_u16(100, 80, |x, y| (1000 + 7 * x + 13 * y) as u16);
+        let params = StretchParams::default();
+        let (pixels, width, height, binning) = image.detection_u8(&params);
+        assert_eq!((width, height, binning), (100, 80, 1));
+        assert_eq!(pixels, image.stretch_to_u8(&params));
+    }
+
+    #[test]
+    fn a_mosaic_is_detected_on_2x2_means_without_its_colour_pattern() {
+        // Red, green and blue at their own flat levels, with a gradient.
+        let mut image = mono_u16(64, 48, |x, y| {
+            let level = match (x % 2, y % 2) {
+                (0, 0) => 1000,
+                (1, 1) => 3000,
+                _ => 2000,
+            };
+            (level + 10 * (x / 2)) as u16
+        });
+        image
+            .headers
+            .push(("BAYERPAT".into(), HeaderValue::String("RGGB".into())));
+        let params = StretchParams::default();
+        let (pixels, width, height, binning) = image.detection_u8(&params);
+        assert_eq!((width, height, binning), (32, 24, 2));
+        // Every block holds the same colours, so each row is one ramp, the
+        // same from row to row.
+        for row in pixels.chunks_exact(width) {
+            assert_eq!(row, &pixels[..width]);
+        }
+        assert!(pixels[width - 1] > pixels[0]);
+    }
+
+    #[test]
+    fn large_mono_frames_and_mosaics_bin_for_detection() {
+        assert!(bins_for_detection(9576, 6388, 1, false));
+        assert!(!bins_for_detection(6248, 3000, 1, false));
+        assert!(bins_for_detection(3840, 2160, 1, true));
+        assert!(!bins_for_detection(9576, 6388, 3, false));
+        assert!(!bins_for_detection(20, 20, 1, true));
+    }
 
     /// The serial conversions as they were before they ran on rayon.
     fn previous_scale_to_u16(values: impl Iterator<Item = f64> + Clone) -> Vec<u16> {

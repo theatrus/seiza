@@ -5926,8 +5926,9 @@ fn refine_on_linear_samples(
 /// nothing solves, its own WCS unchecked.
 ///
 /// FITS and XISF images are detected first on an MTF stretch, as the CLI
-/// does, which suits processed images, and again on their linear samples
-/// when that does not solve. Either way the stars found are measured again
+/// does, which suits processed images, binned 2 × 2 for a raw colour mosaic
+/// or a mono frame over 20 megapixels, and again on their full-resolution
+/// linear samples when that does not solve. Either way the stars found are measured again
 /// on the linear samples, as the CLI's are, for the positions the solve
 /// fits. A raster converted from 8-bit colour is
 /// detected again in float. A raster's EXIF focal length gives the first
@@ -5961,10 +5962,21 @@ fn blind_solve_path(
         let width = u32::try_from(image.width).map_err(|_| "image width is too large")?;
         let height = u32::try_from(image.height).map_err(|_| "image height is too large")?;
         let capture_time = seiza_image_io::capture_time_from_headers(&image.headers);
-        let stretched = image.stretch_to_u8(&StretchParams::default());
-        let stars = image::GrayImage::from_raw(width, height, stretched)
-            .map(|gray| detect_stars(&DynamicImage::ImageLuma8(gray), &detection_config))
-            .unwrap_or_default();
+        // Stars are found in an 8-bit stretch, binned 2 x 2 for a raw
+        // colour mosaic or a large mono frame, and measured again on the
+        // image's own samples.
+        let (pixels, detection_width, detection_height, binning) =
+            image.detection_u8(&StretchParams::default());
+        let mut stars =
+            image::GrayImage::from_raw(detection_width as u32, detection_height as u32, pixels)
+                .map(|gray| detect_stars(&DynamicImage::ImageLuma8(gray), &detection_config))
+                .unwrap_or_default();
+        let (bin, centre) = (binning as f64, (binning as f64 - 1.0) / 2.0);
+        for star in &mut stars {
+            star.x = star.x * bin + centre;
+            star.y = star.y * bin + centre;
+            star.area *= (binning * binning) as u32;
+        }
         let stars = refine_on_linear_samples(&image, stars);
         (
             width,

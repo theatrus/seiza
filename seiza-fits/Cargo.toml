@@ -13,10 +13,9 @@ categories = ["science", "multimedia::images", "parser-implementations"]
 
 [dependencies]
 flate2.workspace = true
+memmap2.workspace = true
 multiversion = "0.9"
 rayon.workspace = true
 seiza-stretch.workspace = true
 tempfile = "3"
 
-[dev-dependencies]
-memmap2.workspace = true

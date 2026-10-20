@@ -1915,6 +1915,7 @@ name = "seiza-fits"
 version = "0.4.0"
 dependencies = [
  "flate2",
+ "memmap2",
  "multiversion",
  "rayon",
  "seiza-stretch",
