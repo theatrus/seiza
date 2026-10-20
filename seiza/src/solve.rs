@@ -281,6 +281,89 @@ pub(crate) fn solve_for_blind_hypothesis(
     }
 }
 
+/// Verify a blind hypothesis from the WCS its quad implies, without a
+/// triangle search.
+///
+/// A quad match already fixes an affine solution, to within a pixel or two
+/// near the quad. Here the brightest catalog stars in the frame are
+/// projected through it, the brightest detections must land on enough of
+/// them, and the matches are refined as [`solve_search`]'s best candidate
+/// is, to the same false-match limit. That costs one cone search and a few
+/// rounds of matching, where a triangle search costs a fraction of a
+/// second; when the quad's solution is too rough, the triangle search is
+/// still there.
+pub(crate) fn solve_from_coarse_wcs(
+    stars: &[DetectedStar],
+    catalog: &dyn StarCatalog,
+    coarse: &Wcs,
+    hint: &SolveHint,
+    dimensions: (u32, u32),
+    limits: &SolveLimits,
+) -> Result<Solution, crate::Error> {
+    limits.check()?;
+    if stars.len() < 4 {
+        return Err(crate::Error::Solve(format!(
+            "only {} stars detected; need at least 4",
+            stars.len()
+        )));
+    }
+    let (width, height) = (dimensions.0 as f64, dimensions.1 as f64);
+    let middle = crate::wcs::image_center(dimensions.0, dimensions.1);
+    let center = coarse.pixel_to_world(middle.0, middle.1);
+    let radius_deg = fov_radius_deg(hint, dimensions);
+    let cone = catalog.cone_search(center.0, center.1, radius_deg, 250);
+    if cone.len() < 4 {
+        return Err(crate::Error::Solve(format!(
+            "only {} catalog stars within {radius_deg:.2}° of the hypothesis",
+            cone.len()
+        )));
+    }
+    let tangent = tangent_wcs(center);
+    let cat: Vec<(f64, f64, CatalogStar)> = cone
+        .iter()
+        .filter_map(|s| tangent.world_to_pixel(s.ra, s.dec).map(|(x, y)| (x, y, *s)))
+        .collect();
+
+    // The quad's solution as a pixel-to-tangent affine about the frame's
+    // center, from three points spanning the frame.
+    let corners = [(0.0, 0.0), (width, 0.0), (0.0, height)];
+    let mut on_tangent = [(0.0, 0.0); 3];
+    for (point, corner) in on_tangent.iter_mut().zip(corners) {
+        let (ra, dec) = coarse.pixel_to_world(corner.0, corner.1);
+        *point = tangent.world_to_pixel(ra, dec).ok_or_else(|| {
+            crate::Error::Solve("the hypothesis puts the frame off its tangent plane".into())
+        })?;
+    }
+    let affine = Affine::from_three_points(&corners, &on_tangent)
+        .ok_or_else(|| crate::Error::Solve("the hypothesis transform is singular".into()))?;
+
+    let scale_deg = hint.scale_arcsec_px / 3600.0;
+    let match_tol = MATCH_TOLERANCE_PX * scale_deg;
+    let grid = CatGrid::build(&cat, match_tol);
+    let vote_stars: Vec<(f64, f64)> = stars
+        .iter()
+        .take(N_VOTE_STARS)
+        .map(|s| (s.x, s.y))
+        .collect();
+    let votes = count_inliers(&affine, &vote_stars, &cat, &grid, match_tol);
+    if votes < MIN_INLIERS.min(vote_stars.len() * 2 / 3) {
+        return Err(crate::Error::Solve(format!(
+            "the hypothesis put only {votes} of {} stars on catalog stars",
+            vote_stars.len()
+        )));
+    }
+    let solution = refine_to_solution(
+        affine, stars, &cat, &grid, match_tol, &tangent, hint, dimensions, 1,
+    )?;
+    if solution.false_match_probability > HINTED_MAX_FALSE_MATCH_PROBABILITY {
+        return Err(crate::Error::Solve(format!(
+            "the hypothesis matched {} stars, which chance explains (false-match probability {:.1e})",
+            solution.matched_stars, solution.false_match_probability
+        )));
+    }
+    Ok(solution)
+}
+
 /// Run the triangle matcher across every FOV-sized window in `hint`.
 ///
 /// [`solve`] first calls this with a zero radius for the common accurate-hint
@@ -2205,6 +2288,60 @@ mod tests {
         };
         let solution = solve(&detected, &catalog, &hint, dims).unwrap();
         assert_solution_matches(&truth, &solution, dims);
+    }
+
+    #[test]
+    fn a_quads_rough_solution_verifies_without_a_triangle_search() {
+        let dims = (4000u32, 3000u32);
+        let truth =
+            Wcs::from_center_scale_rotation((150.5, 33.2), (2000.0, 1500.0), 2.0, 31.0, false);
+        let mut rng = Lcg(303);
+        let (catalog, detected) = synthetic_scene(&truth, dims, &mut rng);
+        // A quad's fit: a few pixels, a part in a thousand of scale and a
+        // tenth of a degree off.
+        let rough = Wcs::from_center_scale_rotation(
+            truth.pixel_to_world(2004.0, 1497.0),
+            (2000.0, 1500.0),
+            2.002,
+            31.1,
+            false,
+        );
+        let hint = SolveHint {
+            center: rough.crval,
+            radius_deg: 0.0,
+            scale_arcsec_px: 2.0,
+            scale_tolerance: 0.15,
+            sip_order: 0,
+        };
+        let solution = solve_from_coarse_wcs(
+            &detected,
+            &catalog,
+            &rough,
+            &hint,
+            dims,
+            &SolveLimits::default(),
+        )
+        .unwrap();
+        assert_solution_matches(&truth, &solution, dims);
+
+        // Pointing at another part of the sky, it finds nothing to verify.
+        let elsewhere =
+            Wcs::from_center_scale_rotation((155.5, 33.2), (2000.0, 1500.0), 2.0, 31.0, false);
+        let hint = SolveHint {
+            center: elsewhere.crval,
+            ..hint
+        };
+        assert!(
+            solve_from_coarse_wcs(
+                &detected,
+                &catalog,
+                &elsewhere,
+                &hint,
+                dims,
+                &SolveLimits::default()
+            )
+            .is_err()
+        );
     }
 
     #[test]

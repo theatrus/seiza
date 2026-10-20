@@ -118,6 +118,17 @@ pub fn solve_with_prior(
             scale_tolerance: WCS_SCALE_TOLERANCE,
             sip_order: params.sip_order,
         };
+        // A header WCS is a whole solution, so checking it directly costs a
+        // cone search and a refit. The triangle search below is for one that
+        // has gone stale.
+        if let Some(wcs) = prior.wcs.as_ref()
+            && let Ok(solution) =
+                crate::solve::solve_from_coarse_wcs(stars, catalog, wcs, &hint, dimensions, limits)
+        {
+            let solution =
+                crate::solve::deepen(solution, stars, catalog, params.sip_order, dimensions);
+            return found(solution, SolveSource::HeaderChecked);
+        }
         let result = solve_with_limits(stars, catalog, &hint, dimensions, limits);
         if let Some(solution) = attempt("header WCS", result)? {
             return found(solution, SolveSource::HeaderChecked);

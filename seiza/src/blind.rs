@@ -156,6 +156,60 @@ type Hypothesis = (u32, (f64, f64), f64, Wcs);
 type SmoothedHypothesis = (HypothesisKey, u32, (f64, f64), f64, Wcs);
 type RankedHypothesis = (usize, u32, (f64, f64), f64, Wcs);
 
+/// The regions non-max suppression has kept, filed in cells of 5 × 5 × 3
+/// buckets. A kept region suppresses every bucket within 2 in centre and 1
+/// in scale of its own, so a bucket's question only needs the kept regions
+/// in the few cells its box overlaps, where marking each kept region's 75
+/// neighbouring buckets took most of a blind search's ranking.
+#[derive(Default)]
+struct SuppressionGrid {
+    cells: FxHashMap<HypothesisKey, Vec<HypothesisKey>>,
+}
+
+impl SuppressionGrid {
+    const REACH: (i64, i64, i64) = (2, 2, 1);
+    const CELL: (i64, i64, i64) = (5, 5, 3);
+
+    fn cell(key: HypothesisKey) -> HypothesisKey {
+        (
+            key.0.div_euclid(Self::CELL.0),
+            key.1.div_euclid(Self::CELL.1),
+            key.2.div_euclid(Self::CELL.2),
+        )
+    }
+
+    /// Whether a kept region lies within reach of `key`.
+    fn suppresses(&self, key: HypothesisKey) -> bool {
+        let low = Self::cell((
+            key.0 - Self::REACH.0,
+            key.1 - Self::REACH.1,
+            key.2 - Self::REACH.2,
+        ));
+        let high = Self::cell((
+            key.0 + Self::REACH.0,
+            key.1 + Self::REACH.1,
+            key.2 + Self::REACH.2,
+        ));
+        (low.0..=high.0).any(|cx| {
+            (low.1..=high.1).any(|cy| {
+                (low.2..=high.2).any(|cz| {
+                    self.cells.get(&(cx, cy, cz)).is_some_and(|keys| {
+                        keys.iter().any(|kept| {
+                            (kept.0 - key.0).abs() <= Self::REACH.0
+                                && (kept.1 - key.1).abs() <= Self::REACH.1
+                                && (kept.2 - key.2).abs() <= Self::REACH.2
+                        })
+                    })
+                })
+            })
+        })
+    }
+
+    fn keep(&mut self, key: HypothesisKey) {
+        self.cells.entry(Self::cell(key)).or_default().push(key);
+    }
+}
+
 fn smooth_hypotheses(hypotheses: &FxHashMap<HypothesisKey, Hypothesis>) -> Vec<SmoothedHypothesis> {
     hypotheses
         .keys()
@@ -758,8 +812,10 @@ pub fn solve_blind_with_limits(
     }
 
     // Shared by every hypothesis verification: the rank-robust fallback's
-    // star-list tables depend only on the image, not the hypothesis.
-    let rr_tables = crate::solve::RankRobustTables::build(stars, dimensions);
+    // star-list tables depend only on the image, not the hypothesis. They
+    // are built the first time a hypothesis needs them, which a field that
+    // verifies from its quad never does.
+    let rr_tables = std::sync::OnceLock::new();
     let (solution, fields) = match solve_blind_with_global_ladder(
         stars,
         catalog,
@@ -831,7 +887,7 @@ fn solve_blind_with_global_ladder(
     params: &BlindParams,
     dimensions: (u32, u32),
     global_ladder: &[usize],
-    rr_tables: &crate::solve::RankRobustTables,
+    rr_tables: &std::sync::OnceLock<crate::solve::RankRobustTables>,
     limits: &SolveLimits,
 ) -> Result<(Solution, usize), crate::Error> {
     // Image patterns: each of the brightest stars with 3-subsets of its
@@ -857,11 +913,11 @@ fn solve_blind_with_global_ladder(
         .take(N_IMAGE_STARS)
         .map(|s| (s.x, s.y))
         .collect();
-    let mut hypotheses: FxHashMap<HypothesisKey, Hypothesis> = FxHashMap::default();
+    // The quads, in the order the search visits them. Building and
+    // deduplicating them is cheap; looking each up in the index and working
+    // out the field it implies is not, so that runs in parallel below.
+    let mut quads: Vec<[(f64, f64); 4]> = Vec::new();
     let mut seen_quads = FxHashSet::default();
-    let mut stat_quads = 0u64;
-    let mut stat_candidates = 0u64;
-    let mut stat_scale_ok = 0u64;
 
     // All 4-combinations of the brightest picks, in a ladder of subset
     // sizes. Index patterns are built from a SPARSE bright tier (5-nearest
@@ -876,52 +932,8 @@ fn solve_blind_with_global_ladder(
             for a in i + 1..n {
                 for b in a + 1..n {
                     for c in b + 1..n {
-                        if !seen_quads.insert([i, a, b, c]) {
-                            continue;
-                        }
-                        let quad = [picked[i], picked[a], picked[b], picked[c]];
-                        let Some((points, max_edge_px)) = canonical_quad(&quad) else {
-                            continue;
-                        };
-                        stat_quads += 1;
-                        let desc = descriptor(&points);
-                        for key in descriptor_keys(&desc) {
-                            let candidates = index.lookup(key)?;
-                            stat_candidates += candidates.len() as u64;
-                            for candidate_offset in candidates {
-                                let candidate = index.checked_candidate_at(candidate_offset)?;
-                                let pattern = index.checked_pattern_at(candidate as usize)?;
-                                // Implied pixel scale from the size ratio
-                                let scale = pattern.max_edge_deg as f64 * 3600.0 / max_edge_px;
-                                if scale < params.min_scale_arcsec_px
-                                    || scale > params.max_scale_arcsec_px
-                                {
-                                    continue;
-                                }
-                                stat_scale_ok += 1;
-                                // The canonical vertex order gives a tentative
-                                // correspondence: fit the affine and read off
-                                // a precise implied field center
-                                let Some((implied, coarse_wcs)) = implied_wcs(
-                                    &points,
-                                    &pattern,
-                                    crate::wcs::image_center(dimensions.0, dimensions.1),
-                                    scale,
-                                ) else {
-                                    continue;
-                                };
-                                // Coarse buckets so multiple correct quads
-                                // merge votes and outrank one-off noise
-                                let bucket = (
-                                    (implied.0 * 2.0) as i64,
-                                    (implied.1 * 2.0) as i64,
-                                    (scale.ln() * 10.0) as i64,
-                                );
-                                let entry = hypotheses
-                                    .entry(bucket)
-                                    .or_insert((0, implied, scale, coarse_wcs));
-                                entry.0 += 1;
-                            }
+                        if seen_quads.insert([i, a, b, c]) {
+                            quads.push([picked[i], picked[a], picked[b], picked[c]]);
                         }
                     }
                 }
@@ -968,55 +980,78 @@ fn solve_blind_with_global_ladder(
                     for c in b + 1..n {
                         for d in c + 1..n {
                             let ids = [window[a], window[b], window[c], window[d]];
-                            if !seen_windows.insert(ids) {
-                                continue;
-                            }
-                            let quad = [
-                                all_stars[ids[0]],
-                                all_stars[ids[1]],
-                                all_stars[ids[2]],
-                                all_stars[ids[3]],
-                            ];
-                            let Some((points, max_edge_px)) = canonical_quad(&quad) else {
-                                continue;
-                            };
-                            stat_quads += 1;
-                            let desc = descriptor(&points);
-                            for key in descriptor_keys(&desc) {
-                                let candidates = index.lookup(key)?;
-                                stat_candidates += candidates.len() as u64;
-                                for candidate_offset in candidates {
-                                    let candidate = index.checked_candidate_at(candidate_offset)?;
-                                    let pattern = index.checked_pattern_at(candidate as usize)?;
-                                    let scale = pattern.max_edge_deg as f64 * 3600.0 / max_edge_px;
-                                    if scale < params.min_scale_arcsec_px
-                                        || scale > params.max_scale_arcsec_px
-                                    {
-                                        continue;
-                                    }
-                                    let Some((implied, coarse_wcs)) = implied_wcs(
-                                        &points,
-                                        &pattern,
-                                        crate::wcs::image_center(dimensions.0, dimensions.1),
-                                        scale,
-                                    ) else {
-                                        continue;
-                                    };
-                                    let bucket = (
-                                        (implied.0 * 2.0) as i64,
-                                        (implied.1 * 2.0) as i64,
-                                        (scale.ln() * 10.0) as i64,
-                                    );
-                                    let entry = hypotheses
-                                        .entry(bucket)
-                                        .or_insert((0, implied, scale, coarse_wcs));
-                                    entry.0 += 1;
-                                }
+                            if seen_windows.insert(ids) {
+                                quads.push(ids.map(|id| all_stars[id]));
                             }
                         }
                     }
                 }
             }
+        }
+    }
+
+    // Each quad's votes: the index patterns of its shape, at a plausible
+    // scale, and the field each implies. Collecting keeps the quads' order,
+    // so merging below gives every bucket the votes and the representative
+    // a single pass would.
+    let image_center = crate::wcs::image_center(dimensions.0, dimensions.1);
+    type Vote = (HypothesisKey, (f64, f64), f64, Wcs);
+    let per_quad = quads
+        .par_iter()
+        .map(|quad| -> Result<(Vec<Vote>, u64, u64, u64), crate::Error> {
+            if limits.stopped() {
+                return Ok((Vec::new(), 0, 0, 0));
+            }
+            let Some((points, max_edge_px)) = canonical_quad(quad) else {
+                return Ok((Vec::new(), 0, 0, 0));
+            };
+            let (mut votes, mut candidates_seen, mut scale_ok) = (Vec::new(), 0u64, 0u64);
+            let desc = descriptor(&points);
+            for key in descriptor_keys(&desc) {
+                let candidates = index.lookup(key)?;
+                candidates_seen += candidates.len() as u64;
+                for candidate_offset in candidates {
+                    let candidate = index.checked_candidate_at(candidate_offset)?;
+                    let pattern = index.checked_pattern_at(candidate as usize)?;
+                    // Implied pixel scale from the size ratio
+                    let scale = pattern.max_edge_deg as f64 * 3600.0 / max_edge_px;
+                    if scale < params.min_scale_arcsec_px || scale > params.max_scale_arcsec_px {
+                        continue;
+                    }
+                    scale_ok += 1;
+                    // The canonical vertex order gives a tentative
+                    // correspondence: fit the affine and read off a precise
+                    // implied field center
+                    let Some((implied, coarse_wcs)) =
+                        implied_wcs(&points, &pattern, image_center, scale)
+                    else {
+                        continue;
+                    };
+                    // Coarse buckets so multiple correct quads merge votes
+                    // and outrank one-off noise
+                    let bucket = (
+                        (implied.0 * 2.0) as i64,
+                        (implied.1 * 2.0) as i64,
+                        (scale.ln() * 10.0) as i64,
+                    );
+                    votes.push((bucket, implied, scale, coarse_wcs));
+                }
+            }
+            Ok((votes, 1, candidates_seen, scale_ok))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    limits.check()?;
+    let mut hypotheses: FxHashMap<HypothesisKey, Hypothesis> = FxHashMap::default();
+    let (mut stat_quads, mut stat_candidates, mut stat_scale_ok) = (0u64, 0u64, 0u64);
+    for (votes, quads, candidates, scale_ok) in per_quad {
+        stat_quads += quads;
+        stat_candidates += candidates;
+        stat_scale_ok += scale_ok;
+        for (bucket, implied, scale, coarse_wcs) in votes {
+            let entry = hypotheses
+                .entry(bucket)
+                .or_insert((0, implied, scale, coarse_wcs));
+            entry.0 += 1;
         }
     }
 
@@ -1033,19 +1068,13 @@ fn solve_blind_with_global_ladder(
     smoothed.sort_by_key(|entry| std::cmp::Reverse(entry.1));
     // Non-max suppression: a strong region floods all its neighbor
     // buckets with the same summed vote; verify each region once
-    let mut taken: FxHashSet<HypothesisKey> = FxHashSet::default();
+    let mut kept = SuppressionGrid::default();
     let mut ranked: Vec<(u32, (f64, f64), f64, Wcs)> = Vec::new();
     for (key, votes, implied, scale, coarse_wcs) in smoothed {
-        if taken.contains(&key) {
+        if kept.suppresses(key) {
             continue;
         }
-        for dx in -2..=2i64 {
-            for dy in -2..=2i64 {
-                for dz in -1..=1i64 {
-                    taken.insert((key.0 + dx, key.1 + dy, key.2 + dz));
-                }
-            }
-        }
+        kept.keep(key);
         ranked.push((votes, implied, scale, coarse_wcs));
     }
 
@@ -1101,13 +1130,26 @@ fn solve_blind_with_global_ladder(
     };
     let verify = |batch: &[RankedHypothesis]| {
         first_verified(batch, limits, |hypothesis, limits| {
-            let (coarse_matches, _, center, scale, _) = *hypothesis;
+            let (coarse_matches, _, center, scale, ref coarse_wcs) = *hypothesis;
+            let hint = hint_for(center, scale);
+            // The quad's own solution first: one cone search and a refit,
+            // where the triangle search below costs a fraction of a second.
+            if let Some(solution) = crate::solve::solve_from_coarse_wcs(
+                stars, catalog, coarse_wcs, &hint, dimensions, limits,
+            )
+            .ok()
+            .and_then(|solution| accepted(solution, scale))
+            {
+                return Some(solution);
+            }
             // The rank-robust fallback is reserved for hypotheses whose
             // position-only coarse score shows real catalog agreement
             // (random collisions project zero or one): a correct field
             // defeated by untrustworthy flux ordering is rescued, while the
             // hundreds of junk hypotheses fail at plain triangle cost.
-            let rank_robust = (coarse_matches >= RR_VERIFY_COARSE_FLOOR).then_some(rr_tables);
+            let rank_robust = (coarse_matches >= RR_VERIFY_COARSE_FLOOR).then(|| {
+                rr_tables.get_or_init(|| crate::solve::RankRobustTables::build(stars, dimensions))
+            });
             crate::solve::solve_for_blind_hypothesis(
                 stars,
                 catalog,
@@ -1752,6 +1794,47 @@ pub(crate) mod tests {
         let result = solve(&SolveLimits::default().with_cancel(cancel));
         assert!(matches!(result, Err(crate::Error::Cancelled)), "{result:?}");
         assert!(asked.load(std::sync::atomic::Ordering::Relaxed) > 5);
+    }
+
+    #[test]
+    fn the_suppression_grid_keeps_what_marking_every_neighbour_kept() {
+        // Keys in a strongest-first order, as smoothing sorts them, over a
+        // region that crosses zero, where floor division matters.
+        let mut rng = Lcg(91);
+        let keys: Vec<HypothesisKey> = (0..4000)
+            .map(|_| {
+                (
+                    (rng.next() * 60.0) as i64 - 30,
+                    (rng.next() * 60.0) as i64 - 30,
+                    (rng.next() * 12.0) as i64 - 6,
+                )
+            })
+            .collect();
+        let mut marked: FxHashSet<HypothesisKey> = FxHashSet::default();
+        let mut expected = Vec::new();
+        for &key in &keys {
+            if marked.contains(&key) {
+                continue;
+            }
+            for dx in -2..=2i64 {
+                for dy in -2..=2i64 {
+                    for dz in -1..=1i64 {
+                        marked.insert((key.0 + dx, key.1 + dy, key.2 + dz));
+                    }
+                }
+            }
+            expected.push(key);
+        }
+        let mut grid = SuppressionGrid::default();
+        let mut kept = Vec::new();
+        for &key in &keys {
+            if !grid.suppresses(key) {
+                grid.keep(key);
+                kept.push(key);
+            }
+        }
+        assert!(expected.len() > 50, "{}", expected.len());
+        assert_eq!(kept, expected);
     }
 
     #[test]
