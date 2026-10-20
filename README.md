@@ -10,11 +10,12 @@ Built to power object overlays and astrometric features in
 [tenrankai](https://github.com/theatrus/tenrankai) and
 [PSF Guard](https://github.com/theatrus/psf-guard).
 
-It is fast. A typical hinted solve of a real telescope frame finishes in
-0.2–0.4 seconds, and a blind solve — no position hint at all — takes about
-half a second with the prebuilt index. In side-by-side benchmarks seiza
+It is fast. A blind solve of a real telescope frame — no position hint at
+all — takes about a tenth of a second with the prebuilt index, and a hinted
+solve 0.05–0.2 seconds, start to finish. In side-by-side benchmarks seiza
 matched or beat ASTAP on every workload we tested, up to 19x faster on blind
-solves. The numbers and caveats are in [Performance](#performance).
+solves, and matched or beat Asterion on blind solves of telescope frames. The
+numbers and caveats are in [Performance](#performance).
 
 **Try it without installing anything:** go to [seiza.fyi](https://seiza.fyi),
 upload an image, and get a solution and object overlay in your browser. The
@@ -483,11 +484,24 @@ quick-look JPEGs; the composition outputs remain full-resolution `f32` FITS.*
 
 ## Performance
 
-Seiza is built to solve inside an imaging loop. On our Windows 11 test machine
-(Intel Core i7-12700H, release builds, no GPU), process startup, image loading,
-star detection, catalog access, solving, and result output are all included:
+Seiza is built to solve inside an imaging loop. Every time here is a whole
+command: process startup, image loading, star detection, catalog access,
+solving, and result output.
 
-- A real hinted FITS solve usually finishes in **0.2-0.4 seconds**.
+On a laptop (Intel Core i5-1340P, Fedora, release builds, October 2026), with
+`stars-deep-gaia17.bin` and `blind-gaia16.idx`, three runs of each image:
+
+- Blind solves of 16 real FITS frames, from 2 to 61 megapixels, took
+  **0.04–0.16 seconds, 0.09 s median**.
+- Hinted solves of 17 frames took **0.04–0.23 seconds, 0.10 s median**.
+  Checking a 26 MP frame's own header WCS takes 0.07–0.10 s.
+- Ten processed AstroBin JPEGs of about 22 megapixels solved blind in
+  0.19–0.59 s, 0.35 s median; decoding the JPEG is most of that.
+
+On our Windows 11 test machine in July 2026 (Intel Core i7-12700H, release
+builds, no GPU), before the October solver work:
+
+- A real hinted FITS solve usually finished in **0.2-0.4 seconds**.
 - Blind solving with a prebuilt index took **0.53 seconds median** across 13
   real FITS frames ranging from 26 to 61 megapixels.
 - Compact u8 detection cut peak detector memory from **1.08 GiB to 543 MiB**
@@ -497,12 +511,35 @@ The [automated scientific corpus](regression/README.md) gates known-truth
 astrometry and calibrated stacking, checks pinned camera images, and records
 repeatable runtime and peak-memory measurements.
 
+### Compared with Asterion
+
+[Asterion](https://github.com/asterion-solver/asterion) is a fast, accurate
+newer solver, and the closest match for blind speed. On the laptop above,
+blind, with seven runs of each program interleaved, each with its own
+catalogs (Asterion 0.1.8 with gaia-500 and tycho2):
+
+| Image | seiza, linear | seiza, SIP order 3 | Asterion |
+|---|---:|---:|---:|
+| M45, 26 MP colour raw | 0.06–0.08 s | 0.06–0.08 s | 0.07–0.16 s |
+| IC 5070, 61 MP mono | 0.09–0.11 s | 0.08–0.11 s | 0.10–0.17 s |
+| M31, 8 MP colour raw | 0.03–0.05 s | 0.03–0.05 s | 0.06–0.09 s |
+| NGC 253, 2 MP mono | 0.03 s | 0.03–0.04 s | 0.07–0.22 s |
+| `elephant`, 22 MP AstroBin JPEG | 0.30–0.32 s | 0.30–0.32 s | 0.31–0.35 s |
+
+Asterion fits a SIP distortion polynomial of an order it picks by default.
+Seiza's blind default is a linear fit, and `--sip-order` asks for SIP, which
+costs it no extra time on these frames. On phone
+shots it differs both ways: Asterion solved a cropped 24 mm phone frame in
+0.19 s, where seiza takes about 5 s, but at its defaults it didn't solve the
+full frames, which seiza solves blind in about 0.4 s.
+
 ### Compared with ASTAP
 
 [ASTAP](https://www.hnsky.org/astap.htm) is a mature, highly regarded plate
 solver and a serious reference point. There is no universal winner: different
 search strategies do better on different fields. In our repeated real-FITS
-comparison, using the catalog recommended for each solver:
+comparison in July 2026, before the October solver work, using the catalog
+recommended for each solver:
 
 | Workload | seiza | ASTAP | Result |
 |---|---:|---:|---|
@@ -587,8 +624,11 @@ Working today:
 - **Blind plate solving** — no position hint, only a plausible pixel-scale
   range: a disc-anchored whole-sky 4-star pattern index, hypothesis voting
   with smoothing and non-max suppression, parallel verification through the
-  hinted solver. The hosted G≤16 index is versioned, SHA-256 verified, and
-  memory-mapped
+  hinted solver. Image quads are looked up in growing chunks, and a field
+  that stands out verifies as soon as it does, so a clear field needs only
+  its first few hundred quads. The hosted G≤16 index is versioned, SHA-256
+  verified, and memory-mapped, with each key's patterns stored together so a
+  lookup reads one place in the file
   (`seiza solve-blind image.jpg --data data --index data --min-scale 0.1 --max-scale 15`).
 - **Star catalogs** — memory-mappable tile formats with cone search.
   Use the prebuilt sets from `download-data prebuilt` unless you need a
