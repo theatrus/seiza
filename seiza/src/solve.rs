@@ -1271,6 +1271,7 @@ fn match_sky_pairs(
 ) -> Vec<SkyPair> {
     let (width, height) = (dimensions.0 as f64, dimensions.1 as f64);
     let margin = 2.0 * tolerance_px;
+    let by_x = DetectionsByX::new(stars);
     let mut proposals: Vec<(f64, usize, usize)> = Vec::new();
     for (cat_index, &(_, _, star)) in cat.iter().enumerate() {
         let Some((sx, sy)) = wcs.world_to_pixel(star.ra, star.dec) else {
@@ -1279,14 +1280,7 @@ fn match_sky_pairs(
         if sx < -margin || sy < -margin || sx > width + margin || sy > height + margin {
             continue;
         }
-        let nearest = stars
-            .iter()
-            .enumerate()
-            .map(|(star_index, s)| ((s.x - sx).hypot(s.y - sy), star_index))
-            .min_by(|a, b| a.0.total_cmp(&b.0));
-        if let Some((distance, star_index)) = nearest
-            && distance <= tolerance_px
-        {
+        if let Some((distance, star_index)) = by_x.nearest_within(sx, sy, tolerance_px) {
             proposals.push((distance, star_index, cat_index));
         }
     }
@@ -1314,6 +1308,47 @@ fn match_sky_pairs(
         });
     }
     result
+}
+
+/// Detections sorted by x, so the ones near a point are a short run found
+/// by binary search instead of a scan of them all.
+struct DetectionsByX {
+    /// (x, y, index into the detections), by x, then by index
+    sorted: Vec<(f64, f64, usize)>,
+}
+
+impl DetectionsByX {
+    fn new(stars: &[DetectedStar]) -> Self {
+        let mut sorted: Vec<(f64, f64, usize)> = stars
+            .iter()
+            .enumerate()
+            .map(|(index, star)| (star.x, star.y, index))
+            .collect();
+        sorted.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.2.cmp(&b.2)));
+        Self { sorted }
+    }
+
+    /// The nearest detection to `(x, y)`, and its distance, when that is
+    /// within `tolerance`: the same detection a scan of them all finds,
+    /// the lowest index among equally near ones.
+    fn nearest_within(&self, x: f64, y: f64, tolerance: f64) -> Option<(f64, usize)> {
+        let first = self.sorted.partition_point(|s| s.0 < x - tolerance);
+        let mut nearest: Option<(f64, usize)> = None;
+        for &(sx, sy, index) in &self.sorted[first..] {
+            if sx > x + tolerance {
+                break;
+            }
+            let distance = (sx - x).hypot(sy - y);
+            if distance <= tolerance
+                && nearest.is_none_or(|(best, best_index)| {
+                    distance < best || (distance == best && index < best_index)
+                })
+            {
+                nearest = Some((distance, index));
+            }
+        }
+        nearest
+    }
 }
 
 /// Fit SIP distortion to the matched pairs of one accepted linear solution
@@ -2530,6 +2565,43 @@ mod tests {
         let rms = (sum_sq / count as f64).sqrt();
         assert!(count > 1000, "{count}");
         assert!(rms < 0.25, "{rms}");
+    }
+
+    #[test]
+    fn the_nearest_detection_is_the_one_a_full_scan_finds() {
+        let mut rng = Lcg(0x5EA7);
+        let mut stars: Vec<DetectedStar> = (0..400)
+            .map(|_| DetectedStar {
+                // Whole pixels, so some detections tie in x and in distance
+                x: (rng.next() * 300.0).round(),
+                y: (rng.next() * 200.0).round(),
+                flux: 1.0,
+                peak: 0.5,
+                area: 9,
+            })
+            .collect();
+        // Two at one place: the lower index must win the tie.
+        stars.push(stars[7].clone());
+        let by_x = DetectionsByX::new(&stars);
+        for probe in 0..5000 {
+            let (x, y) = if probe == 0 {
+                (stars[7].x, stars[7].y)
+            } else {
+                (rng.next() * 320.0 - 10.0, rng.next() * 220.0 - 10.0)
+            };
+            let tolerance = 0.5 + rng.next() * 6.0;
+            let scan = stars
+                .iter()
+                .enumerate()
+                .map(|(index, s)| ((s.x - x).hypot(s.y - y), index))
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .filter(|&(distance, _)| distance <= tolerance);
+            assert_eq!(by_x.nearest_within(x, y, tolerance), scan, "at ({x}, {y})");
+        }
+        assert_eq!(
+            by_x.nearest_within(stars[7].x, stars[7].y, 1.0),
+            Some((0.0, 7))
+        );
     }
 
     #[test]
