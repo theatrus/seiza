@@ -121,6 +121,10 @@ const RR_VERIFY_COARSE_FLOOR: usize = 10;
 const STANDOUT_VOTES: u32 = 20;
 /// See [`STANDOUT_VOTES`].
 const STANDOUT_RATIO: u32 = 4;
+/// A linear fit with an RMS residual of at most this many pixels leaves a
+/// SIP polynomial nothing to take up, so a blind solve asked for SIP that
+/// can't refine one doesn't solve the field again for it.
+const LINEAR_ENOUGH_PX: f64 = 0.5;
 /// Quads looked up before the first early check for a standout region;
 /// each later chunk is twice the one before.
 const FIRST_QUAD_CHUNK: usize = 256;
@@ -888,8 +892,25 @@ pub fn solve_blind_with_limits(
         ));
     }
     // Hypothesis verification deliberately stays linear so acceptance
-    // thresholds keep their meaning across the whole-sky search; the one
-    // accepted solution is then re-solved at the requested SIP order.
+    // thresholds keep their meaning across the whole-sky search. The one
+    // accepted solution is refitted at the requested SIP order against the
+    // deep catalog, as a hinted solve's own result is. When that finds no
+    // more stars to fit a polynomial to, which a wide field whose corners
+    // the linear fit misses can do, it is re-solved at that order instead;
+    // a field the linear fit already matches to within half a pixel has no
+    // distortion for a polynomial to take up, and is left linear.
+    let deepened = crate::solve::deepen(
+        solution.clone(),
+        stars,
+        catalog,
+        params.sip_order,
+        dimensions,
+    );
+    if deepened.wcs.sip.is_some()
+        || deepened.rms_arcsec <= LINEAR_ENOUGH_PX * deepened.wcs.scale_arcsec_per_px()
+    {
+        return Ok(deepened);
+    }
     let center_px = crate::wcs::image_center(dimensions.0, dimensions.1);
     let center = solution.wcs.pixel_to_world(center_px.0, center_px.1);
     let hint = SolveHint {
@@ -1796,6 +1817,97 @@ pub(crate) mod tests {
         let (ra, dec) = refined.wcs.pixel_to_world(2000.0, 1500.0);
         let sep = crate::catalog::angular_separation_deg(ra, dec, 212.4, -35.7);
         assert!(sep < 0.01, "refined center off by {sep}°");
+    }
+
+    #[test]
+    fn a_blind_sip_fit_refines_the_accepted_field_without_solving_it_again() {
+        /// Counts cone searches, the cost of each solve over a field.
+        use std::sync::atomic::AtomicUsize;
+        struct Counting<'a>(&'a MemoryCatalog, AtomicUsize);
+        impl StarCatalog for Counting<'_> {
+            fn cone_search(
+                &self,
+                ra: f64,
+                dec: f64,
+                radius_deg: f64,
+                limit: usize,
+            ) -> Vec<CatalogStar> {
+                self.1.fetch_add(1, Ordering::Relaxed);
+                self.0.cone_search(ra, dec, radius_deg, limit)
+            }
+        }
+
+        // A crowded 2″/px field with barrel distortion, 4.7 px at the
+        // corners: verification matches its brightest few hundred stars,
+        // and the deep refit has over a thousand more to fit SIP to.
+        let mut rng = Lcg(0xACC0_0001);
+        let dims = (4000u32, 3000u32);
+        let truth =
+            Wcs::from_center_scale_rotation((150.0, 33.0), (1999.5, 1499.5), 2.0, 0.0, true);
+        let distort = |x: f64, y: f64| {
+            let (u, v) = (x - 1999.5, y - 1499.5);
+            let factor = 1.0 + 3e-10 * (u * u + v * v);
+            (1999.5 + u * factor, 1499.5 + v * factor)
+        };
+        let mut stars = Vec::new();
+        let mut detected = Vec::new();
+        for _ in 0..6000 {
+            let ra = 150.0 + (rng.next() - 0.5) * 3.6;
+            let dec = 33.0 + (rng.next() - 0.5) * 3.0;
+            let mag = (6.0 + rng.next() * 10.0) as f32;
+            stars.push(CatalogStar { ra, dec, mag });
+            let Some((x, y)) = truth.world_to_pixel(ra, dec) else {
+                continue;
+            };
+            let (x, y) = distort(x, y);
+            if x < 0.0 || y < 0.0 || x >= 4000.0 || y >= 3000.0 || rng.next() < 0.2 {
+                continue;
+            }
+            detected.push(DetectedStar {
+                x: x + (rng.next() - 0.5) * 0.2,
+                y: y + (rng.next() - 0.5) * 0.2,
+                flux: 10f64.powf(-0.4 * mag as f64) * 1e6,
+                peak: 0.5,
+                area: 20,
+            });
+        }
+        detected.sort_by(|a, b| b.flux.total_cmp(&a.flux));
+        detected.truncate(1500);
+        let catalog = MemoryCatalog::new(stars);
+        let params = BlindParams {
+            min_scale_arcsec_px: 1.0,
+            max_scale_arcsec_px: 4.0,
+            max_pattern_deg: 1.5,
+            index_mag_limit: 16.0,
+            ..Default::default()
+        };
+        let index = BlindIndex::build(&catalog, &params);
+        let searches = |sip_order: u8| {
+            let counting = Counting(&catalog, AtomicUsize::new(0));
+            let params = BlindParams {
+                sip_order,
+                ..params.clone()
+            };
+            let solution = solve_blind(&detected, &counting, &index, &params, dims).unwrap();
+            (solution, counting.1.load(Ordering::Relaxed))
+        };
+        let (linear, linear_searches) = searches(0);
+        let (fitted, fitted_searches) = searches(3);
+        assert!(linear.wcs.sip.is_none());
+        assert!(fitted.wcs.sip.is_some(), "a SIP fit was asked for");
+        assert_eq!(fitted_searches, linear_searches, "no second solve");
+        assert!(
+            fitted.matched_stars > linear.matched_stars,
+            "{} against {}",
+            fitted.matched_stars,
+            linear.matched_stars
+        );
+        // A corner, where the distortion is largest, lands on its star.
+        let (x, y) = distort(3900.0, 2900.0);
+        let (ra, dec) = fitted.wcs.pixel_to_world(x, y);
+        let (true_ra, true_dec) = truth.pixel_to_world(3900.0, 2900.0);
+        let off = crate::catalog::angular_separation_deg(ra, dec, true_ra, true_dec) * 3600.0;
+        assert!(off < 0.5, "a corner is {off:.2}″ off");
     }
 
     #[test]
