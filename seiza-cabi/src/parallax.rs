@@ -11,8 +11,8 @@
 //! ([`seiza_parallax_write_video_json`]).
 
 use super::{
-    SeizaCancelSignal, SipResponse, WcsResponse, blind_solve_path, clear_error, ffi_result,
-    owned_json, rc_astro_cli, required_str,
+    SeizaCancelSignal, SipResponse, WcsResponse, clear_error, ffi_result, owned_json, rc_astro_cli,
+    required_str,
 };
 use image::{Rgb32FImage, RgbImage};
 use seiza::wcs::{Sip, Wcs};
@@ -1021,14 +1021,17 @@ fn solution(
         .scene
         .maximum_scale_arcsec_per_pixel
         .unwrap_or(1000.0);
-    let solved = blind_solve_path(
+    let solved = seiza::image_solve::solve_image(
         solve_path,
-        request.scene.catalog_directory.as_deref(),
-        minimum,
-        maximum,
-        2,
+        &seiza::image_solve::ImageSolveOptions {
+            catalog_directory: request.scene.catalog_directory.as_deref(),
+            min_scale_arcsec_px: minimum,
+            max_scale_arcsec_px: maximum,
+            sip_order: 2,
+        },
         &seiza::SolveLimits::default(),
-    )?;
+    )
+    .map_err(|error| error.to_string())?;
     let wcs = solved.solution.wcs;
     let message = if solved.source == crate::SolveSource::HeaderUnchecked {
         format!(

@@ -171,6 +171,26 @@ def test_a_catalog_without_proper_motions_solves_the_same_at_any_epoch():
     assert dated.matched_stars == as_written.matched_stars
 
 
+def test_solve_image_says_when_a_directory_has_no_catalogs(tmp_path):
+    def card(text):
+        return text.ljust(80).encode()
+
+    header = b"".join(
+        card(f"{key:<8}= {value:>20}")
+        for key, value in [("SIMPLE", "T"), ("BITPIX", "16"), ("NAXIS", "2"),
+                           ("NAXIS1", "64"), ("NAXIS2", "48"), ("BZERO", "32768")]
+    ) + card("END")
+    header += b" " * (-len(header) % 2880)
+    data = (np.full((48, 64), 1000, np.uint16) ^ 0x8000).astype(">u2").tobytes()
+    data += b"\0" * (-len(data) % 2880)
+    image = tmp_path / "frame.fits"
+    image.write_bytes(header + data)
+    empty = tmp_path / "catalogs"
+    empty.mkdir()
+    with pytest.raises(seiza.SolveError, match="catalog|star"):
+        seiza.solve_image(image, catalog_dir=empty)
+
+
 def test_wcs_transform_round_trip():
     wcs = seiza.Wcs.from_center_scale_rotation((10.0, -45.0), (500.0, 400.0), 1.5, 33.0)
     ra, dec = wcs.pixel_to_world(123.0, 456.0)

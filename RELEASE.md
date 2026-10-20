@@ -100,15 +100,16 @@ waits for the index):
 
 ```
 seiza-stats  →  seiza-stretch  →  seiza-imgproc  →  seiza-fits  →  seiza-xisf
-→  seiza-core  →  seiza-background  →  seiza-calibration  →  seiza-deconvolution
-→  seiza-sources  →  seiza-download  →  seiza  →  seiza-image-io
+→  seiza-core  →  seiza-image-io  →  seiza-background  →  seiza-calibration
+→  seiza-deconvolution  →  seiza-sources  →  seiza-download  →  seiza
 →  seiza-satellites  →  seiza-stacking  →  seiza-stars  →  seiza-draw
 →  seiza-parallax  →  seiza-cabi  →  seiza-cli
 ```
 
 `seiza-calibration` sits before `seiza-stacking`, which depends on it, and
 `seiza-image-io`, which needs `seiza-core`, `seiza-fits` and `seiza-xisf`, sits
-before `seiza-stacking` and `seiza-parallax`, which read and write through it. If you
+before `seiza`, whose `image_solve` reads image files through it, and before
+`seiza-stacking` and `seiza-parallax`, which read and write through it. If you
 ever need to re-derive this order rather than trust it, `cargo tree` gives it:
 a crate must be published after everything it depends on.
 
@@ -153,7 +154,10 @@ git push origin py-v<version>
   which changes rarely. Where a crate needs one function, take it as a
   closure, as `seiza-satellites` takes the sky-to-pixel mapping. Image
   reading, raster orientation and EXIF live in `seiza-image-io`, which does
-  not depend on `seiza` either.
+  not depend on `seiza` either. `seiza` depends on `seiza-image-io` and
+  `seiza-fits`, to solve an image file (`seiza::image_solve`), so a release
+  that bumps either of them releases `seiza` too; `seiza` moves with nearly
+  every release anyway.
 
 - **Bumping a crate means bumping every published crate that depends on
   it.** A dependent published with the old pin keeps resolving the old

@@ -2665,6 +2665,8 @@ dependencies = [
  "seiza-calibration",
  "seiza-core",
  "seiza-download",
+ "seiza-fits",
+ "seiza-image-io",
  "seiza-stats",
  "serde",
  "serde_json",

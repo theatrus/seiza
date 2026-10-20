@@ -17,6 +17,24 @@ do not mutate an array from another thread until the call returns.
 
 ## Solve an image
 
+The simplest way is to give `solve_image` the file. It reads the image,
+finds its stars, uses what the file says about itself (a WCS, the mount's
+pointing, the pixel scale, the capture time) and solves, blind when it must,
+as C hosts do with `seiza_solve_image_json`:
+
+```python
+import seiza
+
+solution = seiza.solve_image("M31.fits", catalog_dir="data", sip_order=3)
+print(solution.source)          # "header-checked", "header-hint", "blind" or "header-unchecked"
+ra, dec = solution.wcs.pixel_to_world(100.0, 200.0)
+```
+
+FITS and XISF images have their stars measured on their own linear samples;
+PNG, JPEG and TIFF images are detected as decoded, with a photo's EXIF focal
+length as the first scale to try. To control each step instead, detect and
+solve separately:
+
 ```python
 import numpy as np
 import seiza

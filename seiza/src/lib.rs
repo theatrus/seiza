@@ -25,6 +25,7 @@ pub mod constellations;
 pub mod data_paths;
 pub mod detect;
 pub mod field_objects;
+pub mod image_solve;
 pub mod minor_bodies;
 mod object_catalog_v3;
 mod object_catalog_v4;

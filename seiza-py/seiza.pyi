@@ -1156,6 +1156,16 @@ def field_objects(
     catalog_dir: str | Path | None = None,
     capture_time: str | None = None,
 ) -> FieldObjects: ...
+def solve_image(
+    path: str | Path,
+    *,
+    catalog_dir: str | Path | None = None,
+    min_scale_arcsec_px: float = 0.1,
+    max_scale_arcsec_px: float = 20.0,
+    sip_order: int = 0,
+    time_limit: float | None = None,
+    cancel: Callable[[], bool] | None = None,
+) -> Solution: ...
 def solve_with_prior(
     stars: Sequence[StarInput],
     catalog: StarCatalog,

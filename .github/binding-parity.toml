@@ -350,6 +350,15 @@ objects = [
 # reach through a larger call.
 "seiza::blind::*" = { none = "blind solving; the C ABI solves through solve_with_prior, which calls it" }
 "seiza::solve::solve_with_limits" = { none = "hinted solving; the C ABI solves through solve_with_prior, which calls it" }
+"seiza::solve::solve" = { none = "hinted solving; the C ABI solves through solve_with_prior, which calls it" }
+"seiza::prior::solve_with_prior" = { none = "the C ABI solves a file through image_solve::solve_image, which calls it; Python's solve_with_prior calls it on stars it detected" }
+"seiza::image_solve::detect_on_stretch" = { none = "a step inside image_solve::solve_image, which both bindings call" }
+"seiza::image_solve::refine_on_linear_samples" = { none = "a step inside image_solve::solve_image, which both bindings call" }
+"seiza::detect::refine_centroids" = { none = "a step inside image_solve::solve_image, which both bindings call; Python's refine_centroids also calls it on arrays" }
+"seiza::detect_stars" = { none = "detection inside image_solve::solve_image, which both bindings call; Python's detect also calls it on arrays" }
+"seiza::detect_stars_luma_f32" = { none = "detection inside image_solve::solve_image, which both bindings call; Python's detect also calls it on arrays" }
+"seiza-image-io::read_astronomy" = { none = "reading inside image_solve::solve_image, which both bindings call" }
+"seiza-image-io::capture_time_from_headers" = { none = "reading inside image_solve::solve_image, which both bindings call" }
 "seiza::catalog::*" = { none = "catalog arithmetic for the solver, field objects and parallax" }
 "seiza::constellations::project_figures" = { none = "project, which both bindings call, wraps it with the attribution" }
 "seiza::constellations::line_stars" = { none = "dataset, which both bindings call, carries every line star" }
@@ -511,8 +520,8 @@ seiza_parallax_free = { none = "frees a C handle; Python's garbage collector fre
 # --- solving ----------------------------------------------------------------
 # The C call reads the file, detects stars and reads its own prior; a Python
 # caller detects, calls read_solve_prior, then solve_with_prior.
-seiza_solve_image_json = "solve_with_prior"
-seiza_solve_image_with_limits_json = "solve_with_prior"
+seiza_solve_image_json = "solve_image"
+seiza_solve_image_with_limits_json = "solve_image"
 seiza_read_capture_time_json = "read_capture_time"
 seiza_read_photo_metadata_json = "read_photo_metadata"
 seiza_wcs_fits_header_json = "Wcs.fits_header_cards"
@@ -728,6 +737,7 @@ refine_centroids = { none = "C hosts solve a file, and seiza_solve_image_json me
 solve = { none = "C hosts solve a file (seiza_solve_image_json); Python solves stars it detected, near a given position" }
 solve_blind = { none = "C hosts solve a file (seiza_solve_image_json); Python solves stars it detected" }
 read_solve_prior = { none = "seiza_solve_image_json reads the prior itself" }
+solve_with_prior = { none = "C hosts solve a file (seiza_solve_image_json, whose twin is solve_image); Python can also solve stars it detected, with a prior it read" }
 "StarCatalog.open" = { none = "C hosts give a catalog directory, and seiza_solve_image_json opens the catalogs" }
 "StarCatalog.from_stars" = { none = "C hosts give a catalog directory, and seiza_solve_image_json opens the catalogs" }
 "StarCatalog.star_count" = { none = "C hosts give a catalog directory, and seiza_solve_image_json opens the catalogs" }

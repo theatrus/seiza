@@ -23,6 +23,8 @@ thiserror.workspace = true
 seiza-download = { workspace = true, optional = true }
 seiza-calibration.workspace = true
 seiza-core.workspace = true
+seiza-fits.workspace = true
+seiza-image-io.workspace = true
 memmap2.workspace = true
 rayon.workspace = true
 seiza-stats.workspace = true

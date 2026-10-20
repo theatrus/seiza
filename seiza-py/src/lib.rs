@@ -487,7 +487,7 @@ struct PySolution {
     /// candidate the search tried. Near 0 for a sure solution.
     #[pyo3(get)]
     false_match_probability: f64,
-    /// Where :func:`solve_with_prior` found the solution:
+    /// Where :func:`solve_with_prior` or :func:`solve_image` found the solution:
     /// ``"header-checked"``, ``"header-hint"``, ``"blind"``, or
     /// ``"header-unchecked"`` when nothing solved and the image's own WCS
     /// stands unchecked. ``None`` from the other solves.
@@ -1141,6 +1141,64 @@ fn solve_with_prior(
     Ok(solution)
 }
 
+/// Plate-solve the image file at ``path``, a FITS, XISF, PNG, JPEG or TIFF
+/// file, with what it says about itself, as C hosts do with
+/// ``seiza_solve_image_json``: its own WCS checked, else a hinted solve
+/// around its pointing and scale, else blind; and, when nothing solves, its
+/// own WCS unchecked (``source == "header-unchecked"``).
+///
+/// FITS and XISF images are detected on an MTF stretch, binned 2 x 2 for a
+/// raw colour mosaic or a large mono frame, with the stars measured again on
+/// the image's own samples, and detected again at full resolution when that
+/// does not solve. A photo's EXIF focal length gives the first scale to try.
+/// ``catalog_dir`` is a directory of catalogs, or ``None`` for the standard
+/// places; the deepest star catalog there is used, with the blind index
+/// beside it and, when the star file has one, its proper-motion sidecar,
+/// which moves the catalog to the image's capture time. The other arguments
+/// are as for :func:`solve_blind`.
+#[pyfunction]
+#[pyo3(signature = (path, *, catalog_dir=None, min_scale_arcsec_px=0.1,
+    max_scale_arcsec_px=20.0, sip_order=0, time_limit=None, cancel=None))]
+#[allow(clippy::too_many_arguments)]
+fn solve_image(
+    py: Python<'_>,
+    path: PathBuf,
+    catalog_dir: Option<PathBuf>,
+    min_scale_arcsec_px: f64,
+    max_scale_arcsec_px: f64,
+    sip_order: u8,
+    time_limit: Option<f64>,
+    cancel: Option<Py<PyAny>>,
+) -> PyResult<PySolution> {
+    if sip_order > 5 {
+        return Err(PyValueError::new_err("sip_order must be between 0 and 5"));
+    }
+    let limits = PySolveLimits::new(time_limit, cancel)?;
+    let solved = py.detach(|| {
+        seiza::image_solve::solve_image(
+            &path,
+            &seiza::image_solve::ImageSolveOptions {
+                catalog_directory: catalog_dir.as_deref(),
+                min_scale_arcsec_px,
+                max_scale_arcsec_px,
+                sip_order,
+            },
+            &limits.limits,
+        )
+    });
+    let (dimensions, source, result) = match solved {
+        Ok(solved) => (
+            (solved.width, solved.height),
+            Some(solved.source.as_str()),
+            Ok(solved.solution),
+        ),
+        Err(error) => ((0, 0), None, Err(error)),
+    };
+    let mut solution = limits.finish(result, dimensions)?;
+    solution.source = source;
+    Ok(solution)
+}
+
 #[pymodule]
 #[pyo3(name = "seiza")]
 fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -1163,6 +1221,7 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(read_capture_time, m)?)?;
     m.add_function(wrap_pyfunction!(read_solve_prior, m)?)?;
     m.add_function(wrap_pyfunction!(solve_with_prior, m)?)?;
+    m.add_function(wrap_pyfunction!(solve_image, m)?)?;
     color::register(m)?;
     color_calibration::register(m)?;
     deconvolution::register(m)?;
