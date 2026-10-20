@@ -121,6 +121,9 @@ const RR_VERIFY_COARSE_FLOOR: usize = 10;
 const STANDOUT_VOTES: u32 = 20;
 /// See [`STANDOUT_VOTES`].
 const STANDOUT_RATIO: u32 = 4;
+/// Quads looked up before the first early check for a standout region;
+/// each later chunk is twice the one before.
+const FIRST_QUAD_CHUNK: usize = 256;
 /// Bound the temporary per-anchor vectors created by parallel index
 /// generation. Deep Gaia tiers contain tens of millions of stars; collecting
 /// one `Vec` per anchor for an entire tier can otherwise consume gigabytes
@@ -241,6 +244,34 @@ fn smooth_hypotheses(hypotheses: &FxHashMap<HypothesisKey, Hypothesis>) -> Vec<S
             (key, sum, *implied, *scale, coarse_wcs.clone())
         })
         .collect()
+}
+
+/// Whether the leading region's votes, against the next region's, make it
+/// worth verifying before any other region is scored.
+fn stands_out(first: Option<u32>, second: Option<u32>) -> bool {
+    first.is_some_and(|first| {
+        first >= STANDOUT_VOTES && first >= STANDOUT_RATIO.saturating_mul(second.unwrap_or(0))
+    })
+}
+
+/// The leading region of `hypotheses`, ranked as the full search ranks
+/// regions, when it stands out.
+fn standout_region(
+    hypotheses: &FxHashMap<HypothesisKey, Hypothesis>,
+) -> Option<(HypothesisKey, Hypothesis)> {
+    let mut smoothed = smooth_hypotheses(hypotheses);
+    smoothed.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+    let mut kept = SuppressionGrid::default();
+    let mut leaders = smoothed.into_iter().filter(|entry| {
+        let keep = !kept.suppresses(entry.0);
+        if keep {
+            kept.keep(entry.0);
+        }
+        keep
+    });
+    let (key, votes, implied, scale, coarse_wcs) = leaders.next()?;
+    let second = leaders.next().map(|entry| entry.1);
+    stands_out(Some(votes), second).then_some((key, (votes, implied, scale, coarse_wcs)))
 }
 
 /// A searchable pattern index over a catalog's bright stars, frozen into
@@ -990,99 +1021,7 @@ fn solve_blind_with_global_ladder(
         }
     }
 
-    // Each quad's votes: the index patterns of its shape, at a plausible
-    // scale, and the field each implies. Collecting keeps the quads' order,
-    // so merging below gives every bucket the votes and the representative
-    // a single pass would.
     let image_center = crate::wcs::image_center(dimensions.0, dimensions.1);
-    type Vote = (HypothesisKey, (f64, f64), f64, Wcs);
-    let per_quad = quads
-        .par_iter()
-        .map(|quad| -> Result<(Vec<Vote>, u64, u64, u64), crate::Error> {
-            if limits.stopped() {
-                return Ok((Vec::new(), 0, 0, 0));
-            }
-            let Some((points, max_edge_px)) = canonical_quad(quad) else {
-                return Ok((Vec::new(), 0, 0, 0));
-            };
-            let (mut votes, mut candidates_seen, mut scale_ok) = (Vec::new(), 0u64, 0u64);
-            let desc = descriptor(&points);
-            for key in descriptor_keys(&desc) {
-                let candidates = index.lookup(key)?;
-                candidates_seen += candidates.len() as u64;
-                for candidate_offset in candidates {
-                    let candidate = index.checked_candidate_at(candidate_offset)?;
-                    let pattern = index.checked_pattern_at(candidate as usize)?;
-                    // Implied pixel scale from the size ratio
-                    let scale = pattern.max_edge_deg as f64 * 3600.0 / max_edge_px;
-                    if scale < params.min_scale_arcsec_px || scale > params.max_scale_arcsec_px {
-                        continue;
-                    }
-                    scale_ok += 1;
-                    // The canonical vertex order gives a tentative
-                    // correspondence: fit the affine and read off a precise
-                    // implied field center
-                    let Some((implied, coarse_wcs)) =
-                        implied_wcs(&points, &pattern, image_center, scale)
-                    else {
-                        continue;
-                    };
-                    // Coarse buckets so multiple correct quads merge votes
-                    // and outrank one-off noise
-                    let bucket = (
-                        (implied.0 * 2.0) as i64,
-                        (implied.1 * 2.0) as i64,
-                        (scale.ln() * 10.0) as i64,
-                    );
-                    votes.push((bucket, implied, scale, coarse_wcs));
-                }
-            }
-            Ok((votes, 1, candidates_seen, scale_ok))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    limits.check()?;
-    let mut hypotheses: FxHashMap<HypothesisKey, Hypothesis> = FxHashMap::default();
-    let (mut stat_quads, mut stat_candidates, mut stat_scale_ok) = (0u64, 0u64, 0u64);
-    for (votes, quads, candidates, scale_ok) in per_quad {
-        stat_quads += quads;
-        stat_candidates += candidates;
-        stat_scale_ok += scale_ok;
-        for (bucket, implied, scale, coarse_wcs) in votes {
-            let entry = hypotheses
-                .entry(bucket)
-                .or_insert((0, implied, scale, coarse_wcs));
-            entry.0 += 1;
-        }
-    }
-
-    if std::env::var("SEIZA_DEBUG").is_ok() {
-        eprintln!(
-            "blind-funnel: {stat_quads} image quads, {stat_candidates} candidates, \
-             {stat_scale_ok} scale-ok"
-        );
-    }
-    // Correct quads vote for the same field but their implied centers
-    // straddle bucket boundaries; sum each bucket with its neighbors so
-    // split votes recombine while uniform junk stays flat
-    let mut smoothed = smooth_hypotheses(&hypotheses);
-    smoothed.sort_by_key(|entry| std::cmp::Reverse(entry.1));
-    // Non-max suppression: a strong region floods all its neighbor
-    // buckets with the same summed vote; verify each region once
-    let mut kept = SuppressionGrid::default();
-    let mut ranked: Vec<(u32, (f64, f64), f64, Wcs)> = Vec::new();
-    for (key, votes, implied, scale, coarse_wcs) in smoothed {
-        if kept.suppresses(key) {
-            continue;
-        }
-        kept.keep(key);
-        ranked.push((votes, implied, scale, coarse_wcs));
-    }
-
-    let score_count = ranked
-        .partition_point(|hypothesis| hypothesis.0 >= 2)
-        .max(params.max_hypotheses)
-        .min(params.max_coarse_hypotheses.max(params.max_hypotheses))
-        .min(ranked.len());
     let detection_grid = DetectionGrid::new(
         stars.iter().take(200),
         (width.min(height) / 250.0).clamp(8.0, 32.0),
@@ -1121,14 +1060,14 @@ fn solve_blind_with_global_ladder(
     };
     // Blind acceptance is stricter than the hinted floor: across a
     // whole-sky search, chance alignments of a few stars are routine.
-    let accepted = |solution: Solution, scale: f64| {
+    let accepted = |solution: Solution, scale: f64, fields: usize| {
         (solution.matched_stars >= params.min_matches
             && solution.rms_arcsec < params.max_rms_px * scale
-            && solution.false_match_probability * score_count.max(1) as f64
+            && solution.false_match_probability * fields.max(1) as f64
                 <= params.max_false_match_probability)
             .then_some(solution)
     };
-    let verify = |batch: &[RankedHypothesis]| {
+    let verify = |batch: &[RankedHypothesis], fields: usize| {
         first_verified(batch, limits, |hypothesis, limits| {
             let (coarse_matches, _, center, scale, ref coarse_wcs) = *hypothesis;
             let hint = hint_for(center, scale);
@@ -1138,7 +1077,7 @@ fn solve_blind_with_global_ladder(
                 stars, catalog, coarse_wcs, &hint, dimensions, limits,
             )
             .ok()
-            .and_then(|solution| accepted(solution, scale))
+            .and_then(|solution| accepted(solution, scale, fields))
             {
                 return Some(solution);
             }
@@ -1159,20 +1098,156 @@ fn solve_blind_with_global_ladder(
                 limits,
             )
             .ok()
-            .and_then(|solution| accepted(solution, scale))
+            .and_then(|solution| accepted(solution, scale, fields))
         })
     };
 
+    // Each quad's votes: the index patterns of its shape, at a plausible
+    // scale, and the field each implies. A vote is strict when the
+    // pattern's own descriptor agrees with the quad's to within the probe
+    // width, not only by its bucket.
+    type Vote = (HypothesisKey, (f64, f64), f64, Wcs, bool);
+    let look_up = |quad: &[(f64, f64); 4]| -> Result<(Vec<Vote>, u64, u64, u64), crate::Error> {
+        if limits.stopped() {
+            return Ok((Vec::new(), 0, 0, 0));
+        }
+        let Some((points, max_edge_px)) = canonical_quad(quad) else {
+            return Ok((Vec::new(), 0, 0, 0));
+        };
+        let (mut votes, mut candidates_seen, mut scale_ok) = (Vec::new(), 0u64, 0u64);
+        let desc = descriptor(&points);
+        for key in descriptor_keys(&desc) {
+            let candidates = index.lookup(key)?;
+            candidates_seen += candidates.len() as u64;
+            for candidate_offset in candidates {
+                let candidate = index.checked_candidate_at(candidate_offset)?;
+                let pattern = index.checked_pattern_at(candidate as usize)?;
+                // Implied pixel scale from the size ratio
+                let scale = pattern.max_edge_deg as f64 * 3600.0 / max_edge_px;
+                if scale < params.min_scale_arcsec_px || scale > params.max_scale_arcsec_px {
+                    continue;
+                }
+                scale_ok += 1;
+                // The canonical vertex order gives a tentative
+                // correspondence: fit the affine and read off a precise
+                // implied field center
+                let Some((implied, coarse_wcs)) =
+                    implied_wcs(&points, &pattern, image_center, scale)
+                else {
+                    continue;
+                };
+                // Coarse buckets so multiple correct quads merge votes
+                // and outrank one-off noise
+                let bucket = (
+                    (implied.0 * 2.0) as i64,
+                    (implied.1 * 2.0) as i64,
+                    (scale.ln() * 10.0) as i64,
+                );
+                let strict = descriptors_agree(&desc, &descriptor(&pattern.points_f64()));
+                votes.push((bucket, implied, scale, coarse_wcs, strict));
+            }
+        }
+        Ok((votes, 1, candidates_seen, scale_ok))
+    };
+
+    // Quads are looked up in chunks that double in size, keeping their
+    // order, so merging below gives every bucket the votes and the
+    // representative a single pass would. After each chunk, a region that
+    // stands out on strict votes alone is verified, and a field it solves
+    // ends the search: a clear field stands out within the first few
+    // hundred quads, and needs none of the rest.
+    let mut per_quad = Vec::with_capacity(quads.len());
+    let mut strict_votes: FxHashMap<HypothesisKey, Hypothesis> = FxHashMap::default();
+    let mut tried_early: Option<HypothesisKey> = None;
+    let mut chunk_start = 0;
+    let mut chunk_len = FIRST_QUAD_CHUNK;
+    while chunk_start < quads.len() {
+        let chunk_end = (chunk_start + chunk_len).min(quads.len());
+        let chunk = quads[chunk_start..chunk_end]
+            .par_iter()
+            .map(&look_up)
+            .collect::<Result<Vec<_>, _>>()?;
+        limits.check()?;
+        for (votes, ..) in &chunk {
+            for (bucket, implied, scale, coarse_wcs, strict) in votes {
+                if *strict {
+                    strict_votes
+                        .entry(*bucket)
+                        .or_insert_with(|| (0, *implied, *scale, coarse_wcs.clone()))
+                        .0 += 1;
+                }
+            }
+        }
+        per_quad.extend(chunk);
+        chunk_start = chunk_end;
+        chunk_len *= 2;
+        if chunk_start == quads.len() {
+            // The full count below covers the last chunk.
+            break;
+        }
+        let Some((key, leader)) = standout_region(&strict_votes) else {
+            continue;
+        };
+        if tried_early.is_some_and(|tried| tried == key) {
+            continue;
+        }
+        tried_early = Some(key);
+        // Its chance of fooling the search is counted against the most
+        // fields the full search could score.
+        let fields = params.max_coarse_hypotheses.max(params.max_hypotheses);
+        if let Some(solution) = verify(&[score(leader)], fields) {
+            if std::env::var("SEIZA_DEBUG").is_ok() {
+                eprintln!("blind-funnel: verified early, after {chunk_start} image quads");
+            }
+            return Ok((solution, fields));
+        }
+    }
+    let mut hypotheses: FxHashMap<HypothesisKey, Hypothesis> = FxHashMap::default();
+    let (mut stat_quads, mut stat_candidates, mut stat_scale_ok) = (0u64, 0u64, 0u64);
+    for (votes, quads, candidates, scale_ok) in per_quad {
+        stat_quads += quads;
+        stat_candidates += candidates;
+        stat_scale_ok += scale_ok;
+        for (bucket, implied, scale, coarse_wcs, _) in votes {
+            let entry = hypotheses
+                .entry(bucket)
+                .or_insert((0, implied, scale, coarse_wcs));
+            entry.0 += 1;
+        }
+    }
+
+    if std::env::var("SEIZA_DEBUG").is_ok() {
+        eprintln!(
+            "blind-funnel: {stat_quads} image quads, {stat_candidates} candidates, \
+             {stat_scale_ok} scale-ok"
+        );
+    }
+    // Correct quads vote for the same field but their implied centers
+    // straddle bucket boundaries; sum each bucket with its neighbors so
+    // split votes recombine while uniform junk stays flat
+    let mut smoothed = smooth_hypotheses(&hypotheses);
+    smoothed.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+    // Non-max suppression: a strong region floods all its neighbor
+    // buckets with the same summed vote; verify each region once
+    let mut kept = SuppressionGrid::default();
+    let mut ranked: Vec<(u32, (f64, f64), f64, Wcs)> = Vec::new();
+    for (key, votes, implied, scale, coarse_wcs) in smoothed {
+        if kept.suppresses(key) {
+            continue;
+        }
+        kept.keep(key);
+        ranked.push((votes, implied, scale, coarse_wcs));
+    }
+
+    let score_count = ranked
+        .partition_point(|hypothesis| hypothesis.0 >= 2)
+        .max(params.max_hypotheses)
+        .min(params.max_coarse_hypotheses.max(params.max_hypotheses))
+        .min(ranked.len());
     // Verify a region that stands out by votes before scoring anything
     // else: scoring every multi-vote region costs a catalog cone search
     // each, far more than verifying one.
-    let standout = match ranked.as_slice() {
-        [first, second, ..] => {
-            first.0 >= STANDOUT_VOTES && first.0 >= STANDOUT_RATIO.saturating_mul(second.0)
-        }
-        [first] => first.0 >= STANDOUT_VOTES,
-        [] => false,
-    };
+    let standout = stands_out(ranked.first().map(|r| r.0), ranked.get(1).map(|r| r.0));
     let leaders: Vec<RankedHypothesis> = ranked
         .iter()
         .take(usize::from(standout))
@@ -1180,7 +1255,7 @@ fn solve_blind_with_global_ladder(
         .map(score)
         .collect();
     limits.check()?;
-    if let Some(solution) = verify(&leaders) {
+    if let Some(solution) = verify(&leaders, score_count) {
         return Ok((solution, score_count));
     }
 
@@ -1229,7 +1304,7 @@ fn solve_blind_with_global_ladder(
     while attempted < ranked.len() {
         limits.check()?;
         let end = (attempted + batch).min(ranked.len());
-        if let Some(solution) = verify(&ranked[attempted..end]) {
+        if let Some(solution) = verify(&ranked[attempted..end], score_count) {
             return Ok((solution, score_count));
         }
         attempted = end;
@@ -1495,6 +1570,15 @@ fn descriptor(points: &[(f64, f64); 4]) -> [f64; 5] {
         edges[3] / max,
         edges[4] / max,
     ]
+}
+
+/// Whether two descriptors agree in every dimension to within
+/// [`PROBE_EPSILON`], the noise the query probes allow for.
+fn descriptors_agree(image: &[f64; 5], pattern: &[f64; 5]) -> bool {
+    image
+        .iter()
+        .zip(pattern)
+        .all(|(a, b)| (a - b).abs() <= PROBE_EPSILON)
 }
 
 /// The home bucket key for a descriptor: floor-quantized bins packed
@@ -1794,6 +1878,31 @@ pub(crate) mod tests {
         let result = solve(&SolveLimits::default().with_cancel(cancel));
         assert!(matches!(result, Err(crate::Error::Cancelled)), "{result:?}");
         assert!(asked.load(std::sync::atomic::Ordering::Relaxed) > 5);
+    }
+
+    #[test]
+    fn a_region_stands_out_only_far_ahead_of_the_next() {
+        let wcs = Wcs::from_center_scale_rotation((10.0, 20.0), (99.5, 99.5), 2.0, 0.0, false);
+        let vote = |votes: u32| (votes, (10.0, 20.0), 2.0, wcs.clone());
+        // A field's votes split over neighbouring buckets, which smoothing
+        // sums: 14 + 12 = 26, and suppression keeps it as one region.
+        let mut hypotheses: FxHashMap<HypothesisKey, Hypothesis> = FxHashMap::default();
+        hypotheses.insert((20, 40, 7), vote(14));
+        hypotheses.insert((21, 40, 7), vote(12));
+        hypotheses.insert((300, -60, 3), vote(3));
+        hypotheses.insert((500, 10, 9), vote(2));
+        let (key, (votes, ..)) = standout_region(&hypotheses).expect("26 votes against 3");
+        assert!(key == (20, 40, 7) || key == (21, 40, 7));
+        assert_eq!(votes, 26);
+
+        // Against a region with more than a quarter of its votes, it doesn't.
+        hypotheses.insert((300, -60, 3), vote(7));
+        assert!(standout_region(&hypotheses).is_none());
+        // Nor with fewer than STANDOUT_VOTES, however far ahead.
+        hypotheses.insert((300, -60, 3), vote(1));
+        hypotheses.insert((21, 40, 7), vote(5));
+        assert!(standout_region(&hypotheses).is_none());
+        assert!(standout_region(&FxHashMap::default()).is_none());
     }
 
     #[test]
