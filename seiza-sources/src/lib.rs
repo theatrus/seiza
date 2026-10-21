@@ -104,6 +104,16 @@ const SIMBAD_DESIGNATIONS: &[&str] = &[
     "Cl Melotte %",
     "Cl Collinder %",
 ];
+/// SIMBAD's Galactic planetary nebulae: objects it classes as PNe that carry
+/// a PN G designation, which only Galactic ones have, and possible PNe in
+/// Abell's 1966 list. Extragalactic PNe, thousands of them in M31 and the
+/// Magellanic Clouds, have no PN G designation and are left out.
+const PLANETARY_NEBULA_QUERY: &str = "SELECT b.main_id, b.otype, b.ra, b.dec, \
+     b.galdim_majaxis, b.galdim_minaxis, b.galdim_angle, s.ids FROM basic AS b \
+     JOIN ids AS s ON s.oidref = b.oid \
+     WHERE (b.otype = 'PN' AND s.ids LIKE '%PN G%') \
+     OR (b.otype = 'PN?' AND s.ids LIKE '%PN A66%')";
+
 /// A TAP service carrying Gaia DR3 under the archive's column names.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum GaiaArchive {
@@ -1092,6 +1102,8 @@ impl SourceDownloader {
             )
             .await?;
         }
+        self.fetch_simbad(PLANETARY_NEBULA_QUERY, &output.join("simbad-pn.csv"))
+            .await?;
         self.ready("object catalogs", output);
         Ok(())
     }

@@ -974,7 +974,8 @@ enum DownloadSource {
         commit: String,
     },
     /// Advanced source: OpenNGC, Sh2, Barnard, UGC, LDN, vdB,
-    /// LBN, Cederblad, IAU + Bright Star Catalogue star names
+    /// LBN, Cederblad, IAU + Bright Star Catalogue star names, and SIMBAD's
+    /// Galactic planetary nebulae
     Objects {
         /// Directory to download into
         #[arg(long)]

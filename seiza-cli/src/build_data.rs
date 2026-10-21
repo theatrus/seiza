@@ -280,10 +280,8 @@ fn assemble_object_catalog_data(
         }
         canonical.mag = photometry_source.and_then(|index| detail.source_records[index].object.mag);
         for record in &detail.source_records {
-            if record.object.kind != seiza::objects::ObjectKind::Other
-                && canonical.kind == seiza::objects::ObjectKind::Other
-            {
-                canonical.kind = record.object.kind;
+            if record.object.kind != seiza::objects::ObjectKind::Other {
+                canonical.kind = refined_kind(canonical.kind, record.object.kind);
             }
             if canonical.common_name.is_empty() && !record.object.common_name.is_empty() {
                 canonical.common_name = record.object.common_name.clone();
@@ -2860,10 +2858,52 @@ pub fn build_objects(
         }
     }
 
+    // SIMBAD's Galactic planetary nebulae, Abell's among them. Those in
+    // OpenNGC, Sharpless or the LBN merge through their NGC, IC, Messier
+    // and Sh2 identifiers; the rest are added.
+    let planetary_nebulae = input.join(PLANETARY_NEBULA_FILE);
+    if planetary_nebulae.exists() {
+        sources += 1;
+        let mut reader = csv::Reader::from_path(&planetary_nebulae)
+            .with_context(|| format!("reading {}", planetary_nebulae.display()))?;
+        for record in reader.records() {
+            let record =
+                record.with_context(|| format!("reading {}", planetary_nebulae.display()))?;
+            let fields = record.iter().collect::<Vec<_>>();
+            if let Some(object) = parse_simbad_planetary_nebula(&fields) {
+                let matches = planetary_nebula_matches(&identity_index, &objects, &object);
+                source_records.push(ObjectSourceRecord {
+                    id: object.metadata.id.clone(),
+                    source: object.metadata.source.clone(),
+                    object: object.clone(),
+                    properties: catalog_properties(
+                        &fields,
+                        &[
+                            "main_id",
+                            "otype",
+                            "ra_deg",
+                            "dec_deg",
+                            "major_arcmin",
+                            "minor_arcmin",
+                            "position_angle_deg",
+                            "identifiers",
+                        ],
+                    ),
+                });
+                identity_index.merge_or_add_with_matches(
+                    &mut objects,
+                    object,
+                    matches,
+                    &mut merge_stats,
+                );
+            }
+        }
+    }
+
     if sources == 0 {
         bail!(
             "no catalog sources found in {} (expected NGC.csv, sh2.tsv, \
-             barnard.tsv, IAU-CSN.txt); run download-data objects first",
+             barnard.tsv, IAU-CSN.txt, simbad-pn.csv); run download-data objects first",
             input.display()
         );
     }
@@ -3070,9 +3110,7 @@ fn merge_catalog_record(
     target: &mut seiza::objects::SkyObject,
     incoming: seiza::objects::SkyObject,
 ) {
-    if target.kind == seiza::objects::ObjectKind::Other {
-        target.kind = incoming.kind;
-    }
+    target.kind = refined_kind(target.kind, incoming.kind);
     target.mag = target.mag.or(incoming.mag);
     target.major_arcmin = target.major_arcmin.or(incoming.major_arcmin);
     target.minor_arcmin = target.minor_arcmin.or(incoming.minor_arcmin);
@@ -3106,6 +3144,25 @@ fn merge_catalog_record(
     }
     for parent in incoming.metadata.parent_ids {
         add_unique(&mut target.metadata.parent_ids, parent);
+    }
+}
+
+/// The kind an object takes when another catalog's record of it merges in:
+/// an untyped object takes the record's kind, and a nebula or H II region
+/// that another catalog lists as a planetary nebula, as SIMBAD lists
+/// Sh2-274 as Abell 21, becomes one.
+fn refined_kind(
+    current: seiza::objects::ObjectKind,
+    incoming: seiza::objects::ObjectKind,
+) -> seiza::objects::ObjectKind {
+    use seiza::objects::ObjectKind;
+    if current == ObjectKind::Other
+        || (incoming == ObjectKind::PlanetaryNebula
+            && matches!(current, ObjectKind::Nebula | ObjectKind::HiiRegion))
+    {
+        incoming
+    } else {
+        current
     }
 }
 
@@ -3286,6 +3343,152 @@ fn stable_id_for_alias(alias: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// The objects a planetary nebula's identifiers match that it may merge
+/// into: nebulae only. OpenNGC lists Pease 1's PN G designation for M15, the
+/// cluster that holds it, and the two stay apart.
+fn planetary_nebula_matches(
+    index: &ObjectIdentityIndex,
+    objects: &[seiza::objects::SkyObject],
+    nebula: &seiza::objects::SkyObject,
+) -> Vec<usize> {
+    use seiza::objects::ObjectKind;
+    index
+        .matching_indices(objects, nebula)
+        .into_iter()
+        .filter(|&found| {
+            matches!(
+                objects[found].kind,
+                ObjectKind::PlanetaryNebula
+                    | ObjectKind::Nebula
+                    | ObjectKind::HiiRegion
+                    | ObjectKind::Other
+            )
+        })
+        .collect()
+}
+
+/// The SIMBAD query result `download-data objects` writes for planetary
+/// nebulae.
+const PLANETARY_NEBULA_FILE: &str = "simbad-pn.csv";
+const PLANETARY_NEBULA_SOURCE: &str = "SIMBAD TAP basic (otype PN)";
+
+/// One row of [`PLANETARY_NEBULA_FILE`]: main_id, otype, ra, dec, galdim
+/// major and minor axes (arcmin) and angle, and SIMBAD's identifiers joined
+/// by `|`. A possible PN (`PN?`) is kept only when Abell's 1966 list holds
+/// it.
+fn parse_simbad_planetary_nebula(fields: &[&str]) -> Option<seiza::objects::SkyObject> {
+    use seiza::objects::{ObjectKind, ObjectMetadata, SkyObject};
+
+    let [main_id, otype, ra, dec, major, minor, angle, ids, ..] = fields else {
+        return None;
+    };
+    let (Ok(ra), Ok(dec)) = (ra.parse::<f64>(), dec.parse::<f64>()) else {
+        return None;
+    };
+    // SIMBAD pads identifiers to align their numbers: "PN A66   39".
+    let tidy = |id: &str| id.split_whitespace().collect::<Vec<_>>().join(" ");
+    let main_id = tidy(main_id);
+    let ids = ids.split('|').map(tidy).collect::<Vec<_>>();
+    let mut abell = None;
+    let mut catalog = None;
+    let mut messier = None;
+    let mut sharpless = None;
+    let mut png = None;
+    let mut pk = None;
+    let mut short = Vec::new();
+    let mut common_name = None;
+    for id in &ids {
+        let number = |prefix: &str| {
+            id.strip_prefix(prefix)
+                .filter(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+                .map(|rest| rest.trim_start_matches('0').to_string())
+        };
+        if let Some(n) = number("PN A66 ") {
+            abell.get_or_insert(format!("Abell {n}"));
+        } else if let Some(n) = number("NGC ") {
+            catalog.get_or_insert(format!("NGC {n}"));
+        } else if let Some(n) = number("IC ") {
+            catalog.get_or_insert(format!("IC {n}"));
+        } else if let Some(n) = number("M ") {
+            messier.get_or_insert(format!("M {n}"));
+        } else if let Some(n) = number("SH 2-") {
+            sharpless.get_or_insert(format!("Sh2-{n}"));
+        } else if id.starts_with("PN G") {
+            png.get_or_insert(id.clone());
+        } else if id.starts_with("PK ") {
+            pk.get_or_insert(id.clone());
+        } else if id.starts_with("PN ") {
+            // Keep the "PN " prefix: as "M 1-1", a short designation
+            // would match Messier 11's key.
+            short.push(id.clone());
+        } else if let Some(name) = id.strip_prefix("NAME ") {
+            common_name.get_or_insert(name.to_string());
+        }
+    }
+    if *otype != "PN" && abell.is_none() {
+        return None;
+    }
+    let png = png.or_else(|| main_id.starts_with("PN G").then(|| main_id.clone()));
+    // SIMBAD's own choice of a short designation, when it made one.
+    if main_id.starts_with("PN ") && !main_id.starts_with("PN G") && !short.contains(&main_id) {
+        short.insert(0, main_id.clone());
+    } else if let Some(index) = short.iter().position(|id| *id == main_id) {
+        let preferred = short.remove(index);
+        short.insert(0, preferred);
+    }
+    let name = abell
+        .clone()
+        .or_else(|| catalog.clone())
+        .or_else(|| short.first().cloned())
+        .or_else(|| png.clone())
+        .unwrap_or_else(|| main_id.clone());
+    let mut aliases = Vec::new();
+    for alias in [abell, catalog, messier, sharpless, png.clone(), pk]
+        .into_iter()
+        .flatten()
+        .chain(short)
+    {
+        if designation_key(&alias) != designation_key(&name)
+            && !aliases
+                .iter()
+                .any(|existing: &String| designation_key(existing) == designation_key(&alias))
+        {
+            aliases.push(alias);
+        }
+    }
+    // "PN G047.0+42.4" reads unambiguously without its space; a name such
+    // as "PN A66 9" keeps its parts apart.
+    let id = match &png {
+        Some(png) => png.replace(' ', ""),
+        None => main_id.replace(' ', "_"),
+    };
+    let size = |value: &str| {
+        value
+            .parse::<f32>()
+            .ok()
+            .filter(|v| v.is_finite() && *v > 0.0)
+    };
+    Some(SkyObject {
+        kind: ObjectKind::PlanetaryNebula,
+        ra,
+        dec,
+        mag: None,
+        major_arcmin: size(major),
+        minor_arcmin: size(minor),
+        position_angle_deg: angle.parse::<f32>().ok().filter(|v| v.is_finite()),
+        name,
+        common_name: common_name.unwrap_or_default(),
+        metadata: ObjectMetadata {
+            id: format!("simbad:{id}"),
+            source: PLANETARY_NEBULA_SOURCE.to_string(),
+            aliases,
+            parent_ids: Vec::new(),
+            alternate_ids: Vec::new(),
+            alternate_sources: Vec::new(),
+        },
+    })
 }
 
 fn parse_lbn_line(line: &str) -> Option<seiza::objects::SkyObject> {
@@ -3623,6 +3826,11 @@ const OBJECT_SOURCE_DESCRIPTORS: &[ObjectSourceDescriptor] = &[
         label: "IAU Catalog of Star Names",
         reference_url: "https://www.iau.org/public/themes/naming_stars/",
         files: &["IAU-CSN.txt"],
+    },
+    ObjectSourceDescriptor {
+        label: PLANETARY_NEBULA_SOURCE,
+        reference_url: "https://simbad.cds.unistra.fr/simbad/sim-tap",
+        files: &[PLANETARY_NEBULA_FILE],
     },
 ];
 
@@ -5114,6 +5322,214 @@ mod tests {
             objects[0].metadata.alternate_sources,
             vec!["VizieR VII/9/catalog"]
         );
+    }
+
+    /// A row of `simbad-pn.csv`, identifiers padded as SIMBAD pads them.
+    fn simbad_pn(main_id: &str, otype: &str, major: &str, ids: &str) -> Vec<String> {
+        [main_id, otype, "10.5", "-20.25", major, "", "", ids]
+            .into_iter()
+            .map(String::from)
+            .collect()
+    }
+
+    fn parse_pn(fields: &[String]) -> Option<seiza::objects::SkyObject> {
+        parse_simbad_planetary_nebula(&fields.iter().map(String::as_str).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn abell_planetary_nebulae_take_abell_names() {
+        let object = parse_pn(&simbad_pn(
+            "PN A66   39",
+            "PN",
+            "2.9",
+            "PN G047.0+42.4|PK 047+42 1|PN A66   39|WD 1625+280|NAME Abell 39 Nebula",
+        ))
+        .unwrap();
+        assert_eq!(object.kind, seiza::objects::ObjectKind::PlanetaryNebula);
+        assert_eq!(object.name, "Abell 39");
+        assert_eq!(object.common_name, "Abell 39 Nebula");
+        assert_eq!(object.major_arcmin, Some(2.9));
+        assert_eq!(object.metadata.id, "simbad:PNG047.0+42.4");
+        // SIMBAD's own form stays findable too.
+        assert_eq!(
+            object.metadata.aliases,
+            vec!["PN G047.0+42.4", "PK 047+42 1", "PN A66 39"]
+        );
+        assert_eq!(object.metadata.source, PLANETARY_NEBULA_SOURCE);
+    }
+
+    #[test]
+    fn a_possible_planetary_nebula_needs_abell_to_be_kept() {
+        assert!(parse_pn(&simbad_pn("PN G010.0+00.7", "PN?", "", "PN G010.0+00.7")).is_none());
+        let abell = parse_pn(&simbad_pn("PN A66    9", "PN?", "0.617", "PN A66    9")).unwrap();
+        assert_eq!(abell.name, "Abell 9");
+        assert_eq!(abell.metadata.id, "simbad:PN_A66_9");
+    }
+
+    #[test]
+    fn an_ngc_planetary_nebula_merges_with_openngc() {
+        let mut dumbbell = object("M 27", "openngc:NGC6853", "OpenNGC");
+        dumbbell.kind = seiza::objects::ObjectKind::PlanetaryNebula;
+        dumbbell.metadata.aliases.push("NGC 6853".to_string());
+        let mut objects = vec![dumbbell];
+        let incoming = parse_pn(&simbad_pn(
+            "M  27",
+            "PN",
+            "8.0",
+            "M  27|NGC  6853|PN G060.8-03.6|PK 060-03 1|NAME Dumbbell Nebula",
+        ))
+        .unwrap();
+        assert_eq!(incoming.name, "NGC 6853");
+        let mut index = ObjectIdentityIndex::new(&objects);
+        let mut stats = ObjectMergeStats::default();
+
+        index.merge_or_add(&mut objects, incoming, &mut stats);
+
+        assert_eq!(objects.len(), 1);
+        assert_eq!(stats.merged, 1);
+        assert!(
+            objects[0]
+                .metadata
+                .aliases
+                .iter()
+                .any(|alias| alias == "PN G060.8-03.6")
+        );
+    }
+
+    #[test]
+    fn a_minkowski_planetary_nebula_does_not_merge_with_messier_11() {
+        let mut wild_duck = object("M 11", "openngc:NGC6705", "OpenNGC");
+        wild_duck.kind = seiza::objects::ObjectKind::OpenCluster;
+        let mut objects = vec![wild_duck];
+        let incoming = parse_pn(&simbad_pn(
+            "PN M  1-1",
+            "PN",
+            "",
+            "PN G130.9-10.5|PK 130-10 1|PN M  1-1",
+        ))
+        .unwrap();
+        assert_eq!(incoming.name, "PN M 1-1");
+        let mut index = ObjectIdentityIndex::new(&objects);
+        let mut stats = ObjectMergeStats::default();
+
+        index.merge_or_add(&mut objects, incoming, &mut stats);
+
+        assert_eq!(objects.len(), 2);
+        assert_eq!(stats.merged, 0);
+        assert_eq!(objects[0].kind, seiza::objects::ObjectKind::OpenCluster);
+    }
+
+    #[test]
+    fn a_sharpless_planetary_nebula_merges_and_becomes_one() {
+        let mut medusa = object("Sh2-274", "vizier:VII/20:Sh2-274", "VizieR VII/20/catalog");
+        medusa.kind = seiza::objects::ObjectKind::HiiRegion;
+        let mut objects = vec![medusa];
+        let incoming = parse_pn(&simbad_pn(
+            "PN A66   21",
+            "PN",
+            "10.25",
+            "PN G205.1+14.2|PK 205+14 1|PN A66   21|SH  2-274|NAME Medusa Nebula",
+        ))
+        .unwrap();
+        let mut index = ObjectIdentityIndex::new(&objects);
+        let mut stats = ObjectMergeStats::default();
+
+        index.merge_or_add(&mut objects, incoming, &mut stats);
+
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].kind, seiza::objects::ObjectKind::PlanetaryNebula);
+        assert_eq!(objects[0].common_name, "Medusa Nebula");
+        assert!(
+            objects[0]
+                .metadata
+                .aliases
+                .iter()
+                .any(|alias| alias == "Abell 21")
+        );
+    }
+
+    #[test]
+    fn a_planetary_nebula_in_a_cluster_stays_apart_from_it() {
+        let mut m15 = object("M 15", "openngc:NGC7078", "OpenNGC");
+        m15.kind = seiza::objects::ObjectKind::GlobularCluster;
+        m15.metadata.aliases.push("PN G065.0-27.3".to_string());
+        let mut objects = vec![m15];
+        let pease = parse_pn(&simbad_pn(
+            "PN Ps   1",
+            "PN",
+            "",
+            "PN G065.0-27.3|PK 065-27 1|PN Ps   1|NGC  7078   648",
+        ))
+        .unwrap();
+        assert_eq!(pease.name, "PN Ps 1");
+        let mut index = ObjectIdentityIndex::new(&objects);
+        assert_eq!(index.matching_indices(&objects, &pease), vec![0]);
+        let matches = planetary_nebula_matches(&index, &objects, &pease);
+        let mut stats = ObjectMergeStats::default();
+
+        index.merge_or_add_with_matches(&mut objects, pease, matches, &mut stats);
+
+        assert_eq!(objects.len(), 2);
+        assert_eq!(objects[0].kind, seiza::objects::ObjectKind::GlobularCluster);
+    }
+
+    #[test]
+    fn a_sharpless_planetary_nebula_is_built_as_one() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("sh2.tsv"),
+            "#_RAJ2000\t_DEJ2000\tSh2\tDiam\n112.29292\t13.24722\t274\t10\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(PLANETARY_NEBULA_FILE),
+            "main_id,otype,ra,dec,galdim_majaxis,galdim_minaxis,galdim_angle,ids\n\
+             PN A66   21,PN,112.2618,13.2464,10.25,10.25,,\"PN G205.1+14.2|PK 205+14 1|PN A66   21|SH  2-274|NAME Medusa Nebula\"\n\
+             PN A66   39,PN,246.8946,27.9094,2.9,2.9,,\"PN G047.0+42.4|PN A66   39\"\n",
+        )
+        .unwrap();
+        let output = dir.path().join("objects.bin");
+
+        build_objects(dir.path(), &output, None, None).unwrap();
+
+        let catalog = seiza::objects::ObjectCatalog::open(&output).unwrap();
+        let objects = catalog.read_all().unwrap();
+        assert_eq!(objects.len(), 2);
+        let medusa = objects
+            .iter()
+            .find(|object| object.name == "Sh2-274")
+            .unwrap();
+        assert_eq!(medusa.kind, seiza::objects::ObjectKind::PlanetaryNebula);
+        assert_eq!(medusa.common_name, "Medusa Nebula");
+        assert!(
+            medusa
+                .metadata
+                .aliases
+                .iter()
+                .any(|alias| alias == "Abell 21")
+        );
+        let abell = objects
+            .iter()
+            .find(|object| object.name == "Abell 39")
+            .unwrap();
+        assert_eq!(abell.kind, seiza::objects::ObjectKind::PlanetaryNebula);
+        assert_eq!(
+            catalog.lookup_name("Abell 21").unwrap()[0]
+                .object
+                .metadata
+                .id,
+            "vizier:VII/20:Sh2-274"
+        );
+    }
+
+    #[test]
+    fn other_sources_keep_their_kind_when_merged() {
+        let mut target = object("Sh2-1", "vizier:VII/20:Sh2-1", "VizieR VII/20/catalog");
+        target.kind = seiza::objects::ObjectKind::HiiRegion;
+        let mut incoming = object("LBN 1", "vizier:VII/9:LBN1", "VizieR VII/9/catalog");
+        incoming.kind = seiza::objects::ObjectKind::Nebula;
+        merge_catalog_record(&mut target, incoming);
+        assert_eq!(target.kind, seiza::objects::ObjectKind::HiiRegion);
     }
 
     #[test]
