@@ -654,7 +654,8 @@ seiza build-blind-index --data stars-deep.bin --output blind-gaia16.idx --index-
 - **Object catalogs** — OpenNGC (NGC/IC/Messier), Sharpless, Barnard, UGC,
   LDN, LBN, Cederblad, vdB, PGC, Green's Galactic supernova remnants,
   Wolf-Rayet stars, SIMBAD's Galactic planetary nebulae (Abell's 1966 list
-  among them), IAU named and HD stars, and live transient
+  among them, with Strasbourg-ESO diameters where SIMBAD has no size), IAU
+  named and HD stars, and live transient
   (supernova/nova) lists built into a memory-mapped object store. Its embedded
   tile and normalized-name indices page in only relevant records for viewport,
   exact-name/ID, and prefix queries. Query a known sky cone or ordered image

@@ -2862,6 +2862,10 @@ pub fn build_objects(
     // OpenNGC, Sharpless or the LBN merge through their NGC, IC, Messier
     // and Sh2 identifiers; the rest are added.
     let planetary_nebulae = input.join(PLANETARY_NEBULA_FILE);
+    let diameters = read_planetary_nebula_diameters(&input.join(PLANETARY_NEBULA_DIAMETER_FILE))?;
+    if !diameters.is_empty() {
+        sources += 1;
+    }
     if planetary_nebulae.exists() {
         sources += 1;
         let mut reader = csv::Reader::from_path(&planetary_nebulae)
@@ -2870,7 +2874,8 @@ pub fn build_objects(
             let record =
                 record.with_context(|| format!("reading {}", planetary_nebulae.display()))?;
             let fields = record.iter().collect::<Vec<_>>();
-            if let Some(object) = parse_simbad_planetary_nebula(&fields) {
+            if let Some(mut object) = parse_simbad_planetary_nebula(&fields) {
+                fill_planetary_nebula_diameter(&mut object, &diameters);
                 let matches = planetary_nebula_matches(&identity_index, &objects, &object);
                 source_records.push(ObjectSourceRecord {
                     id: object.metadata.id.clone(),
@@ -3374,6 +3379,66 @@ fn planetary_nebula_matches(
 const PLANETARY_NEBULA_FILE: &str = "simbad-pn.csv";
 const PLANETARY_NEBULA_SOURCE: &str = "SIMBAD TAP basic (otype PN)";
 
+/// Optical diameters from the Strasbourg-ESO catalogue of Galactic
+/// planetary nebulae (Acker et al. 1992): PN G designation and diameter in
+/// arcseconds.
+const PLANETARY_NEBULA_DIAMETER_FILE: &str = "pn-diameters.tsv";
+const PLANETARY_NEBULA_DIAMETER_SOURCE: &str = "VizieR V/84/diam";
+
+/// Each PN G designation's optical diameter in arcseconds, from
+/// [`PLANETARY_NEBULA_DIAMETER_FILE`], keyed without the "PN G" prefix as
+/// the catalogue writes it ("037.9-03.4"). A missing file gives none.
+fn read_planetary_nebula_diameters(path: &Path) -> Result<std::collections::HashMap<String, f32>> {
+    let mut diameters = std::collections::HashMap::new();
+    if !path.exists() {
+        return Ok(diameters);
+    }
+    let content = std::fs::read_to_string(path)?;
+    for line in content.lines() {
+        if line.starts_with('#') {
+            continue;
+        }
+        let mut fields = line.split('\t').map(str::trim);
+        let (Some(png), Some(diameter)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        // Header, units and separator rows don't parse; nor does a blank.
+        if let Ok(diameter) = diameter.parse::<f32>()
+            && diameter.is_finite()
+            && diameter > 0.0
+            && !png.is_empty()
+        {
+            diameters.insert(png.to_string(), diameter);
+        }
+    }
+    Ok(diameters)
+}
+
+/// Give a planetary nebula without a size from SIMBAD the Strasbourg-ESO
+/// optical diameter of its PN G designation, as a circle.
+fn fill_planetary_nebula_diameter(
+    object: &mut seiza::objects::SkyObject,
+    diameters: &std::collections::HashMap<String, f32>,
+) {
+    if object.major_arcmin.is_some() {
+        return;
+    }
+    let Some(diameter) = std::iter::once(&object.name)
+        .chain(&object.metadata.aliases)
+        .find_map(|designation| designation.strip_prefix("PN G"))
+        .and_then(|png| diameters.get(png))
+    else {
+        return;
+    };
+    object.major_arcmin = Some(diameter / 60.0);
+    object.minor_arcmin = Some(diameter / 60.0);
+    object.position_angle_deg = None;
+    add_unique(
+        &mut object.metadata.alternate_sources,
+        PLANETARY_NEBULA_DIAMETER_SOURCE.to_string(),
+    );
+}
+
 /// One row of [`PLANETARY_NEBULA_FILE`]: main_id, otype, ra, dec, galdim
 /// major and minor axes (arcmin) and angle, and SIMBAD's identifiers joined
 /// by `|`. A possible PN (`PN?`) is kept only when Abell's 1966 list holds
@@ -3831,6 +3896,11 @@ const OBJECT_SOURCE_DESCRIPTORS: &[ObjectSourceDescriptor] = &[
         label: PLANETARY_NEBULA_SOURCE,
         reference_url: "https://simbad.cds.unistra.fr/simbad/sim-tap",
         files: &[PLANETARY_NEBULA_FILE],
+    },
+    ObjectSourceDescriptor {
+        label: PLANETARY_NEBULA_DIAMETER_SOURCE,
+        reference_url: "https://cdsarc.cds.unistra.fr/viz-bin/cat/V/84",
+        files: &[PLANETARY_NEBULA_DIAMETER_FILE],
     },
 ];
 
@@ -5334,6 +5404,57 @@ mod tests {
 
     fn parse_pn(fields: &[String]) -> Option<seiza::objects::SkyObject> {
         parse_simbad_planetary_nebula(&fields.iter().map(String::as_str).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn a_planetary_nebula_without_a_simbad_size_takes_its_strasbourg_eso_diameter() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(PLANETARY_NEBULA_DIAMETER_FILE);
+        std::fs::write(
+            &path,
+            "#\n#Title: Diameters\nPNG\toDiam\n \tarcsec\n----------\t------\n\
+             037.9-03.4\t 181.0\n047.0+42.4\t 174.0\n000.0-06.8\t   0.0\n",
+        )
+        .unwrap();
+        let diameters = read_planetary_nebula_diameters(&path).unwrap();
+        // Header rows and a zero diameter are skipped.
+        assert_eq!(diameters.len(), 2);
+
+        // Abell 56: SIMBAD has no size.
+        let mut abell56 = parse_pn(&simbad_pn(
+            "PN A66   56",
+            "PN",
+            "",
+            "PK 037-03  2|PN G037.9-03.4|PN A66   56",
+        ))
+        .unwrap();
+        assert_eq!(abell56.major_arcmin, None);
+        fill_planetary_nebula_diameter(&mut abell56, &diameters);
+        assert_eq!(abell56.major_arcmin, Some(181.0 / 60.0));
+        assert_eq!(abell56.minor_arcmin, Some(181.0 / 60.0));
+        assert_eq!(
+            abell56.metadata.alternate_sources,
+            vec![PLANETARY_NEBULA_DIAMETER_SOURCE]
+        );
+
+        // SIMBAD's size, where it has one, stands.
+        let mut abell39 = parse_pn(&simbad_pn(
+            "PN A66   39",
+            "PN",
+            "2.9",
+            "PN G047.0+42.4|PN A66   39",
+        ))
+        .unwrap();
+        fill_planetary_nebula_diameter(&mut abell39, &diameters);
+        assert_eq!(abell39.major_arcmin, Some(2.9));
+        assert!(abell39.metadata.alternate_sources.is_empty());
+
+        // No file, no diameters.
+        assert!(
+            read_planetary_nebula_diameters(&dir.path().join("missing.tsv"))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

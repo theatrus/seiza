@@ -1094,6 +1094,9 @@ impl SourceDownloader {
                 "III/215/table13",
                 "_RAJ2000,_DEJ2000,WR,Name,GCVS,OName",
             ),
+            // Optical diameters of planetary nebulae, for those SIMBAD
+            // gives no size.
+            ("pn-diameters.tsv", "V/84/diam", "PNG,oDiam"),
         ] {
             self.fetch(
                 &format!("{vizier}{source}&-out={columns}&-out.max=unlimited"),
