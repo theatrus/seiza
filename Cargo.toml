@@ -24,7 +24,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.40.0"
+version = "0.40.1"
 edition = "2024"
 rust-version = "1.89"
 license = "Apache-2.0"
@@ -32,7 +32,7 @@ repository = "https://github.com/theatrus/seiza"
 authors = ["Yann Ramin <github@theatr.us>"]
 
 [workspace.dependencies]
-seiza = { path = "seiza", version = "0.40.0" }
+seiza = { path = "seiza", version = "0.40.1" }
 seiza-background = { path = "seiza-background", version = "0.3.1" }
 seiza-calibration = { path = "seiza-calibration", version = "0.8.0" }
 seiza-core = { path = "seiza-core", version = "0.1.0" }
@@ -48,7 +48,7 @@ seiza-stacking = { path = "seiza-stacking", version = "0.43.0" }
 seiza-stars = { path = "seiza-stars", version = "0.4.0" }
 seiza-stats = { path = "seiza-stats", version = "0.1.0" }
 seiza-stretch = { path = "seiza-stretch", version = "0.3.1" }
-seiza-sources = { path = "seiza-sources", version = "0.5.0" }
+seiza-sources = { path = "seiza-sources", version = "0.5.1" }
 seiza-xisf = { path = "seiza-xisf", version = "0.6.0" }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 kamadak-exif = "0.6.1"

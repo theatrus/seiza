@@ -2653,7 +2653,7 @@ dependencies = [
 
 [[package]]
 name = "seiza"
-version = "0.40.0"
+version = "0.40.1"
 dependencies = [
  "directories",
  "image",
@@ -2689,7 +2689,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-cabi"
-version = "0.40.0"
+version = "0.40.1"
 dependencies = [
  "cbindgen",
  "image",
@@ -2727,7 +2727,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-cli"
-version = "0.40.0"
+version = "0.40.1"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -2884,7 +2884,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-sources"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "flate2",
  "futures-util",
