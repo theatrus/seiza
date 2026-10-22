@@ -1,6 +1,7 @@
 //! Stacking's heavy passes on the GPU, through wgpu: Metal, Vulkan or
 //! Direct3D 12, whichever the platform has. [`defect_candidates`] screens
-//! a light for defect learning, [`vng`] debayers a Bayer mosaic's interior, [`resample`] registers a frame onto the reference grid
+//! a light for defect learning, [`vng`] debayers a Bayer mosaic's interior,
+//! [`detect_stars`] finds a frame's stars, [`resample`] registers a frame onto the reference grid
 //! (clamped Lanczos-3 or bilinear), [`GpuMoments`] holds a live stack's
 //! accumulator and [`BandSession`] runs the final integration's rejection
 //! passes, each as its CPU twin does in f32. A resampled sample differs from
@@ -70,6 +71,9 @@ struct Gpu {
     vng_layout: wgpu::BindGroupLayout,
     defects_pipeline: wgpu::ComputePipeline,
     defects_layout: wgpu::BindGroupLayout,
+    /// Star detection's passes, in order, and their layout.
+    detect_pipelines: [wgpu::ComputePipeline; 6],
+    detect_layout: wgpu::BindGroupLayout,
     weights: wgpu::Buffer,
     /// An integrated GPU, which shares memory with the CPU, reads the
     /// source and writes the output in buffers the CPU maps directly;
@@ -456,6 +460,55 @@ impl Gpu {
             compilation_options: Default::default(),
             cache: None,
         });
+        let detect_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("detect"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("gpu/detect.wgsl").into()),
+        });
+        let detect_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("detect"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                storage(1, true),
+                storage(2, false),
+                storage(3, false),
+                storage(4, false),
+                storage(5, false),
+                storage(6, false),
+            ],
+        });
+        let detect_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("detect"),
+                bind_group_layouts: &[Some(&detect_layout)],
+                immediate_size: 0,
+            });
+        let detect_pipelines = [
+            "luminance",
+            "normalize",
+            "background",
+            "count_rows",
+            "offsets",
+            "write_rows",
+        ]
+        .map(|entry| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(entry),
+                layout: Some(&detect_pipeline_layout),
+                module: &detect_module,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        });
         let table = crate::registration::lanczos3_table();
         let weights = wgpu::util::DeviceExt::create_buffer_init(
             &device,
@@ -480,6 +533,8 @@ impl Gpu {
             vng_layout,
             defects_pipeline,
             defects_layout,
+            detect_pipelines,
+            detect_layout,
             weights,
             mapped,
             max_buffer: limits
@@ -1057,6 +1112,253 @@ pub(crate) fn defect_candidates(
             ));
             None
         }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct DetectParams {
+    width: u32,
+    height: u32,
+    channels: u32,
+    tile: u32,
+    tiles_x: u32,
+    tiles_y: u32,
+    sigma: f32,
+    capacity: u32,
+    row: u32,
+    padding: [u32; 3],
+}
+
+/// Samples a tile holds at most for the GPU's background pass, whose
+/// workgroup holds a tile.
+const DETECTION_TILE_SAMPLES: u32 = 4096;
+
+/// Star detection's per-pixel work on the GPU, as `registration::detect`
+/// does it on the CPU, and the stars `seiza::detect_stars_from_excess`
+/// gathers from the pixels that pass. The luminance is normalized in f32
+/// where the CPU works in f64, so a pixel on the threshold can fall either
+/// way; the tiles' medians and robust sigmas are exact. `None` when the CPU
+/// should: the frame is small, its tiles too large to sort, more pixels
+/// pass than the GPU keeps room for, `SEIZA_GPU_DETECT=off`, or no GPU is
+/// in use.
+pub(crate) fn detect_stars(
+    image: &LinearImage,
+    config: &seiza::DetectConfig,
+) -> Option<Vec<seiza::DetectedStar>> {
+    let (width, height, channels) = (image.width, image.height, image.channels);
+    let pixels = width * height;
+    let tile = config.tile_size;
+    if !matches!(channels, 1 | 3)
+        || pixels < MINIMUM_SAMPLES
+        || tile == 0
+        || tile.saturating_mul(tile) > DETECTION_TILE_SAMPLES
+        || width > u32::MAX as usize / 2
+        || height > u32::MAX as usize / 2
+        || config.backend == seiza::DetectBackend::U8
+        || std::env::var("SEIZA_GPU_DETECT").is_ok_and(|value| value == "off")
+    {
+        return None;
+    }
+    let gpu = gpu()?;
+    if (image.data.len() as u64) * 4 > gpu.max_buffer {
+        return None;
+    }
+    let mut trace = Trace::new();
+    let result = gpu.detect(image, config, &mut trace);
+    trace.print(&format!("detect {width}x{height}x{channels}"));
+    match result {
+        Ok(Some(positives)) => Some(seiza::detect_stars_from_excess(
+            width as u32,
+            height as u32,
+            &positives,
+            config,
+        )),
+        Ok(None) => None,
+        Err(reason) => {
+            log_once(&format!(
+                "detecting this frame's stars on the CPU: {reason}"
+            ));
+            None
+        }
+    }
+}
+
+impl Gpu {
+    /// [`detect_stars`]' passes: the pixels that pass, or `None` when more
+    /// pass than there is room for.
+    fn detect(
+        &self,
+        image: &LinearImage,
+        config: &seiza::DetectConfig,
+        trace: &mut Trace,
+    ) -> Result<Option<Vec<(u32, f32)>>, String> {
+        let (width, height) = (image.width as u32, image.height as u32);
+        let pixels = width * height;
+        let tile = config.tile_size;
+        let (tiles_x, tiles_y) = (width.div_ceil(tile), height.div_ceil(tile));
+        // Stars and noise above the threshold are a few hundredths of a
+        // frame; nebulosity a tile's median leaves behind can be more.
+        let capacity = (pixels / 8).max(1 << 16).min((self.max_buffer / 8) as u32);
+        let groups = pixels.div_ceil(256);
+        let columns = groups.min(4096);
+        let params = DetectParams {
+            width,
+            height,
+            channels: image.channels as u32,
+            tile,
+            tiles_x,
+            tiles_y,
+            sigma: config.sigma,
+            capacity,
+            row: columns * 256,
+            padding: [0; 3],
+        };
+        let init = |label: &str, contents: &[u8], usage: wgpu::BufferUsages| {
+            wgpu::util::DeviceExt::create_buffer_init(
+                &self.device,
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some(label),
+                    contents,
+                    usage,
+                },
+            )
+        };
+        let uniform = init(
+            "detect-params",
+            bytemuck::bytes_of(&params),
+            wgpu::BufferUsages::UNIFORM,
+        );
+        let extremes = init(
+            "detect-extremes",
+            bytemuck::cast_slice(&[u32::MAX, 0]),
+            wgpu::BufferUsages::STORAGE,
+        );
+        let scratch = wgpu::BufferUsages::STORAGE;
+        let luma = self.take("detect-luma", u64::from(pixels) * 4, scratch);
+        let tiles = self.take("detect-tiles", u64::from(tiles_x * tiles_y) * 8, scratch);
+        let rows_bytes = (2 * u64::from(height) + 1) * 4;
+        let rows = self.take(
+            "detect-rows",
+            rows_bytes,
+            scratch | wgpu::BufferUsages::COPY_SRC,
+        );
+        let output_usage = wgpu::BufferUsages::STORAGE
+            | if self.mapped {
+                wgpu::BufferUsages::MAP_READ
+            } else {
+                wgpu::BufferUsages::COPY_SRC
+            };
+        let positives = self.take("detect-positives", u64::from(capacity) * 8, output_usage);
+        let total_read = self.buffer(
+            "detect-total",
+            4,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+        let frame = self.upload("detect-frame", &image.data);
+        let result = frame.and_then(|frame| {
+            trace.mark("upload");
+            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("detect"),
+                layout: &self.detect_layout,
+                entries: &[
+                    (0, &uniform),
+                    (1, &frame),
+                    (2, &luma),
+                    (3, &extremes),
+                    (4, &tiles),
+                    (5, &rows),
+                    (6, &positives),
+                ]
+                .map(|(binding, buffer)| wgpu::BindGroupEntry {
+                    binding,
+                    resource: buffer.as_entire_binding(),
+                }),
+            });
+            let per_pixel = (columns, groups.div_ceil(columns));
+            let per_row = (height.min(65535), height.div_ceil(65535));
+            let dispatches = [
+                per_pixel,
+                per_pixel,
+                (tiles_x, tiles_y),
+                per_row,
+                (1, 1),
+                per_row,
+            ];
+            let mut encoder = self.device.create_command_encoder(&Default::default());
+            {
+                let mut pass = encoder.begin_compute_pass(&Default::default());
+                pass.set_bind_group(0, &bind_group, &[]);
+                for (pipeline, (x, y)) in self.detect_pipelines.iter().zip(dispatches) {
+                    pass.set_pipeline(pipeline);
+                    pass.dispatch_workgroups(x, y, 1);
+                }
+            }
+            encoder.copy_buffer_to_buffer(&rows, rows_bytes - 4, &total_read, 0, 4);
+            let submission = self.queue.submit([encoder.finish()]);
+            let mapped = self.map(
+                &[total_read.slice(..)],
+                wgpu::MapMode::Read,
+                Some(submission),
+            );
+            self.give(self.input_usage(), frame);
+            mapped
+        });
+        let found = result.and_then(|()| {
+            trace.mark("kernel");
+            if FAILED.load(Ordering::Relaxed) {
+                return Err("the GPU failed".to_string());
+            }
+            let total: u32 = bytemuck::pod_read_unaligned(
+                &total_read
+                    .slice(..)
+                    .get_mapped_range()
+                    .map_err(|error| error.to_string())?[..4],
+            );
+            total_read.unmap();
+            if total > capacity {
+                return Ok(None);
+            }
+            let bytes = u64::from(total) * 8;
+            if bytes == 0 {
+                return Ok(Some(Vec::new()));
+            }
+            let read_from = if self.mapped {
+                self.map(&[positives.slice(..bytes)], wgpu::MapMode::Read, None)?;
+                None
+            } else {
+                let readback = self.buffer(
+                    "detect-readback",
+                    bytes,
+                    wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                );
+                let mut encoder = self.device.create_command_encoder(&Default::default());
+                encoder.copy_buffer_to_buffer(&positives, 0, &readback, 0, bytes);
+                let submission = self.queue.submit([encoder.finish()]);
+                self.map(&[readback.slice(..)], wgpu::MapMode::Read, Some(submission))?;
+                Some(readback)
+            };
+            let source = read_from.as_ref().unwrap_or(&positives);
+            let view = source
+                .slice(..bytes)
+                .get_mapped_range()
+                .map_err(|error| error.to_string())?;
+            let entries: Vec<[u32; 2]> = copy_out(&view, false);
+            drop(view);
+            source.unmap();
+            trace.mark("copy out");
+            Ok(Some(
+                entries
+                    .into_iter()
+                    .map(|[index, excess]| (index, f32::from_bits(excess)))
+                    .collect(),
+            ))
+        });
+        self.give(scratch, luma);
+        self.give(scratch, tiles);
+        self.give(scratch | wgpu::BufferUsages::COPY_SRC, rows);
+        self.give(output_usage, positives);
+        found
     }
 }
 
@@ -1989,6 +2291,7 @@ mod tests {
             ("accumulate", include_str!("gpu/accumulate.wgsl")),
             ("vng", include_str!("gpu/vng.wgsl")),
             ("defects", include_str!("gpu/defects.wgsl")),
+            ("detect", include_str!("gpu/detect.wgsl")),
         ] {
             let module = naga::front::wgsl::parse_str(source)
                 .unwrap_or_else(|error| panic!("{name}: {}", error.emit_to_string(source)));

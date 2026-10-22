@@ -2550,14 +2550,18 @@ fn detect(
     max_stars: usize,
     scale: Scale,
 ) -> Vec<DetectedStar> {
-    let mut luma = image.luminance();
-    normalize_for_detection(&mut luma);
     let config = scale.detection(DetectConfig {
         backend: DetectBackend::F32,
         sigma: options.detection_sigma,
         max_stars,
         ..DetectConfig::default()
     });
+    #[cfg(feature = "gpu")]
+    if let Some(stars) = crate::gpu::detect_stars(image, &config) {
+        return stars;
+    }
+    let mut luma = image.luminance();
+    normalize_for_detection(&mut luma);
     seiza::detect_stars_luma_f32(&luma, image.width as u32, image.height as u32, &config)
 }
 
@@ -2835,6 +2839,144 @@ pub(crate) fn test_distortion(x: f64, y: f64) -> (f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A frame large enough for the GPU: sky with a gradient and noise,
+    /// 600 stars from faint to near saturation, some touching, a trail and
+    /// a block of NaN; `channels` interleaved, each colour its own weight.
+    #[cfg(feature = "gpu")]
+    fn detection_field(width: usize, height: usize, channels: usize) -> LinearImage {
+        let mut state = 0x2545_f491_4f6c_dd1d_u64 ^ channels as u64;
+        let mut uniform = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1_u64 << 53) as f64
+        };
+        let stars: Vec<(f64, f64, f64, f64)> = (0..600)
+            .map(|_| {
+                (
+                    uniform() * width as f64,
+                    uniform() * height as f64,
+                    10.0_f64.powf(1.3 + uniform() * 3.0),
+                    0.8 + uniform() * 1.6,
+                )
+            })
+            .collect();
+        let mut data = vec![0.0_f32; width * height * channels];
+        for (pixel, samples) in data.chunks_exact_mut(channels).enumerate() {
+            let (x, y) = ((pixel % width) as f64, (pixel / width) as f64);
+            let mut light = 0.0;
+            for &(sx, sy, peak, sigma) in &stars {
+                let (dx, dy) = (x - sx, y - sy);
+                if dx.abs() < 9.0 && dy.abs() < 9.0 {
+                    light += peak * (-(dx * dx + dy * dy) / (2.0 * sigma * sigma)).exp();
+                }
+            }
+            if (y - 0.3 * x - 100.0).abs() < 1.0 {
+                light += 300.0;
+            }
+            for (channel, sample) in samples.iter_mut().enumerate() {
+                let noise = (uniform() + uniform() + uniform() - 1.5) * 12.0;
+                let gain = 1.0 - 0.25 * channel as f64;
+                *sample = (gain * (500.0 + 0.02 * x + light) + noise).min(60_000.0) as f32;
+            }
+        }
+        for y in 700..712 {
+            data[(y * width + 200) * channels..(y * width + 230) * channels].fill(f32::NAN);
+        }
+        LinearImage::new(width, height, channels, data).unwrap()
+    }
+
+    /// The CPU's detection, as `detect` makes it without a GPU.
+    #[cfg(feature = "gpu")]
+    fn detected_on_the_cpu(image: &LinearImage, config: &DetectConfig) -> Vec<DetectedStar> {
+        let mut luma = image.luminance();
+        normalize_for_detection(&mut luma);
+        seiza::detect_stars_luma_f32(&luma, image.width as u32, image.height as u32, config)
+    }
+
+    /// The GPU detects the CPU's stars: bit for bit where normalizing the
+    /// frame changes nothing, as on a frame already spanning 0 to 1; and,
+    /// where it rounds in f32 against the CPU's f64, the same stars within a
+    /// thousandth of a pixel but where a pixel on the threshold falls the
+    /// other way.
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn gpu_detection_matches_the_cpu() {
+        let Some(adapter) = crate::gpu::adapter_description() else {
+            eprintln!("no GPU: GPU detection not compared");
+            return;
+        };
+        eprintln!("comparing detection on {adapter}");
+        let config = DetectConfig {
+            backend: DetectBackend::F32,
+            sigma: RegistrationOptions::default().detection_sigma,
+            max_stars: 500,
+            ..DetectConfig::default()
+        };
+        // Spanning exactly 0 to 1, so normalizing changes nothing.
+        let mut unit = detection_field(1100, 1000, 1);
+        let (low, high) = unit
+            .data
+            .iter()
+            .filter(|value| value.is_finite())
+            .fold((f32::MAX, f32::MIN), |(low, high), &v| {
+                (low.min(v), high.max(v))
+            });
+        for value in &mut unit.data {
+            *value = (*value - low) / (high - low);
+        }
+        unit.data[0] = 0.0;
+        unit.data[1] = 1.0;
+        let cpu = detected_on_the_cpu(&unit, &config);
+        let gpu = crate::gpu::detect_stars(&unit, &config).expect("the GPU detects");
+        assert!(cpu.len() > 300, "{} stars", cpu.len());
+        assert_eq!(cpu.len(), gpu.len());
+        for (a, b) in cpu.iter().zip(&gpu) {
+            assert_eq!(
+                (
+                    a.x.to_bits(),
+                    a.y.to_bits(),
+                    a.flux.to_bits(),
+                    a.peak.to_bits(),
+                    a.area
+                ),
+                (
+                    b.x.to_bits(),
+                    b.y.to_bits(),
+                    b.flux.to_bits(),
+                    b.peak.to_bits(),
+                    b.area
+                ),
+            );
+        }
+        for channels in [1, 3] {
+            let image = detection_field(1101, 1003, channels);
+            let cpu = detected_on_the_cpu(&image, &config);
+            let gpu = crate::gpu::detect_stars(&image, &config).expect("the GPU detects");
+            let (mut same, mut close, mut worst) = (0, 0, 0.0_f64);
+            for star in &cpu {
+                let nearest = gpu
+                    .iter()
+                    .map(|other| (other.x - star.x).hypot(other.y - star.y))
+                    .fold(f64::INFINITY, f64::min);
+                same += usize::from(nearest == 0.0);
+                if nearest < 1e-3 {
+                    close += 1;
+                    worst = worst.max(nearest);
+                }
+            }
+            eprintln!(
+                "{channels} channel(s): {} CPU stars, {} GPU, {same} identical, {close} within \
+                 a thousandth of a pixel (at most {worst:.1e})",
+                cpu.len(),
+                gpu.len()
+            );
+            assert!(cpu.len() > 300);
+            assert!(cpu.len().abs_diff(gpu.len()) * 100 <= cpu.len());
+            assert!(close * 100 >= cpu.len() * 98);
+        }
+    }
 
     fn star(x: f64, y: f64) -> DetectedStar {
         DetectedStar {

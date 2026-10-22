@@ -34,7 +34,10 @@ pub mod prior;
 pub mod solve;
 pub mod star_ids;
 
-pub use detect::{DetectBackend, DetectConfig, DetectedStar, detect_stars, detect_stars_luma_f32};
+pub use detect::{
+    DetectBackend, DetectConfig, DetectedStar, detect_stars, detect_stars_from_excess,
+    detect_stars_luma_f32,
+};
 pub use seiza_core::CancelSignal;
 /// Plate solutions, shared with the crates that need them without the
 /// solver; see `seiza-core`.

@@ -1,8 +1,8 @@
 # GPU stacking
 
-Status: defect learning's screen, VNG debayering, resampling, the live
-accumulator and the final integration's band passes run on the GPU, behind
-`seiza-stacking`'s default `gpu` feature. More stages are follow-on work
+Status: defect learning's screen, VNG debayering, star detection,
+resampling, the live accumulator and the final integration's band passes
+run on the GPU, behind `seiza-stacking`'s default `gpu` feature. More stages are follow-on work
 (see the end).
 
 ## What runs where
@@ -23,6 +23,12 @@ from it arrives. These stages run there:
   or more from each edge of a Bayer mosaic, with the channel balance the
   CPU measures. The two-pixel border, which takes bilinear estimates, stays
   on the CPU, and so do MHC, bilinear and superpixel debayering.
+- **Star detection** (`registration::detect`): the luminance, normalized
+  to 0..=1, each 64x64 tile's median and robust sigma by exact radix
+  selection, and the threshold, which writes the pixels that pass in
+  row-major order. `seiza::detect_stars_from_excess` gathers them into
+  stars on the CPU: the same flood fill as detection over the whole excess
+  image, over those pixels alone, which gives the same stars to the bit.
 - **Registration resampling** (`registration::resample_region_with_inverse`):
   clamped Lanczos-3 and bilinear, mono or RGB, over the whole reference grid
   or a footprint of it. Every frame of a live stack and every frame a final
@@ -44,8 +50,8 @@ from it arrives. These stages run there:
   first estimate and the Student-t limits. A band that records sample fates
   for a drizzle is integrated on the CPU.
 
-Everything else (decoding, calibration, star detection, registration fits,
-normalization fits) stays on the CPU for now.
+Everything else (decoding, calibration, registration fits, normalization
+fits) stays on the CPU for now.
 
 The GPU takes a frame only when it holds at least a million samples; below
 that its fixed cost, a few milliseconds, outweighs the gain, and the small
@@ -80,6 +86,14 @@ f64 and accumulates moments in f64.
   sample beyond a thousandth of it. The window is written out cell by cell
   so it stays in registers; indexed through tables, as on the CPU, the
   kernel ran five times slower.
+- **Star detection.** The tiles' medians and robust sigmas are exact, and
+  so is the threshold: on a frame already spanning 0 to 1, which
+  normalizing leaves alone, the GPU finds the CPU's stars bit for bit, on
+  Metal and on Vulkan. Normalizing in f32, where the CPU works in f64,
+  moves a sample by a unit in its last place, and a pixel on the threshold
+  can fall the other way; on a calibrated Sh2 140 frame of 200 stars, the
+  stars that keep every pixel lie within 2e-4 of a pixel of the CPU's, and
+  up to five a frame lose or gain one and move further.
 - **Integration.** The CPU stores moments in f32 between f64 updates; the
   GPU does the updates in f32 too. Rejection decisions agree at all but a
   handful of samples that lie on a threshold.
@@ -123,8 +137,8 @@ registration with it.
 - Build without the `gpu` feature (`default-features = false`) for a
   CPU-only crate without wgpu.
 - `SEIZA_GPU_ACCUMULATOR=off` keeps the live accumulator on the CPU,
-  `SEIZA_GPU_DEBAYER=off` VNG debayering, and `SEIZA_GPU_DEFECTS=off`
-  defect learning's screen.
+  `SEIZA_GPU_DEBAYER=off` VNG debayering, `SEIZA_GPU_DETECT=off` star
+  detection, and `SEIZA_GPU_DEFECTS=off` defect learning's screen.
 - `SEIZA_GPU_TRACE=1` prints every GPU call's stages (grid, upload,
   kernel, copy out) to stderr, and the time opening the device took (12 ms
   on the M4 Max, 46 ms on an Iris Xe), to see where the time goes on a

@@ -541,30 +541,11 @@ fn extract_stars<T: DetectionSample>(
                 break;
             }
             let idx = row_start + x;
-
-            let mut flux = 0.0f64;
-            let mut sx = 0.0f64;
-            let mut sy = 0.0f64;
-            let mut sxx = 0.0f64;
-            let mut syy = 0.0f64;
-            let mut sxy = 0.0f64;
-            let mut peak = 0.0f32;
-            let mut area = 0u32;
-
+            let mut moments = Moments::default();
             stack.push((x as u32, y, excess[idx]));
             excess[idx] = T::ZERO;
             while let Some((cx, cy, value)) = stack.pop() {
-                let value = value.normalized();
-                let v = value as f64;
-                flux += v;
-                sx += cx as f64 * v;
-                sy += cy as f64 * v;
-                sxx += cx as f64 * cx as f64 * v;
-                syy += cy as f64 * cy as f64 * v;
-                sxy += cx as f64 * cy as f64 * v;
-                peak = peak.max(value);
-                area += 1;
-
+                moments.add(cx, cy, value.normalized());
                 let x0 = cx.saturating_sub(1);
                 let y0 = cy.saturating_sub(1);
                 for ny in y0..=(cy + 1).min(height - 1) {
@@ -578,38 +559,146 @@ fn extract_stars<T: DetectionSample>(
                 }
             }
             x += 1;
-
-            if area >= config.min_area && area <= config.max_area && flux > 0.0 {
-                let (cx, cy) = (sx / flux, sy / flux);
-                let border = config.ignore_border as f64;
-                if cx < border
-                    || cy < border
-                    || cx >= width as f64 - border
-                    || cy >= height as f64 - border
-                {
-                    continue;
-                }
-                if elongation(
-                    sxx / flux - cx * cx,
-                    syy / flux - cy * cy,
-                    sxy / flux - cx * cy,
-                ) <= config.max_elongation as f64
-                {
-                    stars.push(DetectedStar {
-                        x: cx,
-                        y: cy,
-                        flux,
-                        peak,
-                        area,
-                    });
-                }
-            }
+            stars.extend(moments.star(width, height, config));
         }
     }
 
     stars.sort_by(|a, b| b.flux.total_cmp(&a.flux));
     stars.truncate(config.max_stars);
     stars
+}
+
+/// Stars from a thresholded excess image given only by its positive pixels:
+/// `positives` holds each one's index in the `width` × `height` image and
+/// its excess above the background, in row-major order. The same stars, in
+/// the same order and to the bit, that detection extracts from the whole
+/// excess image, for a detector that thresholds elsewhere, such as on a GPU,
+/// and hands back only what passed. The flood fill visits the pixels in the
+/// same order, so every sum adds the same values in the same order.
+pub fn detect_stars_from_excess(
+    width: u32,
+    height: u32,
+    positives: &[(u32, f32)],
+    config: &DetectConfig,
+) -> Vec<DetectedStar> {
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+    // Each row's positives, as a range of `positives`; a pixel is found by
+    // a binary search of its row's.
+    let mut rows = vec![0usize; height as usize + 1];
+    for &(index, _) in positives {
+        let row = (index / width) as usize;
+        if row < height as usize {
+            rows[row + 1] += 1;
+        }
+    }
+    for row in 0..height as usize {
+        rows[row + 1] += rows[row];
+    }
+    let mut taken = vec![false; positives.len()];
+    let find = |x: u32, y: u32, taken: &[bool]| -> Option<usize> {
+        let range = rows[y as usize]..rows[y as usize + 1];
+        let index = y * width + x;
+        let at = range.start
+            + positives[range]
+                .binary_search_by_key(&index, |&(index, _)| index)
+                .ok()?;
+        (!taken[at] && positives[at].1 > 0.0).then_some(at)
+    };
+    let mut stars = Vec::new();
+    let mut stack: Vec<usize> = Vec::new();
+    for seed in 0..positives.len() {
+        let (index, value) = positives[seed];
+        if taken[seed] || value <= 0.0 || index / width >= height {
+            continue;
+        }
+        let mut moments = Moments::default();
+        stack.push(seed);
+        taken[seed] = true;
+        while let Some(at) = stack.pop() {
+            let (index, value) = positives[at];
+            let (cx, cy) = (index % width, index / width);
+            moments.add(cx, cy, value);
+            let x0 = cx.saturating_sub(1);
+            let y0 = cy.saturating_sub(1);
+            for ny in y0..=(cy + 1).min(height - 1) {
+                for nx in x0..=(cx + 1).min(width - 1) {
+                    if let Some(neighbour) = find(nx, ny, &taken) {
+                        stack.push(neighbour);
+                        taken[neighbour] = true;
+                    }
+                }
+            }
+        }
+        stars.extend(moments.star(width, height, config));
+    }
+    stars.sort_by(|a, b| b.flux.total_cmp(&a.flux));
+    stars.truncate(config.max_stars);
+    stars
+}
+
+/// A component's flux-weighted moments as its pixels join it.
+#[derive(Default)]
+struct Moments {
+    flux: f64,
+    sx: f64,
+    sy: f64,
+    sxx: f64,
+    syy: f64,
+    sxy: f64,
+    peak: f32,
+    area: u32,
+}
+
+impl Moments {
+    fn add(&mut self, cx: u32, cy: u32, value: f32) {
+        let v = value as f64;
+        self.flux += v;
+        self.sx += cx as f64 * v;
+        self.sy += cy as f64 * v;
+        self.sxx += cx as f64 * cx as f64 * v;
+        self.syy += cy as f64 * cy as f64 * v;
+        self.sxy += cx as f64 * cy as f64 * v;
+        self.peak = self.peak.max(value);
+        self.area += 1;
+    }
+
+    /// The component as a star, unless its area, place or shape rules it
+    /// out.
+    fn star(&self, width: u32, height: u32, config: &DetectConfig) -> Option<DetectedStar> {
+        let Self {
+            flux,
+            sx,
+            sy,
+            sxx,
+            syy,
+            sxy,
+            peak,
+            area,
+        } = *self;
+        if area < config.min_area || area > config.max_area || flux <= 0.0 {
+            return None;
+        }
+        let (cx, cy) = (sx / flux, sy / flux);
+        let border = config.ignore_border as f64;
+        if cx < border || cy < border || cx >= width as f64 - border || cy >= height as f64 - border
+        {
+            return None;
+        }
+        (elongation(
+            sxx / flux - cx * cx,
+            syy / flux - cy * cy,
+            sxy / flux - cx * cy,
+        ) <= config.max_elongation as f64)
+            .then_some(DetectedStar {
+                x: cx,
+                y: cy,
+                flux,
+                peak,
+                area,
+            })
+    }
 }
 
 /// Per-tile background (median) and noise (MAD-based sigma) maps.
@@ -865,6 +954,81 @@ mod tests {
                 0.0
             };
             assert_eq!(out.to_bits(), expected.to_bits(), "pixel {i}");
+        }
+    }
+
+    /// Extracting stars from an excess image's positive pixels alone gives
+    /// what extracting them from the whole image does, to the bit: stars of
+    /// every size touching each other and the edges, single hot pixels,
+    /// long trails, and a cap on the stars kept.
+    #[test]
+    fn stars_from_positive_excess_match_the_whole_image() {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for (width, height) in [(1, 1), (7, 3), (64, 48), (301, 207)] {
+            for round in 0..20 {
+                let mut excess = vec![0.0f32; (width * height) as usize];
+                for _ in 0..(width * height / 40).max(1) {
+                    let (cx, cy) = (next() % u64::from(width), next() % u64::from(height));
+                    let radius = (next() % 5) as i64;
+                    for dy in -radius..=radius {
+                        for dx in -radius..=radius {
+                            let (x, y) = (cx as i64 + dx, cy as i64 + dy);
+                            if x >= 0 && y >= 0 && x < i64::from(width) && y < i64::from(height) {
+                                excess[(y as u32 * width + x as u32) as usize] =
+                                    ((next() >> 40) as f32 + 1.0) / (1 << 20) as f32;
+                            }
+                        }
+                    }
+                }
+                if round % 4 == 0 {
+                    // A trail across the frame.
+                    for x in 0..width {
+                        excess
+                            [((x * height / width.max(1)).min(height - 1) * width + x) as usize] =
+                            0.5;
+                    }
+                }
+                let positives: Vec<(u32, f32)> = excess
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, value)| **value > 0.0)
+                    .map(|(index, &value)| (index as u32, value))
+                    .collect();
+                let config = DetectConfig {
+                    min_area: 1 + round % 3,
+                    max_area: 5 + round * 7,
+                    ignore_border: round % 2,
+                    max_stars: 3 + round as usize * 5,
+                    ..DetectConfig::default()
+                };
+                let whole = extract_stars(excess, width, height, &config);
+                let sparse = detect_stars_from_excess(width, height, &positives, &config);
+                assert_eq!(whole.len(), sparse.len(), "{width}x{height} round {round}");
+                for (a, b) in whole.iter().zip(&sparse) {
+                    assert_eq!(
+                        (
+                            a.x.to_bits(),
+                            a.y.to_bits(),
+                            a.flux.to_bits(),
+                            a.peak.to_bits(),
+                            a.area
+                        ),
+                        (
+                            b.x.to_bits(),
+                            b.y.to_bits(),
+                            b.flux.to_bits(),
+                            b.peak.to_bits(),
+                            b.area
+                        ),
+                    );
+                }
+            }
         }
     }
 
