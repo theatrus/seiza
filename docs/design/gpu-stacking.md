@@ -1,8 +1,8 @@
 # GPU stacking
 
-Status: resampling and the final integration's band passes run on the GPU,
-behind `seiza-stacking`'s default `gpu` feature. More stages are follow-on
-work (see the end).
+Status: resampling, the live accumulator and the final integration's band
+passes run on the GPU, behind `seiza-stacking`'s default `gpu` feature. More
+stages are follow-on work (see the end).
 
 ## What runs where
 
@@ -16,14 +16,21 @@ from it arrives. Two stages run there:
   or a footprint of it. Every frame of a live stack and every frame a final
   pass prepares goes through it, and so does the clipped-pixel mask. Bayer
   drizzle's nearest-photosite sampling stays on the CPU.
+- **The live accumulator** (`stack::Accumulator`): a live stack's moments
+  move to the GPU with its first frame of a million samples or more, and
+  each frame is classified against them (the admission gate) and integrated
+  there, delta-sigma rejection and the weighted Welford update included. The
+  CPU's copies are freed. [`LiveStacker::view`], snapshots and saved
+  contexts read the moments back, once a frame, the first time they are
+  asked for, into a copy the next frame drops; the borrowed view stays valid
+  for as long as the borrow, since only `&mut` methods integrate.
 - **Final integration** (`batch::bands`): the three passes of leave-one-out
   rejection over one band of rows of every frame, with weights, the trimmed
   first estimate and the Student-t limits. A band that records sample fates
   for a drizzle is integrated on the CPU.
 
 Everything else (decoding, calibration, debayering, star detection,
-registration fits, normalization fits, the live accumulator) stays on the
-CPU for now.
+registration fits, normalization fits) stays on the CPU for now.
 
 The GPU takes a frame only when it holds at least a million samples; below
 that its fixed cost, a few milliseconds, outweighs the gain, and the small
@@ -80,6 +87,9 @@ is present, as on CI.
 
 - Build without the `gpu` feature (`default-features = false`) for a
   CPU-only crate without wgpu.
+- `SEIZA_GPU_ACCUMULATOR=off` keeps the live accumulator on the CPU.
+- `SEIZA_GPU_TRACE=1` prints every GPU call's stages (grid, upload,
+  kernel, copy out) to stderr, to see where the time goes on a machine.
 - `SEIZA_GPU=off` (or `0`, `cpu`), set before the first large frame, keeps
   everything on the CPU. `SEIZA_GPU_BANDS=off` keeps the final integration
   there while resampling stays on the GPU. `WGPU_BACKEND` chooses the
@@ -87,8 +97,13 @@ is present, as on CI.
 - No adapter, a software adapter, or a frame too large for a GPU buffer
   keeps the work on the CPU. A GPU error (device lost, validation) is
   caught, logged once, and turns the GPU off for the rest of the process;
-  the frame or band it hit is done on the CPU. Nothing panics on the GPU's
-  account.
+  the frame or band it hit is done on the CPU. A live stack whose moments
+  are on the GPU reads them back and carries on on the CPU; if the device is
+  lost and they cannot be read, `snapshot`, `into_snapshot` and
+  `save_context` fail saying so rather than return a wrong stack. Nothing
+  panics on the GPU's account.
+- Frame-sized buffers return to a pool of at most 1 GiB: making a new one
+  maps and clears fresh memory, which took longer than the upload.
 - An integrated GPU (Apple Silicon, Intel Iris Xe) reads and writes buffers
   the CPU maps directly; a discrete one goes through staging copies. Mapped
   output is copied out on every core, because one core reading
@@ -113,17 +128,22 @@ time is the steadier measure. The resampling kernel alone, per 26 MP frame:
 4-7 ms on the M4 Max against 97 ms on its CPU, 29 ms on the Iris Xe against
 186 ms on its CPU.
 
+With the accumulator on the GPU, the M4 Max's live pass integrates a
+26 MP frame in about 11 ms (7.4 ms to upload and classify, 3.7 ms to
+integrate) against 30-40 ms on its CPU. The 45-frame live stack matches
+the CPU's to 0.00015 of the noise RMS, no pixel beyond 0.5 noise. The live
+pass is then bound by preparing frames: with 12 workers rather than the
+default it takes 19 ms a frame against 28.
+
 ## Follow-on work
 
-Measured in the `gpu-spike` experiments, not yet in the crate:
-
-- **The live accumulator on the GPU.** Resampling, normalization,
-  delta-sigma classification and the weighted Welford update in one pass,
-  on stack state that stays on the GPU in two buffers: the pass writes the
-  state after the frame, and admitting the frame swaps them. 11.8 ms a
-  frame on the M4 Max and 44 ms on the Iris Xe, against 141 ms and 277 ms
-  on their CPUs. `LiveStacker::view` borrows the CPU's state today, so this
-  needs a readback when a host asks for it.
+- **Speculative integration.** One pass that classifies and integrates
+  into a second copy of the moments, kept when the frame is admitted: in
+  the `gpu-spike` experiments 44 ms a frame against 76 ms for separate
+  passes on the Iris Xe, for twice the moments' memory.
+- **Workers.** The pipeline's default worker count follows a memory budget
+  set for CPU preparation; with the GPU doing the heavy passes, more
+  workers pay.
 - **A tiled resampling kernel for Intel.** Workgroup-shared source tiles cut
   the Iris Xe's kernel from 29 to 21 ms and slow the M4 Max eightfold, so
   the kernel would be chosen by adapter.

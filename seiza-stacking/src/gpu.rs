@@ -63,6 +63,9 @@ struct Gpu {
     layout: wgpu::BindGroupLayout,
     bands_pipeline: wgpu::ComputePipeline,
     bands_layout: wgpu::BindGroupLayout,
+    classify_pipeline: wgpu::ComputePipeline,
+    integrate_pipeline: wgpu::ComputePipeline,
+    accumulate_layout: wgpu::BindGroupLayout,
     weights: wgpu::Buffer,
     /// An integrated GPU, which shares memory with the CPU, reads the
     /// source and writes the output in buffers the CPU maps directly;
@@ -299,6 +302,50 @@ impl Gpu {
             compilation_options: Default::default(),
             cache: None,
         });
+        let accumulate_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("accumulate"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("gpu/accumulate.wgsl").into()),
+        });
+        let accumulate_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("accumulate"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                storage(1, true),
+                storage(2, false),
+                storage(3, false),
+                storage(4, false),
+                storage(5, false),
+                storage(6, false),
+                storage(7, false),
+            ],
+        });
+        let accumulate_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("accumulate"),
+                bind_group_layouts: &[Some(&accumulate_layout)],
+                immediate_size: 0,
+            });
+        let accumulate_pipeline = |entry: &str| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(entry),
+                layout: Some(&accumulate_pipeline_layout),
+                module: &accumulate_module,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        let classify_pipeline = accumulate_pipeline("classify");
+        let integrate_pipeline = accumulate_pipeline("integrate");
         let table = crate::registration::lanczos3_table();
         let weights = wgpu::util::DeviceExt::create_buffer_init(
             &device,
@@ -315,6 +362,9 @@ impl Gpu {
             layout,
             bands_pipeline,
             bands_layout,
+            classify_pipeline,
+            integrate_pipeline,
+            accumulate_layout,
             weights,
             mapped,
             max_buffer: limits
@@ -1005,6 +1055,385 @@ impl BandSession {
     }
 }
 
+/// A live stack's moments, as `stack::Accumulator` keeps them.
+#[derive(Debug, Default)]
+pub(crate) struct MomentVectors {
+    pub(crate) mean: Vec<f32>,
+    pub(crate) m2: Vec<f32>,
+    pub(crate) count: Vec<u32>,
+    pub(crate) rejected: Vec<u32>,
+    /// `None` when frames are weighted equally.
+    pub(crate) weight_sum: Option<Vec<f32>>,
+}
+
+/// A live stack's moments, borrowed.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MomentSlices<'a> {
+    pub(crate) mean: &'a [f32],
+    pub(crate) m2: &'a [f32],
+    pub(crate) count: &'a [u32],
+    pub(crate) rejected: &'a [u32],
+    pub(crate) weight_sum: Option<&'a [f32]>,
+}
+
+/// Where a frame's samples land on the grid: rows `first_row..` of the
+/// grid, `span` samples of each from `first_sample` on, in a grid whose
+/// rows hold `grid_row` samples.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FramePlacement {
+    pub(crate) first_row: usize,
+    pub(crate) rows: usize,
+    pub(crate) first_sample: usize,
+    pub(crate) span: usize,
+    pub(crate) grid_row: usize,
+}
+
+/// Delta-sigma rejection's settings, or `None` for none.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GpuRejection {
+    pub(crate) low_sigma: f32,
+    pub(crate) high_sigma: f32,
+    pub(crate) warmup: u32,
+    pub(crate) minimum_sigma: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct AccumulateParams {
+    first_row: u32,
+    rows: u32,
+    first_sample: u32,
+    span: u32,
+    grid_row: u32,
+    channels: u32,
+    weighted: u32,
+    rejecting: u32,
+    low_sigma: f32,
+    high_sigma: f32,
+    warmup: u32,
+    minimum_sigma: f32,
+    weights: [f32; 4],
+}
+
+/// A live stack's moments held on the GPU, which classifies frames against
+/// them and integrates the frames admitted.
+pub(crate) struct GpuMoments {
+    gpu: &'static Gpu,
+    samples: usize,
+    weighted: bool,
+    mean: wgpu::Buffer,
+    m2: wgpu::Buffer,
+    count: wgpu::Buffer,
+    rejected: wgpu::Buffer,
+    /// One unused word when frames are weighted equally.
+    weight_sum: wgpu::Buffer,
+    params: wgpu::Buffer,
+    counters: wgpu::Buffer,
+    counters_read: wgpu::Buffer,
+    /// The frame last classified, which its integration reads again, with
+    /// its byte length and the usage the pool keeps it under.
+    frame: Option<(wgpu::Buffer, u64)>,
+}
+
+impl GpuMoments {
+    /// Moments of at least a million samples moved to the GPU, or `None`
+    /// when they stay on the CPU.
+    pub(crate) fn upload(moments: MomentSlices<'_>) -> Option<Self> {
+        if moments.mean.len() < MINIMUM_SAMPLES
+            || std::env::var("SEIZA_GPU_ACCUMULATOR").is_ok_and(|value| value == "off")
+        {
+            return None;
+        }
+        let gpu = gpu()?;
+        let samples = moments.mean.len();
+        if (samples as u64) * 4 > gpu.max_buffer {
+            return None;
+        }
+        let init = |label: &str, contents: &[u8]| {
+            wgpu::util::DeviceExt::create_buffer_init(
+                &gpu.device,
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some(label),
+                    contents,
+                    usage: wgpu::BufferUsages::STORAGE
+                        | wgpu::BufferUsages::COPY_SRC
+                        | wgpu::BufferUsages::COPY_DST,
+                },
+            )
+        };
+        let unused = [0.0_f32];
+        let state = Self {
+            gpu,
+            samples,
+            weighted: moments.weight_sum.is_some(),
+            mean: init("mean", bytemuck::cast_slice(moments.mean)),
+            m2: init("m2", bytemuck::cast_slice(moments.m2)),
+            count: init("count", bytemuck::cast_slice(moments.count)),
+            rejected: init("rejected", bytemuck::cast_slice(moments.rejected)),
+            weight_sum: init(
+                "weight-sum",
+                bytemuck::cast_slice(moments.weight_sum.unwrap_or(&unused)),
+            ),
+            params: gpu.buffer(
+                "accumulate-params",
+                std::mem::size_of::<AccumulateParams>() as u64,
+                wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            ),
+            counters: gpu.buffer(
+                "accumulate-counters",
+                8,
+                wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+            ),
+            counters_read: gpu.buffer(
+                "accumulate-counters-read",
+                8,
+                wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            ),
+            frame: None,
+        };
+        gpu.wait().ok()?;
+        (!FAILED.load(Ordering::Relaxed)).then_some(state)
+    }
+
+    fn frame_usage(&self) -> wgpu::BufferUsages {
+        wgpu::BufferUsages::STORAGE
+            | if self.gpu.mapped {
+                wgpu::BufferUsages::MAP_WRITE
+            } else {
+                wgpu::BufferUsages::COPY_DST
+            }
+    }
+
+    /// Classify `frame`, placed as `placement` says, against the moments:
+    /// how many of its finite samples rejection would accept and refuse.
+    /// The frame stays on the GPU for [`Self::integrate`].
+    pub(crate) fn classify(
+        &mut self,
+        frame: &[f32],
+        placement: FramePlacement,
+        weights: &[f32],
+        rejection: Option<GpuRejection>,
+    ) -> Result<(usize, usize), String> {
+        let gpu = self.gpu;
+        let mut trace = Trace::new();
+        let bytes = (frame.len() * 4) as u64;
+        if let Some((buffer, _)) = self.frame.take() {
+            gpu.give(self.frame_usage(), buffer);
+        }
+        let buffer = gpu.take("frame", bytes, self.frame_usage());
+        if gpu.mapped {
+            let range = buffer.slice(..bytes);
+            range.map_async(wgpu::MapMode::Write, |_| {});
+            gpu.wait()?;
+            range
+                .get_mapped_range_mut()
+                .map_err(|error| error.to_string())?
+                .copy_from_slice(bytemuck::cast_slice(frame));
+            buffer.unmap();
+        } else {
+            gpu.queue
+                .write_buffer(&buffer, 0, bytemuck::cast_slice(frame));
+        }
+        self.frame = Some((buffer, bytes));
+        trace.mark("upload");
+        let counts = self.dispatch(placement, weights, rejection, true)?;
+        trace.mark("classify");
+        trace.print(&format!("classify {} samples", frame.len()));
+        Ok(counts)
+    }
+
+    /// Integrate the frame [`Self::classify`] last uploaded; how many of its
+    /// samples were accepted and refused.
+    pub(crate) fn integrate(
+        &mut self,
+        placement: FramePlacement,
+        weights: &[f32],
+        rejection: Option<GpuRejection>,
+    ) -> Result<(usize, usize), String> {
+        let mut trace = Trace::new();
+        let counts = self.dispatch(placement, weights, rejection, false)?;
+        if let Some((buffer, _)) = self.frame.take() {
+            self.gpu.give(self.frame_usage(), buffer);
+        }
+        trace.mark("integrate");
+        trace.print("integrate");
+        Ok(counts)
+    }
+
+    fn dispatch(
+        &self,
+        placement: FramePlacement,
+        weights: &[f32],
+        rejection: Option<GpuRejection>,
+        classify: bool,
+    ) -> Result<(usize, usize), String> {
+        let gpu = self.gpu;
+        let (frame, _) = self
+            .frame
+            .as_ref()
+            .ok_or_else(|| "no frame was classified".to_string())?;
+        let mut frame_weights = [1.0_f32; 4];
+        for (weight, &value) in frame_weights.iter_mut().zip(weights) {
+            *weight = value;
+        }
+        let rejection = rejection.unwrap_or(GpuRejection {
+            low_sigma: 0.0,
+            high_sigma: 0.0,
+            warmup: u32::MAX,
+            minimum_sigma: 0.0,
+        });
+        let params = AccumulateParams {
+            first_row: placement.first_row as u32,
+            rows: placement.rows as u32,
+            first_sample: placement.first_sample as u32,
+            span: placement.span as u32,
+            grid_row: placement.grid_row as u32,
+            channels: weights.len().max(1) as u32,
+            weighted: u32::from(self.weighted),
+            rejecting: u32::from(rejection.warmup != u32::MAX),
+            low_sigma: rejection.low_sigma,
+            high_sigma: rejection.high_sigma,
+            warmup: rejection.warmup,
+            minimum_sigma: rejection.minimum_sigma,
+            weights: frame_weights,
+        };
+        gpu.queue
+            .write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
+        gpu.queue.write_buffer(&self.counters, 0, &[0u8; 8]);
+        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("accumulate"),
+            layout: &gpu.accumulate_layout,
+            entries: &[
+                (0, &self.params),
+                (1, frame),
+                (2, &self.mean),
+                (3, &self.m2),
+                (4, &self.count),
+                (5, &self.rejected),
+                (6, &self.weight_sum),
+                (7, &self.counters),
+            ]
+            .map(|(binding, buffer)| wgpu::BindGroupEntry {
+                binding,
+                resource: buffer.as_entire_binding(),
+            }),
+        });
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(if classify {
+                &gpu.classify_pipeline
+            } else {
+                &gpu.integrate_pipeline
+            });
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(
+                (placement.span as u32).div_ceil(64),
+                (placement.rows as u32).div_ceil(4),
+                1,
+            );
+        }
+        encoder.copy_buffer_to_buffer(&self.counters, 0, &self.counters_read, 0, 8);
+        gpu.queue.submit([encoder.finish()]);
+        self.counters_read
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |_| {});
+        gpu.wait()?;
+        if FAILED.load(Ordering::Relaxed) {
+            return Err("the GPU failed".into());
+        }
+        let counts: [u32; 2] = bytemuck::pod_read_unaligned(
+            &self
+                .counters_read
+                .slice(..)
+                .get_mapped_range()
+                .map_err(|error| error.to_string())?[..8],
+        );
+        self.counters_read.unmap();
+        Ok((counts[0] as usize, counts[1] as usize))
+    }
+
+    /// Samples the moments hold.
+    pub(crate) fn samples(&self) -> usize {
+        self.samples
+    }
+
+    /// Whether frames are weighted.
+    pub(crate) fn weighted(&self) -> bool {
+        self.weighted
+    }
+
+    /// The moments, read back.
+    pub(crate) fn read(&self) -> Result<MomentVectors, String> {
+        let gpu = self.gpu;
+        let mut trace = Trace::new();
+        let bytes = (self.samples * 4) as u64;
+        let usage = wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST;
+        let sources: Vec<&wgpu::Buffer> = if self.weighted {
+            vec![
+                &self.mean,
+                &self.m2,
+                &self.count,
+                &self.rejected,
+                &self.weight_sum,
+            ]
+        } else {
+            vec![&self.mean, &self.m2, &self.count, &self.rejected]
+        };
+        let staging: Vec<wgpu::Buffer> = sources
+            .iter()
+            .map(|_| gpu.take("moments-read", bytes, usage))
+            .collect();
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        for (source, staging) in sources.iter().zip(&staging) {
+            encoder.copy_buffer_to_buffer(source, 0, staging, 0, bytes);
+        }
+        gpu.queue.submit([encoder.finish()]);
+        for staging in &staging {
+            staging
+                .slice(..bytes)
+                .map_async(wgpu::MapMode::Read, |_| {});
+        }
+        gpu.wait()?;
+        if FAILED.load(Ordering::Relaxed) {
+            return Err("the GPU failed".into());
+        }
+        let mut words: Vec<Vec<u32>> = Vec::with_capacity(staging.len());
+        for staging in &staging {
+            let view = staging
+                .slice(..bytes)
+                .get_mapped_range()
+                .map_err(|error| error.to_string())?;
+            let mut out = vec![0_u32; self.samples];
+            let out_bytes: &mut [u8] = bytemuck::cast_slice_mut(&mut out);
+            out_bytes
+                .par_chunks_mut(1 << 20)
+                .zip(view.par_chunks(1 << 20))
+                .for_each(|(out, input)| out.copy_from_slice(input));
+            drop(view);
+            staging.unmap();
+            words.push(out);
+        }
+        for staging in staging {
+            gpu.give(usage, staging);
+        }
+        let float = |words: Vec<u32>| -> Vec<f32> { bytemuck::cast_vec(words) };
+        let mut words = words.into_iter();
+        let moments = MomentVectors {
+            mean: float(words.next().unwrap_or_default()),
+            m2: float(words.next().unwrap_or_default()),
+            count: words.next().unwrap_or_default(),
+            rejected: words.next().unwrap_or_default(),
+            weight_sum: words.next().map(float),
+        };
+        trace.mark("read");
+        trace.print(&format!("moments read back, {} samples", self.samples));
+        Ok(moments)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1201,6 +1630,7 @@ mod tests {
         for (name, source) in [
             ("resample", include_str!("gpu/resample.wgsl")),
             ("bands", include_str!("gpu/bands.wgsl")),
+            ("accumulate", include_str!("gpu/accumulate.wgsl")),
         ] {
             let module = naga::front::wgsl::parse_str(source)
                 .unwrap_or_else(|error| panic!("{name}: {}", error.emit_to_string(source)));
