@@ -1611,6 +1611,71 @@ pub(crate) fn resample_region_geometry(
     }
 }
 
+/// [`resample_region_geometry`] of `source`, and of `mask`, its clip mask,
+/// one sample a source pixel, bilinearly, as [`resample_region_geometry`]
+/// resamples it: in one pass on the GPU, which finds every pixel's source
+/// position once for both.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resample_region_geometry_masked(
+    source: &LinearImage,
+    mask: Option<&LinearImage>,
+    reference_width: usize,
+    reference_height: usize,
+    region: ReferenceRegion,
+    geometry: FrameGeometry<'_>,
+    sampling: Sampling,
+) -> Result<(LinearImage, Option<LinearImage>)> {
+    if let Sampling::NearestPhotosite(_) = sampling {
+        let image = resample_region_geometry(
+            source,
+            reference_width,
+            reference_height,
+            region,
+            geometry,
+            sampling,
+        )?;
+        let mask = mask
+            .map(|mask| {
+                resample_region_geometry(
+                    mask,
+                    reference_width,
+                    reference_height,
+                    region,
+                    geometry,
+                    Sampling::Bilinear,
+                )
+            })
+            .transpose()?;
+        return Ok((image, mask));
+    }
+    match geometry {
+        FrameGeometry::Similarity(transform) => {
+            transform.validate()?;
+            resample_region_with_inverse_masked(
+                source,
+                mask,
+                reference_width,
+                reference_height,
+                region,
+                transform.inverse_map(),
+                sampling,
+            )
+        }
+        FrameGeometry::Warp(warp) => {
+            warp.validate()?;
+            resample_region_with_inverse_masked(
+                source,
+                mask,
+                reference_width,
+                reference_height,
+                region,
+                |x, y| warp.apply(x, y),
+                sampling,
+            )
+        }
+    }
+}
+
 /// The smallest region of a `reference_width` by `reference_height` grid
 /// holding every pixel [`resample_region_geometry`] can give a finite sample
 /// for a `source_width` by `source_height` frame: those whose source position
@@ -1867,6 +1932,56 @@ impl ChannelSites {
 /// at `sites`: each output pixel takes every channel from where that
 /// channel's samples put the pixel's centre, so its colours line up.
 /// Without sites it is [`resample_region_geometry`] itself.
+/// [`resample_region_sited`] of `source`, and of `mask`, its clip mask,
+/// bilinearly at the pixels' own positions, as
+/// [`resample_region_geometry_masked`] resamples it; with channel sites, the
+/// mask is resampled apart.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resample_region_sited_masked(
+    source: &LinearImage,
+    mask: Option<&LinearImage>,
+    reference_width: usize,
+    reference_height: usize,
+    region: ReferenceRegion,
+    geometry: FrameGeometry<'_>,
+    sampling: Sampling,
+    sites: Option<ChannelSites>,
+) -> Result<(LinearImage, Option<LinearImage>)> {
+    if sites.is_some() && source.channels == 3 {
+        let image = resample_region_sited(
+            source,
+            reference_width,
+            reference_height,
+            region,
+            geometry,
+            sampling,
+            sites,
+        )?;
+        let mask = mask
+            .map(|mask| {
+                resample_region_geometry(
+                    mask,
+                    reference_width,
+                    reference_height,
+                    region,
+                    geometry,
+                    Sampling::Bilinear,
+                )
+            })
+            .transpose()?;
+        return Ok((image, mask));
+    }
+    resample_region_geometry_masked(
+        source,
+        mask,
+        reference_width,
+        reference_height,
+        region,
+        geometry,
+        sampling,
+    )
+}
+
 pub(crate) fn resample_region_sited(
     source: &LinearImage,
     reference_width: usize,
@@ -2053,6 +2168,51 @@ fn resample_region_with_inverse(
     inverse: impl Fn(f64, f64) -> (f64, f64) + Sync,
     sampling: Sampling,
 ) -> Result<LinearImage> {
+    resample_region_with_inverse_masked(
+        source,
+        None,
+        reference_width,
+        reference_height,
+        region,
+        inverse,
+        sampling,
+    )
+    .map(|(image, _)| image)
+}
+
+/// [`resample_region_with_inverse`] of `source`, and of `mask` bilinearly,
+/// in one pass on the GPU, or else one after the other.
+fn resample_region_with_inverse_masked(
+    source: &LinearImage,
+    mask: Option<&LinearImage>,
+    reference_width: usize,
+    reference_height: usize,
+    region: ReferenceRegion,
+    inverse: impl Fn(f64, f64) -> (f64, f64) + Sync,
+    sampling: Sampling,
+) -> Result<(LinearImage, Option<LinearImage>)> {
+    // The mask alone, as `resample_region_with_inverse` resamples it
+    // bilinearly where the GPU's joint pass did not take it; the region is
+    // the frame's, checked below.
+    let mask_alone = |mask: &LinearImage| -> Result<LinearImage> {
+        #[cfg(feature = "gpu")]
+        if let Some((image, _)) = crate::gpu::resample_masked(
+            mask,
+            None,
+            region,
+            &inverse,
+            crate::gpu::GpuSampling::Bilinear,
+        ) {
+            return Ok(image);
+        }
+        resample_region_on_cpu(
+            mask,
+            region,
+            &inverse,
+            Sampling::Bilinear,
+            &vec![0.0; mask.channels],
+        )
+    };
     if reference_width == 0 || reference_height == 0 {
         return Err(Error::Registration(
             "resampling reference dimensions must be non-zero".into(),
@@ -2101,12 +2261,19 @@ fn resample_region_with_inverse(
             Sampling::NearestPhotosite(_) => None,
         };
         if let Some(gpu_sampling) = gpu_sampling
-            && let Some(image) = crate::gpu::resample(source, region, &inverse, gpu_sampling)
+            && let Some((image, resampled_mask)) =
+                crate::gpu::resample_masked(source, mask, region, &inverse, gpu_sampling)
         {
-            return Ok(image);
+            let resampled_mask = match (resampled_mask, mask) {
+                (Some(resampled), _) => Some(resampled),
+                (None, Some(mask)) => Some(mask_alone(mask)?),
+                (None, None) => None,
+            };
+            return Ok((image, resampled_mask));
         }
     }
-    resample_region_on_cpu(source, region, &inverse, sampling, &clamp_spans)
+    let image = resample_region_on_cpu(source, region, &inverse, sampling, &clamp_spans)?;
+    Ok((image, mask.map(mask_alone).transpose()?))
 }
 
 /// [`resample_region_with_inverse`]'s CPU path, for a checked region.

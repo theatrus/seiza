@@ -3,6 +3,8 @@
 // of `registration::resample_row`, one invocation per output pixel and every
 // channel of it. The source position of each pixel comes from a coarse grid
 // of positions the host evaluated in f64, interpolated bilinearly.
+// `with_mask` also resamples the frame's clip mask, bilinearly, at the same
+// positions, as `main` would resample it alone.
 
 struct Params {
     // The output region, its origin on the reference grid.
@@ -40,6 +42,9 @@ struct Node {
 // 1025 steps of six normalized Lanczos-3 weights.
 @group(0) @binding(3) var<storage, read> weights: array<f32>;
 @group(0) @binding(4) var<storage, read_write> output: array<f32>;
+// The frame's clip mask, one sample a source pixel, and its resampling.
+@group(0) @binding(5) var<storage, read> mask: array<f32>;
+@group(0) @binding(6) var<storage, read_write> mask_output: array<f32>;
 
 const NAN_BITS: u32 = 0x7fc00000u;
 
@@ -75,13 +80,8 @@ fn clamped(w: u32, t: array<f32, 6>, noise_span: f32) -> f32 {
     return positive + negative;
 }
 
-fn bilinear(x0: u32, y0: u32, tx: f32, ty: f32, channel: u32) -> f32 {
-    let x1 = min(x0 + 1u, params.source_width - 1u);
-    let y1 = min(y0 + 1u, params.source_height - 1u);
-    let a = tap(x0, y0, channel);
-    let b = tap(x1, y0, channel);
-    let c = tap(x0, y1, channel);
-    let d = tap(x1, y1, channel);
+// Bilinear interpolation of four neighbouring samples, NaN if any is.
+fn blend(a: f32, b: f32, c: f32, d: f32, tx: f32, ty: f32) -> f32 {
     if (!(finite(a) && finite(b) && finite(c) && finite(d))) {
         return bitcast<f32>(NAN_BITS);
     }
@@ -90,12 +90,31 @@ fn bilinear(x0: u32, y0: u32, tx: f32, ty: f32, channel: u32) -> f32 {
     return top * (1.0 - ty) + bottom * ty;
 }
 
-@compute @workgroup_size(16, 16)
-fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-    if (id.x >= params.width || id.y >= params.height) {
-        return;
-    }
-    let first = (id.y * params.width + id.x) * params.channels;
+fn bilinear(x0: u32, y0: u32, tx: f32, ty: f32, channel: u32) -> f32 {
+    let x1 = min(x0 + 1u, params.source_width - 1u);
+    let y1 = min(y0 + 1u, params.source_height - 1u);
+    return blend(
+        tap(x0, y0, channel),
+        tap(x1, y0, channel),
+        tap(x0, y1, channel),
+        tap(x1, y1, channel),
+        tx,
+        ty,
+    );
+}
+
+// Where an output pixel reads the source: whole pixels and the fraction
+// past them, or `valid` false where it reads nothing.
+struct Position {
+    valid: bool,
+    x0: u32,
+    y0: u32,
+    tx: f32,
+    ty: f32,
+}
+
+fn position(id: vec3<u32>) -> Position {
+    let none = Position(false, 0u, 0u, 0.0, 0.0);
     let step = params.grid_step;
     let x = params.origin_x + id.x;
     let y = params.origin_y + id.y;
@@ -122,10 +141,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         fy,
     );
     if (!finite(relative.x) || !finite(relative.y)) {
-        for (var channel = 0u; channel < params.channels; channel++) {
-            output[first + channel] = bitcast<f32>(NAN_BITS);
-        }
-        return;
+        return none;
     }
     let steps = floor(relative);
     var whole = base + vec2<i32>(steps);
@@ -138,10 +154,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         || (whole.y < 0 && !(whole.y == -1 && fraction.y >= 1.0 - epsilon))
         || (whole.x > max_x || (whole.x == max_x && fraction.x > epsilon))
         || (whole.y > max_y || (whole.y == max_y && fraction.y > epsilon))) {
-        for (var channel = 0u; channel < params.channels; channel++) {
-            output[first + channel] = bitcast<f32>(NAN_BITS);
-        }
-        return;
+        return none;
     }
     // Clamp onto the frame, as the CPU does for positions just outside.
     if (whole.x < 0) {
@@ -158,10 +171,22 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (whole.y == max_y) {
         fraction.y = 0.0;
     }
-    let x0 = u32(whole.x);
-    let y0 = u32(whole.y);
-    let tx = fraction.x;
-    let ty = fraction.y;
+    return Position(true, u32(whole.x), u32(whole.y), fraction.x, fraction.y);
+}
+
+// Resample every channel of output pixel `id` at `at`.
+fn resample_pixel(id: vec3<u32>, at: Position) {
+    let first = (id.y * params.width + id.x) * params.channels;
+    if (!at.valid) {
+        for (var channel = 0u; channel < params.channels; channel++) {
+            output[first + channel] = bitcast<f32>(NAN_BITS);
+        }
+        return;
+    }
+    let x0 = at.x0;
+    let y0 = at.y0;
+    let tx = at.tx;
+    let ty = at.ty;
     let window = params.sampling == 0u && x0 >= 2u && y0 >= 2u
         && x0 + 3u < params.source_width && y0 + 3u < params.source_height;
     let wx = min(u32(tx * 1024.0 + 0.5), 1024u);
@@ -186,4 +211,30 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         output[first + channel] = value;
     }
+}
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x >= params.width || id.y >= params.height) {
+        return;
+    }
+    resample_pixel(id, position(id));
+}
+
+@compute @workgroup_size(16, 16)
+fn with_mask(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x >= params.width || id.y >= params.height) {
+        return;
+    }
+    let at = position(id);
+    resample_pixel(id, at);
+    var value = bitcast<f32>(NAN_BITS);
+    if (at.valid) {
+        let x1 = min(at.x0 + 1u, params.source_width - 1u);
+        let y1 = min(at.y0 + 1u, params.source_height - 1u);
+        let row0 = at.y0 * params.source_width;
+        let row1 = y1 * params.source_width;
+        value = blend(mask[row0 + at.x0], mask[row0 + x1], mask[row1 + at.x0], mask[row1 + x1], at.tx, at.ty);
+    }
+    mask_output[id.y * params.width + id.x] = value;
 }

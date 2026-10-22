@@ -24,16 +24,20 @@ from it arrives. These stages run there:
   CPU measures. The two-pixel border, which takes bilinear estimates, stays
   on the CPU, and so do MHC, bilinear and superpixel debayering.
 - **Star detection** (`registration::detect`): the luminance, normalized
-  to 0..=1, each 64x64 tile's median and robust sigma by exact radix
-  selection, and the threshold, which writes the pixels that pass in
-  row-major order. `seiza::detect_stars_from_excess` gathers them into
+  to 0..=1 as each pass reads it, each 64x64 tile's median and robust sigma
+  by exact radix selection (an even tile's upper middle sample is its lower
+  one again, or the least above it, not a second selection), and the
+  threshold, which writes the pixels that pass in row-major order. A mono
+  frame's luminance is read where the frame lies, not copied. `seiza::detect_stars_from_excess` gathers them into
   stars on the CPU: the same flood fill as detection over the whole excess
   image, over those pixels alone, which gives the same stars to the bit.
 - **Registration resampling** (`registration::resample_region_with_inverse`):
   clamped Lanczos-3 and bilinear, mono or RGB, over the whole reference grid
   or a footprint of it. Every frame of a live stack and every frame a final
-  pass prepares goes through it, and so does the clipped-pixel mask. Bayer
-  drizzle's nearest-photosite sampling stays on the CPU.
+  pass prepares goes through it, and its clip mask with it: one pass finds
+  each pixel's source position once, resamples the frame there and the
+  mask bilinearly, to the bit as two passes would. Bayer drizzle's
+  nearest-photosite sampling stays on the CPU.
 - **The live accumulator** (`stack::Accumulator`): a live stack's moments
   move to the GPU with its first frame of a million samples or more, and
   each frame is classified against them (the admission gate) and integrated
@@ -155,6 +159,9 @@ registration with it.
 - `SEIZA_GPU_ACCUMULATOR=off` keeps the live accumulator on the CPU,
   `SEIZA_GPU_DEBAYER=off` VNG debayering, `SEIZA_GPU_DETECT=off` star
   detection, and `SEIZA_GPU_DEFECTS=off` defect learning's screen.
+- `SEIZA_GPU_CALLS` sets how many frame calls (debayering, detection,
+  resampling, screening) run on the GPU at once, three by default: a frame
+  waiting for one holds no GPU buffer.
 - `SEIZA_GPU_TRACE=1` prints every GPU call's stages (grid, upload,
   kernel, copy out) to stderr, and the time opening the device took (12 ms
   on the M4 Max, 46 ms on an Iris Xe), to see where the time goes on a

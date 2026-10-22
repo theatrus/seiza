@@ -61,6 +61,9 @@ struct Gpu {
     queue: wgpu::Queue,
     pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
+    /// Resampling a frame and its clip mask at once.
+    masked_pipeline: wgpu::ComputePipeline,
+    masked_layout: wgpu::BindGroupLayout,
     bands_pipeline: wgpu::ComputePipeline,
     bands_layout: wgpu::BindGroupLayout,
     classify_pipeline: wgpu::ComputePipeline,
@@ -72,7 +75,7 @@ struct Gpu {
     defects_pipeline: wgpu::ComputePipeline,
     defects_layout: wgpu::BindGroupLayout,
     /// Star detection's passes, in order, and their layout.
-    detect_pipelines: [wgpu::ComputePipeline; 6],
+    detect_pipelines: [wgpu::ComputePipeline; 5],
     detect_layout: wgpu::BindGroupLayout,
     scatter_pipeline: wgpu::ComputePipeline,
     scatter_layout: wgpu::BindGroupLayout,
@@ -87,6 +90,36 @@ struct Gpu {
     /// Frame-sized buffers kept between calls: making a new one maps and
     /// clears fresh memory, which took longer than the upload itself.
     pool: std::sync::Mutex<Vec<(wgpu::BufferUsages, wgpu::Buffer)>>,
+    /// Frame calls running at once, which [`Gpu::admitted`] holds to a few.
+    calls: (std::sync::Mutex<usize>, std::sync::Condvar),
+}
+
+/// Frame calls (debayering, detection, resampling, screening) that run at
+/// once, three unless `SEIZA_GPU_CALLS` says otherwise. The GPU runs one
+/// kernel at a time, so a frame waiting here rather than in the GPU's queue
+/// holds no buffer while it waits: with a dozen frames prepared at once,
+/// uncapped calls took the M45 stack on an Iris Xe to 7.8-8.6 GB, against
+/// 7.3-7.5 GB for three. One call at a time left that GPU idle while a call
+/// copied, and took 45-46 s against 39; two took 39.4-39.7, three 38.8-38.9.
+fn frame_calls() -> usize {
+    static CALLS: OnceLock<usize> = OnceLock::new();
+    *CALLS.get_or_init(|| {
+        std::env::var("SEIZA_GPU_CALLS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(3)
+    })
+}
+
+/// One of the [`frame_calls`] permits, given back when dropped.
+struct FrameCall<'a>(&'a Gpu);
+
+impl Drop for FrameCall<'_> {
+    fn drop(&mut self) {
+        let (count, freed) = &self.0.calls;
+        *count.lock().unwrap_or_else(|poison| poison.into_inner()) -= 1;
+        freed.notify_one();
+    }
 }
 
 /// Bytes each core copies at a time out of a mapped buffer.
@@ -115,6 +148,13 @@ fn copy_out<T: bytemuck::Pod + Send + Sync>(view: &[u8], every_core: bool) -> Ve
         .copied()
         .collect_into_vec(&mut out);
     out
+}
+
+/// One binding of a [`Gpu::compute_keeping`] pass: a buffer the pass reads,
+/// or an output of so many samples it writes and is read back.
+enum Bound<'a> {
+    Input(&'a wgpu::Buffer),
+    Output(usize),
 }
 
 /// Which samples a resident buffer holds: where they are, how many, and a
@@ -718,6 +758,41 @@ impl Gpu {
             compilation_options: Default::default(),
             cache: None,
         });
+        let masked_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("resample-masked"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                storage(1, true),
+                storage(2, true),
+                storage(3, true),
+                storage(4, false),
+                storage(5, true),
+                storage(6, false),
+            ],
+        });
+        let masked_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("resample-masked"),
+                bind_group_layouts: &[Some(&masked_layout)],
+                immediate_size: 0,
+            });
+        let masked_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("resample-masked"),
+            layout: Some(&masked_pipeline_layout),
+            module: &module,
+            entry_point: Some("with_mask"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
         let bands_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("bands"),
             source: wgpu::ShaderSource::Wgsl(include_str!("gpu/bands.wgsl").into()),
@@ -982,7 +1057,6 @@ impl Gpu {
         });
         let detect_pipelines = [
             "luminance",
-            "normalize",
             "background",
             "count_rows",
             "offsets",
@@ -1012,6 +1086,8 @@ impl Gpu {
             queue,
             pipeline,
             layout,
+            masked_pipeline,
+            masked_layout,
             bands_pipeline,
             bands_layout,
             classify_pipeline,
@@ -1034,6 +1110,7 @@ impl Gpu {
                 .max_buffer_size
                 .min(limits.max_storage_buffer_binding_size),
             pool: std::sync::Mutex::new(Vec::new()),
+            calls: (std::sync::Mutex::new(0), std::sync::Condvar::new()),
         })
     }
 
@@ -1147,39 +1224,69 @@ impl Gpu {
         output_samples: usize,
         trace: &mut Trace,
     ) -> Result<Vec<T>, String> {
-        self.compute_keeping(layout, passes, inputs, output_samples, false, trace)
-            .map(|(data, _)| data)
+        let bindings: Vec<Bound<'_>> = inputs
+            .iter()
+            .map(|&buffer| Bound::Input(buffer))
+            .chain([Bound::Output(output_samples)])
+            .collect();
+        self.compute_keeping(layout, passes, &bindings, false, trace)
+            .map(|(mut outputs, _)| outputs.swap_remove(0))
     }
 
-    /// [`Self::compute`], and with `keep`, the output buffer and its usage
-    /// too, still holding the output, rather than back to the pool.
+    /// [`Self::compute`] with `bindings` in binding order, each an input
+    /// buffer or an output of so many samples, every output read back; and,
+    /// with `keep`, the first output's buffer and its usage too, still
+    /// holding it, rather than back to the pool.
     #[allow(clippy::type_complexity)]
     fn compute_keeping<T: bytemuck::Pod + Send + Sync>(
         &self,
         layout: &wgpu::BindGroupLayout,
         passes: &[(&wgpu::ComputePipeline, (u32, u32))],
-        inputs: &[&wgpu::Buffer],
-        output_samples: usize,
+        bindings: &[Bound<'_>],
         keep: bool,
         trace: &mut Trace,
-    ) -> Result<(Vec<T>, Option<(wgpu::Buffer, wgpu::BufferUsages)>), String> {
-        let output_bytes = (output_samples * std::mem::size_of::<T>()) as u64;
+    ) -> Result<(Vec<Vec<T>>, Option<(wgpu::Buffer, wgpu::BufferUsages)>), String> {
+        let outputs: Vec<usize> = bindings
+            .iter()
+            .filter_map(|binding| match binding {
+                Bound::Output(samples) => Some(*samples),
+                Bound::Input(_) => None,
+            })
+            .collect();
+        let bytes: Vec<u64> = outputs
+            .iter()
+            .map(|&samples| (samples * std::mem::size_of::<T>()) as u64)
+            .collect();
         let output_usage = wgpu::BufferUsages::STORAGE
             | if self.mapped {
                 wgpu::BufferUsages::MAP_READ
             } else {
                 wgpu::BufferUsages::COPY_SRC
             };
-        let output = self.take("output", output_bytes, output_usage);
-        let readback_usage = wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST;
-        let readback = (!self.mapped).then(|| self.take("readback", output_bytes, readback_usage));
-        let entries: Vec<wgpu::BindGroupEntry> = inputs
+        let output_buffers: Vec<wgpu::Buffer> = bytes
             .iter()
-            .chain([&&output])
+            .map(|&bytes| self.take("output", bytes, output_usage))
+            .collect();
+        let readback_usage = wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST;
+        let readbacks: Option<Vec<wgpu::Buffer>> = (!self.mapped).then(|| {
+            bytes
+                .iter()
+                .map(|&bytes| self.take("readback", bytes, readback_usage))
+                .collect()
+        });
+        let mut next_output = output_buffers.iter();
+        let entries: Vec<wgpu::BindGroupEntry> = bindings
+            .iter()
             .enumerate()
-            .map(|(binding, buffer)| wgpu::BindGroupEntry {
-                binding: binding as u32,
-                resource: buffer.as_entire_binding(),
+            .map(|(binding, bound)| {
+                let buffer = match bound {
+                    Bound::Input(buffer) => *buffer,
+                    Bound::Output(_) => next_output.next().expect("an output for each"),
+                };
+                wgpu::BindGroupEntry {
+                    binding: binding as u32,
+                    resource: buffer.as_entire_binding(),
+                }
             })
             .collect();
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1196,43 +1303,53 @@ impl Gpu {
                 pass.dispatch_workgroups(columns, rows, 1);
             }
         }
-        if let Some(readback) = &readback {
-            encoder.copy_buffer_to_buffer(&output, 0, readback, 0, output_bytes);
+        if let Some(readbacks) = &readbacks {
+            for ((output, readback), &bytes) in output_buffers.iter().zip(readbacks).zip(&bytes) {
+                encoder.copy_buffer_to_buffer(output, 0, readback, 0, bytes);
+            }
         }
         trace.mark("upload");
         let submission = self.queue.submit([encoder.finish()]);
-        let read_from = readback.as_ref().unwrap_or(&output);
+        let read_from = readbacks.as_ref().unwrap_or(&output_buffers);
+        let slices: Vec<wgpu::BufferSlice<'_>> = read_from
+            .iter()
+            .zip(&bytes)
+            .map(|(buffer, &bytes)| buffer.slice(..bytes))
+            .collect();
         let result = self
-            .map(
-                &[read_from.slice(..output_bytes)],
-                wgpu::MapMode::Read,
-                Some(submission),
-            )
+            .map(&slices, wgpu::MapMode::Read, Some(submission))
             .and_then(|()| {
                 trace.mark("kernel");
                 if FAILED.load(Ordering::Relaxed) {
                     return Err("the GPU failed".to_string());
                 }
-                let view = read_from
-                    .slice(..output_bytes)
-                    .get_mapped_range()
-                    .map_err(|error| error.to_string())?;
-                let data = copy_out(&view, false);
-                drop(view);
-                read_from.unmap();
+                let mut data = Vec::with_capacity(outputs.len());
+                for (buffer, &bytes) in read_from.iter().zip(&bytes) {
+                    let view = buffer
+                        .slice(..bytes)
+                        .get_mapped_range()
+                        .map_err(|error| error.to_string())?;
+                    data.push(copy_out(&view, false));
+                    drop(view);
+                    buffer.unmap();
+                }
                 trace.mark("copy out");
                 Ok(data)
             });
-        if let Some(readback) = readback {
-            self.give(readback_usage, readback);
-        }
-        match result {
-            Ok(data) if keep => Ok((data, Some((output, output_usage)))),
-            result => {
-                self.give(output_usage, output);
-                result.map(|data| (data, None))
+        if let Some(readbacks) = readbacks {
+            for readback in readbacks {
+                self.give(readback_usage, readback);
             }
         }
+        let mut output_buffers = output_buffers.into_iter();
+        let kept = match &result {
+            Ok(_) if keep => output_buffers.next().map(|buffer| (buffer, output_usage)),
+            _ => None,
+        };
+        for buffer in output_buffers {
+            self.give(output_usage, buffer);
+        }
+        result.map(|data| (data, kept))
     }
 
     /// Wait for `submission`, and those before it, to finish, but not for
@@ -1308,6 +1425,19 @@ impl Gpu {
         Ok(())
     }
 
+    /// Wait for one of the [`frame_calls`] permits.
+    fn admitted(&self) -> FrameCall<'_> {
+        let (count, freed) = &self.calls;
+        let mut running = count.lock().unwrap_or_else(|poison| poison.into_inner());
+        while *running >= frame_calls() {
+            running = freed
+                .wait(running)
+                .unwrap_or_else(|poison| poison.into_inner());
+        }
+        *running += 1;
+        FrameCall(self)
+    }
+
     fn wait(&self) -> Result<(), String> {
         self.device
             .poll(wgpu::PollType::wait_indefinitely())
@@ -1315,6 +1445,7 @@ impl Gpu {
             .map_err(|error| error.to_string())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn resample(
         &self,
         source: &LinearImage,
@@ -1322,8 +1453,9 @@ impl Gpu {
         grid: &[[u32; 4]],
         (grid_columns, grid_origin): (u32, u32),
         sampling: GpuSampling,
+        mask: Option<&LinearImage>,
         trace: &mut Trace,
-    ) -> Result<LinearImage, String> {
+    ) -> Result<(LinearImage, Option<LinearImage>), String> {
         let channels = source.channels;
         let source_bytes = (source.data.len() * 4) as u64;
         let output_samples = region.width * region.height * channels;
@@ -1377,23 +1509,46 @@ impl Gpu {
             (region.width as u32).div_ceil(16),
             (region.height as u32).div_ceil(16),
         );
-        let data = self.compute_keeping(
-            &self.layout,
-            &[(&self.pipeline, workgroups)],
-            &[&uniform, &source_buffer, &grid, &self.weights],
-            output_samples,
-            true,
-            trace,
-        );
+        let mask_buffer = mask
+            .map(|mask| self.upload("mask", &mask.data))
+            .transpose()?;
+        let mut bindings = vec![
+            Bound::Input(&uniform),
+            Bound::Input(&source_buffer),
+            Bound::Input(&grid),
+            Bound::Input(&self.weights),
+            Bound::Output(output_samples),
+        ];
+        // The mask goes through the same positions in the same pass.
+        let (layout, pipeline) = match &mask_buffer {
+            Some(mask_buffer) => {
+                bindings.push(Bound::Input(mask_buffer));
+                bindings.push(Bound::Output(region.width * region.height));
+                (&self.masked_layout, &self.masked_pipeline)
+            }
+            None => (&self.layout, &self.pipeline),
+        };
+        let data = self.compute_keeping(layout, &[(pipeline, workgroups)], &bindings, true, trace);
+        drop(bindings);
         drop(source_buffer);
-        let (data, output) = data?;
+        if let Some(mask_buffer) = mask_buffer {
+            self.give(self.input_usage(), mask_buffer);
+        }
+        let (mut outputs, output) = data?;
+        let mask_data = (outputs.len() > 1).then(|| outputs.swap_remove(1));
+        let data = outputs.swap_remove(0);
         // The resampled frame stays on the GPU, for its normalization and
         // the accumulator to take; see `take_resident`.
         if let Some((buffer, usage)) = output {
             keep_resident(buffer, usage, ResidentKey::of(&data));
         }
-        LinearImage::new(region.width, region.height, channels, data)
-            .map_err(|error| error.to_string())
+        let mask = mask_data
+            .map(|data| LinearImage::new(region.width, region.height, 1, data))
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        let image = LinearImage::new(region.width, region.height, channels, data)
+            .map_err(|error| error.to_string())?;
+        Ok((image, mask))
     }
 }
 
@@ -1401,13 +1556,31 @@ impl Gpu {
 /// (reference position to source position) on the GPU, or `None` when the
 /// CPU should: the frame is small, the channels are neither one nor three,
 /// or no GPU is in use.
+#[cfg(test)]
 pub(crate) fn resample(
     source: &LinearImage,
     region: ReferenceRegion,
     inverse: &(impl Fn(f64, f64) -> (f64, f64) + Sync),
     sampling: GpuSampling,
 ) -> Option<LinearImage> {
+    resample_masked(source, None, region, inverse, sampling).map(|(image, _)| image)
+}
+
+/// [`resample`], and `mask`, the frame's clip mask, one sample a source
+/// pixel, resampled bilinearly in the same pass, at the same positions, as
+/// [`resample`] alone would resample it. The mask comes back only when it
+/// was taken: it matches the frame's shape.
+pub(crate) fn resample_masked(
+    source: &LinearImage,
+    mask: Option<&LinearImage>,
+    region: ReferenceRegion,
+    inverse: &(impl Fn(f64, f64) -> (f64, f64) + Sync),
+    sampling: GpuSampling,
+) -> Option<(LinearImage, Option<LinearImage>)> {
     let channels = source.channels;
+    let mask = mask.filter(|mask| {
+        mask.channels == 1 && (mask.width, mask.height) == (source.width, source.height)
+    });
     // By the source, not the region: every region of a frame resamples the
     // same way, so a footprint holds what the whole grid would.
     if !matches!(channels, 1 | 3)
@@ -1420,6 +1593,7 @@ pub(crate) fn resample(
         return None;
     }
     let gpu = gpu()?;
+    let _call = gpu.admitted();
     let mut trace = Trace::new();
     let step = GRID_STEP as usize;
     let (first_column, first_row) = (region.x / step, region.y / step);
@@ -1466,6 +1640,7 @@ pub(crate) fn resample(
         &grid,
         (columns as u32, origin),
         sampling,
+        mask,
         &mut trace,
     );
     trace.print(&format!(
@@ -1512,6 +1687,7 @@ pub(crate) fn vng(
         return None;
     }
     let gpu = gpu()?;
+    let _call = gpu.admitted();
     if (mosaic.len() as u64) * 12 > gpu.max_buffer {
         return None;
     }
@@ -1541,7 +1717,7 @@ pub(crate) fn vng(
     let balanced_bytes = (mosaic.len() * 4) as u64;
     let balanced = gpu.take("balanced", balanced_bytes, wgpu::BufferUsages::STORAGE);
     let result = gpu.upload("mosaic", mosaic).and_then(|source| {
-        let rgb = gpu.compute_keeping(
+        let rgb = gpu.compute_keeping::<f32>(
             &gpu.vng_layout,
             &[
                 (
@@ -1556,8 +1732,12 @@ pub(crate) fn vng(
                     ),
                 ),
             ],
-            &[&uniform, &source, &balanced],
-            mosaic.len() * 3,
+            &[
+                Bound::Input(&uniform),
+                Bound::Input(&source),
+                Bound::Input(&balanced),
+                Bound::Output(mosaic.len() * 3),
+            ],
             true,
             &mut trace,
         );
@@ -1567,8 +1747,8 @@ pub(crate) fn vng(
     gpu.give(wgpu::BufferUsages::STORAGE, balanced);
     trace.print(&format!("vng {width}x{height}"));
     match result {
-        Ok((rgb, output)) => Some((
-            rgb,
+        Ok((mut outputs, output)) => Some((
+            outputs.swap_remove(0),
             output.map(|(buffer, usage)| VngOutput {
                 buffer,
                 usage,
@@ -1619,6 +1799,7 @@ pub(crate) fn defect_candidates(
         return None;
     }
     let gpu = gpu()?;
+    let _call = gpu.admitted();
     if (data.len() as u64) * 4 > gpu.max_buffer {
         return None;
     }
@@ -1712,6 +1893,7 @@ pub(crate) fn detect_stars(
         return None;
     }
     let gpu = gpu()?;
+    let _call = gpu.admitted();
     if (image.data.len() as u64) * 4 > gpu.max_buffer {
         return None;
     }
@@ -1786,7 +1968,14 @@ impl Gpu {
             wgpu::BufferUsages::STORAGE,
         );
         let scratch = wgpu::BufferUsages::STORAGE;
-        let luma = self.take("detect-luma", u64::from(pixels) * 4, scratch);
+        // A mono frame's luminance is the frame, read where it lies, and the
+        // binding holds a word.
+        let luma_bytes = if image.channels == 3 {
+            u64::from(pixels) * 4
+        } else {
+            4
+        };
+        let luma = self.take("detect-luma", luma_bytes, scratch);
         let tiles = self.take("detect-tiles", u64::from(tiles_x * tiles_y) * 8, scratch);
         let rows_bytes = (2 * u64::from(height) + 1) * 4;
         let rows = self.take(
@@ -1828,14 +2017,7 @@ impl Gpu {
             });
             let per_pixel = (columns, groups.div_ceil(columns));
             let per_row = (height.min(65535), height.div_ceil(65535));
-            let dispatches = [
-                per_pixel,
-                per_pixel,
-                (tiles_x, tiles_y),
-                per_row,
-                (1, 1),
-                per_row,
-            ];
+            let dispatches = [per_pixel, (tiles_x, tiles_y), per_row, (1, 1), per_row];
             let mut encoder = self.device.create_command_encoder(&Default::default());
             {
                 let mut pass = encoder.begin_compute_pass(&Default::default());
@@ -2714,6 +2896,63 @@ mod tests {
             }
         }
         LinearImage::new(width, height, channels, data).unwrap()
+    }
+
+    /// A frame and its clip mask resampled in one pass come out as each does
+    /// resampled alone, to the bit: the mask bilinearly, the frame clamped
+    /// Lanczos-3 or bilinear, over the whole grid and a region of it.
+    #[test]
+    fn a_frame_and_its_mask_resample_together_as_apart() {
+        if adapter_description().is_none() {
+            eprintln!("no GPU: joint resampling not compared");
+            return;
+        }
+        let transform = SimilarityTransform {
+            scale: 0.9996,
+            rotation_radians: 1.3_f64.to_radians(),
+            translation_x: -4.6,
+            translation_y: 7.1,
+        };
+        let inverse = transform.inverse_map();
+        let source = star_field(1100, 1000, 3);
+        let mut mask = star_field(1100, 1000, 1);
+        for value in &mut mask.data {
+            if value.is_finite() {
+                *value = (*value / 60_000.0).min(1.0);
+            }
+        }
+        let spans = crate::registration::lanczos_clamp_spans(&source);
+        let mut clamp_spans = [0.0; 4];
+        clamp_spans[..3].copy_from_slice(&spans);
+        for sampling in [GpuSampling::Lanczos3 { clamp_spans }, GpuSampling::Bilinear] {
+            for region in [
+                ReferenceRegion {
+                    x: 0,
+                    y: 0,
+                    width: 1100,
+                    height: 1000,
+                },
+                ReferenceRegion {
+                    x: 37,
+                    y: 211,
+                    width: 640,
+                    height: 480,
+                },
+            ] {
+                let alone = resample(&source, region, &inverse, sampling).unwrap();
+                let mask_alone = resample(&mask, region, &inverse, GpuSampling::Bilinear).unwrap();
+                let (together, mask_together) =
+                    resample_masked(&source, Some(&mask), region, &inverse, sampling).unwrap();
+                let mask_together = mask_together.expect("the mask was taken");
+                for (a, b) in alone.data.iter().zip(&together.data) {
+                    assert_eq!(a.to_bits(), b.to_bits());
+                }
+                for (a, b) in mask_alone.data.iter().zip(&mask_together.data) {
+                    assert_eq!(a.to_bits(), b.to_bits());
+                }
+            }
+        }
+        release_resident();
     }
 
     /// The GPU resamples as the CPU does, to a small fraction of the noise,

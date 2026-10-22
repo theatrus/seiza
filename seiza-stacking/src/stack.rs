@@ -2711,8 +2711,13 @@ pub(crate) fn prepare_frame(
             height: reference.height,
         },
     };
-    let mut registered = crate::registration::resample_region_sited(
+    // The frame's clip mask, where its raw pixels clipped, goes onto the
+    // grid as the frame does: bilinearly, so a pixel reads how much of it
+    // they reach, in the same pass where the GPU resamples.
+    let mask = clipped.filter(|mask| (mask.width, mask.height) == (frame.width, frame.height));
+    let (mut registered, clipped) = crate::registration::resample_region_sited_masked(
         &frame,
+        mask.as_ref(),
         reference.width,
         reference.height,
         region,
@@ -2932,21 +2937,6 @@ pub(crate) fn prepare_frame(
     mapping.set_warp(registration.warp.clone())?;
     mapping.set_bin_factor(options.bin_factor);
     mapping.set_channel_sites(options.channel_sites(cfa));
-    // Where the frame's raw pixels clipped, carried onto the grid as the
-    // frame was: bilinearly, so a pixel reads how much of it they reach.
-    let clipped = match clipped {
-        Some(mask) if (mask.width, mask.height) == (frame.width, frame.height) => {
-            Some(crate::registration::resample_region_geometry(
-                &mask,
-                reference.width,
-                reference.height,
-                region,
-                geometry,
-                crate::registration::Sampling::Bilinear,
-            )?)
-        }
-        _ => None,
-    };
     // A frame whose normalized samples lie on the GPU for its accumulator
     // keeps no second copy here, which a frame queued for integration would
     // hold for as long as it waits.

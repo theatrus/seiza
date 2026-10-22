@@ -4,8 +4,10 @@
 // robust sigma, and the excess of every pixel above its tile's median by
 // more than `sigma` of its noise. What passes is written in row-major
 // order, as (pixel, excess), for `seiza::detect_stars_from_excess` to
-// gather into stars on the CPU. Six passes, dispatched in order in one
-// submission.
+// gather into stars on the CPU. Five passes, dispatched in order in one
+// submission. The luminance is normalized as each pass reads it, rather
+// than in a pass of its own, and a mono frame's is the frame itself, read
+// where it lies.
 
 struct Params {
     width: u32,
@@ -53,8 +55,10 @@ fn from_key(key: u32) -> f32 {
 var<workgroup> lows: array<u32, 256>;
 var<workgroup> highs: array<u32, 256>;
 
-// The luminance, as `LinearImage::luminance`'s `rec709_luma` forms it, and
-// its finite extremes: each workgroup's by a tree, then one atomic each.
+// The luminance of a colour frame, as `LinearImage::luminance`'s
+// `rec709_luma` forms it, and a frame's finite luminance's extremes: each
+// workgroup's by a tree, then one atomic each. A mono frame's luminance is
+// the frame, which is not copied.
 @compute @workgroup_size(256)
 fn luminance(
     @builtin(global_invocation_id) id: vec3<u32>,
@@ -68,10 +72,10 @@ fn luminance(
         if (params.channels == 3u) {
             let at = pixel * 3u;
             value = fma(0.2126, frame[at], fma(0.7152, frame[at + 1u], 0.0722 * frame[at + 2u]));
+            luma[pixel] = value;
         } else {
             value = frame[pixel];
         }
-        luma[pixel] = value;
         if (finite(value)) {
             low = order_key(value);
             high = low;
@@ -93,32 +97,37 @@ fn luminance(
     }
 }
 
-// `normalize_for_detection`, in f32 where the CPU works in f64: a sample
-// can differ by a unit in the last place. Each workgroup reads the extremes
-// once.
-@compute @workgroup_size(256)
-fn normalize(
-    @builtin(global_invocation_id) id: vec3<u32>,
-    @builtin(local_invocation_index) local: u32,
-) {
+// The normalization's lowest luminance, its span, and 1 where there is
+// one (0 where every sample is NaN, or all are equal), which each workgroup
+// of the later passes reads once.
+var<workgroup> range: array<f32, 3>;
+
+fn load_range(local: u32) {
     if (local == 0u) {
-        lows[0] = atomicLoad(&extremes[0]);
-        highs[0] = atomicLoad(&extremes[1]);
+        let least_key = atomicLoad(&extremes[0]);
+        let lowest = from_key(least_key);
+        let highest = from_key(atomicLoad(&extremes[1]));
+        range[0] = lowest;
+        range[1] = highest - lowest;
+        range[2] = select(0.0, 1.0, least_key != 0xffffffffu && highest > lowest);
     }
     workgroupBarrier();
-    let pixel = id.y * params.row + id.x;
-    if (pixel >= params.width * params.height) {
-        return;
-    }
-    let least_key = lows[0];
-    let lowest = from_key(least_key);
-    let highest = from_key(highs[0]);
-    let value = luma[pixel];
-    if (least_key == 0xffffffffu || !(highest > lowest) || !finite(value)) {
-        luma[pixel] = 0.0;
+}
+
+// Pixel `pixel`'s luminance, normalized as `normalize_for_detection` does,
+// in f32 where the CPU works in f64: a sample can differ by a unit in the
+// last place. Needs `load_range` first.
+fn normalized(pixel: u32) -> f32 {
+    var value: f32;
+    if (params.channels == 3u) {
+        value = luma[pixel];
     } else {
-        luma[pixel] = (value - lowest) / (highest - lowest);
+        value = frame[pixel];
     }
+    if (range[2] == 0.0 || !finite(value)) {
+        return 0.0;
+    }
+    return (value - range[0]) / range[1];
 }
 
 const TILE_SAMPLES: u32 = 4096u;
@@ -129,17 +138,20 @@ const BINS: u32 = 1024u;
 var<workgroup> histogram: array<atomic<u32>, 1024>;
 var<workgroup> sums: array<u32, 256>;
 var<workgroup> groups: array<u32, 16>;
-var<workgroup> found: array<u32, 2>;
+var<workgroup> found: array<u32, 3>;
+var<workgroup> next_key: atomic<u32>;
 
-// The key of rank `rank` (from 0) among the keys the workgroup's
-// invocations hold in `keys`, all within 0..=`span`: a radix select, ten
-// bits a round, each round counting the keys of the range left into a
-// histogram and keeping the bin that rank falls in. Exact, and a key past
-// `span` is not counted.
-fn select_rank(keys: ptr<function, array<u32, 16>>, local: u32, wanted: u32, span_in: u32) -> u32 {
+// The key of rank `wanted` (from 0) among the keys the workgroup's
+// invocations hold in `keys`, all within 0..=`span_in`, which is not 0: a
+// radix select, ten bits a round, each round counting the keys of the range
+// left into a histogram and keeping the bin that rank falls in. Exact, and
+// a key past `span_in` is not counted. With it, its rank among the keys
+// equal to it and how many there are: the last bin kept holds one key.
+fn select_rank(keys: ptr<function, array<u32, 16>>, local: u32, wanted: u32, span_in: u32) -> vec3<u32> {
     var base = 0u;
     var span = span_in;
     var rank = wanted;
+    var held = 0u;
     loop {
         if (span == 0u) {
             break;
@@ -193,8 +205,9 @@ fn select_rank(keys: ptr<function, array<u32, 16>>, local: u32, wanted: u32, spa
                 before += sums[t];
             }
             var bin = owner * 4u;
+            var count = 0u;
             for (var j = 0u; j < 4u; j++) {
-                let count = atomicLoad(&histogram[owner * 4u + j]);
+                count = atomicLoad(&histogram[owner * 4u + j]);
                 if (rank < before + count) {
                     bin = owner * 4u + j;
                     break;
@@ -203,26 +216,53 @@ fn select_rank(keys: ptr<function, array<u32, 16>>, local: u32, wanted: u32, spa
             }
             found[0] = bin;
             found[1] = before;
+            found[2] = count;
         }
         workgroupBarrier();
         let bin = found[0];
         rank -= found[1];
+        held = found[2];
         base += bin << shift;
         span = min(span - (bin << shift), (1u << shift) - 1u);
         workgroupBarrier();
     }
-    return base;
+    return vec3<u32>(base, rank, held);
+}
+
+// The least key the workgroup holds above `key`.
+fn next_above(keys: ptr<function, array<u32, 16>>, local: u32, key: u32) -> u32 {
+    if (local == 0u) {
+        atomicStore(&next_key, 0xffffffffu);
+    }
+    workgroupBarrier();
+    var least = 0xffffffffu;
+    for (var i = 0u; i < HELD; i++) {
+        let held = (*keys)[i];
+        if (held > key) {
+            least = min(least, held);
+        }
+    }
+    atomicMin(&next_key, least);
+    workgroupBarrier();
+    let next = atomicLoad(&next_key);
+    workgroupBarrier();
+    return next;
 }
 
 // The median of the `count` keys the workgroup holds, as `median_in_place`
 // takes it.
+// For an even count, the key above the lower middle one is that key again
+// when more hold it, or else the least above it, which one pass finds
+// rather than a second selection.
 fn held_median(keys: ptr<function, array<u32, 16>>, local: u32, count: u32, span: u32) -> f32 {
     let middle = count / 2u;
-    var median = bitcast<f32>(select_rank(keys, local, middle, span));
-    if (count % 2u == 0u) {
-        median = (bitcast<f32>(select_rank(keys, local, middle - 1u, span)) + median) * 0.5;
+    if (count % 2u == 1u) {
+        return bitcast<f32>(select_rank(keys, local, middle, span).x);
     }
-    return median;
+    let lower = select_rank(keys, local, middle - 1u, span);
+    let above = next_above(keys, local, lower.x);
+    let upper = select(above, lower.x, lower.y + 1u < lower.z);
+    return (bitcast<f32>(lower.x) + bitcast<f32>(upper)) * 0.5;
 }
 
 // Each tile's median and robust sigma, as `seiza::detect`'s
@@ -239,12 +279,13 @@ fn background(
     let tile_width = min(params.tile, params.width - x0);
     let tile_height = min(params.tile, params.height - y0);
     let count = tile_width * tile_height;
+    load_range(local);
     var keys: array<u32, 16>;
     for (var i = 0u; i < HELD; i++) {
         let at = local + i * 256u;
         var key = 0xffffffffu;
         if (at < count) {
-            key = bitcast<u32>(luma[(y0 + at / tile_width) * params.width + x0 + at % tile_width]);
+            key = bitcast<u32>(normalized((y0 + at / tile_width) * params.width + x0 + at % tile_width));
         }
         keys[i] = key;
     }
@@ -266,7 +307,7 @@ fn background(
 // A pixel's excess above its tile's median, when it passes the threshold.
 fn excess_at(x: u32, y: u32) -> f32 {
     let tile = tiles[(y / params.tile) * params.tiles_x + x / params.tile];
-    let excess = luma[y * params.width + x] - tile.x;
+    let excess = normalized(y * params.width + x) - tile.x;
     // A NaN fails the comparison, as on the CPU; none reaches here.
     return select(0.0, excess, excess > params.sigma * tile.y);
 }
@@ -280,6 +321,7 @@ fn count_rows(
     @builtin(workgroup_id) group: vec3<u32>,
     @builtin(local_invocation_index) local: u32,
 ) {
+    load_range(local);
     let y = group.y * 65535u + group.x;
     let run = (params.width + 255u) / 256u;
     var found = 0u;
@@ -341,6 +383,7 @@ fn write_rows(
     @builtin(workgroup_id) group: vec3<u32>,
     @builtin(local_invocation_index) local: u32,
 ) {
+    load_range(local);
     let y = group.y * 65535u + group.x;
     let run = (params.width + 255u) / 256u;
     let first = local * run;
