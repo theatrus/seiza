@@ -106,37 +106,38 @@ fn any_in_bins(mask: &LinearImage, factor: u32) -> Result<LinearImage> {
     Ok(binned)
 }
 
-/// `mask` with every clipped pixel spread `radius` pixels in each direction.
+/// `mask` with every clipped pixel spread `radius` pixels in each direction:
+/// along each row, then down the columns, every output row taking the
+/// largest of the spread rows within `radius` of it. Each row of both passes
+/// is independent and reads memory in order, so both run on every core.
 fn dilated(mask: &LinearImage, radius: usize) -> LinearImage {
     let (width, height) = (mask.width, mask.height);
-    let spread = |line: &[f32], output: &mut [f32]| {
-        for (index, value) in output.iter_mut().enumerate() {
-            let start = index.saturating_sub(radius);
-            let end = (index + radius + 1).min(line.len());
-            *value = line[start..end].iter().copied().fold(0.0, f32::max);
-        }
-    };
     let mut rows = vec![0.0_f32; width * height];
     rows.par_chunks_mut(width)
         .zip(mask.data.par_chunks(width))
-        .for_each(|(output, line)| spread(line, output));
-    let mut columns = vec![0.0_f32; width * height];
-    let mut column = vec![0.0_f32; height];
-    let mut spread_column = vec![0.0_f32; height];
-    for x in 0..width {
-        for (y, value) in column.iter_mut().enumerate() {
-            *value = rows[y * width + x];
-        }
-        spread(&column, &mut spread_column);
-        for (y, &value) in spread_column.iter().enumerate() {
-            columns[y * width + x] = value;
-        }
-    }
+        .for_each(|(output, line)| {
+            for (index, value) in output.iter_mut().enumerate() {
+                let start = index.saturating_sub(radius);
+                let end = (index + radius + 1).min(width);
+                *value = line[start..end].iter().copied().fold(0.0, f32::max);
+            }
+        });
+    let mut data = vec![0.0_f32; width * height];
+    data.par_chunks_mut(width)
+        .enumerate()
+        .for_each(|(y, output)| {
+            let (start, end) = (y.saturating_sub(radius), (y + radius + 1).min(height));
+            for row in rows[start * width..end * width].chunks_exact(width) {
+                for (value, &spread) in output.iter_mut().zip(row) {
+                    *value = value.max(spread);
+                }
+            }
+        });
     LinearImage {
         width,
         height,
         channels: 1,
-        data: columns,
+        data,
     }
 }
 
