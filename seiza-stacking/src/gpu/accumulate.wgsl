@@ -2,6 +2,9 @@
 // classification of a frame against the moments so far, and Welford's
 // update (West's, weighted) of the samples it keeps. A frame covers a region
 // of the grid; its samples are the region's rows, each `span` samples long.
+// Dispatched one after the other in a single submission, `integrate` acts
+// only if `classify` accepted at least `admit_at` samples, so a frame is
+// classified, admitted and integrated without waiting on the host between.
 
 struct Params {
     // The region, in samples of the grid's rows.
@@ -19,6 +22,8 @@ struct Params {
     high_sigma: f32,
     warmup: u32,
     minimum_sigma: f32,
+    // The samples `classify` must accept for `integrate` to act.
+    admit_at: u32,
     // This frame's weight per channel.
     weights: vec4<f32>,
 }
@@ -30,8 +35,9 @@ struct Params {
 @group(0) @binding(4) var<storage, read_write> count: array<u32>;
 @group(0) @binding(5) var<storage, read_write> rejected: array<u32>;
 @group(0) @binding(6) var<storage, read_write> weight_sum: array<f32>;
-// The frame's accepted and refused samples.
-@group(0) @binding(7) var<storage, read_write> counters: array<atomic<u32>, 2>;
+// The frame's accepted and refused samples, as `classify` and then
+// `integrate` count them.
+@group(0) @binding(7) var<storage, read_write> counters: array<atomic<u32>, 4>;
 
 var<workgroup> local_counts: array<atomic<u32>, 2>;
 
@@ -88,7 +94,8 @@ fn classify(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocat
 
 @compute @workgroup_size(64, 4)
 fn integrate(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_index) local: u32) {
-    if (id.x < params.span && id.y < params.rows) {
+    let admitted = atomicLoad(&counters[0]) >= params.admit_at;
+    if (admitted && id.x < params.span && id.y < params.rows) {
         let placed = place(id);
         let at = placed.x;
         let sample = frame[placed.y];
@@ -125,10 +132,10 @@ fn integrate(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invoca
         let accepted = atomicLoad(&local_counts[0]);
         let refused = atomicLoad(&local_counts[1]);
         if (accepted > 0u) {
-            atomicAdd(&counters[0], accepted);
+            atomicAdd(&counters[2], accepted);
         }
         if (refused > 0u) {
-            atomicAdd(&counters[1], refused);
+            atomicAdd(&counters[3], refused);
         }
     }
 }

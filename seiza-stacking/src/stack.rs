@@ -2969,6 +2969,25 @@ pub(crate) struct IntegrationHalf<'a> {
     reference_height: usize,
 }
 
+/// The fewest accepted samples whose `fraction` is not below `minimum`, as
+/// the frame's admission compares them, so a frame is admitted exactly when
+/// it accepts at least as many; past `u32::MAX`, more than a frame holds,
+/// when no count up to it is.
+fn admission_count(fraction: &impl Fn(usize) -> f32, minimum: f32) -> usize {
+    // `fraction` grows with the count, so the counts it falls short at come
+    // first.
+    let (mut low, mut high) = (0, u32::MAX as usize + 1);
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if fraction(middle) < minimum {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    low
+}
+
 impl IntegrationHalf<'_> {
     /// Integrate one prepared frame. Must be called in submission order:
     /// whether a frame survives `minimum_integrated_fraction` depends on every
@@ -3004,9 +3023,6 @@ impl IntegrationHalf<'_> {
             height: self.reference_height,
         };
 
-        let (would_accept, _) =
-            self.accumulator
-                .classify_frame(placed, self.options.rejection, weights);
         // A photosite frame offers one sample per pixel, not one per channel.
         // This runs on the one serial stage a pipeline waits on, so the
         // count of a canvas frame's ~50 million samples runs in parallel.
@@ -3017,16 +3033,21 @@ impl IntegrationHalf<'_> {
         } else {
             registered.sample_count()
         };
-        let integrated_fraction = would_accept as f32 / offered.max(1) as f32;
-        if integrated_fraction < self.options.acceptance.minimum_integrated_fraction {
+        let minimum = self.options.acceptance.minimum_integrated_fraction;
+        let fraction = |accepted: usize| accepted as f32 / offered.max(1) as f32;
+        let (would_accept, integrated) = self.accumulator.admit_frame(
+            placed,
+            self.options.rejection,
+            weights,
+            admission_count(&fraction, minimum),
+        );
+        let integrated_fraction = fraction(would_accept);
+        let Some((accepted_samples, rejected_samples)) = integrated else {
             return self.reject(FrameRejectionReason::InsufficientIntegratedSamples {
                 measured: integrated_fraction,
-                minimum: self.options.acceptance.minimum_integrated_fraction,
+                minimum,
             });
-        }
-        let (accepted_samples, rejected_samples) =
-            self.accumulator
-                .integrate_frame(placed, self.options.rejection, weights);
+        };
         if let Some(clipped) = &clipped {
             self.accumulator.add_clipped(
                 clipped,
@@ -3267,57 +3288,47 @@ impl Accumulator {
         }
     }
 
-    /// [`Self::classify_placed`] on the GPU when the moments are there.
-    fn classify_frame(
+    /// Classify `frame` against the moments and, if rejection would accept
+    /// at least `admit_at` of its samples, integrate it: how many it would
+    /// accept and refuse, and the integration's accepted and rejected counts
+    /// when it was integrated. On the GPU, when the moments are there, in
+    /// one submission; else [`Self::classify_placed`] and
+    /// [`Self::integrate_placed`].
+    fn admit_frame(
         &mut self,
         frame: Placed<'_>,
         rejection: RejectionMode,
         weights: Option<&[f32]>,
-    ) -> (usize, usize) {
+        admit_at: usize,
+    ) -> (usize, Option<(usize, usize)>) {
         #[cfg(feature = "gpu")]
         {
             self.offer_gpu();
             if let Some(gpu) = &mut self.gpu {
                 let unit = [1.0_f32];
-                match gpu.classify(
+                match gpu.admit(
                     &frame.image.data,
                     gpu_placement(frame),
                     weights.unwrap_or(&unit),
                     gpu_rejection(rejection),
+                    admit_at,
                 ) {
-                    Ok(counts) => return counts,
+                    Ok((accepted, integrated)) => {
+                        if integrated.is_some() {
+                            // The moments changed; a copy read back before
+                            // is stale.
+                            self.mirror = std::sync::OnceLock::new();
+                        }
+                        return (accepted, integrated);
+                    }
                     Err(reason) => self.leave_gpu(&reason),
                 }
             }
         }
-        self.classify_placed(frame, rejection, weights)
-    }
-
-    /// [`Self::integrate_placed`] on the GPU when the moments are there;
-    /// `frame` must be the frame just classified.
-    fn integrate_frame(
-        &mut self,
-        frame: Placed<'_>,
-        rejection: RejectionMode,
-        weights: Option<&[f32]>,
-    ) -> (usize, usize) {
-        #[cfg(feature = "gpu")]
-        {
-            // The moments change; a copy read back before is stale.
-            self.mirror = std::sync::OnceLock::new();
-            if let Some(gpu) = &mut self.gpu {
-                let unit = [1.0_f32];
-                match gpu.integrate(
-                    gpu_placement(frame),
-                    weights.unwrap_or(&unit),
-                    gpu_rejection(rejection),
-                ) {
-                    Ok(counts) => return counts,
-                    Err(reason) => self.leave_gpu(&reason),
-                }
-            }
-        }
-        self.integrate_placed(frame, rejection, weights)
+        let (accepted, _) = self.classify_placed(frame, rejection, weights);
+        let integrated =
+            (accepted >= admit_at).then(|| self.integrate_placed(frame, rejection, weights));
+        (accepted, integrated)
     }
 
     /// Add a frame's clipped share of each pixel of `region`, a mono image
@@ -3960,6 +3971,42 @@ mod binned_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A frame is admitted at exactly the counts whose fraction the
+    /// comparison would let through, at every minimum, odd ones included.
+    #[test]
+    fn the_admission_count_is_where_the_fraction_comparison_turns() {
+        for offered in [0_usize, 1, 2, 3, 7, 1000, 1_048_577, 78_274_944] {
+            let fraction = |accepted: usize| accepted as f32 / offered.max(1) as f32;
+            for minimum in [
+                -1.0,
+                0.0,
+                f32::MIN_POSITIVE,
+                0.1,
+                0.5,
+                1.0 / 3.0,
+                0.999_999,
+                1.0,
+                1.5,
+                f32::INFINITY,
+                f32::NAN,
+            ] {
+                let count = admission_count(&fraction, minimum);
+                for accepted in [0, 1, count.saturating_sub(1), count, count + 1, offered] {
+                    if accepted > u32::MAX as usize {
+                        continue;
+                    }
+                    // As `integrate` decides: rejected below the minimum.
+                    let refused = fraction(accepted) < minimum;
+                    assert_eq!(
+                        accepted >= count,
+                        !refused,
+                        "{offered} offered, minimum {minimum}, {accepted} accepted"
+                    );
+                }
+            }
+        }
+    }
     use crate::BayerLayout;
 
     fn stacking_star_field(width: usize, height: usize) -> LinearImage {
@@ -4433,17 +4480,28 @@ mod tests {
                     let total = (c + d).max(1);
                     a.abs_diff(c) * 100_000 <= total && b.abs_diff(d) * 100_000 <= total
                 };
-                let expected = cpu.classify_frame(placed, rejection, weights);
-                let actual = gpu.classify_frame(placed, rejection, weights);
+                let (classified, expected) = cpu.admit_frame(placed, rejection, weights, 0);
+                let (would_accept, actual) = gpu.admit_frame(placed, rejection, weights, 0);
+                let (expected, actual) = (expected.unwrap(), actual.unwrap());
                 assert!(
-                    close(actual, expected),
-                    "frame {frame} weighted {weighted}: classified {actual:?} against {expected:?}"
+                    close((would_accept, 0), (classified, 0)),
+                    "frame {frame} weighted {weighted}: classified {would_accept} against \
+                     {classified}"
                 );
-                let expected = cpu.integrate_frame(placed, rejection, weights);
-                let actual = gpu.integrate_frame(placed, rejection, weights);
                 assert!(
                     close(actual, expected),
                     "frame {frame} weighted {weighted}: integrated {actual:?} against {expected:?}"
+                );
+                // A frame short of its admission count is classified, and
+                // left out of the moments on both.
+                let refused_at = classified + classified / 2 + 1;
+                assert_eq!(
+                    cpu.admit_frame(placed, rejection, weights, refused_at).1,
+                    None
+                );
+                assert_eq!(
+                    gpu.admit_frame(placed, rejection, weights, refused_at).1,
+                    None
                 );
             }
             let (cpu, gpu) = (cpu.moments(), gpu.moments());

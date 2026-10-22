@@ -1509,6 +1509,8 @@ struct AccumulateParams {
     high_sigma: f32,
     warmup: u32,
     minimum_sigma: f32,
+    admit_at: u32,
+    padding: [u32; 3],
     weights: [f32; 4],
 }
 
@@ -1527,9 +1529,6 @@ pub(crate) struct GpuMoments {
     params: wgpu::Buffer,
     counters: wgpu::Buffer,
     counters_read: wgpu::Buffer,
-    /// The frame last classified, which its integration reads again, with
-    /// its byte length and the usage the pool keeps it under.
-    frame: Option<(wgpu::Buffer, u64)>,
 }
 
 impl GpuMoments {
@@ -1578,80 +1577,62 @@ impl GpuMoments {
             ),
             counters: gpu.buffer(
                 "accumulate-counters",
-                8,
+                16,
                 wgpu::BufferUsages::STORAGE
                     | wgpu::BufferUsages::COPY_SRC
                     | wgpu::BufferUsages::COPY_DST,
             ),
             counters_read: gpu.buffer(
                 "accumulate-counters-read",
-                8,
+                16,
                 wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             ),
-            frame: None,
         };
         gpu.wait().ok()?;
         (!FAILED.load(Ordering::Relaxed)).then_some(state)
     }
 
-    fn frame_usage(&self) -> wgpu::BufferUsages {
-        self.gpu.input_usage()
-    }
-
-    /// Classify `frame`, placed as `placement` says, against the moments:
-    /// how many of its finite samples rejection would accept and refuse.
-    /// The frame stays on the GPU for [`Self::integrate`].
-    pub(crate) fn classify(
+    /// Classify `frame`, placed as `placement` says, against the moments,
+    /// and integrate it if rejection would accept at least `admit_at` of its
+    /// finite samples: how many it would accept, and, when it was
+    /// integrated, how many were accepted and refused there. One submission,
+    /// one wait: the GPU decides the admission itself.
+    pub(crate) fn admit(
         &mut self,
         frame: &[f32],
         placement: FramePlacement,
         weights: &[f32],
         rejection: Option<GpuRejection>,
-    ) -> Result<(usize, usize), String> {
+        admit_at: usize,
+    ) -> Result<(usize, Option<(usize, usize)>), String> {
         let gpu = self.gpu;
         let mut trace = Trace::new();
-        let bytes = (frame.len() * 4) as u64;
-        if let Some((buffer, _)) = self.frame.take() {
-            gpu.give(self.frame_usage(), buffer);
-        }
-        self.frame = Some((gpu.upload("frame", frame)?, bytes));
+        let source = gpu.upload("frame", frame)?;
         trace.mark("upload");
-        let counts = self.dispatch(placement, weights, rejection, true)?;
-        trace.mark("classify");
-        trace.print(&format!("classify {} samples", frame.len()));
-        Ok(counts)
-    }
-
-    /// Integrate the frame [`Self::classify`] last uploaded; how many of its
-    /// samples were accepted and refused.
-    pub(crate) fn integrate(
-        &mut self,
-        placement: FramePlacement,
-        weights: &[f32],
-        rejection: Option<GpuRejection>,
-    ) -> Result<(usize, usize), String> {
-        let mut trace = Trace::new();
-        let counts = self.dispatch(placement, weights, rejection, false)?;
-        if let Some((buffer, _)) = self.frame.take() {
-            self.gpu.give(self.frame_usage(), buffer);
-        }
-        trace.mark("integrate");
-        trace.print("integrate");
-        Ok(counts)
+        // No frame holds `u32::MAX` samples, so a count past it, which
+        // admits none, admits none here either.
+        let admit_at = u32::try_from(admit_at).unwrap_or(u32::MAX);
+        let counts = self.dispatch(&source, placement, weights, rejection, admit_at);
+        gpu.give(gpu.input_usage(), source);
+        let [accepted, _, integrated, refused] = counts?;
+        trace.mark("admit");
+        trace.print(&format!("admit {} samples", frame.len()));
+        let admitted = accepted >= admit_at;
+        Ok((
+            accepted as usize,
+            admitted.then_some((integrated as usize, refused as usize)),
+        ))
     }
 
     fn dispatch(
         &self,
+        frame: &wgpu::Buffer,
         placement: FramePlacement,
         weights: &[f32],
         rejection: Option<GpuRejection>,
-        classify: bool,
-    ) -> Result<(usize, usize), String> {
+        admit_at: u32,
+    ) -> Result<[u32; 4], String> {
         let gpu = self.gpu;
-        let (frame, _) = self
-            .frame
-            .as_ref()
-            .ok_or_else(|| "no frame was classified".to_string())?;
         let mut frame_weights = [1.0_f32; 4];
         for (weight, &value) in frame_weights.iter_mut().zip(weights) {
             *weight = value;
@@ -1675,11 +1656,13 @@ impl GpuMoments {
             high_sigma: rejection.high_sigma,
             warmup: rejection.warmup,
             minimum_sigma: rejection.minimum_sigma,
+            admit_at,
+            padding: [0; 3],
             weights: frame_weights,
         };
         gpu.queue
             .write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
-        gpu.queue.write_buffer(&self.counters, 0, &[0u8; 8]);
+        gpu.queue.write_buffer(&self.counters, 0, &[0u8; 16]);
         let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("accumulate"),
             layout: &gpu.accumulate_layout,
@@ -1700,20 +1683,20 @@ impl GpuMoments {
         });
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         {
+            // Each dispatch sees the last one's writes: `integrate` reads the
+            // count `classify` left.
             let mut pass = encoder.begin_compute_pass(&Default::default());
-            pass.set_pipeline(if classify {
-                &gpu.classify_pipeline
-            } else {
-                &gpu.integrate_pipeline
-            });
             pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(
+            let groups = (
                 (placement.span as u32).div_ceil(64),
                 (placement.rows as u32).div_ceil(4),
-                1,
             );
+            for pipeline in [&gpu.classify_pipeline, &gpu.integrate_pipeline] {
+                pass.set_pipeline(pipeline);
+                pass.dispatch_workgroups(groups.0, groups.1, 1);
+            }
         }
-        encoder.copy_buffer_to_buffer(&self.counters, 0, &self.counters_read, 0, 8);
+        encoder.copy_buffer_to_buffer(&self.counters, 0, &self.counters_read, 0, 16);
         let submission = gpu.queue.submit([encoder.finish()]);
         gpu.map(
             &[self.counters_read.slice(..)],
@@ -1723,15 +1706,15 @@ impl GpuMoments {
         if FAILED.load(Ordering::Relaxed) {
             return Err("the GPU failed".into());
         }
-        let counts: [u32; 2] = bytemuck::pod_read_unaligned(
+        let counts: [u32; 4] = bytemuck::pod_read_unaligned(
             &self
                 .counters_read
                 .slice(..)
                 .get_mapped_range()
-                .map_err(|error| error.to_string())?[..8],
+                .map_err(|error| error.to_string())?[..16],
         );
         self.counters_read.unmap();
-        Ok((counts[0] as usize, counts[1] as usize))
+        Ok(counts)
     }
 
     /// Samples the moments hold.

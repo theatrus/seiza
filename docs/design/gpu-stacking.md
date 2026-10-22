@@ -31,7 +31,10 @@ from it arrives. These stages run there:
 - **The live accumulator** (`stack::Accumulator`): a live stack's moments
   move to the GPU with its first frame of a million samples or more, and
   each frame is classified against them (the admission gate) and integrated
-  there, delta-sigma rejection and the weighted Welford update included. The
+  there, delta-sigma rejection and the weighted Welford update included, in
+  one submission: the host turns the minimum integrated fraction into the
+  count of accepted samples it takes, and the integrating pass acts only if
+  classification reached it. The
   CPU's copies are freed. [`LiveStacker::view`], snapshots and saved
   contexts read the moments back, once a frame, the first time they are
   asked for, into a copy the next frame drops; the borrowed view stays valid
@@ -200,17 +203,53 @@ the bottleneck, busy for most of the run with about half a second of
 kernels a frame, so VNG on the GPU saves CPU time (271 CPU-s against 299)
 but not wall time.
 
+## The Iris Xe's limit
+
+On the i5-1340P's Iris Xe, M45 takes 41 s: 5 s choosing the reference,
+learning defects and preparing it, 23 s for the live pass (about 600 ms a
+frame), 12 s reintegrating. Each stage's kernel is 4-20 times the M4 Max's,
+and a mapped buffer costs more besides: the driver maps it afresh each time,
+and the first write to each 4 KB page faults, about 36 ms of a 47 ms copy of
+128 MB, against 3 ms for the whole copy on the M4 Max. Uploading through
+`queue.write_buffer` instead was slower, 49 s against 41.
+
+The live pass there is bound by what the CPU and the GPU share, the
+memory: a GPU call is in flight 98% of it, the one thread integrating
+frames spends 80% of it in its classify-and-integrate call, and none of
+these moved it:
+
+| | live pass |
+|---|---:|
+| as it stands | 23.2-23.5 s |
+| VNG on the CPU | 22.9-23.5 s (38 CPU-s more) |
+| VNG in workgroup tiles (17% faster kernel) | within 0.5 s |
+| classify and integrate in one submission | 23.2 s |
+| each frame staged on the GPU by its worker | 23.4-23.7 s |
+| 4 to 12 workers | 40.6-42.5 s for the run |
+
+Staging frames took a third off the integrating thread's calls, and it
+then waited as long for the next frame. What would move it is fewer bytes
+crossing memory: a frame that goes up once and stays (calibrated,
+debayered, resampled and integrated where it lies, coming back only as the
+luminance star detection needs and the normalized frame a reintegration
+keeps). A discrete GPU, where each crossing is a PCIe transfer, would gain
+the same way.
+
 ## Follow-on work
 
+- **Frames that stay on the GPU** from calibration to integration, above:
+  the change that would move the Iris Xe and a discrete GPU, and the
+  largest, since `LinearImage` and star detection would need a frame that
+  lives there.
 - **Speculative integration.** One pass that classifies and integrates
   into a second copy of the moments, kept when the frame is admitted: in
   the `gpu-spike` experiments 44 ms a frame against 76 ms for separate
-  passes on the Iris Xe, for twice the moments' memory.
-- **Workers.** The pipeline's default worker count follows a memory budget
-  set for CPU preparation; with the GPU doing the heavy passes, more
-  workers pay.
-- **A tiled resampling kernel for Intel.** Workgroup-shared source tiles cut
-  the Iris Xe's kernel from 29 to 21 ms and slow the M4 Max eightfold, so
-  the kernel would be chosen by adapter.
-- **Calibration, debayering and normalization on the GPU**, which would let
-  a frame go up once, raw, and come back only as its registered result.
+  passes on the Iris Xe, for twice the moments' memory. One submission now
+  does both passes; the second copy is what remains, and on the Iris Xe
+  the passes are not what holds the live pass.
+- **Tiled kernels for Intel.** Workgroup-shared tiles cut the Iris Xe's
+  VNG kernel from 92-97 to 78-81 ms and its resampling kernel by 28% in
+  the `gpu-spike` experiments, and slow the M4 Max's three and eight times;
+  neither moved the Iris Xe's run, for the reason above.
+- **NVIDIA**, on Windows and Linux: not yet run. Its staging path is the
+  one a discrete GPU takes and is untested on one.
