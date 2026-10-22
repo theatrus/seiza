@@ -892,7 +892,8 @@ fn resize(source: &RgbImage, width: u32, height: u32) -> RgbImage {
     wide.par_chunks_mut(out_stride)
         .zip(source.as_raw().par_chunks(in_stride))
         .for_each(|(out, row)| {
-            for ((start, taps), pixel) in columns.iter().zip(out.chunks_exact_mut(3)) {
+            for ((start, taps), pixel) in columns.iter().zip(out.as_chunks_mut::<3>().0.iter_mut())
+            {
                 for (offset, &weight) in taps.iter().enumerate() {
                     let input = &row[(start + offset) * 3..][..3];
                     for channel in 0..3 {

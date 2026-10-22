@@ -1049,7 +1049,7 @@ fn read_image(
 fn write_f32_values(writer: &mut impl Write, values: &[f32]) -> std::io::Result<()> {
     let mut bytes = vec![0_u8; IO_BUFFER_VALUES * 4];
     for chunk in values.chunks(IO_BUFFER_VALUES) {
-        for (value, output) in chunk.iter().zip(bytes.chunks_exact_mut(4)) {
+        for (value, output) in chunk.iter().zip(bytes.as_chunks_mut::<4>().0.iter_mut()) {
             output.copy_from_slice(&value.to_bits().to_le_bytes());
         }
         writer.write_all(&bytes[..chunk.len() * 4])?;
@@ -1060,7 +1060,7 @@ fn write_f32_values(writer: &mut impl Write, values: &[f32]) -> std::io::Result<
 fn write_u32_values(writer: &mut impl Write, values: &[u32]) -> std::io::Result<()> {
     let mut bytes = vec![0_u8; IO_BUFFER_VALUES * 4];
     for chunk in values.chunks(IO_BUFFER_VALUES) {
-        for (value, output) in chunk.iter().zip(bytes.chunks_exact_mut(4)) {
+        for (value, output) in chunk.iter().zip(bytes.as_chunks_mut::<4>().0.iter_mut()) {
             output.copy_from_slice(&value.to_le_bytes());
         }
         writer.write_all(&bytes[..chunk.len() * 4])?;
@@ -1078,11 +1078,13 @@ fn read_f32_values(reader: &mut impl Read, length: usize) -> std::result::Result
         reader
             .read_exact(&mut bytes[..bytes_to_read])
             .map_err(|error| error.to_string())?;
-        values.extend(bytes[..bytes_to_read].chunks_exact(4).map(|bytes| {
-            f32::from_bits(u32::from_le_bytes(
-                bytes.try_into().expect("four-byte chunk"),
-            ))
-        }));
+        values.extend(
+            bytes[..bytes_to_read]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|bytes| f32::from_bits(u32::from_le_bytes(*bytes))),
+        );
         remaining -= values_to_read;
     }
     Ok(values)
@@ -1100,8 +1102,10 @@ fn read_u32_values(reader: &mut impl Read, length: usize) -> std::result::Result
             .map_err(|error| error.to_string())?;
         values.extend(
             bytes[..bytes_to_read]
-                .chunks_exact(4)
-                .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("four-byte chunk"))),
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|bytes| u32::from_le_bytes(*bytes)),
         );
         remaining -= values_to_read;
     }

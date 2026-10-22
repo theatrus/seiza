@@ -259,7 +259,12 @@ fn contour_points(contour: &PyReadonlyArrayDyn<'_, i32>) -> PyResult<Vec<Point>>
     let flat = contour
         .as_slice()
         .map_err(|_| PyValueError::new_err("contour arrays must be C-contiguous"))?;
-    Ok(flat.chunks_exact(2).map(|p| (p[0], p[1])).collect())
+    Ok(flat
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|p| (p[0], p[1]))
+        .collect())
 }
 
 /// Polygon area of a contour, as `cv::contourArea` computes it (Green's

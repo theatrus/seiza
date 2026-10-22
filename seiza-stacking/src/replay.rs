@@ -1173,7 +1173,7 @@ impl FrameCache {
         let mut bytes = vec![0_u8; 1 << 20];
         for values in runs {
             for chunk in values.chunks(bytes.len() / 4) {
-                for (&sample, out) in chunk.iter().zip(bytes.chunks_exact_mut(4)) {
+                for (&sample, out) in chunk.iter().zip(bytes.as_chunks_mut::<4>().0.iter_mut()) {
                     let sample = if sample == 0.0 && !keep_zeros {
                         0.0_f32
                     } else {
@@ -1211,7 +1211,7 @@ impl FrameCache {
         for chunk in data.chunks_mut(bytes.len() / 4) {
             let raw = &mut bytes[..chunk.len() * 4];
             file.read_exact(raw).ok()?;
-            for (sample, raw) in chunk.iter_mut().zip(raw.chunks_exact(4)) {
+            for (sample, raw) in chunk.iter_mut().zip(raw.as_chunks::<4>().0.iter()) {
                 *sample = f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
             }
         }
@@ -1244,10 +1244,13 @@ impl FrameCache {
             region.width,
             region.height,
         ];
-        if header.chunks_exact(8).zip(expected).any(|(raw, expected)| {
-            u64::from_le_bytes(raw.try_into().expect("a header field is eight bytes"))
-                != expected as u64
-        }) {
+        if header
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .zip(expected)
+            .any(|(raw, expected)| u64::from_le_bytes(*raw) != expected as u64)
+        {
             return None;
         }
         let stored = layout
@@ -1263,7 +1266,7 @@ impl FrameCache {
             for chunk in samples[range].chunks_mut(bytes.len() / 4) {
                 let raw = &mut bytes[..chunk.len() * 4];
                 file.read_exact(raw).ok()?;
-                for (sample, raw) in chunk.iter_mut().zip(raw.chunks_exact(4)) {
+                for (sample, raw) in chunk.iter_mut().zip(raw.as_chunks::<4>().0.iter()) {
                     *sample = f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
                 }
             }
@@ -1361,7 +1364,7 @@ impl FrameCache {
                 let row = first_read + offset;
                 let at = (row - top) * row_samples + start;
                 let samples = &mut band[at..at + run];
-                for (sample, raw) in samples.iter_mut().zip(raw.chunks_exact(4)) {
+                for (sample, raw) in samples.iter_mut().zip(raw.as_chunks::<4>().0.iter()) {
                     *sample = f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
                 }
                 if let Some(normalizer) = &normalizer {

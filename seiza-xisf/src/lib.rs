@@ -966,7 +966,9 @@ fn read_complex_from(
                 .collect::<Vec<_>>();
             ComplexSamples::C32(
                 values
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|pair| [pair[0], pair[1]])
                     .collect(),
             )
@@ -983,7 +985,9 @@ fn read_complex_from(
                 .collect::<Vec<_>>();
             ComplexSamples::C64(
                 values
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|pair| [pair[0], pair[1]])
                     .collect(),
             )
@@ -1796,7 +1800,10 @@ fn find_indexed_block(path: &Path, file_bytes: u64, id: u64) -> Result<(u64, u64
         }
         let mut elements = vec![0_u8; elements_bytes as usize];
         file.read_exact(&mut elements)?;
-        for element in elements.chunks_exact(BLOCK_INDEX_ELEMENT_BYTES as usize) {
+        for element in elements
+            .as_chunks::<{ BLOCK_INDEX_ELEMENT_BYTES as usize }>()
+            .0
+        {
             let (unique_id, position, bytes) =
                 (u64_at(element, 0), u64_at(element, 8), u64_at(element, 16));
             // A zero position marks a free element, which holds no block.
@@ -2361,7 +2368,7 @@ fn append_decoded(
     match (pixels, format) {
         (Pixels::U8(values), SampleFormat::UInt8) => values.extend_from_slice(bytes),
         (Pixels::U16(values), SampleFormat::UInt16) => {
-            values.extend(bytes.chunks_exact(2).map(|bytes| {
+            values.extend(bytes.as_chunks::<2>().0.iter().map(|bytes| {
                 let bytes = [bytes[0], bytes[1]];
                 match order {
                     ByteOrder::Little => u16::from_le_bytes(bytes),
@@ -2370,8 +2377,8 @@ fn append_decoded(
             }))
         }
         (Pixels::F32(values), SampleFormat::Float32) => {
-            values.extend(bytes.chunks_exact(4).map(|bytes| {
-                let bytes = bytes.try_into().unwrap();
+            values.extend(bytes.as_chunks::<4>().0.iter().map(|bytes| {
+                let bytes = *bytes;
                 match order {
                     ByteOrder::Little => f32::from_le_bytes(bytes),
                     ByteOrder::Big => f32::from_be_bytes(bytes),
@@ -2379,8 +2386,8 @@ fn append_decoded(
             }))
         }
         (Pixels::F64(values), SampleFormat::UInt32) => {
-            values.extend(bytes.chunks_exact(4).map(|bytes| {
-                let bytes = bytes.try_into().unwrap();
+            values.extend(bytes.as_chunks::<4>().0.iter().map(|bytes| {
+                let bytes = *bytes;
                 match order {
                     ByteOrder::Little => u32::from_le_bytes(bytes) as f64,
                     ByteOrder::Big => u32::from_be_bytes(bytes) as f64,
@@ -2388,8 +2395,8 @@ fn append_decoded(
             }))
         }
         (Pixels::F64(values), SampleFormat::UInt64) => {
-            values.extend(bytes.chunks_exact(8).map(|bytes| {
-                let bytes = bytes.try_into().unwrap();
+            values.extend(bytes.as_chunks::<8>().0.iter().map(|bytes| {
+                let bytes = *bytes;
                 match order {
                     ByteOrder::Little => u64::from_le_bytes(bytes) as f64,
                     ByteOrder::Big => u64::from_be_bytes(bytes) as f64,
@@ -2397,8 +2404,8 @@ fn append_decoded(
             }))
         }
         (Pixels::F64(values), SampleFormat::Float64) => {
-            values.extend(bytes.chunks_exact(8).map(|bytes| {
-                let bytes = bytes.try_into().unwrap();
+            values.extend(bytes.as_chunks::<8>().0.iter().map(|bytes| {
+                let bytes = *bytes;
                 match order {
                     ByteOrder::Little => f64::from_le_bytes(bytes),
                     ByteOrder::Big => f64::from_be_bytes(bytes),
@@ -4422,7 +4429,9 @@ mod tests {
         // encoder stores uncompressed, still shuffled.
         let raw = noise(128, 0x0bad_cafe);
         let values = raw
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect::<Vec<_>>();
         let stored = shuffled(&raw, 2);

@@ -230,7 +230,7 @@ impl DiskObjectGeometry {
                         return Err(invalid_data("outline vertex range is out of bounds"));
                     }
                     let mut vertices = Vec::with_capacity(len);
-                    for vertex in vertex_bytes[start..start + byte_len].chunks_exact(16) {
+                    for vertex in vertex_bytes[start..start + byte_len].as_chunks::<16>().0 {
                         vertices.push((
                             f64::from_le_bytes(vertex[..8].try_into().unwrap()),
                             f64::from_le_bytes(vertex[8..].try_into().unwrap()),

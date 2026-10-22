@@ -1506,7 +1506,12 @@ impl StretchPlan {
                 }
             }),
             ColorStrategy::LuminancePreserving => chunks.for_each(|(output, input)| {
-                for (output, pixel) in output.chunks_exact_mut(3).zip(input.chunks_exact(3)) {
+                for (output, pixel) in output
+                    .as_chunks_mut::<3>()
+                    .0
+                    .iter_mut()
+                    .zip(input.as_chunks::<3>().0)
+                {
                     let mapped = map_luminance_pixel(mappers[0], pixel);
                     for (output, value) in output.iter_mut().zip(mapped) {
                         *output = convert(value);
@@ -2408,7 +2413,9 @@ mod tests {
                 .map(|(index, value)| convert(previous_map(plan.curves[index % channels], *value)))
                 .collect(),
             ColorStrategy::LuminancePreserving => data
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .flat_map(|pixel| {
                     let mapped = if pixel.iter().any(|value| !value.is_finite()) {
                         [0.0; 3]
@@ -3611,7 +3618,7 @@ mod tests {
         // A grey RGB image keeps its luminance curve on every channel.
         let grey = data.iter().flat_map(|&v| [v; 3]).collect::<Vec<_>>();
         let output = layered_output(&grey, 3, params);
-        for (pixel, &value) in output.chunks_exact(3).zip(&expected) {
+        for (pixel, &value) in output.as_chunks::<3>().0.iter().zip(&expected) {
             for channel in pixel {
                 assert!((channel - value).abs() < 1.0e-5, "{pixel:?} {value}");
             }
@@ -3753,7 +3760,12 @@ mod tests {
         // Near the black point blue clips to 0, so those pixels are fully
         // saturated already; every other one gains colour.
         let (mut raised, mut eligible) = (0, 0);
-        for (before, after) in plain.chunks_exact(3).zip(lifted.chunks_exact(3)) {
+        for (before, after) in plain
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .zip(lifted.as_chunks::<3>().0)
+        {
             let value = before[0].max(before[1]).max(before[2]);
             if value < 0.01 {
                 continue;

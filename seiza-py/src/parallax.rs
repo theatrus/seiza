@@ -764,7 +764,9 @@ fn frame_array(py: Python<'_>, frame: image::RgbImage, format: &str) -> PyResult
             let bgra = format == "bgra";
             let data = frame
                 .as_raw()
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .flat_map(|rgb| {
                     if bgra {
                         [rgb[2], rgb[1], rgb[0], 255]

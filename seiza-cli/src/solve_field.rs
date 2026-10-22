@@ -656,7 +656,7 @@ fn parse_header(bytes: &[u8], offset: &mut usize) -> Result<Vec<(String, String)
             .get(*offset..*offset + FITS_BLOCK)
             .context("truncated FITS header")?;
         *offset += FITS_BLOCK;
-        for card in block.chunks_exact(FITS_CARD) {
+        for card in block.as_chunks::<FITS_CARD>().0 {
             let card = std::str::from_utf8(card).context("non-ASCII FITS header")?;
             let keyword = card[..8].trim().to_string();
             if keyword == "END" {

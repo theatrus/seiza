@@ -1041,7 +1041,9 @@ pub fn decode_plane(bytes: &[u8]) -> Option<Plane> {
         width,
         height,
         data: body
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 let fixed = u16::from_le_bytes([pair[0], pair[1]]);
                 if fixed == 0 {

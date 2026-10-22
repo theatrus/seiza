@@ -439,7 +439,9 @@ impl TileCatalog {
             ));
         }
         let index = map[index_start..index_end]
-            .chunks_exact(12)
+            .as_chunks::<12>()
+            .0
+            .iter()
             .map(|chunk| {
                 (
                     u64::from_le_bytes(chunk[0..8].try_into().unwrap()),
@@ -643,7 +645,7 @@ impl TileCatalog {
                 let Some(data) = self.map.get(offset..end) else {
                     return;
                 };
-                for (i, r) in data.chunks_exact(V1_RECORD_SIZE).enumerate() {
+                for (i, r) in data.as_chunks::<V1_RECORD_SIZE>().0.iter().enumerate() {
                     let keep_going = visit(
                         i,
                         CatalogStar {

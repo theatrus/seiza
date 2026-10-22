@@ -541,7 +541,7 @@ impl ObjectDistances {
 
         let mut entries = Vec::with_capacity(entry_count);
         let mut previous: Option<&str> = None;
-        for record in records.chunks_exact(ENTRY_SIZE) {
+        for record in records.as_chunks::<ENTRY_SIZE>().0 {
             let mut fields = Cursor {
                 bytes: record,
                 at: 0,

@@ -1560,8 +1560,10 @@ mod tests {
                 fits.debayer()
                     .unwrap()
                     .data
-                    .chunks_exact(3)
-                    .all(|pixel| pixel == [1000, 2000, 3000])
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .all(|pixel| *pixel == [1000, 2000, 3000])
             );
             let frame = FitsFrame::from_fits(fits, None).unwrap();
             let expected = if height == 4 {
@@ -1595,8 +1597,10 @@ mod tests {
                     prepared
                         .image
                         .data
-                        .chunks_exact(3)
-                        .all(|pixel| pixel == [1000.0, 2000.0, 3000.0])
+                        .as_chunks::<3>()
+                        .0
+                        .iter()
+                        .all(|pixel| *pixel == [1000.0, 2000.0, 3000.0])
                 );
             }
         }

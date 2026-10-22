@@ -365,7 +365,7 @@ impl Region {
                     }
                 }
                 crossings.sort_by(f64::total_cmp);
-                for pair in crossings.chunks_exact(2) {
+                for pair in crossings.as_chunks::<2>().0 {
                     let from = ((pair[0] - left as f64).ceil().max(0.0) as usize).min(columns);
                     let to = ((pair[1] - left as f64).ceil().max(0.0) as usize).min(columns);
                     for pixel in &mut pixels[from..to.max(from)] {

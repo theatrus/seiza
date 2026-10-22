@@ -653,32 +653,42 @@ fn values(bytes: &[u8], pixels: usize, floats: bool) -> Result<Tile, FitsError> 
         (1, _) => Tile::Int(bytes.iter().map(|&byte| i64::from(byte)).collect()),
         (2, _) => Tile::Int(
             bytes
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|chunk| i64::from(i16::from_be_bytes([chunk[0], chunk[1]])))
                 .collect(),
         ),
         (4, false) => Tile::Int(
             bytes
-                .chunks_exact(4)
-                .map(|chunk| i64::from(i32::from_be_bytes(chunk.try_into().unwrap())))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|chunk| i64::from(i32::from_be_bytes(*chunk)))
                 .collect(),
         ),
         (4, true) => Tile::F32(
             bytes
-                .chunks_exact(4)
-                .map(|chunk| f32::from_be_bytes(chunk.try_into().unwrap()))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|chunk| f32::from_be_bytes(*chunk))
                 .collect(),
         ),
         (8, false) => Tile::Int(
             bytes
-                .chunks_exact(8)
-                .map(|chunk| i64::from_be_bytes(chunk.try_into().unwrap()))
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|chunk| i64::from_be_bytes(*chunk))
                 .collect(),
         ),
         (8, true) => Tile::F64(
             bytes
-                .chunks_exact(8)
-                .map(|chunk| f64::from_be_bytes(chunk.try_into().unwrap()))
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|chunk| f64::from_be_bytes(*chunk))
                 .collect(),
         ),
         _ => return Err(malformed(format!("tile holds {width}-byte samples"))),
@@ -839,7 +849,9 @@ fn rice_decode(
 /// or step it and write one sample.
 fn plio_decode(input: &[u8], count: usize) -> Result<Vec<i64>, FitsError> {
     let words: Vec<i32> = input
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|chunk| i32::from(i16::from_be_bytes([chunk[0], chunk[1]])))
         .collect();
     let word = |index: usize| -> Result<i32, FitsError> {
@@ -1030,22 +1042,34 @@ fn write_samples(tile: &Tile, source: usize, count: usize, bitpix: i64, out: &mu
             }
         }
         (Tile::F32(values), -32) => {
-            for (value, out) in values[range].iter().zip(out.chunks_exact_mut(4)) {
+            for (value, out) in values[range]
+                .iter()
+                .zip(out.as_chunks_mut::<4>().0.iter_mut())
+            {
                 out.copy_from_slice(&value.to_be_bytes());
             }
         }
         (Tile::F32(values), _) => {
-            for (value, out) in values[range].iter().zip(out.chunks_exact_mut(8)) {
+            for (value, out) in values[range]
+                .iter()
+                .zip(out.as_chunks_mut::<8>().0.iter_mut())
+            {
                 out.copy_from_slice(&f64::from(*value).to_be_bytes());
             }
         }
         (Tile::F64(values), -64) => {
-            for (value, out) in values[range].iter().zip(out.chunks_exact_mut(8)) {
+            for (value, out) in values[range]
+                .iter()
+                .zip(out.as_chunks_mut::<8>().0.iter_mut())
+            {
                 out.copy_from_slice(&value.to_be_bytes());
             }
         }
         (Tile::F64(values), _) => {
-            for (value, out) in values[range].iter().zip(out.chunks_exact_mut(4)) {
+            for (value, out) in values[range]
+                .iter()
+                .zip(out.as_chunks_mut::<4>().0.iter_mut())
+            {
                 out.copy_from_slice(&(*value as f32).to_be_bytes());
             }
         }
@@ -1381,8 +1405,10 @@ mod tests {
             );
             let decoded = crate::FitsImage::from_bytes(&file).unwrap();
             let expected: Vec<f32> = unhex(restored)
-                .chunks_exact(4)
-                .map(|chunk| f32::from_be_bytes(chunk.try_into().unwrap()))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|chunk| f32::from_be_bytes(*chunk))
                 .collect();
             let crate::Pixels::F32(values) = &decoded.pixels else {
                 panic!("{method}: expected f32 samples");

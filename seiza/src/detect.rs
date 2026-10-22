@@ -670,14 +670,14 @@ fn estimate_background_u8(
             for y in y0..y1 {
                 let row = (y * width) as usize;
                 let values = &pixels[row + x0 as usize..row + x1 as usize];
-                let mut quads = values.chunks_exact(4);
-                for quad in &mut quads {
+                let (quads, rest) = values.as_chunks::<4>();
+                for quad in quads {
                     lanes[0][quad[0] as usize] += 1;
                     lanes[1][quad[1] as usize] += 1;
                     lanes[2][quad[2] as usize] += 1;
                     lanes[3][quad[3] as usize] += 1;
                 }
-                for &value in quads.remainder() {
+                for &value in rest {
                     lanes[0][value as usize] += 1;
                 }
             }

@@ -555,7 +555,7 @@ mod tests {
             }
         }
         let rgb = debayer_rgb16(&mosaic, w, h, BayerPattern::Rggb, 0, 0);
-        for px in rgb.data.chunks_exact(3) {
+        for px in rgb.data.as_chunks::<3>().0.iter() {
             assert_eq!(px, &[4000, 2000, 1000]);
         }
         let luma = rgb.to_luma_u16();
@@ -657,7 +657,9 @@ mod tests {
                     let rgb = debayer_rgb16(&integers, width, height, pattern, x_offset, y_offset);
                     assert_eq!(rgb.data, serial, "{width}x{height} {pattern:?}");
                     let luma = serial
-                        .chunks_exact(3)
+                        .as_chunks::<3>()
+                        .0
+                        .iter()
                         .map(|px| ((px[0] as u32 + 2 * px[1] as u32 + px[2] as u32) / 4) as u16)
                         .collect::<Vec<_>>();
                     assert_eq!(rgb.to_luma_u16(), luma, "{width}x{height} {pattern:?}");

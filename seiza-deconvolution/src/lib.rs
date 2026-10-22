@@ -645,7 +645,9 @@ mod tests {
         assert!(
             restored
                 .data
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .all(|pixel| pixel[1] == 4.0 && pixel[2] == 8.0)
         );
     }

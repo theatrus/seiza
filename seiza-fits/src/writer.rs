@@ -451,7 +451,7 @@ pub fn update_header_in_place(
             return Err(FitsError::Io(error));
         }
 
-        for (card_idx, card) in block.chunks_exact(CARD).enumerate() {
+        for (card_idx, card) in block.as_chunks::<CARD>().0.iter().enumerate() {
             if card_keyword(card).is_some_and(|found| found.eq_ignore_ascii_case(keyword)) {
                 let target_offset = start_pos + (card_idx * CARD) as u64;
                 file.seek(SeekFrom::Start(target_offset))
@@ -622,7 +622,9 @@ mod tests {
                 )
                 .unwrap();
                 let filter_card = encoded[..BLOCK]
-                    .chunks_exact(CARD)
+                    .as_chunks::<CARD>()
+                    .0
+                    .iter()
                     .find(|card| card.starts_with(b"FILTER  = "))
                     .unwrap();
                 assert!(filter_card[10..30].iter().all(|byte| *byte == b' '));
@@ -747,11 +749,15 @@ mod tests {
 
     fn header_cards(encoded: &[u8]) -> Vec<String> {
         let end = encoded
-            .chunks_exact(CARD)
+            .as_chunks::<CARD>()
+            .0
+            .iter()
             .position(|card| card.starts_with(b"END "))
             .unwrap();
         encoded[..end * CARD]
-            .chunks_exact(CARD)
+            .as_chunks::<CARD>()
+            .0
+            .iter()
             .map(|card| String::from_utf8(card.to_vec()).unwrap())
             .collect()
     }

@@ -222,7 +222,7 @@ fn parse_header_cards(data: &[u8]) -> Result<(FitsHeader, usize), FitsError> {
         let Some(block_data) = data.get(start..start + BLOCK) else {
             return Err(FitsError::Malformed("header runs past EOF".into()));
         };
-        for card in block_data.chunks_exact(CARD) {
+        for card in block_data.as_chunks::<CARD>().0.iter() {
             let keyword = std::str::from_utf8(&card[0..8])
                 .map_err(|_| FitsError::Malformed("non-ASCII keyword".into()))?
                 .trim_end()
@@ -291,7 +291,9 @@ pub(crate) fn is_hierarch_keyword(keyword: &str) -> bool {
 /// Whether a header block holds the END card.
 fn holds_end_card(block: &[u8]) -> bool {
     block
-        .chunks_exact(CARD)
+        .as_chunks::<CARD>()
+        .0
+        .iter()
         .any(|card| card.starts_with(b"END") && card[3] == b' ')
 }
 
@@ -733,7 +735,9 @@ fn allocate_pixel_vec<T>(count: usize) -> Result<Vec<T>, FitsError> {
 #[multiversion::multiversion(targets("x86_64+avx2", "x86_64+sse4.1", "aarch64+neon"))]
 fn fold_be_u16(raw: &[u8], flip: u16, out: &mut Vec<u16>) {
     out.extend(
-        raw.chunks_exact(2)
+        raw.as_chunks::<2>()
+            .0
+            .iter()
             .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]) ^ flip),
     );
 }
@@ -763,7 +767,7 @@ fn decode_camera_u16_in_parallel(payload: &[u8], spec: ImageSpec) -> Option<Pixe
 
 #[multiversion::multiversion(targets("x86_64+avx2", "x86_64+sse4.1", "aarch64+neon"))]
 fn swap_be_u16(raw: &[u8], flip: u16, out: &mut [u16]) {
-    for (out, chunk) in out.iter_mut().zip(raw.chunks_exact(2)) {
+    for (out, chunk) in out.iter_mut().zip(raw.as_chunks::<2>().0.iter()) {
         *out = u16::from_be_bytes([chunk[0], chunk[1]]) ^ flip;
     }
 }
@@ -810,7 +814,7 @@ fn decode_pixels(reader: &mut impl Read, spec: ImageSpec) -> Result<Pixels, Fits
             } else {
                 let mut out = allocate_pixel_vec(spec.count)?;
                 read_payload_chunks(reader, spec.count, 2, |raw| {
-                    out.extend(raw.chunks_exact(2).map(|chunk| {
+                    out.extend(raw.as_chunks::<2>().0.iter().map(|chunk| {
                         let stored = i16::from_be_bytes([chunk[0], chunk[1]]);
                         if spec.blank == Some(i64::from(stored)) {
                             return f32::NAN;
@@ -827,8 +831,8 @@ fn decode_pixels(reader: &mut impl Read, spec: ImageSpec) -> Result<Pixels, Fits
             // BZERO 32768: flipping the sign bit gives the u64 exactly.
             let unsigned = spec.bscale == 1.0 && spec.bzero == 9_223_372_036_854_775_808.0;
             read_payload_chunks(reader, spec.count, 8, |raw| {
-                out.extend(raw.chunks_exact(8).map(|chunk| {
-                    let stored = i64::from_be_bytes(chunk.try_into().unwrap());
+                out.extend(raw.as_chunks::<8>().0.iter().map(|chunk| {
+                    let stored = i64::from_be_bytes(*chunk);
                     if spec.blank == Some(stored) {
                         f64::NAN
                     } else if unsigned {
@@ -844,7 +848,9 @@ fn decode_pixels(reader: &mut impl Read, spec: ImageSpec) -> Result<Pixels, Fits
             let mut out = allocate_pixel_vec(spec.count)?;
             read_payload_chunks(reader, spec.count, 4, |raw| {
                 out.extend(
-                    raw.chunks_exact(4)
+                    raw.as_chunks::<4>()
+                        .0
+                        .iter()
                         .map(|chunk| i32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])),
                 );
             })?;
@@ -854,7 +860,9 @@ fn decode_pixels(reader: &mut impl Read, spec: ImageSpec) -> Result<Pixels, Fits
             let mut out = allocate_pixel_vec(spec.count)?;
             read_payload_chunks(reader, spec.count, 4, |raw| {
                 out.extend(
-                    raw.chunks_exact(4)
+                    raw.as_chunks::<4>()
+                        .0
+                        .iter()
                         .map(|chunk| f32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])),
                 );
             })?;
@@ -864,8 +872,10 @@ fn decode_pixels(reader: &mut impl Read, spec: ImageSpec) -> Result<Pixels, Fits
             let mut out = allocate_pixel_vec(spec.count)?;
             read_payload_chunks(reader, spec.count, 8, |raw| {
                 out.extend(
-                    raw.chunks_exact(8)
-                        .map(|chunk| f64::from_be_bytes(chunk.try_into().unwrap())),
+                    raw.as_chunks::<8>()
+                        .0
+                        .iter()
+                        .map(|chunk| f64::from_be_bytes(*chunk)),
                 );
             })?;
             Ok(Pixels::F64(out))
@@ -1102,8 +1112,13 @@ impl FitsImage {
             .zip(green.par_chunks(PARALLEL_CHUNK))
             .zip(blue.par_chunks(PARALLEL_CHUNK))
             .for_each(|(((data, red), green), blue)| {
-                for (((pixel, &red), &green), &blue) in
-                    data.chunks_exact_mut(3).zip(red).zip(green).zip(blue)
+                for (((pixel, &red), &green), &blue) in data
+                    .as_chunks_mut::<3>()
+                    .0
+                    .iter_mut()
+                    .zip(red)
+                    .zip(green)
+                    .zip(blue)
                 {
                     pixel.copy_from_slice(&[red, green, blue]);
                 }
@@ -1348,8 +1363,8 @@ fn finite_range<T: Copy>(values: &[T], to_f64: impl Fn(T) -> f64) -> (f64, f64) 
     const LANES: usize = 4;
     let mut min = [f64::INFINITY; LANES];
     let mut max = [f64::NEG_INFINITY; LANES];
-    let mut chunks = values.chunks_exact(LANES);
-    for chunk in &mut chunks {
+    let (chunks, remainder) = values.as_chunks::<LANES>();
+    for chunk in chunks {
         for lane in 0..LANES {
             let v = to_f64(chunk[lane]);
             let finite = v.is_finite();
@@ -1365,7 +1380,7 @@ fn finite_range<T: Copy>(values: &[T], to_f64: impl Fn(T) -> f64) -> (f64, f64) 
             };
         }
     }
-    for &v in chunks.remainder() {
+    for &v in remainder {
         let v = to_f64(v);
         if v.is_finite() {
             min[0] = min[0].min(v);

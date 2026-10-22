@@ -36,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2.9.2
         with:
           workspaces: seiza-py
@@ -104,7 +104,7 @@ jobs:
       - uses: PyO3/maturin-action@v1
         with:
           working-directory: seiza-py
-          rust-toolchain: 1.97.1
+          rust-toolchain: 1.99.1
           target: ${{ matrix.target }}
           args: --release --out ../dist
           manylinux: ${{ matrix.manylinux || 'auto' }}
@@ -121,7 +121,7 @@ jobs:
       - uses: PyO3/maturin-action@v1
         with:
           working-directory: seiza-py
-          rust-toolchain: 1.97.1
+          rust-toolchain: 1.99.1
           command: sdist
           args: --out ../dist
       - uses: actions/upload-artifact@v7

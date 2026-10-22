@@ -1722,12 +1722,22 @@ fn write_pixels(frame: &RgbImage, format: u32, out: &mut [u8], stride: usize) {
         match format {
             SEIZA_PIXEL_FORMAT_RGB8 => target[..width * 3].copy_from_slice(row),
             SEIZA_PIXEL_FORMAT_RGBA8 => {
-                for (pixel, rgb) in target.chunks_exact_mut(4).zip(row.chunks_exact(3)) {
+                for (pixel, rgb) in target
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .zip(row.as_chunks::<3>().0.iter())
+                {
                     pixel.copy_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
                 }
             }
             _ => {
-                for (pixel, rgb) in target.chunks_exact_mut(4).zip(row.chunks_exact(3)) {
+                for (pixel, rgb) in target
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .zip(row.as_chunks::<3>().0.iter())
+                {
                     pixel.copy_from_slice(&[rgb[2], rgb[1], rgb[0], 255]);
                 }
             }

@@ -658,7 +658,12 @@ pub(crate) fn estimate_chunk<const C: usize>(
     samples: &[f32],
     weights: &ChannelWeights<C>,
 ) {
-    for (first, samples) in first.chunks_exact_mut(C).zip(samples.chunks_exact(C)) {
+    for (first, samples) in first
+        .as_chunks_mut::<C>()
+        .0
+        .iter_mut()
+        .zip(samples.as_chunks::<C>().0.iter())
+    {
         for channel in 0..C {
             let sample = samples[channel];
             if sample.is_finite() {
@@ -680,9 +685,11 @@ pub(crate) fn refine_chunk<const C: usize>(
     keep: &mut [u64],
 ) {
     for (pixel, ((kept, first), samples)) in kept
-        .chunks_exact_mut(C)
-        .zip(first.chunks_exact(C))
-        .zip(samples.chunks_exact(C))
+        .as_chunks_mut::<C>()
+        .0
+        .iter_mut()
+        .zip(first.as_chunks::<C>().0.iter())
+        .zip(samples.as_chunks::<C>().0.iter())
         .enumerate()
     {
         for channel in 0..C {

@@ -254,7 +254,7 @@ pub fn apply_color_gains(samples: &mut [f32], gains: [f32; 3], offsets: [f32; 3]
         return Err(Error::Color("gains and offsets must be finite".into()));
     }
     samples.par_chunks_mut(3 * 4096).for_each(|pixels| {
-        for pixel in pixels.chunks_exact_mut(3) {
+        for pixel in pixels.as_chunks_mut::<3>().0.iter_mut() {
             for (channel, value) in pixel.iter_mut().enumerate() {
                 if value.is_finite() {
                     *value = value.mul_add(gains[channel], offsets[channel]);
@@ -306,7 +306,7 @@ pub fn neutralize_clipped(image: &mut LinearImage, clipped: &LinearImage) -> Res
         .enumerate()
         .for_each(|(y, row)| {
             let map_row = &clipped.data[(y / y_scale) * clipped.width..][..clipped.width];
-            for (x, pixel) in row.chunks_exact_mut(3).enumerate() {
+            for (x, pixel) in row.as_chunks_mut::<3>().0.iter_mut().enumerate() {
                 let fraction = map_row[x / x_scale];
                 if !fraction.is_finite() || pixel.iter().any(|value| !value.is_finite()) {
                     continue;

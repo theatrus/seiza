@@ -1192,7 +1192,7 @@ impl SeizaRenderedImage {
 
 /// Swap the red and blue channels in place, converting RGBA8 to BGRA8.
 fn rgba_to_bgra(mut pixels: Vec<u8>) -> Vec<u8> {
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
     pixels
@@ -7079,7 +7079,9 @@ fn render_prepared_fits(
         .data;
     let mut rgba: Vec<u8> = if prepared.channels == 3 {
         stretched
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 255])
             .collect()
     } else {
@@ -7089,7 +7091,7 @@ fn render_prepared_fits(
             .collect()
     };
     if let Some(mask) = &prepared.validity_mask {
-        for (pixel, valid) in rgba.chunks_exact_mut(4).zip(mask) {
+        for (pixel, valid) in rgba.as_chunks_mut::<4>().0.iter_mut().zip(mask) {
             if !valid {
                 pixel.fill(0);
             }
@@ -7160,7 +7162,9 @@ fn render_prepared_fits16(
         .data;
     let rgba: Vec<u16> = if prepared.channels == 3 {
         stretched
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], u16::MAX])
             .collect()
     } else {
@@ -7526,7 +7530,7 @@ fn display_histogram_json(rgba: &[u8]) -> Value {
     let mut red = [0_u64; 256];
     let mut green = [0_u64; 256];
     let mut blue = [0_u64; 256];
-    for pixel in rgba.chunks_exact(4) {
+    for pixel in rgba.as_chunks::<4>().0 {
         red[usize::from(pixel[0])] += 1;
         green[usize::from(pixel[1])] += 1;
         blue[usize::from(pixel[2])] += 1;
@@ -7544,7 +7548,7 @@ fn display_histogram_u16_json(rgba: &[u16]) -> Value {
     let mut red = [0_u64; 256];
     let mut green = [0_u64; 256];
     let mut blue = [0_u64; 256];
-    for pixel in rgba.chunks_exact(4) {
+    for pixel in rgba.as_chunks::<4>().0 {
         red[usize::from(pixel[0] >> 8)] += 1;
         green[usize::from(pixel[1] >> 8)] += 1;
         blue[usize::from(pixel[2] >> 8)] += 1;
@@ -7709,7 +7713,9 @@ fn stretch_rgb(rgb: &RgbImage16, params: &StretchParams, mode: RgbStretchMode) -
         RgbStretchMode::Linear => rgb.data.iter().copied().map(linear_u16_to_u8).collect(),
     };
     stretched
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 255])
         .collect()
 }
@@ -7733,14 +7739,16 @@ fn stretch_rgb16(rgb: &RgbImage16, params: &StretchParams, mode: RgbStretchMode)
         RgbStretchMode::Linear => rgb.data.clone(),
     };
     stretched
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], u16::MAX])
         .collect()
 }
 
 fn rgb_channels(rgb: &RgbImage16) -> [Vec<u16>; 3] {
     let mut channels = [Vec::new(), Vec::new(), Vec::new()];
-    for pixel in rgb.data.chunks_exact(3) {
+    for pixel in rgb.data.as_chunks::<3>().0 {
         channels[0].push(pixel[0]);
         channels[1].push(pixel[1]);
         channels[2].push(pixel[2]);
@@ -11434,7 +11442,9 @@ mod tests {
             )
         };
         let display_codes = rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|pixel| pixel[3] != 0)
             .map(|pixel| pixel[0])
             .collect::<std::collections::BTreeSet<_>>();
@@ -11571,7 +11581,9 @@ mod tests {
         assert_eq!(
             image8
                 .rgba
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|pixel| pixel[0])
                 .collect::<Vec<_>>(),
             [0, 64, 128, 191, 255]
@@ -11579,7 +11591,9 @@ mod tests {
         assert_eq!(
             image16
                 .rgba
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|pixel| pixel[0])
                 .collect::<Vec<_>>(),
             [0, 16_384, 32_768, 49_152, 65_535]
@@ -11640,7 +11654,9 @@ mod tests {
         assert_eq!(
             image
                 .rgba
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|pixel| pixel[0])
                 .collect::<Vec<_>>(),
             [0, 64, 128, 191, 255]
@@ -14219,7 +14235,13 @@ mod tests {
 
         let image = render_path(&path, &StretchParams::default(), 0, RgbStretchMode::Auto).unwrap();
         assert_eq!(image.rgba.len(), image.bgra().len());
-        for (rgba, bgra) in image.rgba.chunks_exact(4).zip(image.bgra().chunks_exact(4)) {
+        for (rgba, bgra) in image
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(image.bgra().as_chunks::<4>().0.iter())
+        {
             assert_eq!(
                 [bgra[0], bgra[1], bgra[2], bgra[3]],
                 [rgba[2], rgba[1], rgba[0], rgba[3]]
@@ -14361,7 +14383,9 @@ mod tests {
         assert!(
             image16
                 .rgba
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .all(|pixel| pixel[3] == u16::MAX)
         );
         let metadata: Value =
@@ -14398,7 +14422,13 @@ mod tests {
         assert_eq!(length, 16);
         let pixels =
             unsafe { std::slice::from_raw_parts(seiza_rendered_image16_rgba(image), length) };
-        assert!(pixels.chunks_exact(4).all(|pixel| pixel[3] == u16::MAX));
+        assert!(
+            pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| pixel[3] == u16::MAX)
+        );
         let metadata = unsafe { CStr::from_ptr(seiza_rendered_image16_metadata_json(image)) };
         let metadata: Value = serde_json::from_slice(metadata.to_bytes()).unwrap();
         assert_eq!(metadata["bitsPerComponent"], 16);
@@ -15000,7 +15030,12 @@ mod tests {
         assert!((statistics.mad - 7_166.666_666_666_667).abs() < 1e-9);
         let expected = seiza_fits::stretch_u16_to_u8(&rgb.data, &statistics, &params);
         let linked = stretch_rgb(&rgb, &params, RgbStretchMode::LinkedAuto);
-        for (pixel, expected) in linked.chunks_exact(4).zip(expected.chunks_exact(3)) {
+        for (pixel, expected) in linked
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(expected.as_chunks::<3>().0.iter())
+        {
             assert_eq!(&pixel[..3], expected);
             assert_eq!(pixel[3], 255);
         }

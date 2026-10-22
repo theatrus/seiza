@@ -68,7 +68,7 @@ impl FlatScratch {
                 .par_chunks_mut(16 * 1024 * 4)
                 .zip(chunk.par_chunks(16 * 1024))
                 .for_each(|(bytes, chunk)| {
-                    for (bytes, sample) in bytes.chunks_exact_mut(4).zip(chunk) {
+                    for (bytes, sample) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(chunk) {
                         bytes.copy_from_slice(&sample.to_le_bytes());
                     }
                 });
@@ -194,8 +194,8 @@ fn gather_pixels(
     let pixels = values.len() / frames;
     for (frame, bytes) in tile.chunks_exact(length * 4).enumerate() {
         let bytes = &bytes[first * 4..(first + pixels) * 4];
-        for (index, bytes) in bytes.chunks_exact(4).enumerate() {
-            let value = f32::from_le_bytes(bytes.try_into().expect("four-byte sample"));
+        for (index, bytes) in bytes.as_chunks::<4>().0.iter().enumerate() {
+            let value = f32::from_le_bytes(*bytes);
             if !value.is_finite() && !(masking && value.is_nan()) {
                 return Err(Error::FlatStarMasking(
                     "unexpected non-finite sample in flat scratch storage".into(),

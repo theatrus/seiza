@@ -241,8 +241,10 @@ pub(crate) fn apply(layered: &ResolvedLayered, data: &[f32], shape: ImageShape) 
         .zip(stretched.par_chunks(width).zip(luminance.par_chunks(width)))
         .for_each(|((output, input), (stretched, luminance))| {
             for (((output, pixel), &value), &luma) in output
-                .chunks_exact_mut(3)
-                .zip(input.chunks_exact(3))
+                .as_chunks_mut::<3>()
+                .0
+                .iter_mut()
+                .zip(input.as_chunks::<3>().0)
                 .zip(stretched)
                 .zip(luminance)
             {

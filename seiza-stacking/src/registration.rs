@@ -3465,7 +3465,13 @@ mod tests {
             )
             .unwrap();
             let mut compared = 0;
-            for (pixel, unsited) in sited.data.chunks_exact(3).zip(unsited.data.chunks_exact(3)) {
+            for (pixel, unsited) in sited
+                .data
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .zip(unsited.data.as_chunks::<3>().0.iter())
+            {
                 if pixel.iter().all(|value| value.is_finite()) {
                     assert!((pixel[0] - pixel[1]).abs() < 1e-3, "{pixel:?}");
                     assert!((pixel[2] - pixel[1]).abs() < 1e-3, "{pixel:?}");

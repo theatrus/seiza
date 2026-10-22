@@ -551,7 +551,7 @@ impl RegisteredFrameMapping {
                         })?;
                         data.resize(samples, 0.0);
                     }
-                    for (pixel, value) in data.chunks_exact_mut(3).zip(plane.data) {
+                    for (pixel, value) in data.as_chunks_mut::<3>().0.iter_mut().zip(plane.data) {
                         pixel[channel] = value;
                     }
                 }
@@ -672,7 +672,7 @@ mod tests {
                     .extract_region_after_affine(&source, 32, 24, region, AffineTransform::IDENTITY)
                     .unwrap(),
             ] {
-                for (i, rgb) in crop.data.chunks_exact(3).enumerate() {
+                for (i, rgb) in crop.data.as_chunks::<3>().0.iter().enumerate() {
                     let expected = 100.0
                         + 3.0 * (region.x + i % region.width) as f32
                         + 2.0 * (region.y + i / region.width) as f32;

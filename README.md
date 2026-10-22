@@ -71,7 +71,7 @@ The same Rust engine drives two real desktop apps through
   newer; see [MSRV](#minimum-supported-rust-version)).
 
 Building from source requires Rust 1.89 or newer. Repository checkouts pin
-Rust 1.97.1 through `rust-toolchain.toml` so local builds and CI use the same
+Rust 1.99.1 through `rust-toolchain.toml` so local builds and CI use the same
 compiler, formatter, and linter.
 
 ## Ways to use it

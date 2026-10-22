@@ -308,7 +308,9 @@ impl LinearImage {
             return self.data.clone();
         }
         self.data
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|pixel| rec709_luma(pixel[0], pixel[1], pixel[2]))
             .collect()
     }
@@ -424,7 +426,7 @@ impl LinearImage {
                 let at = |column: usize, (x, y): (usize, usize)| {
                     self.data[(2 * row + y) * self.width + 2 * column + x]
                 };
-                for (column, pixel) in out.chunks_exact_mut(3).enumerate() {
+                for (column, pixel) in out.as_chunks_mut::<3>().0.iter_mut().enumerate() {
                     let (first, second) = (at(column, greens[0]), at(column, greens[1]));
                     pixel[0] = at(column, red);
                     pixel[1] = match (first.is_finite(), second.is_finite()) {
@@ -457,19 +459,14 @@ impl LinearImage {
 /// repeat every two samples and the products are taken eight at a time.
 fn balance_row(row: &[f32], out: &mut [f32], balance: [f32; 3], layout: BayerLayout, y: usize) {
     let factors: [f32; 8] = std::array::from_fn(|x| balance[layout.channel_at(x, y)]);
-    let mut outs = out.chunks_exact_mut(8);
-    let mut values = row.chunks_exact(8);
-    for (out, values) in (&mut outs).zip(&mut values) {
+    let (outs, out_rest) = out.as_chunks_mut::<8>();
+    let (values, value_rest) = row.as_chunks::<8>();
+    for (out, values) in outs.iter_mut().zip(values) {
         for ((out, &value), &factor) in out.iter_mut().zip(values).zip(&factors) {
             *out = value * factor;
         }
     }
-    for ((out, &value), &factor) in outs
-        .into_remainder()
-        .iter_mut()
-        .zip(values.remainder())
-        .zip(&factors)
-    {
+    for ((out, &value), &factor) in out_rest.iter_mut().zip(value_rest).zip(&factors) {
         *out = value * factor;
     }
 }
@@ -489,7 +486,7 @@ fn bilinear_row_ends(
 ) {
     for (first_column, pixels, target) in [(0, 0..2, 0..2), (width - 3, 1..3, width - 2..width)] {
         let mut window = [0.0_f32; 9];
-        for (row, window_row) in window.chunks_exact_mut(3).enumerate() {
+        for (row, window_row) in window.as_chunks_mut::<3>().0.iter_mut().enumerate() {
             let start = (y + row - 1) * width + first_column;
             window_row.copy_from_slice(&mosaic[start..start + 3]);
         }
@@ -521,24 +518,24 @@ fn unbalance_row(
     y: usize,
 ) {
     let divisors: [f32; 12] = std::array::from_fn(|sample| balance[sample % 3]);
-    let mut chunks = out_row.chunks_exact_mut(12);
-    for chunk in &mut chunks {
+    let (chunks, rest) = out_row.as_chunks_mut::<12>();
+    for chunk in chunks {
         for (value, divisor) in chunk.iter_mut().zip(&divisors) {
             *value /= divisor;
         }
     }
-    for (value, divisor) in chunks.into_remainder().iter_mut().zip(&divisors) {
+    for (value, divisor) in rest.iter_mut().zip(&divisors) {
         *value /= divisor;
     }
     let own = [layout.channel_at(0, y), layout.channel_at(1, y)];
-    let mut pairs = out_row.chunks_exact_mut(6);
-    let mut samples = source.chunks_exact(2);
-    for (pair, samples) in (&mut pairs).zip(&mut samples) {
+    let (pairs, pair_rest) = out_row.as_chunks_mut::<6>();
+    let (samples, sample_rest) = source.as_chunks::<2>();
+    for (pair, samples) in pairs.iter_mut().zip(samples) {
         pair[own[0]] = samples[0];
         pair[3 + own[1]] = samples[1];
     }
-    if let [sample] = samples.remainder() {
-        pairs.into_remainder()[own[0]] = *sample;
+    if let [sample] = sample_rest {
+        pair_rest[own[0]] = *sample;
     }
 }
 
@@ -807,7 +804,7 @@ fn vng_rows(
             let start = (y + row - 2) * width;
             let source = &mosaic[start..start + width];
             let (even, odd) = planes[2 * row * stride..(2 * row + 2) * stride].split_at_mut(stride);
-            for (index, pair) in source.chunks_exact(2).enumerate() {
+            for (index, pair) in source.as_chunks::<2>().0.iter().enumerate() {
                 even[index] = pair[0];
                 odd[index] = pair[1];
             }
@@ -1387,7 +1384,7 @@ mod tests {
             }
             for (band_row, out_row) in rows.chunks_exact_mut(row_samples).enumerate() {
                 let y = first_row + band_row;
-                for (x, pixel) in out_row.chunks_exact_mut(3).enumerate() {
+                for (x, pixel) in out_row.as_chunks_mut::<3>().0.iter_mut().enumerate() {
                     for (channel, value) in pixel.iter_mut().enumerate() {
                         *value /= balance[channel];
                     }
@@ -1484,7 +1481,7 @@ mod tests {
             let rgb = mosaic(24, 20, sensitivity, |_, _| [800.0, 1000.0, 600.0])
                 .debayer_with(rggb(), demosaic)
                 .unwrap();
-            for pixel in rgb.data.chunks_exact(3) {
+            for pixel in rgb.data.as_chunks::<3>().0.iter() {
                 for (channel, expected) in [400.0_f32, 1000.0, 420.0].into_iter().enumerate() {
                     assert!(
                         (pixel[channel] - expected).abs() < 1.0e-2,

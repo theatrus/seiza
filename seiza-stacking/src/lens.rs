@@ -495,7 +495,12 @@ impl<'a> Model<'a> {
         distortion.center_x += params[2];
         distortion.center_y += params[3];
         let mut poses = vec![Pose::Similarity(SimilarityTransform::IDENTITY)];
-        for (index, p) in params[LENS_PARAMS..].chunks_exact(POSE_PARAMS).enumerate() {
+        for (index, p) in params[LENS_PARAMS..]
+            .as_chunks::<POSE_PARAMS>()
+            .0
+            .iter()
+            .enumerate()
+        {
             poses.push(self.pose(index + 1, p));
         }
         if let Some(projection) = self.projection {

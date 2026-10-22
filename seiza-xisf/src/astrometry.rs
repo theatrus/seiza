@@ -527,7 +527,7 @@ fn pair(values: &[f64]) -> [f64; 2] {
 }
 
 fn pairs(array: &Array) -> Vec<[f64; 2]> {
-    array.values.chunks_exact(2).map(pair).collect()
+    array.values.as_chunks::<2>().0.to_vec()
 }
 
 fn projection(properties: &Properties<'_>) -> Layer<Projection> {
