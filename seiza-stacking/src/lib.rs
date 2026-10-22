@@ -59,6 +59,7 @@ mod lens;
 pub use lens::ExpandedLens;
 #[cfg(feature = "gpu")]
 mod gpu;
+mod gpu_options;
 mod mapping;
 mod master;
 mod normalization;
@@ -112,6 +113,7 @@ pub use fits::{
     write_linear_image_fits_f32, write_master_fits_f32, write_processed_image_fits_f32,
     write_stack_export_fits_f32,
 };
+pub use gpu_options::GpuOptions;
 pub use image::{BayerLayout, Demosaic, LinearImage};
 pub use mapping::RegisteredFrameMapping;
 pub use master::{

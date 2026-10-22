@@ -2327,6 +2327,7 @@ impl LiveStacker {
                 &options,
                 stars,
                 crate::binning::Scale::NATIVE,
+                &self.options.gpu,
             );
             let mut initial = carried.transform();
             initial.translation_x -= region.x as f64;
@@ -2339,6 +2340,7 @@ impl LiveStacker {
                 &options,
                 stars,
                 crate::binning::Scale::NATIVE,
+                &self.options.gpu,
             )
             .map(|mut result| {
                 result.transform.translation_x += region.x as f64;
@@ -2582,10 +2584,13 @@ impl LiveStacker {
             return Err(Error::Stack(reason));
         }
         let ledger = &self.ledger;
-        let weighted_options;
-        let options = if self.options.weighting.is_equal() {
-            options
-        } else {
+        // Frames are prepared again as the stack prepared them, and their
+        // rejection passes run on the GPU only where the stack allows it too.
+        let mut options = BatchStackOptions {
+            gpu: self.options.gpu.within(options.gpu),
+            ..options.clone()
+        };
+        if !self.options.weighting.is_equal() {
             if options.frame_weights.is_some() {
                 return Err(Error::Stack(
                     "a weighted stack replays with its recorded frame weights; \
@@ -2593,18 +2598,15 @@ impl LiveStacker {
                         .into(),
                 ));
             }
-            weighted_options = BatchStackOptions {
-                frame_weights: Some(
-                    ledger
-                        .frames
-                        .iter()
-                        .map(|frame| frame.weighting.weight.clone())
-                        .collect(),
-                ),
-                ..options.clone()
-            };
-            &weighted_options
-        };
+            options.frame_weights = Some(
+                ledger
+                    .frames
+                    .iter()
+                    .map(|frame| frame.weighting.weight.clone())
+                    .collect(),
+            );
+        }
+        let options = &options;
         let count = ledger.frames.len();
         let masters = MastersCache::default();
         // The frames the live pass kept, when it was asked to; otherwise a
@@ -2975,11 +2977,13 @@ impl LiveStacker {
                 prepared,
                 region,
                 crate::registration::Sampling::NearestPhotosite(layout),
+                &self.options.gpu,
             )?,
             None if keeps_zeros(&self.options, cfa) => admitted.mapping.resample_region(
                 prepared,
                 region,
                 self.options.interpolation.into(),
+                &self.options.gpu,
             )?,
             None => interpolated.clone(),
         };
@@ -3029,11 +3033,18 @@ impl LiveStacker {
                 self.full_region(admitted),
                 interpolation,
                 sites,
+                &self.options.gpu,
             )?));
         }
         let region = admitted.mapping.footprint(prepared.width, prepared.height);
         Ok(PlacedImage {
-            image: identity.extract_region_sited(prepared, region, interpolation, sites)?,
+            image: identity.extract_region_sited(
+                prepared,
+                region,
+                interpolation,
+                sites,
+                &self.options.gpu,
+            )?,
             region,
             width: admitted.mapping.reference_width(),
             height: admitted.mapping.reference_height(),
@@ -3192,10 +3203,12 @@ impl LiveStacker {
                         .mapping
                         .extract_region_photosites(&frame.image, region, layout)
                 }
-                None => admitted.mapping.extract_region_with(
+                None => admitted.mapping.extract_region_sited(
                     &frame.image,
                     region,
                     self.options.interpolation,
+                    admitted.mapping.channel_sites(),
+                    &self.options.gpu,
                 ),
             };
         }
@@ -3235,8 +3248,13 @@ impl LiveStacker {
         let identity = admitted
             .mapping
             .with_normalization(crate::NormalizationMap::identity(&self.reference))?;
-        let mut interpolated =
-            identity.extract_region_with(&frame.image, region, self.options.interpolation)?;
+        let mut interpolated = identity.extract_region_sited(
+            &frame.image,
+            region,
+            self.options.interpolation,
+            identity.channel_sites(),
+            &self.options.gpu,
+        )?;
         let map = renormalizer.map_for(admitted, index, Placed::whole(&interpolated))?;
         match cfa.filter(|_| self.options.cfa_integration == crate::CfaIntegration::BayerDrizzle) {
             Some(layout) => admitted
@@ -3354,6 +3372,7 @@ mod tests {
                 None,
                 &stacker.options.registration,
                 stacker.options.scale(),
+                &crate::GpuOptions::default(),
             )
             .unwrap(),
         );
@@ -3454,6 +3473,7 @@ mod tests {
                 None,
                 &stacker.options.registration,
                 stacker.options.scale(),
+                &crate::GpuOptions::default(),
             )
             .unwrap(),
         );

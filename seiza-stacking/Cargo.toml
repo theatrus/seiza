@@ -13,8 +13,8 @@ categories = ["science", "multimedia::images"]
 
 [features]
 default = ["gpu"]
-# Resample registered frames on the GPU when one is present, through wgpu.
-# Without it, or with SEIZA_GPU=off at run time, every frame resamples on
+# Run stacking's heavy passes on the GPU when one is present, through wgpu,
+# where each request's GpuOptions allow it. Without it, every pass runs on
 # the CPU.
 gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 

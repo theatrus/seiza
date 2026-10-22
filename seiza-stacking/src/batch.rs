@@ -56,6 +56,13 @@ pub struct BatchStackOptions {
     /// normalization again, reads as many at once as half this memory holds,
     /// from two to four. The result does not depend on it.
     pub band_memory_bytes: usize,
+    /// Which passes may run on the GPU: here the rejection passes of
+    /// [`integrate_registered_frames_banded`], as
+    /// [`crate::GpuOptions::integration`] says. [`crate::LiveStacker::reintegrate`]
+    /// prepares and integrates its frames under the stack's
+    /// [`crate::StackOptions::gpu`] narrowed by these: a pass runs on the GPU
+    /// only where both allow it.
+    pub gpu: crate::GpuOptions,
 }
 
 /// Bytes of frame bands reintegration holds by default.
@@ -70,6 +77,7 @@ impl Default for BatchStackOptions {
             frame_weights: None,
             scratch_directory: None,
             band_memory_bytes: DEFAULT_BAND_MEMORY_BYTES,
+            gpu: crate::GpuOptions::default(),
         }
     }
 }
@@ -384,7 +392,7 @@ pub(crate) fn validate_options(frame_count: usize, options: &BatchStackOptions) 
             ));
         }
     }
-    Ok(())
+    options.gpu.validate()
 }
 
 /// The three passes, one whole frame at a time, over frames of `C` channels

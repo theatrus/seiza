@@ -749,6 +749,26 @@ for frame in frames:
 ```
 
 
+Where the hardware has a GPU, a build with seiza-stacking's `gpu` feature
+(the default) runs stacking's heavy passes there, in single precision, so
+results differ from the CPU's by rounding. A `GpuOptions` says which passes
+may: give it as `gpu` to `StackOptions`, which governs the stack and its
+reintegration, to `detect_defects` and to `integrate_registered_frames`.
+`GpuOptions(enabled=False)` keeps every pass on the CPU; `defects`, `debayer`,
+`detection`, `resampling`, `accumulator` and `integration` keep one each.
+`concurrency` (3) is the frame calls the GPU takes at once, and `trace=True`
+prints each call's timings to stderr:
+
+```python
+options = seiza.StackOptions(gpu=seiza.GpuOptions(debayer=False))
+stack, frames = seiza.integrate_registered_frames(
+    registered_paths, gpu=seiza.GpuOptions(enabled=False)
+)
+```
+
+A context keeps the stack's GPU options, and its configuration fingerprint
+leaves them out.
+
 Checkpointing is non-consuming. Reopening preserves the original registration
 reference, calibration and options, online rejection statistics, coverage, and
 the FITS/XISF source ledger:

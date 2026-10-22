@@ -215,12 +215,19 @@ bit for bit as the CPU's (see `docs/design/gpu-stacking.md`); on a 45-frame,
 26 MP stack with reintegration it halves the wall time and quarters the CPU
 time.
 
-Set `SEIZA_GPU=off` before the first large frame to keep everything on the
-CPU, or one of `SEIZA_GPU_DEFECTS=off`, `SEIZA_GPU_DEBAYER=off`,
-`SEIZA_GPU_DETECT=off`, `SEIZA_GPU_ACCUMULATOR=off` and
-`SEIZA_GPU_BANDS=off` to keep only that stage there. Build with `default-features = false` for a crate without
-wgpu. No adapter, or any GPU error, falls back to the CPU; an error is
-logged once and turns the GPU off for the rest of the process.
+Each request says which passes may run there, in its `GpuOptions`:
+`StackOptions::gpu` for a live stack and its reintegration,
+`BatchStackOptions::gpu` for `integrate_registered_frames_banded`, and
+`DefectDetectionOptions::gpu` for defect learning. `GpuOptions::cpu()` keeps
+every pass on the CPU, and `defects`, `debayer`, `detection`, `resampling`,
+`accumulator` and `integration` keep one each; `concurrency` (3) is how many
+frame calls the GPU takes at once, and `trace` prints each call's timings to
+stderr. A stack's context keeps its GPU options, and its configuration
+fingerprint leaves them out. Calls that take no options, such as
+`resample_to_reference` and `FitsFrame::into_prepared`, use the defaults.
+Build with `default-features = false` for a crate without wgpu. No adapter,
+or any GPU error, falls back to the CPU; an error is logged once and turns
+the GPU off for the rest of the process.
 
 ## Pipelined preparation with a shared pool
 

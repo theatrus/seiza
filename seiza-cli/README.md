@@ -681,6 +681,8 @@ changed:
 | `--drizzle 1\|2\|3\|4` | off | Drizzle the stack onto a grid this many times finer than the reference, as WBPP's DrizzleIntegration does. Turns on `--reintegrate`, whose rejection decides which pixels each frame drops. The output is the drizzled image with the reference WCS scaled to it. Bayer frames drop each photosite into its own colour, with no demosaicing. `2` recovers detail in undersampled, well-dithered data. |
 | `--drizzle-drop-shrink` | `0.9` mono, `1.0` Bayer | Each drop's side as a fraction of a source pixel. Smaller drops keep more detail and need more dithered frames to fill the grid. |
 | `--workers`, `--pipeline-memory-mib` | derived, `4096` | Frames read and prepared at once, and the memory for them; the memory also bounds the bands of rows of every frame `--reintegrate` reads back at once. |
+| `--no-gpu`, `--cpu-pass` | off, none | Keep every pass on the CPU, or only those named (`defects`, `debayer`, `detection`, `resampling`, `accumulator`, `integration`, comma-separated); otherwise stacking's heavy passes run on the GPU when there is one. |
+| `--gpu-concurrency`, `--gpu-trace` | `3`, off | Frame calls the GPU takes at once, and printing each GPU call's timings to stderr. |
 
 On 126 one-shot-color frames of M45 (ASI2600MC, 173 mm, no calibration) the
 defaults stacked in 1 min 17 s at 2.7px FWHM with a 0.10px red-blue offset;

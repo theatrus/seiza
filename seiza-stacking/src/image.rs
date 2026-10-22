@@ -317,12 +317,18 @@ impl LinearImage {
 
     #[cfg(test)]
     pub(crate) fn debayer(self, layout: BayerLayout) -> Result<Self> {
-        self.debayer_with(layout, Demosaic::default())
+        self.debayer_with(layout, Demosaic::default(), &crate::GpuOptions::default())
     }
 
-    /// Debayer a one-channel CFA frame with the given method. A
-    /// [`Demosaic::Superpixel`] frame comes back half the size on each side.
-    pub(crate) fn debayer_with(self, layout: BayerLayout, demosaic: Demosaic) -> Result<Self> {
+    /// Debayer a one-channel CFA frame with the given method, VNG's interior
+    /// on the GPU where `gpu` allows it. A [`Demosaic::Superpixel`] frame
+    /// comes back half the size on each side.
+    pub(crate) fn debayer_with(
+        self,
+        layout: BayerLayout,
+        demosaic: Demosaic,
+        gpu: &crate::GpuOptions,
+    ) -> Result<Self> {
         if self.channels != 1 {
             return Err(Error::InvalidImage(
                 "only a one-channel CFA image can be debayered".into(),
@@ -366,6 +372,7 @@ impl LinearImage {
                 (width, height),
                 std::array::from_fn(|phase| layout.channel_at(phase & 1, phase >> 1) as u32),
                 balance,
+                gpu,
             )
             .map(|(interior, output)| {
                 rgb = interior;
@@ -373,7 +380,10 @@ impl LinearImage {
             })
             .is_some();
         #[cfg(not(feature = "gpu"))]
-        let on_gpu = false;
+        let on_gpu = {
+            let _ = gpu;
+            false
+        };
         // Rows depend only on the mosaic, so bands of them debayer in
         // parallel with the same samples a single pass produces.
         const BAND_ROWS: usize = 32;
@@ -1049,7 +1059,7 @@ mod tests {
                 y_offset,
             };
             let rgb = mosaic(false)
-                .debayer_with(layout, Demosaic::Superpixel)
+                .debayer_with(layout, Demosaic::Superpixel, &crate::GpuOptions::default())
                 .unwrap();
             assert_eq!((rgb.width, rgb.height, rgb.channels), (2, 2, 3));
             let greens = (green + other_green) as f32 * 0.5;
@@ -1063,13 +1073,17 @@ mod tests {
             // A green that is not finite leaves the other.
             if green == 1 {
                 let rgb = mosaic(true)
-                    .debayer_with(layout, Demosaic::Superpixel)
+                    .debayer_with(layout, Demosaic::Superpixel, &crate::GpuOptions::default())
                     .unwrap();
                 assert_eq!(rgb.data[1], other_green as f32);
             }
         }
         let single = LinearImage::new(1, 4, 1, vec![1.0; 4]).unwrap();
-        assert!(single.debayer_with(rggb(), Demosaic::Superpixel).is_err());
+        assert!(
+            single
+                .debayer_with(rggb(), Demosaic::Superpixel, &crate::GpuOptions::default())
+                .is_err()
+        );
     }
 
     #[test]
@@ -1497,7 +1511,10 @@ mod tests {
                 let image = LinearImage::new(width, height, 1, data).unwrap();
                 for demosaic in [Demosaic::Vng, Demosaic::Mhc, Demosaic::Bilinear] {
                     let expected = debayer_with_reference(&image, layout, demosaic);
-                    let got = image.clone().debayer_with(layout, demosaic).unwrap();
+                    let got = image
+                        .clone()
+                        .debayer_with(layout, demosaic, &crate::GpuOptions::default())
+                        .unwrap();
                     assert_eq!(got.channels, 3);
                     for (sample, (a, b)) in got.data.iter().zip(&expected).enumerate() {
                         assert_eq!(
@@ -1581,7 +1598,10 @@ mod tests {
             data[500 * width + 700] = f32::INFINITY;
             let image = LinearImage::new(width, height, 1, data).unwrap();
             let expected = debayer_with_reference(&image, layout, Demosaic::Vng);
-            let got = image.clone().debayer_with(layout, Demosaic::Vng).unwrap();
+            let got = image
+                .clone()
+                .debayer_with(layout, Demosaic::Vng, &crate::GpuOptions::default())
+                .unwrap();
             let (mut squares, mut compared, mut far, mut largest) = (0.0_f64, 0_usize, 0, 0.0_f64);
             for (sample, (&a, &b)) in got.data.iter().zip(&expected).enumerate() {
                 let (pixel, channel) = (sample / 3, sample % 3);
@@ -1647,7 +1667,7 @@ mod tests {
             .collect();
         let rgb = LinearImage::new(width, height, 1, data)
             .unwrap()
-            .debayer_with(rggb(), Demosaic::Vng)
+            .debayer_with(rggb(), Demosaic::Vng, &crate::GpuOptions::default())
             .unwrap();
         let held = crate::gpu::resident_samples(&rgb.data).expect("the GPU keeps the frame");
         assert_eq!(held.len(), rgb.data.len());
@@ -1663,7 +1683,7 @@ mod tests {
         let sensitivity = [0.5, 1.0, 0.7];
         for demosaic in [Demosaic::Vng, Demosaic::Mhc, Demosaic::Bilinear] {
             let rgb = mosaic(24, 20, sensitivity, |_, _| [800.0, 1000.0, 600.0])
-                .debayer_with(rggb(), demosaic)
+                .debayer_with(rggb(), demosaic, &crate::GpuOptions::default())
                 .unwrap();
             for pixel in rgb.data.as_chunks::<3>().0.iter() {
                 for (channel, expected) in [400.0_f32, 1000.0, 420.0].into_iter().enumerate() {
@@ -1731,7 +1751,10 @@ mod tests {
         // Large enough that MHC and VNG reach the interior.
         let raw = LinearImage::new(8, 8, 1, (0..64).map(|v| v as f32 + 1.0).collect()).unwrap();
         for demosaic in [Demosaic::Vng, Demosaic::Mhc, Demosaic::Bilinear] {
-            let rgb = raw.clone().debayer_with(rggb(), demosaic).unwrap();
+            let rgb = raw
+                .clone()
+                .debayer_with(rggb(), demosaic, &crate::GpuOptions::default())
+                .unwrap();
             assert_eq!(rgb.channels, 3);
             for y in 0..8 {
                 for x in 0..8 {

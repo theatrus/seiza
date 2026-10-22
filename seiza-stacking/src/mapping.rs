@@ -424,17 +424,25 @@ impl RegisteredFrameMapping {
         region: ReferenceRegion,
         interpolation: crate::Interpolation,
     ) -> Result<LinearImage> {
-        self.extract_region_sited(source, region, interpolation, self.channel_sites)
+        self.extract_region_sited(
+            source,
+            region,
+            interpolation,
+            self.channel_sites,
+            &crate::GpuOptions::default(),
+        )
     }
 
     /// [`Self::extract_region_with`] for a source whose channels sample the
-    /// sky at `sites`; see [`crate::registration::resample_region_sited`].
+    /// sky at `sites`, resampled on the GPU where `gpu` allows it; see
+    /// [`crate::registration::resample_region_sited`].
     pub(crate) fn extract_region_sited(
         &self,
         source: &LinearImage,
         region: ReferenceRegion,
         interpolation: crate::Interpolation,
         sites: Option<crate::registration::ChannelSites>,
+        gpu: &crate::GpuOptions,
     ) -> Result<LinearImage> {
         self.validate()?;
         let mut crop = crate::registration::resample_region_sited(
@@ -445,6 +453,7 @@ impl RegisteredFrameMapping {
             self.geometry(),
             interpolation.into(),
             sites,
+            gpu,
         )?;
         self.normalization
             .apply_region(&mut crop, region.x, region.y)?;
@@ -452,12 +461,14 @@ impl RegisteredFrameMapping {
     }
 
     /// [`Self::extract_region_with`]'s resampling alone, sampling as
-    /// `sampling` says, with no normalization.
+    /// `sampling` says, with no normalization, on the GPU where `gpu`
+    /// allows it.
     pub(crate) fn resample_region(
         &self,
         source: &LinearImage,
         region: ReferenceRegion,
         sampling: crate::registration::Sampling,
+        gpu: &crate::GpuOptions,
     ) -> Result<LinearImage> {
         self.validate()?;
         crate::registration::resample_region_geometry(
@@ -467,6 +478,7 @@ impl RegisteredFrameMapping {
             region,
             self.geometry(),
             sampling,
+            gpu,
         )
     }
 
@@ -488,6 +500,7 @@ impl RegisteredFrameMapping {
             region,
             self.geometry(),
             crate::registration::Sampling::NearestPhotosite(layout),
+            &crate::GpuOptions::default(),
         )?;
         self.normalization
             .apply_region(&mut crop, region.x, region.y)?;
@@ -584,6 +597,7 @@ impl RegisteredFrameMapping {
             self.geometry(),
             crate::registration::Sampling::Bilinear,
             self.channel_sites,
+            &crate::GpuOptions::default(),
         )?;
         self.normalization.apply(&mut intermediate)?;
         resample_region_to_reference_affine(

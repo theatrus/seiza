@@ -336,7 +336,7 @@ fn a_frame_is_resampled_over_its_footprint_alone() {
     for path in &paths {
         let (frame, _) = FitsFrame::open(path)
             .unwrap()
-            .into_prepared_with_layout(stacker.options.demosaic)
+            .into_prepared_with_layout(stacker.options.demosaic, &stacker.options.gpu)
             .unwrap();
         let known =
             crate::expand::registration_for(&stacker.planned_registrations, frame.source.as_ref())
@@ -392,6 +392,7 @@ fn a_frame_is_resampled_over_its_footprint_alone() {
             },
             geometry,
             stacker.options.interpolation.into(),
+            &crate::GpuOptions::default(),
         )
         .unwrap();
         let placed = Placed::on(&ready.registered, region, canvas);

@@ -237,6 +237,15 @@ pub struct StackOptions {
         skip_serializing_if = "is_native_bin_factor"
     )]
     pub bin_factor: u32,
+    /// Which passes may run on the GPU, for every frame the stack is pushed
+    /// and for its reintegration, which [`crate::BatchStackOptions::gpu`]
+    /// can only narrow. They decide where the arithmetic runs, which moves
+    /// the stack by rounding at most, so
+    /// [`LiveStacker::configuration_fingerprint`] leaves them out; a saved
+    /// context keeps them. The default, every pass, is not serialized, so
+    /// existing options and contexts keep their exact bytes.
+    #[serde(default, skip_serializing_if = "crate::GpuOptions::is_default")]
+    pub gpu: crate::GpuOptions,
 }
 
 impl Default for StackOptions {
@@ -254,6 +263,7 @@ impl Default for StackOptions {
             demosaic: crate::Demosaic::default(),
             match_tolerances: seiza_calibration::MatchTolerances::default(),
             bin_factor: native_bin_factor(),
+            gpu: crate::GpuOptions::default(),
         }
     }
 }
@@ -374,7 +384,7 @@ impl StackOptions {
                     .into(),
             ));
         }
-        Ok(())
+        self.gpu.validate()
     }
 
     /// Where each channel of a light prepared from `cfa` samples the sky:
@@ -851,9 +861,14 @@ impl LiveStacker {
             alignment.image,
             options.channel_sites(cfa),
             options.interpolation,
+            &options.gpu,
         )?;
-        let registrar =
-            Registrar::at_scale(&alignment.image, &options.registration, options.scale())?;
+        let registrar = Registrar::at_scale(
+            &alignment.image,
+            &options.registration,
+            options.scale(),
+            &options.gpu,
+        )?;
         // Use the regular registration gates, with no photometric comparison
         // to the external image. This image is a target, not an observation.
         let geometry_options = StackOptions {
@@ -1203,7 +1218,14 @@ impl LiveStacker {
         };
         let registrar = full_reference
             .as_ref()
-            .map(|reference| Registrar::new(reference, self.options.registration.clone()))
+            .map(|reference| {
+                Registrar::at_scale(
+                    reference,
+                    &self.options.registration,
+                    crate::binning::Scale::NATIVE,
+                    &self.options.gpu,
+                )
+            })
             .transpose()?;
         // A grid of the finer size: the reference frame itself where it was
         // read again, which the replay reads only for its shape.
@@ -1345,7 +1367,12 @@ impl LiveStacker {
                 (registrar, noise, None, None)
             }
             ReferenceContribution::Integrated(cfa) => (
-                Registrar::at_scale(&reference, &options.registration, options.scale())?,
+                Registrar::at_scale(
+                    &reference,
+                    &options.registration,
+                    options.scale(),
+                    &options.gpu,
+                )?,
                 if options.weighting.is_equal() {
                     Vec::new()
                 } else {
@@ -1368,6 +1395,7 @@ impl LiveStacker {
                 reference,
                 options.channel_sites(reference_cfa),
                 options.interpolation,
+                &options.gpu,
             )?
         } else {
             reference
@@ -1570,6 +1598,7 @@ impl LiveStacker {
                     restored.expanded_lens,
                     &restored.options.registration,
                     restored.options.scale(),
+                    &restored.options.gpu,
                 )
                 .and_then(|canvas| canvas.with_projections(restored.expanded_panel_projections))
             })
@@ -1584,6 +1613,7 @@ impl LiveStacker {
                     .unwrap_or(&restored.reference),
                 &restored.options.registration,
                 restored.options.scale(),
+                &restored.options.gpu,
             )
             .map_err(read_error)?,
         };
@@ -2355,7 +2385,7 @@ pub(crate) fn develop(
     } else {
         options.demosaic
     };
-    let (frame, cfa) = frame.into_prepared_with_layout(demosaic)?;
+    let (frame, cfa) = frame.into_prepared_with_layout(demosaic, &options.gpu)?;
     let binned = if cfa.is_some() && demosaic == crate::Demosaic::Superpixel {
         2
     } else {
@@ -2366,11 +2396,13 @@ pub(crate) fn develop(
 
 /// `image`, whose channels sample the sky at `sites`, resampled so every
 /// channel samples its pixels' centres, as registration carries every frame
-/// it resamples; `image` itself without sites.
+/// it resamples; `image` itself without sites. Resampled on the GPU where
+/// `gpu` allows it.
 pub(crate) fn co_site(
     image: LinearImage,
     sites: Option<crate::registration::ChannelSites>,
     interpolation: crate::Interpolation,
+    gpu: &crate::GpuOptions,
 ) -> Result<LinearImage> {
     if sites.is_none() {
         return Ok(image);
@@ -2388,6 +2420,7 @@ pub(crate) fn co_site(
         crate::registration::FrameGeometry::Similarity(SimilarityTransform::IDENTITY),
         interpolation.into(),
         sites,
+        gpu,
     )
 }
 
@@ -2422,8 +2455,12 @@ fn stack_configuration_fingerprint(
     calibration: &CalibrationMasters,
     input_mode: FrameInputMode,
 ) -> Result<String> {
-    let options = serde_json::to_vec(options)
-        .map_err(|error| Error::Stack(format!("failed to fingerprint stack options: {error}")))?;
+    // Where the arithmetic runs is no part of the configuration.
+    let options = serde_json::to_vec(&StackOptions {
+        gpu: crate::GpuOptions::default(),
+        ..options.clone()
+    })
+    .map_err(|error| Error::Stack(format!("failed to fingerprint stack options: {error}")))?;
     let mut hasher = Sha256::new();
     hasher.update(b"seiza-live-stack-configuration-v1\0");
     hasher.update([match input_mode {
@@ -2724,11 +2761,12 @@ pub(crate) fn prepare_frame(
         geometry,
         options.interpolation.into(),
         options.channel_sites(cfa),
+        &options.gpu,
     )?;
     // Where the GPU resampled the frame, its samples stay there for the
     // normalization and a GPU accumulator to read, when there is one.
     #[cfg(feature = "gpu")]
-    let mut on_gpu = crate::gpu::accumulating()
+    let mut on_gpu = (options.gpu.accumulator && crate::gpu::accumulating())
         .then(|| {
             crate::gpu::take_resident(
                 &registered.data,
@@ -2884,6 +2922,7 @@ pub(crate) fn prepare_frame(
             region,
             geometry,
             crate::registration::Sampling::NearestPhotosite(layout),
+            &options.gpu,
         )?;
         staged = cache.and_then(|cache| {
             cache.stage(
@@ -3100,6 +3139,8 @@ impl IntegrationHalf<'_> {
         let minimum = self.options.acceptance.minimum_integrated_fraction;
         let fraction = |accepted: usize| accepted as f32 / offered.max(1) as f32;
         let admit_at = admission_count(&fraction, minimum);
+        #[cfg(feature = "gpu")]
+        self.accumulator.offer_gpu(&self.options.gpu);
         // The frame's normalized samples on the GPU, for the accumulator
         // there; else the CPU's copy, normalized now if it waited.
         #[cfg(feature = "gpu")]
@@ -3356,9 +3397,9 @@ impl Accumulator {
     }
 
     /// Move the moments to the GPU the first time a frame arrives, when
-    /// they are large enough for it.
+    /// they are large enough for it and `options` allow it.
     #[cfg(feature = "gpu")]
-    fn offer_gpu(&mut self) {
+    fn offer_gpu(&mut self, options: &crate::GpuOptions) {
         if self.offered {
             return;
         }
@@ -3370,7 +3411,7 @@ impl Accumulator {
             rejected: &self.rejected,
             weight_sum: self.weight_sum.as_deref(),
         };
-        if let Some(gpu) = crate::gpu::GpuMoments::upload(moments) {
+        if let Some(gpu) = crate::gpu::GpuMoments::upload(moments, options) {
             self.gpu = Some(gpu);
             // The GPU holds them now; free the CPU's.
             self.mean = Vec::new();
@@ -3425,7 +3466,6 @@ impl Accumulator {
         weights: Option<&[f32]>,
         admit_at: usize,
     ) -> Staged {
-        self.offer_gpu();
         let Some(gpu) = self.gpu.as_mut() else {
             return Staged::Elsewhere(staged);
         };
@@ -3467,7 +3507,6 @@ impl Accumulator {
     ) -> (usize, Option<(usize, usize)>) {
         #[cfg(feature = "gpu")]
         {
-            self.offer_gpu();
             if let Some(gpu) = &mut self.gpu {
                 let unit = [1.0_f32];
                 match gpu.admit(
@@ -4261,6 +4300,62 @@ mod tests {
         assert_eq!(reopened.clipped_fraction().unwrap().data, fraction.data);
     }
 
+    /// A stack's GPU options decide where its arithmetic runs, not what it
+    /// stacks: its fingerprint leaves them out, and a context keeps them.
+    #[test]
+    fn gpu_options_leave_the_fingerprint_and_a_context_keeps_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let field = stacking_star_field(160, 128);
+        let open = |gpu| {
+            let frame = FitsFrame {
+                image: field.clone(),
+                headers: Vec::new(),
+                exposure_seconds: None,
+                bayer: None,
+                source: None,
+                bounds: None,
+            };
+            let options = StackOptions {
+                gpu,
+                ..StackOptions::default()
+            };
+            LiveStacker::new(frame, CalibrationMasters::default(), options).unwrap()
+        };
+        let everywhere = open(crate::GpuOptions::default());
+        let narrowed = crate::GpuOptions {
+            detection: false,
+            concurrency: 1,
+            ..crate::GpuOptions::default()
+        };
+        let stacker = open(narrowed);
+        assert_eq!(
+            stacker.configuration_fingerprint(),
+            everywhere.configuration_fingerprint()
+        );
+        let path = directory.path().join("gpu.seiza-stack");
+        stacker.save_context(&path).unwrap();
+        let reopened = LiveStacker::open_context(&path).unwrap();
+        assert_eq!(reopened.options.gpu, narrowed);
+        assert_eq!(
+            reopened.configuration_fingerprint(),
+            everywhere.configuration_fingerprint()
+        );
+        // The defaults are not written, so existing contexts keep their bytes.
+        let written = serde_json::to_value(StackOptions::default()).unwrap();
+        assert!(written.get("gpu").is_none(), "{written}");
+        assert!(
+            StackOptions {
+                gpu: crate::GpuOptions {
+                    concurrency: 0,
+                    ..crate::GpuOptions::default()
+                },
+                ..StackOptions::default()
+            }
+            .validate()
+            .is_err()
+        );
+    }
+
     fn offset_image(reference: &LinearImage, offset: f32) -> LinearImage {
         LinearImage::new(
             reference.width,
@@ -4586,9 +4681,8 @@ mod tests {
         let rejection = RejectionMode::DeltaSigma(DeltaSigmaOptions::default());
         for weighted in [false, true] {
             let mut cpu = Accumulator::new(width * height, weighted);
-            cpu.offered = true;
             let mut gpu = Accumulator::new(width * height, weighted);
-            gpu.offer_gpu();
+            gpu.offer_gpu(&crate::GpuOptions::default());
             if gpu.gpu.is_none() {
                 eprintln!("no GPU: the GPU accumulator not compared");
                 return;
@@ -5158,6 +5252,7 @@ mod tests {
                 Some(crate::lens::LensDistortion::none(160, 128)),
                 &stacker.options.registration,
                 crate::binning::Scale::NATIVE,
+                &crate::GpuOptions::default(),
             )
             .unwrap(),
         );

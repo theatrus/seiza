@@ -9,12 +9,12 @@
 //! a tap span lies on the clamping threshold and the two take different
 //! branches; `docs/design/gpu-stacking.md` gives each stage's accuracy.
 //!
-//! The device is opened once, the first time a frame large enough to gain
-//! from it arrives. Setting `SEIZA_GPU=off` (or `0`, `cpu`) before then keeps
-//! everything on the CPU, as a build without the `gpu` feature does. When no
-//! adapter is found, or the GPU fails, the work stays on the CPU; a failure
-//! is logged once.
-use crate::{LinearImage, ReferenceRegion};
+//! Each entry takes the [`GpuOptions`] of the call it serves, and leaves its
+//! work to the CPU when they do not allow its pass. The device is opened
+//! once, the first time a call that allows the GPU has a frame large enough
+//! to gain from it. When no adapter is found, or the GPU fails, the work
+//! stays on the CPU; a failure is logged once.
+use crate::{GpuOptions, LinearImage, ReferenceRegion};
 use rayon::prelude::*;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -90,35 +90,23 @@ struct Gpu {
     /// Frame-sized buffers kept between calls: making a new one maps and
     /// clears fresh memory, which took longer than the upload itself.
     pool: std::sync::Mutex<Vec<(wgpu::BufferUsages, wgpu::Buffer)>>,
-    /// Frame calls running at once, which [`Gpu::admitted`] holds to a few.
+    /// Frame calls running at once, which [`Gpu::admitted`] holds to each
+    /// call's [`GpuOptions::concurrency`].
     calls: (std::sync::Mutex<usize>, std::sync::Condvar),
 }
 
-/// Frame calls (debayering, detection, resampling, screening) that run at
-/// once, three unless `SEIZA_GPU_CALLS` says otherwise. The GPU runs one
-/// kernel at a time, so a frame waiting here rather than in the GPU's queue
-/// holds no buffer while it waits: with a dozen frames prepared at once,
-/// uncapped calls took the M45 stack on an Iris Xe to 7.8-8.6 GB, against
-/// 7.3-7.5 GB for three. One call at a time left that GPU idle while a call
-/// copied, and took 45-46 s against 39; two took 39.4-39.7, three 38.8-38.9.
-fn frame_calls() -> usize {
-    static CALLS: OnceLock<usize> = OnceLock::new();
-    *CALLS.get_or_init(|| {
-        std::env::var("SEIZA_GPU_CALLS")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(3)
-    })
-}
-
-/// One of the [`frame_calls`] permits, given back when dropped.
+/// A frame call's place among those [`Gpu::admitted`] lets run at once,
+/// given back when dropped. The GPU runs one kernel at a time, so a frame
+/// waiting for one, rather than in the GPU's queue, holds no buffer while it
+/// waits.
 struct FrameCall<'a>(&'a Gpu);
 
 impl Drop for FrameCall<'_> {
     fn drop(&mut self) {
         let (count, freed) = &self.0.calls;
         *count.lock().unwrap_or_else(|poison| poison.into_inner()) -= 1;
-        freed.notify_one();
+        // Every waiter, as calls may allow different numbers at once.
+        freed.notify_all();
     }
 }
 
@@ -225,7 +213,7 @@ pub(crate) fn release_resident() {
 /// read back (an uploaded frame, which is `data` copied).
 #[cfg(test)]
 pub(crate) fn resident_samples(data: &[f32]) -> Option<Vec<f32>> {
-    let gpu = gpu()?;
+    let gpu = opened()?;
     let key = ResidentKey::of(data);
     let (buffer, usage) = RESIDENT.with(|resident| {
         resident
@@ -345,7 +333,7 @@ impl GpuFrame {
         &mut self,
         coefficients: &NormalizationCoefficients,
     ) -> Result<(), String> {
-        let gpu = gpu().ok_or("no GPU")?;
+        let gpu = opened().ok_or("no GPU")?;
         let buffer = self.buffer.as_ref().ok_or("the frame has left the GPU")?;
         let samples = (self.width * self.height * self.channels) as u32;
         let groups = samples.div_ceil(256);
@@ -436,7 +424,7 @@ impl GpuFrame {
     /// The frame's samples read back, for a frame that must be integrated
     /// on the CPU after all; `None` when the GPU cannot give them.
     pub(crate) fn download(&self) -> Option<Vec<f32>> {
-        let gpu = gpu()?;
+        let gpu = opened()?;
         let buffer = self.buffer.as_ref()?;
         let bytes = (self.width * self.height * self.channels * 4) as u64;
         let read_from = if self.usage.contains(wgpu::BufferUsages::MAP_READ) {
@@ -494,7 +482,7 @@ impl VngOutput {
     /// Write `rgb`'s two-pixel border, which the CPU filled, into the GPU's
     /// copy, and keep it resident as `rgb`'s samples.
     pub(crate) fn finish(self, rgb: &[f32]) {
-        let Some(gpu) = gpu() else {
+        let Some(gpu) = opened() else {
             return;
         };
         let (width, height) = (self.width, self.height);
@@ -574,8 +562,8 @@ const POOL_BYTES: u64 = 1 << 30;
 
 static GPU: OnceLock<Option<Gpu>> = OnceLock::new();
 
-/// Each stage's time in one GPU call, printed to stderr when
-/// `SEIZA_GPU_TRACE` is set, to see where the time goes on a machine.
+/// Each stage's time in one GPU call, printed to stderr when the call's
+/// [`GpuOptions::trace`] asks.
 pub(crate) struct Trace {
     enabled: bool,
     last: std::time::Instant,
@@ -583,10 +571,9 @@ pub(crate) struct Trace {
 }
 
 impl Trace {
-    pub(crate) fn new() -> Self {
-        static ENABLED: OnceLock<bool> = OnceLock::new();
+    pub(crate) fn new(enabled: bool) -> Self {
         Self {
-            enabled: *ENABLED.get_or_init(|| std::env::var_os("SEIZA_GPU_TRACE").is_some()),
+            enabled,
             last: std::time::Instant::now(),
             parts: Vec::new(),
         }
@@ -616,24 +603,13 @@ impl Trace {
 }
 static FAILED: AtomicBool = AtomicBool::new(false);
 
-fn disabled_by_environment() -> bool {
-    std::env::var("SEIZA_GPU").is_ok_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "off" | "0" | "cpu" | "false" | "no"
-        )
-    })
-}
-
-fn gpu() -> Option<&'static Gpu> {
-    if FAILED.load(Ordering::Relaxed) {
+/// The GPU, opened the first time, for a call `options` let use it.
+fn gpu(options: &GpuOptions) -> Option<&'static Gpu> {
+    if !options.enabled || FAILED.load(Ordering::Relaxed) {
         return None;
     }
     GPU.get_or_init(|| {
-        if disabled_by_environment() {
-            return None;
-        }
-        let mut trace = Trace::new();
+        let mut trace = Trace::new(options.trace);
         let opened = Gpu::open();
         trace.mark("open");
         trace.print("device");
@@ -648,6 +624,14 @@ fn gpu() -> Option<&'static Gpu> {
     .as_ref()
 }
 
+/// The GPU, when a call opened it, for work on what is there already.
+fn opened() -> Option<&'static Gpu> {
+    if FAILED.load(Ordering::Relaxed) {
+        return None;
+    }
+    GPU.get().and_then(Option::as_ref)
+}
+
 fn log_once(message: &str) {
     static LOGGED: AtomicBool = AtomicBool::new(false);
     if !LOGGED.swap(true, Ordering::Relaxed) {
@@ -659,7 +643,7 @@ fn log_once(message: &str) {
 /// resampling stays on the CPU. Opens the device if it is not open yet.
 #[cfg(test)]
 pub(crate) fn adapter_description() -> Option<String> {
-    gpu().map(|gpu| {
+    gpu(&GpuOptions::default()).map(|gpu| {
         let info = gpu.device.adapter_info();
         format!("{} ({:?})", info.name, info.backend)
     })
@@ -1425,11 +1409,11 @@ impl Gpu {
         Ok(())
     }
 
-    /// Wait for one of the [`frame_calls`] permits.
-    fn admitted(&self) -> FrameCall<'_> {
+    /// Wait until fewer than `concurrency` frame calls run.
+    fn admitted(&self, concurrency: usize) -> FrameCall<'_> {
         let (count, freed) = &self.calls;
         let mut running = count.lock().unwrap_or_else(|poison| poison.into_inner());
-        while *running >= frame_calls() {
+        while *running >= concurrency.max(1) {
             running = freed
                 .wait(running)
                 .unwrap_or_else(|poison| poison.into_inner());
@@ -1562,20 +1546,23 @@ pub(crate) fn resample(
     region: ReferenceRegion,
     inverse: &(impl Fn(f64, f64) -> (f64, f64) + Sync),
     sampling: GpuSampling,
+    options: &GpuOptions,
 ) -> Option<LinearImage> {
-    resample_masked(source, None, region, inverse, sampling).map(|(image, _)| image)
+    resample_masked(source, None, region, inverse, sampling, options).map(|(image, _)| image)
 }
 
 /// [`resample`], and `mask`, the frame's clip mask, one sample a source
 /// pixel, resampled bilinearly in the same pass, at the same positions, as
 /// [`resample`] alone would resample it. The mask comes back only when it
-/// was taken: it matches the frame's shape.
+/// was taken: it matches the frame's shape. `None` when the CPU should: the
+/// frame is small, `options` keep resampling there, or no GPU is in use.
 pub(crate) fn resample_masked(
     source: &LinearImage,
     mask: Option<&LinearImage>,
     region: ReferenceRegion,
     inverse: &(impl Fn(f64, f64) -> (f64, f64) + Sync),
     sampling: GpuSampling,
+    options: &GpuOptions,
 ) -> Option<(LinearImage, Option<LinearImage>)> {
     let channels = source.channels;
     let mask = mask.filter(|mask| {
@@ -1589,12 +1576,13 @@ pub(crate) fn resample_masked(
         || source.height < 6
         || region.width == 0
         || region.height == 0
+        || !options.resampling
     {
         return None;
     }
-    let gpu = gpu()?;
-    let _call = gpu.admitted();
-    let mut trace = Trace::new();
+    let gpu = gpu(options)?;
+    let _call = gpu.admitted(options.concurrency);
+    let mut trace = Trace::new(options.trace);
     let step = GRID_STEP as usize;
     let (first_column, first_row) = (region.x / step, region.y / step);
     let (last_column, last_row) = (
@@ -1672,26 +1660,23 @@ struct VngParams {
 /// from the balance and with its own sample, and anything on the two-pixel
 /// border, which the caller fills. `channels` is the colour of each Bayer
 /// phase, column parity | row parity << 1. `None` when the CPU should: the
-/// mosaic is small, `SEIZA_GPU_DEBAYER=off`, or no GPU is in use.
+/// mosaic is small, `options` keep debayering there, or no GPU is in use.
 pub(crate) fn vng(
     mosaic: &[f32],
     (width, height): (usize, usize),
     channels: [u32; 4],
     balance: [f32; 3],
+    options: &GpuOptions,
 ) -> Option<(Vec<f32>, Option<VngOutput>)> {
-    if mosaic.len() < MINIMUM_SAMPLES
-        || width < 5
-        || height < 5
-        || std::env::var("SEIZA_GPU_DEBAYER").is_ok_and(|value| value == "off")
-    {
+    if mosaic.len() < MINIMUM_SAMPLES || width < 5 || height < 5 || !options.debayer {
         return None;
     }
-    let gpu = gpu()?;
-    let _call = gpu.admitted();
+    let gpu = gpu(options)?;
+    let _call = gpu.admitted(options.concurrency);
     if (mosaic.len() as u64) * 12 > gpu.max_buffer {
         return None;
     }
-    let mut trace = Trace::new();
+    let mut trace = Trace::new(options.trace);
     let params = VngParams {
         width: width as u32,
         height: height as u32,
@@ -1783,27 +1768,28 @@ struct DefectParams {
 /// neighbours' extremes. The test is loosened a little, so every sample the
 /// CPU's exact test keeps is flagged, and some it would not. `thresholds`
 /// holds `sigma` times each plane's noise, by `channel * step^2 + plane`.
-/// `None` when the CPU should: the frame is small,
-/// `SEIZA_GPU_DEFECTS=off`, or no GPU is in use.
+/// `None` when the CPU should: the frame is small, `options` keep the
+/// screen there, or no GPU is in use.
 pub(crate) fn defect_candidates(
     data: &[f32],
     (width, height, channels, step): (usize, usize, usize, usize),
     thresholds: [f32; 4],
+    options: &GpuOptions,
 ) -> Option<Vec<u32>> {
     if data.len() < MINIMUM_SAMPLES
         || data.len() != width * height * channels
         || channels * step * step > 4
         || data.len() > u32::MAX as usize
-        || std::env::var("SEIZA_GPU_DEFECTS").is_ok_and(|value| value == "off")
+        || !options.defects
     {
         return None;
     }
-    let gpu = gpu()?;
-    let _call = gpu.admitted();
+    let gpu = gpu(options)?;
+    let _call = gpu.admitted(options.concurrency);
     if (data.len() as u64) * 4 > gpu.max_buffer {
         return None;
     }
-    let mut trace = Trace::new();
+    let mut trace = Trace::new(options.trace);
     let groups = data.len().div_ceil(256) as u32;
     let columns = groups.min(4096);
     let params = DefectParams {
@@ -1872,11 +1858,12 @@ const DETECTION_TILE_SAMPLES: u32 = 4096;
 /// where the CPU works in f64, so a pixel on the threshold can fall either
 /// way; the tiles' medians and robust sigmas are exact. `None` when the CPU
 /// should: the frame is small, its tiles too large to sort, more pixels
-/// pass than the GPU keeps room for, `SEIZA_GPU_DETECT=off`, or no GPU is
-/// in use.
+/// pass than the GPU keeps room for, `options` keep detection there, or no
+/// GPU is in use.
 pub(crate) fn detect_stars(
     image: &LinearImage,
     config: &seiza::DetectConfig,
+    options: &GpuOptions,
 ) -> Option<Vec<seiza::DetectedStar>> {
     let (width, height, channels) = (image.width, image.height, image.channels);
     let pixels = width * height;
@@ -1888,16 +1875,16 @@ pub(crate) fn detect_stars(
         || width > u32::MAX as usize / 2
         || height > u32::MAX as usize / 2
         || config.backend == seiza::DetectBackend::U8
-        || std::env::var("SEIZA_GPU_DETECT").is_ok_and(|value| value == "off")
+        || !options.detection
     {
         return None;
     }
-    let gpu = gpu()?;
-    let _call = gpu.admitted();
+    let gpu = gpu(options)?;
+    let _call = gpu.admitted(options.concurrency);
     if (image.data.len() as u64) * 4 > gpu.max_buffer {
         return None;
     }
-    let mut trace = Trace::new();
+    let mut trace = Trace::new(options.trace);
     let result = gpu.detect(image, config, &mut trace);
     trace.print(&format!("detect {width}x{height}x{channels}"));
     match result {
@@ -2156,28 +2143,31 @@ pub(crate) struct BandSession {
     counts_read: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     precision: BandTables,
+    trace: bool,
 }
 
 impl BandSession {
     /// A session for `frame_count` frames of `channels` channels, bands of
     /// up to `band_samples` samples, weighted per `weight_channels` channels
     /// when `weights` is given (one row per frame), or `None` when the CPU
-    /// should integrate: a small band, too many frames, or no GPU.
+    /// should integrate: a small band, too many frames, `options` keep
+    /// integration there, or no GPU.
     pub(crate) fn new(
         frame_count: usize,
         channels: usize,
         band_samples: usize,
         weights: Option<(&[f32], usize)>,
         tables: BandTables,
+        options: &GpuOptions,
     ) -> Option<Self> {
         if frame_count == 0
             || frame_count > MAX_BAND_FRAMES
             || band_samples * frame_count < MINIMUM_SAMPLES
-            || std::env::var("SEIZA_GPU_BANDS").is_ok_and(|value| value == "off")
+            || !options.integration
         {
             return None;
         }
-        let gpu = gpu()?;
+        let gpu = gpu(options)?;
         let values_bytes = (band_samples * frame_count * 4) as u64;
         if values_bytes > gpu.max_buffer || (band_samples as u64) * 16 > gpu.max_buffer {
             return None;
@@ -2303,6 +2293,7 @@ impl BandSession {
             counts_read,
             bind_group,
             precision: tables,
+            trace: options.trace,
         })
     }
 
@@ -2317,7 +2308,7 @@ impl BandSession {
         counts: &mut [(usize, usize)],
     ) -> Result<(), String> {
         let gpu = self.gpu;
-        let mut trace = Trace::new();
+        let mut trace = Trace::new(self.trace);
         let samples = outputs.mean.len();
         if samples > self.band_capacity || frames.len() != self.frame_count {
             return Err("the band does not fit the session".into());
@@ -2563,6 +2554,7 @@ pub(crate) struct GpuMoments {
     params: wgpu::Buffer,
     counters: wgpu::Buffer,
     counters_read: wgpu::Buffer,
+    trace: bool,
 }
 
 impl Drop for GpuMoments {
@@ -2573,14 +2565,13 @@ impl Drop for GpuMoments {
 
 impl GpuMoments {
     /// Moments of at least a million samples moved to the GPU, or `None`
-    /// when they stay on the CPU.
-    pub(crate) fn upload(moments: MomentSlices<'_>) -> Option<Self> {
-        if moments.mean.len() < MINIMUM_SAMPLES
-            || std::env::var("SEIZA_GPU_ACCUMULATOR").is_ok_and(|value| value == "off")
-        {
+    /// when they stay on the CPU, as they do when `options` keep the
+    /// accumulator there.
+    pub(crate) fn upload(moments: MomentSlices<'_>, options: &GpuOptions) -> Option<Self> {
+        if moments.mean.len() < MINIMUM_SAMPLES || !options.accumulator {
             return None;
         }
-        let gpu = gpu()?;
+        let gpu = gpu(options)?;
         let samples = moments.mean.len();
         if (samples as u64) * 4 > gpu.max_buffer {
             return None;
@@ -2627,6 +2618,7 @@ impl GpuMoments {
                 16,
                 wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             ),
+            trace: options.trace,
         };
         gpu.wait().ok()?;
         if FAILED.load(Ordering::Relaxed) {
@@ -2653,7 +2645,7 @@ impl GpuMoments {
         admit_at: usize,
     ) -> Result<(usize, Option<(usize, usize)>), String> {
         let gpu = self.gpu;
-        let mut trace = Trace::new();
+        let mut trace = Trace::new(self.trace);
         let samples = placement.rows * placement.span;
         let held = staged.and_then(|mut staged| {
             (staged.width * staged.height * staged.channels == samples)
@@ -2787,7 +2779,7 @@ impl GpuMoments {
     /// The moments, read back.
     pub(crate) fn read(&self) -> Result<MomentVectors, String> {
         let gpu = self.gpu;
-        let mut trace = Trace::new();
+        let mut trace = Trace::new(self.trace);
         let bytes = (self.samples * 4) as u64;
         let usage = wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST;
         let sources: Vec<&wgpu::Buffer> = if self.weighted {
@@ -2898,6 +2890,74 @@ mod tests {
         LinearImage::new(width, height, channels, data).unwrap()
     }
 
+    /// Each pass runs on the GPU under the defaults, and on the CPU, `None`
+    /// here, when the call's options keep it there or keep the GPU out.
+    #[test]
+    fn a_call_keeps_each_pass_where_its_options_say() {
+        if adapter_description().is_none() {
+            eprintln!("no GPU: options not compared");
+            return;
+        }
+        let everywhere = GpuOptions::default();
+        let cpu = GpuOptions::cpu();
+        let without = |pass: fn(&mut GpuOptions)| {
+            let mut options = GpuOptions::default();
+            pass(&mut options);
+            options
+        };
+        let mono = star_field(1100, 1000, 1);
+        let rgb = star_field(1100, 1000, 3);
+        let region = ReferenceRegion {
+            x: 0,
+            y: 0,
+            width: 1100,
+            height: 1000,
+        };
+        let identity = |x: f64, y: f64| (x, y);
+        let resample = |options: &GpuOptions| {
+            resample(&rgb, region, &identity, GpuSampling::Bilinear, options).is_some()
+        };
+        assert!(resample(&everywhere));
+        assert!(!resample(&without(|options| options.resampling = false)));
+        assert!(!resample(&cpu));
+        let vng = |options: &GpuOptions| {
+            vng(&mono.data, (1100, 1000), [0, 1, 1, 2], [1.0; 3], options).is_some()
+        };
+        assert!(vng(&everywhere));
+        assert!(!vng(&without(|options| options.debayer = false)));
+        assert!(!vng(&cpu));
+        let config = seiza::DetectConfig {
+            backend: seiza::DetectBackend::F32,
+            ..seiza::DetectConfig::default()
+        };
+        let detect = |options: &GpuOptions| detect_stars(&rgb, &config, options).is_some();
+        assert!(detect(&everywhere));
+        assert!(!detect(&without(|options| options.detection = false)));
+        assert!(!detect(&cpu));
+        let screen = |options: &GpuOptions| {
+            defect_candidates(&mono.data, (1100, 1000, 1, 2), [50.0; 4], options).is_some()
+        };
+        assert!(screen(&everywhere));
+        assert!(!screen(&without(|options| options.defects = false)));
+        assert!(!screen(&cpu));
+        let samples = 1100 * 1000;
+        let (mean, m2) = (vec![0.0_f32; samples], vec![0.0_f32; samples]);
+        let (count, rejected) = (vec![0_u32; samples], vec![0_u32; samples]);
+        let upload = |options: &GpuOptions| {
+            let moments = MomentSlices {
+                mean: &mean,
+                m2: &m2,
+                count: &count,
+                rejected: &rejected,
+                weight_sum: None,
+            };
+            GpuMoments::upload(moments, options).is_some()
+        };
+        assert!(upload(&everywhere));
+        assert!(!upload(&without(|options| options.accumulator = false)));
+        assert!(!upload(&cpu));
+    }
+
     /// A frame and its clip mask resampled in one pass come out as each does
     /// resampled alone, to the bit: the mask bilinearly, the frame clamped
     /// Lanczos-3 or bilinear, over the whole grid and a region of it.
@@ -2939,10 +2999,25 @@ mod tests {
                     height: 480,
                 },
             ] {
-                let alone = resample(&source, region, &inverse, sampling).unwrap();
-                let mask_alone = resample(&mask, region, &inverse, GpuSampling::Bilinear).unwrap();
-                let (together, mask_together) =
-                    resample_masked(&source, Some(&mask), region, &inverse, sampling).unwrap();
+                let alone =
+                    resample(&source, region, &inverse, sampling, &GpuOptions::default()).unwrap();
+                let mask_alone = resample(
+                    &mask,
+                    region,
+                    &inverse,
+                    GpuSampling::Bilinear,
+                    &GpuOptions::default(),
+                )
+                .unwrap();
+                let (together, mask_together) = resample_masked(
+                    &source,
+                    Some(&mask),
+                    region,
+                    &inverse,
+                    sampling,
+                    &GpuOptions::default(),
+                )
+                .unwrap();
                 let mask_together = mask_together.expect("the mask was taken");
                 for (a, b) in alone.data.iter().zip(&together.data) {
                     assert_eq!(a.to_bits(), b.to_bits());
@@ -2996,7 +3071,14 @@ mod tests {
                 },
             ] {
                 let what = format!("{channels} channel(s), lanczos {lanczos}, {region:?}");
-                let gpu = resample(&source, region, &inverse, gpu_sampling).expect(&what);
+                let gpu = resample(
+                    &source,
+                    region,
+                    &inverse,
+                    gpu_sampling,
+                    &GpuOptions::default(),
+                )
+                .expect(&what);
                 let cpu = crate::registration::resample_region_on_cpu(
                     &source,
                     region,

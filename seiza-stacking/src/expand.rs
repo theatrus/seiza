@@ -217,14 +217,16 @@ struct Window {
 
 impl Window {
     /// The panel at `region` of `canvas`, binned at `scale`, matching with
-    /// `options` in the sensor's pixels.
+    /// `options` in the sensor's pixels, its stars detected where `gpu`
+    /// allows.
     fn new(
         canvas: &LinearImage,
         region: ReferenceRegion,
         options: &RegistrationOptions,
         scale: Scale,
+        gpu: &crate::GpuOptions,
     ) -> Result<Self> {
-        Self::from_pixels(&crop(canvas, region, 0, 0)?, region, options, scale)
+        Self::from_pixels(&crop(canvas, region, 0, 0)?, region, options, scale, gpu)
     }
 
     /// A panel at `region` whose stars are detected in `pixels`, an image of
@@ -234,11 +236,17 @@ impl Window {
         region: ReferenceRegion,
         options: &RegistrationOptions,
         scale: Scale,
+        gpu: &crate::GpuOptions,
     ) -> Result<Self> {
         let options = Self::options(region, options, scale);
-        let stars =
-            crate::registration::detect_stars(pixels, &options, options.dense_star_count(), scale);
-        Self::from_stars(region, stars, options, scale)
+        let stars = crate::registration::detect_stars(
+            pixels,
+            &options,
+            options.dense_star_count(),
+            scale,
+            gpu,
+        );
+        Self::from_stars(region, stars, options, scale, gpu)
     }
 
     /// The registration options, in working pixels, a panel at `region`
@@ -258,19 +266,22 @@ impl Window {
     }
 
     /// A panel at `region` matching `stars`, on the region's grid, with
-    /// [`Self::options`].
+    /// [`Self::options`]. The stars of the frames it registers are detected
+    /// where `gpu` allows.
     fn from_stars(
         region: ReferenceRegion,
         stars: Vec<DetectedStar>,
         options: RegistrationOptions,
         scale: Scale,
+        gpu: &crate::GpuOptions,
     ) -> Result<Self> {
         let maximum_stars = options.maximum_stars;
         let match_tolerance_pixels = options.match_tolerance_pixels;
         let radius = options.effective_maximum_drift_pixels(region.width, region.height);
         let hypotheses =
             (radius / match_tolerance_pixels).powi(2) + options.maximum_candidates as f64;
-        let registrar = Registrar::from_stars(region.width, region.height, stars, options, scale)?;
+        let registrar =
+            Registrar::from_stars(region.width, region.height, stars, options, scale, gpu)?;
         Ok(Self {
             region,
             stars: registrar.reference_star_positions(),
@@ -513,7 +524,9 @@ impl CanvasRegistrar {
     /// Panels at `regions` of `canvas`, matching the stars planning saved
     /// for them, or, for a context saved before panels kept their stars,
     /// the stars of the canvas beneath them. `canvas`, its panels and `lens`
-    /// are binned at `scale`, and `options` are in the sensor's pixels.
+    /// are binned at `scale`, and `options` are in the sensor's pixels. The
+    /// stars of the frames it registers are detected where `gpu` allows.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         canvas: &LinearImage,
         regions: &[ReferenceRegion],
@@ -521,6 +534,7 @@ impl CanvasRegistrar {
         lens: Option<LensDistortion>,
         options: &RegistrationOptions,
         scale: Scale,
+        gpu: &crate::GpuOptions,
     ) -> Result<Self> {
         if regions.is_empty() {
             return Err(Error::Stack("an expanded canvas needs a panel".into()));
@@ -559,8 +573,9 @@ impl CanvasRegistrar {
                         stars,
                         Window::options(*region, options, scale),
                         scale,
+                        gpu,
                     ),
-                    None => Window::new(canvas, *region, options, scale),
+                    None => Window::new(canvas, *region, options, scale, gpu),
                 }
             })
             .collect::<Result<Vec<_>>>()?;
@@ -1066,6 +1081,7 @@ pub(crate) fn plan(
         frame.image,
         options.channel_sites(anchor_cfa),
         options.interpolation,
+        &options.gpu,
     )?;
     let anchor = ReferenceRegion {
         x: 0,
@@ -1073,7 +1089,13 @@ pub(crate) fn plan(
         width: frame.image.width,
         height: frame.image.height,
     };
-    let anchor = Window::new(&frame.image, anchor, &options.registration, scale)?;
+    let anchor = Window::new(
+        &frame.image,
+        anchor,
+        &options.registration,
+        scale,
+        &options.gpu,
+    )?;
     let record = Record {
         anchor_size: (frame.image.width, frame.image.height),
         anchor_headers: frame.headers.clone(),
@@ -1085,6 +1107,7 @@ pub(crate) fn plan(
                 &options.registration,
                 LENS_STARS,
                 scale,
+                &options.gpu,
             ),
             window: 0,
             creates_window: true,
@@ -1526,6 +1549,7 @@ impl Plan {
                 crate::registration::FrameGeometry::Similarity(transform),
                 options.interpolation.into(),
                 sites,
+                &options.gpu,
             )?),
             None => None,
         };
@@ -1572,8 +1596,13 @@ impl Plan {
         let mut creates_window = false;
         if let Some(incoming) = incoming.as_ref().filter(|_| starts_panel)
             && filled as f64 >= NEW_PANEL_FRACTION * source_area
-            && let Ok(panel) =
-                Window::from_pixels(incoming, region, &options.registration, options.scale())
+            && let Ok(panel) = Window::from_pixels(
+                incoming,
+                region,
+                &options.registration,
+                options.scale(),
+                &options.gpu,
+            )
         {
             self.windows.push(panel);
             self.last_window = self.windows.len() - 1;
@@ -1587,6 +1616,7 @@ impl Plan {
                     &options.registration,
                     LENS_STARS,
                     options.scale(),
+                    &options.gpu,
                 ),
                 window,
                 creates_window,
@@ -1780,7 +1810,14 @@ impl Plan {
             Some(covered) => (None, covered),
             None => {
                 let incoming = crate::registration::resample_region_sited(
-                    source, width, height, region, geometry, sampling, sites,
+                    source,
+                    width,
+                    height,
+                    region,
+                    geometry,
+                    sampling,
+                    sites,
+                    &options.gpu,
                 )?;
                 let covered = incoming.data.iter().map(|v| v.is_finite()).collect();
                 (Some(incoming), covered)
@@ -1830,6 +1867,7 @@ impl Plan {
             &scale.registration(&options.registration),
             options.registration.maximum_stars * PLANNING_STARS_FACTOR,
             scale,
+            &options.gpu,
         )
         .filter(|refined| refined.matched_stars > registration.matched_stars)?;
         refined = admissible(refined, options).ok()?;
@@ -1926,6 +1964,7 @@ impl Plan {
                     &options.registration,
                     LENS_STARS,
                     Scale::NATIVE,
+                    &options.gpu,
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -2010,10 +2049,17 @@ impl Plan {
             crate::registration::FrameGeometry::Warp(&warp),
             options.interpolation.into(),
             sites,
+            &options.gpu,
         )?;
         drop(source);
-        let anchor = Window::new(&image, region, &options.registration, options.scale())?
-            .with_projection(Some(projection))?;
+        let anchor = Window::new(
+            &image,
+            region,
+            &options.registration,
+            options.scale(),
+            &options.gpu,
+        )?
+        .with_projection(Some(projection))?;
         let mut headers = self.record.anchor_headers.clone();
         // These pixels are undistorted. Translating CRPIX cannot compose the
         // raw frame's WCS (including SIP) with this nonlinear mapping. Leave
@@ -2262,6 +2308,7 @@ impl Plan {
             crate::registration::FrameGeometry::Warp(&warp),
             options.interpolation.into(),
             sites,
+            &options.gpu,
         )?;
         let existing = crop(&self.image, region, dx, dy)?;
         let (mut common, mut uncovered) = (0, 0);
@@ -2299,12 +2346,18 @@ impl Plan {
         self.commit((width, height, dx, dy), region, Some(&incoming))?;
         if start.creates_window {
             self.windows.push(
-                Window::from_pixels(&incoming, region, &options.registration, options.scale())?
-                    .with_projection(Some(PanelProjection {
-                        width: source.width,
-                        height: source.height,
-                        warp: polynomial.translated(region_x, region_y),
-                    }))?,
+                Window::from_pixels(
+                    &incoming,
+                    region,
+                    &options.registration,
+                    options.scale(),
+                    &options.gpu,
+                )?
+                .with_projection(Some(PanelProjection {
+                    width: source.width,
+                    height: source.height,
+                    warp: polynomial.translated(region_x, region_y),
+                }))?,
             );
         }
         self.registrations.insert(
@@ -2846,6 +2899,7 @@ mod tests {
             stars,
             Window::options(region, &RegistrationOptions::default(), Scale::NATIVE),
             Scale::NATIVE,
+            &crate::GpuOptions::default(),
         )
         .unwrap()
         .with_projection(Some(projection))
@@ -3008,6 +3062,7 @@ mod tests {
             reference,
             Window::options(region, &RegistrationOptions::default(), Scale::NATIVE),
             Scale::NATIVE,
+            &crate::GpuOptions::default(),
         )
         .unwrap()
         .with_projection(Some(PanelProjection {
@@ -3239,6 +3294,7 @@ mod tests {
                 None,
                 &options,
                 Scale::NATIVE,
+                &crate::GpuOptions::default(),
             )
         };
         assert!(restore(region, stars.clone()).is_ok());

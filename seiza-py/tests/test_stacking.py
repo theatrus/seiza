@@ -64,6 +64,39 @@ def test_stack_options_choose_the_demosaic():
         seiza.StackOptions(demosaic="superpixel")
 
 
+def test_gpu_options_say_which_passes_may_run_on_the_gpu():
+    everywhere = seiza.GpuOptions()
+    assert everywhere.enabled and everywhere.debayer and everywhere.integration
+    assert (everywhere.concurrency, everywhere.trace) == (3, False)
+    assert seiza.StackOptions().gpu == everywhere
+    narrowed = seiza.GpuOptions(detection=False, concurrency=1)
+    options = seiza.StackOptions(gpu=narrowed)
+    assert options.gpu == narrowed
+    assert not options.gpu.detection and options.gpu.resampling
+    assert "detection=False" in repr(narrowed)
+    assert not seiza.GpuOptions(enabled=False).enabled
+    with pytest.raises(ValueError, match="concurrency"):
+        seiza.GpuOptions(concurrency=0)
+
+
+def test_a_stack_on_the_cpu_keeps_its_gpu_options_in_a_context(tmp_path):
+    image = synthetic_star_field()
+    cpu = seiza.GpuOptions(enabled=False)
+    options = seiza.StackOptions(normalization="none", rejection="none", gpu=cpu)
+    stacker = seiza.LiveStacker.from_array(image, options=options)
+    everywhere = seiza.LiveStacker.from_array(image, options=no_adjustment_options())
+    assert stacker.push(image.copy()).accepted
+    # Where the arithmetic runs is no part of the configuration.
+    assert stacker.state().configuration_fingerprint == (
+        everywhere.state().configuration_fingerprint
+    )
+    stacker.save_context(tmp_path / "cpu.seiza-stack")
+    reopened = seiza.LiveStacker.open_context(tmp_path / "cpu.seiza-stack")
+    assert reopened.state().configuration_fingerprint == (
+        stacker.state().configuration_fingerprint
+    )
+
+
 def test_live_stacker_accepts_numpy_and_returns_owned_snapshot():
     image = synthetic_star_field()
     stacker = seiza.LiveStacker.from_array(image, options=no_adjustment_options())
@@ -1193,6 +1226,11 @@ def test_registered_frames_integrate_with_leave_one_out_rejection(tmp_path):
     assert list(scratch.iterdir()) == []
     with pytest.raises(seiza.StackError, match="scratch directory"):
         seiza.integrate_registered_frames(paths, scratch_directory=tmp_path / "missing")
+    # On the CPU alone, the same stack: these frames are too small for the GPU.
+    on_cpu, _ = seiza.integrate_registered_frames(
+        paths, gpu=seiza.GpuOptions(enabled=False)
+    )
+    assert np.array_equal(on_cpu.image, stack.image, equal_nan=True)
 
     def stop():
         raise KeyError("stop")
@@ -1291,6 +1329,8 @@ def test_defects_are_learned_from_dithered_lights_and_repaired(tmp_path):
         seiza.DefectMap(4, 4, [16])
     with pytest.raises(seiza.StackError, match="persistence"):
         seiza.detect_defects(lights, persistence=2.0)
+    on_cpu = seiza.detect_defects(lights, gpu=seiza.GpuOptions(enabled=False))
+    assert (on_cpu.pixels, on_cpu.excess) == (defects.pixels, defects.excess)
 
 
 @pytest.mark.parametrize("bin_factor", [2, 4])

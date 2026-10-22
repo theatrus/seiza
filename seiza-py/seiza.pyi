@@ -510,6 +510,30 @@ class DefectMap:
     def __init__(self, width: int, height: int, pixels: Sequence[int]) -> None: ...
     def __len__(self) -> int: ...
 
+class GpuOptions:
+    enabled: bool
+    defects: bool
+    debayer: bool
+    detection: bool
+    resampling: bool
+    accumulator: bool
+    integration: bool
+    concurrency: int
+    trace: bool
+    def __init__(
+        self,
+        *,
+        enabled: bool = True,
+        defects: bool = True,
+        debayer: bool = True,
+        detection: bool = True,
+        resampling: bool = True,
+        accumulator: bool = True,
+        integration: bool = True,
+        concurrency: int = 3,
+        trace: bool = False,
+    ) -> None: ...
+
 class StackOptions:
     normalization: str
     local_tile_size: int | None
@@ -522,6 +546,7 @@ class StackOptions:
     defects: DefectMap | None
     match_tolerances: MatchTolerances
     bin_factor: int
+    gpu: GpuOptions
     def __init__(
         self,
         *,
@@ -555,6 +580,7 @@ class StackOptions:
         weighting: str = "equal",
         defects: DefectMap | None = None,
         bin_factor: int = 1,
+        gpu: GpuOptions | None = None,
     ) -> None: ...
 
 class FrameDisposition:
@@ -1350,6 +1376,7 @@ def detect_defects(
     sigma: float = 5.0,
     persistence: float = 0.6,
     maximum_frames: int = 16,
+    gpu: GpuOptions | None = None,
 ) -> DefectMap: ...
 def choose_reference(
     images: Sequence[str | Path],
@@ -1401,6 +1428,7 @@ def integrate_registered_frames(
     frame_weights: Sequence[Sequence[float]] | None = None,
     scratch_directory: str | Path | None = None,
     cancel: Callable[[], bool] | None = None,
+    gpu: GpuOptions | None = None,
 ) -> tuple[StackSnapshot, list[IntegratedFrame]]: ...
 def frame_noise(image: npt.NDArray[np.float32]) -> list[float] | None: ...
 def probe_frame(path: str | Path) -> FrameProbe: ...

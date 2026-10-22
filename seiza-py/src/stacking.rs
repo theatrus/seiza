@@ -6,7 +6,7 @@ use seiza_stacking::{
     BatchStackOptions, CalibrationMasters, CancelSignal, DarkLevelScreening,
     DefectDetectionOptions, DefectMap, DeltaSigmaOptions, Demosaic, DrizzleOptions, DrizzleResult,
     FitsFrame, FlatStarMaskingOptions, FlatStarMaskingStatistics, FrameAcceptanceCriteria,
-    FrameDisposition, FrameWeighting, ImpulseFilterOptions, LinearImage, LiveStacker,
+    FrameDisposition, FrameWeighting, GpuOptions, ImpulseFilterOptions, LinearImage, LiveStacker,
     MasterBuildOptions, MasterDark, MasterFrameKind, MasterRejectionOptions, NormalizationMode,
     PipelineOptions, PipelineReport, RegistrationModel, RejectionMode, SnrSample, StackOptions,
     StackSnapshot, build_master_from_fits, build_master_from_fits_with_scratch, checkpoint_depths,
@@ -137,6 +137,152 @@ impl PyDefectMap {
     }
 }
 
+/// Which of stacking's passes may run on the GPU, in a build with one, and
+/// how: give it as ``gpu`` to :class:`StackOptions`, :func:`detect_defects`
+/// or :func:`integrate_registered_frames`. Every pass may by default;
+/// ``enabled=False`` keeps them all on the CPU. The GPU works in single
+/// precision, so its results differ from the CPU's by rounding.
+#[pyclass(from_py_object, frozen, eq, name = "GpuOptions", module = "seiza")]
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) struct PyGpuOptions {
+    inner: GpuOptions,
+}
+
+impl PyGpuOptions {
+    fn or_default(options: Option<Self>) -> GpuOptions {
+        options.map_or_else(GpuOptions::default, |options| options.inner)
+    }
+}
+
+#[pymethods]
+impl PyGpuOptions {
+    #[new]
+    #[pyo3(signature = (
+        *,
+        enabled=true,
+        defects=true,
+        debayer=true,
+        detection=true,
+        resampling=true,
+        accumulator=true,
+        integration=true,
+        concurrency=3,
+        trace=false
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        enabled: bool,
+        defects: bool,
+        debayer: bool,
+        detection: bool,
+        resampling: bool,
+        accumulator: bool,
+        integration: bool,
+        concurrency: usize,
+        trace: bool,
+    ) -> PyResult<Self> {
+        if concurrency == 0 {
+            return Err(PyValueError::new_err("concurrency must be at least 1"));
+        }
+        Ok(Self {
+            inner: GpuOptions {
+                enabled,
+                defects,
+                debayer,
+                detection,
+                resampling,
+                accumulator,
+                integration,
+                concurrency,
+                trace,
+            },
+        })
+    }
+
+    /// Whether to use the GPU at all.
+    #[getter]
+    fn enabled(&self) -> bool {
+        self.inner.enabled
+    }
+
+    /// Screen each light for the samples defect learning examines.
+    #[getter]
+    fn defects(&self) -> bool {
+        self.inner.defects
+    }
+
+    /// Debayer a Bayer frame's interior by VNG.
+    #[getter]
+    fn debayer(&self) -> bool {
+        self.inner.debayer
+    }
+
+    /// Detect each frame's stars.
+    #[getter]
+    fn detection(&self) -> bool {
+        self.inner.detection
+    }
+
+    /// Resample each frame, and its clip mask, onto the reference grid.
+    #[getter]
+    fn resampling(&self) -> bool {
+        self.inner.resampling
+    }
+
+    /// Hold a live stack's accumulator, and admit each frame there.
+    #[getter]
+    fn accumulator(&self) -> bool {
+        self.inner.accumulator
+    }
+
+    /// Run the rejection passes of reintegration and of
+    /// :func:`integrate_registered_frames`.
+    #[getter]
+    fn integration(&self) -> bool {
+        self.inner.integration
+    }
+
+    /// Frame calls the GPU takes at once; the rest wait without holding its
+    /// memory.
+    #[getter]
+    fn concurrency(&self) -> usize {
+        self.inner.concurrency
+    }
+
+    /// Print each GPU call's stages and their times to stderr.
+    #[getter]
+    fn trace(&self) -> bool {
+        self.inner.trace
+    }
+
+    fn __repr__(&self) -> String {
+        let GpuOptions {
+            enabled,
+            defects,
+            debayer,
+            detection,
+            resampling,
+            accumulator,
+            integration,
+            concurrency,
+            trace,
+        } = self.inner;
+        let python = |value: bool| if value { "True" } else { "False" };
+        format!(
+            "GpuOptions(enabled={}, defects={}, debayer={}, detection={}, resampling={}, \
+             accumulator={}, integration={}, concurrency={concurrency}, trace={})",
+            python(enabled),
+            python(defects),
+            python(debayer),
+            python(detection),
+            python(resampling),
+            python(accumulator),
+            python(integration),
+            python(trace),
+        )
+    }
+}
+
 #[pyclass(skip_from_py_object, frozen, name = "StackOptions", module = "seiza")]
 #[derive(Clone, Default)]
 pub(crate) struct PyStackOptions {
@@ -194,7 +340,8 @@ impl PyStackOptions {
         registration_model="similarity",
         weighting="equal",
         defects=None,
-        bin_factor=1
+        bin_factor=1,
+        gpu=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -228,6 +375,7 @@ impl PyStackOptions {
         weighting: &str,
         defects: Option<PyRef<'_, PyDefectMap>>,
         bin_factor: u32,
+        gpu: Option<PyGpuOptions>,
     ) -> PyResult<Self> {
         let weighting = match weighting {
             "equal" => FrameWeighting::Equal,
@@ -322,6 +470,7 @@ impl PyStackOptions {
         inner.demosaic = demosaic;
         inner.match_tolerances = crate::calibration::tolerances_or_default(match_tolerances);
         inner.bin_factor = bin_factor;
+        inner.gpu = PyGpuOptions::or_default(gpu);
         inner
             .validate()
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
@@ -410,6 +559,15 @@ impl PyStackOptions {
     #[getter]
     fn bin_factor(&self) -> u32 {
         self.inner.bin_factor
+    }
+
+    /// Which passes of the stack, and of its reintegration, may run on the
+    /// GPU.
+    #[getter]
+    fn gpu(&self) -> PyGpuOptions {
+        PyGpuOptions {
+            inner: self.inner.gpu,
+        }
     }
 
     /// The sensor defects repaired in every light before debayering, as
@@ -2305,7 +2463,8 @@ fn stack_fits(
 /// drift, for a star to be told from a defect. A light that cannot be read
 /// or calibrated, or of another size than the first, is passed over, and
 /// fewer than three examined lights give an empty map. Give the map to
-/// :class:`StackOptions` to have it repaired in every light.
+/// :class:`StackOptions` to have it repaired in every light. ``gpu``, a
+/// :class:`GpuOptions`, says whether each light is screened on the GPU.
 #[pyfunction]
 #[pyo3(signature = (
     images,
@@ -2316,7 +2475,8 @@ fn stack_fits(
     dark_exposure_seconds=None,
     sigma=5.0,
     persistence=0.6,
-    maximum_frames=16
+    maximum_frames=16,
+    gpu=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn detect_defects(
@@ -2329,12 +2489,14 @@ fn detect_defects(
     sigma: f32,
     persistence: f32,
     maximum_frames: usize,
+    gpu: Option<PyGpuOptions>,
 ) -> PyResult<PyDefectMap> {
     validate_exposure_override(dark.as_ref(), dark_exposure_seconds, "dark")?;
     let options = DefectDetectionOptions {
         sigma,
         persistence,
         maximum_frames,
+        gpu: PyGpuOptions::or_default(gpu),
     };
     py.detach(move || {
         let calibration = load_calibration(bias, dark, flat, dark_exposure_seconds)?;
@@ -2619,7 +2781,9 @@ impl PyIntegratedFrame {
 /// input, each is read once per pass instead, and must read the same each
 /// time. ``frame_weights`` gives one list per input with one positive
 /// weight per channel; left out, every frame weighs the same.
-/// ``minimum_sigma`` is a noise floor in the frames' units. Returns the
+/// ``minimum_sigma`` is a noise floor in the frames' units. ``gpu``, a
+/// :class:`GpuOptions`, says whether the rejection passes may run on the
+/// GPU. Returns the
 /// stack, which writes with the first input's WCS, and what
 /// rejection did with each input. Raises :class:`StackError` when the
 /// inputs differ in shape or change between passes, or a chosen
@@ -2633,7 +2797,8 @@ impl PyIntegratedFrame {
     minimum_sigma=None,
     frame_weights=None,
     scratch_directory=None,
-    cancel=None
+    cancel=None,
+    gpu=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn integrate_registered_frames(
@@ -2645,11 +2810,13 @@ fn integrate_registered_frames(
     frame_weights: Option<Vec<Vec<f32>>>,
     scratch_directory: Option<PathBuf>,
     cancel: Option<Py<PyAny>>,
+    gpu: Option<PyGpuOptions>,
 ) -> PyResult<(PyStackSnapshot, Vec<PyIntegratedFrame>)> {
     let (signal, raised) = python_cancel_signal(cancel);
     let mut options = batch_options(sigma_low, sigma_high, scratch_directory)?;
     options.cancel = Some(signal);
     options.frame_weights = frame_weights;
+    options.gpu = PyGpuOptions::or_default(gpu);
     if let Some(minimum_sigma) = minimum_sigma {
         options.minimum_sigma = minimum_sigma;
     }
@@ -2951,6 +3118,7 @@ fn frame_noise(py: Python<'_>, image: PyReadonlyArrayDyn<'_, f32>) -> PyResult<O
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyStackOptions>()?;
+    module.add_class::<PyGpuOptions>()?;
     module.add_class::<PyDefectMap>()?;
     module.add_function(wrap_pyfunction!(detect_defects, module)?)?;
     module.add_class::<PyFrameDisposition>()?;

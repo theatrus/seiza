@@ -289,6 +289,7 @@ impl Run<'_> {
                     rows * row_samples,
                     WEIGHTED.then_some((flat.as_slice(), C)),
                     rejection.gpu_tables(),
+                    &options.gpu,
                 )
             })
             .flatten();

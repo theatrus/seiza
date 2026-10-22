@@ -3291,8 +3291,9 @@ pub unsafe extern "C" fn seiza_stack_choose_reference_json(
 /// moved on the sensor, by dithering or drift, for a star to be told from a
 /// defect. Pass null or empty `options_json` for the defaults; its fields
 /// are `seiza_stacking::DefectDetectionOptions`'s: `"sigma"` (5),
-/// `"persistence"` (0.6, the fraction of lights) and `"maximum_frames"` (16,
-/// at least 3). A light that cannot be read or calibrated, or of another
+/// `"persistence"` (0.6, the fraction of lights), `"maximum_frames"` (16,
+/// at least 3) and `"gpu"`, as for [`seiza_live_stacker_open_fits`], whose
+/// `"defects"` screens each light on the GPU. A light that cannot be read or calibrated, or of another
 /// size than the first, is passed over.
 ///
 /// Returns owned schema-1 JSON whose `defects` holds `width`, `height`,
@@ -3378,10 +3379,16 @@ pub unsafe extern "C" fn seiza_stack_detect_defects_json(
 /// `"interpolation": "bilinear" | "lanczos3"`,
 /// `"normalization": {"mode": "local-background", "options": {"tile_size": 256}}`,
 /// `"weighting": {"mode": "inverse-noise-variance"}`,
-/// `"registration": {"model": "quadratic"}`, or
+/// `"registration": {"model": "quadratic"}`,
 /// `"match_tolerances": {"rotation_deg": 5.0}`, the gate the reference and
 /// every pushed light are judged under against the masters (tolerances left
-/// out keep their defaults). All files
+/// out keep their defaults), or `"gpu": {"enabled": false}`, which keeps
+/// every pass of the stack and its reintegration on the CPU. `"gpu"` names
+/// the passes that may run on the GPU, each `true` by default: `"defects"`,
+/// `"debayer"`, `"detection"`, `"resampling"`, `"accumulator"` and
+/// `"integration"`; with `"concurrency"`, the frame calls the GPU takes at
+/// once (3), and `"trace"`, which prints each GPU call's timings to stderr.
+/// All files
 /// are fully read during this call and are not kept open afterward.
 /// Local-background offsets use median paired residuals after applying the
 /// gain, preserving shared nebular structure. Mosaic reintegration uses up
@@ -8892,6 +8899,25 @@ mod tests {
         assert_eq!(returned, expected);
         assert_eq!(returned.excess().len(), hot.len());
 
+        // Screened on the CPU alone, the same map.
+        let cpu = CString::new(r#"{"gpu": {"enabled": false}}"#).unwrap();
+        let raw = unsafe {
+            seiza_stack_detect_defects_json(
+                paths_json.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                0.0,
+                cpu.as_ptr(),
+                &mut error,
+            )
+        };
+        assert!(error.is_null());
+        let on_cpu: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(raw) }.to_str().unwrap()).unwrap();
+        unsafe { seiza_string_free(raw) };
+        assert_eq!(on_cpu["defects"], response["defects"]);
+
         // The map goes into a stack's options as it came.
         let options =
             CString::new(serde_json::json!({ "defects": response["defects"] }).to_string())
@@ -9075,6 +9101,23 @@ mod tests {
         .unwrap();
         let options = stack_options(documented.as_ptr()).unwrap();
         assert_eq!(options.demosaic, seiza_stacking::Demosaic::Bilinear);
+        let gpu = std::ffi::CString::new(
+            r#"{"gpu": {"debayer": false, "concurrency": 2, "trace": true}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            stack_options(gpu.as_ptr()).unwrap().gpu,
+            seiza_stacking::GpuOptions {
+                debayer: false,
+                concurrency: 2,
+                trace: true,
+                ..seiza_stacking::GpuOptions::default()
+            }
+        );
+        let off = std::ffi::CString::new(r#"{"gpu": {"enabled": false}}"#).unwrap();
+        assert!(!stack_options(off.as_ptr()).unwrap().gpu.enabled);
+        let none = std::ffi::CString::new(r#"{"gpu": {"concurrency": 0}}"#).unwrap();
+        assert!(stack_options(none.as_ptr()).is_err());
         let superpixel =
             std::ffi::CString::new(r#"{"demosaic": "superpixel", "bin_factor": 2}"#).unwrap();
         assert_eq!(
@@ -12783,6 +12826,40 @@ mod tests {
         assert_eq!(frames[2]["finiteSamples"], width * height - 1);
         assert!(frames[2]["integratedSamples"].as_u64().unwrap() < (width * height - 1) as u64);
         assert_eq!(frames[0]["finiteSamples"], width * height);
+
+        // The request says where the rejection passes may run: on the CPU
+        // alone, the same stack; a pass it does not know is refused.
+        for (gpu, works) in [
+            (json!({"enabled": false}), true),
+            (json!({"bands": false}), false),
+        ] {
+            let request = CString::new(json!({"inputs": inputs, "gpu": gpu}).to_string()).unwrap();
+            let mut error = ptr::null_mut();
+            let integrated = unsafe {
+                seiza_stack_integrate_registered_json(
+                    request.as_ptr(),
+                    ptr::null(),
+                    None,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    &mut error,
+                )
+            };
+            assert_eq!(integrated.is_null(), !works, "{gpu}");
+            if works {
+                let bits = unsafe { &*integrated }
+                    .snapshot
+                    .image
+                    .data
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>();
+                assert_eq!(bits, expected_bits);
+                unsafe { seiza_stack_snapshot_free(integrated) };
+            } else {
+                unsafe { seiza_string_free(error) };
+            }
+        }
 
         // It writes, and never over an input.
         let output = directory.path().join("stack.fits");
@@ -18215,6 +18292,8 @@ struct RegisteredIntegrationRequest {
     frame_weights: Option<Vec<Vec<f32>>>,
     #[serde(default)]
     scratch_directory: Option<String>,
+    #[serde(default)]
+    gpu: seiza_stacking::GpuOptions,
 }
 
 /// What the final pass did with each input, in request order.
@@ -18245,7 +18324,9 @@ struct RegisteredFrameResponse {
 /// `minimumSigma` (a noise floor in the frames' units, 1e-6 by default) and
 /// `frameWeights` (one list per input with one positive weight per channel,
 /// as a live stack's diagnostics give them; left out, every frame weighs
-/// the same) and `scratchDirectory`. Each input is read through
+/// the same), `scratchDirectory` and `gpu`, as for
+/// [`seiza_live_stacker_open_fits`], whose `"integration"` runs the
+/// rejection passes on the GPU. Each input is read through
 /// seiza-image-io once and kept in a scratch file, four bytes per sample,
 /// in a new directory inside `scratchDirectory`, an existing writable
 /// directory, or the system temporary directory; the three passes then read
@@ -18301,6 +18382,7 @@ pub unsafe extern "C" fn seiza_stack_integrate_registered_json(
                 .map(|signal| CancelSignal::from(Arc::clone(&signal.cancelled))),
             frame_weights: request.frame_weights,
             scratch_directory: request.scratch_directory.map(PathBuf::from),
+            gpu: request.gpu,
             ..seiza_stacking::BatchStackOptions::default()
         };
         if let Some(minimum_sigma) = request.minimum_sigma {

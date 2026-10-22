@@ -765,6 +765,7 @@ triangle_tilt_analysis = { c = "seiza_stars_detect_luma_u16_json" }
 # stacking and colour
 StackOptions = { none = "stack options; C calls take them as JSON fields" }
 DefectMap = { none = "a defect map; C hosts pass the JSON seiza_stack_detect_defects_json returns, or their own, as the stack options' defects" }
+GpuOptions = { none = "GPU options; C calls take them as the gpu field of their options or request JSON" }
 FlatStarMasking = { none = "flat star masking options; C takes them as JSON (MasterBuildRequest.flatStarMasking)" }
 stack_fits = { none = "C hosts take the same steps with the live stacker: seiza_stack_choose_reference_json, open, push_fits_pipelined and finish" }
 

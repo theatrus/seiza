@@ -75,6 +75,10 @@ pub struct DefectDetectionOptions {
     /// Most lights examined; a longer list is sampled evenly across it. At
     /// least three.
     pub maximum_frames: usize,
+    /// Whether each light's screen may run on the GPU, as
+    /// [`crate::GpuOptions::defects`] says. The default is not serialized.
+    #[serde(default, skip_serializing_if = "crate::GpuOptions::is_default")]
+    pub gpu: crate::GpuOptions,
 }
 
 impl Default for DefectDetectionOptions {
@@ -83,6 +87,7 @@ impl Default for DefectDetectionOptions {
             sigma: 5.0,
             persistence: 0.6,
             maximum_frames: 16,
+            gpu: crate::GpuOptions::default(),
         }
     }
 }
@@ -101,7 +106,7 @@ impl DefectDetectionOptions {
                  and at least {MINIMUM_DEFECT_FRAMES} frames"
             )));
         }
-        Ok(())
+        self.gpu.validate()
     }
 }
 
@@ -361,7 +366,8 @@ pub fn detect_defects(
                 calibration
                     .apply(&mut frame.image, frame.exposure_seconds, frame.bayer)
                     .ok()?;
-                let deviations = frame_deviations(&frame.image, frame.bayer, options.sigma)?;
+                let deviations =
+                    frame_deviations(&frame.image, frame.bayer, options.sigma, &options.gpu)?;
                 Some((
                     (frame.image.width, frame.image.height, frame.image.channels),
                     frame.exposure_seconds,
@@ -558,22 +564,14 @@ fn steady_excess(found: &[(f32, f32, Option<f64>)], exposure_seconds: Option<f64
 /// The samples of one calibrated frame that stand more than `sigma` from
 /// the median of their eight same-plane neighbours, both in the frame's
 /// noise and in the spread of the 24 samples around them. `None` when the
-/// frame is too small or its noise cannot be measured.
+/// frame is too small or its noise cannot be measured. Screened on the GPU
+/// when `gpu` allows it and one is in use, or else by examining every
+/// sample: the same deviations either way.
 fn frame_deviations(
     image: &LinearImage,
     bayer: Option<BayerLayout>,
     sigma: f32,
-) -> Option<Vec<Deviation>> {
-    deviations_screened(image, bayer, sigma, true)
-}
-
-/// [`frame_deviations`], screened on the GPU when `on_gpu` and one is in
-/// use, or else by examining every sample.
-fn deviations_screened(
-    image: &LinearImage,
-    bayer: Option<BayerLayout>,
-    sigma: f32,
-    on_gpu: bool,
+    gpu: &crate::GpuOptions,
 ) -> Option<Vec<Deviation>> {
     let step = if bayer.is_some() && image.channels == 1 {
         2
@@ -686,10 +684,7 @@ fn deviations_screened(
     // `examine` does first, and flags the few it cannot rule out, so only
     // those are examined here: the same deviations, in the same order.
     #[cfg(feature = "gpu")]
-    if let Some(flags) = on_gpu
-        .then(|| gpu_candidates(image, step, sigma, &noise))
-        .flatten()
-    {
+    if let Some(flags) = gpu_candidates(image, step, sigma, &noise, gpu) {
         const WORDS: usize = 1024;
         let found = flags
             .par_chunks(WORDS)
@@ -711,7 +706,7 @@ fn deviations_screened(
         return Some(found);
     }
     #[cfg(not(feature = "gpu"))]
-    let _ = on_gpu;
+    let _ = gpu;
     let found = (0..height)
         .into_par_iter()
         .flat_map_iter(|y| {
@@ -726,10 +721,16 @@ fn deviations_screened(
 /// The GPU's screen for [`frame_deviations`]: a bit for each sample, set
 /// where its distance from its same-plane neighbours' extremes may pass
 /// `sigma` times its plane's noise. `None` when the frame is small, the
-/// thresholds are not all finite (the CPU then examines everything), or no
-/// GPU is in use.
+/// thresholds are not all finite (the CPU then examines everything), `gpu`
+/// keeps the screen on the CPU, or no GPU is in use.
 #[cfg(feature = "gpu")]
-fn gpu_candidates(image: &LinearImage, step: usize, sigma: f32, noise: &[f32]) -> Option<Vec<u32>> {
+fn gpu_candidates(
+    image: &LinearImage,
+    step: usize,
+    sigma: f32,
+    noise: &[f32],
+    gpu: &crate::GpuOptions,
+) -> Option<Vec<u32>> {
     // As `examine` forms them, so the GPU compares against the same values.
     let thresholds: Vec<f32> = noise.iter().map(|&noise| sigma * noise).collect();
     if thresholds.len() > 4 || !thresholds.iter().all(|threshold| threshold.is_finite()) {
@@ -741,6 +742,7 @@ fn gpu_candidates(image: &LinearImage, step: usize, sigma: f32, noise: &[f32]) -
         &image.data,
         (image.width, image.height, image.channels, step),
         padded,
+        gpu,
     )
 }
 
@@ -955,7 +957,8 @@ mod tests {
             let image = screened_field(1101, 1000, channels);
             let step = if bayer.is_some() { 2 } else { 1 };
             let noise = plane_noise(&image, step).unwrap();
-            let flags = gpu_candidates(&image, step, sigma, &noise).expect("the GPU screens");
+            let flags = gpu_candidates(&image, step, sigma, &noise, &crate::GpuOptions::default())
+                .expect("the GPU screens");
             let (width, height) = (image.width, image.height);
             let planes = step * step;
             let (mut kept, mut flagged) = (0, 0);
@@ -1000,8 +1003,10 @@ mod tests {
             }
             eprintln!("{channels} channel(s), step {step}: {kept} kept, {flagged} flagged");
             assert!(kept > 1000 && flagged <= kept + kept / 100);
-            let screened = deviations_screened(&image, bayer, sigma, true).unwrap();
-            let examined = deviations_screened(&image, bayer, sigma, false).unwrap();
+            let screened =
+                frame_deviations(&image, bayer, sigma, &crate::GpuOptions::default()).unwrap();
+            let examined =
+                frame_deviations(&image, bayer, sigma, &crate::GpuOptions::cpu()).unwrap();
             assert!(!examined.is_empty());
             assert_eq!(screened.len(), examined.len());
             for (a, b) in screened.iter().zip(&examined) {

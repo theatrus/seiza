@@ -10,7 +10,7 @@ use seiza_fits::{HeaderValue, WriteHeaderCard};
 use seiza_stacking::{
     BatchStackOptions, CalibrationMasters, CfaIntegration, Continue, DefectDetectionOptions,
     Demosaic, DrizzleOptions, FrameAcceptanceCriteria, FrameDisposition, FrameWeighting,
-    ImpulseFilterOptions, Interpolation, LinearImage, LiveStacker, MasterBuildOptions,
+    GpuOptions, ImpulseFilterOptions, Interpolation, LinearImage, LiveStacker, MasterBuildOptions,
     MasterFrameKind, NormalizationMode, RegistrationModel, RejectionMode, StackOptions,
     StackSnapshot, build_master_from_fits, detect_defects, write_master_fits_f32,
     write_processed_image_fits_f32,
@@ -777,8 +777,9 @@ fn registered_frames_a_host_integrates_keep_their_output() {
 
 /// Frames large enough that, with the `gpu` feature and a GPU present,
 /// they resample there, and a reintegration whose bands integrate there:
-/// the GPU's single-precision work must stay within this file's tolerance
-/// of the CPU's, which recorded the summaries (`SEIZA_GPU=off`).
+/// stacked on the CPU, which recorded the summaries, and where the GPU may,
+/// whose single-precision work must stay within this file's tolerance of
+/// the CPU's.
 #[test]
 fn a_stack_large_enough_for_the_gpu_keeps_its_output() {
     let stars = large_stars();
@@ -813,31 +814,38 @@ fn a_stack_large_enough_for_the_gpu_keeps_its_output() {
             path
         })
         .collect::<Vec<_>>();
-    let mut stacker =
-        LiveStacker::open_fits(&paths[0], None, None, None, None, StackOptions::default()).unwrap();
-    stacker.retain_frames_for_reintegration(None).unwrap();
-    for path in &paths[1..] {
-        admit(stacker.push_fits(path).unwrap());
+    for (on, gpu) in [("CPU", GpuOptions::cpu()), ("GPU", GpuOptions::default())] {
+        eprintln!("on the {on}");
+        let options = StackOptions {
+            gpu,
+            ..StackOptions::default()
+        };
+        let mut stacker =
+            LiveStacker::open_fits(&paths[0], None, None, None, None, options).unwrap();
+        stacker.retain_frames_for_reintegration(None).unwrap();
+        for path in &paths[1..] {
+            admit(stacker.push_fits(path).unwrap());
+        }
+        check(
+            "LARGE_LIVE",
+            &summary(&stacker.snapshot().unwrap().image),
+            LARGE_LIVE,
+        );
+        let reintegrated = stacker
+            .reintegrate(&BatchStackOptions::default(), |_, _, _| {})
+            .unwrap();
+        check(
+            "LARGE_REINTEGRATED",
+            &summary(&reintegrated.snapshot.image),
+            LARGE_REINTEGRATED,
+        );
     }
-    check(
-        "LARGE_LIVE",
-        &summary(&stacker.snapshot().unwrap().image),
-        LARGE_LIVE,
-    );
-    let reintegrated = stacker
-        .reintegrate(&BatchStackOptions::default(), |_, _, _| {})
-        .unwrap();
-    check(
-        "LARGE_REINTEGRATED",
-        &summary(&reintegrated.snapshot.image),
-        LARGE_REINTEGRATED,
-    );
 }
 
 /// RGGB lights as large as [`a_stack_large_enough_for_the_gpu_keeps_its_output`]'s,
 /// which with a GPU present demosaic there (VNG) as well as resample: a
-/// colour stack must stay within this file's tolerance of the CPU's, which
-/// recorded the summary (`SEIZA_GPU=off`).
+/// colour stack, on the CPU, which recorded the summary, and where the GPU
+/// may, within this file's tolerance of the CPU's.
 #[test]
 fn a_debayered_stack_large_enough_for_the_gpu_keeps_its_output() {
     const SKY: [f32; 3] = [400.0, 300.0, 200.0];
@@ -863,8 +871,15 @@ fn a_debayered_stack_large_enough_for_the_gpu_keeps_its_output() {
             path
         })
         .collect::<Vec<_>>();
-    let snapshot = fits_stack(&paths, StackOptions::default());
-    check("LARGE_BAYER", &summary(&snapshot.image), LARGE_BAYER);
+    for (on, gpu) in [("CPU", GpuOptions::cpu()), ("GPU", GpuOptions::default())] {
+        eprintln!("on the {on}");
+        let options = StackOptions {
+            gpu,
+            ..StackOptions::default()
+        };
+        let snapshot = fits_stack(&paths, options);
+        check("LARGE_BAYER", &summary(&snapshot.image), LARGE_BAYER);
+    }
 }
 
 const LARGE_WIDTH: usize = 1280;

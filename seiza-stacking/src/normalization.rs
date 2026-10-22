@@ -1699,6 +1699,7 @@ mod tests {
                     region,
                     &identity,
                     crate::gpu::GpuSampling::Bilinear,
+                    &crate::GpuOptions::default(),
                 )
                 .expect("the GPU resamples");
                 let mut frame = crate::gpu::take_resident(

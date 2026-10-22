@@ -1136,8 +1136,9 @@ char *seiza_stack_choose_reference_json(const char *paths_json,
  moved on the sensor, by dithering or drift, for a star to be told from a
  defect. Pass null or empty `options_json` for the defaults; its fields
  are `seiza_stacking::DefectDetectionOptions`'s: `"sigma"` (5),
- `"persistence"` (0.6, the fraction of lights) and `"maximum_frames"` (16,
- at least 3). A light that cannot be read or calibrated, or of another
+ `"persistence"` (0.6, the fraction of lights), `"maximum_frames"` (16,
+ at least 3) and `"gpu"`, as for [`seiza_live_stacker_open_fits`], whose
+ `"defects"` screens each light on the GPU. A light that cannot be read or calibrated, or of another
  size than the first, is passed over.
 
  Returns owned schema-1 JSON whose `defects` holds `width`, `height`,
@@ -1177,10 +1178,16 @@ char *seiza_stack_detect_defects_json(const char *paths_json,
  `"interpolation": "bilinear" | "lanczos3"`,
  `"normalization": {"mode": "local-background", "options": {"tile_size": 256}}`,
  `"weighting": {"mode": "inverse-noise-variance"}`,
- `"registration": {"model": "quadratic"}`, or
+ `"registration": {"model": "quadratic"}`,
  `"match_tolerances": {"rotation_deg": 5.0}`, the gate the reference and
  every pushed light are judged under against the masters (tolerances left
- out keep their defaults). All files
+ out keep their defaults), or `"gpu": {"enabled": false}`, which keeps
+ every pass of the stack and its reintegration on the CPU. `"gpu"` names
+ the passes that may run on the GPU, each `true` by default: `"defects"`,
+ `"debayer"`, `"detection"`, `"resampling"`, `"accumulator"` and
+ `"integration"`; with `"concurrency"`, the frame calls the GPU takes at
+ once (3), and `"trace"`, which prints each GPU call's timings to stderr.
+ All files
  are fully read during this call and are not kept open afterward.
  Local-background offsets use median paired residuals after applying the
  gain, preserving shared nebular structure. Mosaic reintegration uses up
@@ -3213,7 +3220,9 @@ bool seiza_calibration_apply_residual_flat_response(const float *response,
  `minimumSigma` (a noise floor in the frames' units, 1e-6 by default) and
  `frameWeights` (one list per input with one positive weight per channel,
  as a live stack's diagnostics give them; left out, every frame weighs
- the same) and `scratchDirectory`. Each input is read through
+ the same), `scratchDirectory` and `gpu`, as for
+ [`seiza_live_stacker_open_fits`], whose `"integration"` runs the
+ rejection passes on the GPU. Each input is read through
  seiza-image-io once and kept in a scratch file, four bytes per sample,
  in a new directory inside `scratchDirectory`, an existing writable
  directory, or the system temporary directory; the three passes then read

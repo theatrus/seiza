@@ -156,20 +156,26 @@ registration with it.
 
 - Build without the `gpu` feature (`default-features = false`) for a
   CPU-only crate without wgpu.
-- `SEIZA_GPU_ACCUMULATOR=off` keeps the live accumulator on the CPU,
-  `SEIZA_GPU_DEBAYER=off` VNG debayering, `SEIZA_GPU_DETECT=off` star
-  detection, and `SEIZA_GPU_DEFECTS=off` defect learning's screen.
-- `SEIZA_GPU_CALLS` sets how many frame calls (debayering, detection,
+- Each request carries a `GpuOptions`, which says which passes may run on
+  the GPU: `StackOptions::gpu` for a live stack and its reintegration,
+  `BatchStackOptions::gpu` for `integrate_registered_frames_banded` (and to
+  narrow a reintegration's rejection passes), and
+  `DefectDetectionOptions::gpu` for defect learning. The C ABI takes it as
+  the `gpu` object of the options or request JSON, Python as
+  `seiza.GpuOptions`, and the CLI's `stack` as `--no-gpu` and
+  `--cpu-pass`. `enabled: false` keeps everything on the CPU and never
+  opens the device; `accumulator`, `debayer`, `detection`, `defects`,
+  `resampling` and `integration` keep one pass each.
+- `concurrency` sets how many frame calls (debayering, detection,
   resampling, screening) run on the GPU at once, three by default: a frame
   waiting for one holds no GPU buffer.
-- `SEIZA_GPU_TRACE=1` prints every GPU call's stages (grid, upload,
-  kernel, copy out) to stderr, and the time opening the device took (12 ms
-  on the M4 Max, 46 ms on an Iris Xe), to see where the time goes on a
-  machine.
-- `SEIZA_GPU=off` (or `0`, `cpu`), set before the first large frame, keeps
-  everything on the CPU. `SEIZA_GPU_BANDS=off` keeps the final integration
-  there while resampling stays on the GPU. `WGPU_BACKEND` chooses the
-  backend, as wgpu reads it.
+- `trace` prints every GPU call's stages (grid, upload, kernel, copy out)
+  to stderr, and the time opening the device took (12 ms on the M4 Max,
+  46 ms on an Iris Xe), to see where the time goes on a machine.
+- The options decide where the arithmetic runs, which moves results by
+  rounding at most, so a stack's configuration fingerprint leaves them out;
+  its context keeps them. `WGPU_BACKEND` chooses the backend, as wgpu reads
+  it.
 - No adapter, a software adapter, or a frame too large for a GPU buffer
   keeps the work on the CPU. A GPU error (device lost, validation) is
   caught, logged once, and turns the GPU off for the rest of the process;
