@@ -1,19 +1,18 @@
-//! Clamped Lanczos-3 resampling on the GPU, through wgpu: Metal, Vulkan or
-//! Direct3D 12, whichever the platform has.
-//!
-//! [`resample_lanczos3`] does what `registration::resample_region_with_inverse`
-//! does for [`crate::Interpolation::Lanczos3`], in f32: the same taps, weight
-//! table, clamping rule and bilinear fallback, but the source position of
-//! each pixel interpolated from a coarse grid evaluated in f64, and the
-//! arithmetic in single precision. A sample differs from the CPU's by a few
-//! thousandths of the frame's noise at most, except where a tap span lies
-//! on the clamping threshold and the two take different branches.
+//! Stacking's heavy passes on the GPU, through wgpu: Metal, Vulkan or
+//! Direct3D 12, whichever the platform has. [`vng`] debayers a Bayer
+//! mosaic's interior, [`resample`] registers a frame onto the reference grid
+//! (clamped Lanczos-3 or bilinear), [`GpuMoments`] holds a live stack's
+//! accumulator and [`BandSession`] runs the final integration's rejection
+//! passes, each as its CPU twin does in f32. A resampled sample differs from
+//! the CPU's by a few thousandths of the frame's noise at most, except where
+//! a tap span lies on the clamping threshold and the two take different
+//! branches; `docs/design/gpu-stacking.md` gives each stage's accuracy.
 //!
 //! The device is opened once, the first time a frame large enough to gain
-//! from it is resampled. Setting `SEIZA_GPU=off` (or `0`, `cpu`) before then
-//! keeps every resample on the CPU, as a build without the `gpu` feature
-//! does. When no adapter is found, or the GPU fails, resampling stays on the
-//! CPU; a failure is logged once.
+//! from it arrives. Setting `SEIZA_GPU=off` (or `0`, `cpu`) before then keeps
+//! everything on the CPU, as a build without the `gpu` feature does. When no
+//! adapter is found, or the GPU fails, the work stays on the CPU; a failure
+//! is logged once.
 use crate::{LinearImage, ReferenceRegion};
 use rayon::prelude::*;
 use std::sync::OnceLock;
@@ -66,6 +65,9 @@ struct Gpu {
     classify_pipeline: wgpu::ComputePipeline,
     integrate_pipeline: wgpu::ComputePipeline,
     accumulate_layout: wgpu::BindGroupLayout,
+    balance_pipeline: wgpu::ComputePipeline,
+    vng_pipeline: wgpu::ComputePipeline,
+    vng_layout: wgpu::BindGroupLayout,
     weights: wgpu::Buffer,
     /// An integrated GPU, which shares memory with the CPU, reads the
     /// source and writes the output in buffers the CPU maps directly;
@@ -75,6 +77,27 @@ struct Gpu {
     /// Frame-sized buffers kept between calls: making a new one maps and
     /// clears fresh memory, which took longer than the upload itself.
     pool: std::sync::Mutex<Vec<(wgpu::BufferUsages, wgpu::Buffer)>>,
+}
+
+/// Bytes each core copies at a time into or out of a mapped buffer.
+const COPY_CHUNK: usize = 1 << 20;
+
+/// A mapped buffer's words, copied out on every core: one alone reads
+/// write-combined memory, as an integrated GPU's can be, several times
+/// slower. The words go straight into the vector rather than over zeros
+/// written first, which on a frame cost as much as the copy.
+fn copy_out<T: bytemuck::Pod + Send + Sync>(view: &[u8]) -> Vec<T> {
+    let mut out = Vec::new();
+    match bytemuck::try_cast_slice::<u8, T>(view) {
+        Ok(words) => words
+            .par_iter()
+            .with_min_len(COPY_CHUNK / std::mem::size_of::<T>())
+            .copied()
+            .collect_into_vec(&mut out),
+        // A mapping is aligned to 8 bytes, so this is not reached.
+        Err(_) => out = bytemuck::pod_collect_to_vec(view),
+    }
+    out
 }
 
 /// Bytes the pool keeps at most, past which a returned buffer is dropped.
@@ -346,6 +369,45 @@ impl Gpu {
         };
         let classify_pipeline = accumulate_pipeline("classify");
         let integrate_pipeline = accumulate_pipeline("integrate");
+        let vng_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("vng"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("gpu/vng.wgsl").into()),
+        });
+        let vng_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vng"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                storage(1, true),
+                storage(2, false),
+                storage(3, false),
+            ],
+        });
+        let vng_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("vng"),
+            bind_group_layouts: &[Some(&vng_layout)],
+            immediate_size: 0,
+        });
+        let vng_pipeline = |entry: &str| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(entry),
+                layout: Some(&vng_pipeline_layout),
+                module: &vng_module,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        let balance_pipeline = vng_pipeline("balance");
+        let vng_pipeline = vng_pipeline("main");
         let table = crate::registration::lanczos3_table();
         let weights = wgpu::util::DeviceExt::create_buffer_init(
             &device,
@@ -365,6 +427,9 @@ impl Gpu {
             classify_pipeline,
             integrate_pipeline,
             accumulate_layout,
+            balance_pipeline,
+            vng_pipeline,
+            vng_layout,
             weights,
             mapped,
             max_buffer: limits
@@ -417,6 +482,121 @@ impl Gpu {
         if held + buffer.size() <= POOL_BYTES {
             pool.push((usage, buffer));
         }
+    }
+
+    /// The usage of a buffer the host fills and the GPU reads.
+    fn input_usage(&self) -> wgpu::BufferUsages {
+        wgpu::BufferUsages::STORAGE
+            | if self.mapped {
+                wgpu::BufferUsages::MAP_WRITE
+            } else {
+                wgpu::BufferUsages::COPY_DST
+            }
+    }
+
+    /// A pooled buffer of [`Self::input_usage`] holding `data`.
+    fn upload(&self, label: &str, data: &[f32]) -> Result<wgpu::Buffer, String> {
+        let bytes = std::mem::size_of_val(data) as u64;
+        let buffer = self.take(label, bytes, self.input_usage());
+        if self.mapped {
+            buffer
+                .slice(..bytes)
+                .map_async(wgpu::MapMode::Write, |_| {});
+            self.wait()?;
+            // Every core copies in, each through a view of its own part:
+            // views of disjoint parts may be held at once.
+            let copied = bytemuck::cast_slice::<f32, u8>(data)
+                .par_chunks(COPY_CHUNK)
+                .enumerate()
+                .try_for_each(|(index, chunk)| {
+                    let start = (index * COPY_CHUNK) as u64;
+                    buffer
+                        .slice(start..start + chunk.len() as u64)
+                        .get_mapped_range_mut()
+                        .map(|mut view| view.slice(..).copy_from_slice(chunk))
+                });
+            buffer.unmap();
+            copied.map_err(|error| error.to_string())?;
+        } else {
+            self.queue
+                .write_buffer(&buffer, 0, bytemuck::cast_slice(data));
+        }
+        Ok(buffer)
+    }
+
+    /// Run `passes`, each a pipeline of `layout` over its workgroups, in
+    /// order, their bindings `inputs` and then an output of
+    /// `output_samples`, and read the output back.
+    fn compute(
+        &self,
+        layout: &wgpu::BindGroupLayout,
+        passes: &[(&wgpu::ComputePipeline, (u32, u32))],
+        inputs: &[&wgpu::Buffer],
+        output_samples: usize,
+        trace: &mut Trace,
+    ) -> Result<Vec<f32>, String> {
+        let output_bytes = (output_samples * 4) as u64;
+        let output_usage = wgpu::BufferUsages::STORAGE
+            | if self.mapped {
+                wgpu::BufferUsages::MAP_READ
+            } else {
+                wgpu::BufferUsages::COPY_SRC
+            };
+        let output = self.take("output", output_bytes, output_usage);
+        let readback_usage = wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST;
+        let readback = (!self.mapped).then(|| self.take("readback", output_bytes, readback_usage));
+        let entries: Vec<wgpu::BindGroupEntry> = inputs
+            .iter()
+            .chain([&&output])
+            .enumerate()
+            .map(|(binding, buffer)| wgpu::BindGroupEntry {
+                binding: binding as u32,
+                resource: buffer.as_entire_binding(),
+            })
+            .collect();
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout,
+            entries: &entries,
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_bind_group(0, &bind_group, &[]);
+            for &(pipeline, (columns, rows)) in passes {
+                pass.set_pipeline(pipeline);
+                pass.dispatch_workgroups(columns, rows, 1);
+            }
+        }
+        if let Some(readback) = &readback {
+            encoder.copy_buffer_to_buffer(&output, 0, readback, 0, output_bytes);
+        }
+        trace.mark("upload");
+        self.queue.submit([encoder.finish()]);
+        let read_from = readback.as_ref().unwrap_or(&output);
+        read_from
+            .slice(..output_bytes)
+            .map_async(wgpu::MapMode::Read, |_| {});
+        let result = self.wait().and_then(|()| {
+            trace.mark("kernel");
+            if FAILED.load(Ordering::Relaxed) {
+                return Err("the GPU failed".to_string());
+            }
+            let view = read_from
+                .slice(..output_bytes)
+                .get_mapped_range()
+                .map_err(|error| error.to_string())?;
+            let data = copy_out(&view);
+            drop(view);
+            read_from.unmap();
+            trace.mark("copy out");
+            Ok(data)
+        });
+        self.give(output_usage, output);
+        if let Some(readback) = readback {
+            self.give(readback_usage, readback);
+        }
+        result
     }
 
     fn wait(&self) -> Result<(), String> {
@@ -483,95 +663,20 @@ impl Gpu {
             bytemuck::cast_slice(grid),
             wgpu::BufferUsages::STORAGE,
         );
-        let source_usage = wgpu::BufferUsages::STORAGE
-            | if self.mapped {
-                wgpu::BufferUsages::MAP_WRITE
-            } else {
-                wgpu::BufferUsages::COPY_DST
-            };
-        let source_buffer = self.take("source", source_bytes, source_usage);
-        if self.mapped {
-            let range = source_buffer.slice(..source_bytes);
-            range.map_async(wgpu::MapMode::Write, |_| {});
-            self.wait()?;
-            range
-                .get_mapped_range_mut()
-                .map_err(|error| error.to_string())?
-                .copy_from_slice(bytemuck::cast_slice(&source.data));
-            source_buffer.unmap();
-        } else {
-            self.queue
-                .write_buffer(&source_buffer, 0, bytemuck::cast_slice(&source.data));
-        }
-        let output_usage = wgpu::BufferUsages::STORAGE
-            | if self.mapped {
-                wgpu::BufferUsages::MAP_READ
-            } else {
-                wgpu::BufferUsages::COPY_SRC
-            };
-        let output = self.take("output", output_bytes, output_usage);
-        let readback_usage = wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST;
-        let readback = (!self.mapped).then(|| self.take("readback", output_bytes, readback_usage));
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("resample"),
-            layout: &self.layout,
-            entries: &[
-                (0, &uniform),
-                (1, &source_buffer),
-                (2, &grid),
-                (3, &self.weights),
-                (4, &output),
-            ]
-            .map(|(binding, buffer)| wgpu::BindGroupEntry {
-                binding,
-                resource: buffer.as_entire_binding(),
-            }),
-        });
-        let mut encoder = self.device.create_command_encoder(&Default::default());
-        {
-            let mut pass = encoder.begin_compute_pass(&Default::default());
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(
-                (region.width as u32).div_ceil(16),
-                (region.height as u32).div_ceil(16),
-                1,
-            );
-        }
-        if let Some(readback) = &readback {
-            encoder.copy_buffer_to_buffer(&output, 0, readback, 0, output_bytes);
-        }
-        trace.mark("upload");
-        self.queue.submit([encoder.finish()]);
-        let read_from = readback.as_ref().unwrap_or(&output);
-        read_from
-            .slice(..output_bytes)
-            .map_async(wgpu::MapMode::Read, |_| {});
-        self.wait()?;
-        trace.mark("kernel");
-        if FAILED.load(Ordering::Relaxed) {
-            return Err("the GPU failed".into());
-        }
-        let view = read_from
-            .slice(..output_bytes)
-            .get_mapped_range()
-            .map_err(|error| error.to_string())?;
-        // Every core copies out: one alone reads write-combined memory, as
-        // an integrated GPU's can be, several times slower.
-        let mut data = vec![0.0_f32; output_samples];
-        let bytes: &mut [u8] = bytemuck::cast_slice_mut(&mut data);
-        bytes
-            .par_chunks_mut(1 << 20)
-            .zip(view.par_chunks(1 << 20))
-            .for_each(|(out, input)| out.copy_from_slice(input));
-        drop(view);
-        read_from.unmap();
-        trace.mark("copy out");
-        self.give(source_usage, source_buffer);
-        self.give(output_usage, output);
-        if let Some(readback) = readback {
-            self.give(readback_usage, readback);
-        }
+        let source_buffer = self.upload("source", &source.data)?;
+        let workgroups = (
+            (region.width as u32).div_ceil(16),
+            (region.height as u32).div_ceil(16),
+        );
+        let data = self.compute(
+            &self.layout,
+            &[(&self.pipeline, workgroups)],
+            &[&uniform, &source_buffer, &grid, &self.weights],
+            output_samples,
+            trace,
+        );
+        self.give(self.input_usage(), source_buffer);
+        let data = data?;
         LinearImage::new(region.width, region.height, channels, data)
             .map_err(|error| error.to_string())
     }
@@ -656,6 +761,99 @@ pub(crate) fn resample(
         Ok(image) => Some(image),
         Err(reason) => {
             log_once(&format!("resampling this frame on the CPU: {reason}"));
+            None
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct VngParams {
+    width: u32,
+    height: u32,
+    padding: [u32; 2],
+    balance: [f32; 4],
+    channels: [u32; 4],
+}
+
+/// VNG demosaicing of a `width` by `height` Bayer `mosaic` on the GPU, as
+/// `image::vng_rows` does it on the mosaic balanced by `balance`: the
+/// interleaved RGB of every pixel two or more from each edge, scaled back
+/// from the balance and with its own sample, and anything on the two-pixel
+/// border, which the caller fills. `channels` is the colour of each Bayer
+/// phase, column parity | row parity << 1. `None` when the CPU should: the
+/// mosaic is small, `SEIZA_GPU_DEBAYER=off`, or no GPU is in use.
+pub(crate) fn vng(
+    mosaic: &[f32],
+    (width, height): (usize, usize),
+    channels: [u32; 4],
+    balance: [f32; 3],
+) -> Option<Vec<f32>> {
+    if mosaic.len() < MINIMUM_SAMPLES
+        || width < 5
+        || height < 5
+        || std::env::var("SEIZA_GPU_DEBAYER").is_ok_and(|value| value == "off")
+    {
+        return None;
+    }
+    let gpu = gpu()?;
+    if (mosaic.len() as u64) * 12 > gpu.max_buffer {
+        return None;
+    }
+    let mut trace = Trace::new();
+    let params = VngParams {
+        width: width as u32,
+        height: height as u32,
+        padding: [0; 2],
+        balance: [balance[0], balance[1], balance[2], 1.0],
+        channels,
+    };
+    let init = |label: &str, contents: &[u8], usage: wgpu::BufferUsages| {
+        wgpu::util::DeviceExt::create_buffer_init(
+            &gpu.device,
+            &wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents,
+                usage,
+            },
+        )
+    };
+    let uniform = init(
+        "vng-params",
+        bytemuck::bytes_of(&params),
+        wgpu::BufferUsages::UNIFORM,
+    );
+    let balanced_bytes = (mosaic.len() * 4) as u64;
+    let balanced = gpu.take("balanced", balanced_bytes, wgpu::BufferUsages::STORAGE);
+    let result = gpu.upload("mosaic", mosaic).and_then(|source| {
+        let rgb = gpu.compute(
+            &gpu.vng_layout,
+            &[
+                (
+                    &gpu.balance_pipeline,
+                    ((width as u32).div_ceil(16), (height as u32).div_ceil(16)),
+                ),
+                (
+                    &gpu.vng_pipeline,
+                    (
+                        (width as u32 - 4).div_ceil(16),
+                        (height as u32 - 4).div_ceil(16),
+                    ),
+                ),
+            ],
+            &[&uniform, &source, &balanced],
+            mosaic.len() * 3,
+            &mut trace,
+        );
+        gpu.give(gpu.input_usage(), source);
+        rgb
+    });
+    gpu.give(wgpu::BufferUsages::STORAGE, balanced);
+    trace.print(&format!("vng {width}x{height}"));
+    match result {
+        Ok(rgb) => Some(rgb),
+        Err(reason) => {
+            log_once(&format!("debayering this frame on the CPU: {reason}"));
             None
         }
     }
@@ -1198,12 +1396,7 @@ impl GpuMoments {
     }
 
     fn frame_usage(&self) -> wgpu::BufferUsages {
-        wgpu::BufferUsages::STORAGE
-            | if self.gpu.mapped {
-                wgpu::BufferUsages::MAP_WRITE
-            } else {
-                wgpu::BufferUsages::COPY_DST
-            }
+        self.gpu.input_usage()
     }
 
     /// Classify `frame`, placed as `placement` says, against the moments:
@@ -1222,21 +1415,7 @@ impl GpuMoments {
         if let Some((buffer, _)) = self.frame.take() {
             gpu.give(self.frame_usage(), buffer);
         }
-        let buffer = gpu.take("frame", bytes, self.frame_usage());
-        if gpu.mapped {
-            let range = buffer.slice(..bytes);
-            range.map_async(wgpu::MapMode::Write, |_| {});
-            gpu.wait()?;
-            range
-                .get_mapped_range_mut()
-                .map_err(|error| error.to_string())?
-                .copy_from_slice(bytemuck::cast_slice(frame));
-            buffer.unmap();
-        } else {
-            gpu.queue
-                .write_buffer(&buffer, 0, bytemuck::cast_slice(frame));
-        }
-        self.frame = Some((buffer, bytes));
+        self.frame = Some((gpu.upload("frame", frame)?, bytes));
         trace.mark("upload");
         let counts = self.dispatch(placement, weights, rejection, true)?;
         trace.mark("classify");
@@ -1406,12 +1585,7 @@ impl GpuMoments {
                 .slice(..bytes)
                 .get_mapped_range()
                 .map_err(|error| error.to_string())?;
-            let mut out = vec![0_u32; self.samples];
-            let out_bytes: &mut [u8] = bytemuck::cast_slice_mut(&mut out);
-            out_bytes
-                .par_chunks_mut(1 << 20)
-                .zip(view.par_chunks(1 << 20))
-                .for_each(|(out, input)| out.copy_from_slice(input));
+            let out = copy_out::<u32>(&view);
             drop(view);
             staging.unmap();
             words.push(out);
@@ -1631,6 +1805,7 @@ mod tests {
             ("resample", include_str!("gpu/resample.wgsl")),
             ("bands", include_str!("gpu/bands.wgsl")),
             ("accumulate", include_str!("gpu/accumulate.wgsl")),
+            ("vng", include_str!("gpu/vng.wgsl")),
         ] {
             let module = naga::front::wgsl::parse_str(source)
                 .unwrap_or_else(|error| panic!("{name}: {}", error.emit_to_string(source)));

@@ -367,6 +367,24 @@ const LARGE_LIVE: &[f64] = &[
 ];
 
 #[rustfmt::skip]
+const LARGE_BAYER: &[f64] = &[
+    4.3709554e2, 7.3621421e2, 2.6103078e4, 3.2695387e2, 5.3528112e2, 1.8510148e4,
+    2.1808718e2, 3.5899090e2, 1.2386176e4, 4.0050531e2, 3.0018240e2, 2.0045538e2,
+    3.9962393e2, 2.9976782e2, 1.9975221e2, 3.9953403e2, 3.0012613e2, 1.9953230e2,
+    3.9951831e2, 2.9954590e2, 1.9981696e2, 4.0076828e2, 2.9883420e2, 1.9905986e2,
+    3.9881314e2, 2.9911264e2, 2.0006700e2, 3.9864709e2, 3.0036853e2, 1.9870906e2,
+    4.0169772e2, 3.0038361e2, 2.0111650e2, 4.0058640e2, 3.0095898e2, 2.0120891e2,
+    4.0081522e2, 3.0000491e2, 2.0044273e2, 4.0016983e2, 2.9984689e2, 1.9977567e2,
+    3.9921402e2, 2.9975696e2, 1.9996878e2, 3.9955930e2, 2.9950284e2, 1.9945724e2,
+    4.0122397e2, 3.0141617e2, 2.0101453e2, 3.9955362e2, 3.0063062e2, 2.0016751e2,
+    3.9889505e2, 3.0023480e2, 2.0014856e2, 4.0034567e2, 3.0036606e2, 2.0079869e2,
+    3.9922552e2, 2.9927734e2, 1.9887303e2, 3.9959268e2, 2.9980222e2, 1.9983990e2,
+    3.9948978e2, 2.9909891e2, 1.9988362e2, 3.9961865e2, 2.9905649e2, 1.9947746e2,
+    3.9930807e2, 2.9961392e2, 2.0005275e2, 3.9946231e2, 3.0006506e2, 2.0044939e2,
+    4.0022821e2, 3.0036121e2, 2.0021049e2, 4.0079575e2, 2.9973444e2, 1.9990431e2,
+];
+
+#[rustfmt::skip]
 const LARGE_REINTEGRATED: &[f64] = &[
     1.3750326e2, 4.2837601e2, 1.7889000e4, 9.7606865e1, 1.0074303e2, 1.0332143e2,
     1.0640565e2, 1.0970185e2, 1.0199506e2, 1.0470235e2, 1.0888734e2, 1.1142345e2,
@@ -763,22 +781,7 @@ fn registered_frames_a_host_integrates_keep_their_output() {
 /// of the CPU's, which recorded the summaries (`SEIZA_GPU=off`).
 #[test]
 fn a_stack_large_enough_for_the_gpu_keeps_its_output() {
-    const LARGE_WIDTH: usize = 1280;
-    const LARGE_HEIGHT: usize = 960;
-    let mut state = 0x6a09_e667_u32;
-    let mut next = || {
-        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        (state >> 8) as f32 / (1 << 24) as f32
-    };
-    let stars: Vec<(f32, f32, f32)> = (0..200)
-        .map(|_| {
-            (
-                8.0 + next() * (LARGE_WIDTH as f32 - 16.0),
-                8.0 + next() * (LARGE_HEIGHT as f32 - 16.0),
-                400.0 + next() * 20_000.0,
-            )
-        })
-        .collect();
+    let stars = large_stars();
     let directory = tempfile::tempdir().unwrap();
     let paths = SHIFTS
         .iter()
@@ -789,16 +792,7 @@ fn a_stack_large_enough_for_the_gpu_keeps_its_output() {
                 .map(|index| {
                     let (x, y) = ((index % LARGE_WIDTH) as f32, (index / LARGE_WIDTH) as f32);
                     let sky = 100.0 + 0.01 * x + 0.02 * y;
-                    let light: f32 = stars
-                        .iter()
-                        .filter(|star| {
-                            (star.0 - x + dx).abs() < 8.0 && (star.1 - y + dy).abs() < 8.0
-                        })
-                        .map(|&(star_x, star_y, flux)| {
-                            let (sx, sy) = (x - dx - star_x, y - dy - star_y);
-                            flux * (-(sx * sx + sy * sy) / 4.5).exp()
-                        })
-                        .sum();
+                    let light = large_star_light(&stars, (x, y), (dx, dy));
                     gain * (sky + light) + noise(index, frame, 3.0)
                 })
                 .collect();
@@ -838,6 +832,73 @@ fn a_stack_large_enough_for_the_gpu_keeps_its_output() {
         &summary(&reintegrated.snapshot.image),
         LARGE_REINTEGRATED,
     );
+}
+
+/// RGGB lights as large as [`a_stack_large_enough_for_the_gpu_keeps_its_output`]'s,
+/// which with a GPU present demosaic there (VNG) as well as resample: a
+/// colour stack must stay within this file's tolerance of the CPU's, which
+/// recorded the summary (`SEIZA_GPU=off`).
+#[test]
+fn a_debayered_stack_large_enough_for_the_gpu_keeps_its_output() {
+    const SKY: [f32; 3] = [400.0, 300.0, 200.0];
+    const COLOR: [f32; 3] = [1.0, 0.8, 0.6];
+    let stars = large_stars();
+    let directory = tempfile::tempdir().unwrap();
+    let bayer = [("BAYERPAT".to_string(), HeaderValue::String("RGGB".into()))];
+    let paths = SHIFTS[..6]
+        .iter()
+        .enumerate()
+        .map(|(frame, &(dx, dy))| {
+            let data: Vec<f32> = (0..LARGE_WIDTH * LARGE_HEIGHT)
+                .map(|index| {
+                    let (x, y) = (index % LARGE_WIDTH, index / LARGE_WIDTH);
+                    let channel = [[0, 1], [1, 2]][y & 1][x & 1];
+                    let light = large_star_light(&stars, (x as f32, y as f32), (dx, dy));
+                    SKY[channel] + COLOR[channel] * light + noise(index, frame, 4.0)
+                })
+                .collect();
+            let image = LinearImage::new(LARGE_WIDTH, LARGE_HEIGHT, 1, data).unwrap();
+            let path = directory.path().join(format!("large-bayer-{frame}.fits"));
+            write_processed_image_fits_f32(&path, &image, &bayer, &[]).unwrap();
+            path
+        })
+        .collect::<Vec<_>>();
+    let snapshot = fits_stack(&paths, StackOptions::default());
+    check("LARGE_BAYER", &summary(&snapshot.image), LARGE_BAYER);
+}
+
+const LARGE_WIDTH: usize = 1280;
+const LARGE_HEIGHT: usize = 960;
+
+/// Two hundred stars over a large frame, from a small integer generator.
+fn large_stars() -> Vec<(f32, f32, f32)> {
+    let mut state = 0x6a09_e667_u32;
+    let mut next = || {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (state >> 8) as f32 / (1 << 24) as f32
+    };
+    (0..200)
+        .map(|_| {
+            (
+                8.0 + next() * (LARGE_WIDTH as f32 - 16.0),
+                8.0 + next() * (LARGE_HEIGHT as f32 - 16.0),
+                400.0 + next() * 20_000.0,
+            )
+        })
+        .collect()
+}
+
+/// The light of [`large_stars`] at `(x, y)` of a frame shifted by
+/// `(dx, dy)`.
+fn large_star_light(stars: &[(f32, f32, f32)], (x, y): (f32, f32), (dx, dy): (f32, f32)) -> f32 {
+    stars
+        .iter()
+        .filter(|star| (star.0 - x + dx).abs() < 8.0 && (star.1 - y + dy).abs() < 8.0)
+        .map(|&(star_x, star_y, flux)| {
+            let (sx, sy) = (x - dx - star_x, y - dy - star_y);
+            flux * (-(sx * sx + sy * sy) / 4.5).exp()
+        })
+        .sum()
 }
 
 /// Lights binned by 2 after calibration and before registration, and the

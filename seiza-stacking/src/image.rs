@@ -353,6 +353,22 @@ impl LinearImage {
         // each pixel's own colour is put back from its sample at the end, so
         // they need bilinear estimates only on the two-pixel border.
         let interior = demosaic != Demosaic::Bilinear && width >= 5 && height >= 5;
+        // A large mosaic's VNG interior comes back from the GPU finished,
+        // scaled back and with each photosite's own sample, and only the
+        // border is left to fill here.
+        #[cfg(feature = "gpu")]
+        let on_gpu = interior
+            && demosaic == Demosaic::Vng
+            && crate::gpu::vng(
+                &self.data,
+                (width, height),
+                std::array::from_fn(|phase| layout.channel_at(phase & 1, phase >> 1) as u32),
+                balance,
+            )
+            .map(|interior| rgb = interior)
+            .is_some();
+        #[cfg(not(feature = "gpu"))]
+        let on_gpu = false;
         // Rows depend only on the mosaic, so bands of them debayer in
         // parallel with the same samples a single pass produces.
         const BAND_ROWS: usize = 32;
@@ -379,6 +395,7 @@ impl LinearImage {
                     }
                 }
                 match demosaic {
+                    _ if on_gpu => {}
                     Demosaic::Vng => vng_rows(&balanced, width, height, layout, first_row, rows),
                     Demosaic::Mhc => {
                         malvar_he_cutler_rows(&balanced, width, height, layout, first_row, rows)
@@ -388,7 +405,17 @@ impl LinearImage {
                 for (band_row, out_row) in rows.chunks_exact_mut(row_samples).enumerate() {
                     let y = first_row + band_row;
                     let source = &self.data[y * width..(y + 1) * width];
-                    unbalance_row(source, out_row, balance, layout, y);
+                    if on_gpu && (2..height - 2).contains(&y) {
+                        for x in [0, 1, width - 2, width - 1] {
+                            let pixel = &mut out_row[x * 3..x * 3 + 3];
+                            for (channel, value) in pixel.iter_mut().enumerate() {
+                                *value /= balance[channel];
+                            }
+                            pixel[layout.channel_at(x, y)] = source[x];
+                        }
+                    } else {
+                        unbalance_row(source, out_row, balance, layout, y);
+                    }
                 }
             });
         Self::new(width, height, 3, rgb)
@@ -1471,6 +1498,119 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// A mosaic large enough for the GPU debayers there as the CPU does, to a
+    /// small fraction of the noise, every pattern and phase, with each
+    /// photosite's own sample and every NaN where the CPU leaves one.
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn gpu_vng_matches_the_cpu() {
+        let Some(adapter) = crate::gpu::adapter_description() else {
+            eprintln!("no GPU: GPU debayering not compared");
+            return;
+        };
+        eprintln!("comparing VNG on {adapter}");
+        let (width, height) = (1101, 1000);
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut uniform = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1_u64 << 53) as f64
+        };
+        let stars: Vec<(f64, f64, f64, f64, [f64; 3])> = (0..600)
+            .map(|_| {
+                (
+                    uniform() * width as f64,
+                    uniform() * height as f64,
+                    10.0_f64.powf(1.0 + uniform() * 3.6),
+                    0.7 + uniform() * 1.5,
+                    [0.6 + uniform(), 1.0, 0.6 + uniform()],
+                )
+            })
+            .collect();
+        // Noise of 5 ADU; red and blue at about half and 0.7 of green, as raw
+        // channels are, so the balance is not one.
+        const NOISE: f64 = 5.0;
+        let sensitivity = [0.5, 1.0, 0.7];
+        let patterns = [
+            BayerPattern::Rggb,
+            BayerPattern::Bggr,
+            BayerPattern::Grbg,
+            BayerPattern::Gbrg,
+        ];
+        for (index, pattern) in patterns.into_iter().enumerate() {
+            let layout = BayerLayout {
+                pattern,
+                x_offset: index & 1,
+                y_offset: index >> 1,
+            };
+            let mut data: Vec<f32> = (0..width * height)
+                .map(|pixel| {
+                    let (x, y) = ((pixel % width) as f64, (pixel / width) as f64);
+                    let channel = layout.channel_at(pixel % width, pixel / width);
+                    let mut light = 0.0;
+                    for &(sx, sy, peak, sigma, colour) in &stars {
+                        let (dx, dy) = (x - sx, y - sy);
+                        if dx.abs() < 8.0 && dy.abs() < 8.0 {
+                            light += peak
+                                * colour[channel]
+                                * (-(dx * dx + dy * dy) / (2.0 * sigma * sigma)).exp();
+                        }
+                    }
+                    let noise = (uniform() + uniform() + uniform() - 1.5) * 2.0 * NOISE;
+                    (((300.0 + light) * sensitivity[channel] + noise).min(60_000.0)) as f32
+                })
+                .collect();
+            for y in 300..306 {
+                data[y * width + 400..y * width + 411].fill(f32::NAN);
+            }
+            data[500 * width + 700] = f32::INFINITY;
+            let image = LinearImage::new(width, height, 1, data).unwrap();
+            let expected = debayer_with_reference(&image, layout, Demosaic::Vng);
+            let got = image.clone().debayer_with(layout, Demosaic::Vng).unwrap();
+            let (mut squares, mut compared, mut far, mut largest) = (0.0_f64, 0_usize, 0, 0.0_f64);
+            for (sample, (&a, &b)) in got.data.iter().zip(&expected).enumerate() {
+                let (pixel, channel) = (sample / 3, sample % 3);
+                let (x, y) = (pixel % width, pixel / width);
+                if channel == layout.channel_at(x, y) {
+                    assert_eq!(
+                        a.to_bits(),
+                        b.to_bits(),
+                        "{pattern:?} own sample at {x},{y}"
+                    );
+                    continue;
+                }
+                assert_eq!(
+                    a.is_nan(),
+                    b.is_nan(),
+                    "{pattern:?} {x},{y}/{channel}: {a} vs {b}"
+                );
+                if !(a.is_finite() && b.is_finite()) {
+                    assert!(
+                        a.is_nan() || a == b,
+                        "{pattern:?} {x},{y}/{channel}: {a} vs {b}"
+                    );
+                    continue;
+                }
+                let difference = f64::from(a - b).abs() / NOISE;
+                squares += difference * difference;
+                compared += 1;
+                far += usize::from(difference > 0.1);
+                largest = largest.max(difference);
+            }
+            let rms = (squares / compared as f64).sqrt();
+            eprintln!(
+                "{pattern:?}: RMS {rms:.2e} noise, {far} of {compared} beyond 0.1, \
+                 largest {largest:.3}"
+            );
+            assert!(rms < 1e-3, "{pattern:?}: RMS {rms} noise");
+            assert!(
+                far * 10_000 < compared,
+                "{pattern:?}: {far} beyond 0.1 noise"
+            );
         }
     }
 

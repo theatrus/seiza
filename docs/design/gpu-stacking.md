@@ -1,16 +1,20 @@
 # GPU stacking
 
-Status: resampling, the live accumulator and the final integration's band
-passes run on the GPU, behind `seiza-stacking`'s default `gpu` feature. More
-stages are follow-on work (see the end).
+Status: VNG debayering, resampling, the live accumulator and the final
+integration's band passes run on the GPU, behind `seiza-stacking`'s default
+`gpu` feature. More stages are follow-on work (see the end).
 
 ## What runs where
 
 `seiza-stacking` reaches the GPU through [wgpu](https://wgpu.rs): Metal on
 macOS, Vulkan on Linux, and Direct3D 12 or Vulkan on Windows, chosen at run
 time. It opens the device once, the first time a frame large enough to gain
-from it arrives. Two stages run there:
+from it arrives. These stages run there:
 
+- **VNG debayering** (`image::LinearImage::debayer_with`): every pixel two
+  or more from each edge of a Bayer mosaic, with the channel balance the
+  CPU measures. The two-pixel border, which takes bilinear estimates, stays
+  on the CPU, and so do MHC, bilinear and superpixel debayering.
 - **Registration resampling** (`registration::resample_region_with_inverse`):
   clamped Lanczos-3 and bilinear, mono or RGB, over the whole reference grid
   or a footprint of it. Every frame of a live stack and every frame a final
@@ -29,7 +33,7 @@ from it arrives. Two stages run there:
   first estimate and the Student-t limits. A band that records sample fates
   for a drizzle is integrated on the CPU.
 
-Everything else (decoding, calibration, debayering, star detection,
+Everything else (decoding, calibration, defect detection, star detection,
 registration fits, normalization fits) stays on the CPU for now.
 
 The GPU takes a frame only when it holds at least a million samples; below
@@ -56,6 +60,15 @@ f64 and accumulates moments in f64.
 - **Weights and clamping.** The same 1025-step Lanczos-3 table as the CPU,
   the same clamping rule, and the same bilinear fallback. NaN is tested by
   its bits, since shader compilers may assume no float is NaN.
+- **Debayering.** The same gradients, threshold and colour differences in
+  f32, as the CPU's are. The mosaic is balanced to green in a pass of its
+  own: balanced as the kernel read each pixel's window, the product was
+  fused into the gradients' differences, which flipped a few directions on
+  stars' flanks (0.6 of the noise at most, on a few pixels in a million).
+  Balanced first, a frame matches the CPU's to 6e-6 of the noise RMS, no
+  sample beyond a thousandth of it. The window is written out cell by cell
+  so it stays in registers; indexed through tables, as on the CPU, the
+  kernel ran five times slower.
 - **Integration.** The CPU stores moments in f32 between f64 updates; the
   GPU does the updates in f32 too. Rejection decisions agree at all but a
   handful of samples that lie on a threshold.
@@ -75,19 +88,31 @@ The band passes alone, GPU against CPU on the same resampled frames, leave
 
 These differences sit well inside `tests/output_version.rs`'s tolerance:
 `a_stack_large_enough_for_the_gpu_keeps_its_output` stacks and reintegrates
-eight 1280x960 frames, which reach both GPU stages, against summaries
-recorded on the CPU, and passes on the GPU too, so the GPU path keeps
-`OUTPUT_VERSION`. A planted change in the band kernel fails it, as does a
-gross change in the resampler; a sub-pixel change in the resampler is below
-what a summary sees, and the GPU-against-CPU unit tests in `gpu.rs` catch
-that instead. Those tests, and the case, run on the CPU alone where no GPU
-is present, as on CI.
+eight 1280x960 frames, which reach the resampler, the accumulator and the
+band kernel, and `a_debayered_stack_large_enough_for_the_gpu_keeps_its_output`
+stacks six RGGB frames of that size, which reach the VNG kernel, against
+summaries recorded on the CPU. Both pass on the GPU too, so the GPU path
+keeps `OUTPUT_VERSION`. A planted change in the band kernel or the VNG
+threshold fails them, as does a gross change in the resampler; a sub-pixel
+change in the resampler is below what a summary sees, and the
+GPU-against-CPU unit tests in `gpu.rs` and `image.rs` catch that instead.
+The VNG kernel balancing as it read the window, above, moved the colour
+case's green maximum by 1.3e-5 and failed it. Those tests, and the cases,
+run on the CPU alone where no GPU is present, as on CI.
+
+On the 40-frame M45 OSC set (6248x4176 RGGB, `--reintegrate`), the stack
+with the GPU's VNG against the CPU's, everything else on the GPU in both:
+0.0013 of the noise RMS on the sky in each channel. Under 170 pixels a
+channel differ by more than 0.1 of the noise, all on bright stars, where a
+star's centroid on a frame moves a hair with the demosaic and its
+registration with it.
 
 ## Controls and fallbacks
 
 - Build without the `gpu` feature (`default-features = false`) for a
   CPU-only crate without wgpu.
-- `SEIZA_GPU_ACCUMULATOR=off` keeps the live accumulator on the CPU.
+- `SEIZA_GPU_ACCUMULATOR=off` keeps the live accumulator on the CPU, and
+  `SEIZA_GPU_DEBAYER=off` VNG debayering.
 - `SEIZA_GPU_TRACE=1` prints every GPU call's stages (grid, upload,
   kernel, copy out) to stderr, to see where the time goes on a machine.
 - `SEIZA_GPU=off` (or `0`, `cpu`), set before the first large frame, keeps
@@ -106,8 +131,9 @@ is present, as on CI.
   maps and clears fresh memory, which took longer than the upload.
 - An integrated GPU (Apple Silicon, Intel Iris Xe) reads and writes buffers
   the CPU maps directly; a discrete one goes through staging copies. Mapped
-  output is copied out on every core, because one core reading
-  write-combined memory is several times slower.
+  buffers are filled and copied out on every core, because one core reading
+  write-combined memory is several times slower, and output goes straight
+  into its vector rather than over zeros, which cost as much as the copy.
 
 ## Measurements
 
@@ -134,6 +160,12 @@ integrate) against 30-40 ms on its CPU. The 45-frame live stack matches
 the CPU's to 0.00015 of the noise RMS, no pixel beyond 0.5 noise. The live
 pass is then bound by preparing frames: with 12 workers rather than the
 default it takes 19 ms a frame against 28.
+
+The 40-frame M45 OSC set with `--reintegrate` on the M4 Max, VNG on the GPU
+against VNG on the CPU, everything else on the GPU in both: 6.9-7.2 s and
+54-56 CPU-s against 7.8-7.9 s and 74-77 CPU-s. The VNG kernel takes 4-7 ms
+a 26 MP frame on an idle GPU, against about 14 ms (225 CPU-ms) on the
+CPU's 16 cores; debayering fell from 28% of the workers' busy time to 2%.
 
 ## Follow-on work
 
