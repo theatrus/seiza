@@ -12599,12 +12599,20 @@ mod tests {
         assert!(error.is_null());
         let stacked = unsafe { &*snapshot };
         assert!(stacked.snapshot.image.data[40] < 11.0);
+        let expected_bits = stacked
+            .snapshot
+            .image
+            .data
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>();
         assert_eq!(stacked.snapshot.accepted_frames, 5);
-        assert!(
-            calls
-                .iter()
-                .any(|&(pass, _, total)| pass == 2 && total == 5)
-        );
+        // Each input is read once, then the bands are integrated.
+        let expected_calls = [0, 2]
+            .into_iter()
+            .flat_map(|pass| (0..5).map(move |index| (pass, index, 5)))
+            .collect::<Vec<_>>();
+        assert_eq!(calls, expected_calls);
         let parsed: Value =
             serde_json::from_str(unsafe { CStr::from_ptr(report) }.to_str().unwrap()).unwrap();
         unsafe { seiza_string_free(report) };
@@ -12654,6 +12662,46 @@ mod tests {
         };
         assert!(refused.is_null() && report.is_null() && !error.is_null());
         unsafe { seiza_string_free(error) };
+
+        // A chosen scratch directory gives the same stack and is left as it
+        // was found; one that does not exist fails the call.
+        let scratch = tempfile::tempdir().unwrap();
+        let missing = scratch.path().join("missing");
+        for (directory, works) in [(scratch.path(), true), (missing.as_path(), false)] {
+            let request =
+                CString::new(json!({"inputs": inputs, "scratchDirectory": directory}).to_string())
+                    .unwrap();
+            let mut error = ptr::null_mut();
+            let snapshot = unsafe {
+                seiza_stack_integrate_registered_json(
+                    request.as_ptr(),
+                    ptr::null(),
+                    None,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    &mut error,
+                )
+            };
+            assert_eq!(snapshot.is_null(), !works);
+            if works {
+                let bits = |snapshot: &SeizaStackSnapshot| {
+                    snapshot
+                        .snapshot
+                        .image
+                        .data
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(bits(unsafe { &*snapshot }), expected_bits);
+                assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
+                unsafe { seiza_stack_snapshot_free(snapshot) };
+            } else {
+                let message = unsafe { CStr::from_ptr(error) }.to_str().unwrap();
+                assert!(message.contains("scratch directory"), "{message}");
+                unsafe { seiza_string_free(error) };
+            }
+        }
     }
 
     #[test]
@@ -17936,6 +17984,8 @@ struct RegisteredIntegrationRequest {
     minimum_sigma: Option<f32>,
     #[serde(default)]
     frame_weights: Option<Vec<Vec<f32>>>,
+    #[serde(default)]
+    scratch_directory: Option<String>,
 }
 
 /// What the final pass did with each input, in request order.
@@ -17966,18 +18016,26 @@ struct RegisteredFrameResponse {
 /// `minimumSigma` (a noise floor in the frames' units, 1e-6 by default) and
 /// `frameWeights` (one list per input with one positive weight per channel,
 /// as a live stack's diagnostics give them; left out, every frame weighs
-/// the same). Each input is read through seiza-image-io once per pass, and
-/// must read the same each time. Nothing is registered or normalized again,
-/// and every input takes part. Pixels with fewer than three samples are
-/// averaged without rejection. Memory is about 40 bytes per output sample
-/// plus one frame.
+/// the same) and `scratchDirectory`. Each input is read through
+/// seiza-image-io once and kept in a scratch file, four bytes per sample,
+/// in a new directory inside `scratchDirectory`, an existing writable
+/// directory, or the system temporary directory; the three passes then read
+/// the files back in bands of rows, and the directory is removed before
+/// this returns. Nothing is registered or normalized again, and every input
+/// takes part. Pixels with fewer than three samples are averaged without
+/// rejection. Memory is about 20 bytes per output sample plus the bands
+/// being read, at most 256 MiB, and the input being read. When the system
+/// temporary directory cannot take every input, each is instead read once
+/// per pass, in about 40 bytes per output sample plus one input; a chosen
+/// `scratchDirectory` that cannot fails the call.
 ///
 /// When `report_out` is non-null it receives owned JSON holding `frames`,
 /// one per input in request order, with its `path`, `finiteSamples` (the
 /// samples it covers) and `integratedSamples` (those rejection kept); free
 /// it with [`seiza_string_free`]. `cancel` and `progress` work as for
 /// [`seiza_live_stacker_reintegrate`], with the input's index and the input
-/// count. The snapshot writes with the first input's WCS, and
+/// count: pass 0 before each input is read, then pass 2 for the input
+/// indices in turn, spread over the bands. The snapshot writes with the first input's WCS, and
 /// refuses to write over an input. Release it with
 /// [`seiza_stack_snapshot_free`]. On failure the snapshot and report are
 /// null and `error_out` says why.
@@ -18013,6 +18071,7 @@ pub unsafe extern "C" fn seiza_stack_integrate_registered_json(
             cancel: unsafe { cancel.as_ref() }
                 .map(|signal| CancelSignal::from(Arc::clone(&signal.cancelled))),
             frame_weights: request.frame_weights,
+            scratch_directory: request.scratch_directory.map(PathBuf::from),
             ..seiza_stacking::BatchStackOptions::default()
         };
         if let Some(minimum_sigma) = request.minimum_sigma {
@@ -18020,21 +18079,27 @@ pub unsafe extern "C" fn seiza_stack_integrate_registered_json(
         }
         let count = paths.len();
         let mut reference_headers = None;
-        let result = seiza_stacking::integrate_registered_frames(count, &options, |pass, index| {
-            if let Some(callback) = progress {
-                let pass = match pass {
-                    seiza_stacking::BatchStackPass::Estimate => 0,
-                    seiza_stacking::BatchStackPass::Refine => 1,
-                    seiza_stacking::BatchStackPass::Integrate => 2,
-                };
-                unsafe { callback(pass, index, count, context as *mut c_void) };
-            }
-            let frame = FitsFrame::open(&paths[index])?;
-            if reference_headers.is_none() && index == 0 {
-                reference_headers = Some(frame.headers);
-            }
-            Ok(frame.image)
-        })
+        let result = seiza_stacking::integrate_registered_frames_banded(
+            count,
+            &options,
+            |index| {
+                let frame = FitsFrame::open(&paths[index])?;
+                if reference_headers.is_none() && index == 0 {
+                    reference_headers = Some(frame.headers);
+                }
+                Ok(frame.image)
+            },
+            |pass, index, count| {
+                if let Some(callback) = progress {
+                    let pass = match pass {
+                        seiza_stacking::BatchStackPass::Estimate => 0,
+                        seiza_stacking::BatchStackPass::Refine => 1,
+                        seiza_stacking::BatchStackPass::Integrate => 2,
+                    };
+                    unsafe { callback(pass, index, count, context as *mut c_void) };
+                }
+            },
+        )
         .map_err(stacking_message)?;
         if !report_out.is_null() {
             let report = RegisteredIntegrationResponse {

@@ -317,9 +317,13 @@ image even when an identical late trail would be rejected. Lowering the online
 sigma threshold cannot remove a sample already integrated.
 
 `integrate_registered_frames` supplies the completed-stack path. It reads each
-admitted frame twice through a caller-supplied loader: first to estimate
-per-sample moments, then to compute a mean and variance after leave-one-out
-sigma rejection. Removing the candidate sample from its comparison statistics
+admitted frame on each of its passes through a caller-supplied loader: first to
+estimate per-sample moments, then to compute a mean and variance after
+leave-one-out sigma rejection. `integrate_registered_frames_banded` runs the
+same passes, to the bit, but loads each frame once into a scratch file and
+reads the files back in bands of rows, as `LiveStacker::reintegrate` does; a
+host replaying its own ledger should prefer it, since each load there
+calibrates and resamples a frame again. Removing the candidate sample from its comparison statistics
 allows a sufficiently strong isolated transient to be rejected even at
 three-frame depth, including the registration reference and other online
 warm-up frames. Multiple

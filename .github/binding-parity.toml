@@ -156,8 +156,7 @@ core = "seiza-calibration::ResidualFlatDiagnostics"
 [rust.RegisteredIntegrationRequest]
 core = "seiza-stacking::BatchStackOptions"
 cancel = { none = "the C call takes a cancel signal as an argument" }
-scratch_directory = { none = "only reintegration keeps frames in scratch files; registered inputs are read from their own files" }
-band_memory_bytes = { none = "only reintegration reads frames in bands" }
+band_memory_bytes = { none = "hosts take the default bands, at most 256 MiB, as reintegration does" }
 
 [rust.RegisteredFrameResponse]
 core = "seiza-stacking::BatchFrameDiagnostics"
@@ -449,6 +448,7 @@ objects = [
 "seiza-stacking::measure_depth" = { none = "both bindings read a live stack's depth through LiveStacker::measure_depth, which calls it and adds the stack's bin factor" }
 "seiza-stacking::drizzle_reference_headers" = { none = "the C drizzle result carries its reference headers already" }
 "seiza-stacking::rescaled_reference_headers" = { none = "binned stacks and full-resolution reintegrations carry their reference headers already rescaled" }
+"seiza-stacking::integrate_registered_frames" = { none = "integrate_registered_frames_banded, which both bindings call, falls back to it when the system temporary directory cannot hold the frames" }
 "seiza-stacking::covered_region" = { none = "crop_report gives the region and more; the C ABI calls crop_report" }
 "seiza-stacking::reference_score" = { none = "choose_reference scores each frame; the C ABI calls choose_reference" }
 "seiza-stacking::resample_to_reference" = { none = "a registration building block the stacker uses" }

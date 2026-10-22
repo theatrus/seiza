@@ -123,11 +123,19 @@ frames pushed as pixels, frames calibrated with in-memory masters that were
 since replaced, or a context saved before the ledger existed. Saved contexts
 carry the ledger from format version 3; versions 1 and 2 still open.
 
-Hosts that keep their own records can call `integrate_registered_frames`
-directly to reread admitted frames with their saved calibration and
-`RegisteredFrameMapping`. The loader
-receives `BatchStackPass` and the frame index, so a host can report each pass
-and cancel the work. `BatchStackResult` includes the final mean, variance,
+Hosts that keep their own records can call
+`integrate_registered_frames_banded` directly to reread admitted frames with
+their saved calibration and `RegisteredFrameMapping`. Its loader runs once per
+frame; each frame is kept in a scratch file inside
+`BatchStackOptions::scratch_directory` (the system temporary directory by
+default, four bytes per sample, removed before it returns), and the three
+passes read the files back a band of rows at a time, as
+`LiveStacker::reintegrate` does. A progress callback hears
+`BatchStackPass::Estimate` before each load and `BatchStackPass::Integrate`
+as the bands are integrated, and `BatchStackOptions::cancel` stops the work.
+`integrate_registered_frames` is the same estimator with no scratch files: its
+loader receives `BatchStackPass` and the frame index and runs on each pass.
+Both give the same result to the bit. `BatchStackResult` includes the final mean, variance,
 coverage, rejection maps, and per-frame finite/integrated sample counts.
 
 The estimator uses leave-one-out sigma clipping rather than comparing a
@@ -154,8 +162,13 @@ another. Normalized frames have equal weight unless
 Through `integrate_registered_frames` memory stays proportional to the output
 image (about 40 bytes per sample, 44 weighted, plus one loaded input and one
 bit per sample per frame), and each frame is loaded three times. Changed shapes
-or sample checksums abort the result. Reintegration from scratch files needs
-16 bytes per sample (20 weighted) plus `BatchStackOptions::band_memory_bytes`.
+or sample checksums abort the result. Reintegration from scratch files, by
+`integrate_registered_frames_banded` or `LiveStacker::reintegrate`, needs 16
+bytes per sample (20 weighted) plus `BatchStackOptions::band_memory_bytes` and
+one loaded input, and loads each frame once; on 45 frames of a 26 MP mono
+sensor replayed from their sources, that took 8.6 s and 5.7 GB at peak against
+23.2 s and 9.9 GB. When the system temporary directory cannot hold the files,
+`integrate_registered_frames_banded` falls back to the three loads.
 
 ## Frame weighting
 
@@ -176,7 +189,7 @@ for each accepted frame, and `LiveStacker::reference_noise` reports the
 reference's. They are empty in equal mode, which measures nothing. The
 admitted-frame ledger keeps each frame's weight, so `LiveStacker::reintegrate`
 replays a weighted stack with the live weights and does not measure noise
-again. To replay frames yourself with `integrate_registered_frames`, pass the
+again. To replay frames yourself with `integrate_registered_frames_banded`, pass the
 recorded weights, with 1 for the reference, as
 `BatchStackOptions::frame_weights`.
 

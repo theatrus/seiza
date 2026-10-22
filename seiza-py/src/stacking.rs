@@ -2597,13 +2597,19 @@ impl PyIntegratedFrame {
 /// :meth:`LiveStacker.reintegrate` uses.
 ///
 /// Every input must be one size on one pixel grid, with samples it does not
-/// cover stored as NaN; each is read once per pass and must read the same
-/// each time. ``frame_weights`` gives one list per input with one positive
+/// cover stored as NaN. Each is read once and kept in a scratch file, four
+/// bytes per sample, in a new directory inside ``scratch_directory``, an
+/// existing writable directory, or the system temporary directory; the three
+/// passes read the files back in bands of rows, and the directory is removed
+/// before this returns. When the system temporary directory cannot take every
+/// input, each is read once per pass instead, and must read the same each
+/// time. ``frame_weights`` gives one list per input with one positive
 /// weight per channel; left out, every frame weighs the same.
 /// ``minimum_sigma`` is a noise floor in the frames' units. Returns the
 /// stack, which writes with the first input's WCS, and what
 /// rejection did with each input. Raises :class:`StackError` when the
-/// inputs differ in shape or change between passes.
+/// inputs differ in shape or change between passes, or a chosen
+/// ``scratch_directory`` cannot take them.
 #[pyfunction]
 #[pyo3(signature = (
     images,
@@ -2612,8 +2618,10 @@ impl PyIntegratedFrame {
     sigma_high=3.0,
     minimum_sigma=None,
     frame_weights=None,
+    scratch_directory=None,
     cancel=None
 ))]
+#[allow(clippy::too_many_arguments)]
 fn integrate_registered_frames(
     py: Python<'_>,
     images: Vec<PathBuf>,
@@ -2621,10 +2629,11 @@ fn integrate_registered_frames(
     sigma_high: f32,
     minimum_sigma: Option<f32>,
     frame_weights: Option<Vec<Vec<f32>>>,
+    scratch_directory: Option<PathBuf>,
     cancel: Option<Py<PyAny>>,
 ) -> PyResult<(PyStackSnapshot, Vec<PyIntegratedFrame>)> {
     let (signal, raised) = python_cancel_signal(cancel);
-    let mut options = batch_options(sigma_low, sigma_high, None)?;
+    let mut options = batch_options(sigma_low, sigma_high, scratch_directory)?;
     options.cancel = Some(signal);
     options.frame_weights = frame_weights;
     if let Some(minimum_sigma) = minimum_sigma {
@@ -2633,14 +2642,18 @@ fn integrate_registered_frames(
     let paths = images.clone();
     let integrated = py.detach(move || {
         let mut reference_headers = None;
-        let result =
-            seiza_stacking::integrate_registered_frames(paths.len(), &options, |_, index| {
+        let result = seiza_stacking::integrate_registered_frames_banded(
+            paths.len(),
+            &options,
+            |index| {
                 let frame = FitsFrame::open(&paths[index])?;
                 if reference_headers.is_none() && index == 0 {
                     reference_headers = Some(frame.headers);
                 }
                 Ok(frame.image)
-            })?;
+            },
+            |_, _, _| {},
+        )?;
         Ok::<_, seiza_stacking::Error>((result, reference_headers.unwrap_or_default()))
     });
     if let Some(error) = raised.lock().unwrap().take() {

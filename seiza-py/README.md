@@ -721,8 +721,11 @@ pixels onto the sensor's grid, with rejection decided at the binned resolution.
 
 Frames calibrated, registered and normalized somewhere else, one size on one
 pixel grid with uncovered samples as NaN, take the same rejection through
-`integrate_registered_frames`. It reads each file once per pass and registers
-nothing again; `frame_weights` gives one weight per channel for each frame:
+`integrate_registered_frames`. It reads each file once, keeps its samples in a
+scratch file inside `scratch_directory` (the system temporary directory by
+default; four bytes per sample, removed when it returns), runs the three passes
+over those files in bands of rows, and registers nothing again;
+`frame_weights` gives one weight per channel for each frame:
 
 ```python
 stack, frames = seiza.integrate_registered_frames(registered_paths, sigma_high=3.0)

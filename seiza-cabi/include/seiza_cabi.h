@@ -3144,18 +3144,26 @@ bool seiza_calibration_apply_residual_flat_response(const float *response,
  `minimumSigma` (a noise floor in the frames' units, 1e-6 by default) and
  `frameWeights` (one list per input with one positive weight per channel,
  as a live stack's diagnostics give them; left out, every frame weighs
- the same). Each input is read through seiza-image-io once per pass, and
- must read the same each time. Nothing is registered or normalized again,
- and every input takes part. Pixels with fewer than three samples are
- averaged without rejection. Memory is about 40 bytes per output sample
- plus one frame.
+ the same) and `scratchDirectory`. Each input is read through
+ seiza-image-io once and kept in a scratch file, four bytes per sample,
+ in a new directory inside `scratchDirectory`, an existing writable
+ directory, or the system temporary directory; the three passes then read
+ the files back in bands of rows, and the directory is removed before
+ this returns. Nothing is registered or normalized again, and every input
+ takes part. Pixels with fewer than three samples are averaged without
+ rejection. Memory is about 20 bytes per output sample plus the bands
+ being read, at most 256 MiB, and the input being read. When the system
+ temporary directory cannot take every input, each is instead read once
+ per pass, in about 40 bytes per output sample plus one input; a chosen
+ `scratchDirectory` that cannot fails the call.
 
  When `report_out` is non-null it receives owned JSON holding `frames`,
  one per input in request order, with its `path`, `finiteSamples` (the
  samples it covers) and `integratedSamples` (those rejection kept); free
  it with [`seiza_string_free`]. `cancel` and `progress` work as for
  [`seiza_live_stacker_reintegrate`], with the input's index and the input
- count. The snapshot writes with the first input's WCS, and
+ count: pass 0 before each input is read, then pass 2 for the input
+ indices in turn, spread over the bands. The snapshot writes with the first input's WCS, and
  refuses to write over an input. Release it with
  [`seiza_stack_snapshot_free`]. On failure the snapshot and report are
  null and `error_out` says why.

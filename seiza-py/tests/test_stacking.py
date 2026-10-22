@@ -1184,6 +1184,16 @@ def test_registered_frames_integrate_with_leave_one_out_rejection(tmp_path):
     with pytest.raises(seiza.StackError):
         seiza.integrate_registered_frames([paths[0], paths[1], small])
 
+    # A chosen scratch directory gives the same stack and is left empty; one
+    # that does not exist is refused.
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    kept, _ = seiza.integrate_registered_frames(paths, scratch_directory=scratch)
+    assert np.array_equal(kept.image, stack.image, equal_nan=True)
+    assert list(scratch.iterdir()) == []
+    with pytest.raises(seiza.StackError, match="scratch directory"):
+        seiza.integrate_registered_frames(paths, scratch_directory=tmp_path / "missing")
+
     def stop():
         raise KeyError("stop")
 

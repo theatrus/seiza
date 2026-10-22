@@ -324,6 +324,15 @@ const BAYER_DRIZZLE: &[f64] = &[
 ];
 
 #[rustfmt::skip]
+const HOST_INTEGRATED: &[f64] = &[
+    1.5026973e2, 2.9195168e2, 4.1777139e3, 1.0074651e2, 1.0366454e2, 1.0547443e2,
+    1.1940752e2, 1.0942122e2, 1.0227286e2, 1.0470843e2, 1.0725134e2, 1.0821719e2,
+    1.0901280e2, 1.0415617e2, 1.0412110e2, 1.0803335e2, 1.0816547e2, 1.1112226e2,
+    1.0462069e2, 1.0627757e2, 1.0888474e2, 1.1139577e2, 1.1152663e2, 1.0536192e2,
+    1.6954681e2, 1.0875781e2, 1.1115813e2, 1.1303532e2,
+];
+
+#[rustfmt::skip]
 const REINTEGRATED: &[f64] = &[
     1.4613894e2, 2.8383271e2, 3.9288564e3, 9.7148277e1, 9.9584862e1, 1.0101023e2,
     1.1875857e2, 1.0546034e2, 9.7901772e1, 1.0035715e2, 1.0214648e2, 1.0342279e2,
@@ -651,6 +660,58 @@ fn a_reintegration_and_its_drizzle_keep_their_output() {
         .reintegrate_drizzled(&options, &drizzle, |_, _, _| {})
         .unwrap();
     check("DRIZZLED", &summary(&drizzled.image), DRIZZLED);
+}
+
+/// Frames a host registered and normalized itself, integrated with frame
+/// weights by the three passes PSF Guard's final pass runs, a trail across
+/// the first: loaded on every pass, and once into scratch files.
+#[test]
+fn registered_frames_a_host_integrates_keep_their_output() {
+    let frames = (0..8)
+        .map(|frame| {
+            let mut image = mono_field(0.0, 0.0, 1.0, frame);
+            if frame == 0 {
+                for x in 0..WIDTH {
+                    image.data[(HEIGHT / 2 + x / 12) * WIDTH + x] += 400.0;
+                }
+            }
+            image
+        })
+        .collect::<Vec<_>>();
+    let options = BatchStackOptions {
+        frame_weights: Some(
+            (0..frames.len())
+                .map(|frame| vec![1.0 / (1.0 + 0.1 * frame as f32)])
+                .collect(),
+        ),
+        ..BatchStackOptions::default()
+    };
+    let whole = seiza_stacking::integrate_registered_frames(frames.len(), &options, |_, index| {
+        Ok(frames[index].clone())
+    })
+    .unwrap();
+    check(
+        "HOST_INTEGRATED",
+        &summary(&whole.snapshot.image),
+        HOST_INTEGRATED,
+    );
+    let scratch = tempfile::tempdir().unwrap();
+    let options = BatchStackOptions {
+        scratch_directory: Some(scratch.path().to_path_buf()),
+        ..options
+    };
+    let banded = seiza_stacking::integrate_registered_frames_banded(
+        frames.len(),
+        &options,
+        |index| Ok(frames[index].clone()),
+        |_, _, _| {},
+    )
+    .unwrap();
+    check(
+        "HOST_INTEGRATED",
+        &summary(&banded.snapshot.image),
+        HOST_INTEGRATED,
+    );
 }
 
 /// Lights binned by 2 after calibration and before registration, and the

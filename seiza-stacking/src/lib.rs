@@ -73,7 +73,7 @@ mod tasks;
 
 pub use batch::{
     BatchFrameDiagnostics, BatchStackOptions, BatchStackPass, BatchStackResult,
-    integrate_registered_frames,
+    integrate_registered_frames, integrate_registered_frames_banded,
 };
 pub use calibration::{CalibrationMasters, MasterDark, MasterFlat};
 pub use calibration_plan::{

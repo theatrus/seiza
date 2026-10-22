@@ -155,6 +155,83 @@ pub fn integrate_registered_frames(
     integrate_registered_frames_observed(frame_count, options, load, None)
 }
 
+/// [`integrate_registered_frames`], loading each frame once rather than on
+/// every pass, in less memory.
+///
+/// `load` is called for each index in turn, once. Each frame is kept in a
+/// scratch file, four bytes per sample, inside
+/// [`BatchStackOptions::scratch_directory`] or the system temporary
+/// directory, and the three passes then read the files back a band of rows
+/// at a time, as [`crate::LiveStacker::reintegrate`] reads its frames: each
+/// file once, running all three passes on one band of every frame before the
+/// next. The result is bit-identical to [`integrate_registered_frames`]'s.
+/// The files are removed before this returns.
+///
+/// Memory is the outputs, 16 bytes per sample (20 with frame weights), two
+/// bands of every frame within [`BatchStackOptions::band_memory_bytes`], and
+/// the frame being loaded, against [`integrate_registered_frames`]'s 40 (44)
+/// bytes per sample, one bit per sample per frame, and the frame being
+/// loaded. A chosen scratch directory must exist and take every frame, or
+/// this fails. When the system temporary directory cannot take every frame,
+/// the frames are integrated whole as [`integrate_registered_frames`]
+/// integrates them, and `load` is called again for each frame on each pass.
+///
+/// `progress` receives the pass, a zero-based frame index and the frame
+/// count: [`BatchStackPass::Estimate`] before each frame is loaded, then
+/// [`BatchStackPass::Integrate`] for the frame indices in turn, spread over
+/// the bands so that they follow the work done. When the frames are
+/// integrated whole instead, it hears each pass and frame before the load.
+pub fn integrate_registered_frames_banded(
+    frame_count: usize,
+    options: &BatchStackOptions,
+    mut load: impl FnMut(usize) -> Result<LinearImage>,
+    mut progress: impl FnMut(BatchStackPass, usize, usize),
+) -> Result<BatchStackResult> {
+    validate_options(frame_count, options)?;
+    let whole = |load: &mut dyn FnMut(usize) -> Result<LinearImage>,
+                 progress: &mut dyn FnMut(BatchStackPass, usize, usize)| {
+        integrate_registered_frames(frame_count, options, |pass, index| {
+            progress(pass, index, frame_count);
+            load(index)
+        })
+    };
+    let Some(mut frames) =
+        crate::replay::LoadedFrames::new(options.scratch_directory.as_deref(), frame_count)?
+    else {
+        return whole(&mut load, &mut progress);
+    };
+    let mut shape = None;
+    for index in 0..frame_count {
+        check_cancelled(options)?;
+        progress(BatchStackPass::Estimate, index, frame_count);
+        let image = load(index)?;
+        check_cancelled(options)?;
+        validate_image(&image, shape)?;
+        shape = Some((image.width, image.height, image.channels));
+        if !frames.keep(index, &image)? {
+            drop((image, frames));
+            return whole(&mut load, &mut progress);
+        }
+    }
+    let shape = shape.expect("a batch has at least one frame");
+    let mut reported = 0;
+    let (result, _) = integrate_bands(
+        shape,
+        frame_count,
+        options,
+        &frames,
+        false,
+        &mut |band, bands| {
+            let until = ((band + 1) * frame_count).div_ceil(bands).min(frame_count);
+            while reported < until {
+                progress(BatchStackPass::Integrate, reported, frame_count);
+                reported += 1;
+            }
+        },
+    )?;
+    Ok(result)
+}
+
 /// What the final pass did with one registered sample.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SampleFate {
@@ -1448,6 +1525,112 @@ mod tests {
                 assert_same_result(&unrecorded, &fates, &expected, &expected_fates);
             }
         }
+    }
+
+    /// Frames loaded once and kept in scratch files integrate to the bit as
+    /// frames loaded on every pass do, whatever the bands, in a chosen
+    /// directory or the system's, which is left as it was found. Each frame
+    /// is loaded once, in order, and progress follows the loads and then
+    /// the bands.
+    #[test]
+    fn frames_loaded_once_match_the_original_bit_for_bit() {
+        for (mut frames, options) in reference_cases() {
+            // A negative zero is kept as it was loaded.
+            frames[1].data[0] = -0.0;
+            let (expected, _) = reference::integrate(&frames, &options);
+            let count = frames.len();
+            let scratch = tempfile::tempdir().unwrap();
+            for (rows, directory) in [
+                (1, Some(scratch.path())),
+                (7, None),
+                (frames[0].height, Some(scratch.path())),
+            ] {
+                let options = BatchStackOptions {
+                    band_memory_bytes: band_memory(&frames, rows),
+                    scratch_directory: directory.map(std::path::Path::to_path_buf),
+                    ..options.clone()
+                };
+                let mut loads = Vec::new();
+                let mut heard = Vec::new();
+                let actual = integrate_registered_frames_banded(
+                    count,
+                    &options,
+                    |index| {
+                        loads.push(index);
+                        Ok(frames[index].clone())
+                    },
+                    |pass, index, frames| heard.push((pass, index, frames)),
+                )
+                .unwrap();
+                assert_same_result(&actual, &[], &expected, &[]);
+                assert_eq!(loads, (0..count).collect::<Vec<_>>());
+                let passes = [BatchStackPass::Estimate, BatchStackPass::Integrate];
+                let expected_progress = passes
+                    .into_iter()
+                    .flat_map(|pass| (0..count).map(move |index| (pass, index, count)))
+                    .collect::<Vec<_>>();
+                assert_eq!(heard, expected_progress);
+                assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn frames_loaded_once_need_a_usable_directory_and_matching_shapes() {
+        let missing = tempfile::tempdir().unwrap().path().join("missing");
+        let options = BatchStackOptions {
+            scratch_directory: Some(missing),
+            ..BatchStackOptions::default()
+        };
+        let error =
+            integrate_registered_frames_banded(2, &options, |_| unreachable!(), |_, _, _| {})
+                .unwrap_err();
+        assert!(error.to_string().contains("scratch directory"), "{error}");
+        let options = BatchStackOptions::default();
+        assert!(
+            integrate_registered_frames_banded(0, &options, |_| unreachable!(), |_, _, _| {})
+                .is_err()
+        );
+        assert!(
+            integrate_registered_frames_banded(
+                2,
+                &options,
+                |index| LinearImage::new(index + 1, 1, 1, vec![1.0; index + 1]),
+                |_, _, _| {}
+            )
+            .is_err()
+        );
+        let error = integrate_registered_frames_banded(
+            3,
+            &options,
+            |index| {
+                if index == 2 {
+                    Err(Error::Stack("source disappeared".into()))
+                } else {
+                    LinearImage::new(1, 1, 1, vec![10.0])
+                }
+            },
+            |_, _, _| {},
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("source disappeared"));
+        let flag = Arc::new(AtomicBool::new(false));
+        let options = BatchStackOptions {
+            cancel: Some(Arc::clone(&flag).into()),
+            ..BatchStackOptions::default()
+        };
+        let result = integrate_registered_frames_banded(
+            3,
+            &options,
+            |index| {
+                if index == 1 {
+                    flag.store(true, Ordering::Relaxed);
+                }
+                LinearImage::new(1, 1, 1, vec![10.0])
+            },
+            |_, _, _| {},
+        );
+        assert!(matches!(result, Err(Error::Cancelled)));
     }
 
     /// The next band is read while this one is integrated, and the reads

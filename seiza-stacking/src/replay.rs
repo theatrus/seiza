@@ -1275,15 +1275,16 @@ impl FrameCache {
     /// of frame `index`'s file, normalizing them with `map` as each
     /// megabyte arrives, while it is still in the processor's cache. When
     /// `recorded` is present, apply it first and then `map` as an additive
-    /// residual, retaining each map's tile grid. Only the region the file
-    /// holds is read; the rest of the band is `NaN`.
+    /// residual, retaining each map's tile grid. Without `map` the samples
+    /// are left as the file holds them. Only the region the file holds is
+    /// read; the rest of the band is `NaN`.
     fn read_band(
         &self,
         index: usize,
         shape: (usize, usize, usize),
         top: usize,
         band: &mut [f32],
-        map: &crate::NormalizationMap,
+        map: Option<&crate::NormalizationMap>,
         recorded: Option<&crate::NormalizationMap>,
     ) -> Result<()> {
         use std::io::{Read, Seek};
@@ -1340,10 +1341,13 @@ impl FrameCache {
             (header.len() + (first - region.y) * run * 4) as u64,
         ))
         .map_err(|error| failed(error.to_string()))?;
-        let normalizer = RowNormalizer::new(recorded.unwrap_or(map), region.x, region.width);
+        let normalizer = recorded
+            .or(map)
+            .map(|map| RowNormalizer::new(map, region.x, region.width));
         let residual = recorded
-            .filter(|_| !map.is_identity())
-            .map(|_| RowNormalizer::new(map, region.x, region.width));
+            .and(map)
+            .filter(|map| !map.is_identity())
+            .map(|map| RowNormalizer::new(map, region.x, region.width));
         let mut residual_coefficients = RowCoefficients::default();
         let rows_per_read = ((1 << 20) / (run * 4)).max(1);
         let mut bytes = vec![0_u8; rows_per_read * run * 4];
@@ -1360,7 +1364,9 @@ impl FrameCache {
                 for (sample, raw) in samples.iter_mut().zip(raw.chunks_exact(4)) {
                     *sample = f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
                 }
-                normalizer.apply(&mut coefficients, samples, row);
+                if let Some(normalizer) = &normalizer {
+                    normalizer.apply(&mut coefficients, samples, row);
+                }
                 if let Some(residual) = &residual {
                     residual.apply(&mut residual_coefficients, samples, row);
                 }
@@ -1430,7 +1436,7 @@ impl crate::batch::BandSource for CacheBands<'_> {
             self.shape,
             top,
             band,
-            &self.maps[index],
+            Some(&self.maps[index]),
             self.recorded.map(|maps| &maps[index]),
         )
     }
@@ -1440,6 +1446,53 @@ impl crate::batch::BandSource for CacheBands<'_> {
         self.cache
             .region(self.frames[index])
             .filter(|region| (region.width, region.height) != (width, height))
+    }
+}
+
+/// Frames a caller of [`crate::integrate_registered_frames_banded`] loaded,
+/// each kept in a scratch file exactly as it was loaded, negative zeros
+/// included, and read back a band of rows at a time.
+pub(crate) struct LoadedFrames {
+    cache: FrameCache,
+    shape: Option<(usize, usize, usize)>,
+}
+
+impl LoadedFrames {
+    /// Room for `frames` frames in a new directory inside `directory`, or
+    /// the system temporary directory. `None` when the system temporary
+    /// directory cannot hold one; a chosen directory that cannot is an
+    /// error.
+    pub(crate) fn new(directory: Option<&Path>, frames: usize) -> Result<Option<Self>> {
+        Ok(FrameCache::for_replay(directory, frames, None)?
+            .map(|cache| Self { cache, shape: None }))
+    }
+
+    /// Keep frame `index`'s `image`, which [`crate::batch`] has checked
+    /// matches the others' shape. `Ok(false)` when the system temporary
+    /// directory could not take it; a chosen directory that could not is
+    /// an error.
+    pub(crate) fn keep(&mut self, index: usize, image: &LinearImage) -> Result<bool> {
+        self.shape = Some((image.width, image.height, image.channels));
+        self.cache.keep(index, image, None, true);
+        if self.cache.stored(index) {
+            return Ok(true);
+        }
+        if self.cache.required {
+            return Err(Error::Stack(format!(
+                "cannot keep registered frame {} in the chosen scratch directory",
+                index + 1
+            )));
+        }
+        Ok(false)
+    }
+}
+
+impl crate::batch::BandSource for LoadedFrames {
+    fn read(&self, index: usize, top: usize, band: &mut [f32]) -> Result<()> {
+        let shape = self
+            .shape
+            .expect("a band is read only after every frame is kept");
+        self.cache.read_band(index, shape, top, band, None, None)
     }
 }
 
@@ -4465,7 +4518,7 @@ mod tests {
         let read = |index: usize| {
             let mut band = vec![0.0; image.sample_count()];
             cache
-                .read_band(index, (width, height, 3), 0, &mut band, &map, None)
+                .read_band(index, (width, height, 3), 0, &mut band, Some(&map), None)
                 .unwrap();
             band
         };

@@ -1398,6 +1398,7 @@ def integrate_registered_frames(
     sigma_high: float = 3.0,
     minimum_sigma: float | None = None,
     frame_weights: Sequence[Sequence[float]] | None = None,
+    scratch_directory: str | Path | None = None,
     cancel: Callable[[], bool] | None = None,
 ) -> tuple[StackSnapshot, list[IntegratedFrame]]: ...
 def frame_noise(image: npt.NDArray[np.float32]) -> list[float] | None: ...
