@@ -65,8 +65,15 @@ for star detection and resampling to read, and a frame detection uploads,
 as a mono one, is read again there by resampling. Each thread keeps at most
 one such frame, known by where its samples lie, how many there are and a
 fingerprint of 1024 of them, and gives it back when the frame is prepared.
-The debayered frame still comes back to the CPU, which measures its noise
-for weighting and normalizes it once resampled.
+Resampling's output stays on the GPU too, while a live stack's moments are
+there: the CPU fits the frame's normalization from its copy, the GPU
+applies it where the frame lies (one gain and offset per channel fused as
+the CPU's `mul_add`, bit for bit; a tile grid interpolated with the CPU's
+own weights, within a few units in the last place), and the accumulator
+reads it there. The CPU's copy is dropped once the frame is normalized, so
+a frame waiting to be integrated holds one copy, not two; a frame the GPU
+cannot integrate after all comes back from it, normalized. The debayered
+frame still comes back to the CPU, which measures its noise for weighting.
 
 ## How close it stays to the CPU
 
@@ -261,10 +268,10 @@ the same way.
 ## Follow-on work
 
 - **Frames that stay on the GPU** from calibration to integration, above.
-  A debayered frame already does from VNG to resampling. What still
+  A debayered frame already does from VNG to integration. What still
   crosses is the debayered frame back (for its noise), the registered frame
-  back (for normalization, photometry and the cache) and up again (for the
-  accumulator), and the clip mask both ways.
+  back (for the normalization fit, photometry and the cache), and the clip
+  mask both ways.
 - **Speculative integration.** One pass that classifies and integrates
   into a second copy of the moments, kept when the frame is admitted: in
   the `gpu-spike` experiments 44 ms a frame against 76 ms for separate

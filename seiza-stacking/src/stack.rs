@@ -2545,6 +2545,17 @@ pub(crate) struct ReadyFrame {
     /// How much of each pixel of `region` the frame's clipped raw pixels
     /// reach, from 0 to 1, when any of them clipped.
     clipped: Option<LinearImage>,
+    /// The normalization `registered` still waits for, when it was applied
+    /// to `on_gpu` instead: the CPU's copy needs it only if the frame is
+    /// integrated there after all.
+    pending_normalization: Option<NormalizationMap>,
+    /// `registered`'s samples, normalized, where the GPU resampled them, for
+    /// a live stack's accumulator there; `registered` then keeps its shape
+    /// and not its samples.
+    #[cfg(feature = "gpu")]
+    on_gpu: Option<crate::gpu::GpuFrame>,
+    /// `registered`'s finite samples.
+    finite_samples: usize,
 }
 
 impl PreparedFrame {
@@ -2709,6 +2720,17 @@ pub(crate) fn prepare_frame(
         options.interpolation.into(),
         options.channel_sites(cfa),
     )?;
+    // Where the GPU resampled the frame, its samples stay there for the
+    // normalization and a GPU accumulator to read, when there is one.
+    #[cfg(feature = "gpu")]
+    let mut on_gpu = crate::gpu::accumulating()
+        .then(|| {
+            crate::gpu::take_resident(
+                &registered.data,
+                (registered.width, registered.height, registered.channels),
+            )
+        })
+        .flatten();
     let finite_samples = registered
         .data
         .par_iter()
@@ -2812,16 +2834,42 @@ pub(crate) fn prepare_frame(
         ),
         (None, _) => (None, None),
     };
-    if !matches!(options.normalization, NormalizationMode::None)
-        && let Err(error) = normalization.apply_region(&mut registered, region.x, region.y)
-    {
-        let message = match error {
-            Error::Normalization(message) => message,
-            other => other.to_string(),
-        };
-        return Ok(PreparedFrame::Rejected(
-            FrameRejectionReason::Normalization(message),
-        ));
+    // Normalized on the GPU when the frame lies there for its accumulator,
+    // and the CPU's copy only if the frame comes back to the CPU.
+    #[cfg(feature = "gpu")]
+    if photosites.is_some() {
+        on_gpu = None;
+    }
+    let mut pending_normalization = None;
+    if !matches!(options.normalization, NormalizationMode::None) {
+        #[cfg(feature = "gpu")]
+        let normalized_there = on_gpu.as_mut().is_some_and(|frame| {
+            normalization
+                .gpu_coefficients(
+                    (region.x, region.y),
+                    (registered.width, registered.height, registered.channels),
+                )
+                .is_some_and(|coefficients| frame.normalize(&coefficients).is_ok())
+        });
+        #[cfg(not(feature = "gpu"))]
+        let normalized_there = false;
+        if normalized_there {
+            pending_normalization = Some(normalization.clone());
+        } else {
+            #[cfg(feature = "gpu")]
+            {
+                on_gpu = None;
+            }
+            if let Err(error) = normalization.apply_region(&mut registered, region.x, region.y) {
+                let message = match error {
+                    Error::Normalization(message) => message,
+                    other => other.to_string(),
+                };
+                return Ok(PreparedFrame::Rejected(
+                    FrameRejectionReason::Normalization(message),
+                ));
+            }
+        }
     }
     if let Some(layout) = photosites {
         registered = crate::registration::resample_region_geometry(
@@ -2899,8 +2947,16 @@ pub(crate) fn prepare_frame(
         }
         _ => None,
     };
+    // A frame whose normalized samples lie on the GPU for its accumulator
+    // keeps no second copy here, which a frame queued for integration would
+    // hold for as long as it waits.
+    #[cfg(feature = "gpu")]
+    if on_gpu.is_some() {
+        registered.data = Vec::new();
+    }
     Ok(PreparedFrame::Ready(Box::new(ReadyFrame {
         registered,
+        finite_samples,
         region,
         transform: registration.transform,
         matched_stars: registration.matched_stars,
@@ -2916,6 +2972,9 @@ pub(crate) fn prepare_frame(
         photosites: photosites.is_some(),
         staged,
         clipped,
+        pending_normalization,
+        #[cfg(feature = "gpu")]
+        on_gpu,
     })))
 }
 
@@ -2973,6 +3032,18 @@ pub(crate) struct IntegrationHalf<'a> {
     reference_height: usize,
 }
 
+/// What [`Accumulator::admit_staged`] did with a frame on the GPU.
+#[cfg(feature = "gpu")]
+enum Staged {
+    /// Admitted there or not: what classification accepted, and the
+    /// integration's counts when it was integrated.
+    Admitted((usize, Option<(usize, usize)>)),
+    /// The moments are not on the GPU, so the frame is handed back.
+    Elsewhere(crate::gpu::GpuFrame),
+    /// The GPU failed; the moments are back on the CPU.
+    Failed,
+}
+
 /// The fewest accepted samples whose `fraction` is not below `minimum`, as
 /// the frame's admission compares them, so a frame is admitted exactly when
 /// it accepts at least as many; past `u32::MAX`, more than a frame holds,
@@ -3018,33 +3089,94 @@ impl IntegrationHalf<'_> {
             photosites,
             staged,
             clipped,
+            pending_normalization,
+            #[cfg(feature = "gpu")]
+            on_gpu,
+            finite_samples,
         } = *ready;
+        let mut registered = registered;
+        #[cfg_attr(not(feature = "gpu"), allow(unused_mut))]
+        let mut pending_normalization = pending_normalization;
         let weights = (!weight.is_empty()).then_some(weight.as_slice());
-        let placed = Placed {
-            image: &registered,
-            region,
-            width: self.reference_width,
-            height: self.reference_height,
-        };
 
         // A photosite frame offers one sample per pixel, not one per channel.
-        // This runs on the one serial stage a pipeline waits on, so the
-        // count of a canvas frame's ~50 million samples runs in parallel.
         let offered = if self.expanded_canvas {
-            registered.data.par_iter().filter(|v| v.is_finite()).count()
+            finite_samples
         } else if photosites {
             registered.pixel_count()
         } else {
-            registered.sample_count()
+            registered.pixel_count() * registered.channels
         };
         let minimum = self.options.acceptance.minimum_integrated_fraction;
         let fraction = |accepted: usize| accepted as f32 / offered.max(1) as f32;
-        let (would_accept, integrated) = self.accumulator.admit_frame(
-            placed,
-            self.options.rejection,
-            weights,
-            admission_count(&fraction, minimum),
-        );
+        let admit_at = admission_count(&fraction, minimum);
+        // The frame's normalized samples on the GPU, for the accumulator
+        // there; else the CPU's copy, normalized now if it waited.
+        #[cfg(feature = "gpu")]
+        let admitted = match on_gpu {
+            None => None,
+            Some(staged) => match self.accumulator.admit_staged(
+                Placed {
+                    image: &registered,
+                    region,
+                    width: self.reference_width,
+                    height: self.reference_height,
+                },
+                staged,
+                self.options.rejection,
+                weights,
+                admit_at,
+            ) {
+                Staged::Admitted(admitted) => Some(admitted),
+                // The moments are on the CPU: the frame comes back, already
+                // normalized.
+                Staged::Elsewhere(staged) => {
+                    match staged.download() {
+                        Some(samples) if registered.data.is_empty() => {
+                            registered.data = samples;
+                            pending_normalization = None;
+                        }
+                        _ if registered.data.is_empty() => {
+                            return self.reject(FrameRejectionReason::Normalization(
+                                "the GPU could not give back the frame it normalized".into(),
+                            ));
+                        }
+                        _ => {}
+                    }
+                    None
+                }
+                Staged::Failed if registered.data.is_empty() => {
+                    return self.reject(FrameRejectionReason::Normalization(
+                        "the GPU failed holding the frame it normalized".into(),
+                    ));
+                }
+                Staged::Failed => None,
+            },
+        };
+        #[cfg(not(feature = "gpu"))]
+        let admitted = None;
+        let (would_accept, integrated) = match admitted {
+            Some(admitted) => admitted,
+            None => {
+                if let Some(normalization) = &pending_normalization
+                    && let Err(error) =
+                        normalization.apply_region(&mut registered, region.x, region.y)
+                {
+                    return self.reject(FrameRejectionReason::Normalization(error.to_string()));
+                }
+                self.accumulator.admit_frame(
+                    Placed {
+                        image: &registered,
+                        region,
+                        width: self.reference_width,
+                        height: self.reference_height,
+                    },
+                    self.options.rejection,
+                    weights,
+                    admit_at,
+                )
+            }
+        };
         let integrated_fraction = fraction(would_accept);
         let Some((accepted_samples, rejected_samples)) = integrated else {
             return self.reject(FrameRejectionReason::InsufficientIntegratedSamples {
@@ -3292,6 +3424,44 @@ impl Accumulator {
         }
     }
 
+    /// [`Self::admit_frame`] for a frame whose samples, normalized, already
+    /// lie on the GPU as `staged`, when the moments are there too.
+    #[cfg(feature = "gpu")]
+    fn admit_staged(
+        &mut self,
+        frame: Placed<'_>,
+        staged: crate::gpu::GpuFrame,
+        rejection: RejectionMode,
+        weights: Option<&[f32]>,
+        admit_at: usize,
+    ) -> Staged {
+        self.offer_gpu();
+        let Some(gpu) = self.gpu.as_mut() else {
+            return Staged::Elsewhere(staged);
+        };
+        let unit = [1.0_f32];
+        match gpu.admit(
+            &frame.image.data,
+            Some(staged),
+            gpu_placement(frame),
+            weights.unwrap_or(&unit),
+            gpu_rejection(rejection),
+            admit_at,
+        ) {
+            Ok((accepted, integrated)) => {
+                if integrated.is_some() {
+                    // The moments changed; a copy read back before is stale.
+                    self.mirror = std::sync::OnceLock::new();
+                }
+                Staged::Admitted((accepted, integrated))
+            }
+            Err(reason) => {
+                self.leave_gpu(&reason);
+                Staged::Failed
+            }
+        }
+    }
+
     /// Classify `frame` against the moments and, if rejection would accept
     /// at least `admit_at` of its samples, integrate it: how many it would
     /// accept and refuse, and the integration's accepted and rejected counts
@@ -3312,6 +3482,7 @@ impl Accumulator {
                 let unit = [1.0_f32];
                 match gpu.admit(
                     &frame.image.data,
+                    None,
                     gpu_placement(frame),
                     weights.unwrap_or(&unit),
                     gpu_rejection(rejection),

@@ -17,7 +17,7 @@
 use crate::{LinearImage, ReferenceRegion};
 use rayon::prelude::*;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Samples below which the CPU is as quick: the GPU's fixed cost, the
 /// coordinate grid and the transfers, is a few milliseconds a frame.
@@ -76,6 +76,8 @@ struct Gpu {
     detect_layout: wgpu::BindGroupLayout,
     scatter_pipeline: wgpu::ComputePipeline,
     scatter_layout: wgpu::BindGroupLayout,
+    normalize_pipeline: wgpu::ComputePipeline,
+    normalize_layout: wgpu::BindGroupLayout,
     weights: wgpu::Buffer,
     /// An integrated GPU, which shares memory with the CPU, reads the
     /// source and writes the output in buffers the CPU maps directly;
@@ -215,6 +217,210 @@ pub(crate) fn resident_samples(data: &[f32]) -> Option<Vec<f32>> {
     let samples = copy_out(&read_from.slice(..bytes).get_mapped_range().ok()?, false);
     read_from.unmap();
     Some(samples)
+}
+
+/// The frame this thread keeps on the GPU for `data`, taken out of its
+/// keeping, or `None` when it keeps none for these samples. A frame's
+/// resampled samples are taken so, to be normalized there and integrated.
+pub(crate) fn take_resident(
+    data: &[f32],
+    (width, height, channels): (usize, usize, usize),
+) -> Option<GpuFrame> {
+    let key = ResidentKey::of(data);
+    let resident = RESIDENT.with(|resident| {
+        let mut resident = resident.borrow_mut();
+        resident
+            .as_ref()
+            .is_some_and(|resident| resident.key == key)
+            .then(|| resident.take())
+            .flatten()
+    })?;
+    Some(GpuFrame {
+        buffer: Some(resident.buffer),
+        usage: resident.usage,
+        width,
+        height,
+        channels,
+    })
+}
+
+/// Whether some live stack's moments are on the GPU, which is when a
+/// prepared frame's samples there are worth keeping for it.
+pub(crate) fn accumulating() -> bool {
+    ACCUMULATORS.load(Ordering::Relaxed) > 0
+}
+
+/// Live stacks whose moments are on the GPU.
+static ACCUMULATORS: AtomicUsize = AtomicUsize::new(0);
+
+/// A prepared frame's samples on the GPU, `width` by `height` with
+/// `channels` interleaved, which a live stack's accumulator there takes in
+/// place of uploading them. Back to the pool when dropped.
+pub(crate) struct GpuFrame {
+    buffer: Option<wgpu::Buffer>,
+    usage: wgpu::BufferUsages,
+    width: usize,
+    height: usize,
+    channels: usize,
+}
+
+impl Drop for GpuFrame {
+    fn drop(&mut self) {
+        if let (Some(buffer), Some(gpu)) = (self.buffer.take(), GPU.get().and_then(Option::as_ref))
+        {
+            gpu.give(self.usage, buffer);
+        }
+    }
+}
+
+/// [`NormalizationMap::apply_region`]'s coefficients for a region, as
+/// [`crate::normalization::NormalizationMap::gpu_coefficients`] gives them.
+pub(crate) struct NormalizationCoefficients {
+    pub(crate) global: bool,
+    pub(crate) tile_columns: u32,
+    /// Each column's lower and upper tile and fraction's bits; empty for a
+    /// global map, and so `rows`.
+    pub(crate) columns: Vec<[u32; 3]>,
+    pub(crate) rows: Vec<[u32; 3]>,
+    pub(crate) gains: Vec<f32>,
+    pub(crate) offsets: Vec<f32>,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct NormalizeParams {
+    width: u32,
+    height: u32,
+    channels: u32,
+    global: u32,
+    tile_columns: u32,
+    row: u32,
+    padding: [u32; 2],
+}
+
+impl GpuFrame {
+    /// Apply a normalization where the frame lies, as the CPU applies it.
+    /// Not waited for: the accumulator's work is submitted after it.
+    pub(crate) fn normalize(
+        &mut self,
+        coefficients: &NormalizationCoefficients,
+    ) -> Result<(), String> {
+        let gpu = gpu().ok_or("no GPU")?;
+        let buffer = self.buffer.as_ref().ok_or("the frame has left the GPU")?;
+        let samples = (self.width * self.height * self.channels) as u32;
+        let groups = samples.div_ceil(256);
+        let columns = groups.min(4096);
+        let params = NormalizeParams {
+            width: self.width as u32,
+            height: self.height as u32,
+            channels: self.channels as u32,
+            global: u32::from(coefficients.global),
+            tile_columns: coefficients.tile_columns,
+            row: columns * 256,
+            padding: [0; 2],
+        };
+        let init = |label: &str, contents: &[u8], usage: wgpu::BufferUsages| {
+            wgpu::util::DeviceExt::create_buffer_init(
+                &gpu.device,
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some(label),
+                    contents,
+                    usage,
+                },
+            )
+        };
+        let storage = wgpu::BufferUsages::STORAGE;
+        // A binding holds a word at least.
+        let words = |values: &[[u32; 3]]| -> Vec<u32> {
+            let mut words: Vec<u32> = values.iter().flatten().copied().collect();
+            if words.is_empty() {
+                words.push(0);
+            }
+            words
+        };
+        let uniform = init(
+            "normalize-params",
+            bytemuck::bytes_of(&params),
+            wgpu::BufferUsages::UNIFORM,
+        );
+        let column_weights = init(
+            "normalize-columns",
+            bytemuck::cast_slice(&words(&coefficients.columns)),
+            storage,
+        );
+        let row_weights = init(
+            "normalize-rows",
+            bytemuck::cast_slice(&words(&coefficients.rows)),
+            storage,
+        );
+        let gains = init(
+            "normalize-gains",
+            bytemuck::cast_slice(&coefficients.gains),
+            storage,
+        );
+        let offsets = init(
+            "normalize-offsets",
+            bytemuck::cast_slice(&coefficients.offsets),
+            storage,
+        );
+        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("normalize"),
+            layout: &gpu.normalize_layout,
+            entries: &[
+                (0, &uniform),
+                (1, &column_weights),
+                (2, &row_weights),
+                (3, &gains),
+                (4, &offsets),
+                (5, buffer),
+            ]
+            .map(|(binding, buffer)| wgpu::BindGroupEntry {
+                binding,
+                resource: buffer.as_entire_binding(),
+            }),
+        });
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&gpu.normalize_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(columns, groups.div_ceil(columns), 1);
+        }
+        gpu.queue.submit([encoder.finish()]);
+        if FAILED.load(Ordering::Relaxed) {
+            return Err("the GPU failed".into());
+        }
+        Ok(())
+    }
+
+    /// The frame's samples read back, for a frame that must be integrated
+    /// on the CPU after all; `None` when the GPU cannot give them.
+    pub(crate) fn download(&self) -> Option<Vec<f32>> {
+        let gpu = gpu()?;
+        let buffer = self.buffer.as_ref()?;
+        let bytes = (self.width * self.height * self.channels * 4) as u64;
+        let read_from = if self.usage.contains(wgpu::BufferUsages::MAP_READ) {
+            gpu.wait().ok()?;
+            gpu.map(&[buffer.slice(..bytes)], wgpu::MapMode::Read, None)
+                .ok()?;
+            buffer.clone()
+        } else {
+            let readback = gpu.buffer(
+                "frame-readback",
+                bytes,
+                wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            );
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            encoder.copy_buffer_to_buffer(buffer, 0, &readback, 0, bytes);
+            let submission = gpu.queue.submit([encoder.finish()]);
+            gpu.map(&[readback.slice(..)], wgpu::MapMode::Read, Some(submission))
+                .ok()?;
+            readback
+        };
+        let samples = copy_out(&read_from.slice(..bytes).get_mapped_range().ok()?, false);
+        read_from.unmap();
+        Some(samples)
+    }
 }
 
 /// Releases this thread's resident frame when dropped, at the end of the
@@ -736,6 +942,44 @@ impl Gpu {
             compilation_options: Default::default(),
             cache: None,
         });
+        let normalize_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("normalize"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("gpu/normalize.wgsl").into()),
+        });
+        let normalize_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("normalize"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                storage(1, true),
+                storage(2, true),
+                storage(3, true),
+                storage(4, true),
+                storage(5, false),
+            ],
+        });
+        let normalize_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("normalize"),
+                bind_group_layouts: &[Some(&normalize_layout)],
+                immediate_size: 0,
+            });
+        let normalize_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("normalize"),
+            layout: Some(&normalize_pipeline_layout),
+            module: &normalize_module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
         let detect_pipelines = [
             "luminance",
             "normalize",
@@ -782,6 +1026,8 @@ impl Gpu {
             detect_layout,
             scatter_pipeline,
             scatter_layout,
+            normalize_pipeline,
+            normalize_layout,
             weights,
             mapped,
             max_buffer: limits
@@ -1131,15 +1377,21 @@ impl Gpu {
             (region.width as u32).div_ceil(16),
             (region.height as u32).div_ceil(16),
         );
-        let data = self.compute(
+        let data = self.compute_keeping(
             &self.layout,
             &[(&self.pipeline, workgroups)],
             &[&uniform, &source_buffer, &grid, &self.weights],
             output_samples,
+            true,
             trace,
         );
         drop(source_buffer);
-        let data = data?;
+        let (data, output) = data?;
+        // The resampled frame stays on the GPU, for its normalization and
+        // the accumulator to take; see `take_resident`.
+        if let Some((buffer, usage)) = output {
+            keep_resident(buffer, usage, ResidentKey::of(&data));
+        }
         LinearImage::new(region.width, region.height, channels, data)
             .map_err(|error| error.to_string())
     }
@@ -2131,6 +2383,12 @@ pub(crate) struct GpuMoments {
     counters_read: wgpu::Buffer,
 }
 
+impl Drop for GpuMoments {
+    fn drop(&mut self) {
+        ACCUMULATORS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 impl GpuMoments {
     /// Moments of at least a million samples moved to the GPU, or `None`
     /// when they stay on the CPU.
@@ -2189,17 +2447,24 @@ impl GpuMoments {
             ),
         };
         gpu.wait().ok()?;
-        (!FAILED.load(Ordering::Relaxed)).then_some(state)
+        if FAILED.load(Ordering::Relaxed) {
+            return None;
+        }
+        ACCUMULATORS.fetch_add(1, Ordering::Relaxed);
+        Some(state)
     }
 
     /// Classify `frame`, placed as `placement` says, against the moments,
     /// and integrate it if rejection would accept at least `admit_at` of its
     /// finite samples: how many it would accept, and, when it was
     /// integrated, how many were accepted and refused there. One submission,
-    /// one wait: the GPU decides the admission itself.
+    /// one wait: the GPU decides the admission itself. `staged` holds the
+    /// frame's samples where they already lie on the GPU, which are not
+    /// uploaded again.
     pub(crate) fn admit(
         &mut self,
         frame: &[f32],
+        staged: Option<GpuFrame>,
         placement: FramePlacement,
         weights: &[f32],
         rejection: Option<GpuRejection>,
@@ -2207,16 +2472,26 @@ impl GpuMoments {
     ) -> Result<(usize, Option<(usize, usize)>), String> {
         let gpu = self.gpu;
         let mut trace = Trace::new();
-        let source = gpu.upload("frame", frame)?;
+        let samples = placement.rows * placement.span;
+        let held = staged.and_then(|mut staged| {
+            (staged.width * staged.height * staged.channels == samples)
+                .then(|| staged.buffer.take().map(|buffer| (buffer, staged.usage)))
+                .flatten()
+        });
+        let (source, usage) = match held {
+            Some(held) => held,
+            None if frame.len() == samples => (gpu.upload("frame", frame)?, gpu.input_usage()),
+            None => return Err("the frame's samples are neither here nor on the GPU".into()),
+        };
         trace.mark("upload");
         // No frame holds `u32::MAX` samples, so a count past it, which
         // admits none, admits none here either.
         let admit_at = u32::try_from(admit_at).unwrap_or(u32::MAX);
         let counts = self.dispatch(&source, placement, weights, rejection, admit_at);
-        gpu.give(gpu.input_usage(), source);
+        gpu.give(usage, source);
         let [accepted, _, integrated, refused] = counts?;
         trace.mark("admit");
-        trace.print(&format!("admit {} samples", frame.len()));
+        trace.print(&format!("admit {samples} samples"));
         let admitted = accepted >= admit_at;
         Ok((
             accepted as usize,
@@ -2591,6 +2866,7 @@ mod tests {
             ("defects", include_str!("gpu/defects.wgsl")),
             ("detect", include_str!("gpu/detect.wgsl")),
             ("scatter", include_str!("gpu/scatter.wgsl")),
+            ("normalize", include_str!("gpu/normalize.wgsl")),
         ] {
             let module = naga::front::wgsl::parse_str(source)
                 .unwrap_or_else(|error| panic!("{name}: {}", error.emit_to_string(source)));

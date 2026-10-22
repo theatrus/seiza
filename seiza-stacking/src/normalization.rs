@@ -655,6 +655,50 @@ impl NormalizationMap {
         Ok(())
     }
 
+    /// What applying this map to a region `width` by `height` at
+    /// `(origin_x, origin_y)` of its grid takes, for the GPU to apply it as
+    /// [`Self::apply_region`] does: each column's and row's tile weights as
+    /// [`RowNormalizer`] works them out, and the tiles' gains and offsets.
+    /// `None` when the region does not fit the grid.
+    #[cfg(feature = "gpu")]
+    pub(crate) fn gpu_coefficients(
+        &self,
+        (origin_x, origin_y): (usize, usize),
+        (width, height, channels): (usize, usize, usize),
+    ) -> Option<crate::gpu::NormalizationCoefficients> {
+        if self.validate().is_err()
+            || channels != self.channels
+            || origin_x + width > self.width
+            || origin_y + height > self.height
+        {
+            return None;
+        }
+        let global = self.columns == 1 && self.rows == 1;
+        let weights = |coordinates: std::ops::Range<usize>, cells: usize| {
+            if global {
+                return Vec::new();
+            }
+            coordinates
+                .map(|coordinate| {
+                    let weights = axis_weights(coordinate, cells, self.tile_size);
+                    [
+                        weights.low as u32,
+                        weights.high as u32,
+                        weights.fraction.to_bits(),
+                    ]
+                })
+                .collect()
+        };
+        Some(crate::gpu::NormalizationCoefficients {
+            global,
+            tile_columns: self.columns as u32,
+            columns: weights(origin_x..origin_x + width, self.columns),
+            rows: weights(origin_y..origin_y + height, self.rows),
+            gains: self.gains.clone(),
+            offsets: self.offsets.clone(),
+        })
+    }
+
     /// Per-sample gains and offsets for drizzle, which reads them at
     /// scattered positions: each column's and row's tile weights are worked
     /// out once.
@@ -1570,6 +1614,120 @@ fn affine_for_region(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A frame the GPU resampled, normalized where it lies, is the CPU's
+    /// normalized frame: to the bit for one gain and offset per channel,
+    /// fused on both, and within a few units in the last place for a tile
+    /// grid, whose interpolation a GPU compiler may fuse where the CPU
+    /// rounds each step; on the whole grid and on a region of it.
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn the_gpu_normalizes_a_frame_as_the_cpu_does() {
+        if crate::gpu::adapter_description().is_none() {
+            eprintln!("no GPU: GPU normalization not compared");
+            return;
+        }
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1_u64 << 53) as f64
+        };
+        let (grid_width, grid_height, channels) = (1300, 1000, 3);
+        let source = LinearImage::new(
+            grid_width,
+            grid_height,
+            channels,
+            (0..grid_width * grid_height * channels)
+                .map(|index| {
+                    if index % 997 == 0 {
+                        f32::NAN
+                    } else {
+                        (200.0 + 50.0 * next()) as f32
+                    }
+                })
+                .collect(),
+        )
+        .unwrap();
+        let tile_size = 128;
+        let (columns, rows) = (
+            grid_width.div_ceil(tile_size),
+            grid_height.div_ceil(tile_size),
+        );
+        let tiled = NormalizationMap {
+            schema_version: NORMALIZATION_MAP_SCHEMA_VERSION,
+            width: grid_width,
+            height: grid_height,
+            channels,
+            tile_size,
+            columns,
+            rows,
+            gains: (0..columns * rows * channels)
+                .map(|_| (0.9 + 0.2 * next()) as f32)
+                .collect(),
+            offsets: (0..columns * rows * channels)
+                .map(|_| (-20.0 + 40.0 * next()) as f32)
+                .collect(),
+        };
+        let global = NormalizationMap {
+            columns: 1,
+            rows: 1,
+            tile_size: grid_width.max(grid_height),
+            gains: vec![1.05, 0.97, 1.11],
+            offsets: vec![-3.25, 7.5, 0.125],
+            ..tiled.clone()
+        };
+        let identity = |x: f64, y: f64| (x, y);
+        for region in [
+            ReferenceRegion {
+                x: 0,
+                y: 0,
+                width: grid_width,
+                height: grid_height,
+            },
+            ReferenceRegion {
+                x: 210,
+                y: 130,
+                width: 900,
+                height: 800,
+            },
+        ] {
+            for (map, exact) in [(&global, true), (&tiled, false)] {
+                let mut registered = crate::gpu::resample(
+                    &source,
+                    region,
+                    &identity,
+                    crate::gpu::GpuSampling::Bilinear,
+                )
+                .expect("the GPU resamples");
+                let mut frame = crate::gpu::take_resident(
+                    &registered.data,
+                    (registered.width, registered.height, registered.channels),
+                )
+                .expect("the resampled frame stays on the GPU");
+                let coefficients = map
+                    .gpu_coefficients(
+                        (region.x, region.y),
+                        (registered.width, registered.height, channels),
+                    )
+                    .unwrap();
+                frame.normalize(&coefficients).unwrap();
+                map.apply_region(&mut registered, region.x, region.y)
+                    .unwrap();
+                let normalized = frame.download().unwrap();
+                let mut largest = 0.0_f32;
+                for (sample, (&gpu, &cpu)) in normalized.iter().zip(&registered.data).enumerate() {
+                    if exact || !cpu.is_finite() {
+                        assert_eq!(gpu.to_bits(), cpu.to_bits(), "sample {sample}");
+                    } else {
+                        largest = largest.max((gpu - cpu).abs() / cpu.abs().max(1.0));
+                    }
+                }
+                assert!(largest < 1e-6, "{largest} apart");
+            }
+        }
+    }
 
     /// The tile's sampled pixels, stepped by row and column, are the ones
     /// dividing each sample's place gives.
