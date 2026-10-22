@@ -69,9 +69,56 @@ struct Gpu {
     /// a discrete one goes through staging copies.
     mapped: bool,
     max_buffer: u64,
+    /// Frame-sized buffers kept between calls: making a new one maps and
+    /// clears fresh memory, which took longer than the upload itself.
+    pool: std::sync::Mutex<Vec<(wgpu::BufferUsages, wgpu::Buffer)>>,
 }
 
+/// Bytes the pool keeps at most, past which a returned buffer is dropped.
+const POOL_BYTES: u64 = 1 << 30;
+
 static GPU: OnceLock<Option<Gpu>> = OnceLock::new();
+
+/// Each stage's time in one GPU call, printed to stderr when
+/// `SEIZA_GPU_TRACE` is set, to see where the time goes on a machine.
+pub(crate) struct Trace {
+    enabled: bool,
+    last: std::time::Instant,
+    parts: Vec<(&'static str, f64)>,
+}
+
+impl Trace {
+    pub(crate) fn new() -> Self {
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        Self {
+            enabled: *ENABLED.get_or_init(|| std::env::var_os("SEIZA_GPU_TRACE").is_some()),
+            last: std::time::Instant::now(),
+            parts: Vec::new(),
+        }
+    }
+
+    pub(crate) fn mark(&mut self, stage: &'static str) {
+        if self.enabled {
+            let now = std::time::Instant::now();
+            self.parts
+                .push((stage, (now - self.last).as_secs_f64() * 1000.0));
+            self.last = now;
+        }
+    }
+
+    pub(crate) fn print(&self, what: &str) {
+        if self.enabled {
+            let total: f64 = self.parts.iter().map(|(_, ms)| ms).sum();
+            let parts = self
+                .parts
+                .iter()
+                .map(|(stage, ms)| format!("{stage} {ms:.1}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            eprintln!("seiza-stacking gpu: {what}: {total:.1} ms ({parts})");
+        }
+    }
+}
 static FAILED: AtomicBool = AtomicBool::new(false);
 
 fn disabled_by_environment() -> bool {
@@ -273,6 +320,7 @@ impl Gpu {
             max_buffer: limits
                 .max_buffer_size
                 .min(limits.max_storage_buffer_binding_size),
+            pool: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -283,6 +331,42 @@ impl Gpu {
             usage,
             mapped_at_creation: false,
         })
+    }
+
+    /// A buffer of `usage` holding at least `size` bytes, from the pool when
+    /// one there is no more than twice as large, or else a new one.
+    fn take(&self, label: &str, size: u64, usage: wgpu::BufferUsages) -> wgpu::Buffer {
+        let mut pool = self
+            .pool
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let found = pool
+            .iter()
+            .enumerate()
+            .filter(|(_, (kind, buffer))| {
+                *kind == usage && buffer.size() >= size && buffer.size() <= 2 * size
+            })
+            .min_by_key(|(_, (_, buffer))| buffer.size())
+            .map(|(index, _)| index);
+        match found {
+            Some(index) => pool.swap_remove(index).1,
+            None => {
+                drop(pool);
+                self.buffer(label, size, usage)
+            }
+        }
+    }
+
+    /// Return a buffer [`Self::take`] gave, unmapped, for a later call.
+    fn give(&self, usage: wgpu::BufferUsages, buffer: wgpu::Buffer) {
+        let mut pool = self
+            .pool
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let held: u64 = pool.iter().map(|(_, buffer)| buffer.size()).sum();
+        if held + buffer.size() <= POOL_BYTES {
+            pool.push((usage, buffer));
+        }
     }
 
     fn wait(&self) -> Result<(), String> {
@@ -299,6 +383,7 @@ impl Gpu {
         grid: &[[u32; 4]],
         (grid_columns, grid_origin): (u32, u32),
         sampling: GpuSampling,
+        trace: &mut Trace,
     ) -> Result<LinearImage, String> {
         let channels = source.channels;
         let source_bytes = (source.data.len() * 4) as u64;
@@ -348,44 +433,35 @@ impl Gpu {
             bytemuck::cast_slice(grid),
             wgpu::BufferUsages::STORAGE,
         );
-        let source_buffer = if self.mapped {
-            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("source"),
-                size: source_bytes,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::MAP_WRITE,
-                mapped_at_creation: true,
-            });
-            buffer
-                .slice(..)
+        let source_usage = wgpu::BufferUsages::STORAGE
+            | if self.mapped {
+                wgpu::BufferUsages::MAP_WRITE
+            } else {
+                wgpu::BufferUsages::COPY_DST
+            };
+        let source_buffer = self.take("source", source_bytes, source_usage);
+        if self.mapped {
+            let range = source_buffer.slice(..source_bytes);
+            range.map_async(wgpu::MapMode::Write, |_| {});
+            self.wait()?;
+            range
                 .get_mapped_range_mut()
                 .map_err(|error| error.to_string())?
                 .copy_from_slice(bytemuck::cast_slice(&source.data));
-            buffer.unmap();
-            buffer
+            source_buffer.unmap();
         } else {
-            init(
-                "source",
-                bytemuck::cast_slice(&source.data),
-                wgpu::BufferUsages::STORAGE,
-            )
-        };
-        let output = self.buffer(
-            "output",
-            output_bytes,
-            wgpu::BufferUsages::STORAGE
-                | if self.mapped {
-                    wgpu::BufferUsages::MAP_READ
-                } else {
-                    wgpu::BufferUsages::COPY_SRC
-                },
-        );
-        let readback = (!self.mapped).then(|| {
-            self.buffer(
-                "readback",
-                output_bytes,
-                wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            )
-        });
+            self.queue
+                .write_buffer(&source_buffer, 0, bytemuck::cast_slice(&source.data));
+        }
+        let output_usage = wgpu::BufferUsages::STORAGE
+            | if self.mapped {
+                wgpu::BufferUsages::MAP_READ
+            } else {
+                wgpu::BufferUsages::COPY_SRC
+            };
+        let output = self.take("output", output_bytes, output_usage);
+        let readback_usage = wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST;
+        let readback = (!self.mapped).then(|| self.take("readback", output_bytes, readback_usage));
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("resample"),
             layout: &self.layout,
@@ -415,15 +491,19 @@ impl Gpu {
         if let Some(readback) = &readback {
             encoder.copy_buffer_to_buffer(&output, 0, readback, 0, output_bytes);
         }
+        trace.mark("upload");
         self.queue.submit([encoder.finish()]);
         let read_from = readback.as_ref().unwrap_or(&output);
-        read_from.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        read_from
+            .slice(..output_bytes)
+            .map_async(wgpu::MapMode::Read, |_| {});
         self.wait()?;
+        trace.mark("kernel");
         if FAILED.load(Ordering::Relaxed) {
             return Err("the GPU failed".into());
         }
         let view = read_from
-            .slice(..)
+            .slice(..output_bytes)
             .get_mapped_range()
             .map_err(|error| error.to_string())?;
         // Every core copies out: one alone reads write-combined memory, as
@@ -436,6 +516,12 @@ impl Gpu {
             .for_each(|(out, input)| out.copy_from_slice(input));
         drop(view);
         read_from.unmap();
+        trace.mark("copy out");
+        self.give(source_usage, source_buffer);
+        self.give(output_usage, output);
+        if let Some(readback) = readback {
+            self.give(readback_usage, readback);
+        }
         LinearImage::new(region.width, region.height, channels, data)
             .map_err(|error| error.to_string())
     }
@@ -464,6 +550,7 @@ pub(crate) fn resample(
         return None;
     }
     let gpu = gpu()?;
+    let mut trace = Trace::new();
     let step = GRID_STEP as usize;
     let (first_column, first_row) = (region.x / step, region.y / step);
     let (last_column, last_row) = (
@@ -502,7 +589,20 @@ pub(crate) fn resample(
         })
         .collect();
     let origin = (first_row as u32) << 16 | first_column as u32;
-    match gpu.resample(source, region, &grid, (columns as u32, origin), sampling) {
+    trace.mark("grid");
+    let result = gpu.resample(
+        source,
+        region,
+        &grid,
+        (columns as u32, origin),
+        sampling,
+        &mut trace,
+    );
+    trace.print(&format!(
+        "resample {}x{}x{channels}",
+        region.width, region.height
+    ));
+    match result {
         Ok(image) => Some(image),
         Err(reason) => {
             log_once(&format!("resampling this frame on the CPU: {reason}"));
@@ -734,6 +834,7 @@ impl BandSession {
         counts: &mut [(usize, usize)],
     ) -> Result<(), String> {
         let gpu = self.gpu;
+        let mut trace = Trace::new();
         let samples = outputs.mean.len();
         if samples > self.band_capacity || frames.len() != self.frame_count {
             return Err("the band does not fit the session".into());
@@ -811,6 +912,7 @@ impl BandSession {
         }
         let count_bytes = (reaching.len() * 8) as u64;
         encoder.copy_buffer_to_buffer(&self.counts, 0, &self.counts_read, 0, count_bytes);
+        trace.mark("upload");
         gpu.queue.submit([encoder.finish()]);
         let moments_from = self.moments_read.as_ref().unwrap_or(&self.moments);
         let tallies_from = self.tallies_read.as_ref().unwrap_or(&self.tallies);
@@ -824,6 +926,7 @@ impl BandSession {
             .slice(..count_bytes)
             .map_async(wgpu::MapMode::Read, |_| {});
         gpu.wait()?;
+        trace.mark("kernel");
         if FAILED.load(Ordering::Relaxed) {
             return Err("the GPU failed".into());
         }
@@ -893,6 +996,11 @@ impl BandSession {
         moments_from.unmap();
         tallies_from.unmap();
         self.counts_read.unmap();
+        trace.mark("copy out");
+        trace.print(&format!(
+            "band of {samples} samples, {} frames",
+            reaching.len()
+        ));
         Ok(())
     }
 }
