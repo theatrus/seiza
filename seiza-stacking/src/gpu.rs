@@ -1,6 +1,6 @@
 //! Stacking's heavy passes on the GPU, through wgpu: Metal, Vulkan or
-//! Direct3D 12, whichever the platform has. [`vng`] debayers a Bayer
-//! mosaic's interior, [`resample`] registers a frame onto the reference grid
+//! Direct3D 12, whichever the platform has. [`defect_candidates`] screens
+//! a light for defect learning, [`vng`] debayers a Bayer mosaic's interior, [`resample`] registers a frame onto the reference grid
 //! (clamped Lanczos-3 or bilinear), [`GpuMoments`] holds a live stack's
 //! accumulator and [`BandSession`] runs the final integration's rejection
 //! passes, each as its CPU twin does in f32. A resampled sample differs from
@@ -68,6 +68,8 @@ struct Gpu {
     balance_pipeline: wgpu::ComputePipeline,
     vng_pipeline: wgpu::ComputePipeline,
     vng_layout: wgpu::BindGroupLayout,
+    defects_pipeline: wgpu::ComputePipeline,
+    defects_layout: wgpu::BindGroupLayout,
     weights: wgpu::Buffer,
     /// An integrated GPU, which shares memory with the CPU, reads the
     /// source and writes the output in buffers the CPU maps directly;
@@ -171,7 +173,11 @@ fn gpu() -> Option<&'static Gpu> {
         if disabled_by_environment() {
             return None;
         }
-        match Gpu::open() {
+        let mut trace = Trace::new();
+        let opened = Gpu::open();
+        trace.mark("open");
+        trace.print("device");
+        match opened {
             Ok(gpu) => Some(gpu),
             Err(reason) => {
                 log_once(&format!("resampling on the CPU: {reason}"));
@@ -415,6 +421,41 @@ impl Gpu {
         };
         let balance_pipeline = vng_pipeline("balance");
         let vng_pipeline = vng_pipeline("main");
+        let defects_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("defects"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("gpu/defects.wgsl").into()),
+        });
+        let defects_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("defects"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                storage(1, true),
+                storage(2, false),
+            ],
+        });
+        let defects_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("defects"),
+                bind_group_layouts: &[Some(&defects_layout)],
+                immediate_size: 0,
+            });
+        let defects_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("defects"),
+            layout: Some(&defects_pipeline_layout),
+            module: &defects_module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
         let table = crate::registration::lanczos3_table();
         let weights = wgpu::util::DeviceExt::create_buffer_init(
             &device,
@@ -437,6 +478,8 @@ impl Gpu {
             balance_pipeline,
             vng_pipeline,
             vng_layout,
+            defects_pipeline,
+            defects_layout,
             weights,
             mapped,
             max_buffer: limits
@@ -526,15 +569,15 @@ impl Gpu {
     /// Run `passes`, each a pipeline of `layout` over its workgroups, in
     /// order, their bindings `inputs` and then an output of
     /// `output_samples`, and read the output back.
-    fn compute(
+    fn compute<T: bytemuck::Pod + Send + Sync>(
         &self,
         layout: &wgpu::BindGroupLayout,
         passes: &[(&wgpu::ComputePipeline, (u32, u32))],
         inputs: &[&wgpu::Buffer],
         output_samples: usize,
         trace: &mut Trace,
-    ) -> Result<Vec<f32>, String> {
-        let output_bytes = (output_samples * 4) as u64;
+    ) -> Result<Vec<T>, String> {
+        let output_bytes = (output_samples * std::mem::size_of::<T>()) as u64;
         let output_usage = wgpu::BufferUsages::STORAGE
             | if self.mapped {
                 wgpu::BufferUsages::MAP_READ
@@ -929,6 +972,89 @@ pub(crate) fn vng(
         Ok(rgb) => Some(rgb),
         Err(reason) => {
             log_once(&format!("debayering this frame on the CPU: {reason}"));
+            None
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct DefectParams {
+    width: u32,
+    height: u32,
+    channels: u32,
+    step: u32,
+    samples: u32,
+    row: u32,
+    padding: [u32; 2],
+    thresholds: [f32; 4],
+}
+
+/// The first test `defects::frame_deviations` makes of every sample, on the
+/// GPU: a bit for each sample of `data` (`width` by `height`, `channels`
+/// interleaved, same-plane neighbours `step` apart), 32 to a word, set where
+/// the sample may stand more than its plane's threshold from its eight
+/// neighbours' extremes. The test is loosened a little, so every sample the
+/// CPU's exact test keeps is flagged, and some it would not. `thresholds`
+/// holds `sigma` times each plane's noise, by `channel * step^2 + plane`.
+/// `None` when the CPU should: the frame is small,
+/// `SEIZA_GPU_DEFECTS=off`, or no GPU is in use.
+pub(crate) fn defect_candidates(
+    data: &[f32],
+    (width, height, channels, step): (usize, usize, usize, usize),
+    thresholds: [f32; 4],
+) -> Option<Vec<u32>> {
+    if data.len() < MINIMUM_SAMPLES
+        || data.len() != width * height * channels
+        || channels * step * step > 4
+        || data.len() > u32::MAX as usize
+        || std::env::var("SEIZA_GPU_DEFECTS").is_ok_and(|value| value == "off")
+    {
+        return None;
+    }
+    let gpu = gpu()?;
+    if (data.len() as u64) * 4 > gpu.max_buffer {
+        return None;
+    }
+    let mut trace = Trace::new();
+    let groups = data.len().div_ceil(256) as u32;
+    let columns = groups.min(4096);
+    let params = DefectParams {
+        width: width as u32,
+        height: height as u32,
+        channels: channels as u32,
+        step: step as u32,
+        samples: data.len() as u32,
+        row: columns * 256,
+        padding: [0; 2],
+        thresholds,
+    };
+    let uniform = wgpu::util::DeviceExt::create_buffer_init(
+        &gpu.device,
+        &wgpu::util::BufferInitDescriptor {
+            label: Some("defect-params"),
+            contents: bytemuck::bytes_of(&params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        },
+    );
+    let result = gpu.upload("defects", data).and_then(|source| {
+        let flags = gpu.compute::<u32>(
+            &gpu.defects_layout,
+            &[(&gpu.defects_pipeline, (columns, groups.div_ceil(columns)))],
+            &[&uniform, &source],
+            data.len().div_ceil(32),
+            &mut trace,
+        );
+        gpu.give(gpu.input_usage(), source);
+        flags
+    });
+    trace.print(&format!("defects {width}x{height}x{channels}"));
+    match result {
+        Ok(flags) => Some(flags),
+        Err(reason) => {
+            log_once(&format!(
+                "screening this frame for defects on the CPU: {reason}"
+            ));
             None
         }
     }
@@ -1879,6 +2005,7 @@ mod tests {
             ("bands", include_str!("gpu/bands.wgsl")),
             ("accumulate", include_str!("gpu/accumulate.wgsl")),
             ("vng", include_str!("gpu/vng.wgsl")),
+            ("defects", include_str!("gpu/defects.wgsl")),
         ] {
             let module = naga::front::wgsl::parse_str(source)
                 .unwrap_or_else(|error| panic!("{name}: {}", error.emit_to_string(source)));

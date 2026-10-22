@@ -1,8 +1,9 @@
 # GPU stacking
 
-Status: VNG debayering, resampling, the live accumulator and the final
-integration's band passes run on the GPU, behind `seiza-stacking`'s default
-`gpu` feature. More stages are follow-on work (see the end).
+Status: defect learning's screen, VNG debayering, resampling, the live
+accumulator and the final integration's band passes run on the GPU, behind
+`seiza-stacking`'s default `gpu` feature. More stages are follow-on work
+(see the end).
 
 ## What runs where
 
@@ -11,6 +12,13 @@ macOS, Vulkan on Linux, and Direct3D 12 or Vulkan on Windows, chosen at run
 time. It opens the device once, the first time a frame large enough to gain
 from it arrives. These stages run there:
 
+- **Defect learning's screen** (`defects::frame_deviations`): the first
+  test of every sample of a light the defect map is learned from, against
+  the extremes of its eight same-plane neighbours. Nearly every sample
+  passes it; the GPU flags the rest in a bitmask, the test loosened by a
+  hundred-thousandth so it flags every sample the CPU's exact test keeps,
+  and the CPU examines only those, the exact test first. The deviations,
+  and so the map, are bit for bit those of examining every sample.
 - **VNG debayering** (`image::LinearImage::debayer_with`): every pixel two
   or more from each edge of a Bayer mosaic, with the channel balance the
   CPU measures. The two-pixel border, which takes bilinear estimates, stays
@@ -33,8 +41,8 @@ from it arrives. These stages run there:
   first estimate and the Student-t limits. A band that records sample fates
   for a drizzle is integrated on the CPU.
 
-Everything else (decoding, calibration, defect detection, star detection,
-registration fits, normalization fits) stays on the CPU for now.
+Everything else (decoding, calibration, star detection, registration fits,
+normalization fits) stays on the CPU for now.
 
 The GPU takes a frame only when it holds at least a million samples; below
 that its fixed cost, a few milliseconds, outweighs the gain, and the small
@@ -111,10 +119,13 @@ registration with it.
 
 - Build without the `gpu` feature (`default-features = false`) for a
   CPU-only crate without wgpu.
-- `SEIZA_GPU_ACCUMULATOR=off` keeps the live accumulator on the CPU, and
-  `SEIZA_GPU_DEBAYER=off` VNG debayering.
+- `SEIZA_GPU_ACCUMULATOR=off` keeps the live accumulator on the CPU,
+  `SEIZA_GPU_DEBAYER=off` VNG debayering, and `SEIZA_GPU_DEFECTS=off`
+  defect learning's screen.
 - `SEIZA_GPU_TRACE=1` prints every GPU call's stages (grid, upload,
-  kernel, copy out) to stderr, to see where the time goes on a machine.
+  kernel, copy out) to stderr, and the time opening the device took (12 ms
+  on the M4 Max, 46 ms on an Iris Xe), to see where the time goes on a
+  machine.
 - `SEIZA_GPU=off` (or `0`, `cpu`), set before the first large frame, keeps
   everything on the CPU. `SEIZA_GPU_BANDS=off` keeps the final integration
   there while resampling stays on the GPU. `WGPU_BACKEND` chooses the
@@ -176,6 +187,12 @@ a 26 MP frame on an idle GPU, against about 14 ms (225 CPU-ms) on the
 CPU's 16 cores; debayering fell from 28% of the workers' busy time to 2%.
 With each call waiting for its own submission and copying on its own core,
 6.7-7.2 s and 51-53 CPU-s.
+
+Learning the defect map from 16 of the M45 lights took 1.1 s of that on the
+M4 Max, before any frame was prepared; with the GPU's screen it takes
+0.65 s, most of it reading and calibrating the lights, and the run 10
+CPU-s less (39 against 49). On the Iris Xe, 1.7 s against 3.2 s, and 200
+CPU-s against 228. The stacks are byte-identical either way.
 
 The same set on an i5-1340P with its Iris Xe (Vulkan, Linux): 41-42 s and
 240 CPU-s, against 62 s and 811 CPU-s on the CPU alone. There the GPU is

@@ -204,21 +204,23 @@ fingerprint do not change.
 
 ## GPU resampling and integration
 
-With the default `gpu` feature, VNG debayering, registration resampling
-(clamped Lanczos-3 and bilinear), the live stack's accumulator and the final
-integration's three rejection passes run on the GPU when one is present,
-through wgpu: Metal, Vulkan or Direct3D 12. Frames under a million samples
-stay on the CPU, which is as quick for them. The GPU works in single
-precision and stays within a few thousandths of the frame's noise of the CPU
-(see `docs/design/gpu-stacking.md`); on a 45-frame, 26 MP stack with
-reintegration it halves the wall time and quarters the CPU time.
+With the default `gpu` feature, defect learning's first screen, VNG
+debayering, registration resampling (clamped Lanczos-3 and bilinear), the
+live stack's accumulator and the final integration's three rejection passes
+run on the GPU when one is present, through wgpu: Metal, Vulkan or
+Direct3D 12. Frames under a million samples stay on the CPU, which is as
+quick for them. The GPU works in single precision and stays within a few
+thousandths of the frame's noise of the CPU, and the defect map comes out
+bit for bit as the CPU's (see `docs/design/gpu-stacking.md`); on a 45-frame,
+26 MP stack with reintegration it halves the wall time and quarters the CPU
+time.
 
 Set `SEIZA_GPU=off` before the first large frame to keep everything on the
-CPU, or one of `SEIZA_GPU_DEBAYER=off`, `SEIZA_GPU_ACCUMULATOR=off` and
-`SEIZA_GPU_BANDS=off` to keep only that stage there. Build with
-`default-features = false` for a crate without wgpu. No adapter, or any GPU
-error, falls back to the CPU; an error is logged once and turns the GPU off
-for the rest of the process.
+CPU, or one of `SEIZA_GPU_DEFECTS=off`, `SEIZA_GPU_DEBAYER=off`,
+`SEIZA_GPU_ACCUMULATOR=off` and `SEIZA_GPU_BANDS=off` to keep only that
+stage there. Build with `default-features = false` for a crate without
+wgpu. No adapter, or any GPU error, falls back to the CPU; an error is
+logged once and turns the GPU off for the rest of the process.
 
 ## Pipelined preparation with a shared pool
 

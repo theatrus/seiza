@@ -564,6 +564,17 @@ fn frame_deviations(
     bayer: Option<BayerLayout>,
     sigma: f32,
 ) -> Option<Vec<Deviation>> {
+    deviations_screened(image, bayer, sigma, true)
+}
+
+/// [`frame_deviations`], screened on the GPU when `on_gpu` and one is in
+/// use, or else by examining every sample.
+fn deviations_screened(
+    image: &LinearImage,
+    bayer: Option<BayerLayout>,
+    sigma: f32,
+    on_gpu: bool,
+) -> Option<Vec<Deviation>> {
     let step = if bayer.is_some() && image.channels == 1 {
         2
     } else {
@@ -577,113 +588,160 @@ fn frame_deviations(
     let plane = |x: usize, y: usize| (y % step) * step + x % step;
     let noise = plane_noise(image, step)?;
     let data = &image.data;
+    // Whether the sample at `(x, y, channel)` stands out, as a deviation.
+    let examine = |x: usize, y: usize, channel: usize| -> Option<Deviation> {
+        let mut ring = [0.0f32; 8];
+        let mut outer = [0.0f32; 16];
+        let mut around = [0.0f32; 24];
+        let value = data[(y * width + x) * channels + channel];
+        if !value.is_finite() {
+            return None;
+        }
+        let count = gather(
+            data, x, y, channel, step, 1, width, height, channels, &mut ring,
+        );
+        if count < 5 {
+            return None;
+        }
+        let frame_sigma = noise[channel * planes + plane(x, y)];
+        let threshold = sigma * frame_sigma;
+        // The median lies between the extremes, so a sample within the
+        // threshold of both cannot deviate beyond it.
+        let (low, high) = ring[..count]
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), &v| {
+                (low.min(v), high.max(v))
+            });
+        if value - low <= threshold && high - value <= threshold {
+            return None;
+        }
+        let median = median_in_place(&mut ring[..count]);
+        let deviation = value - median;
+        // A defect stands out from all its neighbours but at most one, its
+        // partner in a pair; a pixel on a star's flank has brighter ones
+        // toward the core. The median left the neighbours sorted.
+        if deviation.abs() <= threshold
+            || (deviation > 0.0 && value <= ring[count - 2])
+            || (deviation < 0.0 && value >= ring[1])
+        {
+            return None;
+        }
+        // The local noise, from all 24 samples around: eight alone scatter
+        // too widely to judge by.
+        let outer_count = gather(
+            data, x, y, channel, step, 2, width, height, channels, &mut outer,
+        );
+        let total = count + outer_count;
+        around[..count].copy_from_slice(&ring[..count]);
+        around[count..total].copy_from_slice(&outer[..outer_count]);
+        let center = median_in_place(&mut around[..total]);
+        for sample in &mut around[..total] {
+            *sample = (*sample - center).abs();
+        }
+        let local = MAD_TO_SIGMA * median_in_place(&mut around[..total]);
+        if deviation.abs() <= sigma * local {
+            return None;
+        }
+        let structure = if step == 2 {
+            // A raw colour frame's same-colour neighbours are two pixels
+            // away, where a tight star has already faded; the other colours
+            // beside it are still in its core. So judge the eight adjacent
+            // photosites, each by its own colour's neighbours and noise.
+            let mut adjacent = [0.0f32; 8];
+            let mut adjacent_count = 0;
+            for (dx, dy) in ring_offsets(1) {
+                let Some((nx, ny)) = offset(x, y, dx, dy, width, height) else {
+                    continue;
+                };
+                let neighbor = data[(ny * width + nx) * channels + channel];
+                let mut own = [0.0f32; 8];
+                let own_count = gather(
+                    data, nx, ny, channel, step, 1, width, height, channels, &mut own,
+                );
+                if neighbor.is_finite() && own_count >= 5 {
+                    adjacent[adjacent_count] = (neighbor - median_in_place(&mut own[..own_count]))
+                        / noise[channel * planes + plane(nx, ny)];
+                    adjacent_count += 1;
+                }
+            }
+            if adjacent_count >= 5 {
+                median_in_place(&mut adjacent[..adjacent_count])
+            } else {
+                0.0
+            }
+        } else if outer_count >= 8 {
+            (median - median_in_place(&mut outer[..outer_count])) / frame_sigma
+        } else {
+            0.0
+        };
+        Some(Deviation {
+            sample: ((y * width + x) * channels + channel) as u32,
+            hot: deviation > 0.0,
+            excess: deviation,
+            noise: frame_sigma,
+            structure,
+        })
+    };
+    // The GPU screens every sample against its neighbours' extremes, as
+    // `examine` does first, and flags the few it cannot rule out, so only
+    // those are examined here: the same deviations, in the same order.
+    #[cfg(feature = "gpu")]
+    if let Some(flags) = on_gpu
+        .then(|| gpu_candidates(image, step, sigma, &noise))
+        .flatten()
+    {
+        const WORDS: usize = 1024;
+        let found = flags
+            .par_chunks(WORDS)
+            .enumerate()
+            .flat_map_iter(|(chunk, words)| {
+                let examine = &examine;
+                words.iter().enumerate().flat_map(move |(index, &word)| {
+                    let first = (chunk * WORDS + index) * 32;
+                    (0..32)
+                        .filter(move |bit| word >> bit & 1 == 1)
+                        .filter_map(move |bit| {
+                            let sample = first + bit;
+                            let pixel = sample / channels;
+                            examine(pixel % width, pixel / width, sample % channels)
+                        })
+                })
+            })
+            .collect();
+        return Some(found);
+    }
+    #[cfg(not(feature = "gpu"))]
+    let _ = on_gpu;
     let found = (0..height)
         .into_par_iter()
         .flat_map_iter(|y| {
-            let noise = &noise;
-            let mut ring = [0.0f32; 8];
-            let mut outer = [0.0f32; 16];
-            let mut around = [0.0f32; 24];
-            let mut found = Vec::new();
-            for x in 0..width {
-                for channel in 0..channels {
-                    let value = data[(y * width + x) * channels + channel];
-                    if !value.is_finite() {
-                        continue;
-                    }
-                    let count = gather(
-                        data, x, y, channel, step, 1, width, height, channels, &mut ring,
-                    );
-                    if count < 5 {
-                        continue;
-                    }
-                    let frame_sigma = noise[channel * planes + plane(x, y)];
-                    let threshold = sigma * frame_sigma;
-                    // The median lies between the extremes, so a sample within
-                    // the threshold of both cannot deviate beyond it.
-                    let (low, high) = ring[..count]
-                        .iter()
-                        .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), &v| {
-                            (low.min(v), high.max(v))
-                        });
-                    if value - low <= threshold && high - value <= threshold {
-                        continue;
-                    }
-                    let median = median_in_place(&mut ring[..count]);
-                    let deviation = value - median;
-                    // A defect stands out from all its neighbours but at
-                    // most one, its partner in a pair; a pixel on a star's
-                    // flank has brighter ones toward the core. The median
-                    // left the neighbours sorted.
-                    if deviation.abs() <= threshold
-                        || (deviation > 0.0 && value <= ring[count - 2])
-                        || (deviation < 0.0 && value >= ring[1])
-                    {
-                        continue;
-                    }
-                    // The local noise, from all 24 samples around: eight
-                    // alone scatter too widely to judge by.
-                    let outer_count = gather(
-                        data, x, y, channel, step, 2, width, height, channels, &mut outer,
-                    );
-                    let total = count + outer_count;
-                    around[..count].copy_from_slice(&ring[..count]);
-                    around[count..total].copy_from_slice(&outer[..outer_count]);
-                    let center = median_in_place(&mut around[..total]);
-                    for sample in &mut around[..total] {
-                        *sample = (*sample - center).abs();
-                    }
-                    let local = MAD_TO_SIGMA * median_in_place(&mut around[..total]);
-                    if deviation.abs() <= sigma * local {
-                        continue;
-                    }
-                    let structure = if step == 2 {
-                        // A raw colour frame's same-colour neighbours are two
-                        // pixels away, where a tight star has already faded;
-                        // the other colours beside it are still in its core.
-                        // So judge the eight adjacent photosites, each by
-                        // its own colour's neighbours and noise.
-                        let mut adjacent = [0.0f32; 8];
-                        let mut adjacent_count = 0;
-                        for (dx, dy) in ring_offsets(1) {
-                            let Some((nx, ny)) = offset(x, y, dx, dy, width, height) else {
-                                continue;
-                            };
-                            let neighbor = data[(ny * width + nx) * channels + channel];
-                            let mut own = [0.0f32; 8];
-                            let own_count = gather(
-                                data, nx, ny, channel, step, 1, width, height, channels, &mut own,
-                            );
-                            if neighbor.is_finite() && own_count >= 5 {
-                                adjacent[adjacent_count] = (neighbor
-                                    - median_in_place(&mut own[..own_count]))
-                                    / noise[channel * planes + plane(nx, ny)];
-                                adjacent_count += 1;
-                            }
-                        }
-                        if adjacent_count >= 5 {
-                            median_in_place(&mut adjacent[..adjacent_count])
-                        } else {
-                            0.0
-                        }
-                    } else if outer_count >= 8 {
-                        (median - median_in_place(&mut outer[..outer_count])) / frame_sigma
-                    } else {
-                        0.0
-                    };
-                    found.push(Deviation {
-                        sample: ((y * width + x) * channels + channel) as u32,
-                        hot: deviation > 0.0,
-                        excess: deviation,
-                        noise: frame_sigma,
-                        structure,
-                    });
-                }
-            }
-            found
+            let examine = &examine;
+            (0..width)
+                .flat_map(move |x| (0..channels).filter_map(move |channel| examine(x, y, channel)))
         })
         .collect();
     Some(found)
+}
+
+/// The GPU's screen for [`frame_deviations`]: a bit for each sample, set
+/// where its distance from its same-plane neighbours' extremes may pass
+/// `sigma` times its plane's noise. `None` when the frame is small, the
+/// thresholds are not all finite (the CPU then examines everything), or no
+/// GPU is in use.
+#[cfg(feature = "gpu")]
+fn gpu_candidates(image: &LinearImage, step: usize, sigma: f32, noise: &[f32]) -> Option<Vec<u32>> {
+    // As `examine` forms them, so the GPU compares against the same values.
+    let thresholds: Vec<f32> = noise.iter().map(|&noise| sigma * noise).collect();
+    if thresholds.len() > 4 || !thresholds.iter().all(|threshold| threshold.is_finite()) {
+        return None;
+    }
+    let mut padded = [0.0_f32; 4];
+    padded[..thresholds.len()].copy_from_slice(&thresholds);
+    crate::gpu::defect_candidates(
+        &image.data,
+        (image.width, image.height, image.channels, step),
+        padded,
+    )
 }
 
 /// Robust sigma of each channel and CFA plane's deviation from its
@@ -826,6 +884,144 @@ mod tests {
             };
             let (u, v) = (uniform(), uniform());
             ((-2.0 * u.ln()).sqrt() * (std::f64::consts::TAU * v).cos()) as f32
+        }
+    }
+
+    /// A frame large enough for the GPU: sky with a gradient and noise,
+    /// stars, hot, warm and dead pixels, a block of NaN and an infinite
+    /// sample, `channels` interleaved.
+    #[cfg(feature = "gpu")]
+    fn screened_field(width: usize, height: usize, channels: usize) -> LinearImage {
+        let mut normal = Normal(0x5851_f42d_4c95_7f2d ^ channels as u64);
+        let stars: Vec<(f32, f32, f32)> = (0..300)
+            .map(|star| {
+                let at = |modulus: usize| ((star * 7919 + 13) % modulus) as f32 + 0.37;
+                (
+                    at(width),
+                    at(height * 31) / 31.0,
+                    200.0 + (star % 17) as f32 * 300.0,
+                )
+            })
+            .collect();
+        let mut data = vec![0.0_f32; width * height * channels];
+        for (pixel, samples) in data.chunks_exact_mut(channels).enumerate() {
+            let (x, y) = ((pixel % width) as f32, (pixel / width) as f32);
+            let mut light = 0.0;
+            for &(sx, sy, flux) in &stars {
+                let (dx, dy) = (x - sx, y - sy);
+                if dx.abs() < 6.0 && dy.abs() < 6.0 {
+                    light += flux * (-(dx * dx + dy * dy) / 2.0).exp();
+                }
+            }
+            for (channel, sample) in samples.iter_mut().enumerate() {
+                let gain = 1.0 - 0.2 * channel as f32;
+                *sample = gain * (SKY + 0.01 * x + light) + NOISE * normal.next();
+            }
+        }
+        for defect in 0..2000 {
+            let sample = (defect * 104_729 + 7) % data.len();
+            data[sample] = match defect % 3 {
+                0 => data[sample] + 800.0,
+                1 => data[sample] + 25.0,
+                _ => 0.0,
+            };
+        }
+        for y in 300..306 {
+            let row = y * width * channels;
+            data[row + 400 * channels..row + 411 * channels].fill(f32::NAN);
+        }
+        data[(500 * width + 700) * channels] = f32::INFINITY;
+        LinearImage::new(width, height, channels, data).unwrap()
+    }
+
+    /// The GPU flags every sample the CPU's first test keeps, and few more,
+    /// on mono, raw colour and RGB frames; screened so, the frame's
+    /// deviations are bit for bit those examining every sample finds.
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn the_gpu_screen_keeps_every_deviation() {
+        let Some(adapter) = crate::gpu::adapter_description() else {
+            eprintln!("no GPU: the GPU defect screen not compared");
+            return;
+        };
+        eprintln!("comparing the defect screen on {adapter}");
+        let layout = BayerLayout {
+            pattern: seiza_fits::BayerPattern::Rggb,
+            x_offset: 0,
+            y_offset: 0,
+        };
+        let sigma = DefectDetectionOptions::default().sigma;
+        for (channels, bayer) in [(1, None), (1, Some(layout)), (3, None)] {
+            let image = screened_field(1101, 1000, channels);
+            let step = if bayer.is_some() { 2 } else { 1 };
+            let noise = plane_noise(&image, step).unwrap();
+            let flags = gpu_candidates(&image, step, sigma, &noise).expect("the GPU screens");
+            let (width, height) = (image.width, image.height);
+            let planes = step * step;
+            let (mut kept, mut flagged) = (0, 0);
+            let mut ring = [0.0f32; 8];
+            for (sample, &value) in image.data.iter().enumerate() {
+                let set = flags[sample / 32] >> (sample % 32) & 1 == 1;
+                flagged += usize::from(set);
+                let (pixel, channel) = (sample / channels, sample % channels);
+                let (x, y) = (pixel % width, pixel / width);
+                if !value.is_finite() {
+                    continue;
+                }
+                let count = gather(
+                    &image.data,
+                    x,
+                    y,
+                    channel,
+                    step,
+                    1,
+                    width,
+                    height,
+                    channels,
+                    &mut ring,
+                );
+                if count < 5 {
+                    continue;
+                }
+                let threshold = sigma * noise[channel * planes + (y % step) * step + x % step];
+                let (low, high) = ring[..count]
+                    .iter()
+                    .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), &v| {
+                        (low.min(v), high.max(v))
+                    });
+                if value - low <= threshold && high - value <= threshold {
+                    continue;
+                }
+                kept += 1;
+                assert!(
+                    set,
+                    "{channels} channel(s), step {step}: sample {sample} unflagged"
+                );
+            }
+            eprintln!("{channels} channel(s), step {step}: {kept} kept, {flagged} flagged");
+            assert!(kept > 1000 && flagged <= kept + kept / 100);
+            let screened = deviations_screened(&image, bayer, sigma, true).unwrap();
+            let examined = deviations_screened(&image, bayer, sigma, false).unwrap();
+            assert!(!examined.is_empty());
+            assert_eq!(screened.len(), examined.len());
+            for (a, b) in screened.iter().zip(&examined) {
+                assert_eq!(
+                    (
+                        a.sample,
+                        a.hot,
+                        a.excess.to_bits(),
+                        a.noise.to_bits(),
+                        a.structure.to_bits()
+                    ),
+                    (
+                        b.sample,
+                        b.hot,
+                        b.excess.to_bits(),
+                        b.noise.to_bits(),
+                        b.structure.to_bits()
+                    ),
+                );
+            }
         }
     }
 
