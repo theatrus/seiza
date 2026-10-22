@@ -387,12 +387,55 @@ fn tile_sample_pixels(
     y: usize,
     width: usize,
     height: usize,
-) -> impl ExactSizeIterator<Item = usize> {
+) -> TileSamples {
     let stride = (width * height / 4_000).max(1);
-    (0..width * height)
-        .step_by(stride)
-        .map(move |sample| (y + sample / width) * image_width + x + sample % width)
+    TileSamples {
+        remaining: (width * height).div_ceil(stride),
+        row: y,
+        column: 0,
+        stride,
+        width,
+        image_width,
+        x,
+    }
 }
+
+/// [`tile_sample_pixels`]' pixels, stepping a row and column rather than
+/// dividing for each.
+#[derive(Clone)]
+struct TileSamples {
+    remaining: usize,
+    row: usize,
+    column: usize,
+    stride: usize,
+    width: usize,
+    image_width: usize,
+    x: usize,
+}
+
+impl Iterator for TileSamples {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<usize> {
+        if self.remaining == 0 {
+            return None;
+        }
+        self.remaining -= 1;
+        let pixel = self.row * self.image_width + self.x + self.column;
+        self.column += self.stride;
+        if self.column >= self.width {
+            self.row += self.column / self.width;
+            self.column %= self.width;
+        }
+        Some(pixel)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+impl ExactSizeIterator for TileSamples {}
 
 /// Per-channel gain and offset that map a source frame onto the reference
 /// background, either globally or over a tile grid.
@@ -1094,25 +1137,17 @@ fn local_background_with_gains(
     tile_size: usize,
     globals: &[(f32, f32)],
 ) -> Result<NormalizationMap> {
-    Ok(local_background_from(
+    let gains: Vec<f32> = globals.iter().map(|&(gain, _)| gain).collect();
+    Ok(local_background_by_tile(
         (source.width, source.height, source.channels()),
         tile_size,
         globals,
-        |_, channel, (x, y, width, height)| {
+        |_, (x, y, width, height), offsets| {
             // A tile the source does not reach shares no samples with the
             // reference.
-            source
-                .reaches(x, y, width, height)
-                .then(|| {
-                    tile_offset(
-                        reference,
-                        source,
-                        channel,
-                        (x, y, width, height),
-                        globals[channel].0,
-                    )
-                })
-                .flatten()
+            if source.reaches(x, y, width, height) {
+                tile_offsets(reference, source, (x, y, width, height), &gains, offsets);
+            }
         },
     ))
 }
@@ -1126,18 +1161,40 @@ fn local_background_from(
     globals: &[(f32, f32)],
     offset: impl Fn(usize, usize, (usize, usize, usize, usize)) -> Option<f32> + Sync,
 ) -> NormalizationMap {
+    local_background_by_tile(shape, tile_size, globals, |cell, region, offsets| {
+        for (channel, slot) in offsets.iter_mut().enumerate() {
+            *slot = offset(cell, channel, region);
+        }
+    })
+}
+
+/// [`local_background_from`], with `offsets` filling every channel's offset
+/// of a tile at once, by the tile's index and region, so a tile's samples
+/// are read once for all its channels.
+fn local_background_by_tile(
+    shape: (usize, usize, usize),
+    tile_size: usize,
+    globals: &[(f32, f32)],
+    offsets: impl Fn(usize, (usize, usize, usize, usize), &mut [Option<f32>]) + Sync,
+) -> NormalizationMap {
     let (width, height, channels) = shape;
     let columns = width.div_ceil(tile_size);
     let rows = height.div_ceil(tile_size);
-    let mut offsets = (0..columns * rows * channels)
-        .into_par_iter()
-        .map(|index| {
-            let channel = index % channels;
-            let cell = index / channels;
-            offset(cell, channel, tile(cell, columns, width, height, tile_size))
-                .filter(|offset| offset.is_finite())
-        })
-        .collect::<Vec<_>>();
+    let mut offsets_by_tile = vec![None; columns * rows * channels];
+    offsets_by_tile
+        .par_chunks_mut(channels.max(1))
+        .enumerate()
+        .for_each(|(cell, tile_offsets)| {
+            offsets(
+                cell,
+                tile(cell, columns, width, height, tile_size),
+                tile_offsets,
+            );
+            for slot in tile_offsets.iter_mut() {
+                *slot = slot.filter(|offset| offset.is_finite());
+            }
+        });
+    let mut offsets = offsets_by_tile;
     for (channel, &(_, global_offset)) in globals.iter().enumerate() {
         fill_and_smooth_offsets(
             &mut offsets,
@@ -1184,6 +1241,38 @@ fn tile_offset(
         indices().map(|index| source.sample(index)),
         gain,
     )
+}
+
+/// [`tile_offset`] for every channel of a tile, into `offsets`: each
+/// sampled pixel's channels read together, rather than the tile walked once
+/// a channel, and each channel's residuals in the same order.
+fn tile_offsets(
+    reference: &LinearImage,
+    source: Placed<'_>,
+    (x, y, width, height): (usize, usize, usize, usize),
+    gains: &[f32],
+    offsets: &mut [Option<f32>],
+) {
+    let channels = source.channels();
+    let pixels = tile_sample_pixels(source.width, x, y, width, height);
+    let mut residuals: Vec<Vec<f32>> = (0..channels)
+        .map(|_| Vec::with_capacity(pixels.len()))
+        .collect();
+    for pixel in pixels {
+        for (channel, (residuals, &gain)) in residuals.iter_mut().zip(gains).enumerate() {
+            let index = pixel * channels + channel;
+            let (reference_value, source_value) = (reference.data[index], source.sample(index));
+            let residual = reference_value - gain * source_value;
+            if reference_value.is_finite() && source_value.is_finite() && residual.is_finite() {
+                residuals.push(residual);
+            }
+        }
+    }
+    for (offset, residuals) in offsets.iter_mut().zip(&mut residuals) {
+        *offset = (residuals.len() >= 64)
+            .then(|| median_in_place(residuals))
+            .flatten();
+    }
 }
 
 /// The median of finite paired residuals. Shared structure cancels before
@@ -1481,6 +1570,116 @@ fn affine_for_region(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tile's sampled pixels, stepped by row and column, are the ones
+    /// dividing each sample's place gives.
+    #[test]
+    fn stepped_tile_samples_are_the_divided_ones() {
+        for (image_width, x, y, width, height) in [
+            (6248, 0, 0, 256, 256),
+            (6248, 5888, 3840, 104, 79),
+            (100, 3, 7, 1, 1),
+            (100, 3, 7, 61, 1),
+            (100, 0, 0, 100, 100),
+            (300, 17, 2, 37, 211),
+        ] {
+            let stride = (width * height / 4_000).max(1);
+            let divided: Vec<usize> = (0..width * height)
+                .step_by(stride)
+                .map(|sample| (y + sample / width) * image_width + x + sample % width)
+                .collect();
+            let stepped = tile_sample_pixels(image_width, x, y, width, height);
+            assert_eq!(stepped.len(), divided.len());
+            assert_eq!(stepped.collect::<Vec<_>>(), divided);
+        }
+    }
+
+    /// Every channel's tile offsets from one walk of the tile are those a
+    /// walk a channel gives, to the bit: mono and RGB, a frame covering the
+    /// whole grid or a region of it, with NaN, tiles cut by the edges and
+    /// tiles with too few samples.
+    #[test]
+    fn one_walk_of_a_tile_gives_each_channels_offsets() {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1_u64 << 53) as f64
+        };
+        for channels in [1, 3] {
+            let (width, height) = (701, 433);
+            let mut sample = |nan: f64| {
+                (0..width * height * channels)
+                    .map(|index| {
+                        if next() < nan {
+                            f32::NAN
+                        } else {
+                            (300.0 + 0.01 * (index % width) as f64 + 40.0 * next()) as f32
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let reference = LinearImage::new(width, height, channels, sample(0.01)).unwrap();
+            let whole = LinearImage::new(width, height, channels, sample(0.05)).unwrap();
+            let region = ReferenceRegion {
+                x: 130,
+                y: 90,
+                width: 300,
+                height: 200,
+            };
+            let part = LinearImage::new(
+                region.width,
+                region.height,
+                channels,
+                (0..region.width * region.height * channels)
+                    .map(|_| (310.0 + 30.0 * next()) as f32)
+                    .collect(),
+            )
+            .unwrap();
+            let globals: Vec<(f32, f32)> = (0..channels)
+                .map(|channel| (0.9 + 0.05 * channel as f32, 1.5))
+                .collect();
+            for (source, tile_size) in [
+                (Placed::whole(&whole), 64),
+                (Placed::whole(&whole), 256),
+                (Placed::on(&part, region, &reference), 64),
+            ] {
+                let walked =
+                    local_background_with_gains(&reference, source, tile_size, &globals).unwrap();
+                let by_channel = local_background_from(
+                    (source.width, source.height, source.channels()),
+                    tile_size,
+                    &globals,
+                    |_, channel, (x, y, width, height)| {
+                        source
+                            .reaches(x, y, width, height)
+                            .then(|| {
+                                tile_offset(
+                                    &reference,
+                                    source,
+                                    channel,
+                                    (x, y, width, height),
+                                    globals[channel].0,
+                                )
+                            })
+                            .flatten()
+                    },
+                );
+                let bits = |map: &NormalizationMap| {
+                    (
+                        map.gains.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        map.offsets.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    )
+                };
+                assert_eq!(
+                    bits(&walked),
+                    bits(&by_channel),
+                    "{channels} channels, {tile_size}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn paired_background_offsets_do_not_follow_shared_nebulae() {
