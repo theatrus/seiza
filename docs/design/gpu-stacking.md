@@ -130,10 +130,18 @@ registration with it.
 - Frame-sized buffers return to a pool of at most 1 GiB: making a new one
   maps and clears fresh memory, which took longer than the upload.
 - An integrated GPU (Apple Silicon, Intel Iris Xe) reads and writes buffers
-  the CPU maps directly; a discrete one goes through staging copies. Mapped
-  buffers are filled and copied out on every core, because one core reading
-  write-combined memory is several times slower, and output goes straight
-  into its vector rather than over zeros, which cost as much as the copy.
+  the CPU maps directly; a discrete one goes through staging copies. A
+  frame goes in and comes out on the core that asked for it: frames are
+  prepared on several cores at once, and copying each on every core made
+  the call wait behind other frames' work in the pool (0.5 s longer on the
+  M4 Max's M45 stack, 70 CPU-s more on the Iris Xe's, for no time saved).
+  A live stack's moments, which nothing else is reading beside, come back
+  on every core, since one core alone reads write-combined memory several
+  times slower. Output goes straight into its vector rather than over
+  zeros, which cost as much as the copy.
+- Each call waits for its own submission, not for the queue to empty:
+  waiting for the queue held every preparing thread behind every other's
+  kernels, and cost the Iris Xe's M45 stack a second.
 
 ## Measurements
 
@@ -166,6 +174,14 @@ against VNG on the CPU, everything else on the GPU in both: 6.9-7.2 s and
 54-56 CPU-s against 7.8-7.9 s and 74-77 CPU-s. The VNG kernel takes 4-7 ms
 a 26 MP frame on an idle GPU, against about 14 ms (225 CPU-ms) on the
 CPU's 16 cores; debayering fell from 28% of the workers' busy time to 2%.
+With each call waiting for its own submission and copying on its own core,
+6.7-7.2 s and 51-53 CPU-s.
+
+The same set on an i5-1340P with its Iris Xe (Vulkan, Linux): 41-42 s and
+240 CPU-s, against 62 s and 811 CPU-s on the CPU alone. There the GPU is
+the bottleneck, busy for most of the run with about half a second of
+kernels a frame, so VNG on the GPU saves CPU time (271 CPU-s against 299)
+but not wall time.
 
 ## Follow-on work
 

@@ -79,24 +79,31 @@ struct Gpu {
     pool: std::sync::Mutex<Vec<(wgpu::BufferUsages, wgpu::Buffer)>>,
 }
 
-/// Bytes each core copies at a time into or out of a mapped buffer.
+/// Bytes each core copies at a time out of a mapped buffer.
 const COPY_CHUNK: usize = 1 << 20;
 
-/// A mapped buffer's words, copied out on every core: one alone reads
-/// write-combined memory, as an integrated GPU's can be, several times
-/// slower. The words go straight into the vector rather than over zeros
-/// written first, which on a frame cost as much as the copy.
-fn copy_out<T: bytemuck::Pod + Send + Sync>(view: &[u8]) -> Vec<T> {
-    let mut out = Vec::new();
-    match bytemuck::try_cast_slice::<u8, T>(view) {
-        Ok(words) => words
-            .par_iter()
-            .with_min_len(COPY_CHUNK / std::mem::size_of::<T>())
-            .copied()
-            .collect_into_vec(&mut out),
+/// A mapped buffer's words, copied straight into a vector rather than over
+/// zeros written first, which on a frame cost as much as the copy. On
+/// `every_core`, for a read nothing else waits beside, such as a live
+/// stack's moments: one core alone reads write-combined memory, as an
+/// integrated GPU's can be, several times slower. A frame's output is read
+/// on one core, since frames are read on several at once: copying each on
+/// every core cost 30 CPU-s more on the M45 stack on an Iris Xe, for no
+/// time saved.
+fn copy_out<T: bytemuck::Pod + Send + Sync>(view: &[u8], every_core: bool) -> Vec<T> {
+    let Ok(words) = bytemuck::try_cast_slice::<u8, T>(view) else {
         // A mapping is aligned to 8 bytes, so this is not reached.
-        Err(_) => out = bytemuck::pod_collect_to_vec(view),
+        return bytemuck::pod_collect_to_vec(view);
+    };
+    if !every_core {
+        return words.to_vec();
     }
+    let mut out = Vec::new();
+    words
+        .par_iter()
+        .with_min_len(COPY_CHUNK / std::mem::size_of::<T>())
+        .copied()
+        .collect_into_vec(&mut out);
     out
 }
 
@@ -499,22 +506,14 @@ impl Gpu {
         let bytes = std::mem::size_of_val(data) as u64;
         let buffer = self.take(label, bytes, self.input_usage());
         if self.mapped {
-            buffer
+            self.map(&[buffer.slice(..bytes)], wgpu::MapMode::Write, None)?;
+            // One core writes: copying on every core, the call waited for
+            // its parts behind other frames' work in the pool, and on the
+            // M45 stack took 0.5 s longer and, on an Iris Xe, 40 CPU-s more.
+            let copied = buffer
                 .slice(..bytes)
-                .map_async(wgpu::MapMode::Write, |_| {});
-            self.wait()?;
-            // Every core copies in, each through a view of its own part:
-            // views of disjoint parts may be held at once.
-            let copied = bytemuck::cast_slice::<f32, u8>(data)
-                .par_chunks(COPY_CHUNK)
-                .enumerate()
-                .try_for_each(|(index, chunk)| {
-                    let start = (index * COPY_CHUNK) as u64;
-                    buffer
-                        .slice(start..start + chunk.len() as u64)
-                        .get_mapped_range_mut()
-                        .map(|mut view| view.slice(..).copy_from_slice(chunk))
-                });
+                .get_mapped_range_mut()
+                .map(|mut view| view.slice(..).copy_from_slice(bytemuck::cast_slice(data)));
             buffer.unmap();
             copied.map_err(|error| error.to_string())?;
         } else {
@@ -572,31 +571,107 @@ impl Gpu {
             encoder.copy_buffer_to_buffer(&output, 0, readback, 0, output_bytes);
         }
         trace.mark("upload");
-        self.queue.submit([encoder.finish()]);
+        let submission = self.queue.submit([encoder.finish()]);
         let read_from = readback.as_ref().unwrap_or(&output);
-        read_from
-            .slice(..output_bytes)
-            .map_async(wgpu::MapMode::Read, |_| {});
-        let result = self.wait().and_then(|()| {
-            trace.mark("kernel");
-            if FAILED.load(Ordering::Relaxed) {
-                return Err("the GPU failed".to_string());
-            }
-            let view = read_from
-                .slice(..output_bytes)
-                .get_mapped_range()
-                .map_err(|error| error.to_string())?;
-            let data = copy_out(&view);
-            drop(view);
-            read_from.unmap();
-            trace.mark("copy out");
-            Ok(data)
-        });
+        let result = self
+            .map(
+                &[read_from.slice(..output_bytes)],
+                wgpu::MapMode::Read,
+                Some(submission),
+            )
+            .and_then(|()| {
+                trace.mark("kernel");
+                if FAILED.load(Ordering::Relaxed) {
+                    return Err("the GPU failed".to_string());
+                }
+                let view = read_from
+                    .slice(..output_bytes)
+                    .get_mapped_range()
+                    .map_err(|error| error.to_string())?;
+                let data = copy_out(&view, false);
+                drop(view);
+                read_from.unmap();
+                trace.mark("copy out");
+                Ok(data)
+            });
         self.give(output_usage, output);
         if let Some(readback) = readback {
             self.give(readback_usage, readback);
         }
         result
+    }
+
+    /// Wait for `submission`, and those before it, to finish, but not for
+    /// work other threads submitted since.
+    fn wait_for(&self, submission: wgpu::SubmissionIndex) -> Result<(), String> {
+        self.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: None,
+            })
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    /// Map `slices` for reading once `submission`, which last uses them, is
+    /// done, or for writing at once when no submission in flight uses them,
+    /// as a buffer from the pool or a session's between calls. Waiting for
+    /// the queue to empty instead held every thread behind every other's
+    /// kernels.
+    fn map(
+        &self,
+        slices: &[wgpu::BufferSlice<'_>],
+        mode: wgpu::MapMode,
+        submission: Option<wgpu::SubmissionIndex>,
+    ) -> Result<(), String> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        for slice in slices {
+            let sender = sender.clone();
+            slice.map_async(mode, move |result| {
+                let _ = sender.send(result);
+            });
+        }
+        drop(sender);
+        match submission {
+            Some(submission) => self.wait_for(submission)?,
+            None => {
+                self.device
+                    .poll(wgpu::PollType::Poll)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        // Whichever thread polls when a mapping is ready runs its callback,
+        // a moment after any poll returns, so the callbacks are awaited
+        // rather than looked for.
+        let started = std::time::Instant::now();
+        let mut pending = slices.len();
+        let mut waited_for_all = false;
+        while pending > 0 {
+            match receiver.recv_timeout(std::time::Duration::from_millis(10)) {
+                Ok(result) => {
+                    result.map_err(|error| error.to_string())?;
+                    pending -= 1;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("a buffer's mapping was dropped".into());
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if FAILED.load(Ordering::Relaxed) {
+                        return Err("the GPU failed".into());
+                    }
+                    if !waited_for_all && started.elapsed().as_millis() > 100 {
+                        // Still in use after all: wait for the queue.
+                        waited_for_all = true;
+                        self.wait()?;
+                    } else {
+                        self.device
+                            .poll(wgpu::PollType::Poll)
+                            .map_err(|error| error.to_string())?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn wait(&self) -> Result<(), String> {
@@ -1097,18 +1172,17 @@ impl BandSession {
         }
         let bytes = samples * 4;
         if gpu.mapped {
-            let range = self.values.slice(..(reaching.len() * bytes) as u64);
-            range.map_async(wgpu::MapMode::Write, |_| {});
-            gpu.wait()?;
-            let mut view = range
-                .get_mapped_range_mut()
-                .map_err(|error| error.to_string())?;
-            for (slot, &index) in reaching.iter().enumerate() {
-                view.slice(slot * bytes..(slot + 1) * bytes)
-                    .copy_from_slice(bytemuck::cast_slice(frames[index]));
-            }
-            drop(view);
+            let total = reaching.len() * bytes;
+            let range = self.values.slice(..total as u64);
+            gpu.map(&[range], wgpu::MapMode::Write, None)?;
+            let copied = range.get_mapped_range_mut().map(|mut view| {
+                for (slot, &index) in reaching.iter().enumerate() {
+                    view.slice(slot * bytes..(slot + 1) * bytes)
+                        .copy_from_slice(bytemuck::cast_slice(frames[index]));
+                }
+            });
             self.values.unmap();
+            copied.map_err(|error| error.to_string())?;
         } else {
             for (slot, &index) in reaching.iter().enumerate() {
                 gpu.queue.write_buffer(
@@ -1161,19 +1235,18 @@ impl BandSession {
         let count_bytes = (reaching.len() * 8) as u64;
         encoder.copy_buffer_to_buffer(&self.counts, 0, &self.counts_read, 0, count_bytes);
         trace.mark("upload");
-        gpu.queue.submit([encoder.finish()]);
+        let submission = gpu.queue.submit([encoder.finish()]);
         let moments_from = self.moments_read.as_ref().unwrap_or(&self.moments);
         let tallies_from = self.tallies_read.as_ref().unwrap_or(&self.tallies);
-        moments_from
-            .slice(..output_bytes)
-            .map_async(wgpu::MapMode::Read, |_| {});
-        tallies_from
-            .slice(..tally_bytes)
-            .map_async(wgpu::MapMode::Read, |_| {});
-        self.counts_read
-            .slice(..count_bytes)
-            .map_async(wgpu::MapMode::Read, |_| {});
-        gpu.wait()?;
+        gpu.map(
+            &[
+                moments_from.slice(..output_bytes),
+                tallies_from.slice(..tally_bytes),
+                self.counts_read.slice(..count_bytes),
+            ],
+            wgpu::MapMode::Read,
+            Some(submission),
+        )?;
         trace.mark("kernel");
         if FAILED.load(Ordering::Relaxed) {
             return Err("the GPU failed".into());
@@ -1515,11 +1588,12 @@ impl GpuMoments {
             );
         }
         encoder.copy_buffer_to_buffer(&self.counters, 0, &self.counters_read, 0, 8);
-        gpu.queue.submit([encoder.finish()]);
-        self.counters_read
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, |_| {});
-        gpu.wait()?;
+        let submission = gpu.queue.submit([encoder.finish()]);
+        gpu.map(
+            &[self.counters_read.slice(..)],
+            wgpu::MapMode::Read,
+            Some(submission),
+        )?;
         if FAILED.load(Ordering::Relaxed) {
             return Err("the GPU failed".into());
         }
@@ -1569,13 +1643,12 @@ impl GpuMoments {
         for (source, staging) in sources.iter().zip(&staging) {
             encoder.copy_buffer_to_buffer(source, 0, staging, 0, bytes);
         }
-        gpu.queue.submit([encoder.finish()]);
-        for staging in &staging {
-            staging
-                .slice(..bytes)
-                .map_async(wgpu::MapMode::Read, |_| {});
-        }
-        gpu.wait()?;
+        let submission = gpu.queue.submit([encoder.finish()]);
+        let slices: Vec<wgpu::BufferSlice<'_>> = staging
+            .iter()
+            .map(|staging| staging.slice(..bytes))
+            .collect();
+        gpu.map(&slices, wgpu::MapMode::Read, Some(submission))?;
         if FAILED.load(Ordering::Relaxed) {
             return Err("the GPU failed".into());
         }
@@ -1585,7 +1658,7 @@ impl GpuMoments {
                 .slice(..bytes)
                 .get_mapped_range()
                 .map_err(|error| error.to_string())?;
-            let out = copy_out::<u32>(&view);
+            let out = copy_out::<u32>(&view, true);
             drop(view);
             staging.unmap();
             words.push(out);
