@@ -2932,6 +2932,9 @@ dependencies = [
 [[package]]
 name = "seiza-stats"
 version = "0.1.0"
+dependencies = [
+ "bytemuck",
+]
 
 [[package]]
 name = "seiza-stretch"

@@ -12,3 +12,4 @@ keywords = ["astronomy", "astrophotography", "statistics", "median"]
 categories = ["science", "mathematics"]
 
 [dependencies]
+bytemuck.workspace = true
