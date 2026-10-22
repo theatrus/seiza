@@ -50,7 +50,7 @@ seiza-stats = { path = "seiza-stats", version = "0.1.0" }
 seiza-stretch = { path = "seiza-stretch", version = "0.3.2" }
 seiza-sources = { path = "seiza-sources", version = "0.5.1" }
 seiza-xisf = { path = "seiza-xisf", version = "0.6.1" }
-bytemuck = "1"
+bytemuck = { version = "1", features = ["derive"] }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 kamadak-exif = "0.6.1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
@@ -93,7 +93,6 @@ multiversion = "0.9"
 # Vulkan or Direct3D 12, chosen at run time.
 wgpu = "30"
 pollster = "1"
-bytemuck = { version = "1", features = ["derive"] }
 # Validates the GPU shaders in tests, without a GPU; the version wgpu uses.
 naga = { version = "30", features = ["wgsl-in"] }
 quick-xml = "0.42"
