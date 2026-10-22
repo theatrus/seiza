@@ -916,6 +916,7 @@ fn prepare_decoded(
                 half.planned_registrations,
                 frame.source.as_ref(),
             )?,
+            ceilings: half.reference_ceilings,
         },
         half.options,
         half.reference_noise,

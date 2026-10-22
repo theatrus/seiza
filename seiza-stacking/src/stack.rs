@@ -718,6 +718,11 @@ pub struct LiveStacker {
     /// Per-channel noise of the reference frame, the unit of frame weights.
     /// Empty when frames are weighted equally.
     reference_noise: Vec<f32>,
+    /// The reference's [`crate::normalization::photometric_ceilings`],
+    /// measured the first time a frame needs them rather than for every
+    /// frame: on a 26 MP colour reference that pass was 11% of preparing a
+    /// frame.
+    reference_ceilings: std::sync::OnceLock<Vec<f32>>,
     accumulator: Accumulator,
     reference_headers: Vec<(String, HeaderValue)>,
     pub(crate) accepted_frames: u32,
@@ -881,6 +886,7 @@ impl LiveStacker {
                     registrar: &registrar,
                     canvas: None,
                     known: None,
+                    ceilings: &std::sync::OnceLock::new(),
                 },
                 &geometry_options,
                 &[],
@@ -1214,6 +1220,8 @@ impl LiveStacker {
             // over its footprint.
             canvas_registrar: self.canvas_registrar.clone(),
             reference_noise: self.reference_noise.clone(),
+            // Of the full-resolution reference, not this one's.
+            reference_ceilings: std::sync::OnceLock::new(),
             accumulator: Accumulator::new(0, !self.options.weighting.is_equal()),
             reference_headers: crate::fits::rebinned_headers(&self.reference_headers, bin, 1),
             accepted_frames: self.accepted_frames,
@@ -1397,6 +1405,7 @@ impl LiveStacker {
             planned_registrations: Default::default(),
             canvas_registrar,
             reference_noise,
+            reference_ceilings: std::sync::OnceLock::new(),
             accumulator,
             reference_headers,
             accepted_frames: u32::from(reference_is_integrated),
@@ -1581,6 +1590,7 @@ impl LiveStacker {
             planned_registrations: Default::default(),
             canvas_registrar,
             reference_noise: restored.reference_noise,
+            reference_ceilings: std::sync::OnceLock::new(),
             accumulator: Accumulator {
                 mean: restored.mean,
                 m2: restored.m2,
@@ -1828,6 +1838,7 @@ impl LiveStacker {
                     &self.planned_registrations,
                     frame.source.as_ref(),
                 )?,
+                ceilings: &self.reference_ceilings,
             },
             &self.options,
             &self.reference_noise,
@@ -1895,6 +1906,7 @@ impl LiveStacker {
                 registrar: &self.registrar,
                 canvas: self.canvas_registrar.as_ref(),
                 known: None,
+                ceilings: &self.reference_ceilings,
             },
             &self.options,
             &self.reference_noise,
@@ -1929,6 +1941,7 @@ impl LiveStacker {
                 calibration: &self.calibration,
                 options: &self.options,
                 reference_noise: &self.reference_noise,
+                reference_ceilings: &self.reference_ceilings,
                 frame_cache: cache_files,
             },
             IntegrationHalf {
@@ -2528,6 +2541,9 @@ pub(crate) struct FrameRegistration<'a> {
     pub registrar: &'a Registrar,
     pub canvas: Option<&'a crate::expand::CanvasRegistrar>,
     pub known: Option<std::result::Result<&'a crate::RegistrationResult, &'a str>>,
+    /// The reference's photometric ceilings once measured, for every frame
+    /// prepared against the same reference.
+    pub ceilings: &'a std::sync::OnceLock<Vec<f32>>,
 }
 
 impl FrameRegistration<'_> {
@@ -2551,11 +2567,14 @@ impl FrameRegistration<'_> {
     }
 
     /// The [`crate::normalization::photometric_ceilings`] of `reference`,
-    /// which an expanded canvas measured once.
-    fn reference_ceilings(&self, reference: &LinearImage) -> Vec<f32> {
+    /// which an expanded canvas measured once, as do [`Self::ceilings`]
+    /// the first time they are asked for.
+    fn reference_ceilings(&self, reference: &LinearImage) -> &[f32] {
         match self.canvas {
-            Some(canvas) if !resamples_whole_canvas() => canvas.photometric_ceilings().to_vec(),
-            _ => crate::normalization::photometric_ceilings(reference),
+            Some(canvas) if !resamples_whole_canvas() => canvas.photometric_ceilings(),
+            _ => self
+                .ceilings
+                .get_or_init(|| crate::normalization::photometric_ceilings(reference)),
         }
     }
 }
@@ -2692,7 +2711,7 @@ pub(crate) fn prepare_frame(
     .then(|| {
         crate::normalization::photometric_gains(
             reference,
-            &target.reference_ceilings(reference),
+            target.reference_ceilings(reference),
             Placed::on(&registered, region, reference),
             &target.reference_star_positions(),
         )
@@ -2904,6 +2923,7 @@ pub(crate) struct PreparationHalf<'a> {
     pub(crate) calibration: &'a CalibrationMasters,
     pub(crate) options: &'a StackOptions,
     pub(crate) reference_noise: &'a [f32],
+    pub(crate) reference_ceilings: &'a std::sync::OnceLock<Vec<f32>>,
     /// Where a stack kept for reintegration writes each frame's registered
     /// image.
     pub(crate) frame_cache: Option<&'a crate::replay::CacheFiles>,
