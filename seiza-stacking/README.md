@@ -202,6 +202,23 @@ stacks, and format 4 only as a weighted one. Equal-weight stacks keep writing
 format 3, byte for byte as before, and their options and configuration
 fingerprint do not change.
 
+## GPU resampling and integration
+
+With the default `gpu` feature, registration resampling (clamped Lanczos-3
+and bilinear) and the final integration's three rejection passes run on the
+GPU when one is present, through wgpu: Metal, Vulkan or Direct3D 12. Frames
+under a million samples stay on the CPU, which is as quick for them. The GPU
+works in single precision and stays within a few thousandths of the frame's
+noise of the CPU (see `docs/design/gpu-stacking.md`); on a 45-frame,
+26 MP stack with reintegration it halves the wall time and quarters the CPU
+time.
+
+Set `SEIZA_GPU=off` before the first large frame to keep everything on the
+CPU, or `SEIZA_GPU_BANDS=off` to keep only the final integration there.
+Build with `default-features = false` for a crate without wgpu. No adapter,
+or any GPU error, falls back to the CPU; an error is logged once and turns
+the GPU off for the rest of the process.
+
 ## Pipelined preparation with a shared pool
 
 `LiveStacker::push_fits_pipelined_with_pool` takes a host-owned Rayon pool and

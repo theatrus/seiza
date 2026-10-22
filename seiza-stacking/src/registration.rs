@@ -2077,20 +2077,49 @@ fn resample_region_with_inverse(
         ));
     }
     let channels = source.channels;
-    let sample_count = region
+    // Checked here, so both paths can size their output plainly.
+    region
         .width
         .checked_mul(region.height)
         .and_then(|pixels| pixels.checked_mul(channels))
         .ok_or_else(|| Error::Registration("resampling output dimensions overflow".into()))?;
-    let row_samples = region
-        .width
-        .checked_mul(channels)
-        .ok_or_else(|| Error::Registration("resampling row dimensions overflow".into()))?;
     let clamp_spans = match sampling {
         Sampling::Lanczos3 => lanczos_clamp_spans(source),
         _ => vec![0.0; channels],
     };
-    let mut data = vec![f32::NAN; sample_count];
+    #[cfg(feature = "gpu")]
+    {
+        let gpu_sampling = match sampling {
+            Sampling::Lanczos3 => {
+                let mut spans = [0.0_f32; 4];
+                for (span, &value) in spans.iter_mut().zip(&clamp_spans) {
+                    *span = value;
+                }
+                Some(crate::gpu::GpuSampling::Lanczos3 { clamp_spans: spans })
+            }
+            Sampling::Bilinear => Some(crate::gpu::GpuSampling::Bilinear),
+            Sampling::NearestPhotosite(_) => None,
+        };
+        if let Some(gpu_sampling) = gpu_sampling
+            && let Some(image) = crate::gpu::resample(source, region, &inverse, gpu_sampling)
+        {
+            return Ok(image);
+        }
+    }
+    resample_region_on_cpu(source, region, &inverse, sampling, &clamp_spans)
+}
+
+/// [`resample_region_with_inverse`]'s CPU path, for a checked region.
+pub(crate) fn resample_region_on_cpu(
+    source: &LinearImage,
+    region: ReferenceRegion,
+    inverse: &(impl Fn(f64, f64) -> (f64, f64) + Sync),
+    sampling: Sampling,
+    clamp_spans: &[f32],
+) -> Result<LinearImage> {
+    let channels = source.channels;
+    let row_samples = region.width * channels;
+    let mut data = vec![f32::NAN; row_samples * region.height];
     data.par_chunks_mut(row_samples)
         .enumerate()
         .for_each(|(y, output_row)| {
@@ -2098,9 +2127,9 @@ fn resample_region_with_inverse(
                 source,
                 region.x,
                 region.y + y,
-                &inverse,
+                inverse,
                 sampling,
-                &clamp_spans,
+                clamp_spans,
                 output_row,
             );
         });
@@ -2241,7 +2270,7 @@ fn resample_row<F>(
 /// The share of the positive lobes' contribution the negative lobes may
 /// reach before a 1-D Lanczos pass drops them, as PixInsight's clamping
 /// threshold does.
-const LANCZOS_CLAMPING: f32 = 0.3;
+pub(crate) const LANCZOS_CLAMPING: f32 = 0.3;
 
 /// How many times a frame's photosite noise the taps of a 1-D Lanczos pass
 /// must span, highest to lowest, before [`LANCZOS_CLAMPING`] may drop the
@@ -2281,7 +2310,7 @@ const LANCZOS_CLAMPING_NOISE_SPAN: f32 = 5.0;
 /// [`crate::snr::photosite_noise`], which a demosaic does not lower, or
 /// zero, clamping as the share test alone says, where the image is too
 /// small to measure its noise.
-fn lanczos_clamp_spans(source: &LinearImage) -> Vec<f32> {
+pub(crate) fn lanczos_clamp_spans(source: &LinearImage) -> Vec<f32> {
     match crate::snr::photosite_noise(source) {
         Some(noise) => noise
             .into_iter()
@@ -2371,8 +2400,14 @@ const LANCZOS_STEPS: usize = 1024;
 /// sample a fraction `t` (0..1) to the left, from a table of 1/1024-pixel
 /// steps.
 fn lanczos3_weights(t: f32) -> [f32; 6] {
+    lanczos3_table()[((t * LANCZOS_STEPS as f32 + 0.5) as usize).min(LANCZOS_STEPS)]
+}
+
+/// [`lanczos3_weights`]' table: the weights at every 1/1024-pixel step from
+/// 0 to 1, which the GPU resampler reads too.
+pub(crate) fn lanczos3_table() -> &'static [[f32; 6]] {
     static TABLE: std::sync::OnceLock<Vec<[f32; 6]>> = std::sync::OnceLock::new();
-    let table = TABLE.get_or_init(|| {
+    TABLE.get_or_init(|| {
         (0..=LANCZOS_STEPS)
             .map(|step| {
                 let t = step as f64 / LANCZOS_STEPS as f64;
@@ -2392,8 +2427,7 @@ fn lanczos3_weights(t: f32) -> [f32; 6] {
                 weights.map(|weight| (weight / total) as f32)
             })
             .collect()
-    });
-    table[((t * LANCZOS_STEPS as f32 + 0.5) as usize).min(LANCZOS_STEPS)]
+    })
 }
 
 #[derive(Clone, Copy, Debug, Default)]

@@ -89,6 +89,13 @@ rayon = "1.7"
 nalgebra = { version = "0.35", default-features = false, features = ["std"] }
 rustc-hash = { version = "2" }
 multiversion = "0.9"
+# GPU resampling in seiza-stacking (its default `gpu` feature): Metal,
+# Vulkan or Direct3D 12, chosen at run time.
+wgpu = "30"
+pollster = "1"
+bytemuck = { version = "1", features = ["derive"] }
+# Validates the GPU shaders in tests, without a GPU; the version wgpu uses.
+naga = { version = "30", features = ["wgsl-in"] }
 quick-xml = "0.42"
 lz4_flex = "0.14"
 sha1 = "0.11"

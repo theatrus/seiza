@@ -358,6 +358,24 @@ const HOST_INTEGRATED: &[f64] = &[
 ];
 
 #[rustfmt::skip]
+const LARGE_LIVE: &[f64] = &[
+    1.3779775e2, 4.2943252e2, 1.8050789e4, 9.7606865e1, 1.0074303e2, 1.0332143e2,
+    1.0640565e2, 1.0970185e2, 1.0199506e2, 1.0470235e2, 1.0888734e2, 1.1169503e2,
+    1.1423000e2, 1.0608360e2, 1.0971593e2, 1.1210521e2, 1.1694767e2, 1.1877633e2,
+    1.1073438e2, 1.1466586e2, 1.1635000e2, 1.1988004e2, 1.2327108e2, 1.1514570e2,
+    1.1829337e2, 1.2178257e2, 1.2421250e2, 1.2779749e2,
+];
+
+#[rustfmt::skip]
+const LARGE_REINTEGRATED: &[f64] = &[
+    1.3750326e2, 4.2837601e2, 1.7889000e4, 9.7606865e1, 1.0074303e2, 1.0332143e2,
+    1.0640565e2, 1.0970185e2, 1.0199506e2, 1.0470235e2, 1.0888734e2, 1.1142345e2,
+    1.1423000e2, 1.0608360e2, 1.0971593e2, 1.1210521e2, 1.1694767e2, 1.1877633e2,
+    1.1073438e2, 1.1466586e2, 1.1635000e2, 1.1988004e2, 1.2327108e2, 1.1537320e2,
+    1.1829337e2, 1.2178257e2, 1.2421250e2, 1.2779749e2,
+];
+
+#[rustfmt::skip]
 const REINTEGRATED: &[f64] = &[
     1.4613894e2, 2.8383271e2, 3.9288564e3, 9.7148277e1, 9.9584862e1, 1.0101023e2,
     1.1875857e2, 1.0546034e2, 9.7901772e1, 1.0035715e2, 1.0214648e2, 1.0342279e2,
@@ -736,6 +754,89 @@ fn registered_frames_a_host_integrates_keep_their_output() {
         "HOST_INTEGRATED",
         &summary(&banded.snapshot.image),
         HOST_INTEGRATED,
+    );
+}
+
+/// Frames large enough that, with the `gpu` feature and a GPU present,
+/// they resample there, and a reintegration whose bands integrate there:
+/// the GPU's single-precision work must stay within this file's tolerance
+/// of the CPU's, which recorded the summaries (`SEIZA_GPU=off`).
+#[test]
+fn a_stack_large_enough_for_the_gpu_keeps_its_output() {
+    const LARGE_WIDTH: usize = 1280;
+    const LARGE_HEIGHT: usize = 960;
+    let mut state = 0x6a09_e667_u32;
+    let mut next = || {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (state >> 8) as f32 / (1 << 24) as f32
+    };
+    let stars: Vec<(f32, f32, f32)> = (0..200)
+        .map(|_| {
+            (
+                8.0 + next() * (LARGE_WIDTH as f32 - 16.0),
+                8.0 + next() * (LARGE_HEIGHT as f32 - 16.0),
+                400.0 + next() * 20_000.0,
+            )
+        })
+        .collect();
+    let directory = tempfile::tempdir().unwrap();
+    let paths = SHIFTS
+        .iter()
+        .enumerate()
+        .map(|(frame, &(dx, dy))| {
+            let gain = 0.97 + 0.01 * frame as f32;
+            let mut data: Vec<f32> = (0..LARGE_WIDTH * LARGE_HEIGHT)
+                .map(|index| {
+                    let (x, y) = ((index % LARGE_WIDTH) as f32, (index / LARGE_WIDTH) as f32);
+                    let sky = 100.0 + 0.01 * x + 0.02 * y;
+                    let light: f32 = stars
+                        .iter()
+                        .filter(|star| {
+                            (star.0 - x + dx).abs() < 8.0 && (star.1 - y + dy).abs() < 8.0
+                        })
+                        .map(|&(star_x, star_y, flux)| {
+                            let (sx, sy) = (x - dx - star_x, y - dy - star_y);
+                            flux * (-(sx * sx + sy * sy) / 4.5).exp()
+                        })
+                        .sum();
+                    gain * (sky + light) + noise(index, frame, 3.0)
+                })
+                .collect();
+            // A satellite trail in the first frame, which only the
+            // reintegration can take out.
+            if frame == 0 {
+                for x in 0..LARGE_WIDTH {
+                    data[(100 + x / 2) * LARGE_WIDTH + x] += 2_000.0;
+                }
+            }
+            let path = directory.path().join(format!("large-{frame}.fits"));
+            let image = LinearImage::new(LARGE_WIDTH, LARGE_HEIGHT, 1, data).unwrap();
+            let cards = [
+                WriteHeaderCard::new("IMAGETYP", HeaderValue::String("LIGHT".into())),
+                WriteHeaderCard::new("EXPTIME", HeaderValue::Float(60.0)),
+            ];
+            write_processed_image_fits_f32(&path, &image, &[], &cards).unwrap();
+            path
+        })
+        .collect::<Vec<_>>();
+    let mut stacker =
+        LiveStacker::open_fits(&paths[0], None, None, None, None, StackOptions::default()).unwrap();
+    stacker.retain_frames_for_reintegration(None).unwrap();
+    for path in &paths[1..] {
+        admit(stacker.push_fits(path).unwrap());
+    }
+    check(
+        "LARGE_LIVE",
+        &summary(&stacker.snapshot().unwrap().image),
+        LARGE_LIVE,
+    );
+    let reintegrated = stacker
+        .reintegrate(&BatchStackOptions::default(), |_, _, _| {})
+        .unwrap();
+    check(
+        "LARGE_REINTEGRATED",
+        &summary(&reintegrated.snapshot.image),
+        LARGE_REINTEGRATED,
     );
 }
 

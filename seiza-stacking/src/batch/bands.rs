@@ -274,6 +274,24 @@ impl Run<'_> {
                 })
                 .collect::<Vec<_>>()
         });
+        // The GPU integrates whole bands when there is one; a drizzle's
+        // fates are recorded on the CPU.
+        #[cfg(feature = "gpu")]
+        let mut gpu = (!self.record_fates)
+            .then(|| {
+                let flat: Vec<f32> = weights
+                    .iter()
+                    .flat_map(|weights| weights.weight.map(|weight| weight as f32))
+                    .collect();
+                crate::gpu::BandSession::new(
+                    frame_count,
+                    channels,
+                    rows * row_samples,
+                    WEIGHTED.then_some((flat.as_slice(), C)),
+                    rejection.gpu_tables(),
+                )
+            })
+            .flatten();
         for_each_band(
             self.shape,
             frame_count,
@@ -285,6 +303,27 @@ impl Run<'_> {
                 // A frame the band does not reach was not read, and its
                 // samples are empty.
                 let band_samples = rows.min(height - top) * row_samples;
+                #[cfg(feature = "gpu")]
+                if let Some(session) = &gpu {
+                    let range = top * row_samples..top * row_samples + band_samples;
+                    let mut band_counts = vec![(0, 0); frame_count];
+                    let result = session.integrate(frames, outputs.band(range), &mut band_counts);
+                    match result {
+                        Ok(()) => {
+                            for (counts, (finite, integrated)) in counts.iter().zip(band_counts) {
+                                counts.finite.fetch_add(finite, Ordering::Relaxed);
+                                counts.integrated.fetch_add(integrated, Ordering::Relaxed);
+                            }
+                            return check_cancelled(options);
+                        }
+                        Err(reason) => {
+                            eprintln!(
+                                "seiza-stacking: integrating on the CPU from this band on: {reason}"
+                            );
+                            gpu = None;
+                        }
+                    }
+                }
                 let context = Band {
                     frames,
                     regions: &regions,

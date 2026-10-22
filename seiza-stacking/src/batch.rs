@@ -580,6 +580,22 @@ impl Outputs {
         }
     }
 
+    /// The outputs for `range` as one band, for the GPU's band kernel.
+    #[cfg(feature = "gpu")]
+    pub(crate) fn band(&mut self, range: std::ops::Range<usize>) -> crate::gpu::BandOutputs<'_> {
+        crate::gpu::BandOutputs {
+            mean: &mut self.mean[range.clone()],
+            variance: &mut self.variance[range.clone()],
+            weight: if self.weight.is_empty() {
+                &mut []
+            } else {
+                &mut self.weight[range.clone()]
+            },
+            coverage: &mut self.coverage[range.clone()],
+            rejected: &mut self.rejected[range],
+        }
+    }
+
     /// The outputs for `range`, in runs of `size` samples.
     pub(crate) fn chunks_mut(
         &mut self,
@@ -1064,6 +1080,42 @@ impl Rejection {
         }
     }
 
+    /// These constants in single precision, by sample count, for the GPU's
+    /// band kernel.
+    #[cfg(feature = "gpu")]
+    pub(crate) fn gpu_tables(&self) -> crate::gpu::BandTables {
+        let counts = self.thresholds.len();
+        crate::gpu::BandTables {
+            thresholds: self
+                .thresholds
+                .iter()
+                .map(|&(low, high)| [low as f32, high as f32])
+                .collect(),
+            factors: (0..counts)
+                .map(|count| {
+                    let trimmed = count as u32 >= TRIMMED_FIRST_ESTIMATE;
+                    [
+                        self.peer_factor[count] as f32,
+                        if trimmed {
+                            self.trim_factor(count as u32, true) as f32
+                        } else {
+                            1.0
+                        },
+                        if trimmed {
+                            self.trim_factor(count as u32, false) as f32
+                        } else {
+                            1.0
+                        },
+                        0.0,
+                    ]
+                })
+                .collect(),
+            minimum_sigma: self.minimum_sigma,
+            clipped_correction: self.clipped_correction as f32,
+            precision: (PRECISION_STEPS * f64::from(f32::EPSILON)) as f32,
+        }
+    }
+
     /// The factor that corrects a trimmed first estimate of `count` samples,
     /// which also leaves out the candidate when `without_candidate`.
     fn trim_factor(&self, count: u32, without_candidate: bool) -> f64 {
@@ -1175,7 +1227,7 @@ impl FirstEstimate {
 const TRIMMED_FIRST_ESTIMATE: u32 = 10;
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::{
         Arc,

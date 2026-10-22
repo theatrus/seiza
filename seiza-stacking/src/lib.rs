@@ -57,6 +57,8 @@ mod fits;
 mod image;
 mod lens;
 pub use lens::ExpandedLens;
+#[cfg(feature = "gpu")]
+mod gpu;
 mod mapping;
 mod master;
 mod normalization;
