@@ -357,6 +357,8 @@ impl LinearImage {
         // scaled back and with each photosite's own sample, and only the
         // border is left to fill here.
         #[cfg(feature = "gpu")]
+        let mut on_gpu_output = None;
+        #[cfg(feature = "gpu")]
         let on_gpu = interior
             && demosaic == Demosaic::Vng
             && crate::gpu::vng(
@@ -365,7 +367,10 @@ impl LinearImage {
                 std::array::from_fn(|phase| layout.channel_at(phase & 1, phase >> 1) as u32),
                 balance,
             )
-            .map(|interior| rgb = interior)
+            .map(|(interior, output)| {
+                rgb = interior;
+                on_gpu_output = output;
+            })
             .is_some();
         #[cfg(not(feature = "gpu"))]
         let on_gpu = false;
@@ -418,6 +423,12 @@ impl LinearImage {
                     }
                 }
             });
+        // The GPU's copy, with the border the CPU just filled, stays there
+        // for detection and resampling to read.
+        #[cfg(feature = "gpu")]
+        if let Some(output) = on_gpu_output {
+            output.finish(&rgb);
+        }
         Self::new(width, height, 3, rgb)
     }
 
@@ -1612,6 +1623,39 @@ mod tests {
                 "{pattern:?}: {far} beyond 0.1 noise"
             );
         }
+    }
+
+    /// The GPU's copy of a frame it debayered, the border the CPU fills
+    /// written in, is the frame to the bit, and stays on the GPU for
+    /// detection and resampling to read.
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn a_frame_debayered_on_the_gpu_stays_there_whole() {
+        if crate::gpu::adapter_description().is_none() {
+            eprintln!("no GPU: the debayered frame's GPU copy not compared");
+            return;
+        }
+        let (width, height) = (1101, 1000);
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let data = (0..width * height)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                300.0 + (state >> 40) as f32 / (1 << 14) as f32
+            })
+            .collect();
+        let rgb = LinearImage::new(width, height, 1, data)
+            .unwrap()
+            .debayer_with(rggb(), Demosaic::Vng)
+            .unwrap();
+        let held = crate::gpu::resident_samples(&rgb.data).expect("the GPU keeps the frame");
+        assert_eq!(held.len(), rgb.data.len());
+        for (sample, (a, b)) in held.iter().zip(&rgb.data).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(), "sample {sample}");
+        }
+        crate::gpu::release_resident();
+        assert!(crate::gpu::resident_samples(&rgb.data).is_none());
     }
 
     #[test]

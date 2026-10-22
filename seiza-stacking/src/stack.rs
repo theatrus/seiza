@@ -2624,6 +2624,10 @@ pub(crate) fn prepare_frame(
     cache: Option<&crate::replay::CacheFiles>,
     clipped: Option<LinearImage>,
 ) -> Result<PreparedFrame> {
+    // The frame's samples the GPU holds, for detection and resampling, go
+    // back to the pool when this returns.
+    #[cfg(feature = "gpu")]
+    let _resident = crate::gpu::ResidentScope;
     if reference.channels != frame.channels {
         return Ok(PreparedFrame::Rejected(
             FrameRejectionReason::IncompatibleImage(format!(

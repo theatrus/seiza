@@ -74,6 +74,8 @@ struct Gpu {
     /// Star detection's passes, in order, and their layout.
     detect_pipelines: [wgpu::ComputePipeline; 6],
     detect_layout: wgpu::BindGroupLayout,
+    scatter_pipeline: wgpu::ComputePipeline,
+    scatter_layout: wgpu::BindGroupLayout,
     weights: wgpu::Buffer,
     /// An integrated GPU, which shares memory with the CPU, reads the
     /// source and writes the output in buffers the CPU maps directly;
@@ -111,6 +113,214 @@ fn copy_out<T: bytemuck::Pod + Send + Sync>(view: &[u8], every_core: bool) -> Ve
         .copied()
         .collect_into_vec(&mut out);
     out
+}
+
+/// Which samples a resident buffer holds: where they are, how many, and a
+/// fingerprint of 1024 of them, so samples changed in place since, or a new
+/// vector that came to lie where an old one was freed, are not mistaken for
+/// them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ResidentKey {
+    address: usize,
+    samples: usize,
+    fingerprint: u64,
+}
+
+impl ResidentKey {
+    fn of(data: &[f32]) -> Self {
+        let samples = data.len();
+        let taken = samples.min(1024);
+        let mut fingerprint = 0xcbf2_9ce4_8422_2325_u64;
+        for at in 0..taken {
+            let sample = data[at * samples / taken];
+            fingerprint =
+                (fingerprint ^ u64::from(sample.to_bits())).wrapping_mul(0x0100_0000_01b3);
+        }
+        Self {
+            address: data.as_ptr() as usize,
+            samples,
+            fingerprint,
+        }
+    }
+}
+
+/// A frame's samples this thread put on the GPU, or had the GPU make.
+struct Resident {
+    buffer: wgpu::Buffer,
+    usage: wgpu::BufferUsages,
+    key: ResidentKey,
+}
+
+thread_local! {
+    /// The frame this thread keeps on the GPU, at most one.
+    static RESIDENT: std::cell::RefCell<Option<Resident>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Keep `buffer`, holding the samples `key` names, resident for this
+/// thread, in place of the frame it kept before.
+fn keep_resident(buffer: wgpu::Buffer, usage: wgpu::BufferUsages, key: ResidentKey) {
+    let previous = RESIDENT.with(|resident| {
+        resident
+            .borrow_mut()
+            .replace(Resident { buffer, usage, key })
+    });
+    if let (Some(previous), Some(gpu)) = (previous, GPU.get().and_then(Option::as_ref)) {
+        gpu.give(previous.usage, previous.buffer);
+    }
+}
+
+/// Hand the frame this thread keeps on the GPU back to the pool.
+pub(crate) fn release_resident() {
+    let previous = RESIDENT.with(|resident| resident.borrow_mut().take());
+    if let (Some(previous), Some(gpu)) = (previous, GPU.get().and_then(Option::as_ref)) {
+        gpu.give(previous.usage, previous.buffer);
+    }
+}
+
+/// The samples this thread keeps on the GPU for `data`, read back, or
+/// `None` when it keeps none for them, or keeps them where they cannot be
+/// read back (an uploaded frame, which is `data` copied).
+#[cfg(test)]
+pub(crate) fn resident_samples(data: &[f32]) -> Option<Vec<f32>> {
+    let gpu = gpu()?;
+    let key = ResidentKey::of(data);
+    let (buffer, usage) = RESIDENT.with(|resident| {
+        resident
+            .borrow()
+            .as_ref()
+            .filter(|resident| resident.key == key)
+            .map(|resident| (resident.buffer.clone(), resident.usage))
+    })?;
+    let bytes = (data.len() * 4) as u64;
+    let read_from = if usage.contains(wgpu::BufferUsages::MAP_READ) {
+        gpu.map(&[buffer.slice(..bytes)], wgpu::MapMode::Read, None)
+            .ok()?;
+        buffer
+    } else if usage.contains(wgpu::BufferUsages::COPY_SRC) {
+        let readback = gpu.buffer(
+            "resident-readback",
+            bytes,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(&buffer, 0, &readback, 0, bytes);
+        let submission = gpu.queue.submit([encoder.finish()]);
+        gpu.map(&[readback.slice(..)], wgpu::MapMode::Read, Some(submission))
+            .ok()?;
+        readback
+    } else {
+        return None;
+    };
+    let samples = copy_out(&read_from.slice(..bytes).get_mapped_range().ok()?, false);
+    read_from.unmap();
+    Some(samples)
+}
+
+/// Releases this thread's resident frame when dropped, at the end of the
+/// work that reads it.
+pub(crate) struct ResidentScope;
+
+impl Drop for ResidentScope {
+    fn drop(&mut self) {
+        release_resident();
+    }
+}
+
+/// A debayered frame's samples on the GPU, all but the border the CPU
+/// fills; [`Self::finish`] puts that in and keeps the frame resident.
+pub(crate) struct VngOutput {
+    buffer: wgpu::Buffer,
+    usage: wgpu::BufferUsages,
+    width: usize,
+    height: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct ScatterParams {
+    entries: u32,
+    row: u32,
+    padding: [u32; 2],
+}
+
+impl VngOutput {
+    /// Write `rgb`'s two-pixel border, which the CPU filled, into the GPU's
+    /// copy, and keep it resident as `rgb`'s samples.
+    pub(crate) fn finish(self, rgb: &[f32]) {
+        let Some(gpu) = gpu() else {
+            return;
+        };
+        let (width, height) = (self.width, self.height);
+        if rgb.len() != width * height * 3 {
+            gpu.give(self.usage, self.buffer);
+            return;
+        }
+        let mut patch: Vec<[u32; 2]> = Vec::with_capacity((4 * width + 4 * height) * 3);
+        let mut push = |pixel: usize| {
+            let first = pixel * 3;
+            for (offset, value) in rgb[first..first + 3].iter().enumerate() {
+                patch.push([(first + offset) as u32, value.to_bits()]);
+            }
+        };
+        for y in 0..height {
+            if y < 2 || y + 2 >= height {
+                (0..width).for_each(|x| push(y * width + x));
+            } else {
+                for x in [0, 1, width - 2, width - 1] {
+                    push(y * width + x);
+                }
+            }
+        }
+        let entries = patch.len() as u32;
+        let groups = entries.div_ceil(256);
+        let columns = groups.min(4096);
+        let params = ScatterParams {
+            entries,
+            row: columns * 256,
+            padding: [0; 2],
+        };
+        let init = |label: &str, contents: &[u8], usage: wgpu::BufferUsages| {
+            wgpu::util::DeviceExt::create_buffer_init(
+                &gpu.device,
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some(label),
+                    contents,
+                    usage,
+                },
+            )
+        };
+        let uniform = init(
+            "scatter-params",
+            bytemuck::bytes_of(&params),
+            wgpu::BufferUsages::UNIFORM,
+        );
+        let patch = init(
+            "scatter-patch",
+            bytemuck::cast_slice(&patch),
+            wgpu::BufferUsages::STORAGE,
+        );
+        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scatter"),
+            layout: &gpu.scatter_layout,
+            entries: &[(0, &uniform), (1, &patch), (2, &self.buffer)].map(|(binding, buffer)| {
+                wgpu::BindGroupEntry {
+                    binding,
+                    resource: buffer.as_entire_binding(),
+                }
+            }),
+        });
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&gpu.scatter_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(columns, groups.div_ceil(columns), 1);
+        }
+        // Not waited for: what reads the frame next is submitted after it.
+        gpu.queue.submit([encoder.finish()]);
+        keep_resident(self.buffer, self.usage, ResidentKey::of(rgb));
+    }
 }
 
 /// Bytes the pool keeps at most, past which a returned buffer is dropped.
@@ -491,6 +701,41 @@ impl Gpu {
                 bind_group_layouts: &[Some(&detect_layout)],
                 immediate_size: 0,
             });
+        let scatter_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("scatter"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("gpu/scatter.wgsl").into()),
+        });
+        let scatter_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("scatter"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                storage(1, true),
+                storage(2, false),
+            ],
+        });
+        let scatter_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("scatter"),
+                bind_group_layouts: &[Some(&scatter_layout)],
+                immediate_size: 0,
+            });
+        let scatter_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("scatter"),
+            layout: Some(&scatter_pipeline_layout),
+            module: &scatter_module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
         let detect_pipelines = [
             "luminance",
             "normalize",
@@ -535,6 +780,8 @@ impl Gpu {
             defects_layout,
             detect_pipelines,
             detect_layout,
+            scatter_pipeline,
+            scatter_layout,
             weights,
             mapped,
             max_buffer: limits
@@ -621,6 +868,28 @@ impl Gpu {
         Ok(buffer)
     }
 
+    /// A buffer holding `data`: the one this thread keeps resident when it
+    /// holds these very samples, or else `data` uploaded, which this thread
+    /// then keeps resident in its place. A frame's star detection and its
+    /// resampling read the same samples, so the second reads them where the
+    /// first left them.
+    fn source(&self, label: &str, data: &[f32]) -> Result<wgpu::Buffer, String> {
+        let key = ResidentKey::of(data);
+        let held = RESIDENT.with(|resident| {
+            resident
+                .borrow()
+                .as_ref()
+                .filter(|resident| resident.key == key)
+                .map(|resident| resident.buffer.clone())
+        });
+        if let Some(buffer) = held {
+            return Ok(buffer);
+        }
+        let buffer = self.upload(label, data)?;
+        keep_resident(buffer.clone(), self.input_usage(), key);
+        Ok(buffer)
+    }
+
     /// Run `passes`, each a pipeline of `layout` over its workgroups, in
     /// order, their bindings `inputs` and then an output of
     /// `output_samples`, and read the output back.
@@ -632,6 +901,22 @@ impl Gpu {
         output_samples: usize,
         trace: &mut Trace,
     ) -> Result<Vec<T>, String> {
+        self.compute_keeping(layout, passes, inputs, output_samples, false, trace)
+            .map(|(data, _)| data)
+    }
+
+    /// [`Self::compute`], and with `keep`, the output buffer and its usage
+    /// too, still holding the output, rather than back to the pool.
+    #[allow(clippy::type_complexity)]
+    fn compute_keeping<T: bytemuck::Pod + Send + Sync>(
+        &self,
+        layout: &wgpu::BindGroupLayout,
+        passes: &[(&wgpu::ComputePipeline, (u32, u32))],
+        inputs: &[&wgpu::Buffer],
+        output_samples: usize,
+        keep: bool,
+        trace: &mut Trace,
+    ) -> Result<(Vec<T>, Option<(wgpu::Buffer, wgpu::BufferUsages)>), String> {
         let output_bytes = (output_samples * std::mem::size_of::<T>()) as u64;
         let output_usage = wgpu::BufferUsages::STORAGE
             | if self.mapped {
@@ -692,11 +977,16 @@ impl Gpu {
                 trace.mark("copy out");
                 Ok(data)
             });
-        self.give(output_usage, output);
         if let Some(readback) = readback {
             self.give(readback_usage, readback);
         }
-        result
+        match result {
+            Ok(data) if keep => Ok((data, Some((output, output_usage)))),
+            result => {
+                self.give(output_usage, output);
+                result.map(|data| (data, None))
+            }
+        }
     }
 
     /// Wait for `submission`, and those before it, to finish, but not for
@@ -836,7 +1126,7 @@ impl Gpu {
             bytemuck::cast_slice(grid),
             wgpu::BufferUsages::STORAGE,
         );
-        let source_buffer = self.upload("source", &source.data)?;
+        let source_buffer = self.source("source", &source.data)?;
         let workgroups = (
             (region.width as u32).div_ceil(16),
             (region.height as u32).div_ceil(16),
@@ -848,7 +1138,7 @@ impl Gpu {
             output_samples,
             trace,
         );
-        self.give(self.input_usage(), source_buffer);
+        drop(source_buffer);
         let data = data?;
         LinearImage::new(region.width, region.height, channels, data)
             .map_err(|error| error.to_string())
@@ -961,7 +1251,7 @@ pub(crate) fn vng(
     (width, height): (usize, usize),
     channels: [u32; 4],
     balance: [f32; 3],
-) -> Option<Vec<f32>> {
+) -> Option<(Vec<f32>, Option<VngOutput>)> {
     if mosaic.len() < MINIMUM_SAMPLES
         || width < 5
         || height < 5
@@ -999,7 +1289,7 @@ pub(crate) fn vng(
     let balanced_bytes = (mosaic.len() * 4) as u64;
     let balanced = gpu.take("balanced", balanced_bytes, wgpu::BufferUsages::STORAGE);
     let result = gpu.upload("mosaic", mosaic).and_then(|source| {
-        let rgb = gpu.compute(
+        let rgb = gpu.compute_keeping(
             &gpu.vng_layout,
             &[
                 (
@@ -1016,6 +1306,7 @@ pub(crate) fn vng(
             ],
             &[&uniform, &source, &balanced],
             mosaic.len() * 3,
+            true,
             &mut trace,
         );
         gpu.give(gpu.input_usage(), source);
@@ -1024,7 +1315,15 @@ pub(crate) fn vng(
     gpu.give(wgpu::BufferUsages::STORAGE, balanced);
     trace.print(&format!("vng {width}x{height}"));
     match result {
-        Ok(rgb) => Some(rgb),
+        Ok((rgb, output)) => Some((
+            rgb,
+            output.map(|(buffer, usage)| VngOutput {
+                buffer,
+                usage,
+                width,
+                height,
+            }),
+        )),
         Err(reason) => {
             log_once(&format!("debayering this frame on the CPU: {reason}"));
             None
@@ -1255,7 +1554,7 @@ impl Gpu {
             4,
             wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         );
-        let frame = self.upload("detect-frame", &image.data);
+        let frame = self.source("detect-frame", &image.data);
         let result = frame.and_then(|frame| {
             trace.mark("upload");
             let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1296,13 +1595,12 @@ impl Gpu {
             }
             encoder.copy_buffer_to_buffer(&rows, rows_bytes - 4, &total_read, 0, 4);
             let submission = self.queue.submit([encoder.finish()]);
-            let mapped = self.map(
+            drop(frame);
+            self.map(
                 &[total_read.slice(..)],
                 wgpu::MapMode::Read,
                 Some(submission),
-            );
-            self.give(self.input_usage(), frame);
-            mapped
+            )
         });
         let found = result.and_then(|()| {
             trace.mark("kernel");
@@ -2292,6 +2590,7 @@ mod tests {
             ("vng", include_str!("gpu/vng.wgsl")),
             ("defects", include_str!("gpu/defects.wgsl")),
             ("detect", include_str!("gpu/detect.wgsl")),
+            ("scatter", include_str!("gpu/scatter.wgsl")),
         ] {
             let module = naga::front::wgsl::parse_str(source)
                 .unwrap_or_else(|error| panic!("{name}: {}", error.emit_to_string(source)));
