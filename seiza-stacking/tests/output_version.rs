@@ -782,6 +782,59 @@ fn registered_frames_a_host_integrates_keep_their_output() {
 /// the CPU's.
 #[test]
 fn a_stack_large_enough_for_the_gpu_keeps_its_output() {
+    large_stack(
+        false,
+        NormalizationMode::Global,
+        LARGE_LIVE,
+        LARGE_REINTEGRATED,
+    );
+}
+
+/// Preparation runs ahead of admission, including the first batch before
+/// the lazy accumulator would previously have been offered to the GPU.
+#[test]
+fn a_pipelined_stack_large_enough_for_the_gpu_keeps_its_output() {
+    large_stack(
+        true,
+        NormalizationMode::Global,
+        LARGE_LIVE,
+        LARGE_REINTEGRATED,
+    );
+}
+
+#[test]
+fn a_locally_normalized_pipelined_stack_large_enough_for_the_gpu_keeps_its_output() {
+    large_stack(
+        true,
+        NormalizationMode::LocalBackground { tile_size: 256 },
+        LARGE_LOCAL_LIVE,
+        LARGE_LOCAL_REINTEGRATED,
+    );
+}
+
+// First recorded with lazy accumulator startup, before preparation began
+// with resident moments. Local background fits exercise a grid of offsets.
+#[rustfmt::skip]
+const LARGE_LOCAL_LIVE: &[f64] = &[
+    1.3754521e2, 4.2678341e2, 1.7932547e4, 9.7603149e1, 1.0072701e2, 1.0332149e2, 1.0637009e2,
+    1.0963932e2, 1.0196701e2, 1.0466370e2, 1.0884956e2, 1.1161555e2, 1.1412208e2, 1.0603079e2,
+    1.0965089e2, 1.1204286e2, 1.1683111e2, 1.1863527e2, 1.1065800e2, 1.1457457e2, 1.1625290e2,
+    1.1974577e2, 1.2310165e2, 1.1479590e2, 1.1817994e2, 1.2165116e2, 1.2404044e2, 1.2759380e2,
+];
+#[rustfmt::skip]
+const LARGE_LOCAL_REINTEGRATED: &[f64] = &[
+    1.3728293e2, 4.2654226e2, 1.7932539e4, 9.7631035e1, 1.0074255e2, 1.0330618e2, 1.0636744e2,
+    1.0964255e2, 1.0198824e2, 1.0467348e2, 1.0883335e2, 1.1135132e2, 1.1413447e2, 1.0604317e2,
+    1.0965260e2, 1.1202531e2, 1.1683836e2, 1.1865505e2, 1.1066511e2, 1.1457175e2, 1.1623668e2,
+    1.1975120e2, 1.2311982e2, 1.1527016e2, 1.1817233e2, 1.2163953e2, 1.2405253e2, 1.2762001e2,
+];
+
+fn large_stack(
+    pipelined: bool,
+    normalization: NormalizationMode,
+    live_expected: &[f64],
+    reintegrated_expected: &[f64],
+) {
     let stars = large_stars();
     let directory = tempfile::tempdir().unwrap();
     let paths = SHIFTS
@@ -814,22 +867,54 @@ fn a_stack_large_enough_for_the_gpu_keeps_its_output() {
             path
         })
         .collect::<Vec<_>>();
-    for (on, gpu) in [("CPU", GpuOptions::cpu()), ("GPU", GpuOptions::default())] {
+    for (on, gpu) in [
+        ("CPU", GpuOptions::cpu()),
+        ("GPU", GpuOptions::default()),
+        (
+            "traced GPU",
+            GpuOptions {
+                trace: true,
+                ..GpuOptions::default()
+            },
+        ),
+    ] {
         eprintln!("on the {on}");
         let options = StackOptions {
             gpu,
+            normalization,
             ..StackOptions::default()
         };
         let mut stacker =
             LiveStacker::open_fits(&paths[0], None, None, None, None, options.clone()).unwrap();
         stacker.retain_frames_for_reintegration(None).unwrap();
-        for path in &paths[1..] {
-            admit(stacker.push_fits(path).unwrap());
+        if pipelined {
+            let report = stacker
+                .push_fits_pipelined(
+                    &paths[1..],
+                    &seiza_stacking::PipelineOptions {
+                        workers: Some(2),
+                        ..Default::default()
+                    },
+                    |_, result| {
+                        admit(result.unwrap());
+                        Continue::Yes
+                    },
+                )
+                .unwrap();
+            assert_eq!(report.integrated, paths.len() - 1);
+        } else {
+            for path in &paths[1..] {
+                admit(stacker.push_fits(path).unwrap());
+            }
         }
         check(
-            "LARGE_LIVE",
+            if matches!(normalization, NormalizationMode::LocalBackground { .. }) {
+                "LARGE_LOCAL_LIVE"
+            } else {
+                "LARGE_LIVE"
+            },
             &summary(&stacker.snapshot().unwrap().image),
-            LARGE_LIVE,
+            live_expected,
         );
         // Exercise both one band and repeated buffer reuse, including a
         // shorter final band. Each full band still reaches the GPU's
@@ -849,9 +934,13 @@ fn a_stack_large_enough_for_the_gpu_keeps_its_output() {
                 )
                 .unwrap();
             check(
-                "LARGE_REINTEGRATED",
+                if matches!(normalization, NormalizationMode::LocalBackground { .. }) {
+                    "LARGE_LOCAL_REINTEGRATED"
+                } else {
+                    "LARGE_REINTEGRATED"
+                },
                 &summary(&reintegrated.snapshot.image),
-                LARGE_REINTEGRATED,
+                reintegrated_expected,
             );
         }
     }

@@ -81,8 +81,10 @@ buffers also scale with that row count. `GpuOptions::concurrency`
 continues to limit frame preparation calls, independently of these two
 band buffer sets. Band traces report host upload/staging, time in flight
 while other work runs, the remaining wait and copying outputs. These spans
-overlap across bands and are not GPU timestamp measurements. Mask traces
-also report actual sparse upload bytes and bounded readback bytes.
+overlap across bands and are not GPU timestamp measurements. A separate
+`device compute` line reports compute-pass timestamps when the adapter
+supports them. Mask traces also report actual sparse upload bytes and
+bounded readback bytes.
 
 The resampled image stays on the GPU through normalization and admission.
 A full CPU image copy still serves normalization fitting and the scratch
@@ -204,9 +206,19 @@ registration with it.
 - `concurrency` sets how many frame calls (debayering, detection,
   resampling, screening) run on the GPU at once, three by default: a frame
   waiting for one holds no GPU buffer.
-- `trace` prints every GPU call's stages (grid, upload, kernel, copy out)
+- `trace` prints every GPU call's host stages (grid, upload, queue/readback,
+  copy out)
   to stderr, and the time opening the device took (12 ms on the M4 Max,
-  46 ms on an Iris Xe), to see where the time goes on a machine.
+  46 ms on an Iris Xe), to see where the time goes on a machine. It also
+  separates decoded-frame clipping and calibration, registration,
+  resampling, coverage and photometry, normalization fitting, cache writes,
+  normalization application and weighting. These are overlapping host
+  elapsed spans, including waits and scheduling. Separate `device compute`
+  lines time the compute passes with optional device timestamp queries.
+  Those are resolved and mapped beside existing results; normalization's
+  timestamps are collected at admission, preserving its asynchronous
+  submission. Transfers and host work are excluded from device intervals;
+  they are not occupancy measurements.
 - The options decide where the arithmetic runs, which moves results by
   rounding at most, so a stack's configuration fingerprint leaves them out;
   its context keeps them. `WGPU_BACKEND` chooses the backend, as wgpu reads
@@ -221,6 +233,15 @@ registration with it.
   panics on the GPU's account.
 - Frame-sized buffers return to a pool of at most 1 GiB: making a new one
   maps and clears fresh memory, which took longer than the upload.
+- Discrete-GPU frame uploads reuse mapped staging buffers from that pool
+  and submit their copies immediately. They avoid a fresh staging allocation
+  for each queue write and can transfer while the host encodes compute work.
+  A staging buffer returned while its copy is in flight is mapped only when
+  that copy has finished. Shared-memory adapters keep their direct mappings.
+- A pipeline offers its accumulator to the GPU before starting preparation.
+  Otherwise the first worker batch sees no GPU accumulator, normalizes on
+  the CPU and uploads again at admission. Its setup time counts with the
+  pipeline's integration time.
 - An integrated GPU (Apple Silicon, Intel Iris Xe) reads and writes buffers
   the CPU maps directly; a discrete one goes through staging copies. A
   frame goes in and comes out on the core that asked for it: frames are

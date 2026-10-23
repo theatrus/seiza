@@ -2672,6 +2672,8 @@ pub(crate) fn prepare_frame(
     cache: Option<&crate::replay::CacheFiles>,
     clipped: Option<LinearImage>,
 ) -> Result<PreparedFrame> {
+    #[cfg(feature = "gpu")]
+    let mut trace = crate::gpu::Trace::new(options.gpu.trace);
     // The frame's samples the GPU holds, for detection and resampling, go
     // back to the pool when this returns.
     #[cfg(feature = "gpu")]
@@ -2697,6 +2699,8 @@ pub(crate) fn prepare_frame(
         }
     };
     let criteria = options.acceptance;
+    #[cfg(feature = "gpu")]
+    trace.mark("registration");
     // Registration measures in working pixels; gates and reports read the
     // sensor's own.
     let scale = options.scale();
@@ -2763,6 +2767,8 @@ pub(crate) fn prepare_frame(
         options.channel_sites(cfa),
         &options.gpu,
     )?;
+    #[cfg(feature = "gpu")]
+    trace.mark("resampling");
     // Where the GPU resampled the frame, its samples stay there for the
     // normalization and a GPU accumulator to read, when there is one.
     #[cfg(feature = "gpu")]
@@ -2809,6 +2815,8 @@ pub(crate) fn prepare_frame(
         )
     })
     .flatten();
+    #[cfg(feature = "gpu")]
+    trace.mark("coverage and photometry");
     let placed = Placed::on(&registered, region, reference);
     // An expanded canvas keeps the first value each sample received, so its
     // background is a patchwork of single frames' skies, each with its own
@@ -2840,6 +2848,8 @@ pub(crate) fn prepare_frame(
             }
         };
     let (minimum_gain, maximum_gain) = normalization.gain_range();
+    #[cfg(feature = "gpu")]
+    trace.mark("normalization fit");
     if minimum_gain < criteria.minimum_normalization_gain
         || maximum_gain > criteria.maximum_normalization_gain
     {
@@ -2877,6 +2887,8 @@ pub(crate) fn prepare_frame(
         ),
         (None, _) => (None, None),
     };
+    #[cfg(feature = "gpu")]
+    trace.mark("cache");
     // Normalized on the GPU when the frame lies there for its accumulator,
     // and the CPU's copy only if the frame comes back to the CPU.
     #[cfg(feature = "gpu")]
@@ -2892,7 +2904,9 @@ pub(crate) fn prepare_frame(
                     (region.x, region.y),
                     (registered.width, registered.height, registered.channels),
                 )
-                .is_some_and(|coefficients| frame.normalize(&coefficients).is_ok())
+                .is_some_and(|coefficients| {
+                    frame.normalize(&coefficients, options.gpu.trace).is_ok()
+                })
         });
         #[cfg(not(feature = "gpu"))]
         let normalized_there = false;
@@ -2938,6 +2952,8 @@ pub(crate) fn prepare_frame(
     // Noise is read from the calibrated frame before resampling. Bilinear
     // resampling averages neighbouring pixels by an amount that depends on
     // each frame's sub-pixel shift, which would bias the weights.
+    #[cfg(feature = "gpu")]
+    trace.mark("normalization apply");
     let (noise, weight) = if options.weighting.is_equal() {
         (Vec::new(), Vec::new())
     } else {
@@ -2982,6 +2998,11 @@ pub(crate) fn prepare_frame(
     #[cfg(feature = "gpu")]
     if on_gpu.is_some() {
         registered.data = Vec::new();
+    }
+    #[cfg(feature = "gpu")]
+    {
+        trace.mark("weighting and finish");
+        trace.print("prepare frame");
     }
     Ok(PreparedFrame::Ready(Box::new(ReadyFrame {
         registered,
@@ -3093,6 +3114,12 @@ fn admission_count(fraction: &impl Fn(usize) -> f32, minimum: f32) -> usize {
 }
 
 impl IntegrationHalf<'_> {
+    /// Establish residency before preparation decides whether to keep
+    /// normalized samples on the GPU.
+    pub(crate) fn prepare_accumulator(&mut self) {
+        #[cfg(feature = "gpu")]
+        self.accumulator.offer_gpu(&self.options.gpu);
+    }
     /// Integrate one prepared frame. Must be called in submission order:
     /// whether a frame survives `minimum_integrated_fraction` depends on every
     /// frame integrated before it.
@@ -3396,8 +3423,8 @@ impl Accumulator {
         Ok(())
     }
 
-    /// Move the moments to the GPU the first time a frame arrives, when
-    /// they are large enough for it and `options` allow it.
+    /// Move the moments to the GPU once, when they are large enough for it
+    /// and `options` allow it.
     #[cfg(feature = "gpu")]
     fn offer_gpu(&mut self, options: &crate::GpuOptions) {
         if self.offered {

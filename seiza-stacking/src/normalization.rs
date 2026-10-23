@@ -1713,7 +1713,7 @@ mod tests {
                         (registered.width, registered.height, channels),
                     )
                     .unwrap();
-                frame.normalize(&coefficients).unwrap();
+                frame.normalize(&coefficients, false).unwrap();
                 map.apply_region(&mut registered, region.x, region.y)
                     .unwrap();
                 let normalized = frame.download().unwrap();

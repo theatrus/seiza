@@ -20,6 +20,9 @@ use rayon::prelude::*;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+mod timing;
+use timing::GpuTimer;
+
 /// Samples below which the CPU is as quick: the GPU's fixed cost, the
 /// coordinate grid and the transfers, is a few milliseconds a frame.
 const MINIMUM_SAMPLES: usize = 1 << 20;
@@ -274,6 +277,7 @@ pub(crate) fn take_resident(
         width,
         height,
         channels,
+        normalization_timer: None,
     })
 }
 
@@ -295,6 +299,7 @@ pub(crate) struct GpuFrame {
     width: usize,
     height: usize,
     channels: usize,
+    normalization_timer: Option<GpuTimer>,
 }
 
 impl Drop for GpuFrame {
@@ -337,6 +342,7 @@ impl GpuFrame {
     pub(crate) fn normalize(
         &mut self,
         coefficients: &NormalizationCoefficients,
+        trace: bool,
     ) -> Result<(), String> {
         let gpu = opened().ok_or("no GPU")?;
         let buffer = self.buffer.as_ref().ok_or("the frame has left the GPU")?;
@@ -413,13 +419,21 @@ impl GpuFrame {
             }),
         });
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        let timer = GpuTimer::new(gpu, trace);
         {
-            let mut pass = encoder.begin_compute_pass(&Default::default());
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("normalize"),
+                timestamp_writes: timer.as_ref().map(GpuTimer::writes),
+            });
             pass.set_pipeline(&gpu.normalize_pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.dispatch_workgroups(columns, groups.div_ceil(columns), 1);
         }
+        if let Some(timer) = &timer {
+            timer.resolve(&mut encoder);
+        }
         gpu.queue.submit([encoder.finish()]);
+        self.normalization_timer = timer;
         if FAILED.load(Ordering::Relaxed) {
             return Err("the GPU failed".into());
         }
@@ -573,6 +587,7 @@ pub(crate) struct Trace {
     enabled: bool,
     last: std::time::Instant,
     parts: Vec<(&'static str, f64)>,
+    device_ms: Option<f64>,
 }
 
 impl Trace {
@@ -581,6 +596,7 @@ impl Trace {
             enabled,
             last: std::time::Instant::now(),
             parts: Vec::new(),
+            device_ms: None,
         }
     }
 
@@ -599,10 +615,13 @@ impl Trace {
             let parts = self
                 .parts
                 .iter()
-                .map(|(stage, ms)| format!("{stage} {ms:.1}"))
+                .map(|(stage, ms)| format!("{stage} {ms:.3}"))
                 .collect::<Vec<_>>()
                 .join(", ");
             eprintln!("seiza-stacking gpu: {what}: {total:.1} ms ({parts})");
+            if let Some(ms) = self.device_ms {
+                eprintln!("seiza-stacking gpu: {what}: device compute {ms:.3} ms");
+            }
         }
     }
 }
@@ -619,7 +638,20 @@ fn gpu(options: &GpuOptions) -> Option<&'static Gpu> {
         trace.mark("open");
         trace.print("device");
         match opened {
-            Ok(gpu) => Some(gpu),
+            Ok(gpu) => {
+                if options.trace {
+                    let info = gpu.device.adapter_info();
+                    eprintln!(
+                        "seiza-stacking gpu: adapter: {} ({:?}), device timestamps {}",
+                        info.name,
+                        info.backend,
+                        gpu.device
+                            .features()
+                            .contains(wgpu::Features::TIMESTAMP_QUERY)
+                    );
+                }
+                Some(gpu)
+            }
             Err(reason) => {
                 log_once(&format!("resampling on the CPU: {reason}"));
                 None
@@ -679,11 +711,11 @@ impl Gpu {
         };
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("seiza-stacking"),
-            required_features: if mapped {
+            required_features: (if mapped {
                 wgpu::Features::MAPPABLE_PRIMARY_BUFFERS
             } else {
                 wgpu::Features::empty()
-            },
+            }) | (adapter.features() & wgpu::Features::TIMESTAMP_QUERY),
             required_limits: limits.clone(),
             ..Default::default()
         }))
@@ -1214,8 +1246,22 @@ impl Gpu {
             buffer.unmap();
             copied.map_err(|error| error.to_string())?;
         } else {
-            self.queue
-                .write_buffer(&buffer, 0, bytemuck::cast_slice(data));
+            // Reuse host staging and submit this frame's copy immediately,
+            // rather than allocating an upload on every queue write and
+            // leaving it to the next compute submission to flush.
+            let usage = wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC;
+            let upload = self.take("frame-upload", bytes, usage);
+            self.map(&[upload.slice(..bytes)], wgpu::MapMode::Write, None)?;
+            let copied = upload
+                .slice(..bytes)
+                .get_mapped_range_mut()
+                .map(|mut view| view.slice(..).copy_from_slice(bytemuck::cast_slice(data)));
+            upload.unmap();
+            copied.map_err(|error| error.to_string())?;
+            let mut encoder = self.device.create_command_encoder(&Default::default());
+            encoder.copy_buffer_to_buffer(&upload, 0, &buffer, 0, bytes);
+            self.queue.submit([encoder.finish()]);
+            self.give(usage, upload);
         }
         Ok(buffer)
     }
@@ -1428,13 +1474,20 @@ impl Gpu {
                 encoder.clear_buffer(buffer, 0, None);
             }
         }
+        let timer = GpuTimer::new(self, trace.enabled);
         {
-            let mut pass = encoder.begin_compute_pass(&Default::default());
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: None,
+                timestamp_writes: timer.as_ref().map(GpuTimer::writes),
+            });
             pass.set_bind_group(0, &bind_group, &[]);
             for &(pipeline, (columns, rows)) in passes {
                 pass.set_pipeline(pipeline);
                 pass.dispatch_workgroups(columns, rows, 1);
             }
+        }
+        if let Some(timer) = &timer {
+            timer.resolve(&mut encoder);
         }
         if let Some(readbacks) = &readbacks {
             for ((output, readback), &bytes) in output_buffers.iter().zip(readbacks).zip(&bytes) {
@@ -1444,15 +1497,21 @@ impl Gpu {
         trace.mark("upload");
         let submission = self.queue.submit([encoder.finish()]);
         let read_from = readbacks.as_ref().unwrap_or(&output_buffers);
-        let slices: Vec<wgpu::BufferSlice<'_>> = read_from
+        let mut slices: Vec<wgpu::BufferSlice<'_>> = read_from
             .iter()
             .zip(&bytes)
             .map(|(buffer, &bytes)| buffer.slice(..bytes))
             .collect();
+        if let Some(timer) = &timer {
+            slices.push(timer.readback.slice(..));
+        }
         let result = self
             .map(&slices, wgpu::MapMode::Read, Some(submission))
             .and_then(|()| {
-                trace.mark("kernel");
+                trace.mark("queue and readback");
+                if let Some(timer) = &timer {
+                    timer.record(trace)?;
+                }
                 if FAILED.load(Ordering::Relaxed) {
                     return Err("the GPU failed".to_string());
                 }
@@ -2241,6 +2300,7 @@ impl Gpu {
             wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         );
         let frame = self.source("detect-frame", &image.data);
+        let timer = GpuTimer::new(self, trace.enabled);
         let result = frame.and_then(|frame| {
             trace.mark("upload");
             let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -2265,24 +2325,33 @@ impl Gpu {
             let dispatches = [per_pixel, (tiles_x, tiles_y), per_row, (1, 1), per_row];
             let mut encoder = self.device.create_command_encoder(&Default::default());
             {
-                let mut pass = encoder.begin_compute_pass(&Default::default());
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("detect"),
+                    timestamp_writes: timer.as_ref().map(GpuTimer::writes),
+                });
                 pass.set_bind_group(0, &bind_group, &[]);
                 for (pipeline, (x, y)) in self.detect_pipelines.iter().zip(dispatches) {
                     pass.set_pipeline(pipeline);
                     pass.dispatch_workgroups(x, y, 1);
                 }
             }
+            if let Some(timer) = &timer {
+                timer.resolve(&mut encoder);
+            }
             encoder.copy_buffer_to_buffer(&rows, rows_bytes - 4, &total_read, 0, 4);
             let submission = self.queue.submit([encoder.finish()]);
             drop(frame);
-            self.map(
-                &[total_read.slice(..)],
-                wgpu::MapMode::Read,
-                Some(submission),
-            )
+            let mut slices = vec![total_read.slice(..)];
+            if let Some(timer) = &timer {
+                slices.push(timer.readback.slice(..));
+            }
+            self.map(&slices, wgpu::MapMode::Read, Some(submission))
         });
         let found = result.and_then(|()| {
-            trace.mark("kernel");
+            trace.mark("queue and count");
+            if let Some(timer) = &timer {
+                timer.record(trace)?;
+            }
             if FAILED.load(Ordering::Relaxed) {
                 return Err("the GPU failed".to_string());
             }
@@ -2413,6 +2482,7 @@ struct PendingBand {
     reaching: Vec<usize>,
     submission: Option<wgpu::SubmissionIndex>,
     trace: Trace,
+    timer: Option<GpuTimer>,
 }
 
 impl BandSession {
@@ -2627,6 +2697,7 @@ impl BandSession {
                 reaching,
                 submission: None,
                 trace,
+                timer: None,
             });
             return Ok(());
         }
@@ -2674,13 +2745,20 @@ impl BandSession {
             encoder.copy_buffer_to_buffer(upload, 0, &self.values, 0, total);
         }
         encoder.clear_buffer(&self.counts, 0, None);
+        let timer = GpuTimer::new(gpu, self.trace);
         {
-            let mut pass = encoder.begin_compute_pass(&Default::default());
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("band rejection"),
+                timestamp_writes: timer.as_ref().map(GpuTimer::writes),
+            });
             pass.set_pipeline(&gpu.bands_pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
             let groups = samples.div_ceil(256) as u32;
             let (x, y) = (groups.min(32768), groups.div_ceil(32768));
             pass.dispatch_workgroups(x, y, 1);
+        }
+        if let Some(timer) = &timer {
+            timer.resolve(&mut encoder);
         }
         let output_bytes = (samples * 16) as u64;
         let tally_bytes = (samples * 8) as u64;
@@ -2697,6 +2775,7 @@ impl BandSession {
             reaching,
             submission: Some(submission),
             trace,
+            timer,
         });
         Ok(())
     }
@@ -2713,6 +2792,7 @@ impl BandSession {
             reaching,
             submission,
             mut trace,
+            timer,
         } = self.pending.take().ok_or("no band has been submitted")?;
         if outputs.mean.len() != samples || counts.len() != self.frame_count {
             return Err("the outputs do not fit the submitted band".into());
@@ -2729,16 +2809,19 @@ impl BandSession {
         trace.mark("in flight");
         let moments_from = self.moments_read.as_ref().unwrap_or(&self.moments);
         let tallies_from = self.tallies_read.as_ref().unwrap_or(&self.tallies);
-        gpu.map(
-            &[
-                moments_from.slice(..output_bytes),
-                tallies_from.slice(..tally_bytes),
-                self.counts_read.slice(..count_bytes),
-            ],
-            wgpu::MapMode::Read,
-            Some(submission),
-        )?;
+        let mut slices = vec![
+            moments_from.slice(..output_bytes),
+            tallies_from.slice(..tally_bytes),
+            self.counts_read.slice(..count_bytes),
+        ];
+        if let Some(timer) = &timer {
+            slices.push(timer.readback.slice(..));
+        }
+        gpu.map(&slices, wgpu::MapMode::Read, Some(submission))?;
         trace.mark("wait");
+        if let Some(timer) = &timer {
+            timer.record(&mut trace)?;
+        }
         if FAILED.load(Ordering::Relaxed) {
             return Err("the GPU failed".into());
         }
@@ -2987,9 +3070,13 @@ impl GpuMoments {
         let gpu = self.gpu;
         let mut trace = Trace::new(self.trace);
         let samples = placement.rows * placement.span;
+        let mut normalization_timer = None;
         let held = staged.and_then(|mut staged| {
             (staged.width * staged.height * staged.channels == samples)
-                .then(|| staged.buffer.take().map(|buffer| (buffer, staged.usage)))
+                .then(|| {
+                    normalization_timer = staged.normalization_timer.take();
+                    staged.buffer.take().map(|buffer| (buffer, staged.usage))
+                })
                 .flatten()
         });
         let (source, usage) = match held {
@@ -3001,7 +3088,15 @@ impl GpuMoments {
         // No frame holds `u32::MAX` samples, so a count past it, which
         // admits none, admits none here either.
         let admit_at = u32::try_from(admit_at).unwrap_or(u32::MAX);
-        let counts = self.dispatch(&source, placement, weights, rejection, admit_at);
+        let counts = self.dispatch(
+            &source,
+            placement,
+            weights,
+            rejection,
+            admit_at,
+            &mut trace,
+            normalization_timer.as_ref(),
+        );
         gpu.give(usage, source);
         let [accepted, _, integrated, refused] = counts?;
         trace.mark("admit");
@@ -3013,6 +3108,7 @@ impl GpuMoments {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn dispatch(
         &self,
         frame: &wgpu::Buffer,
@@ -3020,6 +3116,8 @@ impl GpuMoments {
         weights: &[f32],
         rejection: Option<GpuRejection>,
         admit_at: u32,
+        trace: &mut Trace,
+        normalization_timer: Option<&GpuTimer>,
     ) -> Result<[u32; 4], String> {
         let gpu = self.gpu;
         let mut frame_weights = [1.0_f32; 4];
@@ -3071,10 +3169,14 @@ impl GpuMoments {
             }),
         });
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        let timer = GpuTimer::new(gpu, self.trace);
         {
             // Each dispatch sees the last one's writes: `integrate` reads the
             // count `classify` left.
-            let mut pass = encoder.begin_compute_pass(&Default::default());
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("admission"),
+                timestamp_writes: timer.as_ref().map(GpuTimer::writes),
+            });
             pass.set_bind_group(0, &bind_group, &[]);
             let groups = (
                 (placement.span as u32).div_ceil(64),
@@ -3085,13 +3187,23 @@ impl GpuMoments {
                 pass.dispatch_workgroups(groups.0, groups.1, 1);
             }
         }
+        if let Some(timer) = &timer {
+            timer.resolve(&mut encoder);
+        }
         encoder.copy_buffer_to_buffer(&self.counters, 0, &self.counters_read, 0, 16);
         let submission = gpu.queue.submit([encoder.finish()]);
-        gpu.map(
-            &[self.counters_read.slice(..)],
-            wgpu::MapMode::Read,
-            Some(submission),
-        )?;
+        let mut slices = vec![self.counters_read.slice(..)];
+        for timer in [timer.as_ref(), normalization_timer].into_iter().flatten() {
+            slices.push(timer.readback.slice(..));
+        }
+        gpu.map(&slices, wgpu::MapMode::Read, Some(submission))?;
+        if let Some(timer) = &timer {
+            timer.record(trace)?;
+        }
+        if let Some(timer) = normalization_timer {
+            let ms = timer.elapsed_ms()?;
+            eprintln!("seiza-stacking gpu: normalize: device compute {ms:.3} ms");
+        }
         if FAILED.load(Ordering::Relaxed) {
             return Err("the GPU failed".into());
         }

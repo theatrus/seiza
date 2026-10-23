@@ -312,3 +312,152 @@ the build of all stacking targets without the GPU feature, workspace and
 Python formatting, binding parity and `git diff --check` pass. The release
 CLI and C ABI DLL build; the DLL's native smoke test accepts three full-size
 FITS frames. Building it leaves the generated header unchanged.
+
+## Profiling frame preparation and reusing uploads
+
+Further profiling starts from `a245500`, after the buffered-band and
+sparse-clipping changes. With tracing enabled, the pipeline now reports
+read/decode time, raw clipping and calibration, and the accepted frame's
+registration, resampling, coverage/photometry, normalization fit, cache
+write, normalization application and weighting/finish. Spans print with
+three decimal places in milliseconds. These remain overlapping
+host elapsed times, including queue waits and Rayon scheduling; they are
+not device timestamps or additive CPU times.
+
+In the first instrumented 12-worker/six-call run, the median accepted
+frame spends 279 ms registering (including detection), 237 ms resampling,
+167 ms writing its cache and 70 ms weighting/finishing. In comparison,
+coverage/photometry and normalization fitting take 4.7 and 8.9 ms. This
+points toward transfers and cache traffic before a rewrite of the fit.
+
+Discrete-GPU frame uploads now use reusable mapped staging buffers from
+the existing 1 GiB pool, submitting their copies immediately. The previous
+path used `queue.write_buffer` for each full frame. Buffer mappings wait
+for any earlier use before a staging buffer is filled again. Shared-memory
+adapters retain their direct mapped uploads. The change neither raises
+the pool limit nor adds public options.
+
+Three alternating before/after pairs used all 200 frames, 16 Rayon
+threads, 12 preparation workers, six GPU calls and a 16 GiB pipeline
+budget. Tracing was disabled, and no build, test or other benchmark ran
+alongside them. The baseline and modified executables were saved separately.
+
+| Median of three untraced runs | `a245500` | Reusable frame uploads |
+|---|---:|---:|
+| Whole stack | 31.84 s | 28.82 s |
+| Reference to final estimation | 19.84 s | 18.49 s |
+| Process CPU time | 255.3 CPU-s | 265.0 CPU-s |
+| Peak host working set | 11.05 GiB | 10.73 GiB |
+| Peak total VRAM, including desktop | 12.43 GiB | 12.15 GiB |
+| Mean sampled GPU utilization | 17.8% | 16.0% |
+
+Baseline runs took 31.84, 32.41 and 30.23 seconds; modified runs took
+30.47, 28.52 and 28.82 seconds. This is **9.5% less median elapsed time**
+with **3.8% more median process CPU time**. The GPU busy percentage again
+does not rise with throughput. Individual phase medians need not sum to
+the median whole-stack time.
+
+A trial mapping each immutable scratch file once instead of reopening
+and reading its bands was removed. The complete stack took 34.20 seconds,
+with final integration alone taking 12.69 seconds and a reported 47.47 GiB
+working set, compared with roughly 7–9 seconds integrating through the
+bounded reader. Mapping moved file-backed pages into the process's working
+set; it did not make this Windows workload faster. Its pixels still matched.
+
+The ignored `target/gpu-tuning/` directory contains the paired runs,
+`profile-paired-summary.jsonl`, the stage summaries and the saved executables.
+`profile-stages.py` aggregates host spans, and `profile-pairs.py` aggregates
+whole-run timings and telemetry. The normal CLI invocation above reproduces
+the configuration; omit `--gpu-trace` when timing it.
+
+Reducing GPU concurrency to three, keeping 12 workers and 16 Rayon threads,
+took 27.05, 28.94 and 28.00 seconds before the startup change below. A single
+32-thread/six-call trial took 27.49 seconds but 373.9 CPU-s. More CPU threads
+and more GPU calls did not consistently improve the balance.
+
+### Device time and initial residency
+
+Tracing now also reports compute-pass timestamp queries, when supported,
+separately from the host spans. Timestamp readbacks share the existing
+output wait. Normalization stays asynchronous: its timestamps travel with
+the resident frame and are read at admission. The old host label `kernel`
+is replaced by queue/readback labels so it cannot be mistaken for device
+compute time. An adapter without timestamp support retains host profiling.
+
+The following traced Vulkan run uses the original 16-by-16 resampling
+workgroups, 16 Rayon threads, 12 preparation workers and three GPU calls:
+
+| Device compute stage | Calls | Median per call | Sum of intervals |
+|---|---:|---:|---:|
+| Defect screen | 16 | 0.475 ms | 7.6 ms |
+| Star detection, five dispatches | 200 | 1.957 ms | 398.3 ms |
+| Resampling | 198 | 1.068 ms | 220.9 ms |
+| Normalization | 191 | 0.353 ms | 74.5 ms |
+| Admission and live integration | 191 | 2.433 ms | 500.1 ms |
+| Final band integration | 88 | 2.118 ms | 186.8 ms |
+
+These measured compute intervals sum to 1.39 seconds in a 27.65-second
+run. They omit transfers, clears and mask scatter, and are not an occupancy
+measurement or an additive breakdown of elapsed time. The host packing of
+a 512 MiB band alone has a median near 27 ms. The frame dispatch has about
+239,600 workgroups and each full band 2,731: there is ample pixel-level
+parallelism, while the queue is fed intermittently. A band's frame reduction
+retains frame order; changing it for more parallelism would change its
+floating-point arithmetic.
+
+A 32-by-8 resampling-workgroup trial measured 1.037 ms per call and
+209.2 ms in total, against 1.068 ms and 216.2 ms in the first device-timed
+16-by-16 run. The roughly 7 ms difference over 200 frames does not establish
+an end-to-end gain or an optimum for other GPUs. The existing shape remains.
+
+The timestamp counts exposed a startup transfer: only 179 of 191 incoming
+accepted frames normalized on the GPU, matching the 12 preparation workers
+that began before the lazy GPU accumulator existed. Offering the accumulator
+before preparation keeps all 191 there, avoiding another 12 full-frame
+uploads, about 2.94 GB. Its first untraced run took 26.04 seconds, with
+identical final pixels. Offering it after workers started was also tested
+and removed: two runs took 30.63 seconds traced and 30.00 untraced.
+
+The new `a_pipelined_stack_large_enough_for_the_gpu_keeps_its_output` case
+uses the existing large mono summaries, recorded with lazy startup before
+the change. Corrupting only the GPU's initial mean makes its live summary
+fail; that mutation was undone. Both this case and the original large mono
+case run with CPU, GPU and traced GPU options and cover repeated bands and
+a short tail. Existing summaries and output versions are unchanged.
+Local-background pipeline startup has its own new live and reintegrated
+summaries, first recorded with lazy startup and verified on CPU, GPU and
+traced GPU. A planted initial-mean corruption fails that case too.
+
+### Combined branch after the shared-memory band update
+
+Upstream `2ac5d30` was incorporated after this work was validated. It raises
+shared-memory GPUs' band cap to the same 512 MiB already used on this
+NVIDIA adapter; its Metal and Iris Xe measurements are in the design notes.
+Three final untraced runs on the combined code, using 16 Rayon threads,
+12 preparation workers, three GPU calls and a 16 GiB pipeline budget, took
+**28.07, 28.47 and 28.01 seconds**. The median is **28.07 seconds / 264.75
+CPU-s**, against the earlier 31.84-second / 255.27 CPU-s baseline with six
+GPU calls: **11.9% less elapsed time and 3.7% more process CPU time**, with
+the lower concurrency included. Median peaks are 9.24 GiB host working set
+and 11.04 GiB total VRAM. The 26.04-second prototype result above is a
+single faster run, not the final median.
+
+All three final outputs are bit-identical across all 61,171,488 pixels.
+Every frame's admission decision is unchanged (192 accepted, eight rejected),
+as is the reintegration's 60,666,768 rejected samples. The ignored
+`profile-merged-final-summary.jsonl` and pixel comparisons record this check.
+
+```powershell
+$env:RAYON_NUM_THREADS = '16'
+& .\target\release\seiza.exe stack @lights --reference first --reintegrate `
+    --workers 12 --gpu-concurrency 3 --pipeline-memory-mib 16384 `
+    --output '<GPU output.fits>' --scratch-directory '<local scratch>' `
+    --report '<GPU report.json>'
+```
+
+The final checks include 468 passing stacking unit tests (five existing
+ignores), 36 stacking and three stretch output cases, and all four large
+GPU output cases on DX12/DXC, including traced global and local-background
+pipeline startup. Stacking Clippy, the CPU-only build, workspace and Python
+formatting, binding parity, release CLI/C ABI builds and the three-frame
+native C ABI smoke test pass. The generated C header stays unchanged.

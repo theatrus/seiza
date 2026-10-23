@@ -568,6 +568,8 @@ impl LiveStacker {
             ..PoolPipelineReport::default()
         };
 
+        let (_, elapsed) = timed(|| integration.prepare_accumulator());
+        report.timings.integration += elapsed;
         std::thread::scope(|scope| {
             let mut handles = Vec::with_capacity(workers);
             for (worker, sender) in senders.into_iter().enumerate() {
@@ -694,6 +696,8 @@ impl LiveStacker {
             .in_flight_bytes(workers),
             ..PoolPipelineReport::default()
         };
+        let (_, elapsed) = timed(|| integration.prepare_accumulator());
+        report.timings.integration += elapsed;
         crate::tasks::ahead(|ahead| {
             std::thread::scope(|scope| {
                 let mut in_flight = std::collections::VecDeque::new();
@@ -775,6 +779,8 @@ impl LiveStacker {
             ..PoolPipelineReport::default()
         };
         let (preparation, mut integration) = self.split_for_pipeline();
+        let (_, elapsed) = timed(|| integration.prepare_accumulator());
+        report.timings.integration += elapsed;
         for (index, path) in paths.iter().enumerate() {
             let outcome = match &plan[index] {
                 Planned::Duplicate => Err(duplicate_error(path)),
@@ -867,6 +873,13 @@ fn prepare_worker(
             Planned::Duplicate => Err(duplicate_error(&paths[index])),
             Planned::Prepare(_) => {
                 let (frame, elapsed) = timed(|| read(&paths[index]));
+                #[cfg(feature = "gpu")]
+                if preparation.options.gpu.trace {
+                    eprintln!(
+                        "seiza-stacking gpu: read frame {index}: {:.1} ms",
+                        elapsed.as_secs_f64() * 1000.0
+                    );
+                }
                 timings.read_decode += elapsed;
                 frame.and_then(|frame| {
                     let (prepared, elapsed) = compute
@@ -892,12 +905,16 @@ fn prepare_decoded(
     half: &crate::stack::PreparationHalf<'_>,
     normalized_full_scale: Option<f32>,
 ) -> Result<PreparedFrame> {
+    #[cfg(feature = "gpu")]
+    let mut trace = crate::gpu::Trace::new(half.options.gpu.trace);
     if let Some(full_scale) = normalized_full_scale {
         frame.rescale_declared_unit_bounds(full_scale);
     }
     // Recorded after the rescale, which a replay repeats.
     let source = crate::replay::FrameSource::of(&frame);
     let clipped = crate::saturation::raw_clip_mask(&frame);
+    #[cfg(feature = "gpu")]
+    trace.mark("raw clipping");
     let (frame, cfa) = match crate::stack::prepare_light(
         frame,
         half.calibration,
@@ -907,7 +924,9 @@ fn prepare_decoded(
         Ok(prepared) => prepared,
         Err(failure) => return Ok(PreparedFrame::Rejected(failure.rejection())),
     };
-    Ok(prepare_frame(
+    #[cfg(feature = "gpu")]
+    trace.mark("calibration");
+    let prepared = prepare_frame(
         half.reference,
         crate::stack::FrameRegistration {
             registrar: half.registrar,
@@ -925,7 +944,13 @@ fn prepare_decoded(
         half.frame_cache.filter(|_| source.is_some()),
         crate::stack::developed_clip_mask(clipped, cfa, half.options),
     )?
-    .with_source(source))
+    .with_source(source);
+    #[cfg(feature = "gpu")]
+    {
+        trace.mark("register and normalize");
+        trace.print("prepare decoded");
+    }
+    Ok(prepared)
 }
 
 #[cfg(test)]
