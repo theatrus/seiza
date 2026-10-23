@@ -1,5 +1,10 @@
 name: CI
 
+# Linux and Windows jobs run on ephemeral 32-core spot runners (tfinfra
+# roots/github-runners, docs/github-runners-plan.md). macOS, and every pull
+# request from a fork, stay on GitHub's runners: a fork's code never runs on
+# ours. Job names are unchanged, so the required checks still match.
+
 on:
   push:
     branches: [main]
@@ -15,12 +20,23 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    name: test (${{ matrix.os }})
+    runs-on: ${{ (github.event.pull_request.head.repo.fork || matrix.os == 'macos-latest') && matrix.os || fromJSON(matrix.os == 'windows-latest' && '["self-hosted","windows","ghr-windows-x64"]' || '["self-hosted","linux","ghr-linux-x64"]') }}
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2.9.2
-      - run: cargo test --workspace --all-features
+        # Our runners compile through sccache in S3 instead; GitHub's cache would
+        # only duplicate it, and saving it to GitHub is slow from AWS.
+        if: ${{ !startsWith(runner.name, 'ghr-') }}
+      - uses: taiki-e/install-action@v2.87.30
+        with:
+          tool: cargo-nextest
+      # nextest runs the tests of every binary in parallel, where cargo test runs
+      # one binary at a time; on 32 cores that halves the test step. It does not
+      # run doctests, hence the second step.
+      - run: cargo nextest run --workspace --all-features
+      - run: cargo test --doc --workspace --all-features
       - run: cargo build --workspace --release --all-features
       - uses: actions/setup-python@v7
         with:
@@ -69,7 +85,7 @@ jobs:
           path: dist/*.msi
 
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","ghr-linux-x64"]') }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -82,6 +98,9 @@ jobs:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2.9.2
+        # Our runners compile through sccache in S3 instead; GitHub's cache would
+        # only duplicate it, and saving it to GitHub is slow from AWS.
+        if: ${{ !startsWith(runner.name, 'ghr-') }}
       - name: Test release dependency-chain guard
         run: python3 .github/scripts/test_check_release_version_chain.py
       - name: Test the binding parity check
@@ -112,11 +131,14 @@ jobs:
   # (`rust-version` in [workspace.package]). Keep this toolchain in sync
   # with that field.
   msrv:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","ghr-linux-x64"]') }}
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@1.89.0
       - uses: Swatinem/rust-cache@v2.9.2
+        # Our runners compile through sccache in S3 instead; GitHub's cache would
+        # only duplicate it, and saving it to GitHub is slow from AWS.
+        if: ${{ !startsWith(runner.name, 'ghr-') }}
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -125,11 +147,14 @@ jobs:
 
   integration:
     if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","ghr-linux-x64"]') }}
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2.9.2
+        # Our runners compile through sccache in S3 instead; GitHub's cache would
+        # only duplicate it, and saving it to GitHub is slow from AWS.
+        if: ${{ !startsWith(runner.name, 'ghr-') }}
       - run: cargo test -p seiza-cli --release --test hosted_integration -- --ignored
       - uses: actions/setup-python@v7
         with:
