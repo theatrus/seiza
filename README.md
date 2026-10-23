@@ -375,8 +375,9 @@ Stacking runs its heavy passes on the GPU when one is present, through
 [wgpu](https://wgpu.rs): Metal on macOS, Vulkan on Linux, and Direct3D 12 or
 Vulkan on Windows, chosen at run time. It is `seiza-stacking`'s default `gpu`
 feature, so the CLI, the Python wheel and the C ABI all have it. It has been
-validated on an Apple M4 Max, on Intel Iris Xe (the lowest supported GPU, which
-shares its memory with the CPU), and on an NVIDIA RTX 5090 under Windows.
+validated on an Apple M4 Max; on Intel Iris Xe, the lowest supported GPU,
+which shares its memory with the CPU, under Linux and Windows; and on an Intel
+Arc A770M and an NVIDIA RTX 5090 under Windows.
 
 | Pass | What the GPU does | How close it stays to the CPU |
 |---|---|---|
@@ -405,7 +406,9 @@ time:
 |---|---|---:|---:|
 | Pleiades mono, 200 × 61 MP | M4 Max (Metal) | 71.5–73.4 s, 1104–1136 CPU-s | 12.1 s, 111 CPU-s |
 | Pleiades mono, 200 × 61 MP | i5-1340P, Iris Xe (Vulkan, Linux) | 273–276 s, 3944–3962 CPU-s | 90.2–90.5 s, 616–620 CPU-s |
-| Pleiades mono, 200 × 61 MP | Threadripper PRO 9975WX, RTX 5090 (Vulkan, Windows), 16 threads | 103 s, 1571 CPU-s | 28.1 s, 265 CPU-s |
+| Pleiades mono, 200 × 61 MP | Threadripper PRO 9975WX, RTX 5090 (Vulkan, Windows), 16 threads | 103 s, 1571 CPU-s | 27.1 s, 208 CPU-s |
+| Bode's Galaxy L, 12 × 26 MP mono | i7-12700H, Iris Xe (Vulkan, Windows) | 8.09 s, 111 CPU-s | 4.79 s, 16 CPU-s |
+| Bode's Galaxy L, 12 × 26 MP mono | i7-12700H, Arc A770M (Vulkan, Windows) | 8.09 s, 111 CPU-s | 3.83 s, 14 CPU-s |
 | M45 colour, 40 × 26 MP | M4 Max (Metal) | 17–18 s | 5.1–5.3 s, 30–31 CPU-s |
 | M45 colour, 40 × 26 MP | i5-1340P, Iris Xe (Vulkan, Linux) | 62 s, 811 CPU-s | 38.8–38.9 s, 158 CPU-s |
 
