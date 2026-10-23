@@ -17,8 +17,8 @@ solve 0.05–0.2 seconds, start to finish. In side-by-side benchmarks seiza
 matched or beat ASTAP on every workload we tested, up to 19x faster on blind
 solves, and matched or beat Asterion on blind solves of telescope frames. The
 numbers and caveats are in [Performance](#performance). Stacking 200
-61-megapixel frames with reintegration takes 12 seconds on an M4 Max's GPU,
-against 72 on its CPU alone; see [GPU acceleration](#gpu-acceleration).
+61-megapixel frames with reintegration takes 12.5 seconds on an M4 Max's GPU,
+against 70 on its CPU alone; see [GPU acceleration](#gpu-acceleration).
 
 **Try it without installing anything:** go to [seiza.fyi](https://seiza.fyi),
 upload an image, and get a solution and object overlay in your browser. The
@@ -404,7 +404,7 @@ time:
 
 | Data | Machine | CPU only | With the GPU |
 |---|---|---:|---:|
-| Pleiades mono, 200 × 61 MP | M4 Max (Metal) | 71.5–73.4 s, 1104–1136 CPU-s | 12.1 s, 111 CPU-s |
+| Pleiades mono, 200 × 61 MP | M4 Max (Metal) | 68.9–71.0 s, 1057–1097 CPU-s | 12.4–12.5 s, 111–112 CPU-s |
 | Pleiades mono, 200 × 61 MP | i5-1340P, Iris Xe (Vulkan, Linux) | 273–276 s, 3944–3962 CPU-s | 90.2–90.5 s, 616–620 CPU-s |
 | Pleiades mono, 200 × 61 MP | Threadripper PRO 9975WX, RTX 5090 (Vulkan, Windows), 16 threads | 103 s, 1571 CPU-s | 27.1 s, 208 CPU-s |
 | Bode's Galaxy L, 12 × 26 MP mono | i7-12700H, Iris Xe (Vulkan, Windows) | 8.09 s, 111 CPU-s | 4.79 s, 16 CPU-s |
@@ -413,7 +413,7 @@ time:
 | M45 colour, 40 × 26 MP | i5-1340P, Iris Xe (Vulkan, Linux) | 62 s, 811 CPU-s | 38.8–38.9 s, 158 CPU-s |
 
 The GPU frees most of the CPU too: the M4 Max's Pleiades stack takes a tenth of
-the CPU time, and less memory, 6.8–7.1 GiB at its peak against 9.8–9.9 GiB;
+the CPU time, and less memory, 6.8–7.0 GiB at its peak against 9.6–9.8 GiB;
 the i5-1340P's, 3.5–3.6 GiB against 8.9–9.2 GiB. On the Iris Xe the stack is bound by the memory the CPU and GPU
 share. On the Threadripper, the CPU-only stack on all 64 threads takes 55–57 s,
 and the GPU run used 12 preparation workers and a 16 GiB pipeline budget; the
