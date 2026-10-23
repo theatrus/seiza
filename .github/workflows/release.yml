@@ -1,5 +1,9 @@
 name: Release packages
 
+# Every job builds on ephemeral 32-core runners (tfinfra roots/github-runners,
+# docs/github-runners-plan.md). Only a tag push or a dispatch by someone with
+# write access starts this workflow, so no fork's code reaches them.
+
 on:
   push:
     tags: ["v*"]
@@ -8,13 +12,21 @@ on:
 permissions:
   contents: write
 
+# No sccache, though our runners turn it on. Every branch job in this
+# repository can write to that S3 cache, so a branch that never merged could
+# plant objects there for a release to link into signed binaries. A release
+# compiles from source alone; on 32 cores that is minutes.
+env:
+  RUSTC_WRAPPER: ""
+
 jobs:
   deb:
-    runs-on: ubuntu-latest
+    # Our runners are Ubuntu 22.04, a release older than ubuntu-latest. A
+    # package built against the older glibc installs on both.
+    runs-on: [self-hosted, linux, ghr-linux-x64]
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@1.99.1
-      - uses: Swatinem/rust-cache@v2.9.2
       - run: cargo install cargo-deb --locked
       - run: cargo deb -p seiza-cli
       - name: Rename with distro suffix
@@ -36,14 +48,13 @@ jobs:
     strategy:
       matrix:
         fedora: [43, 44]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, ghr-linux-x64]
     container: fedora:${{ matrix.fedora }}
     steps:
       - name: Install build dependencies
         run: dnf install -y curl gcc rpm-build git
       - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@1.99.1
-      - uses: Swatinem/rust-cache@v2.9.2
       - run: cargo install cargo-generate-rpm --locked
       - run: cargo build --release -p seiza-cli
       - run: ~/.cargo/bin/cargo-generate-rpm -p seiza-cli --payload-compress zstd
@@ -64,7 +75,7 @@ jobs:
           path: dist/*.rpm
 
   windows:
-    runs-on: windows-latest
+    runs-on: [self-hosted, windows, ghr-windows-x64]
     # The Entra federated credential is bound to the subject
     # `repo:theatrus/seiza:environment:release`, so this job has to run in the
     # `release` environment or the OIDC token will not match and azure/login
@@ -81,7 +92,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@1.99.1
-      - uses: Swatinem/rust-cache@v2.9.2
       - run: cargo build --release -p seiza-cli
       - name: Verify Windows CRT is statically linked
         shell: pwsh

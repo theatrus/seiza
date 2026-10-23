@@ -22,11 +22,16 @@ permissions:
 jobs:
   smoke:
     name: Azure Artifact Signing smoke test
-    runs-on: windows-latest
+    # Our Windows runner, where release.yml signs.
+    runs-on: [self-hosted, windows, ghr-windows-x64]
     # Load-bearing: must match the Entra federated credential subject
     # `repo:theatrus/seiza:environment:release`. Remove this and OIDC
     # fails with an unhelpful audience/subject error.
     environment: release
+    # No sccache: what this builds is signed as us, so it must not come from a
+    # cache any branch job can write. See release.yml.
+    env:
+      RUSTC_WRAPPER: ""
     steps:
       - name: Show what we are about to use
         shell: bash
