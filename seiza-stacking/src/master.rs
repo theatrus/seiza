@@ -817,51 +817,61 @@ fn report_progress(
 }
 
 /// Frames handed to a build pass in path order by [`with_read_ahead`].
-struct ReadAhead {
-    frames: std::sync::mpsc::Receiver<Result<FitsFrame>>,
+struct ReadAhead<'a> {
+    next: &'a dyn Fn() -> Result<FitsFrame>,
 }
 
-impl ReadAhead {
+impl ReadAhead<'_> {
     /// The next path's frame, or why it could not be read. A pass takes
     /// at most one per path, in order.
     fn next(&self) -> Result<FitsFrame> {
-        self.frames
-            .recv()
-            .expect("the frame reader stops only after the last path")
+        (self.next)()
     }
 }
 
-/// Run a pass over `paths` while a helper thread reads each next frame.
+/// Run a pass over `paths` while each next frame is read.
 ///
-/// Decoding a frame runs on one thread, so it can overlap the parallel work
-/// a pass does with the frame before: the helper reads one frame ahead and
-/// waits with it until the pass takes it, so at most two frames are held at
-/// once. Only reading moves to the helper. Cancellation checks, progress
+/// Reading a frame overlaps the parallel work a pass does with the frame
+/// before: the next frame is read once the pass takes one, so at most two
+/// frames are held at once. From a thread in no pool a helper thread reads
+/// it; from a pool thread it is a task in that pool, so the Rayon work of
+/// its decode stays there, while a helper reads its file through (see
+/// [`crate::tasks`]). Only reading moves. Cancellation checks, progress
 /// reports, validation and calibration stay on the calling thread, so a
 /// host's callbacks never run on another thread, and frames are combined in
 /// the same order as before, so the master is bit-identical. A pass that
-/// stops early (an error or a cancellation) drops its frames; the helper
-/// then finishes at most the read it is in and stops, and this returns once
-/// it has.
-fn with_read_ahead<P, T>(paths: &[P], pass: impl FnOnce(&ReadAhead) -> T) -> T
+/// stops early (an error or a cancellation) drops its frames; a read not yet
+/// begun never starts, and this returns once one already begun has finished.
+fn with_read_ahead<P, T>(paths: &[P], pass: impl FnOnce(&ReadAhead<'_>) -> T) -> T
 where
     P: AsRef<Path> + Sync,
 {
-    // A rendezvous channel: the helper blocks with its frame until the pass
-    // asks for it.
-    let (sender, frames) = std::sync::mpsc::sync_channel(0);
-    std::thread::scope(|scope| {
-        scope.spawn(move || {
-            for path in paths {
-                if sender.send(FitsFrame::open(path.as_ref())).is_err() {
-                    // The pass stopped taking frames.
-                    return;
+    crate::tasks::ahead(|ahead| {
+        std::thread::scope(|scope| {
+            let read = |index: usize| {
+                let path = paths[index].as_ref();
+                ahead.spawn(
+                    scope,
+                    || vec![path.to_path_buf()],
+                    move || FitsFrame::open(path),
+                )
+            };
+            let reading = std::cell::RefCell::new(paths.first().map(|_| read(0)));
+            let taken = std::cell::Cell::new(0);
+            let next = || {
+                let started = reading
+                    .borrow_mut()
+                    .take()
+                    .expect("a pass takes at most one frame per path");
+                let frame = ahead.join(started);
+                taken.set(taken.get() + 1);
+                if taken.get() < paths.len() {
+                    *reading.borrow_mut() = Some(read(taken.get()));
                 }
-            }
-        });
-        // `frames` is dropped when the pass returns, before the scope waits
-        // for the helper, so a helper blocked on a frame sees it and stops.
-        pass(&ReadAhead { frames })
+                frame
+            };
+            pass(&ReadAhead { next: &next })
+        })
     })
 }
 

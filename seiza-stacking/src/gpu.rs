@@ -102,66 +102,6 @@ struct Gpu {
     /// Frame calls running at once, which [`Gpu::admitted`] holds to each
     /// call's [`GpuOptions::concurrency`].
     calls: (std::sync::Mutex<usize>, std::sync::Condvar),
-    /// The one thread that waits on the device for every mapping.
-    poller: std::sync::Arc<Poller>,
-}
-
-/// Mappings waiting for the GPU, and the thread that waits for it on their
-/// behalf. Each preparation worker waiting in the device itself for its own
-/// submission held the others behind it: on the M4 Max the 200-frame 61 MP
-/// Pleiades live pass took 10.6 s that way, against 10.0 s with every
-/// worker only polling. One thread waits here instead, while the workers
-/// wait for their mappings' callbacks, which run in its polls.
-struct Poller {
-    pending: std::sync::Mutex<usize>,
-    work: std::sync::Condvar,
-}
-
-impl Poller {
-    fn run(&self, device: &wgpu::Device) {
-        loop {
-            {
-                let mut pending = self
-                    .pending
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner());
-                while *pending == 0 {
-                    pending = self
-                        .work
-                        .wait(pending)
-                        .unwrap_or_else(|poison| poison.into_inner());
-                }
-            }
-            // A short wait for the latest submission, then every mapping
-            // that work already done lets finish. Waiting the latest out
-            // held each band's results until the next band, submitted
-            // behind it, was done too: the Iris Xe's final integration took
-            // 28 s rather than 16.
-            let waited = device.poll(wgpu::PollType::Wait {
-                submission_index: None,
-                timeout: Some(std::time::Duration::from_micros(250)),
-            });
-            if waited.is_err() {
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
-        }
-    }
-
-    fn add(&self, mappings: usize) {
-        *self
-            .pending
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) += mappings;
-        self.work.notify_one();
-    }
-
-    fn done(&self) {
-        let mut pending = self
-            .pending
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        *pending = pending.saturating_sub(1);
-    }
 }
 
 /// A frame call's place among those [`Gpu::admitted`] lets run at once,
@@ -313,7 +253,7 @@ pub(crate) fn resident_samples(data: &[f32]) -> Option<Vec<f32>> {
     })?;
     let bytes = (data.len() * 4) as u64;
     let read_from = if usage.contains(wgpu::BufferUsages::MAP_READ) {
-        gpu.map(&[buffer.slice(..bytes)], wgpu::MapMode::Read)
+        gpu.map(&[buffer.slice(..bytes)], wgpu::MapMode::Read, None)
             .ok()?;
         buffer
     } else if usage.contains(wgpu::BufferUsages::COPY_SRC) {
@@ -324,8 +264,9 @@ pub(crate) fn resident_samples(data: &[f32]) -> Option<Vec<f32>> {
         );
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         encoder.copy_buffer_to_buffer(&buffer, 0, &readback, 0, bytes);
-        gpu.queue.submit([encoder.finish()]);
-        gpu.map(&[readback.slice(..)], wgpu::MapMode::Read).ok()?;
+        let submission = gpu.queue.submit([encoder.finish()]);
+        gpu.map(&[readback.slice(..)], wgpu::MapMode::Read, Some(submission))
+            .ok()?;
         readback
     } else {
         return None;
@@ -526,9 +467,9 @@ impl GpuFrame {
         let gpu = opened()?;
         let buffer = self.buffer.as_ref()?;
         let bytes = (self.width * self.height * self.channels * 4) as u64;
-        // Mapping waits for the GPU's writes to the buffer, and no others.
         let read_from = if self.usage.contains(wgpu::BufferUsages::MAP_READ) {
-            gpu.map(&[buffer.slice(..bytes)], wgpu::MapMode::Read)
+            gpu.wait().ok()?;
+            gpu.map(&[buffer.slice(..bytes)], wgpu::MapMode::Read, None)
                 .ok()?;
             buffer.clone()
         } else {
@@ -539,8 +480,9 @@ impl GpuFrame {
             );
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
             encoder.copy_buffer_to_buffer(buffer, 0, &readback, 0, bytes);
-            gpu.queue.submit([encoder.finish()]);
-            gpu.map(&[readback.slice(..)], wgpu::MapMode::Read).ok()?;
+            let submission = gpu.queue.submit([encoder.finish()]);
+            gpu.map(&[readback.slice(..)], wgpu::MapMode::Read, Some(submission))
+                .ok()?;
             readback
         };
         let samples = copy_out(&read_from.slice(..bytes).get_mapped_range().ok()?, false);
@@ -1219,17 +1161,6 @@ impl Gpu {
                 usage: wgpu::BufferUsages::STORAGE,
             },
         );
-        let poller = std::sync::Arc::new(Poller {
-            pending: std::sync::Mutex::new(0),
-            work: std::sync::Condvar::new(),
-        });
-        {
-            let (device, poller) = (device.clone(), poller.clone());
-            std::thread::Builder::new()
-                .name("seiza-gpu-poll".into())
-                .spawn(move || poller.run(&device))
-                .map_err(|error| format!("no thread to wait on the GPU ({error})"))?;
-        }
         Ok(Self {
             device,
             queue,
@@ -1263,7 +1194,6 @@ impl Gpu {
                 .min(limits.max_storage_buffer_binding_size),
             pool: std::sync::Mutex::new(Vec::new()),
             calls: (std::sync::Mutex::new(0), std::sync::Condvar::new()),
-            poller,
         })
     }
 
@@ -1327,7 +1257,7 @@ impl Gpu {
         let bytes = std::mem::size_of_val(data) as u64;
         let buffer = self.take(label, bytes, self.input_usage());
         if self.mapped {
-            self.map(&[buffer.slice(..bytes)], wgpu::MapMode::Write)?;
+            self.map(&[buffer.slice(..bytes)], wgpu::MapMode::Write, None)?;
             // One core writes: copying on every core, the call waited for
             // its parts behind other frames' work in the pool, and on the
             // M45 stack took 0.5 s longer and, on an Iris Xe, 40 CPU-s more.
@@ -1343,7 +1273,7 @@ impl Gpu {
             // leaving it to the next compute submission to flush.
             let usage = wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC;
             let upload = self.take("frame-upload", bytes, usage);
-            self.map(&[upload.slice(..bytes)], wgpu::MapMode::Write)?;
+            self.map(&[upload.slice(..bytes)], wgpu::MapMode::Write, None)?;
             let copied = upload
                 .slice(..bytes)
                 .get_mapped_range_mut()
@@ -1601,7 +1531,7 @@ impl Gpu {
             }
         }
         trace.mark("upload");
-        self.queue.submit([encoder.finish()]);
+        let submission = self.queue.submit([encoder.finish()]);
         let read_from = readbacks.as_deref().unwrap_or(&output_buffers[skip..]);
         let read_bytes = &bytes[skip..];
         let mut slices: Vec<wgpu::BufferSlice<'_>> = read_from
@@ -1615,7 +1545,7 @@ impl Gpu {
         let mapped = if slices.is_empty() {
             Ok(())
         } else {
-            self.map(&slices, wgpu::MapMode::Read)
+            self.map(&slices, wgpu::MapMode::Read, Some(submission))
         };
         let result = mapped.and_then(|()| {
             trace.mark("queue and readback");
@@ -1659,22 +1589,51 @@ impl Gpu {
         result.map(|data| (data, kept))
     }
 
-    /// Map `slices`: for reading once the submissions that write them are
-    /// done, or for writing at once when none in flight uses them, as a
-    /// buffer from the pool or a session's between calls. The poller waits
-    /// on the device; this thread waits only for its own callbacks.
-    fn map(&self, slices: &[wgpu::BufferSlice<'_>], mode: wgpu::MapMode) -> Result<(), String> {
+    /// Wait for `submission`, and those before it, to finish, but not for
+    /// work other threads submitted since.
+    fn wait_for(&self, submission: wgpu::SubmissionIndex) -> Result<(), String> {
+        self.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: None,
+            })
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    /// Map `slices` for reading once `submission`, which last uses them, is
+    /// done, or for writing at once when no submission in flight uses them,
+    /// as a buffer from the pool or a session's between calls. Waiting for
+    /// the queue to empty instead held every thread behind every other's
+    /// kernels.
+    fn map(
+        &self,
+        slices: &[wgpu::BufferSlice<'_>],
+        mode: wgpu::MapMode,
+        submission: Option<wgpu::SubmissionIndex>,
+    ) -> Result<(), String> {
         let (sender, receiver) = std::sync::mpsc::channel();
-        self.poller.add(slices.len());
         for slice in slices {
-            let (sender, poller) = (sender.clone(), self.poller.clone());
+            let sender = sender.clone();
             slice.map_async(mode, move |result| {
-                poller.done();
                 let _ = sender.send(result);
             });
         }
         drop(sender);
+        match submission {
+            Some(submission) => self.wait_for(submission)?,
+            None => {
+                self.device
+                    .poll(wgpu::PollType::Poll)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        // Whichever thread polls when a mapping is ready runs its callback,
+        // a moment after any poll returns, so the callbacks are awaited
+        // rather than looked for.
+        let started = std::time::Instant::now();
         let mut pending = slices.len();
+        let mut waited_for_all = false;
         while pending > 0 {
             match receiver.recv_timeout(std::time::Duration::from_millis(10)) {
                 Ok(result) => {
@@ -1687,6 +1646,15 @@ impl Gpu {
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     if FAILED.load(Ordering::Relaxed) {
                         return Err("the GPU failed".into());
+                    }
+                    if !waited_for_all && started.elapsed().as_millis() > 100 {
+                        // Still in use after all: wait for the queue.
+                        waited_for_all = true;
+                        self.wait()?;
+                    } else {
+                        self.device
+                            .poll(wgpu::PollType::Poll)
+                            .map_err(|error| error.to_string())?;
                     }
                 }
             }
@@ -2475,13 +2443,13 @@ impl Gpu {
                 timer.resolve(&mut encoder);
             }
             encoder.copy_buffer_to_buffer(&rows, rows_bytes - 4, &total_read, 0, 4);
-            self.queue.submit([encoder.finish()]);
+            let submission = self.queue.submit([encoder.finish()]);
             drop(frame);
             let mut slices = vec![total_read.slice(..)];
             if let Some(timer) = &timer {
                 slices.push(timer.readback.slice(..));
             }
-            self.map(&slices, wgpu::MapMode::Read)
+            self.map(&slices, wgpu::MapMode::Read, Some(submission))
         });
         let found = result.and_then(|()| {
             trace.mark("queue and count");
@@ -2506,7 +2474,7 @@ impl Gpu {
                 return Ok(Some(Vec::new()));
             }
             let read_from = if self.mapped {
-                self.map(&[positives.slice(..bytes)], wgpu::MapMode::Read)?;
+                self.map(&[positives.slice(..bytes)], wgpu::MapMode::Read, None)?;
                 None
             } else {
                 let readback = self.buffer(
@@ -2516,8 +2484,8 @@ impl Gpu {
                 );
                 let mut encoder = self.device.create_command_encoder(&Default::default());
                 encoder.copy_buffer_to_buffer(&positives, 0, &readback, 0, bytes);
-                self.queue.submit([encoder.finish()]);
-                self.map(&[readback.slice(..)], wgpu::MapMode::Read)?;
+                let submission = self.queue.submit([encoder.finish()]);
+                self.map(&[readback.slice(..)], wgpu::MapMode::Read, Some(submission))?;
                 Some(readback)
             };
             let source = read_from.as_ref().unwrap_or(&positives);
@@ -2881,7 +2849,7 @@ impl BandSession {
         let total = (reaching.len() * bytes) as u64;
         let upload = self.upload.as_ref().unwrap_or(&self.values);
         let range = upload.slice(..total);
-        gpu.map(&[range], wgpu::MapMode::Write)
+        gpu.map(&[range], wgpu::MapMode::Write, None)
             .map_err(BandStageError::Gpu)?;
         trace.mark("map upload");
         let copied = fill(range);
@@ -2969,10 +2937,10 @@ impl BandSession {
         if outputs.mean.len() != samples || counts.len() != self.frame_count {
             return Err("the outputs do not fit the submitted band".into());
         }
-        if submission.is_none() {
+        let Some(submission) = submission else {
             outputs.mean.fill(0.0);
             return Ok(());
-        }
+        };
         let gpu = self.gpu;
         let output_bytes = (samples * 16) as u64;
         let tally_bytes = (samples * 8) as u64;
@@ -2989,7 +2957,7 @@ impl BandSession {
         if let Some(timer) = &timer {
             slices.push(timer.readback.slice(..));
         }
-        gpu.map(&slices, wgpu::MapMode::Read)?;
+        gpu.map(&slices, wgpu::MapMode::Read, Some(submission))?;
         trace.mark("wait");
         if let Some(timer) = &timer {
             timer.record(&mut trace)?;
@@ -3363,12 +3331,12 @@ impl GpuMoments {
             timer.resolve(&mut encoder);
         }
         encoder.copy_buffer_to_buffer(&self.counters, 0, &self.counters_read, 0, 16);
-        gpu.queue.submit([encoder.finish()]);
+        let submission = gpu.queue.submit([encoder.finish()]);
         let mut slices = vec![self.counters_read.slice(..)];
         for timer in [timer.as_ref(), normalization_timer].into_iter().flatten() {
             slices.push(timer.readback.slice(..));
         }
-        gpu.map(&slices, wgpu::MapMode::Read)?;
+        gpu.map(&slices, wgpu::MapMode::Read, Some(submission))?;
         if let Some(timer) = &timer {
             timer.record(trace)?;
         }
@@ -3425,12 +3393,12 @@ impl GpuMoments {
         for (source, staging) in sources.iter().zip(&staging) {
             encoder.copy_buffer_to_buffer(source, 0, staging, 0, bytes);
         }
-        gpu.queue.submit([encoder.finish()]);
+        let submission = gpu.queue.submit([encoder.finish()]);
         let slices: Vec<wgpu::BufferSlice<'_>> = staging
             .iter()
             .map(|staging| staging.slice(..bytes))
             .collect();
-        gpu.map(&slices, wgpu::MapMode::Read)?;
+        gpu.map(&slices, wgpu::MapMode::Read, Some(submission))?;
         if FAILED.load(Ordering::Relaxed) {
             return Err("the GPU failed".into());
         }

@@ -109,13 +109,44 @@ fn write(
     path
 }
 
+/// `image` as a camera writes it: 16-bit unsigned samples, stored signed
+/// with BZERO 32768.
+fn write_camera(directory: &Path, name: String, image: &LinearImage) -> PathBuf {
+    let path = directory.join(name);
+    let cards = [
+        ("SIMPLE", "T".to_string()),
+        ("BITPIX", "16".to_string()),
+        ("NAXIS", "2".to_string()),
+        ("NAXIS1", image.width.to_string()),
+        ("NAXIS2", image.height.to_string()),
+        ("BZERO", "32768".to_string()),
+        ("BSCALE", "1".to_string()),
+    ];
+    let mut bytes = cards
+        .iter()
+        .map(|(keyword, value)| format!("{keyword:<8}= {value:>20}{:50}", ""))
+        .chain([format!("{:<80}", "END")])
+        .collect::<String>()
+        .into_bytes();
+    bytes.resize(bytes.len().next_multiple_of(2880), b' ');
+    for &value in &image.data {
+        let stored = (value.round().clamp(0.0, 65535.0) as i32 - 32768) as i16;
+        bytes.extend(stored.to_be_bytes());
+    }
+    bytes.resize(bytes.len().next_multiple_of(2880), 0);
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+/// Lights and darks are written as a camera writes them, and Bayer frames
+/// and flats as floating point, so both decodes run in the caller's pool.
 fn inputs() -> Inputs {
     let directory = tempfile::tempdir().unwrap();
     let bayer = [("BAYERPAT".to_string(), HeaderValue::String("RGGB".into()))];
     let path = directory.path();
     Inputs {
         lights: (0..FRAMES)
-            .map(|frame| write(path, format!("light-{frame}.fits"), &star_field(frame), &[]))
+            .map(|frame| write_camera(path, format!("light-{frame}.fits"), &star_field(frame)))
             .collect(),
         bayer: (0..FRAMES)
             .map(|frame| {
@@ -129,11 +160,10 @@ fn inputs() -> Inputs {
             .collect(),
         darks: (0..5)
             .map(|index| {
-                write(
+                write_camera(
                     path,
                     format!("dark-{index}.fits"),
                     &calibration_frame(index, false),
-                    &[],
                 )
             })
             .collect(),

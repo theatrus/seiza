@@ -28,7 +28,7 @@
 
 use std::io::Read;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{
     Receiver, RecvTimeoutError, SendError, SyncSender, TryRecvError, TrySendError, sync_channel,
 };
@@ -242,7 +242,7 @@ fn help() -> bool {
 /// Read `files` and drop the bytes, so the task that opens them finds them
 /// in the page cache instead of waiting on storage in the pool. Any error is
 /// left for that task to meet.
-fn read_through(files: &[PathBuf]) {
+pub(crate) fn read_through(files: &[impl AsRef<Path>]) {
     let mut buffer = vec![0_u8; 1 << 20];
     for file in files {
         let Ok(mut file) = std::fs::File::open(file) else {

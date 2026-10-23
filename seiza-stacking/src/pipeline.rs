@@ -283,6 +283,14 @@ impl ComputePool<'_> {
     }
 }
 
+/// A frame for `pool`: its file read through on this thread, so storage is
+/// read off the pool's threads, then decoded in the pool, so the decode's
+/// Rayon work stays in it.
+fn read_for(pool: &rayon::ThreadPool, path: &Path) -> Result<FitsFrame> {
+    crate::tasks::read_through(&[path]);
+    pool.install(|| FitsFrame::open(path))
+}
+
 fn timed<T>(work: impl FnOnce() -> T) -> (T, Duration) {
     let started = Instant::now();
     let result = work();
@@ -384,11 +392,12 @@ impl LiveStacker {
     /// Overlap reads while keeping all image preparation and integration in
     /// the supplied Rayon pool. Call from a non-Rayon coordinator thread.
     ///
-    /// Bounded scoped OS workers read and decode FITS/XISF containers outside
-    /// the pool, then submit calibration, cosmetic correction, CFA conversion,
-    /// registration and normalization to it. The coordinator submits ordered
-    /// integration to the same pool and invokes `on_frame` on its own thread.
-    /// This preserves the sequential result without borrowing the global pool.
+    /// Bounded scoped OS workers read FITS/XISF files through outside the
+    /// pool, then submit decoding, calibration, cosmetic correction, CFA
+    /// conversion, registration and normalization to it. The coordinator
+    /// submits ordered integration to the same pool and invokes `on_frame` on
+    /// its own thread. This preserves the sequential result without borrowing
+    /// the global pool.
     ///
     /// A caller already on any Rayon worker gets a sequential fallback, even
     /// with a one-thread supplied pool. It still uses the supplied pool for
@@ -420,7 +429,7 @@ impl LiveStacker {
             paths,
             options,
             ComputePool(Some(pool)),
-            &|path| FitsFrame::open(path),
+            &|path| read_for(pool, path),
             &prepare_decoded,
             on_frame,
         )
@@ -430,8 +439,9 @@ impl LiveStacker {
     ///
     /// This is a memory-saving alternative to [`Self::push_fits_pipelined_with_pool`].
     /// It creates no reader threads or preparation queue: each read, preparation,
-    /// integration and callback finishes before the next path is read. Reads and
-    /// callbacks stay on the caller; preparation and integration enter `pool`.
+    /// integration and callback finishes before the next path is read. Files
+    /// are read through and callbacks run on the caller; decoding, preparation
+    /// and integration enter `pool`.
     /// Calling from the same or another Rayon pool is supported, including a
     /// one-thread pool. The callback need not be `Send`.
     ///
@@ -471,7 +481,7 @@ impl LiveStacker {
             &plan,
             normalized_full_scale,
             ComputePool(Some(pool)),
-            &|path| FitsFrame::open(path),
+            &|path| read_for(pool, path),
             &prepare_decoded,
             &mut on_frame,
         );
