@@ -384,6 +384,39 @@ stack), copies 1.7, decoding and byte-swapping FITS 1.9, medians 1.5.
 Writing each frame's clip mask as an image had cost 3.1 before it was
 listed.
 
+The fit's tiles. Each tile's samples were read from the reference and the
+frame at a stride, a cache line apiece, so a 61 MP frame's fit touched
+about 490 MB. A stack whose frames the GPU gathers (on a discrete GPU, live
+only) now works out once where each tile's samples lie among a frame's
+gathered values, with the reference's values there in the same order
+(`normalization::GatheredTiles`), and each fit reads those two arrays in
+order: the same residuals in the same order, so the same medians, to the
+bit. Gathering on shared-memory GPUs too, and for stacks kept for
+reintegration, cut CPU time by a sixth on both machines (M4 Max 94-105
+against 111-128 CPU-s; Iris Xe 491-494 against 602-610) but not time: the
+gather, the GPU's count of finite samples and the separate download for
+the scratch file are GPU work, and took the GPU-bound Iris Xe's stack from
+88.7-90.2 s to 92.6-93.3 s. So those still read the whole frame back.
+
+Waiting for the GPU. Each worker waited in `device.poll` for its own
+submission. With every worker polling instead, the M4 Max's live pass
+took 10.0 s against 10.6 s (medians of three) and 2-5 CPU-s more; the Iris
+Xe's was unchanged, for 15-30 CPU-s more. One thread now waits on the
+device for every mapping (`gpu::Poller`), in waits of 250 us, and the
+workers wait only for their own mappings' callbacks. Waiting out the
+latest submission instead held each band's results behind the next band's
+and took the Iris Xe's final integration from 16 s to 28 s. The Iris Xe
+takes 89.7-90.4 s with the poller against 89.3-90.6 s; the M4 Max ran
+amid other builds and its timings could not tell the two apart.
+
+Not done: dropping reintegration's scratch files, by resampling each band
+of every frame from its source again on the GPU. That moves 47 GB of reads
+and 49 GB of writes off the host, but resamples every frame a second time:
+on the Iris Xe, where the GPU is already the limit, likely more than the
+13.5 s its band phase now takes, and on the M4 Max about as much host work
+again in decoding, calibrating and copying. A discrete GPU, where reading
+the scratch back dominates final integration, is where it would pay.
+
 Windows NVIDIA validation is recorded separately in
 [`2026-10-windows-nvidia-stacking.md`](../benchmarks/2026-10-windows-nvidia-stacking.md):
 200 mono 61 MP Pleiades frames on a Threadripper PRO 9975WX and RTX 5090,

@@ -938,6 +938,8 @@ fn prepare_decoded(
                 frame.source.as_ref(),
             )?,
             ceilings: half.reference_ceilings,
+            #[cfg(feature = "gpu")]
+            fit_tiles: half.fit_tiles,
         },
         half.options,
         half.reference_noise,

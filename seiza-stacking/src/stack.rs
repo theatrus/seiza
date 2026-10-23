@@ -733,6 +733,10 @@ pub struct LiveStacker {
     /// frame: on a 26 MP colour reference that pass was 11% of preparing a
     /// frame.
     reference_ceilings: std::sync::OnceLock<Vec<f32>>,
+    /// Where the reference's local background tiles lie among a gathered
+    /// frame's samples, once a frame has been gathered.
+    #[cfg(feature = "gpu")]
+    fit_tiles: std::sync::OnceLock<Option<crate::normalization::GatheredTiles>>,
     accumulator: Accumulator,
     reference_headers: Vec<(String, HeaderValue)>,
     pub(crate) accepted_frames: u32,
@@ -902,6 +906,8 @@ impl LiveStacker {
                     canvas: None,
                     known: None,
                     ceilings: &std::sync::OnceLock::new(),
+                    #[cfg(feature = "gpu")]
+                    fit_tiles: &std::sync::OnceLock::new(),
                 },
                 &geometry_options,
                 &[],
@@ -1260,6 +1266,8 @@ impl LiveStacker {
             reference_noise: self.reference_noise.clone(),
             // Of the full-resolution reference, not this one's.
             reference_ceilings: std::sync::OnceLock::new(),
+            #[cfg(feature = "gpu")]
+            fit_tiles: std::sync::OnceLock::new(),
             accumulator: Accumulator::new(0, !self.options.weighting.is_equal()),
             reference_headers: crate::fits::rebinned_headers(&self.reference_headers, bin, 1),
             accepted_frames: self.accepted_frames,
@@ -1450,6 +1458,8 @@ impl LiveStacker {
             canvas_registrar,
             reference_noise,
             reference_ceilings: std::sync::OnceLock::new(),
+            #[cfg(feature = "gpu")]
+            fit_tiles: std::sync::OnceLock::new(),
             accumulator,
             reference_headers,
             accepted_frames: u32::from(reference_is_integrated),
@@ -1637,6 +1647,8 @@ impl LiveStacker {
             canvas_registrar,
             reference_noise: restored.reference_noise,
             reference_ceilings: std::sync::OnceLock::new(),
+            #[cfg(feature = "gpu")]
+            fit_tiles: std::sync::OnceLock::new(),
             accumulator: Accumulator::from_moments(
                 restored.mean,
                 restored.m2,
@@ -1887,6 +1899,8 @@ impl LiveStacker {
                     frame.source.as_ref(),
                 )?,
                 ceilings: &self.reference_ceilings,
+                #[cfg(feature = "gpu")]
+                fit_tiles: &self.fit_tiles,
             },
             &self.options,
             &self.reference_noise,
@@ -1955,6 +1969,8 @@ impl LiveStacker {
                 canvas: self.canvas_registrar.as_ref(),
                 known: None,
                 ceilings: &self.reference_ceilings,
+                #[cfg(feature = "gpu")]
+                fit_tiles: &self.fit_tiles,
             },
             &self.options,
             &self.reference_noise,
@@ -1990,6 +2006,8 @@ impl LiveStacker {
                 options: &self.options,
                 reference_noise: &self.reference_noise,
                 reference_ceilings: &self.reference_ceilings,
+                #[cfg(feature = "gpu")]
+                fit_tiles: &self.fit_tiles,
                 frame_cache: cache_files,
             },
             IntegrationHalf {
@@ -2615,6 +2633,9 @@ pub(crate) struct FrameRegistration<'a> {
     /// The reference's photometric ceilings once measured, for every frame
     /// prepared against the same reference.
     pub ceilings: &'a std::sync::OnceLock<Vec<f32>>,
+    /// The reference's local background tiles among gathered samples.
+    #[cfg(feature = "gpu")]
+    pub fit_tiles: &'a std::sync::OnceLock<Option<crate::normalization::GatheredTiles>>,
 }
 
 impl FrameRegistration<'_> {
@@ -2873,9 +2894,28 @@ pub(crate) fn prepare_frame(
         ));
     }
     let placed = Placed::on(&registered, region, reference);
+    // The fit reads each tile's gathered samples in order, from where the
+    // stack worked out they lie for its reference.
+    #[cfg(feature = "gpu")]
+    let tiles = match (sampled.as_ref(), scale.normalization(options.normalization)) {
+        (Some(samples), NormalizationMode::LocalBackground { tile_size })
+            if target.canvas.is_none() =>
+        {
+            target
+                .fit_tiles
+                .get_or_init(|| {
+                    crate::normalization::GatheredTiles::new(reference, tile_size, samples.lookup())
+                })
+                .as_ref()
+        }
+        _ => None,
+    };
     #[cfg(feature = "gpu")]
     let placed = Placed {
-        sampled: sampled.as_ref().map(|samples| samples.pixels()),
+        sampled: sampled.as_ref().map(|samples| crate::image::SampledPixels {
+            tiles,
+            ..samples.pixels()
+        }),
         ..placed
     };
     let gains = matches!(
@@ -3146,6 +3186,8 @@ pub(crate) struct PreparationHalf<'a> {
     pub(crate) options: &'a StackOptions,
     pub(crate) reference_noise: &'a [f32],
     pub(crate) reference_ceilings: &'a std::sync::OnceLock<Vec<f32>>,
+    #[cfg(feature = "gpu")]
+    pub(crate) fit_tiles: &'a std::sync::OnceLock<Option<crate::normalization::GatheredTiles>>,
     /// Where a stack kept for reintegration writes each frame's registered
     /// image.
     pub(crate) frame_cache: Option<&'a crate::replay::CacheFiles>,

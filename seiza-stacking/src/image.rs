@@ -47,6 +47,10 @@ pub(crate) struct Placed<'a> {
 pub(crate) struct SampledPixels<'a> {
     pub(crate) lookup: &'a [u32],
     pub(crate) values: &'a [f32],
+    /// Where each local background tile's samples lie among `values`, when
+    /// the stack has worked that out for its reference.
+    #[cfg(feature = "gpu")]
+    pub(crate) tiles: Option<&'a crate::normalization::GatheredTiles>,
 }
 
 impl SampledPixels<'_> {

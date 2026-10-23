@@ -159,10 +159,17 @@ pub(crate) struct FrameSamples {
 }
 
 impl FrameSamples {
+    /// Where each sample of the frame lies among those gathered, or
+    /// `u32::MAX` where it was not gathered.
+    pub(crate) fn lookup(&self) -> &[u32] {
+        &self.plan.lookup
+    }
+
     pub(crate) fn pixels(&self) -> crate::image::SampledPixels<'_> {
         crate::image::SampledPixels {
             lookup: &self.plan.lookup,
             values: &self.values,
+            tiles: None,
         }
     }
 }

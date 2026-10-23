@@ -1272,6 +1272,18 @@ fn local_background_with_gains(
     globals: &[(f32, f32)],
 ) -> Result<NormalizationMap> {
     let gains: Vec<f32> = globals.iter().map(|&(gain, _)| gain).collect();
+    #[cfg(feature = "gpu")]
+    if let Some(sampled) = source.sampled
+        && let Some(tiles) = sampled.tiles
+        && tiles.fits(reference, source, tile_size)
+    {
+        return Ok(local_background_by_tile(
+            (source.width, source.height, source.channels()),
+            tile_size,
+            globals,
+            |cell, _, offsets| tiles.offsets(cell, sampled.values, &gains, offsets),
+        ));
+    }
     Ok(local_background_by_tile(
         (source.width, source.height, source.channels()),
         tile_size,
@@ -1375,6 +1387,100 @@ fn tile_offset(
         indices().map(|index| source.sample(index)),
         gain,
     )
+}
+
+/// Each local background tile's samples in a frame the GPU gathered: where
+/// each sits among the gathered values, and the reference's value there,
+/// in the order [`tile_offsets`] reads them. A frame's fit then reads two
+/// short arrays in order, rather than its lookup table and the reference
+/// at a stride, a cache line for every sample of both, and finds the same
+/// residuals in the same order. Built once a stack, for its reference.
+#[cfg(feature = "gpu")]
+#[derive(Debug)]
+pub(crate) struct GatheredTiles {
+    shape: (usize, usize, usize),
+    tile_size: usize,
+    /// Where each tile's samples start, and one more for the last's end.
+    starts: Vec<usize>,
+    at: Vec<u32>,
+    reference: Vec<f32>,
+}
+
+#[cfg(feature = "gpu")]
+impl GatheredTiles {
+    /// The tiles of `tile_size` over `reference`, whose every sample
+    /// `lookup` places among a frame's gathered values; `None` when one is
+    /// not gathered.
+    pub(crate) fn new(reference: &LinearImage, tile_size: usize, lookup: &[u32]) -> Option<Self> {
+        let (width, height, channels) = (reference.width, reference.height, reference.channels);
+        if tile_size == 0 || lookup.len() != reference.data.len() {
+            return None;
+        }
+        let columns = width.div_ceil(tile_size);
+        let cells = columns * height.div_ceil(tile_size);
+        let mut starts = Vec::with_capacity(cells + 1);
+        let (mut at, mut values) = (Vec::new(), Vec::new());
+        for cell in 0..cells {
+            starts.push(at.len());
+            let (x, y, tile_width, tile_height) = tile(cell, columns, width, height, tile_size);
+            for pixel in tile_sample_pixels(width, x, y, tile_width, tile_height) {
+                for channel in 0..channels {
+                    let index = pixel * channels + channel;
+                    let position = lookup[index];
+                    if position == u32::MAX {
+                        return None;
+                    }
+                    at.push(position);
+                    values.push(reference.data[index]);
+                }
+            }
+        }
+        starts.push(at.len());
+        Some(Self {
+            shape: (width, height, channels),
+            tile_size,
+            starts,
+            at,
+            reference: values,
+        })
+    }
+
+    /// Whether these are the tiles `tile_offsets` would read for `source`,
+    /// a whole frame, against `reference`.
+    fn fits(&self, reference: &LinearImage, source: Placed<'_>, tile_size: usize) -> bool {
+        let shape = (source.width, source.height, source.channels());
+        source.is_whole()
+            && self.tile_size == tile_size
+            && self.shape == shape
+            && (reference.width, reference.height, reference.channels) == shape
+    }
+
+    /// [`tile_offsets`] for tile `cell` of a frame whose gathered samples
+    /// are `values`.
+    fn offsets(&self, cell: usize, values: &[f32], gains: &[f32], offsets: &mut [Option<f32>]) {
+        let channels = self.shape.2;
+        let range = self.starts[cell]..self.starts[cell + 1];
+        let mut residuals: Vec<Vec<f32>> = (0..channels)
+            .map(|_| Vec::with_capacity(range.len() / channels.max(1)))
+            .collect();
+        let samples = self.at[range.clone()].iter().zip(&self.reference[range]);
+        for (sample, (&at, &reference_value)) in samples.enumerate() {
+            let channel = sample % channels;
+            let Some(&gain) = gains.get(channel) else {
+                continue;
+            };
+            let source_value = values.get(at as usize).copied().unwrap_or(f32::NAN);
+            let residual = reference_value - gain * source_value;
+            if reference_value.is_finite() && source_value.is_finite() && residual.is_finite() {
+                residuals[channel].push(residual);
+            }
+        }
+        for (offset, residuals) in offsets.iter_mut().zip(&mut residuals) {
+            *offset = (residuals.len() >= 64)
+                .then(|| median_in_place(residuals))
+                .flatten();
+        }
+    }
 }
 
 /// [`tile_offset`] for every channel of a tile, into `offsets`: each
@@ -1786,6 +1892,7 @@ mod tests {
                 sampled: Some(crate::image::SampledPixels {
                     lookup: &lookup,
                     values: &values,
+                    tiles: None,
                 }),
                 ..Placed::whole(&shape)
             };
@@ -1811,13 +1918,31 @@ mod tests {
             if photometry {
                 assert!(gain.is_some());
             }
+            // The tiles' samples read in order, as a stack reads them.
+            let tiles = match mode {
+                NormalizationMode::LocalBackground { tile_size } => Some(
+                    GatheredTiles::new(&reference, tile_size, &lookup)
+                        .expect("every tile sample is gathered"),
+                ),
+                _ => None,
+            };
+            let tiled = Placed {
+                sampled: sparse.sampled.map(|sampled| crate::image::SampledPixels {
+                    tiles: tiles.as_ref(),
+                    ..sampled
+                }),
+                ..sparse
+            };
             for gains in [None, gain.as_deref()] {
                 let expected =
                     NormalizationMap::estimate_with_gains(&reference, dense, mode, gains).unwrap();
-                let actual =
-                    NormalizationMap::estimate_with_gains(&reference, sparse, mode, gains).unwrap();
-                assert_eq!(bits(&expected.gains), bits(&actual.gains), "{mode:?}");
-                assert_eq!(bits(&expected.offsets), bits(&actual.offsets), "{mode:?}");
+                for source in [sparse, tiled] {
+                    let actual =
+                        NormalizationMap::estimate_with_gains(&reference, source, mode, gains)
+                            .unwrap();
+                    assert_eq!(bits(&expected.gains), bits(&actual.gains), "{mode:?}");
+                    assert_eq!(bits(&expected.offsets), bits(&actual.offsets), "{mode:?}");
+                }
             }
         }
     }
