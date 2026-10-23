@@ -5,7 +5,8 @@
 Star detection, WCS fitting, plate solving — hinted and blind — and calibrated
 batch/live image stacking for astrophotography, in Rust. Stacking includes
 linear FITS output, canonical north-up/east-left reprojection, and RGB, LRGB,
-and narrowband composition from mono stacks.
+and narrowband composition from mono stacks, and runs its heavy passes on the
+GPU where there is one: Metal, Vulkan or Direct3D 12.
 Built to power object overlays and astrometric features in
 [tenrankai](https://github.com/theatrus/tenrankai) and
 [PSF Guard](https://github.com/theatrus/psf-guard).
@@ -15,7 +16,9 @@ all — takes about a tenth of a second with the prebuilt index, and a hinted
 solve 0.05–0.2 seconds, start to finish. In side-by-side benchmarks seiza
 matched or beat ASTAP on every workload we tested, up to 19x faster on blind
 solves, and matched or beat Asterion on blind solves of telescope frames. The
-numbers and caveats are in [Performance](#performance).
+numbers and caveats are in [Performance](#performance). Stacking 200
+61-megapixel frames with reintegration takes 12 seconds on an M4 Max's GPU,
+against 72 on its CPU alone; see [GPU acceleration](#gpu-acceleration).
 
 **Try it without installing anything:** go to [seiza.fyi](https://seiza.fyi),
 upload an image, and get a solution and object overlay in your browser. The
@@ -158,6 +161,7 @@ below, and **—** means that surface does not expose the feature.
 | Light deconvolution | ✓ | ✓ | ✓ |
 | Batch stacking | ✓ | ✓ | ◐ |
 | Incremental stacking with saved contexts | ✓ | ✓ | ✓ |
+| GPU stacking passes, chosen per request | ✓ | ✓ | ✓ |
 | Bias, dark, and flat master construction | ✓ | ✓ | — |
 | Bias, dark, and flat frame grading | ✓ | — | — |
 | RGB, LRGB, and narrowband composition | ✓ | ✓ | ◐ |
@@ -181,6 +185,7 @@ coverage and crop bounds; Rust and Python perform the channel composition.
 | Catalog download, setup, and validation | ✓ | — | — |
 | Stretch, background correction, and deconvolution | ✓ | — | — |
 | Batch stacking, calibration masters, and color composition | ✓ | — | — |
+| GPU stacking passes, with per-pass CPU fallback | ✓ | — | — |
 | ASTAP and `solve-field` command compatibility | ✓ | — | — |
 | Persistent local solver process | — | ✓ | — |
 | Remote queued solving | — | ✓ | ✓ |
@@ -364,6 +369,85 @@ The [image-correction core plan](docs/design/image-correction-core.md) defines
 how calibration and residual-response kernels will move out of the stacker for
 use by native hosts.
 
+### GPU acceleration
+
+Stacking runs its heavy passes on the GPU when one is present, through
+[wgpu](https://wgpu.rs): Metal on macOS, Vulkan on Linux, and Direct3D 12 or
+Vulkan on Windows, chosen at run time. It is `seiza-stacking`'s default `gpu`
+feature, so the CLI, the Python wheel and the C ABI all have it. It has been
+validated on an Apple M4 Max, on Intel Iris Xe (the lowest supported GPU, which
+shares its memory with the CPU), and on an NVIDIA RTX 5090 under Windows.
+
+| Pass | What the GPU does | How close it stays to the CPU |
+|---|---|---|
+| Defect learning | Screens every sample against its neighbours | Bit for bit: the CPU re-tests the few it flags |
+| VNG debayering | Every pixel but a two-pixel border | 6e-6 of the noise RMS |
+| Star detection | Luminance, exact tile medians and sigmas, threshold | The same stars, but for pixels on the threshold |
+| Registration resampling | Lanczos-3 or bilinear, with the clip mask | A few thousandths of the noise |
+| Live normalization | Applies each frame's fitted gains and offsets | Bit for bit, or a few ulps for tiled maps |
+| Live accumulator | Admission and delta-sigma Welford integration | 0.00015 of the noise RMS |
+| Reintegration | Leave-one-out rejection, band by band | 84% of samples bit for bit |
+
+A frame stays on the GPU from debayering through detection, resampling and
+normalization into the accumulator, rather than crossing back between stages.
+Frames under a million samples stay on the CPU, where the GPU's fixed cost of a
+few milliseconds outweighs it. The GPU works in single precision, so a stack
+differs from the CPU's by rounding: on a 45-frame Hα stack, 0.0045 of its noise
+RMS. Stacking's `output_version` tests hold the GPU to the same summaries as
+the CPU, so the GPU path keeps `OUTPUT_VERSION`. No adapter, a software
+adapter, or a frame too large for a GPU buffer keeps the work on the CPU. A
+GPU error is logged once and the work carries on on the CPU.
+
+Whole `seiza stack --reintegrate` runs in October 2026, wall time and CPU
+time:
+
+| Data | Machine | CPU only | With the GPU |
+|---|---|---:|---:|
+| Pleiades mono, 200 × 61 MP | M4 Max (Metal) | 71.5–73.4 s, 1104–1136 CPU-s | 12.1 s, 111 CPU-s |
+| Pleiades mono, 200 × 61 MP | i5-1340P, Iris Xe (Vulkan, Linux) | 273–276 s, 3944–3962 CPU-s | 90.2–90.5 s, 616–620 CPU-s |
+| Pleiades mono, 200 × 61 MP | Threadripper PRO 9975WX, RTX 5090 (Vulkan, Windows), 16 threads | 103 s, 1571 CPU-s | 28.1 s, 265 CPU-s |
+| M45 colour, 40 × 26 MP | M4 Max (Metal) | 17–18 s | 5.1–5.3 s, 30–31 CPU-s |
+| M45 colour, 40 × 26 MP | i5-1340P, Iris Xe (Vulkan, Linux) | 62 s, 811 CPU-s | 38.8–38.9 s, 158 CPU-s |
+
+The GPU frees most of the CPU too: the M4 Max's Pleiades stack takes a tenth of
+the CPU time, and less memory, 6.8–7.1 GiB at its peak against 9.8–9.9 GiB;
+the i5-1340P's, 3.5–3.6 GiB against 8.9–9.2 GiB. On the Iris Xe the stack is bound by the memory the CPU and GPU
+share. On the Threadripper, the CPU-only stack on all 64 threads takes 55–57 s,
+and the GPU run used 12 preparation workers and a 16 GiB pipeline budget; the
+[Windows NVIDIA report](docs/benchmarks/2026-10-windows-nvidia-stacking.md) has
+the rest.
+
+Each request says which passes may run on the GPU; nothing is read from the
+environment but wgpu's own `WGPU_BACKEND`.
+
+- **CLI:** `seiza stack --no-gpu` keeps every pass on the CPU, and
+  `--cpu-pass debayer,detection` only those named (`defects`, `debayer`,
+  `detection`, `resampling`, `accumulator`, `integration`).
+  `--gpu-concurrency` (3) bounds the frame calls in flight, and so GPU
+  memory, and `--gpu-trace` prints each GPU call's timings to stderr.
+- **Python:** `seiza.GpuOptions`, given as `gpu=` to `StackOptions`,
+  `detect_defects` and `integrate_registered_frames`.
+- **C ABI:** the `"gpu"` object of the stack and defect options JSON and of
+  the registered-integration request, such as `"gpu": {"enabled": false}`.
+- **Rust:** `GpuOptions` in `StackOptions::gpu`, `BatchStackOptions::gpu` and
+  `DefectDetectionOptions::gpu`. Build `seiza-stacking` with
+  `default-features = false` for a CPU-only crate without wgpu.
+
+A saved context keeps its stack's GPU options, and a stack's configuration
+fingerprint leaves them out.
+
+Still on the CPU, and where more could move: FITS and XISF decoding,
+calibration, registration's star matching and transform fits, normalization
+fits, MHC, bilinear and superpixel debayering, and drizzle. The largest gain
+left is a frame that goes to the GPU once, before calibration, and stays there
+until it is integrated. The Iris Xe would gain most, since its time goes to
+moving frames through the memory it shares with the CPU, and a discrete GPU
+would gain too, since each crossing is a PCIe transfer. On a discrete GPU,
+reintegration could also resample each band again from its source instead of
+writing and reading scratch files. NVIDIA on Linux is not yet tested. The
+[GPU stacking design](docs/design/gpu-stacking.md) has every measurement,
+including what was tried and not kept.
+
 ### Light deconvolution (experimental)
 
 `seiza deconvolve` provides a deliberately restrained classical restoration
@@ -486,7 +570,8 @@ quick-look JPEGs; the composition outputs remain full-resolution `f32` FITS.*
 
 Seiza is built to solve inside an imaging loop. Every time here is a whole
 command: process startup, image loading, star detection, catalog access,
-solving, and result output.
+solving, and result output. Stacking's times, with and without the GPU, are in
+[GPU acceleration](#gpu-acceleration).
 
 On a laptop (Intel Core i5-1340P, Fedora, release builds, October 2026), with
 `stars-deep-gaia17.bin` and `blind-gaia16.idx`, three runs of each image:
@@ -835,7 +920,8 @@ and solves in the table's exact frame. Contract details:
 - `seiza-stretch/` — parameterized, format-independent display analysis,
   transfer plans, and mono/RGB application
 - `seiza-stacking/` — FITS/XISF calibration adapters, local registration,
-  normalization, additive integration, rejection, and solved sky orientation
+  normalization, additive integration, rejection, and solved sky orientation;
+  its default `gpu` feature runs the heavy passes on the GPU through wgpu
 - `seiza-cabi/` — shared native C ABI for rendering, background extraction,
   live stacking, solving, overlays, and catalog setup
 - `seiza-cli/` — the `seiza` command-line tool: solving, ASTAP mode, the
