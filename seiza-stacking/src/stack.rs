@@ -953,10 +953,17 @@ impl LiveStacker {
     pub fn with_expanding_reference(
         paths: &[PathBuf],
         calibration: CalibrationMasters,
-        mut options: StackOptions,
+        options: StackOptions,
         maximum_samples: usize,
         progress: impl FnMut(&Path, usize, usize, usize) -> crate::Continue,
     ) -> Result<Self> {
+        let options = Self::expanding_options(options)?;
+        let plan = crate::expand::plan(paths, &calibration, &options, maximum_samples, progress)?;
+        Self::from_expansion(plan, calibration, options)
+    }
+
+    /// `options` checked and adjusted for planning an expanded canvas.
+    pub(crate) fn expanding_options(mut options: StackOptions) -> Result<StackOptions> {
         options.validate()?;
         if options.cfa_integration == CfaIntegration::BayerDrizzle {
             return Err(Error::Stack(
@@ -967,7 +974,16 @@ impl LiveStacker {
         // them; matching, residual, and scale checks guard against a false
         // placement instead.
         options.acceptance.maximum_rotation_degrees = 180.0;
-        let plan = crate::expand::plan(paths, &calibration, &options, maximum_samples, progress)?;
+        Ok(options)
+    }
+
+    /// An empty stack on the canvas `plan` holds, planned with `options`
+    /// from [`Self::expanding_options`].
+    pub(crate) fn from_expansion(
+        plan: crate::expand::Expansion,
+        calibration: CalibrationMasters,
+        mut options: StackOptions,
+    ) -> Result<Self> {
         // Panels bound each registration's search; the canvas diagonal bounds
         // any frame's displacement from its center. Options keep sensor
         // pixels, and the canvas is on the binned grid.

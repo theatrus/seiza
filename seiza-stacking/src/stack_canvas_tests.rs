@@ -120,24 +120,13 @@ fn assert_same_snapshot(expected: &StackSnapshot, actual: &StackSnapshot, what: 
     );
 }
 
-/// A stack planned through every path but the last of each panel, and with
+/// A stack on the canvas `plan` holds, planned with `options`, and with
 /// its frames kept for reintegration when `kept`, before any frame is
 /// pushed.
-fn expanding(
-    paths: &[PathBuf],
-    planned: &[PathBuf],
-    options: &StackOptions,
-    kept: bool,
-) -> LiveStacker {
-    let mut stacker = LiveStacker::with_expanding_reference(
-        planned,
-        CalibrationMasters::default(),
-        options.clone(),
-        usize::MAX,
-        |_, _, _, _| Continue::Yes,
-    )
-    .unwrap();
-    assert!(paths.len() > planned.len());
+fn expanding(plan: &crate::expand::Expansion, options: &StackOptions, kept: bool) -> LiveStacker {
+    let mut stacker =
+        LiveStacker::from_expansion(plan.clone(), CalibrationMasters::default(), options.clone())
+            .unwrap();
     if kept {
         stacker.retain_frames_for_reintegration(None).unwrap();
     }
@@ -173,127 +162,150 @@ fn push_all(stacker: &mut LiveStacker, paths: &[PathBuf], whole: bool) -> Vec<St
 /// Footprints change nothing a mosaic stack gives: every frame's diagnostics,
 /// the stack, and its reintegration, from the frames kept for one or from
 /// their sources, in bands or frame by frame, match the whole canvas's to the
-/// bit, mono and colour, globally and locally normalized, weighted or not,
-/// similarity or warp, and for frames joining after planning, which stray
-/// past the canvas's edge. A pipelined run, which prepares frames on other
-/// threads, gives the same.
-#[test]
-fn footprints_stack_a_mosaic_as_the_whole_canvas_does() {
-    for (normalization, weighting, channels, model) in [
-        (
-            NormalizationMode::Global,
-            FrameWeighting::Equal,
-            1,
-            RegistrationModel::Similarity,
-        ),
-        (
-            NormalizationMode::LocalBackground { tile_size: 64 },
-            FrameWeighting::InverseNoiseVariance {
-                minimum_weight: 0.05,
-                maximum_weight: 20.0,
-            },
-            3,
-            RegistrationModel::Quadratic,
-        ),
-    ] {
-        let what = format!("{normalization:?} {weighting:?} {channels} channel(s) {model:?}");
-        let directory = tempfile::tempdir().unwrap();
-        let paths = mosaic(directory.path(), (2, 2), (512, 384), 3, channels);
-        // Each panel's third frame joins without a plan, three pixels past
-        // the canvas the first two planned.
-        let planned = paths
+/// bit, and for frames joining after planning, which stray past the canvas's
+/// edge. A pipelined run, which prepares frames on other threads, gives the
+/// same.
+fn footprints_stack_as_the_whole_canvas_does(
+    normalization: NormalizationMode,
+    weighting: FrameWeighting,
+    channels: usize,
+    model: RegistrationModel,
+) {
+    let what = format!("{normalization:?} {weighting:?} {channels} channel(s) {model:?}");
+    let directory = tempfile::tempdir().unwrap();
+    let paths = mosaic(directory.path(), (2, 2), (512, 384), 3, channels);
+    // Each panel's third frame joins without a plan, three pixels past the
+    // canvas the first two planned.
+    let planned = paths
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| index % 3 != 2)
+        .map(|(_, path)| path.clone())
+        .collect::<Vec<_>>();
+    let mut options = StackOptions {
+        normalization,
+        weighting,
+        ..StackOptions::default()
+    };
+    options.registration.model = model;
+    options.acceptance.minimum_overlap_fraction = 0.1;
+    // Each stack starts from the same plan, made once.
+    let options = LiveStacker::expanding_options(options).unwrap();
+    let plan = crate::expand::plan(
+        &planned,
+        &CalibrationMasters::default(),
+        &options,
+        usize::MAX,
+        |_, _, _, _| Continue::Yes,
+    )
+    .unwrap();
+
+    let mut whole = expanding(&plan, &options, true);
+    let mut bounded = expanding(&plan, &options, true);
+    let expected = push_all(&mut whole, &paths, true);
+    let dispositions = push_all(&mut bounded, &paths, false);
+    assert!(
+        expected
             .iter()
-            .enumerate()
-            .filter(|(index, _)| index % 3 != 2)
-            .map(|(_, path)| path.clone())
-            .collect::<Vec<_>>();
-        let mut options = StackOptions {
-            normalization,
-            weighting,
-            ..StackOptions::default()
-        };
-        options.registration.model = model;
-        options.acceptance.minimum_overlap_fraction = 0.1;
+            .all(|disposition| disposition.starts_with("Accepted")),
+        "{what}: {expected:?}"
+    );
+    assert_eq!(expected, dispositions, "{what}");
+    assert_eq!(
+        model == RegistrationModel::Quadratic,
+        expected
+            .iter()
+            .any(|disposition| disposition.contains("warp: Some")),
+        "{what}"
+    );
+    let snapshot = whole.snapshot().unwrap();
+    assert_same_snapshot(&snapshot, &bounded.snapshot().unwrap(), &what);
 
-        let mut whole = expanding(&paths, &planned, &options, true);
-        let mut bounded = expanding(&paths, &planned, &options, true);
-        let expected = push_all(&mut whole, &paths, true);
-        let dispositions = push_all(&mut bounded, &paths, false);
+    // The frames kept hold only their footprints.
+    let cache = bounded.frame_cache.as_ref().unwrap();
+    let canvas = &bounded.reference;
+    for index in 0..paths.len() {
+        let region = cache.region(index).unwrap();
         assert!(
-            expected
-                .iter()
-                .all(|disposition| disposition.starts_with("Accepted")),
-            "{what}: {expected:?}"
-        );
-        assert_eq!(expected, dispositions, "{what}");
-        assert_eq!(
-            model == RegistrationModel::Quadratic,
-            expected
-                .iter()
-                .any(|disposition| disposition.contains("warp: Some")),
-            "{what}"
-        );
-        let snapshot = whole.snapshot().unwrap();
-        assert_same_snapshot(&snapshot, &bounded.snapshot().unwrap(), &what);
-
-        // The frames kept hold only their footprints.
-        let cache = bounded.frame_cache.as_ref().unwrap();
-        let canvas = &bounded.reference;
-        for index in 0..paths.len() {
-            let region = cache.region(index).unwrap();
-            assert!(
-                region.width * region.height * 2 < canvas.width * canvas.height,
-                "{what}: frame {index} kept over {region:?}"
-            );
-        }
-        // Every reintegration matches the whole canvas's, from the frames
-        // kept, from their sources, banded or frame by frame.
-        let reintegrated = replay(&whole, true, true);
-        for (stacker, banded, how) in [
-            (&bounded, true, "from kept footprints"),
-            (&bounded, false, "from kept footprints, frame by frame"),
-            (
-                &whole,
-                true,
-                "from the kept whole canvas, preparing footprints",
-            ),
-        ] {
-            assert_same_snapshot(
-                &reintegrated,
-                &replay(stacker, false, banded),
-                &format!("{what}, reintegrated {how}"),
-            );
-        }
-        let mut sourced = expanding(&paths, &planned, &options, false);
-        push_all(&mut sourced, &paths, false);
-        for (whole, banded, how) in [
-            (true, true, "from sources over the whole canvas"),
-            (false, true, "from sources over footprints"),
-            (false, false, "from sources over footprints, frame by frame"),
-        ] {
-            assert_same_snapshot(
-                &reintegrated,
-                &replay(&sourced, whole, banded),
-                &format!("{what}, reintegrated {how}"),
-            );
-        }
-
-        let mut pipelined = expanding(&paths, &planned, &options, true);
-        let mut piped = Vec::new();
-        let report = pipelined
-            .push_fits_pipelined(&paths, &PipelineOptions::default(), |_, disposition| {
-                piped.push(format!("{:?}", disposition.unwrap()));
-                Continue::Yes
-            })
-            .unwrap();
-        assert_eq!(report.integrated, paths.len(), "{what}, pipelined");
-        assert_eq!(expected, piped, "{what}, pipelined");
-        assert_same_snapshot(
-            &snapshot,
-            &pipelined.snapshot().unwrap(),
-            &format!("{what}, pipelined"),
+            region.width * region.height * 2 < canvas.width * canvas.height,
+            "{what}: frame {index} kept over {region:?}"
         );
     }
+    // Every reintegration matches the whole canvas's, from the frames kept,
+    // from their sources, banded or frame by frame.
+    let reintegrated = replay(&whole, true, true);
+    for (stacker, banded, how) in [
+        (&bounded, true, "from kept footprints"),
+        (&bounded, false, "from kept footprints, frame by frame"),
+        (
+            &whole,
+            true,
+            "from the kept whole canvas, preparing footprints",
+        ),
+    ] {
+        assert_same_snapshot(
+            &reintegrated,
+            &replay(stacker, false, banded),
+            &format!("{what}, reintegrated {how}"),
+        );
+    }
+    // Keeping frames changes nothing a push does, so without them the same
+    // stack replays from its sources.
+    bounded.frame_cache = None;
+    for (whole, banded, how) in [
+        (true, true, "from sources over the whole canvas"),
+        (false, true, "from sources over footprints"),
+        (false, false, "from sources over footprints, frame by frame"),
+    ] {
+        assert_same_snapshot(
+            &reintegrated,
+            &replay(&bounded, whole, banded),
+            &format!("{what}, reintegrated {how}"),
+        );
+    }
+
+    let mut pipelined = expanding(&plan, &options, true);
+    let mut piped = Vec::new();
+    let report = pipelined
+        .push_fits_pipelined(&paths, &PipelineOptions::default(), |_, disposition| {
+            piped.push(format!("{:?}", disposition.unwrap()));
+            Continue::Yes
+        })
+        .unwrap();
+    assert_eq!(report.integrated, paths.len(), "{what}, pipelined");
+    assert_eq!(expected, piped, "{what}, pipelined");
+    assert_same_snapshot(
+        &snapshot,
+        &pipelined.snapshot().unwrap(),
+        &format!("{what}, pipelined"),
+    );
+}
+
+/// [`footprints_stack_as_the_whole_canvas_does`] in one channel, globally
+/// normalized, equally weighted, by similarity.
+#[test]
+fn footprints_stack_a_mono_mosaic_as_the_whole_canvas_does() {
+    footprints_stack_as_the_whole_canvas_does(
+        NormalizationMode::Global,
+        FrameWeighting::Equal,
+        1,
+        RegistrationModel::Similarity,
+    );
+}
+
+/// [`footprints_stack_as_the_whole_canvas_does`] in colour, locally
+/// normalized, weighted by noise, and warped.
+#[test]
+fn footprints_stack_a_colour_mosaic_as_the_whole_canvas_does() {
+    footprints_stack_as_the_whole_canvas_does(
+        NormalizationMode::LocalBackground { tile_size: 64 },
+        FrameWeighting::InverseNoiseVariance {
+            minimum_weight: 0.05,
+            maximum_weight: 20.0,
+        },
+        3,
+        RegistrationModel::Quadratic,
+    );
 }
 
 /// A frame on a canvas of nine panels is resampled over a region little

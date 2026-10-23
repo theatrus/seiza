@@ -141,6 +141,7 @@ type Sites = Option<crate::registration::ChannelSites>;
 type Prepare<'a> = dyn Fn(&Path, usize) -> Result<(LinearImage, Sites)> + 'a;
 
 /// Where planning put a frame, or why it could not.
+#[derive(Clone)]
 pub(crate) struct PlannedRegistration {
     pub result: std::result::Result<RegistrationResult, String>,
     stamp: Option<crate::replay::SourceStamp>,
@@ -850,6 +851,7 @@ fn better(candidate: &RegistrationResult, incumbent: &RegistrationResult) -> boo
             && candidate.rms_error_pixels < incumbent.rms_error_pixels)
 }
 
+#[derive(Clone)]
 pub(crate) struct Expansion {
     pub image: LinearImage,
     pub headers: Vec<(String, HeaderValue)>,
