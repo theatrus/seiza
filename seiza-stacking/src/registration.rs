@@ -1654,7 +1654,7 @@ pub(crate) fn resample_region_geometry_masked(
     geometry: FrameGeometry<'_>,
     sampling: Sampling,
     gpu: &crate::GpuOptions,
-) -> Result<(LinearImage, Option<LinearImage>)> {
+) -> Result<(LinearImage, Option<crate::image::ClipMask>)> {
     if let Sampling::NearestPhotosite(_) = sampling {
         let image = resample_region_geometry(
             source,
@@ -1678,7 +1678,7 @@ pub(crate) fn resample_region_geometry_masked(
                 )
             })
             .transpose()?;
-        return Ok((image, mask));
+        return Ok((image, mask.map(crate::image::ClipMask::Dense)));
     }
     match geometry {
         FrameGeometry::Similarity(transform) => {
@@ -1982,7 +1982,7 @@ pub(crate) fn resample_region_sited_masked(
     sampling: Sampling,
     sites: Option<ChannelSites>,
     gpu: &crate::GpuOptions,
-) -> Result<(LinearImage, Option<LinearImage>)> {
+) -> Result<(LinearImage, Option<crate::image::ClipMask>)> {
     if sites.is_some() && source.channels == 3 {
         let image = resample_region_sited(
             source,
@@ -2007,7 +2007,7 @@ pub(crate) fn resample_region_sited_masked(
                 )
             })
             .transpose()?;
-        return Ok((image, mask));
+        return Ok((image, mask.map(crate::image::ClipMask::Dense)));
     }
     resample_region_geometry_masked(
         source,
@@ -2240,7 +2240,7 @@ fn resample_region_with_inverse_masked(
     inverse: impl Fn(f64, f64) -> (f64, f64) + Sync,
     sampling: Sampling,
     gpu: &crate::GpuOptions,
-) -> Result<(LinearImage, Option<LinearImage>)> {
+) -> Result<(LinearImage, Option<crate::image::ClipMask>)> {
     // The mask alone, as `resample_region_with_inverse` resamples it
     // bilinearly where the GPU's joint pass did not take it; the region is
     // the frame's, checked below.
@@ -2313,11 +2313,11 @@ fn resample_region_with_inverse_masked(
         };
         if let Some(gpu_sampling) = gpu_sampling
             && let Some((image, resampled_mask)) =
-                crate::gpu::resample_masked(source, mask, region, &inverse, gpu_sampling, gpu)
+                crate::gpu::resample_clipped(source, mask, region, &inverse, gpu_sampling, gpu)
         {
             let resampled_mask = match (resampled_mask, mask) {
                 (Some(resampled), _) => Some(resampled),
-                (None, Some(mask)) => Some(mask_alone(mask)?),
+                (None, Some(mask)) => Some(crate::image::ClipMask::Dense(mask_alone(mask)?)),
                 (None, None) => None,
             };
             return Ok((image, resampled_mask));
@@ -2326,7 +2326,12 @@ fn resample_region_with_inverse_masked(
     #[cfg(not(feature = "gpu"))]
     let _ = gpu;
     let image = resample_region_on_cpu(source, region, &inverse, sampling, &clamp_spans)?;
-    Ok((image, mask.map(mask_alone).transpose()?))
+    Ok((
+        image,
+        mask.map(mask_alone)
+            .transpose()?
+            .map(crate::image::ClipMask::Dense),
+    ))
 }
 
 /// [`resample_region_with_inverse`]'s CPU path, for a checked region.

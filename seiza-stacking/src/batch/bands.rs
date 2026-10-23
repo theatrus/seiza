@@ -75,6 +75,8 @@ pub(crate) fn integrate_bands(
         frame_count,
         options,
         record_fates,
+        #[cfg(all(test, feature = "gpu"))]
+        fail_gpu_band: None,
     };
     match (&options.frame_weights, channels) {
         (None, _) => {
@@ -194,6 +196,9 @@ struct Run<'a> {
     frame_count: usize,
     options: &'a BatchStackOptions,
     record_fates: bool,
+    /// Exercise rollback after work has been submitted in both buffer sets.
+    #[cfg(all(test, feature = "gpu"))]
+    fail_gpu_band: Option<usize>,
 }
 
 /// Each frame's finite and integrated sample counts.
@@ -253,7 +258,6 @@ impl Run<'_> {
         let row_samples = width * channels;
         let samples = row_samples * height;
         let rows = band_rows(self.shape, frame_count, options.band_memory_bytes);
-        let bands = height.div_ceil(rows);
         // A whole number of 64-pixel runs, so keep bits start on a word.
         let tile_pixels = (TILE_BYTES / (frame_count * channels * 4)).clamp(64, 1024) / 64 * 64;
         let tile = tile_pixels * channels;
@@ -277,23 +281,64 @@ impl Run<'_> {
         // The GPU integrates whole bands when there is one; a drizzle's
         // fates are recorded on the CPU.
         #[cfg(feature = "gpu")]
-        let mut gpu = (!self.record_fates)
+        let gpu = (!self.record_fates)
             .then(|| {
+                let rows = crate::gpu::BandSession::rows(
+                    self.shape,
+                    frame_count,
+                    options.band_memory_bytes,
+                    &options.gpu,
+                )?;
                 let flat: Vec<f32> = weights
                     .iter()
                     .flat_map(|weights| weights.weight.map(|weight| weight as f32))
                     .collect();
-                crate::gpu::BandSession::new(
-                    frame_count,
-                    channels,
-                    rows * row_samples,
-                    WEIGHTED.then_some((flat.as_slice(), C)),
-                    rejection.gpu_tables(),
-                    &options.gpu,
-                )
+                let session = || {
+                    crate::gpu::BandSession::new(
+                        frame_count,
+                        channels,
+                        rows * row_samples,
+                        WEIGHTED.then_some((flat.as_slice(), C)),
+                        rejection.gpu_tables(),
+                        &options.gpu,
+                    )
+                };
+                Some((rows, [session()?, session()?]))
             })
             .flatten();
-        for_each_band(
+        #[cfg(feature = "gpu")]
+        let (rows, mut gpu) = match gpu {
+            Some((rows, sessions)) => (rows, Some(sessions)),
+            None => (rows, None),
+        };
+        let bands = height.div_ceil(rows);
+        #[cfg(feature = "gpu")]
+        let mut pending: Option<(usize, std::ops::Range<usize>)> = None;
+        #[cfg(feature = "gpu")]
+        let mut gpu_failure = None;
+        #[cfg(all(test, feature = "gpu"))]
+        let collecting = std::cell::Cell::new(0);
+        #[cfg(feature = "gpu")]
+        let collect = |session: &mut crate::gpu::BandSession,
+                       outputs: &mut Outputs,
+                       range: std::ops::Range<usize>| {
+            #[cfg(test)]
+            {
+                let band = collecting.get();
+                collecting.set(band + 1);
+                if self.fail_gpu_band == Some(band) {
+                    return Err("injected band collection failure".into());
+                }
+            }
+            let mut band_counts = vec![(0, 0); frame_count];
+            session.collect(outputs.band(range), &mut band_counts)?;
+            for (counts, (finite, integrated)) in counts.iter().zip(band_counts) {
+                counts.finite.fetch_add(finite, Ordering::Relaxed);
+                counts.integrated.fetch_add(integrated, Ordering::Relaxed);
+            }
+            Ok::<_, String>(())
+        };
+        let integrated = for_each_band(
             self.shape,
             frame_count,
             rows,
@@ -301,29 +346,29 @@ impl Run<'_> {
             options.cancel.as_ref(),
             |band, top, frames| {
                 progress(band, bands);
+                check_cancelled(options)?;
                 // A frame the band does not reach was not read, and its
                 // samples are empty.
                 let band_samples = rows.min(height - top) * row_samples;
                 #[cfg(feature = "gpu")]
-                if let Some(session) = &gpu {
+                if let Some(sessions) = &mut gpu {
+                    let slot = band % sessions.len();
                     let range = top * row_samples..top * row_samples + band_samples;
-                    let mut band_counts = vec![(0, 0); frame_count];
-                    let result = session.integrate(frames, outputs.band(range), &mut band_counts);
-                    match result {
-                        Ok(()) => {
-                            for (counts, (finite, integrated)) in counts.iter().zip(band_counts) {
-                                counts.finite.fetch_add(finite, Ordering::Relaxed);
-                                counts.integrated.fetch_add(integrated, Ordering::Relaxed);
-                            }
-                            return check_cancelled(options);
+                    // Submit before collecting: staging this band overlaps
+                    // the previous band's GPU work. Two sets bound the
+                    // uploads and the number of submissions in flight.
+                    let result = sessions[slot].submit(frames, band_samples).and_then(|()| {
+                        if let Some((previous, range)) = pending.take() {
+                            collect(&mut sessions[previous], &mut outputs, range)?;
                         }
-                        Err(reason) => {
-                            eprintln!(
-                                "seiza-stacking: integrating on the CPU from this band on: {reason}"
-                            );
-                            gpu = None;
-                        }
+                        pending = Some((slot, range));
+                        Ok(())
+                    });
+                    if let Err(reason) = result {
+                        gpu_failure = Some(reason.clone());
+                        return Err(Error::Stack(reason));
                     }
+                    return check_cancelled(options);
                 }
                 let context = Band {
                     frames,
@@ -348,7 +393,41 @@ impl Run<'_> {
                     );
                 check_cancelled(options)
             },
-        )?;
+        );
+        #[cfg(feature = "gpu")]
+        let integrated = integrated.and_then(|()| {
+            check_cancelled(options)?;
+            if let Some((slot, range)) = pending.take()
+                && let Err(reason) = collect(&mut gpu.as_mut().unwrap()[slot], &mut outputs, range)
+            {
+                gpu_failure = Some(reason.clone());
+                return Err(Error::Stack(reason));
+            }
+            Ok(())
+        });
+        #[cfg(feature = "gpu")]
+        if let Some(reason) = gpu_failure {
+            check_cancelled(options)?;
+            eprintln!("seiza-stacking: retrying integration on the CPU: {reason}");
+            // An earlier band may still be in flight, and inputs have
+            // already been reused. Start afresh so no output or frame count
+            // from a failed attempt survives. Sources support repeated reads.
+            drop(gpu);
+            drop(outputs);
+            drop(fates);
+            let mut options = options.clone();
+            options.gpu.integration = false;
+            return Run {
+                shape: self.shape,
+                frame_count,
+                options: &options,
+                record_fates: self.record_fates,
+                #[cfg(all(test, feature = "gpu"))]
+                fail_gpu_band: None,
+            }
+            .integrate::<C, WEIGHTED>(weights, source, progress);
+        }
+        integrated?;
 
         let frames = counts
             .into_iter()
@@ -383,6 +462,157 @@ impl TileScratch {
             codes: vec![0; tile],
             fates: vec![0; tile.div_ceil(SampleFate::PER_WORD) + 1],
             counts: vec![(0, 0); frame_count],
+        }
+    }
+}
+
+#[cfg(all(test, feature = "gpu"))]
+mod tests {
+    use super::*;
+    use crate::{GpuOptions, LinearImage};
+    use std::sync::{Arc, atomic::AtomicBool};
+
+    const SHAPE: (usize, usize, usize) = (384, 513, 3);
+    const DEPTH: usize = 12;
+    const ROWS: usize = 80;
+
+    struct Source {
+        frames: Vec<LinearImage>,
+        regions: Vec<ReferenceRegion>,
+        fail_at: AtomicUsize,
+    }
+
+    impl Source {
+        fn new() -> Self {
+            let (width, height, channels) = SHAPE;
+            let mut frames =
+                super::super::tests::synthetic_frames(width, height, channels, DEPTH, 7);
+            let regions = (0..DEPTH)
+                .map(|index| ReferenceRegion {
+                    x: index,
+                    y: if index < DEPTH / 2 { 160 } else { 240 },
+                    width: width - 2 * index,
+                    height: 160,
+                })
+                .collect::<Vec<_>>();
+            for (frame, region) in frames.iter_mut().zip(&regions) {
+                for (index, pixel) in frame.data.chunks_exact_mut(channels).enumerate() {
+                    let (x, y) = (index % width, index / width);
+                    if !(region.x..region.x + region.width).contains(&x)
+                        || !(region.y..region.y + region.height).contains(&y)
+                    {
+                        pixel.fill(f32::NAN);
+                    }
+                }
+            }
+            Self {
+                frames,
+                regions,
+                fail_at: AtomicUsize::new(usize::MAX),
+            }
+        }
+    }
+
+    impl BandSource for Source {
+        fn read(&self, index: usize, top: usize, band: &mut [f32]) -> Result<()> {
+            if index == 0 && top >= self.fail_at.load(Ordering::Relaxed) {
+                return Err(Error::Stack("scratch file vanished".into()));
+            }
+            let start = top * SHAPE.0 * SHAPE.2;
+            band.copy_from_slice(&self.frames[index].data[start..start + band.len()]);
+            Ok(())
+        }
+
+        fn region(&self, index: usize) -> Option<ReferenceRegion> {
+            Some(self.regions[index])
+        }
+    }
+
+    fn options() -> BatchStackOptions {
+        BatchStackOptions {
+            band_memory_bytes: 2 * ROWS * SHAPE.0 * SHAPE.2 * DEPTH * 4,
+            ..BatchStackOptions::default()
+        }
+    }
+
+    #[test]
+    fn gpu_pipeline_reuses_buffers_across_empty_and_partial_bands() {
+        if crate::gpu::adapter_description().is_none() {
+            return;
+        }
+        let source = Source::new();
+        let (expected, _) = integrate_bands(
+            SHAPE,
+            DEPTH,
+            &BatchStackOptions::default(),
+            &source,
+            false,
+            &mut |_, _| {},
+        )
+        .unwrap();
+        let (actual, _) =
+            integrate_bands(SHAPE, DEPTH, &options(), &source, false, &mut |_, _| {}).unwrap();
+        super::super::tests::assert_same_result(&actual, &[], &expected, &[]);
+
+        // A source error or cancellation with GPU work pending returns no
+        // partial result, and does not turn into a CPU retry.
+        let flag = Arc::new(AtomicBool::new(false));
+        let cancelled = integrate_bands(
+            SHAPE,
+            DEPTH,
+            &BatchStackOptions {
+                cancel: Some(flag.clone().into()),
+                ..options()
+            },
+            &source,
+            false,
+            &mut |band, _| {
+                if band == 3 {
+                    flag.store(true, Ordering::Relaxed);
+                }
+            },
+        );
+        assert!(matches!(cancelled, Err(Error::Cancelled)));
+        source.fail_at.store(240, Ordering::Relaxed);
+        let failed =
+            integrate_bands(SHAPE, DEPTH, &options(), &source, false, &mut |_, _| {}).unwrap_err();
+        assert!(failed.to_string().contains("scratch file vanished"));
+    }
+
+    #[test]
+    fn a_failed_gpu_pipeline_restarts_without_partial_outputs_or_counts() {
+        if crate::gpu::adapter_description().is_none() {
+            return;
+        }
+        let source = Source::new();
+        let (expected, _) = integrate_bands(
+            SHAPE,
+            DEPTH,
+            &BatchStackOptions {
+                gpu: GpuOptions::cpu(),
+                ..options()
+            },
+            &source,
+            false,
+            &mut |_, _| {},
+        )
+        .unwrap();
+        let weights = vec![ChannelWeights::<1>::unit(); DEPTH];
+        // Fail after partial results have been collected, and while
+        // draining the final band after the source reader has finished.
+        for fail_gpu_band in [4, SHAPE.1.div_ceil(ROWS) - 1] {
+            let mut visited = Vec::new();
+            let (actual, _) = Run {
+                shape: SHAPE,
+                frame_count: DEPTH,
+                options: &options(),
+                record_fates: false,
+                fail_gpu_band: Some(fail_gpu_band),
+            }
+            .integrate::<1, false>(&weights, &source, &mut |band, _| visited.push(band))
+            .unwrap();
+            assert_eq!(visited.iter().filter(|&&band| band == 0).count(), 2);
+            super::super::tests::assert_same_result(&actual, &[], &expected, &[]);
         }
     }
 }

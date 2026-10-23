@@ -44,7 +44,8 @@ struct Node {
 @group(0) @binding(4) var<storage, read_write> output: array<f32>;
 // The frame's clip mask, one sample a source pixel, and its resampling.
 @group(0) @binding(5) var<storage, read> mask: array<f32>;
-@group(0) @binding(6) var<storage, read_write> mask_output: array<f32>;
+@group(0) @binding(6) var<storage, read_write> mask_output: array<u32>;
+@group(0) @binding(7) var<storage, read_write> mask_count: atomic<u32>;
 
 const NAN_BITS: u32 = 0x7fc00000u;
 
@@ -221,13 +222,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     resample_pixel(id, position(id));
 }
 
-@compute @workgroup_size(16, 16)
-fn with_mask(@builtin(global_invocation_id) id: vec3<u32>) {
-    if (id.x >= params.width || id.y >= params.height) {
-        return;
-    }
-    let at = position(id);
-    resample_pixel(id, at);
+fn resample_mask(at: Position) -> f32 {
     var value = bitcast<f32>(NAN_BITS);
     if (at.valid) {
         let x1 = min(at.x0 + 1u, params.source_width - 1u);
@@ -236,5 +231,35 @@ fn with_mask(@builtin(global_invocation_id) id: vec3<u32>) {
         let row1 = y1 * params.source_width;
         value = blend(mask[row0 + at.x0], mask[row0 + x1], mask[row1 + at.x0], mask[row1 + x1], at.tx, at.ty);
     }
-    mask_output[id.y * params.width + id.x] = value;
+    return value;
+}
+
+@compute @workgroup_size(16, 16)
+fn with_mask(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x >= params.width || id.y >= params.height) {
+        return;
+    }
+    let at = position(id);
+    resample_pixel(id, at);
+    mask_output[id.y * params.width + id.x] = bitcast<u32>(resample_mask(at));
+}
+
+// Only clipping statistics need this mask. Return its nonzero contributions
+// directly, without allocating or reading back a whole mask raster. Each
+// pixel writes once, so list order cannot change any pixel's accumulated sum.
+@compute @workgroup_size(16, 16)
+fn with_sparse_mask(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x >= params.width || id.y >= params.height) {
+        return;
+    }
+    let at = position(id);
+    resample_pixel(id, at);
+    let value = resample_mask(at);
+    if (finite(value) && value > 0.0) {
+        let slot = atomicAdd(&mask_count, 1u);
+        if (slot < arrayLength(&mask_output) / 2u) {
+            mask_output[2u * slot] = id.y * params.width + id.x;
+            mask_output[2u * slot + 1u] = bitcast<u32>(value);
+        }
+    }
 }

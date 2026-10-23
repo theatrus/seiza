@@ -821,7 +821,7 @@ fn a_stack_large_enough_for_the_gpu_keeps_its_output() {
             ..StackOptions::default()
         };
         let mut stacker =
-            LiveStacker::open_fits(&paths[0], None, None, None, None, options).unwrap();
+            LiveStacker::open_fits(&paths[0], None, None, None, None, options.clone()).unwrap();
         stacker.retain_frames_for_reintegration(None).unwrap();
         for path in &paths[1..] {
             admit(stacker.push_fits(path).unwrap());
@@ -831,14 +831,29 @@ fn a_stack_large_enough_for_the_gpu_keeps_its_output() {
             &summary(&stacker.snapshot().unwrap().image),
             LARGE_LIVE,
         );
-        let reintegrated = stacker
-            .reintegrate(&BatchStackOptions::default(), |_, _, _| {})
-            .unwrap();
-        check(
-            "LARGE_REINTEGRATED",
-            &summary(&reintegrated.snapshot.image),
-            LARGE_REINTEGRATED,
-        );
+        // Exercise both one band and repeated buffer reuse, including a
+        // shorter final band. Each full band still reaches the GPU's
+        // minimum work size. Changing band boundaries changes no arithmetic.
+        for band_memory_bytes in [
+            BatchStackOptions::default().band_memory_bytes,
+            2 * 173 * LARGE_WIDTH * paths.len() * std::mem::size_of::<f32>(),
+        ] {
+            let reintegrated = stacker
+                .reintegrate(
+                    &BatchStackOptions {
+                        band_memory_bytes,
+                        gpu: options.gpu,
+                        ..BatchStackOptions::default()
+                    },
+                    |_, _, _| {},
+                )
+                .unwrap();
+            check(
+                "LARGE_REINTEGRATED",
+                &summary(&reintegrated.snapshot.image),
+                LARGE_REINTEGRATED,
+            );
+        }
     }
 }
 
@@ -884,6 +899,92 @@ fn a_debayered_stack_large_enough_for_the_gpu_keeps_its_output() {
 
 const LARGE_WIDTH: usize = 1280;
 const LARGE_HEIGHT: usize = 960;
+
+/// Full-size raw lights carry clipping through GPU resampling as well as
+/// the stack's mean. Isolated saturated pixels give the mask actual work.
+#[test]
+fn a_large_stack_keeps_its_clipped_fraction() {
+    let stars = large_stars();
+    let frames = SHIFTS[..4]
+        .iter()
+        .enumerate()
+        .map(|(frame, &(dx, dy))| {
+            let mut data = (0..LARGE_WIDTH * LARGE_HEIGHT)
+                .map(|index| {
+                    let point = ((index % LARGE_WIDTH) as f32, (index / LARGE_WIDTH) as f32);
+                    100.0 + large_star_light(&stars, point, (dx, dy)) + noise(index, frame, 3.0)
+                })
+                .collect::<Vec<_>>();
+            if frame > 0 {
+                for y in 410..416 {
+                    for x in 610..616 {
+                        data[y * LARGE_WIDTH + x] = 65535.0;
+                    }
+                }
+            }
+            seiza_stacking::FitsFrame {
+                image: LinearImage::new(LARGE_WIDTH, LARGE_HEIGHT, 1, data).unwrap(),
+                headers: vec![
+                    ("BITPIX".into(), HeaderValue::Integer(16)),
+                    ("BZERO".into(), HeaderValue::Float(32768.0)),
+                ],
+                exposure_seconds: None,
+                bayer: None,
+                source: None,
+                bounds: None,
+            }
+        })
+        .collect::<Vec<_>>();
+    for gpu in [GpuOptions::cpu(), GpuOptions::default()] {
+        let mut stacker = LiveStacker::new(
+            frames[0].clone(),
+            CalibrationMasters::default(),
+            StackOptions {
+                gpu,
+                normalization: NormalizationMode::None,
+                rejection: RejectionMode::None,
+                ..StackOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(stacker.clipped_fraction().is_none());
+        for frame in &frames[1..] {
+            admit(stacker.push(frame.clone()).unwrap());
+        }
+        let clipped = stacker.clipped_fraction().unwrap();
+        const LARGE_CLIPPED: &[f64] = &[
+            2.1972651e-5,
+            2.4751522e-3,
+            5.0000000e-1,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ];
+        check("LARGE_CLIPPED", &summary(&clipped), LARGE_CLIPPED);
+    }
+}
 
 /// Two hundred stars over a large frame, from a small integer generator.
 fn large_stars() -> Vec<(f32, f32, f32)> {

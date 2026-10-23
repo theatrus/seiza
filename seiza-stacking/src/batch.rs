@@ -51,10 +51,14 @@ pub struct BatchStackOptions {
     /// next, so each file is read once rather than three times and the
     /// per-pixel statistics stay in the processor's caches. It holds two
     /// bands of every frame, one being integrated and one being read: within
-    /// half this memory each, at most 128 MiB each, and never less than a
-    /// row. A stack whose frames are read whole first, to fit their
+    /// half this memory each, at most 128 MiB each on the CPU or a shared
+    /// memory GPU, and 512 MiB on a discrete GPU, limited further by the
+    /// device's storage bindings, and never less than a row. A stack whose
+    /// frames are read whole first, to fit their
     /// normalization again, reads as many at once as half this memory holds,
-    /// from two to four. The result does not depend on it.
+    /// from two to four. GPU integration additionally holds two sets of
+    /// device band buffers and, on a discrete GPU, two upload bands, each
+    /// sized for those same rows. The result does not depend on it.
     pub band_memory_bytes: usize,
     /// Which passes may run on the GPU: here the rejection passes of
     /// [`integrate_registered_frames_banded`], as

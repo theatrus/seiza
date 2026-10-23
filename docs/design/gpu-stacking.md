@@ -36,7 +36,16 @@ from it arrives. These stages run there:
   or a footprint of it. Every frame of a live stack and every frame a final
   pass prepares goes through it, and its clip mask with it: one pass finds
   each pixel's source position once, resamples the frame there and the
-  mask bilinearly, to the bit as two passes would. Bayer drizzle's
+  mask bilinearly, to the bit as two passes would. For clipping statistics,
+  sparse input masks are sent as index/value pairs and expanded on the
+  GPU, then only the resampled mask's nonzero contributions are returned.
+  The CPU accumulates those in frame order, preserving the dense path's
+  exact sums. Both lists are bounded; a dense mask uses the original upload
+  and, on output overflow, is resampled again as a dense mask. This avoids
+  full mask transfers in either direction for sparse clipping. The CPU
+  builds its mask packet and coordinate grid before taking a GPU-call
+  permit, so that Rayon work cannot hold a permit while it runs another
+  frame's task that needs one. Bayer drizzle's
   nearest-photosite sampling stays on the CPU.
 - **The live accumulator** (`stack::Accumulator`): a live stack's moments
   move to the GPU with its first frame of a million samples or more, and
@@ -51,8 +60,32 @@ from it arrives. These stages run there:
   for as long as the borrow, since only `&mut` methods integrate.
 - **Final integration** (`batch::bands`): the three passes of leave-one-out
   rejection over one band of rows of every frame, with weights, the trimmed
-  first estimate and the Student-t limits. A band that records sample fates
-  for a drizzle is integrated on the CPU.
+  first estimate and the Student-t limits. Two reusable buffer sets separate
+  submission from collection: the CPU stages and submits the next band
+  before collecting the previous one's outputs. On discrete GPUs each set
+  has one mapped upload buffer rather than a separate staging write for
+  each frame. Frame order and rejection
+  arithmetic stay the same. A band that records sample fates for a drizzle
+  is integrated on the CPU. A GPU failure retries the whole integration on
+  the CPU with fresh outputs and frame counts; progress starts again at the
+  first band. Cancellation and source read errors return without a retry.
+
+The band pipeline holds at most two submissions in flight. CPU integration
+and mapped shared-memory GPUs retain the 128 MiB input band cap. Discrete
+GPUs use up to 512 MiB per band to amortize reads and submissions, within
+half the configured band memory and the device's input and output binding
+limits. The CPU reader, both GPU sets and their staging buffers use those
+same rows; output buffers also scale with that row count. `GpuOptions::concurrency`
+continues to limit frame preparation calls, independently of these two
+band buffer sets. Band traces report host upload/staging, time in flight
+while other work runs, the remaining wait and copying outputs. These spans
+overlap across bands and are not GPU timestamp measurements. Mask traces
+also report actual sparse upload bytes and bounded readback bytes.
+
+The resampled image stays on the GPU through normalization and admission.
+A full CPU image copy still serves normalization fitting and the scratch
+cache used for reintegration. Removing that copy needs compact fit samples
+and a different cache strategy; sparse clipping does not remove it.
 
 Everything else (decoding, calibration, registration fits, normalization
 fits) stays on the CPU for now.
@@ -246,6 +279,11 @@ the bottleneck, busy for most of the run with about half a second of
 kernels a frame, so VNG on the GPU saves CPU time (271 CPU-s against 299)
 but not wall time.
 
+Windows NVIDIA validation is recorded separately in
+[`2026-10-windows-nvidia-stacking.md`](../benchmarks/2026-10-windows-nvidia-stacking.md):
+200 mono 61 MP Pleiades frames on a Threadripper PRO 9975WX and RTX 5090,
+through Vulkan and Direct3D 12, including the discrete GPU staging path.
+
 ## The Iris Xe's limit
 
 On the i5-1340P's Iris Xe, M45 takes 41 s: 5 s choosing the reference,
@@ -295,5 +333,5 @@ the same way.
   VNG kernel from 92-97 to 78-81 ms and its resampling kernel by 28% in
   the `gpu-spike` experiments, and slow the M4 Max's three and eight times;
   neither moved the Iris Xe's run, for the reason above.
-- **NVIDIA**, on Windows and Linux: not yet run. Its staging path is the
-  one a discrete GPU takes and is untested on one.
+- **NVIDIA on Linux** remains untested. Windows Vulkan and Direct3D 12
+  validation, including the discrete GPU staging path, is recorded above.

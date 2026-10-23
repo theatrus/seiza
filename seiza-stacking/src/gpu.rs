@@ -14,6 +14,7 @@
 //! once, the first time a call that allows the GPU has a frame large enough
 //! to gain from it. When no adapter is found, or the GPU fails, the work
 //! stays on the CPU; a failure is logged once.
+use crate::image::ClipMask;
 use crate::{GpuOptions, LinearImage, ReferenceRegion};
 use rayon::prelude::*;
 use std::sync::OnceLock;
@@ -64,6 +65,8 @@ struct Gpu {
     /// Resampling a frame and its clip mask at once.
     masked_pipeline: wgpu::ComputePipeline,
     masked_layout: wgpu::BindGroupLayout,
+    sparse_masked_pipeline: wgpu::ComputePipeline,
+    sparse_masked_layout: wgpu::BindGroupLayout,
     bands_pipeline: wgpu::ComputePipeline,
     bands_layout: wgpu::BindGroupLayout,
     classify_pipeline: wgpu::ComputePipeline,
@@ -143,6 +146,8 @@ fn copy_out<T: bytemuck::Pod + Send + Sync>(view: &[u8], every_core: bool) -> Ve
 enum Bound<'a> {
     Input(&'a wgpu::Buffer),
     Output(usize),
+    /// Cleared on the GPU before dispatch, for an atomic counter.
+    ZeroedOutput(usize),
 }
 
 /// Which samples a resident buffer holds: where they are, how many, and a
@@ -777,6 +782,44 @@ impl Gpu {
             compilation_options: Default::default(),
             cache: None,
         });
+        let sparse_masked_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("resample-sparse-mask"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    storage(1, true),
+                    storage(2, true),
+                    storage(3, true),
+                    storage(4, false),
+                    storage(5, true),
+                    storage(6, false),
+                    storage(7, false),
+                ],
+            });
+        let sparse_masked_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("resample-sparse-mask"),
+                bind_group_layouts: &[Some(&sparse_masked_layout)],
+                immediate_size: 0,
+            });
+        let sparse_masked_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("resample-sparse-mask"),
+                layout: Some(&sparse_masked_pipeline_layout),
+                module: &module,
+                entry_point: Some("with_sparse_mask"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
         let bands_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("bands"),
             source: wgpu::ShaderSource::Wgsl(include_str!("gpu/bands.wgsl").into()),
@@ -1072,6 +1115,8 @@ impl Gpu {
             layout,
             masked_pipeline,
             masked_layout,
+            sparse_masked_pipeline,
+            sparse_masked_layout,
             bands_pipeline,
             bands_layout,
             classify_pipeline,
@@ -1175,6 +1220,98 @@ impl Gpu {
         Ok(buffer)
     }
 
+    /// Plan uploads before taking a GPU-call permit: Rayon work may run
+    /// another frame's task while it waits for its own parts.
+    fn clip_patch(&self, mask: &LinearImage) -> Option<Vec<[u32; 2]>> {
+        if self.mapped {
+            return None;
+        }
+        let capacity = mask.data.len().div_ceil(128).clamp(1024, 1 << 18);
+        let patch: Vec<[u32; 2]> = mask
+            .data
+            .par_iter()
+            .with_min_len(64 * 1024)
+            .enumerate()
+            .filter_map(|(index, value)| {
+                (value.to_bits() != 0).then_some([index as u32, value.to_bits()])
+            })
+            .take_any(capacity + 1)
+            .collect();
+        (patch.len() <= capacity).then_some(patch)
+    }
+
+    /// Expand sparse raw clipping on the GPU. Fractional values, negative
+    /// zeros and non-finite samples keep their exact bits.
+    fn upload_clip_mask(
+        &self,
+        mask: &LinearImage,
+        patch: Option<&[[u32; 2]]>,
+        trace: &Trace,
+    ) -> Result<wgpu::Buffer, String> {
+        let Some(patch) = patch else {
+            if trace.enabled {
+                eprintln!(
+                    "seiza-stacking gpu: clip mask upload dense: {} bytes",
+                    mask.data.len() * 4
+                );
+            }
+            return self.upload("mask", &mask.data);
+        };
+        if trace.enabled {
+            eprintln!(
+                "seiza-stacking gpu: clip mask upload: {} bytes for {} pixels",
+                patch.len() * 8,
+                mask.data.len()
+            );
+        }
+        let buffer = self.take("mask", (mask.data.len() * 4) as u64, self.input_usage());
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.clear_buffer(&buffer, 0, None);
+        if !patch.is_empty() {
+            let groups = (patch.len() as u32).div_ceil(256);
+            let columns = groups.min(4096);
+            let params = ScatterParams {
+                entries: patch.len() as u32,
+                row: columns * 256,
+                padding: [0; 2],
+            };
+            let uniform = wgpu::util::DeviceExt::create_buffer_init(
+                &self.device,
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some("mask-scatter-params"),
+                    contents: bytemuck::bytes_of(&params),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                },
+            );
+            let patch = wgpu::util::DeviceExt::create_buffer_init(
+                &self.device,
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some("mask-scatter-patch"),
+                    contents: bytemuck::cast_slice(patch),
+                    usage: wgpu::BufferUsages::STORAGE,
+                },
+            );
+            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("mask-scatter"),
+                layout: &self.scatter_layout,
+                entries: &[(0, &uniform), (1, &patch), (2, &buffer)].map(|(binding, buffer)| {
+                    wgpu::BindGroupEntry {
+                        binding,
+                        resource: buffer.as_entire_binding(),
+                    }
+                }),
+            });
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&self.scatter_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(columns, groups.div_ceil(columns), 1);
+        }
+        // Resampling is submitted after this clear and scatter, with no
+        // CPU wait or readback between the two GPU stages.
+        self.queue.submit([encoder.finish()]);
+        Ok(buffer)
+    }
+
     /// A buffer holding `data`: the one this thread keeps resident when it
     /// holds these very samples, or else `data` uploaded, which this thread
     /// then keeps resident in its place. A frame's star detection and its
@@ -1233,7 +1370,7 @@ impl Gpu {
         let outputs: Vec<usize> = bindings
             .iter()
             .filter_map(|binding| match binding {
-                Bound::Output(samples) => Some(*samples),
+                Bound::Output(samples) | Bound::ZeroedOutput(samples) => Some(*samples),
                 Bound::Input(_) => None,
             })
             .collect();
@@ -1242,6 +1379,7 @@ impl Gpu {
             .map(|&samples| (samples * std::mem::size_of::<T>()) as u64)
             .collect();
         let output_usage = wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_DST
             | if self.mapped {
                 wgpu::BufferUsages::MAP_READ
             } else {
@@ -1265,7 +1403,9 @@ impl Gpu {
             .map(|(binding, bound)| {
                 let buffer = match bound {
                     Bound::Input(buffer) => *buffer,
-                    Bound::Output(_) => next_output.next().expect("an output for each"),
+                    Bound::Output(_) | Bound::ZeroedOutput(_) => {
+                        next_output.next().expect("an output for each")
+                    }
                 };
                 wgpu::BindGroupEntry {
                     binding: binding as u32,
@@ -1279,6 +1419,15 @@ impl Gpu {
             entries: &entries,
         });
         let mut encoder = self.device.create_command_encoder(&Default::default());
+        for (binding, buffer) in bindings
+            .iter()
+            .filter(|binding| !matches!(binding, Bound::Input(_)))
+            .zip(&output_buffers)
+        {
+            if matches!(binding, Bound::ZeroedOutput(_)) {
+                encoder.clear_buffer(buffer, 0, None);
+            }
+        }
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_bind_group(0, &bind_group, &[]);
@@ -1439,7 +1588,9 @@ impl Gpu {
         sampling: GpuSampling,
         mask: Option<&LinearImage>,
         trace: &mut Trace,
-    ) -> Result<(LinearImage, Option<LinearImage>), String> {
+        compact_mask: bool,
+        mask_patch: Option<&[[u32; 2]]>,
+    ) -> Result<(LinearImage, Option<ClipMask>), String> {
         let channels = source.channels;
         let source_bytes = (source.data.len() * 4) as u64;
         let output_samples = region.width * region.height * channels;
@@ -1483,7 +1634,7 @@ impl Gpu {
             bytemuck::bytes_of(&params),
             wgpu::BufferUsages::UNIFORM,
         );
-        let grid = init(
+        let grid_buffer = init(
             "grid",
             bytemuck::cast_slice(grid),
             wgpu::BufferUsages::STORAGE,
@@ -1494,42 +1645,108 @@ impl Gpu {
             (region.height as u32).div_ceil(16),
         );
         let mask_buffer = mask
-            .map(|mask| self.upload("mask", &mask.data))
+            .map(|mask| {
+                if compact_mask {
+                    self.upload_clip_mask(mask, mask_patch, trace)
+                } else {
+                    self.upload("mask", &mask.data)
+                }
+            })
             .transpose()?;
         let mut bindings = vec![
             Bound::Input(&uniform),
             Bound::Input(&source_buffer),
-            Bound::Input(&grid),
+            Bound::Input(&grid_buffer),
             Bound::Input(&self.weights),
             Bound::Output(output_samples),
         ];
         // The mask goes through the same positions in the same pass.
+        let capacity = (region.width * region.height)
+            .div_ceil(128)
+            .clamp(1024, 1 << 18)
+            .min(region.width * region.height);
+        let sparse = compact_mask && mask_buffer.is_some();
         let (layout, pipeline) = match &mask_buffer {
             Some(mask_buffer) => {
                 bindings.push(Bound::Input(mask_buffer));
-                bindings.push(Bound::Output(region.width * region.height));
-                (&self.masked_layout, &self.masked_pipeline)
+                if sparse {
+                    bindings.push(Bound::Output(2 * capacity));
+                    bindings.push(Bound::ZeroedOutput(1));
+                    (&self.sparse_masked_layout, &self.sparse_masked_pipeline)
+                } else {
+                    bindings.push(Bound::Output(region.width * region.height));
+                    (&self.masked_layout, &self.masked_pipeline)
+                }
             }
             None => (&self.layout, &self.pipeline),
         };
-        let data = self.compute_keeping(layout, &[(pipeline, workgroups)], &bindings, true, trace);
+        let data =
+            self.compute_keeping::<f32>(layout, &[(pipeline, workgroups)], &bindings, true, trace);
         drop(bindings);
         drop(source_buffer);
         if let Some(mask_buffer) = mask_buffer {
             self.give(self.input_usage(), mask_buffer);
         }
         let (mut outputs, output) = data?;
-        let mask_data = (outputs.len() > 1).then(|| outputs.swap_remove(1));
+        let mask = if sparse {
+            let count = outputs.pop().unwrap()[0].to_bits() as usize;
+            if count > capacity {
+                if trace.enabled {
+                    eprintln!(
+                        "seiza-stacking gpu: clip mask dense fallback: {count} contributions exceed {capacity}"
+                    );
+                }
+                // A heavily clipped image may not be sparse. Repeat with
+                // a dense mask; no contribution may be silently dropped.
+                if let Some((buffer, usage)) = output {
+                    self.give(usage, buffer);
+                }
+                drop(outputs);
+                return self.resample(
+                    source,
+                    region,
+                    grid,
+                    (grid_columns, grid_origin),
+                    sampling,
+                    mask,
+                    trace,
+                    false,
+                    None,
+                );
+            }
+            let words = outputs.pop().unwrap();
+            if trace.enabled {
+                eprintln!(
+                    "seiza-stacking gpu: clip mask readback: {count} contributions, {} bytes for {} pixels",
+                    8 * capacity + 4,
+                    region.width * region.height
+                );
+            }
+            Some(ClipMask::Sparse {
+                width: region.width,
+                height: region.height,
+                entries: words
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .take(count)
+                    .map(|entry| (entry[0].to_bits() as usize, entry[1]))
+                    .collect(),
+            })
+        } else if outputs.len() > 1 {
+            Some(ClipMask::Dense(
+                LinearImage::new(region.width, region.height, 1, outputs.pop().unwrap())
+                    .map_err(|error| error.to_string())?,
+            ))
+        } else {
+            None
+        };
         let data = outputs.swap_remove(0);
         // The resampled frame stays on the GPU, for its normalization and
         // the accumulator to take; see `take_resident`.
         if let Some((buffer, usage)) = output {
             keep_resident(buffer, usage, ResidentKey::of(&data));
         }
-        let mask = mask_data
-            .map(|data| LinearImage::new(region.width, region.height, 1, data))
-            .transpose()
-            .map_err(|error| error.to_string())?;
         let image = LinearImage::new(region.width, region.height, channels, data)
             .map_err(|error| error.to_string())?;
         Ok((image, mask))
@@ -1564,6 +1781,38 @@ pub(crate) fn resample_masked(
     sampling: GpuSampling,
     options: &GpuOptions,
 ) -> Option<(LinearImage, Option<LinearImage>)> {
+    let (image, mask) =
+        resample_masked_inner(source, mask, region, inverse, sampling, options, false)?;
+    let mask = match mask {
+        Some(ClipMask::Dense(mask)) => Some(mask),
+        None => None,
+        Some(ClipMask::Sparse { .. }) => return None,
+    };
+    Some((image, mask))
+}
+
+/// Resample for clipping statistics: a bounded sparse list when possible,
+/// with a dense fallback when the mask has too many nonzero contributions.
+pub(crate) fn resample_clipped(
+    source: &LinearImage,
+    mask: Option<&LinearImage>,
+    region: ReferenceRegion,
+    inverse: &(impl Fn(f64, f64) -> (f64, f64) + Sync),
+    sampling: GpuSampling,
+    options: &GpuOptions,
+) -> Option<(LinearImage, Option<ClipMask>)> {
+    resample_masked_inner(source, mask, region, inverse, sampling, options, true)
+}
+
+fn resample_masked_inner(
+    source: &LinearImage,
+    mask: Option<&LinearImage>,
+    region: ReferenceRegion,
+    inverse: &(impl Fn(f64, f64) -> (f64, f64) + Sync),
+    sampling: GpuSampling,
+    options: &GpuOptions,
+    compact_mask: bool,
+) -> Option<(LinearImage, Option<ClipMask>)> {
     let channels = source.channels;
     let mask = mask.filter(|mask| {
         mask.channels == 1 && (mask.width, mask.height) == (source.width, source.height)
@@ -1581,8 +1830,13 @@ pub(crate) fn resample_masked(
         return None;
     }
     let gpu = gpu(options)?;
-    let _call = gpu.admitted(options.concurrency);
     let mut trace = Trace::new(options.trace);
+    let patch = if compact_mask {
+        mask.and_then(|mask| gpu.clip_patch(mask))
+    } else {
+        None
+    };
+    trace.mark("mask plan");
     let step = GRID_STEP as usize;
     let (first_column, first_row) = (region.x / step, region.y / step);
     let (last_column, last_row) = (
@@ -1622,6 +1876,8 @@ pub(crate) fn resample_masked(
         .collect();
     let origin = (first_row as u32) << 16 | first_column as u32;
     trace.mark("grid");
+    let _call = gpu.admitted(options.concurrency);
+    trace.mark("admission wait");
     let result = gpu.resample(
         source,
         region,
@@ -1630,6 +1886,8 @@ pub(crate) fn resample_masked(
         sampling,
         mask,
         &mut trace,
+        compact_mask,
+        patch.as_deref(),
     );
     trace.print(&format!(
         "resample {}x{}x{channels}",
@@ -2121,7 +2379,8 @@ pub(crate) struct BandOutputs<'a> {
     pub(crate) rejected: &'a mut [u32],
 }
 
-/// The GPU's buffers for integrating one stack band by band, made once.
+/// One reusable set of GPU band buffers. Submission and collection are
+/// separate so another set can be staged while this one's work runs.
 pub(crate) struct BandSession {
     gpu: &'static Gpu,
     channels: usize,
@@ -2130,6 +2389,8 @@ pub(crate) struct BandSession {
     band_capacity: usize,
     frame_count: usize,
     values: wgpu::Buffer,
+    /// A single reusable upload on a discrete GPU, packed frame by frame.
+    upload: Option<wgpu::Buffer>,
     /// Each frame's weight and its reciprocal per weight channel, frame
     /// after frame; the GPU holds those of the frames a band reaches.
     weight_rows: Vec<[f32; 2]>,
@@ -2144,9 +2405,41 @@ pub(crate) struct BandSession {
     bind_group: wgpu::BindGroup,
     precision: BandTables,
     trace: bool,
+    pending: Option<PendingBand>,
+}
+
+struct PendingBand {
+    samples: usize,
+    reaching: Vec<usize>,
+    submission: Option<wgpu::SubmissionIndex>,
+    trace: Trace,
 }
 
 impl BandSession {
+    /// Larger bands amortize file reads and submission overhead on a
+    /// discrete GPU. Stay within half the caller's band memory, both device
+    /// binding limits, and a 512 MiB input band (128 MiB on shared memory).
+    pub(crate) fn rows(
+        (width, height, channels): (usize, usize, usize),
+        frame_count: usize,
+        memory: usize,
+        options: &GpuOptions,
+    ) -> Option<usize> {
+        if frame_count == 0 || frame_count > MAX_BAND_FRAMES || !options.integration {
+            return None;
+        }
+        let gpu = gpu(options)?;
+        let max_buffer = usize::try_from(gpu.max_buffer).unwrap_or(usize::MAX);
+        let max_samples = (max_buffer / (frame_count * 4)).min(max_buffer / 16);
+        let row_samples = width * channels;
+        if row_samples > max_samples {
+            return None;
+        }
+        let cap = if gpu.mapped { 128 } else { 512 } * 1024 * 1024;
+        let samples = ((memory / 2).min(cap) / (frame_count * 4)).min(max_samples);
+        Some((samples / row_samples).clamp(1, height))
+    }
+
     /// A session for `frame_count` frames of `channels` channels, bands of
     /// up to `band_samples` samples, weighted per `weight_channels` channels
     /// when `weights` is given (one row per frame), or `None` when the CPU
@@ -2204,6 +2497,13 @@ impl BandSession {
                     wgpu::BufferUsages::COPY_DST
                 },
         );
+        let upload = (!gpu.mapped).then(|| {
+            gpu.buffer(
+                "band-upload",
+                values_bytes,
+                wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC,
+            )
+        });
         let thresholds = init(
             "band-thresholds",
             bytemuck::cast_slice(&tables.thresholds),
@@ -2282,6 +2582,7 @@ impl BandSession {
             band_capacity: band_samples,
             frame_count,
             values,
+            upload,
             weight_rows,
             weights,
             params,
@@ -2294,23 +2595,25 @@ impl BandSession {
             bind_group,
             precision: tables,
             trace: options.trace,
+            pending: None,
         })
     }
 
-    /// Integrate one band: `frames[i]` holds frame `i`'s samples of it, or
-    /// is empty when the band does not reach the frame. Writes the band's
-    /// outputs and adds each frame's finite and integrated samples to
-    /// `counts`.
-    pub(crate) fn integrate(
-        &self,
-        frames: &[&[f32]],
-        outputs: BandOutputs<'_>,
-        counts: &mut [(usize, usize)],
-    ) -> Result<(), String> {
+    /// Stage and submit one band without waiting for its outputs. Frame
+    /// slices can be reused on return. Collect before submitting again.
+    pub(crate) fn submit(&mut self, frames: &[&[f32]], samples: usize) -> Result<(), String> {
+        if self.pending.is_some() {
+            return Err("the previous band has not been collected".into());
+        }
         let gpu = self.gpu;
         let mut trace = Trace::new(self.trace);
-        let samples = outputs.mean.len();
-        if samples > self.band_capacity || frames.len() != self.frame_count {
+        if samples == 0
+            || samples > self.band_capacity
+            || frames.len() != self.frame_count
+            || frames
+                .iter()
+                .any(|frame| !frame.is_empty() && frame.len() != samples)
+        {
             return Err("the band does not fit the session".into());
         }
         // Frames the band reaches, in order; the others hold only NaN.
@@ -2318,31 +2621,30 @@ impl BandSession {
             .filter(|&index| !frames[index].is_empty())
             .collect();
         if reaching.is_empty() {
-            outputs.mean.fill(0.0);
+            self.pending = Some(PendingBand {
+                samples,
+                reaching,
+                submission: None,
+                trace,
+            });
             return Ok(());
         }
         let bytes = samples * 4;
-        if gpu.mapped {
-            let total = reaching.len() * bytes;
-            let range = self.values.slice(..total as u64);
-            gpu.map(&[range], wgpu::MapMode::Write, None)?;
-            let copied = range.get_mapped_range_mut().map(|mut view| {
-                for (slot, &index) in reaching.iter().enumerate() {
-                    view.slice(slot * bytes..(slot + 1) * bytes)
-                        .copy_from_slice(bytemuck::cast_slice(frames[index]));
-                }
-            });
-            self.values.unmap();
-            copied.map_err(|error| error.to_string())?;
-        } else {
+        let total = (reaching.len() * bytes) as u64;
+        let upload = self.upload.as_ref().unwrap_or(&self.values);
+        let range = upload.slice(..total);
+        gpu.map(&[range], wgpu::MapMode::Write, None)?;
+        trace.mark("map upload");
+        let copied = range.get_mapped_range_mut().map(|mut view| {
             for (slot, &index) in reaching.iter().enumerate() {
-                gpu.queue.write_buffer(
-                    &self.values,
-                    (slot * bytes) as u64,
-                    bytemuck::cast_slice(frames[index]),
-                );
+                view.slice(slot * bytes..(slot + 1) * bytes)
+                    .copy_from_slice(bytemuck::cast_slice(frames[index]));
             }
-        }
+        });
+        trace.mark("pack");
+        upload.unmap();
+        trace.mark("unmap upload");
+        copied.map_err(|error| error.to_string())?;
         // The kernel numbers frames as the band reaches them.
         let weights: Vec<[f32; 2]> = reaching
             .iter()
@@ -2366,9 +2668,11 @@ impl BandSession {
         };
         gpu.queue
             .write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
-        gpu.queue
-            .write_buffer(&self.counts, 0, &vec![0u8; reaching.len() * 8]);
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        if self.upload.is_some() {
+            encoder.copy_buffer_to_buffer(upload, 0, &self.values, 0, total);
+        }
+        encoder.clear_buffer(&self.counts, 0, None);
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_pipeline(&gpu.bands_pipeline);
@@ -2385,8 +2689,43 @@ impl BandSession {
         }
         let count_bytes = (reaching.len() * 8) as u64;
         encoder.copy_buffer_to_buffer(&self.counts, 0, &self.counts_read, 0, count_bytes);
-        trace.mark("upload");
+        trace.mark("encode");
         let submission = gpu.queue.submit([encoder.finish()]);
+        self.pending = Some(PendingBand {
+            samples,
+            reaching,
+            submission: Some(submission),
+            trace,
+        });
+        Ok(())
+    }
+
+    /// Wait for this set's submitted band, write its outputs, and add its
+    /// per-frame counts. The buffers are reusable after a successful return.
+    pub(crate) fn collect(
+        &mut self,
+        outputs: BandOutputs<'_>,
+        counts: &mut [(usize, usize)],
+    ) -> Result<(), String> {
+        let PendingBand {
+            samples,
+            reaching,
+            submission,
+            mut trace,
+        } = self.pending.take().ok_or("no band has been submitted")?;
+        if outputs.mean.len() != samples || counts.len() != self.frame_count {
+            return Err("the outputs do not fit the submitted band".into());
+        }
+        let Some(submission) = submission else {
+            outputs.mean.fill(0.0);
+            return Ok(());
+        };
+        let gpu = self.gpu;
+        let output_bytes = (samples * 16) as u64;
+        let tally_bytes = (samples * 8) as u64;
+        let count_bytes = (reaching.len() * 8) as u64;
+        // Host elapsed time while other bands were staged, not GPU time.
+        trace.mark("in flight");
         let moments_from = self.moments_read.as_ref().unwrap_or(&self.moments);
         let tallies_from = self.tallies_read.as_ref().unwrap_or(&self.tallies);
         gpu.map(
@@ -2398,7 +2737,7 @@ impl BandSession {
             wgpu::MapMode::Read,
             Some(submission),
         )?;
-        trace.mark("kernel");
+        trace.mark("wait");
         if FAILED.load(Ordering::Relaxed) {
             return Err("the GPU failed".into());
         }
@@ -3030,6 +3369,151 @@ mod tests {
         release_resident();
     }
 
+    #[test]
+    fn gpu_clipping_lists_preserve_every_contribution_and_dense_overflow() {
+        if adapter_description().is_none() {
+            return;
+        }
+        let (width, height) = (1100, 1000);
+        let source = LinearImage::new(
+            width,
+            height,
+            3,
+            (0..width * height * 3)
+                .map(|index| 100.0 + (index % 127) as f32)
+                .collect(),
+        )
+        .unwrap();
+        let transform = SimilarityTransform {
+            scale: 1.0,
+            rotation_radians: 0.0,
+            translation_x: 0.3,
+            translation_y: -0.25,
+        };
+        let inverse = transform.inverse_map();
+        for density in [1, 2, 0] {
+            let mut mask = LinearImage::new(width, height, 1, vec![0.0; width * height]).unwrap();
+            if density == 2 {
+                mask.data.fill(1.0);
+            } else if density == 1 {
+                for y in 240..248 {
+                    for x in 540..548 {
+                        mask.data[y * width + x] = 0.25;
+                    }
+                }
+                mask.data[300 * width + 100] = f32::NAN;
+                mask.data[350 * width + 110] = -0.0;
+            }
+            for region in [
+                ReferenceRegion {
+                    x: 0,
+                    y: 0,
+                    width,
+                    height,
+                },
+                ReferenceRegion {
+                    x: 37,
+                    y: 211,
+                    width: 640,
+                    height: 480,
+                },
+            ] {
+                let (dense_image, dense) = resample_masked(
+                    &source,
+                    Some(&mask),
+                    region,
+                    &inverse,
+                    GpuSampling::Bilinear,
+                    &GpuOptions::default(),
+                )
+                .unwrap();
+                let dense = dense.unwrap();
+                let (image, compact) = resample_clipped(
+                    &source,
+                    Some(&mask),
+                    region,
+                    &inverse,
+                    GpuSampling::Bilinear,
+                    &GpuOptions::default(),
+                )
+                .unwrap();
+                assert!(
+                    dense_image
+                        .data
+                        .iter()
+                        .zip(&image.data)
+                        .all(|(a, b)| a.to_bits() == b.to_bits())
+                );
+                match compact.unwrap() {
+                    ClipMask::Dense(mask) => {
+                        assert_eq!(density, 2, "only the full mask should overflow");
+                        assert!(
+                            dense
+                                .data
+                                .iter()
+                                .zip(mask.data)
+                                .all(|(a, b)| a.to_bits() == b.to_bits())
+                        );
+                    }
+                    ClipMask::Sparse {
+                        width,
+                        height,
+                        entries,
+                    } => {
+                        assert_ne!(density, 2);
+                        assert_eq!((width, height), (region.width, region.height));
+                        let expected = dense
+                            .data
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, value)| value.is_finite() && **value > 0.0)
+                            .map(|(index, value)| (index, value.to_bits()))
+                            .collect::<Vec<_>>();
+                        let mut actual = entries
+                            .into_iter()
+                            .map(|(index, value)| (index, value.to_bits()))
+                            .collect::<Vec<_>>();
+                        actual.sort_unstable_by_key(|entry| entry.0);
+                        assert_eq!(actual, expected);
+                    }
+                }
+            }
+        }
+        // CPU plans run before GPU admission, including from a bounded
+        // one-thread pool with several frame tasks and one GPU-call permit.
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        let mut mask = LinearImage::new(width, height, 1, vec![0.0; width * height]).unwrap();
+        mask.data[244 * width + 541] = 1.0;
+        pool.install(|| {
+            (0..4).into_par_iter().for_each(|_| {
+                let (_, mask) = resample_clipped(
+                    &source,
+                    Some(&mask),
+                    ReferenceRegion {
+                        x: 37,
+                        y: 211,
+                        width: 640,
+                        height: 480,
+                    },
+                    &inverse,
+                    GpuSampling::Bilinear,
+                    &GpuOptions {
+                        concurrency: 1,
+                        ..GpuOptions::default()
+                    },
+                )
+                .unwrap();
+                assert!(
+                    matches!(mask, Some(ClipMask::Sparse { entries, .. }) if entries.len() == 4)
+                );
+            })
+        });
+        release_resident();
+    }
+
     /// The GPU resamples as the CPU does, to a small fraction of the noise,
     /// with the same coverage, over a whole grid and a region of it.
     #[test]
@@ -3124,7 +3608,7 @@ mod tests {
         for (width, height, channels, depth, weighted) in [
             (400, 300, 3, 12, false),
             (400, 300, 3, 12, true),
-            (300, 200, 1, 25, true),
+            (300, 500, 1, 25, true),
         ] {
             let what = format!("{width}x{height}x{channels}, {depth} frames, weighted {weighted}");
             let frames = crate::batch::tests::synthetic_frames(width, height, channels, depth, 7);
@@ -3145,6 +3629,21 @@ mod tests {
                 |_, _, _| {},
             )
             .unwrap();
+            // Enough samples to use the GPU, with both buffer sets reused
+            // and a shorter tail. Band boundaries must change no bits,
+            // including variances, rejection decisions and frame counts.
+            let rows = MINIMUM_SAMPLES.div_ceil(width * channels * depth) + 1;
+            let banded = crate::integrate_registered_frames_banded(
+                depth,
+                &crate::BatchStackOptions {
+                    band_memory_bytes: 2 * rows * width * channels * depth * 4,
+                    ..options.clone()
+                },
+                |index| Ok(frames[index].clone()),
+                |_, _, _| {},
+            )
+            .unwrap();
+            crate::batch::tests::assert_same_result(&banded, &[], &gpu, &[]);
             let samples = cpu.snapshot.coverage.len();
             let same = (0..samples)
                 .filter(|&at| {

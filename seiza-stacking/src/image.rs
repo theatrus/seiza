@@ -15,6 +15,19 @@ pub struct LinearImage {
     pub data: Vec<f32>,
 }
 
+/// The contribution of a registered raw-clipping mask. A sparse mask keeps
+/// only its finite positive samples; zeros and missing pixels contribute
+/// nothing. It is a statistic, not a raster with a finite-pixel footprint.
+pub(crate) enum ClipMask {
+    Dense(LinearImage),
+    #[cfg(feature = "gpu")]
+    Sparse {
+        width: usize,
+        height: usize,
+        entries: Vec<(usize, f32)>,
+    },
+}
+
 /// An image read as one `region` of a larger grid, every sample outside
 /// which is `NaN`: a frame registered onto the part of an expanded canvas its
 /// footprint reaches, read as the canvas-sized image it stands for.

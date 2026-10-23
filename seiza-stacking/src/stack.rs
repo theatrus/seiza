@@ -2581,7 +2581,7 @@ pub(crate) struct ReadyFrame {
     staged: Option<crate::replay::StagedFrame>,
     /// How much of each pixel of `region` the frame's clipped raw pixels
     /// reach, from 0 to 1, when any of them clipped.
-    clipped: Option<LinearImage>,
+    clipped: Option<crate::image::ClipMask>,
     /// The normalization `registered` still waits for, when it was applied
     /// to `on_gpu` instead: the CPU's copy needs it only if the frame is
     /// integrated there after all.
@@ -3216,7 +3216,7 @@ impl IntegrationHalf<'_> {
             });
         };
         if let Some(clipped) = &clipped {
-            self.accumulator.add_clipped(
+            self.accumulator.add_clipped_mask(
                 clipped,
                 region,
                 self.reference_width,
@@ -3533,6 +3533,41 @@ impl Accumulator {
         let integrated =
             (accepted >= admit_at).then(|| self.integrate_placed(frame, rejection, weights));
         (accepted, integrated)
+    }
+
+    fn add_clipped_mask(
+        &mut self,
+        mask: &crate::image::ClipMask,
+        region: ReferenceRegion,
+        grid_width: usize,
+        channels: usize,
+    ) {
+        match mask {
+            crate::image::ClipMask::Dense(mask) => {
+                self.add_clipped(mask, region, grid_width, channels)
+            }
+            #[cfg(feature = "gpu")]
+            crate::image::ClipMask::Sparse {
+                width,
+                height,
+                entries,
+            } => {
+                if (*width, *height) != (region.width, region.height) || entries.is_empty() {
+                    return;
+                }
+                let pixels = self.samples() / channels.max(1);
+                let clipped = self.clipped.get_or_insert_with(|| vec![0.0; pixels]);
+                // Each entry names a different pixel. Frames still arrive
+                // in admission order, so these are the dense path's exact
+                // additions, with its zero and non-finite work omitted.
+                for &(index, value) in entries {
+                    if index < width * height && value.is_finite() && value > 0.0 {
+                        let at = (region.y + index / width) * grid_width + region.x + index % width;
+                        clipped[at] += value.min(1.0);
+                    }
+                }
+            }
+        }
     }
 
     /// Add a frame's clipped share of each pixel of `region`, a mono image
@@ -4298,6 +4333,64 @@ mod tests {
         stacker.save_context(&path).unwrap();
         let reopened = LiveStacker::open_context(&path).unwrap();
         assert_eq!(reopened.clipped_fraction().unwrap().data, fraction.data);
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn sparse_clipping_matches_dense_across_regions_and_frame_order() {
+        let (width, height, channels) = (43, 31, 3);
+        let mut dense = Accumulator::new(width * height * channels, false);
+        let mut sparse = Accumulator::new(width * height * channels, false);
+        for frame in 0..10 {
+            let region = ReferenceRegion {
+                x: 3 + frame,
+                y: 5,
+                width: 13,
+                height: 17,
+            };
+            let data = (0..region.width * region.height)
+                .map(|index| match (index + frame) % 13 {
+                    0 => f32::NAN,
+                    1 => -0.25,
+                    2 => 2.0,
+                    3 => 1.0e-7,
+                    4 => 0.37,
+                    _ => 0.0,
+                })
+                .collect::<Vec<_>>();
+            let entries = data
+                .iter()
+                .enumerate()
+                .rev()
+                .filter(|(_, value)| value.is_finite() && **value > 0.0)
+                .map(|(index, value)| (index, *value))
+                .collect();
+            dense.add_clipped(
+                &LinearImage::new(region.width, region.height, 1, data).unwrap(),
+                region,
+                width,
+                channels,
+            );
+            sparse.add_clipped_mask(
+                &crate::image::ClipMask::Sparse {
+                    width: region.width,
+                    height: region.height,
+                    entries,
+                },
+                region,
+                width,
+                channels,
+            );
+            assert!(
+                dense
+                    .clipped
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .zip(sparse.clipped.as_ref().unwrap())
+                    .all(|(a, b)| a.to_bits() == b.to_bits())
+            );
+        }
     }
 
     /// A stack's GPU options decide where its arithmetic runs, not what it
