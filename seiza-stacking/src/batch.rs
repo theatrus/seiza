@@ -49,16 +49,16 @@ pub struct BatchStackOptions {
     /// Reintegration reads every frame's scratch file in bands of rows and
     /// runs all three passes on one band of every frame before it reads the
     /// next, so each file is read once rather than three times and the
-    /// per-pixel statistics stay in the processor's caches. It holds two
-    /// bands of every frame, one being integrated and one being read: within
-    /// half this memory each, at most 128 MiB each on the CPU and 512 MiB
+    /// per-pixel statistics stay in the processor's caches. Each input band
+    /// fits within half this memory, at most 128 MiB on the CPU and 512 MiB
     /// on a GPU, limited further by the device's storage bindings, and
-    /// never less than a row. A stack whose frames are read whole first, to
+    /// never less than a row. The CPU holds two bands, one being integrated
+    /// and one being read. A stack whose frames are read whole first, to
     /// fit their normalization again, reads as many at once as half this
-    /// memory holds, from two to four. GPU integration additionally holds
-    /// two sets of device band buffers and, on a discrete GPU, two upload
-    /// bands, each sized for those same rows. The result does not depend on
-    /// it.
+    /// memory holds, from two to four. GPU integration fills two reusable
+    /// device band sets from bounded decoded rows, through two upload bands
+    /// on a discrete GPU, without additional full CPU input bands. Device
+    /// outputs use those same rows. The result does not depend on it.
     pub band_memory_bytes: usize,
     /// Which passes may run on the GPU: here the rejection passes of
     /// [`integrate_registered_frames_banded`], as

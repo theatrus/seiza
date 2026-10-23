@@ -64,7 +64,11 @@ from it arrives. These stages run there:
   submission from collection: the CPU stages and submits the next band
   before collecting the previous one's outputs. On discrete GPUs each set
   has one mapped upload buffer rather than a separate staging write for
-  each frame. Frame order and rejection
+  each frame. Cache readers decode and normalize bounded rows directly
+  into disjoint parts of that mapping, without an intermediate full input
+  band or a serial packing copy. GPU input views cover pairs of frames so
+  their offsets stay eight-byte aligned even for odd sample counts. The
+  CPU retains its separate read-ahead band buffers. Frame order and rejection
   arithmetic stay the same. A band that records sample fates for a drizzle
   is integrated on the CPU. A GPU failure retries the whole integration on
   the CPU with fresh outputs and frame counts; progress starts again at the
@@ -107,14 +111,34 @@ as a mono one, is read again there by resampling. Each thread keeps at most
 one such frame, known by where its samples lie, how many there are and a
 fingerprint of 1024 of them, and gives it back when the frame is prepared.
 Resampling's output stays on the GPU too, while a live stack's moments are
-there: the CPU fits the frame's normalization from its copy, the GPU
+there: the CPU fits the frame's normalization from returned samples, the GPU
 applies it where the frame lies (one gain and offset per channel fused as
 the CPU's `mul_add`, bit for bit; a tile grid interpolated with the CPU's
 own weights, within a few units in the last place), and the accumulator
-reads it there. The CPU's copy is dropped once the frame is normalized, so
+reads it there. Any complete CPU copy is dropped once the frame is normalized, so
 a frame waiting to be integrated holds one copy, not two; a frame the GPU
 cannot integrate after all comes back from it, normalized. The debayered
 frame still comes back to the CPU, which measures its noise for weighting.
+
+On discrete GPUs, ordinary unsited frames covering the full reference grid
+keep resampled samples on the device through fitting and admission. A
+live-only stack without retained cache files downloads just the exact pixels
+the existing normalization
+fit and photometry inspect, including fallback fits. A shared plan uploads
+their indices once. The GPU gathers unchanged values and counts finite
+samples over the entire frame with integer reductions; the CPU runs the
+same fits, in the same sample order, against those values. The plan cache
+holds one recent reference, including a decision that sampling is too
+dense to benefit; in-flight frames own their plans.
+
+When reintegration retains frames, its unnormalized full payload must still
+be transferred. That path keeps its original readback and cache writer:
+sharing a mapped readback with the fits and writer reduced CPU time but did
+not improve elapsed time in paired Windows runs. Adding a compact transfer
+before the full cache transfer was slower too. Dense live-only sampling,
+channel-sited or photosite frames, partial footprints and shared-memory
+adapters also keep the existing path. Cache headers, zeros and sample files
+stay unchanged.
 
 ## How close it stays to the CPU
 
@@ -364,8 +388,9 @@ the same way.
 - **Frames that stay on the GPU** from calibration to integration, above.
   A debayered frame already does from VNG to integration. What still
   crosses is the debayered frame back (for its noise), the registered frame
-  back (for the normalization fit, photometry and the cache), and the clip
-  mask both ways.
+  back on paths without compact fit readback, and the cache payload when a
+  reintegration retains it. Sparse clipping already transfers compact lists;
+  dense masks retain their fallback.
 - **Speculative integration.** One pass that classifies and integrates
   into a second copy of the moments, kept when the frame is admitted: in
   the `gpu-spike` experiments 44 ms a frame against 76 ms for separate

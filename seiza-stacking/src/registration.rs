@@ -2021,6 +2021,58 @@ pub(crate) fn resample_region_sited_masked(
     )
 }
 
+/// The live stack's ordinary, unsited sampling, with an owned GPU result
+/// and no full image readback. The caller falls back to the existing path
+/// for unsupported geometry, small images or a failed device.
+#[cfg(feature = "gpu")]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub(crate) fn resample_region_retained(
+    source: &LinearImage,
+    mask: Option<&LinearImage>,
+    region: ReferenceRegion,
+    geometry: FrameGeometry<'_>,
+    sampling: Sampling,
+    gpu: &crate::GpuOptions,
+) -> Option<(
+    LinearImage,
+    Option<crate::image::ClipMask>,
+    crate::gpu::GpuFrame,
+)> {
+    match geometry {
+        FrameGeometry::Similarity(transform) => transform.validate().ok()?,
+        FrameGeometry::Warp(warp) => warp.validate().ok()?,
+    }
+    let sampling = match sampling {
+        Sampling::Bilinear => crate::gpu::GpuSampling::Bilinear,
+        Sampling::Lanczos3 => {
+            let mut clamp_spans = [0.0; 4];
+            for (span, value) in clamp_spans.iter_mut().zip(lanczos_clamp_spans(source)) {
+                *span = value;
+            }
+            crate::gpu::GpuSampling::Lanczos3 { clamp_spans }
+        }
+        Sampling::NearestPhotosite(_) => return None,
+    };
+    match geometry {
+        FrameGeometry::Similarity(transform) => crate::gpu::resample_retained(
+            source,
+            mask,
+            region,
+            &transform.inverse_map(),
+            sampling,
+            gpu,
+        ),
+        FrameGeometry::Warp(warp) => crate::gpu::resample_retained(
+            source,
+            mask,
+            region,
+            &|x, y| warp.apply(x, y),
+            sampling,
+            gpu,
+        ),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resample_region_sited(
     source: &LinearImage,

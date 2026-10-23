@@ -27,6 +27,23 @@ pub(crate) trait BandSource: Sync {
     /// registered and normalized samples from row `top` on.
     fn read(&self, index: usize, top: usize, band: &mut [f32]) -> Result<()>;
 
+    /// Stream a band into its destination in bounded runs. Cache sources
+    /// override this to decode and normalize straight into GPU staging,
+    /// without holding another complete input band.
+    #[cfg(feature = "gpu")]
+    fn read_into(
+        &self,
+        index: usize,
+        top: usize,
+        samples: usize,
+        write: &mut dyn FnMut(usize, &[f32]),
+    ) -> Result<()> {
+        let mut band = vec![0.0; samples];
+        self.read(index, top, &mut band)?;
+        write(0, &band);
+        Ok(())
+    }
+
     /// The region of the grid frame `index` covers, every sample beyond
     /// which is `NaN`, when it is not the whole grid: a frame on part of an
     /// expanded canvas. A band it does not reach is not read.
@@ -338,62 +355,80 @@ impl Run<'_> {
             }
             Ok::<_, String>(())
         };
-        let integrated = for_each_band(
-            self.shape,
-            frame_count,
-            rows,
-            source,
-            options.cancel.as_ref(),
-            |band, top, frames| {
+        let integrate_cpu = |outputs: &mut Outputs, progress: &mut dyn FnMut(usize, usize)| {
+            for_each_band(
+                self.shape,
+                frame_count,
+                rows,
+                source,
+                options.cancel.as_ref(),
+                |band, top, frames| {
+                    progress(band, bands);
+                    check_cancelled(options)?;
+                    // A frame the band does not reach was not read, and its
+                    // samples are empty.
+                    let band_samples = rows.min(height - top) * row_samples;
+                    let context = Band {
+                        frames,
+                        regions: &regions,
+                        width,
+                        channels,
+                        weights,
+                        rejection: &rejection,
+                        cancel: options.cancel.as_ref(),
+                        counts: &counts,
+                        fates: fates.as_deref(),
+                        start: top * row_samples,
+                    };
+                    outputs
+                        .chunks_mut(context.start..context.start + band_samples, tile)
+                        .enumerate()
+                        .for_each_init(
+                            || TileScratch::new(tile, frame_count),
+                            |scratch, (index, mut output)| {
+                                context.tile::<WEIGHTED>(scratch, index * tile, &mut output);
+                            },
+                        );
+                    check_cancelled(options)
+                },
+            )
+        };
+        #[cfg(not(feature = "gpu"))]
+        let integrated = integrate_cpu(&mut outputs, progress);
+        #[cfg(feature = "gpu")]
+        let integrated = if let Some(sessions) = &mut gpu {
+            (0..bands).try_for_each(|band| {
                 progress(band, bands);
                 check_cancelled(options)?;
-                // A frame the band does not reach was not read, and its
-                // samples are empty.
-                let band_samples = rows.min(height - top) * row_samples;
-                #[cfg(feature = "gpu")]
-                if let Some(sessions) = &mut gpu {
-                    let slot = band % sessions.len();
-                    let range = top * row_samples..top * row_samples + band_samples;
-                    // Submit before collecting: staging this band overlaps
-                    // the previous band's GPU work. Two sets bound the
-                    // uploads and the number of submissions in flight.
-                    let result = sessions[slot].submit(frames, band_samples).and_then(|()| {
-                        if let Some((previous, range)) = pending.take() {
-                            collect(&mut sessions[previous], &mut outputs, range)?;
-                        }
-                        pending = Some((slot, range));
-                        Ok(())
-                    });
-                    if let Err(reason) = result {
+                let top = band * rows;
+                let band_rows = rows.min(height - top);
+                let band_samples = band_rows * row_samples;
+                let reaching = (0..frame_count)
+                    .filter(|&index| reaches_rows(regions[index], top, band_rows))
+                    .collect();
+                let slot = band % sessions.len();
+                match sessions[slot].submit_from(source, top, band_samples, reaching) {
+                    Ok(()) => {}
+                    Err(crate::gpu::BandStageError::Source(error)) => return Err(error),
+                    Err(crate::gpu::BandStageError::Gpu(reason)) => {
                         gpu_failure = Some(reason.clone());
                         return Err(Error::Stack(reason));
                     }
-                    return check_cancelled(options);
                 }
-                let context = Band {
-                    frames,
-                    regions: &regions,
-                    width,
-                    channels,
-                    weights,
-                    rejection: &rejection,
-                    cancel: options.cancel.as_ref(),
-                    counts: &counts,
-                    fates: fates.as_deref(),
-                    start: top * row_samples,
-                };
-                outputs
-                    .chunks_mut(context.start..context.start + band_samples, tile)
-                    .enumerate()
-                    .for_each_init(
-                        || TileScratch::new(tile, frame_count),
-                        |scratch, (index, mut output)| {
-                            context.tile::<WEIGHTED>(scratch, index * tile, &mut output);
-                        },
-                    );
+                // Read and submit this band before collecting its predecessor:
+                // the GPU overlaps its copy and compute with bounded cache reads.
+                if let Some((previous, range)) = pending.take()
+                    && let Err(reason) = collect(&mut sessions[previous], &mut outputs, range)
+                {
+                    gpu_failure = Some(reason.clone());
+                    return Err(Error::Stack(reason));
+                }
+                pending = Some((slot, top * row_samples..top * row_samples + band_samples));
                 check_cancelled(options)
-            },
-        );
+            })
+        } else {
+            integrate_cpu(&mut outputs, progress)
+        };
         #[cfg(feature = "gpu")]
         let integrated = integrated.and_then(|()| {
             check_cancelled(options)?;
@@ -472,9 +507,11 @@ mod tests {
     use crate::{GpuOptions, LinearImage};
     use std::sync::{Arc, atomic::AtomicBool};
 
-    const SHAPE: (usize, usize, usize) = (384, 513, 3);
+    // Odd row and band sizes also exercise four-byte frame boundaries
+    // within GPU mappings, whose view offsets must stay eight-byte aligned.
+    const SHAPE: (usize, usize, usize) = (385, 513, 3);
     const DEPTH: usize = 12;
-    const ROWS: usize = 80;
+    const ROWS: usize = 81;
 
     struct Source {
         frames: Vec<LinearImage>,

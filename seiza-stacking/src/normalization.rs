@@ -365,6 +365,96 @@ impl BackgroundSamples {
     }
 }
 
+/// Every pixel the existing CPU preparation may inspect, including the
+/// fallback gain fit and the replay's background sample grid. No values are
+/// approximated: gathered frames use these same CPU fits and sample order.
+#[cfg(feature = "gpu")]
+pub(crate) fn preparation_sample_indices(
+    (width, height, channels): (usize, usize, usize),
+    mode: NormalizationMode,
+    stars: &[(f64, f64)],
+    background: Option<&BackgroundSamples>,
+) -> Vec<u32> {
+    fn add(
+        indices: &mut Vec<u32>,
+        image_width: usize,
+        channels: usize,
+        (x, y, width, height): (usize, usize, usize, usize),
+        target: usize,
+    ) {
+        let stride = (width * height / target).max(1);
+        for sample in (0..width * height).step_by(stride) {
+            let pixel = (y + sample / width) * image_width + x + sample % width;
+            indices.extend((0..channels).map(|channel| (pixel * channels + channel) as u32));
+        }
+    }
+    let mut indices = Vec::new();
+    let whole = (0, 0, width, height);
+    if !matches!(mode, NormalizationMode::None) {
+        add(&mut indices, width, channels, whole, 20_000);
+    }
+    if let NormalizationMode::LocalBackground { tile_size }
+    | NormalizationMode::Local { tile_size } = mode
+    {
+        let columns = width.div_ceil(tile_size);
+        let rows = height.div_ceil(tile_size);
+        let target = if matches!(mode, NormalizationMode::LocalBackground { .. }) {
+            4_000
+        } else {
+            20_000
+        };
+        for cell in 0..columns * rows {
+            add(
+                &mut indices,
+                width,
+                channels,
+                tile(cell, columns, width, height, tile_size),
+                target,
+            );
+        }
+    }
+    if matches!(mode, NormalizationMode::LocalBackground { .. }) {
+        add(&mut indices, width, channels, whole, 4_000);
+        let outer = PHOTOMETRY_ANNULUS.1.ceil() as isize + 1;
+        for &(x, y) in stars {
+            let (cx, cy) = (x.round() as isize, y.round() as isize);
+            if cx < outer
+                || cy < outer
+                || cx + outer >= width as isize
+                || cy + outer >= height as isize
+            {
+                continue;
+            }
+            // Photometry rejects non-finite values throughout the square,
+            // even beyond the circular aperture and annulus.
+            for py in cy - outer..=cy + outer {
+                for px in cx - outer..=cx + outer {
+                    let pixel = py as usize * width + px as usize;
+                    indices
+                        .extend((0..channels).map(|channel| (pixel * channels + channel) as u32));
+                }
+            }
+        }
+    }
+    if let Some(layout) = background {
+        for cell in 0..layout.columns * layout.height.div_ceil(layout.tile_size) {
+            let (x, y, width, height) = tile(
+                cell,
+                layout.columns,
+                layout.width,
+                layout.height,
+                layout.tile_size,
+            );
+            for pixel in tile_sample_pixels(layout.width, x, y, width, height) {
+                indices.extend((0..channels).map(|channel| (pixel * channels + channel) as u32));
+            }
+        }
+    }
+    indices.sort_unstable();
+    indices.dedup();
+    indices
+}
+
 /// Tile `cell`'s position and size, counting tiles row by row, `columns`
 /// to a row, over an image of `width` by `height`.
 fn tile(
@@ -1614,6 +1704,123 @@ fn affine_for_region(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn gathered_samples_preserve_every_preparation_fit() {
+        let (width, height, channels) = (313, 271, 3);
+        let stars = (0..20)
+            .map(|index| {
+                (
+                    25.25 + (index % 5) as f64 * 55.0,
+                    24.5 + (index / 5) as f64 * 60.0,
+                )
+            })
+            .collect::<Vec<_>>();
+        let data = (0..width * height * channels)
+            .map(|index| {
+                let pixel = index / channels;
+                let (x, y) = ((pixel % width) as f64, (pixel / width) as f64);
+                let stars = stars
+                    .iter()
+                    .map(|&(sx, sy)| 300.0 * (-((x - sx).powi(2) + (y - sy).powi(2)) / 6.0).exp())
+                    .sum::<f64>();
+                (100.0
+                    + 0.03 * x
+                    + 0.01 * y
+                    + stars
+                    + ((index * 97 % 1009) as f64 / 1009.0 - 0.5) * 8.0) as f32
+            })
+            .collect();
+        let mut reference = LinearImage::new(width, height, channels, data).unwrap();
+        reference.data[..channels].fill(50_000.0);
+        let source = LinearImage::new(
+            width,
+            height,
+            channels,
+            reference
+                .data
+                .iter()
+                .enumerate()
+                .map(|(index, &value)| {
+                    if index % 701 == 0 && index / (width * channels) < 3 {
+                        f32::NAN
+                    } else {
+                        value * 1.1 + 7.0 + (index / channels % width) as f32 * 0.002
+                    }
+                })
+                .collect(),
+        )
+        .unwrap();
+        let background = BackgroundSamples::new(width, height, channels, 256);
+        let ceilings = photometric_ceilings(&reference);
+        for mode in [
+            NormalizationMode::None,
+            NormalizationMode::Global,
+            NormalizationMode::Local { tile_size: 64 },
+            NormalizationMode::LocalBackground { tile_size: 64 },
+            NormalizationMode::LocalBackground { tile_size: 256 },
+        ] {
+            let indices = preparation_sample_indices(
+                (width, height, channels),
+                mode,
+                &stars,
+                Some(&background),
+            );
+            let mut lookup = vec![u32::MAX; source.data.len()];
+            let values = indices
+                .iter()
+                .enumerate()
+                .map(|(at, &index)| {
+                    lookup[index as usize] = at as u32;
+                    source.data[index as usize]
+                })
+                .collect::<Vec<_>>();
+            let shape = LinearImage {
+                width,
+                height,
+                channels,
+                data: Vec::new(),
+            };
+            let sparse = Placed {
+                sampled: Some(crate::image::SampledPixels {
+                    lookup: &lookup,
+                    values: &values,
+                }),
+                ..Placed::whole(&shape)
+            };
+            let dense = Placed::whole(&source);
+            let bits = |values: &[f32]| {
+                values
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                bits(&background.of_placed(sparse).unwrap()),
+                bits(&background.of_placed(dense).unwrap())
+            );
+            let photometry = matches!(mode, NormalizationMode::LocalBackground { .. });
+            let gain = photometry
+                .then(|| photometric_gains(&reference, &ceilings, dense, &stars))
+                .flatten();
+            let gathered_gain = photometry
+                .then(|| photometric_gains(&reference, &ceilings, sparse, &stars))
+                .flatten();
+            assert_eq!(gain, gathered_gain);
+            if photometry {
+                assert!(gain.is_some());
+            }
+            for gains in [None, gain.as_deref()] {
+                let expected =
+                    NormalizationMap::estimate_with_gains(&reference, dense, mode, gains).unwrap();
+                let actual =
+                    NormalizationMap::estimate_with_gains(&reference, sparse, mode, gains).unwrap();
+                assert_eq!(bits(&expected.gains), bits(&actual.gains), "{mode:?}");
+                assert_eq!(bits(&expected.offsets), bits(&actual.offsets), "{mode:?}");
+            }
+        }
+    }
 
     /// A frame the GPU resampled, normalized where it lies, is the CPU's
     /// normalized frame: to the bit for one gain and offset per channel,

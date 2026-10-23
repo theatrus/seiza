@@ -39,6 +39,26 @@ pub(crate) struct Placed<'a> {
     /// The grid's width and height in pixels.
     pub(crate) width: usize,
     pub(crate) height: usize,
+    /// Exact gathered samples, instead of a complete CPU image.
+    pub(crate) sampled: Option<SampledPixels<'a>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SampledPixels<'a> {
+    pub(crate) lookup: &'a [u32],
+    pub(crate) values: &'a [f32],
+}
+
+impl SampledPixels<'_> {
+    fn at(&self, index: usize) -> f32 {
+        let at = self.lookup[index];
+        debug_assert_ne!(
+            at,
+            u32::MAX,
+            "preparation requested an ungathered sample {index}"
+        );
+        self.values.get(at as usize).copied().unwrap_or(f32::NAN)
+    }
 }
 
 /// An image of one `region` of a larger grid, owning its samples: what a
@@ -75,6 +95,7 @@ impl PlacedImage {
             region: self.region,
             width: self.width,
             height: self.height,
+            sampled: None,
         }
     }
 
@@ -106,6 +127,7 @@ impl<'a> Placed<'a> {
             region,
             width: grid.width,
             height: grid.height,
+            sampled: None,
         }
     }
 
@@ -121,6 +143,7 @@ impl<'a> Placed<'a> {
             },
             width: image.width,
             height: image.height,
+            sampled: None,
         }
     }
 
@@ -139,7 +162,11 @@ impl<'a> Placed<'a> {
         let column = x.wrapping_sub(self.region.x);
         let row = y.wrapping_sub(self.region.y);
         if column < self.region.width && row < self.region.height {
-            self.image.data[(row * self.region.width + column) * self.image.channels + channel]
+            let index = (row * self.region.width + column) * self.image.channels + channel;
+            match self.sampled {
+                Some(sampled) => sampled.at(index),
+                None => self.image.data[index],
+            }
         } else {
             f32::NAN
         }
@@ -167,14 +194,21 @@ impl<'a> Placed<'a> {
     #[inline(always)]
     pub(crate) fn sample(&self, index: usize) -> f32 {
         if self.is_whole() {
-            return self.image.data[index];
+            return match self.sampled {
+                Some(sampled) => sampled.at(index),
+                None => self.image.data[index],
+            };
         }
         let channels = self.image.channels;
         let pixel = index / channels;
         let column = (pixel % self.width).wrapping_sub(self.region.x);
         let row = (pixel / self.width).wrapping_sub(self.region.y);
         if column < self.region.width && row < self.region.height {
-            self.image.data[(row * self.region.width + column) * channels + index % channels]
+            let at = (row * self.region.width + column) * channels + index % channels;
+            match self.sampled {
+                Some(sampled) => sampled.at(at),
+                None => self.image.data[at],
+            }
         } else {
             f32::NAN
         }

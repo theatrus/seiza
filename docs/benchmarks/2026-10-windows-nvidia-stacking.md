@@ -461,3 +461,85 @@ GPU output cases on DX12/DXC, including traced global and local-background
 pipeline startup. Stacking Clippy, the CPU-only build, workspace and Python
 formatting, binding parity, release CLI/C ABI builds and the three-frame
 native C ABI smoke test pass. The generated C header stays unchanged.
+
+## Direct band reads and compact live-only readback
+
+Cache bands now stream decoded, normalized rows straight into disjoint
+parts of the GPU's mapped upload buffer. They no longer allocate full CPU
+input bands and then serialize a second packing copy. Two GPU buffer sets
+still overlap submission and collection. Mapping pairs of frames keeps
+view offsets aligned even when a frame has an odd number of samples.
+The CPU integration path keeps its existing read-ahead bands; a source
+error or cancellation still returns without a GPU-to-CPU retry, and a GPU
+failure still retries with fresh outputs and counts.
+
+A live-only stack on a discrete GPU can also leave a full-grid, unsited
+resampled image on the device. It gathers exactly the CPU normalization
+and photometry's sample positions, including the fallback fits, and counts
+finite samples on the GPU with integer reductions. The original CPU fits
+run on those unchanged values, in their original order. This is not an
+approximate GPU fit. One recent reference plan is shared between workers;
+dense plans are rejected once and remembered, and the extra shaders compile
+only when compact readback is actually used. Shared-memory adapters,
+partial footprints, channel-sited and photosite frames keep the original
+readback. The change adds no public option or binding surface.
+
+On the same 200 mono 61 MP FITS files, with 16 Rayon threads, 12 workers,
+three GPU calls and a 16 GiB pipeline budget, the final untraced runs gave:
+
+| Median of three runs | Direct band reads, full readback control | Retained implementation |
+|---|---:|---:|
+| Live-only elapsed | 16.03 s | **13.46 s** |
+| Live-only process CPU | 178.30 CPU-s | **164.19 CPU-s** |
+| Live-only peak host working set | 7.80 GiB | **6.70 GiB** |
+| With reintegration, elapsed | 27.39 s | 28.24 s |
+| With reintegration, process CPU | 259.34 CPU-s | 260.33 CPU-s |
+
+Live-only elapsed falls **16.0%**, process CPU **7.9%**, and median peak
+working set **14.1%**. The final live-only times were 13.76, 13.30 and
+13.46 s. The controls were 16.03, 15.98 and 16.14 s. A traced final run
+reports **16,232,116 bytes instead of 244,685,952 bytes** per resampled
+image, a **93.4% reduction** in that image's readback, including the finite
+count. Other transfers such as initial uploads and clip-mask packets remain.
+
+There is no repeatable elapsed improvement for the full reintegration run.
+The final range is 27.48–28.84 s, against the control's 26.42–28.09 s;
+the previous PR head's median was 28.07 s. Reintegration still needs the
+full unnormalized cache payload, and that path retains the existing full
+readback and cache writer. A prototype gathering compact samples and then
+reading the full cache payload took about 29.2 s. Sharing one mapped
+readback between fitting and cache writing reduced process CPU but gave a
+28.04 s median in paired runs, against the control's 27.39 s. A raw-byte
+cache-write trial also established no gain. Those cache changes were removed.
+
+The control and final measurements above include direct band reads. That
+change alone did not establish an end-to-end speedup here: its first
+untraced and traced reintegrations took 27.37 and 27.31 s. It removes the
+extra input-band storage and serialized packing step without changing band
+boundaries or arithmetic. The compact readback is where the repeatable
+live-only improvement comes from.
+
+All twelve control and retained FITS files were checked against their
+reported SHA-256 hashes and are byte-identical within each mode, including
+every one of the 61,171,488 output pixels. Every frame decision and every
+reported diagnostic is identical, with 192 accepted and eight rejected
+frames; the reintegrations reject the same 60,666,768 samples. The ignored
+`selected-final-summary.jsonl` records the individual runs and checks.
+
+Both output versions and all existing summaries are unchanged. The large
+global and local-background pipeline cases cover direct band reads; two
+new live-only cases use their already-recorded live summaries and cover
+compact readback. Corrupting gathered values fails both new cases, and a
+planted band payload corruption fails the cached local-background case.
+All planted changes were undone. Additional unit checks compare complete
+CPU fits with gathered mono/RGB samples, test finite counts and sample
+bits on the GPU, and exercise odd-sized bands, cancellation and rollback.
+
+Local validation passes the complete stacking and stretch test suites:
+470 and 60 unit tests, respectively, their integration/doc tests, and 38
+stacking plus three stretch output cases (existing ignores stay ignored).
+All six large GPU output cases also pass on DX12/DXC. Stacking Clippy with
+all targets/features and warnings denied, the CPU-only all-targets check,
+workspace/Python formatting, binding parity, release CLI/C ABI builds and
+the three-frame native C ABI smoke test pass. The generated C header is
+unchanged.

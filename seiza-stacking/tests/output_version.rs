@@ -784,6 +784,7 @@ fn registered_frames_a_host_integrates_keep_their_output() {
 fn a_stack_large_enough_for_the_gpu_keeps_its_output() {
     large_stack(
         false,
+        true,
         NormalizationMode::Global,
         LARGE_LIVE,
         LARGE_REINTEGRATED,
@@ -796,6 +797,7 @@ fn a_stack_large_enough_for_the_gpu_keeps_its_output() {
 fn a_pipelined_stack_large_enough_for_the_gpu_keeps_its_output() {
     large_stack(
         true,
+        true,
         NormalizationMode::Global,
         LARGE_LIVE,
         LARGE_REINTEGRATED,
@@ -806,6 +808,29 @@ fn a_pipelined_stack_large_enough_for_the_gpu_keeps_its_output() {
 fn a_locally_normalized_pipelined_stack_large_enough_for_the_gpu_keeps_its_output() {
     large_stack(
         true,
+        true,
+        NormalizationMode::LocalBackground { tile_size: 256 },
+        LARGE_LOCAL_LIVE,
+        LARGE_LOCAL_REINTEGRATED,
+    );
+}
+
+#[test]
+fn a_live_only_pipelined_stack_large_enough_for_the_gpu_keeps_its_output() {
+    large_stack(
+        true,
+        false,
+        NormalizationMode::Global,
+        LARGE_LIVE,
+        LARGE_REINTEGRATED,
+    );
+}
+
+#[test]
+fn a_live_only_locally_normalized_pipelined_stack_large_enough_for_the_gpu_keeps_its_output() {
+    large_stack(
+        true,
+        false,
         NormalizationMode::LocalBackground { tile_size: 256 },
         LARGE_LOCAL_LIVE,
         LARGE_LOCAL_REINTEGRATED,
@@ -831,6 +856,7 @@ const LARGE_LOCAL_REINTEGRATED: &[f64] = &[
 
 fn large_stack(
     pipelined: bool,
+    retain: bool,
     normalization: NormalizationMode,
     live_expected: &[f64],
     reintegrated_expected: &[f64],
@@ -886,7 +912,9 @@ fn large_stack(
         };
         let mut stacker =
             LiveStacker::open_fits(&paths[0], None, None, None, None, options.clone()).unwrap();
-        stacker.retain_frames_for_reintegration(None).unwrap();
+        if retain {
+            stacker.retain_frames_for_reintegration(None).unwrap();
+        }
         if pipelined {
             let report = stacker
                 .push_fits_pipelined(
@@ -919,6 +947,9 @@ fn large_stack(
         // Exercise both one band and repeated buffer reuse, including a
         // shorter final band. Each full band still reaches the GPU's
         // minimum work size. Changing band boundaries changes no arithmetic.
+        if !retain {
+            continue;
+        }
         for band_memory_bytes in [
             BatchStackOptions::default().band_memory_bytes,
             2 * 173 * LARGE_WIDTH * paths.len() * std::mem::size_of::<f32>(),

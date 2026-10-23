@@ -2756,42 +2756,112 @@ pub(crate) fn prepare_frame(
     // grid as the frame does: bilinearly, so a pixel reads how much of it
     // they reach, in the same pass where the GPU resamples.
     let mask = clipped.filter(|mask| (mask.width, mask.height) == (frame.width, frame.height));
-    let (mut registered, clipped) = crate::registration::resample_region_sited_masked(
-        &frame,
-        mask.as_ref(),
-        reference.width,
-        reference.height,
-        region,
-        geometry,
-        options.interpolation.into(),
-        options.channel_sites(cfa),
-        &options.gpu,
-    )?;
+    let resample = || {
+        crate::registration::resample_region_sited_masked(
+            &frame,
+            mask.as_ref(),
+            reference.width,
+            reference.height,
+            region,
+            geometry,
+            options.interpolation.into(),
+            options.channel_sites(cfa),
+            &options.gpu,
+        )
+    };
+    let stars = if matches!(
+        options.normalization,
+        NormalizationMode::LocalBackground { .. }
+    ) {
+        target.reference_star_positions()
+    } else {
+        Vec::new()
+    };
+    #[cfg(feature = "gpu")]
+    let mut sampled = None;
+    #[cfg(feature = "gpu")]
+    let mut retained = None;
+    #[cfg(feature = "gpu")]
+    let compact = if options.gpu.enabled
+        && options.gpu.accumulator
+        && options.gpu.resampling
+        && crate::gpu::accumulating()
+        && cache.is_none()
+        && frame.data.len() >= 1 << 20
+        && region.x == 0
+        && region.y == 0
+        && (region.width, region.height) == (reference.width, reference.height)
+        && options.channel_sites(cfa).is_none()
+        && !(cfa.is_some() && options.cfa_integration == CfaIntegration::BayerDrizzle)
+    {
+        crate::gpu::gather::plan(
+            (region.width, region.height, frame.channels),
+            scale.normalization(options.normalization),
+            &stars,
+        )
+        .and_then(|plan| {
+            let (image, mask, gpu_frame) = crate::registration::resample_region_retained(
+                &frame,
+                mask.as_ref(),
+                region,
+                geometry,
+                options.interpolation.into(),
+                &options.gpu,
+            )?;
+            match gpu_frame.gather(plan, &options.gpu) {
+                Ok(samples) => {
+                    sampled = Some(samples);
+                    retained = Some(gpu_frame);
+                    Some((image, mask))
+                }
+                Err(reason) => {
+                    crate::gpu::log_once(&format!(
+                        "preparing this frame with a full readback: {reason}"
+                    ));
+                    None
+                }
+            }
+        })
+    } else {
+        None
+    };
+    #[cfg(feature = "gpu")]
+    let (mut registered, clipped) = compact.map(Ok).unwrap_or_else(resample)?;
+    #[cfg(not(feature = "gpu"))]
+    let (mut registered, clipped) = resample()?;
     #[cfg(feature = "gpu")]
     trace.mark("resampling");
     // Where the GPU resampled the frame, its samples stay there for the
     // normalization and a GPU accumulator to read, when there is one.
     #[cfg(feature = "gpu")]
-    let mut on_gpu = (options.gpu.accumulator && crate::gpu::accumulating())
-        .then(|| {
-            crate::gpu::take_resident(
-                &registered.data,
-                (registered.width, registered.height, registered.channels),
-            )
-        })
-        .flatten();
-    let finite_samples = registered
-        .data
-        .par_iter()
-        .filter(|value| value.is_finite())
-        .count();
+    let mut on_gpu = retained.or_else(|| {
+        (options.gpu.accumulator && crate::gpu::accumulating())
+            .then(|| {
+                crate::gpu::take_resident(
+                    &registered.data,
+                    (registered.width, registered.height, registered.channels),
+                )
+            })
+            .flatten()
+    });
+    #[cfg(feature = "gpu")]
+    let finite_on_gpu = sampled.as_ref().map(|samples| samples.finite);
+    #[cfg(not(feature = "gpu"))]
+    let finite_on_gpu = None;
+    let finite_samples = finite_on_gpu.unwrap_or_else(|| {
+        registered
+            .data
+            .par_iter()
+            .filter(|value| value.is_finite())
+            .count()
+    });
     // On an expanded canvas, coverage is relative to the frame's own finite
     // footprint; a fixed grid measures coverage of the reference.
     let offered = if target.canvas.is_some() {
         (frame.data.iter().filter(|value| value.is_finite()).count() as f64
             * registration.transform.scale.powi(2)) as f32
     } else {
-        registered.sample_count() as f32
+        (registered.width * registered.height * registered.channels) as f32
     };
     let overlap_fraction = (finite_samples as f32 / offered.max(1.0)).min(1.0);
     if overlap_fraction < criteria.minimum_overlap_fraction {
@@ -2802,6 +2872,12 @@ pub(crate) fn prepare_frame(
             },
         ));
     }
+    let placed = Placed::on(&registered, region, reference);
+    #[cfg(feature = "gpu")]
+    let placed = Placed {
+        sampled: sampled.as_ref().map(|samples| samples.pixels()),
+        ..placed
+    };
     let gains = matches!(
         options.normalization,
         NormalizationMode::LocalBackground { .. }
@@ -2810,14 +2886,13 @@ pub(crate) fn prepare_frame(
         crate::normalization::photometric_gains(
             reference,
             target.reference_ceilings(reference),
-            Placed::on(&registered, region, reference),
-            &target.reference_star_positions(),
+            placed,
+            &stars,
         )
     })
     .flatten();
     #[cfg(feature = "gpu")]
     trace.mark("coverage and photometry");
-    let placed = Placed::on(&registered, region, reference);
     // An expanded canvas keeps the first value each sample received, so its
     // background is a patchwork of single frames' skies, each with its own
     // gradient. Matched tile by tile, every frame would take on that
@@ -2870,17 +2945,14 @@ pub(crate) fn prepare_frame(
     // gate turns the frame away. Under Bayer drizzle the photosites are kept
     // instead, below, with the samples of this image a background fit reads.
     let (mut staged, background) = match (cache, photosites) {
-        (Some(cache), None) => {
-            let placed = Placed::on(&registered, region, reference);
-            (
-                cache.stage(
-                    placed,
-                    cache.background_samples(placed),
-                    crate::replay::keeps_zeros(options, cfa),
-                ),
-                None,
-            )
-        }
+        (Some(cache), None) => (
+            cache.stage(
+                placed,
+                cache.background_samples(placed),
+                crate::replay::keeps_zeros(options, cfa),
+            ),
+            None,
+        ),
         (Some(cache), Some(_)) => (
             None,
             cache.background_samples(Placed::on(&registered, region, reference)),
@@ -2915,6 +2987,15 @@ pub(crate) fn prepare_frame(
         } else {
             #[cfg(feature = "gpu")]
             {
+                if registered.data.is_empty() {
+                    registered.data = on_gpu
+                        .as_ref()
+                        .and_then(|frame| frame.download())
+                        .unwrap_or_default();
+                    if registered.data.is_empty() {
+                        registered = resample()?.0;
+                    }
+                }
                 on_gpu = None;
             }
             if let Err(error) = normalization.apply_region(&mut registered, region.x, region.y) {
@@ -3179,6 +3260,7 @@ impl IntegrationHalf<'_> {
                     region,
                     width: self.reference_width,
                     height: self.reference_height,
+                    sampled: None,
                 },
                 staged,
                 self.options.rejection,
@@ -3228,6 +3310,7 @@ impl IntegrationHalf<'_> {
                         region,
                         width: self.reference_width,
                         height: self.reference_height,
+                        sampled: None,
                     },
                     self.options.rejection,
                     weights,
@@ -4849,6 +4932,7 @@ mod tests {
                     region,
                     width,
                     height,
+                    sampled: None,
                 };
                 let weights = [0.6 + 0.1 * frame as f32];
                 let weights = weighted.then_some(&weights[..]);
