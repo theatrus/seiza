@@ -111,6 +111,11 @@ jobs:
         with:
           python-version: "3.12"
       - uses: PyO3/maturin-action@v1
+        # Our runners set RUSTC_WRAPPER=sccache, and maturin passes it into its
+        # manylinux container, which has no sccache (and could not reach the
+        # cache's credentials). Empty means no wrapper.
+        env:
+          RUSTC_WRAPPER: ""
         with:
           working-directory: seiza-py
           rust-toolchain: 1.99.1
