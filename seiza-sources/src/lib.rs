@@ -343,15 +343,38 @@ fn distance_tile_name(level: u32, tile: u64) -> String {
 /// lacks: a level-5 tile is there when its file is, or when it was split
 /// and each of its children is there, down to level 9.
 pub fn missing_distance_tiles(dir: &Path) -> Vec<String> {
-    fn missing(dir: &Path, level: u32, tile: u64, out: &mut Vec<String>) {
+    // One listing, not a look at each of the 12,288 tiles: that is slow
+    // where opening a file is, on Windows above all.
+    let files = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_type()
+                .is_ok_and(|kind| kind.is_file() || (kind.is_symlink() && entry.path().is_file()))
+        })
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect();
+    missing_distance_tiles_among(&files)
+}
+
+/// [`missing_distance_tiles`] for a directory holding `files`.
+fn missing_distance_tiles_among(files: &std::collections::HashSet<String>) -> Vec<String> {
+    fn missing(
+        files: &std::collections::HashSet<String>,
+        level: u32,
+        tile: u64,
+        out: &mut Vec<String>,
+    ) {
         let name = distance_tile_name(level, tile);
-        let path = dir.join(&name);
-        if path.is_file() {
+        if files.contains(&name) {
             return;
         }
-        if level < DISTANCE_TILE_FINEST_LEVEL && path.with_extension("split").is_file() {
+        let split = Path::new(&name).with_extension("split");
+        if level < DISTANCE_TILE_FINEST_LEVEL && split.to_str().is_some_and(|s| files.contains(s)) {
             for child in 0..4 {
-                missing(dir, level + 1, tile * 4 + child, out);
+                missing(files, level + 1, tile * 4 + child, out);
             }
         } else {
             out.push(name);
@@ -359,7 +382,7 @@ pub fn missing_distance_tiles(dir: &Path) -> Vec<String> {
     }
     let mut out = Vec::new();
     for tile in 0..12 * 4_u64.pow(DISTANCE_TILE_LEVEL) {
-        missing(dir, DISTANCE_TILE_LEVEL, tile, &mut out);
+        missing(files, DISTANCE_TILE_LEVEL, tile, &mut out);
     }
     out
 }
@@ -2736,35 +2759,46 @@ mod tests {
 
     #[test]
     fn a_distance_download_is_whole_only_with_every_tile() {
+        let level = DISTANCE_TILE_LEVEL;
+        let split = |tile| {
+            Path::new(&distance_tile_name(level, tile))
+                .with_extension("split")
+                .to_str()
+                .unwrap()
+                .to_owned()
+        };
+        let mut files = std::collections::HashSet::new();
+        assert_eq!(
+            missing_distance_tiles_among(&files).len(),
+            12 * 4_usize.pow(level)
+        );
+        files.extend((0..12 * 4_u64.pow(level)).map(|tile| distance_tile_name(level, tile)));
+        assert!(missing_distance_tiles_among(&files).is_empty());
+        // A split tile needs its children, all the way down.
+        files.remove(&distance_tile_name(level, 7));
+        files.insert(split(7));
+        files.extend((0..3).map(|child| distance_tile_name(level + 1, 28 + child)));
+        assert_eq!(
+            missing_distance_tiles_among(&files),
+            [distance_tile_name(level + 1, 31)]
+        );
+
+        // On disk, a directory reads as its files.
         let directory = tempfile::tempdir().unwrap();
         let dir = directory.path();
-        assert_eq!(
-            missing_distance_tiles(dir).len(),
-            12 * 4_usize.pow(DISTANCE_TILE_LEVEL)
-        );
-        for tile in 0..12 * 4_u64.pow(DISTANCE_TILE_LEVEL) {
-            std::fs::write(
-                dir.join(distance_tile_name(DISTANCE_TILE_LEVEL, tile)),
-                "ra\n",
-            )
-            .unwrap();
-        }
-        assert!(missing_distance_tiles(dir).is_empty());
-        // A split tile needs its children, all the way down.
-        let level = DISTANCE_TILE_LEVEL;
-        std::fs::remove_file(dir.join(distance_tile_name(level, 7))).unwrap();
-        std::fs::write(
-            dir.join(distance_tile_name(level, 7))
-                .with_extension("split"),
-            "",
-        )
-        .unwrap();
+        assert_eq!(missing_distance_tiles(dir).len(), 12 * 4_usize.pow(level));
+        std::fs::write(dir.join(split(7)), "").unwrap();
         for child in 0..3 {
             std::fs::write(dir.join(distance_tile_name(level + 1, 28 + child)), "ra\n").unwrap();
         }
+        std::fs::create_dir(dir.join(distance_tile_name(level + 1, 31))).unwrap();
+        let missing = missing_distance_tiles(dir);
+        assert_eq!(missing.len(), 12 * 4_usize.pow(level));
+        assert!(missing.contains(&distance_tile_name(level + 1, 31)));
+        assert!(!missing.contains(&distance_tile_name(level, 7)));
         assert_eq!(
-            missing_distance_tiles(dir),
-            [distance_tile_name(level + 1, 31)]
+            missing_distance_tiles(Path::new("/nonexistent/seiza")).len(),
+            12 * 4_usize.pow(level)
         );
         assert_eq!(distance_download_limit(dir), None);
         std::fs::write(dir.join(DISTANCE_LIMIT_FILE), "14\n").unwrap();
