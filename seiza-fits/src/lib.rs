@@ -1005,6 +1005,17 @@ impl FitsImage {
     /// image with negative samples or unusual scaling decodes straight to
     /// F32, and a BITPIX=64 image decodes straight to F64.
     pub fn into_physical_f32(self) -> Vec<f32> {
+        self.into_physical_f32_in(Vec::new())
+    }
+
+    /// [`Self::into_physical_f32`], written into `buffer`'s memory, which
+    /// is cleared first, on every core. A buffer an earlier image left is
+    /// already mapped, so a large image takes no page faults; a new one is
+    /// faulted in and zeroed by the kernel as it is first written. A BITPIX=16
+    /// image already decoded to F32 returns its own samples, and `buffer` is
+    /// freed.
+    pub fn into_physical_f32_in(self, mut buffer: Vec<f32>) -> Vec<f32> {
+        use rayon::prelude::*;
         let bitpix = self
             .header("BITPIX")
             .and_then(HeaderValue::as_i64)
@@ -1021,43 +1032,48 @@ impl FitsImage {
         };
         match self.pixels {
             Pixels::U8(values) => values
-                .into_iter()
-                .map(|value| physical(i64::from(value), f64::from(value)))
-                .collect(),
+                .par_iter()
+                .map(|&value| physical(i64::from(value), f64::from(value)))
+                .collect_into_vec(&mut buffer),
             // Decoding folded BZERO in, so it folds into BLANK too.
             Pixels::U16(values) => match blank
                 .and_then(|blank| blank.checked_add(bzero as i64))
                 .and_then(|blank| u16::try_from(blank).ok())
             {
-                None => values.into_iter().map(f32::from).collect(),
+                None => values
+                    .par_iter()
+                    .map(|&value| f32::from(value))
+                    .collect_into_vec(&mut buffer),
                 Some(blank) => values
-                    .into_iter()
-                    .map(|value| {
+                    .par_iter()
+                    .map(|&value| {
                         if value == blank {
                             f32::NAN
                         } else {
                             f32::from(value)
                         }
                     })
-                    .collect(),
+                    .collect_into_vec(&mut buffer),
             },
             Pixels::I32(values) => values
-                .into_iter()
-                .map(|value| physical(i64::from(value), f64::from(value)))
-                .collect(),
-            Pixels::F32(values) if bitpix == 16 => values,
+                .par_iter()
+                .map(|&value| physical(i64::from(value), f64::from(value)))
+                .collect_into_vec(&mut buffer),
+            Pixels::F32(values) if bitpix == 16 => return values,
             Pixels::F32(values) => values
-                .into_iter()
-                .map(|value| (bzero + bscale * f64::from(value)) as f32)
-                .collect(),
-            Pixels::F64(values) if bitpix == 64 => {
-                values.into_iter().map(|value| value as f32).collect()
-            }
+                .par_iter()
+                .map(|&value| (bzero + bscale * f64::from(value)) as f32)
+                .collect_into_vec(&mut buffer),
+            Pixels::F64(values) if bitpix == 64 => values
+                .par_iter()
+                .map(|&value| value as f32)
+                .collect_into_vec(&mut buffer),
             Pixels::F64(values) => values
-                .into_iter()
-                .map(|value| (bzero + bscale * value) as f32)
-                .collect(),
+                .par_iter()
+                .map(|&value| (bzero + bscale * value) as f32)
+                .collect_into_vec(&mut buffer),
         }
+        buffer
     }
 
     /// The stored value that marks an undefined sample: the `BLANK` card of

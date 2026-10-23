@@ -277,8 +277,11 @@ pub fn frame_noise(image: &LinearImage) -> Option<Vec<f32>> {
     (0..channels)
         .into_par_iter()
         .map(|channel| {
-            let mut horizontal: Vec<f32> = Vec::new();
-            let mut vertical: Vec<f32> = Vec::new();
+            // Room for every sampled row, so the vectors are not copied as
+            // they grow.
+            let rows = (height - 2).div_ceil(stride);
+            let mut horizontal: Vec<f32> = Vec::with_capacity(rows * (width - 2));
+            let mut vertical: Vec<f32> = Vec::with_capacity(rows * (width - 2));
             let mut y = 1usize;
             while y + 1 < height {
                 let row = y * width;

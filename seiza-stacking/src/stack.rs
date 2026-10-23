@@ -793,7 +793,7 @@ impl LiveStacker {
             ReferenceContribution::Integrated(cfa),
         )?;
         // The reference is integrated where it lies, as it was prepared.
-        if let Some(clipped) = clipped {
+        if let Some(clipped) = clipped.map(crate::saturation::RawClip::into_dense) {
             let (width, height, channels) = (
                 stacker.reference.width,
                 stacker.reference.height,
@@ -2341,10 +2341,10 @@ pub(crate) fn calibrate_light(
 /// demosaic and binning [`develop`] gave the frame; `None` when it had none
 /// or cannot follow.
 pub(crate) fn developed_clip_mask(
-    mask: Option<LinearImage>,
+    mask: Option<crate::saturation::RawClip>,
     cfa: Option<BayerLayout>,
     options: &StackOptions,
-) -> Option<LinearImage> {
+) -> Option<crate::saturation::RawClip> {
     crate::saturation::develop_clip_mask(mask?, cfa, options.demosaic, options.bin_factor).ok()
 }
 
@@ -2670,7 +2670,7 @@ pub(crate) fn prepare_frame(
     frame: LinearImage,
     cfa: Option<BayerLayout>,
     cache: Option<&crate::replay::CacheFiles>,
-    clipped: Option<LinearImage>,
+    clipped: Option<crate::saturation::RawClip>,
 ) -> Result<PreparedFrame> {
     #[cfg(feature = "gpu")]
     let mut trace = crate::gpu::Trace::new(options.gpu.trace);
@@ -2755,7 +2755,7 @@ pub(crate) fn prepare_frame(
     // The frame's clip mask, where its raw pixels clipped, goes onto the
     // grid as the frame does: bilinearly, so a pixel reads how much of it
     // they reach, in the same pass where the GPU resamples.
-    let mask = clipped.filter(|mask| (mask.width, mask.height) == (frame.width, frame.height));
+    let mask = clipped.filter(|mask| mask.dimensions() == (frame.width, frame.height));
     let resample = || {
         crate::registration::resample_region_sited_masked(
             &frame,
@@ -3062,6 +3062,11 @@ pub(crate) fn prepare_frame(
             .collect();
         (noise, weight)
     };
+    // The calibrated frame's buffers serve the next frame read.
+    crate::recycle::give(frame.data);
+    if let Some(mask) = mask {
+        mask.recycle();
+    }
     let normalization_mean_gain = normalization.mean_gain();
     let normalization_mean_offset = normalization.mean_offset();
     let mut mapping = crate::RegisteredFrameMapping::new(
@@ -3078,7 +3083,7 @@ pub(crate) fn prepare_frame(
     // hold for as long as it waits.
     #[cfg(feature = "gpu")]
     if on_gpu.is_some() {
-        registered.data = Vec::new();
+        crate::recycle::give(std::mem::take(&mut registered.data));
     }
     #[cfg(feature = "gpu")]
     {

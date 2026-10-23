@@ -15,6 +15,7 @@
 //! to gain from it. When no adapter is found, or the GPU fails, the work
 //! stays on the CPU; a failure is logged once.
 use crate::image::ClipMask;
+use crate::saturation::ClipView;
 use crate::{GpuOptions, LinearImage, ReferenceRegion};
 use rayon::prelude::*;
 use std::sync::OnceLock;
@@ -134,10 +135,20 @@ fn copy_out<T: bytemuck::Pod + Send + Sync>(view: &[u8], every_core: bool) -> Ve
         // A mapping is aligned to 8 bytes, so this is not reached.
         return bytemuck::pod_collect_to_vec(view);
     };
+    // A frame's samples go into a buffer a finished frame gave back.
+    let mut out = if std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>() {
+        let mut recycled = Some(crate::recycle::take(words.len()));
+        (&mut recycled as &mut dyn std::any::Any)
+            .downcast_mut::<Option<Vec<T>>>()
+            .and_then(Option::take)
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     if !every_core {
-        return words.to_vec();
+        out.extend_from_slice(words);
+        return out;
     }
-    let mut out = Vec::new();
     words
         .par_iter()
         .with_min_len(COPY_CHUNK / std::mem::size_of::<T>())
@@ -1301,27 +1312,34 @@ impl Gpu {
     /// zeros and non-finite samples keep their exact bits.
     fn upload_clip_mask(
         &self,
-        mask: &LinearImage,
+        mask: ClipView<'_>,
         patch: Option<&[[u32; 2]]>,
         trace: &Trace,
-    ) -> Result<wgpu::Buffer, String> {
-        let Some(patch) = patch else {
-            if trace.enabled {
-                eprintln!(
-                    "seiza-stacking gpu: clip mask upload dense: {} bytes",
-                    mask.data.len() * 4
-                );
+    ) -> Result<(wgpu::Buffer, wgpu::BufferUsages), String> {
+        let (width, height, _) = mask.shape();
+        let pixels = width * height;
+        let patch = match (patch, mask) {
+            (Some(patch), _) => patch,
+            (None, ClipView::Image(mask)) => {
+                if trace.enabled {
+                    eprintln!(
+                        "seiza-stacking gpu: clip mask upload dense: {} bytes",
+                        mask.data.len() * 4
+                    );
+                }
+                return Ok((self.upload("mask", &mask.data)?, self.input_usage()));
             }
-            return self.upload("mask", &mask.data);
+            (None, ClipView::Listed { .. }) => return Err("a listed mask needs its list".into()),
         };
         if trace.enabled {
             eprintln!(
-                "seiza-stacking gpu: clip mask upload: {} bytes for {} pixels",
+                "seiza-stacking gpu: clip mask upload: {} bytes for {pixels} pixels",
                 patch.len() * 8,
-                mask.data.len()
             );
         }
-        let buffer = self.take("mask", (mask.data.len() * 4) as u64, self.input_usage());
+        // Cleared and scattered on the GPU, never mapped, whatever the GPU.
+        let usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
+        let buffer = self.take("mask", (pixels * 4) as u64, usage);
         let mut encoder = self.device.create_command_encoder(&Default::default());
         encoder.clear_buffer(&buffer, 0, None);
         if !patch.is_empty() {
@@ -1366,7 +1384,7 @@ impl Gpu {
         // Resampling is submitted after this clear and scatter, with no
         // CPU wait or readback between the two GPU stages.
         self.queue.submit([encoder.finish()]);
-        Ok(buffer)
+        Ok((buffer, usage))
     }
 
     /// A buffer holding `data`: the one this thread keeps resident when it
@@ -1672,7 +1690,7 @@ impl Gpu {
         grid: &[[u32; 4]],
         (grid_columns, grid_origin): (u32, u32),
         sampling: GpuSampling,
-        mask: Option<&LinearImage>,
+        mask: Option<ClipView<'_>>,
         trace: &mut Trace,
         compact_mask: bool,
         mask_patch: Option<&[[u32; 2]]>,
@@ -1732,13 +1750,7 @@ impl Gpu {
             (region.height as u32).div_ceil(16),
         );
         let mask_buffer = mask
-            .map(|mask| {
-                if compact_mask {
-                    self.upload_clip_mask(mask, mask_patch, trace)
-                } else {
-                    self.upload("mask", &mask.data)
-                }
-            })
+            .map(|mask| self.upload_clip_mask(mask, mask_patch, trace))
             .transpose()?;
         let mut bindings = vec![
             Bound::Input(&uniform),
@@ -1754,7 +1766,7 @@ impl Gpu {
             .min(region.width * region.height);
         let sparse = compact_mask && mask_buffer.is_some();
         let (layout, pipeline) = match &mask_buffer {
-            Some(mask_buffer) => {
+            Some((mask_buffer, _)) => {
                 bindings.push(Bound::Input(mask_buffer));
                 if sparse {
                     bindings.push(Bound::Output(2 * capacity));
@@ -1776,8 +1788,8 @@ impl Gpu {
         );
         drop(bindings);
         drop(source_buffer);
-        if let Some(mask_buffer) = mask_buffer {
-            self.give(self.input_usage(), mask_buffer);
+        if let Some((mask_buffer, usage)) = mask_buffer {
+            self.give(usage, mask_buffer);
         }
         let (mut outputs, output) = data?;
         let mask = if sparse {
@@ -1803,7 +1815,7 @@ impl Gpu {
                     mask,
                     trace,
                     false,
-                    None,
+                    mask_patch,
                     retention,
                 );
             }
@@ -1877,7 +1889,7 @@ pub(crate) fn resample(
 /// frame is small, `options` keep resampling there, or no GPU is in use.
 pub(crate) fn resample_masked(
     source: &LinearImage,
-    mask: Option<&LinearImage>,
+    mask: Option<ClipView<'_>>,
     region: ReferenceRegion,
     inverse: &(impl Fn(f64, f64) -> (f64, f64) + Sync),
     sampling: GpuSampling,
@@ -1905,7 +1917,7 @@ pub(crate) fn resample_masked(
 /// with a dense fallback when the mask has too many nonzero contributions.
 pub(crate) fn resample_clipped(
     source: &LinearImage,
-    mask: Option<&LinearImage>,
+    mask: Option<ClipView<'_>>,
     region: ReferenceRegion,
     inverse: &(impl Fn(f64, f64) -> (f64, f64) + Sync),
     sampling: GpuSampling,
@@ -1927,7 +1939,7 @@ pub(crate) fn resample_clipped(
 /// The shape-only image and GPU frame stay together until admission.
 pub(crate) fn resample_retained(
     source: &LinearImage,
-    mask: Option<&LinearImage>,
+    mask: Option<ClipView<'_>>,
     region: ReferenceRegion,
     inverse: &(impl Fn(f64, f64) -> (f64, f64) + Sync),
     sampling: GpuSampling,
@@ -1950,7 +1962,7 @@ pub(crate) fn resample_retained(
 #[allow(clippy::too_many_arguments)]
 fn resample_masked_inner(
     source: &LinearImage,
-    mask: Option<&LinearImage>,
+    mask: Option<ClipView<'_>>,
     region: ReferenceRegion,
     inverse: &(impl Fn(f64, f64) -> (f64, f64) + Sync),
     sampling: GpuSampling,
@@ -1959,9 +1971,7 @@ fn resample_masked_inner(
     retention: OutputRetention,
 ) -> Option<(LinearImage, Option<ClipMask>)> {
     let channels = source.channels;
-    let mask = mask.filter(|mask| {
-        mask.channels == 1 && (mask.width, mask.height) == (source.width, source.height)
-    });
+    let mask = mask.filter(|mask| mask.shape() == (source.width, source.height, 1));
     // By the source, not the region: every region of a frame resamples the
     // same way, so a footprint holds what the whole grid would.
     if !matches!(channels, 1 | 3)
@@ -1976,10 +1986,17 @@ fn resample_masked_inner(
     }
     let gpu = gpu(options)?;
     let mut trace = Trace::new(options.trace);
-    let patch = if compact_mask {
-        mask.and_then(|mask| gpu.clip_patch(mask))
-    } else {
-        None
+    // A listed mask is scattered from its list on every GPU; an image is
+    // listed here, for a compact readback on a discrete GPU.
+    let patch = match mask {
+        Some(ClipView::Listed { pixels, .. }) => Some(
+            pixels
+                .iter()
+                .map(|&pixel| [pixel, 1.0_f32.to_bits()])
+                .collect::<Vec<_>>(),
+        ),
+        Some(ClipView::Image(mask)) if compact_mask => gpu.clip_patch(mask),
+        _ => None,
     };
     trace.mark("mask plan");
     let step = GRID_STEP as usize;
@@ -3586,7 +3603,7 @@ mod tests {
                 .unwrap();
                 let (together, mask_together) = resample_masked(
                     &source,
-                    Some(&mask),
+                    Some(ClipView::Image(&mask)),
                     region,
                     &inverse,
                     sampling,
@@ -3601,6 +3618,102 @@ mod tests {
                     assert_eq!(a.to_bits(), b.to_bits());
                 }
             }
+        }
+        release_resident();
+    }
+
+    #[test]
+    fn a_listed_clip_mask_resamples_as_its_image_does() {
+        if adapter_description().is_none() {
+            return;
+        }
+        let (width, height) = (1100, 1000);
+        let source = LinearImage::new(
+            width,
+            height,
+            1,
+            (0..width * height)
+                .map(|index| 100.0 + (index % 127) as f32)
+                .collect(),
+        )
+        .unwrap();
+        let inverse = SimilarityTransform {
+            scale: 1.0,
+            rotation_radians: 0.002,
+            translation_x: 0.3,
+            translation_y: -0.25,
+        }
+        .inverse_map();
+        let region = ReferenceRegion {
+            x: 37,
+            y: 211,
+            width: 640,
+            height: 480,
+        };
+        // A star's core, and enough scattered pixels that the compact
+        // readback overflows and the frame is resampled again whole.
+        for step in [0, 131] {
+            let mut pixels: Vec<u32> = (240..248)
+                .flat_map(|y| (540..548).map(move |x| (y * width + x) as u32))
+                .collect();
+            if step > 0 {
+                pixels.extend((0..width * height).step_by(step).map(|pixel| pixel as u32));
+                pixels.sort_unstable();
+                pixels.dedup();
+            }
+            let listed = ClipView::Listed {
+                width,
+                height,
+                pixels: &pixels,
+            };
+            let mut image = LinearImage::new(width, height, 1, vec![0.0; width * height]).unwrap();
+            for &pixel in &pixels {
+                image.data[pixel as usize] = 1.0;
+            }
+            let same = |a: &[f32], b: &[f32]| {
+                a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.to_bits() == b.to_bits())
+            };
+            let resample = |mask| {
+                resample_masked(
+                    &source,
+                    Some(mask),
+                    region,
+                    &inverse,
+                    GpuSampling::Bilinear,
+                    &GpuOptions::default(),
+                )
+                .unwrap()
+            };
+            let ((from_list, list_mask), (from_image, image_mask)) =
+                (resample(listed), resample(ClipView::Image(&image)));
+            assert!(same(&from_list.data, &from_image.data));
+            assert!(same(&list_mask.unwrap().data, &image_mask.unwrap().data));
+            let clipped = |mask| {
+                let (_, mask) = resample_clipped(
+                    &source,
+                    Some(mask),
+                    region,
+                    &inverse,
+                    GpuSampling::Bilinear,
+                    &GpuOptions::default(),
+                )
+                .unwrap();
+                match mask.unwrap() {
+                    ClipMask::Dense(mask) => (true, mask.data),
+                    ClipMask::Sparse { entries, .. } => {
+                        let mut data = vec![0.0; region.width * region.height];
+                        for (index, value) in entries {
+                            data[index] = value;
+                        }
+                        (false, data)
+                    }
+                }
+            };
+            let ((list_dense, from_list), (image_dense, from_image)) =
+                (clipped(listed), clipped(ClipView::Image(&image)));
+            assert_eq!(list_dense, step > 0, "only the scattered mask overflows");
+            assert_eq!(image_dense, list_dense);
+            assert!(same(&from_list, &from_image));
         }
         release_resident();
     }
@@ -3656,7 +3769,7 @@ mod tests {
             ] {
                 let (dense_image, dense) = resample_masked(
                     &source,
-                    Some(&mask),
+                    Some(ClipView::Image(&mask)),
                     region,
                     &inverse,
                     GpuSampling::Bilinear,
@@ -3666,7 +3779,7 @@ mod tests {
                 let dense = dense.unwrap();
                 let (image, compact) = resample_clipped(
                     &source,
-                    Some(&mask),
+                    Some(ClipView::Image(&mask)),
                     region,
                     &inverse,
                     GpuSampling::Bilinear,
@@ -3727,7 +3840,7 @@ mod tests {
             (0..4).into_par_iter().for_each(|_| {
                 let (_, mask) = resample_clipped(
                     &source,
-                    Some(&mask),
+                    Some(ClipView::Image(&mask)),
                     ReferenceRegion {
                         x: 37,
                         y: 211,

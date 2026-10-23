@@ -66,6 +66,7 @@ mod normalization;
 mod orientation;
 mod paths;
 mod pipeline;
+mod recycle;
 mod reference;
 mod registration;
 mod replay;

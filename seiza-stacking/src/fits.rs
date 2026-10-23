@@ -202,11 +202,14 @@ impl FitsFrame {
             .filter(|value| value.is_finite() && *value > 0.0);
         let (width, height, planes) = (fits.width, fits.height, fits.planes);
         let headers = fits.headers.clone();
-        let physical = fits.into_physical_f32();
+        // Into a buffer a finished frame gave back, whose pages are mapped.
+        let physical = fits.into_physical_f32_in(crate::recycle::take(width * height * planes));
 
         let channels = if planes == 3 { 3 } else { 1 };
         let data = if channels == 3 {
-            planar_to_interleaved(&physical, width * height)
+            let interleaved = planar_to_interleaved(&physical, width * height);
+            crate::recycle::give(physical);
+            interleaved
         } else {
             physical
         };

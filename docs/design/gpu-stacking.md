@@ -36,13 +36,19 @@ from it arrives. These stages run there:
   or a footprint of it. Every frame of a live stack and every frame a final
   pass prepares goes through it, and its clip mask with it: one pass finds
   each pixel's source position once, resamples the frame there and the
-  mask bilinearly, to the bit as two passes would. For clipping statistics,
-  sparse input masks are sent as index/value pairs and expanded on the
-  GPU, then only the resampled mask's nonzero contributions are returned.
+  mask bilinearly, to the bit as two passes would. A frame's raw clip mask
+  is kept as the list of its clipped pixels when there are few, at most
+  one in 128, and a mono frame at its own size keeps that list to
+  resampling; every GPU clears a mask and scatters the list into it, so no
+  image of ones and zeros is written, copied or read whole. A mask that
+  must be an image, a Bayer frame's spread by the demosaic or a binned
+  one, is listed again for a discrete GPU, as index/value pairs, and
+  uploaded whole to one that shares the CPU's memory. For clipping
+  statistics only the resampled mask's nonzero contributions are returned.
   The CPU accumulates those in frame order, preserving the dense path's
-  exact sums. Both lists are bounded; a dense mask uses the original upload
-  and, on output overflow, is resampled again as a dense mask. This avoids
-  full mask transfers in either direction for sparse clipping. The CPU
+  exact sums. Both lists are bounded; on output overflow the frame is
+  resampled again with a dense output. This avoids full mask transfers in
+  either direction for sparse clipping. The CPU
   builds its mask packet and coordinate grid before taking a GPU-call
   permit, so that Rayon work cannot hold a permit while it runs another
   frame's task that needs one. Bayer drizzle's
@@ -340,11 +346,37 @@ byte-identical to the others on the same machine:
 The M4 Max's final integration fell from 4.0 s to 2.3 s and its live pass
 from 13.4 s to 10.4 s; the Iris Xe's from 54 s to 25 s, then 17.5 s with
 512 MiB bands, and from 83.6 s to 75.8 s. Peak memory fell from 12.7 GiB to
-10.7 GiB and from 7.0 GiB to 5.5-6.1 GiB. Uploading the clip mask
-sparsely on these GPUs too saved nothing measurable on either and cost
-4-23 CPU-s, so it stays on discrete GPUs, which save the copy across the
-bus. The Mac shared its cores with other work, so its wall times are
+10.7 GiB and from 7.0 GiB to 5.5-6.1 GiB. Listing an image mask for these
+GPUs too saved nothing measurable on either and cost 4-23 CPU-s, so only a
+discrete GPU lists one; a mask kept as its list from the start, below,
+does save. The Mac shared its cores with other work, so its wall times are
 noisy.
+
+Preparing frames on the host, on the same set. The M4 Max's live pass is
+bound by CPU, about 116 CPU-s over its 11 s, ten of its twelve
+performance cores: 8, 10 or 12 preparation workers rather than six, or a
+Rayon pool of 8 or 12 threads rather than 16, did not shorten it, and with
+12 workers every stage of a frame took about twice as long, copies
+included. The Iris Xe's is bound by the GPU and the memory it shares with
+the CPU. On both, each frame's decoded image, raw clip mask and resampled
+copy were fresh buffers of 245 MB, which the kernel maps and zeroes page by
+page: on the Iris Xe 46.6 million minor faults and 270-277 of 704-710 CPU-s
+in the kernel. Taking those buffers from the ones finished frames give
+back (`recycle`), decoding the FITS samples into one on every core, and
+keeping a mono frame's clip mask as its list, took that to 11.0 million
+faults and 192-198 CPU-s, the stack from 93.3-93.4 s and 704-710 CPU-s to
+91.7-92.1 s and 648-661 CPU-s, and peak memory from 4.5 GiB to 3.8-4.1 GiB.
+The M4 Max's peak memory fell from 9.3-9.9 GiB to 7.2-7.5 GiB, its wall and
+CPU time within their noise. jemalloc in place of the system allocator
+tripled the M4 Max's faults and took its stack from 14.2 s to 16.5 s. The
+images are byte-identical throughout.
+
+What a 7 s window of the M4 Max's live pass spends its CPU on, after
+Rayon's idle threads (4.4 CPU-s yielding): the normalization fit's tiles
+2.9 CPU-s, writing reintegration's scratch files 2.9 (49 GB over the
+stack), copies 1.7, decoding and byte-swapping FITS 1.9, medians 1.5.
+Writing each frame's clip mask as an image had cost 3.1 before it was
+listed.
 
 Windows NVIDIA validation is recorded separately in
 [`2026-10-windows-nvidia-stacking.md`](../benchmarks/2026-10-windows-nvidia-stacking.md):

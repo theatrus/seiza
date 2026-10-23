@@ -1647,7 +1647,7 @@ pub(crate) fn resample_region_geometry(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resample_region_geometry_masked(
     source: &LinearImage,
-    mask: Option<&LinearImage>,
+    mask: Option<&crate::saturation::RawClip>,
     reference_width: usize,
     reference_height: usize,
     region: ReferenceRegion,
@@ -1668,7 +1668,7 @@ pub(crate) fn resample_region_geometry_masked(
         let mask = mask
             .map(|mask| {
                 resample_region_geometry(
-                    mask,
+                    &mask.to_dense(),
                     reference_width,
                     reference_height,
                     region,
@@ -1974,7 +1974,7 @@ impl ChannelSites {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resample_region_sited_masked(
     source: &LinearImage,
-    mask: Option<&LinearImage>,
+    mask: Option<&crate::saturation::RawClip>,
     reference_width: usize,
     reference_height: usize,
     region: ReferenceRegion,
@@ -1997,7 +1997,7 @@ pub(crate) fn resample_region_sited_masked(
         let mask = mask
             .map(|mask| {
                 resample_region_geometry(
-                    mask,
+                    &mask.to_dense(),
                     reference_width,
                     reference_height,
                     region,
@@ -2028,7 +2028,7 @@ pub(crate) fn resample_region_sited_masked(
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) fn resample_region_retained(
     source: &LinearImage,
-    mask: Option<&LinearImage>,
+    mask: Option<&crate::saturation::RawClip>,
     region: ReferenceRegion,
     geometry: FrameGeometry<'_>,
     sampling: Sampling,
@@ -2056,7 +2056,7 @@ pub(crate) fn resample_region_retained(
     match geometry {
         FrameGeometry::Similarity(transform) => crate::gpu::resample_retained(
             source,
-            mask,
+            mask.map(crate::saturation::RawClip::view),
             region,
             &transform.inverse_map(),
             sampling,
@@ -2064,7 +2064,7 @@ pub(crate) fn resample_region_retained(
         ),
         FrameGeometry::Warp(warp) => crate::gpu::resample_retained(
             source,
-            mask,
+            mask.map(crate::saturation::RawClip::view),
             region,
             &|x, y| warp.apply(x, y),
             sampling,
@@ -2285,7 +2285,7 @@ fn resample_region_with_inverse(
 #[allow(clippy::too_many_arguments)]
 fn resample_region_with_inverse_masked(
     source: &LinearImage,
-    mask: Option<&LinearImage>,
+    mask: Option<&crate::saturation::RawClip>,
     reference_width: usize,
     reference_height: usize,
     region: ReferenceRegion,
@@ -2364,12 +2364,20 @@ fn resample_region_with_inverse_masked(
             Sampling::NearestPhotosite(_) => None,
         };
         if let Some(gpu_sampling) = gpu_sampling
-            && let Some((image, resampled_mask)) =
-                crate::gpu::resample_clipped(source, mask, region, &inverse, gpu_sampling, gpu)
+            && let Some((image, resampled_mask)) = crate::gpu::resample_clipped(
+                source,
+                mask.map(crate::saturation::RawClip::view),
+                region,
+                &inverse,
+                gpu_sampling,
+                gpu,
+            )
         {
             let resampled_mask = match (resampled_mask, mask) {
                 (Some(resampled), _) => Some(resampled),
-                (None, Some(mask)) => Some(crate::image::ClipMask::Dense(mask_alone(mask)?)),
+                (None, Some(mask)) => {
+                    Some(crate::image::ClipMask::Dense(mask_alone(&mask.to_dense())?))
+                }
                 (None, None) => None,
             };
             return Ok((image, resampled_mask));
@@ -2380,7 +2388,7 @@ fn resample_region_with_inverse_masked(
     let image = resample_region_on_cpu(source, region, &inverse, sampling, &clamp_spans)?;
     Ok((
         image,
-        mask.map(mask_alone)
+        mask.map(|mask| mask_alone(&mask.to_dense()))
             .transpose()?
             .map(crate::image::ClipMask::Dense),
     ))

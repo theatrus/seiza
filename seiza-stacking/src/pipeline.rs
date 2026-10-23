@@ -493,6 +493,8 @@ impl LiveStacker {
         mut on_frame: impl FnMut(&Path, Result<FrameDisposition>) -> Continue,
     ) -> Result<PoolPipelineReport> {
         let started = Instant::now();
+        // The frames' buffers go back to the allocator when the run ends.
+        let _recycled = crate::recycle::Scope;
         self.require_fits_input_mode()?;
         if paths.is_empty() {
             return Ok(PoolPipelineReport::default());
