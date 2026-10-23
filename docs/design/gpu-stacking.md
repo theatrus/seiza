@@ -398,16 +398,19 @@ gather, the GPU's count of finite samples and the separate download for
 the scratch file are GPU work, and took the GPU-bound Iris Xe's stack from
 88.7-90.2 s to 92.6-93.3 s. So those still read the whole frame back.
 
-Waiting for the GPU. Each worker waited in `device.poll` for its own
-submission. With every worker polling instead, the M4 Max's live pass
-took 10.0 s against 10.6 s (medians of three) and 2-5 CPU-s more; the Iris
-Xe's was unchanged, for 15-30 CPU-s more. One thread now waits on the
-device for every mapping (`gpu::Poller`), in waits of 250 us, and the
-workers wait only for their own mappings' callbacks. Waiting out the
-latest submission instead held each band's results behind the next band's
-and took the Iris Xe's final integration from 16 s to 28 s. The Iris Xe
-takes 89.7-90.4 s with the poller against 89.3-90.6 s; the M4 Max ran
-amid other builds and its timings could not tell the two apart.
+Waiting for the GPU, tried and not kept. Each worker waits in
+`device.poll` for its own submission. With every worker polling instead,
+the M4 Max's live pass took 10.0 s against 10.6 s (medians of three) and
+2-5 CPU-s more, on a machine other builds were loading; the Iris Xe's was
+unchanged, for 15-30 CPU-s more. One thread waiting on the device for
+every mapping, in waits of 250 us, with the workers waiting only for their
+own mappings' callbacks, gained nothing. Waiting out the latest submission
+there held each band's results behind the next band's and took the Iris
+Xe's final integration from 16 s to 28 s; with the short waits the Iris
+Xe took 89.7-90.4 s against 89.3-90.6 s. On a quiet M4 Max, five
+interleaved runs a side, the live pass took 9.38-9.61 s against
+9.32-9.77 s and the bands 1.79-1.98 s against 1.77-1.80 s, so the
+workers still wait for themselves.
 
 Not done: dropping reintegration's scratch files, by resampling each band
 of every frame from its source again on the GPU. That moves 47 GB of reads
