@@ -71,11 +71,13 @@ from it arrives. These stages run there:
   first band. Cancellation and source read errors return without a retry.
 
 The band pipeline holds at most two submissions in flight. CPU integration
-and mapped shared-memory GPUs retain the 128 MiB input band cap. Discrete
-GPUs use up to 512 MiB per band to amortize reads and submissions, within
+retains the 128 MiB input band cap. GPUs, discrete or sharing the CPU's
+memory, use up to 512 MiB per band to amortize reads and submissions, within
 half the configured band memory and the device's input and output binding
-limits. The CPU reader, both GPU sets and their staging buffers use those
-same rows; output buffers also scale with that row count. `GpuOptions::concurrency`
+limits. On the Iris Xe that took the Pleiades stack's final integration
+from 25 s to 17.5 s; on the M4 Max it stayed at 2.3 s. The CPU reader,
+both GPU sets and their staging buffers use those same rows; output
+buffers also scale with that row count. `GpuOptions::concurrency`
 continues to limit frame preparation calls, independently of these two
 band buffer sets. Band traces report host upload/staging, time in flight
 while other work runs, the remaining wait and copying outputs. These spans
@@ -278,6 +280,26 @@ The same set on an i5-1340P with its Iris Xe (Vulkan, Linux): 41-42 s and
 the bottleneck, busy for most of the run with about half a second of
 kernels a frame, so VNG on the GPU saves CPU time (271 CPU-s against 299)
 but not wall time.
+
+200 mono 61 MP Pleiades frames with `--reference first --reintegrate`, as
+on Windows below, copied to local disk, before (0f1a547) and after
+double-buffered bands and compact clip masks (a245500), and with 512 MiB
+bands on these shared-memory GPUs as well. Medians; every image is
+byte-identical to the others on the same machine:
+
+| Machine | 0f1a547 | a245500 | 512 MiB bands | CPU only |
+|---|---:|---:|---:|---:|
+| M4 Max (Metal) | 18.7 s, 138 CPU-s | 13.9 s, 124 CPU-s | 14.6 s, 119 CPU-s | 77.8 s, 1160 CPU-s |
+| i5-1340P, Iris Xe (Vulkan) | 142 s, 950 CPU-s | 105 s, 828 CPU-s | 96.8 s, 735 CPU-s | |
+
+The M4 Max's final integration fell from 4.0 s to 2.3 s and its live pass
+from 13.4 s to 10.4 s; the Iris Xe's from 54 s to 25 s, then 17.5 s with
+512 MiB bands, and from 83.6 s to 75.8 s. Peak memory fell from 12.7 GiB to
+10.7 GiB and from 7.0 GiB to 5.5-6.1 GiB. Uploading the clip mask
+sparsely on these GPUs too saved nothing measurable on either and cost
+4-23 CPU-s, so it stays on discrete GPUs, which save the copy across the
+bus. The Mac shared its cores with other work, so its wall times are
+noisy.
 
 Windows NVIDIA validation is recorded separately in
 [`2026-10-windows-nvidia-stacking.md`](../benchmarks/2026-10-windows-nvidia-stacking.md):
