@@ -765,6 +765,59 @@ fn decode_camera_u16_in_parallel(payload: &[u8], spec: ImageSpec) -> Option<Pixe
     Some(Pixels::U16(out))
 }
 
+/// [`decode_camera_u16_in_parallel`] straight to physical f32: what
+/// [`FitsImage::into_physical_f32`] makes of that decode, sample for sample,
+/// without the 16-bit image between, into the vector `buffer` gives for the
+/// sample count. `None` for any other kind of data, without calling it.
+fn decode_camera_f32_in_parallel(
+    payload: &[u8],
+    spec: ImageSpec,
+    buffer: impl FnOnce(usize) -> Vec<f32>,
+) -> Option<Pixels> {
+    let offset = spec.bzero as i64;
+    if spec.bitpix != 16 || spec.bscale != 1.0 || !(offset == 32768 || offset == 0) {
+        return None;
+    }
+    let flip = if offset == 32768 { 0x8000 } else { 0 };
+    let raw = &payload.as_chunks::<2>().0[..spec.count];
+    // With no offset the raw bits are the value, unless a sample is
+    // negative: then the image is signed, as the u16 decode finds it.
+    let signed = flip == 0 && raw.par_iter().any(|bytes| bytes[0] & 0x80 != 0);
+    let mut out = buffer(spec.count);
+    if signed {
+        let blank = spec.blank;
+        raw.par_iter()
+            .with_min_len(PARALLEL_CHUNK)
+            .map(|&bytes| {
+                let stored = i16::from_be_bytes(bytes);
+                if blank == Some(i64::from(stored)) {
+                    f32::NAN
+                } else {
+                    f32::from(stored)
+                }
+            })
+            .collect_into_vec(&mut out);
+    } else {
+        // BZERO folds into BLANK, as into_physical_f32 folds it.
+        let blank = spec
+            .blank
+            .and_then(|blank| blank.checked_add(offset))
+            .and_then(|blank| u16::try_from(blank).ok());
+        raw.par_iter()
+            .with_min_len(PARALLEL_CHUNK)
+            .map(|&bytes| {
+                let value = u16::from_be_bytes(bytes) ^ flip;
+                if blank == Some(value) {
+                    f32::NAN
+                } else {
+                    f32::from(value)
+                }
+            })
+            .collect_into_vec(&mut out);
+    }
+    Some(Pixels::F32(out))
+}
+
 #[multiversion::multiversion(targets("x86_64+avx2", "x86_64+sse4.1", "aarch64+neon"))]
 fn swap_be_u16(raw: &[u8], flip: u16, out: &mut [u16]) {
     for (out, chunk) in out.iter_mut().zip(raw.as_chunks::<2>().0.iter()) {
@@ -892,13 +945,34 @@ impl FitsImage {
     /// The image is the primary HDU's, or, when the primary holds no data,
     /// the first image extension's, with the headers [`read_header`] gives.
     pub fn open(path: &Path) -> Result<FitsImage, FitsError> {
+        Self::open_decoding(path, None::<fn(usize) -> Vec<f32>>)
+    }
+
+    /// [`Self::open`], decoding a camera's 16-bit data (BITPIX 16, BSCALE 1,
+    /// BZERO 32768 or 0) straight to [`Pixels::F32`] in physical units, on
+    /// every core, into the vector `buffer` gives for the sample count:
+    /// what [`Self::into_physical_f32`] would return, without the 16-bit
+    /// image between. A buffer an earlier image left is already mapped, so
+    /// a large image takes no page faults. Any other data decodes as
+    /// [`Self::open`] decodes it, and `buffer` is not called.
+    pub fn open_with(
+        path: &Path,
+        buffer: impl FnOnce(usize) -> Vec<f32>,
+    ) -> Result<FitsImage, FitsError> {
+        Self::open_decoding(path, Some(buffer))
+    }
+
+    fn open_decoding(
+        path: &Path,
+        physical: Option<impl FnOnce(usize) -> Vec<f32>>,
+    ) -> Result<FitsImage, FitsError> {
         let mut file = std::fs::File::open(path)?;
         // Mapped, the data unit is decoded straight from the file's pages,
         // in parallel, instead of copied through a read buffer first.
         // Safety: the file is opened read-only; concurrent truncation would
         // fault, which is acceptable for locally-managed image files.
         match unsafe { memmap2::Mmap::map(&file) } {
-            Ok(map) => Self::from_bytes(&map),
+            Ok(map) => Self::decode_bytes(&map, physical),
             Err(_) => Self::read_from(&mut file, None),
         }
     }
@@ -907,6 +981,15 @@ impl FitsImage {
     /// pipeline used by [`Self::open`]. The caller retains ownership of the
     /// input slice, so this entry point does not reduce its memory footprint.
     pub fn from_bytes(data: &[u8]) -> Result<FitsImage, FitsError> {
+        Self::decode_bytes(data, None::<fn(usize) -> Vec<f32>>)
+    }
+
+    /// [`Self::from_bytes`], with camera data decoded straight to physical
+    /// f32 into the vector `physical` gives, as [`Self::open_with`] does.
+    fn decode_bytes(
+        data: &[u8],
+        physical: Option<impl FnOnce(usize) -> Vec<f32>>,
+    ) -> Result<FitsImage, FitsError> {
         let mut reader = std::io::Cursor::new(data);
         let hdu = locate_image(&mut reader, true)?;
         if hdu.table.is_some() {
@@ -923,7 +1006,11 @@ impl FitsImage {
             .filter(|&end| end <= data.len())
             .ok_or_else(|| FitsError::Malformed("data runs past EOF".into()))?;
         let payload = &data[start..end];
-        let pixels = match decode_camera_u16_in_parallel(payload, spec) {
+        let decoded = match physical {
+            Some(buffer) => decode_camera_f32_in_parallel(payload, spec, buffer),
+            None => None,
+        };
+        let pixels = match decoded.or_else(|| decode_camera_u16_in_parallel(payload, spec)) {
             Some(pixels) => pixels,
             None => decode_pixels(&mut &payload[..], spec)?,
         };
@@ -1005,16 +1092,16 @@ impl FitsImage {
     /// image with negative samples or unusual scaling decodes straight to
     /// F32, and a BITPIX=64 image decodes straight to F64.
     pub fn into_physical_f32(self) -> Vec<f32> {
-        self.into_physical_f32_in(Vec::new())
+        self.into_physical_f32_with(Vec::with_capacity)
     }
 
-    /// [`Self::into_physical_f32`], written into `buffer`'s memory, which
-    /// is cleared first, on every core. A buffer an earlier image left is
-    /// already mapped, so a large image takes no page faults; a new one is
+    /// [`Self::into_physical_f32`], converted on every core into the vector
+    /// `buffer` gives for the sample count. A buffer an earlier image left is
+    /// already mapped, so a large image takes no page faults; new memory is
     /// faulted in and zeroed by the kernel as it is first written. A BITPIX=16
-    /// image already decoded to F32 returns its own samples, and `buffer` is
-    /// freed.
-    pub fn into_physical_f32_in(self, mut buffer: Vec<f32>) -> Vec<f32> {
+    /// image already decoded to F32 returns its own samples, without calling
+    /// `buffer`.
+    pub fn into_physical_f32_with(self, buffer: impl FnOnce(usize) -> Vec<f32>) -> Vec<f32> {
         use rayon::prelude::*;
         let bitpix = self
             .header("BITPIX")
@@ -1030,7 +1117,20 @@ impl FitsImage {
                 (bzero + bscale * value) as f32
             }
         };
-        match self.pixels {
+        let pixels = match self.pixels {
+            // Decoded straight to physical units already.
+            Pixels::F32(values) if bitpix == 16 => return values,
+            pixels => pixels,
+        };
+        let samples = match &pixels {
+            Pixels::U8(values) => values.len(),
+            Pixels::U16(values) => values.len(),
+            Pixels::I32(values) => values.len(),
+            Pixels::F32(values) => values.len(),
+            Pixels::F64(values) => values.len(),
+        };
+        let mut buffer = buffer(samples);
+        match pixels {
             Pixels::U8(values) => values
                 .par_iter()
                 .map(|&value| physical(i64::from(value), f64::from(value)))
@@ -1059,7 +1159,6 @@ impl FitsImage {
                 .par_iter()
                 .map(|&value| physical(i64::from(value), f64::from(value)))
                 .collect_into_vec(&mut buffer),
-            Pixels::F32(values) if bitpix == 16 => return values,
             Pixels::F32(values) => values
                 .par_iter()
                 .map(|&value| (bzero + bscale * f64::from(value)) as f32)
@@ -2013,6 +2112,89 @@ mod io_tests {
                 assert_eq!(rgb.data[2], 3000);
                 assert_eq!(rgb.data[5 * 3], 1004);
             }
+        }
+    }
+
+    #[test]
+    fn camera_data_decodes_straight_to_the_physical_values_it_converts_to() {
+        let big_endian = |samples: &[i16]| -> Vec<u8> {
+            samples
+                .iter()
+                .flat_map(|sample| sample.to_be_bytes())
+                .collect()
+        };
+        let unsigned = unsigned_u16_payload(&[0, 1, 1234, 32768, 65535, 4000]);
+        // BITPIX, extra cards, the data unit, and whether it is camera data.
+        type Case<'a> = (i64, Vec<(&'a str, &'a str)>, Vec<u8>, bool);
+        let cases: [Case; 5] = [
+            (
+                16,
+                vec![("BZERO", "32768"), ("BLANK", "-28768")],
+                unsigned.clone(),
+                true,
+            ),
+            (16, vec![("BZERO", "32768")], unsigned, true),
+            // No offset: unsigned while no sample is negative, and signed,
+            // with its own BLANK, once one is.
+            (
+                16,
+                vec![("BLANK", "7")],
+                big_endian(&[0, 7, 1234, 32767, 9, 3]),
+                true,
+            ),
+            (
+                16,
+                vec![("BLANK", "-2")],
+                big_endian(&[0, -2, 1234, -32768, 9, 3]),
+                true,
+            ),
+            (
+                -32,
+                vec![],
+                [1.5_f32, -2.0, 7.25, f32::NAN, 0.0, 1e9]
+                    .iter()
+                    .flat_map(|sample| sample.to_be_bytes())
+                    .collect(),
+                false,
+            ),
+        ];
+        for (bitpix, headers, payload, camera) in cases {
+            let bytes = image_bytes(bitpix, &[3, 2], &headers, &payload, false);
+            let expected = FitsImage::from_bytes(&bytes).unwrap().into_physical_f32();
+            let given = Vec::with_capacity(64);
+            let address = given.as_ptr();
+            let mut called = false;
+            let decoded = FitsImage::decode_bytes(
+                &bytes,
+                Some(|samples| {
+                    assert_eq!(samples, 6);
+                    called = true;
+                    given
+                }),
+            )
+            .unwrap();
+            let physical = decoded.into_physical_f32();
+            assert_eq!(called, camera, "BITPIX {bitpix} {headers:?}");
+            // Each case with a BLANK has a sample that is blank.
+            let blanked = headers.iter().any(|(key, _)| *key == "BLANK");
+            assert_eq!(
+                physical.iter().any(|value| value.is_nan()),
+                blanked || !camera
+            );
+            if camera {
+                assert_eq!(physical.as_ptr(), address);
+            }
+            assert_eq!(
+                physical
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                "BITPIX {bitpix} {headers:?}"
+            );
         }
     }
 

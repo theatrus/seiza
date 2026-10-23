@@ -358,6 +358,7 @@ objects = [
 "seiza::detect_stars_luma_f32" = { none = "detection inside image_solve::solve_image, which both bindings call; Python's detect also calls it on arrays" }
 "seiza::detect_stars_from_excess" = { none = "the last step of seiza-stacking's GPU star detection, which hands it the pixels the GPU thresholded; hosts detect through detect_stars and detect_stars_luma_f32" }
 "seiza-image-io::read_astronomy" = { none = "reading inside image_solve::solve_image, which both bindings call" }
+"seiza-image-io::read_astronomy_with" = { none = "the stacker's reading of each light into a recycled buffer, inside stacking calls both bindings make" }
 "seiza-image-io::capture_time_from_headers" = { none = "reading inside image_solve::solve_image, which both bindings call" }
 "seiza::catalog::*" = { none = "catalog arithmetic for the solver, field objects and parallax" }
 "seiza::constellations::project_figures" = { none = "project, which both bindings call, wraps it with the attribution" }

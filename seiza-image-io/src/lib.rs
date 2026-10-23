@@ -296,6 +296,25 @@ pub struct AstronomyImage {
 /// distributed unit's `.xish` header), FITS otherwise, whatever the
 /// extension, as a FITS reader of camera files must.
 pub fn read_astronomy(path: &Path) -> Result<AstronomyImage, Error> {
+    read_astronomy_decoding(path, None::<fn(usize) -> Vec<f32>>)
+}
+
+/// [`read_astronomy`], decoding a FITS camera's 16-bit data straight to
+/// physical f32 into the vector `buffer` gives for the sample count, as
+/// [`FitsImage::open_with`] does: for a reader that converts every frame to
+/// f32 and can hand each the buffer a finished one leaves. Other data, and
+/// XISF, read as [`read_astronomy`] reads them, without calling `buffer`.
+pub fn read_astronomy_with(
+    path: &Path,
+    buffer: impl FnOnce(usize) -> Vec<f32>,
+) -> Result<AstronomyImage, Error> {
+    read_astronomy_decoding(path, Some(buffer))
+}
+
+fn read_astronomy_decoding(
+    path: &Path,
+    physical: Option<impl FnOnce(usize) -> Vec<f32>>,
+) -> Result<AstronomyImage, Error> {
     if Format::from_path(path) == Some(Format::Xisf) {
         let read =
             seiza_xisf::read_image_with_options(path, 0, &seiza_xisf::ReadOptions::default())
@@ -307,7 +326,11 @@ pub fn read_astronomy(path: &Path) -> Result<AstronomyImage, Error> {
             xisf_metadata: Some(read.metadata),
         });
     }
-    let image = FitsImage::open(path).map_err(|error| Error::open(path, error))?;
+    let image = match physical {
+        Some(buffer) => FitsImage::open_with(path, buffer),
+        None => FitsImage::open(path),
+    }
+    .map_err(|error| Error::open(path, error))?;
     Ok(AstronomyImage {
         image,
         format: Format::Fits,

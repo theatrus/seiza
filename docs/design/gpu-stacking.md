@@ -367,9 +367,15 @@ keeping a mono frame's clip mask as its list, took that to 11.0 million
 faults and 192-198 CPU-s, the stack from 93.3-93.4 s and 704-710 CPU-s to
 91.7-92.1 s and 648-661 CPU-s, and peak memory from 4.5 GiB to 3.8-4.1 GiB.
 The M4 Max's peak memory fell from 9.3-9.9 GiB to 7.2-7.5 GiB, its wall and
-CPU time within their noise. jemalloc in place of the system allocator
-tripled the M4 Max's faults and took its stack from 14.2 s to 16.5 s. The
-images are byte-identical throughout.
+CPU time within their noise. Decoding a camera's 16-bit FITS data straight
+to f32 into such a buffer, rather than through a 16-bit image
+(`seiza_image_io::read_astronomy_with`), then took the Iris Xe's stack from
+92.9-93.7 s and 614-650 CPU-s to 91.3-91.4 s and 566 CPU-s, with 4.7 million
+faults, 157 CPU-s in the kernel and 3.4 GiB at its peak, and the M4 Max's
+kernel time from 23-26 CPU-s to 21-23. Asking the kernel to populate each
+file's mapping at once (`MAP_POPULATE`) changed nothing. jemalloc in place
+of the system allocator tripled the M4 Max's faults and took its stack from
+14.2 s to 16.5 s. The images are byte-identical throughout.
 
 What a 7 s window of the M4 Max's live pass spends its CPU on, after
 Rayon's idle threads (4.4 CPU-s yielding): the normalization fit's tiles

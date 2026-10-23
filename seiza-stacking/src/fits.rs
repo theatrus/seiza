@@ -151,8 +151,10 @@ impl FitsFrame {
     /// Read and decode a FITS or XISF file into a linear frame.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        let read =
-            seiza_image_io::read_astronomy(path).map_err(|error| image_io_error(error, false))?;
+        // A camera's frame decodes straight to f32 into a buffer a finished
+        // frame gave back, whose pages are mapped.
+        let read = seiza_image_io::read_astronomy_with(path, crate::recycle::take)
+            .map_err(|error| image_io_error(error, false))?;
         let mut image = read.image;
         // The metadata carries the astrometric solution, which a PixInsight
         // file keeps as properties rather than WCS cards.
@@ -202,8 +204,7 @@ impl FitsFrame {
             .filter(|value| value.is_finite() && *value > 0.0);
         let (width, height, planes) = (fits.width, fits.height, fits.planes);
         let headers = fits.headers.clone();
-        // Into a buffer a finished frame gave back, whose pages are mapped.
-        let physical = fits.into_physical_f32_in(crate::recycle::take(width * height * planes));
+        let physical = fits.into_physical_f32_with(crate::recycle::take);
 
         let channels = if planes == 3 { 3 } else { 1 };
         let data = if channels == 3 {
