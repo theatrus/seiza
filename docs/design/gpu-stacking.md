@@ -245,8 +245,10 @@ registration with it.
   opens the device; `accumulator`, `debayer`, `detection`, `defects`,
   `resampling` and `integration` keep one pass each.
 - A call that takes no options uses the defaults. Each such call that
-  debayers or resamples has a twin that takes them, for a host that lets
-  its user turn the GPU off: `FitsFrame::into_prepared_with_gpu`,
+  debayers, detects stars or resamples has a twin that takes them, for a
+  host that lets its user turn the GPU off:
+  `FitsFrame::into_prepared_with_gpu`, `Registrar::new_with_gpu` (whose
+  `register` detects each source frame's stars under the same options),
   `resample_region_to_reference_with_gpu`, and
   `RegisteredFrameMapping`'s `extract_region_with_gpu`,
   `extract_region_photosites_with_gpu` and

@@ -879,13 +879,24 @@ pub struct Registrar {
 
 impl Registrar {
     /// Detect stars in the reference frame and prepare the matching index.
+    /// Stars, the reference's and those of each frame [`Self::register`]
+    /// registers, are detected on the GPU where the default
+    /// [`crate::GpuOptions`] allow it; see [`Self::new_with_gpu`].
     pub fn new(reference: &LinearImage, options: RegistrationOptions) -> Result<Self> {
-        Self::at_scale(
-            reference,
-            &options,
-            Scale::NATIVE,
-            &crate::GpuOptions::default(),
-        )
+        Self::new_with_gpu(reference, options, &crate::GpuOptions::default())
+    }
+
+    /// [`Self::new`], detecting stars on the GPU only where `gpu` allows
+    /// it: the reference's here, and each source frame's in
+    /// [`Self::register`]. [`crate::GpuOptions::cpu`] keeps detection on the
+    /// CPU.
+    pub fn new_with_gpu(
+        reference: &LinearImage,
+        options: RegistrationOptions,
+        gpu: &crate::GpuOptions,
+    ) -> Result<Self> {
+        gpu.validate()?;
+        Self::at_scale(reference, &options, Scale::NATIVE, gpu)
     }
 
     /// [`Self::new`] for a reference binned at `scale`, with `options` in
@@ -3219,6 +3230,52 @@ mod tests {
             data[(y * width + 200) * channels..(y * width + 230) * channels].fill(f32::NAN);
         }
         LinearImage::new(width, height, channels, data).unwrap()
+    }
+
+    /// A registrar built under [`crate::GpuOptions::cpu`] detects the
+    /// reference's stars, and each source frame's, on the CPU, on a frame
+    /// large enough for the GPU.
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn a_registrar_built_for_the_cpu_detects_stars_there() {
+        let cpu = crate::GpuOptions::cpu();
+        let reference = detection_field(1101, 1003, 3);
+        let registrar =
+            Registrar::new_with_gpu(&reference, RegistrationOptions::default(), &cpu).unwrap();
+        assert_eq!(registrar.gpu, cpu);
+        let on_the_cpu = |image: &LinearImage| {
+            detect(
+                image,
+                &registrar.options,
+                registrar.options.dense_star_count(),
+                Scale::NATIVE,
+                &cpu,
+            )
+        };
+        let bits = |stars: &[DetectedStar]| {
+            stars
+                .iter()
+                .map(|star| (star.x.to_bits(), star.y.to_bits(), star.flux.to_bits()))
+                .collect::<Vec<_>>()
+        };
+        assert!(registrar.detected_stars().len() > 100);
+        assert_eq!(
+            bits(registrar.detected_stars()),
+            bits(&on_the_cpu(&reference))
+        );
+        let source = detection_field(1101, 1003, 1);
+        assert_eq!(
+            bits(&registrar.detect_source_stars(&source)),
+            bits(&on_the_cpu(&source))
+        );
+        assert!(registrar.register(&reference).is_ok());
+        let invalid = crate::GpuOptions {
+            concurrency: 0,
+            ..crate::GpuOptions::default()
+        };
+        assert!(
+            Registrar::new_with_gpu(&reference, RegistrationOptions::default(), &invalid).is_err()
+        );
     }
 
     /// The CPU's detection, as `detect` makes it without a GPU.

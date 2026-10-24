@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 /// [`crate::FitsFrame::into_prepared`], uses the defaults. Its twin that
 /// takes them runs where they allow:
 /// [`crate::FitsFrame::into_prepared_with_gpu`],
+/// [`crate::Registrar::new_with_gpu`],
 /// [`crate::resample_region_to_reference_with_gpu`],
 /// [`crate::RegisteredFrameMapping::extract_region_with_gpu`],
 /// [`crate::RegisteredFrameMapping::extract_region_photosites_with_gpu`] and
