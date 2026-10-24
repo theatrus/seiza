@@ -2507,6 +2507,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "wgpu",
+ "windows",
  "zstd",
 ]
 

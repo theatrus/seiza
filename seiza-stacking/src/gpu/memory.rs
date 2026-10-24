@@ -27,8 +27,15 @@ pub(super) fn capacity(adapter: &wgpu::Adapter) -> Option<u64> {
     bytes.filter(|&bytes| bytes > 0)
 }
 
-/// Bytes the device holds for this process now, where the backend says.
-pub(super) fn in_use(device: &wgpu::Device) -> Option<u64> {
+/// Bytes the device holds for this process now, where the backend says:
+/// Metal's allocated size, DXGI's local plus non-local usage on Direct3D
+/// 12, or wgpu's allocator reservations elsewhere. DXGI also counts the
+/// committed/shared allocations which bypass wgpu's allocator on an iGPU.
+pub(super) fn in_use(_adapter: &wgpu::Adapter, device: &wgpu::Device) -> Option<u64> {
+    #[cfg(windows)]
+    if _adapter.get_info().backend == wgpu::Backend::Dx12 {
+        return dx12_in_use(_adapter);
+    }
     #[cfg(target_vendor = "apple")]
     {
         use objc2_metal::MTLDevice;
@@ -83,4 +90,23 @@ fn dx12_capacity(adapter: &wgpu::Adapter, integrated: bool) -> Option<u64> {
     } else {
         dedicated
     })
+}
+
+#[cfg(windows)]
+fn dx12_in_use(adapter: &wgpu::Adapter) -> Option<u64> {
+    use windows::Win32::Graphics::Dxgi::{
+        DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL,
+    };
+
+    // SAFETY: only reads this process's usage on the adapter and keeps nothing.
+    let adapter = unsafe { adapter.as_hal::<wgpu::hal::api::Dx12>() }?;
+    let local = adapter
+        .raw_adapter()
+        .query_video_memory_info(DXGI_MEMORY_SEGMENT_GROUP_LOCAL)
+        .ok()?;
+    let non_local = adapter
+        .raw_adapter()
+        .query_video_memory_info(DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL)
+        .ok()?;
+    Some(local.CurrentUsage + non_local.CurrentUsage)
 }

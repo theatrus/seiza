@@ -64,6 +64,7 @@ pub(crate) enum GpuSampling {
 }
 
 struct Gpu {
+    adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::ComputePipeline,
@@ -649,7 +650,7 @@ impl Trace {
                 .collect::<Vec<_>>()
                 .join(", ");
             let held = opened()
-                .and_then(|gpu| memory::in_use(&gpu.device))
+                .and_then(|gpu| memory::in_use(&gpu.adapter, &gpu.device))
                 .map(|bytes| format!(", device memory {} MiB", bytes >> 20))
                 .unwrap_or_default();
             eprintln!("seiza-stacking gpu: {what}: {total:.1} ms ({parts}){held}");
@@ -1178,6 +1179,7 @@ impl Gpu {
             },
         );
         Ok(Self {
+            adapter,
             device,
             queue,
             pipeline,
