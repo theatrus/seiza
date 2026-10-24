@@ -123,10 +123,16 @@ fn super_lrgb_cli_adds_all_channels_and_marks_output() {
 }
 
 fn synthetic_star_field(shift_x: isize, shift_y: isize, gain: f32) -> Vec<f32> {
-    const WIDTH: usize = 128;
-    const HEIGHT: usize = 128;
-    let mut values = (0..WIDTH * HEIGHT)
-        .map(|index| ((index * 37 + index / WIDTH * 19) % 29) as f32 * 1.0e-4)
+    star_field(128, shift_x, shift_y, gain)
+}
+
+/// A `size` by `size` field with the stars of the 128-pixel field spread
+/// over it in proportion.
+fn star_field(size: usize, shift_x: isize, shift_y: isize, gain: f32) -> Vec<f32> {
+    let (width, height) = (size, size);
+    let spread = size / 128;
+    let mut values = (0..width * height)
+        .map(|index| ((index * 37 + index / width * 19) % 29) as f32 * 1.0e-4)
         .collect::<Vec<_>>();
     let stars = [
         (18, 17),
@@ -142,8 +148,8 @@ fn synthetic_star_field(shift_x: isize, shift_y: isize, gain: f32) -> Vec<f32> {
         (111, 110),
     ];
     for (index, (x, y)) in stars.into_iter().enumerate() {
-        let x = (x as isize + shift_x) as usize;
-        let y = (y as isize + shift_y) as usize;
+        let x = ((x * spread) as isize + shift_x) as usize;
+        let y = ((y * spread) as isize + shift_y) as usize;
         let peak = gain * (5.0 + index as f32 * 0.7);
         for (dx, dy, weight) in [
             (0, 0, 1.0),
@@ -154,7 +160,7 @@ fn synthetic_star_field(shift_x: isize, shift_y: isize, gain: f32) -> Vec<f32> {
         ] {
             let sample_x = (x as isize + dx) as usize;
             let sample_y = (y as isize + dy) as usize;
-            values[sample_y * WIDTH + sample_x] += peak * weight;
+            values[sample_y * width + sample_x] += peak * weight;
         }
     }
     values
@@ -373,10 +379,14 @@ fn rgb_cli_registers_shifted_filter_stacks_by_default() {
     }
 }
 
-/// `color` takes the GPU flags `stack` takes. With `--no-gpu` it aligns the
-/// channels on the CPU to the same result; an invalid flag is refused.
+/// `color` takes the GPU flags `stack` takes. On 1024x1024 channels, large
+/// enough for the GPU's star detection and resampling, `--no-gpu` never
+/// opens the GPU, which `--gpu-trace` would report, and aligns the channels
+/// to the result the default run gives, within the GPU's single-precision
+/// rounding. An invalid flag is refused.
 #[test]
 fn rgb_cli_aligns_on_the_cpu_with_no_gpu() {
+    const SIZE: usize = 1024;
     let directory = tempfile::tempdir().unwrap();
     let paths = ["red", "green", "blue"].map(|name| directory.path().join(format!("{name}.fits")));
     for (path, (shift_x, shift_y, gain)) in
@@ -384,9 +394,9 @@ fn rgb_cli_aligns_on_the_cpu_with_no_gpu() {
     {
         write_f32_image(
             path,
-            128,
-            128,
-            F32ImageData::Mono(&synthetic_star_field(shift_x, shift_y, gain)),
+            SIZE,
+            SIZE,
+            F32ImageData::Mono(&star_field(SIZE, shift_x, shift_y, gain)),
             &[],
         )
         .unwrap();
@@ -397,6 +407,7 @@ fn rgb_cli_aligns_on_the_cpu_with_no_gpu() {
             "rgb".to_owned(),
             "--normalization".to_owned(),
             "none".to_owned(),
+            "--gpu-trace".to_owned(),
             "--output".to_owned(),
             output.to_str().unwrap().to_owned(),
         ];
@@ -426,11 +437,29 @@ fn rgb_cli_aligns_on_the_cpu_with_no_gpu() {
     );
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert!(stdout.contains("registered green:"), "{stdout}");
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(!stderr.contains("seiza-stacking gpu:"), "{stderr}");
     let pixels = |path: &Path| match FitsImage::open(path).unwrap().pixels {
-        Pixels::F32(values) => values.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        Pixels::F32(values) => values,
         pixels => panic!("expected f32 output, got {pixels:?}"),
     };
-    assert_eq!(pixels(&cpu), pixels(&default));
+    let (on_cpu, by_default) = (pixels(&cpu), pixels(&default));
+    assert_eq!(on_cpu.len(), by_default.len());
+    // Where a resampled channel's edge lands decides, by rounding, whether
+    // a border pixel counts as covered, so coverage may differ along the
+    // edges; every pixel both cover agrees.
+    let mut border = 0;
+    for (a, b) in on_cpu.iter().zip(&by_default) {
+        if a.is_nan() != b.is_nan() {
+            border += 1;
+        } else if !a.is_nan() {
+            assert!((a - b).abs() <= 1.0e-3 * b.abs().max(1.0), "{a} vs {b}");
+        }
+    }
+    assert!(
+        border <= 3 * 8 * SIZE,
+        "{border} pixels covered by one run only"
+    );
 
     let refused = run(
         &directory.path().join("refused.fits"),

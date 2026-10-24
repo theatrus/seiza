@@ -106,7 +106,9 @@ impl GpuOptions {
         *self == Self::default()
     }
 
-    pub(crate) fn validate(&self) -> Result<()> {
+    /// An error when these options cannot be used: a concurrency of 0, or
+    /// 0 bytes of memory. Every call that takes options checks them so.
+    pub fn validate(&self) -> Result<()> {
         if self.concurrency == 0 {
             return Err(Error::Stack(
                 "the GPU's concurrency must be at least 1".into(),

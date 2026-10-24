@@ -196,8 +196,10 @@ enum ImageRenderConfigRequest {
 }
 
 impl ImageRenderConfigRequest {
-    fn into_parts(self) -> RenderRequestParts {
-        match self {
+    /// The request's parts, refusing GPU options that cannot be used, so
+    /// the same request fails whether or not it reaches the debayering.
+    fn into_parts(self) -> Result<RenderRequestParts, String> {
+        let parts = match self {
             Self::Processed(request) => {
                 let ProcessedRenderRequest {
                     stretch,
@@ -224,7 +226,9 @@ impl ImageRenderConfigRequest {
                 sample_domain: None,
                 gpu: seiza_stacking::GpuOptions::default(),
             },
-        }
+        };
+        parts.gpu.validate().map_err(stacking_message)?;
+        Ok(parts)
     }
 }
 
@@ -4388,7 +4392,7 @@ pub unsafe extern "C" fn seiza_live_stacker_render_preview(
             deconvolution,
             sample_domain,
             ..
-        } = request.into_parts();
+        } = request.into_parts()?;
         let stacker = unsafe { required_live_stacker(stacker)? };
         let sample_domain = sample_domain
             .unwrap_or_else(|| default_live_preview_sample_domain(stacker.stacker.input_mode()));
@@ -5742,7 +5746,7 @@ pub unsafe extern "C" fn seiza_rendered_image_open_with_stretch_config(
             interactive_preview,
             sample_domain,
             gpu,
-        } = request.into_parts();
+        } = request.into_parts()?;
         let sample_domain = sample_domain.unwrap_or_default();
         if interactive_preview {
             render_cached_interactive_preview(
@@ -5851,7 +5855,7 @@ pub unsafe extern "C" fn seiza_rendered_image16_open_with_stretch_config(
             interactive_preview,
             sample_domain,
             gpu,
-        } = request.into_parts();
+        } = request.into_parts()?;
         let sample_domain = sample_domain.unwrap_or_default();
         if interactive_preview {
             render_cached_interactive_preview16(
@@ -14786,7 +14790,7 @@ mod tests {
             interactive_preview,
             sample_domain,
             ..
-        } = request.into_parts();
+        } = request.into_parts().unwrap();
         assert_eq!(stack.len(), 1);
         assert!(background.is_none());
         assert!(deconvolution.is_none());
@@ -14826,22 +14830,71 @@ mod tests {
             serde_json::from_value(request).unwrap()
         };
         assert_eq!(
-            request(None).into_parts().gpu,
+            request(None).into_parts().unwrap().gpu,
             seiza_stacking::GpuOptions::default()
         );
-        let parts = request(Some(json!({ "enabled": false }))).into_parts();
+        let parts = request(Some(json!({ "enabled": false })))
+            .into_parts()
+            .unwrap();
         assert_eq!(parts.gpu, seiza_stacking::GpuOptions::cpu());
+        // Unusable options are refused when the request is read, whatever
+        // the sample domain, so a unit-linear render that never debayers
+        // refuses them too.
+        let error = request(Some(json!({ "concurrency": 0 })))
+            .into_parts()
+            .err()
+            .unwrap();
+        assert!(error.contains("concurrency"), "{error}");
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mono.fits");
+        seiza_fits::write_f32_image(&path, 4, 4, seiza_fits::F32ImageData::Mono(&[0.5; 16]), &[])
+            .unwrap();
+        let path = CString::new(path.to_str().unwrap()).unwrap();
+        let config = CString::new(
+            json!({
+                "stretch": [{
+                    "model": { "type": "identity" },
+                    "color_strategy": "linked",
+                    "max_analysis_samples": 4096
+                }],
+                "gpu": { "concurrency": 0 }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut error = ptr::null_mut();
+        let image = unsafe {
+            seiza_rendered_image_open_with_stretch_config(
+                path.as_ptr(),
+                config.as_ptr(),
+                0,
+                &mut error,
+            )
+        };
+        assert!(image.is_null());
+        let message = unsafe { CStr::from_ptr(error) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(message.contains("concurrency"), "{message}");
+        unsafe { seiza_string_free(error) };
 
         let bayer = || {
             let headers = vec![(
                 "BAYERPAT".to_owned(),
                 seiza_fits::HeaderValue::String("RGGB".into()),
             )];
+            // Large enough for the GPU's VNG, so the default render runs
+            // there where a GPU is present.
             FitsImage {
-                width: 8,
-                height: 8,
+                width: 1024,
+                height: 1024,
                 planes: 1,
-                pixels: seiza_fits::Pixels::U16((0..64).map(|value| value * 1000).collect()),
+                pixels: seiza_fits::Pixels::U16(
+                    (0..1024 * 1024_u32)
+                        .map(|index| ((index * 37 + index / 1024 * 19) % 40_000) as u16)
+                        .collect(),
+                ),
                 headers,
             }
         };
@@ -14860,9 +14913,18 @@ mod tests {
                 },
             )
         };
+        // The GPU's VNG differs from the CPU's by single-precision rounding,
+        // which can move an 8-bit level by one.
         let on_cpu = render(seiza_stacking::GpuOptions::cpu()).unwrap();
         let by_default = render(seiza_stacking::GpuOptions::default()).unwrap();
-        assert_eq!(on_cpu.rgba, by_default.rgba);
+        assert_eq!(on_cpu.rgba.len(), by_default.rgba.len());
+        assert!(
+            on_cpu
+                .rgba
+                .iter()
+                .zip(&by_default.rgba)
+                .all(|(a, b)| a.abs_diff(*b) <= 1)
+        );
         let refused = render(seiza_stacking::GpuOptions {
             concurrency: 0,
             ..seiza_stacking::GpuOptions::default()
@@ -14900,7 +14962,7 @@ mod tests {
             interactive_preview,
             sample_domain,
             ..
-        } = request.into_parts();
+        } = request.into_parts().unwrap();
         assert_eq!(stack.len(), 1);
         assert!(!interactive_preview);
         assert!(deconvolution.is_none());
@@ -15074,7 +15136,7 @@ mod tests {
             interactive_preview,
             sample_domain,
             ..
-        } = request.into_parts();
+        } = request.into_parts().unwrap();
         assert!(background.is_none());
         assert!(sample_domain.is_none());
         let deconvolution = deconvolution.unwrap();

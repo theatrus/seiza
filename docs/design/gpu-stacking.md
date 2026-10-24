@@ -243,9 +243,9 @@ registration with it.
   `seiza.GpuOptions`, and the CLI's `stack` and `color` as `--no-gpu` and
   `--cpu-pass`. The C ABI's file renders take it as the `gpu` member of a
   processed render request, which governs debayering a raw Bayer frame
-  rendered in physical units. `enabled: false` keeps everything on the CPU and never
-  opens the device; `accumulator`, `debayer`, `detection`, `defects`,
-  `resampling` and `integration` keep one pass each.
+  rendered in physical units. `enabled: false` keeps everything on the
+  CPU and never opens the device; `accumulator`, `debayer`, `detection`,
+  `defects`, `resampling` and `integration` keep one pass each.
 - A call that takes no options uses the defaults. Each such call that
   debayers, detects stars or resamples has a twin that takes them, for a
   host that lets its user turn the GPU off:

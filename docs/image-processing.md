@@ -170,15 +170,14 @@ seiza stack lights/*.fits --output stack.fits --cpu-pass debayer,detection
 `--cpu-pass` accepts `defects`, `debayer`, `detection`, `resampling`,
 `accumulator`, and `integration`. `seiza color` accepts the same GPU flags for
 the star detection and resampling that align its channels; `--no-gpu` keeps
-both on the CPU and never opens the GPU. `--gpu-concurrency` bounds concurrent frame
-calls (default 3). `--gpu-memory-mib` caps the device memory the GPU's work is
-planned in, by default what the device has: the live accumulator stays on the
-CPU when it and the frames on the GPU for it would need more than three
+both on the CPU and never opens the GPU. `--gpu-concurrency` bounds concurrent
+frame calls (default 3). `--gpu-memory-mib` caps the device memory the GPU's
+work is planned in, by default what the device has: the live accumulator stays
+on the CPU when it and the frames on the GPU for it would need more than three
 quarters of it. `--gpu-trace` prints per-call timings and the device memory
-held. Python uses
-`GpuOptions` through `StackOptions`; the C ABI uses the `gpu` options object;
-Rust uses `GpuOptions`. CPU-only builds can disable `seiza-stacking`'s default
-features. Saved contexts retain their GPU options.
+held. Python uses `GpuOptions` through `StackOptions`; the C ABI uses the
+`gpu` options object; Rust uses `GpuOptions`. CPU-only builds can disable
+`seiza-stacking`'s default features. Saved contexts retain their GPU options.
 
 See [whole-stack performance](performance.md#stacking) and the
 [Windows/NVIDIA measurements](benchmarks/2026-10-windows-nvidia-stacking.md).
