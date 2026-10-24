@@ -495,8 +495,7 @@ impl RegisteredFrameMapping {
     /// [`Self::extract_region`] for Bayer drizzle: the nearest source
     /// photosite per pixel, in its own channel, normalized the same way.
     /// `source` is the debayered frame and `layout` the Bayer layout it was
-    /// debayered from. The frame is resampled on the GPU where the default
-    /// [`crate::GpuOptions`] allow it; see
+    /// debayered from. This uses the default [`crate::GpuOptions`]; see
     /// [`Self::extract_region_photosites_with_gpu`].
     pub fn extract_region_photosites(
         &self,
@@ -512,8 +511,9 @@ impl RegisteredFrameMapping {
         )
     }
 
-    /// [`Self::extract_region_photosites`], resampling on the GPU only where
-    /// `gpu` allows it.
+    /// [`Self::extract_region_photosites`] under `gpu`. Nearest-photosite
+    /// sampling has no GPU path yet and runs on the CPU whatever `gpu`
+    /// allows; a later GPU path will follow `gpu`.
     pub fn extract_region_photosites_with_gpu(
         &self,
         source: &LinearImage,
@@ -539,7 +539,9 @@ impl RegisteredFrameMapping {
 
     /// Extract a region after a second registration stage. Global
     /// normalization commutes with the second resampling and keeps this path
-    /// bounded. Local normalization uses the exact two-stage order.
+    /// bounded. Local normalization uses the exact two-stage order. Both
+    /// resamplings run on the GPU where the default [`crate::GpuOptions`]
+    /// allow it; see [`Self::extract_region_after_with_gpu`].
     pub fn extract_region_after(
         &self,
         source: &LinearImage,
@@ -548,12 +550,34 @@ impl RegisteredFrameMapping {
         output_region: ReferenceRegion,
         reference_to_output: SimilarityTransform,
     ) -> Result<LinearImage> {
-        self.extract_region_after_affine(
+        self.extract_region_after_with_gpu(
+            source,
+            output_width,
+            output_height,
+            output_region,
+            reference_to_output,
+            &crate::GpuOptions::default(),
+        )
+    }
+
+    /// [`Self::extract_region_after`], resampling on the GPU only where
+    /// `gpu` allows it.
+    pub fn extract_region_after_with_gpu(
+        &self,
+        source: &LinearImage,
+        output_width: usize,
+        output_height: usize,
+        output_region: ReferenceRegion,
+        reference_to_output: SimilarityTransform,
+        gpu: &crate::GpuOptions,
+    ) -> Result<LinearImage> {
+        self.extract_region_after_affine_with_gpu(
             source,
             output_width,
             output_height,
             output_region,
             reference_to_output.as_affine(),
+            gpu,
         )
     }
 
@@ -829,11 +853,97 @@ mod tests {
         let affine = transform.as_affine().then(AffineTransform::IDENTITY);
         assert_eq!(bits(&reprojected), bits(&on_cpu(&affine.inverse_map())));
 
+        let whole_frame =
+            crate::resample_to_reference_with_gpu(&source, width, height, transform, &cpu).unwrap();
+        assert_eq!(bits(&whole_frame), bits(&expected));
+        let after = mapping
+            .extract_region_after_with_gpu(
+                &source,
+                width,
+                height,
+                region,
+                SimilarityTransform::IDENTITY,
+                &cpu,
+            )
+            .unwrap();
+        let identity = transform.as_affine().then(AffineTransform::IDENTITY);
+        assert_eq!(bits(&after), bits(&on_cpu(&identity.inverse_map())));
+        let affine = SimilarityTransform {
+            scale: 0.998,
+            rotation_radians: -0.021,
+            translation_x: -4.5,
+            translation_y: 6.25,
+        }
+        .as_affine();
+        let reprojected =
+            crate::resample_to_reference_affine_with_gpu(&source, width, height, affine, &cpu)
+                .unwrap();
+        assert_eq!(bits(&reprojected), bits(&on_cpu(&affine.inverse_map())));
+
+        // A warp that bends away from the similarity, as a lens would.
+        let pairs = (0..9)
+            .flat_map(|row| (0..9).map(move |column| (column, row)))
+            .map(|(column, row)| {
+                let (x, y) = (column as f64 * 137.0, row as f64 * 124.0);
+                let (u, v) = transform.inverse_apply(x, y);
+                ((x, y), (u + 1.0e-6 * x * y, v - 2.0e-6 * x * x))
+            })
+            .collect::<Vec<_>>();
+        let warp = crate::PolynomialWarp::fit(2, width, height, &pairs).unwrap();
+        let warped = crate::resample_region_warped_with_gpu(
+            &source,
+            width,
+            height,
+            region,
+            &warp,
+            crate::Interpolation::Bilinear,
+            &cpu,
+        )
+        .unwrap();
+        let warped_on_cpu = crate::registration::resample_region_geometry(
+            &source,
+            width,
+            height,
+            region,
+            crate::registration::FrameGeometry::Warp(&warp),
+            crate::registration::Sampling::Bilinear,
+            &cpu,
+        )
+        .unwrap();
+        assert_eq!(bits(&warped), bits(&warped_on_cpu));
+
         let layout = crate::BayerLayout {
             pattern: seiza_fits::BayerPattern::Rggb,
             x_offset: 0,
             y_offset: 0,
         };
+        let rgb = LinearImage::new(
+            width,
+            height,
+            3,
+            source
+                .data
+                .iter()
+                .flat_map(|&v| [v, v + 1.0, v + 2.0])
+                .collect(),
+        )
+        .unwrap();
+        let photosites = crate::resample_region_photosites_with_gpu(
+            &rgb, width, height, region, transform, layout, &cpu,
+        )
+        .unwrap();
+        let photosites_on_cpu = crate::registration::resample_region_geometry(
+            &rgb,
+            width,
+            height,
+            region,
+            crate::registration::FrameGeometry::Similarity(transform),
+            crate::registration::Sampling::NearestPhotosite(layout),
+            &cpu,
+        )
+        .unwrap();
+        assert_eq!(bits(&photosites), bits(&photosites_on_cpu));
+
         let frame = crate::FitsFrame {
             image: source.clone(),
             headers: Vec::new(),
@@ -848,6 +958,126 @@ mod tests {
             .debayer_with(layout, crate::Demosaic::Vng, &cpu)
             .unwrap();
         assert_eq!(bits(&prepared.image), bits(&debayered));
+    }
+
+    /// Under [`crate::GpuOptions::cpu`], the affine extraction keeps a frame
+    /// large enough for the GPU on the CPU in both of its other paths: the
+    /// two stages a tiled normalization needs, and the per-channel planes of
+    /// a frame whose channels sample the sky at different sites.
+    #[test]
+    fn affine_extraction_given_cpu_options_resamples_both_stages_on_the_cpu() {
+        let cpu = crate::GpuOptions::cpu();
+        let (width, height) = (1100, 1000);
+        let image = |channels: usize, seed: usize| {
+            let data = (0..width * height * channels)
+                .map(|index| {
+                    let pixel = index / channels;
+                    100.0
+                        + ((index * 37 + seed * 11) % 53) as f32
+                        + 0.01 * (pixel % width) as f32
+                        + 0.02 * (pixel / width) as f32
+                })
+                .collect();
+            LinearImage::new(width, height, channels, data).unwrap()
+        };
+        let transform = SimilarityTransform {
+            scale: 1.002,
+            rotation_radians: 0.013,
+            translation_x: 7.25,
+            translation_y: -3.5,
+        };
+        let reference_to_output = SimilarityTransform {
+            scale: 1.0,
+            rotation_radians: -0.021,
+            translation_x: -4.5,
+            translation_y: 6.25,
+        }
+        .as_affine();
+        let whole = ReferenceRegion {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        };
+        let on_cpu = |source: &LinearImage, inverse: &(dyn Fn(f64, f64) -> (f64, f64) + Sync)| {
+            crate::registration::resample_region_on_cpu(
+                source,
+                whole,
+                &|x, y| inverse(x, y),
+                crate::registration::Sampling::Bilinear,
+                &vec![0.0; source.channels],
+            )
+            .unwrap()
+        };
+        let bits = |image: &LinearImage| image.data.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+
+        // A tiled normalization: register, normalize, then reproject.
+        let source = image(1, 0);
+        let normalization = NormalizationMap::estimate(
+            &image(1, 1),
+            &source,
+            crate::NormalizationMode::Local { tile_size: 128 },
+        )
+        .unwrap();
+        assert!(!normalization.is_global());
+        let mapping = RegisteredFrameMapping::identity(&source)
+            .with_normalization(normalization.clone())
+            .unwrap()
+            .with_geometry(transform, None)
+            .unwrap();
+        let mut intermediate = on_cpu(&source, &transform.inverse_map());
+        normalization.apply(&mut intermediate).unwrap();
+        let expected = on_cpu(&intermediate, &reference_to_output.inverse_map());
+        let extracted = mapping
+            .extract_region_after_affine_with_gpu(
+                &source,
+                width,
+                height,
+                whole,
+                reference_to_output,
+                &cpu,
+            )
+            .unwrap();
+        assert_eq!(bits(&extracted), bits(&expected));
+
+        // Channels at different sites: each plane resampled on its own.
+        use crate::registration::ChannelSites;
+        let sites = ChannelSites([(-0.25, -0.25), (0.0, 0.0), (0.25, 0.25)]);
+        let source = image(3, 2);
+        let mut mapping = RegisteredFrameMapping::identity(&source)
+            .with_normalization(NormalizationMap::identity(&source))
+            .unwrap()
+            .with_geometry(transform, None)
+            .unwrap();
+        mapping.set_channel_sites(Some(sites));
+        let extracted = mapping
+            .extract_region_after_affine_with_gpu(
+                &source,
+                width,
+                height,
+                whole,
+                reference_to_output,
+                &cpu,
+            )
+            .unwrap();
+        let combined = transform.as_affine().then(reference_to_output);
+        let mut expected = vec![0.0_f32; width * height * 3];
+        for (channel, (dx, dy)) in sites.0.into_iter().enumerate() {
+            let shifted = AffineTransform {
+                translation_x: dx,
+                translation_y: dy,
+                ..AffineTransform::IDENTITY
+            }
+            .then(combined);
+            let plane = on_cpu(&source.channel(channel).unwrap(), &shifted.inverse_map());
+            for (pixel, value) in expected.as_chunks_mut::<3>().0.iter_mut().zip(plane.data) {
+                pixel[channel] = value;
+            }
+        }
+        assert_eq!(
+            bits(&extracted),
+            expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        );
     }
 
     /// A binned mapping with a quadratic warp and a tiled normalization.

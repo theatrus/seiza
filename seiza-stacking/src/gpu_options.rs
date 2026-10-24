@@ -20,10 +20,19 @@ use serde::{Deserialize, Serialize};
 /// takes them runs where they allow:
 /// [`crate::FitsFrame::into_prepared_with_gpu`],
 /// [`crate::Registrar::new_with_gpu`],
+/// [`crate::SkyOrientationPlan::apply_with_gpu`],
+/// [`crate::resample_to_reference_with_gpu`],
 /// [`crate::resample_region_to_reference_with_gpu`],
-/// [`crate::RegisteredFrameMapping::extract_region_with_gpu`],
-/// [`crate::RegisteredFrameMapping::extract_region_photosites_with_gpu`] and
-/// [`crate::RegisteredFrameMapping::extract_region_after_affine_with_gpu`].
+/// [`crate::resample_to_reference_affine_with_gpu`],
+/// [`crate::resample_region_to_reference_affine_with_gpu`],
+/// [`crate::resample_region_warped_with_gpu`],
+/// [`crate::resample_region_photosites_with_gpu`], and
+/// [`crate::RegisteredFrameMapping`]'s `extract_region_with_gpu`,
+/// `extract_region_photosites_with_gpu`, `extract_region_after_with_gpu` and
+/// `extract_region_after_affine_with_gpu`. [`crate::resample_region_to_reference`]
+/// and [`crate::RegisteredFrameMapping::extract_region`] resample
+/// bilinearly; their twins are the `_with_gpu` calls above given
+/// [`crate::Interpolation::Bilinear`].
 /// A saved stack reopens under the options it was saved with, or under
 /// others by [`crate::LiveStacker::open_context_with_gpu`].
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

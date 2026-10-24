@@ -3314,11 +3314,12 @@ impl LiveStacker {
             let (frame, cfa) = self.read_admitted(admitted, masters)?;
             let region = self.full_region(admitted);
             return match cfa {
-                Some(layout) => {
-                    admitted
-                        .mapping
-                        .extract_region_photosites(&frame.image, region, layout)
-                }
+                Some(layout) => admitted.mapping.extract_region_photosites_with_gpu(
+                    &frame.image,
+                    region,
+                    layout,
+                    &self.options.gpu,
+                ),
                 None => admitted.mapping.extract_region_sited(
                     &frame.image,
                     region,
@@ -3376,7 +3377,12 @@ impl LiveStacker {
             Some(layout) => admitted
                 .mapping
                 .with_normalization(map)?
-                .extract_region_photosites(&frame.image, region, layout),
+                .extract_region_photosites_with_gpu(
+                    &frame.image,
+                    region,
+                    layout,
+                    &self.options.gpu,
+                ),
             None => {
                 map.apply(&mut interpolated)?;
                 Ok(interpolated)

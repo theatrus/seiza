@@ -3873,8 +3873,10 @@ pub unsafe extern "C" fn seiza_live_stacker_open_context(
 /// but runs the stack under the GPU options in `gpu_json` in place of the
 /// options it was saved with. `gpu_json` is a JSON object with the fields of
 /// the `"gpu"` member of [`seiza_live_stacker_open_fits`]'s options, such as
-/// `{"enabled": false}` to keep every pass on the CPU; null or empty gives
-/// the defaults, which let every pass run on the GPU. The configuration
+/// `{"enabled": false}` to keep every pass on the CPU, or `{}` for the
+/// defaults, which let every pass run on the GPU. When `gpu_json` is null or
+/// empty, the stack keeps the options it was saved with, as
+/// [`seiza_live_stacker_open_context`] does. The configuration
 /// fingerprint leaves GPU options out, so it matches the saved stack's, and
 /// a context saved from the reopened handle records the new options.
 ///
@@ -3890,9 +3892,11 @@ pub unsafe extern "C" fn seiza_live_stacker_open_context_with_gpu(
     clear_error(error_out);
     ffi_result(error_out, || {
         let context_path = required_path(context_path, "stack context path")?;
-        let gpu = gpu_options(gpu_json)?;
-        let stacker = LiveStacker::open_context_with_gpu(&context_path, gpu)
-            .map_err(|error| error.to_string())?;
+        let stacker = match gpu_options(gpu_json)? {
+            Some(gpu) => LiveStacker::open_context_with_gpu(&context_path, gpu),
+            None => LiveStacker::open_context(&context_path),
+        }
+        .map_err(|error| error.to_string())?;
         Ok(SeizaLiveStacker { stacker })
     })
     .map_or(ptr::null_mut(), |stacker| Box::into_raw(Box::new(stacker)))
@@ -8004,15 +8008,18 @@ fn expanding_stack_options(options_json: *const c_char) -> Result<StackOptions, 
     Ok(options)
 }
 
-fn gpu_options(gpu_json: *const c_char) -> Result<seiza_stacking::GpuOptions, String> {
+/// The GPU options `gpu_json` gives, or `None` when it is null or empty.
+fn gpu_options(gpu_json: *const c_char) -> Result<Option<seiza_stacking::GpuOptions>, String> {
     if gpu_json.is_null() {
-        return Ok(seiza_stacking::GpuOptions::default());
+        return Ok(None);
     }
     let gpu_json = required_str(gpu_json, "GPU options JSON")?;
     if gpu_json.trim().is_empty() {
-        return Ok(seiza_stacking::GpuOptions::default());
+        return Ok(None);
     }
-    serde_json::from_str(&gpu_json).map_err(|error| format!("invalid GPU options JSON: {error}"))
+    serde_json::from_str(&gpu_json)
+        .map(Some)
+        .map_err(|error| format!("invalid GPU options JSON: {error}"))
 }
 
 fn stack_options(options_json: *const c_char) -> Result<StackOptions, String> {
@@ -10666,7 +10673,8 @@ mod tests {
         let saved = fingerprint(stacker);
         unsafe { seiza_live_stacker_free(stacker) };
 
-        for gpu in [Some(r#"{"enabled": false}"#), Some(""), None] {
+        // Null and empty keep the saved options; `{}` asks for the defaults.
+        for gpu in [Some(r#"{"enabled": false}"#), Some("{}"), Some(""), None] {
             let gpu = gpu.map(|gpu| CString::new(gpu).unwrap());
             let resumed = unsafe {
                 seiza_live_stacker_open_context_with_gpu(

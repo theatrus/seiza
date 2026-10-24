@@ -134,9 +134,12 @@ pub use reference::{ReferenceScore, choose_reference, rank_references, reference
 pub use registration::{
     AffineTransform, Interpolation, PolynomialWarp, ReferenceRegion, Registrar, RegistrationModel,
     RegistrationOptions, RegistrationResult, SimilarityTransform, resample_region_photosites,
-    resample_region_to_reference, resample_region_to_reference_affine,
+    resample_region_photosites_with_gpu, resample_region_to_reference,
+    resample_region_to_reference_affine, resample_region_to_reference_affine_with_gpu,
     resample_region_to_reference_with, resample_region_to_reference_with_gpu,
-    resample_region_warped, resample_to_reference, resample_to_reference_affine,
+    resample_region_warped, resample_region_warped_with_gpu, resample_to_reference,
+    resample_to_reference_affine, resample_to_reference_affine_with_gpu,
+    resample_to_reference_with_gpu,
 };
 pub use residual_flat::{
     RESIDUAL_FLAT_ALGORITHM_VERSION, ResidualFlatBuild, ResidualFlatDiagnostics,

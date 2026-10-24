@@ -459,6 +459,11 @@ objects = [
 "seiza-stacking::resample_region_to_reference_affine" = { none = "a registration building block the stacker uses" }
 "seiza-stacking::resample_region_to_reference_with" = { none = "a registration building block the stacker uses" }
 "seiza-stacking::resample_region_to_reference_with_gpu" = { none = "a registration building block the stacker uses" }
+"seiza-stacking::resample_to_reference_with_gpu" = { none = "a registration building block the stacker uses" }
+"seiza-stacking::resample_to_reference_affine_with_gpu" = { none = "a registration building block the stacker uses" }
+"seiza-stacking::resample_region_to_reference_affine_with_gpu" = { none = "a registration building block the stacker uses" }
+"seiza-stacking::resample_region_warped_with_gpu" = { none = "a registration building block the stacker uses" }
+"seiza-stacking::resample_region_photosites_with_gpu" = { none = "a registration building block the stacker uses" }
 "seiza-stacking::resample_region_warped" = { none = "a registration building block the stacker uses" }
 "seiza-stacking::resample_region_photosites" = { none = "a registration building block the stacker uses" }
 "seiza-stacking::screen_dark_levels" = { none = "master builds call it for dark level screening (MasterBuildRequest.darkLevelScreening)" }

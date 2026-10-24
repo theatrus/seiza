@@ -1462,14 +1462,35 @@ pub(crate) fn refine_similarity(
 
 /// Resample a source image through a fitted source-to-reference transform.
 /// Samples outside the source grid, or whose interpolation neighborhood is
-/// not finite, are written as `NaN`.
+/// not finite, are written as `NaN`. The image is resampled on the GPU where
+/// the default [`crate::GpuOptions`] allow it; see
+/// [`resample_to_reference_with_gpu`].
 pub fn resample_to_reference(
     source: &LinearImage,
     width: usize,
     height: usize,
     transform: SimilarityTransform,
 ) -> Result<LinearImage> {
-    resample_region_to_reference(
+    resample_to_reference_with_gpu(
+        source,
+        width,
+        height,
+        transform,
+        &crate::GpuOptions::default(),
+    )
+}
+
+/// [`resample_to_reference`], resampling bilinearly on the GPU only where
+/// `gpu` allows it. [`crate::GpuOptions::cpu`] keeps the resampling on the
+/// CPU.
+pub fn resample_to_reference_with_gpu(
+    source: &LinearImage,
+    width: usize,
+    height: usize,
+    transform: SimilarityTransform,
+    gpu: &crate::GpuOptions,
+) -> Result<LinearImage> {
+    resample_region_to_reference_with_gpu(
         source,
         width,
         height,
@@ -1480,6 +1501,8 @@ pub fn resample_to_reference(
             height,
         },
         transform,
+        Interpolation::Bilinear,
+        gpu,
     )
 }
 
@@ -1487,7 +1510,8 @@ pub fn resample_to_reference(
 /// full registered image. Output pixel `(0, 0)` corresponds to
 /// `(region.x, region.y)` in reference coordinates. Samples outside the source
 /// grid, or whose interpolation neighborhood is not finite, are written as
-/// `NaN`.
+/// `NaN`. Bilinear [`resample_region_to_reference_with_gpu`] takes GPU
+/// options.
 pub fn resample_region_to_reference(
     source: &LinearImage,
     reference_width: usize,
@@ -1587,6 +1611,9 @@ impl Interpolation {
 /// these are the raw sensor values. Integrating many frames that land on
 /// different photosites fills every channel without interpolation; this is
 /// Bayer drizzle with a one-pixel drop at the reference scale.
+///
+/// This uses the default [`crate::GpuOptions`]; see
+/// [`resample_region_photosites_with_gpu`].
 pub fn resample_region_photosites(
     source: &LinearImage,
     reference_width: usize,
@@ -1595,6 +1622,30 @@ pub fn resample_region_photosites(
     transform: SimilarityTransform,
     layout: crate::BayerLayout,
 ) -> Result<LinearImage> {
+    resample_region_photosites_with_gpu(
+        source,
+        reference_width,
+        reference_height,
+        region,
+        transform,
+        layout,
+        &crate::GpuOptions::default(),
+    )
+}
+
+/// [`resample_region_photosites`] under `gpu`. Nearest-photosite sampling
+/// has no GPU path yet and runs on the CPU whatever `gpu` allows; a later
+/// GPU path will follow `gpu`.
+pub fn resample_region_photosites_with_gpu(
+    source: &LinearImage,
+    reference_width: usize,
+    reference_height: usize,
+    region: ReferenceRegion,
+    transform: SimilarityTransform,
+    layout: crate::BayerLayout,
+    gpu: &crate::GpuOptions,
+) -> Result<LinearImage> {
+    gpu.validate()?;
     transform.validate()?;
     if source.channels != 3 {
         return Err(Error::Registration(
@@ -1608,7 +1659,7 @@ pub fn resample_region_photosites(
         region,
         transform.inverse_map(),
         Sampling::NearestPhotosite(layout),
-        &crate::GpuOptions::default(),
+        gpu,
     )
 }
 
@@ -1922,7 +1973,9 @@ fn within_source(source_x: f64, source_y: f64, maximum_x: f64, maximum_y: f64) -
 }
 
 /// Resample one reference-grid region through a polynomial warp from
-/// [`RegistrationResult::warp`].
+/// [`RegistrationResult::warp`]. The image is resampled on the GPU where the
+/// default [`crate::GpuOptions`] allow it; see
+/// [`resample_region_warped_with_gpu`].
 pub fn resample_region_warped(
     source: &LinearImage,
     reference_width: usize,
@@ -1931,6 +1984,29 @@ pub fn resample_region_warped(
     warp: &PolynomialWarp,
     interpolation: Interpolation,
 ) -> Result<LinearImage> {
+    resample_region_warped_with_gpu(
+        source,
+        reference_width,
+        reference_height,
+        region,
+        warp,
+        interpolation,
+        &crate::GpuOptions::default(),
+    )
+}
+
+/// [`resample_region_warped`], resampling on the GPU only where `gpu`
+/// allows it.
+pub fn resample_region_warped_with_gpu(
+    source: &LinearImage,
+    reference_width: usize,
+    reference_height: usize,
+    region: ReferenceRegion,
+    warp: &PolynomialWarp,
+    interpolation: Interpolation,
+    gpu: &crate::GpuOptions,
+) -> Result<LinearImage> {
+    gpu.validate()?;
     resample_region_geometry(
         source,
         reference_width,
@@ -1938,7 +2014,7 @@ pub fn resample_region_warped(
         region,
         FrameGeometry::Warp(warp),
         Sampling::from(interpolation),
-        &crate::GpuOptions::default(),
+        gpu,
     )
 }
 
@@ -2250,14 +2326,34 @@ pub(crate) enum Sampling {
 }
 
 /// Resample a source image through a general source-to-reference affine
-/// transform. This supports parity flips as well as rotation and scale.
+/// transform. This supports parity flips as well as rotation and scale. The
+/// image is resampled on the GPU where the default [`crate::GpuOptions`]
+/// allow it; see [`resample_to_reference_affine_with_gpu`].
 pub fn resample_to_reference_affine(
     source: &LinearImage,
     width: usize,
     height: usize,
     transform: AffineTransform,
 ) -> Result<LinearImage> {
-    resample_region_to_reference_affine(
+    resample_to_reference_affine_with_gpu(
+        source,
+        width,
+        height,
+        transform,
+        &crate::GpuOptions::default(),
+    )
+}
+
+/// [`resample_to_reference_affine`], resampling on the GPU only where `gpu`
+/// allows it. [`crate::GpuOptions::cpu`] keeps the resampling on the CPU.
+pub fn resample_to_reference_affine_with_gpu(
+    source: &LinearImage,
+    width: usize,
+    height: usize,
+    transform: AffineTransform,
+    gpu: &crate::GpuOptions,
+) -> Result<LinearImage> {
+    resample_region_to_reference_affine_with_gpu(
         source,
         width,
         height,
@@ -2268,11 +2364,14 @@ pub fn resample_to_reference_affine(
             height,
         },
         transform,
+        gpu,
     )
 }
 
 /// Resample one bounded reference-grid region through a general affine
-/// transform without allocating the full registered image.
+/// transform without allocating the full registered image. The image is
+/// resampled on the GPU where the default [`crate::GpuOptions`] allow it;
+/// see [`resample_region_to_reference_affine_with_gpu`].
 pub fn resample_region_to_reference_affine(
     source: &LinearImage,
     reference_width: usize,
@@ -2292,7 +2391,7 @@ pub fn resample_region_to_reference_affine(
 
 /// [`resample_region_to_reference_affine`], resampling on the GPU only where
 /// `gpu` allows it.
-pub(crate) fn resample_region_to_reference_affine_with_gpu(
+pub fn resample_region_to_reference_affine_with_gpu(
     source: &LinearImage,
     reference_width: usize,
     reference_height: usize,
@@ -2300,6 +2399,7 @@ pub(crate) fn resample_region_to_reference_affine_with_gpu(
     transform: AffineTransform,
     gpu: &crate::GpuOptions,
 ) -> Result<LinearImage> {
+    gpu.validate()?;
     transform.validate()?;
     resample_region_with_inverse(
         source,

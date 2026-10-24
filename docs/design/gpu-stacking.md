@@ -247,12 +247,22 @@ registration with it.
 - A call that takes no options uses the defaults. Each such call that
   debayers, detects stars or resamples has a twin that takes them, for a
   host that lets its user turn the GPU off:
-  `FitsFrame::into_prepared_with_gpu`, `Registrar::new_with_gpu` (whose
-  `register` detects each source frame's stars under the same options),
-  `resample_region_to_reference_with_gpu`, and
-  `RegisteredFrameMapping`'s `extract_region_with_gpu`,
-  `extract_region_photosites_with_gpu` and
-  `extract_region_after_affine_with_gpu`.
+  `FitsFrame::into_prepared_with_gpu`; `Registrar::new_with_gpu`, whose
+  `register` detects each source frame's stars under the same options;
+  `SkyOrientationPlan::apply_with_gpu`; `resample_to_reference_with_gpu`,
+  `resample_region_to_reference_with_gpu`,
+  `resample_to_reference_affine_with_gpu`,
+  `resample_region_to_reference_affine_with_gpu`,
+  `resample_region_warped_with_gpu` and
+  `resample_region_photosites_with_gpu`; and `RegisteredFrameMapping`'s
+  `extract_region_with_gpu`, `extract_region_photosites_with_gpu`,
+  `extract_region_after_with_gpu` and
+  `extract_region_after_affine_with_gpu`. `resample_region_to_reference`
+  and `extract_region` resample bilinearly, so their twins are
+  `resample_region_to_reference_with_gpu` and `extract_region_with_gpu`
+  given `Interpolation::Bilinear`. Nearest-photosite sampling has no GPU
+  path yet, so the photosite twins run on the CPU whatever the options
+  allow.
 - A saved stack keeps its `GpuOptions`, and `LiveStacker::open_context`
   reopens it under them. `LiveStacker::open_context_with_gpu` reopens it
   under others: registration, resampling, the accumulator and

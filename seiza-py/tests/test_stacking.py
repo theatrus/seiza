@@ -119,6 +119,11 @@ def test_a_context_reopens_under_other_gpu_options(tmp_path):
     )
     assert on_the_cpu.push(image.copy()).accepted
     assert on_the_cpu.accepted_frames == stacker.accepted_frames + 1
+    # gpu=None keeps the options the stack was saved with.
+    kept = seiza.LiveStacker.open_context(context, gpu=None)
+    assert kept.state().configuration_fingerprint == (
+        stacker.state().configuration_fingerprint
+    )
     # Both stacks hold the same frames, so their means agree.
     stacker.push(image.copy())
     assert np.allclose(

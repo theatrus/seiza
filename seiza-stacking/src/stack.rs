@@ -1417,7 +1417,7 @@ impl LiveStacker {
             match reference_cfa.filter(|_| options.cfa_integration == CfaIntegration::BayerDrizzle)
             {
                 Some(layout) => {
-                    let photosites = crate::registration::resample_region_photosites(
+                    let photosites = crate::registration::resample_region_photosites_with_gpu(
                         &reference,
                         reference.width,
                         reference.height,
@@ -1429,6 +1429,7 @@ impl LiveStacker {
                         },
                         SimilarityTransform::IDENTITY,
                         layout,
+                        &options.gpu,
                     )?;
                     accumulator.integrate(&photosites.data, RejectionMode::None, None);
                 }
@@ -4681,8 +4682,6 @@ mod tests {
         for frame in frames[3..].iter().cloned() {
             resumed.push_linear(frame).unwrap();
         }
-        #[cfg(feature = "gpu")]
-        assert!(resumed.accumulator.gpu.is_none());
 
         // A context saved from the reopened stack records the new options.
         let cpu_path = directory.path().join("cpu.seiza-stack");

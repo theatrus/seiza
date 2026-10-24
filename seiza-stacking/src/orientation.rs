@@ -1,4 +1,4 @@
-use crate::{AffineTransform, Error, LinearImage, Result, resample_to_reference_affine};
+use crate::{AffineTransform, Error, LinearImage, Result, resample_to_reference_affine_with_gpu};
 use seiza::{FitsCardValue, Wcs};
 use seiza_fits::{HeaderValue, WriteHeaderCard};
 
@@ -109,8 +109,21 @@ impl SkyOrientationPlan {
         })
     }
 
-    /// Resample one linear mono or RGB image onto this plan's sky-up grid.
+    /// Resample one linear mono or RGB image onto this plan's sky-up grid,
+    /// on the GPU where the default [`crate::GpuOptions`] allow it; see
+    /// [`Self::apply_with_gpu`].
     pub fn apply(&self, source: &LinearImage) -> Result<LinearImage> {
+        self.apply_with_gpu(source, &crate::GpuOptions::default())
+    }
+
+    /// [`Self::apply`], resampling on the GPU only where `gpu` allows it.
+    /// [`crate::GpuOptions::cpu`] keeps the resampling on the CPU.
+    pub fn apply_with_gpu(
+        &self,
+        source: &LinearImage,
+        gpu: &crate::GpuOptions,
+    ) -> Result<LinearImage> {
+        gpu.validate()?;
         if source.width != self.source_width || source.height != self.source_height {
             return Err(Error::Orientation(format!(
                 "sky-orientation source is {}x{}; expected {}x{}",
@@ -123,11 +136,12 @@ impl SkyOrientationPlan {
         {
             return Ok(source.clone());
         }
-        resample_to_reference_affine(
+        resample_to_reference_affine_with_gpu(
             source,
             self.output_width,
             self.output_height,
             self.source_to_output,
+            gpu,
         )
     }
 
@@ -261,6 +275,50 @@ mod tests {
                 .filter(|value| value.is_finite())
                 .count(),
             12
+        );
+    }
+
+    /// Under [`crate::GpuOptions::cpu`], a frame large enough for the GPU
+    /// is turned north-up on the CPU.
+    #[test]
+    fn apply_given_cpu_options_resamples_on_the_cpu() {
+        let (width, height) = (1100, 1000);
+        let image = LinearImage::new(
+            width,
+            height,
+            1,
+            (0..width * height)
+                .map(|index| 100.0 + ((index * 37) % 53) as f32 + 0.01 * (index % width) as f32)
+                .collect(),
+        )
+        .unwrap();
+        let wcs = Wcs::from_center_scale_rotation((120.0, 30.0), (550.0, 500.0), 1.5, 30.0, false);
+        let plan = SkyOrientationPlan::new(width, height, &wcs).unwrap();
+        let cpu = crate::GpuOptions::cpu();
+        let oriented = plan.apply_with_gpu(&image, &cpu).unwrap();
+        let expected = crate::registration::resample_region_on_cpu(
+            &image,
+            crate::ReferenceRegion {
+                x: 0,
+                y: 0,
+                width: plan.output_width(),
+                height: plan.output_height(),
+            },
+            &plan.source_to_output().inverse_map(),
+            crate::registration::Sampling::Bilinear,
+            &[0.0],
+        )
+        .unwrap();
+        assert_eq!(
+            (oriented.width, oriented.height),
+            (expected.width, expected.height)
+        );
+        assert!(
+            oriented
+                .data
+                .iter()
+                .zip(&expected.data)
+                .all(|(a, b)| a.to_bits() == b.to_bits())
         );
     }
 

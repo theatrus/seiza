@@ -1386,8 +1386,10 @@ SeizaLiveStacker *seiza_live_stacker_open_context(const char *context_path, char
  but runs the stack under the GPU options in `gpu_json` in place of the
  options it was saved with. `gpu_json` is a JSON object with the fields of
  the `"gpu"` member of [`seiza_live_stacker_open_fits`]'s options, such as
- `{"enabled": false}` to keep every pass on the CPU; null or empty gives
- the defaults, which let every pass run on the GPU. The configuration
+ `{"enabled": false}` to keep every pass on the CPU, or `{}` for the
+ defaults, which let every pass run on the GPU. When `gpu_json` is null or
+ empty, the stack keeps the options it was saved with, as
+ [`seiza_live_stacker_open_context`] does. The configuration
  fingerprint leaves GPU options out, so it matches the saved stack's, and
  a context saved from the reopened handle records the new options.
 
