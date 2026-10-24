@@ -16,7 +16,7 @@ default = ["gpu"]
 # Run stacking's heavy passes on the GPU when one is present, through wgpu,
 # where each request's GpuOptions allow it. Without it, every pass runs on
 # the CPU.
-gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck", "dep:objc2-metal"]
 
 [dependencies]
 multiversion = "0.9"
@@ -40,6 +40,11 @@ seiza-stretch.workspace = true
 tempfile = "3"
 thiserror.workspace = true
 zstd.workspace = true
+
+# What a Metal device's memory is and holds, which wgpu does not report;
+# the version wgpu uses.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+objc2-metal = { version = "0.3.2", optional = true, default-features = false, features = ["MTLDevice"] }
 
 [dev-dependencies]
 naga.workspace = true

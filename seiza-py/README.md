@@ -756,8 +756,11 @@ may: give it as `gpu` to `StackOptions`, which governs the stack and its
 reintegration, to `detect_defects` and to `integrate_registered_frames`.
 `GpuOptions(enabled=False)` keeps every pass on the CPU; `defects`, `debayer`,
 `detection`, `resampling`, `accumulator` and `integration` keep one each.
-`concurrency` (3) is the frame calls the GPU takes at once, and `trace=True`
-prints each call's timings to stderr:
+`concurrency` (3) is the frame calls the GPU takes at once. `memory_bytes`
+caps the device memory the GPU's work is planned in, by default what the
+device has: a live stack's accumulator stays on the CPU when it, the frames
+prepared for it and the frame calls' buffers would need more than three
+quarters of it. `trace=True` prints each call's timings to stderr:
 
 ```python
 options = seiza.StackOptions(gpu=seiza.GpuOptions(debayer=False))

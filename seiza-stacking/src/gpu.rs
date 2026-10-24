@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 mod timing;
 use timing::GpuTimer;
 pub(crate) mod gather;
+mod memory;
 
 /// Samples below which the CPU is as quick: the GPU's fixed cost, the
 /// coordinate grid and the transfers, is a few milliseconds a frame.
@@ -96,6 +97,8 @@ struct Gpu {
     /// a discrete one goes through staging copies.
     mapped: bool,
     max_buffer: u64,
+    /// Bytes of memory the device has, where its backend says.
+    memory: Option<u64>,
     /// Frame-sized buffers kept between calls: making a new one maps and
     /// clears fresh memory, which took longer than the upload itself.
     pool: std::sync::Mutex<Vec<(wgpu::BufferUsages, wgpu::Buffer)>>,
@@ -597,8 +600,14 @@ impl VngOutput {
     }
 }
 
-/// Bytes the pool keeps at most, past which a returned buffer is dropped.
+/// Bytes the pool keeps at most, past which a returned buffer is dropped,
+/// and no more than a sixteenth of the device's memory: 512 MiB on an 8 GB
+/// card.
 const POOL_BYTES: u64 = 1 << 30;
+
+/// Bytes of memory planned for a device whose backend does not say how much
+/// it has: the smallest discrete GPUs these passes run well on.
+const UNREPORTED_MEMORY: u64 = 4 << 30;
 
 static GPU: OnceLock<Option<Gpu>> = OnceLock::new();
 
@@ -639,7 +648,11 @@ impl Trace {
                 .map(|(stage, ms)| format!("{stage} {ms:.3}"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            eprintln!("seiza-stacking gpu: {what}: {total:.1} ms ({parts})");
+            let held = opened()
+                .and_then(|gpu| memory::in_use(&gpu.device))
+                .map(|bytes| format!(", device memory {} MiB", bytes >> 20))
+                .unwrap_or_default();
+            eprintln!("seiza-stacking gpu: {what}: {total:.1} ms ({parts}){held}");
             if let Some(ms) = self.device_ms {
                 eprintln!("seiza-stacking gpu: {what}: device compute {ms:.3} ms");
             }
@@ -663,12 +676,14 @@ fn gpu(options: &GpuOptions) -> Option<&'static Gpu> {
                 if options.trace {
                     let info = gpu.device.adapter_info();
                     eprintln!(
-                        "seiza-stacking gpu: adapter: {} ({:?}), device timestamps {}",
+                        "seiza-stacking gpu: adapter: {} ({:?}), device timestamps {}, memory {}",
                         info.name,
                         info.backend,
                         gpu.device
                             .features()
-                            .contains(wgpu::Features::TIMESTAMP_QUERY)
+                            .contains(wgpu::Features::TIMESTAMP_QUERY),
+                        gpu.memory
+                            .map_or("unknown".into(), |bytes| format!("{} MiB", bytes >> 20)),
                     );
                 }
                 Some(gpu)
@@ -724,6 +739,7 @@ impl Gpu {
             && adapter
                 .features()
                 .contains(wgpu::Features::MAPPABLE_PRIMARY_BUFFERS);
+        let memory = memory::capacity(&adapter);
         let supported = adapter.limits();
         let limits = wgpu::Limits {
             max_storage_buffer_binding_size: supported.max_storage_buffer_binding_size,
@@ -1192,6 +1208,7 @@ impl Gpu {
             max_buffer: limits
                 .max_buffer_size
                 .min(limits.max_storage_buffer_binding_size),
+            memory,
             pool: std::sync::Mutex::new(Vec::new()),
             calls: (std::sync::Mutex::new(0), std::sync::Condvar::new()),
         })
@@ -1230,6 +1247,20 @@ impl Gpu {
         }
     }
 
+    /// Bytes of idle buffers the pool keeps at most.
+    fn pool_bytes(&self) -> u64 {
+        POOL_BYTES.min(self.memory.unwrap_or(UNREPORTED_MEMORY) / 16)
+    }
+
+    /// Bytes of device memory a call's `options` plan its work in: what the
+    /// device has, or less where they cap it.
+    fn memory_for(&self, options: &GpuOptions) -> u64 {
+        match (self.memory, options.memory_bytes) {
+            (Some(device), Some(cap)) => device.min(cap),
+            (device, cap) => device.or(cap).unwrap_or(UNREPORTED_MEMORY),
+        }
+    }
+
     /// Return a buffer [`Self::take`] gave, unmapped, for a later call.
     fn give(&self, usage: wgpu::BufferUsages, buffer: wgpu::Buffer) {
         let mut pool = self
@@ -1237,7 +1268,7 @@ impl Gpu {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let held: u64 = pool.iter().map(|(_, buffer)| buffer.size()).sum();
-        if held + buffer.size() <= POOL_BYTES {
+        if held + buffer.size() <= self.pool_bytes() {
             pool.push((usage, buffer));
         }
     }
@@ -2599,7 +2630,9 @@ impl BandSession {
     /// bands took the 200-frame 61 MP Pleiades stack's final integration on
     /// an Iris Xe from 25 s to 17.5 s, against 128 MiB, and left the M4 Max's
     /// 2.3 s as it was. Stay within half the caller's band memory, both
-    /// device binding limits, and a 512 MiB input band.
+    /// device binding limits, a 512 MiB input band, and a sixteenth of the
+    /// device memory planned for: the two sessions' bands and, on a
+    /// discrete GPU, their uploads take four times that.
     pub(crate) fn rows(
         (width, height, channels): (usize, usize, usize),
         frame_count: usize,
@@ -2616,7 +2649,9 @@ impl BandSession {
         if row_samples > max_samples {
             return None;
         }
-        let samples = ((memory / 2).min(512 * 1024 * 1024) / (frame_count * 4)).min(max_samples);
+        let planned = usize::try_from(gpu.memory_for(options) / 16).unwrap_or(usize::MAX);
+        let samples =
+            ((memory / 2).min(512 * 1024 * 1024).min(planned) / (frame_count * 4)).min(max_samples);
         Some((samples / row_samples).clamp(1, height))
     }
 
@@ -3129,7 +3164,8 @@ impl Drop for GpuMoments {
 impl GpuMoments {
     /// Moments of at least a million samples moved to the GPU, or `None`
     /// when they stay on the CPU, as they do when `options` keep the
-    /// accumulator there.
+    /// accumulator there, or when it would crowd the device's memory; see
+    /// [`Self::memory_needed`].
     pub(crate) fn upload(moments: MomentSlices<'_>, options: &GpuOptions) -> Option<Self> {
         if moments.mean.len() < MINIMUM_SAMPLES || !options.accumulator {
             return None;
@@ -3137,6 +3173,27 @@ impl GpuMoments {
         let gpu = gpu(options)?;
         let samples = moments.mean.len();
         if (samples as u64) * 4 > gpu.max_buffer {
+            return None;
+        }
+        let needed = Self::memory_needed(
+            samples,
+            moments.weight_sum.is_some(),
+            options.concurrency,
+            gpu.mapped,
+        )
+        .saturating_add(gpu.pool_bytes());
+        let memory = gpu.memory_for(options);
+        let fits = Self::fits(needed, memory);
+        if options.trace {
+            eprintln!(
+                "seiza-stacking gpu: accumulator on the {}: it and its frames need {} MiB, \
+                 against three quarters of {} MiB",
+                if fits { "GPU" } else { "CPU" },
+                needed >> 20,
+                memory >> 20
+            );
+        }
+        if !fits {
             return None;
         }
         let init = |label: &str, contents: &[u8]| {
@@ -3189,6 +3246,37 @@ impl GpuMoments {
         }
         ACCUMULATORS.fetch_add(1, Ordering::Relaxed);
         Some(state)
+    }
+
+    /// Bytes a GPU accumulator of `samples` takes, with the frames that are
+    /// on the GPU for it at once, besides the pool's idle buffers: the
+    /// moments, five words a sample when `weighted` and four when not; each
+    /// pipeline worker's queued frame and the one it builds, at the most
+    /// workers a pipeline derives, and the frame integrating; and the
+    /// `concurrency` frame calls' buffers, three frames each on a discrete
+    /// GPU, with its staging copies, and one where the CPU maps them. A
+    /// frame is counted at the grid's size, which an expanded canvas's
+    /// frames fill only in part.
+    ///
+    /// The Pleiades stack, 61 million samples, held 5.2 GiB on an M4 Max,
+    /// against the 5.8 GiB counted here with its pool. On an 8 GB RTX 2080
+    /// SUPER, a mosaic of 128 million samples whose frames each covered 50
+    /// million held 7.3 GB with the desktop, and every pass slowed as
+    /// Windows paged the card's memory: 207 to 276 s for 129 frames, where
+    /// an accumulator on the CPU took 120 (#362).
+    fn memory_needed(samples: usize, weighted: bool, concurrency: usize, mapped: bool) -> u64 {
+        let frame = (samples as u64).saturating_mul(4);
+        let moments = frame.saturating_mul(if weighted { 5 } else { 4 });
+        let frames = (2 * crate::pipeline::MAXIMUM_DERIVED_WORKERS as u64 + 1)
+            .saturating_add((concurrency as u64).saturating_mul(if mapped { 1 } else { 3 }));
+        moments.saturating_add(frame.saturating_mul(frames))
+    }
+
+    /// Whether `needed` bytes leave a quarter of `memory` free, for other
+    /// programs, the frame calls' smaller buffers and the allocator's
+    /// blocks.
+    fn fits(needed: u64, memory: u64) -> bool {
+        needed <= memory / 4 * 3
     }
 
     /// Classify `frame`, placed as `placement` says, against the moments,
@@ -3435,6 +3523,36 @@ impl GpuMoments {
 mod tests {
     use super::*;
     use crate::registration::{Sampling, SimilarityTransform};
+
+    #[test]
+    fn an_accumulator_that_would_crowd_the_card_stays_on_the_cpu() {
+        // #362: a weighted mosaic of 127,780,092 samples, three frame calls
+        // on an 8 GB discrete card, whose pool keeps 512 MiB.
+        let mosaic = GpuMoments::memory_needed(127_780_092, true, 3, false) + (512 << 20);
+        assert!(!GpuMoments::fits(mosaic, 8 << 30));
+        assert!(GpuMoments::fits(mosaic, 32 << 30));
+        // The Pleiades stack's 61 million samples held 5.2 GiB on an M4 Max,
+        // whose CPU maps the buffers, with a 1 GiB pool.
+        let pleiades = GpuMoments::memory_needed(61_171_488, true, 3, true) + (1 << 30);
+        assert_eq!(pleiades >> 20, 5924);
+        assert!(GpuMoments::fits(pleiades, 110_100 << 20));
+        // On a discrete card its frame calls stage their copies: 8.1 GiB of
+        // VRAM on an RTX 5090, with the desktop, so not on an 8 GB card.
+        let discrete = GpuMoments::memory_needed(61_171_488, true, 3, false) + (512 << 20);
+        assert!(!GpuMoments::fits(discrete, 8 << 30));
+        assert!(GpuMoments::fits(discrete, 12 << 30));
+        // Unweighted moments are four words a sample, not five.
+        assert_eq!(
+            GpuMoments::memory_needed(1 << 20, true, 3, true)
+                - GpuMoments::memory_needed(1 << 20, false, 3, true),
+            4 << 20
+        );
+        // A concurrency past any count does not overflow.
+        assert_eq!(
+            GpuMoments::memory_needed(1 << 20, true, usize::MAX, false),
+            u64::MAX
+        );
+    }
 
     /// Sky of 100 with noise of 5, stars of every brightness up to
     /// saturated ones, and a patch of `NaN`.

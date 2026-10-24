@@ -167,6 +167,7 @@ impl PyGpuOptions {
         accumulator=true,
         integration=true,
         concurrency=3,
+        memory_bytes=None,
         trace=false
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -179,10 +180,14 @@ impl PyGpuOptions {
         accumulator: bool,
         integration: bool,
         concurrency: usize,
+        memory_bytes: Option<u64>,
         trace: bool,
     ) -> PyResult<Self> {
         if concurrency == 0 {
             return Err(PyValueError::new_err("concurrency must be at least 1"));
+        }
+        if memory_bytes == Some(0) {
+            return Err(PyValueError::new_err("memory_bytes must be more than zero"));
         }
         Ok(Self {
             inner: GpuOptions {
@@ -194,6 +199,7 @@ impl PyGpuOptions {
                 accumulator,
                 integration,
                 concurrency,
+                memory_bytes,
                 trace,
             },
         })
@@ -249,6 +255,13 @@ impl PyGpuOptions {
         self.inner.concurrency
     }
 
+    /// Bytes of device memory to plan the GPU's work in, or ``None`` for
+    /// what the device has.
+    #[getter]
+    fn memory_bytes(&self) -> Option<u64> {
+        self.inner.memory_bytes
+    }
+
     /// Print each GPU call's stages and their times to stderr.
     #[getter]
     fn trace(&self) -> bool {
@@ -265,12 +278,14 @@ impl PyGpuOptions {
             accumulator,
             integration,
             concurrency,
+            memory_bytes,
             trace,
         } = self.inner;
         let python = |value: bool| if value { "True" } else { "False" };
         format!(
             "GpuOptions(enabled={}, defects={}, debayer={}, detection={}, resampling={}, \
-             accumulator={}, integration={}, concurrency={concurrency}, trace={})",
+             accumulator={}, integration={}, concurrency={concurrency}, memory_bytes={}, \
+             trace={})",
             python(enabled),
             python(defects),
             python(debayer),
@@ -278,6 +293,7 @@ impl PyGpuOptions {
             python(resampling),
             python(accumulator),
             python(integration),
+            memory_bytes.map_or("None".into(), |bytes| bytes.to_string()),
             python(trace),
         )
     }

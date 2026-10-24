@@ -94,7 +94,7 @@ const DEFAULT_IN_FLIGHT_BYTES: usize = 1024 * 1024 * 1024;
 /// workers and then falls back slightly at eight, so there is nothing past
 /// this to win locally. Frames read over a network do want more; that is what
 /// [`PipelineOptions::workers`] is for.
-const MAXIMUM_DERIVED_WORKERS: usize = 6;
+pub(crate) const MAXIMUM_DERIVED_WORKERS: usize = 6;
 
 /// Hard ceiling on threads, however many a caller asks for. Each is an OS
 /// thread holding up to two prepared frames, and `scope.spawn` panics rather

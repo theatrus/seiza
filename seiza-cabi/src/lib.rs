@@ -3387,7 +3387,10 @@ pub unsafe extern "C" fn seiza_stack_detect_defects_json(
 /// the passes that may run on the GPU, each `true` by default: `"defects"`,
 /// `"debayer"`, `"detection"`, `"resampling"`, `"accumulator"` and
 /// `"integration"`; with `"concurrency"`, the frame calls the GPU takes at
-/// once (3), and `"trace"`, which prints each GPU call's timings to stderr.
+/// once (3), `"memory_bytes"`, the device memory to plan the GPU's work in
+/// (by default what the device has; with less, the live accumulator stays
+/// on the CPU sooner), and `"trace"`, which prints each GPU call's timings
+/// to stderr.
 /// All files
 /// are fully read during this call and are not kept open afterward.
 /// Local-background offsets use median paired residuals after applying the
@@ -9102,7 +9105,8 @@ mod tests {
         let options = stack_options(documented.as_ptr()).unwrap();
         assert_eq!(options.demosaic, seiza_stacking::Demosaic::Bilinear);
         let gpu = std::ffi::CString::new(
-            r#"{"gpu": {"debayer": false, "concurrency": 2, "trace": true}}"#,
+            r#"{"gpu": {"debayer": false, "concurrency": 2, "memory_bytes": 8589934592,
+                "trace": true}}"#,
         )
         .unwrap();
         assert_eq!(
@@ -9110,6 +9114,7 @@ mod tests {
             seiza_stacking::GpuOptions {
                 debayer: false,
                 concurrency: 2,
+                memory_bytes: Some(8 << 30),
                 trace: true,
                 ..seiza_stacking::GpuOptions::default()
             }
@@ -9118,6 +9123,8 @@ mod tests {
         assert!(!stack_options(off.as_ptr()).unwrap().gpu.enabled);
         let none = std::ffi::CString::new(r#"{"gpu": {"concurrency": 0}}"#).unwrap();
         assert!(stack_options(none.as_ptr()).is_err());
+        let empty = std::ffi::CString::new(r#"{"gpu": {"memory_bytes": 0}}"#).unwrap();
+        assert!(stack_options(empty.as_ptr()).is_err());
         let superpixel =
             std::ffi::CString::new(r#"{"demosaic": "superpixel", "bin_factor": 2}"#).unwrap();
         assert_eq!(

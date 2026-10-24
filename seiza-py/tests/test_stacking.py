@@ -77,6 +77,13 @@ def test_gpu_options_say_which_passes_may_run_on_the_gpu():
     assert not seiza.GpuOptions(enabled=False).enabled
     with pytest.raises(ValueError, match="concurrency"):
         seiza.GpuOptions(concurrency=0)
+    assert everywhere.memory_bytes is None
+    capped = seiza.GpuOptions(memory_bytes=8 << 30)
+    assert capped.memory_bytes == 8 << 30
+    assert "memory_bytes=8589934592" in repr(capped)
+    assert seiza.StackOptions(gpu=capped).gpu == capped
+    with pytest.raises(ValueError, match="memory_bytes"):
+        seiza.GpuOptions(memory_bytes=0)
 
 
 def test_a_stack_on_the_cpu_keeps_its_gpu_options_in_a_context(tmp_path):

@@ -254,6 +254,11 @@ pub(crate) struct StackArgs {
     /// takes at once; the rest wait without holding its memory
     #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u64).range(1..))]
     gpu_concurrency: u64,
+    /// Device memory to plan the GPU's work in, in MiB; by default what the
+    /// device has. With less, the live stack's accumulator stays on the CPU
+    /// sooner, leaving the rest to other programs
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    gpu_memory_mib: Option<u64>,
     /// Print each GPU call's stages and their times to stderr
     #[arg(long)]
     gpu_trace: bool,
@@ -272,6 +277,9 @@ impl StackArgs {
             accumulator: on_gpu(GpuPassArg::Accumulator),
             integration: on_gpu(GpuPassArg::Integration),
             concurrency: usize::try_from(self.gpu_concurrency).unwrap_or(usize::MAX),
+            memory_bytes: self
+                .gpu_memory_mib
+                .map(|mib| mib.saturating_mul(1024 * 1024)),
             trace: self.gpu_trace,
         }
     }

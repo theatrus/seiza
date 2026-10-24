@@ -519,6 +519,7 @@ class GpuOptions:
     accumulator: bool
     integration: bool
     concurrency: int
+    memory_bytes: int | None
     trace: bool
     def __init__(
         self,
@@ -531,6 +532,7 @@ class GpuOptions:
         accumulator: bool = True,
         integration: bool = True,
         concurrency: int = 3,
+        memory_bytes: int | None = None,
         trace: bool = False,
     ) -> None: ...
 

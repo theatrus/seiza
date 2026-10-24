@@ -3300,6 +3300,7 @@ dependencies = [
  "bytemuck",
  "multiversion",
  "naga",
+ "objc2-metal",
  "pollster",
  "postcard",
  "rayon",

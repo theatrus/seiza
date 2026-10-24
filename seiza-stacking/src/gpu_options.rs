@@ -44,6 +44,14 @@ pub struct GpuOptions {
     /// 3, the default. One at a time left that GPU idle while a call
     /// copied: 45-46 s, against 39.4-39.7 at 2 and 38.8-38.9 at 3.
     pub concurrency: usize,
+    /// Bytes of device memory to plan the GPU's work in, or `None` for what
+    /// the device has, as its backend reports it; a cap above that is held
+    /// to it. A live stack's accumulator stays on the CPU when it, the
+    /// frames prepared for it at once and the frame calls' buffers would
+    /// need more than three quarters of this, and reintegration's bands
+    /// keep to a sixteenth. Less than the device has leaves the rest to
+    /// other programs, such as a desktop the GPU also drives.
+    pub memory_bytes: Option<u64>,
     /// Print each GPU call's stages and their times to stderr, to see where
     /// the time goes on a machine.
     pub trace: bool,
@@ -60,6 +68,7 @@ impl Default for GpuOptions {
             accumulator: true,
             integration: true,
             concurrency: 3,
+            memory_bytes: None,
             trace: false,
         }
     }
@@ -85,11 +94,16 @@ impl GpuOptions {
                 "the GPU's concurrency must be at least 1".into(),
             ));
         }
+        if self.memory_bytes == Some(0) {
+            return Err(Error::Stack(
+                "the GPU's memory must be more than zero bytes".into(),
+            ));
+        }
         Ok(())
     }
 
-    /// The passes both these and `other` allow, at the lower concurrency,
-    /// traced if either asks.
+    /// The passes both these and `other` allow, at the lower concurrency
+    /// and memory, traced if either asks.
     pub(crate) fn within(self, other: Self) -> Self {
         Self {
             enabled: self.enabled && other.enabled,
@@ -100,6 +114,10 @@ impl GpuOptions {
             accumulator: self.accumulator && other.accumulator,
             integration: self.integration && other.integration,
             concurrency: self.concurrency.min(other.concurrency),
+            memory_bytes: match (self.memory_bytes, other.memory_bytes) {
+                (Some(own), Some(other)) => Some(own.min(other)),
+                (own, other) => own.or(other),
+            },
             trace: self.trace || other.trace,
         }
     }
@@ -111,13 +129,16 @@ mod tests {
 
     #[test]
     fn options_read_as_written_and_default_every_field() {
-        let options: GpuOptions =
-            serde_json::from_str(r#"{"debayer": false, "concurrency": 2}"#).unwrap();
+        let options: GpuOptions = serde_json::from_str(
+            r#"{"debayer": false, "concurrency": 2, "memory_bytes": 8589934592}"#,
+        )
+        .unwrap();
         assert_eq!(
             options,
             GpuOptions {
                 debayer: false,
                 concurrency: 2,
+                memory_bytes: Some(8 << 30),
                 ..GpuOptions::default()
             }
         );
@@ -131,6 +152,7 @@ mod tests {
         let stack = GpuOptions {
             detection: false,
             concurrency: 2,
+            memory_bytes: Some(8 << 30),
             ..GpuOptions::default()
         };
         let call = GpuOptions {
@@ -145,14 +167,29 @@ mod tests {
                 detection: false,
                 integration: false,
                 concurrency: 2,
+                memory_bytes: Some(8 << 30),
                 trace: true,
                 ..GpuOptions::default()
             }
         );
+        let smaller = GpuOptions {
+            memory_bytes: Some(4 << 30),
+            ..GpuOptions::default()
+        };
+        assert_eq!(stack.within(smaller).memory_bytes, Some(4 << 30));
+        assert_eq!(smaller.within(stack).memory_bytes, Some(4 << 30));
         assert!(!GpuOptions::default().within(GpuOptions::cpu()).enabled);
         assert!(
             GpuOptions {
                 concurrency: 0,
+                ..GpuOptions::default()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            GpuOptions {
+                memory_bytes: Some(0),
                 ..GpuOptions::default()
             }
             .validate()

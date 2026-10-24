@@ -60,7 +60,18 @@ from it arrives. These stages run there:
   one submission: the host turns the minimum integrated fraction into the
   count of accepted samples it takes, and the integrating pass acts only if
   classification reached it. The
-  CPU's copies are freed. [`LiveStacker::view`], snapshots and saved
+  CPU's copies are freed. The moments stay on the CPU when they, the
+  frames on the GPU for them at once and the frame calls' buffers would need
+  more than three quarters of the device memory planned for
+  (`GpuMoments::memory_needed`): each pipeline worker's queued frame and
+  the one it builds, at the six workers a pipeline derives at most, the
+  frame integrating, three frames for each frame call on a discrete GPU and
+  one where the CPU maps its buffers, all at the grid's size, and the pool.
+  The Pleiades stack held 5.2 GiB on the M4 Max, against 5.8 GiB counted. On
+  an 8 GB RTX 2080 SUPER, a mosaic of 128 million samples held 7.3 GB with
+  the desktop, and every pass slowed as Windows paged the card's memory:
+  207 to 276 s for 129 frames, where the accumulator on the CPU took 120
+  (#362). [`LiveStacker::view`], snapshots and saved
   contexts read the moments back, once a frame, the first time they are
   asked for, into a copy the next frame drops; the borrowed view stays valid
   for as long as the borrow, since only `&mut` methods integrate.
@@ -236,6 +247,19 @@ registration with it.
 - `concurrency` sets how many frame calls (debayering, detection,
   resampling, screening) run on the GPU at once, three by default: a frame
   waiting for one holds no GPU buffer.
+- `memory_bytes` caps the device memory the GPU's work is planned in. By
+  default it is what the device has, which wgpu does not report, so each
+  backend is asked: Metal's recommended working set (110,100 MiB on a
+  128 GB M4 Max), Vulkan's largest device-local heap, and on Direct3D 12 a
+  discrete GPU's dedicated memory, or an integrated one's dedicated and
+  shared memory together; 4 GiB where the backend does not say. It is the
+  device's capacity, not the budget the system grants at the moment, so a
+  machine plans the same way on every run. The live accumulator is
+  planned within it, the pool keeps at most a sixteenth of the device's
+  memory in idle buffers (and never more than 1 GiB), and a reintegration
+  band at most a sixteenth of the planned memory. `trace` prints the
+  device's memory, the accumulator's plan, and after each call the memory
+  the device holds.
 - `trace` prints every GPU call's host stages (grid, upload, queue/readback,
   copy out)
   to stderr, and the time opening the device took (12 ms on the M4 Max,

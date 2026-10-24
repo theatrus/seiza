@@ -169,7 +169,11 @@ seiza stack lights/*.fits --output stack.fits --cpu-pass debayer,detection
 
 `--cpu-pass` accepts `defects`, `debayer`, `detection`, `resampling`,
 `accumulator`, and `integration`. `--gpu-concurrency` bounds concurrent frame
-calls (default 3); `--gpu-trace` prints per-call timings. Python uses
+calls (default 3). `--gpu-memory-mib` caps the device memory the GPU's work is
+planned in, by default what the device has: the live accumulator stays on the
+CPU when it and the frames on the GPU for it would need more than three
+quarters of it. `--gpu-trace` prints per-call timings and the device memory
+held. Python uses
 `GpuOptions` through `StackOptions`; the C ABI uses the `gpu` options object;
 Rust uses `GpuOptions`. CPU-only builds can disable `seiza-stacking`'s default
 features. Saved contexts retain their GPU options.

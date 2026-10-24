@@ -683,6 +683,7 @@ changed:
 | `--workers`, `--pipeline-memory-mib` | derived, `4096` | Frames read and prepared at once, and the memory for them; the memory also bounds the bands of rows of every frame `--reintegrate` reads back at once. |
 | `--no-gpu`, `--cpu-pass` | off, none | Keep every pass on the CPU, or only those named (`defects`, `debayer`, `detection`, `resampling`, `accumulator`, `integration`, comma-separated); otherwise stacking's heavy passes run on the GPU when there is one. |
 | `--gpu-concurrency`, `--gpu-trace` | `3`, off | Frame calls the GPU takes at once, and printing each GPU call's timings to stderr. |
+| `--gpu-memory-mib` | the device's | Device memory to plan the GPU's work in. The live accumulator stays on the CPU when it, the frames on the GPU for it and the frame calls' buffers would need more than three quarters of it. |
 
 On 126 one-shot-color frames of M45 (ASI2600MC, 173 mm, no calibration) the
 defaults stacked in 1 min 17 s at 2.7px FWHM with a 0.10px red-blue offset;

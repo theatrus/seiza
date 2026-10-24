@@ -1186,7 +1186,10 @@ char *seiza_stack_detect_defects_json(const char *paths_json,
  the passes that may run on the GPU, each `true` by default: `"defects"`,
  `"debayer"`, `"detection"`, `"resampling"`, `"accumulator"` and
  `"integration"`; with `"concurrency"`, the frame calls the GPU takes at
- once (3), and `"trace"`, which prints each GPU call's timings to stderr.
+ once (3), `"memory_bytes"`, the device memory to plan the GPU's work in
+ (by default what the device has; with less, the live accumulator stays
+ on the CPU sooner), and `"trace"`, which prints each GPU call's timings
+ to stderr.
  All files
  are fully read during this call and are not kept open afterward.
  Local-background offsets use median paired residuals after applying the
