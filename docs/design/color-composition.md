@@ -506,3 +506,15 @@ and LRGB+SHO masters before selecting automatic continuum thresholds. Include
 emission-dominated nebulae and a continuum-dominated galaxy/reflection field.
 Use held-out stars and residual structure to assess a continuum fit; a prettier
 JPEG is not evidence that subtraction preserved the line signal.
+
+
+### Real star-layer integration check
+
+PSF Guard's paired implementation was exercised with RC-Astro 2.6.6 and SXT
+ML11 on Supergateway's CPU backend, using 1024×1024 cutouts of real Bubble
+Nebula RGB and SHO channel masters. Explicit RGB stars, automatic RGB stars,
+and a starless narrowband output completed. The automatic build reused both
+linear separation caches. The final display FITS retained common RGB/nebula
+coverage, and OIII/SII balance reported applied curves. The isolated fixture
+had no fresh plate solve, so this validates star separation and display
+recombination without making a Gaia-calibration or full-frame speed claim.
