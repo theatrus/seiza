@@ -62,6 +62,7 @@ mod gpu;
 mod gpu_options;
 mod mapping;
 mod master;
+mod narrowband_balance;
 mod normalization;
 mod orientation;
 mod paths;
@@ -123,6 +124,10 @@ pub use master::{
     MasterInputStatistics, MasterProgress, MasterRejectionMethod, MasterRejectionOptions,
     build_master_from_fits, build_master_from_fits_with_scratch, screen_dark_levels,
 };
+pub use narrowband_balance::{
+    NarrowbandBalanceOptions, NarrowbandBalanceReport, NarrowbandChannelBalance,
+    balance_narrowband, screen_rgb_stars,
+};
 pub use normalization::{NormalizationMap, NormalizationMode};
 pub use orientation::{SKY_ORIENTATION_NAME, SKY_ORIENTATION_VERSION, SkyOrientationPlan};
 pub use paths::{path_identity, paths_refer_to_same_file};
@@ -180,7 +185,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// folds back onto the frame far beyond it, which 0.40.0 sampled (#307). The
 /// value stayed at "0.40.0" because no cache keyed on it predates 0.42.0,
 /// the first release to export it.
-pub const OUTPUT_VERSION: &str = "0.45.0";
+pub const OUTPUT_VERSION: &str = "0.47.0";
 
 /// Anything that can go wrong while calibrating, registering, normalizing, or
 /// stacking frames.

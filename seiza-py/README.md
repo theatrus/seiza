@@ -1,5 +1,21 @@
 # seiza (Python)
 
+`balance_narrowband(image, shadow_protection=1, oiii_boost=1, sii_boost=1,
+max_samples=1000000)` accepts interleaved display samples in `[0, 1]`, with
+three physical planes H-alpha/OIII/SII, and returns `(image, report)` without
+changing the input. The report's `channels` list gives each physical channel's
+`status`, `reason`, `samples`, `median`, `background`, `positiveDeviation` and
+`midtone`. Curves protect the selected background; unreliable measurements
+are skipped. This nonlinear display operation is not photometric calibration.
+For HOO, duplicate OIII into the third plane and set `has_sii=False`; the
+third plane is ignored and the report includes only H-alpha and OIII.
+
+`screen_rgb_stars(nebula, original, starless)` returns a new display RGB image
+with RGB stars screened onto the starless nebula. All inputs share one grid
+and lie in `[0, 1]`; original and starless RGB must share the same display
+transfer. Missing coverage masks whole pixels. Negative extraction noise is
+suppressed for display. The function does not run a star-separation tool.
+
 Python bindings for [seiza](https://github.com/theatrus/seiza): star detection,
 WCS fitting, hinted/blind plate solving, satellite prediction, calibration,
 deconvolution, and batch/live image stacking for astrophotography, implemented

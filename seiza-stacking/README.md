@@ -872,3 +872,22 @@ is measured from the nearer of the reference orientation and its 180-degree
 counterpart, while diagnostics retain the full fitted rotation (for example,
 179.3 degrees). The same similarity transform is then used to rotate the
 pixels back onto the reference grid before normalization and integration.
+
+
+## Display narrowband balance and RGB stars
+
+`balance_narrowband(&mut image, &options)` takes three aligned interleaved
+physical planes in H-alpha/OIII/SII order, already stretched into [0, 1]. For
+HOO, duplicate OIII into plane three and set `has_sii=false`. The returned
+report lists each measured channel's background, positive deviation, midpoint,
+and application or skip reason. H-alpha and protected shadows keep their
+samples; flat or noise-dominated channels remain unchanged.
+
+`screen_rgb_stars(&mut nebula, &original_rgb, &starless_rgb)` derives a
+screen-compatible stars layer and screens it onto a starless display nebula.
+All images must share one RGB grid and [0, 1] display scaling. Apply the same
+linked display transfer to original and starless RGB before calling it. Missing
+coverage masks complete pixels. Neither function aligns images or runs external
+tools. Both produce display-referred data, unsuitable for photometry or linear
+continuum subtraction. C ABI, Python and CLI counterparts provide the same
+operations; see the [color composition design](../docs/design/color-composition.md).

@@ -665,3 +665,101 @@ fn narrowband_cli_validates_and_uses_only_palette_inputs() {
         String::from_utf8_lossy(&rejects_unused.stderr).contains("HOO does not use an SII channel")
     );
 }
+
+#[test]
+fn display_balance_and_star_screen_cli_report_and_mark_nonlinear_outputs() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("physical.fits");
+    let balanced = directory.path().join("balanced.fits");
+    let report = directory.path().join("balance.json");
+    let original = directory.path().join("rgb.fits");
+    let starless = directory.path().join("starless.fits");
+    let output = directory.path().join("screen.fits");
+    write_f32_image(
+        &input,
+        1,
+        4,
+        F32ImageData::RgbInterleaved(&[
+            0.1, 0.05, 0.025, 0.1, 0.05, 0.025, 0.2, 0.1, 0.05, 0.5, 0.2, 0.1,
+        ]),
+        &[],
+    )
+    .unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_seiza"))
+        .args([
+            "color",
+            "balance",
+            "--input",
+            input.to_str().unwrap(),
+            "--output",
+            balanced.to_str().unwrap(),
+            "--report",
+            report.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+    assert_eq!(report["channels"][1]["status"], "applied");
+    assert_eq!(
+        FitsImage::open(&balanced)
+            .unwrap()
+            .header("SEIZATRF")
+            .and_then(HeaderValue::as_str),
+        Some("DISPLAY")
+    );
+    write_f32_image(
+        &original,
+        1,
+        4,
+        F32ImageData::RgbInterleaved(&[0.7; 12]),
+        &[],
+    )
+    .unwrap();
+    write_f32_image(
+        &starless,
+        1,
+        4,
+        F32ImageData::RgbInterleaved(&[0.1; 12]),
+        &[],
+    )
+    .unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_seiza"))
+        .args([
+            "color",
+            "screen-stars",
+            "--nebula",
+            balanced.to_str().unwrap(),
+            "--original-rgb",
+            original.to_str().unwrap(),
+            "--starless-rgb",
+            starless.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let output = FitsImage::open(&output).unwrap();
+    assert_eq!(
+        output.header("SEIZATRF").and_then(HeaderValue::as_str),
+        Some("DISPLAY")
+    );
+    let Pixels::F32(values) = output.pixels else {
+        panic!("expected display samples");
+    };
+    assert!(
+        values
+            .iter()
+            .all(|v| v.is_finite() && *v >= 0.67 && *v <= 1.0)
+    );
+}

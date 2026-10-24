@@ -679,6 +679,46 @@ char *seiza_color_combine_narrowband_matrix_json(const char *request_json,
                                                  char **error_out);
 
 /*
+ Balance three display planes ordered H-alpha/OIII/SII. For HOO, pass
+ OIII twice and set hasSii=false; the third plane is then ignored.
+ `options_json` is nullable or a JSON object with shadowProtection (0..1),
+ oiiiBoost/siiBoost (positive) and maxSamples (4..1000000). Missing options
+ use the core defaults. Returns a JSON report with channels, each containing
+ channel, status, reason, samples, median, background, positiveDeviation and
+ midtone. Free with seiza_string_free. Samples must be in [0,1] or nonfinite;
+ the resulting image is display-referred. Errors leave the image untouched.
+
+ # Safety
+ `data` points to width*height*channels writable floats (channels must be 3).
+ options_json, when non-null, is a NUL-terminated UTF-8 string. error_out,
+ when non-null, points to writable pointer storage.
+ */
+char *seiza_color_balance_narrowband_json(float *data,
+                                          size_t width,
+                                          size_t height,
+                                          size_t channels,
+                                          const char *options_json,
+                                          char **error_out);
+
+/*
+ Screen display RGB stars from `original` and `starless` onto `nebula`,
+ in place. All three images share dimensions and RGB display scaling in
+ [0,1]. Original and starless must use the same display transfer. Negative
+ extraction noise is suppressed only for display; nonfinite coverage masks
+ the whole output pixel. This does not extract stars or run an external tool.
+
+ # Safety
+ Each buffer points to width*height*3 floats. `nebula` is writable; the
+ others are readable. error_out, when non-null, is writable pointer storage.
+ */
+bool seiza_color_screen_rgb_stars(float *nebula,
+                                  const float *original,
+                                  const float *starless,
+                                  size_t width,
+                                  size_t height,
+                                  char **error_out);
+
+/*
  Fits a compact background model to interleaved linear `float` samples.
 
  `channels` must be one or three and `data_length` must equal

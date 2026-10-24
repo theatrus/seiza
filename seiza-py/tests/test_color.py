@@ -10,6 +10,29 @@ def mono(value: float) -> np.ndarray:
     return np.array([[value]], dtype=np.float32)
 
 
+def test_narrowband_balance_preserves_ha_and_reports_physical_channels() -> None:
+    ha = np.concatenate([np.full(60, 0.1), np.linspace(0.11, 0.75, 40)]).astype(np.float32)
+    image = np.stack([ha, ha / 2, np.full_like(ha, 0.1)], axis=-1)[None, ...]
+    output, report = seiza.balance_narrowband(image)
+    np.testing.assert_array_equal(output[..., 0], image[..., 0])
+    np.testing.assert_array_equal(output[..., 2], image[..., 2])
+    assert report['channels'][1]['status'] == 'applied'
+    assert report['channels'][2]['reason'] == 'too_little_signal'
+    assert output[0, -1, 1] > image[0, -1, 1]
+    two, report = seiza.balance_narrowband(image, has_sii=False)
+    np.testing.assert_allclose(two[..., :2], output[..., :2])
+    assert len(report['channels']) == 2
+
+
+def test_screen_rgb_stars_reconstructs_display_original() -> None:
+    starless = np.array([[[0.1, 0.2, 0.3]]], dtype=np.float32)
+    original = np.array([[[0.4, 0.5, 0.8]]], dtype=np.float32)
+    np.testing.assert_allclose(seiza.screen_rgb_stars(starless, original, starless), original, atol=1e-6)
+    np.testing.assert_allclose(starless, [[[0.1, 0.2, 0.3]]])
+    with pytest.raises(ValueError, match=r'\[0, 1\]'):
+        seiza.screen_rgb_stars(starless * 20, original, starless)
+
+
 def test_rgb_combines_mono_channels_without_normalization() -> None:
     rgb = seiza.combine_rgb(
         mono(0.2), mono(0.4), mono(0.6), normalization="none"

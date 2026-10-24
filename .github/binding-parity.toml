@@ -709,6 +709,8 @@ seiza_color_combine_rgb_json = "combine_rgb"
 seiza_color_combine_lrgb_json = "combine_lrgb"
 seiza_color_combine_narrowband_json = "combine_narrowband"
 seiza_color_combine_narrowband_matrix_json = "combine_narrowband_matrix"
+seiza_color_balance_narrowband_json = "balance_narrowband"
+seiza_color_screen_rgb_stars = "screen_rgb_stars"
 
 # --- rc-astro ---------------------------------------------------------------
 seiza_rc_astro_locate = "rc_astro_locate"

@@ -2162,7 +2162,126 @@ pub unsafe extern "C" fn seiza_color_combine_narrowband_matrix_json(
     .unwrap_or(ptr::null_mut())
 }
 
-/// A request the core refused before any work, in the core's own words.
+/// Optional camelCase display-balance settings for C callers.
+#[derive(Default, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+struct NarrowbandBalanceOptionsJson {
+    has_sii: Option<bool>,
+    shadow_protection: Option<f64>,
+    oiii_boost: Option<f64>,
+    sii_boost: Option<f64>,
+    max_samples: Option<usize>,
+}
+
+fn display_length(width: usize, height: usize, channels: usize) -> Result<usize, String> {
+    width
+        .checked_mul(height)
+        .and_then(|n| n.checked_mul(channels))
+        .filter(|n| *n > 0 && *n <= isize::MAX as usize / std::mem::size_of::<f32>())
+        .ok_or_else(|| "Display image dimensions are empty or overflow".into())
+}
+
+#[unsafe(no_mangle)]
+/// Balance three display planes ordered H-alpha/OIII/SII. For HOO, pass
+/// OIII twice and set hasSii=false; the third plane is then ignored.
+/// `options_json` is nullable or a JSON object with shadowProtection (0..1),
+/// oiiiBoost/siiBoost (positive) and maxSamples (4..1000000). Missing options
+/// use the core defaults. Returns a JSON report with channels, each containing
+/// channel, status, reason, samples, median, background, positiveDeviation and
+/// midtone. Free with seiza_string_free. Samples must be in [0,1] or nonfinite;
+/// the resulting image is display-referred. Errors leave the image untouched.
+///
+/// # Safety
+/// `data` points to width*height*channels writable floats (channels must be 3).
+/// options_json, when non-null, is a NUL-terminated UTF-8 string. error_out,
+/// when non-null, points to writable pointer storage.
+pub unsafe extern "C" fn seiza_color_balance_narrowband_json(
+    data: *mut f32,
+    width: usize,
+    height: usize,
+    channels: usize,
+    options_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        if channels != 3 {
+            return Err("Narrowband balance requires three interleaved planes".into());
+        }
+        let length = display_length(width, height, channels)?;
+        let options: NarrowbandBalanceOptionsJson = if options_json.is_null() {
+            Default::default()
+        } else {
+            parse_request(options_json, "narrowband balance")?
+        };
+        let defaults = seiza_stacking::NarrowbandBalanceOptions::default();
+        let options = seiza_stacking::NarrowbandBalanceOptions {
+            has_sii: options.has_sii.unwrap_or(defaults.has_sii),
+            shadow_protection: options
+                .shadow_protection
+                .unwrap_or(defaults.shadow_protection),
+            oiii_boost: options.oiii_boost.unwrap_or(defaults.oiii_boost),
+            sii_boost: options.sii_boost.unwrap_or(defaults.sii_boost),
+            max_samples: options.max_samples.unwrap_or(defaults.max_samples),
+        };
+        let samples = unsafe { required_f32_slice_mut(data, length, "narrowband image")? };
+        let mut image = LinearImage::new(width, height, channels, samples.to_vec())
+            .map_err(color_request_error)?;
+        let report = seiza_stacking::balance_narrowband(&mut image, &options)
+            .map_err(color_request_error)?;
+        let result = owned_json(&report)?;
+        samples.copy_from_slice(&image.data);
+        Ok(result)
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+/// Screen display RGB stars from `original` and `starless` onto `nebula`,
+/// in place. All three images share dimensions and RGB display scaling in
+/// [0,1]. Original and starless must use the same display transfer. Negative
+/// extraction noise is suppressed only for display; nonfinite coverage masks
+/// the whole output pixel. This does not extract stars or run an external tool.
+///
+/// # Safety
+/// Each buffer points to width*height*3 floats. `nebula` is writable; the
+/// others are readable. error_out, when non-null, is writable pointer storage.
+pub unsafe extern "C" fn seiza_color_screen_rgb_stars(
+    nebula: *mut f32,
+    original: *const f32,
+    starless: *const f32,
+    width: usize,
+    height: usize,
+    error_out: *mut *mut c_char,
+) -> bool {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let length = display_length(width, height, 3)?;
+        let original = LinearImage::new(
+            width,
+            height,
+            3,
+            unsafe { required_f32_slice(original, length, "original RGB")? }.to_vec(),
+        )
+        .map_err(color_request_error)?;
+        let starless = LinearImage::new(
+            width,
+            height,
+            3,
+            unsafe { required_f32_slice(starless, length, "starless RGB")? }.to_vec(),
+        )
+        .map_err(color_request_error)?;
+        let samples = unsafe { required_f32_slice_mut(nebula, length, "starless nebula")? };
+        let mut image =
+            LinearImage::new(width, height, 3, samples.to_vec()).map_err(color_request_error)?;
+        seiza_stacking::screen_rgb_stars(&mut image, &original, &starless)
+            .map_err(color_request_error)?;
+        samples.copy_from_slice(&image.data);
+        Ok(())
+    })
+    .is_some()
+}
+
 fn color_request_error(error: seiza_stacking::Error) -> String {
     match error {
         seiza_stacking::Error::Color(message) => message,
@@ -9588,6 +9707,59 @@ mod tests {
     }
 
     /// Write a 32 by 24 mono stack of `value`, blank above row `blank_rows`.
+    #[test]
+    fn narrowband_display_cabi_balances_and_recombines_stars() {
+        let mut physical = vec![
+            0.1, 0.05, 0.025, 0.1, 0.05, 0.025, 0.2, 0.1, 0.05, 0.5, 0.2, 0.1,
+        ];
+        let mut error = ptr::null_mut();
+        let result = unsafe {
+            seiza_color_balance_narrowband_json(
+                physical.as_mut_ptr(),
+                1,
+                4,
+                3,
+                ptr::null(),
+                &mut error,
+            )
+        };
+        assert!(error.is_null());
+        assert!(!result.is_null());
+        let report: serde_json::Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(result) }.to_str().unwrap()).unwrap();
+        assert_eq!(report["channels"][1]["status"], "applied");
+        assert!(report["channels"][1]["positiveDeviation"].as_f64().unwrap() > 0.0);
+        unsafe { seiza_string_free(result) };
+        let original = [0.4, 0.5, 0.6];
+        let starless = [0.1, 0.2, 0.3];
+        let mut nebula = starless;
+        assert!(unsafe {
+            seiza_color_screen_rgb_stars(
+                nebula.as_mut_ptr(),
+                original.as_ptr(),
+                starless.as_ptr(),
+                1,
+                1,
+                &mut error,
+            )
+        });
+        for (value, expected) in nebula.iter().zip(original) {
+            assert!((value - expected).abs() < 1e-6);
+        }
+        assert!(!unsafe {
+            seiza_color_screen_rgb_stars(
+                nebula.as_mut_ptr(),
+                original.as_ptr(),
+                starless.as_ptr(),
+                usize::MAX,
+                2,
+                &mut error,
+            )
+        });
+        assert!(!error.is_null());
+        unsafe { seiza_string_free(error) };
+    }
+
     fn color_channel(
         directory: &Path,
         name: &str,

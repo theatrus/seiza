@@ -488,6 +488,57 @@ fn output_version_is_no_newer_than_the_next_minor_version() {
 }
 
 #[test]
+fn narrowband_display_modes_keep_their_output() {
+    let mut physical = LinearImage::new(
+        1,
+        4,
+        3,
+        vec![
+            0.1, 0.05, 0.025, 0.1, 0.05, 0.025, 0.2, 0.1, 0.05, 0.5, 0.2, 0.1,
+        ],
+    )
+    .unwrap();
+    seiza_stacking::balance_narrowband(&mut physical, &Default::default()).unwrap();
+    let ha = LinearImage::new(1, 4, 1, physical.data.iter().step_by(3).copied().collect()).unwrap();
+    let oiii = LinearImage::new(
+        1,
+        4,
+        1,
+        physical.data.iter().skip(1).step_by(3).copied().collect(),
+    )
+    .unwrap();
+    let sii = LinearImage::new(
+        1,
+        4,
+        1,
+        physical.data.iter().skip(2).step_by(3).copied().collect(),
+    )
+    .unwrap();
+    let sums: Vec<f64> = [&ha, &oiii, &sii]
+        .iter()
+        .map(|image| image.data.iter().map(|value| f64::from(*value)).sum())
+        .collect();
+    check(
+        "NARROWBAND_BALANCE",
+        &sums,
+        &[9.0000001e-1, 6.5793314e-1, 5.4459879e-1],
+    );
+    let mut nebula = LinearImage::new(1, 1, 3, vec![0.1, 0.2, 0.3]).unwrap();
+    let original = LinearImage::new(1, 1, 3, vec![0.4, 0.5, 0.6]).unwrap();
+    let starless = nebula.clone();
+    seiza_stacking::screen_rgb_stars(&mut nebula, &original, &starless).unwrap();
+    check(
+        "RGB_STARS",
+        &nebula
+            .data
+            .iter()
+            .map(|v| f64::from(*v))
+            .collect::<Vec<_>>(),
+        &[4.0000004e-1, 5.0000000e-1, 6.0000002e-1],
+    );
+}
+
+#[test]
 fn a_mono_stack_with_default_options_keeps_its_output() {
     check(
         "MONO_DEFAULT",

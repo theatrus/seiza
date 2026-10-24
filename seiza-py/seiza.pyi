@@ -1254,6 +1254,14 @@ def deconvolve(
     max_correction: float = 2.0,
     masked: bool = False,
 ) -> npt.NDArray[np.float32]: ...
+def balance_narrowband(
+    image: npt.NDArray[np.float32], *, shadow_protection: float = 1.0,
+    oiii_boost: float = 1.0, sii_boost: float = 1.0, max_samples: int = 1_000_000, has_sii: bool = True,
+) -> tuple[npt.NDArray[np.float32], dict[str, Any]]: ...
+def screen_rgb_stars(
+    nebula: npt.NDArray[np.float32], original: npt.NDArray[np.float32],
+    starless: npt.NDArray[np.float32],
+) -> npt.NDArray[np.float32]: ...
 def combine_rgb(
     red: npt.NDArray[np.float32],
     green: npt.NDArray[np.float32],

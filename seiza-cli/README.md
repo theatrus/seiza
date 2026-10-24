@@ -941,6 +941,31 @@ one-channel and are applied before debayering. See the
 [stacking design](https://github.com/theatrus/seiza/blob/main/docs/design/image-stacking.md)
 for the live API, rejection semantics, and PSF Guard integration boundary.
 
+### Display narrowband balance and RGB stars
+
+Prepare aligned display samples in [0, 1] before these operations. For
+balance, store the physical planes as H-alpha/OIII/SII, independent of the
+final palette. For HOO, duplicate OIII into the third plane and pass `--hoo`.
+
+```sh
+seiza color balance --input physical-display.fits --output balanced.fits \
+  --report balance.json --shadow-protection 1 --oiii-boost 1 --sii-boost 1
+seiza color screen-stars --nebula starless-nebula.fits \
+  --original-rgb rgb-display.fits --starless-rgb rgb-starless-display.fits \
+  --output combined.fits
+```
+
+Balance protects each background and uses H-alpha as its reference. A flat,
+noise-dominated, or insufficiently sampled channel remains unchanged, with a
+reason in the JSON report. This is an aesthetic display operation, unsuitable
+for photometry or continuum fitting. These commands write `SEIZATRF='DISPLAY'`.
+
+`screen-stars` does not run a star-removal tool. Supply aligned original and
+starless RGB with the same linked display transfer already applied. It derives
+a screen-compatible RGB stars layer and screens it onto the nebula. Negative
+extraction noise is suppressed for display; missing coverage masks the whole
+output pixel. Source paths and output paths must be distinct.
+
 ### Color composition
 
 `seiza color` consumes mono `float32` FITS stacks. It can emit an RGB
