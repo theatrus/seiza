@@ -1,7 +1,9 @@
 > Implementation status: `balance_narrowband` and `screen_rgb_stars` are
 > implemented in `seiza-stacking`, the C ABI, Python and the CLI. Both operate
 > on prepared display samples; hosts own alignment, calibration and external
-> star separation. Continuum fitting remains planned.
+> star separation. Linear continuum fitting, measurement and signed subtraction
+> are also implemented across all four surfaces. Combined LRGB+SHO composition
+> and applying a fit to an associated starless revision remain host integration work.
 
 # Color composition from mono stacks
 
@@ -235,14 +237,16 @@ intermediate FITS files are intentionally not checked in.
 - PNG output is for fast visual assessment; floating-point FITS remains the
   editable result for linear RGB/LRGB and direct palettes.
 
-## Proposed: narrowband balance and continuum subtraction
+## Narrowband balance and continuum subtraction
 
-Status: research and API design, 2026-10-24. None of the operations in this
-section is implemented. The paired PSF Guard branch is
-`codex/narrowband-normalization`; its `docs/design/color-channel-processing.md`
-specifies processing order, default setups and UI. Keep these as separate
-operations: aesthetic channel balance must not alter the linear data used for
-continuum fitting.
+Status: implemented core and bindings, 2026-10-24, in the unreleased
+`codex/narrowband-normalization` branch. The paired PSF Guard branch's
+`docs/design/color-channel-processing.md` specifies processing order, default
+setups and UI. Its combined LRGB+SHO integration remains planned. Keep these
+as separate operations: aesthetic channel balance must not alter the linear
+data used for continuum fitting. The current callable contract is documented
+in [Continuum fitting and signed residuals](../../seiza-stacking/README.md#continuum-fitting-and-signed-residuals).
+The details below retain the design rationale and future host requirements.
 
 ### Reference workflows
 
@@ -339,15 +343,20 @@ is absent. Green reduction must not alter these physical-channel reports.
 
 ### Continuum fit is a different linear operation
 
-Proposed surface:
+Implemented Rust surface:
 
 ```text
-fit_continuum(star_fluxes, reference_roles, options) -> ContinuumPlan
-measure_and_fit_continuum(aligned_linear_images, star_positions, options)
-    -> ContinuumPlan + diagnostics
-subtract_continuum(narrowband, broadband_references, plan)
-    -> signed linear residual
+fit_continuum(stars, sources, options) -> Result<ContinuumFitOutcome>
+measure_and_fit_continuum(narrowband, references, sources, positions,
+                         fit_options, photometry_options)
+    -> Result<ContinuumFitOutcome>
+subtract_continuum(narrowband, references, sources, plan) -> Result<LinearImage>
 ```
+
+A successful outcome contains the exact-source plan and diagnostics; a skipped
+outcome contains a typed reason and no plan. Empty positions request detection.
+The CLI requires already aligned inputs and an explicit linear declaration;
+it does not reuse the color-composition CLI's registration or normalization.
 
 The fit takes local-background-subtracted aperture fluxes from common,
 isolated, unsaturated stars. Begin with R as the candidate continuum for
@@ -487,8 +496,9 @@ reports must distinguish skipped work from a successful application.
 Before touching numerical code, run stacking and stretch `output_version`
 tests as required by `AGENTS.md`. Add cases for each new enabled mode, verify
 that a planted change fails, and preserve existing disabled-path summaries.
-Record output versions according to the repository rules; do not bump versions
-or regenerate summaries for this design-only change. Cover:
+Record output versions according to the repository rules. The upcoming
+stacking 0.47.0 output version covers these new operations; existing stacking
+and stretch summaries remain unchanged. Cover:
 
 - Known midtone landmarks, identity, protected shadows, H-alpha preservation,
   weak/flat channels, NaNs and invalid/degenerate options.
@@ -518,3 +528,33 @@ linear separation caches. The final display FITS retained common RGB/nebula
 coverage, and OIII/SII balance reported applied curves. The isolated fixture
 had no fresh plate solve, so this validates star separation and display
 recombination without making a Gaia-calibration or full-frame speed claim.
+
+### Initial real continuum check
+
+The new core and CLI were exercised on central 1024×1024 cutouts of the same
+Bubble Nebula R/G/B and Ha/OIII/SII masters used for the paired application's
+real SXT check. A separate Seiza registration aligned every cutout to Ha without
+photometric normalization. Registration RMS ranged from 0.64 to 0.94 pixels.
+The fixture declared a 65535 saturation ceiling in the working ADU units;
+no physical filter-throughput or pure-line calibration was inferred. The
+original masters and live catalog were unchanged.
+
+With the default aperture and fit controls:
+
+| Line and reference | Result | Coefficients | Held-out fractional RMS |
+| --- | --- | --- | --- |
+| Ha / R | Skipped: brightness trend | No accepted plan | 0.1347 before the trend check |
+| SII / R | Fitted | 0.22863 | 0.0642 |
+| OIII / G+B | Fitted | 0.09086, 0.10852 | 0.0397 |
+| OIII / G | Fitted | 0.22242 | 0.0918 |
+| OIII / B | Fitted | 0.18905 | 0.0720 |
+
+The multi-reference OIII fit retained 16 training and five held-out stars;
+SII retained 33 and 12. The Ha faint/bright residual difference was -0.1577,
+exceeding the default 0.15 limit even though aggregate RMS alone passed.
+The CLI wrote a skipped report and no Ha residual image. Successful outputs
+preserved signed samples and were marked linear emission residuals. This is a
+single-field functional check, not enough evidence to enable automatic
+continuum subtraction for every combined-image recipe. Wider nebula and
+reflection/galaxy validation, starless-branch equivalence, PSF matching where
+needed, and the PSF Guard combined-image stage remain work before release.

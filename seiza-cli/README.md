@@ -966,6 +966,53 @@ a screen-compatible RGB stars layer and screens it onto the nebula. Negative
 extraction noise is suppressed for display; missing coverage masks the whole
 output pixel. Source paths and output paths must be distinct.
 
+### Subtract continuum from linear narrowband images
+
+Register the mono narrowband and broadband references onto the same grid.
+Keep stars in each input. Correct backgrounds consistently, then fit and
+subtract **before** stretching, display balance, star removal or LRGB blending.
+This command does not register or normalize inputs.
+
+```sh
+seiza color continuum --narrowband ha-linear.fits --reference red-linear.fits \
+  --saturation 65535 --assume-linear --output ha-emission.fits \
+  --report continuum.json --save-plan continuum-plan.json
+seiza color continuum --narrowband ha-linear.fits --reference red-linear.fits \
+  --saturation 65535 --assume-linear --plan continuum-plan.json \
+  --output ha-emission-reused.fits
+```
+
+Declare physical saturation in each image's sample units: use `1` for unit-scaled
+samples, or the known sensor saturation on an ADU scale. `--reference-saturation`
+accepts one comma-separated value per reference when their scales differ.
+The observed maximum is not a saturation estimate. `SEIZATRF=LINEAR` inputs
+need no `--assume-linear`; that flag permits only untagged inputs. DISPLAY or
+unknown transfer tags are always refused. FITS and XISF are supported through
+the shared image reader/writer.
+
+Supply one to three repeated `--reference` paths (or one path list). Their
+order defines coefficient order. Automatic fitting detects common isolated
+stars, rejects saturation, low SNR, PSF and registration mismatches, and checks
+held-out residuals. A skipped fit writes `--report` with `status=skipped` and a
+reason, exits unsuccessfully, and writes no new image or plan. It never silently
+returns the original image. Existing files remain untouched on a skipped fit.
+Inspect the JSON diagnostics before accepting a subtraction.
+
+For a manual model, pass `--coefficients 0.35` or a comma-separated list instead
+of `--plan`. The values must be nonnegative and match reference order. For
+premeasured stars, `--stars stars.json` accepts the core's `ContinuumStar` array.
+`--positions positions.json` supplies `[x,y]` locations instead of detection.
+`--fit-options options.json` and `--photometry-options apertures.json` override
+the core defaults. Omit `--output` and supply `--report` or `--save-plan` for
+fit-only use. Plans record content fingerprints and declared saturation;
+changed files, scales, reference order or processing versions are refused.
+
+Output preserves signed linear samples and missing coverage, carries
+`SEIZATRF=LINEAR` and `SEIZACON=EMISSION-RESIDUAL`, and is replaced atomically.
+It is not pure line flux: broadband filters can transmit emission themselves.
+No clipping, pedestal, filter-throughput correction or LRGB blending is applied.
+See [the fit contract and defaults](../seiza-stacking/README.md#continuum-fitting-and-signed-residuals).
+
 ### Color composition
 
 `seiza color` consumes mono `float32` FITS stacks. It can emit an RGB

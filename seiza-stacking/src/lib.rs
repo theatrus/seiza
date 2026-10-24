@@ -47,6 +47,7 @@ mod calibration_plan;
 mod color;
 mod color_calibration;
 mod context;
+mod continuum;
 mod cosmetic;
 mod crop;
 mod defects;
@@ -98,6 +99,12 @@ pub use color_calibration::{
     ColorStarMeasurement, GaiaColorSource, GaiaColors, SOLAR_BP_RP, apply_color_gains,
     calibrate_and_stretch, calibrate_color, calibrate_color_image, neutralize_clipped,
     place_gaia_sources, transform_wcs,
+};
+pub use continuum::{
+    ContinuumDiagnostics, ContinuumFitOptions, ContinuumFitOutcome, ContinuumOrigin,
+    ContinuumPhotometry, ContinuumPhotometryOptions, ContinuumPlan, ContinuumSkipReason,
+    ContinuumSource, ContinuumSources, ContinuumStar, ContinuumStarDiagnostic, ContinuumTransfer,
+    fit_continuum, measure_and_fit_continuum, subtract_continuum,
 };
 pub use cosmetic::{ImpulseFilterOptions, suppress_impulses};
 pub use crop::{

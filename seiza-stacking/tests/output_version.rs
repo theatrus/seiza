@@ -487,6 +487,75 @@ fn output_version_is_no_newer_than_the_next_minor_version() {
     );
 }
 
+// Reference coefficients and signed samples were recorded from the planted
+// linear model before implementing the continuum operations.
+#[test]
+fn continuum_linear_modes_keep_their_output() {
+    use seiza_stacking::{
+        ContinuumFitOutcome, ContinuumOrigin, ContinuumPhotometry, ContinuumPlan, ContinuumSource,
+        ContinuumSources, ContinuumStar, ContinuumTransfer, fit_continuum, subtract_continuum,
+    };
+    let source = |name: &str| ContinuumSource {
+        name: name.into(),
+        revision: "v1".into(),
+        transfer: ContinuumTransfer::Linear,
+        saturation: 65535.0,
+    };
+    let mut sources = ContinuumSources {
+        width: 256,
+        height: 256,
+        narrowband: source("ha"),
+        references: vec![source("red"), source("green")],
+    };
+    let measurement = |flux: f64, i: usize| ContinuumPhotometry {
+        x: 25.0 + (i % 7) as f64 * 30.0,
+        y: 25.0 + (i / 7) as f64 * 20.0,
+        flux,
+        peak: 100.0 + flux / 20.0,
+        fwhm: 3.0,
+        snr: 100.0,
+    };
+    let stars: Vec<_> = (0..40)
+        .map(|i| {
+            let r = 1000.0 + ((i * 17) % 157) as f64 * 50.0;
+            let g = 1000.0 + ((i * 28 + 83) % 157) as f64 * 50.0;
+            ContinuumStar {
+                narrowband: measurement(0.4 * r + 0.2 * g, i),
+                references: vec![measurement(r, i), measurement(g, i)],
+            }
+        })
+        .collect();
+    let ContinuumFitOutcome::Fitted { plan } =
+        fit_continuum(&stars, &sources, &Default::default()).unwrap()
+    else {
+        panic!("planted continuum fit was skipped")
+    };
+    check("CONTINUUM_COEFFICIENTS", &plan.coefficients, &[0.4, 0.2]);
+    sources.width = 3;
+    sources.height = 1;
+    sources.references.truncate(1);
+    let plan = ContinuumPlan {
+        schema_version: 1,
+        sources: sources.clone(),
+        coefficients: vec![0.35],
+        origin: ContinuumOrigin::Manual,
+        diagnostics: None,
+    };
+    let broad = LinearImage::new(3, 1, 1, vec![0.5, 0.3, 0.4]).unwrap();
+    let narrow = LinearImage::new(3, 1, 1, vec![0.2, 0.1, 0.5]).unwrap();
+    let output = subtract_continuum(&narrow, &[&broad], &sources, &plan).unwrap();
+    let signed: Vec<_> = output.data.iter().map(|v| f64::from(*v)).collect();
+    check(
+        "CONTINUUM_SIGNED",
+        &signed,
+        &[
+            0.02500000223517418,
+            -0.005000002682209015,
+            0.36000001430511475,
+        ],
+    );
+}
+
 #[test]
 fn narrowband_display_modes_keep_their_output() {
     let mut physical = LinearImage::new(

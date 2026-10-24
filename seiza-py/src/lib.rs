@@ -7,6 +7,7 @@ mod calibration;
 mod color;
 mod color_calibration;
 mod constellations;
+mod continuum;
 mod deconvolution;
 mod field_objects;
 mod flat_response;
@@ -1224,6 +1225,7 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(solve_with_prior, m)?)?;
     m.add_function(wrap_pyfunction!(solve_image, m)?)?;
     color::register(m)?;
+    continuum::register(m)?;
     color_calibration::register(m)?;
     deconvolution::register(m)?;
     field_objects::register(m)?;

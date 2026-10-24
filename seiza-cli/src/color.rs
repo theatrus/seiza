@@ -18,6 +18,8 @@ pub(crate) struct ColorArgs {
 
 #[derive(Subcommand)]
 enum ColorCommand {
+    /// Fit and subtract continuum on aligned linear mono images
+    Continuum(crate::continuum::ContinuumArgs),
     /// Balance prepared display planes ordered H-alpha/OIII/SII
     Balance(DisplayBalanceArgs),
     /// Screen display RGB stars onto a starless display nebula
@@ -288,6 +290,7 @@ impl From<PaletteArg> for NarrowbandPalette {
 
 pub(crate) fn run(args: ColorArgs) -> Result<()> {
     match args.command {
+        ColorCommand::Continuum(args) => crate::continuum::run(args),
         ColorCommand::Balance(args) => run_balance(args),
         ColorCommand::ScreenStars(args) => run_screen_stars(args),
         ColorCommand::Rgb(args) => run_rgb(args),

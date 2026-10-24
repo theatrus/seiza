@@ -891,3 +891,65 @@ coverage masks complete pixels. Neither function aligns images or runs external
 tools. Both produce display-referred data, unsuitable for photometry or linear
 continuum subtraction. C ABI, Python and CLI counterparts provide the same
 operations; see the [color composition design](../docs/design/color-composition.md).
+
+## Continuum fitting and signed residuals
+
+Use continuum fitting **before stretching or removing stars**, on mono linear
+inputs already registered to one grid. The host supplies one to three concrete
+broadband references; Seiza does not infer filter roles, integration-time
+scaling or line throughput. R is a starting candidate for H-alpha/SII; G/B are
+candidates for OIII. L is not an automatic reference.
+
+`fit_continuum(stars, sources, options)` consumes common isolated-star aperture
+photometry. `measure_and_fit_continuum(narrowband, references, sources, positions,
+options, photometry)` measures local-background-subtracted fluxes; empty
+positions request Seiza detection on the narrowband plane. All `ContinuumSource`
+records declare a distinct name, exact prepared revision, linear transfer and
+physical saturation in that image's sample units. Change the revision whenever
+pixels, scale, registration, backgrounds or masks change. Saturation must come
+from the image's physical scale, never its observed maximum.
+
+The core fits `F_N = sum(a_j * F_Bj)` with nonnegative weights and no pedestal,
+using column scaling, small deterministic subset starts and iterative MAD
+rejection. Every fourth usable star is held out. Defaults require 12 stars,
+SNR 20, peaks below 80% saturation, width ratios at most 1.3, centroid offsets
+at most one pixel, condition number at most 1000, and fractional RMS at most
+0.15 on both training and validation sets. At least 70% of each set must
+remain after rejection. Image measurement rejects crowded/edge apertures and
+fits a robust local sky plane with default radii 8/12/20 pixels. Supplied
+photometry must already be from isolated stars with consistent PSF widths.
+A rank-deficient multi-reference model may fall back to the best validated
+single reference; otherwise it returns a typed skip. No fixed G/B mixture is
+substituted. These are conservative starting defaults, not a calibration claim
+for every instrument or target.
+
+`ContinuumFitOutcome` distinguishes a fitted plan from skipped work with a
+reason, detail and diagnostics. Diagnostics include used/held-out star counts,
+rejection counts, residuals per star, conditioning, RMS, four ordered quadrant
+medians (null when fewer than three stars), and faint-versus-bright residuals.
+A fit never runs on an image-wide nebular regression. Inspect residuals before
+using automatic subtraction as a default in a host.
+
+`subtract_continuum(narrowband, references, sources, plan)` validates exact
+source revisions, order, grid, transfer, coefficient shape and provenance.
+It returns `N - sum(a_j * B_j)` without changing inputs, clipping negative
+samples, shifting black levels or stretching. Missing contributing coverage
+remains NaN; a zero-weight reference does not mask pixels. Manual plans use
+schema version 1, explicit sources and coefficients, `ContinuumOrigin::Manual`
+and no diagnostics. Fitted plans retain their diagnostics.
+
+The coefficients include the actual input scales. A rescale requires a new
+fit or an explicit host conversion on new revisions; old plans are refused.
+Background offsets remain separate. Applying the same plan to a starless or
+otherwise processed revision is refused until the host establishes and records
+that revision's equivalent flux scale. No implicit PSF matching is performed.
+
+Broadband references can contain line emission. If `B = C + beta*E` and
+`N = a*C + E`, subtraction yields `(1-a*beta)*E`. The result is an **emission
+residual**, not calibrated pure line flux. LRGB+SHO blend weights, negative-noise
+display suppression and luminance integration are separate host policies.
+C exports `seiza_continuum_fit_json`, `seiza_continuum_measure_fit_json` and
+`seiza_continuum_subtract_json` carry the same core types. C images are planar
+NB followed by references; Python uses a list of mono arrays and returns the
+same JSON keys. See [CLI usage](../seiza-cli/README.md#subtract-continuum-from-linear-narrowband-images)
+and [Python usage](../seiza-py/README.md#subtract-stellar-continuum-before-color-composition).

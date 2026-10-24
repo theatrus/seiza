@@ -2488,6 +2488,7 @@ version = "0.47.0"
 dependencies = [
  "bytemuck",
  "multiversion",
+ "nalgebra",
  "objc2-metal",
  "pollster",
  "postcard",

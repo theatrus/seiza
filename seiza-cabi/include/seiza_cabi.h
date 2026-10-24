@@ -3405,6 +3405,56 @@ bool seiza_live_stacker_light_rotation(const SeizaLiveStacker *stacker,
                                        double *degrees_out);
 
 /*
+ Fit premeasured common stellar fluxes. Request JSON contains sources, stars
+ and optional options, as defined by the continuum core. Returns a tagged
+ fitted/skipped JSON outcome; free it with seiza_string_free. A skip is not
+ an API error and never supplies a subtraction plan.
+
+ # Safety
+ request_json is a NUL-terminated UTF-8 object; error_out, if non-null,
+ points to writable pointer storage.
+ */
+char *seiza_continuum_fit_json(const char *request_json, char **error_out);
+
+/*
+ Measure and fit aligned linear planes. Data is planar: narrowband, then
+ references in sources order. Request JSON contains sources, optional
+ positions, fitOptions and photometryOptions. Empty positions asks Seiza to
+ detect stars. Sources declare exact prepared revisions, linear transfer and
+ physical saturation in each plane's units. Returns fitted/skipped JSON;
+ free it with seiza_string_free. The input buffer is never modified.
+
+ # Safety
+ data points to width*height*planes readable floats (planes 2..4).
+ request_json is NUL-terminated UTF-8. error_out, if non-null, is writable.
+ */
+char *seiza_continuum_measure_fit_json(const float *data,
+                                       size_t width,
+                                       size_t height,
+                                       size_t planes,
+                                       const char *request_json,
+                                       char **error_out);
+
+/*
+ Apply a continuum plan, preserving signed linear residuals and coverage.
+ Input data is planar NB then references. Request JSON contains sources and
+ plan. Output is width*height mono floats and may alias an input plane.
+ Errors leave the output untouched. No normalization or clipping is applied.
+
+ # Safety
+ data points to width*height*planes readable floats (planes 2..4), output
+ to width*height writable floats. request_json is NUL-terminated UTF-8.
+ error_out, if non-null, points to writable pointer storage.
+ */
+bool seiza_continuum_subtract_json(const float *data,
+                                   size_t width,
+                                   size_t height,
+                                   size_t planes,
+                                   const char *request_json,
+                                   float *output,
+                                   char **error_out);
+
+/*
  Every constellation figure and the stars its lines use, for a host that
  draws figures its own way. Returns JSON, released with
  `seiza_string_free`: `{"attribution", "epoch", "figures": [{"abbr",

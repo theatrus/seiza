@@ -23,6 +23,7 @@ mod build_distances;
 mod color;
 mod color_calibrate;
 mod common;
+mod continuum;
 mod deconvolution;
 mod interrupt;
 mod master;

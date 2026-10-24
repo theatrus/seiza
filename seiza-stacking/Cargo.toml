@@ -19,6 +19,7 @@ default = ["gpu"]
 gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck", "dep:objc2-metal", "dep:windows"]
 
 [dependencies]
+nalgebra.workspace = true
 multiversion = "0.9"
 wgpu = { workspace = true, optional = true }
 pollster = { workspace = true, optional = true }

@@ -1,3 +1,5 @@
+mod continuum;
+
 use image::DynamicImage;
 mod constellations;
 mod flat_response;

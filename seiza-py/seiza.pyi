@@ -1254,6 +1254,38 @@ def deconvolve(
     max_correction: float = 2.0,
     masked: bool = False,
 ) -> npt.NDArray[np.float32]: ...
+
+def fit_continuum(
+    stars: Sequence[Mapping[str, Any]],
+    sources: Mapping[str, Any],
+    *,
+    options: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Fit isolated stellar fluxes; return tagged fitted/skipped core JSON."""
+    ...
+
+def measure_and_fit_continuum(
+    narrowband: npt.NDArray[np.float32],
+    references: Sequence[npt.NDArray[np.float32]],
+    sources: Mapping[str, Any],
+    *,
+    positions: Sequence[tuple[float, float]] | None = None,
+    fit_options: Mapping[str, Any] | None = None,
+    photometry_options: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Measure aligned linear planes; empty positions requests star detection."""
+    ...
+
+def subtract_continuum(
+    narrowband: npt.NDArray[np.float32],
+    references: Sequence[npt.NDArray[np.float32]],
+    sources: Mapping[str, Any],
+    plan: Mapping[str, Any],
+) -> npt.NDArray[np.float32]:
+    """Apply an exact-source plan; preserve signed residuals and NaN coverage."""
+    ...
+
+
 def balance_narrowband(
     image: npt.NDArray[np.float32], *, shadow_protection: float = 1.0,
     oiii_boost: float = 1.0, sii_boost: float = 1.0, max_samples: int = 1_000_000, has_sii: bool = True,

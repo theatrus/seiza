@@ -28,8 +28,9 @@ pip install seiza
 Binary wheels cover Linux (x86_64, aarch64), macOS (universal2), and
 Windows (x64); each is a single abi3 wheel for every CPython from 3.11 up.
 Type stubs are included, and computational image operations release the GIL.
-Input arrays are read in place, without a copy, while the GIL is released:
-do not mutate an array from another thread until the call returns.
+Some operations read input arrays in place while the GIL is released; others,
+including continuum fitting/subtraction and color composition, copy their
+inputs first. Do not mutate an array from another thread until the call returns.
 
 ## Solve an image
 
@@ -1307,3 +1308,48 @@ maturin develop && python -m pytest tests/ -q
 ## License
 
 Apache-2.0
+
+### Subtract stellar continuum before color composition
+
+`fit_continuum(stars, sources, options=None)` fits premeasured, isolated common
+stars. `measure_and_fit_continuum(narrowband, references, sources, positions=None,
+fit_options=None, photometry_options=None)` measures them on aligned,
+star-containing **linear** mono float32 arrays. Omit positions to detect stars.
+Each function returns the core JSON: either `{"status": "fitted", "plan": ...}`
+or `{"status": "skipped", "reason": ..., "detail": ..., "diagnostics": ...}`.
+A skipped fit has no plan; decide how to recover before composing an image.
+
+```python
+source = lambda name, revision: dict(name=name, revision=revision,
+                                    transfer="linear", saturation=65535)
+sources = dict(width=ha.shape[1], height=ha.shape[0],
+               narrowband=source("ha", "ha:registered:v1"),
+               references=[source("red", "red:registered:v1")])
+fit = seiza.measure_and_fit_continuum(ha, [red], sources,
+                                    fit_options={"minimum_stars": 12})
+if fit["status"] == "fitted":
+    emission = seiza.subtract_continuum(ha, [red], sources, fit["plan"])
+```
+
+`saturation` is the physical saturation level in each plane's working units,
+not its observed maximum. Use `1` for samples scaled from a sensor saturation
+level to one. Change `revision` whenever pixels, scale, background treatment,
+registration or masks change. Names must be distinct; the one to three
+references and their order define coefficient order. Plans reject changed
+sources, scales (through revisions), grids, order or non-linear transfer.
+Python option dicts accept snake_case; returned plan/diagnostic keys match the
+C ABI's camelCase JSON. Input arrays are copied before releasing the GIL.
+
+The default fit requires 12 common unsaturated stars, SNR 20, width ratios at
+most 1.3, centroid differences at most one pixel, and training/held-out RMS
+fractional errors at most 0.15. Every fourth accepted star is held out; at
+least 70% of both sets must remain after rejection. Aperture/sky radii default
+to 8/12/20 pixels. `fit_options` accepts all `ContinuumFitOptions` fields;
+`photometry_options` accepts `aperture_radius`, `annulus_inner`, `annulus_outer`.
+Manual plans have `schemaVersion=1`, the same `sources`, a nonnegative
+`coefficients` list, `origin="manual"`, and `diagnostics=None`.
+`subtract_continuum(narrowband, references, sources, plan)` returns a new signed
+array `N - sum(a_i * B_i)`, keeping negative values and NaN for missing
+contributing coverage. It never clips, rescales, stretches or corrects filter
+line transmission. A broadband reference can contain emission itself, so the
+result is an emission residual rather than calibrated pure line flux.
