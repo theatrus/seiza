@@ -373,6 +373,72 @@ fn rgb_cli_registers_shifted_filter_stacks_by_default() {
     }
 }
 
+/// `color` takes the GPU flags `stack` takes. With `--no-gpu` it aligns the
+/// channels on the CPU to the same result; an invalid flag is refused.
+#[test]
+fn rgb_cli_aligns_on_the_cpu_with_no_gpu() {
+    let directory = tempfile::tempdir().unwrap();
+    let paths = ["red", "green", "blue"].map(|name| directory.path().join(format!("{name}.fits")));
+    for (path, (shift_x, shift_y, gain)) in
+        paths.iter().zip([(0, 0, 1.0), (4, -3, 1.5), (-5, 2, 2.0)])
+    {
+        write_f32_image(
+            path,
+            128,
+            128,
+            F32ImageData::Mono(&synthetic_star_field(shift_x, shift_y, gain)),
+            &[],
+        )
+        .unwrap();
+    }
+    let run = |output: &Path, gpu: &[&str]| {
+        let mut arguments = vec![
+            "color".to_owned(),
+            "rgb".to_owned(),
+            "--normalization".to_owned(),
+            "none".to_owned(),
+            "--output".to_owned(),
+            output.to_str().unwrap().to_owned(),
+        ];
+        for (flag, path) in ["--red", "--green", "--blue"].iter().zip(&paths) {
+            arguments.push((*flag).to_owned());
+            arguments.push(path.to_str().unwrap().to_owned());
+        }
+        arguments.extend(gpu.iter().map(|flag| (*flag).to_owned()));
+        Command::new(env!("CARGO_BIN_EXE_seiza"))
+            .args(&arguments)
+            .output()
+            .unwrap()
+    };
+    let default = directory.path().join("default.fits");
+    let cpu = directory.path().join("cpu.fits");
+    let result = run(&default, &[]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let result = run(&cpu, &["--no-gpu", "--gpu-concurrency", "1"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("registered green:"), "{stdout}");
+    let pixels = |path: &Path| match FitsImage::open(path).unwrap().pixels {
+        Pixels::F32(values) => values.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        pixels => panic!("expected f32 output, got {pixels:?}"),
+    };
+    assert_eq!(pixels(&cpu), pixels(&default));
+
+    let refused = run(
+        &directory.path().join("refused.fits"),
+        &["--gpu-concurrency", "0"],
+    );
+    assert!(!refused.status.success());
+}
+
 #[test]
 fn rgb_cli_crops_registration_borders_and_moves_the_solution() {
     let directory = tempfile::tempdir().unwrap();

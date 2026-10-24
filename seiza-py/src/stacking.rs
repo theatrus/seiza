@@ -2417,7 +2417,10 @@ fn stack_fits(
             let map = seiza_stacking::detect_defects(
                 &ordered,
                 &calibration,
-                &DefectDetectionOptions::default(),
+                &DefectDetectionOptions {
+                    gpu: options.gpu,
+                    ..DefectDetectionOptions::default()
+                },
             )?;
             options.defects = (!map.is_empty()).then_some(map);
         }

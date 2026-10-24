@@ -240,8 +240,10 @@ registration with it.
   narrow a reintegration's rejection passes), and
   `DefectDetectionOptions::gpu` for defect learning. The C ABI takes it as
   the `gpu` object of the options or request JSON, Python as
-  `seiza.GpuOptions`, and the CLI's `stack` as `--no-gpu` and
-  `--cpu-pass`. `enabled: false` keeps everything on the CPU and never
+  `seiza.GpuOptions`, and the CLI's `stack` and `color` as `--no-gpu` and
+  `--cpu-pass`. The C ABI's file renders take it as the `gpu` member of a
+  processed render request, which governs debayering a raw Bayer frame
+  rendered in physical units. `enabled: false` keeps everything on the CPU and never
   opens the device; `accumulator`, `debayer`, `detection`, `defects`,
   `resampling` and `integration` keep one pass each.
 - A call that takes no options uses the defaults. Each such call that

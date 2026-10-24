@@ -64,22 +64,6 @@ enum DefectsArg {
     Off,
 }
 
-#[derive(Clone, Copy, PartialEq, ValueEnum)]
-enum GpuPassArg {
-    /// Defect learning's screen of each light
-    Defects,
-    /// VNG debayering
-    Debayer,
-    /// Star detection
-    Detection,
-    /// Resampling onto the reference grid
-    Resampling,
-    /// The live stack's accumulator
-    Accumulator,
-    /// --reintegrate's rejection passes
-    Integration,
-}
-
 #[derive(Clone, Copy, ValueEnum)]
 enum InterpolationArg {
     Bilinear,
@@ -243,46 +227,8 @@ pub(crate) struct StackArgs {
     /// rows of every frame --reintegrate reads back at once, in MiB
     #[arg(long, default_value_t = 4096)]
     pipeline_memory_mib: usize,
-    /// Keep every pass on the CPU. Otherwise stacking's heavy passes run on
-    /// the GPU, when there is one, in single precision
-    #[arg(long)]
-    no_gpu: bool,
-    /// Keep these passes on the CPU and the rest on the GPU, comma-separated
-    #[arg(long, value_enum, value_delimiter = ',')]
-    cpu_pass: Vec<GpuPassArg>,
-    /// Frame calls (debayering, detection, resampling, screening) the GPU
-    /// takes at once; the rest wait without holding its memory
-    #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u64).range(1..))]
-    gpu_concurrency: u64,
-    /// Device memory to plan the GPU's work in, in MiB; by default what the
-    /// device has. With less, the live stack's accumulator stays on the CPU
-    /// sooner, leaving the rest to other programs
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
-    gpu_memory_mib: Option<u64>,
-    /// Print each GPU call's stages and their times to stderr
-    #[arg(long)]
-    gpu_trace: bool,
-}
-
-impl StackArgs {
-    /// The passes the GPU may run, as the flags say.
-    fn gpu(&self) -> seiza_stacking::GpuOptions {
-        let on_gpu = |pass| !self.cpu_pass.contains(&pass);
-        seiza_stacking::GpuOptions {
-            enabled: !self.no_gpu,
-            defects: on_gpu(GpuPassArg::Defects),
-            debayer: on_gpu(GpuPassArg::Debayer),
-            detection: on_gpu(GpuPassArg::Detection),
-            resampling: on_gpu(GpuPassArg::Resampling),
-            accumulator: on_gpu(GpuPassArg::Accumulator),
-            integration: on_gpu(GpuPassArg::Integration),
-            concurrency: usize::try_from(self.gpu_concurrency).unwrap_or(usize::MAX),
-            memory_bytes: self
-                .gpu_memory_mib
-                .map(|mib| mib.saturating_mul(1024 * 1024)),
-            trace: self.gpu_trace,
-        }
-    }
+    #[command(flatten)]
+    gpu: crate::common::GpuArgs,
 }
 
 #[derive(Serialize)]
@@ -589,7 +535,7 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
         } else {
             seiza_stacking::CfaIntegration::Demosaic
         },
-        gpu: options.gpu(),
+        gpu: options.gpu.options(),
         ..StackOptions::default()
     };
     stack_options.acceptance.maximum_registration_rms_pixels = options.max_registration_rms;

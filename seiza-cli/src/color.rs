@@ -6,7 +6,7 @@ use seiza_stacking::{
     ColorComposition, ColorCrop, ColorNormalization, ColorOptions, ColorTransfer, FitsFrame,
     ForaxxOptions, LinearImage, LrgbLuminance, NarrowbandPalette, Registrar, RegistrationOptions,
     RgbLuminance, combine_lrgb, combine_narrowband, combine_rgb, combine_super_lrgb,
-    combine_super_rgb, resample_to_reference, write_color_fits_f32,
+    combine_super_rgb, resample_to_reference_with_gpu, write_color_fits_f32,
 };
 use std::path::{Path, PathBuf};
 
@@ -139,6 +139,8 @@ struct CommonArgs {
         default_value_t = RegistrationOptions::DEFAULT_MAXIMUM_DRIFT_FRACTION
     )]
     max_registration_drift_fraction: f64,
+    #[command(flatten)]
+    gpu: crate::common::GpuArgs,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -359,7 +361,11 @@ impl CommonArgs {
             maximum_drift_fraction: self.max_registration_drift_fraction,
             ..RegistrationOptions::default()
         };
-        Ok(Some(Registrar::new(reference, options)?))
+        Ok(Some(Registrar::new_with_gpu(
+            reference,
+            options,
+            &self.gpu.options(),
+        )?))
     }
 
     fn align(
@@ -389,11 +395,12 @@ impl CommonArgs {
             registration.transform.rotation_radians.to_degrees(),
             registration.matched_stars,
         );
-        Ok(resample_to_reference(
+        Ok(resample_to_reference_with_gpu(
             &source,
             reference.width,
             reference.height,
             registration.transform,
+            &self.gpu.options(),
         )?)
     }
 }

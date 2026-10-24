@@ -168,7 +168,9 @@ seiza stack lights/*.fits --output stack.fits --cpu-pass debayer,detection
 ```
 
 `--cpu-pass` accepts `defects`, `debayer`, `detection`, `resampling`,
-`accumulator`, and `integration`. `--gpu-concurrency` bounds concurrent frame
+`accumulator`, and `integration`. `seiza color` accepts the same GPU flags for
+the star detection and resampling that align its channels; `--no-gpu` keeps
+both on the CPU and never opens the GPU. `--gpu-concurrency` bounds concurrent frame
 calls (default 3). `--gpu-memory-mib` caps the device memory the GPU's work is
 planned in, by default what the device has: the live accumulator stays on the
 CPU when it and the frames on the GPU for it would need more than three

@@ -1354,6 +1354,14 @@ def test_defects_are_learned_from_dithered_lights_and_repaired(tmp_path):
         for y, x in hot:
             assert auto[0].data[y, x] < 120.0
             assert off[0].data[y, x] > 500.0
+    # The map is learned under the stack's GPU options.
+    cpu_options = seiza.StackOptions(
+        normalization="none", rejection="none", gpu=seiza.GpuOptions(enabled=False)
+    )
+    seiza.stack_fits(lights, tmp_path / "auto-cpu.fits", options=cpu_options)
+    with fits.open(tmp_path / "auto-cpu.fits") as on_cpu:
+        for y, x in hot:
+            assert on_cpu[0].data[y, x] < 120.0
     with pytest.raises(ValueError, match="defects"):
         seiza.stack_fits(lights, tmp_path / "unused.fits", defects="maybe")
 

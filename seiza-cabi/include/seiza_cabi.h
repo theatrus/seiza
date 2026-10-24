@@ -2296,7 +2296,11 @@ SeizaRenderedImage *seiza_rendered_image_open_with_rgb_stretch(const char *path,
  `config_json`. The value may be one serialized `seiza-stretch`
  `StretchConfig` (the original schema), a non-empty array of configs, or an
  object with `stretch`, optional `background`, optional `deconvolution`,
- optional `sample_domain`, and optional `interactive_preview` fields. Array
+ optional `sample_domain`, optional `interactive_preview` and optional
+ `gpu` fields. `gpu` takes the fields of the `"gpu"` member of
+ [`seiza_live_stacker_open_fits`]'s options, such as `{"enabled": false}`,
+ and says whether a raw Bayer frame rendered in physical units is
+ debayered on the GPU; by default it may be. Array
  stages are applied in order using `f32` intermediates and converted to RGBA
  only after the final stage. Background correction and deconvolution, when
  requested, are applied to linear samples in that order. Sample-domain
