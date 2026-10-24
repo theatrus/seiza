@@ -1382,6 +1382,25 @@ char *seiza_live_stacker_expansion_planning_notes_json(const SeizaLiveStacker *s
 SeizaLiveStacker *seiza_live_stacker_open_context(const char *context_path, char **error_out);
 
 /*
+ Reopens a live-stack context as [`seiza_live_stacker_open_context`] does,
+ but runs the stack under the GPU options in `gpu_json` in place of the
+ options it was saved with. `gpu_json` is a JSON object with the fields of
+ the `"gpu"` member of [`seiza_live_stacker_open_fits`]'s options, such as
+ `{"enabled": false}` to keep every pass on the CPU; null or empty gives
+ the defaults, which let every pass run on the GPU. The configuration
+ fingerprint leaves GPU options out, so it matches the saved stack's, and
+ a context saved from the reopened handle records the new options.
+
+ # Safety
+ `context_path` must be a valid NUL-terminated path. `gpu_json` may be
+ null; when non-null it must be NUL-terminated. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+SeizaLiveStacker *seiza_live_stacker_open_context_with_gpu(const char *context_path,
+                                                           const char *gpu_json,
+                                                           char **error_out);
+
+/*
  Atomically checkpoints every piece of state required to reopen this live
  stack and continue integrating with identical online rejection behavior.
  The live handle remains usable after the checkpoint completes.

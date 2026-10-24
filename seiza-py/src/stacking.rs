@@ -1554,10 +1554,20 @@ impl PyLiveStacker {
     }
 
     /// Reopen a versioned on-disk context and continue adding frames.
+    ///
+    /// The stack runs under the :class:`GpuOptions` it was saved with, or
+    /// under ``gpu`` when given: ``gpu=GpuOptions(enabled=False)`` keeps
+    /// every pass on the CPU. The configuration fingerprint leaves GPU
+    /// options out, so it stays the same, and a context saved afterwards
+    /// records ``gpu``.
     #[staticmethod]
-    fn open_context(py: Python<'_>, path: PathBuf) -> PyResult<Self> {
+    #[pyo3(signature = (path, *, gpu = None))]
+    fn open_context(py: Python<'_>, path: PathBuf, gpu: Option<PyGpuOptions>) -> PyResult<Self> {
         let inner = py
-            .detach(|| LiveStacker::open_context(path))
+            .detach(|| match gpu {
+                Some(gpu) => LiveStacker::open_context_with_gpu(path, gpu.inner),
+                None => LiveStacker::open_context(path),
+            })
             .map_err(stack_error)?;
         Ok(Self { inner: Some(inner) })
     }

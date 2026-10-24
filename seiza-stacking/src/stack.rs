@@ -1585,9 +1585,30 @@ impl LiveStacker {
 
     /// Restore an atomically checkpointed live stack, including its immutable
     /// registration reference, calibration, online moments, and source ledger.
+    /// The stack runs under the [`crate::GpuOptions`] it was saved with; see
+    /// [`Self::open_context_with_gpu`].
     pub fn open_context(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
+        Self::restore_context(path.as_ref(), None)
+    }
+
+    /// [`Self::open_context`], running the stack under `gpu` in place of the
+    /// [`crate::GpuOptions`] it was saved with: registration detects stars,
+    /// frames are resampled, the accumulator is placed and reintegration
+    /// rejects where `gpu` allows. The configuration fingerprint leaves GPU
+    /// options out, so it is the same as [`Self::open_context`] gives, and a
+    /// context saved from the reopened stack records `gpu`.
+    pub fn open_context_with_gpu(path: impl AsRef<Path>, gpu: crate::GpuOptions) -> Result<Self> {
+        gpu.validate()?;
+        Self::restore_context(path.as_ref(), Some(gpu))
+    }
+
+    fn restore_context(path: &Path, gpu: Option<crate::GpuOptions>) -> Result<Self> {
         let mut restored = context::read(path)?;
+        // The registrars detect stars under these options, and the
+        // accumulator moves to the GPU under them at the first frame.
+        if let Some(gpu) = gpu {
+            restored.options.gpu = gpu;
+        }
         if restored.expanded_lens.is_some() {
             // Early lens contexts retained the raw anchor's WCS even though
             // their pixels were already on the undistorted canvas.
@@ -4604,6 +4625,140 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+
+    /// A context reopened under other GPU options runs under them, keeps its
+    /// counts and fingerprint, and integrates the frames pushed afterwards
+    /// as a stack under those options from the start does.
+    #[test]
+    fn a_context_reopens_under_other_gpu_options() {
+        let reference = stacking_star_field(160, 128);
+        let options = |gpu| StackOptions {
+            normalization: NormalizationMode::None,
+            rejection: RejectionMode::DeltaSigma(DeltaSigmaOptions {
+                warmup_samples: 4,
+                minimum_sigma: 0.01,
+                ..DeltaSigmaOptions::default()
+            }),
+            gpu,
+            ..StackOptions::default()
+        };
+        let mut frames = [0.10, -0.10, 0.05, -0.05]
+            .map(|offset| offset_image(&reference, offset))
+            .to_vec();
+        let mut partial_outlier = offset_image(&reference, 0.0);
+        let center = partial_outlier.height / 2 * partial_outlier.width + partial_outlier.width / 2;
+        partial_outlier.data[center] += 1_000.0;
+        frames.push(partial_outlier);
+        frames.push(offset_image(&reference, 0.02));
+        let cpu = crate::GpuOptions::cpu();
+        let mut on_the_cpu = LiveStacker::from_linear(reference.clone(), options(cpu)).unwrap();
+        for frame in frames.iter().cloned() {
+            on_the_cpu.push_linear(frame).unwrap();
+        }
+
+        let mut checkpointed =
+            LiveStacker::from_linear(reference, options(crate::GpuOptions::default())).unwrap();
+        for frame in frames[..3].iter().cloned() {
+            checkpointed.push_linear(frame).unwrap();
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("everywhere.seiza-stack");
+        checkpointed.save_context(&path).unwrap();
+        let mut resumed = LiveStacker::open_context_with_gpu(&path, cpu).unwrap();
+        assert_eq!(resumed.options.gpu, cpu);
+        assert_eq!(
+            resumed.configuration_fingerprint(),
+            checkpointed.configuration_fingerprint()
+        );
+        assert_eq!(resumed.accepted_frames, checkpointed.accepted_frames);
+        assert_eq!(resumed.rejected_frames, checkpointed.rejected_frames);
+        // The saved options are untouched: open_context still reads them.
+        assert_eq!(
+            LiveStacker::open_context(&path).unwrap().options.gpu,
+            crate::GpuOptions::default()
+        );
+        for frame in frames[3..].iter().cloned() {
+            resumed.push_linear(frame).unwrap();
+        }
+        #[cfg(feature = "gpu")]
+        assert!(resumed.accumulator.gpu.is_none());
+
+        // A context saved from the reopened stack records the new options.
+        let cpu_path = directory.path().join("cpu.seiza-stack");
+        resumed.save_context(&cpu_path).unwrap();
+        assert_eq!(
+            LiveStacker::open_context(&cpu_path).unwrap().options.gpu,
+            cpu
+        );
+        let everywhere =
+            LiveStacker::open_context_with_gpu(&cpu_path, crate::GpuOptions::default()).unwrap();
+        assert_eq!(everywhere.options.gpu, crate::GpuOptions::default());
+        assert_eq!(
+            everywhere.configuration_fingerprint(),
+            checkpointed.configuration_fingerprint()
+        );
+
+        let expected = on_the_cpu.into_snapshot().unwrap();
+        let actual = resumed.into_snapshot().unwrap();
+        assert_eq!(actual.image.data, expected.image.data);
+        assert_eq!(actual.variance.data, expected.variance.data);
+        assert_eq!(actual.coverage, expected.coverage);
+        assert_eq!(actual.rejected_samples, expected.rejected_samples);
+        assert!(actual.rejected_samples.iter().sum::<u32>() > 0);
+        assert_eq!(actual.accepted_frames, expected.accepted_frames);
+        assert_eq!(actual.rejected_frames, expected.rejected_frames);
+
+        let invalid = crate::GpuOptions {
+            concurrency: 0,
+            ..crate::GpuOptions::default()
+        };
+        assert!(LiveStacker::open_context_with_gpu(&path, invalid).is_err());
+    }
+
+    /// A stack large enough for the GPU's accumulator keeps it on the CPU
+    /// when reopened under [`crate::GpuOptions::cpu`], and moves it to the
+    /// GPU, where there is one, when a stack saved on the CPU is reopened
+    /// under the defaults.
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn the_accumulator_follows_the_gpu_options_a_context_reopens_under() {
+        let mut probe = Accumulator::new(1 << 20, false);
+        probe.offer_gpu(&crate::GpuOptions::default());
+        if probe.gpu.is_none() {
+            eprintln!("no GPU: where a reopened stack's accumulator lies not checked");
+            return;
+        }
+        drop(probe);
+        let reference = stacking_star_field(1024, 1024);
+        let options = |gpu| StackOptions {
+            normalization: NormalizationMode::None,
+            rejection: RejectionMode::None,
+            gpu,
+            ..StackOptions::default()
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let reopen_and_push = |saved: crate::GpuOptions, reopened: crate::GpuOptions| {
+            let path = directory.path().join("stack.seiza-stack");
+            LiveStacker::from_linear(reference.clone(), options(saved))
+                .unwrap()
+                .save_context(&path)
+                .unwrap();
+            let mut resumed = LiveStacker::open_context_with_gpu(&path, reopened).unwrap();
+            assert!(matches!(
+                resumed.push_linear(offset_image(&reference, 0.05)).unwrap(),
+                FrameDisposition::Accepted(_)
+            ));
+            resumed.accumulator.gpu.is_some()
+        };
+        assert!(!reopen_and_push(
+            crate::GpuOptions::default(),
+            crate::GpuOptions::cpu()
+        ));
+        assert!(reopen_and_push(
+            crate::GpuOptions::cpu(),
+            crate::GpuOptions::default()
+        ));
     }
 
     fn offset_image(reference: &LinearImage, offset: f32) -> LinearImage {

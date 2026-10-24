@@ -16,7 +16,15 @@ use serde::{Deserialize, Serialize};
 /// [`crate::BatchStackOptions::gpu`] governs the integration of registered
 /// frames, and [`crate::DefectDetectionOptions::gpu`] defect learning. A
 /// call that takes no options, such as [`crate::resample_to_reference`] or
-/// [`crate::FitsFrame::into_prepared`], uses the defaults.
+/// [`crate::FitsFrame::into_prepared`], uses the defaults. Its twin that
+/// takes them runs where they allow:
+/// [`crate::FitsFrame::into_prepared_with_gpu`],
+/// [`crate::resample_region_to_reference_with_gpu`],
+/// [`crate::RegisteredFrameMapping::extract_region_with_gpu`],
+/// [`crate::RegisteredFrameMapping::extract_region_photosites_with_gpu`] and
+/// [`crate::RegisteredFrameMapping::extract_region_after_affine_with_gpu`].
+/// A saved stack reopens under the options it was saved with, or under
+/// others by [`crate::LiveStacker::open_context_with_gpu`].
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GpuOptions {

@@ -770,7 +770,15 @@ stack, frames = seiza.integrate_registered_frames(
 ```
 
 A context keeps the stack's GPU options, and its configuration fingerprint
-leaves them out.
+leaves them out. `LiveStacker.open_context(path, gpu=...)` reopens a stack
+under other options, for example when a user turns the GPU off, and the
+fingerprint stays the same:
+
+```python
+stacker = seiza.LiveStacker.open_context(
+    "m31.seiza-stack", gpu=seiza.GpuOptions(enabled=False)
+)
+```
 
 Checkpointing is non-consuming. Reopening preserves the original registration
 reference, calibration and options, online rejection statistics, coverage, and

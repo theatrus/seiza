@@ -3869,6 +3869,36 @@ pub unsafe extern "C" fn seiza_live_stacker_open_context(
 }
 
 #[unsafe(no_mangle)]
+/// Reopens a live-stack context as [`seiza_live_stacker_open_context`] does,
+/// but runs the stack under the GPU options in `gpu_json` in place of the
+/// options it was saved with. `gpu_json` is a JSON object with the fields of
+/// the `"gpu"` member of [`seiza_live_stacker_open_fits`]'s options, such as
+/// `{"enabled": false}` to keep every pass on the CPU; null or empty gives
+/// the defaults, which let every pass run on the GPU. The configuration
+/// fingerprint leaves GPU options out, so it matches the saved stack's, and
+/// a context saved from the reopened handle records the new options.
+///
+/// # Safety
+/// `context_path` must be a valid NUL-terminated path. `gpu_json` may be
+/// null; when non-null it must be NUL-terminated. When non-null,
+/// `error_out` must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_live_stacker_open_context_with_gpu(
+    context_path: *const c_char,
+    gpu_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaLiveStacker {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let context_path = required_path(context_path, "stack context path")?;
+        let gpu = gpu_options(gpu_json)?;
+        let stacker = LiveStacker::open_context_with_gpu(&context_path, gpu)
+            .map_err(|error| error.to_string())?;
+        Ok(SeizaLiveStacker { stacker })
+    })
+    .map_or(ptr::null_mut(), |stacker| Box::into_raw(Box::new(stacker)))
+}
+
+#[unsafe(no_mangle)]
 /// Atomically checkpoints every piece of state required to reopen this live
 /// stack and continue integrating with identical online rejection behavior.
 /// The live handle remains usable after the checkpoint completes.
@@ -7974,6 +8004,17 @@ fn expanding_stack_options(options_json: *const c_char) -> Result<StackOptions, 
     Ok(options)
 }
 
+fn gpu_options(gpu_json: *const c_char) -> Result<seiza_stacking::GpuOptions, String> {
+    if gpu_json.is_null() {
+        return Ok(seiza_stacking::GpuOptions::default());
+    }
+    let gpu_json = required_str(gpu_json, "GPU options JSON")?;
+    if gpu_json.trim().is_empty() {
+        return Ok(seiza_stacking::GpuOptions::default());
+    }
+    serde_json::from_str(&gpu_json).map_err(|error| format!("invalid GPU options JSON: {error}"))
+}
+
 fn stack_options(options_json: *const c_char) -> Result<StackOptions, String> {
     let options = if options_json.is_null() {
         StackOptions::default()
@@ -10588,6 +10629,95 @@ mod tests {
         unsafe { seiza_string_free(disposition) };
         assert_eq!(unsafe { seiza_live_stacker_accepted_frames(resumed) }, 3);
         unsafe { seiza_live_stacker_free(resumed) };
+    }
+
+    #[test]
+    fn stacking_cabi_reopens_a_context_under_other_gpu_options() {
+        let (width, height) = (160, 128);
+        let image = stacking_star_field(width, height);
+        let config = no_adjustment_stack_options();
+        let directory = tempfile::tempdir().unwrap();
+        let context_c =
+            CString::new(directory.path().join("live.seiza-stack").to_str().unwrap()).unwrap();
+        let mut error = ptr::null_mut();
+        let stacker = unsafe {
+            seiza_live_stacker_create(
+                image.as_ptr(),
+                image.len(),
+                width,
+                height,
+                1,
+                config.as_ptr(),
+                &mut error,
+            )
+        };
+        assert!(!stacker.is_null());
+        assert!(unsafe {
+            seiza_live_stacker_save_context(stacker, context_c.as_ptr(), &mut error)
+        });
+        let fingerprint = |stacker| {
+            let raw = unsafe { seiza_live_stacker_state_json(stacker, ptr::null_mut()) };
+            assert!(!raw.is_null());
+            let state: Value =
+                serde_json::from_str(unsafe { CStr::from_ptr(raw) }.to_str().unwrap()).unwrap();
+            unsafe { seiza_string_free(raw) };
+            state["configurationFingerprint"].clone()
+        };
+        let saved = fingerprint(stacker);
+        unsafe { seiza_live_stacker_free(stacker) };
+
+        for gpu in [Some(r#"{"enabled": false}"#), Some(""), None] {
+            let gpu = gpu.map(|gpu| CString::new(gpu).unwrap());
+            let resumed = unsafe {
+                seiza_live_stacker_open_context_with_gpu(
+                    context_c.as_ptr(),
+                    gpu.as_ref().map_or(ptr::null(), |gpu| gpu.as_ptr()),
+                    &mut error,
+                )
+            };
+            assert!(!resumed.is_null());
+            assert!(error.is_null());
+            assert_eq!(unsafe { seiza_live_stacker_accepted_frames(resumed) }, 1);
+            assert_eq!(fingerprint(resumed), saved);
+            let disposition = unsafe {
+                seiza_live_stacker_push_linear_json(
+                    resumed,
+                    image.as_ptr(),
+                    image.len(),
+                    width,
+                    height,
+                    1,
+                    &mut error,
+                )
+            };
+            assert!(!disposition.is_null());
+            unsafe { seiza_string_free(disposition) };
+            assert_eq!(unsafe { seiza_live_stacker_accepted_frames(resumed) }, 2);
+            unsafe { seiza_live_stacker_free(resumed) };
+        }
+
+        for (gpu, message) in [
+            (r#"{"concurrency": 0}"#, "concurrency"),
+            (r#"{"cuda": true}"#, "invalid GPU options JSON"),
+        ] {
+            let gpu = CString::new(gpu).unwrap();
+            let resumed = unsafe {
+                seiza_live_stacker_open_context_with_gpu(
+                    context_c.as_ptr(),
+                    gpu.as_ptr(),
+                    &mut error,
+                )
+            };
+            assert!(resumed.is_null());
+            assert!(!error.is_null());
+            let text = unsafe { CStr::from_ptr(error) }
+                .to_str()
+                .unwrap()
+                .to_owned();
+            assert!(text.contains(message), "{text}");
+            unsafe { seiza_string_free(error) };
+            error = ptr::null_mut();
+        }
     }
 
     #[test]

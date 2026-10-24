@@ -118,6 +118,9 @@ exposes the **superset** of what both apps need.
   `seiza_live_stacker_save_context` atomically checkpoints a still-live handle;
   `seiza_live_stacker_open_context` restores it later with its original
   reference, calibration, online moments, counters, and source ledger intact.
+  `seiza_live_stacker_open_context_with_gpu` restores it under other GPU
+  options, such as `{"enabled": false}` when a user turns the GPU off; the
+  configuration fingerprint stays the same.
   `seiza_live_stacker_state_json` exposes an authoritative resume identity,
   `..._set_calibration_fits` swaps session masters atomically between batches,
   and `..._render_preview` renders from a bounded sample of the live mean

@@ -1,6 +1,6 @@
 use crate::{
     AffineTransform, Error, LinearImage, NormalizationMap, ReferenceRegion, Result,
-    SimilarityTransform, resample_region_to_reference_affine,
+    SimilarityTransform, registration::resample_region_to_reference_affine_with_gpu,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
@@ -417,20 +417,30 @@ impl RegisteredFrameMapping {
     }
 
     /// [`Self::extract_region`] with the stack's interpolation, so a replay
-    /// resamples each frame as the live pass did.
+    /// resamples each frame as the live pass did. The frame is resampled on
+    /// the GPU where the default [`crate::GpuOptions`] allow it; see
+    /// [`Self::extract_region_with_gpu`].
     pub fn extract_region_with(
         &self,
         source: &LinearImage,
         region: ReferenceRegion,
         interpolation: crate::Interpolation,
     ) -> Result<LinearImage> {
-        self.extract_region_sited(
-            source,
-            region,
-            interpolation,
-            self.channel_sites,
-            &crate::GpuOptions::default(),
-        )
+        self.extract_region_with_gpu(source, region, interpolation, &crate::GpuOptions::default())
+    }
+
+    /// [`Self::extract_region_with`], resampling on the GPU only where `gpu`
+    /// allows it. [`crate::GpuOptions::cpu`] keeps the resampling on the
+    /// CPU.
+    pub fn extract_region_with_gpu(
+        &self,
+        source: &LinearImage,
+        region: ReferenceRegion,
+        interpolation: crate::Interpolation,
+        gpu: &crate::GpuOptions,
+    ) -> Result<LinearImage> {
+        gpu.validate()?;
+        self.extract_region_sited(source, region, interpolation, self.channel_sites, gpu)
     }
 
     /// [`Self::extract_region_with`] for a source whose channels sample the
@@ -485,13 +495,33 @@ impl RegisteredFrameMapping {
     /// [`Self::extract_region`] for Bayer drizzle: the nearest source
     /// photosite per pixel, in its own channel, normalized the same way.
     /// `source` is the debayered frame and `layout` the Bayer layout it was
-    /// debayered from.
+    /// debayered from. The frame is resampled on the GPU where the default
+    /// [`crate::GpuOptions`] allow it; see
+    /// [`Self::extract_region_photosites_with_gpu`].
     pub fn extract_region_photosites(
         &self,
         source: &LinearImage,
         region: ReferenceRegion,
         layout: crate::BayerLayout,
     ) -> Result<LinearImage> {
+        self.extract_region_photosites_with_gpu(
+            source,
+            region,
+            layout,
+            &crate::GpuOptions::default(),
+        )
+    }
+
+    /// [`Self::extract_region_photosites`], resampling on the GPU only where
+    /// `gpu` allows it.
+    pub fn extract_region_photosites_with_gpu(
+        &self,
+        source: &LinearImage,
+        region: ReferenceRegion,
+        layout: crate::BayerLayout,
+        gpu: &crate::GpuOptions,
+    ) -> Result<LinearImage> {
+        gpu.validate()?;
         self.validate()?;
         let mut crop = crate::registration::resample_region_geometry(
             source,
@@ -500,7 +530,7 @@ impl RegisteredFrameMapping {
             region,
             self.geometry(),
             crate::registration::Sampling::NearestPhotosite(layout),
-            &crate::GpuOptions::default(),
+            gpu,
         )?;
         self.normalization
             .apply_region(&mut crop, region.x, region.y)?;
@@ -529,7 +559,9 @@ impl RegisteredFrameMapping {
 
     /// Extract a region after a general affine output reprojection. This keeps
     /// parity-changing sky orientation tied to the exact source registration
-    /// and normalization provenance.
+    /// and normalization provenance. Both resamplings run on the GPU where
+    /// the default [`crate::GpuOptions`] allow it; see
+    /// [`Self::extract_region_after_affine_with_gpu`].
     pub fn extract_region_after_affine(
         &self,
         source: &LinearImage,
@@ -538,6 +570,29 @@ impl RegisteredFrameMapping {
         output_region: ReferenceRegion,
         reference_to_output: AffineTransform,
     ) -> Result<LinearImage> {
+        self.extract_region_after_affine_with_gpu(
+            source,
+            output_width,
+            output_height,
+            output_region,
+            reference_to_output,
+            &crate::GpuOptions::default(),
+        )
+    }
+
+    /// [`Self::extract_region_after_affine`], resampling on the GPU only
+    /// where `gpu` allows it. [`crate::GpuOptions::cpu`] keeps both
+    /// resamplings on the CPU.
+    pub fn extract_region_after_affine_with_gpu(
+        &self,
+        source: &LinearImage,
+        output_width: usize,
+        output_height: usize,
+        output_region: ReferenceRegion,
+        reference_to_output: AffineTransform,
+        gpu: &crate::GpuOptions,
+    ) -> Result<LinearImage> {
+        gpu.validate()?;
         self.validate()?;
         reference_to_output.validate()?;
         if self.normalization.is_global() && self.warp.is_none() {
@@ -551,12 +606,13 @@ impl RegisteredFrameMapping {
                         ..AffineTransform::IDENTITY
                     }
                     .then(transform);
-                    let plane = resample_region_to_reference_affine(
+                    let plane = resample_region_to_reference_affine_with_gpu(
                         &source.channel(channel)?,
                         output_width,
                         output_height,
                         output_region,
                         shifted,
+                        gpu,
                     )?;
                     if data.is_empty() {
                         let samples = plane.data.len().checked_mul(3).ok_or_else(|| {
@@ -573,12 +629,13 @@ impl RegisteredFrameMapping {
                 self.normalization.apply_global(&mut crop)?;
                 return Ok(crop);
             }
-            let mut crop = resample_region_to_reference_affine(
+            let mut crop = resample_region_to_reference_affine_with_gpu(
                 source,
                 output_width,
                 output_height,
                 output_region,
                 self.transform.as_affine().then(reference_to_output),
+                gpu,
             )?;
             self.normalization.apply_global(&mut crop)?;
             return Ok(crop);
@@ -597,15 +654,16 @@ impl RegisteredFrameMapping {
             self.geometry(),
             crate::registration::Sampling::Bilinear,
             self.channel_sites,
-            &crate::GpuOptions::default(),
+            gpu,
         )?;
         self.normalization.apply(&mut intermediate)?;
-        resample_region_to_reference_affine(
+        resample_region_to_reference_affine_with_gpu(
             &intermediate,
             output_width,
             output_height,
             output_region,
             reference_to_output,
+            gpu,
         )
     }
 
@@ -700,6 +758,96 @@ mod tests {
         let mut json = serde_json::to_value(&mapping).unwrap();
         json["channel_sites"] = serde_json::json!([[99.0, 0.0], [0.0, 0.0], [0.0, 0.0]]);
         assert!(serde_json::from_value::<RegisteredFrameMapping>(json).is_err());
+    }
+
+    /// The calls that take GPU options keep a frame large enough for the
+    /// GPU on the CPU under [`crate::GpuOptions::cpu`]: each gives the CPU's
+    /// arithmetic to the bit, with or without a GPU.
+    #[test]
+    fn calls_given_cpu_options_debayer_and_resample_on_the_cpu() {
+        let cpu = crate::GpuOptions::cpu();
+        let (width, height) = (1100, 1000);
+        let data = (0..width * height)
+            .map(|index| 100.0 + ((index * 37) % 53) as f32 + 0.01 * (index % width) as f32)
+            .collect();
+        let source = LinearImage::new(width, height, 1, data).unwrap();
+        let transform = SimilarityTransform {
+            scale: 1.002,
+            rotation_radians: 0.013,
+            translation_x: 7.25,
+            translation_y: -3.5,
+        };
+        let region = ReferenceRegion {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        };
+        let on_cpu = |inverse: &(dyn Fn(f64, f64) -> (f64, f64) + Sync)| {
+            crate::registration::resample_region_on_cpu(
+                &source,
+                region,
+                &|x, y| inverse(x, y),
+                crate::registration::Sampling::Bilinear,
+                &[0.0],
+            )
+            .unwrap()
+        };
+        let bits = |image: &LinearImage| image.data.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+        let expected = on_cpu(&transform.inverse_map());
+        let resampled = crate::resample_region_to_reference_with_gpu(
+            &source,
+            width,
+            height,
+            region,
+            transform,
+            crate::Interpolation::Bilinear,
+            &cpu,
+        )
+        .unwrap();
+        assert_eq!(bits(&resampled), bits(&expected));
+
+        let mapping = RegisteredFrameMapping::identity(&source)
+            .with_normalization(NormalizationMap::identity(&source))
+            .unwrap()
+            .with_geometry(transform, None)
+            .unwrap();
+        let extracted = mapping
+            .extract_region_with_gpu(&source, region, crate::Interpolation::Bilinear, &cpu)
+            .unwrap();
+        assert_eq!(bits(&extracted), bits(&expected));
+        let reprojected = mapping
+            .extract_region_after_affine_with_gpu(
+                &source,
+                width,
+                height,
+                region,
+                AffineTransform::IDENTITY,
+                &cpu,
+            )
+            .unwrap();
+        let affine = transform.as_affine().then(AffineTransform::IDENTITY);
+        assert_eq!(bits(&reprojected), bits(&on_cpu(&affine.inverse_map())));
+
+        let layout = crate::BayerLayout {
+            pattern: seiza_fits::BayerPattern::Rggb,
+            x_offset: 0,
+            y_offset: 0,
+        };
+        let frame = crate::FitsFrame {
+            image: source.clone(),
+            headers: Vec::new(),
+            exposure_seconds: None,
+            bayer: Some(layout),
+            source: None,
+            bounds: None,
+        };
+        let prepared = frame.into_prepared_with_gpu(&cpu).unwrap();
+        let debayered = source
+            .clone()
+            .debayer_with(layout, crate::Demosaic::Vng, &cpu)
+            .unwrap();
+        assert_eq!(bits(&prepared.image), bits(&debayered));
     }
 
     /// A binned mapping with a quadratic warp and a tiled normalization.

@@ -225,7 +225,7 @@ impl AffineTransform {
         self.matrix[0][0].mul_add(self.matrix[1][1], -self.matrix[0][1] * self.matrix[1][0])
     }
 
-    fn inverse_map(self) -> impl Fn(f64, f64) -> (f64, f64) {
+    pub(crate) fn inverse_map(self) -> impl Fn(f64, f64) -> (f64, f64) {
         let determinant = self.determinant();
         let inverse = [
             [
@@ -1494,7 +1494,9 @@ pub fn resample_region_to_reference(
     )
 }
 
-/// [`resample_region_to_reference`] with a choice of interpolation.
+/// [`resample_region_to_reference`] with a choice of interpolation. The
+/// image is resampled on the GPU where the default [`crate::GpuOptions`]
+/// allow it; see [`resample_region_to_reference_with_gpu`].
 pub fn resample_region_to_reference_with(
     source: &LinearImage,
     reference_width: usize,
@@ -1503,6 +1505,31 @@ pub fn resample_region_to_reference_with(
     transform: SimilarityTransform,
     interpolation: Interpolation,
 ) -> Result<LinearImage> {
+    resample_region_to_reference_with_gpu(
+        source,
+        reference_width,
+        reference_height,
+        region,
+        transform,
+        interpolation,
+        &crate::GpuOptions::default(),
+    )
+}
+
+/// [`resample_region_to_reference_with`], resampling on the GPU only where
+/// `gpu` allows it. [`crate::GpuOptions::cpu`] keeps the resampling on the
+/// CPU. A whole frame is the region at `(0, 0)` the size of the reference
+/// grid.
+pub fn resample_region_to_reference_with_gpu(
+    source: &LinearImage,
+    reference_width: usize,
+    reference_height: usize,
+    region: ReferenceRegion,
+    transform: SimilarityTransform,
+    interpolation: Interpolation,
+    gpu: &crate::GpuOptions,
+) -> Result<LinearImage> {
+    gpu.validate()?;
     transform.validate()?;
     resample_region_with_inverse(
         source,
@@ -1510,11 +1537,8 @@ pub fn resample_region_to_reference_with(
         reference_height,
         region,
         transform.inverse_map(),
-        match interpolation {
-            Interpolation::Bilinear => Sampling::Bilinear,
-            Interpolation::Lanczos3 => Sampling::Lanczos3,
-        },
-        &crate::GpuOptions::default(),
+        Sampling::from(interpolation),
+        gpu,
     )
 }
 
@@ -2245,6 +2269,26 @@ pub fn resample_region_to_reference_affine(
     region: ReferenceRegion,
     transform: AffineTransform,
 ) -> Result<LinearImage> {
+    resample_region_to_reference_affine_with_gpu(
+        source,
+        reference_width,
+        reference_height,
+        region,
+        transform,
+        &crate::GpuOptions::default(),
+    )
+}
+
+/// [`resample_region_to_reference_affine`], resampling on the GPU only where
+/// `gpu` allows it.
+pub(crate) fn resample_region_to_reference_affine_with_gpu(
+    source: &LinearImage,
+    reference_width: usize,
+    reference_height: usize,
+    region: ReferenceRegion,
+    transform: AffineTransform,
+    gpu: &crate::GpuOptions,
+) -> Result<LinearImage> {
     transform.validate()?;
     resample_region_with_inverse(
         source,
@@ -2253,7 +2297,7 @@ pub fn resample_region_to_reference_affine(
         region,
         transform.inverse_map(),
         Sampling::Bilinear,
-        &crate::GpuOptions::default(),
+        gpu,
     )
 }
 

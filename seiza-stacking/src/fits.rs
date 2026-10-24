@@ -285,10 +285,19 @@ impl FitsFrame {
     }
 
     /// Convert raw CFA sampling to the prepared RGB grid used by registration
-    /// and stacking. Planar RGB and mono frames pass through unchanged.
+    /// and stacking. Planar RGB and mono frames pass through unchanged. VNG
+    /// runs on the GPU where the default [`crate::GpuOptions`] allow it; see
+    /// [`Self::into_prepared_with_gpu`].
     pub fn into_prepared(self) -> Result<Self> {
+        self.into_prepared_with_gpu(&crate::GpuOptions::default())
+    }
+
+    /// [`Self::into_prepared`], with VNG on the GPU only where `gpu` allows
+    /// it. [`crate::GpuOptions::cpu`] keeps the debayering on the CPU.
+    pub fn into_prepared_with_gpu(self, gpu: &crate::GpuOptions) -> Result<Self> {
+        gpu.validate()?;
         Ok(self
-            .into_prepared_with_layout(crate::Demosaic::default(), &crate::GpuOptions::default())?
+            .into_prepared_with_layout(crate::Demosaic::default(), gpu)?
             .0)
     }
 

@@ -104,6 +104,28 @@ def test_a_stack_on_the_cpu_keeps_its_gpu_options_in_a_context(tmp_path):
     )
 
 
+def test_a_context_reopens_under_other_gpu_options(tmp_path):
+    image = synthetic_star_field()
+    stacker = seiza.LiveStacker.from_array(image, options=no_adjustment_options())
+    assert stacker.push(image.copy()).accepted
+    context = tmp_path / "everywhere.seiza-stack"
+    stacker.save_context(context)
+    on_the_cpu = seiza.LiveStacker.open_context(
+        context, gpu=seiza.GpuOptions(enabled=False)
+    )
+    assert on_the_cpu.accepted_frames == stacker.accepted_frames
+    assert on_the_cpu.state().configuration_fingerprint == (
+        stacker.state().configuration_fingerprint
+    )
+    assert on_the_cpu.push(image.copy()).accepted
+    assert on_the_cpu.accepted_frames == stacker.accepted_frames + 1
+    # Both stacks hold the same frames, so their means agree.
+    stacker.push(image.copy())
+    assert np.allclose(
+        on_the_cpu.snapshot().image, stacker.snapshot().image, rtol=1e-5, equal_nan=True
+    )
+
+
 def test_live_stacker_accepts_numpy_and_returns_owned_snapshot():
     image = synthetic_star_field()
     stacker = seiza.LiveStacker.from_array(image, options=no_adjustment_options())

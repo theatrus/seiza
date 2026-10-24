@@ -458,6 +458,7 @@ objects = [
 "seiza-stacking::resample_region_to_reference" = { none = "a registration building block the stacker uses" }
 "seiza-stacking::resample_region_to_reference_affine" = { none = "a registration building block the stacker uses" }
 "seiza-stacking::resample_region_to_reference_with" = { none = "a registration building block the stacker uses" }
+"seiza-stacking::resample_region_to_reference_with_gpu" = { none = "a registration building block the stacker uses" }
 "seiza-stacking::resample_region_warped" = { none = "a registration building block the stacker uses" }
 "seiza-stacking::resample_region_photosites" = { none = "a registration building block the stacker uses" }
 "seiza-stacking::screen_dark_levels" = { none = "master builds call it for dark level screening (MasterBuildRequest.darkLevelScreening)" }
@@ -537,6 +538,7 @@ seiza_live_stacker_open_fits_expanding = "LiveStacker.open_fits_expanding"
 seiza_live_stacker_expanded_lens_json = "LiveStacker.expanded_lens"
 seiza_live_stacker_expansion_planning_notes_json = "LiveStacker.expansion_planning_notes"
 seiza_live_stacker_open_context = "LiveStacker.open_context"
+seiza_live_stacker_open_context_with_gpu = "LiveStacker.open_context"
 seiza_live_stacker_open_prepared_fits = "LiveStacker.open_prepared_fits"
 seiza_live_stacker_reference_noise_json = "LiveStacker.reference_noise"
 seiza_live_stacker_reference_mapping_json = "LiveStacker.reference_mapping"
