@@ -558,3 +558,48 @@ single-field functional check, not enough evidence to enable automatic
 continuum subtraction for every combined-image recipe. Wider nebula and
 reflection/galaxy validation, starless-branch equivalence, PSF matching where
 needed, and the PSF Guard combined-image stage remain work before release.
+
+### SNR G132: sample stability remains a release prerequisite
+
+A second full-field test used the newest SNR G132 RGB and Ha/OIII/SII masters
+(100 h 4 min in total), software-binned twofold from 9576×6388 to 4788×3194.
+Separate Seiza registration onto Ha measured RMS 0.14–0.54 pixels. The input
+planes retained stars, physical working scales and their filter identities;
+no photometric normalization or image-wide background pedestal was applied.
+The fixture declared an experimental 65535 working-unit saturation ceiling.
+Its physical mapping after master calibration/normalization is not established
+by this test, and must not be inferred from observed maxima.
+
+The default 400-candidate run skipped Ha/R after 341 saturation rejections;
+SII/R fitted 0.092994 with 12 training and three held-out stars (validation RMS
+0.1092); OIII/G+B skipped on a brightness trend of -0.2675. Changing only
+`max_stars` to 1600 produced Ha and SII brightness-trend skips (-0.1967 and
+-0.2300), while OIII/G+B fitted 0.036448/0.057917 with 530 training and 178
+held-out stars (validation RMS 0.0630). No failed model was applied.
+
+The detector requests up to four times the configured count, but measurement
+currently considers only the first `max_stars` positions. Saturated bright
+stars can consume that budget before enough eligible stars are measured.
+Improve eligibility-aware sampling and brightness-range coverage, then test
+fit stability across budgets. SII's small-sample acceptance did not survive
+broader sampling, so aggregate held-out RMS and the current minimum count
+alone do not establish a field-wide default. Add regression/output-version
+coverage for the changed selection mode before altering the numerical path.
+
+The OIII signed residual was visually inspected. Local stellar residuals and
+negative cores remain despite acceptable aperture-flux statistics. Preserve
+them in linear artifacts and evaluate PSF/halo behavior before defining a
+starless combined-image recipe. Grayscale original/residual previews used
+separate Auto-MTF stretches; their displayed brightness is not a common-scale
+measurement. No pure-line-flux or photometric-throughput claim follows.
+
+The paired application separately completed RGB, unbalanced and balanced SHO,
+SHO with RGB stars, and HOO with RGB stars through tracked color jobs and real
+licensed SXT on Supergateway. These color examples did not use continuum
+subtraction. Source masters and live catalogs stayed unchanged.
+
+Before releasing, address sampling/fit stability and physical saturation
+provenance; finalize combined-image residual units and blending; validate
+any starless-branch association and pixel-level residual behavior; and finish
+the PSF Guard linear job/cache, per-line outcomes and UI. Keep both PRs in draft
+and defer publication while the complete feature set is assembled.
