@@ -217,5 +217,4 @@ write uncalibrated outputs when calibration cannot run. See the
 - [Parallax videos](../seiza-cli/README.md#parallax-fly-through-videos) and [scene API](../seiza-parallax/README.md)
 - [Image-processing primitives](../seiza-imgproc/README.md)
 
-See [performance by operation](performance.md#operation-coverage) for measured
-runtimes and operations that still need benchmarks.
+See [benchmarks and methodology](performance.md) for recorded measurements.

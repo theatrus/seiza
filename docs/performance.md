@@ -8,49 +8,12 @@ options affect results. MP means megapixels; CPU-s is total CPU time across
 threads, not elapsed time. Times for a complete command must not be compared to
 kernel-only times.
 
-[Operation coverage](#operation-coverage) · [Solving](#plate-solving) ·
+[Solving](#plate-solving) ·
 [Stacking](#stacking) · [I/O and display](#image-io-and-display) ·
 [Background](#background-correction) · [Catalogs](#catalogs-and-downloads) ·
 [Reproduction](#reproduce-and-compare)
 
-## Operation coverage
-
-This table lists measurements for each operation family. **Unmeasured** means
-the repository documentation has no separate timing for that operation.
-Pipeline totals include several operations; use an isolated benchmark to
-measure an individual function.
-
-| Operation | Recorded timing or memory evidence | Limits / main cost controls |
-|---|---|---|
-| Star detection | Included in solve timings; compact detector peak memory 179 MiB for a 61 MP FITS frame, versus 590 MiB previously | No standalone current detector timing; image size, sampling backend, thresholds |
-| Star measurement and tilt | Unmeasured | Detection count, measurement mode, field grid |
-| Hinted solve | 0.04–0.23 s, 0.10 s median, 17 FITS frames | i5-1340P, October 2026; whole CLI command |
-| Blind solve | 0.04–0.16 s, 0.09 s median, 16 FITS frames | Same laptop; prebuilt index; scale range and field affect search |
-| SIP fit | Included in the linear/SIP comparison below | Standalone fit unmeasured; order, matches, field distortion |
-| WCS transforms and FITS cards | Unmeasured separately | Number of points, projection, SIP order |
-| Catalog name/cone/footprint/distance queries | Unmeasured separately | Catalog depth, query area, OS page cache |
-| Catalog installation and validation | July complete bundle: 3.93 GB unpacked, 2.90 GB compressed; 3.74 s local validation/decompression | Download/network time and exhaustive catalog validation unmeasured |
-| Overlay and sky-map rendering | Unmeasured separately | Output size, label/object count; not included in every solve command |
-| FITS decode | 16.5 ms, 125.2 MB peak RSS, warm local 61 MP frame | macOS profiling, median of five single-decode processes; uncompressed input |
-| XISF/raster decode and image writing | Unmeasured separately | Codec/compression, bit depth, channels, disk |
-| Statistics and display stretch | ~8 ms statistics, ~25 ms legacy stretch on 26 MP | Legacy desktop observation; no standalone times for GHS, layered, or ordered stacks |
-| Calibration application, matching, grading, response/dust analysis | Unmeasured separately | Input dimensions, master count, sample/feature count; application is included in calibrated stack runs |
-| Bias/dark/flat master construction | Unmeasured separately | Number/size of frames, rejection, storage, bounded tile workspace |
-| Registration and resampling | Included in whole-stack times; per-pass profiles linked below | CPU/GPU, transform model, kernel, native/binned grid |
-| Normalization, weighting, live accumulation | Included in whole-stack times | No standalone portable benchmark; canvas, channels, normalization model |
-| Completed-stack rejection/reintegration | Included in the `--reintegrate` stack timings | Cache/disk bandwidth, bands, CPU/GPU, rejection settings |
-| Drizzle | 43 s for 62 × 26 MP mono frames at 2×; 159 s for 126 × 26 MP color frames at 1× | i5-1340P; whole commands, including reintegration, not drizzle-only kernels |
-| Mosaic planning, sky orientation, context save/resume | Unmeasured separately | Output area, overlap, frame/context size and disk |
-| Background fitting/correction | ~0.7 s complete 26 MP command, including corrected/model FITS and JSON | Warm local smoke test; fit-only and correction-only timings unmeasured |
-| Color composition/cropping | Unmeasured separately | Registration, output area, channel count, palette, crop search |
-| Photometric color calibration | Unmeasured separately | Offline catalog versus network, number of usable stars, photometry and output |
-| Deconvolution | Unmeasured; corpus study measures quality only | Dimensions, channels, PSF width, iteration count; four iterations by default |
-| Satellite prediction | Unmeasured | Catalog size, exposure duration, sampling, element-cache/network availability |
-| Parallax preparation, tour planning, rendering and encoding | Unmeasured | Image/output size, stars, depth layers, frame count, codec and encoder |
-| Image-processing primitives | Unmeasured | Dimensions, channels, kernel/filter parameters |
-
-Sources and measurement scopes follow. Unmeasured operations need a dedicated
-benchmark before a numerical speed claim can be made.
+<a id="operation-coverage"></a>
 
 ## Plate solving
 
@@ -181,8 +144,7 @@ record these October 2026 whole-command times on an i5-1340P laptop (16 threads,
 
 These are a different dataset and protocol from the CPU/GPU comparison above;
 they do not isolate the cost of drizzle or imply the same throughput at every
-drizzle scale. Mosaic planning, reprojection, and context save/resume have no
-standalone timing recorded.
+drizzle scale.
 
 ## Image I/O and display
 
@@ -232,8 +194,7 @@ and preset selection change the download size. Clients store the unpacked files
 for memory mapping.
 
 Object, star, and identifier catalogs use memory mapping and indices so normal
-queries page in relevant records instead of scanning every entry. No current
-standalone name/cone/footprint query latency is recorded. The
+queries page in relevant records instead of scanning every entry. The
 [cone-search optimization report](benchmarks/2026-07-cone-search-optimization.md)
 measures changes within solve workloads, not a universal query-time guarantee.
 
@@ -274,6 +235,4 @@ target/release/examples/io_profile stream image.fits 50 --load-only
 When adding a timing, record the input dimensions/channels, hardware, OS,
 revision, build/features, catalogs, cache state, repetitions, outputs, and whether
 it measures a kernel, an API call, or a complete process. Keep the correctness
-check alongside the speed measurement. The
-[deconvolution corpus](benchmarks/2026-07-deconvolution-corpus.md), for example,
-is a quality comparison and supplies no runtime benchmark.
+check alongside the speed measurement.

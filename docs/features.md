@@ -1,6 +1,6 @@
 # Features and limits
 
-[Documentation](README.md) · [Performance by operation](performance.md)
+[Documentation](README.md) · [Benchmarks](performance.md)
 
 ## Astrometry
 
@@ -56,8 +56,7 @@ Opening a catalog uses local files. Install or update data with the
 | Parallax | Distance-based stars, lifted objects/depth planes, dust, tours, labels, and video/PNG output. Requires separate starless and star images. | [Parallax](../seiza-parallax/README.md) |
 | Primitives | OpenCV-compatible blur, Canny, Otsu, morphology, contours and edge-aware filters in pure Rust. | [Image processing](../seiza-imgproc/README.md) |
 
-[Performance by operation](performance.md#operation-coverage) lists measurements
-and identifies operations that still need benchmarks.
+See [benchmarks and methodology](performance.md) for recorded measurements.
 
 ## Interfaces
 

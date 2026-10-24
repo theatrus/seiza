@@ -11,7 +11,7 @@
 | [Image processing](image-processing.md) | Stacking, GPU controls, stretching, background, color, and deconvolution |
 | [Catalogs](catalogs.md) | Setup, discovery, contents, queries, and custom builds |
 | [Integrations](integrations.md) | N.I.N.A., Siril, and application entry points |
-| [Performance](performance.md) | Timings, memory, benchmark gaps, comparisons, and reproduction |
+| [Performance](performance.md) | Recorded timings, memory, comparisons, and reproduction |
 
 ## API references
 
