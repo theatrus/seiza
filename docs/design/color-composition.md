@@ -210,7 +210,7 @@ composition.
 Both direct SHO and Foraxx-SHO produced full-resolution 6248 by 4176 FITS and
 PNG outputs. The FITS metadata marked direct SHO as `LINEAR` and Foraxx-SHO as
 `DISPLAY`. Cropped, downscaled versions of those PNG previews are shown in the
-[main README](../../README.md#color-from-mono-stacks); the large source and
+[image-processing guide](../image-processing.md#color-from-mono-stacks); the large source and
 intermediate FITS files are intentionally not checked in.
 
 ## Boundaries

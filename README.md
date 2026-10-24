@@ -2,955 +2,103 @@
 
 [![MSRV](https://img.shields.io/badge/MSRV-1.89-blue.svg)](Cargo.toml)
 
-Star detection, WCS fitting, plate solving — hinted and blind — and calibrated
-batch/live image stacking for astrophotography, in Rust. Stacking includes
-linear FITS output, canonical north-up/east-left reprojection, and RGB, LRGB,
-and narrowband composition from mono stacks, and runs its heavy passes on the
-GPU where there is one: Metal, Vulkan or Direct3D 12.
-Built to power object overlays and astrometric features in
-[tenrankai](https://github.com/theatrus/tenrankai) and
-[PSF Guard](https://github.com/theatrus/psf-guard).
+Astrophotography tools in Rust: star detection, hinted and blind plate solving,
+WCS transforms, calibrated batch/live stacking, and image processing. Available
+as a CLI, Rust crates, Python package, and C ABI for native applications.
 
-It is fast. A blind solve of a real telescope frame — no position hint at
-all — takes about a tenth of a second with the prebuilt index, and a hinted
-solve 0.05–0.2 seconds, start to finish. In side-by-side benchmarks seiza
-matched or beat ASTAP on every workload we tested, up to 19x faster on blind
-solves, and matched or beat Asterion on blind solves of telescope frames. The
-numbers and caveats are in [Performance](#performance). Stacking 200
-61-megapixel frames with reintegration takes 12.5 seconds on an M4 Max's GPU,
-against 70 on its CPU alone; see [GPU acceleration](#gpu-acceleration).
+<a id="native-apps"></a><a id="apps"></a>
 
-**Try it without installing anything:** go to [seiza.fyi](https://seiza.fyi),
-upload an image, and get a solution and object overlay in your browser. The
-site runs [seiza-server](https://github.com/theatrus/seiza-server); the CLI
-can submit to the same server with `seiza worker --server`.
+**[Try it in your browser](https://seiza.fyi)** ·
+**[Mac app](https://github.com/theatrus/seiza-mac)** ·
+**[Windows app](https://github.com/theatrus/seiza-win)** ·
+**[Documentation](docs/README.md)**
 
-**Contents:** [Native apps](#native-apps) · [Install](#install) ·
-[Ways to use it](#ways-to-use-it) · [Feature matrix](#feature-matrix) ·
-[Quick start](#quick-start) · [Image stacking](#image-stacking) ·
-[Performance](#performance) · [Catalogs and data](#catalogs-and-data) ·
-[Status](#status) · [N.I.N.A.](#use-with-nina-astap-compatible-mode) ·
-[Siril](#use-with-siril-solve-field-compatible-mode) · [Layout](#layout)
+<a id="feature-matrix"></a><a id="status"></a><a id="performance"></a>
 
-**Built on seiza:**
-[Seiza for Mac](https://github.com/theatrus/seiza-mac) ·
-[Seiza for Windows](https://github.com/theatrus/seiza-win) ·
-[seiza-server / seiza.fyi](https://github.com/theatrus/seiza-server) ·
-[PSF Guard](https://github.com/theatrus/psf-guard) ·
-[tenrankai](https://github.com/theatrus/tenrankai)
+## Features and performance
 
-## Native apps
+The performance links describe the inputs, hardware, and measurement limits.
+“Unmeasured” means no separate runtime benchmark is documented for that operation.
 
-The same Rust engine drives two real desktop apps through
-[`seiza-cabi`](seiza-cabi/README.md):
+| Capability | What it does | Performance |
+|---|---|---|
+| Star detection and measurement | Subpixel centroids, flux, HFR/FWHM, tilt analysis | Compact detection uses 179 MiB on a 61 MP FITS frame; [measurement/tilt latency unmeasured](docs/performance.md#operation-coverage) |
+| Hinted plate solving | Solve from approximate position and pixel scale | [0.10 s median](docs/performance.md#plate-solving), 17 FITS frames, i5-1340P |
+| Blind plate solving | Solve without a position hint using a prebuilt index | [0.09 s median](docs/performance.md#plate-solving), 16 FITS frames, i5-1340P |
+| WCS and SIP | Pixel/sky transforms, FITS WCS output, optional order 2–5 distortion | [Included in solve timings](docs/performance.md#plate-solving); standalone transforms unmeasured |
+| Catalogs and overlays | Object/name/cone queries, distances, constellations, sky maps | Memory-mapped catalogs; [query/render latency unmeasured](docs/performance.md#operation-coverage) |
+| Image I/O | FITS, XISF, PNG, JPEG, TIFF; linear float output and raster export | [16.5 ms FITS decode](docs/performance.md#image-io-and-display), warm local 61 MP frame; other formats unmeasured |
+| Calibration and masters | Bias/dark/flat construction, frame grading, response and dust analysis | [Standalone timings unmeasured](docs/performance.md#operation-coverage) |
+| Batch and live stacking | Calibration, registration, normalization, rejection, drizzle, mosaics, resumable contexts | [200 × 61 MP mono frames in 12.4–12.5 s](docs/performance.md#stacking), M4 Max GPU with reintegration |
+| Display stretching | Ordered MTF, GHS, asinh, median-anchor, and layered curves | [~25 ms for a 26 MP legacy display stretch](docs/performance.md#image-io-and-display); other models unmeasured |
+| Background correction | Robust polynomial/RBF fitting, subtraction or division | [~0.7 s for a 26 MP command](docs/performance.md#background-correction), local smoke test including outputs |
+| Color composition and calibration | RGB/LRGB, narrowband palettes, Gaia photometric color calibration | [Standalone timings unmeasured](docs/performance.md#operation-coverage) |
+| Deconvolution (experimental) | Damped Richardson–Lucy with a supplied Gaussian PSF | [Runtime unmeasured](docs/performance.md#operation-coverage); four iterations by default |
+| Satellite prediction | Current/historical orbital elements projected through one exposure | [Runtime unmeasured](docs/performance.md#operation-coverage); requires time and observer position |
+| Parallax videos | Distance-based fly-throughs from starless and star images | [Runtime unmeasured](docs/performance.md#operation-coverage); rendering and encoding depend on output settings |
+| Image-processing primitives | Blur, thresholds, contours, morphology, edge-aware filtering | [Runtime unmeasured](docs/performance.md#operation-coverage) |
 
-- 🍎 **[Seiza for Mac](https://github.com/theatrus/seiza-mac)** — a fast,
-  native FITS viewer and plate solver. Browse whole folders with thumbnails,
-  stretch live with a reorderable stack editor, subtract gradients,
-  deconvolve, blind solve on your machine with no uploads, install and verify
-  catalogs, and export images with overlays. Finder shows image thumbnails,
-  and Quick Look keeps the full frame fitted as its window changes size.
-  macOS 15+, Apple silicon and Intel.
-- 🪟 **[Seiza for Windows](https://github.com/theatrus/seiza-win)** — a
-  first-class native WinUI 3 viewer and solver. GPU-accelerated pan and
-  zoom, per-channel color rendering, gradient subtraction, deconvolution,
-  background plate solving with star, deep-sky, and motion overlays, and
-  built-in catalog install, verify, and repair. Windows 11.
+<a id="gpu-acceleration"></a>
+
+Stacking accelerates supported passes through Metal, Vulkan, or Direct3D 12,
+with CPU fallback. Linear stacks remain unstretched; previews are separate.
+See [features and limits](docs/features.md) and the
+[full performance report](docs/performance.md) for details and solver comparisons.
+See [GPU controls](docs/image-processing.md#gpu-controls) to select CPU/GPU passes.
+
+<a id="ways-to-use-it"></a><a id="minimum-supported-rust-version"></a>
 
 ## Install
 
-- **🍎 macOS app** — `brew install --cask theatrus/seiza/seiza-mac`, or
-  download the DMG from the
-  [Seiza for Mac releases](https://github.com/theatrus/seiza-mac/releases).
-- **Homebrew (macOS / Linux)** — `brew install theatrus/seiza/seiza` builds
-  the CLI from source via the
-  [theatrus/homebrew-seiza tap](https://github.com/theatrus/homebrew-seiza).
-- **Windows** — download the MSI installer from the
-  [releases](https://github.com/theatrus/seiza/releases). It puts `seiza` on
-  your `PATH` and offers to download catalogs for you when it finishes.
-- **Fedora / Ubuntu** — install the RPM or deb from the same releases page.
-- **Python** — `pip install seiza` for the library with binary wheels.
-- **Anywhere with Rust** — `cargo install seiza-cli` (requires Rust 1.89 or
-  newer; see [MSRV](#minimum-supported-rust-version)).
-
-Building from source requires Rust 1.89 or newer. Repository checkouts pin
-Rust 1.99.1 through `rust-toolchain.toml` so local builds and CI use the same
-compiler, formatter, and linter.
-
-## Ways to use it
-
-- 🍎🪟 **On your desktop** — the [native Mac and Windows apps](#native-apps)
-  above: browse, stretch, solve, and export without touching a terminal.
-- **As N.I.N.A.'s plate solver** — seiza answers ASTAP's command line, so
-  select ASTAP in N.I.N.A. and point it at `seiza.exe`. No plugin needed.
-  [Steps below](#use-with-nina-astap-compatible-mode).
-- **As Siril's plate solver** — seiza also answers astrometry.net's
-  `solve-field` command line. Point Siril's astrometry.net path at a copy
-  of seiza named `solve-field` and solve as usual, SIP distortion
-  included. [Steps below](#use-with-siril-solve-field-compatible-mode).
-- **In [Tenrankai](https://github.com/theatrus/tenrankai)** — its gallery
-  server uses seiza for astrometric solutions and object overlays.
-- **In [PSF Guard](https://github.com/theatrus/psf-guard)** — seiza provides
-  solved WCS and catalog context for image-quality and spatial analysis, plus
-  calibrated batch stacking of selected frames.
-- **In a browser** — [seiza.fyi](https://seiza.fyi) lets you upload an image
-  for a hosted solution and object overlay, with nothing to install.
-- **From your own application** — run `seiza worker` to keep the catalogs
-  and blind index open between solves, and send it one JSON request per
-  line. It can also forward solves to a seiza-server, local or hosted.
-  [Wire protocol](docs/design/worker-protocol.md).
-- **From Python** — `pip install seiza`: detection, hinted and blind
-  solving with optional SIP distortion, WCS transforms, FITS WCS keyword
-  output, verified catalog downloads, and native batch/live image stacking
-  with calibration-master construction, robust background extraction,
-  parameterized display stretching, and NumPy support. Binary wheels for Linux
-  x86_64 and aarch64, macOS, and Windows cover every CPython from 3.11 up, with
-  type stubs included ([seiza-py](seiza-py/README.md)).
-- **From native applications** — [`seiza-cabi`](seiza-cabi/README.md) exposes
-  FITS/XISF/raster rendering, robust background fitting and correction,
-  incremental image stacking, solving, overlays, and catalog setup through one
-  generated C header for Swift, .NET, C, and C++ consumers.
-- **From Rust** — use the crates directly: [`seiza`](seiza/README.md)
-  (detection, WCS, solving, catalogs),
-  [`seiza-core`](seiza-core/README.md) (the shared types: plate solutions,
-  cancellation and header priors, for crates that need them without the
-  solver),
-  [`seiza-fits`](seiza-fits/README.md) (FITS reading and linear `f32` writing),
-  [`seiza-xisf`](seiza-xisf/README.md) (XISF reading into the same astronomy
-  image representation),
-  [`seiza-image-io`](seiza-image-io/README.md) (opening and saving PNG,
-  JPEG, TIFF, FITS and XISF by file extension, and photos' EXIF orientation
-  and metadata),
-  [`seiza-background`](seiza-background/README.md) (robust gradient models),
-  [`seiza-calibration`](seiza-calibration/README.md) (host-neutral calibration
-  response fitting and application),
-  [`seiza-deconvolution`](seiza-deconvolution/README.md) (experimental,
-  conservative linear-image restoration),
-  [`seiza-stretch`](seiza-stretch/README.md) (parameterized display curves),
-  [`seiza-imgproc`](seiza-imgproc/README.md) (pure-Rust image processing
-  primitives with OpenCV-compatible semantics),
-  [`seiza-stacking`](seiza-stacking/README.md) (linear calibration,
-  registration, and additive live stacking),
-  [`seiza-download`](seiza-download/README.md) (catalog download and
-  caching), [`seiza-satellites`](seiza-satellites/README.md) (single-exposure
-  satellite track prediction), and [`seiza-sources`](seiza-sources/README.md)
-  (raw upstream data for custom catalog builds).
-
-## Feature matrix
-
-These tables distinguish engine support from what each public API or app
-actually exposes. **✓** means shipped, **◐** means the limited form described
-below, and **—** means that surface does not expose the feature.
-
-### Library APIs
-
-| Feature | [Rust crates](#layout) | [Python](seiza-py/README.md) | [C ABI](seiza-cabi/README.md) |
-|---|:-:|:-:|:-:|
-| Standalone star detection | ✓ | ✓ | — |
-| Measured-star detection and parallelogram/triangle tilt analysis | ✓ | ✓ | ✓ |
-| Hinted plate solving | ✓ | ✓ | — |
-| Blind plate solving | ✓ | ✓ | ✓ |
-| WCS and SIP solution output | ✓ | ✓ | ✓ |
-| Pixel/world transforms and FITS WCS cards | ✓ | ✓ | — |
-| Solve-time star, deep-sky, transient, and Solar System annotations | ✓ | — | ✓ |
-| Constellation figures projected through a WCS | ✓ | — | — |
-| Verified catalog download and setup | ✓ | ✓ | ✓ |
-| FITS, XISF, and raster decoding and rendering | ✓ | — | ✓ |
-| Parameterized display stretching | ✓ | ✓ | ✓ |
-| Background fitting and correction | ✓ | ✓ | ✓ |
-| Light deconvolution | ✓ | ✓ | ✓ |
-| Batch stacking | ✓ | ✓ | ◐ |
-| Incremental stacking with saved contexts | ✓ | ✓ | ✓ |
-| GPU stacking passes, chosen per request | ✓ | ✓ | ✓ |
-| Bias, dark, and flat master construction | ✓ | ✓ | — |
-| Bias, dark, and flat frame grading | ✓ | — | — |
-| RGB, LRGB, and narrowband composition | ✓ | ✓ | ◐ |
-| Satellite track prediction | ✓ | ✓ | — |
-| OpenCV-compatible image-processing primitives | ✓ | ✓ | — |
-
-The C ABI supplies the incremental engine used for batch stacking by the
-desktop apps, but it has no one-call batch helper. Its color API reports shared
-coverage and crop bounds; Rust and Python perform the channel composition.
-
-### Commands and services
-
-| Feature | [CLI commands](seiza-cli/README.md) | [Worker JSON](docs/design/worker-protocol.md) | [seiza-server API and web app](https://github.com/theatrus/seiza-server) |
-|---|:-:|:-:|:-:|
-| Hinted plate solving | ✓ | ✓ | ✓ |
-| Blind plate solving | ✓ | ✓ | ✓ |
-| WCS and SIP solution output | ✓ | ✓ | ✓ |
-| Catalog object and stellar-name queries | ✓ | — | ✓ |
-| Solve overlays and downloadable WCS | ✓ | — | ✓ |
-| Satellite track prediction | ✓ | — | ✓ |
-| Catalog download, setup, and validation | ✓ | — | — |
-| Stretch, background correction, and deconvolution | ✓ | — | — |
-| Batch stacking, calibration masters, and color composition | ✓ | — | — |
-| GPU stacking passes, with per-pass CPU fallback | ✓ | — | — |
-| ASTAP and `solve-field` command compatibility | ✓ | — | — |
-| Persistent local solver process | — | ✓ | — |
-| Remote queued solving | — | ✓ | ✓ |
-| Resumable uploads and durable solve history | — | — | ✓ |
-| Astrometry.net-compatible HTTP API | — | — | ✓ |
-
-The worker protocol stays small on purpose: it keeps catalogs open and serves
-hinted or blind solves. It is not a general image-processing RPC. A worker can
-forward the same requests to seiza-server; remote worker results currently use
-a linear TAN solution even when a local worker could fit SIP.
-
-### Apps
-
-| Feature | [Seiza for Mac](https://github.com/theatrus/seiza-mac) | [Seiza for Windows](https://github.com/theatrus/seiza-win) | [seiza.fyi / seiza-server](https://github.com/theatrus/seiza-server) |
-|---|:-:|:-:|:-:|
-| View or upload FITS, XISF, and raster images | ✓ | ✓ | ✓ |
-| Folder browser with cached thumbnails | ✓ | ✓ | — |
-| Blind plate solving | ✓ | ✓ | ✓ |
-| Hinted plate solving | — | — | ✓ |
-| Named stars, deep-sky objects, transients, and Solar System overlays | ✓ | ✓ | ✓ |
-| Satellite track overlays | — | — | ✓ |
-| Ordered stretch editor, background correction, and deconvolution | ✓ | ✓ | — |
-| Directory stacking with optional calibration masters | ✓ | ✓ | — |
-| Full-resolution PNG, JPEG, and TIFF export with optional overlays | ✓ | ✓ | — |
-| 16-bit PNG and TIFF export | ✓ | ✓ | — |
-| FITS WCS sidecar or header download | ✓ | ✓ | ✓ |
-| Catalog install, verify, repair, and relocation UI | ✓ | ✓ | — |
-| OS file preview | Fit-to-window Quick Look | Preview Pane | — |
-| OS content thumbnails | ✓ | ✓ | — |
-| Signed in-app updates | ✓ | ✓ | — |
-| Durable queued jobs, accounts, API keys, and solve history | — | — | ✓ |
-
-The app columns describe shipped UI, not every function present in the linked
-C ABI. The Mac and Windows apps both stack folders now; neither exposes hinted
-solve controls or satellite tracks yet. Both apps supply file previews and
-content thumbnails through their native file managers. PSF Guard and Tenrankai
-are downstream products rather than Seiza distributions: PSF Guard uses
-solving, catalog context, and batch stacking, while Tenrankai uses solving and
-overlays.
+| Interface | Install |
+|---|---|
+| Mac app | `brew install --cask theatrus/seiza/seiza-mac` or [download a DMG](https://github.com/theatrus/seiza-mac/releases) |
+| Windows app | [Seiza for Windows](https://github.com/theatrus/seiza-win) |
+| CLI, macOS/Linux | `brew install theatrus/seiza/seiza` |
+| CLI, Windows/Fedora/Ubuntu | MSI, portable ZIP, RPM, or deb from [releases](https://github.com/theatrus/seiza/releases) |
+| CLI, from Rust | `cargo install seiza-cli` (Rust 1.89+) |
+| Python | `pip install seiza` ([API and NumPy examples](seiza-py/README.md)) |
+| Rust / C ABI | [Crate guide](docs/README.md#rust-crates) / [native API](seiza-cabi/README.md) |
 
 ## Quick start
 
-These are CLI instructions for core use, scripting, and integration. If you
-just want to view, solve, and process images, install a
-[native Mac or Windows app](#native-apps) instead — nothing below is needed
-there.
+Install the CLI, download catalogs once, and solve an image:
 
-Download the ready-made catalogs once, then solve:
-
-```
-cargo install seiza-cli
-seiza download-data prebuilt --output data       # SHA-256-verified from downloads.seiza.fyi
-seiza solve-blind image.jpg --data data --min-scale 0.5 --max-scale 15
-seiza solve image.fits --data data --scale 1.26 --objects data
-seiza solve integration.xisf --data data --scale 1.26 --objects data
-seiza solve image.fits --data data --scale 1.26 --satellites-celestrak --annotate tracks.png
-seiza solve-blind phone.jpg --data data --sip-order 2 --sky-map sky-map.png --sky-map-foreground
-seiza catalog object --data data "Andromeda Galaxy"
-seiza catalog objects --data data --ra 10.6848 --dec 41.2691 --radius 3 --format json
-seiza catalog star --data data "TYC 5949-2777-1" --format json
-seiza master bias bias/*.fits --output master-bias.fits
-seiza stack light-001.fits light-002.fits light-003.fits --output stack.fits \
-  --preview stack.png --report stack-report.json
-seiza background stack.fits --output stack-bg.fits \
-  --model-output background.fits --diagnostics background.json
-seiza color-calibrate stack-bg.fits --output stack-cc.fits --report colour.json \
-  --display stack-cc.png
-seiza deconvolve stack-bg.fits --output stack-light-dc.fits \
-  --psf-fwhm 3.1 --iterations 4 --amount 0.35
+```sh
+seiza setup --preset blind-deep
+seiza solve-blind image.fits --min-scale 0.5 --max-scale 15
 ```
 
-`--data` takes a file or a directory: a directory picks the right catalog
-automatically (the deepest star catalog present, the blind pattern index
-when one is there). After `seiza setup`, every `--data` and `--index` can
-be omitted entirely — the standard catalog locations are searched.
+Scale bounds are in arcseconds per pixel. Catalogs installed by setup are
+found automatically. Solving works locally after installation.
 
-Satellite overlays are opt-in and apply only to one shutter-open exposure,
-not a stack. The solver reads `DATE-BEG`/`DATE-END`, `DATE-AVG` plus
-`EXPTIME`, `DATE-OBS` plus `EXPTIME`, or a lone `DATE-END` plus `EXPTIME`, and
-standard `OBSGEO-*` observer coordinates from FITS. Explicit `--time`,
-`--exposure-seconds`, and `--observer-lat/--observer-lon` remain available.
-The annotation is a predicted path, not a claim that a trail was detected.
-For historical images, the `seiza-satellites` library resolves epoch-
-appropriate TLEs from its durable cache, the Seiza rolling mirror, or the
-public IAU SatChecker fallback. Current CelesTrak and historical responses
-share a cache-only-replayable history with a configurable 5 GiB default cap.
-See the [satellite track design](docs/design/satellite-tracks.md).
-Mirror operators should follow the
-[satellite publication runbook](docs/SATELLITE_MIRROR.md).
+Hinted solving reads position hints from image metadata; explicit options are
+available when those are absent. To solve with a scale hint or stack light frames:
 
-Not sure which catalogs you need? Run the guided setup — the same one the
-Windows installer offers, available on every platform:
-
-```text
-seiza setup
+```sh
+seiza solve image.fits --scale 1.26
+seiza stack lights/*.fits --output stack.fits --reintegrate --preview stack.png
 ```
 
-It walks you through use-case-based choices: lightweight hinted solving,
-denser Gaia solving, deep blind solving, or the complete bundle. Every choice
-includes object search, Solar System objects, active transients, and at least
-one plate-solving catalog. All downloads are versioned and SHA-256 verified.
-
-Set `SEIZA_CATALOG_DIR` to choose the default setup and ASTAP-compatible
-catalog directory. The all-users Windows installer sets it system-wide to the
-shared `%ProgramData%\Seiza\catalogs` directory.
-
-Solving many images from your own application? Start a worker so the
-catalogs and blind index stay open instead of being reloaded for every solve:
-
-```text
-seiza worker --data data --index data
-```
-
-Send it one JSON request per line on stdin; it writes one response per line
-on stdout, takes FITS or normal image paths, and exits cleanly at EOF. The
-full request and response format is in
-[the worker protocol](docs/design/worker-protocol.md).
-
-The same worker can send solves to a
-[`seiza-server`](https://github.com/theatrus/seiza-server) instead of solving
-locally — your own, or the hosted one at [seiza.fyi](https://seiza.fyi). It
-converts each FITS to a lossless 8-bit PNG before upload to keep transfers
-small:
-
-```text
-seiza worker --server http://solver-host:8080
-```
-
-If the server needs an API key, pass `--server-token` or set
-`SEIZA_SERVER_TOKEN`. To upload the original FITS instead of the PNG (for
-example, to preserve headers or full bit depth), pass `--server-upload fits`.
-Remote solves give up after five minutes; change that with
-`--server-timeout SECONDS`. Local and remote workers speak the same JSON
-protocol, so your application code does not change.
-
-## Image stacking
-
-`seiza stack` calibrates and registers linear FITS or XISF light frames,
-normalizes their backgrounds, and integrates them with online delta-sigma
-rejection; `--reintegrate` adds a completed-stack pass that removes satellite
-trails and other transients, and `--drizzle 2` drizzles that pass onto a grid
-twice as fine, for undersampled, dithered data. By default it picks the clearest, sharpest frame
-as the reference, fits a quadratic warp to follow lens distortion, matches each
-frame's background tile by tile so frame edges leave no seams, weights frames
-by their noise, and resamples with Lanczos-3. Differently sized or cropped
-frames are mapped onto the reference's fixed output grid. Frames acquired after
-a German-equatorial-mount meridian flip are handled automatically: a transform
-near 180 degrees is accepted under the normal rotation tolerance and the pixels
-are rotated back onto the reference orientation before integration.
-
-Color remains color. Three-plane FITS/XISF inputs are stacked as linear RGB; raw
-one-shot-color frames carrying `BAYERPAT` are calibrated in their native CFA
-sampling and then demosaiced with VNG (or MHC, bilinear, or Bayer drizzle). Registration detects stars from a luminance view,
-but the resulting transform, per-channel normalization, rejection, and
-accumulation retain all three channels. The result is an unstretched
-three-plane `float32` RGB FITS, and `--preview` produces an RGB display image.
-
-```text
-seiza stack lights/*.fits --output stack.fits \
-  --bias master-bias.fits --dark master-dark.fits --flat master-flat.fits \
-  --reintegrate --preview stack.png --report stack-report.json
-```
-
-![Eight-frame Sadr and Crescent Nebula H-alpha stack](docs/images/stacking/sadr-ha-8-frame.jpg)
-
-*Eight 300-second H-alpha frames stacked on the first frame's pixel grid. The
-JPEG uses a display-only stretch; the stack itself remains linear `f32` FITS.*
-
-The Rust crate, Python wheel, and C ABI expose the same incremental
-`LiveStacker` engine. Live handles can be atomically checkpointed to a
-versioned `.seiza-stack` context, reopened in a later process, and continue
-accepting frames without resetting their registration or rejection history.
-Rust hosts can use `SkyOrientationPlan` after integration to preserve the full
-solved footprint on a north-up, east-left TAN grid. The plan returns the affine
-mapping and replacement FITS WCS, so source-frame crop tools can follow the
-same geometry.
-See the [CLI stacking guide](seiza-cli/README.md#image-stacking),
-[Python API](seiza-py/README.md#image-stacking), and
-[stacking design](docs/design/image-stacking.md).
-The [image-correction core plan](docs/design/image-correction-core.md) defines
-how calibration and residual-response kernels will move out of the stacker for
-use by native hosts.
-
-### GPU acceleration
-
-Stacking runs its heavy passes on the GPU when one is present, through
-[wgpu](https://wgpu.rs): Metal on macOS, Vulkan on Linux, and Direct3D 12 or
-Vulkan on Windows, chosen at run time. It is `seiza-stacking`'s default `gpu`
-feature, so the CLI, the Python wheel and the C ABI all have it. It has been
-validated on an Apple M4 Max; on Intel Iris Xe, the lowest supported GPU,
-which shares its memory with the CPU, under Linux and Windows; and on an Intel
-Arc A770M and an NVIDIA RTX 5090 under Windows.
-
-| Pass | What the GPU does | How close it stays to the CPU |
-|---|---|---|
-| Defect learning | Screens every sample against its neighbours | Bit for bit: the CPU re-tests the few it flags |
-| VNG debayering | Every pixel but a two-pixel border | 6e-6 of the noise RMS |
-| Star detection | Luminance, exact tile medians and sigmas, threshold | The same stars, but for pixels on the threshold |
-| Registration resampling | Lanczos-3 or bilinear, with the clip mask | A few thousandths of the noise |
-| Live normalization | Applies each frame's fitted gains and offsets | Bit for bit, or a few ulps for tiled maps |
-| Live accumulator | Admission and delta-sigma Welford integration | 0.00015 of the noise RMS |
-| Reintegration | Leave-one-out rejection, band by band | 84% of samples bit for bit |
-
-A frame stays on the GPU from debayering through detection, resampling and
-normalization into the accumulator, rather than crossing back between stages.
-Frames under a million samples stay on the CPU, where the GPU's fixed cost of a
-few milliseconds outweighs it. The GPU works in single precision, so a stack
-differs from the CPU's by rounding: on a 45-frame Hα stack, 0.0045 of its noise
-RMS. Stacking's `output_version` tests hold the GPU to the same summaries as
-the CPU, so the GPU path keeps `OUTPUT_VERSION`. No adapter, a software
-adapter, or a frame too large for a GPU buffer keeps the work on the CPU. A
-GPU error is logged once and the work carries on on the CPU.
-
-Whole `seiza stack --reintegrate` runs in October 2026, wall time and CPU
-time:
-
-| Data | Machine | CPU only | With the GPU |
-|---|---|---:|---:|
-| Pleiades mono, 200 × 61 MP | M4 Max (Metal) | 68.9–71.0 s, 1057–1097 CPU-s | 12.4–12.5 s, 111–112 CPU-s |
-| Pleiades mono, 200 × 61 MP | i5-1340P, Iris Xe (Vulkan, Linux) | 273–276 s, 3944–3962 CPU-s | 90.2–90.5 s, 616–620 CPU-s |
-| Pleiades mono, 200 × 61 MP | Threadripper PRO 9975WX, RTX 5090 (Vulkan, Windows), 16 threads | 103 s, 1571 CPU-s | 27.1 s, 208 CPU-s |
-| Bode's Galaxy L, 12 × 26 MP mono | i7-12700H, Iris Xe (Vulkan, Windows) | 8.09 s, 111 CPU-s | 4.79 s, 16 CPU-s |
-| Bode's Galaxy L, 12 × 26 MP mono | i7-12700H, Arc A770M (Vulkan, Windows) | 8.09 s, 111 CPU-s | 3.83 s, 14 CPU-s |
-| M45 colour, 40 × 26 MP | M4 Max (Metal) | 17–18 s | 5.1–5.3 s, 30–31 CPU-s |
-| M45 colour, 40 × 26 MP | i5-1340P, Iris Xe (Vulkan, Linux) | 62 s, 811 CPU-s | 38.8–38.9 s, 158 CPU-s |
-
-The GPU frees most of the CPU too: the M4 Max's Pleiades stack takes a tenth of
-the CPU time, and less memory, 6.8–7.0 GiB at its peak against 9.6–9.8 GiB;
-the i5-1340P's, 3.5–3.6 GiB against 8.9–9.2 GiB. On the Iris Xe the stack is bound by the memory the CPU and GPU
-share. On the Threadripper, the CPU-only stack on all 64 threads takes 55–57 s,
-and the GPU run used 12 preparation workers and a 16 GiB pipeline budget; the
-[Windows NVIDIA report](docs/benchmarks/2026-10-windows-nvidia-stacking.md) has
-the rest.
-
-Each request says which passes may run on the GPU; nothing is read from the
-environment but wgpu's own `WGPU_BACKEND`.
-
-- **CLI:** `seiza stack --no-gpu` keeps every pass on the CPU, and
-  `--cpu-pass debayer,detection` only those named (`defects`, `debayer`,
-  `detection`, `resampling`, `accumulator`, `integration`).
-  `--gpu-concurrency` (3) bounds the frame calls in flight, and so GPU
-  memory, and `--gpu-trace` prints each GPU call's timings to stderr.
-- **Python:** `seiza.GpuOptions`, given as `gpu=` to `StackOptions`,
-  `detect_defects` and `integrate_registered_frames`.
-- **C ABI:** the `"gpu"` object of the stack and defect options JSON and of
-  the registered-integration request, such as `"gpu": {"enabled": false}`.
-- **Rust:** `GpuOptions` in `StackOptions::gpu`, `BatchStackOptions::gpu` and
-  `DefectDetectionOptions::gpu`. Build `seiza-stacking` with
-  `default-features = false` for a CPU-only crate without wgpu.
-
-A saved context keeps its stack's GPU options, and a stack's configuration
-fingerprint leaves them out.
-
-Still on the CPU, and where more could move: FITS and XISF decoding,
-calibration, registration's star matching and transform fits, normalization
-fits, MHC, bilinear and superpixel debayering, and drizzle. The largest gain
-left is a frame that goes to the GPU once, before calibration, and stays there
-until it is integrated. The Iris Xe would gain most, since its time goes to
-moving frames through the memory it shares with the CPU, and a discrete GPU
-would gain too, since each crossing is a PCIe transfer. On a discrete GPU,
-reintegration could also resample each band again from its source instead of
-writing and reading scratch files. NVIDIA on Linux is not yet tested. The
-[GPU stacking design](docs/design/gpu-stacking.md) has every measurement,
-including what was tried and not kept.
-
-### Light deconvolution (experimental)
-
-`seiza deconvolve` provides a deliberately restrained classical restoration
-experiment for calibrated/stacked linear FITS/XISF images. Supply a stellar FWHM in
-pixels; Seiza applies four damped Richardson-Lucy iterations by default and
-blends 35% of the result back into the input while preserving per-channel flux.
-The CLI keeps `NaN` registration borders masked instead of treating them as
-image data.
-
-```text
-seiza deconvolve stack-bg.fits --output stack-light-dc.fits \
-  --psf-fwhm 3.1 --iterations 4 --amount 0.35
-```
-
-The Python wheel exposes the same operation as
-`seiza.deconvolve(image, psf_fwhm=3.1)`. Native consumers can call
-`seiza_deconvolve_in_place` from the generated C ABI header.
-
-This is an explicit symmetric-Gaussian PSF model, not blind sharpening or a
-learned reconstruction. Use it before display stretching and inspect for noise,
-rings, and field-dependent failures. Raw Bayer mosaics are rejected. See the
-[`seiza-deconvolution` crate](seiza-deconvolution/README.md) and
-[design note](docs/design/deconvolution.md) for the guardrails and limitations.
-The [AstroBin corpus trial](docs/benchmarks/2026-07-deconvolution-corpus.md)
-shows four input/conservative/strong/external-reference comparisons with
-measured PSF and background changes, including a ringing failure hidden by
-aggregate FWHM; the
-[model-based restoration plan](docs/design/ml-restoration-training.md) explains
-how synthetic degradations and registered expert pairs could train a later ML
-operation without treating attractive edits as ground truth.
-
-### Automatic background extraction
-
-`seiza background` estimates a smooth gradient from robust sample windows in a
-linear mono or RGB FITS/XISF image. It defaults to automatic held-out selection
-among conservative polynomial degrees. A smoothed thin-plate radial-basis model
-is available manually, or as an explicit `--auto-rbf` candidate when an image
-has suitable background regions. The selected model is fit per channel at
-shared positions; locally noisy samples and samples inconsistent with the
-surface are rejected. Output remains linear `float32` and retains a valid input
-WCS.
-
-```text
-seiza background stack.fits --output corrected.fits \
-  --model-output background.fits --diagnostics background.json
-
-# Force a conservative plane for a simple additive gradient
-seiza background stack.fits --output corrected.fits --model polynomial --degree 1
-
-# Tune an irregular model and apply only 70% of its correction
-seiza background stack.fits --output corrected.fits --model radial-basis \
-  --rbf-smoothing 0.03 --strength 0.7
-
-# Let held-out selection consider RBF after inspecting or masking the field
-seiza background stack.fits --output corrected.fits --auto-rbf
-
-# Multiplicative illumination correction
-seiza background stack.fits --output corrected.fits --mode divide
-```
-
-Automatic diagnostics include each candidate's normalized validation error and
-the selected surface. Fitting retains only compact samples and coefficients.
-Correction can run in place; a full-resolution model is allocated only when
-requested. Rust, Python, and the C ABI expose the same fit/apply split and
-accept an exclusion mask for extended structures. The Rust and JSON configs
-also accept normalized ellipse or polygon regions, so solved OpenNGC outlines
-can protect real targets at preview and full resolution. See the
-[background-extraction design](docs/design/background-extraction.md) for the
-ADBE-inspired sampling strategy, correction math, memory behavior, and limits.
-
-### Color from mono stacks
-
-Mono stacks can be turned into RGB/LRGB or narrowband quick looks
-without changing the linear stack accumulator:
-
-```text
-seiza color lrgb --luminance l.fits --red r.fits --green g.fits --blue b.fits \
-  --output lrgb.fits --preview lrgb.png
-
-seiza color lrgb --luminance l.fits --red r.fits --green g.fits --blue b.fits \
-  --luminance-mode super --output super-lrgb.fits --preview super-lrgb.png
-
-seiza color narrowband --ha ha.fits --oiii oiii.fits --sii sii.fits \
-  --palette sho --output sho.fits --preview sho.png
-
-seiza color narrowband --ha ha.fits --oiii oiii.fits --sii sii.fits \
-  --palette foraxx-sho --preview foraxx.png
-
-seiza color rgb --red r.fits --green g.fits --blue b.fits \
-  --crop inscribed --output rgb.fits
-```
-
-RGB, LRGB, additive super-LRGB (`L + R + G + B`), synthetic super-RGB
-(`R + G + B`, no luminance stack), SHO/HOO, every direct three-filter
-permutation, and custom Rust mixing matrices retain linear-light samples. Foraxx-SHO and Foraxx-HOO use the
-published dynamic formula on internally stretched working channels and are
-explicitly marked display-referred in FITS metadata. See the [color-composition
-design](docs/design/color-composition.md) for normalization, equations, and
-the distinction between linear CIE-luminance replacement and display palettes.
-The CLI automatically registers filter stacks onto L, R, or H-alpha before
-composition; pass `--no-register` only for masters already sharing one grid.
-Registration leaves blank edges where a channel did not reach. `--crop bounds`
-trims to the box every channel covers and `--crop inscribed` to the largest
-rectangle they all cover in full, which also removes the corners a rotated or
-meridian-flipped channel leaves behind. A crop moves the written `CRPIX` onto
-the new grid, scales every channel from the kept region alone, and names any
-channel whose coverage sits far from the others.
-
-| Direct linear SHO | Foraxx-SHO quick look |
-| --- | --- |
-| ![Sh2-132 rendered with the direct SHO palette](docs/images/color/sh2-132-sho.jpg) | ![Sh2-132 rendered with the Foraxx-SHO palette](docs/images/color/sh2-132-foraxx-sho.jpg) |
-
-*Sh2-132 from twelve 300-second Askar107PHQ frames per H-alpha, OIII, and SII
-channel. Seiza calibrated and stacked all 36 frames, handled the meridian-flip
-orientation automatically, registered the three filter masters, and rendered
-both previews from the same data. These README images are cropped, downscaled
-quick-look JPEGs; the composition outputs remain full-resolution `f32` FITS.*
-
-## Performance
-
-Seiza is built to solve inside an imaging loop. Every time here is a whole
-command: process startup, image loading, star detection, catalog access,
-solving, and result output. Stacking's times, with and without the GPU, are in
-[GPU acceleration](#gpu-acceleration).
-
-On a laptop (Intel Core i5-1340P, Fedora, release builds, October 2026), with
-`stars-deep-gaia17.bin` and `blind-gaia16.idx`, three runs of each image:
-
-- Blind solves of 16 real FITS frames, from 2 to 61 megapixels, took
-  **0.04–0.16 seconds, 0.09 s median**.
-- Hinted solves of 17 frames took **0.04–0.23 seconds, 0.10 s median**.
-  Checking a 26 MP frame's own header WCS takes 0.07–0.10 s.
-- Ten processed AstroBin JPEGs of about 22 megapixels solved blind in
-  0.19–0.59 s, 0.35 s median; decoding the JPEG is most of that.
-
-On our Windows 11 test machine in July 2026 (Intel Core i7-12700H, release
-builds, no GPU), before the October solver work:
-
-- A real hinted FITS solve usually finished in **0.2-0.4 seconds**.
-- Blind solving with a prebuilt index took **0.53 seconds median** across 13
-  real FITS frames ranging from 26 to 61 megapixels.
-- Compact u8 detection cut peak detector memory from **1.08 GiB to 543 MiB**
-  on a 94 MP JPEG, and from **590 MiB to 179 MiB** on a 61 MP FITS frame.
-
-The [automated scientific corpus](regression/README.md) gates known-truth
-astrometry and calibrated stacking, checks pinned camera images, and records
-repeatable runtime and peak-memory measurements.
-
-### Compared with Asterion
-
-[Asterion](https://github.com/asterion-solver/asterion) is a fast, accurate
-newer solver, and the closest match for blind speed. On the laptop above,
-blind, with seven runs of each program interleaved, each with its own
-catalogs (Asterion 0.1.8 with gaia-500 and tycho2):
-
-| Image | seiza, linear | seiza, SIP order 3 | Asterion |
-|---|---:|---:|---:|
-| M45, 26 MP colour raw | 0.06–0.08 s | 0.06–0.08 s | 0.07–0.16 s |
-| IC 5070, 61 MP mono | 0.09–0.11 s | 0.08–0.11 s | 0.10–0.17 s |
-| M31, 8 MP colour raw | 0.03–0.05 s | 0.03–0.05 s | 0.06–0.09 s |
-| NGC 253, 2 MP mono | 0.03 s | 0.03–0.04 s | 0.07–0.22 s |
-| `elephant`, 22 MP AstroBin JPEG | 0.30–0.32 s | 0.30–0.32 s | 0.31–0.35 s |
-
-Asterion fits a SIP distortion polynomial of an order it picks by default.
-Seiza's blind default is a linear fit, and `--sip-order` asks for SIP, which
-costs it no extra time on these frames. On phone
-shots it differs both ways: Asterion solved a cropped 24 mm phone frame in
-0.19 s, where seiza takes about 5 s, but at its defaults it didn't solve the
-full frames, which seiza solves blind in about 0.4 s.
-
-### Compared with ASTAP
-
-[ASTAP](https://www.hnsky.org/astap.htm) is a mature, highly regarded plate
-solver and a serious reference point. There is no universal winner: different
-search strategies do better on different fields. In our repeated real-FITS
-comparison in July 2026, before the October solver work, using the catalog
-recommended for each solver:
-
-| Workload | seiza | ASTAP | Result |
-|---|---:|---:|---|
-| Accurate hint, 26 MP narrow field | 0.25-0.27 s | 0.27-0.29 s | Roughly tied; seiza 9-11% faster |
-| Accurate hint, 61 MP wide field | 0.42 s | 0.63 s | seiza 1.5x faster |
-| Position blind, 26 MP narrow field | 1.61 s | 31.28 s | seiza 19x faster |
-| Position blind, 61 MP wide field | 0.65 s | 1.09 s | seiza 1.7x faster |
-
-The 61 MP position-blind row was rerun after the blind-pipeline improvements
-(three runs each: seiza 0.62-0.65 s, ASTAP 1.08-1.16 s).
-
-On a separate set of 25 heavily processed JPEGs, seiza solved all 25 with a
-hint and all 25 position-blind. ASTAP solved 13 and 12 respectively. Among
-images both programs solved, seiza was **3.5x faster hinted** and **6.5x faster
-position-blind** by median wall-time ratio. Seiza also solved all 25 with no
-position or scale hint in 0.90 seconds median. This is deliberately unusual
-input for a plate solver, so it measures robustness on processed web images
-rather than ASTAP's normal FITS workflow.
-
-These are measurements on one system, not universal promises. Runs used the
-normal OS file cache and included complete command-line wall time. See the
-[FITS comparison](docs/benchmarks/2026-07-astap-comparison.md) and
-[blind/detection follow-up](docs/benchmarks/2026-07-blind-pipeline-priorities.md)
-for the images, catalogs, repetitions, correctness checks, and caveats.
-
-## Catalogs and data
-
-Most users only need `seiza download-data prebuilt` or `seiza setup` from the
-Quick start; this section is the detail behind them — what is in each hosted
-bundle and how the compatibility paths work.
-
-V4-capable clients use one complete, versioned
-[v4 catalog-bundle manifest](https://downloads.seiza.fyi/data/v4/manifest.json).
-New clients never combine files from different bundle versions:
-`stars-lite-tycho2.bin` (2.5M stars, 25 MB), `stars-gaia.bin` (Gaia DR3
-G≤15, 36.7M stars, 367 MB), `stars-deep-gaia17.bin` (Gaia DR3 G≤17,
-154.1M stars, 1.54 GB), `blind-gaia16.idx` (the memory-mapped G≤16 blind
-pattern index, 1.63 GB), `stars-lite-tycho2.ids.bin` (2.7M numeric identifiers
-and 387k names, 100 MB), `objects.bin` (315k objects), `minor-bodies.bin`
-(comets and asteroids), and `transients.bin` (active supernovae/novae,
-refreshed nightly). `download-data prebuilt` combines the bundle into one
-local data directory. Current manifests may offer zstd-compressed transports;
-new clients stream-decompress them into the normal uncompressed mmap cache,
-while older v4 clients continue to use the retained uncompressed artifacts.
-The deep catalog and maintained index
-enable blind solving of small, fine-scale fields whose brightest detections
-are fainter than the G≤15 catalog's small-field pattern tiers without
-rebuilding the whole-sky index for every process.
-
-Applications can install only the catalogs they need without invoking the CLI:
-
-```rust,no_run
-// Enable seiza's non-default `downloads` feature first.
-let manager = seiza::downloads::CatalogManager::builder().build()?;
-let files = manager
-    .ensure(&seiza::downloads::CatalogSet::solver_lite()
-        .with(seiza::downloads::Dataset::Objects))
-    .await?;
-let stars = seiza::catalog::TileCatalog::open(
-    files.path(seiza::downloads::Dataset::StarsLiteTycho2)?,
-)?;
-```
-
-[`seiza-download`](seiza-download/README.md) owns the async, verified runtime
-bundle cache. [`seiza-sources`](seiza-sources/README.md) separately owns raw
-Gaia, VizieR, MPC, OpenNGC, and other catalog-building downloads, keeping those
-large and rate-limited workflows out of application integrations.
-
-## Status
-
-Working today:
-
-- **Star detection** — tile-based background/noise estimation (median +
-  MAD), sigma thresholding, connected components, flux-weighted sub-pixel
-  centroids.
-- **WCS** — TAN (gnomonic) projection with a CD matrix: pixel ↔ world
-  transforms, scale/footprint helpers.
-- **Hinted plate solving** — triangle matching over FOV-sized windows,
-  affine candidate voting, iterative least-squares refinement, seeded by an
-  approximate center and pixel scale. Solves real telescope images in tens
-  of milliseconds with sub-arcsecond RMS.
-- **Blind plate solving** — no position hint, only a plausible pixel-scale
-  range: a disc-anchored whole-sky 4-star pattern index, hypothesis voting
-  with smoothing and non-max suppression, parallel verification through the
-  hinted solver. Image quads are looked up in growing chunks, and a field
-  that stands out verifies as soon as it does, so a clear field needs only
-  its first few hundred quads. The hosted G≤16 index is versioned, SHA-256
-  verified, and memory-mapped, with each key's patterns stored together so a
-  lookup reads one place in the file
-  (`seiza solve-blind image.jpg --data data --index data --min-scale 0.1 --max-scale 15`).
-- **Star catalogs** — memory-mappable tile formats with cone search.
-  Use the prebuilt sets from `download-data prebuilt` unless you need a
-  custom depth or epoch: building from primary sources stays fully
-  supported (Tycho-2; Gaia DR3 via ESA TAP with `--max-mag` and
-  `--chunks` for deeper sets; ASTAP `.1476` databases) but the Gaia
-  download alone can take many hours against the ESA archive.
-  An optional memory-mapped identifier sidecar resolves TYC/HIP/HR/HD/SAO/FK5,
-  IAU and Bayer/Flamsteed names, GCVS variables, and WDS double-star
-  designations without a network request or plate solve. Its normalized name
-  index also supports prefix completion for interactive search.
-  Catalog readers keep normal opens non-exhaustive; run
-  `seiza catalog validate --data FILE` when a deliberate full integrity scan
-  is needed.
-
-```
-# custom build from primary sources (the prebuilt sets skip all this)
-seiza download-data gaia --output raw/gaia --max-mag 17 --chunks 3072
-seiza build-data gaia --input raw/gaia --output stars-deep.bin --max-mag 17
-seiza build-blind-index --data stars-deep.bin --output blind-gaia16.idx --index-mag-limit 16
-```
-
-- **Object catalogs** — OpenNGC (NGC/IC/Messier), Sharpless, Barnard, UGC,
-  LDN, LBN, Cederblad, vdB, PGC, Green's Galactic supernova remnants,
-  Wolf-Rayet stars, SIMBAD's Galactic planetary nebulae (Abell's 1966 list
-  among them, with Strasbourg-ESO diameters where SIMBAD has no size), IAU
-  named and HD stars, and live transient
-  (supernova/nova) lists built into a memory-mapped object store. Its embedded
-  tile and normalized-name indices page in only relevant records for viewport,
-  exact-name/ID, and prefix queries. Query a known sky cone or ordered image
-  footprint without plate solving (`seiza catalog objects ...`), resolve a
-  name or alias with `seiza catalog object ...`, or query a solved image with
-  projected pixel and ellipse geometry
-  (`seiza solve ... --objects objects.bin`).
-  The current [extensible v4 container](docs/design/objects-bin-v4.md) also
-  preserves every contributing upstream record, typed relations, preferred
-  facet selections, source-qualified geometry (including hand-drawn OpenNGC
-  outlines), pinned build provenance, and externally curated corrections;
-  `seiza catalog object --all-sources` audits all of it. Earlier `SEIZAOB1`
-  and `SEIZAOB3` files remain readable. An optional distance file gives
-  about 180,000 of the objects a distance with its range, method and source,
-  from Gaia cluster parallaxes, Cosmicflows-4, SIMBAD and other catalogues
-  (`seiza catalog distance "M 42"`).
-- **FITS** — streaming reading with typed headers, exact
-  histogram statistics, planar RGB
-  (NAXIS3) support, OSC debayering (`BAYERPAT`), and bounded-memory
-  streaming into native pixel storage, plus atomic linear `f32` output, in the
-  [`seiza-fits`](https://crates.io/crates/seiza-fits) crate. FITS files
-  plate-solve directly, with RA/DEC hints read from headers.
-- **XISF** — monolithic grayscale, planar RGB, and Bayer image reading with
-  typed integer/float samples, attached image blocks, FITS-compatible metadata,
-  and zlib, LZ4/LZ4HC, or zstd compression with optional byte shuffling in
-  [`seiza-xisf`](seiza-xisf/README.md). XISF uses the same linear image path as
-  FITS for solving, rendering, background work, deconvolution, and stacking.
-  Atomic `Float32` XISF output mirrors the FITS writer; a `.xisf` output path
-  selects it in every CLI save command.
-- **Parameterized stretching** — reusable identity, linear, asinh,
-  percentile-asinh, MTF, manual GHS, median/MAD Auto-MTF, median anchor
-  (median placed exactly on a target from a robust black point), and layered
-  (the median anchor curve on luminance, with large and fine structure
-  treated apart) models in `seiza-stretch`. Analysis, curve resolution, and application are separate so
-  interactive and full-resolution pipeline stages can share an exact plan.
-- **Background extraction** — deterministic low-noise sample selection,
-  robust rejection, weighted polynomial and smoothed thin-plate radial-basis
-  surfaces, held-out automatic model selection, additive subtraction, and
-  multiplicative correction in `seiza-background`. Model fitting is compact;
-  rendering a full model image is explicit.
-- **Image stacking** — master bias/dark/flat construction, CFA-aware OSC
-  calibration with VNG, MHC, bilinear, or Bayer-drizzle colour, automatic
-  reference choice, similarity, affine, or quadratic registration with
-  meridian-flip handling, global, tiled local, or local-background
-  normalization, noise weighting, bilinear or Lanczos-3 resampling, online
-  delta-sigma rejection, and three-pass completed-stack rejection in
-  `seiza-stacking`. Solved outputs can be reprojected
-  to a full-footprint north-up, east-left grid. The same incremental
-  `LiveStacker` engine serves batch and live use, with atomic on-disk contexts
-  for exact process-to-process resumption.
-- **Deconvolution (experimental)** — damped Richardson-Lucy restoration from
-  a measured Gaussian PSF FWHM with per-channel flux preservation in
-  `seiza-deconvolution`. `NaN` registration borders stay masked instead of
-  being treated as image data.
-- **Color from mono stacks** — RGB, LRGB with native or additive
-  super-luminance modes, SHO/HOO and every direct three-filter permutation,
-  Foraxx quick looks, and custom mixing matrices, all in linear light.
-  Optional cropping to the area every channel covers, with a warning for the
-  channel that sits away from the rest.
-- **Satellite track prediction** — single-exposure tracks from current or
-  historical OMM/TLE element sets, with annotated overlays, in
-  `seiza-satellites`.
-- **Sky maps** — `--sky-map` on `solve` and `solve-blind` draws constellation
-  figures, IAU-named stars, and deep-sky objects over the solved image, with
-  a title bar and solve statistics
-  ([example](docs/images/phone/phone-sky-map.jpg)). `--sky-map-foreground`
-  leaves out marks on the ground in a photo with a horizon. The figures,
-  built into `seiza::constellations`, need no download.
-- **Packages & CI** — crates.io releases, a guided
-  [Windows MSI installer](packaging/windows/README.md), Fedora RPMs and
-  Ubuntu debs on GitHub releases, and an integration suite that solves real
-  hosted camera frames against known-good solutions on every PR.
-
-Every solution reports its false-match probability: the chance that a wrong
-field would match as well, counting every candidate the search tried. True
-fields score far below one in a billion; blind solving refuses fields above
-that, which stops the chance alignments a fixed match count let through. Both
-solvers take a time limit (`--time-limit`, solve-field's `-l`, the worker's
-`timeLimitMs`, and `time_limit=` in Python) and can be cancelled from the C
-ABI, Python and the worker.
-
-Both solvers can fit SIP distortion polynomials (orders 2-5, forward and
-inverse) on the accepted solution with `--sip-order`; the linear solution is
-kept whenever the polynomial does not improve the residual beyond what its
-extra coefficients buy for free. On real wide-field images this cuts the
-astrometric residual by a third to a half
-([measurements](docs/benchmarks/2026-07-sip-real-field-validation.md)).
-
-## Use with N.I.N.A. (ASTAP-compatible mode)
-
-seiza speaks ASTAP's command-line contract, so N.I.N.A. can use it as
-its plate solver with no plugin:
-
-1. Grab the Windows MSI from the
-   [releases](https://github.com/theatrus/seiza/releases) (or use the portable
-   ZIP or `cargo install seiza-cli`).
-2. Install the catalogs you want. On Windows, let the installer launch catalog
-   setup when it finishes or open **Seiza Catalog Setup** from the Start menu
-   later. On every platform, the equivalent command is `seiza setup`. It writes
-   a complete usable selection into Seiza's standard catalog directory, which
-   ASTAP-compatible mode discovers automatically.
-
-   For a manual or portable layout, download the prebuilt bundle into one
-   directory and configure that directory once:
-
-   ```
-   seiza download-data prebuilt --output C:\seiza-data
-   setx SEIZA_CATALOG_DIR C:\seiza-data
-   ```
-
-3. In N.I.N.A.: **Options → Plate Solving → Plate Solver: ASTAP**, and
-   point the ASTAP path at the `astap.exe` the installer puts next to
-   `seiza.exe` (`C:\Program Files\Seiza CLI\astap.exe` for an all-users
-   install; the portable ZIP carries the same pair). N.I.N.A. asks for a
-   file of that name, and both names run the same solver. It works in the
-   blind-solver slot too.
-
-seiza auto-detects ASTAP-style invocations (`-f image.fits -fov … -ra …
--spd …`), solves hinted or blind accordingly, and writes the `.ini`
-result file N.I.N.A. reads — including the full CD matrix, so pixel
-scale, rotation, and flip all come through. Catalog discovery selects the
-right star catalog and blind index from the configured directory; advanced
-single-file overrides remain available through `SEIZA_STAR_DATA` and
-`SEIZA_BLIND_INDEX`. Any copy of the binary named `astap.exe` behaves
-identically, whether or not the command line carries an ASTAP flag. Details:
-[docs/design/astap-mode.md](docs/design/astap-mode.md).
-
-## Use with Siril (solve-field compatible mode)
-
-seiza speaks astrometry.net's `solve-field` command line — and on Windows
-it also answers Siril's `bin/bash` launch wrapper itself, so no cygwin is
-needed. Siril's existing astrometry.net integration drives it with no
-plugin on every platform:
-
-1. Run `seiza install-solve-field --dir <dir>` — it installs the complete
-   layout (`solve-field`, `bin/bash`, `tmp/`) Siril expects.
-2. Install catalogs with **Seiza Catalog Setup** on Windows or `seiza setup`
-   on any platform. For a manual or portable layout, populate one directory
-   with `seiza download-data prebuilt --output <directory>` and point
-   `SEIZA_CATALOG_DIR` at it. Solve-field mode selects the star catalog and
-   blind index from that directory automatically.
-3. In Siril: **Preferences → Astrometry → astrometry.net install dir**, set
-   it to that directory, and pick the astrometry.net solver when plate
-   solving.
-
-Siril hands seiza its own detected star list and reads the solution back
-from the standard `.wcs` file — no pixels are exchanged, and the SIP
-distortion order Siril requests is fitted by seiza's solver.
-
-Siril reports fitted PSF amplitudes rather than photometric flux, which
-would defeat the matcher's brightness ranking on stretched images — so
-when the source image is present next to the star table (the normal
-Siril case), seiza automatically re-measures star flux from the pixels
-and solves in the table's exact frame. Contract details:
-[docs/design/solve-field-mode.md](docs/design/solve-field-mode.md).
-
-## Layout
-
-- `seiza/` — library crate: `detect`, `catalog`, `objects`, `solve`, and
-  `wcs` re-exported from `seiza-core`
-- `seiza-core/` — the types other crates share without the solver: `Wcs`,
-  `CancelSignal` and `SolvePrior`. It changes rarely, so a crate that needs
-  only these does not move with every `seiza` release
-- `seiza-fits/` — FITS reading and atomic linear `f32` writing; re-exports the
-  statistics and MTF autostretch that now live in `seiza-stretch`
-- `seiza-xisf/` — XISF metadata and attached-pixel reading into `FitsImage`,
-  plus atomic linear `f32` writing
-- `seiza-image-io/` — opening and saving images by file extension, PNG, JPEG,
-  TIFF, FITS and XISF alike, for the CLI, the C ABI, stacking and parallax;
-  `raster` opens photos upright by their EXIF orientation and reads their
-  capture metadata
-- `seiza-background/` — format-independent robust background sampling,
-  polynomial fitting, diagnostics, and linear correction
-- `seiza-calibration/` — format-independent calibration on caller-owned
-  linear buffers: response fitting, validation, and bounded application;
-  frame matching; and bias, dark, and flat frame grading
-- `seiza-stretch/` — parameterized, format-independent display analysis,
-  transfer plans, and mono/RGB application
-- `seiza-stacking/` — FITS/XISF calibration adapters, local registration,
-  normalization, additive integration, rejection, and solved sky orientation;
-  its default `gpu` feature runs the heavy passes on the GPU through wgpu
-- `seiza-cabi/` — shared native C ABI for rendering, background extraction,
-  live stacking, solving, overlays, and catalog setup
-- `seiza-cli/` — the `seiza` command-line tool: solving, ASTAP mode, the
-  JSON-RPC worker, guided `seiza setup`, and dataset building
-- `seiza-download/` — async, verified runtime catalog-bundle cache
-- `seiza-sources/` — raw upstream catalog acquisition for custom builds
-- `seiza-py/` — Python bindings (`pip install seiza`), outside the cargo
-  workspace so workspace builds never need libpython
-- `packaging/windows/` — the WiX MSI installer
-- `docs/` — design notes and benchmark reports
-
-## Minimum supported Rust version
-
-seiza builds on Rust **1.89** or newer. This is a real floor set by the
-dependency tree (currently `nalgebra`), not just the 2024 edition's own 1.85
-requirement, and it is declared as `rust-version` in `Cargo.toml` and checked
-in CI against a pinned 1.89 toolchain. A bump here is treated as a routine
-change, not a breaking one.
+See the [solving guide](docs/solving.md) for position and scale options.
+
+## Documentation
+
+- [Features and limits](docs/features.md)
+- <a id="commands-and-services"></a>[Solving, annotations, and workers](docs/solving.md)
+- <a id="image-stacking"></a><a id="automatic-background-extraction"></a><a id="color-from-mono-stacks"></a><a id="light-deconvolution-experimental"></a>[Stacking, background correction, color, and deconvolution](docs/image-processing.md)
+- <a id="catalogs-and-data"></a>[Catalog setup, storage, and custom builds](docs/catalogs.md)
+- <a id="use-with-nina-astap-compatible-mode"></a><a id="use-with-siril-solve-field-compatible-mode"></a>[N.I.N.A., Siril, and application integration](docs/integrations.md)
+- <a id="compared-with-asterion"></a><a id="compared-with-astap"></a>[Performance by operation and benchmark methodology](docs/performance.md)
+- <a id="library-apis"></a>[CLI reference](seiza-cli/README.md), [Python API](seiza-py/README.md), [C ABI](seiza-cabi/README.md)
+- <a id="layout"></a>[Crates, design notes, and development](docs/README.md)
+
+Built into [PSF Guard](https://github.com/theatrus/psf-guard),
+[Tenrankai](https://github.com/theatrus/tenrankai), and
+[seiza-server](https://github.com/theatrus/seiza-server).
 
 ## License
 
-Apache-2.0
-
-The constellation figures embedded in `seiza` are the Constellation Lines
-dataset by Marc van der Sluys (2005-2023), hemel.waarnemen.com. DOI:
-10.5281/zenodo.10397192. Licensed under CC BY 4.0
-([details](seiza/data/constellation-lines/README.md)). The sky map's labels
-use the Inter typeface, licensed under the SIL Open Font License 1.1
-([details](seiza-cli/fonts/README.md)).
+Apache-2.0. Embedded constellation figures are CC BY 4.0
+([attribution](seiza/data/constellation-lines/README.md)); Inter is SIL OFL 1.1
+([font license](seiza-cli/fonts/README.md)).
