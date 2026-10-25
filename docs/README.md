@@ -79,4 +79,6 @@ and required checks, and [RELEASE.md](../RELEASE.md) for versioning and publishi
 [Windows packaging](../packaging/windows/README.md) describes the CLI installer.
 
 See the [Seiza 0.44.0 release notes](releases/v0.44.0.md) for registered mosaic
-background matching and independent RGB star stretching.
+background matching and independent RGB star stretching, and the
+[0.44.1 notes](releases/v0.44.1.md) for its fix to local normalization on an
+expanded canvas.
