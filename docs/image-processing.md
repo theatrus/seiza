@@ -39,6 +39,11 @@ Rust, Python, and C hosts use the incremental `LiveStacker` engine. Save a
 rejection history intact. Rust hosts can use `SkyOrientationPlan` to reproject
 a solved stack onto a north-up, east-left grid and obtain the updated FITS WCS.
 
+For panels registered by a host, registered-frame integration accepts panel
+IDs to match backgrounds and taper remaining differences across their
+overlaps. It retains the shared diffuse sky, full-resolution star detail and
+missing coverage. See [mosaic background matching](design/mosaic-backgrounds.md).
+
 See the [CLI stacking guide](../seiza-cli/README.md#image-stacking),
 [Python stacking API](../seiza-py/README.md#image-stacking),
 [stacking design](design/image-stacking.md), and [GPU controls](#gpu-controls).

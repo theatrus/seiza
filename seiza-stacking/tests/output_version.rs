@@ -898,6 +898,400 @@ fn registered_frames_a_host_integrates_keep_their_output() {
     );
 }
 
+/// Four registered panels with independent skies, shared extended emission,
+/// and two observations per panel, through the host's final integration path.
+#[test]
+fn registered_mosaic_backgrounds_keep_their_output() {
+    let (width, height) = (256, 240);
+    let frames = (0..8)
+        .map(|index| {
+            let panel = index / 2;
+            let (left, top) = ((panel % 2) * 96, (panel / 2) * 88);
+            let data = (0..width * height)
+                .map(|pixel| {
+                    let (x, y) = (pixel % width, pixel / width);
+                    if x < left || x >= left + 160 || y < top || y >= top + 152 {
+                        return f32::NAN;
+                    }
+                    let (xx, yy) = (x as f32 / width as f32, y as f32 / height as f32);
+                    let nebula =
+                        110.0 * (-((xx - 0.43).powi(2) + (yy - 0.55).powi(2)) / 0.025).exp();
+                    let sky = [0.0, 17.0, -12.0, 8.0][panel]
+                        + [0.0, 22.0, -7.0, 13.0][panel] * xx
+                        + [0.0, -15.0, 19.0, -9.0][panel] * yy;
+                    100.0 + nebula + sky + noise(pixel, index, 0.4)
+                })
+                .collect();
+            LinearImage::new(width, height, 1, data).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let options = BatchStackOptions {
+        mosaic_panels: Some((0..8).map(|i| i / 2).collect()),
+        ..Default::default()
+    };
+    let result = seiza_stacking::integrate_registered_frames(frames.len(), &options, |_, index| {
+        Ok(frames[index].clone())
+    })
+    .unwrap();
+    check(
+        "REGISTERED_MOSAIC_BACKGROUNDS",
+        &summary(&result.snapshot.image),
+        REGISTERED_MOSAIC_BACKGROUNDS,
+    );
+}
+
+const REGISTERED_MOSAIC_BACKGROUNDS: &[f64] = &[
+    1.1776097e2,
+    1.1963589e2,
+    2.1656921e2,
+    1.0051737e2,
+    1.0758487e2,
+    1.1445993e2,
+    1.2108497e2,
+    1.2822806e2,
+    9.8188171e1,
+    1.0771823e2,
+    1.1705459e2,
+    1.1880308e2,
+    1.2547261e2,
+    9.6052299e1,
+    1.4362491e2,
+    1.9097940e2,
+    1.1951297e2,
+    1.2271482e2,
+    9.3255600e1,
+    1.1458409e2,
+    1.3630460e2,
+    1.1491711e2,
+    1.2002249e2,
+    9.0404106e1,
+    9.7089279e1,
+    1.0401866e2,
+    1.1092870e2,
+    1.1739417e2,
+];
+
+/// Extended emission fills the overlap: only a relative constant is
+/// measurable safely when there are too few dim background cells.
+#[test]
+fn a_signal_dominated_registered_mosaic_keeps_its_output() {
+    let (width, height) = (160, 96);
+    let images = (0..4)
+        .map(|frame| {
+            let panel = frame / 2;
+            let data = (0..width * height)
+                .map(|pixel| {
+                    let (x, y) = (pixel % width, pixel / width);
+                    if x < panel * 48 || x >= panel * 48 + 112 {
+                        return f32::NAN;
+                    }
+                    let nebula = 100.0
+                        * (-((x as f32 - 78.0).powi(2) + (y as f32 - 48.0).powi(2)) / 180.0).exp();
+                    20.0 + nebula + panel as f32 * 18.0
+                })
+                .collect();
+            LinearImage::new(width, height, 1, data).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let options = BatchStackOptions {
+        mosaic_panels: Some(vec![0, 0, 1, 1]),
+        ..Default::default()
+    };
+    let result = seiza_stacking::integrate_registered_frames(4, &options, |_, index| {
+        Ok(images[index].clone())
+    })
+    .unwrap();
+    check(
+        "REGISTERED_SIGNAL_DOMINATED_MOSAIC",
+        &summary(&result.snapshot.image),
+        REGISTERED_SIGNAL_DOMINATED_MOSAIC,
+    );
+}
+const REGISTERED_SIGNAL_DOMINATED_MOSAIC: &[f64] = &[
+    3.2681552e1,
+    3.5193859e1,
+    1.2900000e2,
+    2.8999996e1,
+    2.9002277e1,
+    2.9330900e1,
+    2.9000553e1,
+    2.9000004e1,
+    2.8999996e1,
+    2.9162500e1,
+    5.2587708e1,
+    2.9039196e1,
+    2.9000004e1,
+    2.8999996e1,
+    2.9673790e1,
+    1.2680228e2,
+    2.9162510e1,
+    2.9000004e1,
+    2.8999996e1,
+    2.9162502e1,
+    5.2587708e1,
+    2.9039196e1,
+    2.9000004e1,
+    2.8999996e1,
+    2.9002277e1,
+    2.9330900e1,
+    2.9000553e1,
+    2.9000004e1,
+];
+
+/// Paired samples: stellar structure under a steep sky,
+/// a partial-cell overlap, and independently missing RGB samples.
+#[test]
+fn registered_mosaic_paired_samples_keep_their_output() {
+    let mut fingerprint = Vec::new();
+    for mode in 0..3 {
+        let (width, height, channels, span, shift) = match mode {
+            0 => (256, 192, 1, 160, 96),
+            1 => (248, 128, 1, 128, 120),
+            _ => (160, 96, 3, 112, 48),
+        };
+        let frames = (0..2)
+            .map(|panel| {
+                let data = (0..width * height * channels)
+                    .map(|sample| {
+                        let (pixel, c) = (sample / channels, sample % channels);
+                        let (x, y) = (pixel % width, pixel / width);
+                        if x < panel * shift
+                            || x >= panel * shift + span
+                            || (mode == 2 && ((c == 0 && x % 2 == 1) || (c == 1 && x % 2 == 0)))
+                        {
+                            return f32::NAN;
+                        }
+                        if mode == 0 {
+                            100.0
+                                + panel as f32 * 1000.0 * x as f32 / 256.0
+                                + 1000.0
+                                    * (-((x as f32 - 103.0).powi(2) + (y as f32 - 82.0).powi(2))
+                                        / 8.0)
+                                        .exp()
+                        } else {
+                            100.0 + panel as f32 * 18.0
+                        }
+                    })
+                    .collect();
+                LinearImage::new(width, height, channels, data).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let options = BatchStackOptions {
+            mosaic_panels: Some(vec![0, 1]),
+            gpu: GpuOptions {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let result =
+            seiza_stacking::integrate_registered_frames(2, &options, |_, i| Ok(frames[i].clone()))
+                .unwrap();
+        // Summaries operate on finite scalar samples; preserve each channel's
+        // support separately rather than hiding NaNs by replacing them.
+        for c in 0..channels {
+            let finite = result
+                .snapshot
+                .image
+                .data
+                .iter()
+                .skip(c)
+                .step_by(channels)
+                .copied()
+                .filter(|v| v.is_finite())
+                .collect::<Vec<_>>();
+            fingerprint.extend([
+                finite.iter().map(|&v| f64::from(v)).sum::<f64>() / finite.len() as f64,
+                (finite.iter().map(|&v| f64::from(v).powi(2)).sum::<f64>() / finite.len() as f64)
+                    .sqrt(),
+                f64::from(finite.iter().copied().fold(f32::NEG_INFINITY, f32::max)),
+                f64::from(finite.iter().copied().fold(f32::INFINITY, f32::min)),
+            ]);
+            fingerprint.extend((0..16).map(|i| f64::from(finite[i * (finite.len() - 1) / 15])));
+        }
+    }
+    check(
+        "REGISTERED_MOSAIC_PAIRED_SAMPLES",
+        &fingerprint,
+        REGISTERED_MOSAIC_PAIRED_SAMPLES,
+    );
+}
+const REGISTERED_MOSAIC_PAIRED_SAMPLES: &[f64] = &[
+    4.4337287e2,
+    5.6152321e2,
+    1.3284091e3,
+    -1.5085341e2,
+    -1.5084932e2,
+    7.9943890e2,
+    5.6141522e2,
+    3.2374130e2,
+    8.1807182e1,
+    1.0373828e3,
+    7.9944031e2,
+    5.6146613e2,
+    3.1909070e2,
+    8.1805809e1,
+    1.0373842e3,
+    7.9944165e2,
+    5.5678729e2,
+    3.1906598e2,
+    8.1804436e1,
+    1.0373856e3,
+    1.0900000e2,
+    1.0900000e2,
+    1.0900001e2,
+    1.0899999e2,
+    1.0899999e2,
+    1.0900000e2,
+    1.0899999e2,
+    1.0900001e2,
+    1.0899999e2,
+    1.0900001e2,
+    1.0899999e2,
+    1.0900001e2,
+    1.0899999e2,
+    1.0900001e2,
+    1.0899999e2,
+    1.0900001e2,
+    1.0899999e2,
+    1.0900001e2,
+    1.0900000e2,
+    1.0900001e2,
+    1.0893251e2,
+    1.0911080e2,
+    1.1959697e2,
+    9.8268074e1,
+    9.8268074e1,
+    1.0663826e2,
+    1.1527836e2,
+    1.0231677e2,
+    1.1095766e2,
+    1.1959697e2,
+    1.0663651e2,
+    1.1527836e2,
+    1.0231677e2,
+    1.1095838e2,
+    1.1959697e2,
+    1.0663716e2,
+    1.1527836e2,
+    1.0231677e2,
+    1.1095687e2,
+    1.1959697e2,
+    1.0906749e2,
+    1.0924557e2,
+    1.1973193e2,
+    9.8403030e1,
+    9.8403030e1,
+    1.0677322e2,
+    1.1541331e2,
+    1.0245173e2,
+    1.1109272e2,
+    1.1973193e2,
+    1.0677155e2,
+    1.1541331e2,
+    1.0245173e2,
+    1.1109341e2,
+    1.1973193e2,
+    1.0677222e2,
+    1.1541331e2,
+    1.0245173e2,
+    1.1109183e2,
+    1.1973193e2,
+    1.0900000e2,
+    1.0917821e2,
+    1.1973193e2,
+    9.8268074e1,
+    9.8268074e1,
+    1.0677322e2,
+    1.1541331e2,
+    1.0245173e2,
+    1.1109272e2,
+    1.1973193e2,
+    1.0677155e2,
+    1.1541331e2,
+    1.0245173e2,
+    1.1109341e2,
+    1.1973193e2,
+    1.0677222e2,
+    1.1541331e2,
+    1.0245173e2,
+    1.1109183e2,
+    1.1973193e2,
+];
+
+/// A transient hit on a sampled position is rejected in the full-resolution
+/// pass; its background estimate must not carry it into neighboring cells.
+#[test]
+fn registered_mosaic_sampled_outliers_keep_their_output() {
+    let frames = (0..6)
+        .map(|index| {
+            let panel = index / 3;
+            let data = (0..256 * 192)
+                .map(|pixel| {
+                    let (x, y) = (pixel % 256, pixel / 256);
+                    if x < panel * 96 || x >= panel * 96 + 160 {
+                        return f32::NAN;
+                    }
+                    100.0
+                        + panel as f32 * 18.0
+                        + if index == 0 && (x, y) == (97, 85) {
+                            3000.0
+                        } else {
+                            0.0
+                        }
+                })
+                .collect();
+            LinearImage::new(256, 192, 1, data).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let options = BatchStackOptions {
+        mosaic_panels: Some(vec![0, 0, 0, 1, 1, 1]),
+        gpu: GpuOptions {
+            enabled: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let result =
+        seiza_stacking::integrate_registered_frames(6, &options, |_, i| Ok(frames[i].clone()))
+            .unwrap();
+    check(
+        "REGISTERED_MOSAIC_SAMPLED_OUTLIERS",
+        &summary(&result.snapshot.image),
+        REGISTERED_MOSAIC_SAMPLED_OUTLIERS,
+    );
+}
+const REGISTERED_MOSAIC_SAMPLED_OUTLIERS: &[f64] = &[
+    1.0899995e2,
+    1.0923943e2,
+    1.2147171e2,
+    9.8092636e1,
+    1.0356977e2,
+    1.0904907e2,
+    1.1452798e2,
+    1.2000472e2,
+    9.8092636e1,
+    1.0356978e2,
+    1.0904911e2,
+    1.1452797e2,
+    1.2000471e2,
+    9.8092644e1,
+    1.0356978e2,
+    1.0904911e2,
+    1.1452797e2,
+    1.2000471e2,
+    9.8092644e1,
+    1.0356979e2,
+    1.0904911e2,
+    1.1452796e2,
+    1.2000471e2,
+    9.8092651e1,
+    1.0356979e2,
+    1.0904907e2,
+    1.1452795e2,
+    1.2000471e2,
+];
+
 /// Frames large enough that, with the `gpu` feature and a GPU present,
 /// they resample there, and a reintegration whose bands integrate there:
 /// stacked on the CPU, which recorded the summaries, and where the GPU may,

@@ -3,6 +3,7 @@ use rayon::prelude::*;
 use statrs::distribution::{Continuous, ContinuousCDF, Normal, StudentsT};
 
 mod bands;
+mod mosaic;
 #[cfg(test)]
 mod reference;
 
@@ -28,6 +29,26 @@ pub struct BatchStackOptions {
     /// relative to a frame of weight 1: `minimum_sigma` and the variance
     /// output then describe such a frame.
     pub frame_weights: Option<Vec<Vec<f32>>>,
+    /// Optional panel ID per registered input, in loader order. Repeated IDs
+    /// identify observations of the same sky panel. Registered-frame
+    /// integration matches additive background planes across panel overlaps,
+    /// then tapers remaining smooth differences using footprint distances.
+    /// Photometric gains must already match; this does not flatten the sky.
+    /// Missing samples remain missing, and star detail stays in rejection.
+    /// At most 256 distinct panels are supported. `None` leaves normalization
+    /// untouched. A `LiveStacker` manages its own backgrounds and refuses this
+    /// option on reintegration.
+    ///
+    /// Matching retains corresponding positions and independent channel
+    /// support, including partial overlap cells. At most 64 positions per
+    /// cell on grids at most 128 by 128 use 16 bytes per panel and channel
+    /// per position, with aggregate sample storage capped at 128 MiB by
+    /// increasing grid spacing. Cell means, distances and corrections need
+    /// another 16 bytes per cell per panel and channel. The plane solve has
+    /// three unknowns per panel, plus about 40 bytes per usable pairwise
+    /// overlap cell. The whole-frame path reads each input once more to fit
+    /// backgrounds before its passes.
+    pub mosaic_panels: Option<Vec<u32>>,
     /// Where [`crate::LiveStacker::reintegrate`] keeps each frame's prepared
     /// image between passes, or `None` for the system temporary directory.
     /// An explicitly selected directory must exist and be writable; failure
@@ -79,6 +100,7 @@ impl Default for BatchStackOptions {
             minimum_sigma: 1.0e-6,
             cancel: None,
             frame_weights: None,
+            mosaic_panels: None,
             scratch_directory: None,
             band_memory_bytes: DEFAULT_BAND_MEMORY_BYTES,
             gpu: crate::GpuOptions::default(),
@@ -213,6 +235,7 @@ pub fn integrate_registered_frames_banded(
         return whole(&mut load, &mut progress);
     };
     let mut shape = None;
+    let mut mosaic = None;
     for index in 0..frame_count {
         check_cancelled(options)?;
         progress(BatchStackPass::Estimate, index, frame_count);
@@ -220,18 +243,27 @@ pub fn integrate_registered_frames_banded(
         check_cancelled(options)?;
         validate_image(&image, shape)?;
         shape = Some((image.width, image.height, image.channels));
+        if let Some(panels) = &options.mosaic_panels {
+            let samples = mosaic.get_or_insert_with(|| mosaic::Samples::new(&image, panels));
+            samples.add(index, &image, options)?;
+        }
         if !frames.keep(index, &image)? {
             drop((image, frames));
             return whole(&mut load, &mut progress);
         }
     }
     let shape = shape.expect("a batch has at least one frame");
+    let corrections = mosaic.map(|samples| samples.finish(options)).transpose()?;
+    let source = mosaic::Corrected {
+        source: &frames,
+        corrections: corrections.as_ref(),
+    };
     let mut reported = 0;
     let (result, _) = integrate_bands(
         shape,
         frame_count,
         options,
-        &frames,
+        &source,
         false,
         &mut |band, bands| {
             let until = ((band + 1) * frame_count).div_ceil(bands).min(frame_count);
@@ -345,6 +377,44 @@ pub(crate) fn integrate_registered_frames_observed(
     observe: Option<RejectionObserver<'_>>,
 ) -> Result<BatchStackResult> {
     validate_options(frame_count, options)?;
+    if let Some(panels) = &options.mosaic_panels {
+        let mut samples = None;
+        let mut checksums = Vec::with_capacity(frame_count);
+        let mut shape = None;
+        for index in 0..frame_count {
+            let image = load_unchanged(options, &mut load, BatchStackPass::Estimate, index, shape)?;
+            shape = Some((image.width, image.height, image.channels));
+            checksums.push(sample_checksum(&image.data));
+            samples
+                .get_or_insert_with(|| mosaic::Samples::new(&image, panels))
+                .add(index, &image, options)?;
+        }
+        let corrections = samples.expect("a batch has inputs").finish(options)?;
+        let plain_options = BatchStackOptions {
+            mosaic_panels: None,
+            ..options.clone()
+        };
+        return integrate_registered_frames_plain(
+            frame_count,
+            &plain_options,
+            |pass, index| {
+                let mut image =
+                    load_matching(options, &mut load, pass, index, shape, checksums[index])?;
+                corrections.apply(index, 0, &mut image.data);
+                Ok(image)
+            },
+            observe,
+        );
+    }
+    integrate_registered_frames_plain(frame_count, options, load, observe)
+}
+
+fn integrate_registered_frames_plain(
+    frame_count: usize,
+    options: &BatchStackOptions,
+    mut load: impl FnMut(BatchStackPass, usize) -> Result<LinearImage>,
+    observe: Option<RejectionObserver<'_>>,
+) -> Result<BatchStackResult> {
     let first_image = load_unchanged(options, &mut load, BatchStackPass::Estimate, 0, None)?;
     match (&options.frame_weights, first_image.channels) {
         (None, _) => {
@@ -393,6 +463,19 @@ pub(crate) fn validate_options(frame_count: usize, options: &BatchStackOptions) 
         }) {
             return Err(Error::Stack(
                 "batch frame weights must be finite and positive".into(),
+            ));
+        }
+    }
+    if let Some(panels) = &options.mosaic_panels {
+        if panels.len() != frame_count {
+            return Err(Error::Stack(
+                "mosaic_panels must contain one panel ID per registered frame".into(),
+            ));
+        }
+        let ids: std::collections::BTreeSet<_> = panels.iter().collect();
+        if ids.len() > 256 {
+            return Err(Error::Stack(
+                "mosaic integration supports at most 256 distinct panels".into(),
             ));
         }
     }

@@ -3347,8 +3347,16 @@ bool seiza_calibration_apply_residual_flat_response(const float *response,
  in a new directory inside `scratchDirectory`, an existing writable
  directory, or the system temporary directory; the three passes then read
  the files back in bands of rows, and the directory is removed before
- this returns. Nothing is registered or normalized again, and every input
- takes part. Pixels with fewer than three samples are averaged without
+ this returns. Optional `mosaicPanels` gives one unsigned panel ID per
+ input (repeated for observations of the same panel, at most 256 distinct
+ IDs). It matches additive background planes through the panel overlaps and
+ tapers remaining smooth differences at their edges, preserving missing
+ pixels and star detail. Gains must already match; it does not flatten the
+ sky. Matching uses paired positions and independent channel support,
+ including partial overlap cells. Its weighted sample arrays use at most
+ 128 MiB, plus coarse correction maps and the panel fit matrices.
+ Without it no normalization is repeated. Every input takes part.
+ Pixels with fewer than three samples are averaged without
  rejection. Memory is about 20 bytes per output sample plus the bands
  being read, at most 256 MiB, and the input being read. When the system
  temporary directory cannot take every input, each is instead read once

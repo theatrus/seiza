@@ -2696,6 +2696,9 @@ impl LiveStacker {
         mut progress: impl FnMut(BatchStackPass, usize, usize),
         banded: bool,
     ) -> Result<(BatchStackResult, Option<DrizzleResult>)> {
+        if options.mosaic_panels.is_some() {
+            return Err(Error::Stack("mosaic_panels belongs to registered-frame integration; a live stack manages its own backgrounds".into()));
+        }
         if let Some(reason) = self.reintegration_unavailable() {
             return Err(Error::Stack(reason));
         }

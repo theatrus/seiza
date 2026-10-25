@@ -662,6 +662,20 @@ samples of each hot pixel coincided, too many for rejection to single out. On
 sixteen 300s lights of a 61 MP sensor the map held 86 000 pixels and took 4 s
 of the stack's 16 s.
 
+## Registered mosaic backgrounds
+
+Set `BatchStackOptions::mosaic_panels` to one panel ID per input to
+`integrate_registered_frames` or `integrate_registered_frames_banded`.
+Repeated IDs group observations of the same sky panel. Seiza matches additive
+planes through all panel overlaps together, then tapers remaining smooth
+differences using distance to each panel's edges. Star detail stays in the
+three-pass integration, and missing pixels remain missing.
+
+Inputs must already share one pixel grid and photometric scale. This matches
+relative backgrounds; it cannot remove a gradient shared by every panel.
+Rust, C (`mosaicPanels`) and Python (`mosaic_panels`) use the same core code.
+See [method, costs and limits](../docs/design/mosaic-backgrounds.md).
+
 ## Normalization and frame-edge seams
 
 Global normalization gives each frame one gain and one offset per channel. A

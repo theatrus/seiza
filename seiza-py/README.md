@@ -766,6 +766,16 @@ for frame in frames:
 ```
 
 
+For registered mosaic panels, pass `mosaic_panels=[0, 0, 1, 1]` when the
+first two inputs cover one panel and the next two cover another. Seiza matches
+additive background planes across overlaps, then tapers remaining smooth
+differences at panel edges. Inputs must share a pixel grid and photometric
+scale; missing pixels stay NaN. The option accepts at most 256 distinct panel
+IDs and leaves the existing rejection and frame weights in use. Matching
+compares paired positions before clipping, including partial overlap cells
+and independent channel coverage. See
+[mosaic background matching](../docs/design/mosaic-backgrounds.md).
+
 Where the hardware has a GPU, a build with seiza-stacking's `gpu` feature
 (the default) runs stacking's heavy passes there, in single precision, so
 results differ from the CPU's by rounding. A `GpuOptions` says which passes

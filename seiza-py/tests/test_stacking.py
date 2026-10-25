@@ -1,6 +1,8 @@
 """Native Python coverage for batch, live, and calibration stacking APIs."""
 
 import shutil
+import pathlib
+import tempfile
 
 import numpy as np
 import pytest
@@ -1415,3 +1417,122 @@ def test_live_stacker_records_where_frames_clipped(tmp_path):
     assert 0.3 <= fraction[118:120, 91:93].min() and fraction.max() <= 0.5
     assert fraction[:20, :20].max() == 0.0
     assert seiza.LiveStacker.from_array(synthetic_star_field()).clipped_fraction() is None
+
+
+def test_registered_mosaic_matches_backgrounds_and_keeps_shared_nebula(tmp_path):
+    yy, xx = np.mgrid[:96, :160]
+    sky = (20.0 + 100.0 * np.exp(-((xx - 78) ** 2 + (yy - 48) ** 2) / 180.0)).astype(np.float32)
+    paths = []
+    for index in range(4):
+        panel = index // 2
+        image = np.full(sky.shape, np.nan, dtype=np.float32)
+        left = panel * 48
+        image[:, left:left + 112] = sky[:, left:left + 112] + panel * 18.0
+        image[10, 70] = np.nan
+        path = tmp_path / f"panel-{index}.fits"
+        fits.writeto(path, image)
+        paths.append(path)
+    result, _ = seiza.integrate_registered_frames(
+        paths, mosaic_panels=[0, 0, 1, 1], gpu=seiza.GpuOptions(enabled=False)
+    )
+    image = result.image
+    keep = np.isfinite(image)
+    basis = np.column_stack((np.ones(keep.sum()), xx[keep], yy[keep]))
+    difference = image[keep] - sky[keep]
+    common_plane, *_ = np.linalg.lstsq(basis, difference, rcond=None)
+    assert np.sqrt(np.mean((difference - basis @ common_plane) ** 2)) < 0.1
+    assert np.isnan(image[10, 70])
+    assert result.coverage[10, 70] == 0
+    assert result.coverage[30, 80] == 4
+    with pytest.raises(seiza.StackError, match="one panel ID"):
+        seiza.integrate_registered_frames(paths, mosaic_panels=[0])
+
+
+def _integrate_registered_mosaic_fixture(images, ids=None):
+    with tempfile.TemporaryDirectory() as folder:
+        paths = []
+        for i, image in enumerate(images):
+            path = pathlib.Path(folder) / f"{i}.fits"
+            fits.writeto(path, np.moveaxis(image, -1, 0) if image.ndim == 3 else image)
+            paths.append(path)
+        result, _ = seiza.integrate_registered_frames(
+            paths, mosaic_panels=ids, gpu=seiza.GpuOptions(enabled=False)
+        )
+        return result.image.copy()
+
+
+def test_a_valid_eight_pixel_overlap_is_background_matched():
+    a = np.full((128, 248), np.nan, np.float32)
+    b = a.copy()
+    a[:, :128] = 100
+    b[:, 120:] = 118
+    result = _integrate_registered_mosaic_fixture([a, b], [0, 1])
+    # Remove a possible common linear sky slope at the coverage boundary.
+    discontinuity = float(result[64, 120] - 2 * result[64, 119] + result[64, 118])
+    assert abs(discontinuity) < 0.1, f"uncorrected boundary step: {discontinuity} ADU"
+
+
+@pytest.mark.parametrize("missing_blue", [False, True])
+def test_rgb_channels_can_have_independent_missing_samples(missing_blue):
+    images = []
+    for panel in range(2):
+        image = np.full((96, 160, 3), np.nan, np.float32)
+        left = panel * 48
+        image[:, left : left + 112] = 100 + panel * 18
+        image[:, 1::2, 0] = np.nan
+        image[:, ::2, 1] = np.nan
+        if missing_blue:
+            image[:, :, 2] = np.nan
+        images.append(image)
+    ordinary = _integrate_registered_mosaic_fixture(images)
+    corrected = _integrate_registered_mosaic_fixture(images, [0, 1])
+    change = float(np.nanmax(abs(corrected - ordinary)))
+    assert change > 1, f"the 18 ADU panel mismatch was left untouched: change={change}"
+    assert np.array_equal(np.isnan(corrected), np.isnan(ordinary))
+    y, x = np.mgrid[:96, :160]
+    for c in range(2 if missing_blue else 3):
+        valid = np.isfinite(corrected[:, :, c])
+        basis = np.column_stack([np.ones(valid.sum()), x[valid], y[valid]])
+        values = corrected[:, :, c][valid]
+        plane = np.linalg.lstsq(basis, values, rcond=None)[0]
+        assert np.sqrt(np.mean((values - basis @ plane) ** 2)) < 0.1
+
+
+def test_shared_stellar_signal_does_not_create_a_background_halo():
+    y, x = np.mgrid[:192, :256]
+    star = (1000 * np.exp(-((x - 103) ** 2 + (y - 82) ** 2) / 8)).astype(np.float32)
+    results = []
+    for signal in [False, True]:
+        images = []
+        for panel in range(2):
+            image = (100 + panel * 1000 * x / 256 + (star if signal else 0)).astype(np.float32)
+            image[~((x >= panel * 96) & (x < panel * 96 + 160))] = np.nan
+            images.append(image)
+        results.append(_integrate_registered_mosaic_fixture(images, [0, 1]))
+    error = results[1] - results[0] - star
+    radius_squared = (x - 103) ** 2 + (y - 82) ** 2
+    outside = np.isfinite(error) & (radius_squared > 40**2)
+    basis = np.column_stack([np.ones(outside.sum()), x[outside], y[outside]])
+    plane = np.linalg.lstsq(basis, error[outside], rcond=None)[0]
+    residual = error - (plane[0] + plane[1] * x + plane[2] * y)
+    ring = np.isfinite(residual) & (radius_squared > 6**2) & (radius_squared < 30**2)
+    halo = float(np.max(abs(residual[ring])))
+    assert halo < 1, f"identical shared star created {halo:.3f} ADU of background structure"
+
+
+def test_a_rejected_cosmic_ray_cannot_spread_into_the_background():
+    outputs = []
+    for hit in [False, True]:
+        images = []
+        for index in range(6):
+            panel = index // 3
+            image = np.full((192, 256), np.nan, np.float32)
+            image[:, panel * 96 : panel * 96 + 160] = 100 + panel * 18
+            if hit and index == 0:
+                image[85, 97] += 3000
+            images.append(image)
+        outputs.append(_integrate_registered_mosaic_fixture(images, [0, 0, 0, 1, 1, 1]))
+    error = outputs[1] - outputs[0]
+    # These pixels lie outside the overlap and never saw the cosmic ray.
+    halo = float(np.max(abs(error[70:102, 80:96])))
+    assert halo < 0.1, f"rejected cosmic ray left a {halo:.3f} ADU background halo"

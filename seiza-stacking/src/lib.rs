@@ -202,7 +202,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// folds back onto the frame far beyond it, which 0.40.0 sampled (#307). The
 /// value stayed at "0.40.0" because no cache keyed on it predates 0.42.0,
 /// the first release to export it.
-pub const OUTPUT_VERSION: &str = "0.50.0";
+pub const OUTPUT_VERSION: &str = "0.51.0";
 
 /// Anything that can go wrong while calibrating, registering, normalizing, or
 /// stacking frames.

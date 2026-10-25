@@ -1,0 +1,500 @@
+{
+  "R": {
+    "after": {
+      "panels": [
+        {
+          "median_adu": 0.372528076171875,
+          "p90_adu": 0.97943115234375,
+          "samples": 2568
+        },
+        {
+          "median_adu": 0.2996826171875,
+          "p90_adu": 0.826202392578125,
+          "samples": 2956
+        },
+        {
+          "median_adu": 0.36419677734375,
+          "p90_adu": 0.947784423828125,
+          "samples": 3150
+        },
+        {
+          "median_adu": 0.311798095703125,
+          "p90_adu": 0.920074462890625,
+          "samples": 2939
+        }
+      ],
+      "pooled": {
+        "median_adu": 0.33172607421875,
+        "p90_adu": 0.9188232421875,
+        "samples": 11613
+      }
+    },
+    "before": {
+      "panels": [
+        {
+          "median_adu": 0.5953369140625,
+          "p90_adu": 2.0572509765625,
+          "samples": 2568
+        },
+        {
+          "median_adu": 0.599945068359375,
+          "p90_adu": 1.478790283203125,
+          "samples": 2956
+        },
+        {
+          "median_adu": 1.174346923828125,
+          "p90_adu": 2.10516357421875,
+          "samples": 3150
+        },
+        {
+          "median_adu": 0.555999755859375,
+          "p90_adu": 1.59088134765625,
+          "samples": 2939
+        }
+      ],
+      "pooled": {
+        "median_adu": 0.723175048828125,
+        "p90_adu": 1.878173828125,
+        "samples": 11613
+      }
+    },
+    "bin": 4,
+    "corrected_integration_seconds": 0.1394,
+    "display_domain": {
+      "black": 364.51312255859375,
+      "type": "physical-linear",
+      "white": 608.3836059570312
+    },
+    "display_plan": {
+      "channels": 1,
+      "color_strategy": "linked",
+      "curves": [
+        {
+          "highlights": 1.0,
+          "midtone": 0.055491957942398064,
+          "shadows": 0.020365983247756958,
+          "type": "mtf"
+        }
+      ]
+    },
+    "height": 1926,
+    "registration_model": "quadratic",
+    "stacking_output_version": "0.51.0",
+    "width": 2841
+  },
+  "G": {
+    "after": {
+      "panels": [
+        {
+          "median_adu": 0.462554931640625,
+          "p90_adu": 1.3287353515625,
+          "samples": 2567
+        },
+        {
+          "median_adu": 0.44647216796875,
+          "p90_adu": 1.21270751953125,
+          "samples": 2967
+        },
+        {
+          "median_adu": 0.423919677734375,
+          "p90_adu": 1.12420654296875,
+          "samples": 3148
+        },
+        {
+          "median_adu": 0.371551513671875,
+          "p90_adu": 1.034942626953125,
+          "samples": 2936
+        }
+      ],
+      "pooled": {
+        "median_adu": 0.4232177734375,
+        "p90_adu": 1.17767333984375,
+        "samples": 11618
+      }
+    },
+    "before": {
+      "panels": [
+        {
+          "median_adu": 0.671844482421875,
+          "p90_adu": 2.0970458984375,
+          "samples": 2567
+        },
+        {
+          "median_adu": 0.669403076171875,
+          "p90_adu": 1.64862060546875,
+          "samples": 2967
+        },
+        {
+          "median_adu": 1.164886474609375,
+          "p90_adu": 2.161224365234375,
+          "samples": 3148
+        },
+        {
+          "median_adu": 0.5364990234375,
+          "p90_adu": 1.50048828125,
+          "samples": 2936
+        }
+      ],
+      "pooled": {
+        "median_adu": 0.741302490234375,
+        "p90_adu": 1.902679443359375,
+        "samples": 11618
+      }
+    },
+    "bin": 4,
+    "corrected_integration_seconds": 0.200356541,
+    "display_domain": {
+      "black": 394.82928466796875,
+      "type": "physical-linear",
+      "white": 588.5890502929688
+    },
+    "display_plan": {
+      "channels": 1,
+      "color_strategy": "linked",
+      "curves": [
+        {
+          "highlights": 1.0,
+          "midtone": 0.07130138584821596,
+          "shadows": 0.025190837681293488,
+          "type": "mtf"
+        }
+      ]
+    },
+    "height": 1928,
+    "registration_model": "quadratic",
+    "stacking_output_version": "0.51.0",
+    "width": 2840
+  },
+  "B": {
+    "after": {
+      "panels": [
+        {
+          "median_adu": 0.442352294921875,
+          "p90_adu": 1.179595947265625,
+          "samples": 2569
+        },
+        {
+          "median_adu": 0.378021240234375,
+          "p90_adu": 1.030059814453125,
+          "samples": 2989
+        },
+        {
+          "median_adu": 0.416259765625,
+          "p90_adu": 1.10791015625,
+          "samples": 3140
+        },
+        {
+          "median_adu": 0.363555908203125,
+          "p90_adu": 0.98065185546875,
+          "samples": 2925
+        }
+      ],
+      "pooled": {
+        "median_adu": 0.398681640625,
+        "p90_adu": 1.0670166015625,
+        "samples": 11623
+      }
+    },
+    "before": {
+      "panels": [
+        {
+          "median_adu": 0.539581298828125,
+          "p90_adu": 1.4407958984375,
+          "samples": 2569
+        },
+        {
+          "median_adu": 0.460418701171875,
+          "p90_adu": 1.185699462890625,
+          "samples": 2989
+        },
+        {
+          "median_adu": 0.65338134765625,
+          "p90_adu": 1.547210693359375,
+          "samples": 3140
+        },
+        {
+          "median_adu": 0.42901611328125,
+          "p90_adu": 1.125152587890625,
+          "samples": 2925
+        }
+      ],
+      "pooled": {
+        "median_adu": 0.51861572265625,
+        "p90_adu": 1.35223388671875,
+        "samples": 11623
+      }
+    },
+    "bin": 4,
+    "corrected_integration_seconds": 0.143164958,
+    "display_domain": {
+      "black": 383.3081359863281,
+      "type": "physical-linear",
+      "white": 537.743896484375
+    },
+    "display_plan": {
+      "channels": 1,
+      "color_strategy": "linked",
+      "curves": [
+        {
+          "highlights": 1.0,
+          "midtone": 0.07904860977363527,
+          "shadows": 0.01157144084572792,
+          "type": "mtf"
+        }
+      ]
+    },
+    "height": 1943,
+    "registration_model": "quadratic",
+    "stacking_output_version": "0.51.0",
+    "width": 2842
+  },
+  "HA": {
+    "after": {
+      "panels": [
+        {
+          "median_adu": 0.5498580932617188,
+          "p90_adu": 1.637786865234375,
+          "samples": 2531
+        },
+        {
+          "median_adu": 0.3523101806640625,
+          "p90_adu": 0.9767684936523438,
+          "samples": 2841
+        },
+        {
+          "median_adu": 0.36602020263671875,
+          "p90_adu": 1.0065155029296875,
+          "samples": 3085
+        },
+        {
+          "median_adu": 0.26119232177734375,
+          "p90_adu": 0.7227859497070312,
+          "samples": 3036
+        }
+      ],
+      "pooled": {
+        "median_adu": 0.356658935546875,
+        "p90_adu": 1.095977783203125,
+        "samples": 11493
+      }
+    },
+    "before": {
+      "panels": [
+        {
+          "median_adu": 0.7830429077148438,
+          "p90_adu": 2.1568450927734375,
+          "samples": 2531
+        },
+        {
+          "median_adu": 0.8547821044921875,
+          "p90_adu": 1.8830184936523438,
+          "samples": 2841
+        },
+        {
+          "median_adu": 1.53472900390625,
+          "p90_adu": 2.75048828125,
+          "samples": 3085
+        },
+        {
+          "median_adu": 1.341461181640625,
+          "p90_adu": 2.3647918701171875,
+          "samples": 3036
+        }
+      ],
+      "pooled": {
+        "median_adu": 1.06134033203125,
+        "p90_adu": 2.4365921020507812,
+        "samples": 11493
+      }
+    },
+    "bin": 4,
+    "corrected_integration_seconds": 0.167349209,
+    "display_domain": {
+      "black": 72.78943634033203,
+      "type": "physical-linear",
+      "white": 208.82823181152344
+    },
+    "display_plan": {
+      "channels": 1,
+      "color_strategy": "linked",
+      "curves": [
+        {
+          "highlights": 1.0,
+          "midtone": 0.22523144154880295,
+          "shadows": 0.0,
+          "type": "mtf"
+        }
+      ]
+    },
+    "height": 1917,
+    "registration_model": "quadratic",
+    "stacking_output_version": "0.51.0",
+    "width": 2912
+  },
+  "OIII": {
+    "after": {
+      "panels": [
+        {
+          "median_adu": 0.36017608642578125,
+          "p90_adu": 1.018218994140625,
+          "samples": 2582
+        },
+        {
+          "median_adu": 0.35480499267578125,
+          "p90_adu": 0.9016647338867188,
+          "samples": 3024
+        },
+        {
+          "median_adu": 0.37404632568359375,
+          "p90_adu": 1.030059814453125,
+          "samples": 3091
+        },
+        {
+          "median_adu": 0.309539794921875,
+          "p90_adu": 0.869781494140625,
+          "samples": 2964
+        }
+      ],
+      "pooled": {
+        "median_adu": 0.34622955322265625,
+        "p90_adu": 0.9593353271484375,
+        "samples": 11661
+      }
+    },
+    "before": {
+      "panels": [
+        {
+          "median_adu": 0.3733367919921875,
+          "p90_adu": 1.0361404418945312,
+          "samples": 2582
+        },
+        {
+          "median_adu": 0.44957733154296875,
+          "p90_adu": 1.1327667236328125,
+          "samples": 3024
+        },
+        {
+          "median_adu": 0.5094146728515625,
+          "p90_adu": 1.2472457885742188,
+          "samples": 3091
+        },
+        {
+          "median_adu": 0.4049530029296875,
+          "p90_adu": 1.0243988037109375,
+          "samples": 2964
+        }
+      ],
+      "pooled": {
+        "median_adu": 0.429931640625,
+        "p90_adu": 1.1236572265625,
+        "samples": 11661
+      }
+    },
+    "bin": 4,
+    "corrected_integration_seconds": 0.176610208,
+    "display_domain": {
+      "black": 66.97606658935547,
+      "type": "physical-linear",
+      "white": 259.13525390625
+    },
+    "display_plan": {
+      "channels": 1,
+      "color_strategy": "linked",
+      "curves": [
+        {
+          "highlights": 1.0,
+          "midtone": 0.07411988392734763,
+          "shadows": 0.0,
+          "type": "mtf"
+        }
+      ]
+    },
+    "height": 1947,
+    "registration_model": "quadratic",
+    "stacking_output_version": "0.51.0",
+    "width": 2865
+  },
+  "SII": {
+    "after": {
+      "panels": [
+        {
+          "median_adu": 0.31217002868652344,
+          "p90_adu": 0.9782333374023438,
+          "samples": 2553
+        },
+        {
+          "median_adu": 0.26737213134765625,
+          "p90_adu": 0.7070960998535156,
+          "samples": 3042
+        },
+        {
+          "median_adu": 0.2735176086425781,
+          "p90_adu": 0.8105049133300781,
+          "samples": 3057
+        },
+        {
+          "median_adu": 0.26171302795410156,
+          "p90_adu": 0.7954645156860352,
+          "samples": 3009
+        }
+      ],
+      "pooled": {
+        "median_adu": 0.2757740020751953,
+        "p90_adu": 0.8080902099609375,
+        "samples": 11661
+      }
+    },
+    "before": {
+      "panels": [
+        {
+          "median_adu": 0.3744792938232422,
+          "p90_adu": 1.0650711059570312,
+          "samples": 2553
+        },
+        {
+          "median_adu": 0.3045978546142578,
+          "p90_adu": 0.7845325469970703,
+          "samples": 3042
+        },
+        {
+          "median_adu": 0.38028907775878906,
+          "p90_adu": 1.0109825134277344,
+          "samples": 3057
+        },
+        {
+          "median_adu": 0.2722148895263672,
+          "p90_adu": 0.8423423767089844,
+          "samples": 3009
+        }
+      ],
+      "pooled": {
+        "median_adu": 0.3276195526123047,
+        "p90_adu": 0.9222564697265625,
+        "samples": 11661
+      }
+    },
+    "bin": 4,
+    "corrected_integration_seconds": 0.163061625,
+    "display_domain": {
+      "black": 16.44021224975586,
+      "type": "physical-linear",
+      "white": 181.45809936523438
+    },
+    "display_plan": {
+      "channels": 1,
+      "color_strategy": "linked",
+      "curves": [
+        {
+          "highlights": 1.0,
+          "midtone": 0.060229508415798196,
+          "shadows": 0.0,
+          "type": "mtf"
+        }
+      ]
+    },
+    "height": 1944,
+    "registration_model": "quadratic",
+    "stacking_output_version": "0.51.0",
+    "width": 2860
+  }
+}

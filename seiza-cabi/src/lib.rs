@@ -13325,6 +13325,138 @@ mod tests {
     }
 
     #[test]
+    fn registered_mosaic_json_matches_backgrounds_and_preserves_coverage() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut inputs = Vec::new();
+        for index in 0..4 {
+            let panel = index / 2;
+            let data = (0..160 * 96)
+                .map(|pixel| {
+                    let (x, y) = (pixel % 160, pixel / 160);
+                    if x < panel * 48 || x >= panel * 48 + 112 || (x, y) == (70, 10) {
+                        return f32::NAN;
+                    }
+                    20.0 + panel as f32 * 18.0
+                })
+                .collect();
+            let path = directory.path().join(format!("panel-{index}.fits"));
+            seiza_stacking::write_processed_image_fits_f32(
+                &path,
+                &LinearImage::new(160, 96, 1, data).unwrap(),
+                &[],
+                &[],
+            )
+            .unwrap();
+            inputs.push(path);
+        }
+        let request = CString::new(
+            json!({"inputs":inputs,"mosaicPanels":[0,0,1,1],"gpu":{"enabled":false}}).to_string(),
+        )
+        .unwrap();
+        let mut error = ptr::null_mut();
+        let snapshot = unsafe {
+            seiza_stack_integrate_registered_json(
+                request.as_ptr(),
+                ptr::null(),
+                None,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut error,
+            )
+        };
+        assert!(error.is_null());
+        assert!(!snapshot.is_null());
+        let image = &unsafe { &*snapshot }.snapshot.image;
+        // The common plane is unconstrained; it must be continuous at both
+        // coverage boundaries, without treating missing pixels as zero.
+        for x in [48, 112] {
+            let p = 30 * 160 + x;
+            let left = image.data[p - 1] - image.data[p - 2];
+            let right = image.data[p + 1] - image.data[p];
+            let step = image.data[p] - image.data[p - 1];
+            assert!((step - (left + right) * 0.5).abs() < 0.1);
+        }
+        assert!(image.data[10 * 160 + 70].is_nan());
+        unsafe { seiza_stack_snapshot_free(snapshot) };
+        let request =
+            CString::new(json!({"inputs":inputs,"mosaicPanels":[0]}).to_string()).unwrap();
+        let mut error = ptr::null_mut();
+        let snapshot = unsafe {
+            seiza_stack_integrate_registered_json(
+                request.as_ptr(),
+                ptr::null(),
+                None,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut error,
+            )
+        };
+        assert!(snapshot.is_null());
+        assert!(!error.is_null());
+        unsafe { seiza_string_free(error) };
+    }
+
+    #[test]
+    fn registered_mosaic_json_matches_partial_cells_with_independent_rgb_support() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut inputs = Vec::new();
+        for panel in 0..2 {
+            let data: Vec<f32> = (0..248 * 128 * 3)
+                .map(|sample| {
+                    let (pixel, c) = (sample / 3, sample % 3);
+                    let x = pixel % 248;
+                    if x < panel * 120
+                        || x >= panel * 120 + 128
+                        || (c == 0 && x % 2 == 1)
+                        || (c == 1 && x % 2 == 0)
+                    {
+                        f32::NAN
+                    } else {
+                        100.0 + panel as f32 * 18.0
+                    }
+                })
+                .collect();
+            let path = directory.path().join(format!("panel-{panel}.fits"));
+            seiza_image_io::save_f32(
+                &path,
+                248,
+                128,
+                seiza_fits::F32ImageData::RgbInterleaved(&data),
+                &Default::default(),
+            )
+            .unwrap();
+            inputs.push(path);
+        }
+        let request = CString::new(
+            json!({"inputs":inputs,"mosaicPanels":[0,1],"gpu":{"enabled":false}}).to_string(),
+        )
+        .unwrap();
+        let mut error = ptr::null_mut();
+        let snapshot = unsafe {
+            seiza_stack_integrate_registered_json(
+                request.as_ptr(),
+                ptr::null(),
+                None,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut error,
+            )
+        };
+        assert!(error.is_null());
+        assert!(!snapshot.is_null());
+        let image = &unsafe { &*snapshot }.snapshot.image;
+        for c in 0..3 {
+            let x = if c == 1 { 121 } else { 120 };
+            let at = |x: usize| image.data[(64 * 248 + x) * 3 + c];
+            let step = at(x) - 2.0 * at(x - 2) + at(x - 4);
+            assert!(step.abs() < 0.1, "channel {c}: {step}");
+        }
+        assert!(image.data[(64 * 248 + 121) * 3].is_nan());
+        assert!(image.data[(64 * 248 + 120) * 3 + 1].is_nan());
+        unsafe { seiza_stack_snapshot_free(snapshot) };
+    }
+
+    #[test]
     fn registered_frames_are_integrated_with_leave_one_out_rejection() {
         unsafe extern "C" fn count(pass: u32, index: usize, total: usize, context: *mut c_void) {
             let calls = unsafe { &mut *(context as *mut Vec<(u32, usize, usize)>) };
@@ -19027,6 +19159,8 @@ struct RegisteredIntegrationRequest {
     #[serde(default)]
     frame_weights: Option<Vec<Vec<f32>>>,
     #[serde(default)]
+    mosaic_panels: Option<Vec<u32>>,
+    #[serde(default)]
     scratch_directory: Option<String>,
     #[serde(default)]
     gpu: seiza_stacking::GpuOptions,
@@ -19067,8 +19201,16 @@ struct RegisteredFrameResponse {
 /// in a new directory inside `scratchDirectory`, an existing writable
 /// directory, or the system temporary directory; the three passes then read
 /// the files back in bands of rows, and the directory is removed before
-/// this returns. Nothing is registered or normalized again, and every input
-/// takes part. Pixels with fewer than three samples are averaged without
+/// this returns. Optional `mosaicPanels` gives one unsigned panel ID per
+/// input (repeated for observations of the same panel, at most 256 distinct
+/// IDs). It matches additive background planes through the panel overlaps and
+/// tapers remaining smooth differences at their edges, preserving missing
+/// pixels and star detail. Gains must already match; it does not flatten the
+/// sky. Matching uses paired positions and independent channel support,
+/// including partial overlap cells. Its weighted sample arrays use at most
+/// 128 MiB, plus coarse correction maps and the panel fit matrices.
+/// Without it no normalization is repeated. Every input takes part.
+/// Pixels with fewer than three samples are averaged without
 /// rejection. Memory is about 20 bytes per output sample plus the bands
 /// being read, at most 256 MiB, and the input being read. When the system
 /// temporary directory cannot take every input, each is instead read once
@@ -19117,6 +19259,7 @@ pub unsafe extern "C" fn seiza_stack_integrate_registered_json(
             cancel: unsafe { cancel.as_ref() }
                 .map(|signal| CancelSignal::from(Arc::clone(&signal.cancelled))),
             frame_weights: request.frame_weights,
+            mosaic_panels: request.mosaic_panels,
             scratch_directory: request.scratch_directory.map(PathBuf::from),
             gpu: request.gpu,
             ..seiza_stacking::BatchStackOptions::default()

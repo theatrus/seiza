@@ -144,10 +144,13 @@ exposes the **superset** of what both apps need.
   with the reintegrated snapshot.
   `seiza_stack_integrate_registered_json` gives the same three-pass
   rejection to FITS or XISF frames calibrated, registered and normalized
-  elsewhere, onto one grid: it reads each file once per pass, takes optional
-  per-frame weights, a cancel signal and the same progress callback, and
-  returns a `SeizaStackSnapshot` with an optional JSON report of what each
-  frame kept.
+  elsewhere, onto one grid: it reads each file once into scratch and takes
+  optional per-frame weights, a cancel signal and the same progress callback.
+  `mosaicPanels` optionally assigns each input a panel ID, repeated for
+  observations of the same panel (at most 256 distinct IDs). It matches
+  additive background planes and tapers residual differences across overlaps;
+  inputs must already share a photometric scale. The call returns a
+  `SeizaStackSnapshot` with an optional JSON report of what each frame kept.
   `seiza_live_stacker_open_prepared_fits` opens a stack from a FITS or XISF
   frame the host has already calibrated and debayered, keeping its header
   cards for the outputs, so a host can correct a frame between calibration and

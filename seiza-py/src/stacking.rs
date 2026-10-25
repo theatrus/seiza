@@ -2808,7 +2808,12 @@ impl PyIntegratedFrame {
 /// passes read the files back in bands of rows, and the directory is removed
 /// before this returns. When the system temporary directory cannot take every
 /// input, each is read once per pass instead, and must read the same each
-/// time. ``frame_weights`` gives one list per input with one positive
+/// time. ``mosaic_panels`` optionally gives one unsigned panel ID per input,
+/// repeated for observations of the same panel (at most 256 distinct IDs).
+/// It matches additive background planes through their overlaps and tapers
+/// remaining smooth differences at panel edges, preserving missing pixels
+/// and star detail. Gains must already match; it does not flatten the sky.
+/// ``frame_weights`` gives one list per input with one positive
 /// weight per channel; left out, every frame weighs the same.
 /// ``minimum_sigma`` is a noise floor in the frames' units. ``gpu``, a
 /// :class:`GpuOptions`, says whether the rejection passes may run on the
@@ -2825,6 +2830,7 @@ impl PyIntegratedFrame {
     sigma_high=3.0,
     minimum_sigma=None,
     frame_weights=None,
+    mosaic_panels=None,
     scratch_directory=None,
     cancel=None,
     gpu=None
@@ -2837,6 +2843,7 @@ fn integrate_registered_frames(
     sigma_high: f32,
     minimum_sigma: Option<f32>,
     frame_weights: Option<Vec<Vec<f32>>>,
+    mosaic_panels: Option<Vec<u32>>,
     scratch_directory: Option<PathBuf>,
     cancel: Option<Py<PyAny>>,
     gpu: Option<PyGpuOptions>,
@@ -2845,6 +2852,7 @@ fn integrate_registered_frames(
     let mut options = batch_options(sigma_low, sigma_high, scratch_directory)?;
     options.cancel = Some(signal);
     options.frame_weights = frame_weights;
+    options.mosaic_panels = mosaic_panels;
     options.gpu = PyGpuOptions::or_default(gpu);
     if let Some(minimum_sigma) = minimum_sigma {
         options.minimum_sigma = minimum_sigma;

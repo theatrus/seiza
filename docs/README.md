@@ -80,3 +80,5 @@ and required checks, and [RELEASE.md](../RELEASE.md) for versioning and publishi
 
 See the [Seiza 0.43.0 release notes](releases/v0.43.0.md) for narrowband balance,
 validated continuum subtraction and RGB star reduction.
+
+[Unreleased changes](releases/unreleased.md) include registered mosaic background matching.
