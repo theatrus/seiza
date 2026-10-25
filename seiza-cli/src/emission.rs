@@ -12,6 +12,19 @@ pub(crate) struct BlendArgs {
 }
 #[derive(Subcommand)]
 enum BlendCommand {
+    /// Export calibrated line flux from signed residuals and exact plan responses
+    Flux {
+        #[arg(long, num_args=1..=3)]
+        residual: Vec<PathBuf>,
+        /// JSON object containing plans and calibration, as in the C ABI
+        #[arg(long)]
+        settings: PathBuf,
+        /// One signed mono output per physical line
+        #[arg(long, num_args=1..=3)]
+        output: Vec<PathBuf>,
+        #[arg(long)]
+        report: PathBuf,
+    },
     /// Add signed mono line residuals to linear RGB using exact plans
     Emission {
         #[arg(long)]
@@ -65,7 +78,77 @@ fn open(path: &std::path::Path, transfer: &str) -> Result<FitsFrame> {
     Ok(frame)
 }
 pub(crate) fn run(args: BlendArgs) -> Result<()> {
+    if let BlendCommand::Flux {
+        residual,
+        settings,
+        output,
+        report,
+    } = &args.command
+    {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct FluxSettings {
+            plans: Vec<seiza_stacking::ContinuumPlan>,
+            calibration: seiza_stacking::EmissionFluxCalibration,
+        }
+        let mut paths = vec![
+            ("settings".into(), settings.as_path()),
+            ("report".into(), report.as_path()),
+        ];
+        paths.extend(
+            residual
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (format!("residual {i}"), p.as_path())),
+        );
+        paths.extend(
+            output
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (format!("output {i}"), p.as_path())),
+        );
+        crate::provenance::validate_path_roles(paths)?;
+        let config: FluxSettings = serde_json::from_slice(&std::fs::read(settings)?)?;
+        if output.len() != residual.len() {
+            bail!("Supply one output per residual line");
+        }
+        let frames = residual
+            .iter()
+            .map(FitsFrame::open)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if frames.iter().any(|frame| !frame.headers.iter().any(|(k,v)| k.eq_ignore_ascii_case("SEIZATRF") && matches!(v,HeaderValue::String(tag) if tag.trim().eq_ignore_ascii_case("LINEAR")))) {bail!("Flux inversion requires signed LINEAR residuals");}
+        let (images, result) = seiza_stacking::solve_emission_flux(
+            &frames.iter().map(|f| &f.image).collect::<Vec<_>>(),
+            &config.plans,
+            &config.calibration,
+        )?;
+        for (i, (image, path)) in images.iter().zip(output).enumerate() {
+            seiza_stacking::write_processed_image_fits_f32(
+                path,
+                image,
+                &frames[0].headers,
+                &[
+                    WriteHeaderCard::new(
+                        "SEIZACON",
+                        HeaderValue::String("CALIBRATED-EMISSION".into()),
+                    ),
+                    WriteHeaderCard::new("FILTER", HeaderValue::String(result.lines[i].clone())),
+                    WriteHeaderCard::new("SEIZATRF", HeaderValue::String("LINEAR".into())),
+                    WriteHeaderCard::new("BUNIT", HeaderValue::String(result.unit.clone())),
+                ],
+            )?;
+        }
+        let mut provenance = serde_json::to_value(&result)?;
+        provenance["residualInputs"] = serde_json::to_value(
+            residual
+                .iter()
+                .map(|path| crate::provenance::file_identity(path))
+                .collect::<Result<Vec<_>>>()?,
+        )?;
+        return crate::provenance::write_json_atomic(report, &provenance);
+    }
     let (base, image, output, transfer) = match args.command {
+        BlendCommand::Flux { .. } => unreachable!(),
         BlendCommand::Emission {
             broadband,
             residual,

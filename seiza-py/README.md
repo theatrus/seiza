@@ -1387,3 +1387,70 @@ the base only. `blend_display_structure(narrowband, broadband, amount)` mixes
 prepared starless RGB display images in [0,1], before restoring RGB stars once.
 Amount 0 keeps narrowband, 1 keeps broadband, and intermediate amounts require
 common coverage. All three functions return new arrays and preserve inputs.
+
+### Validate profiles and export calibrated line flux
+
+`measure_and_fit_continuum` and its masked twin accept
+`photometry_options={"psf_matching": {"target_fwhm": 5.0}}` for explicit Gaussian
+broadening on copies. Omit `target_fwhm` to choose 1.05 times the broadest measured
+profile. The plan records raw/prepared revisions and kernels;
+`subtract_continuum` replays them on the original arrays. Saturation evidence
+is still required for every original input. Held-out pixel validation defaults
+to `max_pixel_residual=0.15` and remains mandatory for automatic host use.
+The result's `pixelValidation` report distinguishes cores/halos from aperture
+flux error. Gaussian matching can still fail this check.
+
+`balance_narrowband(..., star_mask_radius=8)` excludes star circles from curve
+statistics while preserving image coverage. `None` includes stars.
+`reduce_green_excess(image, amount)` returns a copy of bounded display RGB,
+reducing green above both red and blue. Use it after palette mapping and before
+restoring an RGB-star layer. The input is unchanged.
+
+`solve_emission_flux(residuals, plans, calibration)` returns `(images, report)`.
+The calibration mapping supplies `revision`, `unit`, `lines`, exact `sources`,
+`narrowband_response`, `reference_response` and optional `residual_covariance`.
+Rows follow the plan/line order, references follow each plan. Responses include
+all exposure/gain/throughput factors in the exact input units. The operation
+subtracts the fitted broadband responses before solving coupled lines. Signed
+samples and common coverage are retained. The report embeds calibration/plans
+and propagated covariance. Missing covariance means unknown uncertainty;
+response, coefficient and zero-level uncertainty are not included. Filter labels cannot
+supply a physical flux calibration.
+
+Matching also requires `target_fwhm <= aperture_radius` and
+`annulus_inner >= 1.5 * target_fwhm`. The default 8/12/20 photometry therefore
+permits targets up to **8 pixels**. Larger targets require larger photometry
+radii in the options JSON (with a hard target limit of 32 pixels and outer
+sky-annulus radius at most 128 pixels). This keeps the target profile inside
+the measurement aperture and away from its sky annulus.
+
+Calibrated export also requires explicit `residualZeroLevels` (Python alias
+`residual_zero_levels`), one additive zero level per residual in its exact
+sample units. Zero is an explicit calibration declaration. The solver uses
+`M F = E − residualZeroLevels`; it never guesses these values from a sky median
+or the display baseline. Background preparation may retain an additive reference
+level, so response calibration alone cannot establish a physical zero point.
+Zero-level uncertainty is outside the propagated residual covariance unless
+the producer includes it there.
+
+Image-based validation also audits isolated candidates excluded for clipping or
+saturation. They never train the fit. Their observed residual profiles must all
+be measurable and below the same absolute limit; `clippedStars`,
+`clippedProfiles` and `clippedMaxAbsoluteFraction` record this separate check.
+It prevents a clean unsaturated sample from hiding clipped-core artifacts and
+does not infer lost flux. The held-out report keeps both its 90th-percentile
+and maximum profile error.
+
+`screen_rgb_stars_reduced(nebula, original, starless, reduction)` returns display
+RGB with a reduced screen-star layer. Reduction 0 preserves ordinary screen
+recombination; 1 uses full one-pixel cross erosion of star intensity. A shared
+RGB gain preserves star-layer color ratios, while invalid neighbours/borders
+retain the unreduced layer. The inputs and starless nebula are unchanged.
+This changes display prominence/apparent size, not linear or PSF measurements.
+
+Calibrated export requires `continuumCoefficients` (Python alias
+`continuum_coefficients`): exact per-plan coefficient snapshots in reference
+order. Residual zero-level calibration depends on these weights. A changed
+fit/manual weight is rejected even when the raw source revisions are unchanged;
+update the explicit zero levels and snapshots after recalibration. Reports and
+cache identities retain the snapshots.

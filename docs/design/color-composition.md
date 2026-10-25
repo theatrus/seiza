@@ -392,8 +392,8 @@ starless branches and validate equivalent scaling.
 
 Require and report registration and PSF checks. Aperture totals can fit even
 when subtraction leaves stellar rings. Start by refusing automatic subtraction
-when stellar residuals show an unacceptable PSF mismatch. A later optional
-PSF-matching operation must describe its kernel and resulting resolution;
+when stellar residuals show an unacceptable PSF mismatch. The optional Gaussian
+PSF preparation records its kernels and resulting target resolution;
 never sharpen one image implicitly during fitting.
 
 For multiple references, scale design-matrix columns for numerical stability,
@@ -430,8 +430,8 @@ Multiple lines in overlapping filters require a coupled response matrix,
 not three independent scalar corrections.
 
 Label the default output an emission residual. Reserve pure line-flux claims
-for a later throughput-aware solver with measured response inputs, an explicit
-uncertainty model, and a well-conditioned matrix. Broadband integration for
+for `solve_emission_flux` with calibrated response inputs, an explicit
+uncertainty report, and a well-conditioned matrix. Broadband integration for
 an artistic LRGB+emission result does not need that scientific claim.
 
 ### Automatic narrowband with RGB stars: explicit core branches
@@ -497,7 +497,7 @@ Before touching numerical code, run stacking and stretch `output_version`
 tests as required by `AGENTS.md`. Add cases for each new enabled mode, verify
 that a planted change fails, and preserve existing disabled-path summaries.
 Record output versions according to the repository rules. The upcoming
-stacking 0.49.0 output version covers these new operations; existing stacking
+stacking 0.50.0 output version covers these new operations; existing stacking
 and stretch summaries remain unchanged. Cover:
 
 - Known midtone landmarks, identity, protected shadows, H-alpha preservation,
@@ -529,130 +529,85 @@ coverage, and OIII/SII balance reported applied curves. The isolated fixture
 had no fresh plate solve, so this validates star separation and display
 recombination without making a Gaia-calibration or full-frame speed claim.
 
-### Initial real continuum check
+### Current combined-image contract
 
-The new core and CLI were exercised on central 1024×1024 cutouts of the same
-Bubble Nebula R/G/B and Ha/OIII/SII masters used for the paired application's
-real SXT check. A separate Seiza registration aligned every cutout to Ha without
-photometric normalization. Registration RMS ranged from 0.64 to 0.94 pixels.
-The fixture declared a 65535 saturation ceiling in the working ADU units;
-no physical filter-throughput or pure-line calibration was inferred. The
-original masters and live catalog were unchanged.
+The paired draft uses Seiza 0.43.0 and stacking/output 0.50.0, unreleased.
+See [continuum, matching and calibrated response APIs](../../seiza-stacking/README.md#validate-stellar-profiles-and-match-psfs-explicitly).
+PSF Guard retains aligned, background-prepared linear samples, validates and
+subtracts before SXT, and keeps signed residuals separate from artistic amounts.
+No plan is transferred to changed starless pixels. Optional Gaussian matching
+records exact kernels and propagates clipping/coverage support; held-out pixel
+profiles still gate acceptance. Balance masks affect statistics only. Green
+reduction runs before independently prepared RGB stars are restored.
 
-With the default aperture and fit controls:
+Calibrated line-flux export is a separate response-matrix operation. It requires
+producer-calibrated responses on exact source units and records full provenance
+and uncertainty assumptions. Unknown covariance remains unknown. Display
+previews continue to use empirical reference-unit emission residuals.
 
-| Line and reference | Result | Coefficients | Held-out fractional RMS |
-| --- | --- | --- | --- |
-| Ha / R | Skipped: brightness trend | No accepted plan | 0.1347 before the trend check |
-| SII / R | Fitted | 0.22863 | 0.0642 |
-| OIII / G+B | Fitted | 0.09086, 0.10852 | 0.0397 |
-| OIII / G | Fitted | 0.22242 | 0.0918 |
-| OIII / B | Fitted | 0.18905 | 0.0720 |
+Synthetic regressions cover equal-aperture-flux core/ring failures, matching
+replay and mask/NaN support, extended wing mismatch, malformed saved kernels,
+unknown original saturation, independent input gains, coupled line leakage,
+rank/conditioning, covariance and extreme finite numeric scales. The output
+version changes because the new default pixel gate refuses a profile mismatch
+that the prior aperture-only fixture accepted. Existing stacking/stretch
+summaries remain unchanged.
 
-The multi-reference OIII fit retained 16 training and five held-out stars;
-SII retained 33 and 12. The Ha faint/bright residual difference was -0.1577,
-exceeding the default 0.15 limit even though aggregate RMS alone passed.
-The CLI wrote a skipped report and no Ha residual image. Successful outputs
-preserved signed samples and were marked linear emission residuals. This is a
-single-field functional check, not enough evidence to enable automatic
-continuum subtraction for every combined-image recipe. Wider nebula and
-reflection/galaxy validation, starless-branch equivalence, PSF matching where
-needed, and the PSF Guard combined-image stage remain work before release.
+Real validation uses isolated copies of completed masters and fresh pixel
+solves; original files/catalogs stay unchanged. Reports and images distinguish
+accepted emission residuals, omitted lines and failed mapped builds. No physical
+line-flux calibration is inferred from those examples' filter names. Keep both
+PRs draft and defer publication until the complete release is authorized.
 
-### Initial SNR G132 sampling findings
+Calibrated export also requires explicit `residualZeroLevels` (Python alias
+`residual_zero_levels`), one additive zero level per residual in its exact
+sample units. Zero is an explicit calibration declaration. The solver uses
+`M F = E − residualZeroLevels`; it never guesses these values from a sky median
+or the display baseline. Background preparation may retain an additive reference
+level, so response calibration alone cannot establish a physical zero point.
+Zero-level uncertainty is outside the propagated residual covariance unless
+the producer includes it there.
 
-A second full-field test used the newest SNR G132 RGB and Ha/OIII/SII masters
-(100 h 4 min in total), software-binned twofold from 9576×6388 to 4788×3194.
-Separate Seiza registration onto Ha measured RMS 0.14–0.54 pixels. The input
-planes retained stars, physical working scales and their filter identities;
-no photometric normalization or image-wide background pedestal was applied.
-The fixture declared an experimental 65535 working-unit saturation ceiling.
-Its physical mapping after master calibration/normalization is not established
-by this test, and must not be inferred from observed maxima.
+Image-based validation also audits isolated candidates excluded for clipping or
+saturation. They never train the fit. Their observed residual profiles must all
+be measurable and below the same absolute limit; `clippedStars`,
+`clippedProfiles` and `clippedMaxAbsoluteFraction` record this separate check.
+It prevents a clean unsaturated sample from hiding clipped-core artifacts and
+does not infer lost flux. The held-out report keeps both its 90th-percentile
+and maximum profile error.
 
-The default 400-candidate run skipped Ha/R after 341 saturation rejections;
-SII/R fitted 0.092994 with 12 training and three held-out stars (validation RMS
-0.1092); OIII/G+B skipped on a brightness trend of -0.2675. Changing only
-`max_stars` to 1600 produced Ha and SII brightness-trend skips (-0.1967 and
--0.2300), while OIII/G+B fitted 0.036448/0.057917 with 530 training and 178
-held-out stars (validation RMS 0.0630). No failed model was applied.
+### Display RGB star reduction
 
-In that initial implementation the detector requested four times the configured
-count, but measurement considered only the first `max_stars` positions.
-Saturated bright stars consumed the budget before enough eligible stars were
-measured. The prepared follow-up searches up to 4096 candidates independently
-of the usable budget, checks eligibility first, samples across brightness and
-validates against the complete eligible pool. SII's small-sample acceptance did not survive
-broader sampling, so aggregate held-out RMS and the current minimum count
-alone do not establish a field-wide default. Add regression/output-version
-coverage for the changed selection mode before altering the numerical path.
+`screen_rgb_stars_reduced` adds an explicit [0,1] reduction amount to screen
+recombination. It blends the extracted star intensity toward one-pixel cross
+erosion, applies one linked RGB gain and preserves missing coverage. Edge/
+invalid-neighbour pixels retain their unreduced stars. Zero keeps the previous
+screen path bitwise. C/Python twins and CLI `--reduction` share this operation;
+PSF Guard applies it only to restored RGB stars after other nebula display work.
+The analytic output-version fixture was recorded through the existing screen
+operation before adding reduction. Existing stacking/stretch summaries remain
+unchanged; stacking/output stays at the unreleased 0.50.0.
 
-The OIII signed residual was visually inspected. Local stellar residuals and
-negative cores remain despite acceptable aperture-flux statistics. Preserve
-them in linear artifacts and evaluate PSF/halo behavior before defining a
-starless combined-image recipe. Grayscale original/residual previews used
-separate Auto-MTF stretches; their displayed brightness is not a common-scale
-measurement. No pure-line-flux or photometric-throughput claim follows.
+### Real-frame outcomes of the final gates
 
-The paired application separately completed RGB, unbalanced and balanced SHO,
-SHO with RGB stars, and HOO with RGB stars through tracked color jobs and real
-licensed SXT on Supergateway. These color examples did not use continuum
-subtraction. Source masters and live catalogs stayed unchanged.
+Isolated paired-host checks on real Gecko/Cocoon LRGB+SHO, Triangulum LRGB+Ha,
+NGC7023 reflection LRGB and SNR G132 RGB/SHO used fresh pixel solves and Gaia.
+Explicit 8-pixel broadening reduced unsaturated profile p90 errors to about
+1–6%, but clipped-core errors remained roughly 30–84% or were unmeasurable.
+The automatic recipes therefore omitted the unsafe natural-color contributions
+and stopped required mapped residual builds. These are safety checks, not
+successful physical line-flux measurements.
 
-The paired drafts now implement producer clipping provenance, sampling checks,
-combined-image units and the PSF Guard job/cache and outcome UI described below.
-Subtraction before SXT avoids transferring a plan onto a changed revision.
-Pixel-level residual inspection still matters: an accepted aperture fit does
-not promise complete cancellation of every stellar core or halo. Keep both PRs
-in draft and defer publication until the complete release is reviewed.
+A clean SNR G132 star comparison keeps continuum Off and broadband structure
+0. Real licensed BXT ML5, Gaia and SXT ML11 prepared the RGB stars. Display
+reduction 0.4 then reused the exact BXT/SXT artifacts and completed in 8.11 s;
+native-pixel crops show reduced star prominence with the same starless nebula.
+Original masters/catalogs remained unchanged. The paired PSF Guard guide and
+offline gallery retain exact requests, reports and source provenance.
 
-
-### Prepared combined-image core
-
-The draft now includes producer-mask photometry, eligibility-before-budget
-sampling, broader-pool stability validation, empirical emission projection,
-calibrated RGB addition and bounded starless display-structure mixing. See
-[continuum and combined-image contracts](../../seiza-stacking/README.md#clipping-evidence-sampling-and-combined-images).
-Plans remain tied to exact linear revisions. PSF Guard applies subtraction
-before SXT, so a plan is never silently transferred to a changed starless image.
-The signed residual stays separate from its explicit display baseline and
-positive-only contribution policy. Seiza 0.43.0 with stacking/output 0.49.0
-remains unreleased; no publication is authorized by this preparation.
-
-
-### Final SNR G132 combined-image validation
-
-The paired drafts were rerun with producer-derived clipping maps on the binned
-4788×3194 planes. Automatic fitting uses a fixed maximum of 4096 candidate
-positions independently of the usable-star budget, checks eligibility before
-sampling, and audits the brightness-spanning sample against the full eligible
-pool. No working-unit saturation ceiling was guessed.
-
-| Line | 400-star coefficients | Training / held out | Held-out RMS | Sample/full prediction RMS difference |
-| --- | --- | --- | --- | --- |
-| Ha / R | 0.04777995 | 293 / 96 | 10.22% | 0.077% |
-| OIII / G+B | 0.04377472, 0.04798876 | 278 / 92 | 1.98% | 0.176% |
-| SII / R | 0.05519169 | 298 / 100 | 5.46% | 0.066% |
-
-All three default fits and the 1600-star check passed without relaxing the
-PSF, registration, error or inlier limits. The final RGB + emission recipe
-completed with BXT on linear RGB, amounts 0.25 and a linked composition stretch
-while Gaia was off. The broader fit reused BXT and completed in 14 seconds.
-Automatic HOO + 20% starless broadband structure also completed, subtracting
-Ha/OIII before SXT and restoring one BXT-processed RGB star layer. The original
-masters and live catalogs were unchanged; no separate L master was available.
-LRGB + emission was exercised on the synthetic application/browser path.
-
-Licensed RC-Astro 2.6.6 used BXT ML5 and SXT ML11 on CPU. The BXT star option
-uses the vendor defaults, including Sharpen Stars 0.5, before RGB calibration
-and SXT. Native-pixel crops and full-field comparisons were visually inspected.
-The final signed Ha/OIII/SII FITS retain negative samples and coverage gaps and
-record LINEAR / EMISSION-RESIDUAL metadata. The offline gallery, exact requests,
-plans, stellar diagnostics and signed artifacts are in the user's Dropbox.
-
-The mapped automatic result still shows colored residual rings around some
-bright stars. An accepted aperture fit does not establish pixel-perfect local
-PSF or saturated-core cancellation. The gallery documents that limitation and
-retains an explicit continuum-Off comparison. These are emission residuals,
-with no pure-line-flux or third-party numerical-parity claim. Keep both PRs
-draft and Seiza unreleased while the complete release is reviewed.
+Calibrated export requires `continuumCoefficients` (Python alias
+`continuum_coefficients`): exact per-plan coefficient snapshots in reference
+order. Residual zero-level calibration depends on these weights. A changed
+fit/manual weight is rejected even when the raw source revisions are unchanged;
+update the explicit zero levels and snapshots after recalibration. Reports and
+cache identities retain the snapshots.

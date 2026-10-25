@@ -1385,3 +1385,62 @@ Each line has an exact continuum plan, `referenceChannels` in RGB index order,
 `--reference-flux-ratios 1,2` alongside `--coefficients` to record explicit
 stellar ratios in reference order. Linear commands require `SEIZATRF=LINEAR`; structure
 inputs require `SEIZATRF=DISPLAY`. Structure mixing does not extract stars.
+
+### Match continuum PSFs and export calibrated line flux
+
+Pass `--photometry-options options.json` to `seiza color continuum` with:
+
+```json
+{"psfMatching":{"targetFwhm":5.0},"maxPixelResidual":0.15}
+```
+
+Use an empty `psfMatching` object for an automatic target, or omit it to leave
+matching off. Matching broadens copies before fitting/subtraction, retains
+coverage gaps and records kernels. It requires original saturation evidence.
+The target must be at least every measured width, at most 32 pixels. Held-out
+pixel validation still checks core/halo cancellation. A reused saved plan
+replays the exact preparation.
+
+`seiza color balance --star-mask-radius 8` excludes detected stars from display
+balance statistics. `seiza color reduce-green --input mapped.fits --output
+reduced.fits --amount 0.5` reduces green excess on DISPLAY RGB before RGB stars
+are restored.
+
+For scientific export, `seiza color blend flux --residual ha-residual.fits
+--settings response.json --output ha-flux.fits --report flux-report.json`
+accepts a settings object with `plans` and `calibration`. Supply exact source
+identities, calibrated NB/reference response arrays, line order, revision and
+common unit. Use one output per residual. The solver accounts for broadband
+line leakage and coupled responses, retaining signed flux and declared BUNIT.
+The report includes complete provenance and optional propagated residual
+covariance. Unknown covariance is not a zero-error claim. Response/fit
+uncertainty and unmodelled lines remain outside that covariance.
+
+Matching also requires `target_fwhm <= aperture_radius` and
+`annulus_inner >= 1.5 * target_fwhm`. The default 8/12/20 photometry therefore
+permits targets up to **8 pixels**. Larger targets require larger photometry
+radii in the options JSON (with a hard target limit of 32 pixels and outer
+sky-annulus radius at most 128 pixels). This keeps the target profile inside
+the measurement aperture and away from its sky annulus.
+
+Calibrated export also requires explicit `residualZeroLevels` (Python alias
+`residual_zero_levels`), one additive zero level per residual in its exact
+sample units. Zero is an explicit calibration declaration. The solver uses
+`M F = E − residualZeroLevels`; it never guesses these values from a sky median
+or the display baseline. Background preparation may retain an additive reference
+level, so response calibration alone cannot establish a physical zero point.
+Zero-level uncertainty is outside the propagated residual covariance unless
+the producer includes it there.
+
+For RGB star minimization, add `--reduction 0.4` to `seiza color screen-stars`.
+The input original/starless RGB images must use the same display transfer.
+Zero preserves normal screen recombination; higher amounts shrink/fade the
+restored layer with one linked RGB gain and can remove faint stars. The
+starless nebula stays unchanged; this does not alter scientific linear data.
+
+Calibrated export requires `continuumCoefficients` (Python alias
+`continuum_coefficients`): exact per-plan coefficient snapshots in reference
+order. Residual zero-level calibration depends on these weights. A changed
+fit/manual weight is rejected even when the raw source revisions are unchanged;
+update the explicit zero levels and snapshots after recalibration. Reports and
+cache identities retain the snapshots.

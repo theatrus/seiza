@@ -269,3 +269,39 @@ pub fn add_rgb_contribution(
     }
     LinearImage::new(base.width, base.height, 3, data)
 }
+
+/// Reduce only green above both red and blue on bounded display RGB.
+/// Amount is in [0,1]. This aesthetic operation preserves red, blue, neutral
+/// pixels and common coverage. Apply before adding independently prepared stars.
+pub fn reduce_green_excess(image: &mut LinearImage, amount: f64) -> Result<()> {
+    if image.width == 0
+        || image.height == 0
+        || image
+            .width
+            .checked_mul(image.height)
+            .and_then(|n| n.checked_mul(3))
+            != Some(image.data.len())
+        || image.channels != 3
+        || !amount.is_finite()
+        || !(0.0..=1.0).contains(&amount)
+        || image
+            .data
+            .iter()
+            .any(|v| v.is_finite() && !(0.0..=1.0).contains(v))
+    {
+        return Err(Error::Color(
+            "Green reduction requires display RGB in [0,1] and an amount from zero to one".into(),
+        ));
+    }
+    if amount == 0.0 {
+        return Ok(());
+    }
+    for pixel in image.data.as_chunks_mut::<3>().0 {
+        if pixel.iter().all(|v| v.is_finite()) {
+            pixel[1] -= amount as f32 * (pixel[1] - pixel[0].max(pixel[2])).max(0.0);
+        } else {
+            pixel.fill(f32::NAN);
+        }
+    }
+    Ok(())
+}

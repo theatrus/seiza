@@ -425,7 +425,8 @@ fn parse_palette(value: &str) -> PyResult<NarrowbandPalette> {
 
 /// Balance display planes ordered H-alpha/OIII[/SII], returning a copy and report.
 #[pyfunction]
-#[pyo3(signature = (image, *, shadow_protection=1.0, oiii_boost=1.0, sii_boost=1.0, max_samples=1_000_000, has_sii=true))]
+#[pyo3(signature = (image, *, shadow_protection=1.0, oiii_boost=1.0, sii_boost=1.0, max_samples=1_000_000, has_sii=true, star_mask_radius=None))]
+#[allow(clippy::too_many_arguments)]
 fn balance_narrowband<'py>(
     py: Python<'py>,
     image: PyReadonlyArrayDyn<'_, f32>,
@@ -434,6 +435,7 @@ fn balance_narrowband<'py>(
     sii_boost: f64,
     max_samples: usize,
     has_sii: bool,
+    star_mask_radius: Option<f64>,
 ) -> PyResult<(Bound<'py, PyArrayDyn<f32>>, Bound<'py, PyDict>)> {
     let mut image = linear_image(image)?;
     let options = seiza_stacking::NarrowbandBalanceOptions {
@@ -442,6 +444,7 @@ fn balance_narrowband<'py>(
         sii_boost,
         max_samples,
         has_sii,
+        star_mask_radius,
     };
     let report = py
         .detach(|| seiza_stacking::balance_narrowband(&mut image, &options))
@@ -471,9 +474,29 @@ fn screen_rgb_stars<'py>(
     into_image_array(py, nebula)
 }
 
+/// Recombine RGB stars onto a starless display nebula without mutating inputs.
+#[pyfunction]
+fn screen_rgb_stars_reduced<'py>(
+    py: Python<'py>,
+    nebula: PyReadonlyArrayDyn<'_, f32>,
+    original: PyReadonlyArrayDyn<'_, f32>,
+    starless: PyReadonlyArrayDyn<'_, f32>,
+    reduction: f64,
+) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
+    let mut nebula = linear_image(nebula)?;
+    let original = linear_image(original)?;
+    let starless = linear_image(starless)?;
+    py.detach(|| {
+        seiza_stacking::screen_rgb_stars_reduced(&mut nebula, &original, &starless, reduction)
+    })
+    .map_err(invalid)?;
+    into_image_array(py, nebula)
+}
+
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(balance_narrowband, module)?)?;
     module.add_function(wrap_pyfunction!(screen_rgb_stars, module)?)?;
+    module.add_function(wrap_pyfunction!(screen_rgb_stars_reduced, module)?)?;
     module.add_function(wrap_pyfunction!(combine_rgb, module)?)?;
     module.add_function(wrap_pyfunction!(combine_lrgb, module)?)?;
     module.add_function(wrap_pyfunction!(combine_narrowband, module)?)?;

@@ -719,6 +719,23 @@ bool seiza_color_screen_rgb_stars(float *nebula,
                                   char **error_out);
 
 /*
+ Screen display RGB stars after linked one-pixel cross erosion. Reduction
+ in [0,1] blends toward the eroded star intensity while preserving RGB ratios.
+ Zero preserves ordinary screen output; all buffers share RGB display [0,1].
+ Errors leave nebula unchanged. This does not change scientific linear data.
+
+ # Safety
+ Each buffer addresses width*height*3 floats; nebula/error_out are writable.
+ */
+bool seiza_color_screen_rgb_stars_reduced(float *nebula,
+                                          const float *original,
+                                          const float *starless,
+                                          size_t width,
+                                          size_t height,
+                                          double reduction,
+                                          char **error_out);
+
+/*
  Fits a compact background model to interleaved linear `float` samples.
 
  `channels` must be one or three and `data_length` must equal
@@ -3524,6 +3541,37 @@ bool seiza_color_add_rgb_contribution(const float *base,
                                       const float *gains,
                                       float *output,
                                       char **error_out);
+
+/*
+ Reduce excess display green in-place, preserving red/blue and coverage.
+ Invalid input or amount leaves all samples unchanged.
+
+ # Safety
+ data addresses width*height*3 writable floats; non-null error_out is writable.
+ */
+bool seiza_color_reduce_green_excess(float *data,
+                                     size_t width,
+                                     size_t height,
+                                     double amount,
+                                     char **error_out);
+
+/*
+ Invert calibrated line responses. Planar residuals/output are in calibration
+ line order. JSON contains plans and calibration; the returned owned JSON
+ report must be freed with seiza_string_free. Errors leave output untouched.
+
+ # Safety
+ residuals/output address width*height*lines floats (lines 1..3); output is
+ writable and may alias residuals. request_json is NUL-terminated UTF-8;
+ error_out, if non-null, is writable.
+ */
+char *seiza_emission_flux_json(const float *residuals,
+                               size_t width,
+                               size_t height,
+                               size_t lines,
+                               const char *request_json,
+                               float *output,
+                               char **error_out);
 
 /*
  Every constellation figure and the stars its lines use, for a host that

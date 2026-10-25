@@ -44,7 +44,7 @@ seiza-image-io = { path = "seiza-image-io", version = "0.11.0" }
 seiza-imgproc = { path = "seiza-imgproc", version = "0.3.2" }
 seiza-parallax = { path = "seiza-parallax", version = "0.19.1" }
 seiza-satellites = { path = "seiza-satellites", version = "0.22.1" }
-seiza-stacking = { path = "seiza-stacking", version = "0.49.0" }
+seiza-stacking = { path = "seiza-stacking", version = "0.50.0" }
 seiza-stars = { path = "seiza-stars", version = "0.4.0" }
 seiza-stats = { path = "seiza-stats", version = "0.1.1" }
 seiza-stretch = { path = "seiza-stretch", version = "0.3.2" }

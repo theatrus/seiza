@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use seiza_stacking::*;
 
 pub fn saturated_field() -> (
@@ -139,5 +140,51 @@ pub fn deeper_candidate_summary() -> Vec<f64> {
         ContinuumFitOutcome::Skipped { diagnostics: d, .. } => {
             vec![0.0, 0.0, 0.0, 0.0, d.candidate_stars as f64]
         }
+    }
+}
+
+/// Equal integrated flux, but enough profile mismatch to leave cores/rings.
+pub fn profile_field() -> (
+    LinearImage,
+    LinearImage,
+    Vec<[f64; 2]>,
+    ContinuumSources,
+    ContinuumFitOptions,
+) {
+    let (mut n, mut b, positions, sources, mut options) = saturated_field();
+    n.data.fill(10.0);
+    b.data.fill(10.0);
+    for (i, p) in positions.iter().enumerate() {
+        for y in (p[1] as usize - 12)..=(p[1] as usize + 12) {
+            for x in (p[0] as usize - 12)..=(p[0] as usize + 12) {
+                let r2 = (x as f64 - p[0]).powi(2) + (y as f64 - p[1]).powi(2);
+                let flux = 1500.0 + 50.0 * i as f64;
+                n.data[y * n.width + x] += (flux / (2.0 * std::f64::consts::PI * 1.6_f64.powi(2))
+                    * (-r2 / (2.0 * 1.6_f64.powi(2))).exp())
+                    as f32;
+                b.data[y * b.width + x] +=
+                    (flux / (0.35 * 2.0 * std::f64::consts::PI * 1.4_f64.powi(2))
+                        * (-r2 / (2.0 * 1.4_f64.powi(2))).exp()) as f32;
+            }
+        }
+    }
+    options.max_stars = 32;
+    (n, b, positions, sources, options)
+}
+
+pub fn profile_summary() -> Vec<f64> {
+    let (n, b, positions, sources, options) = profile_field();
+    match measure_and_fit_continuum(
+        &n,
+        &[&b],
+        &sources,
+        &positions,
+        &options,
+        &Default::default(),
+    )
+    .unwrap()
+    {
+        ContinuumFitOutcome::Fitted { plan } => vec![1.0, plan.coefficients[0]],
+        ContinuumFitOutcome::Skipped { .. } => vec![0.0, 0.0],
     }
 }

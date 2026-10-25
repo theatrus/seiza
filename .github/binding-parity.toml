@@ -718,6 +718,9 @@ seiza_continuum_measure_masked_fit_json = "measure_and_fit_continuum_masked"
 seiza_continuum_subtract_json = "subtract_continuum"
 seiza_color_balance_narrowband_json = "balance_narrowband"
 seiza_color_screen_rgb_stars = "screen_rgb_stars"
+seiza_color_screen_rgb_stars_reduced = "screen_rgb_stars_reduced"
+seiza_color_reduce_green_excess = "reduce_green_excess"
+seiza_emission_flux_json = "solve_emission_flux"
 
 # --- rc-astro ---------------------------------------------------------------
 seiza_rc_astro_locate = "rc_astro_locate"

@@ -985,3 +985,110 @@ offsets affect the base only. Add L through the existing luminance composition.
 with endpoints preserving the selected branch's coverage and intermediate
 amounts requiring common coverage. Restore a single RGB star layer afterward.
 These operations are also exposed through the C ABI, Python and CLI.
+
+### Validate stellar profiles and match PSFs explicitly
+
+Image-based continuum measurement now defaults to an independent held-out pixel
+check, controlled by `ContinuumPhotometryOptions.max_pixel_residual` (0.15).
+It compares the local-sky-subtracted NB patch with the fitted reference patches,
+sums absolute residual above a three-sigma local noise allowance, and divides
+by stellar flux. The 90th percentile must pass. At least three profiles and
+70% of eligible held-out profiles must be remeasurable. Reports retain signed
+core/halo fractions separately. Premeasured `fit_continuum` has no pixels and
+therefore reports no pixel validation; manual plans also make no such claim.
+Explicit `None` disables the pixel gate for research callers, not PSF Guard's
+automatic mode.
+
+Set `photometry.psf_matching = Some(ContinuumPsfOptions { target_fwhm: None })`
+to broaden copies before measurement and subtraction. Common unsaturated stars
+supply Gaussian-equivalent widths. The default target is 1.05 times the largest
+median width; an explicit target must be at least every measured width and at
+most 32 pixels. Kernels conserve DC/flux. Missing coverage and unsupported edges
+remain NaN; producer clipping evidence expands over the full kernel support.
+Original saturation evidence is required before preparation creates derived
+mask revisions.
+
+The plan records exact raw sources, derived prepared sources, measured widths,
+target and kernel sigma/radius. `subtract_continuum` replays that preparation
+from the original inputs. Saved plans must pass source, kernel and target
+consistency validation. No deconvolution occurs. A Gaussian-equivalent width
+match does not ensure matched real wings: the held-out pixel gate still applies
+and can skip a broadened result.
+
+`NarrowbandBalanceOptions.star_mask_radius` optionally excludes detected-star
+circles from balance/noise statistics without changing output coverage. It is
+off by default, accepts 1–64 pixels and reports counts. `reduce_green_excess`
+reduces display green above both red and blue by an explicit amount [0,1],
+preserving neutral pixels. Apply it after palette mapping and before adding
+independently prepared RGB stars. It is not a photometric operation or a claim
+of SCNR parity.
+
+### Export calibrated line flux
+
+`solve_emission_flux(residuals, plans, calibration)` solves one to three coupled
+line responses. `EmissionFluxCalibration` supplies exact plan sources, line
+order, common unit, calibration revision, NB responses and each plan's reference
+responses. Responses are in the actual input sample units per common flux unit;
+the producer accounts for throughput, exposure, gain, extinction and doublets.
+No filter-name or bandwidth approximation is inferred.
+
+The effective response is `M[i,k] = N[i,k] − sum_j a[i,j] B[i,j,k]`.
+The operation solves `M F = E − residualZeroLevels`, retaining signed flux and common coverage.
+It refuses stale source identities, inconsistent PSF targets, nonpositive or
+nearly cancelled diagonal response, excessive conditioning and numeric overflow.
+Inversion uses a normalized matrix and restores row units analytically.
+
+Optional residual covariance propagates as `M⁻¹ C M⁻ᵀ`. Missing covariance means
+unknown uncertainty. The report embeds calibration and plan provenance and
+explicitly excludes response/fit-coefficient uncertainty, unmodelled lines and
+spatial PSF errors. The result is calibrated only to the supplied response model.
+It does not replace an artistic display blend. C exports
+`seiza_emission_flux_json`; Python returns `(images, report)`; the CLI exposes
+`seiza color blend flux` with planar residuals, a settings JSON, output paths
+and a report.
+
+Matching also requires `target_fwhm <= aperture_radius` and
+`annulus_inner >= 1.5 * target_fwhm`. The default 8/12/20 photometry therefore
+permits targets up to **8 pixels**. Larger targets require larger photometry
+radii in the options JSON (with a hard target limit of 32 pixels and outer
+sky-annulus radius at most 128 pixels). This keeps the target profile inside
+the measurement aperture and away from its sky annulus.
+
+Calibrated export also requires explicit `residualZeroLevels` (Python alias
+`residual_zero_levels`), one additive zero level per residual in its exact
+sample units. Zero is an explicit calibration declaration. The solver uses
+`M F = E − residualZeroLevels`; it never guesses these values from a sky median
+or the display baseline. Background preparation may retain an additive reference
+level, so response calibration alone cannot establish a physical zero point.
+Zero-level uncertainty is outside the propagated residual covariance unless
+the producer includes it there.
+
+Image-based validation also audits isolated candidates excluded for clipping or
+saturation. They never train the fit. Their observed residual profiles must all
+be measurable and below the same absolute limit; `clippedStars`,
+`clippedProfiles` and `clippedMaxAbsoluteFraction` record this separate check.
+It prevents a clean unsaturated sample from hiding clipped-core artifacts and
+does not infer lost flux. The held-out report keeps both its 90th-percentile
+and maximum profile error.
+
+### Reduce restored RGB stars
+
+`screen_rgb_stars_reduced(nebula, original, starless, reduction)` performs the
+same display screen recombination with optional star minimization. An amount
+in [0,1] blends the isolated star layer's maximum-channel intensity toward a
+one-pixel cross erosion. A shared per-pixel RGB gain preserves layer color
+ratios. The starless nebula is untouched. Invalid neighbours/outer edges retain
+the unreduced layer; central coverage is unchanged. High values also remove
+faint stars. Zero uses the original screen arithmetic bit for bit.
+
+The operation is display-only; it does not sharpen a PSF or alter scientific
+linear artifacts. C exports `seiza_color_screen_rgb_stars_reduced`; Python
+returns a copy with the same name; CLI `seiza color screen-stars --reduction
+0.4` applies it after a consistently stretched original/starless RGB pair.
+
+Calibrated export requires `continuumCoefficients` (Python alias
+`continuum_coefficients`): exact per-plan coefficient snapshots in reference
+order. Residual zero-level calibration depends on these weights. A changed
+fit/manual weight is rejected even when the raw source revisions are unchanged;
+update the explicit zero levels and snapshots after recalibration. Reports and
+cache identities retain the snapshots.

@@ -103,3 +103,25 @@ def test_producer_clipping_maps_replace_guessed_scalar_saturation():
     assert out['plan']['diagnostics']['rejected']['saturated'] == 16
     with pytest.raises(ValueError, match='binary'):
         seiza.measure_and_fit_continuum_masked(n, [b], context, [np.full_like(masks[0], 2), masks[1]], positions=positions)
+
+
+def test_pixel_profiles_reject_rings_and_matching_is_replayed():
+    yy, xx = np.mgrid[:240, :400]
+    positions = [(30 + i % 8 * 45, 30 + i // 8 * 50) for i in range(32)]
+    planes = []
+    for sigma, scale in [(1.6, 1), (1.4, 1 / 0.35)]:
+        data = np.full_like(xx, 10, dtype=np.float64)
+        for i, (x, y) in enumerate(positions):
+            data += scale * (1500 + 50*i) / (2*np.pi*sigma**2) * np.exp(-((xx-x)**2+(yy-y)**2)/(2*sigma**2))
+        planes.append(np.ascontiguousarray(data, dtype=np.float32))
+    context = sources(400, 240)
+    out = seiza.measure_and_fit_continuum(planes[0], [planes[1]], context, positions=positions)
+    assert out['status'] == 'skipped' and out['reason'] == 'pixel_residual', out
+    out = seiza.measure_and_fit_continuum(planes[0], [planes[1]], context, positions=positions,
+        photometry_options={'psf_matching': {'target_fwhm': 5.0}})
+    assert out['status'] == 'fitted', out
+    assert out['plan']['diagnostics']['pixelValidation']['accepted']
+    assert out['plan']['psfMatching']['targetFwhm'] == 5.0
+    result = seiza.subtract_continuum(planes[0], [planes[1]], context, out['plan'])
+    assert np.isnan(result[0, 0])
+    assert abs(result[30, 30] - 6.5) < 2

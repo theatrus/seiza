@@ -222,6 +222,7 @@ pub(crate) fn run(args: ContinuumArgs) -> Result<()> {
     } else if !args.coefficients.is_empty() {
         ContinuumFitOutcome::Fitted {
             plan: ContinuumPlan {
+                psf_matching: None,
                 schema_version: 1,
                 sources: sources.clone(),
                 coefficients: args.coefficients.clone(),

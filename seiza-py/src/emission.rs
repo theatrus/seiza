@@ -72,7 +72,50 @@ fn add_rgb_contribution<'py>(
         .map_err(core_error)?;
     into_image_array(py, result)
 }
+#[pyfunction]
+fn reduce_green_excess<'py>(
+    py: Python<'py>,
+    image: PyReadonlyArrayDyn<'_, f32>,
+    amount: f64,
+) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
+    let mut image = linear_image(image)?;
+    py.detach(|| seiza_stacking::reduce_green_excess(&mut image, amount))
+        .map_err(core_error)?;
+    into_image_array(py, image)
+}
+type FluxArrays<'py> = (Vec<Bound<'py, PyArrayDyn<f32>>>, Bound<'py, PyAny>);
+
+#[pyfunction]
+fn solve_emission_flux<'py>(
+    py: Python<'py>,
+    residuals: Vec<PyReadonlyArrayDyn<'_, f32>>,
+    plans: &Bound<'_, PyAny>,
+    calibration: &Bound<'_, PyAny>,
+) -> PyResult<FluxArrays<'py>> {
+    let images = residuals
+        .into_iter()
+        .map(linear_image)
+        .collect::<PyResult<Vec<_>>>()?;
+    let plans: Vec<seiza_stacking::ContinuumPlan> = from_python(plans)?;
+    let calibration: seiza_stacking::EmissionFluxCalibration = from_python(calibration)?;
+    let (images, report) = py
+        .detach(move || {
+            seiza_stacking::solve_emission_flux(
+                &images.iter().collect::<Vec<_>>(),
+                &plans,
+                &calibration,
+            )
+        })
+        .map_err(core_error)?;
+    let images = images
+        .into_iter()
+        .map(|image| into_image_array(py, image))
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok((images, crate::flat_response::to_python(py, &report)?))
+}
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(reduce_green_excess, m)?)?;
+    m.add_function(wrap_pyfunction!(solve_emission_flux, m)?)?;
     m.add_function(wrap_pyfunction!(blend_emission_rgb, m)?)?;
     m.add_function(wrap_pyfunction!(add_rgb_contribution, m)?)?;
     m.add_function(wrap_pyfunction!(blend_display_structure, m)?)?;

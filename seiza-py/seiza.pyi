@@ -1299,6 +1299,7 @@ def subtract_continuum(
 def balance_narrowband(
     image: npt.NDArray[np.float32], *, shadow_protection: float = 1.0,
     oiii_boost: float = 1.0, sii_boost: float = 1.0, max_samples: int = 1_000_000, has_sii: bool = True,
+    star_mask_radius: float | None = None,
 ) -> tuple[npt.NDArray[np.float32], dict[str, Any]]: ...
 def screen_rgb_stars(
     nebula: npt.NDArray[np.float32], original: npt.NDArray[np.float32],
@@ -1824,3 +1825,24 @@ def blend_display_structure(
     ...
 
 def add_rgb_contribution(base: npt.NDArray[np.float32], contribution: npt.NDArray[np.float32], *, gains: tuple[float, float, float] = ...) -> npt.NDArray[np.float32]: ...
+
+
+def reduce_green_excess(image: npt.NDArray[np.float32], amount: float) -> npt.NDArray[np.float32]:
+    """Return bounded display RGB with excess green reduced before star restoration."""
+    ...
+
+
+def solve_emission_flux(
+    residuals: Sequence[npt.NDArray[np.float32]], plans: Sequence[Mapping[str, Any]],
+    calibration: Mapping[str, Any],
+) -> tuple[list[npt.NDArray[np.float32]], dict[str, Any]]:
+    """Solve exact calibrated NB-minus-reference responses; signed flux and covariance report."""
+    ...
+
+
+def screen_rgb_stars_reduced(
+    nebula: npt.NDArray[np.float32], original: npt.NDArray[np.float32],
+    starless: npt.NDArray[np.float32], reduction: float,
+) -> npt.NDArray[np.float32]:
+    """Screen a linked RGB star layer reduced toward one-pixel erosion; inputs unchanged."""
+    ...

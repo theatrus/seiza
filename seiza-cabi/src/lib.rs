@@ -2169,6 +2169,7 @@ pub unsafe extern "C" fn seiza_color_combine_narrowband_matrix_json(
 #[derive(Default, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 struct NarrowbandBalanceOptionsJson {
+    star_mask_radius: Option<f64>,
     has_sii: Option<bool>,
     shadow_protection: Option<f64>,
     oiii_boost: Option<f64>,
@@ -2226,6 +2227,7 @@ pub unsafe extern "C" fn seiza_color_balance_narrowband_json(
             oiii_boost: options.oiii_boost.unwrap_or(defaults.oiii_boost),
             sii_boost: options.sii_boost.unwrap_or(defaults.sii_boost),
             max_samples: options.max_samples.unwrap_or(defaults.max_samples),
+            star_mask_radius: options.star_mask_radius,
         };
         let samples = unsafe { required_f32_slice_mut(data, length, "narrowband image")? };
         let mut image = LinearImage::new(width, height, channels, samples.to_vec())
@@ -2278,6 +2280,51 @@ pub unsafe extern "C" fn seiza_color_screen_rgb_stars(
         let mut image =
             LinearImage::new(width, height, 3, samples.to_vec()).map_err(color_request_error)?;
         seiza_stacking::screen_rgb_stars(&mut image, &original, &starless)
+            .map_err(color_request_error)?;
+        samples.copy_from_slice(&image.data);
+        Ok(())
+    })
+    .is_some()
+}
+
+/// Screen display RGB stars after linked one-pixel cross erosion. Reduction
+/// in [0,1] blends toward the eroded star intensity while preserving RGB ratios.
+/// Zero preserves ordinary screen output; all buffers share RGB display [0,1].
+/// Errors leave nebula unchanged. This does not change scientific linear data.
+///
+/// # Safety
+/// Each buffer addresses width*height*3 floats; nebula/error_out are writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_color_screen_rgb_stars_reduced(
+    nebula: *mut f32,
+    original: *const f32,
+    starless: *const f32,
+    width: usize,
+    height: usize,
+    reduction: f64,
+    error_out: *mut *mut c_char,
+) -> bool {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let length = display_length(width, height, 3)?;
+        let original = LinearImage::new(
+            width,
+            height,
+            3,
+            unsafe { required_f32_slice(original, length, "original RGB")? }.to_vec(),
+        )
+        .map_err(color_request_error)?;
+        let starless = LinearImage::new(
+            width,
+            height,
+            3,
+            unsafe { required_f32_slice(starless, length, "starless RGB")? }.to_vec(),
+        )
+        .map_err(color_request_error)?;
+        let samples = unsafe { required_f32_slice_mut(nebula, length, "starless nebula")? };
+        let mut image =
+            LinearImage::new(width, height, 3, samples.to_vec()).map_err(color_request_error)?;
+        seiza_stacking::screen_rgb_stars_reduced(&mut image, &original, &starless, reduction)
             .map_err(color_request_error)?;
         samples.copy_from_slice(&image.data);
         Ok(())

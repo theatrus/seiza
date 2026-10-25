@@ -124,6 +124,13 @@ pub struct ContinuumPhotometryOptions {
     pub annulus_inner: f64,
     #[serde(alias = "annulus_outer")]
     pub annulus_outer: f64,
+    /// Maximum noise-adjusted absolute pixel residual / stellar flux at the
+    /// 90th percentile of held-out stars. None disables this independent gate.
+    #[serde(alias = "max_pixel_residual")]
+    pub max_pixel_residual: Option<f64>,
+    /// Explicit Gaussian broadening on copies, before measurement/subtraction.
+    #[serde(alias = "psf_matching")]
+    pub psf_matching: Option<ContinuumPsfOptions>,
 }
 impl Default for ContinuumPhotometryOptions {
     fn default() -> Self {
@@ -131,8 +138,32 @@ impl Default for ContinuumPhotometryOptions {
             aperture_radius: 8.0,
             annulus_inner: 12.0,
             annulus_outer: 20.0,
+            max_pixel_residual: Some(0.15),
+            psf_matching: None,
         }
     }
+}
+
+/// Broaden all continuum planes to a common Gaussian-equivalent FWHM.
+/// No deconvolution is performed. Real profile wings still require validation.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContinuumPsfOptions {
+    /// None chooses 1.05 times the largest measured FWHM, in common-grid pixels.
+    #[serde(alias = "target_fwhm")]
+    pub target_fwhm: Option<f64>,
+}
+
+/// The exact deterministic preparation replayed when applying a fitted plan.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContinuumPsfMatch {
+    pub measured_stars: usize,
+    pub measured_fwhm: Vec<f64>,
+    pub target_fwhm: f64,
+    pub kernel_sigma: Vec<f64>,
+    pub kernel_radius: Vec<usize>,
+    pub prepared_sources: ContinuumSources,
 }
 
 /// A rejected stellar measurement or an automatic-fit skip, not an error.
@@ -155,6 +186,7 @@ pub enum ContinuumSkipReason {
     Outlier,
     SpatialResidual,
     BrightnessTrend,
+    PixelResidual,
 }
 
 /// Resolved stellar residuals for inspection; validation stars are held out.
@@ -196,6 +228,29 @@ pub struct ContinuumDiagnostics {
     /// Median faint-star residual minus median bright-star residual.
     pub brightness_residual_difference: Option<f64>,
     pub stars: Vec<ContinuumStarDiagnostic>,
+    /// Independent held-out profile validation, absent for premeasured fits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pixel_validation: Option<ContinuumPixelValidation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub psf_matching: Option<Box<ContinuumPsfMatch>>,
+}
+
+/// Noise-adjusted profile errors on held-out stars. Fractions use each
+/// star's NB aperture flux; core and halo are signed and cannot cancel in L1.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContinuumPixelValidation {
+    pub expected_stars: usize,
+    pub stars: usize,
+    pub p90_absolute_fraction: f64,
+    pub maximum_absolute_fraction: f64,
+    pub clipped_stars: usize,
+    pub clipped_profiles: usize,
+    pub clipped_max_absolute_fraction: Option<f64>,
+    pub median_core_fraction: f64,
+    pub median_halo_fraction: f64,
+    pub limit: f64,
+    pub accepted: bool,
 }
 
 /// How the coefficients were obtained. Manual plans have no fit diagnostics.
@@ -223,6 +278,12 @@ pub struct ContinuumPlan {
     pub reference_flux_ratios: Vec<f64>,
     pub origin: ContinuumOrigin,
     pub diagnostics: Option<ContinuumDiagnostics>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "psf_matching"
+    )]
+    pub psf_matching: Option<Box<ContinuumPsfMatch>>,
 }
 
 /// Automatic fitting never silently substitutes an unsubtracted image.
@@ -828,6 +889,7 @@ pub fn fit_continuum(
     }
     Ok(ContinuumFitOutcome::Fitted {
         plan: ContinuumPlan {
+            psf_matching: None,
             schema_version: 1,
             sources: sources.clone(),
             coefficients: model.coefficients,
@@ -912,6 +974,14 @@ fn measure_and_fit_inner(
             ));
         }
     }
+    if photometry
+        .max_pixel_residual
+        .is_some_and(|limit| !limit.is_finite() || limit <= 0.0 || limit > 1.0)
+    {
+        return Err(invalid(
+            "Pixel residual limit must be greater than zero and at most one",
+        ));
+    }
     if ![
         photometry.aperture_radius,
         photometry.annulus_inner,
@@ -926,6 +996,19 @@ fn measure_and_fit_inner(
     {
         return Err(invalid(
             "Continuum aperture needs 2 <= radius < annulus inner < annulus outer <= 128 pixels",
+        ));
+    }
+    let maximum_target = 32.0_f64
+        .min(photometry.aperture_radius)
+        .min(photometry.annulus_inner / 1.5);
+    if photometry
+        .psf_matching
+        .as_ref()
+        .and_then(|p| p.target_fwhm)
+        .is_some_and(|target| !target.is_finite() || target <= 0.0 || target > maximum_target)
+    {
+        return Err(invalid(
+            "PSF target must fit inside the aperture, with sky annulus inner radius at least 1.5 times the target FWHM (maximum 32 pixels)",
         ));
     }
     // Keep the search population independent of the usable-star budget.
@@ -951,9 +1034,167 @@ fn measure_and_fit_inner(
     } else {
         positions.iter().take(max_candidates).copied().collect()
     };
+    if photometry.psf_matching.is_some()
+        && source_list
+            .iter()
+            .any(|source| source.saturation.is_none() && source.clipping_revision.is_none())
+    {
+        return Err(invalid(
+            "Automatic continuum PSF matching requires a physical saturation ceiling or producer clipping mask for every original source",
+        ));
+    }
+    if let Some(matching) = &photometry.psf_matching {
+        let images: Vec<_> = std::iter::once(narrowband)
+            .chain(references.iter().copied())
+            .collect();
+        let relaxed = ContinuumFitOptions {
+            max_psf_ratio: f64::MAX,
+            ..options.clone()
+        };
+        let mut widths = vec![Vec::new(); images.len()];
+        for position in &positions {
+            if positions.iter().any(|other| {
+                other != position
+                    && (other[0] - position[0]).hypot(other[1] - position[1])
+                        < 2.0 * photometry.aperture_radius + 2.0
+            }) {
+                continue;
+            }
+            let measured: Option<Vec<_>> = images
+                .iter()
+                .zip(&source_list)
+                .enumerate()
+                .map(|(i, (image, source))| {
+                    measure(
+                        image,
+                        *position,
+                        source.saturation,
+                        clipping_masks.map(|m| m[i]),
+                        options,
+                        photometry,
+                    )
+                    .ok()
+                })
+                .collect();
+            let Some(measured) = measured else { continue };
+            if star_rejection(
+                &ContinuumStar {
+                    narrowband: measured[0].clone(),
+                    references: measured[1..].to_vec(),
+                },
+                sources,
+                &relaxed,
+            )
+            .is_some()
+            {
+                continue;
+            }
+            for (samples, star) in widths.iter_mut().zip(measured) {
+                samples.push(star.fwhm);
+            }
+        }
+        if widths[0].len() < options.minimum_stars {
+            return Ok(skipped(
+                ContinuumSkipReason::TooFewStars,
+                "Too few common unsaturated stars to measure PSF matching kernels",
+                ContinuumDiagnostics::default(),
+            ));
+        }
+        let measured_fwhm: Vec<_> = widths.iter().map(|w| median(w)).collect();
+        let largest = measured_fwhm.iter().copied().fold(0.0, f64::max);
+        let target = matching.target_fwhm.unwrap_or(largest * 1.05);
+        if matching.target_fwhm.is_none() && target > maximum_target {
+            return Ok(skipped(
+                ContinuumSkipReason::PsfMismatch,
+                "Measured PSFs are too broad for the current aperture/sky annulus; increase the photometry radii before matching",
+                ContinuumDiagnostics::default(),
+            ));
+        }
+        if !target.is_finite() || target < largest || target > maximum_target {
+            return Err(invalid(&format!(
+                "PSF target must be at least every measured FWHM ({largest:.2} pixels maximum) and at most {maximum_target:.2} pixels for this aperture/sky annulus"
+            )));
+        }
+        let sigma: Vec<_> = measured_fwhm
+            .iter()
+            .map(|f| ((target * target - f * f).max(0.0)).sqrt() / 2.354820045)
+            .collect();
+        let radii: Vec<_> = sigma
+            .iter()
+            .map(|s| {
+                if *s < 0.05 {
+                    0
+                } else {
+                    (4.0 * s).ceil() as usize
+                }
+            })
+            .collect();
+        let prepared_sources = prepared_psf_sources(sources, &sigma, &radii)?;
+        let report = ContinuumPsfMatch {
+            measured_stars: widths[0].len(),
+            measured_fwhm,
+            target_fwhm: target,
+            kernel_sigma: sigma,
+            kernel_radius: radii,
+            prepared_sources,
+        };
+        let prepared = apply_psf_preparation(&images, &report)?;
+        let expanded_masks: Vec<_> = images
+            .iter()
+            .zip(&source_list)
+            .enumerate()
+            .map(|(i, (image, source))| {
+                let mask: Vec<_> = image
+                    .data
+                    .iter()
+                    .enumerate()
+                    .map(|(p, v)| {
+                        u8::from(
+                            clipping_masks.is_some_and(|m| m[i][p] != 0)
+                                || source.saturation.is_some_and(|s| {
+                                    f64::from(*v) >= s * options.saturation_fraction
+                                }),
+                        )
+                    })
+                    .collect();
+                dilate_square(
+                    &mask,
+                    sources.width,
+                    sources.height,
+                    report.kernel_radius[i],
+                )
+            })
+            .collect();
+        let masks: Vec<_> = expanded_masks.iter().map(Vec::as_slice).collect();
+        let mut geometry = photometry.clone();
+        geometry.psf_matching = None;
+        let mut outcome = measure_and_fit_inner(
+            &prepared[0],
+            &prepared[1..].iter().collect::<Vec<_>>(),
+            &report.prepared_sources,
+            Some(&masks),
+            &positions,
+            options,
+            &geometry,
+        )?;
+        if let ContinuumFitOutcome::Fitted { plan } = &mut outcome {
+            plan.sources = sources.clone();
+            plan.psf_matching = Some(Box::new(report.clone()));
+        }
+        match &mut outcome {
+            ContinuumFitOutcome::Fitted { plan } => {
+                plan.diagnostics.as_mut().unwrap().psf_matching = Some(Box::new(report))
+            }
+            ContinuumFitOutcome::Skipped { diagnostics, .. } => {
+                diagnostics.psf_matching = Some(Box::new(report))
+            }
+        }
+        return Ok(outcome);
+    }
     let mut rejected = BTreeMap::new();
     let mut measurements = Vec::new();
     let mut measured_count = 0;
+    let mut clipped_positions = Vec::new();
     for (index, position) in positions.iter().enumerate() {
         let measured = (|| {
             if !position.iter().all(|v| v.is_finite()) {
@@ -964,6 +1205,29 @@ fn measure_and_fit_inner(
                 other != index && (p[0] - position[0]).hypot(p[1] - position[1]) < isolation
             }) {
                 return Err(ContinuumSkipReason::NotIsolated);
+            }
+            let [x, y] = *position;
+            let outer = photometry.annulus_outer;
+            if x - outer >= 0.0
+                && y - outer >= 0.0
+                && x + outer < sources.width as f64
+                && y + outer < sources.height as f64
+                && std::iter::once(narrowband)
+                    .chain(references.iter().copied())
+                    .zip(&source_list)
+                    .enumerate()
+                    .any(|(i, (image, source))| {
+                        aperture_has_clipping(
+                            image,
+                            *position,
+                            source.saturation,
+                            clipping_masks.map(|m| m[i]),
+                            options.saturation_fraction,
+                            photometry.aperture_radius,
+                        )
+                    })
+            {
+                clipped_positions.push(*position);
             }
             let narrowband = measure(
                 narrowband,
@@ -1000,7 +1264,9 @@ fn measure_and_fit_inner(
         })();
         match measured {
             Ok(star) => measurements.push(star),
-            Err(reason) => *rejected.entry(reason).or_insert(0_usize) += 1,
+            Err(reason) => {
+                *rejected.entry(reason).or_insert(0_usize) += 1;
+            }
         }
     }
     // Rejections do not spend the usable-star budget. Sample the whole
@@ -1067,6 +1333,47 @@ fn measure_and_fit_inner(
             _ => unreachable!(),
         }
     }
+    if let (Some(limit), ContinuumFitOutcome::Fitted { plan }) =
+        (photometry.max_pixel_residual, &mut outcome)
+    {
+        let mut report =
+            validate_pixel_profiles(narrowband, references, plan, options, photometry, limit);
+        if !clipped_positions.is_empty() {
+            // Clipped stars never train the model. Inspect their observed
+            // residual profiles separately so a clean unsaturated sample cannot
+            // conceal a visible saturated core/ring. No lost flux is inferred.
+            let mut audit = plan.clone();
+            audit.diagnostics.as_mut().unwrap().stars = clipped_positions
+                .iter()
+                .map(|p| ContinuumStarDiagnostic {
+                    x: p[0],
+                    y: p[1],
+                    flux: 1.0,
+                    used: false,
+                    validation: true,
+                    fractional_residual: None,
+                    rejection: None,
+                })
+                .collect();
+            let clipped =
+                validate_pixel_profiles(narrowband, references, &audit, options, photometry, limit);
+            report.clipped_stars = clipped_positions.len();
+            report.clipped_profiles = clipped.stars;
+            report.clipped_max_absolute_fraction =
+                (clipped.stars > 0).then_some(clipped.maximum_absolute_fraction);
+            report.accepted &= clipped.stars == clipped_positions.len()
+                && clipped.maximum_absolute_fraction <= limit;
+        }
+        let accepted = report.accepted;
+        plan.diagnostics.as_mut().unwrap().pixel_validation = Some(report);
+        if !accepted {
+            outcome = skipped(
+                ContinuumSkipReason::PixelResidual,
+                "Held-out or clipped stellar pixel profiles retain excessive cores or halos; match the PSFs or inspect the residual before using manual weights",
+                plan.diagnostics.clone().unwrap(),
+            );
+        }
+    }
     let diagnostics = match &mut outcome {
         ContinuumFitOutcome::Fitted { plan } => plan.diagnostics.as_mut().unwrap(),
         ContinuumFitOutcome::Skipped { diagnostics, .. } => diagnostics,
@@ -1099,6 +1406,31 @@ fn measure_and_fit_inner(
     }
     Ok(outcome)
 }
+fn aperture_has_clipping(
+    image: &LinearImage,
+    position: [f64; 2],
+    saturation: Option<f64>,
+    mask: Option<&[u8]>,
+    fraction: f64,
+    radius: f64,
+) -> bool {
+    let [x, y] = position;
+    for py in (y - radius).floor() as usize..=(y + radius).ceil() as usize {
+        for px in (x - radius).floor() as usize..=(x + radius).ceil() as usize {
+            if (px as f64 - x).hypot(py as f64 - y) > radius {
+                continue;
+            }
+            let index = py * image.width + px;
+            if mask.is_some_and(|m| m[index] != 0)
+                || saturation.is_some_and(|s| f64::from(image.data[index]) >= s * fraction)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn measure(
     image: &LinearImage,
     position: [f64; 2],
@@ -1107,6 +1439,26 @@ fn measure(
     options: &ContinuumFitOptions,
     geometry: &ContinuumPhotometryOptions,
 ) -> std::result::Result<ContinuumPhotometry, ContinuumSkipReason> {
+    measure_profile(
+        image,
+        position,
+        saturation,
+        clipping_mask,
+        options,
+        geometry,
+    )
+    .map(|p| p.0)
+}
+
+type StellarProfile = (ContinuumPhotometry, Vec<(f64, f64, f64)>, f64);
+fn measure_profile(
+    image: &LinearImage,
+    position: [f64; 2],
+    saturation: Option<f64>,
+    clipping_mask: Option<&[u8]>,
+    options: &ContinuumFitOptions,
+    geometry: &ContinuumPhotometryOptions,
+) -> std::result::Result<StellarProfile, ContinuumSkipReason> {
     use ContinuumSkipReason::*;
     let [x, y] = position;
     let outer = geometry.annulus_outer;
@@ -1236,17 +1588,234 @@ fn measure(
         .map(|s| ((s.0 - cx).powi(2) + (s.1 - cy).powi(2)) * s.2)
         .sum::<f64>()
         / (2.0 * weight);
-    Ok(ContinuumPhotometry {
-        x: x + cx,
-        y: y + cy,
-        flux,
-        peak: aperture
+    Ok((
+        ContinuumPhotometry {
+            x: x + cx,
+            y: y + cy,
+            flux,
+            peak: aperture
+                .iter()
+                .map(|s| s.2)
+                .fold(f64::NEG_INFINITY, f64::max),
+            fwhm: 2.354820045 * variance.max(0.0).sqrt(),
+            snr,
+        },
+        signal,
+        noise,
+    ))
+}
+
+fn validate_pixel_profiles(
+    narrowband: &LinearImage,
+    references: &[&LinearImage],
+    plan: &ContinuumPlan,
+    options: &ContinuumFitOptions,
+    geometry: &ContinuumPhotometryOptions,
+    limit: f64,
+) -> ContinuumPixelValidation {
+    let mut absolute = Vec::new();
+    let mut cores = Vec::new();
+    let mut halos = Vec::new();
+    for star in plan
+        .diagnostics
+        .as_ref()
+        .unwrap()
+        .stars
+        .iter()
+        .filter(|s| s.validation && s.rejection.is_none())
+    {
+        let position = [star.x, star.y];
+        let Ok((n, patch, noise)) =
+            measure_profile(narrowband, position, None, None, options, geometry)
+        else {
+            continue;
+        };
+        let reference_profiles: Option<Vec<_>> = references
             .iter()
-            .map(|s| s.2)
-            .fold(f64::NEG_INFINITY, f64::max),
-        fwhm: 2.354820045 * variance.max(0.0).sqrt(),
-        snr,
-    })
+            .map(|image| measure_profile(image, position, None, None, options, geometry).ok())
+            .collect();
+        let Some(reference_profiles) = reference_profiles else {
+            continue;
+        };
+        let sigma = (noise.powi(2)
+            + reference_profiles
+                .iter()
+                .zip(&plan.coefficients)
+                .map(|(p, a)| (a * p.2).powi(2))
+                .sum::<f64>())
+        .sqrt();
+        let mut l1 = 0.0;
+        let mut core = 0.0;
+        let mut halo = 0.0;
+        for (i, (dx, dy, value)) in patch.iter().enumerate() {
+            let residual = value
+                - reference_profiles
+                    .iter()
+                    .zip(&plan.coefficients)
+                    .map(|(p, a)| a * p.1[i].2)
+                    .sum::<f64>();
+            l1 += (residual.abs() - 3.0 * sigma).max(0.0);
+            if dx.hypot(*dy) <= n.fwhm * 0.5 {
+                core += residual;
+            } else {
+                halo += residual;
+            }
+        }
+        absolute.push(l1 / n.flux);
+        cores.push(core / n.flux);
+        halos.push(halo / n.flux);
+    }
+    absolute.sort_by(f64::total_cmp);
+    let p90 = absolute
+        .get((absolute.len().saturating_sub(1) * 9).div_ceil(10))
+        .copied()
+        .unwrap_or(1.0);
+    let expected_stars = plan
+        .diagnostics
+        .as_ref()
+        .unwrap()
+        .stars
+        .iter()
+        .filter(|s| s.validation && s.rejection.is_none())
+        .count();
+    ContinuumPixelValidation {
+        expected_stars,
+        stars: absolute.len(),
+        p90_absolute_fraction: p90,
+        maximum_absolute_fraction: absolute.last().copied().unwrap_or(1.0),
+        clipped_stars: 0,
+        clipped_profiles: 0,
+        clipped_max_absolute_fraction: None,
+        median_core_fraction: if cores.is_empty() {
+            0.0
+        } else {
+            median(&cores)
+        },
+        median_halo_fraction: if halos.is_empty() {
+            0.0
+        } else {
+            median(&halos)
+        },
+        limit,
+        accepted: absolute.len() >= (options.minimum_stars / 4).max(3)
+            && absolute.len() as f64 >= expected_stars as f64 * options.minimum_inlier_fraction
+            && p90 <= limit,
+    }
+}
+
+fn prepared_psf_sources(
+    sources: &ContinuumSources,
+    sigma: &[f64],
+    radii: &[usize],
+) -> Result<ContinuumSources> {
+    use sha2::{Digest, Sha256};
+    let key = serde_json::to_vec(&(crate::OUTPUT_VERSION, sources, sigma, radii))
+        .map_err(|e| invalid(&e.to_string()))?;
+    let digest = Sha256::digest(key)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let revision = format!("gaussian-psf:{digest}");
+    let mut prepared = sources.clone();
+    for (i, source) in std::iter::once(&mut prepared.narrowband)
+        .chain(&mut prepared.references)
+        .enumerate()
+    {
+        source.revision = format!("{}:{revision}:{i}", source.revision);
+        source.clipping_revision = Some(format!("{revision}:clipping:{i}"));
+        source.saturation = None;
+    }
+    Ok(prepared)
+}
+
+// Separable rolling box maximum: bounded O(pixels), independent of kernel area.
+fn dilate_square(mask: &[u8], width: usize, height: usize, radius: usize) -> Vec<u8> {
+    let mut horizontal = vec![0; mask.len()];
+    let mut output = vec![0; mask.len()];
+    for y in 0..height {
+        let mut sum = 0usize;
+        for x in 0..width {
+            if x == 0 {
+                sum = mask[y * width..y * width + (radius + 1).min(width)]
+                    .iter()
+                    .map(|v| usize::from(*v != 0))
+                    .sum();
+            } else {
+                if x > radius {
+                    sum -= usize::from(mask[y * width + x - radius - 1] != 0);
+                }
+                if x + radius < width {
+                    sum += usize::from(mask[y * width + x + radius] != 0);
+                }
+            }
+            horizontal[y * width + x] = u8::from(sum > 0);
+        }
+    }
+    for x in 0..width {
+        let mut sum = 0usize;
+        for y in 0..height {
+            if y == 0 {
+                sum = (0..(radius + 1).min(height))
+                    .map(|r| usize::from(horizontal[r * width + x] != 0))
+                    .sum();
+            } else {
+                if y > radius {
+                    sum -= usize::from(horizontal[(y - radius - 1) * width + x] != 0);
+                }
+                if y + radius < height {
+                    sum += usize::from(horizontal[(y + radius) * width + x] != 0);
+                }
+            }
+            output[y * width + x] = u8::from(sum > 0);
+        }
+    }
+    output
+}
+
+fn apply_psf_preparation(
+    images: &[&LinearImage],
+    report: &ContinuumPsfMatch,
+) -> Result<Vec<LinearImage>> {
+    images
+        .iter()
+        .zip(report.kernel_sigma.iter().zip(&report.kernel_radius))
+        .map(|(image, (sigma, radius))| {
+            if *radius == 0 {
+                return Ok((*image).clone());
+            }
+            let invalid: Vec<_> = image
+                .data
+                .iter()
+                .map(|v| u8::from(!v.is_finite()))
+                .collect();
+            let invalid = dilate_square(&invalid, image.width, image.height, *radius);
+            let finite: Vec<_> = image
+                .data
+                .iter()
+                .map(|v| if v.is_finite() { *v } else { 0.0 })
+                .collect();
+            let mut data = seiza_imgproc::blur::gaussian_blur_f32(
+                &finite,
+                image.width,
+                image.height,
+                2 * radius + 1,
+                *sigma,
+                seiza_imgproc::BorderMode::Reflect101,
+            );
+            for (i, value) in data.iter_mut().enumerate() {
+                let (x, y) = (i % image.width, i / image.width);
+                if invalid[i] != 0
+                    || x < *radius
+                    || y < *radius
+                    || x + radius >= image.width
+                    || y + radius >= image.height
+                {
+                    *value = f32::NAN;
+                }
+            }
+            LinearImage::new(image.width, image.height, 1, data)
+        })
+        .collect()
 }
 
 /// Subtract the plan on exactly its prepared linear revisions. Negative
@@ -1265,6 +1834,21 @@ pub fn subtract_continuum(
         return Err(invalid(
             "Continuum plan does not match the prepared input revisions, grid or reference order",
         ));
+    }
+    if let Some(report) = &plan.psf_matching {
+        let images: Vec<_> = std::iter::once(narrowband)
+            .chain(references.iter().copied())
+            .collect();
+        let prepared = apply_psf_preparation(&images, report)?;
+        let mut matched = plan.clone();
+        matched.psf_matching = None;
+        matched.sources = report.prepared_sources.clone();
+        return subtract_continuum(
+            &prepared[0],
+            &prepared[1..].iter().collect::<Vec<_>>(),
+            &matched.sources,
+            &matched,
+        );
     }
     let mut output = Vec::with_capacity(narrowband.data.len());
     for (i, n) in narrowband.data.iter().enumerate() {
@@ -1293,6 +1877,50 @@ pub fn subtract_continuum(
 
 pub(crate) fn validate_plan(plan: &ContinuumPlan) -> Result<()> {
     validate_sources(&plan.sources)?;
+    if let Some(report) = &plan.psf_matching {
+        let count = plan.sources.references.len() + 1;
+        if report.kernel_sigma.len() != count
+            || report.kernel_radius.len() != count
+            || report.measured_fwhm.len() != count
+            || !report.target_fwhm.is_finite()
+            || report.target_fwhm <= 0.0
+            || report.target_fwhm > 32.0
+            || report
+                .measured_fwhm
+                .iter()
+                .any(|v| !v.is_finite() || *v <= 0.0 || *v > report.target_fwhm)
+            || report
+                .kernel_sigma
+                .iter()
+                .zip(&report.kernel_radius)
+                .any(|(s, r)| {
+                    !s.is_finite()
+                        || *s < 0.0
+                        || *s > 14.0
+                        || *r
+                            != if *s < 0.05 {
+                                0
+                            } else {
+                                (4.0 * s).ceil() as usize
+                            }
+                })
+            || report
+                .measured_fwhm
+                .iter()
+                .zip(&report.kernel_sigma)
+                .any(|(f, s)| {
+                    let expected =
+                        (report.target_fwhm.powi(2) - f.powi(2)).max(0.0).sqrt() / 2.354820045;
+                    (s - expected).abs() > 1e-10 * expected.max(1.0)
+                })
+            || report.prepared_sources
+                != prepared_psf_sources(&plan.sources, &report.kernel_sigma, &report.kernel_radius)?
+        {
+            return Err(invalid(
+                "Continuum PSF preparation does not match the exact source revisions or bounded kernels",
+            ));
+        }
+    }
     if plan.schema_version != 1 || plan.coefficients.len() != plan.sources.references.len() {
         return Err(invalid(
             "Continuum plan does not match its schema or reference order",
