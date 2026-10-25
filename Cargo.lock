@@ -3051,7 +3051,7 @@ dependencies = [
 
 [[package]]
 name = "seiza"
-version = "0.43.0"
+version = "0.44.0"
 dependencies = [
  "directories",
  "image",
@@ -3087,7 +3087,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-cabi"
-version = "0.43.0"
+version = "0.44.0"
 dependencies = [
  "cbindgen",
  "image",
@@ -3125,7 +3125,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-cli"
-version = "0.43.0"
+version = "0.44.0"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -3243,7 +3243,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-parallax"
-version = "0.19.1"
+version = "0.19.2"
 dependencies = [
  "ab_glyph",
  "image",
@@ -3263,7 +3263,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-satellites"
-version = "0.22.1"
+version = "0.22.2"
 dependencies = [
  "directories",
  "fs2",
@@ -3295,7 +3295,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-stacking"
-version = "0.50.0"
+version = "0.51.0"
 dependencies = [
  "bytemuck",
  "multiversion",

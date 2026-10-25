@@ -78,7 +78,5 @@ Follow [AGENTS.md](../AGENTS.md) for binding parity, output-version protection,
 and required checks, and [RELEASE.md](../RELEASE.md) for versioning and publishing.
 [Windows packaging](../packaging/windows/README.md) describes the CLI installer.
 
-See the [Seiza 0.43.0 release notes](releases/v0.43.0.md) for narrowband balance,
-validated continuum subtraction and RGB star reduction.
-
-[Unreleased changes](releases/unreleased.md) include registered mosaic background matching.
+See the [Seiza 0.44.0 release notes](releases/v0.44.0.md) for registered mosaic
+background matching and independent RGB star stretching.
