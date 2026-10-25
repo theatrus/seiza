@@ -239,7 +239,7 @@ impl RcAstroCli {
 
     /// Read one tool's live contract: `rc-astro <tool> --json`.
     pub fn tool_schema(&self, tool: &str) -> Result<ExternalToolSchema> {
-        let output = Command::new(&self.executable)
+        let output = tool_command(&self.executable)
             .arg(tool)
             .arg("--json")
             .stdin(Stdio::null())
@@ -295,7 +295,7 @@ impl RcAstroCli {
             .map_err(|error| external_error(&request.tool, format!("output path: {error}")))?;
         let arguments = build_arguments(schema, request, &self.host, &input, &output)?;
 
-        let mut command = Command::new(&self.executable);
+        let mut command = tool_command(&self.executable);
         command
             .args(&arguments)
             .stdin(Stdio::null())
@@ -939,6 +939,21 @@ fn absorb_event_line(line: &str, events: &mut RunEvents, progress: &mut dyn FnMu
     }
 }
 
+/// A command for the tool's executable. On Windows it gets no console
+/// window: rc-astro is a console program, and an app without a console of
+/// its own (a desktop app, a tray, a service) would otherwise open one for
+/// every run, which closes the tool when the user closes it.
+fn tool_command(executable: &Path) -> Command {
+    #[allow(unused_mut)]
+    let mut command = Command::new(executable);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
 #[cfg(test)]
 mod tests {
     use super::*;
