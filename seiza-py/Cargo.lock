@@ -2295,7 +2295,7 @@ dependencies = [
 
 [[package]]
 name = "seiza"
-version = "0.44.1"
+version = "0.44.2"
 dependencies = [
  "directories",
  "image",
@@ -2431,7 +2431,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-py"
-version = "0.44.1"
+version = "0.44.2"
 dependencies = [
  "image",
  "numpy",
@@ -2484,7 +2484,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-stacking"
-version = "0.51.1"
+version = "0.51.2"
 dependencies = [
  "bytemuck",
  "multiversion",

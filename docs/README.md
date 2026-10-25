@@ -80,5 +80,7 @@ and required checks, and [RELEASE.md](../RELEASE.md) for versioning and publishi
 
 See the [Seiza 0.44.0 release notes](releases/v0.44.0.md) for registered mosaic
 background matching and independent RGB star stretching, and the
-[0.44.1 notes](releases/v0.44.1.md) for its fix to local normalization on an
-expanded canvas.
+[0.44.1 notes](releases/v0.44.1.md) for faster blind registration and its fix
+to local normalization on an expanded canvas. The
+[0.44.2 notes](releases/v0.44.2.md) describe RC-Astro calls without console
+windows on Windows.

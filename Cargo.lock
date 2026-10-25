@@ -3051,7 +3051,7 @@ dependencies = [
 
 [[package]]
 name = "seiza"
-version = "0.44.1"
+version = "0.44.2"
 dependencies = [
  "directories",
  "image",
@@ -3087,7 +3087,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-cabi"
-version = "0.44.1"
+version = "0.44.2"
 dependencies = [
  "cbindgen",
  "image",
@@ -3125,7 +3125,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-cli"
-version = "0.44.1"
+version = "0.44.2"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -3295,7 +3295,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-stacking"
-version = "0.51.1"
+version = "0.51.2"
 dependencies = [
  "bytemuck",
  "multiversion",
