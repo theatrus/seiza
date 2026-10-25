@@ -1,4 +1,5 @@
 mod continuum;
+mod emission;
 
 use image::DynamicImage;
 mod constellations;

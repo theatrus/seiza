@@ -3436,6 +3436,25 @@ char *seiza_continuum_measure_fit_json(const float *data,
                                        char **error_out);
 
 /*
+ Measure with producer-derived clipping masks. Like seiza_continuum_measure_fit_json,
+ with one planar byte mask per input (NB then references). Zero is usable,
+ one is clipped. Each source declares clippingRevision; saturation may be omitted.
+ Returns the same fitted/skipped JSON and never changes either input buffer.
+
+ # Safety
+ data points to width*height*planes floats and clipping_masks to the same
+ number of readable bytes. request_json is NUL-terminated UTF-8. error_out,
+ if non-null, points to writable pointer storage.
+ */
+char *seiza_continuum_measure_masked_fit_json(const float *data,
+                                              size_t width,
+                                              size_t height,
+                                              size_t planes,
+                                              const uint8_t *clipping_masks,
+                                              const char *request_json,
+                                              char **error_out);
+
+/*
  Apply a continuum plan, preserving signed linear residuals and coverage.
  Input data is planar NB then references. Request JSON contains sources and
  plan. Output is width*height mono floats and may alias an input plane.
@@ -3453,6 +3472,58 @@ bool seiza_continuum_subtract_json(const float *data,
                                    const char *request_json,
                                    float *output,
                                    char **error_out);
+
+/*
+ Add linear mono residuals to linear RGB using exact continuum plans and
+ empirical reference units. Request JSON contains lines and optional options.
+ Residuals are planar in lines order; broadband/output are interleaved RGB.
+ Errors leave output unchanged. Output may alias either input buffer.
+
+ # Safety
+ broadband/output each address width*height*3 floats; residuals addresses
+ width*height*line-count floats (nullable only for zero lines). request_json
+ is NUL-terminated UTF-8 and error_out, if non-null, is writable.
+ */
+bool seiza_color_blend_emission_json(const float *broadband,
+                                     const float *residuals,
+                                     size_t width,
+                                     size_t height,
+                                     const char *request_json,
+                                     float *output,
+                                     char **error_out);
+
+/*
+ Blend aligned bounded display RGB structures. Amount zero keeps narrowband,
+ one keeps broadband; intermediate amounts use common coverage. Output may
+ alias inputs and is unchanged on an error. No star extraction is performed.
+
+ # Safety
+ Each image pointer addresses width*height*3 floats (output writable).
+ error_out, if non-null, points to writable pointer storage.
+ */
+bool seiza_color_blend_display_structure(const float *narrowband,
+                                         const float *broadband,
+                                         size_t width,
+                                         size_t height,
+                                         double amount,
+                                         float *output,
+                                         char **error_out);
+
+/*
+ Add a linear RGB contribution with multiplicative calibration gains.
+ Inputs may alias output; errors leave output unchanged.
+
+ # Safety
+ Image pointers address width*height*3 floats; gains addresses three floats.
+ Output and non-null error_out must be writable.
+ */
+bool seiza_color_add_rgb_contribution(const float *base,
+                                      const float *contribution,
+                                      size_t width,
+                                      size_t height,
+                                      const float *gains,
+                                      float *output,
+                                      char **error_out);
 
 /*
  Every constellation figure and the stars its lines use, for a host that

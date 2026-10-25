@@ -117,6 +117,52 @@ pub unsafe extern "C" fn seiza_continuum_measure_fit_json(
     .unwrap_or(ptr::null_mut())
 }
 
+/// Measure with producer-derived clipping masks. Like seiza_continuum_measure_fit_json,
+/// with one planar byte mask per input (NB then references). Zero is usable,
+/// one is clipped. Each source declares clippingRevision; saturation may be omitted.
+/// Returns the same fitted/skipped JSON and never changes either input buffer.
+///
+/// # Safety
+/// data points to width*height*planes floats and clipping_masks to the same
+/// number of readable bytes. request_json is NUL-terminated UTF-8. error_out,
+/// if non-null, points to writable pointer storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_continuum_measure_masked_fit_json(
+    data: *const f32,
+    width: usize,
+    height: usize,
+    planes: usize,
+    clipping_masks: *const u8,
+    request_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let request: ContinuumMeasureRequest =
+            parse_request(request_json, "masked continuum measurement")?;
+        let images = unsafe { decode_planes(data, width, height, planes, &request.sources)? };
+        let length = display_length(width, height, planes)?;
+        if clipping_masks.is_null() {
+            return Err("Continuum clipping masks are null".into());
+        }
+        let mask_data = unsafe { std::slice::from_raw_parts(clipping_masks, length) };
+        let masks: Vec<_> = mask_data.chunks_exact(width * height).collect();
+        let references: Vec<_> = images[1..].iter().collect();
+        let outcome = seiza_stacking::measure_and_fit_continuum_masked(
+            &images[0],
+            &references,
+            &request.sources,
+            &masks,
+            &request.positions,
+            &request.fit_options,
+            &request.photometry_options,
+        )
+        .map_err(color_request_error)?;
+        owned_json(&outcome)
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
 /// Apply a continuum plan, preserving signed linear residuals and coverage.
 /// Input data is planar NB then references. Request JSON contains sources and
 /// plan. Output is width*height mono floats and may alias an input plane.
@@ -167,7 +213,8 @@ mod tests {
             name: name.into(),
             revision: "v1".into(),
             transfer: ContinuumTransfer::Linear,
-            saturation: 65535.0,
+            saturation: Some(65535.0),
+            clipping_revision: None,
         };
         let sources = ContinuumSources {
             width: 256,
@@ -252,6 +299,45 @@ mod tests {
                 256,
                 256,
                 2,
+                request.as_ptr(),
+                &mut error,
+            )
+        };
+        assert!(error.is_null());
+        assert!(!output.is_null());
+        let actual: serde_json::Value =
+            unsafe { serde_json::from_str(CStr::from_ptr(output).to_str().unwrap()).unwrap() };
+        unsafe { seiza_string_free(output) };
+        assert_eq!(actual, serde_json::to_value(expected).unwrap());
+        let mut masked_sources = sources.clone();
+        for source in
+            std::iter::once(&mut masked_sources.narrowband).chain(&mut masked_sources.references)
+        {
+            source.saturation = None;
+            source.clipping_revision = Some("producer-v1".into());
+        }
+        let masks = vec![0_u8; data.len()];
+        let request = CString::new(
+            serde_json::json!({"sources":masked_sources,"positions":positions}).to_string(),
+        )
+        .unwrap();
+        let expected = seiza_stacking::measure_and_fit_continuum_masked(
+            &narrowband,
+            &[&reference],
+            &masked_sources,
+            &[&masks[..256 * 256], &masks[256 * 256..]],
+            &positions,
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap();
+        let output = unsafe {
+            seiza_continuum_measure_masked_fit_json(
+                data.as_ptr(),
+                256,
+                256,
+                2,
+                masks.as_ptr(),
                 request.as_ptr(),
                 &mut error,
             )

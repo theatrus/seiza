@@ -52,6 +52,7 @@ mod cosmetic;
 mod crop;
 mod defects;
 mod drizzle;
+mod emission;
 mod expand;
 mod external;
 mod fits;
@@ -104,7 +105,7 @@ pub use continuum::{
     ContinuumDiagnostics, ContinuumFitOptions, ContinuumFitOutcome, ContinuumOrigin,
     ContinuumPhotometry, ContinuumPhotometryOptions, ContinuumPlan, ContinuumSkipReason,
     ContinuumSource, ContinuumSources, ContinuumStar, ContinuumStarDiagnostic, ContinuumTransfer,
-    fit_continuum, measure_and_fit_continuum, subtract_continuum,
+    fit_continuum, measure_and_fit_continuum, measure_and_fit_continuum_masked, subtract_continuum,
 };
 pub use cosmetic::{ImpulseFilterOptions, suppress_impulses};
 pub use crop::{
@@ -112,6 +113,10 @@ pub use crop::{
 };
 pub use defects::{DefectDetectionOptions, DefectMap, detect_defects};
 pub use drizzle::{DrizzleOptions, DrizzleResult};
+pub use emission::{
+    EmissionBlendLine, EmissionBlendOptions, EmissionNegativePolicy, add_rgb_contribution,
+    blend_display_structure, blend_emission_rgb,
+};
 pub use external::{
     ExternalParameterKind, ExternalParameterValue, ExternalToolParameter, ExternalToolRequest,
     ExternalToolRun, ExternalToolSchema, ProcessedStackImage, RC_ASTRO_TOOLS, RcAstroCli,
@@ -192,7 +197,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// folds back onto the frame far beyond it, which 0.40.0 sampled (#307). The
 /// value stayed at "0.40.0" because no cache keyed on it predates 0.42.0,
 /// the first release to export it.
-pub const OUTPUT_VERSION: &str = "0.47.0";
+pub const OUTPUT_VERSION: &str = "0.49.0";
 
 /// Anything that can go wrong while calibrating, registering, normalizing, or
 /// stacking frames.

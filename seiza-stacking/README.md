@@ -904,8 +904,9 @@ candidates for OIII. L is not an automatic reference.
 photometry. `measure_and_fit_continuum(narrowband, references, sources, positions,
 options, photometry)` measures local-background-subtracted fluxes; empty
 positions request Seiza detection on the narrowband plane. All `ContinuumSource`
-records declare a distinct name, exact prepared revision, linear transfer and
-physical saturation in that image's sample units. Change the revision whenever
+records declare a distinct name, exact prepared revision and linear transfer.
+Automatic fitting also needs a physical saturation ceiling or producer clipping
+mask, described below. Change the revision whenever
 pixels, scale, registration, backgrounds or masks change. Saturation must come
 from the image's physical scale, never its observed maximum.
 
@@ -953,3 +954,34 @@ C exports `seiza_continuum_fit_json`, `seiza_continuum_measure_fit_json` and
 NB followed by references; Python uses a list of mono arrays and returns the
 same JSON keys. See [CLI usage](../seiza-cli/README.md#subtract-continuum-from-linear-narrowband-images)
 and [Python usage](../seiza-py/README.md#subtract-stellar-continuum-before-color-composition).
+
+
+### Clipping evidence, sampling and combined images
+
+`measure_and_fit_continuum_masked` accepts one binary clipping plane per input
+(NB then references). Declare exact `clipping_revision` values in the sources;
+a scalar physical `saturation` ceiling may be omitted. Automatic fitting needs
+one of these forms of evidence for every source. Manual signed subtraction
+can omit both. Masks reject stars before sampling and never change image pixels.
+The usable-star budget defaults to 400. Measurement considers up to 4096 candidates independently of that budget, rejects ineligible stars first, samples
+across the remaining flux range, and validates against the complete eligible
+pool. A disagreement or failed broader validation produces a skipped outcome.
+Diagnostics retain eligible/sample counts and sampling stability.
+
+`blend_emission_rgb` projects exact signed residuals into RGB reference units.
+Each `EmissionBlendLine` supplies a plan, destination RGB indices in reference
+order, amount [0,5] and explicit background offset. For stellar ratios
+r_j=F_Bj/F_B0, k_j=sum(a_i*r_i)/r_j; the contribution is amount*(E-offset)/k_j.
+Fitted plans record the ratios. Multi-reference manual plans need measured or
+explicit ratios; single-reference plans use 1. Independent input gains commute
+with projection. `PositiveContribution` clamps the display contribution only;
+the original signed residual stays unchanged. This does not correct broadband
+line transmission or produce calibrated pure line flux.
+
+Calibrate broadband stars before emission addition. `add_rgb_contribution`
+then adds normalized RGB emission with the measured channel gains; calibration
+offsets affect the base only. Add L through the existing luminance composition.
+`blend_display_structure` mixes prepared starless [0,1] RGB display images,
+with endpoints preserving the selected branch's coverage and intermediate
+amounts requiring common coverage. Restore a single RGB star layer afterward.
+These operations are also exposed through the C ABI, Python and CLI.

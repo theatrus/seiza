@@ -21,7 +21,16 @@ pub struct ContinuumSource {
     pub revision: String,
     pub transfer: ContinuumTransfer,
     /// Saturation in these samples' units, never an observed image maximum.
-    pub saturation: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saturation: Option<f64>,
+    /// Exact producer-supplied clipping-mask revision when no scalar ceiling is known.
+    #[serde(
+        default,
+        rename = "clippingRevision",
+        alias = "clipping_revision",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub clipping_revision: Option<String>,
 }
 
 /// Common grid and concrete sources. Reference order defines coefficient order.
@@ -131,6 +140,7 @@ impl Default for ContinuumPhotometryOptions {
 #[serde(rename_all = "snake_case")]
 pub enum ContinuumSkipReason {
     NoStars,
+    UnknownSaturation,
     TooFewStars,
     InvalidMeasurement,
     Saturated,
@@ -140,6 +150,7 @@ pub enum ContinuumSkipReason {
     PsfMismatch,
     RegistrationMismatch,
     RankDeficient,
+    UnstableSampling,
     PoorFit,
     Outlier,
     SpatialResidual,
@@ -165,6 +176,14 @@ pub struct ContinuumStarDiagnostic {
 pub struct ContinuumDiagnostics {
     pub candidate_stars: usize,
     pub measured_stars: usize,
+    /// Common stars passing saturation, signal, alignment and PSF checks.
+    pub eligible_stars: usize,
+    /// Eligible stars retained across the flux range for the bounded fit.
+    pub sampled_stars: usize,
+    /// RMS prediction difference between the bounded and full eligible fits.
+    pub sampling_stability_rms: Option<f64>,
+    /// Median reference stellar flux ratios, normalized to the first reference.
+    pub reference_flux_ratios: Vec<f64>,
     pub used_stars: usize,
     pub validation_stars: usize,
     pub rejected: BTreeMap<ContinuumSkipReason, usize>,
@@ -195,6 +214,13 @@ pub struct ContinuumPlan {
     pub schema_version: u32,
     pub sources: ContinuumSources,
     pub coefficients: Vec<f64>,
+    /// Empirical stellar reference ratios for scale-covariant emission projection.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        alias = "reference_flux_ratios"
+    )]
+    pub reference_flux_ratios: Vec<f64>,
     pub origin: ContinuumOrigin,
     pub diagnostics: Option<ContinuumDiagnostics>,
 }
@@ -242,9 +268,16 @@ fn validate_sources(sources: &ContinuumSources) -> Result<()> {
                 "Continuum sources require distinct names and nonempty prepared revisions",
             ));
         }
-        if !source.saturation.is_finite() || source.saturation <= 0.0 {
+        if source
+            .saturation
+            .is_some_and(|v| !v.is_finite() || v <= 0.0)
+            || source
+                .clipping_revision
+                .as_ref()
+                .is_some_and(|v| v.trim().is_empty())
+        {
             return Err(invalid(
-                "Declare each continuum input's physical saturation level in its working units",
+                "Declare each continuum input's physical saturation level or an exact clipping-mask revision",
             ));
         }
     }
@@ -354,7 +387,10 @@ fn star_rejection(
         {
             return Some(ContinuumSkipReason::InvalidMeasurement);
         }
-        if measurement.peak >= source.saturation * options.saturation_fraction {
+        if source
+            .saturation
+            .is_some_and(|level| measurement.peak >= level * options.saturation_fraction)
+        {
             return Some(ContinuumSkipReason::Saturated);
         }
         if measurement.snr < options.minimum_snr {
@@ -595,6 +631,14 @@ pub fn fit_continuum(
     options: &ContinuumFitOptions,
 ) -> Result<ContinuumFitOutcome> {
     validate_sources(sources)?;
+    if std::iter::once(&sources.narrowband)
+        .chain(&sources.references)
+        .any(|source| source.saturation.is_none() && source.clipping_revision.is_none())
+    {
+        return Err(invalid(
+            "Automatic continuum fitting requires a physical saturation ceiling or producer clipping mask for every source",
+        ));
+    }
     validate_options(options)?;
     let mut diagnostics = ContinuumDiagnostics {
         candidate_stars: stars.len().min(options.max_stars),
@@ -635,6 +679,20 @@ pub fn fit_continuum(
         }
     }
     diagnostics.measured_stars = stars.len().min(options.max_stars);
+    diagnostics.eligible_stars = good.len();
+    diagnostics.sampled_stars = good.len();
+    if !good.is_empty() {
+        diagnostics.reference_flux_ratios = (0..sources.references.len())
+            .map(|column| {
+                median(
+                    &good
+                        .iter()
+                        .map(|star| star.references[column].flux / star.references[0].flux)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+    }
     if good.len() < options.minimum_stars {
         let reason = if stars.is_empty() {
             ContinuumSkipReason::NoStars
@@ -773,6 +831,7 @@ pub fn fit_continuum(
             schema_version: 1,
             sources: sources.clone(),
             coefficients: model.coefficients,
+            reference_flux_ratios: diagnostics.reference_flux_ratios.clone(),
             origin,
             diagnostics: Some(diagnostics),
         },
@@ -790,8 +849,69 @@ pub fn measure_and_fit_continuum(
     options: &ContinuumFitOptions,
     photometry: &ContinuumPhotometryOptions,
 ) -> Result<ContinuumFitOutcome> {
+    measure_and_fit_inner(
+        narrowband, references, sources, None, positions, options, photometry,
+    )
+}
+
+/// Measure with producer-derived saturation/clipping masks on the exact grid.
+/// One byte plane per input (NB then references), zero usable and one clipped.
+/// Masks need exact revisions in sources; scalar saturation may then be absent.
+/// Masks affect stellar eligibility, not subtraction samples or flux scales.
+#[allow(clippy::too_many_arguments)]
+pub fn measure_and_fit_continuum_masked(
+    narrowband: &LinearImage,
+    references: &[&LinearImage],
+    sources: &ContinuumSources,
+    clipping_masks: &[&[u8]],
+    positions: &[[f64; 2]],
+    options: &ContinuumFitOptions,
+    photometry: &ContinuumPhotometryOptions,
+) -> Result<ContinuumFitOutcome> {
+    measure_and_fit_inner(
+        narrowband,
+        references,
+        sources,
+        Some(clipping_masks),
+        positions,
+        options,
+        photometry,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn measure_and_fit_inner(
+    narrowband: &LinearImage,
+    references: &[&LinearImage],
+    sources: &ContinuumSources,
+    clipping_masks: Option<&[&[u8]]>,
+    positions: &[[f64; 2]],
+    options: &ContinuumFitOptions,
+    photometry: &ContinuumPhotometryOptions,
+) -> Result<ContinuumFitOutcome> {
     validate_images(narrowband, references, sources)?;
     validate_options(options)?;
+    let source_list: Vec<_> = std::iter::once(&sources.narrowband)
+        .chain(&sources.references)
+        .collect();
+    match clipping_masks {
+        Some(masks)
+            if masks.len() == source_list.len()
+                && masks.iter().all(|mask| {
+                    mask.len() == sources.width * sources.height && mask.iter().all(|v| *v <= 1)
+                })
+                && source_list
+                    .iter()
+                    .all(|source| source.clipping_revision.is_some()) => {}
+        None if source_list
+            .iter()
+            .all(|source| source.clipping_revision.is_none()) => {}
+        _ => {
+            return Err(invalid(
+                "Continuum clipping masks need one binary plane and exact mask revision per source",
+            ));
+        }
+    }
     if ![
         photometry.aperture_radius,
         photometry.annulus_inner,
@@ -808,7 +928,8 @@ pub fn measure_and_fit_continuum(
             "Continuum aperture needs 2 <= radius < annulus inner < annulus outer <= 128 pixels",
         ));
     }
-    let max_candidates = options.max_stars.saturating_mul(4);
+    // Keep the search population independent of the usable-star budget.
+    let max_candidates = 4096;
     let positions = if positions.is_empty() {
         let width = u32::try_from(sources.width)
             .map_err(|_| invalid("Continuum image is too wide for star detection"))?;
@@ -832,7 +953,8 @@ pub fn measure_and_fit_continuum(
     };
     let mut rejected = BTreeMap::new();
     let mut measurements = Vec::new();
-    for (index, position) in positions.iter().take(options.max_stars).enumerate() {
+    let mut measured_count = 0;
+    for (index, position) in positions.iter().enumerate() {
         let measured = (|| {
             if !position.iter().all(|v| v.is_finite()) {
                 return Err(ContinuumSkipReason::InvalidMeasurement);
@@ -847,47 +969,141 @@ pub fn measure_and_fit_continuum(
                 narrowband,
                 *position,
                 sources.narrowband.saturation,
+                clipping_masks.map(|masks| masks[0]),
                 options,
                 photometry,
             )?;
             let references = references
                 .iter()
                 .zip(&sources.references)
-                .map(|(image, source)| {
-                    measure(image, *position, source.saturation, options, photometry)
+                .enumerate()
+                .map(|(i, (image, source))| {
+                    measure(
+                        image,
+                        *position,
+                        source.saturation,
+                        clipping_masks.map(|masks| masks[i + 1]),
+                        options,
+                        photometry,
+                    )
                 })
                 .collect::<std::result::Result<Vec<_>, _>>()?;
-            Ok(ContinuumStar {
+            measured_count += 1;
+            let star = ContinuumStar {
                 narrowband,
                 references,
-            })
+            };
+            if let Some(reason) = star_rejection(&star, sources, options) {
+                return Err(reason);
+            }
+            Ok(star)
         })();
         match measured {
             Ok(star) => measurements.push(star),
             Err(reason) => *rejected.entry(reason).or_insert(0_usize) += 1,
         }
     }
-    let mut outcome = fit_continuum(&measurements, sources, options)?;
+    // Rejections do not spend the usable-star budget. Sample the whole
+    // eligible brightness range, rather than stopping on the brightest stars.
+    let eligible_count = measurements.len();
+    measurements.sort_by(|a, b| {
+        b.narrowband
+            .flux
+            .total_cmp(&a.narrowband.flux)
+            .then_with(|| a.narrowband.x.total_cmp(&b.narrowband.x))
+            .then_with(|| a.narrowband.y.total_cmp(&b.narrowband.y))
+    });
+    let sampled: Vec<_> = if measurements.len() > options.max_stars {
+        let last = measurements.len() - 1;
+        (0..options.max_stars)
+            .map(|i| measurements[i * last / (options.max_stars - 1)].clone())
+            .collect()
+    } else {
+        measurements.clone()
+    };
+    let mut outcome = fit_continuum(&sampled, sources, options)?;
+    if eligible_count > sampled.len() && matches!(outcome, ContinuumFitOutcome::Fitted { .. }) {
+        let audit_options = ContinuumFitOptions {
+            max_stars: eligible_count,
+            ..options.clone()
+        };
+        let audit = fit_continuum(&measurements, sources, &audit_options)?;
+        match (&mut outcome, audit) {
+            (ContinuumFitOutcome::Fitted { plan }, ContinuumFitOutcome::Fitted { plan: full }) => {
+                let differences: Vec<_> = measurements
+                    .iter()
+                    .map(|star| {
+                        star.references
+                            .iter()
+                            .zip(plan.coefficients.iter().zip(&full.coefficients))
+                            .map(|(r, (a, b))| (a - b) * r.flux / star.narrowband.flux)
+                            .sum::<f64>()
+                    })
+                    .collect();
+                let difference = rms(&differences);
+                plan.diagnostics.as_mut().unwrap().sampling_stability_rms = Some(difference);
+                if !difference.is_finite() || difference > options.max_fractional_error * 0.5 {
+                    outcome = skipped(
+                        ContinuumSkipReason::UnstableSampling,
+                        "Continuum predictions change across the bounded and full eligible star samples",
+                        plan.diagnostics.clone().unwrap(),
+                    );
+                }
+            }
+            (
+                _,
+                ContinuumFitOutcome::Skipped {
+                    reason,
+                    detail,
+                    diagnostics,
+                },
+            ) => {
+                outcome = ContinuumFitOutcome::Skipped {
+                    reason,
+                    detail: format!("Broader eligible-star validation: {detail}"),
+                    diagnostics,
+                };
+            }
+            _ => unreachable!(),
+        }
+    }
     let diagnostics = match &mut outcome {
         ContinuumFitOutcome::Fitted { plan } => plan.diagnostics.as_mut().unwrap(),
         ContinuumFitOutcome::Skipped { diagnostics, .. } => diagnostics,
     };
-    diagnostics.candidate_stars = positions.len().min(options.max_stars);
+    diagnostics.candidate_stars = positions.len();
+    diagnostics.measured_stars = measured_count;
+    diagnostics.eligible_stars = eligible_count;
+    diagnostics.sampled_stars = sampled.len();
     for (reason, count) in rejected {
         *diagnostics.rejected.entry(reason).or_default() += count;
     }
-    if let ContinuumFitOutcome::Skipped { reason, .. } = &mut outcome
-        && *reason == ContinuumSkipReason::NoStars
+    if let ContinuumFitOutcome::Skipped {
+        reason,
+        diagnostics,
+        ..
+    } = &mut outcome
+        && matches!(
+            *reason,
+            ContinuumSkipReason::NoStars | ContinuumSkipReason::TooFewStars
+        )
         && !positions.is_empty()
     {
-        *reason = ContinuumSkipReason::TooFewStars;
+        *reason = [
+            ContinuumSkipReason::PsfMismatch,
+            ContinuumSkipReason::RegistrationMismatch,
+        ]
+        .into_iter()
+        .find(|r| diagnostics.rejected.get(r).copied().unwrap_or_default() >= options.minimum_stars)
+        .unwrap_or(ContinuumSkipReason::TooFewStars);
     }
     Ok(outcome)
 }
 fn measure(
     image: &LinearImage,
     position: [f64; 2],
-    saturation: f64,
+    saturation: Option<f64>,
+    clipping_mask: Option<&[u8]>,
     options: &ContinuumFitOptions,
     geometry: &ContinuumPhotometryOptions,
 ) -> std::result::Result<ContinuumPhotometry, ContinuumSkipReason> {
@@ -920,7 +1136,9 @@ fn measure(
                 if !value.is_finite() {
                     return Err(MissingCoverage);
                 }
-                if value >= saturation * options.saturation_fraction {
+                if saturation.is_some_and(|level| value >= level * options.saturation_fraction)
+                    || clipping_mask.is_some_and(|mask| mask[py * image.width + px] != 0)
+                {
                     return Err(Saturated);
                 }
                 aperture.push((dx, dy, value));
@@ -1042,22 +1260,10 @@ pub fn subtract_continuum(
     plan: &ContinuumPlan,
 ) -> Result<LinearImage> {
     validate_images(narrowband, references, sources)?;
-    if plan.schema_version != 1
-        || &plan.sources != sources
-        || plan.coefficients.len() != references.len()
-    {
+    validate_plan(plan)?;
+    if &plan.sources != sources {
         return Err(invalid(
             "Continuum plan does not match the prepared input revisions, grid or reference order",
-        ));
-    }
-    if plan.coefficients.iter().any(|a| !a.is_finite() || *a < 0.0) {
-        return Err(invalid(
-            "Continuum coefficients must be finite and nonnegative",
-        ));
-    }
-    if (plan.origin == ContinuumOrigin::Manual) != plan.diagnostics.is_none() {
-        return Err(invalid(
-            "Manual continuum plans have no fit diagnostics; fitted plans must retain theirs",
         ));
     }
     let mut output = Vec::with_capacity(narrowband.data.len());
@@ -1083,4 +1289,35 @@ pub fn subtract_continuum(
         output.push(value as f32);
     }
     LinearImage::new(narrowband.width, narrowband.height, 1, output)
+}
+
+pub(crate) fn validate_plan(plan: &ContinuumPlan) -> Result<()> {
+    validate_sources(&plan.sources)?;
+    if plan.schema_version != 1 || plan.coefficients.len() != plan.sources.references.len() {
+        return Err(invalid(
+            "Continuum plan does not match its schema or reference order",
+        ));
+    }
+    if plan.coefficients.iter().any(|a| !a.is_finite() || *a < 0.0) {
+        return Err(invalid(
+            "Continuum coefficients must be finite and nonnegative",
+        ));
+    }
+    if (plan.origin == ContinuumOrigin::Manual) != plan.diagnostics.is_none() {
+        return Err(invalid(
+            "Manual continuum plans have no fit diagnostics; fitted plans must retain theirs",
+        ));
+    }
+    if !plan.reference_flux_ratios.is_empty()
+        && (plan.reference_flux_ratios.len() != plan.coefficients.len()
+            || plan
+                .reference_flux_ratios
+                .iter()
+                .any(|r| !r.is_finite() || *r <= 0.0))
+    {
+        return Err(invalid(
+            "Continuum reference flux ratios must be positive, finite and match the reference count",
+        ));
+    }
+    Ok(())
 }

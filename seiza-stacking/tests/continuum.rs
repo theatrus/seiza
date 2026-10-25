@@ -5,7 +5,8 @@ fn sources(count: usize) -> ContinuumSources {
         name: name.into(),
         revision: format!("{name}:linear-v1"),
         transfer: ContinuumTransfer::Linear,
-        saturation: 1e6,
+        saturation: Some(1e6),
+        clipping_revision: None,
     };
     ContinuumSources {
         width: 256,
@@ -58,6 +59,7 @@ fn manual(sources: &ContinuumSources, coefficients: Vec<f64>) -> ContinuumPlan {
         schema_version: 1,
         sources: sources.clone(),
         coefficients,
+        reference_flux_ratios: Vec::new(),
         origin: ContinuumOrigin::Manual,
         diagnostics: None,
     }
@@ -98,8 +100,8 @@ fn input_scale_changes_are_carried_by_the_fitted_weights_not_hidden_normalizatio
         star.references[0].flux *= 7.0;
         star.references[0].peak *= 7.0;
     }
-    context.narrowband.saturation *= 3.0;
-    context.references[0].saturation *= 7.0;
+    context.narrowband.saturation = context.narrowband.saturation.map(|v| v * 3.0);
+    context.references[0].saturation = context.references[0].saturation.map(|v| v * 7.0);
     context.narrowband.revision = "ha:scaled".into();
     context.references[0].revision = "red:scaled".into();
     let scaled = plan(fit_continuum(&data, &context, &Default::default()).unwrap());
@@ -410,4 +412,39 @@ fn automatic_fitting_refuses_brightness_dependent_and_extreme_flux_models() {
         fit_continuum(&data, &context, &Default::default()).unwrap(),
         ContinuumFitOutcome::Skipped { .. }
     ));
+}
+
+#[path = "common/continuum.rs"]
+mod measurement_fixture;
+
+#[test]
+fn rejected_bright_stars_do_not_spend_the_usable_photometry_budget() {
+    let summary = measurement_fixture::measurement_summary();
+    assert_eq!(summary[0], 1.0);
+    assert!((summary[1] - 0.35).abs() < 1e-6);
+    let (n, b, positions, sources, options) = measurement_fixture::saturated_field();
+    let result = plan(
+        measure_and_fit_continuum(
+            &n,
+            &[&b],
+            &sources,
+            &positions,
+            &options,
+            &Default::default(),
+        )
+        .unwrap(),
+    );
+    let d = result.diagnostics.unwrap();
+    assert_eq!(d.candidate_stars, 32);
+    assert_eq!(d.eligible_stars, 16);
+    assert_eq!(d.sampled_stars, 16);
+    assert_eq!(d.rejected[&ContinuumSkipReason::Saturated], 16);
+}
+
+#[test]
+fn candidate_search_reaches_valid_fainter_stars_independently_of_usable_budget() {
+    let actual = measurement_fixture::deeper_candidate_summary();
+    for (actual, expected) in actual.iter().zip([1.0, 0.35, 12.0, 4.0, 100.0]) {
+        assert!((actual - expected).abs() < 1e-6);
+    }
 }

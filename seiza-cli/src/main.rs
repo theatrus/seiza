@@ -25,6 +25,7 @@ mod color_calibrate;
 mod common;
 mod continuum;
 mod deconvolution;
+mod emission;
 mod interrupt;
 mod master;
 pub(crate) use seiza_draw::ellipse_points;

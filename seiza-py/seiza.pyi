@@ -1276,6 +1276,16 @@ def measure_and_fit_continuum(
     """Measure aligned linear planes; empty positions requests star detection."""
     ...
 
+def measure_and_fit_continuum_masked(
+    narrowband: npt.NDArray[np.float32], references: Sequence[npt.NDArray[np.float32]],
+    sources: Mapping[str, Any], clipping_masks: Sequence[npt.NDArray[np.uint8]], *,
+    positions: Sequence[tuple[float, float]] | None = None,
+    fit_options: Mapping[str, Any] | None = None,
+    photometry_options: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Fit with exact producer clipping masks; no scalar ceiling is required."""
+    ...
+
 def subtract_continuum(
     narrowband: npt.NDArray[np.float32],
     references: Sequence[npt.NDArray[np.float32]],
@@ -1799,3 +1809,18 @@ def dust_match_features(
 # 4.0): anything that shows them must carry the returned "attribution".
 def constellation_figures() -> dict[str, Any]: ...
 def project_constellations(wcs: Wcs, width: int, height: int) -> dict[str, Any]: ...
+
+def blend_emission_rgb(
+    broadband: npt.NDArray[np.float32], residuals: Sequence[npt.NDArray[np.float32]],
+    lines: Sequence[Mapping[str, Any]], *, negative: str = "preserve",
+) -> npt.NDArray[np.float32]:
+    """Add line residuals in empirical reference units; preserve signed data."""
+    ...
+
+def blend_display_structure(
+    narrowband: npt.NDArray[np.float32], broadband: npt.NDArray[np.float32], amount: float,
+) -> npt.NDArray[np.float32]:
+    """Blend matching starless display structures before restoring stars."""
+    ...
+
+def add_rgb_contribution(base: npt.NDArray[np.float32], contribution: npt.NDArray[np.float32], *, gains: tuple[float, float, float] = ...) -> npt.NDArray[np.float32]: ...

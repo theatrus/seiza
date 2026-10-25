@@ -1351,3 +1351,37 @@ library caller explicitly requests it. See the
 ## License
 
 Apache-2.0
+
+
+Producer clipping maps can replace an unknown physical ceiling:
+
+```sh
+seiza color continuum --narrowband ha-linear.fits --reference red-linear.fits \
+  --clipping-mask ha-clipped.fits red-clipped.fits --report fit.json \
+  --save-plan plan.json --output ha-residual.fits
+```
+
+Maps contain mono fractions on the exact input grid. Any positive or nonfinite
+sample excludes the star from fitting. Map file identities are part of the
+source revisions. Manual `--coefficients` subtraction needs no guessed ceiling.
+The usable-star budget is applied after eligibility checks and validated
+against the broader eligible pool; inspect skip reasons before blending.
+
+Use the same core projection and display mixing from files:
+
+```sh
+seiza color blend emission --broadband rgb-linear.fits \
+  --residual ha-residual.fits --settings blend.json --output combined.fits
+seiza color blend contribution --base calibrated-rgb.fits \
+  --contribution normalized-emission.fits --gains 1.2,1,0.9 --output combined.fits
+seiza color blend structure --narrowband sho-starless.fits \
+  --broadband rgb-starless.fits --amount 0.25 --output structure.fits
+```
+
+Emission settings use the C ABI JSON shape `{"lines":[...],"options":{...}}`.
+Each line has an exact continuum plan, `referenceChannels` in RGB index order,
+`amount` and optional `backgroundOffset`. Multi-reference plans include
+`referenceFluxRatios`. For a manual continuum plan, pass
+`--reference-flux-ratios 1,2` alongside `--coefficients` to record explicit
+stellar ratios in reference order. Linear commands require `SEIZATRF=LINEAR`; structure
+inputs require `SEIZATRF=DISPLAY`. Structure mixing does not extract stars.

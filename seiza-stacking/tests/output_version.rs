@@ -499,7 +499,8 @@ fn continuum_linear_modes_keep_their_output() {
         name: name.into(),
         revision: "v1".into(),
         transfer: ContinuumTransfer::Linear,
-        saturation: 65535.0,
+        saturation: Some(65535.0),
+        clipping_revision: None,
     };
     let mut sources = ContinuumSources {
         width: 256,
@@ -538,6 +539,7 @@ fn continuum_linear_modes_keep_their_output() {
         schema_version: 1,
         sources: sources.clone(),
         coefficients: vec![0.35],
+        reference_flux_ratios: Vec::new(),
         origin: ContinuumOrigin::Manual,
         diagnostics: None,
     };
@@ -2516,3 +2518,136 @@ const SUPERPIXEL_MAPPING: &[f64] = &[
     3.0147623e2,
     2.0163464e2,
 ];
+
+#[path = "common/continuum.rs"]
+mod continuum_measurement_fixture;
+
+#[test]
+fn continuum_saturated_candidate_sampling_keeps_its_output() {
+    check(
+        "CONTINUUM_CANDIDATE_SAMPLING",
+        &continuum_measurement_fixture::measurement_summary(),
+        &[1.0, 0.35, 12.0, 4.0, 16.0],
+    );
+}
+
+fn emission_fixture() -> seiza_stacking::EmissionBlendLine {
+    use seiza_stacking::*;
+    let source = |name: &str| ContinuumSource {
+        name: name.into(),
+        revision: "fixture-v1".into(),
+        transfer: ContinuumTransfer::Linear,
+        saturation: Some(1000.0),
+        clipping_revision: None,
+    };
+    EmissionBlendLine {
+        plan: ContinuumPlan {
+            schema_version: 1,
+            sources: ContinuumSources {
+                width: 1,
+                height: 1,
+                narrowband: source("ha"),
+                references: vec![source("red")],
+            },
+            coefficients: vec![0.2],
+            reference_flux_ratios: vec![1.0],
+            origin: ContinuumOrigin::Manual,
+            diagnostics: None,
+        },
+        reference_channels: vec![0],
+        amount: 0.25,
+        background_offset: 0.0,
+    }
+}
+#[test]
+fn emission_blending_keeps_its_output() {
+    use seiza_stacking::*;
+    let base = LinearImage::new(1, 1, 3, vec![0.2, 0.3, 0.4]).unwrap();
+    let residual = LinearImage::new(1, 1, 1, vec![0.04]).unwrap();
+    let projected = blend_emission_rgb(
+        &base,
+        &[&residual],
+        &[emission_fixture()],
+        &Default::default(),
+    )
+    .unwrap();
+    check(
+        "EMISSION_RGB",
+        &projected
+            .data
+            .iter()
+            .map(|v| f64::from(*v))
+            .collect::<Vec<_>>(),
+        &[0.25, 0.3, 0.4],
+    );
+    let nebula = LinearImage::new(1, 1, 3, vec![0.1, 0.2, 0.3]).unwrap();
+    let broadband = LinearImage::new(1, 1, 3, vec![0.5, 0.6, 0.7]).unwrap();
+    let mixed = blend_display_structure(&nebula, &broadband, 0.25).unwrap();
+    check(
+        "EMISSION_STRUCTURE",
+        &mixed.data.iter().map(|v| f64::from(*v)).collect::<Vec<_>>(),
+        &[0.2, 0.3, 0.4],
+    );
+}
+#[test]
+fn calibrated_emission_addition_keeps_its_output() {
+    use seiza_stacking::*;
+    let base = LinearImage::new(1, 1, 3, vec![0.2, 0.3, 0.4]).unwrap();
+    let delta = LinearImage::new(1, 1, 3, vec![0.1, 0.2, 0.3]).unwrap();
+    let result = add_rgb_contribution(&base, &delta, [2.0, 1.0, 0.5]).unwrap();
+    check(
+        "CALIBRATED_EMISSION",
+        &result
+            .data
+            .iter()
+            .map(|v| f64::from(*v))
+            .collect::<Vec<_>>(),
+        &[0.4, 0.5, 0.55],
+    );
+}
+#[test]
+fn continuum_clipping_map_keeps_its_output() {
+    use seiza_stacking::*;
+    let (n, b, positions, mut sources, options) = continuum_measurement_fixture::saturated_field();
+    let masks: Vec<Vec<u8>> = [&n, &b]
+        .iter()
+        .map(|image| image.data.iter().map(|v| u8::from(*v >= 1000.0)).collect())
+        .collect();
+    for source in std::iter::once(&mut sources.narrowband).chain(&mut sources.references) {
+        source.saturation = None;
+        source.clipping_revision = Some("producer-v1".into());
+    }
+    let outcome = measure_and_fit_continuum_masked(
+        &n,
+        &[&b],
+        &sources,
+        &masks.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+        &positions,
+        &options,
+        &Default::default(),
+    )
+    .unwrap();
+    let ContinuumFitOutcome::Fitted { plan } = outcome else {
+        panic!("masked fit skipped: {outcome:?}")
+    };
+    let d = plan.diagnostics.unwrap();
+    check(
+        "CONTINUUM_CLIPPING",
+        &[
+            plan.coefficients[0],
+            d.used_stars as f64,
+            d.validation_stars as f64,
+            d.rejected[&ContinuumSkipReason::Saturated] as f64,
+        ],
+        &[0.35, 12.0, 4.0, 16.0],
+    );
+}
+
+#[test]
+fn continuum_deeper_candidate_search_keeps_its_output() {
+    check(
+        "CONTINUUM_DEEPER_CANDIDATES",
+        &continuum_measurement_fixture::deeper_candidate_summary(),
+        &[1.0, 0.35, 12.0, 4.0, 100.0],
+    );
+}

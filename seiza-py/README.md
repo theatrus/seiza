@@ -1353,3 +1353,37 @@ array `N - sum(a_i * B_i)`, keeping negative values and NaN for missing
 contributing coverage. It never clips, rescales, stretches or corrects filter
 line transmission. A broadband reference can contain emission itself, so the
 result is an emission residual rather than calibrated pure line flux.
+
+
+### Use producer clipping masks and add emission
+
+When no physical working-unit saturation ceiling is known, set each source's
+`clipping_revision` and call `measure_and_fit_continuum_masked(narrowband,
+references, sources, clipping_masks, *, positions=None, fit_options=None,
+photometry_options=None)`. Supply a C-contiguous uint8 mono mask for each input,
+narrowband first: 0 is usable and 1 is clipped. The masks select stars; they do
+not alter pixels or signed subtraction. Automatic measurement examines up to
+4096 candidates independently of the usable-star budget, applies eligibility
+checks before that budget, samples across stellar brightness, and checks the
+fit against the complete eligible pool. `eligibleStars`, `sampledStars` and
+`samplingStabilityRms` report these decisions. A failed broader validation
+returns a skipped outcome. Manual subtraction can omit saturation evidence.
+
+`blend_emission_rgb(broadband, residuals, lines, *, negative="preserve")` projects
+signed mono residuals into linear RGB. Each line contains its exact `plan`,
+`reference_channels` (RGB indices in reference order), an artistic `amount`
+from 0 to 5, and optional explicit `background_offset` (default 0). The original
+residual remains signed. `negative="positive_contribution"` limits only the
+added contribution. Fitted plans record `referenceFluxRatios`; manual plans
+with multiple references must supply these measured or explicit ratios.
+For stellar ratios r_j=F_Bj/F_B0, projection uses k_j=sum(a_i*r_i)/r_j and adds
+amount*(E-background_offset)/k_j. Independent input gains commute with this
+conversion. It is an empirical emission residual, not pure line flux.
+
+Calibrate the broadband stars before adding emission. To apply their measured
+gains to an already normalized RGB contribution, call
+`add_rgb_contribution(base, contribution, *, gains=(1,1,1))`; offsets apply to
+the base only. `blend_display_structure(narrowband, broadband, amount)` mixes
+prepared starless RGB display images in [0,1], before restoring RGB stars once.
+Amount 0 keeps narrowband, 1 keeps broadband, and intermediate amounts require
+common coverage. All three functions return new arrays and preserve inputs.

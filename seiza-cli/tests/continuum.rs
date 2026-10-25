@@ -58,6 +58,8 @@ fn manual_signed_residual_and_exact_plan_reuse_preserve_units_and_inputs() {
         &[
             "--coefficients",
             "0.35",
+            "--reference-flux-ratios",
+            "1",
             "--output",
             "emission.fits",
             "--save-plan",
@@ -66,6 +68,9 @@ fn manual_signed_residual_and_exact_plan_reuse_preserve_units_and_inputs() {
             "report.json",
         ],
     ));
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("plan.json")).unwrap()).unwrap();
+    assert_eq!(saved["referenceFluxRatios"], serde_json::json!([1.0]));
     let result = FitsFrame::open(dir.join("emission.fits")).unwrap();
     assert!(result.image.data[1] < 0.0);
     for (v, e) in result.image.data.iter().zip([0.025, -0.005, 0.36, -0.045]) {

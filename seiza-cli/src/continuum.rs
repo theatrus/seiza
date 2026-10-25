@@ -19,10 +19,13 @@ pub(crate) struct ContinuumArgs {
     reference: Vec<PathBuf>,
     /// Physical saturation level in narrowband sample units, not an image maximum
     #[arg(long)]
-    saturation: f64,
+    saturation: Option<f64>,
     /// Reference saturation levels in their sample units; defaults to --saturation
     #[arg(long, value_delimiter=',', num_args=1..=3)]
     reference_saturation: Vec<f64>,
+    /// Producer clipping maps, NB then references; nonzero fractions are clipped
+    #[arg(long, num_args=1..=4, action=clap::ArgAction::Append)]
+    clipping_mask: Vec<PathBuf>,
     /// Declare untagged inputs linear; DISPLAY tags are always refused
     #[arg(long)]
     assume_linear: bool,
@@ -41,6 +44,9 @@ pub(crate) struct ContinuumArgs {
     /// Nonnegative manual weights in reference order; bypasses fitting
     #[arg(long, value_delimiter=',', num_args=1..=3, allow_negative_numbers=true, conflicts_with_all=["stars", "positions", "fit_options", "photometry_options"])]
     coefficients: Vec<f64>,
+    /// Manual stellar reference flux ratios relative to the first reference
+    #[arg(long, value_delimiter=',', num_args=1..=3, requires="coefficients", conflicts_with="plan")]
+    reference_flux_ratios: Vec<f64>,
     /// JSON array of premeasured ContinuumStar objects; otherwise measure images
     #[arg(long, conflicts_with_all=["positions", "photometry_options"])]
     stars: Option<PathBuf>,
@@ -81,7 +87,12 @@ fn open_linear(path: &Path, assume_linear: bool) -> Result<FitsFrame> {
     }
     Ok(frame)
 }
-fn source(path: &Path, name: String, saturation: f64) -> Result<ContinuumSource> {
+fn source(
+    path: &Path,
+    name: String,
+    saturation: Option<f64>,
+    clipping: Option<&Path>,
+) -> Result<ContinuumSource> {
     let identity = file_identity(path)?;
     Ok(ContinuumSource {
         name,
@@ -93,6 +104,14 @@ fn source(path: &Path, name: String, saturation: f64) -> Result<ContinuumSource>
         ),
         transfer: ContinuumTransfer::Linear,
         saturation,
+        clipping_revision: clipping.map(file_identity).transpose()?.map(|identity| {
+            format!(
+                "{}:{}:{}",
+                seiza_stacking::OUTPUT_VERSION,
+                identity.bytes,
+                identity.sha256
+            )
+        }),
     })
 }
 
@@ -108,7 +127,20 @@ pub(crate) fn run(args: ContinuumArgs) -> Result<()> {
     {
         bail!("--reference-saturation must supply one value per reference");
     }
+    if !args.clipping_mask.is_empty() && args.clipping_mask.len() != args.reference.len() + 1 {
+        bail!("--clipping-mask must supply narrowband then one map per reference");
+    }
+    if args.saturation.is_none()
+        && args.clipping_mask.is_empty()
+        && args.coefficients.is_empty()
+        && args.plan.is_none()
+    {
+        bail!("supply known physical --saturation or producer --clipping-mask maps");
+    }
     let mut roles = vec![("narrowband input".into(), args.narrowband.as_path())];
+    for (i, path) in args.clipping_mask.iter().enumerate() {
+        roles.push((format!("clipping map {}", i + 1), path.as_path()));
+    }
     for (i, path) in args.reference.iter().enumerate() {
         roles.push((format!("reference {}", i + 1), path.as_path()));
     }
@@ -136,7 +168,12 @@ pub(crate) fn run(args: ContinuumArgs) -> Result<()> {
     let sources = ContinuumSources {
         width: narrowband.image.width,
         height: narrowband.image.height,
-        narrowband: source(&args.narrowband, "narrowband".into(), args.saturation)?,
+        narrowband: source(
+            &args.narrowband,
+            "narrowband".into(),
+            args.saturation,
+            args.clipping_mask.first().map(PathBuf::as_path),
+        )?,
         references: args
             .reference
             .iter()
@@ -148,12 +185,36 @@ pub(crate) fn run(args: ContinuumArgs) -> Result<()> {
                     args.reference_saturation
                         .get(i)
                         .copied()
-                        .unwrap_or(args.saturation),
+                        .or(args.saturation),
+                    args.clipping_mask.get(i + 1).map(PathBuf::as_path),
                 )
             })
             .collect::<Result<_>>()?,
     };
     let images: Vec<_> = references.iter().map(|f| &f.image).collect();
+    let masks = args
+        .clipping_mask
+        .iter()
+        .map(|path| {
+            let map = FitsFrame::open(path)?;
+            if (map.image.width, map.image.height, map.image.channels)
+                != (sources.width, sources.height, 1)
+                || map
+                    .image
+                    .data
+                    .iter()
+                    .any(|v| v.is_finite() && !(0.0..=1.0).contains(v))
+            {
+                bail!("Clipping maps must be mono fractions on the input grid");
+            }
+            Ok(map
+                .image
+                .data
+                .iter()
+                .map(|v| u8::from(!v.is_finite() || *v > 0.0))
+                .collect::<Vec<_>>())
+        })
+        .collect::<Result<Vec<_>>>()?;
     let outcome = if let Some(path) = &args.plan {
         ContinuumFitOutcome::Fitted {
             plan: read_json(path)?,
@@ -164,6 +225,7 @@ pub(crate) fn run(args: ContinuumArgs) -> Result<()> {
                 schema_version: 1,
                 sources: sources.clone(),
                 coefficients: args.coefficients.clone(),
+                reference_flux_ratios: args.reference_flux_ratios.clone(),
                 origin: ContinuumOrigin::Manual,
                 diagnostics: None,
             },
@@ -191,14 +253,27 @@ pub(crate) fn run(args: ContinuumArgs) -> Result<()> {
                 .map(read_json)
                 .transpose()?
                 .unwrap_or_default();
-            seiza_stacking::measure_and_fit_continuum(
-                &narrowband.image,
-                &images,
-                &sources,
-                &positions,
-                &options,
-                &photometry,
-            )?
+            if masks.is_empty() {
+                seiza_stacking::measure_and_fit_continuum(
+                    &narrowband.image,
+                    &images,
+                    &sources,
+                    &positions,
+                    &options,
+                    &photometry,
+                )?
+            } else {
+                let masks: Vec<_> = masks.iter().map(Vec::as_slice).collect();
+                seiza_stacking::measure_and_fit_continuum_masked(
+                    &narrowband.image,
+                    &images,
+                    &sources,
+                    &masks,
+                    &positions,
+                    &options,
+                    &photometry,
+                )?
+            }
         }
     };
     let plan = match &outcome {

@@ -81,3 +81,25 @@ def test_automatic_and_supplied_star_photometry_agree_across_gradients():
     empty = seiza.measure_and_fit_continuum(np.zeros_like(n), [r], context)
     assert empty["status"] == "skipped"
     assert empty["reason"] == "no_stars"
+
+
+def test_producer_clipping_maps_replace_guessed_scalar_saturation():
+    yy, xx = np.mgrid[:240, :400]
+    positions = [(30 + i % 8 * 45, 30 + i // 8 * 50) for i in range(32)]
+    signal = np.zeros_like(xx, dtype=np.float64)
+    for i, (x, y) in enumerate(positions):
+        signal += (5000 if i < 16 else 70 + i) * np.exp(-((xx-x)**2+(yy-y)**2)/(2*1.4**2))
+    n = np.ascontiguousarray(10 + signal, dtype=np.float32)
+    b = np.ascontiguousarray(10 + signal / 0.35, dtype=np.float32)
+    context = sources(400, 240)
+    for source in [context['narrowband'], *context['references']]:
+        del source['saturation']
+        source['clipping_revision'] = 'producer-v1'
+    masks = [(im >= 1000).astype(np.uint8) for im in [n, b]]
+    out = seiza.measure_and_fit_continuum_masked(n, [b], context, masks,
+        positions=positions, fit_options={'max_stars': 16})
+    assert out['status'] == 'fitted', out
+    assert out['plan']['coefficients'] == pytest.approx([0.35], abs=1e-6)
+    assert out['plan']['diagnostics']['rejected']['saturated'] == 16
+    with pytest.raises(ValueError, match='binary'):
+        seiza.measure_and_fit_continuum_masked(n, [b], context, [np.full_like(masks[0], 2), masks[1]], positions=positions)

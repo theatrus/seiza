@@ -497,7 +497,7 @@ Before touching numerical code, run stacking and stretch `output_version`
 tests as required by `AGENTS.md`. Add cases for each new enabled mode, verify
 that a planted change fails, and preserve existing disabled-path summaries.
 Record output versions according to the repository rules. The upcoming
-stacking 0.47.0 output version covers these new operations; existing stacking
+stacking 0.49.0 output version covers these new operations; existing stacking
 and stretch summaries remain unchanged. Cover:
 
 - Known midtone landmarks, identity, protected shadows, H-alpha preservation,
@@ -559,7 +559,7 @@ continuum subtraction for every combined-image recipe. Wider nebula and
 reflection/galaxy validation, starless-branch equivalence, PSF matching where
 needed, and the PSF Guard combined-image stage remain work before release.
 
-### SNR G132: sample stability remains a release prerequisite
+### Initial SNR G132 sampling findings
 
 A second full-field test used the newest SNR G132 RGB and Ha/OIII/SII masters
 (100 h 4 min in total), software-binned twofold from 9576×6388 to 4788×3194.
@@ -577,11 +577,12 @@ SII/R fitted 0.092994 with 12 training and three held-out stars (validation RMS
 -0.2300), while OIII/G+B fitted 0.036448/0.057917 with 530 training and 178
 held-out stars (validation RMS 0.0630). No failed model was applied.
 
-The detector requests up to four times the configured count, but measurement
-currently considers only the first `max_stars` positions. Saturated bright
-stars can consume that budget before enough eligible stars are measured.
-Improve eligibility-aware sampling and brightness-range coverage, then test
-fit stability across budgets. SII's small-sample acceptance did not survive
+In that initial implementation the detector requested four times the configured
+count, but measurement considered only the first `max_stars` positions.
+Saturated bright stars consumed the budget before enough eligible stars were
+measured. The prepared follow-up searches up to 4096 candidates independently
+of the usable budget, checks eligibility first, samples across brightness and
+validates against the complete eligible pool. SII's small-sample acceptance did not survive
 broader sampling, so aggregate held-out RMS and the current minimum count
 alone do not establish a field-wide default. Add regression/output-version
 coverage for the changed selection mode before altering the numerical path.
@@ -598,8 +599,60 @@ SHO with RGB stars, and HOO with RGB stars through tracked color jobs and real
 licensed SXT on Supergateway. These color examples did not use continuum
 subtraction. Source masters and live catalogs stayed unchanged.
 
-Before releasing, address sampling/fit stability and physical saturation
-provenance; finalize combined-image residual units and blending; validate
-any starless-branch association and pixel-level residual behavior; and finish
-the PSF Guard linear job/cache, per-line outcomes and UI. Keep both PRs in draft
-and defer publication while the complete feature set is assembled.
+The paired drafts now implement producer clipping provenance, sampling checks,
+combined-image units and the PSF Guard job/cache and outcome UI described below.
+Subtraction before SXT avoids transferring a plan onto a changed revision.
+Pixel-level residual inspection still matters: an accepted aperture fit does
+not promise complete cancellation of every stellar core or halo. Keep both PRs
+in draft and defer publication until the complete release is reviewed.
+
+
+### Prepared combined-image core
+
+The draft now includes producer-mask photometry, eligibility-before-budget
+sampling, broader-pool stability validation, empirical emission projection,
+calibrated RGB addition and bounded starless display-structure mixing. See
+[continuum and combined-image contracts](../../seiza-stacking/README.md#clipping-evidence-sampling-and-combined-images).
+Plans remain tied to exact linear revisions. PSF Guard applies subtraction
+before SXT, so a plan is never silently transferred to a changed starless image.
+The signed residual stays separate from its explicit display baseline and
+positive-only contribution policy. Seiza 0.43.0 with stacking/output 0.49.0
+remains unreleased; no publication is authorized by this preparation.
+
+
+### Final SNR G132 combined-image validation
+
+The paired drafts were rerun with producer-derived clipping maps on the binned
+4788×3194 planes. Automatic fitting uses a fixed maximum of 4096 candidate
+positions independently of the usable-star budget, checks eligibility before
+sampling, and audits the brightness-spanning sample against the full eligible
+pool. No working-unit saturation ceiling was guessed.
+
+| Line | 400-star coefficients | Training / held out | Held-out RMS | Sample/full prediction RMS difference |
+| --- | --- | --- | --- | --- |
+| Ha / R | 0.04777995 | 293 / 96 | 10.22% | 0.077% |
+| OIII / G+B | 0.04377472, 0.04798876 | 278 / 92 | 1.98% | 0.176% |
+| SII / R | 0.05519169 | 298 / 100 | 5.46% | 0.066% |
+
+All three default fits and the 1600-star check passed without relaxing the
+PSF, registration, error or inlier limits. The final RGB + emission recipe
+completed with BXT on linear RGB, amounts 0.25 and a linked composition stretch
+while Gaia was off. The broader fit reused BXT and completed in 14 seconds.
+Automatic HOO + 20% starless broadband structure also completed, subtracting
+Ha/OIII before SXT and restoring one BXT-processed RGB star layer. The original
+masters and live catalogs were unchanged; no separate L master was available.
+LRGB + emission was exercised on the synthetic application/browser path.
+
+Licensed RC-Astro 2.6.6 used BXT ML5 and SXT ML11 on CPU. The BXT star option
+uses the vendor defaults, including Sharpen Stars 0.5, before RGB calibration
+and SXT. Native-pixel crops and full-field comparisons were visually inspected.
+The final signed Ha/OIII/SII FITS retain negative samples and coverage gaps and
+record LINEAR / EMISSION-RESIDUAL metadata. The offline gallery, exact requests,
+plans, stellar diagnostics and signed artifacts are in the user's Dropbox.
+
+The mapped automatic result still shows colored residual rings around some
+bright stars. An accepted aperture fit does not establish pixel-perfect local
+PSF or saturated-core cancellation. The gallery documents that limitation and
+retains an explicit continuum-Off comparison. These are emission residuals,
+with no pure-line-flux or third-party numerical-parity claim. Keep both PRs
+draft and Seiza unreleased while the complete release is reviewed.
