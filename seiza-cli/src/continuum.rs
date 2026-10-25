@@ -300,7 +300,10 @@ pub(crate) fn run(args: ContinuumArgs) -> Result<()> {
         let temporary = tempfile::Builder::new()
             .prefix(".seiza-continuum-")
             .suffix(&suffix)
-            .tempfile_in(parent)?;
+            .tempfile_in(parent)?
+            // The image writer reopens this path. Windows forbids replacing
+            // the reserved file while NamedTempFile still holds it open.
+            .into_temp_path();
         let coefficients = plan
             .coefficients
             .iter()
@@ -308,7 +311,7 @@ pub(crate) fn run(args: ContinuumArgs) -> Result<()> {
             .collect::<Vec<_>>()
             .join(",");
         seiza_stacking::write_processed_image_fits_f32(
-            temporary.path(),
+            &temporary,
             &image,
             &narrowband.headers,
             &[
@@ -321,7 +324,10 @@ pub(crate) fn run(args: ContinuumArgs) -> Result<()> {
                 ),
             ],
         )?;
-        temporary.as_file().sync_all()?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&temporary)?
+            .sync_all()?;
         temporary
             .persist(path)
             .with_context(|| format!("failed to replace {}", path.display()))?;

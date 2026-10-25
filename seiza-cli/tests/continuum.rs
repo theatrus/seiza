@@ -97,6 +97,7 @@ fn manual_signed_residual_and_exact_plan_reuse_preserve_units_and_inputs() {
             .as_str(),
         Some("EMISSION-RESIDUAL")
     );
+    std::fs::write(dir.join("reuse.fits"), b"previous output").unwrap();
     success(&run(
         dir,
         &["--plan", "plan.json", "--output", "reuse.fits"],
@@ -105,6 +106,13 @@ fn manual_signed_residual_and_exact_plan_reuse_preserve_units_and_inputs() {
         FitsFrame::open(dir.join("reuse.fits")).unwrap().image.data,
         result.image.data
     );
+    assert!(std::fs::read_dir(dir).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".seiza-continuum-")
+    }));
     write(&dir.join("r.fits"), 2, 2, &[0.6; 4], Some("LINEAR"));
     let bad = run(dir, &["--plan", "plan.json", "--output", "stale.fits"]);
     assert!(!bad.status.success());
