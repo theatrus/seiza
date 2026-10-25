@@ -2808,3 +2808,25 @@ fn reduced_rgb_stars_keep_their_output() {
         &[0.55, 0.4, 0.3875],
     );
 }
+
+#[test]
+fn independently_stretched_rgb_stars_keep_their_output() {
+    // Baseline recorded on the unchanged MTF implementation at m=1/28;
+    // a planted identity curve made this case fail before adding this API.
+    let original = LinearImage::new(2, 1, 3, vec![0.001, 0.002, 0.004, 0.01, 0.02, 0.04]).unwrap();
+    let zero = LinearImage::new(2, 1, 3, vec![0.0; 6]).unwrap();
+    let stars = seiza_stacking::stretch_rgb_stars(&original, &zero, 3.0).unwrap();
+    let mut nebula = LinearImage::new(2, 1, 3, vec![0.2; 6]).unwrap();
+    seiza_stacking::screen_rgb_star_layer(&mut nebula, &stars, 0.0).unwrap();
+    check(
+        "INDEPENDENT_RGB_STAR_STRETCH",
+        &nebula
+            .data
+            .iter()
+            .map(|x| f64::from(*x))
+            .collect::<Vec<_>>(),
+        &[
+            0.22105263, 0.24106464, 0.27826087, 0.37142857, 0.48421053, 0.62352941,
+        ],
+    );
+}

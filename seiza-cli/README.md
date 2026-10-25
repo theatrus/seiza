@@ -1444,3 +1444,22 @@ order. Residual zero-level calibration depends on these weights. A changed
 fit/manual weight is rejected even when the raw source revisions are unchanged;
 update the explicit zero levels and snapshots after recalibration. Reports and
 cache identities retain the snapshots.
+
+### Stretch linear RGB stars and restore them
+
+Run SXT on linear RGB after optional BXT and color calibration. Then extract
+and independently stretch the stars before restoring them over the stretched
+nebula:
+
+```bash
+seiza color star-stretch --original-rgb rgb-linear.fits \
+  --starless-rgb rgb-starless-linear.fits --amount 3 --output stars-display.fits
+seiza color screen-star-layer --nebula nebula-display.fits \
+  --stars stars-display.fits --reduction 0.4 --output restored.fits
+```
+
+The SetiAstro-style rational tone accepts amount 0–8 (default 5); lower amounts
+subdue stars. Zero keeps the normalized linear residual without a nonlinear
+lift. The starless nebula is stretched separately. The first command rejects
+inputs marked DISPLAY; the second requires DISPLAY on both inputs. These
+commands do not run SXT/BXT or PixInsight's optional color processes.

@@ -493,7 +493,42 @@ fn screen_rgb_stars_reduced<'py>(
     into_image_array(py, nebula)
 }
 
+/// Extract and independently stretch stars from aligned linear RGB; inputs unchanged.
+#[pyfunction]
+#[pyo3(signature = (original, starless, amount=5.0))]
+fn stretch_rgb_stars<'py>(
+    py: Python<'py>,
+    original: PyReadonlyArrayDyn<'_, f32>,
+    starless: PyReadonlyArrayDyn<'_, f32>,
+    amount: f64,
+) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
+    let original = linear_image(original)?;
+    let starless = linear_image(starless)?;
+    let image = py
+        .detach(|| seiza_stacking::stretch_rgb_stars(&original, &starless, amount))
+        .map_err(invalid)?;
+    into_image_array(py, image)
+}
+
+/// Screen a prepared display RGB stars-only layer; inputs unchanged.
+#[pyfunction]
+#[pyo3(signature = (nebula, stars, reduction=0.0))]
+fn screen_rgb_star_layer<'py>(
+    py: Python<'py>,
+    nebula: PyReadonlyArrayDyn<'_, f32>,
+    stars: PyReadonlyArrayDyn<'_, f32>,
+    reduction: f64,
+) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
+    let mut nebula = linear_image(nebula)?;
+    let stars = linear_image(stars)?;
+    py.detach(|| seiza_stacking::screen_rgb_star_layer(&mut nebula, &stars, reduction))
+        .map_err(invalid)?;
+    into_image_array(py, nebula)
+}
+
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_function(wrap_pyfunction!(stretch_rgb_stars, module)?)?;
+    module.add_function(wrap_pyfunction!(screen_rgb_star_layer, module)?)?;
     module.add_function(wrap_pyfunction!(balance_narrowband, module)?)?;
     module.add_function(wrap_pyfunction!(screen_rgb_stars, module)?)?;
     module.add_function(wrap_pyfunction!(screen_rgb_stars_reduced, module)?)?;

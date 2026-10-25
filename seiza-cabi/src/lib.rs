@@ -2332,6 +2332,88 @@ pub unsafe extern "C" fn seiza_color_screen_rgb_stars_reduced(
     .is_some()
 }
 
+/// Extract stars from aligned linear RGB and apply the SetiAstro-style rational
+/// tone. Amount [0,8], typically 5; lower values subdue stars. The shared source
+/// range normalizes physical units; negative residuals clip only in the display
+/// output. No external tool or optional PixInsight color processes are run.
+/// Errors leave output unchanged. Inputs may alias output.
+///
+/// # Safety
+/// Input and output buffers address width*height*3 floats. Inputs are readable;
+/// output and non-null error_out are writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_color_stretch_rgb_stars(
+    original: *const f32,
+    starless: *const f32,
+    output: *mut f32,
+    width: usize,
+    height: usize,
+    amount: f64,
+    error_out: *mut *mut c_char,
+) -> bool {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let length = display_length(width, height, 3)?;
+        let original = LinearImage::new(
+            width,
+            height,
+            3,
+            unsafe { required_f32_slice(original, length, "linear original RGB")? }.to_vec(),
+        )
+        .map_err(color_request_error)?;
+        let starless = LinearImage::new(
+            width,
+            height,
+            3,
+            unsafe { required_f32_slice(starless, length, "linear starless RGB")? }.to_vec(),
+        )
+        .map_err(color_request_error)?;
+        let image = seiza_stacking::stretch_rgb_stars(&original, &starless, amount)
+            .map_err(color_request_error)?;
+        unsafe { required_f32_slice_mut(output, length, "display stars output")? }
+            .copy_from_slice(&image.data);
+        Ok(())
+    })
+    .is_some()
+}
+
+/// Screen a prepared display RGB stars-only layer over a display nebula with
+/// optional linked star reduction [0,1]. No additional stretch. Errors leave
+/// nebula unchanged; missing coverage masks whole pixels.
+///
+/// # Safety
+/// Buffers address width*height*3 floats. Stars are readable; nebula and
+/// non-null error_out are writable. Buffers may alias.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_color_screen_rgb_star_layer(
+    nebula: *mut f32,
+    stars: *const f32,
+    width: usize,
+    height: usize,
+    reduction: f64,
+    error_out: *mut *mut c_char,
+) -> bool {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let length = display_length(width, height, 3)?;
+        let stars = LinearImage::new(
+            width,
+            height,
+            3,
+            unsafe { required_f32_slice(stars, length, "display stars")? }.to_vec(),
+        )
+        .map_err(color_request_error)?;
+        let samples = unsafe { required_f32_slice_mut(nebula, length, "display nebula")? };
+        let mut image =
+            LinearImage::new(width, height, 3, samples.to_vec()).map_err(color_request_error)?;
+        seiza_stacking::screen_rgb_star_layer(&mut image, &stars, reduction)
+            .map_err(color_request_error)?;
+        samples.copy_from_slice(&image.data);
+        Ok(())
+    })
+    .is_some()
+}
+
 fn color_request_error(error: seiza_stacking::Error) -> String {
     match error {
         seiza_stacking::Error::Color(message) => message,
@@ -9808,6 +9890,72 @@ mod tests {
         });
         assert!(!error.is_null());
         unsafe { seiza_string_free(error) };
+    }
+
+    #[test]
+    fn independent_rgb_star_tone_and_screen_validate_without_mutating_on_error() {
+        let original = [0.001, 0.01, 1.0];
+        let starless = [0.0; 3];
+        let mut stars = [-1.0; 3];
+        let mut error = ptr::null_mut();
+        assert!(unsafe {
+            seiza_color_stretch_rgb_stars(
+                original.as_ptr(),
+                starless.as_ptr(),
+                stars.as_mut_ptr(),
+                1,
+                1,
+                3.0,
+                &mut error,
+            )
+        });
+        for (actual, expected) in stars.iter().zip([0.027 / 1.026, 0.27 / 1.26, 1.0]) {
+            assert!((f64::from(*actual) - expected).abs() < 1e-7);
+        }
+        let mut nebula = [0.2; 3];
+        assert!(unsafe {
+            seiza_color_screen_rgb_star_layer(
+                nebula.as_mut_ptr(),
+                stars.as_ptr(),
+                1,
+                1,
+                0.0,
+                &mut error,
+            )
+        });
+        assert!((nebula[0] - (1.0 - 0.8 * (1.0 - stars[0]))).abs() < 1e-7);
+        let before = stars;
+        assert!(!unsafe {
+            seiza_color_stretch_rgb_stars(
+                original.as_ptr(),
+                starless.as_ptr(),
+                stars.as_mut_ptr(),
+                1,
+                1,
+                9.0,
+                &mut error,
+            )
+        });
+        assert_eq!(stars, before);
+        assert!(!error.is_null());
+        unsafe {
+            seiza_string_free(error);
+        }
+        assert!(!unsafe {
+            seiza_color_stretch_rgb_stars(
+                original.as_ptr(),
+                starless.as_ptr(),
+                ptr::null_mut(),
+                1,
+                1,
+                3.0,
+                &mut error,
+            )
+        });
+        assert!(!error.is_null());
+        unsafe {
+            seiza_string_free(error);
+        }
     }
 
     fn color_channel(

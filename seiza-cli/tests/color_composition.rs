@@ -763,3 +763,107 @@ fn display_balance_and_star_screen_cli_report_and_mark_nonlinear_outputs() {
             .all(|v| v.is_finite() && *v >= 0.67 && *v <= 1.0)
     );
 }
+
+#[test]
+fn linear_star_tone_is_display_only_and_screening_does_not_stretch_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let original = dir.path().join("original.fits");
+    let starless = dir.path().join("starless.fits");
+    let stars = dir.path().join("stars.fits");
+    let nebula = dir.path().join("nebula.fits");
+    let output = dir.path().join("output.fits");
+    write_f32_image(
+        &original,
+        1,
+        1,
+        F32ImageData::RgbInterleaved(&[0.001, 0.01, 1.0]),
+        &[],
+    )
+    .unwrap();
+    write_f32_image(
+        &starless,
+        1,
+        1,
+        F32ImageData::RgbInterleaved(&[0.0; 3]),
+        &[],
+    )
+    .unwrap();
+    write_f32_image(
+        &nebula,
+        1,
+        1,
+        F32ImageData::RgbInterleaved(&[0.2; 3]),
+        &[WriteHeaderCard::new(
+            "SEIZATRF",
+            HeaderValue::String("DISPLAY".into()),
+        )],
+    )
+    .unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_seiza"))
+        .args([
+            "color",
+            "star-stretch",
+            "--original-rgb",
+            original.to_str().unwrap(),
+            "--starless-rgb",
+            starless.to_str().unwrap(),
+            "--amount",
+            "3",
+            "--output",
+            stars.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let fits = FitsImage::open(&stars).unwrap();
+    assert_eq!(
+        fits.header("SEIZATRF").and_then(HeaderValue::as_str),
+        Some("DISPLAY")
+    );
+    let Pixels::F32(values) = fits.pixels else {
+        panic!("f32");
+    };
+    assert!((values[0] - 0.027 / 1.026).abs() < 1e-7);
+    let result = Command::new(env!("CARGO_BIN_EXE_seiza"))
+        .args([
+            "color",
+            "screen-star-layer",
+            "--nebula",
+            nebula.to_str().unwrap(),
+            "--stars",
+            stars.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let fits = FitsImage::open(&output).unwrap();
+    let Pixels::F32(values) = fits.pixels else {
+        panic!("f32");
+    };
+    assert!((values[0] - (1.0 - 0.8 * (1.0 - 0.027 / 1.026))).abs() < 1e-7);
+    let refused = Command::new(env!("CARGO_BIN_EXE_seiza"))
+        .args([
+            "color",
+            "star-stretch",
+            "--original-rgb",
+            stars.to_str().unwrap(),
+            "--starless-rgb",
+            starless.to_str().unwrap(),
+            "--output",
+            dir.path().join("refused.fits").to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(!dir.path().join("refused.fits").exists());
+}

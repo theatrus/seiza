@@ -28,6 +28,10 @@ enum ColorCommand {
     ReduceGreen(ReduceGreenArgs),
     /// Screen display RGB stars onto a starless display nebula
     ScreenStars(ScreenStarsArgs),
+    /// Extract linear RGB stars and apply an independent rational star stretch
+    StarStretch(StarStretchArgs),
+    /// Screen an already stretched RGB stars-only layer over a display nebula
+    ScreenStarLayer(ScreenStarLayerArgs),
     /// Combine red, green, and blue mono stacks
     Rgb(RgbArgs),
     /// Combine luminance, red, green, and blue mono stacks
@@ -91,6 +95,59 @@ struct ScreenStarsArgs {
     starless_rgb: PathBuf,
     #[arg(long)]
     output: PathBuf,
+}
+
+#[derive(Args)]
+struct StarStretchArgs {
+    #[arg(long)]
+    original_rgb: PathBuf,
+    #[arg(long)]
+    starless_rgb: PathBuf,
+    #[arg(long)]
+    output: PathBuf,
+    /// Rational tone amount [0,8]. Lower values make stars fainter
+    #[arg(long, default_value_t = 5.0)]
+    amount: f64,
+}
+#[derive(Args)]
+struct ScreenStarLayerArgs {
+    #[arg(long)]
+    nebula: PathBuf,
+    #[arg(long)]
+    stars: PathBuf,
+    #[arg(long)]
+    output: PathBuf,
+    #[arg(long, default_value_t = 0.0)]
+    reduction: f64,
+}
+fn run_star_stretch(args: StarStretchArgs) -> Result<()> {
+    validate_path_roles([
+        ("original RGB".into(), args.original_rgb.as_path()),
+        ("starless RGB".into(), args.starless_rgb.as_path()),
+        ("output".into(), args.output.as_path()),
+    ])?;
+    let mut original = FitsFrame::open(&args.original_rgb)?;
+    let starless = FitsFrame::open(&args.starless_rgb)?;
+    for frame in [&original, &starless] {
+        if frame.headers.iter().any(|(k,v)| k.eq_ignore_ascii_case("SEIZATRF") && matches!(v,seiza_fits::HeaderValue::String(tag) if tag.trim().eq_ignore_ascii_case("DISPLAY"))) { anyhow::bail!("Star stretching requires linear RGB before any display stretch"); }
+    }
+    original.image =
+        seiza_stacking::stretch_rgb_stars(&original.image, &starless.image, args.amount)?;
+    write_display(&args.output, &original)
+}
+fn run_screen_star_layer(args: ScreenStarLayerArgs) -> Result<()> {
+    validate_path_roles([
+        ("nebula".into(), args.nebula.as_path()),
+        ("stars".into(), args.stars.as_path()),
+        ("output".into(), args.output.as_path()),
+    ])?;
+    let mut nebula = FitsFrame::open(&args.nebula)?;
+    let stars = FitsFrame::open(&args.stars)?;
+    for frame in [&nebula, &stars] {
+        if !frame.headers.iter().any(|(k,v)| k.eq_ignore_ascii_case("SEIZATRF") && matches!(v,seiza_fits::HeaderValue::String(tag) if tag.trim().eq_ignore_ascii_case("DISPLAY"))) { anyhow::bail!("Star screening requires SEIZATRF=DISPLAY on both inputs"); }
+    }
+    seiza_stacking::screen_rgb_star_layer(&mut nebula.image, &stars.image, args.reduction)?;
+    write_display(&args.output, &nebula)
 }
 
 fn run_balance(args: DisplayBalanceArgs) -> Result<()> {
@@ -331,6 +388,8 @@ pub(crate) fn run(args: ColorArgs) -> Result<()> {
         ColorCommand::Balance(args) => run_balance(args),
         ColorCommand::ReduceGreen(args) => run_reduce_green(args),
         ColorCommand::ScreenStars(args) => run_screen_stars(args),
+        ColorCommand::StarStretch(args) => run_star_stretch(args),
+        ColorCommand::ScreenStarLayer(args) => run_screen_star_layer(args),
         ColorCommand::Rgb(args) => run_rgb(args),
         ColorCommand::Lrgb(args) => run_lrgb(args),
         ColorCommand::Narrowband(args) => run_narrowband(args),

@@ -1846,3 +1846,13 @@ def screen_rgb_stars_reduced(
 ) -> npt.NDArray[np.float32]:
     """Screen a linked RGB star layer reduced toward one-pixel erosion; inputs unchanged."""
     ...
+
+
+def stretch_rgb_stars(original: npt.NDArray[np.float32], starless: npt.NDArray[np.float32], amount: float = 5.0) -> npt.NDArray[np.float32]:
+    """Extract a LINEAR RGB residual, normalize once, and apply a rational star tone [0,8]."""
+    ...
+
+
+def screen_rgb_star_layer(nebula: npt.NDArray[np.float32], stars: npt.NDArray[np.float32], reduction: float = 0.0) -> npt.NDArray[np.float32]:
+    """Screen display stars over a display nebula, optionally reducing stars [0,1]."""
+    ...

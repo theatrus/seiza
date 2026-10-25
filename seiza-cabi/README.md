@@ -953,3 +953,12 @@ cargo build -p seiza-cabi --release
 ```
 
 Consumers link the artifact for their platform and include `seiza_cabi.h`.
+
+`seiza_color_stretch_rgb_stars(original, starless, output, width, height, amount,
+error_out)` extracts a linear RGB residual and writes a separately stretched
+display stars-only layer. Amount is [0,8], typically 5; lower values subdue stars.
+`seiza_color_screen_rgb_star_layer(nebula, stars, width, height, reduction,
+error_out)` screens it over a display nebula in place with optional linked
+reduction [0,1]. All buffers contain width*height*3 interleaved floats. Shared
+source normalization preserves RGB scale; inputs remain linear and unchanged.
+Errors leave writable buffers unchanged. Neither call runs an external tool.

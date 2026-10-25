@@ -611,3 +611,22 @@ order. Residual zero-level calibration depends on these weights. A changed
 fit/manual weight is rejected even when the raw source revisions are unchanged;
 update the explicit zero levels and snapshots after recalibration. Reports and
 cache identities retain the snapshots.
+
+### Stretch linear RGB stars independently
+
+Run star separation on linear RGB after any linear sharpening and color
+calibration. Pass that original/starless pair to `stretch_rgb_stars(original,
+starless, amount)` to extract the linear residual and apply the SetiAstro-style
+rational tone `3^amount*x / (1+(3^amount-1)*x)`. Amount is 0–8; 5 is the script's
+starting tone, lower values make stars fainter, and 0 leaves the normalized
+linear residual without nonlinear lift. One shared source range normalizes
+physical units; do not normalize each channel or the stars-only layer to its
+own peak. The background offset cancels in the residual.
+
+Use `screen_rgb_star_layer(&mut nebula, &stars, reduction)` on the resulting
+display stars and display nebula. Reduction is 0–1 and applies the existing
+linked cross erosion only to the stars. Negative extraction noise is clipped
+only in the display layer; missing coverage masks whole RGB pixels. Linear
+inputs stay unchanged. This independently implements the published
+[SetiAstro tone](https://www.setiastro.com/pjsr-scripts), without replicating
+PixInsight's optional ColorSaturation or SCNR processes.

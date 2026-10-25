@@ -78,6 +78,8 @@ mod residual_flat;
 mod saturation;
 mod snr;
 mod stack;
+mod star_stretch;
+pub use star_stretch::{screen_rgb_star_layer, stretch_rgb_stars};
 mod tasks;
 
 pub use batch::{

@@ -736,6 +736,41 @@ bool seiza_color_screen_rgb_stars_reduced(float *nebula,
                                           char **error_out);
 
 /*
+ Extract stars from aligned linear RGB and apply the SetiAstro-style rational
+ tone. Amount [0,8], typically 5; lower values subdue stars. The shared source
+ range normalizes physical units; negative residuals clip only in the display
+ output. No external tool or optional PixInsight color processes are run.
+ Errors leave output unchanged. Inputs may alias output.
+
+ # Safety
+ Input and output buffers address width*height*3 floats. Inputs are readable;
+ output and non-null error_out are writable.
+ */
+bool seiza_color_stretch_rgb_stars(const float *original,
+                                   const float *starless,
+                                   float *output,
+                                   size_t width,
+                                   size_t height,
+                                   double amount,
+                                   char **error_out);
+
+/*
+ Screen a prepared display RGB stars-only layer over a display nebula with
+ optional linked star reduction [0,1]. No additional stretch. Errors leave
+ nebula unchanged; missing coverage masks whole pixels.
+
+ # Safety
+ Buffers address width*height*3 floats. Stars are readable; nebula and
+ non-null error_out are writable. Buffers may alias.
+ */
+bool seiza_color_screen_rgb_star_layer(float *nebula,
+                                       const float *stars,
+                                       size_t width,
+                                       size_t height,
+                                       double reduction,
+                                       char **error_out);
+
+/*
  Fits a compact background model to interleaved linear `float` samples.
 
  `channels` must be one or three and `data_length` must equal

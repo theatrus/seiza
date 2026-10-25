@@ -1454,3 +1454,13 @@ order. Residual zero-level calibration depends on these weights. A changed
 fit/manual weight is rejected even when the raw source revisions are unchanged;
 update the explicit zero levels and snapshots after recalibration. Reports and
 cache identities retain the snapshots.
+
+`stretch_rgb_stars(original, starless, amount=5)` takes an aligned **linear** RGB
+original and its linear starless result, extracts the residual, and returns
+stars stretched with the SetiAstro-style rational tone. Amount [0,8] controls
+prominence: lower is fainter; 0 keeps the normalized residual without nonlinear
+lift. Shared source normalization handles physical units. This is the tone
+formula, without PixInsight's optional saturation/SCNR processes.
+`screen_rgb_star_layer(nebula, stars, reduction=0)` screens the display layer over
+a display nebula with optional linked star reduction [0,1]. Inputs are unchanged;
+missing coverage masks whole RGB pixels. Run star separation before stretching.

@@ -292,3 +292,21 @@ def test_narrowband_matrix_refuses_unknown_names_and_a_missing_sii() -> None:
             matrix={"red": {"sii": 1.0}, "green": {"ha": 1.0}},
             normalization="none",
         )
+
+
+def test_independent_linear_star_stretch_and_screen() -> None:
+    original = np.array([[[0.001, 0.01, 1.0]]], dtype=np.float32)
+    starless = np.zeros_like(original)
+    stars = seiza.stretch_rgb_stars(original, starless, amount=3)
+    np.testing.assert_allclose(stars, [[[0.027/1.026, 0.27/1.26, 1]]], rtol=1e-6)
+    np.testing.assert_array_equal(seiza.stretch_rgb_stars(original, starless, 0), original)
+    assert seiza.stretch_rgb_stars(original, starless)[0, 0, 0] > stars[0, 0, 0]
+    nebula = np.full_like(original, 0.2)
+    result = seiza.screen_rgb_star_layer(nebula, stars)
+    np.testing.assert_allclose(result, 1-(1-nebula)*(1-stars), atol=1e-7)
+    np.testing.assert_array_equal(nebula, np.full_like(original, 0.2))
+    for amount in [-1, 9, float('nan')]:
+        with pytest.raises(ValueError):
+            seiza.stretch_rgb_stars(original, starless, amount)
+    with pytest.raises(ValueError):
+        seiza.screen_rgb_star_layer(nebula, stars, 1.1)
