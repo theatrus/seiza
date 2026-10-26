@@ -1819,6 +1819,41 @@ fn a_mosaic_keeps_its_output() {
     }
 }
 
+/// The same mosaic with its frames prepared several at once, as many as a
+/// small budget affords: how many fit sets only how the work overlaps, never
+/// the canvas it builds.
+#[test]
+fn a_mosaic_prepared_several_frames_at_once_keeps_its_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let paths = mosaic_panels(&directory);
+    let mut options = StackOptions::default();
+    options.acceptance.minimum_overlap_fraction = 0.1;
+    let mut stacker = LiveStacker::with_expanding_reference(
+        &paths,
+        CalibrationMasters::default(),
+        options,
+        usize::MAX,
+        |_, _, _, _| Continue::Yes,
+    )
+    .unwrap();
+    let report = stacker
+        .push_fits_pipelined(
+            &paths,
+            &seiza_stacking::PipelineOptions::with_budget(1_200_000),
+            |_, result| {
+                admit(result.unwrap());
+                Continue::Yes
+            },
+        )
+        .unwrap();
+    assert_eq!(report.integrated, paths.len());
+    check(
+        "MOSAIC",
+        &summary(&stacker.snapshot().unwrap().image),
+        MOSAIC,
+    );
+}
+
 /// A calibrated lens changes the canvas geometry even with the default
 /// similarity model. Exposures following each panel's first frame must keep
 /// that nonlinear projection when refining their dithered star positions.

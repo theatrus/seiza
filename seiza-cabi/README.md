@@ -110,7 +110,10 @@ exposes the **superset** of what both apps need.
   and how close they came to `minimum_overlap_fraction`. Unless the options
   set that, a light joins sharing 0.05 of its footprint with the canvas, as
   with the CLI's `--reference expand`: panels planned for 10% overlap land
-  nearer 9%. Array and path-based pushes
+  nearer 9%. `seiza_live_stacker_pipeline_memory_json` gives what preparing
+  each frame needs, for planning memory around a pipelined push: on an
+  expanded canvas a frame is costed at its own footprint, not the canvas.
+  Array and path-based pushes
   return owned admission JSON. Borrowed
   mean/coverage/rejection views support copy-free live display, snapshots add
   variance, and `seiza_live_stacker_finish` moves the final accumulator into an

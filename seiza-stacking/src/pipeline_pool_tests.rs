@@ -416,18 +416,21 @@ fn budget_caps_explicit_workers_and_includes_rgb_intermediates() {
     );
     let mut options = concurrent(11);
     options.max_in_flight_bytes = rgb_memory.in_flight_bytes(2);
-    assert_eq!(resolve_pool_workers(&options, &rgb, 1, &pool).unwrap(), 2);
+    assert_eq!(
+        resolve_pool_workers(&options, rgb_memory, &pool).unwrap(),
+        2
+    );
     assert_eq!(
         options.resolve_workers(120_000),
         11,
         "legacy explicit-worker contract stays unchanged"
     );
     options.max_in_flight_bytes = 1;
-    assert!(resolve_pool_workers(&options, &rgb, 1, &pool).is_err());
+    assert!(resolve_pool_workers(&options, rgb_memory, &pool).is_err());
     options.max_in_flight_bytes = usize::MAX;
     options.workers = Some(usize::MAX);
     assert_eq!(
-        resolve_pool_workers(&options, &rgb, 1, &pool).unwrap(),
+        resolve_pool_workers(&options, rgb_memory, &pool).unwrap(),
         MAXIMUM_WORKERS
     );
 }
@@ -770,4 +773,18 @@ fn the_older_call_inside_a_pool_prepares_frames_side_by_side_there() {
         .unwrap();
     assert_eq!(report.frames.integrated, 2);
     assert_eq!(report.workers, 2);
+}
+
+/// An ordinary stack's frames are costed at its reference's size.
+#[test]
+fn an_ordinary_stack_costs_its_frames_at_the_reference_size() {
+    let (_directory, paths) = frame_set(1);
+    let stacker = stacker_from(&paths[0]);
+    assert_eq!(
+        stacker.pipeline_memory(),
+        PoolPipelineMemory::for_reference(
+            stacker.reference.pixel_count(),
+            stacker.reference.sample_count()
+        )
+    );
 }

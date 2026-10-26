@@ -83,9 +83,11 @@ minimum one-worker budget is checked before reading. Larger-than-reference
 sources, codec buffers, allocator overhead and unusual registration settings
 are outside the estimate; a mandatory all-frame header scan would add latency
 to remote storage. Hosts reserve their own reference, accumulator and every
-resident session master separately. `PoolPipelineMemory::for_reference` exports
+resident session master separately. `LiveStacker::pipeline_memory` exports
 the same worker/integration estimate for host budget policy, without duplicating
-the formula downstream. `CalibrationMasters::image_buffer_bytes`
+the formula downstream. On an expanded canvas it costs a frame at the largest
+frame planning read and that frame's footprint bound, at any rotation and the
+admitted scale, since preparation resamples only the footprint. `CalibrationMasters::image_buffer_bytes`
 counts sample lengths without claiming total process memory; deep clones must
 also be counted.
 

@@ -1895,6 +1895,42 @@ pub(crate) fn footprint_region(
     if escapes { whole } else { region }
 }
 
+/// The most pixels [`footprint_region`] gives a `source_width` by
+/// `source_height` frame placed by a similarity at any rotation, scaled by
+/// at most `maximum_scale_deviation` either way, on a `reference_width` by
+/// `reference_height` grid: what preparing such a frame resamples, before
+/// it is known where the frame lands.
+///
+/// A rotated frame's sides each span at most its diagonal, held to the
+/// grid's, and together at most √2 times its width and height, so their
+/// product is at most the square of half that. A warp that bends far from
+/// its similarity, or that cannot be carried back, can give more, up to the
+/// whole grid.
+pub(crate) fn footprint_bound(
+    (source_width, source_height): (usize, usize),
+    (reference_width, reference_height): (usize, usize),
+    maximum_scale_deviation: f64,
+) -> usize {
+    let whole = reference_width.saturating_mul(reference_height);
+    if source_width == 0 || source_height == 0 {
+        return whole;
+    }
+    let scale = 1.0 + maximum_scale_deviation.max(0.0);
+    let (width, height) = (source_width as f64 * scale, source_height as f64 * scale);
+    // The region rounds outward to whole pixels, takes the last one, and
+    // adds the margin on both sides.
+    let slack = 3.0 + 2.0 * FOOTPRINT_MARGIN;
+    let side = width.hypot(height) + slack;
+    let held = side.min(reference_width as f64) * side.min(reference_height as f64);
+    let square = ((width + height) * std::f64::consts::FRAC_1_SQRT_2 + slack).powi(2);
+    let bound = held.min(square).ceil();
+    if bound >= whole as f64 {
+        whole
+    } else {
+        bound as usize
+    }
+}
+
 /// Pixels a frame's edge may bow outward past the bounds of the points of it
 /// [`footprint_region`] carries onto the reference grid.
 const FOOTPRINT_MARGIN: f64 = 2.0;
@@ -3625,6 +3661,65 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// However a frame lands on a grid, rotated and scaled as far as the
+    /// default acceptance admits, its footprint fits the bound; a grid
+    /// narrower than the frame's diagonal holds each side to its own.
+    #[test]
+    fn every_footprint_fits_the_bound_at_any_rotation_and_admitted_scale() {
+        for (source, reference) in [
+            ((97, 61), (400, 300)),
+            ((97, 61), (130, 1000)),
+            ((60, 200), (230, 230)),
+        ] {
+            let bound = footprint_bound(source, reference, 0.04);
+            assert!(bound <= reference.0 * reference.1);
+            let mut largest = 0;
+            for step in 0..72 {
+                for scale in [0.96, 1.0, 1.04] {
+                    let placed = SimilarityTransform {
+                        scale,
+                        rotation_radians: (step as f64 * 5.0).to_radians(),
+                        translation_x: 0.0,
+                        translation_y: 0.0,
+                    };
+                    let (x, y) =
+                        placed.apply((source.0 - 1) as f64 / 2.0, (source.1 - 1) as f64 / 2.0);
+                    let transform = SimilarityTransform {
+                        translation_x: (reference.0 - 1) as f64 / 2.0 - x,
+                        translation_y: (reference.1 - 1) as f64 / 2.0 - y,
+                        ..placed
+                    };
+                    let region = footprint_region(
+                        source.0,
+                        source.1,
+                        reference.0,
+                        reference.1,
+                        FrameGeometry::Similarity(transform),
+                        transform,
+                    );
+                    largest = largest.max(region.width * region.height);
+                }
+            }
+            assert!(
+                largest <= bound,
+                "{source:?} on {reference:?}: {largest} > {bound}"
+            );
+            assert!(
+                bound * 10 <= largest * 12,
+                "{source:?} on {reference:?}: {bound} for {largest}"
+            );
+        }
+        // A frame of a full-frame sensor reaches at most half again its own
+        // area, at 45 degrees; on a strip of a canvas, less.
+        let frame = (6248, 4176);
+        let open = footprint_bound(frame, (20_000, 20_000), 0.04);
+        assert!(open > 7371 * 7371 && open < 7700 * 7700, "{open}");
+        let strip = footprint_bound(frame, (12_000, 4500), 0.04);
+        assert!(strip < open && strip < 12_000 * 4500, "{strip}");
+        assert_eq!(footprint_bound(frame, (5000, 3000), 0.04), 5000 * 3000);
+        assert_eq!(footprint_bound((0, 61), (400, 300), 0.04), 400 * 300);
     }
 
     /// A warp Newton's method cannot carry back, here one that sends every

@@ -523,6 +523,9 @@ pub(crate) struct CanvasRegistrar {
     lens: Option<LensDistortion>,
     summary: Option<crate::ExpandedLens>,
     planning_notes: Vec<String>,
+    /// The widest and tallest of the frames planning read, binned as the
+    /// canvas is; `None` for a reopened context, which does not plan again.
+    largest_frame: Option<(usize, usize)>,
 }
 
 impl CanvasRegistrar {
@@ -606,6 +609,27 @@ impl CanvasRegistrar {
         Self { summary, ..self }
     }
 
+    fn with_largest_frame(self, largest_frame: (usize, usize)) -> Self {
+        Self {
+            largest_frame: Some(largest_frame),
+            ..self
+        }
+    }
+
+    /// The widest and tallest of the frames planning read, binned as the
+    /// canvas is, or for a reopened context those of its panels' footprints,
+    /// each of which holds the frame that started it.
+    pub(crate) fn largest_frame(&self) -> (usize, usize) {
+        self.largest_frame.unwrap_or_else(|| {
+            self.windows.iter().fold((0, 0), |(width, height), window| {
+                (
+                    width.max(window.region.width),
+                    height.max(window.region.height),
+                )
+            })
+        })
+    }
+
     /// What planning measured of the lens the canvas is undistorted from.
     pub(crate) fn lens_summary(&self) -> Option<crate::ExpandedLens> {
         self.summary
@@ -637,6 +661,7 @@ impl CanvasRegistrar {
             lens,
             summary: None,
             planning_notes: Vec::new(),
+            largest_frame: None,
         }
     }
 
@@ -1094,6 +1119,8 @@ pub(crate) fn plan(
         width: frame.image.width,
         height: frame.image.height,
     };
+    // For the memory a stack plans each frame it prepares with.
+    let mut largest_frame = (anchor.width, anchor.height);
     let anchor = Window::new(
         &frame.image,
         anchor,
@@ -1249,6 +1276,10 @@ pub(crate) fn plan(
                         item.optics = Some(optics);
                         item.stars = stars;
                         item.size = Some((prepared.width, prepared.height));
+                        largest_frame = (
+                            largest_frame.0.max(prepared.width),
+                            largest_frame.1.max(prepared.height),
+                        );
                         image = Some((prepared, sites));
                     }
                     let (width, height) = item.size.expect("the frame was measured");
@@ -1430,7 +1461,8 @@ pub(crate) fn plan(
     Ok(Expansion {
         canvas: CanvasRegistrar::from_windows(&plan.image, plan.windows, plan.lens)
             .with_summary(summary)
-            .with_planning_notes(planning_notes),
+            .with_planning_notes(planning_notes)
+            .with_largest_frame(largest_frame),
         image: plan.image,
         headers: plan.headers,
         metadata,

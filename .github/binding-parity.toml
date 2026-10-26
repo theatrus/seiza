@@ -251,6 +251,9 @@ core = "seiza-stacking::NarrowbandMix"
 [rust.ExpandedLensResponse]
 core = "seiza-stacking::ExpandedLens"
 
+[rust.PipelineMemoryResponse]
+core = "seiza-stacking::PoolPipelineMemory"
+
 [rust.ColorFitJson]
 core = "seiza-stacking::ColorFit"
 
@@ -543,6 +546,7 @@ seiza_live_stacker_open_fits_with_reference_image_candidates = "LiveStacker.open
 seiza_live_stacker_open_fits_expanding = "LiveStacker.open_fits_expanding"
 seiza_live_stacker_expanded_lens_json = "LiveStacker.expanded_lens"
 seiza_live_stacker_expansion_planning_notes_json = "LiveStacker.expansion_planning_notes"
+seiza_live_stacker_pipeline_memory_json = "LiveStacker.pipeline_memory"
 seiza_live_stacker_open_context = "LiveStacker.open_context"
 seiza_live_stacker_open_context_with_gpu = "LiveStacker.open_context"
 seiza_live_stacker_open_prepared_fits = "LiveStacker.open_prepared_fits"

@@ -265,8 +265,8 @@ before reading. These estimates include preparation scratch and buffered
 frames, but assume source images no larger than the reference and are not hard
 RSS limits. Hosts must also reserve their reference, accumulator, calibration
 masters, larger inputs and codec/allocator overhead. Use
-`PoolPipelineMemory::for_reference` to share the same worker/integration
-estimate when planning the host's budget, and
+`LiveStacker::pipeline_memory` to share the same worker/integration estimate
+when planning the host's budget, and
 `CalibrationMasters::image_buffer_bytes` to count resident master samples;
 session masters and their active deep clones both consume storage.
 
@@ -275,7 +275,17 @@ When even one queued worker would exceed the host's memory policy, use
 It reads, prepares and integrates one frame at a time without reader threads
 or a queue budget. It reports `SequentialRequested`, zero coordinator wait,
 and `PoolPipelineMemory::sequential_bytes`: `64 * pixels + 8 * samples` of
-reference-sized scratch. The host must reserve its persistent stack and master
+reference-sized scratch.
+
+On an expanded canvas a frame is resampled onto only the part of the canvas
+its footprint covers, so `LiveStacker::pipeline_memory` costs each frame at
+the largest frame planning read, landing at any rotation and at the scale
+`FrameAcceptanceCriteria::maximum_scale_deviation` admits, rather than at the
+canvas's size: `64 * frame pixels` and `16 * footprint samples` for a worker.
+Pipelined pushes, and the derived worker count of `push_fits_pipelined`,
+follow it. On a four-panel mosaic of 88 megapixels from 26-megapixel frames,
+a worker is costed at 2.4 GiB rather than 6.5 GiB. A reopened context, which
+does not plan again, costs its frames by its largest panel. The host must reserve its persistent stack and master
 buffers separately. Do not inflate a pipeline budget to request this mode.
 Cancellation stops before the next frame is read, and callbacks remain on the
 caller even when called from a one-thread Rayon pool.

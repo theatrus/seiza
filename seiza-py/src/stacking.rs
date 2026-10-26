@@ -1862,6 +1862,29 @@ impl PyLiveStacker {
         Ok(self.active()?.expansion_planning_notes().to_vec())
     }
 
+    /// What preparing this stack's frames needs, frame by frame, for a
+    /// caller planning its memory, as a dict: ``worker_bytes`` for each
+    /// worker, which prepares one frame while it holds the one it prepared
+    /// before; ``integration_bytes`` for the frame being integrated; and
+    /// ``sequential_bytes`` for preparing one frame at a time. A caller
+    /// naming ``workers`` for :meth:`push_fits_pipelined` can plan on about
+    /// ``workers`` times ``worker_bytes`` plus ``integration_bytes``, besides
+    /// the stack itself and its masters; a derived count follows the same
+    /// frame sizes. An ordinary stack's frames are costed at its reference's
+    /// size; a frame joining an expanded canvas at the largest frame planning
+    /// read, landing at any rotation and scale the acceptance admits, rather
+    /// than at the canvas's size. A reopened context costs it by its largest
+    /// panel.
+    #[getter]
+    fn pipeline_memory<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let memory = self.active()?.pipeline_memory();
+        let dict = pyo3::types::PyDict::new(py);
+        dict.set_item("worker_bytes", memory.worker_bytes)?;
+        dict.set_item("integration_bytes", memory.integration_bytes)?;
+        dict.set_item("sequential_bytes", memory.sequential_bytes)?;
+        Ok(dict)
+    }
+
     fn snapshot(&self, py: Python<'_>) -> PyResult<PyStackSnapshot> {
         let stacker = self.active()?;
         let snapshot = py.detach(|| stacker.snapshot()).map_err(stack_error)?;

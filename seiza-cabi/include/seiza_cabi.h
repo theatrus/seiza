@@ -1469,6 +1469,30 @@ char *seiza_live_stacker_expansion_planning_notes_json(const SeizaLiveStacker *s
                                                        char **error_out);
 
 /*
+ What preparing a live stack's frames needs, frame by frame, for a host
+ planning its memory, as owned JSON. The object is schema 1:
+ `workerBytes` for each worker, which prepares one frame while it holds
+ the one it prepared before; `integrationBytes` for the frame being
+ integrated; and `sequentialBytes` for preparing one frame at a time. A
+ host naming `workers` for [`seiza_live_stacker_push_fits_pipelined_json`]
+ can plan on about `workers` times `workerBytes` plus `integrationBytes`,
+ besides the stack itself and its masters; a derived count follows the
+ same frame sizes.
+
+ An ordinary stack's frames are costed at its reference's size. A frame
+ joining a canvas from [`seiza_live_stacker_open_fits_expanding`] is
+ resampled onto only the part of the canvas its footprint covers, so it is
+ costed at the largest frame planning read, at any rotation and scaled as
+ far as the acceptance criteria admit, rather than at the canvas's size;
+ a reopened context costs it by its largest panel. A frame larger than
+ planning read can need more. Free the string with [`seiza_string_free`].
+
+ # Safety
+ As [`seiza_live_stacker_expanded_lens_json`].
+ */
+char *seiza_live_stacker_pipeline_memory_json(const SeizaLiveStacker *stacker, char **error_out);
+
+/*
  Reopens a versioned live-stack context previously written by
  [`seiza_live_stacker_save_context`]. The restored handle retains its
  original registration reference, calibration, online rejection moments,

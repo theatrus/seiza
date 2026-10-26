@@ -586,6 +586,16 @@ asked before each light is planned, and Ctrl-C also stops planning. Drizzle is
 not supported on an expanded canvas. See the CLI documentation for how panels
 are matched and what the result looks like on real data.
 
+`stacker.pipeline_memory` gives what preparing frames needs, frame by frame,
+for planning memory: `worker_bytes` for each worker, `integration_bytes` for
+the frame being integrated, and `sequential_bytes` for one frame at a time. A
+frame joining an expanded canvas is resampled onto only the part of the canvas
+it covers, so it is costed at the largest frame planning read, at any rotation
+and scale the acceptance admits, rather than at the canvas's size; a derived
+`workers` count follows the same sizes. On a four-panel mosaic of 88
+megapixels from 26-megapixel frames, each worker is costed at 2.4 GiB rather
+than the canvas's 6.5 GiB.
+
 Lens-corrected mosaics preserve each panel's sky projection even with the
 default `registration_model="similarity"`, including new exposures added after
 planning or reopening a saved context. Older saved lens-corrected contexts

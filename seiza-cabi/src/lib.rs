@@ -4028,6 +4028,16 @@ pub unsafe extern "C" fn seiza_live_stacker_open_fits_expanding(
     .map_or(ptr::null_mut(), |stacker| Box::into_raw(Box::new(stacker)))
 }
 
+/// What preparing a live stack's frames needs, frame by frame.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PipelineMemoryResponse {
+    schema_version: u32,
+    worker_bytes: usize,
+    integration_bytes: usize,
+    sequential_bytes: usize,
+}
+
 /// The lens distortion an expanded canvas was planned through.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -4114,6 +4124,45 @@ pub unsafe extern "C" fn seiza_live_stacker_expansion_planning_notes_json(
     ffi_result(error_out, || {
         let stacker = unsafe { required_live_stacker(stacker)? };
         owned_json(&stacker.stacker.expansion_planning_notes())
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+/// What preparing a live stack's frames needs, frame by frame, for a host
+/// planning its memory, as owned JSON. The object is schema 1:
+/// `workerBytes` for each worker, which prepares one frame while it holds
+/// the one it prepared before; `integrationBytes` for the frame being
+/// integrated; and `sequentialBytes` for preparing one frame at a time. A
+/// host naming `workers` for [`seiza_live_stacker_push_fits_pipelined_json`]
+/// can plan on about `workers` times `workerBytes` plus `integrationBytes`,
+/// besides the stack itself and its masters; a derived count follows the
+/// same frame sizes.
+///
+/// An ordinary stack's frames are costed at its reference's size. A frame
+/// joining a canvas from [`seiza_live_stacker_open_fits_expanding`] is
+/// resampled onto only the part of the canvas its footprint covers, so it is
+/// costed at the largest frame planning read, at any rotation and scaled as
+/// far as the acceptance criteria admit, rather than at the canvas's size;
+/// a reopened context costs it by its largest panel. A frame larger than
+/// planning read can need more. Free the string with [`seiza_string_free`].
+///
+/// # Safety
+/// As [`seiza_live_stacker_expanded_lens_json`].
+pub unsafe extern "C" fn seiza_live_stacker_pipeline_memory_json(
+    stacker: *const SeizaLiveStacker,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let stacker = unsafe { required_live_stacker(stacker)? };
+        let memory = stacker.stacker.pipeline_memory();
+        owned_json(&PipelineMemoryResponse {
+            schema_version: 1,
+            worker_bytes: memory.worker_bytes,
+            integration_bytes: memory.integration_bytes,
+            sequential_bytes: memory.sequential_bytes,
+        })
     })
     .unwrap_or(ptr::null_mut())
 }
@@ -10385,6 +10434,14 @@ mod tests {
         // Undistorted panels leave the lens nothing to explain.
         assert!(stacker_json(seiza_live_stacker_expanded_lens_json, stacker).is_null());
         assert!(stacker_json(seiza_live_stacker_expansion_planning_notes_json, stacker).is_array());
+        // A frame costs its own footprint, not the canvas.
+        let memory = stacker_json(seiza_live_stacker_pipeline_memory_json, stacker);
+        assert_eq!(memory["schemaVersion"], 1);
+        let height = unsafe { seiza_live_stacker_height(stacker) };
+        let integration = memory["integrationBytes"].as_u64().unwrap() as usize;
+        assert!(integration < 4 * width * height, "{memory}");
+        assert!(memory["workerBytes"].as_u64().unwrap() > 0, "{memory}");
+        assert!(memory["sequentialBytes"].as_u64().unwrap() > 0, "{memory}");
         unsafe { seiza_live_stacker_free(stacker) };
 
         // An ordinary stack has no lens and no notes.
@@ -10406,6 +10463,16 @@ mod tests {
         assert_eq!(
             stacker_json(seiza_live_stacker_expansion_planning_notes_json, ordinary),
             json!([])
+        );
+        // An ordinary stack's frames cost its reference's size.
+        assert_eq!(
+            stacker_json(seiza_live_stacker_pipeline_memory_json, ordinary),
+            json!({
+                "schemaVersion": 1,
+                "workerBytes": 80 * 160 * 128,
+                "integrationBytes": 4 * 160 * 128,
+                "sequentialBytes": 72 * 160 * 128,
+            })
         );
         unsafe { seiza_live_stacker_free(ordinary) };
     }

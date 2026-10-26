@@ -2,7 +2,7 @@
 //! over their own footprints, which must give what the whole canvas gives.
 
 use super::*;
-use crate::{BatchStackOptions, Continue, PipelineOptions, RegistrationModel};
+use crate::{BatchStackOptions, Continue, PipelineOptions, PoolPipelineMemory, RegistrationModel};
 use seiza_fits::{F32ImageData, write_f32_image};
 
 /// A `columns` by `rows` mosaic of `panel_width` by `panel_height` panels
@@ -737,4 +737,82 @@ fn panels_just_short_of_the_minimum_overlap_are_noted_at_planning() {
     );
     assert!(joined.reference.width > 2 * width * 92 / 100);
     assert!(joined.reference.height > 2 * height * 92 / 100);
+}
+
+/// A frame joining a canvas of nine panels is costed at its own size and
+/// footprint, not the canvas's, so a budget holding one canvas-sized frame
+/// prepares several at once, and stacks what one at a time does, to the
+/// bit. A reopened context, which does not plan again, costs its frames by
+/// its panels' footprints, which here are the frames' own.
+#[test]
+fn a_mosaic_plans_its_frames_memory_by_their_footprints() {
+    let directory = tempfile::tempdir().unwrap();
+    let (width, height) = (512, 384);
+    let paths = mosaic(directory.path(), (3, 3), (width, height), 2, 1);
+    let mut options = StackOptions::default();
+    options.acceptance.minimum_overlap_fraction = 0.1;
+    let open = || {
+        LiveStacker::with_expanding_reference(
+            &paths,
+            CalibrationMasters::default(),
+            options.clone(),
+            usize::MAX,
+            |_, _, _, _| Continue::Yes,
+        )
+        .unwrap()
+    };
+    let mut pipelined = open();
+    assert_eq!(
+        pipelined.canvas_registrar.as_ref().unwrap().largest_frame(),
+        (width, height)
+    );
+    let canvas = &pipelined.reference;
+    let whole = PoolPipelineMemory::for_reference(canvas.pixel_count(), canvas.sample_count());
+    let frame = PoolPipelineMemory::for_reference(width * height, width * height);
+    let memory = pipelined.pipeline_memory();
+    assert!(
+        memory.worker_bytes > frame.worker_bytes && memory.worker_bytes * 4 < whole.worker_bytes,
+        "{memory:?} for {frame:?} on {whole:?}"
+    );
+    assert!(memory.integration_bytes * 2 < whole.integration_bytes);
+
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(8)
+        .build()
+        .unwrap();
+    let report = pipelined
+        .push_fits_pipelined_with_pool(
+            &paths,
+            &PipelineOptions::with_budget(whole.in_flight_bytes(1)),
+            &pool,
+            |_, outcome| {
+                assert!(matches!(outcome, Ok(FrameDisposition::Accepted(_))));
+                Continue::Yes
+            },
+        )
+        .unwrap();
+    assert_eq!(report.workers, 4, "{report:?}");
+    assert_eq!(report.estimated_in_flight_bytes, memory.in_flight_bytes(4));
+    let mut sequential = open();
+    push_all(&mut sequential, &paths, false);
+    assert_same_snapshot(
+        &sequential.snapshot().unwrap(),
+        &pipelined.snapshot().unwrap(),
+        "pipelined against one frame at a time",
+    );
+
+    let path = directory.path().join("mosaic.seiza-stack");
+    pipelined.save_context(&path).unwrap();
+    let reopened = LiveStacker::open_context(&path).unwrap();
+    let panels = reopened.canvas_registrar.as_ref().unwrap().largest_frame();
+    assert!(
+        panels.0 >= width && panels.0 <= width + 8 && panels.1 >= height && panels.1 <= height + 8,
+        "{panels:?}"
+    );
+    let reopened = reopened.pipeline_memory();
+    assert!(
+        reopened.worker_bytes >= memory.worker_bytes
+            && reopened.worker_bytes * 10 <= memory.worker_bytes * 11,
+        "{reopened:?} against {memory:?}"
+    );
 }

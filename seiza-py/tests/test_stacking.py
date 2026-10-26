@@ -907,6 +907,14 @@ def test_expanding_stack_holds_every_panel(tmp_path):
     ordinary = seiza.LiveStacker(paths[0], options=options)
     assert ordinary.expanded_lens is None
     assert ordinary.expansion_planning_notes == []
+    # A frame costs its own footprint, not the canvas, which is more than
+    # twice a panel's width.
+    memory = stacker.pipeline_memory
+    frame = ordinary.pipeline_memory
+    assert set(memory) == {"worker_bytes", "integration_bytes", "sequential_bytes"}
+    assert frame["integration_bytes"] == 4 * 192 * 160
+    assert frame["worker_bytes"] < memory["worker_bytes"]
+    assert memory["integration_bytes"] < 4 * snapshot.width * snapshot.height
 
 
 def test_expanding_stack_notes_lights_that_did_not_join(tmp_path):

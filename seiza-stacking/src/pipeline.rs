@@ -208,13 +208,16 @@ pub struct PoolPipelineReport {
     pub execution: PipelineExecution,
     /// Reader/preparation workers actually used, or zero for an empty batch.
     pub workers: usize,
-    /// Conservative reference-sized frame working-set estimate, not process RSS.
-    /// Excludes the caller's reference, accumulator, and calibration masters.
+    /// Conservative frame working-set estimate from
+    /// [`LiveStacker::pipeline_memory`], not process RSS. Excludes the
+    /// caller's reference, accumulator, and calibration masters.
     pub estimated_in_flight_bytes: usize,
     pub timings: PipelineTimings,
 }
 
-/// Reference-sized frame estimates for host memory planning.
+/// Frame estimates for host memory planning: reference-sized for an ordinary
+/// stack, and sized by each frame's footprint on an expanded canvas. See
+/// [`LiveStacker::pipeline_memory`].
 ///
 /// These exclude the host's reference, accumulator and masters. Sources larger
 /// than the reference, codec buffers and allocator overhead can exceed them;
@@ -223,7 +226,7 @@ pub struct PoolPipelineReport {
 pub struct PoolPipelineMemory {
     /// Preparation scratch, decoded data and one queued frame per worker.
     pub worker_bytes: usize,
-    /// One reference-sized frame currently being integrated.
+    /// One frame currently being integrated.
     pub integration_bytes: usize,
     /// One-frame-at-a-time scratch, without queued or concurrently integrating frames.
     pub sequential_bytes: usize,
@@ -243,18 +246,20 @@ impl PoolPipelineMemory {
         }
     }
 
-    /// [`Self::for_reference`] for a stack whose lights are binned by
-    /// `bin_factor`, from its binned `reference`: each worker decodes,
-    /// calibrates and debayers a frame at the sensor's size before binning
-    /// it, while integration holds a binned one.
-    pub(crate) fn for_binned_reference(reference: &crate::LinearImage, bin_factor: u32) -> Self {
+    /// [`Self::for_reference`] for lights of `frame_pixels`, binned by
+    /// `bin_factor`, each resampled onto `footprint_samples` of the binned
+    /// grid: each worker decodes, calibrates and debayers a frame at the
+    /// sensor's size before binning it, while integration holds a binned
+    /// footprint. An ordinary stack's frames and footprints are its
+    /// reference's size.
+    fn for_frames(frame_pixels: usize, footprint_samples: usize, bin_factor: u32) -> Self {
         let area = (bin_factor as usize).pow(2);
-        let binned = Self::for_reference(reference.pixel_count(), reference.sample_count());
+        let binned = Self::for_reference(frame_pixels, footprint_samples);
         Self {
             integration_bytes: binned.integration_bytes,
             ..Self::for_reference(
-                reference.pixel_count().saturating_mul(area),
-                reference.sample_count().saturating_mul(area),
+                frame_pixels.saturating_mul(area),
+                footprint_samples.saturating_mul(area),
             )
         }
     }
@@ -299,11 +304,9 @@ fn timed<T>(work: impl FnOnce() -> T) -> (T, Duration) {
 
 fn resolve_pool_workers(
     options: &PipelineOptions,
-    reference: &crate::LinearImage,
-    bin_factor: u32,
+    memory: PoolPipelineMemory,
     pool: &rayon::ThreadPool,
 ) -> Result<usize> {
-    let memory = PoolPipelineMemory::for_binned_reference(reference, bin_factor);
     let affordable = options
         .max_in_flight_bytes
         .saturating_sub(memory.integration_bytes)
@@ -333,6 +336,44 @@ enum Planned {
 }
 
 impl LiveStacker {
+    /// What preparing this stack's frames needs, frame by frame, for a host
+    /// planning its memory: the estimate
+    /// [`Self::push_fits_pipelined_with_pool`] fits its workers to its budget
+    /// by, and [`Self::push_fits_pipelined`] its derived worker count.
+    ///
+    /// An ordinary stack's frames are costed at the reference's size. A
+    /// frame joining an expanded canvas is resampled onto only the part of
+    /// the canvas its footprint covers, so it is costed at the largest frame
+    /// planning read, landing at any rotation and scaled as far as
+    /// [`crate::FrameAcceptanceCriteria::maximum_scale_deviation`] admits,
+    /// rather than at the canvas's size. A reopened context, which does not
+    /// plan again, takes its largest panel's footprint for that frame, which
+    /// costs a panel lying rotated on the canvas more than its frame. A frame
+    /// larger than planning read, or warped far from its similarity, can need
+    /// more.
+    pub fn pipeline_memory(&self) -> PoolPipelineMemory {
+        let reference = &self.reference;
+        let (frame_pixels, footprint_pixels) = match &self.canvas_registrar {
+            Some(canvas) if !crate::stack::resamples_whole_canvas() => {
+                let frame = canvas.largest_frame();
+                (
+                    frame.0.saturating_mul(frame.1),
+                    crate::registration::footprint_bound(
+                        frame,
+                        (reference.width, reference.height),
+                        self.options.acceptance.maximum_scale_deviation,
+                    ),
+                )
+            }
+            _ => (reference.pixel_count(), reference.pixel_count()),
+        };
+        PoolPipelineMemory::for_frames(
+            frame_pixels,
+            footprint_pixels.saturating_mul(reference.channels),
+            self.options.bin_factor,
+        )
+    }
+
     /// Stack a sequence of FITS or XISF paths, preparing several at once.
     ///
     /// Each frame is read, calibrated, registered and normalized on a worker
@@ -412,6 +453,8 @@ impl LiveStacker {
     /// decoded/calibrated/CFA buffers and a queued frame per worker, but excludes
     /// the caller's reference, accumulator and masters. A budget too small for
     /// one worker and its integration frame returns an error before any read.
+    /// On an expanded canvas each frame is costed at its own footprint rather
+    /// than the canvas; [`Self::pipeline_memory`] gives the estimate.
     ///
     /// This is a conservative estimate for reference-sized or smaller sources,
     /// not a hard allocation/RSS limit: larger source images, container codec
@@ -510,15 +553,15 @@ impl LiveStacker {
             return Ok(PoolPipelineReport::default());
         }
 
+        let memory = self.pipeline_memory();
         // Each light is decoded and prepared at the sensor's size, before
-        // any binning.
-        let frame_bytes = self.reference.data.len()
-            * std::mem::size_of::<f32>()
-            * (self.options.bin_factor as usize).pow(2);
+        // any binning: the reference's size for an ordinary stack, and the
+        // frame's footprint on an expanded canvas.
+        let frame_bytes = memory
+            .integration_bytes
+            .saturating_mul((self.options.bin_factor as usize).pow(2));
         let workers = match compute.0 {
-            Some(pool) => {
-                resolve_pool_workers(options, &self.reference, self.options.bin_factor, pool)?
-            }
+            Some(pool) => resolve_pool_workers(options, memory, pool)?,
             None => options.resolve_workers(frame_bytes),
         }
         .min(paths.len());
@@ -572,11 +615,7 @@ impl LiveStacker {
         let (preparation, mut integration) = self.split_for_pipeline();
         let mut report = PoolPipelineReport {
             workers,
-            estimated_in_flight_bytes: PoolPipelineMemory::for_binned_reference(
-                preparation.reference,
-                preparation.options.bin_factor,
-            )
-            .in_flight_bytes(workers),
+            estimated_in_flight_bytes: memory.in_flight_bytes(workers),
             ..PoolPipelineReport::default()
         };
 
@@ -697,15 +736,12 @@ impl LiveStacker {
          ),
         on_frame: &mut impl FnMut(&Path, Result<FrameDisposition>) -> Continue,
     ) -> PoolPipelineReport {
+        let memory = self.pipeline_memory();
         let (preparation, mut integration) = self.split_for_pipeline();
         let preparation = &preparation;
         let mut report = PoolPipelineReport {
             workers,
-            estimated_in_flight_bytes: PoolPipelineMemory::for_binned_reference(
-                preparation.reference,
-                preparation.options.bin_factor,
-            )
-            .in_flight_bytes(workers),
+            estimated_in_flight_bytes: memory.in_flight_bytes(workers),
             ..PoolPipelineReport::default()
         };
         let (_, elapsed) = timed(|| integration.prepare_accumulator());
@@ -783,11 +819,7 @@ impl LiveStacker {
         let mut report = PoolPipelineReport {
             workers: 1,
             execution: PipelineExecution::SequentialRayonFallback,
-            estimated_in_flight_bytes: PoolPipelineMemory::for_binned_reference(
-                &self.reference,
-                self.options.bin_factor,
-            )
-            .sequential_bytes,
+            estimated_in_flight_bytes: self.pipeline_memory().sequential_bytes,
             ..PoolPipelineReport::default()
         };
         let (preparation, mut integration) = self.split_for_pipeline();
