@@ -19,6 +19,21 @@ when that output changes."""
 
 StarInput = Union["Star", tuple[float, float, float]]
 
+def analyze_project(
+    inputs: Sequence[str | Path], *, samples: int = 262144,
+    filter: str | None = None, max_frames: int | None = None,
+) -> dict[str, Any]:
+    """Analyze mono FITS/XISF files, directories, or text lists; return schema-1 diagnostics.
+
+    Keys: schema_version, algorithm_version, options, frames, groups, warnings.
+    Individual file errors stay in frames; invalid requests raise ValueError.
+    """
+    ...
+
+def analysis_html(report: Mapping[str, Any]) -> str:
+    """Render an analyze_project result as portable, self-contained HTML."""
+    ...
+
 class EngineError(RuntimeError):
     """Stretching, color composition, background fitting, or deconvolution failed."""
 

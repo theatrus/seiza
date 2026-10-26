@@ -1,5 +1,39 @@
 # seiza (Python)
 
+## Project analysis
+
+```python
+from pathlib import Path
+import json
+import seiza
+
+report = seiza.analyze_project([Path("lights")], filter="Ha", samples=262144)
+Path("analysis.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+Path("analysis.html").write_text(seiza.analysis_html(report), encoding="utf-8")
+```
+
+`analyze_project(inputs, *, samples=262144, filter=None, max_frames=None)`
+accepts paths to files, nonrecursive directories or UTF-8 text lists; relative
+list entries resolve beside the list. `max_frames` limits sorted deduplicated
+paths before header filtering. It releases the GIL during analysis and returns
+a snake_case dictionary with `schema_version`, `algorithm_version`, `options`,
+`frames`, `groups`, and `warnings`. Invalid requests raise `ValueError`;
+individual unreadable, unsupported or unregistrable inputs stay in `frames`
+with `status="rejected"` and an `error`. Inspect `groups` even after a successful
+call, since no usable reference may have been found.
+
+Mono non-Bayer FITS/XISF frames are measured without producing a full stack.
+Per-filter groups contain registration/photometry diagnostics, common-footprint
+noise curves, known integration time, unknown-exposure counts and optional
+conditional trend estimates. `analysis_html(report)` returns a portable HTML
+dashboard with embedded data, filter controls and capture-time health plots.
+Neither function writes reports or modifies source images.
+
+Noise measurements at even depths use balanced frame differences, which cancel
+shared systematic errors as well as scene structure. They do not reproduce
+production weighting/rejection or guarantee improvement with more exposure.
+See [the complete method and schema](../seiza-analysis/README.md).
+
 `balance_narrowband(image, shadow_protection=1, oiii_boost=1, sii_boost=1,
 max_samples=1000000)` accepts interleaved display samples in `[0, 1]`, with
 three physical planes H-alpha/OIII/SII, and returns `(image, report)` without

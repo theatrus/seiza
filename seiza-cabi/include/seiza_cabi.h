@@ -3500,6 +3500,26 @@ bool seiza_live_stacker_light_rotation(const SeizaLiveStacker *stacker,
                                        double *degrees_out);
 
 /*
+ Analyze mono FITS/XISF inputs without stacking. Request: inputs (paths,
+ directories or text lists), samples (8192..2097152, default 262144), filter
+ (optional), maxFrames (optional). Returns the core report with camelCase
+ keys. Individual frame failures remain in the report. Free with seiza_string_free.
+
+ # Safety
+ request_json must be NUL-terminated UTF-8. error_out must be null or writable.
+ */
+char *seiza_analyze_project_json(const char *request_json, char **error_out);
+
+/*
+ Render the camelCase JSON report returned by seiza_analyze_project_json as
+ self-contained HTML. Returns owned UTF-8; free with seiza_string_free.
+
+ # Safety
+ report_json must be NUL-terminated UTF-8. error_out must be null or writable.
+ */
+char *seiza_analysis_html(const char *report_json, char **error_out);
+
+/*
  Fit premeasured common stellar fluxes. Request JSON contains sources, stars
  and optional options, as defined by the continuum core. Returns a tagged
  fitted/skipped JSON outcome; free it with seiza_string_free. A skip is not

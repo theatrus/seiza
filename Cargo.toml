@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "seiza-analysis",
     "seiza",
     "seiza-background",
     "seiza-calibration",
@@ -32,6 +33,7 @@ repository = "https://github.com/theatrus/seiza"
 authors = ["Yann Ramin <github@theatr.us>"]
 
 [workspace.dependencies]
+seiza-analysis = { path = "seiza-analysis", version = "0.1.0" }
 seiza = { path = "seiza", version = "0.44.2" }
 seiza-background = { path = "seiza-background", version = "0.3.1" }
 seiza-calibration = { path = "seiza-calibration", version = "0.8.1" }

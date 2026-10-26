@@ -1,5 +1,31 @@
 # seiza-cli
 
+## Analyze a project without stacking
+
+```sh
+seiza analyze ./lights
+seiza analyze ./frames.txt --filter Ha --samples 262144 \
+  --json ha-analysis.json --html ha-analysis.html
+```
+
+Writes versioned JSON and a self-contained HTML dashboard (default:
+`project-analysis.json` and `project-analysis.html`). Destinations must not
+already exist. Input images are never modified. Files, nonrecursive directories,
+and UTF-8 text lists are accepted; relative list entries resolve beside the list.
+`--max-frames N` limits sorted, deduplicated paths before header filtering.
+
+The initial scope is monochrome non-Bayer FITS/XISF. Each filter gets its own
+reference, registration, photometric normalization, common sampling footprint
+and noise curve. Errors remain visible per frame; if no group can be analyzed,
+the reports are still written and the command exits unsuccessfully.
+
+The dashboard includes HFR/FWHM, eccentricity, star counts, capture-time health
+plots, warnings, and conditional depth trends. Split noise is measured only at
+even depths and requires at least 32 patches common to every accepted frame.
+Shared systematic errors cancel in the difference: this is not a prediction of
+production stacking or a guarantee that more exposure will help. See
+[the analysis method and report contract](../seiza-analysis/README.md).
+
 The `seiza` command-line tool: star detection, hinted and blind plate
 solving, and star/object dataset management for astrophotography. The
 library lives in the [seiza](https://crates.io/crates/seiza) crate.

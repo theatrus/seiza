@@ -3074,6 +3074,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "seiza-analysis"
+version = "0.1.0"
+dependencies = [
+ "seiza-fits",
+ "seiza-image-io",
+ "seiza-stacking",
+ "seiza-stars",
+ "seiza-stats",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "seiza-background"
 version = "0.3.1"
 dependencies = [
@@ -3092,6 +3107,7 @@ dependencies = [
  "cbindgen",
  "image",
  "seiza",
+ "seiza-analysis",
  "seiza-background",
  "seiza-calibration",
  "seiza-deconvolution",
@@ -3141,6 +3157,7 @@ dependencies = [
  "rayon",
  "rustls",
  "seiza",
+ "seiza-analysis",
  "seiza-background",
  "seiza-deconvolution",
  "seiza-download",

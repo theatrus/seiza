@@ -18,6 +18,7 @@ name = "seiza"
 path = "src/main.rs"
 
 [dependencies]
+seiza-analysis.workspace = true
 ctrlc = { version = "3", features = ["termination"] }
 seiza.workspace = true
 seiza-background.workspace = true

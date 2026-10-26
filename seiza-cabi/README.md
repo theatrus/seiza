@@ -1,5 +1,26 @@
 # seiza-cabi
 
+## Project analysis
+
+`seiza_analyze_project_json(request_json, error_out)` analyzes mono, non-Bayer
+FITS/XISF projects without producing a stack. Example request:
+
+```json
+{"inputs":["lights"],"samples":262144,"filter":"Ha","maxFrames":100}
+```
+
+Only `inputs` is required. Inputs may be files, nonrecursive directories or
+UTF-8 text lists. The response is the core analysis report with camelCase
+keys (`schemaVersion`, `algorithmVersion`, `options`, `frames`, `groups`,
+`warnings`). Failed frames remain in the report; an empty `groups` array means
+no usable reference was found. Invalid requests return null and set `error_out`.
+`seiza_analysis_html(report_json, error_out)` renders that camelCase result as
+self-contained HTML. Both return owned strings freed with `seiza_string_free`.
+These calls write no source images or report files. The Python counterparts are
+`analyze_project` and `analysis_html`.
+
+See [the analysis contract and limitations](../seiza-analysis/README.md).
+
 A C ABI over Seiza for native application front-ends. It is the single, shared
 successor to the near-identical `seiza-cabi` crates that previously lived in the
 [`seiza-win`](https://github.com/theatrus/seiza-win) (.NET) and
