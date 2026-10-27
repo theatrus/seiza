@@ -161,7 +161,9 @@ a searchable frame ledger with keyboard-accessible details, errors and measureme
 caveats. Summary cards, labeled charts and timing bars use a responsive layout;
 print styles retain the selected filter and chart labels. A Dark mode toggle
 remembers the preference when browser storage is available; printing always
-uses the light palette. The toggle still works when storage is blocked. Metadata is inserted as text and
+uses the light palette. The toggle still works when storage is blocked. Download JSON saves the complete
+embedded report, regardless of the current filter or table search, without
+requiring a server or a separate JSON file. Metadata is inserted as text and
 embedded JSON escapes HTML delimiters. It can be opened directly or shared.
 
 C: `seiza_analyze_project_json` accepts `inputs`, `samples`, `filter`, `maxFrames`;
