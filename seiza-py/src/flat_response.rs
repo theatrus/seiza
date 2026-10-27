@@ -66,7 +66,7 @@ pub(crate) fn to_python<'py>(
 }
 
 /// A Python value (a dict, a list, a string) as the core type `T`.
-fn from_python<T: serde::de::DeserializeOwned>(
+pub(crate) fn from_python<T: serde::de::DeserializeOwned>(
     value: &Bound<'_, PyAny>,
     name: &str,
 ) -> PyResult<T> {

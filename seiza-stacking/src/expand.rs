@@ -1084,13 +1084,31 @@ pub(crate) fn plan(
     maximum_samples: usize,
     progress: impl FnMut(&Path, usize, usize, usize) -> Continue,
 ) -> Result<Expansion> {
-    plan_with_calibration(paths, |_| calibration, options, maximum_samples, progress)
+    plan_prepared(
+        paths,
+        &|_, frame, bin| {
+            crate::stack::prepare_light_at(
+                frame,
+                calibration,
+                &options.match_tolerances,
+                options,
+                bin,
+            )
+            .map_err(crate::stack::LightFailure::into_error)
+        },
+        options,
+        maximum_samples,
+        progress,
+    )
 }
 
-/// Use the same geometric planner with each light's own filter calibration.
-pub(crate) fn plan_with_calibration<'a>(
+/// The planner uses the same per-file preparation for its anchor, deferred
+/// overlaps and full-resolution lens rebuild. Calibration precedes detection.
+pub(crate) fn plan_prepared(
     paths: &[PathBuf],
-    calibration: impl Fn(&Path) -> &'a CalibrationMasters + Sync,
+    prepare_calibrated: &(
+         impl Fn(&Path, FitsFrame, u32) -> Result<(FitsFrame, Option<crate::BayerLayout>)> + Sync
+     ),
     options: &StackOptions,
     maximum_samples: usize,
     mut progress: impl FnMut(&Path, usize, usize, usize) -> Continue,
@@ -1118,13 +1136,7 @@ pub(crate) fn plan_with_calibration<'a>(
     let frame = FitsFrame::open(first)?;
     let metadata = frame.metadata();
     let anchor_optics = OpticalMetadata::from_frame(&frame);
-    let (mut frame, anchor_cfa) = crate::stack::prepare_light(
-        frame,
-        calibration(first),
-        &options.match_tolerances,
-        options,
-    )
-    .map_err(crate::stack::LightFailure::into_error)?;
+    let (mut frame, anchor_cfa) = prepare_calibrated(first, frame, options.bin_factor)?;
     check_source(first)?;
     if frame.image.sample_count() > maximum_samples {
         return Err(Error::Stack(format!(
@@ -1212,14 +1224,7 @@ pub(crate) fn plan_with_calibration<'a>(
         check_source(path)?;
         let frame = FitsFrame::open(path)?;
         let optics = OpticalMetadata::from_frame(&frame);
-        let (frame, cfa) = crate::stack::prepare_light_at(
-            frame,
-            calibration(path),
-            &options.match_tolerances,
-            options,
-            bin_factor,
-        )
-        .map_err(crate::stack::LightFailure::into_error)?;
+        let (frame, cfa) = prepare_calibrated(path, frame, bin_factor)?;
         check_source(path)?;
         if frame.image.channels != channels {
             return Err(Error::Stack(format!(

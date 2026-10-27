@@ -26,6 +26,7 @@
 
 pub mod dust;
 pub mod flat_response;
+pub mod library;
 mod matching;
 mod pedestal;
 mod quality;
@@ -157,6 +158,12 @@ impl<'a> LinearImageRef<'a> {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+    /// Invalid immutable calibration library snapshot.
+    #[error("calibration library: {0}")]
+    CalibrationLibrary(String),
+    /// A measured flat-group request has inconsistent identities or limits.
+    #[error("flat groups: {0}")]
+    FlatGroups(String),
     /// Image dimensions, channel count, or sample buffer are inconsistent.
     #[error("invalid image: {0}")]
     InvalidImage(String),

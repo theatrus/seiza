@@ -1,12 +1,16 @@
+mod analysis;
 mod continuum;
 mod emission;
 
 use image::DynamicImage;
 mod constellations;
+mod flat_groups;
 mod flat_response;
+mod library;
 mod parallax;
 mod resample;
 mod satellites;
+mod sessions;
 use resample::{downsample_interleaved_f32, downsample_rgba};
 use seiza::SolveLimits;
 use seiza::catalog::StarCatalog;
@@ -10441,7 +10445,7 @@ mod tests {
 
     /// Three panels across one star field, each overlapping the next by 80
     /// pixels; the first and third share no sky.
-    fn overlapping_panels(directory: &Path) -> Vec<String> {
+    pub(super) fn overlapping_panels(directory: &Path) -> Vec<String> {
         let (width, height, step) = (192, 160, 112);
         let sky_width = width + 2 * step;
         let mut state = 41_u64;

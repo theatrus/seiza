@@ -1174,3 +1174,12 @@ For faster reference mode, use `open_fits_on_canvas` directly when an existing
 canvas covers the desired field. Joint mode adds a pass over all groups; plan
 once and reuse it. Save a nonempty channel stack with `save_context` to preserve
 the union geometry, even where that filter has no coverage.
+
+### Session-aware expanded mosaics
+
+`LiveStacker::open_fits_expanding_sessions` accepts original paths, complete
+`FileCalibrationSession` records and a session index for each path. It applies
+the assigned masters and gate during canvas planning and later integration,
+including A→B→A sequences. It returns an empty stack; push all original lights.
+See [session planning](../docs/calibration-sessions.md) for recipes, scaling,
+checkpoint/replay guarantees and bounded preparation.

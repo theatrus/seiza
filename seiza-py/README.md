@@ -1,5 +1,43 @@
 # seiza (Python)
 
+## Project analysis
+
+```python
+from pathlib import Path
+import json
+import seiza
+
+report = seiza.analyze_project([Path("lights")], filter="Ha", samples=262144)
+Path("analysis.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+Path("analysis.html").write_text(seiza.analysis_html(report), encoding="utf-8")
+```
+
+`analyze_project(inputs, *, samples=262144, filter=None, max_frames=None, metrics_only=False)`
+accepts paths to files, nonrecursive directories or UTF-8 text lists; relative
+list entries resolve beside the list. `max_frames` limits sorted deduplicated
+paths before header filtering. It releases the GIL during analysis and returns
+a snake_case dictionary with `schema_version`, `algorithm_version`, `options`,
+`frames`, `groups`, `timings`, and `warnings` (schema/algorithm version 2). Invalid requests raise `ValueError`;
+individual inputs stay in `frames` with separate `measurement_status` and
+`depth_status`. Measurement failures use `error`; depth failures use `depth_error`.
+Measured frames contribute to native quality medians even if registration fails.
+`metrics_only=True` skips registration, normalization, sampling and replay;
+normalized noise and depth results remain unavailable. Groups count
+`measured_frames`, `depth_frames` and `normalized_noise_frames` separately.
+Use separate invocations per panel/pointing. No outcome is a quality verdict.
+
+Mono non-Bayer FITS/XISF frames are measured without producing a full stack.
+Per-filter groups contain registration/photometry diagnostics, common-footprint
+noise curves, known integration time, unknown-exposure counts and optional
+conditional trend estimates. `analysis_html(report)` returns a portable HTML
+dashboard with embedded data, filter controls and capture-time health plots.
+Neither function writes reports or modifies source images.
+
+Noise measurements at even depths use balanced frame differences, which cancel
+shared systematic errors as well as scene structure. They do not reproduce
+production weighting/rejection or guarantee improvement with more exposure.
+See [the complete method and schema](../seiza-analysis/README.md).
+
 `balance_narrowband(image, shadow_protection=1, oiii_boost=1, sii_boost=1,
 max_samples=1000000)` accepts interleaved display samples in `[0, 1]`, with
 three physical planes H-alpha/OIII/SII, and returns `(image, report)` without
@@ -1143,6 +1181,19 @@ a few lights' own sky against a change or a set of candidate responses;
 `flat_encode_plane` and `flat_decode_plane` keep planes in a cache. Options
 are a dict of `DustOptions` fields, such as `{"edge_sigma": 3.0}`.
 
+`flat_group_plan` shares PSF Guard's measured grouping policy: response families,
+groups, changes, angle epochs, uncertain light placements and resolved personal
+choices. Pass `responses`, `comparisons`, `evidence`, `imaging` (or
+`imaging_lights` with `profile_rigs`), `limits`, `group_overrides`,
+`night_boundaries`, `epoch_samples`, `family_evidence`, `light_choices`, and
+`lights` as keyword collections. Records/results use snake_case; times are Unix
+seconds, angles degrees, levels ADU, dust/broad fractions of background. Omitted
+collections are empty. The result includes measurement jobs and evidence keys
+for subsequent pixel passes. Compatible families must already pass the host's
+sensor/optics gates. Automatic results and personal choices stay distinct. This
+stage does not grade frames or build masters. See [the schema and executable
+fixture](../docs/flat-groups.md). `flat_group_plan()` evaluates an empty library.
+
 ### Constellation figures
 
 `project_constellations(wcs, width, height)` gives a solved image's
@@ -1564,3 +1615,133 @@ For faster reference mode when a saved canvas already covers all filters, use
 `LiveStacker.open_context(...).open_fits_on_canvas(...)`. Joint mode adds a
 geometry pass over every group; do it once and reuse its result. Stellar overlap
 is required between panels; normalization needs overlap within each filter.
+
+### Expanded mosaics with calibration sessions
+
+`LiveStacker.open_fits_expanding_sessions` prepares every original light with
+its assigned calibration before planning the canvas. It returns an empty stack;
+push every original file, including the anchor, in its original order:
+
+```python
+sessions = [
+    {"bias": "bias-a.fits", "flat": "flat-a.fits"},
+    {"bias": "bias-b.fits", "flat": "flat-b.fits",
+     "tolerances": {"light_rotation": {"basis": "measured", "degrees": 90.0}}},
+]
+stacker = seiza.LiveStacker.open_fits_expanding_sessions(
+    paths, sessions, [0, 1, 0], max_canvas_megasamples=256)
+for path in paths:
+    stacker.push_fits(path)
+```
+
+Each session supplies a complete gate; omitted values use native defaults.
+A fitted-pedestal recipe supplies `flat` (already normalized) and `pedestal`,
+without bias or dark. `normalized_full_scale=65535` rescales only images that
+declare normalized `0:1` bounds, matching PSF Guard's loader.
+Assignments are immutable and survive checkpoints and reintegration. Changed
+sources or masters are refused. See [session planning](../docs/calibration-sessions.md)
+for file identity, memory and pipeline behavior.
+
+### PSF Guard library grading and selection
+
+`seiza.calibration_library_plan` runs PSF Guard's extracted library policy.
+For repeated calls, construct `book = seiza.FlatGroups(grouping_request)` once
+and pass `prepared_grouping=book` with no `grouping` rows. Preparation uses the
+`flat_group_plan` record schema, including rig limits. Planning reuses the
+immutable book, refuses conflicting limits, and performs no file I/O. Recreate
+the book when its source rows, night boundaries or settings change.
+
+For example, without a prepared book:
+
+```python
+plan = seiza.calibration_library_plan(
+    frames=calibration_rows, lights=ordered_light_rows,
+    quality=measurement_rows, grouping=measured_flat_groups, regrade=True,
+    global_settings=[{"key": "dark_choice", "value": "complete"}],
+)
+print(plan["grades"], plan["selections"])
+print(plan["sessions"], plan["assignments"])
+```
+
+All records/results use snake_case. Optional keywords are `frames`, `lights`,
+`quality`, `global_settings`, `rigs`, `grouping`, `available_responses`,
+`night_shifts`, `regrade=False`, `master_failures`, `pedestal_evidence`,
+`force_flat_without_pedestal=False` and `flat_star_masking=False`. Settings use
+`{key, value}` records. Outputs include the original settings schema and
+nondefault rule notes; peer grading, overrides, temporal selection and complete
+session gates use one resolved rule layer.
+
+This call plans native master builds; it opens no files and does not publish a
+master. Verify sources and replan, execute the dependency recipes, and return
+failures or native pedestal-fit evidence when required. Automatic flat-only
+calibration is withheld until a reliable fit exists. See the
+[shared library contract](../docs/calibration-library.md) for schemas, units,
+source verification, pixel checks and final recipe persistence. After building
+the masters, use `LiveStacker.open_fits_expanding_sessions` to apply the same
+assignments during mosaic planning and integration.
+
+### Shared calibration master execution
+
+`calibration_master_plan(request)` resolves already selected/verified candidates
+without matching or file access. It returns the same session/recipes as
+`calibration_library_plan`; forward cached `quality` decisions and
+`flat_star_masking`. `calibration_master_cohort(request)` supplies coherence-only
+previews using effective settings. `calibration_flat_retry(request)` decides
+trimming, alternate sessions, fallback and withholding from measured build
+feedback. Default `flat_stability` options preserve all PSF Guard retries;
+hosts may set `enabled`, `trim_unstable`, `try_next_session` or `retain_unstable`
+false. Policy algorithm version 4 includes these options and held-back inputs
+in session identity. `enabled` controls retry decisions; pixel measurement is
+independently callable.
+
+The four request APIs also accept keyword fields, with typed requests/results
+such as `CalibrationMasterPlanRequest`, `CalibrationSession`, `FlatRetryPolicy`
+and `CalibrationFlatRetryDecision`. Use either a mapping or keyword fields.
+Unknown/invalid/duplicate settings raise `ValueError` with the setting and layer.
+Pass the returned session directly to retry planning:
+
+```python
+session = seiza.calibration_master_plan(
+    frames=selected, lights=lights, quality=cached_quality,
+    flat_stability=seiza.FlatRetryPolicy(retain_unstable=False),
+)
+decision = seiza.calibration_flat_retry(
+    session=session, candidates=selected_raw_flats, first=first_attempt,
+)
+```
+
+This retains policy, held-back inputs and the rig's resolved time window.
+Successful `trimmed`/`alternate` feedback implies attempted; set the respective
+`*_attempted=True` flag when a retry fails without feedback. A
+[complete host execution loop](examples/calibration_retry.py) demonstrates retry
+feedback, memo rebuilding, publication and cleanup.
+
+`master_flat_stability(request)` measures one source at a time against a
+`master` file, with optional `bias`, `dark`, `dark_exposure_seconds` and
+`normalized_full_scale`. `inputs` contains `{path, exposure_seconds, skipped}`.
+It returns `algorithm_version` (2), `feature_pixels`, `drift_threshold`,
+`disagreement` and indexed `errors`. Missing/incompatible inputs count as
+drifting; skipped inputs have zero disagreement. `normalized_full_scale=65535`
+preserves PSF Guard's declared-unit XISF handling. Mono, RGB and CFA data use
+separate sample planes. See [the execution contract](../docs/calibration-library.md).
+
+
+`master_flat_stability_images(master, inputs, *, bias=None, dark=None,
+input_metadata=None, bayer=None, dark_exposure_seconds=None,
+dark_bias_subtracted=False)` measures cached float32 NumPy images without file
+I/O. Arrays must be C-contiguous mono `(H,W)` or interleaved RGB `(H,W,3)`;
+raw CFA uses mono plus `bayer={pattern, x_offset, y_offset}`. All pixels already
+use the same units. Metadata is omitted/empty or aligned to inputs, with
+`exposure_seconds`, `bayer` and `skipped`. The bindings copy buffers for the call;
+the host retains its original caches. File and cached-image measurement execute
+the same algorithm and return `FlatSetStability`.
+
+### Analysis baselines and stellar SNR
+
+The result dictionary uses snake_case (`median_star_snr`, `median_normalized_noise`).
+Frames now include median unsaturated-star peak SNR. Filter groups expose
+measured-frame medians of star count, HFR, FWHM, eccentricity, noise, background
+and stellar SNR, plus gain-normalized noise. Raw noise/background retain native
+input units; normalized noise uses reference units. Missing measurements are
+null/None. See [measurement definitions](../seiza-analysis/README.md#measurements-and-physical-meaning)
+for population, units and limitations. Thresholds and rejection remain caller-owned.

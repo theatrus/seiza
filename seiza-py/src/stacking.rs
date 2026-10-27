@@ -1746,6 +1746,93 @@ impl PyLiveStacker {
         })
     }
 
+    /// Plan and integrate original files under immutable per-light calibration
+    /// sessions. Records use snake_case with the complete native tolerances,
+    /// including light_rotation. Push all lights; assignments survive resume.
+    /// Pipelines use one active set in input order. Manual master/gate changes
+    /// and anonymous pixels are refused. Source changes invalidate the plan.
+    #[staticmethod]
+    #[pyo3(signature = (
+        paths,
+        sessions,
+        assignments,
+        *,
+        options=None,
+        max_canvas_megasamples=256,
+        cancel=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn open_fits_expanding_sessions(
+        py: Python<'_>,
+        paths: Vec<PathBuf>,
+        sessions: &Bound<'_, PyAny>,
+        assignments: Vec<usize>,
+        options: Option<PyRef<'_, PyStackOptions>>,
+        max_canvas_megasamples: usize,
+        cancel: Option<Py<PyAny>>,
+    ) -> PyResult<Self> {
+        if paths.is_empty() {
+            return Err(PyValueError::new_err("at least one light is required"));
+        }
+        let keywords = pyo3::types::PyDict::new(py);
+        keywords.set_item("default", py.import("os")?.getattr("fspath")?)?;
+        let json: String = py
+            .import("json")?
+            .call_method("dumps", (sessions,), Some(&keywords))?
+            .extract()?;
+        let sessions: Vec<seiza_stacking::FileCalibrationSession> = serde_json::from_str(&json)
+            .map_err(|error| {
+                PyValueError::new_err(format!("invalid calibration sessions: {error}"))
+            })?;
+        let maximum_samples = max_canvas_megasamples
+            .checked_mul(1_000_000)
+            .filter(|samples| *samples > 0)
+            .ok_or_else(|| PyValueError::new_err("max_canvas_megasamples must be positive"))?;
+        let options = options.as_deref().map_or_else(
+            || PyStackOptions::default().expanding(),
+            PyStackOptions::expanding,
+        );
+        // Planning reads every light with the GIL released, taking it back
+        // before each one to ask whether to stop.
+        let raised: Mutex<Option<PyErr>> = Mutex::new(None);
+        let planned = py.detach(|| {
+            LiveStacker::open_fits_expanding_sessions(
+                &paths,
+                &sessions,
+                &assignments,
+                options,
+                maximum_samples,
+                |_, _, _, _| {
+                    let stop = Python::attach(|py| {
+                        let asked = py.check_signals().and_then(|()| match &cancel {
+                            Some(cancel) => cancel
+                                .call0(py)
+                                .and_then(|value| value.bind(py).is_truthy()),
+                            None => Ok(false),
+                        });
+                        asked.unwrap_or_else(|error| {
+                            // Re-raised once planning unwinds, so the caller
+                            // sees KeyboardInterrupt or their own exception.
+                            *raised.lock().unwrap() = Some(error);
+                            true
+                        })
+                    });
+                    if stop {
+                        seiza_stacking::Continue::No
+                    } else {
+                        seiza_stacking::Continue::Yes
+                    }
+                },
+            )
+        });
+        if let Some(error) = raised.lock().unwrap().take() {
+            return Err(error);
+        }
+        Ok(Self {
+            inner: Some(planned.map_err(stack_error)?),
+        })
+    }
+
     /// Reopen a versioned on-disk context and continue adding frames.
     ///
     /// The stack runs under the :class:`GpuOptions` it was saved with, or

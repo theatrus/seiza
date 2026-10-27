@@ -1,0 +1,1019 @@
+{
+  "cases": [
+    {
+      "name": "trim_minority",
+      "request": {
+        "candidates": [
+          {
+            "frame_uuid": "f0",
+            "kind": "flat",
+            "captured_at": 0,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f1",
+            "kind": "flat",
+            "captured_at": 1,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f2",
+            "kind": "flat",
+            "captured_at": 2,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f3",
+            "kind": "flat",
+            "captured_at": 3,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f4",
+            "kind": "flat",
+            "captured_at": 100000,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f5",
+            "kind": "flat",
+            "captured_at": 100001,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f6",
+            "kind": "flat",
+            "captured_at": 100002,
+            "filter": "Ha"
+          }
+        ],
+        "first": {
+          "used": [
+            "f0",
+            "f1",
+            "f2",
+            "f3"
+          ],
+          "disagreement": [
+            0,
+            0,
+            0,
+            20
+          ],
+          "drift_threshold": 16,
+          "feature_pixels": 80,
+          "label": "four initial flats"
+        },
+        "held_back": [
+          "f6"
+        ]
+      },
+      "action": "try_trimmed",
+      "inputs": [
+        "f0",
+        "f1",
+        "f2"
+      ],
+      "rebuild_first": false
+    },
+    {
+      "name": "publish_stable_trim",
+      "request": {
+        "candidates": [
+          {
+            "frame_uuid": "f0",
+            "kind": "flat",
+            "captured_at": 0,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f1",
+            "kind": "flat",
+            "captured_at": 1,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f2",
+            "kind": "flat",
+            "captured_at": 2,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f3",
+            "kind": "flat",
+            "captured_at": 3,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f4",
+            "kind": "flat",
+            "captured_at": 100000,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f5",
+            "kind": "flat",
+            "captured_at": 100001,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f6",
+            "kind": "flat",
+            "captured_at": 100002,
+            "filter": "Ha"
+          }
+        ],
+        "first": {
+          "used": [
+            "f0",
+            "f1",
+            "f2",
+            "f3"
+          ],
+          "disagreement": [
+            0,
+            0,
+            0,
+            20
+          ],
+          "drift_threshold": 16,
+          "feature_pixels": 80,
+          "label": "four initial flats"
+        },
+        "held_back": [
+          "f6"
+        ],
+        "trimmed_attempted": true,
+        "trimmed": {
+          "used": [
+            "f0",
+            "f1",
+            "f2"
+          ],
+          "disagreement": [
+            0,
+            0,
+            0
+          ],
+          "drift_threshold": 16
+        }
+      },
+      "action": "publish_trimmed",
+      "inputs": [],
+      "rebuild_first": false
+    },
+    {
+      "name": "failed_trim_tries_other_session",
+      "request": {
+        "candidates": [
+          {
+            "frame_uuid": "f0",
+            "kind": "flat",
+            "captured_at": 0,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f1",
+            "kind": "flat",
+            "captured_at": 1,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f2",
+            "kind": "flat",
+            "captured_at": 2,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f3",
+            "kind": "flat",
+            "captured_at": 3,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f4",
+            "kind": "flat",
+            "captured_at": 100000,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f5",
+            "kind": "flat",
+            "captured_at": 100001,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f6",
+            "kind": "flat",
+            "captured_at": 100002,
+            "filter": "Ha"
+          }
+        ],
+        "first": {
+          "used": [
+            "f0",
+            "f1",
+            "f2",
+            "f3"
+          ],
+          "disagreement": [
+            0,
+            0,
+            0,
+            20
+          ],
+          "drift_threshold": 16,
+          "feature_pixels": 80,
+          "label": "four initial flats"
+        },
+        "held_back": [
+          "f6"
+        ],
+        "trimmed_attempted": true
+      },
+      "action": "try_alternate",
+      "inputs": [
+        "f4",
+        "f5"
+      ],
+      "rebuild_first": false
+    },
+    {
+      "name": "unstable_trim_tries_other_session",
+      "request": {
+        "candidates": [
+          {
+            "frame_uuid": "f0",
+            "kind": "flat",
+            "captured_at": 0,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f1",
+            "kind": "flat",
+            "captured_at": 1,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f2",
+            "kind": "flat",
+            "captured_at": 2,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f3",
+            "kind": "flat",
+            "captured_at": 3,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f4",
+            "kind": "flat",
+            "captured_at": 100000,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f5",
+            "kind": "flat",
+            "captured_at": 100001,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f6",
+            "kind": "flat",
+            "captured_at": 100002,
+            "filter": "Ha"
+          }
+        ],
+        "first": {
+          "used": [
+            "f0",
+            "f1",
+            "f2",
+            "f3"
+          ],
+          "disagreement": [
+            0,
+            0,
+            0,
+            20
+          ],
+          "drift_threshold": 16,
+          "feature_pixels": 80,
+          "label": "four initial flats"
+        },
+        "held_back": [
+          "f6"
+        ],
+        "trimmed_attempted": true,
+        "trimmed": {
+          "used": [
+            "f0",
+            "f1",
+            "f2"
+          ],
+          "disagreement": [
+            20,
+            20,
+            20
+          ],
+          "drift_threshold": 16
+        }
+      },
+      "action": "try_alternate",
+      "inputs": [
+        "f4",
+        "f5"
+      ],
+      "rebuild_first": false
+    },
+    {
+      "name": "publish_stable_alternate",
+      "request": {
+        "candidates": [
+          {
+            "frame_uuid": "f0",
+            "kind": "flat",
+            "captured_at": 0,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f1",
+            "kind": "flat",
+            "captured_at": 1,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f2",
+            "kind": "flat",
+            "captured_at": 2,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f3",
+            "kind": "flat",
+            "captured_at": 3,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f4",
+            "kind": "flat",
+            "captured_at": 100000,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f5",
+            "kind": "flat",
+            "captured_at": 100001,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f6",
+            "kind": "flat",
+            "captured_at": 100002,
+            "filter": "Ha"
+          }
+        ],
+        "first": {
+          "used": [
+            "f0",
+            "f1",
+            "f2",
+            "f3"
+          ],
+          "disagreement": [
+            0,
+            0,
+            0,
+            20
+          ],
+          "drift_threshold": 16,
+          "feature_pixels": 80,
+          "label": "four initial flats"
+        },
+        "held_back": [
+          "f6"
+        ],
+        "trimmed_attempted": true,
+        "alternate_attempted": true,
+        "alternate": {
+          "used": [
+            "f4",
+            "f5"
+          ],
+          "disagreement": [
+            0,
+            0
+          ],
+          "drift_threshold": 16,
+          "label": "two alternate flats"
+        }
+      },
+      "action": "publish_alternate",
+      "inputs": [],
+      "rebuild_first": false
+    },
+    {
+      "name": "failed_retries_keep_first",
+      "request": {
+        "candidates": [
+          {
+            "frame_uuid": "f0",
+            "kind": "flat",
+            "captured_at": 0,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f1",
+            "kind": "flat",
+            "captured_at": 1,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f2",
+            "kind": "flat",
+            "captured_at": 2,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f3",
+            "kind": "flat",
+            "captured_at": 3,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f4",
+            "kind": "flat",
+            "captured_at": 100000,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f5",
+            "kind": "flat",
+            "captured_at": 100001,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f6",
+            "kind": "flat",
+            "captured_at": 100002,
+            "filter": "Ha"
+          }
+        ],
+        "first": {
+          "used": [
+            "f0",
+            "f1",
+            "f2",
+            "f3"
+          ],
+          "disagreement": [
+            0,
+            0,
+            0,
+            20
+          ],
+          "drift_threshold": 16,
+          "feature_pixels": 80,
+          "label": "four initial flats"
+        },
+        "held_back": [
+          "f6"
+        ],
+        "trimmed_attempted": true,
+        "alternate_attempted": true
+      },
+      "action": "publish_first",
+      "inputs": [],
+      "rebuild_first": false
+    },
+    {
+      "name": "memo_fallback_rebuilds",
+      "request": {
+        "candidates": [
+          {
+            "frame_uuid": "f0",
+            "kind": "flat",
+            "captured_at": 0,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f1",
+            "kind": "flat",
+            "captured_at": 1,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f2",
+            "kind": "flat",
+            "captured_at": 2,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f3",
+            "kind": "flat",
+            "captured_at": 3,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f4",
+            "kind": "flat",
+            "captured_at": 100000,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f5",
+            "kind": "flat",
+            "captured_at": 100001,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f6",
+            "kind": "flat",
+            "captured_at": 100002,
+            "filter": "Ha"
+          }
+        ],
+        "first": {
+          "used": [
+            "f0",
+            "f1",
+            "f2",
+            "f3"
+          ],
+          "disagreement": [
+            0,
+            0,
+            0,
+            20
+          ],
+          "drift_threshold": 16,
+          "feature_pixels": 80,
+          "label": "four initial flats",
+          "memo": true
+        },
+        "held_back": [
+          "f6"
+        ],
+        "trimmed_attempted": true,
+        "alternate_attempted": true
+      },
+      "action": "publish_first",
+      "inputs": [],
+      "rebuild_first": true
+    },
+    {
+      "name": "strict_host_withholds_unstable",
+      "request": {
+        "candidates": [
+          {
+            "frame_uuid": "f0",
+            "kind": "flat",
+            "captured_at": 0,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f1",
+            "kind": "flat",
+            "captured_at": 1,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f2",
+            "kind": "flat",
+            "captured_at": 2,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f3",
+            "kind": "flat",
+            "captured_at": 3,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f4",
+            "kind": "flat",
+            "captured_at": 100000,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f5",
+            "kind": "flat",
+            "captured_at": 100001,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f6",
+            "kind": "flat",
+            "captured_at": 100002,
+            "filter": "Ha"
+          }
+        ],
+        "first": {
+          "used": [
+            "f0",
+            "f1",
+            "f2",
+            "f3"
+          ],
+          "disagreement": [
+            0,
+            0,
+            0,
+            20
+          ],
+          "drift_threshold": 16,
+          "feature_pixels": 80,
+          "label": "four initial flats"
+        },
+        "held_back": [
+          "f6"
+        ],
+        "policy": {
+          "retain_unstable": false
+        },
+        "trimmed_attempted": true,
+        "alternate_attempted": true
+      },
+      "action": "withhold",
+      "inputs": [],
+      "rebuild_first": false
+    },
+    {
+      "name": "host_can_disable_retry_policy",
+      "request": {
+        "candidates": [
+          {
+            "frame_uuid": "f0",
+            "kind": "flat",
+            "captured_at": 0,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f1",
+            "kind": "flat",
+            "captured_at": 1,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f2",
+            "kind": "flat",
+            "captured_at": 2,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f3",
+            "kind": "flat",
+            "captured_at": 3,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f4",
+            "kind": "flat",
+            "captured_at": 100000,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f5",
+            "kind": "flat",
+            "captured_at": 100001,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f6",
+            "kind": "flat",
+            "captured_at": 100002,
+            "filter": "Ha"
+          }
+        ],
+        "first": {
+          "used": [
+            "f0",
+            "f1",
+            "f2",
+            "f3"
+          ],
+          "disagreement": [
+            0,
+            0,
+            0,
+            20
+          ],
+          "drift_threshold": 16,
+          "feature_pixels": 80,
+          "label": "four initial flats"
+        },
+        "held_back": [
+          "f6"
+        ],
+        "policy": {
+          "enabled": false
+        }
+      },
+      "action": "publish_first",
+      "inputs": [],
+      "rebuild_first": false
+    },
+    {
+      "name": "host_can_skip_trimming",
+      "request": {
+        "candidates": [
+          {
+            "frame_uuid": "f0",
+            "kind": "flat",
+            "captured_at": 0,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f1",
+            "kind": "flat",
+            "captured_at": 1,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f2",
+            "kind": "flat",
+            "captured_at": 2,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f3",
+            "kind": "flat",
+            "captured_at": 3,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f4",
+            "kind": "flat",
+            "captured_at": 100000,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f5",
+            "kind": "flat",
+            "captured_at": 100001,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f6",
+            "kind": "flat",
+            "captured_at": 100002,
+            "filter": "Ha"
+          }
+        ],
+        "first": {
+          "used": [
+            "f0",
+            "f1",
+            "f2",
+            "f3"
+          ],
+          "disagreement": [
+            0,
+            0,
+            0,
+            20
+          ],
+          "drift_threshold": 16,
+          "feature_pixels": 80,
+          "label": "four initial flats"
+        },
+        "held_back": [
+          "f6"
+        ],
+        "policy": {
+          "trim_unstable": false
+        }
+      },
+      "action": "try_alternate",
+      "inputs": [
+        "f4",
+        "f5"
+      ],
+      "rebuild_first": false
+    },
+    {
+      "name": "host_can_skip_alternate",
+      "request": {
+        "candidates": [
+          {
+            "frame_uuid": "f0",
+            "kind": "flat",
+            "captured_at": 0,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f1",
+            "kind": "flat",
+            "captured_at": 1,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f2",
+            "kind": "flat",
+            "captured_at": 2,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f3",
+            "kind": "flat",
+            "captured_at": 3,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f4",
+            "kind": "flat",
+            "captured_at": 100000,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f5",
+            "kind": "flat",
+            "captured_at": 100001,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f6",
+            "kind": "flat",
+            "captured_at": 100002,
+            "filter": "Ha"
+          }
+        ],
+        "first": {
+          "used": [
+            "f0",
+            "f1",
+            "f2",
+            "f3"
+          ],
+          "disagreement": [
+            0,
+            0,
+            0,
+            20
+          ],
+          "drift_threshold": 16,
+          "feature_pixels": 80,
+          "label": "four initial flats"
+        },
+        "held_back": [
+          "f6"
+        ],
+        "policy": {
+          "try_next_session": false
+        },
+        "trimmed_attempted": true
+      },
+      "action": "publish_first",
+      "inputs": [],
+      "rebuild_first": false
+    },
+    {
+      "name": "stable_first_publishes",
+      "request": {
+        "candidates": [
+          {
+            "frame_uuid": "f0",
+            "kind": "flat",
+            "captured_at": 0,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f1",
+            "kind": "flat",
+            "captured_at": 1,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f2",
+            "kind": "flat",
+            "captured_at": 2,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f3",
+            "kind": "flat",
+            "captured_at": 3,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f4",
+            "kind": "flat",
+            "captured_at": 100000,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f5",
+            "kind": "flat",
+            "captured_at": 100001,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f6",
+            "kind": "flat",
+            "captured_at": 100002,
+            "filter": "Ha"
+          }
+        ],
+        "first": {
+          "used": [
+            "f0",
+            "f1",
+            "f2",
+            "f3"
+          ],
+          "disagreement": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "drift_threshold": 16,
+          "feature_pixels": 80,
+          "label": "four initial flats"
+        },
+        "held_back": [
+          "f6"
+        ]
+      },
+      "action": "publish_first",
+      "inputs": [],
+      "rebuild_first": false
+    },
+    {
+      "name": "majority_drift_skips_trim",
+      "request": {
+        "candidates": [
+          {
+            "frame_uuid": "f0",
+            "kind": "flat",
+            "captured_at": 0,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f1",
+            "kind": "flat",
+            "captured_at": 1,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f2",
+            "kind": "flat",
+            "captured_at": 2,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f3",
+            "kind": "flat",
+            "captured_at": 3,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f4",
+            "kind": "flat",
+            "captured_at": 100000,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f5",
+            "kind": "flat",
+            "captured_at": 100001,
+            "filter": "Ha"
+          },
+          {
+            "frame_uuid": "f6",
+            "kind": "flat",
+            "captured_at": 100002,
+            "filter": "Ha"
+          }
+        ],
+        "first": {
+          "used": [
+            "f0",
+            "f1",
+            "f2",
+            "f3"
+          ],
+          "disagreement": [
+            20,
+            20,
+            20,
+            0
+          ],
+          "drift_threshold": 16,
+          "feature_pixels": 80,
+          "label": "four initial flats"
+        },
+        "held_back": [
+          "f6"
+        ]
+      },
+      "action": "try_alternate",
+      "inputs": [
+        "f4",
+        "f5"
+      ],
+      "rebuild_first": false
+    }
+  ]
+}

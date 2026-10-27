@@ -25,6 +25,7 @@ wgpu = { workspace = true, optional = true }
 pollster = { workspace = true, optional = true }
 bytemuck = { workspace = true, optional = true }
 rayon.workspace = true
+same-file = "1.0"
 serde.workspace = true
 serde_json.workspace = true
 postcard.workspace = true

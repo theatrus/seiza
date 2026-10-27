@@ -117,6 +117,83 @@ fn stack(lights: &[PathBuf], dark: &Path, output: &Path) -> Output {
 }
 
 #[test]
+fn flat_gain_offset_mismatch_requires_opt_in_and_dark_subtraction() {
+    let directory = tempfile::tempdir().unwrap();
+    let lights: Vec<_> = [(0, 0), (3, 2)]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (x, y))| {
+            let path = directory.path().join(format!("light-{index}.fits"));
+            let mut headers = sensor_cards(Some(-10.0));
+            headers.push(WriteHeaderCard::new("OFFSET", HeaderValue::Integer(80)));
+            seiza_image_io::save_f32(
+                &path,
+                WIDTH,
+                HEIGHT,
+                F32ImageData::Mono(&star_field(x, y)),
+                &seiza_image_io::SaveOptions {
+                    headers: &headers,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            path
+        })
+        .collect();
+    let flat = directory.path().join("flat.fits");
+    let output = directory.path().join("stack.fits");
+    let report = directory.path().join("stack.json");
+    for dark_subtracted in [false, true] {
+        seiza_image_io::save_f32(
+            &flat,
+            WIDTH,
+            HEIGHT,
+            F32ImageData::Mono(&vec![1.0; WIDTH * HEIGHT]),
+            &seiza_image_io::SaveOptions {
+                headers: &[
+                    WriteHeaderCard::new("SEIZAMST", HeaderValue::String("FLAT".into())),
+                    WriteHeaderCard::new("GAIN", HeaderValue::Integer(0)),
+                    WriteHeaderCard::new("OFFSET", HeaderValue::Integer(0)),
+                    WriteHeaderCard::new("DARKSUB", HeaderValue::Logical(dark_subtracted)),
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for allow in [false, true] {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_seiza"));
+            command
+                .arg("stack")
+                .args(&lights)
+                .arg("--flat")
+                .arg(&flat)
+                .args(["--reference", "first", "--defects", "off", "--output"])
+                .arg(&output)
+                .arg("--report")
+                .arg(&report);
+            if allow {
+                command.arg("--allow-flat-gain-offset-mismatch");
+            }
+            let result = command.output().unwrap();
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            assert_eq!(
+                result.status.success(),
+                allow && dark_subtracted,
+                "allow={allow}, DARKSUB={dark_subtracted}: {stderr}"
+            );
+            if result.status.success() {
+                let report: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+                assert_eq!(report["accepted_frames"], 2);
+            } else {
+                assert!(stderr.contains("gain"), "{stderr}");
+                assert!(!stderr.contains("unexpected argument"), "{stderr}");
+            }
+        }
+    }
+}
+
+#[test]
 fn common_reference_aligns_channels_without_contributing_pixels() {
     let directory = tempfile::tempdir().unwrap();
     let reference = directory.path().join("common.fits");

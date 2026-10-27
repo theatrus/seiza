@@ -29,6 +29,9 @@ ignore = ["starless", "stars", "wcs", "progress", "cancel"]
 [rust.SceneRequest]
 core = "seiza-parallax::SceneOptions"
 
+[rust.AnalysisRequest]
+core = "seiza-analysis::AnalysisOptions"
+
 [rust.VideoRequest]
 core = "seiza-parallax::VideoOptions"
 image_shaped_size = { c = "size" }
@@ -342,6 +345,7 @@ core = "seiza-satellites::PixelSegment"
 # by the C ABI; otherwise an entry says why not. "crate::*" covers a whole
 # crate of building blocks.
 [core_functions]
+"seiza-stacking::measure_flat_stability" = { none = "C and Python offer both file and cached-image measurement; this native hybrid accepts a loaded master and streams file sources through the same algorithm" }
 objects = [
     "seiza-parallax::Parallax",
     "seiza-stacking::LiveStacker",
@@ -488,6 +492,8 @@ objects = [
 # ("solve_blind", "ParallaxVideo") or "Class.member" ("ParallaxVideo.reconfigure",
 # "LiveStacker.accepted_frames") — or why Python has none.
 [functions]
+seiza_analyze_project_json = "analyze_project"
+seiza_analysis_html = "analysis_html"
 
 # --- constellation figures --------------------------------------------------
 seiza_constellation_figures_json = "constellation_figures"
@@ -504,6 +510,18 @@ seiza_flat_lights_background = "flat_lights_background"
 seiza_flat_fit_change_json = "flat_fit_change"
 seiza_flat_combine_verdicts_json = "flat_combine_verdicts"
 seiza_flat_choose_response_json = "flat_choose_response"
+seiza_flat_group_plan_json = "flat_group_plan"
+seiza_live_stacker_open_fits_expanding_sessions = "LiveStacker.open_fits_expanding_sessions"
+
+seiza_master_flat_stability_json = "master_flat_stability"
+seiza_master_flat_stability_images_json = "master_flat_stability_images"
+seiza_calibration_master_plan_json = "calibration_master_plan"
+seiza_calibration_master_cohort_json = "calibration_master_cohort"
+seiza_calibration_flat_retry_json = "calibration_flat_retry"
+seiza_calibration_library_plan_json = "calibration_library_plan"
+seiza_calibration_library_plan_with_groups_json = "calibration_library_plan"
+seiza_flat_groups_prepare_json = "FlatGroups.__init__"
+seiza_flat_groups_free = { none = "frees a C grouping handle; Python garbage collection frees FlatGroups" }
 seiza_flat_encode_plane = "flat_encode_plane"
 seiza_flat_decode_plane = "flat_decode_plane"
 seiza_dust_find_json = "dust_find"

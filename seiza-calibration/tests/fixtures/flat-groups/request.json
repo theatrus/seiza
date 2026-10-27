@@ -1,0 +1,167 @@
+{
+  "responses": [
+    {
+      "algorithm_version": 1,
+      "bin": 10,
+      "captured_first": 0,
+      "captured_last": 600,
+      "error": null,
+      "family_key": "rig-ha-sensor",
+      "filter": "Ha",
+      "frame_uuids": [
+        "a-0",
+        "a-1",
+        "a-2"
+      ],
+      "frames": 3,
+      "height": 80,
+      "level_adu": 30000.0,
+      "night": "",
+      "noise": 0.0003,
+      "pedestal_adu": 500.0,
+      "response_key": "a",
+      "rig_uuid": "rig",
+      "rotation": 0.0,
+      "session_key": "s-a",
+      "unread": [],
+      "width": 100
+    },
+    {
+      "algorithm_version": 1,
+      "bin": 10,
+      "captured_first": 259200,
+      "captured_last": 259800,
+      "error": null,
+      "family_key": "rig-ha-sensor",
+      "filter": "Ha",
+      "frame_uuids": [
+        "b-0",
+        "b-1",
+        "b-2"
+      ],
+      "frames": 3,
+      "height": 80,
+      "level_adu": 30000.0,
+      "night": "",
+      "noise": 0.0003,
+      "pedestal_adu": 500.0,
+      "response_key": "b",
+      "rig_uuid": "rig",
+      "rotation": 90.0,
+      "session_key": "s-b",
+      "unread": [],
+      "width": 100
+    },
+    {
+      "algorithm_version": 1,
+      "bin": 10,
+      "captured_first": 518400,
+      "captured_last": 519000,
+      "error": null,
+      "family_key": "rig-ha-sensor",
+      "filter": "Ha",
+      "frame_uuids": [
+        "c-0",
+        "c-1",
+        "c-2"
+      ],
+      "frames": 3,
+      "height": 80,
+      "level_adu": 30000.0,
+      "night": "",
+      "noise": 0.0003,
+      "pedestal_adu": 500.0,
+      "response_key": "c",
+      "rig_uuid": "rig",
+      "rotation": 90.0,
+      "session_key": "s-c",
+      "unread": [],
+      "width": 100
+    }
+  ],
+  "comparisons": [
+    {
+      "earlier_key": "a",
+      "later_key": "b",
+      "dust": 0.002,
+      "broad": 0.001,
+      "sigma": 0.0002,
+      "spots": [],
+      "broad_x": 0.5,
+      "broad_y": 0.5,
+      "vignetting": 0.0,
+      "vignetting_changes": []
+    },
+    {
+      "earlier_key": "a",
+      "later_key": "c",
+      "dust": 0.03,
+      "broad": 0.001,
+      "sigma": 0.0002,
+      "spots": [],
+      "broad_x": 0.5,
+      "broad_y": 0.5,
+      "vignetting": 0.0,
+      "vignetting_changes": []
+    },
+    {
+      "earlier_key": "b",
+      "later_key": "c",
+      "dust": 0.03,
+      "broad": 0.001,
+      "sigma": 0.0002,
+      "spots": [],
+      "broad_x": 0.5,
+      "broad_y": 0.5,
+      "vignetting": 0.0,
+      "vignetting_changes": []
+    }
+  ],
+  "limits": [
+    {
+      "rig_uuid": "rig",
+      "limits": {
+        "broad": 0.02,
+        "dust": 0.01,
+        "rotation": 2.0,
+        "window": 86400,
+        "measured": true
+      }
+    }
+  ],
+  "lights": [
+    {
+      "file_name": "light-0.fits",
+      "rig_uuid": "rig",
+      "filter": "Ha",
+      "at": 172800,
+      "angle": 90.0,
+      "rotation_tolerance": 2.0,
+      "compatible_families": [
+        "rig-ha-sensor:a-0"
+      ]
+    },
+    {
+      "file_name": "light-1.fits",
+      "rig_uuid": "rig",
+      "filter": "Ha",
+      "at": 345600,
+      "angle": 90.0,
+      "rotation_tolerance": 2.0,
+      "compatible_families": [
+        "rig-ha-sensor:a-0"
+      ]
+    },
+    {
+      "file_name": "light-2.fits",
+      "rig_uuid": "rig",
+      "filter": "Ha",
+      "at": 604800,
+      "angle": 90.0,
+      "rotation_tolerance": 2.0,
+      "compatible_families": [
+        "rig-ha-sensor:a-0"
+      ]
+    }
+  ]
+}

@@ -28,6 +28,7 @@
 
 pub mod choice;
 pub mod evidence;
+pub mod groups;
 pub mod metric;
 
 pub use choice::{PairFit, PairOutcome, ResponseChoice, choose_response};

@@ -90,9 +90,18 @@ impl LiveStacker {
         let mut geometry_options = options.clone();
         geometry_options.normalization = NormalizationMode::None;
         geometry_options.weighting = FrameWeighting::Equal;
-        let plan = crate::expand::plan_with_calibration(
+        let plan = crate::expand::plan_prepared(
             &paths,
-            |path| &calibrations[owners[&path_identity(path)]],
+            &|path, frame, bin| {
+                prepare_light_at(
+                    frame,
+                    &calibrations[owners[&path_identity(path)]],
+                    &geometry_options.match_tolerances,
+                    &geometry_options,
+                    bin,
+                )
+                .map_err(LightFailure::into_error)
+            },
             &geometry_options,
             maximum_samples,
             &mut progress,

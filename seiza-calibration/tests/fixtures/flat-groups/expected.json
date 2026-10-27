@@ -1,0 +1,106 @@
+{
+  "families": [
+    {
+      "alike_ranges": [],
+      "angles": [
+        {
+          "high": 0.0,
+          "low": 0.0
+        },
+        {
+          "high": 90.0,
+          "low": 90.0
+        }
+      ],
+      "boundaries": [
+        0
+      ],
+      "carry_class": [
+        0,
+        1
+      ],
+      "family_key": "rig-ha-sensor",
+      "filter": "Ha",
+      "groups": [
+        [
+          0,
+          1
+        ],
+        [
+          2
+        ]
+      ],
+      "joined": [],
+      "key": "rig-ha-sensor:a-0",
+      "rig_uuid": "rig",
+      "rotation": 90.0,
+      "sessions": [
+        0,
+        1,
+        2
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "after": 2,
+      "before": 1,
+      "broad": 0.001,
+      "by_hand": null,
+      "drift": null,
+      "dust": 0.03,
+      "end": 518400,
+      "family": 0,
+      "opens": 2,
+      "spots": [],
+      "start": 259800,
+      "vignetting": 0.0,
+      "vignetting_changes": []
+    }
+  ],
+  "events": [
+    {
+      "boundaries": [
+        0
+      ],
+      "broad": 0.001,
+      "by_hand": false,
+      "camera_side": false,
+      "dust": 0.03,
+      "end": 518400,
+      "families": [
+        0
+      ],
+      "filters": [
+        "ha"
+      ],
+      "key": "221ac5c9496d5bb0ae6b7216",
+      "rig_uuid": "rig",
+      "rotations": [
+        90.0
+      ],
+      "spots": [],
+      "start": 259800,
+      "vignetting": 0.0,
+      "vignetting_changes": [],
+      "within_flat_run": false
+    }
+  ],
+  "placements": [
+    {
+      "after": {
+        "by": "time",
+        "side": "after"
+      },
+      "before": {
+        "by": "time",
+        "side": "before"
+      },
+      "during": {
+        "by": "undetermined",
+        "pixels": null,
+        "session": null
+      }
+    }
+  ]
+}

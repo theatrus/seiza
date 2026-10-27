@@ -11,6 +11,8 @@ and C ABI.
 
 - **Plate solving:** hinted and blind solving, with WCS and SIP distortion output.
 - **Star measurement:** subpixel positions, flux, HFR/FWHM, and sensor tilt analysis.
+- **Project analysis:** `seiza analyze` measures mono FITS/XISF projects without
+  stacking, with per-filter noise-depth curves and portable JSON/HTML reports.
 - <a id="gpu-acceleration"></a>**Stacking:** calibrated batch and live stacking, GPU acceleration, rejection,
   drizzle, mosaics, and resumable sessions.
 - **Image processing:** stretching, background correction, RGB/LRGB and narrowband

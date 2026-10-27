@@ -1,0 +1,443 @@
+//! Measured flat families, change events, and light assignments.
+//!
+//! Extracted from PSF Guard rather than reconstructed from metadata matching.
+//! [`evaluate`] is the batch interface used by C and Python. Native hosts may
+//! use [`Book`] directly. Neither interface reads a catalog, files, or pixels.
+//! Hosts supply the response/comparison/evidence measurements and the families
+//! that passed their hard sensor/optics gates. This is one stage of calibration
+//! selection, not a replacement for grading, dark selection, or master recipes.
+
+pub(crate) mod lights;
+pub(crate) mod model;
+pub(crate) mod overrides;
+mod rows;
+
+use super::{choice, evidence, metric};
+use serde::{Deserialize, Serialize};
+
+use std::collections::{BTreeSet, HashMap};
+
+/// Version the host includes when caching grouping snapshots and assignments.
+pub const ALGORITHM_VERSION: u32 = 1;
+
+pub use lights::{
+    ANGLE_PRIOR_DEG, AngleEpochs, EPOCH_JUMP_DEG, Epoch, FAMILY_EVIDENCE_VERSION, FamilyBasis,
+    FamilyChoice,
+};
+pub use model::{
+    AlikeRange, AngleSpan, AngleTerm, Book, Boundary, Event, Family, HandEdge, ImagingSession,
+    Limits, Placement, ROTATION_CLUSTER_DEG, Session,
+};
+pub use overrides::{
+    GROUP_CHOICE_KEY, GroupChoice, GroupOverrideRow, GroupPick, LightChoice, LightChoiceEntry,
+    LightChoiceRow, OverrideState, OverrideStatus, ResolvedChoices,
+};
+pub use rows::{
+    ComparisonRow, EvidenceFit, EvidenceRow, FamilyEvidenceRow, FamilyPairRow, FileStamp,
+    ResponseRow, UnreadFlat, UnreadKind,
+};
+
+/// Limits for one rig; every rig with usable responses must have an entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RigLimits {
+    pub rig_uuid: String,
+    pub limits: Limits,
+}
+
+/// A rig's sky-minus-mechanical angle, modulo a half turn, at a Unix time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EpochSample {
+    pub rig_uuid: String,
+    pub at: i64,
+    pub offset: f64,
+}
+
+/// Local-noon shift for one flat, unwrapped (12h minus UTC offset). Unlisted flats use
+/// noon UTC. The stable frame identity, rather than a database id, names it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NightBoundary {
+    pub rig_uuid: String,
+    pub frame_uuid: String,
+    pub seconds: i64,
+}
+
+/// One light to place. `compatible_families` names families that already
+/// passed the host's hard sensor/optics gates; empty means no candidates.
+/// A missing capture time leaves its event placements unknown.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LightQuery {
+    pub file_name: String,
+    pub rig_uuid: String,
+    pub filter: Option<String>,
+    pub at: Option<i64>,
+    pub angle: Option<f64>,
+    pub compatible_families: Vec<String>,
+    pub rotation_tolerance: f64,
+}
+
+/// A complete, immutable snapshot of inputs for the grouping stage. Vectors
+/// of keyed records avoid converting user identifiers when bindings translate
+/// field names. Omitted collections are empty; unknown fields are refused.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Request {
+    pub responses: Vec<ResponseRow>,
+    pub comparisons: Vec<ComparisonRow>,
+    pub evidence: Vec<EvidenceRow>,
+    pub imaging: Vec<ImagingSession>,
+    /// Alternative to `imaging`: `(id, profile, captured_at)` source rows.
+    pub imaging_lights: Vec<(i64, Option<String>, i64)>,
+    /// `(profile, rigs)` bindings used when grouping `imaging_lights`.
+    pub profile_rigs: Vec<(Option<String>, Vec<String>)>,
+    pub limits: Vec<RigLimits>,
+    pub group_overrides: Vec<GroupOverrideRow>,
+    pub night_boundaries: Vec<NightBoundary>,
+    pub epoch_samples: Vec<EpochSample>,
+    pub family_evidence: Vec<FamilyEvidenceRow>,
+    pub light_choices: Vec<LightChoiceEntry>,
+    pub lights: Vec<LightQuery>,
+}
+
+/// An automatic event placement and the response pair from which a correction
+/// map can be measured. Personal choices are returned separately on the light.
+#[derive(Debug, Clone, Serialize)]
+pub struct EventPlacement {
+    pub event: usize,
+    pub placement: Option<Placement>,
+    pub map_source: Option<(String, String)>,
+    pub evidence_reference: Option<usize>,
+}
+
+/// Inputs for a host's response-choice pixel pass. Candidate and representative
+/// indices refer to this snapshot. Reuse `key` on the resulting family evidence
+/// row; changes to the candidates or their measurements invalidate old evidence.
+#[derive(Debug, Clone, Serialize)]
+pub struct FamilyProbe {
+    pub key: String,
+    pub candidates: Vec<usize>,
+    pub representatives: Vec<Option<usize>>,
+}
+
+/// Results in request order. Automatic results deliberately remain distinct
+/// from resolved personal choices, as in the native book: the selector can
+/// explain both and enforce its hard calibration gates before using a choice.
+#[derive(Debug, Clone, Serialize)]
+pub struct LightResult {
+    pub automatic_family: Option<FamilyChoice>,
+    pub family_probe: Option<FamilyProbe>,
+    pub choices: ResolvedChoices,
+    pub events: Vec<EventPlacement>,
+}
+
+/// Indices refer to this snapshot's arrays, never to host database rows.
+/// Keyed outputs are sorted lists of pairs, so their wire format is stable.
+#[derive(Debug, Clone, Serialize)]
+pub struct Snapshot {
+    pub algorithm_version: u32,
+    pub imaging: Vec<ImagingSession>,
+    pub sessions: Vec<Session>,
+    pub families: Vec<Family>,
+    pub boundaries: Vec<Boundary>,
+    pub events: Vec<Event>,
+    pub overrides: Vec<OverrideState>,
+    pub outliers: BTreeSet<usize>,
+    pub spanning: BTreeSet<usize>,
+    pub angle_terms: Vec<(String, AngleTerm)>,
+    pub epochs: Vec<(String, Vec<Epoch>)>,
+    pub pairs_to_compare: Vec<(usize, usize)>,
+    pub sessions_in_windows: Vec<(usize, usize, String)>,
+    pub sessions_needing_evidence: Vec<(usize, usize)>,
+    pub lights: Vec<LightResult>,
+}
+
+/// Build measured families and changes, then evaluate the requested lights.
+/// Missing measurements remain missing: no metadata-only verdict is invented.
+pub fn evaluate(request: Request) -> crate::Result<Snapshot> {
+    let lights_request = request.lights.clone();
+    let book = prepare(request)?;
+    let lights = lights_request
+        .into_iter()
+        .map(|light| {
+            let compatible = light
+                .compatible_families
+                .iter()
+                .map(|key| {
+                    let index = book
+                        .families
+                        .iter()
+                        .position(|family| family.key == *key)
+                        .ok_or_else(|| invalid(format!("unknown compatible family {key:?}")))?;
+                    let family = &book.families[index];
+                    if family.rig_uuid != light.rig_uuid
+                        || family.filter.as_deref().map(model::canonical_filter)
+                            != light.filter.as_deref().map(model::canonical_filter)
+                    {
+                        return Err(invalid(format!(
+                            "compatible family {key:?} has another rig or filter"
+                        )));
+                    }
+                    Ok(index)
+                })
+                .collect::<crate::Result<Vec<_>>>()?;
+            let automatic_family = book.choose_family(
+                &light.rig_uuid,
+                light.filter.as_deref(),
+                light.at,
+                light.angle,
+                &compatible,
+                light.rotation_tolerance,
+            );
+            let family_probe = light.at.zip(light.angle).map(|(at, angle)| {
+                let candidates: Vec<_> = book
+                    .family_candidates(&light.rig_uuid, Some(at), angle, &compatible)
+                    .into_iter()
+                    .map(|(family, _)| family)
+                    .collect();
+                let key = book.family_evidence_key(&candidates, &light.rig_uuid, at, angle);
+                let representatives = candidates
+                    .iter()
+                    .map(|family| book.family_representative(*family, &light.rig_uuid, at, angle))
+                    .collect();
+                FamilyProbe {
+                    key,
+                    candidates,
+                    representatives,
+                }
+            });
+            let choices = book.light_choices(
+                &light.file_name,
+                light.filter.as_deref(),
+                &light.rig_uuid,
+                light.at,
+            );
+            let events = book
+                .events
+                .iter()
+                .enumerate()
+                .filter(|(_, event)| {
+                    event.rig_uuid == light.rig_uuid && event.applies_to(light.filter.as_deref())
+                })
+                .map(|(index, event)| EventPlacement {
+                    event: index,
+                    placement: light.at.map(|at| book.place(event, at)),
+                    map_source: book.map_source(index, light.filter.as_deref()),
+                    evidence_reference: light
+                        .at
+                        .zip(light.filter.as_deref())
+                        .and_then(|(at, filter)| book.evidence_reference(event, filter, at)),
+                })
+                .collect();
+            Ok(LightResult {
+                automatic_family,
+                family_probe,
+                choices,
+                events,
+            })
+        })
+        .collect::<crate::Result<Vec<_>>>()?;
+    let pairs_to_compare = book.pairs_to_compare();
+    let sessions_in_windows = book.sessions_in_windows();
+    let sessions_needing_evidence = book.sessions_needing_evidence();
+    let mut angle_terms: Vec<_> = book.angle_terms.into_iter().collect();
+    angle_terms.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut epochs: Vec<_> = book.epochs.by_rig.into_iter().collect();
+    epochs.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(Snapshot {
+        algorithm_version: ALGORITHM_VERSION,
+        imaging: book.imaging,
+        sessions: book.sessions,
+        families: book.families,
+        boundaries: book.boundaries,
+        events: book.events,
+        overrides: book.overrides,
+        outliers: book.outliers,
+        spanning: book.spanning,
+        angle_terms,
+        epochs,
+        pairs_to_compare,
+        sessions_in_windows,
+        sessions_needing_evidence,
+        lights,
+    })
+}
+
+/// Assemble the same measured book for grouping and library selection.
+pub fn prepare(request: Request) -> crate::Result<Book> {
+    validate(&request)?;
+    let imaging = if request.imaging_lights.is_empty() {
+        request.imaging
+    } else {
+        model::imaging_sessions(request.imaging_lights, |profile| {
+            request
+                .profile_rigs
+                .iter()
+                .find(|(key, _)| key.as_deref() == profile)
+                .map(|(_, rigs)| rigs.clone())
+                .unwrap_or_default()
+        })
+    };
+    let limits: HashMap<_, _> = request
+        .limits
+        .into_iter()
+        .map(|row| (row.rig_uuid, row.limits))
+        .collect();
+    let nights: HashMap<_, _> = request
+        .night_boundaries
+        .into_iter()
+        .map(|row| ((row.rig_uuid, row.frame_uuid), row.seconds))
+        .collect();
+    let mut book = Book::build_with_overrides(
+        request.responses,
+        request.comparisons,
+        request.evidence,
+        imaging,
+        |rig| limits[rig],
+        request.group_overrides,
+        |rig, frame| {
+            nights
+                .get(&(rig.to_owned(), frame.to_owned()))
+                .copied()
+                .unwrap_or(model::DEFAULT_NIGHT_BOUNDARY)
+        },
+    );
+    book.epochs = AngleEpochs::from_samples(
+        request
+            .epoch_samples
+            .into_iter()
+            .map(|row| (row.rig_uuid, row.at, row.offset))
+            .collect(),
+    );
+    for row in request.family_evidence {
+        book.family_evidence
+            .entry(row.session_key.clone())
+            .or_default()
+            .push(row);
+    }
+    for row in request.light_choices {
+        book.light_choices
+            .entry(row.file_name.clone())
+            .or_default()
+            .push(row);
+    }
+    Ok(book)
+}
+
+fn invalid(message: impl Into<String>) -> crate::Error {
+    crate::Error::FlatGroups(message.into())
+}
+
+fn validate(request: &Request) -> crate::Result<()> {
+    if !request.imaging.is_empty() && !request.imaging_lights.is_empty() {
+        return Err(invalid(
+            "supply imaging sessions or imaging_lights, not both",
+        ));
+    }
+    let mut profiles = BTreeSet::new();
+    for (profile, _) in &request.profile_rigs {
+        if !profiles.insert(profile) {
+            return Err(invalid("duplicate profile_rigs binding"));
+        }
+    }
+    let mut light_ids = BTreeSet::new();
+    for (id, _, _) in &request.imaging_lights {
+        if !light_ids.insert(id) {
+            return Err(invalid("duplicate imaging light id"));
+        }
+    }
+    let mut rigs = BTreeSet::new();
+    for row in &request.limits {
+        let l = row.limits;
+        if !rigs.insert(row.rig_uuid.as_str()) {
+            return Err(invalid("duplicate rig limits"));
+        }
+        if !l.dust.is_finite()
+            || l.dust <= 0.0
+            || !l.broad.is_finite()
+            || l.broad <= 0.0
+            || !l.rotation.is_finite()
+            || l.rotation < 0.0
+            || l.window < 0
+            || l.window > 1_000_000_000_000
+        {
+            return Err(invalid(
+                "limits need positive finite dust/broad, nonnegative rotation, and window in 0..=1000000000000 seconds",
+            ));
+        }
+    }
+    let mut responses = BTreeSet::new();
+    let mut frames = BTreeSet::new();
+    for row in &request.responses {
+        if row.error.is_some() || row.captured_first.is_none() || row.captured_last.is_none() {
+            continue;
+        }
+        if !rigs.contains(row.rig_uuid.as_str()) {
+            return Err(invalid("missing rig limits"));
+        }
+        if !responses.insert(&row.response_key) {
+            return Err(invalid("duplicate response key"));
+        }
+        for frame in &row.frame_uuids {
+            if !frames.insert(frame) {
+                return Err(invalid("a flat belongs to multiple responses"));
+            }
+        }
+        if row.captured_first > row.captured_last {
+            return Err(invalid("response ends before it starts"));
+        }
+    }
+    // Leave ample headroom for the policy's timestamp differences and windows.
+    // This accepts Unix seconds millions of years from the present, and refuses
+    // integer extrema before subtraction can overflow in either build profile.
+    let safe_time = |at: i64| (-(1_i64 << 50)..=(1_i64 << 50)).contains(&at);
+    let times = request
+        .responses
+        .iter()
+        .flat_map(|row| [row.captured_first, row.captured_last])
+        .flatten()
+        .chain(request.imaging.iter().flat_map(|row| [row.start, row.end]))
+        .chain(request.imaging_lights.iter().map(|(_, _, at)| *at))
+        .chain(request.epoch_samples.iter().map(|row| row.at))
+        .chain(
+            request
+                .family_evidence
+                .iter()
+                .flat_map(|row| [row.start, row.end]),
+        )
+        .chain(request.light_choices.iter().filter_map(|row| row.at))
+        .chain(
+            request
+                .light_choices
+                .iter()
+                .flat_map(|row| [row.row.change_start, row.row.change_end])
+                .flatten(),
+        )
+        .chain(request.lights.iter().filter_map(|row| row.at));
+    if times.into_iter().any(|at| !safe_time(at)) {
+        return Err(invalid("capture time is outside the supported range"));
+    }
+    for row in &request.lights {
+        if !row.rotation_tolerance.is_finite()
+            || row.rotation_tolerance < 0.0
+            || row.angle.is_some_and(|angle| !angle.is_finite())
+        {
+            return Err(invalid(
+                "light angles and nonnegative rotation tolerances must be finite",
+            ));
+        }
+    }
+    let mut nights = BTreeSet::new();
+    for row in &request.night_boundaries {
+        if !(-86400..=129600).contains(&row.seconds)
+            || !nights.insert((&row.rig_uuid, &row.frame_uuid))
+        {
+            return Err(invalid(
+                "night boundaries need unique rig/frame keys and noon shifts within one day of noon UTC",
+            ));
+        }
+    }
+    Ok(())
+}
