@@ -5,6 +5,7 @@ use image::DynamicImage;
 mod constellations;
 mod flat_groups;
 mod flat_response;
+mod library;
 mod parallax;
 mod resample;
 mod satellites;

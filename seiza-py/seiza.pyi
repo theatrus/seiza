@@ -1889,3 +1889,20 @@ def flat_group_plan(
     light_choices: Sequence[Mapping[str, Any]] | None = None,
     lights: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]: ...
+
+# PSF Guard's shared library policy; records use snake_case.
+def calibration_library_plan(
+    *, frames: Sequence[Mapping[str, Any]] | None = None,
+    lights: Sequence[Mapping[str, Any]] | None = None,
+    quality: Sequence[Mapping[str, Any]] | None = None,
+    global_settings: Sequence[Mapping[str, Any]] | None = None,
+    rigs: Sequence[Mapping[str, Any]] | None = None,
+    grouping: Mapping[str, Any] | None = None,
+    available_responses: Sequence[str] | None = None,
+    night_shifts: Sequence[Mapping[str, Any]] | None = None,
+    regrade: bool = False,
+    master_failures: Sequence[Mapping[str, Any]] | None = None,
+    pedestal_evidence: Sequence[Mapping[str, Any]] | None = None,
+    force_flat_without_pedestal: bool = False,
+    flat_star_masking: bool = False,
+) -> dict[str, Any]: ...

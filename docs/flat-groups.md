@@ -54,7 +54,8 @@ book, preserving the original policy. Every usable response's rig needs limits.
 
 Times are Unix **seconds**, angles **degrees**, levels/pedestals **ADU**,
 dust/broad/noise fractions of background. `window` is seconds. Night boundaries
-lie in `[0, 86400)`, defaulting to noon UTC. Capture times are bounded to ±2^50
+are unwrapped local-noon shifts (`12h - UTC offset`) within one day of noon UTC,
+defaulting to noon UTC. Capture times are bounded to ±2^50
 seconds to keep differences safe. Dust/broad limits must be positive and
 finite, rotations nonnegative and finite, windows in `[0, 1000000000000]`.
 Supply either pre-grouped `imaging` or raw `imaging_lights`. Raw rows group by
@@ -97,9 +98,10 @@ its pinned PSF Guard fixture through Rust, C and Python. The 48 extracted unit
 tests cover angle ranges/epochs, camera-side events, pixel corroboration,
 outliers, spanning changes and evidence freshness.
 
-Full automatic calibration still needs library-wide peer grading/eligibility,
-temporal/cohort selection with deterministic master recipes, and raw-file
-expanded planning calibrated with each input's assigned session. Existing
-`plan_calibration` metadata matching alone is insufficient. The Mac app should
-consume released C APIs for these stages instead of porting policy into Swift.
-This changes no existing pixel processing path or output version.
+The [library policy](calibration-library.md) adds peer grading/eligibility,
+temporal/cohort selection and master dependency recipes. The
+[session-aware expanded planner](calibration-sessions.md) calibrates original
+files under their assignments before star detection and footprint planning.
+The Mac app should consume these released C APIs and complete host parity
+before enabling setup. Existing pixel processing baselines and output versions
+remain unchanged.

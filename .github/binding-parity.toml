@@ -506,6 +506,8 @@ seiza_flat_combine_verdicts_json = "flat_combine_verdicts"
 seiza_flat_choose_response_json = "flat_choose_response"
 seiza_flat_group_plan_json = "flat_group_plan"
 seiza_live_stacker_open_fits_expanding_sessions = "LiveStacker.open_fits_expanding_sessions"
+
+seiza_calibration_library_plan_json = "calibration_library_plan"
 seiza_flat_encode_plane = "flat_encode_plane"
 seiza_flat_decode_plane = "flat_decode_plane"
 seiza_dust_find_json = "dust_find"

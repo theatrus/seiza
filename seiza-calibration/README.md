@@ -190,3 +190,12 @@ match choice.chosen() {
 }
 # }
 ```
+
+## Library policy
+
+`library::evaluate` runs the library policy extracted from PSF Guard: rig/global
+rules, peer grading and eligibility, temporal/cohort selection, measured flat
+families, complete gates, master dependencies and ordered session assignments.
+It opens no files. The C ABI and Python expose the same batch interface; see
+[calibration-library.md](../docs/calibration-library.md) for record schemas,
+source verification, build execution and reference coverage.

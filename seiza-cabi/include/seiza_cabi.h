@@ -4059,6 +4059,26 @@ char *seiza_dust_match_features_json(const char *earlier_json,
                                      char **error_out);
 
 /*
+ Grade and select a calibration library using PSF Guard's shared policy.
+ `request_json` is a camelCase library::Request: frames, lights, quality,
+ globalSettings, rigs, grouping, availableResponses, nightShifts, regrade, masterFailures, pedestalEvidence,
+ forceFlatWithoutPedestal and flatStarMasking.
+ Missing collections are empty. Settings are {key,value} records; identifiers,
+ enum values and arbitrary setting values are preserved. The returned snapshot
+ contains grades, selections, complete gates, sessions, assignments and master
+ dependency recipes. This pure call opens no files and builds no master pixels.
+ Hosts verify sources and execute recipes through the native master builders.
+ See docs/calibration-library.md for provenance, units and execution contracts.
+ Free the result or error with seiza_string_free.
+
+ # Safety
+ `request_json` must point to NUL-terminated UTF-8. When non-null, `error_out`
+ must point to writable storage for one pointer.
+ */
+char *seiza_calibration_library_plan_json(const char *request_json,
+                                          char **error_out);
+
+/*
  Prepare a parallax video from a JSON request (see the fields below) and
  return it, released with [`seiza_parallax_free`], or null with
  `error_out` set.
