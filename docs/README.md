@@ -83,4 +83,6 @@ background matching and independent RGB star stretching, and the
 [0.44.1 notes](releases/v0.44.1.md) for faster blind registration and its fix
 to local normalization on an expanded canvas. The
 [0.44.2 notes](releases/v0.44.2.md) describe RC-Astro calls without console
-windows on Windows.
+windows on Windows, and the [0.45.0 notes](releases/v0.45.0.md) mosaic frames
+prepared within a memory budget, global normalization for CLI mosaics, and
+flats at another gain or offset.
