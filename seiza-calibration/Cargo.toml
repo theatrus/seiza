@@ -15,10 +15,8 @@ categories = ["science", "multimedia::images"]
 nalgebra.workspace = true
 rayon.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 seiza-imgproc.workspace = true
 seiza-stats.workspace = true
 thiserror.workspace = true
-
-[dev-dependencies]
-serde_json.workspace = true

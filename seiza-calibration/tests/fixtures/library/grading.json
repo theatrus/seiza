@@ -1,0 +1,724 @@
+{
+  "psf_guard_revision": "79f5e31d53b8371e8fcd0b22a9b69692412cd8b4",
+  "cases": [
+    {
+      "name": "different-gains",
+      "request": {
+        "frames": [
+          {
+            "id": 0,
+            "frame_uuid": "bias-100-0.fits",
+            "rig_uuid": "r",
+            "kind": "bias",
+            "source_path": "/bias-100-0.fits",
+            "source_fingerprint": "bias-100-0.fits",
+            "captured_at": 0,
+            "camera": "ParityCam",
+            "telescope": "ParityScope",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "exposure_s": 0,
+            "camera_temp": -10,
+            "filter": "Ha"
+          },
+          {
+            "id": 1,
+            "frame_uuid": "bias-100-1.fits",
+            "rig_uuid": "r",
+            "kind": "bias",
+            "source_path": "/bias-100-1.fits",
+            "source_fingerprint": "bias-100-1.fits",
+            "captured_at": 1,
+            "camera": "ParityCam",
+            "telescope": "ParityScope",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "exposure_s": 0,
+            "camera_temp": -10,
+            "filter": "Ha"
+          },
+          {
+            "id": 2,
+            "frame_uuid": "bias-100-2.fits",
+            "rig_uuid": "r",
+            "kind": "bias",
+            "source_path": "/bias-100-2.fits",
+            "source_fingerprint": "bias-100-2.fits",
+            "captured_at": 2,
+            "camera": "ParityCam",
+            "telescope": "ParityScope",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "exposure_s": 0,
+            "camera_temp": -10,
+            "filter": "Ha"
+          },
+          {
+            "id": 3,
+            "frame_uuid": "bias-200-0.fits",
+            "rig_uuid": "r",
+            "kind": "bias",
+            "source_path": "/bias-200-0.fits",
+            "source_fingerprint": "bias-200-0.fits",
+            "captured_at": 3,
+            "camera": "ParityCam",
+            "telescope": "ParityScope",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 200,
+            "offset": 20,
+            "exposure_s": 0,
+            "camera_temp": -10,
+            "filter": "Ha"
+          },
+          {
+            "id": 4,
+            "frame_uuid": "bias-200-1.fits",
+            "rig_uuid": "r",
+            "kind": "bias",
+            "source_path": "/bias-200-1.fits",
+            "source_fingerprint": "bias-200-1.fits",
+            "captured_at": 4,
+            "camera": "ParityCam",
+            "telescope": "ParityScope",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 200,
+            "offset": 20,
+            "exposure_s": 0,
+            "camera_temp": -10,
+            "filter": "Ha"
+          },
+          {
+            "id": 5,
+            "frame_uuid": "bias-200-2.fits",
+            "rig_uuid": "r",
+            "kind": "bias",
+            "source_path": "/bias-200-2.fits",
+            "source_fingerprint": "bias-200-2.fits",
+            "captured_at": 5,
+            "camera": "ParityCam",
+            "telescope": "ParityScope",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 200,
+            "offset": 20,
+            "exposure_s": 0,
+            "camera_temp": -10,
+            "filter": "Ha"
+          }
+        ],
+        "quality": [
+          {
+            "frame_uuid": "bias-100-0.fits",
+            "source_fingerprint": "bias-100-0.fits",
+            "algorithm_version": 1,
+            "measurement": {
+              "type": "dark",
+              "algorithm_version": 1,
+              "column_banding": 0.04633125,
+              "height": 64,
+              "hot_pixels": 0,
+              "hot_threshold": 526.45807,
+              "level": 500.0,
+              "noise": 2.6458087,
+              "row_banding": 0.04633125,
+              "sigma": 2.9652,
+              "width": 64
+            }
+          },
+          {
+            "frame_uuid": "bias-100-1.fits",
+            "source_fingerprint": "bias-100-1.fits",
+            "algorithm_version": 1,
+            "measurement": {
+              "type": "dark",
+              "algorithm_version": 1,
+              "column_banding": 0.04633125,
+              "height": 64,
+              "hot_pixels": 0,
+              "hot_threshold": 526.45807,
+              "level": 500.0,
+              "noise": 2.6458087,
+              "row_banding": 0.04633125,
+              "sigma": 2.9652,
+              "width": 64
+            }
+          },
+          {
+            "frame_uuid": "bias-100-2.fits",
+            "source_fingerprint": "bias-100-2.fits",
+            "algorithm_version": 1,
+            "measurement": {
+              "type": "dark",
+              "algorithm_version": 1,
+              "column_banding": 0.04633125,
+              "height": 64,
+              "hot_pixels": 0,
+              "hot_threshold": 526.45807,
+              "level": 500.0,
+              "noise": 2.6458087,
+              "row_banding": 0.04633125,
+              "sigma": 2.9652,
+              "width": 64
+            }
+          },
+          {
+            "frame_uuid": "bias-200-0.fits",
+            "source_fingerprint": "bias-200-0.fits",
+            "algorithm_version": 1,
+            "measurement": {
+              "type": "dark",
+              "algorithm_version": 1,
+              "column_banding": 0.04633125,
+              "height": 64,
+              "hot_pixels": 0,
+              "hot_threshold": 526.45807,
+              "level": 500.0,
+              "noise": 2.6458087,
+              "row_banding": 0.04633125,
+              "sigma": 2.9652,
+              "width": 64
+            }
+          },
+          {
+            "frame_uuid": "bias-200-1.fits",
+            "source_fingerprint": "bias-200-1.fits",
+            "algorithm_version": 1,
+            "measurement": {
+              "type": "dark",
+              "algorithm_version": 1,
+              "column_banding": 0.04633125,
+              "height": 64,
+              "hot_pixels": 0,
+              "hot_threshold": 526.45807,
+              "level": 500.0,
+              "noise": 2.6458087,
+              "row_banding": 0.04633125,
+              "sigma": 2.9652,
+              "width": 64
+            }
+          },
+          {
+            "frame_uuid": "bias-200-2.fits",
+            "source_fingerprint": "bias-200-2.fits",
+            "algorithm_version": 1,
+            "measurement": {
+              "type": "dark",
+              "algorithm_version": 1,
+              "column_banding": 0.04633125,
+              "height": 64,
+              "hot_pixels": 0,
+              "hot_threshold": 526.45807,
+              "level": 500.0,
+              "noise": 2.6458087,
+              "row_banding": 0.04633125,
+              "sigma": 2.9652,
+              "width": 64
+            }
+          }
+        ],
+        "lights": [
+          {
+            "path": "/light.fits",
+            "rig_uuid": "r",
+            "camera": "ParityCam",
+            "telescope": "ParityScope",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "exposure_s": 300,
+            "camera_temp": -10,
+            "filter": "Ha",
+            "timestamp": 100
+          }
+        ],
+        "regrade": true
+      },
+      "ungraded": {
+        "bias": [
+          "bias-100-0.fits",
+          "bias-100-1.fits",
+          "bias-100-2.fits"
+        ],
+        "dark": [],
+        "dark_flat": [],
+        "flat": [],
+        "kept_out": []
+      },
+      "expected": {
+        "bias": [
+          "bias-100-0.fits",
+          "bias-100-1.fits",
+          "bias-100-2.fits"
+        ],
+        "dark": [],
+        "dark_flat": [],
+        "flat": [],
+        "kept_out": []
+      },
+      "grades": [
+        {
+          "frame_uuid": "bias-100-0.fits",
+          "grade": "ok",
+          "code": null,
+          "kept_out": null
+        },
+        {
+          "frame_uuid": "bias-100-1.fits",
+          "grade": "ok",
+          "code": null,
+          "kept_out": null
+        },
+        {
+          "frame_uuid": "bias-100-2.fits",
+          "grade": "ok",
+          "code": null,
+          "kept_out": null
+        },
+        {
+          "frame_uuid": "bias-200-0.fits",
+          "grade": "ok",
+          "code": null,
+          "kept_out": null
+        },
+        {
+          "frame_uuid": "bias-200-1.fits",
+          "grade": "ok",
+          "code": null,
+          "kept_out": null
+        },
+        {
+          "frame_uuid": "bias-200-2.fits",
+          "grade": "ok",
+          "code": null,
+          "kept_out": null
+        }
+      ],
+      "use_anyway": null
+    },
+    {
+      "name": "dark-leak",
+      "request": {
+        "frames": [
+          {
+            "id": 0,
+            "frame_uuid": "bias-100-0.fits",
+            "rig_uuid": "r",
+            "kind": "bias",
+            "source_path": "/bias-100-0.fits",
+            "source_fingerprint": "bias-100-0.fits",
+            "captured_at": 0,
+            "camera": "ParityCam",
+            "telescope": "ParityScope",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "exposure_s": 0,
+            "camera_temp": -10,
+            "filter": "Ha"
+          },
+          {
+            "id": 1,
+            "frame_uuid": "bias-100-1.fits",
+            "rig_uuid": "r",
+            "kind": "bias",
+            "source_path": "/bias-100-1.fits",
+            "source_fingerprint": "bias-100-1.fits",
+            "captured_at": 1,
+            "camera": "ParityCam",
+            "telescope": "ParityScope",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "exposure_s": 0,
+            "camera_temp": -10,
+            "filter": "Ha"
+          },
+          {
+            "id": 2,
+            "frame_uuid": "bias-100-2.fits",
+            "rig_uuid": "r",
+            "kind": "bias",
+            "source_path": "/bias-100-2.fits",
+            "source_fingerprint": "bias-100-2.fits",
+            "captured_at": 2,
+            "camera": "ParityCam",
+            "telescope": "ParityScope",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "exposure_s": 0,
+            "camera_temp": -10,
+            "filter": "Ha"
+          },
+          {
+            "id": 3,
+            "frame_uuid": "dark-0.fits",
+            "rig_uuid": "r",
+            "kind": "dark",
+            "source_path": "/dark-0.fits",
+            "source_fingerprint": "dark-0.fits",
+            "captured_at": 3,
+            "camera": "ParityCam",
+            "telescope": "ParityScope",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "exposure_s": 300,
+            "camera_temp": -10,
+            "filter": "Ha"
+          },
+          {
+            "id": 4,
+            "frame_uuid": "dark-1.fits",
+            "rig_uuid": "r",
+            "kind": "dark",
+            "source_path": "/dark-1.fits",
+            "source_fingerprint": "dark-1.fits",
+            "captured_at": 4,
+            "camera": "ParityCam",
+            "telescope": "ParityScope",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "exposure_s": 300,
+            "camera_temp": -10,
+            "filter": "Ha"
+          },
+          {
+            "id": 5,
+            "frame_uuid": "dark-2.fits",
+            "rig_uuid": "r",
+            "kind": "dark",
+            "source_path": "/dark-2.fits",
+            "source_fingerprint": "dark-2.fits",
+            "captured_at": 5,
+            "camera": "ParityCam",
+            "telescope": "ParityScope",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "exposure_s": 300,
+            "camera_temp": -10,
+            "filter": "Ha"
+          },
+          {
+            "id": 6,
+            "frame_uuid": "dark-3.fits",
+            "rig_uuid": "r",
+            "kind": "dark",
+            "source_path": "/dark-3.fits",
+            "source_fingerprint": "dark-3.fits",
+            "captured_at": 6,
+            "camera": "ParityCam",
+            "telescope": "ParityScope",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "exposure_s": 300,
+            "camera_temp": -10,
+            "filter": "Ha"
+          }
+        ],
+        "quality": [
+          {
+            "frame_uuid": "bias-100-0.fits",
+            "source_fingerprint": "bias-100-0.fits",
+            "algorithm_version": 1,
+            "measurement": {
+              "type": "dark",
+              "algorithm_version": 1,
+              "column_banding": 0.04633125,
+              "height": 64,
+              "hot_pixels": 0,
+              "hot_threshold": 526.45807,
+              "level": 500.0,
+              "noise": 2.6458087,
+              "row_banding": 0.04633125,
+              "sigma": 2.9652,
+              "width": 64
+            }
+          },
+          {
+            "frame_uuid": "bias-100-1.fits",
+            "source_fingerprint": "bias-100-1.fits",
+            "algorithm_version": 1,
+            "measurement": {
+              "type": "dark",
+              "algorithm_version": 1,
+              "column_banding": 0.04633125,
+              "height": 64,
+              "hot_pixels": 0,
+              "hot_threshold": 526.45807,
+              "level": 500.0,
+              "noise": 2.6458087,
+              "row_banding": 0.04633125,
+              "sigma": 2.9652,
+              "width": 64
+            }
+          },
+          {
+            "frame_uuid": "bias-100-2.fits",
+            "source_fingerprint": "bias-100-2.fits",
+            "algorithm_version": 1,
+            "measurement": {
+              "type": "dark",
+              "algorithm_version": 1,
+              "column_banding": 0.04633125,
+              "height": 64,
+              "hot_pixels": 0,
+              "hot_threshold": 526.45807,
+              "level": 500.0,
+              "noise": 2.6458087,
+              "row_banding": 0.04633125,
+              "sigma": 2.9652,
+              "width": 64
+            }
+          },
+          {
+            "frame_uuid": "dark-0.fits",
+            "source_fingerprint": "dark-0.fits",
+            "algorithm_version": 1,
+            "measurement": {
+              "type": "dark",
+              "algorithm_version": 1,
+              "column_banding": 0.04633125,
+              "height": 64,
+              "hot_pixels": 0,
+              "hot_threshold": 529.45807,
+              "level": 503.0,
+              "noise": 2.6458087,
+              "row_banding": 0.04633125,
+              "sigma": 2.9652,
+              "width": 64
+            }
+          },
+          {
+            "frame_uuid": "dark-1.fits",
+            "source_fingerprint": "dark-1.fits",
+            "algorithm_version": 1,
+            "measurement": {
+              "type": "dark",
+              "algorithm_version": 1,
+              "column_banding": 0.04633125,
+              "height": 64,
+              "hot_pixels": 0,
+              "hot_threshold": 529.4541,
+              "level": 503.0,
+              "noise": 2.6454072,
+              "row_banding": 0.04633125,
+              "sigma": 2.9652,
+              "width": 64
+            }
+          },
+          {
+            "frame_uuid": "dark-2.fits",
+            "source_fingerprint": "dark-2.fits",
+            "algorithm_version": 1,
+            "measurement": {
+              "type": "dark",
+              "algorithm_version": 1,
+              "column_banding": 0.04633125,
+              "height": 64,
+              "hot_pixels": 0,
+              "hot_threshold": 529.45807,
+              "level": 503.0,
+              "noise": 2.6458087,
+              "row_banding": 0.04633125,
+              "sigma": 2.9652,
+              "width": 64
+            }
+          },
+          {
+            "frame_uuid": "dark-3.fits",
+            "source_fingerprint": "dark-3.fits",
+            "algorithm_version": 1,
+            "measurement": {
+              "type": "dark",
+              "algorithm_version": 1,
+              "column_banding": 0.04633125,
+              "height": 64,
+              "hot_pixels": 0,
+              "hot_threshold": 926.45807,
+              "level": 900.0,
+              "noise": 2.6458087,
+              "row_banding": 0.04633125,
+              "sigma": 2.9652,
+              "width": 64
+            }
+          }
+        ],
+        "lights": [
+          {
+            "path": "/light.fits",
+            "rig_uuid": "r",
+            "camera": "ParityCam",
+            "telescope": "ParityScope",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "exposure_s": 300,
+            "camera_temp": -10,
+            "filter": "Ha",
+            "timestamp": 100
+          }
+        ],
+        "regrade": true
+      },
+      "ungraded": {
+        "bias": [
+          "bias-100-0.fits",
+          "bias-100-1.fits",
+          "bias-100-2.fits"
+        ],
+        "dark": [
+          "dark-0.fits",
+          "dark-1.fits",
+          "dark-2.fits",
+          "dark-3.fits"
+        ],
+        "dark_flat": [],
+        "flat": [],
+        "kept_out": []
+      },
+      "expected": {
+        "bias": [
+          "bias-100-0.fits",
+          "bias-100-1.fits",
+          "bias-100-2.fits"
+        ],
+        "dark": [
+          "dark-0.fits",
+          "dark-1.fits",
+          "dark-2.fits"
+        ],
+        "dark_flat": [],
+        "flat": [],
+        "kept_out": [
+          "dark-3.fits"
+        ]
+      },
+      "grades": [
+        {
+          "frame_uuid": "bias-100-0.fits",
+          "grade": "ok",
+          "code": null,
+          "kept_out": null
+        },
+        {
+          "frame_uuid": "bias-100-1.fits",
+          "grade": "ok",
+          "code": null,
+          "kept_out": null
+        },
+        {
+          "frame_uuid": "bias-100-2.fits",
+          "grade": "ok",
+          "code": null,
+          "kept_out": null
+        },
+        {
+          "frame_uuid": "dark-0.fits",
+          "grade": "ok",
+          "code": null,
+          "kept_out": null
+        },
+        {
+          "frame_uuid": "dark-1.fits",
+          "grade": "ok",
+          "code": null,
+          "kept_out": null
+        },
+        {
+          "frame_uuid": "dark-2.fits",
+          "grade": "ok",
+          "code": null,
+          "kept_out": null
+        },
+        {
+          "frame_uuid": "dark-3.fits",
+          "grade": "poor",
+          "code": "level_excess",
+          "kept_out": "stray light: level 900.0 sits 397.0 above the quietest dark, 133.9 times its pixel spread of 3.0"
+        }
+      ],
+      "use_anyway": {
+        "bias": [
+          "bias-100-0.fits",
+          "bias-100-1.fits",
+          "bias-100-2.fits"
+        ],
+        "dark": [
+          "dark-0.fits",
+          "dark-1.fits",
+          "dark-2.fits",
+          "dark-3.fits"
+        ],
+        "dark_flat": [],
+        "flat": [],
+        "kept_out": []
+      }
+    }
+  ]
+}

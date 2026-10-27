@@ -54,7 +54,8 @@ book, preserving the original policy. Every usable response's rig needs limits.
 
 Times are Unix **seconds**, angles **degrees**, levels/pedestals **ADU**,
 dust/broad/noise fractions of background. `window` is seconds. Night boundaries
-lie in `[0, 86400)`, defaulting to noon UTC. Capture times are bounded to ±2^50
+are unwrapped local-noon shifts (`12h - UTC offset`) within one day of noon UTC,
+defaulting to noon UTC. Capture times are bounded to ±2^50
 seconds to keep differences safe. Dust/broad limits must be positive and
 finite, rotations nonnegative and finite, windows in `[0, 1000000000000]`.
 Supply either pre-grouped `imaging` or raw `imaging_lights`. Raw rows group by

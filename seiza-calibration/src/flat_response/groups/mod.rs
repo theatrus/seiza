@@ -7,9 +7,9 @@
 //! that passed their hard sensor/optics gates. This is one stage of calibration
 //! selection, not a replacement for grading, dark selection, or master recipes.
 
-mod lights;
-mod model;
-mod overrides;
+pub(crate) mod lights;
+pub(crate) mod model;
+pub(crate) mod overrides;
 mod rows;
 
 use super::{choice, evidence, metric};
@@ -51,7 +51,7 @@ pub struct EpochSample {
     pub offset: f64,
 }
 
-/// Local noon for one flat; seconds after midnight UTC. Unlisted flats use
+/// Local-noon shift for one flat, unwrapped (12h minus UTC offset). Unlisted flats use
 /// noon UTC. The stable frame identity, rather than a database id, names it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -154,64 +154,9 @@ pub struct Snapshot {
 /// Build measured families and changes, then evaluate the requested lights.
 /// Missing measurements remain missing: no metadata-only verdict is invented.
 pub fn evaluate(request: Request) -> crate::Result<Snapshot> {
-    validate(&request)?;
-    let imaging = if request.imaging_lights.is_empty() {
-        request.imaging
-    } else {
-        model::imaging_sessions(request.imaging_lights, |profile| {
-            request
-                .profile_rigs
-                .iter()
-                .find(|(key, _)| key.as_deref() == profile)
-                .map(|(_, rigs)| rigs.clone())
-                .unwrap_or_default()
-        })
-    };
-    let limits: HashMap<_, _> = request
-        .limits
-        .into_iter()
-        .map(|row| (row.rig_uuid, row.limits))
-        .collect();
-    let nights: HashMap<_, _> = request
-        .night_boundaries
-        .into_iter()
-        .map(|row| ((row.rig_uuid, row.frame_uuid), row.seconds))
-        .collect();
-    let mut book = Book::build_with_overrides(
-        request.responses,
-        request.comparisons,
-        request.evidence,
-        imaging,
-        |rig| limits[rig],
-        request.group_overrides,
-        |rig, frame| {
-            nights
-                .get(&(rig.to_owned(), frame.to_owned()))
-                .copied()
-                .unwrap_or(model::DEFAULT_NIGHT_BOUNDARY)
-        },
-    );
-    book.epochs = AngleEpochs::from_samples(
-        request
-            .epoch_samples
-            .into_iter()
-            .map(|row| (row.rig_uuid, row.at, row.offset))
-            .collect(),
-    );
-    for row in request.family_evidence {
-        book.family_evidence
-            .entry(row.session_key.clone())
-            .or_default()
-            .push(row);
-    }
-    for row in request.light_choices {
-        book.light_choices
-            .entry(row.file_name.clone())
-            .or_default()
-            .push(row);
-    }
-    let lights = request
-        .lights
+    let lights_request = request.lights.clone();
+    let book = build_book(request)?;
+    let lights = lights_request
         .into_iter()
         .map(|light| {
             let compatible = light
@@ -315,6 +260,67 @@ pub fn evaluate(request: Request) -> crate::Result<Snapshot> {
         sessions_needing_evidence,
         lights,
     })
+}
+
+/// Assemble the same measured book for grouping and library selection.
+pub(crate) fn build_book(request: Request) -> crate::Result<Book> {
+    validate(&request)?;
+    let imaging = if request.imaging_lights.is_empty() {
+        request.imaging
+    } else {
+        model::imaging_sessions(request.imaging_lights, |profile| {
+            request
+                .profile_rigs
+                .iter()
+                .find(|(key, _)| key.as_deref() == profile)
+                .map(|(_, rigs)| rigs.clone())
+                .unwrap_or_default()
+        })
+    };
+    let limits: HashMap<_, _> = request
+        .limits
+        .into_iter()
+        .map(|row| (row.rig_uuid, row.limits))
+        .collect();
+    let nights: HashMap<_, _> = request
+        .night_boundaries
+        .into_iter()
+        .map(|row| ((row.rig_uuid, row.frame_uuid), row.seconds))
+        .collect();
+    let mut book = Book::build_with_overrides(
+        request.responses,
+        request.comparisons,
+        request.evidence,
+        imaging,
+        |rig| limits[rig],
+        request.group_overrides,
+        |rig, frame| {
+            nights
+                .get(&(rig.to_owned(), frame.to_owned()))
+                .copied()
+                .unwrap_or(model::DEFAULT_NIGHT_BOUNDARY)
+        },
+    );
+    book.epochs = AngleEpochs::from_samples(
+        request
+            .epoch_samples
+            .into_iter()
+            .map(|row| (row.rig_uuid, row.at, row.offset))
+            .collect(),
+    );
+    for row in request.family_evidence {
+        book.family_evidence
+            .entry(row.session_key.clone())
+            .or_default()
+            .push(row);
+    }
+    for row in request.light_choices {
+        book.light_choices
+            .entry(row.file_name.clone())
+            .or_default()
+            .push(row);
+    }
+    Ok(book)
 }
 
 fn invalid(message: impl Into<String>) -> crate::Error {
@@ -422,9 +428,11 @@ fn validate(request: &Request) -> crate::Result<()> {
     }
     let mut nights = BTreeSet::new();
     for row in &request.night_boundaries {
-        if !(0..86400).contains(&row.seconds) || !nights.insert((&row.rig_uuid, &row.frame_uuid)) {
+        if !(-86400..=129600).contains(&row.seconds)
+            || !nights.insert((&row.rig_uuid, &row.frame_uuid))
+        {
             return Err(invalid(
-                "night boundaries need unique rig/frame keys and seconds in 0..86400",
+                "night boundaries need unique rig/frame keys and noon shifts within one day of noon UTC",
             ));
         }
     }

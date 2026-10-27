@@ -1523,3 +1523,35 @@ formula, without PixInsight's optional saturation/SCNR processes.
 `screen_rgb_star_layer(nebula, stars, reduction=0)` screens the display layer over
 a display nebula with optional linked star reduction [0,1]. Inputs are unchanged;
 missing coverage masks whole RGB pixels. Run star separation before stretching.
+
+### PSF Guard library grading and selection
+
+`seiza.calibration_library_plan` runs PSF Guard's extracted library policy:
+
+```python
+plan = seiza.calibration_library_plan(
+    frames=calibration_rows, lights=ordered_light_rows,
+    quality=measurement_rows, grouping=measured_flat_groups, regrade=True,
+    global_settings=[{"key": "dark_choice", "value": "complete"}],
+)
+print(plan["grades"], plan["selections"])
+print(plan["sessions"], plan["assignments"])
+```
+
+All records/results use snake_case. Optional keywords are `frames`, `lights`,
+`quality`, `global_settings`, `rigs`, `grouping`, `available_responses`,
+`night_shifts`, `regrade=False`, `master_failures`, `pedestal_evidence`,
+`force_flat_without_pedestal=False` and `flat_star_masking=False`. Settings use
+`{key, value}` records. Outputs include the original settings schema and
+nondefault rule notes; peer grading, overrides, temporal selection and complete
+session gates use one resolved rule layer.
+
+This call plans native master builds; it opens no files and does not publish a
+master. Verify sources and replan, execute the dependency recipes, and return
+failures or native pedestal-fit evidence when required. Automatic flat-only
+calibration is withheld until a reliable fit exists. See the
+[shared library contract](../docs/calibration-library.md) for schemas, units,
+source verification, pixel checks and final recipe persistence. After building
+the masters, use `LiveStacker.open_fits_expanding_sessions` to apply the same
+assignments during mosaic planning and integration (available with the
+session-planning change).
