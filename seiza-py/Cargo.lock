@@ -2295,7 +2295,7 @@ dependencies = [
 
 [[package]]
 name = "seiza"
-version = "0.45.0"
+version = "0.46.0"
 dependencies = [
  "directories",
  "image",
@@ -2318,7 +2318,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-analysis"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "seiza-image-io",
  "seiza-stacking",
@@ -2343,7 +2343,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-calibration"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "nalgebra",
  "rayon",
@@ -2430,7 +2430,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-parallax"
-version = "0.19.3"
+version = "0.19.4"
 dependencies = [
  "ab_glyph",
  "image",
@@ -2447,7 +2447,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-py"
-version = "0.45.0"
+version = "0.46.0"
 dependencies = [
  "image",
  "numpy",
@@ -2501,7 +2501,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-stacking"
-version = "0.52.0"
+version = "0.53.0"
 dependencies = [
  "bytemuck",
  "multiversion",
