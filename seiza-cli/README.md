@@ -945,6 +945,10 @@ bias-subtracted dark or calibrated flat is not subtracted twice. Each light is
 checked against what the masters' headers record: gain, offset, binning, the
 dark's sensor temperature (`CCD-TEMP` or `SET-TEMP`) and the flat's filter and
 optics. A master dark that records no temperature is used with a warning.
+Use `--flat master-flat.fits --allow-flat-gain-offset-mismatch` to allow a
+flat shot at a different gain or offset, provided it was calibrated with
+matching flat-darks and records `DARKSUB=T`. The default still rejects these
+mismatches. The flag does not relax bias/dark matching or any other flat checks.
 Planar RGB flats are normalized independently per channel. CFA flats remain
 one-channel and are applied before debayering. See the
 [stacking design](https://github.com/theatrus/seiza/blob/main/docs/design/image-stacking.md)
