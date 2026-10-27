@@ -508,6 +508,9 @@ seiza_flat_group_plan_json = "flat_group_plan"
 seiza_live_stacker_open_fits_expanding_sessions = "LiveStacker.open_fits_expanding_sessions"
 
 seiza_calibration_library_plan_json = "calibration_library_plan"
+seiza_calibration_library_plan_with_groups_json = "calibration_library_plan"
+seiza_flat_groups_prepare_json = "FlatGroups.__init__"
+seiza_flat_groups_free = { none = "frees a C grouping handle; Python garbage collection frees FlatGroups" }
 seiza_flat_encode_plane = "flat_encode_plane"
 seiza_flat_decode_plane = "flat_decode_plane"
 seiza_dust_find_json = "dust_find"

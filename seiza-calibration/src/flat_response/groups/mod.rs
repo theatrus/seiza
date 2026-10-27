@@ -20,10 +20,13 @@ use std::collections::{BTreeSet, HashMap};
 /// Version the host includes when caching grouping snapshots and assignments.
 pub const ALGORITHM_VERSION: u32 = 1;
 
-pub use lights::{AngleEpochs, Epoch, FamilyBasis, FamilyChoice};
+pub use lights::{
+    ANGLE_PRIOR_DEG, AngleEpochs, EPOCH_JUMP_DEG, Epoch, FAMILY_EVIDENCE_VERSION, FamilyBasis,
+    FamilyChoice,
+};
 pub use model::{
     AlikeRange, AngleSpan, AngleTerm, Book, Boundary, Event, Family, HandEdge, ImagingSession,
-    Limits, Placement, Session,
+    Limits, Placement, ROTATION_CLUSTER_DEG, Session,
 };
 pub use overrides::{
     GROUP_CHOICE_KEY, GroupChoice, GroupOverrideRow, GroupPick, LightChoice, LightChoiceEntry,
@@ -155,7 +158,7 @@ pub struct Snapshot {
 /// Missing measurements remain missing: no metadata-only verdict is invented.
 pub fn evaluate(request: Request) -> crate::Result<Snapshot> {
     let lights_request = request.lights.clone();
-    let book = build_book(request)?;
+    let book = prepare(request)?;
     let lights = lights_request
         .into_iter()
         .map(|light| {
@@ -263,7 +266,7 @@ pub fn evaluate(request: Request) -> crate::Result<Snapshot> {
 }
 
 /// Assemble the same measured book for grouping and library selection.
-pub(crate) fn build_book(request: Request) -> crate::Result<Book> {
+pub fn prepare(request: Request) -> crate::Result<Book> {
     validate(&request)?;
     let imaging = if request.imaging_lights.is_empty() {
         request.imaging

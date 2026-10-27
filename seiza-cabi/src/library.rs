@@ -4,6 +4,50 @@ use seiza_calibration::library;
 use serde_json::Value;
 use std::ffi::c_char;
 use std::ptr;
+use std::sync::Arc;
+
+/// Immutable measured grouping book. Safe for concurrent read-only planning.
+pub struct SeizaFlatGroups {
+    book: Arc<seiza_calibration::flat_response::groups::Book>,
+}
+
+/// Prepare a reusable grouping book from camelCase flat-group request JSON.
+/// No file I/O. Free the returned handle with seiza_flat_groups_free.
+/// # Safety
+/// The request is NUL-terminated UTF-8; error_out is null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_flat_groups_prepare_json(
+    request_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaFlatGroups {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let json = required_str(request_json, "flat group request")?;
+        let value: Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+        if field_names(field_names(value.clone(), false), true) != value {
+            return Err("flat group request field names must be camelCase".into());
+        }
+        let request =
+            serde_json::from_value(field_names(value, false)).map_err(|e| e.to_string())?;
+        let book = seiza_calibration::flat_response::groups::prepare(request)
+            .map_err(|e| e.to_string())?;
+        Ok(Box::into_raw(Box::new(SeizaFlatGroups {
+            book: Arc::new(book),
+        })))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+/// Release an immutable grouping handle; null is allowed.
+/// # Safety
+/// A non-null pointer must be a live handle returned by prepare and freed once,
+/// with no concurrent call still borrowing it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_flat_groups_free(groups: *mut SeizaFlatGroups) {
+    if !groups.is_null() {
+        drop(unsafe { Box::from_raw(groups) });
+    }
+}
 
 // Settings are keyed records. Their identifiers and JSON values are opaque;
 // only schema fields, including those in measurements/grouping, change case.
@@ -65,6 +109,20 @@ pub unsafe extern "C" fn seiza_calibration_library_plan_json(
     request_json: *const c_char,
     error_out: *mut *mut c_char,
 ) -> *mut c_char {
+    unsafe { seiza_calibration_library_plan_with_groups_json(request_json, ptr::null(), error_out) }
+}
+
+/// Plan using a reusable grouping handle, or null to build from request rows.
+/// Non-null handles require empty grouping rows and matching grouping limits.
+/// # Safety
+/// The request/error pointers follow seiza_calibration_library_plan_json's
+/// contract; a non-null groups pointer must remain valid throughout this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_calibration_library_plan_with_groups_json(
+    request_json: *const c_char,
+    groups: *const SeizaFlatGroups,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
     clear_error(error_out);
     ffi_result(error_out, || {
         let json = required_str(request_json, "calibration library request")?;
@@ -74,7 +132,11 @@ pub unsafe extern "C" fn seiza_calibration_library_plan_json(
         }
         let request: library::Request = serde_json::from_value(field_names(value, false))
             .map_err(|e| format!("invalid calibration library request: {e}"))?;
-        let result = library::evaluate(request).map_err(|e| e.to_string())?;
+        let result = match unsafe { groups.as_ref() } {
+            Some(groups) => library::evaluate_with_book(request, Arc::clone(&groups.book)),
+            None => library::evaluate(request),
+        }
+        .map_err(|e| e.to_string())?;
         owned_json(&field_names(
             serde_json::to_value(result).map_err(|e| e.to_string())?,
             true,
@@ -213,6 +275,55 @@ mod tests {
                 }
                 assert_eq!(recipe["requiresSourceVerification"], false);
             }
+        }
+    }
+    #[test]
+    fn prepared_grouping_handle_matches_value_planning() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../seiza-calibration/tests/fixtures/library/psf-guard.json"
+        ))
+        .unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let mut request = field_names(case["request"].clone(), true);
+            let expected = run(request.clone()).unwrap();
+            let mut grouping = request
+                .as_object_mut()
+                .unwrap()
+                .remove("grouping")
+                .unwrap_or(serde_json::json!({}));
+            let rigs: std::collections::BTreeSet<_> = grouping["responses"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|r| r["rigUuid"].as_str().unwrap())
+                .collect();
+            let limits: Vec<_> = rigs.into_iter().map(|rig| serde_json::json!({"rigUuid":rig,"limits":{"measured":true,"dust":0.01,"broad":0.02,"window":86400,"rotation":2.0}})).collect();
+            grouping["limits"] = serde_json::json!(limits);
+            let grouping = CString::new(grouping.to_string()).unwrap();
+            let mut error = ptr::null_mut();
+            let handle = unsafe { seiza_flat_groups_prepare_json(grouping.as_ptr(), &mut error) };
+            assert!(!handle.is_null());
+            assert!(error.is_null());
+            let request = CString::new(request.to_string()).unwrap();
+            let out = unsafe {
+                seiza_calibration_library_plan_with_groups_json(
+                    request.as_ptr(),
+                    handle,
+                    &mut error,
+                )
+            };
+            assert!(!out.is_null());
+            assert!(error.is_null());
+            let actual: Value =
+                serde_json::from_str(unsafe { CStr::from_ptr(out) }.to_str().unwrap()).unwrap();
+            assert_eq!(actual, expected);
+            unsafe {
+                crate::seiza_string_free(out);
+                seiza_flat_groups_free(handle);
+            }
+        }
+        unsafe {
+            seiza_flat_groups_free(ptr::null_mut());
         }
     }
     #[test]

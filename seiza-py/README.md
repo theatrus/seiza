@@ -1552,7 +1552,14 @@ for file identity, memory and pipeline behavior.
 
 ### PSF Guard library grading and selection
 
-`seiza.calibration_library_plan` runs PSF Guard's extracted library policy:
+`seiza.calibration_library_plan` runs PSF Guard's extracted library policy.
+For repeated calls, construct `book = seiza.FlatGroups(grouping_request)` once
+and pass `prepared_grouping=book` with no `grouping` rows. Preparation uses the
+`flat_group_plan` record schema, including rig limits. Planning reuses the
+immutable book, refuses conflicting limits, and performs no file I/O. Recreate
+the book when its source rows, night boundaries or settings change.
+
+For example, without a prepared book:
 
 ```python
 plan = seiza.calibration_library_plan(

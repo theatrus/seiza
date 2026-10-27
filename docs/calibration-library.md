@@ -76,6 +76,17 @@ A CLI without a catalog gathers metadata and measurements from disk to fill
 the same request; persistence and scanning are host choices. Neither host needs
 to duplicate the matching policy.
 
+For repeated selection, Rust hosts pass their existing `Arc<groups::Book>` to
+`library::evaluate_with_book`. C hosts call `seiza_flat_groups_prepare_json` once
+and reuse its immutable handle with `seiza_calibration_library_plan_with_groups_json`,
+then call `seiza_flat_groups_free`. Python uses `FlatGroups(grouping_request)` and
+`calibration_library_plan(..., prepared_grouping=book)`. Preparation takes the
+same grouping records as `flat_group_plan`, including explicit rig `limits`.
+Selection reuses the book and accepts no additional `grouping` rows; its
+resolved limits must agree with the library settings. Hosts invalidate cached
+books when source rows, night boundaries or settings change. C handles may be
+shared for concurrent reads but must outlive all calls borrowing them.
+
 ## Results and master execution
 
 `grades` retains input frame order. `selections` and `assignments` retain input

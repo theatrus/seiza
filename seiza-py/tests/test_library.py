@@ -9,6 +9,16 @@ import seiza
 FIXTURES = Path(__file__).resolve().parents[2] / 'seiza-calibration/tests/fixtures/library'
 
 
+def prepare_grouping(grouping):
+    grouping = copy.deepcopy(grouping)
+    grouping['limits'] = [
+        {'rig_uuid': rig, 'limits': {'measured': True, 'dust': 0.01, 'broad': 0.02,
+                                    'window': 86400, 'rotation': 2.0}}
+        for rig in sorted({r['rig_uuid'] for r in grouping.get('responses', [])})
+    ]
+    return seiza.FlatGroups(grouping)
+
+
 @pytest.mark.parametrize('case', json.loads((FIXTURES / 'recipes.json').read_text())['cases'], ids=lambda c: c['name'])
 def test_resolved_recipes_determine_sessions_and_exposure(case):
     result = seiza.calibration_library_plan(**case['request'])
@@ -52,6 +62,19 @@ def test_psf_guard_selection_reference(case):
     reversed_request = copy.deepcopy(case['request'])
     reversed_request['frames'].reverse()
     assert seiza.calibration_library_plan(**reversed_request)['sessions'] == result['sessions']
+    cached_request = copy.deepcopy(case['request'])
+    book = prepare_grouping(cached_request.pop('grouping', {}))
+    assert seiza.calibration_library_plan(**cached_request, prepared_grouping=book) == result
+
+
+def test_prepared_grouping_rejects_conflicting_rows_and_limits():
+    request = copy.deepcopy(json.loads((FIXTURES / 'psf-guard.json').read_text())['cases'][13]['request'])
+    book = prepare_grouping(request.pop('grouping'))
+    with pytest.raises(ValueError, match='either'):
+        seiza.calibration_library_plan(**request, grouping={'epoch_samples': [{'rig_uuid': 'r', 'at': 1, 'offset': 2}]}, prepared_grouping=book)
+    request['global_settings'] = [{'key': 'flat_split_dust_pct', 'value': 5.0}]
+    with pytest.raises(ValueError, match='limits'):
+        seiza.calibration_library_plan(**request, prepared_grouping=book)
 
 
 @pytest.mark.parametrize('case', json.loads((FIXTURES / 'grading.json').read_text())['cases'], ids=lambda c: c['name'])

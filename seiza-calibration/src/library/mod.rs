@@ -446,7 +446,32 @@ fn invalid(message: impl Into<String>) -> crate::Error {
 /// Run PSF Guard's grading and selection against an immutable library snapshot.
 /// Selections and assignments retain light order; sessions reuse identical recipes.
 /// Recipes still require host source verification and the native pixel builders.
-pub fn evaluate(mut request: Request) -> crate::Result<Snapshot> {
+pub fn evaluate(request: Request) -> crate::Result<Snapshot> {
+    evaluate_inner(request, None)
+}
+
+/// Select against the host's immutable cached grouping book. No grouping rows
+/// may also be supplied. The host invalidates the book when its source rows,
+/// night boundaries or settings change; resolved grouping limits are checked.
+pub fn evaluate_with_book(
+    request: Request,
+    book: Arc<crate::flat_response::groups::Book>,
+) -> crate::Result<Snapshot> {
+    if serde_json::to_value(&request.grouping).expect("grouping request")
+        != serde_json::to_value(crate::flat_response::groups::Request::default())
+            .expect("empty grouping request")
+    {
+        return Err(invalid(
+            "supply either a prepared grouping book or grouping rows",
+        ));
+    }
+    evaluate_inner(request, Some(book))
+}
+
+fn evaluate_inner(
+    mut request: Request,
+    prepared: Option<Arc<crate::flat_response::groups::Book>>,
+) -> crate::Result<Snapshot> {
     if !request.grouping.lights.is_empty() {
         return Err(invalid(
             "library lights belong in lights, not grouping.lights",
@@ -494,6 +519,16 @@ pub fn evaluate(mut request: Request) -> crate::Result<Snapshot> {
         }
     }
     let rules = RuleBook::new(values(request.global_settings)?, rigs);
+    if let Some(book) = &prepared {
+        for session in &book.sessions {
+            let rig = &session.row.rig_uuid;
+            if book.limits(rig) != Some(flat_groups::limits_of(&rules.for_rig(rig))) {
+                return Err(invalid(
+                    "prepared grouping limits differ from the library settings",
+                ));
+            }
+        }
+    }
     // The same resolved rules grade, group and select. A separate grouping
     // request cannot silently give its rig another threshold.
     let group_rigs: BTreeSet<_> = request
@@ -642,7 +677,10 @@ pub fn evaluate(mut request: Request) -> crate::Result<Snapshot> {
     });
     let library = LibrarySnapshot {
         frames: request.frames,
-        flat_book: Arc::new(crate::flat_response::groups::build_book(request.grouping)?),
+        flat_book: match prepared {
+            Some(book) => book,
+            None => Arc::new(crate::flat_response::groups::prepare(request.grouping)?),
+        },
         available_responses: request.available_responses.into_iter().collect(),
     };
     let mut selections = Vec::new();

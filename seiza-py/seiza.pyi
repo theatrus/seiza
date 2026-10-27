@@ -1891,6 +1891,9 @@ def flat_group_plan(
 ) -> dict[str, Any]: ...
 
 # PSF Guard's shared library policy; records use snake_case.
+class FlatGroups:
+    def __init__(self, request: Mapping[str, Any]) -> None: ...
+
 def calibration_library_plan(
     *, frames: Sequence[Mapping[str, Any]] | None = None,
     lights: Sequence[Mapping[str, Any]] | None = None,
@@ -1905,4 +1908,5 @@ def calibration_library_plan(
     pedestal_evidence: Sequence[Mapping[str, Any]] | None = None,
     force_flat_without_pedestal: bool = False,
     flat_star_masking: bool = False,
+    prepared_grouping: FlatGroups | None = None,
 ) -> dict[str, Any]: ...

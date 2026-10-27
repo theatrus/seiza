@@ -250,6 +250,11 @@ typedef struct SeizaCancelSignal SeizaCancelSignal;
 typedef struct SeizaDrizzleResult SeizaDrizzleResult;
 
 /*
+ Immutable measured grouping book. Safe for concurrent read-only planning.
+ */
+typedef struct SeizaFlatGroups SeizaFlatGroups;
+
+/*
  An opaque incremental stacker. Release it with
  [`seiza_live_stacker_free`], or consume it with
  [`seiza_live_stacker_finish`].
@@ -4059,6 +4064,22 @@ char *seiza_dust_match_features_json(const char *earlier_json,
                                      char **error_out);
 
 /*
+ Prepare a reusable grouping book from camelCase flat-group request JSON.
+ No file I/O. Free the returned handle with seiza_flat_groups_free.
+ # Safety
+ The request is NUL-terminated UTF-8; error_out is null or writable.
+ */
+SeizaFlatGroups *seiza_flat_groups_prepare_json(const char *request_json, char **error_out);
+
+/*
+ Release an immutable grouping handle; null is allowed.
+ # Safety
+ A non-null pointer must be a live handle returned by prepare and freed once,
+ with no concurrent call still borrowing it.
+ */
+void seiza_flat_groups_free(SeizaFlatGroups *groups);
+
+/*
  Grade and select a calibration library using PSF Guard's shared policy.
  `request_json` is a camelCase library::Request: frames, lights, quality,
  globalSettings, rigs, grouping, availableResponses, nightShifts, regrade, masterFailures, pedestalEvidence,
@@ -4077,6 +4098,17 @@ char *seiza_dust_match_features_json(const char *earlier_json,
  */
 char *seiza_calibration_library_plan_json(const char *request_json,
                                           char **error_out);
+
+/*
+ Plan using a reusable grouping handle, or null to build from request rows.
+ Non-null handles require empty grouping rows and matching grouping limits.
+ # Safety
+ The request/error pointers follow seiza_calibration_library_plan_json's
+ contract; a non-null groups pointer must remain valid throughout this call.
+ */
+char *seiza_calibration_library_plan_with_groups_json(const char *request_json,
+                                                      const SeizaFlatGroups *groups,
+                                                      char **error_out);
 
 /*
  Prepare a parallax video from a JSON request (see the fields below) and

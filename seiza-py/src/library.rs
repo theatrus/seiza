@@ -3,6 +3,25 @@ use crate::flat_response::{from_python, to_python};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use seiza_calibration::library;
+use std::sync::Arc;
+
+/// Reusable measured grouping book. Construction and planning perform no I/O.
+#[pyclass(module = "seiza", frozen)]
+struct FlatGroups {
+    book: Arc<seiza_calibration::flat_response::groups::Book>,
+}
+#[pymethods]
+impl FlatGroups {
+    #[new]
+    fn new(request: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let request = from_python(request, "flat grouping request")?;
+        let book = seiza_calibration::flat_response::groups::prepare(request)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(Self {
+            book: Arc::new(book),
+        })
+    }
+}
 fn records<T: serde::de::DeserializeOwned>(
     value: Option<&Bound<'_, PyAny>>,
     name: &str,
@@ -15,7 +34,7 @@ fn records<T: serde::de::DeserializeOwned>(
 }
 /// Grade and select an immutable calibration library; no file or catalog I/O.
 #[pyfunction]
-#[pyo3(signature=(*,frames=None,lights=None,quality=None,global_settings=None,rigs=None,grouping=None,available_responses=None,night_shifts=None,regrade=false, master_failures=None, pedestal_evidence=None, force_flat_without_pedestal=false, flat_star_masking=false))]
+#[pyo3(signature=(*,frames=None,lights=None,quality=None,global_settings=None,rigs=None,grouping=None,available_responses=None,night_shifts=None,regrade=false, master_failures=None, pedestal_evidence=None, force_flat_without_pedestal=false, flat_star_masking=false, prepared_grouping=None))]
 #[allow(clippy::too_many_arguments)]
 fn calibration_library_plan<'py>(
     py: Python<'py>,
@@ -32,6 +51,7 @@ fn calibration_library_plan<'py>(
     pedestal_evidence: Option<&Bound<'py, PyAny>>,
     force_flat_without_pedestal: bool,
     flat_star_masking: bool,
+    prepared_grouping: Option<PyRef<'py, FlatGroups>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let request = library::Request {
         frames: records(frames, "frames")?,
@@ -52,12 +72,17 @@ fn calibration_library_plan<'py>(
         force_flat_without_pedestal,
         flat_star_masking,
     };
+    let book = prepared_grouping.map(|groups| Arc::clone(&groups.book));
     let result = py
-        .detach(|| library::evaluate(request))
+        .detach(|| match book {
+            Some(book) => library::evaluate_with_book(request, book),
+            None => library::evaluate(request),
+        })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     to_python(py, &result)
 }
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<FlatGroups>()?;
     module.add_function(wrap_pyfunction!(calibration_library_plan, module)?)?;
     Ok(())
 }

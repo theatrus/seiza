@@ -1,5 +1,57 @@
 use seiza_calibration::library::{Request, evaluate};
 use serde_json::Value;
+use std::sync::Arc;
+
+#[test]
+fn cached_grouping_preserves_library_results_and_rejects_conflicting_inputs() {
+    use seiza_calibration::{flat_response::groups, library};
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/library/psf-guard.json")).unwrap();
+    for case in fixture["cases"].as_array().unwrap() {
+        let mut request: Request = serde_json::from_value(case["request"].clone()).unwrap();
+        let expected = serde_json::to_value(evaluate(request.clone()).unwrap()).unwrap();
+        let mut grouping = std::mem::take(&mut request.grouping);
+        grouping.limits = grouping
+            .responses
+            .iter()
+            .map(|r| r.rig_uuid.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .map(|rig_uuid| groups::RigLimits {
+                rig_uuid,
+                limits: groups::Limits {
+                    measured: true,
+                    dust: 0.01,
+                    broad: 0.02,
+                    window: 86400,
+                    rotation: 2.0,
+                },
+            })
+            .collect();
+        let book = Arc::new(groups::prepare(grouping).unwrap());
+        let result = library::evaluate_with_book(request.clone(), Arc::clone(&book)).unwrap();
+        assert_eq!(
+            serde_json::to_value(result).unwrap(),
+            expected,
+            "{}",
+            case["name"]
+        );
+        if !book.sessions.is_empty() {
+            let mut changed = request.clone();
+            changed.global_settings.push(library::Setting {
+                key: "flat_split_dust_pct".into(),
+                value: 5.0.into(),
+            });
+            assert!(library::evaluate_with_book(changed, Arc::clone(&book)).is_err());
+        }
+        request.grouping.epoch_samples.push(groups::EpochSample {
+            rig_uuid: "r".into(),
+            at: 1,
+            offset: 2.0,
+        });
+        assert!(library::evaluate_with_book(request, book).is_err());
+    }
+}
 
 #[test]
 fn resolved_recipes_determine_sessions_and_exposure() {
