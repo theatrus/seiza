@@ -25,11 +25,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@1.99.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
         # Our runners compile through sccache in S3 instead; GitHub's cache would
         # only duplicate it, and saving it to GitHub is slow from AWS.
         if: ${{ !startsWith(runner.name, 'ghr-') }}
-      - uses: taiki-e/install-action@v2.87.30
+      - uses: taiki-e/install-action@v2.87.31
         with:
           tool: cargo-nextest
       # nextest runs the tests of every binary in parallel, where cargo test runs
@@ -97,7 +97,7 @@ jobs:
         with:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
         # Our runners compile through sccache in S3 instead; GitHub's cache would
         # only duplicate it, and saving it to GitHub is slow from AWS.
         if: ${{ !startsWith(runner.name, 'ghr-') }}
@@ -135,7 +135,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@1.89.0
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
         # Our runners compile through sccache in S3 instead; GitHub's cache would
         # only duplicate it, and saving it to GitHub is slow from AWS.
         if: ${{ !startsWith(runner.name, 'ghr-') }}
@@ -151,7 +151,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@1.99.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
         # Our runners compile through sccache in S3 instead; GitHub's cache would
         # only duplicate it, and saving it to GitHub is slow from AWS.
         if: ${{ !startsWith(runner.name, 'ghr-') }}
