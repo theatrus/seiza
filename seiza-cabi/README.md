@@ -6,14 +6,19 @@
 FITS/XISF projects without producing a stack. Example request:
 
 ```json
-{"inputs":["lights"],"samples":262144,"filter":"Ha","maxFrames":100}
+{"inputs":["lights"],"samples":262144,"filter":"Ha","maxFrames":100,"metricsOnly":true}
 ```
 
 Only `inputs` is required. Inputs may be files, nonrecursive directories or
 UTF-8 text lists. The response is the core analysis report with camelCase
 keys (`schemaVersion`, `algorithmVersion`, `options`, `frames`, `groups`,
-`warnings`). Failed frames remain in the report; an empty `groups` array means
-no usable reference was found. Invalid requests return null and set `error_out`.
+`timings`, `warnings`), with schema/algorithm version 2. `metricsOnly` defaults
+to false; true skips registration, normalization, sampling and replay. Frames
+have separate `measurementStatus` and `depthStatus`, with `error` and
+`depthError` respectively. Groups expose `measuredFrames`, `depthFrames` and
+`normalizedNoiseFrames`; native quality medians use all measured frames.
+An empty `groups` array means no frames were measured. Use separate invocations
+per panel/pointing; processing outcomes are not quality verdicts. Invalid requests return null and set `error_out`.
 `seiza_analysis_html(report_json, error_out)` renders that camelCase result as
 self-contained HTML. Both return owned strings freed with `seiza_string_free`.
 These calls write no source images or report files. The Python counterparts are
@@ -994,7 +999,7 @@ Errors leave writable buffers unchanged. Neither call runs an external tool.
 
 The JSON response uses camelCase (`medianStarSnr`, `medianNormalizedNoise`).
 Frames now include median unsaturated-star peak SNR. Filter groups expose
-accepted-frame medians of star count, HFR, FWHM, eccentricity, noise, background
+measured-frame medians of star count, HFR, FWHM, eccentricity, noise, background
 and stellar SNR, plus gain-normalized noise. Raw noise/background retain native
 input units; normalized noise uses reference units. Missing measurements are
 null/None. See [measurement definitions](../seiza-analysis/README.md#measurements-and-physical-meaning)

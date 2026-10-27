@@ -5,11 +5,11 @@ import seiza
 
 def test_analysis_rejected_frame_and_portable_html(tmp_path):
     report = seiza.analyze_project([tmp_path / "missing.fits"])
-    assert report["schema_version"] == 1
-    assert report["algorithm_version"] == 1
+    assert report["schema_version"] == 2
+    assert report["algorithm_version"] == 2
     assert report["groups"] == []
     frame = report["frames"][0]
-    assert frame["status"] == "rejected"
+    assert frame["measurement_status"] == "failed"
     assert frame["error"]
     assert "capture_time" in frame
     assert "registration_rms_pixels" in frame
@@ -48,7 +48,7 @@ def test_analysis_successful_project(tmp_path):
         fits.writeto(tmp_path / f"{i}.fits", ((scene+rng.normal(0,10,scene.shape))*scale).astype("float32"), header)
     report = seiza.analyze_project([tmp_path])
     group = report["groups"][0]
-    assert group["accepted_frames"] == 4
+    assert group["depth_frames"] == 4
     assert group["integration_seconds"] == 240
     assert group["common_patches"] == 100
     assert group["curve"][0]["noise"] is None
@@ -69,3 +69,17 @@ def test_analysis_successful_project(tmp_path):
     snr = [f["median_star_snr"] for f in report["frames"]]
     assert min(snr) > 0
     assert max(snr) / min(snr) < 1.1  # Dimensionless despite 100x stored-unit change.
+
+    metrics = seiza.analyze_project([tmp_path], metrics_only=True)
+    assert metrics["options"]["metrics_only"] is True
+    assert metrics["groups"][0]["measured_frames"] == 4
+    assert metrics["groups"][0]["depth_frames"] == 0
+    assert metrics["groups"][0]["reference"] is None
+    assert metrics["groups"][0]["median_normalized_noise"] is None
+    for a, b in zip(report["frames"], metrics["frames"]):
+        assert b["measurement_status"] == "measured"
+        assert b["depth_status"] == "not_requested"
+        for key in ("star_count", "median_hfr", "median_eccentricity", "median_star_snr", "noise", "background"):
+            assert a[key] == b[key]
+    assert metrics["timings"]["registration_seconds"] == 0
+    assert "Depth analysis not requested" in seiza.analysis_html(metrics)

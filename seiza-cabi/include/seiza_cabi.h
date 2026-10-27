@@ -3502,13 +3502,14 @@ bool seiza_live_stacker_light_rotation(const SeizaLiveStacker *stacker,
 /*
  Analyze mono FITS/XISF inputs without stacking. Request: inputs (paths,
  directories or text lists), samples (8192..2097152, default 262144), filter
- (optional), maxFrames (optional). Returns the core report with camelCase
+ (optional), maxFrames (optional), metricsOnly (default false). Returns the core report with camelCase
  keys. Individual frame failures remain in the report. Free with seiza_string_free.
 
  # Safety
  request_json must be NUL-terminated UTF-8. error_out must be null or writable.
  */
-char *seiza_analyze_project_json(const char *request_json, char **error_out);
+char *seiza_analyze_project_json(const char *request_json,
+                                 char **error_out);
 
 /*
  Render the camelCase JSON report returned by seiza_analyze_project_json as

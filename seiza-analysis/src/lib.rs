@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 /// Errors affecting the request as a whole; individual unreadable frames stay in the report.
 #[derive(Debug, thiserror::Error)]
@@ -30,6 +31,8 @@ pub enum Error {
 #[serde(default, deny_unknown_fields)]
 pub struct AnalysisOptions {
     pub samples: usize,
+    /// Measure frames without registration, normalization, sampling or replay.
+    pub metrics_only: bool,
     /// Case-insensitive header filter selection; missing filters are never guessed.
     pub filter: Option<String>,
     /// First N paths after sorting and deduplication, before header filtering.
@@ -39,15 +42,18 @@ impl Default for AnalysisOptions {
     fn default() -> Self {
         Self {
             samples: 262_144,
+            metrics_only: false,
             filter: None,
             max_frames: None,
         }
     }
 }
 
-/// Schema 1. Depth noise uses reference units; frame measurements use native units.
+/// Schema 2. Depth noise uses reference units; frame measurements use native units.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AnalysisReport {
+    #[serde(default)]
+    pub timings: AnalysisTimings,
     pub schema_version: u32,
     pub algorithm_version: u32,
     pub options: AnalysisOptions,
@@ -61,8 +67,14 @@ pub struct FrameReport {
     pub filter: Option<String>,
     pub capture_time: Option<String>,
     pub exposure_seconds: Option<f64>,
-    /// accepted, rejected, or excluded (by the requested filter).
-    pub status: String,
+    /// measured, failed, or excluded by the requested filter. Not a quality verdict.
+    #[serde(alias = "status")]
+    pub measurement_status: String,
+    /// included, unavailable, or not_requested. Empty only in legacy schema-1 reports.
+    #[serde(default)]
+    pub depth_status: String,
+    #[serde(default)]
+    pub depth_error: Option<String>,
     pub error: Option<String>,
     pub star_count: Option<usize>,
     pub median_hfr: Option<f64>,
@@ -81,14 +93,20 @@ pub struct FrameReport {
     pub normalization: Option<String>,
     pub warnings: Vec<String>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct FilterReport {
     pub filter: Option<String>,
-    pub reference: PathBuf,
+    pub reference: Option<PathBuf>,
     pub candidate_patches: usize,
     pub common_patches: usize,
-    pub accepted_frames: usize,
-    /// Medians of available finite measurements from accepted frames only.
+    #[serde(alias = "accepted_frames")]
+    pub depth_frames: usize,
+    #[serde(default)]
+    pub measured_frames: usize,
+    /// Frames contributing to median_normalized_noise (finite noise * gain).
+    #[serde(default)]
+    pub normalized_noise_frames: usize,
+    /// Medians of available finite measurements from all successfully measured frames, independently of depth eligibility.
     /// Noise/background retain native frame units; normalized noise uses noise * gain.
     #[serde(default)]
     pub median_star_count: Option<f64>,
@@ -139,6 +157,28 @@ pub struct DepthPoint {
     pub ideal_noise: Option<f64>,
 }
 
+/// Aggregate wall-clock seconds, including failed attempts. Stages do not overlap.
+/// Total also includes discovery, summary calculation and other overhead; excludes report rendering/writing.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AnalysisTimings {
+    pub read_seconds: f64,
+    /// Conversion, quality detection/PSF fits, native noise/background and metadata.
+    pub measurement_seconds: f64,
+    /// Includes the registrar's own star detection and reference construction.
+    pub registration_seconds: f64,
+    /// Photometric normalization, patch gathering and temporary sample writes.
+    pub sampling_seconds: f64,
+    pub replay_seconds: f64,
+    pub total_seconds: f64,
+}
+
+fn timed<T>(seconds: &mut f64, work: impl FnOnce() -> T) -> T {
+    let start = Instant::now();
+    let value = work();
+    *seconds += start.elapsed().as_secs_f64();
+    value
+}
+
 struct Group {
     report: FilterReport,
     registrar: Registrar,
@@ -158,6 +198,7 @@ struct Group {
 /// Source images are never written. Compact samples spill to temporary disk and
 /// are deleted on return, including errors; image memory does not grow with frame count.
 pub fn analyze(inputs: &[PathBuf], options: &AnalysisOptions) -> Result<AnalysisReport, Error> {
+    let started = Instant::now();
     if !(8192..=2_097_152).contains(&options.samples) {
         return Err(Error::Invalid(
             "samples must be between 8192 and 2097152".into(),
@@ -182,10 +223,19 @@ pub fn analyze(inputs: &[PathBuf], options: &AnalysisOptions) -> Result<Analysis
     if paths.is_empty() {
         return Err(Error::Invalid("no FITS/XISF inputs found".into()));
     }
-    let mut result = AnalysisReport { schema_version: 1, algorithm_version: 1,
+    let mut result = AnalysisReport { schema_version: 2, algorithm_version: 2, timings: AnalysisTimings::default(),
         options: options.clone(), frames: Vec::new(), groups: Vec::new(),
         warnings: vec!["Equal-weight nearest-detector diagnostic. Shared scene structure and shared systematic errors cancel in split noise; seeing, registration and illumination changes may remain. This does not reproduce production weighting or rejection.".into(),
         "Curves follow sorted path order, not capture-time or quality order. Ideal noise assumes independent equal-quality frames; it is not an improvement forecast.".into()] };
+    if options.metrics_only {
+        result.warnings.clear();
+        result.warnings.push(
+            "Metrics-only analysis: no registration, normalization or depth calculation requested."
+                .into(),
+        );
+    }
+    result.warnings.push("Measurement and depth outcomes are processing outcomes, not quality verdicts. Compare combined metrics within one panel/pointing and filter; separate pointings into separate input lists or invocations.".into());
+    let mut measured_groups: BTreeMap<Option<String>, Vec<usize>> = BTreeMap::new();
     let mut groups: BTreeMap<Option<String>, Group> = BTreeMap::new();
     for path in paths {
         let mut row = FrameReport {
@@ -193,7 +243,14 @@ pub fn analyze(inputs: &[PathBuf], options: &AnalysisOptions) -> Result<Analysis
             filter: None,
             capture_time: None,
             exposure_seconds: None,
-            status: "rejected".into(),
+            measurement_status: "failed".into(),
+            depth_status: if options.metrics_only {
+                "not_requested"
+            } else {
+                "unavailable"
+            }
+            .into(),
+            depth_error: None,
             error: None,
             star_count: None,
             median_hfr: None,
@@ -210,30 +267,40 @@ pub fn analyze(inputs: &[PathBuf], options: &AnalysisOptions) -> Result<Analysis
             warnings: Vec::new(),
         };
         let index = result.frames.len();
-        match prepare(&path, options, &mut row) {
+        match prepare(&path, options, &mut row, &mut result.timings) {
             Ok(Some((frame, measured))) => {
                 let key = row.filter.as_ref().map(|s| s.to_lowercase());
+                row.measurement_status = "measured".into();
+                measured_groups.entry(key.clone()).or_default().push(index);
+                if options.metrics_only {
+                    result.frames.push(row);
+                    continue;
+                }
                 if let Some(group) = groups.get_mut(&key) {
-                    match sample_frame(group, &frame, &measured, &mut row) {
+                    match sample_frame(group, &frame, &measured, &mut row, &mut result.timings) {
                         Ok(values) => {
-                            append(group, &values, index)?;
-                            row.status = "accepted".into();
+                            timed(&mut result.timings.sampling_seconds, || {
+                                append(group, &values, index)
+                            })?;
+                            row.depth_status = "included".into();
                         }
-                        Err(error) => row.error = Some(error),
+                        Err(error) => row.depth_error = Some(error),
                     }
                 } else {
-                    match new_group(&frame, measured, &row, options) {
+                    match new_group(&frame, measured, &row, options, &mut result.timings) {
                         Ok(mut group) => {
                             let values = group.reference_samples.clone();
-                            append(&mut group, &values, index)?;
-                            row.status = "accepted".into();
+                            timed(&mut result.timings.sampling_seconds, || {
+                                append(&mut group, &values, index)
+                            })?;
+                            row.depth_status = "included".into();
                             row.gain = Some(1.0);
                             row.offset = Some(0.0);
                             row.normalization = Some("reference".into());
                             row.warnings.push("Reference frame: identity placement is not an independent registration measurement.".into());
                             groups.insert(key, group);
                         }
-                        Err(error) => row.error = Some(error),
+                        Err(error) => row.depth_error = Some(error),
                     }
                 }
             }
@@ -242,16 +309,28 @@ pub fn analyze(inputs: &[PathBuf], options: &AnalysisOptions) -> Result<Analysis
         }
         result.frames.push(row);
     }
-    for (_, mut group) in groups {
-        summarize_health(&group.indices, &result.frames, &mut group.report);
-        annotate_health(&group.indices, &mut result.frames, &group.report);
-        result.groups.push(finish(group, &result.frames)?);
+    for (key, indices) in measured_groups {
+        let mut group = if let Some(depth) = groups.remove(&key) {
+            timed(&mut result.timings.replay_seconds, || {
+                finish(depth, &result.frames)
+            })?
+        } else {
+            FilterReport {
+                filter: result.frames[indices[0]].filter.clone(),
+                ..Default::default()
+            }
+        };
+        group.measured_frames = indices.len();
+        summarize_health(&indices, &result.frames, &mut group);
+        annotate_health(&indices, &mut result.frames, &group);
+        result.groups.push(group);
     }
     if result.groups.is_empty() {
         result
             .warnings
-            .push("No usable reference frames; inspect frame errors and filter selection.".into());
+            .push("No measured frames; inspect measurement errors and filter selection.".into());
     }
+    result.timings.total_seconds = started.elapsed().as_secs_f64();
     Ok(result)
 }
 
@@ -292,102 +371,110 @@ fn prepare(
     path: &Path,
     options: &AnalysisOptions,
     row: &mut FrameReport,
+    timings: &mut AnalysisTimings,
 ) -> Result<Option<(FitsFrame, HocusFocusDetectionResult)>, String> {
-    let raw = seiza_image_io::read_astronomy(path).map_err(|e| e.to_string())?;
-    row.filter = raw
-        .image
-        .header_str("FILTER")
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned);
-    row.capture_time = seiza_image_io::capture_time_from_headers(&raw.image.headers);
-    if options.filter.as_ref().is_some_and(|f| {
-        !row.filter
-            .as_ref()
-            .is_some_and(|v| v.eq_ignore_ascii_case(f))
-    }) {
-        row.status = "excluded".into();
-        return Ok(None);
-    }
-    if raw.image.planes != 1 || raw.image.bayer_pattern_in_storage_order().is_some() {
-        return Err("analysis currently requires monochrome, non-Bayer frames".into());
-    }
-    if raw.image.width < 40 || raw.image.height < 40 {
-        return Err("image too small for analysis (minimum 40 pixels per axis)".into());
-    }
-    let luma = seiza_image_io::luma_u16(&raw.image);
-    let mut measured = seiza_stars::detect_stars_hocus_focus(
-        &luma,
-        raw.image.width,
-        raw.image.height,
-        &HocusFocusParams {
-            psf_type: PSFType::Gaussian,
-            ..Default::default()
-        },
-    );
-    let luma = luma.into_owned();
-    let saturation = raw.image.header_f64("SATURATE").filter(|v| v.is_finite());
-    let mut frame =
-        FitsFrame::from_fits(raw.image, Some(path.to_path_buf())).map_err(|e| e.to_string())?;
-    // The measurement detector works on u16. Its flux must be converted back
-    // to physical units: per-frame min/max scaling otherwise erases transparency.
-    let endpoints = luma
-        .iter()
-        .zip(&frame.image.data)
-        .filter(|(_, v)| v.is_finite());
-    let low = endpoints.clone().min_by_key(|(v, _)| **v);
-    let high = endpoints.max_by_key(|(v, _)| **v);
-    if let (Some((lo, physical_lo)), Some((hi, physical_hi))) = (low, high) {
-        let scale =
-            (f64::from(*physical_hi) - f64::from(*physical_lo)) / f64::from(hi.saturating_sub(*lo));
-        for star in &mut measured.stars {
-            star.flux *= scale;
+    let raw = timed(&mut timings.read_seconds, || {
+        seiza_image_io::read_astronomy(path)
+    })
+    .map_err(|e| e.to_string())?;
+    timed(&mut timings.measurement_seconds, || {
+        row.filter = raw
+            .image
+            .header_str("FILTER")
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        row.capture_time = seiza_image_io::capture_time_from_headers(&raw.image.headers);
+        if options.filter.as_ref().is_some_and(|f| {
+            !row.filter
+                .as_ref()
+                .is_some_and(|v| v.eq_ignore_ascii_case(f))
+        }) {
+            row.measurement_status = "excluded".into();
+            return Ok(None);
         }
-    }
-    row.exposure_seconds = frame.exposure_seconds;
-    row.star_count = Some(measured.stars.len());
-    row.median_hfr = sampling::median(measured.stars.iter().map(|s| s.hfr));
-    row.median_fwhm = sampling::median(measured.stars.iter().map(|s| s.fwhm));
-    row.median_eccentricity = sampling::median(
-        measured
-            .stars
+        if raw.image.planes != 1 || raw.image.bayer_pattern_in_storage_order().is_some() {
+            return Err("analysis currently requires monochrome, non-Bayer frames".into());
+        }
+        if raw.image.width < 40 || raw.image.height < 40 {
+            return Err("image too small for analysis (minimum 40 pixels per axis)".into());
+        }
+        let luma = seiza_image_io::luma_u16(&raw.image);
+        let mut measured = seiza_stars::detect_stars_hocus_focus(
+            &luma,
+            raw.image.width,
+            raw.image.height,
+            &HocusFocusParams {
+                psf_type: PSFType::Gaussian,
+                ..Default::default()
+            },
+        );
+        let luma = luma.into_owned();
+        let saturation = raw.image.header_f64("SATURATE").filter(|v| v.is_finite());
+        let mut frame =
+            FitsFrame::from_fits(raw.image, Some(path.to_path_buf())).map_err(|e| e.to_string())?;
+        // The measurement detector works on u16. Its flux must be converted back
+        // to physical units: per-frame min/max scaling otherwise erases transparency.
+        let endpoints = luma
             .iter()
-            .filter_map(|s| s.psf_model.as_ref().map(|m| m.eccentricity)),
-    );
-    row.median_star_snr = sampling::median(
-        measured
-            .stars
-            .iter()
-            .filter(|s| !s.saturated)
-            .map(|s| s.snr),
-    );
-    row.noise = seiza_stacking::frame_noise(&frame.image)
-        .and_then(|v| v.first().copied())
-        .map(f64::from);
-    row.background = sampling::median(frame.image.data.iter().step_by(16).map(|v| f64::from(*v)));
-    if row.filter.is_none() {
-        row.warnings
-            .push("Missing FILTER: unknown frames may represent different passbands.".into());
-    }
-    if row.exposure_seconds.is_none() {
-        row.warnings
-            .push("Missing positive exposure duration.".into());
-    }
-    if measured.stars.len() < 10 {
-        row.warnings
-            .push("Few measured stars; shape and photometry may be unreliable.".into());
-    }
-    if let Some(limit) = saturation {
-        for v in &mut frame.image.data {
-            if f64::from(*v) >= limit {
-                *v = f32::NAN;
+            .zip(&frame.image.data)
+            .filter(|(_, v)| v.is_finite());
+        let low = endpoints.clone().min_by_key(|(v, _)| **v);
+        let high = endpoints.max_by_key(|(v, _)| **v);
+        if let (Some((lo, physical_lo)), Some((hi, physical_hi))) = (low, high) {
+            let scale = (f64::from(*physical_hi) - f64::from(*physical_lo))
+                / f64::from(hi.saturating_sub(*lo));
+            for star in &mut measured.stars {
+                star.flux *= scale;
             }
         }
-    } else {
-        row.warnings
-            .push("No SATURATE header; detector-sample saturation masking is unavailable.".into());
-    }
-    Ok(Some((frame, measured)))
+        row.exposure_seconds = frame.exposure_seconds;
+        row.star_count = Some(measured.stars.len());
+        row.median_hfr = sampling::median(measured.stars.iter().map(|s| s.hfr));
+        row.median_fwhm = sampling::median(measured.stars.iter().map(|s| s.fwhm));
+        row.median_eccentricity = sampling::median(
+            measured
+                .stars
+                .iter()
+                .filter_map(|s| s.psf_model.as_ref().map(|m| m.eccentricity)),
+        );
+        row.median_star_snr = sampling::median(
+            measured
+                .stars
+                .iter()
+                .filter(|s| !s.saturated)
+                .map(|s| s.snr),
+        );
+        row.noise = seiza_stacking::frame_noise(&frame.image)
+            .and_then(|v| v.first().copied())
+            .map(f64::from);
+        row.background =
+            sampling::median(frame.image.data.iter().step_by(16).map(|v| f64::from(*v)));
+        if row.filter.is_none() {
+            row.warnings
+                .push("Missing FILTER: unknown frames may represent different passbands.".into());
+        }
+        if row.exposure_seconds.is_none() {
+            row.warnings
+                .push("Missing positive exposure duration.".into());
+        }
+        if measured.stars.len() < 10 {
+            row.warnings
+                .push("Few measured stars; shape and photometry may be unreliable.".into());
+        }
+        if let Some(limit) = saturation {
+            for v in &mut frame.image.data {
+                if f64::from(*v) >= limit {
+                    *v = f32::NAN;
+                }
+            }
+        } else {
+            row.warnings.push(
+                "No SATURATE header; detector-sample saturation masking is unavailable.".into(),
+            );
+        }
+        Ok(Some((frame, measured)))
+    })
 }
 
 fn new_group(
@@ -395,51 +482,41 @@ fn new_group(
     measured: HocusFocusDetectionResult,
     row: &FrameReport,
     options: &AnalysisOptions,
+    timings: &mut AnalysisTimings,
 ) -> Result<Group, String> {
-    let registrar = Registrar::new_with_gpu(
-        &frame.image,
-        RegistrationOptions::default(),
-        &GpuOptions::cpu(),
-    )
+    let registrar = timed(&mut timings.registration_seconds, || {
+        Registrar::new_with_gpu(
+            &frame.image,
+            RegistrationOptions::default(),
+            &GpuOptions::cpu(),
+        )
+    })
     .map_err(|e| e.to_string())?;
-    let patches = sampling::patches(frame.image.width, frame.image.height, options.samples);
-    if patches.is_empty() {
-        return Err("image too small for sampling patches".into());
-    }
-    let (reference_samples, common) = sampling::gather(&frame.image, &patches, None);
-    let report = FilterReport {
-        filter: row.filter.clone(),
-        reference: row.path.clone(),
-        candidate_patches: patches.len(),
-        common_patches: 0,
-        accepted_frames: 0,
-        median_star_count: None,
-        median_hfr: None,
-        median_fwhm: None,
-        median_eccentricity: None,
-        median_noise: None,
-        median_background: None,
-        median_star_snr: None,
-        median_normalized_noise: None,
-
-        integration_seconds: 0.0,
-        unknown_exposures: 0,
-        curve: Vec::new(),
-        noise_trend: None,
-        warnings: Vec::new(),
-    };
-    Ok(Group {
-        report,
-        registrar,
-        measured,
-        width: frame.image.width,
-        height: frame.image.height,
-        exposure: frame.exposure_seconds,
-        patches,
-        reference_samples,
-        common,
-        spool: tempfile::tempfile().map_err(|e| e.to_string())?,
-        indices: Vec::new(),
+    timed(&mut timings.sampling_seconds, || {
+        let patches = sampling::patches(frame.image.width, frame.image.height, options.samples);
+        if patches.is_empty() {
+            return Err("image too small for sampling patches".into());
+        }
+        let (reference_samples, common) = sampling::gather(&frame.image, &patches, None);
+        let report = FilterReport {
+            filter: row.filter.clone(),
+            reference: Some(row.path.clone()),
+            candidate_patches: patches.len(),
+            ..Default::default()
+        };
+        Ok(Group {
+            report,
+            registrar,
+            measured,
+            width: frame.image.width,
+            height: frame.image.height,
+            exposure: frame.exposure_seconds,
+            patches,
+            reference_samples,
+            common,
+            spool: tempfile::tempfile().map_err(|e| e.to_string())?,
+            indices: Vec::new(),
+        })
     })
 }
 fn sample_frame(
@@ -447,53 +524,57 @@ fn sample_frame(
     frame: &FitsFrame,
     measured: &HocusFocusDetectionResult,
     row: &mut FrameReport,
+    timings: &mut AnalysisTimings,
 ) -> Result<Vec<f32>, String> {
     if frame.image.width != group.width || frame.image.height != group.height {
         return Err("dimensions differ from this filter's reference".into());
     }
-    let registration = group
-        .registrar
-        .register(&frame.image)
-        .map_err(|e| e.to_string())?;
-    row.matched_stars = Some(registration.matched_stars);
-    row.registration_rms_pixels = Some(registration.rms_error_pixels);
-    let (mut values, valid) = sampling::gather(&frame.image, &group.patches, Some(&registration));
-    let ratios = stellar_ratios(&group.measured, measured, &registration);
-    let gain = if ratios.len() >= 5 {
-        row.normalization = Some("stellar_flux".into());
-        sampling::median(ratios).unwrap()
-    } else {
-        row.warnings.push("Insufficient matched photometry: exposure-ratio (or unity) gain cannot measure transparency changes.".into());
-        row.normalization = Some("exposure_fallback".into());
-        match (group.exposure, frame.exposure_seconds) {
-            (Some(a), Some(b)) => a / b,
-            _ => 1.0,
+    let registration = timed(&mut timings.registration_seconds, || {
+        group.registrar.register(&frame.image)
+    })
+    .map_err(|e| e.to_string())?;
+    timed(&mut timings.sampling_seconds, || {
+        row.matched_stars = Some(registration.matched_stars);
+        row.registration_rms_pixels = Some(registration.rms_error_pixels);
+        let (mut values, valid) =
+            sampling::gather(&frame.image, &group.patches, Some(&registration));
+        let ratios = stellar_ratios(&group.measured, measured, &registration);
+        let gain = if ratios.len() >= 5 {
+            row.normalization = Some("stellar_flux".into());
+            sampling::median(ratios).unwrap()
+        } else {
+            row.warnings.push("Insufficient matched photometry: exposure-ratio (or unity) gain cannot measure transparency changes.".into());
+            row.normalization = Some("exposure_fallback".into());
+            match (group.exposure, frame.exposure_seconds) {
+                (Some(a), Some(b)) => a / b,
+                _ => 1.0,
+            }
+        };
+        if !gain.is_finite() || gain <= 0.0 {
+            return Err("unusable photometric gain".into());
         }
-    };
-    if !gain.is_finite() || gain <= 0.0 {
-        return Err("unusable photometric gain".into());
-    }
-    let offset = sampling::median(
-        values
-            .iter()
-            .zip(&group.reference_samples)
-            .enumerate()
-            .filter(|(i, _)| valid[i / sampling::PIXELS] && group.common[i / sampling::PIXELS])
-            .map(|(_, (v, r))| f64::from(*r) - gain * f64::from(*v)),
-    )
-    .ok_or("no valid sample overlap")?;
-    for v in &mut values {
-        *v = (f64::from(*v) * gain + offset) as f32;
-    }
-    for (i, common) in group.common.iter_mut().enumerate() {
-        *common &= valid[i]
-            && values[i * sampling::PIXELS..(i + 1) * sampling::PIXELS]
+        let offset = sampling::median(
+            values
                 .iter()
-                .all(|v| v.is_finite());
-    }
-    row.gain = Some(gain);
-    row.offset = Some(offset);
-    Ok(values)
+                .zip(&group.reference_samples)
+                .enumerate()
+                .filter(|(i, _)| valid[i / sampling::PIXELS] && group.common[i / sampling::PIXELS])
+                .map(|(_, (v, r))| f64::from(*r) - gain * f64::from(*v)),
+        )
+        .ok_or("no valid sample overlap")?;
+        for v in &mut values {
+            *v = (f64::from(*v) * gain + offset) as f32;
+        }
+        for (i, common) in group.common.iter_mut().enumerate() {
+            *common &= valid[i]
+                && values[i * sampling::PIXELS..(i + 1) * sampling::PIXELS]
+                    .iter()
+                    .all(|v| v.is_finite());
+        }
+        row.gain = Some(gain);
+        row.offset = Some(offset);
+        Ok(values)
+    })
 }
 fn stellar_ratios(
     reference: &HocusFocusDetectionResult,
@@ -533,7 +614,7 @@ fn append(group: &mut Group, values: &[f32], index: usize) -> Result<(), Error> 
 }
 fn finish(mut group: Group, frames: &[FrameReport]) -> Result<FilterReport, Error> {
     group.report.common_patches = group.common.iter().filter(|v| **v).count();
-    group.report.accepted_frames = group.indices.len();
+    group.report.depth_frames = group.indices.len();
     let enough = group.report.common_patches >= 32;
     if !enough {
         group
@@ -608,6 +689,15 @@ fn summarize_health(indices: &[usize], frames: &[FrameReport], group: &mut Filte
     group.median_noise = median(|f| f.noise);
     group.median_background = median(|f| f.background);
     group.median_star_snr = median(|f| f.median_star_snr);
+    group.normalized_noise_frames = indices
+        .iter()
+        .filter(|i| {
+            frames[**i]
+                .noise
+                .zip(frames[**i].gain)
+                .is_some_and(|(n, g)| (n * g).is_finite())
+        })
+        .count();
     group.median_normalized_noise = median(|f| Some(f.noise? * f.gain?));
 }
 
@@ -652,7 +742,7 @@ mod health_tests {
     use super::*;
 
     #[test]
-    fn baselines_use_only_accepted_indices_and_keep_native_units() {
+    fn baselines_use_selected_measurement_population_and_keep_native_units() {
         let mut report = analyze(&["missing.fits".into()], &AnalysisOptions::default()).unwrap();
         let empty = report.frames.pop().unwrap();
         let mut frames = vec![empty; 4];

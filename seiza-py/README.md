@@ -12,15 +12,19 @@ Path("analysis.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
 Path("analysis.html").write_text(seiza.analysis_html(report), encoding="utf-8")
 ```
 
-`analyze_project(inputs, *, samples=262144, filter=None, max_frames=None)`
+`analyze_project(inputs, *, samples=262144, filter=None, max_frames=None, metrics_only=False)`
 accepts paths to files, nonrecursive directories or UTF-8 text lists; relative
 list entries resolve beside the list. `max_frames` limits sorted deduplicated
 paths before header filtering. It releases the GIL during analysis and returns
 a snake_case dictionary with `schema_version`, `algorithm_version`, `options`,
-`frames`, `groups`, and `warnings`. Invalid requests raise `ValueError`;
-individual unreadable, unsupported or unregistrable inputs stay in `frames`
-with `status="rejected"` and an `error`. Inspect `groups` even after a successful
-call, since no usable reference may have been found.
+`frames`, `groups`, `timings`, and `warnings` (schema/algorithm version 2). Invalid requests raise `ValueError`;
+individual inputs stay in `frames` with separate `measurement_status` and
+`depth_status`. Measurement failures use `error`; depth failures use `depth_error`.
+Measured frames contribute to native quality medians even if registration fails.
+`metrics_only=True` skips registration, normalization, sampling and replay;
+normalized noise and depth results remain unavailable. Groups count
+`measured_frames`, `depth_frames` and `normalized_noise_frames` separately.
+Use separate invocations per panel/pointing. No outcome is a quality verdict.
 
 Mono non-Bayer FITS/XISF frames are measured without producing a full stack.
 Per-filter groups contain registration/photometry diagnostics, common-footprint
@@ -1549,7 +1553,7 @@ missing coverage masks whole RGB pixels. Run star separation before stretching.
 
 The result dictionary uses snake_case (`median_star_snr`, `median_normalized_noise`).
 Frames now include median unsaturated-star peak SNR. Filter groups expose
-accepted-frame medians of star count, HFR, FWHM, eccentricity, noise, background
+measured-frame medians of star count, HFR, FWHM, eccentricity, noise, background
 and stellar SNR, plus gain-normalized noise. Raw noise/background retain native
 input units; normalized noise uses reference units. Missing measurements are
 null/None. See [measurement definitions](../seiza-analysis/README.md#measurements-and-physical-meaning)

@@ -8,6 +8,7 @@ fn analysis_writes_failure_diagnostics_and_never_overwrites() {
     let run = || {
         Command::new(env!("CARGO_BIN_EXE_seiza"))
             .arg("analyze")
+            .arg("--metrics-only")
             .arg(dir.path().join("missing.fits"))
             .arg("--json")
             .arg(&json)
@@ -20,7 +21,9 @@ fn analysis_writes_failure_diagnostics_and_never_overwrites() {
     assert!(!first.status.success());
     let bytes = std::fs::read(&json).unwrap();
     let report: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(report["frames"][0]["status"], "rejected");
+    assert_eq!(report["frames"][0]["measurement_status"], "failed");
+    assert_eq!(report["frames"][0]["depth_status"], "not_requested");
+    assert_eq!(report["options"]["metrics_only"], true);
     assert!(
         std::fs::read_to_string(&html)
             .unwrap()

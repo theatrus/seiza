@@ -2,15 +2,16 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use std::path::PathBuf;
 
-/// Return frame measurements and accepted-frame group baselines, including stellar peak SNR.
+/// Return frame measurements and measured-frame group baselines, including stellar peak SNR.
 #[pyfunction]
-#[pyo3(signature = (inputs, *, samples=262_144, filter=None, max_frames=None))]
+#[pyo3(signature = (inputs, *, samples=262_144, filter=None, max_frames=None, metrics_only=false))]
 fn analyze_project(
     py: Python<'_>,
     inputs: Vec<PathBuf>,
     samples: usize,
     filter: Option<String>,
     max_frames: Option<usize>,
+    metrics_only: bool,
 ) -> PyResult<Bound<'_, PyAny>> {
     let report = py
         .detach(|| {
@@ -20,6 +21,7 @@ fn analyze_project(
                     samples,
                     filter,
                     max_frames,
+                    metrics_only,
                 },
             )
         })

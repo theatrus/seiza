@@ -85,7 +85,7 @@ fn independent_noise_falls_with_depth_and_flux_units_survive_scaling() {
     let report = analyze(&[dir.path().to_path_buf()], &options).unwrap();
     assert_eq!(report.groups.len(), 1, "{:#?}", report.frames);
     let group = &report.groups[0];
-    assert_eq!(group.accepted_frames, 12, "{:#?}", report.frames);
+    assert_eq!(group.depth_frames, 12, "{:#?}", report.frames);
     for row in report.frames.iter().skip(1) {
         assert_eq!(
             row.normalization.as_deref(),
@@ -167,10 +167,10 @@ fn discovery_filters_xisf_deduplication_and_failed_frames() {
     .unwrap();
     assert_eq!(report.frames.len(), 4);
     assert_eq!(report.groups.len(), 1);
-    assert_eq!(report.groups[0].accepted_frames, 2, "{:#?}", report.frames);
+    assert_eq!(report.groups[0].depth_frames, 2, "{:#?}", report.frames);
     assert!(report.frames[1].registration_rms_pixels.unwrap() < 0.2);
-    assert_eq!(report.frames[2].status, "rejected");
-    assert_eq!(report.frames[3].status, "excluded");
+    assert_eq!(report.frames[2].measurement_status, "failed");
+    assert_eq!(report.frames[3].measurement_status, "excluded");
     assert!(report.frames[2].error.is_some());
 }
 
@@ -188,7 +188,7 @@ fn invalid_requests_and_unreadable_inputs_are_distinct() {
         .is_err()
     );
     let report = analyze(&["missing.fits".into()], &AnalysisOptions::default()).unwrap();
-    assert_eq!(report.frames[0].status, "rejected");
+    assert_eq!(report.frames[0].measurement_status, "failed");
     assert!(report.groups.is_empty());
 }
 
@@ -224,7 +224,7 @@ fn common_footprint_excludes_every_frames_invalid_patches() {
     }
     let report = analyze(&[dir.path().to_path_buf()], &AnalysisOptions::default()).unwrap();
     let group = &report.groups[0];
-    assert_eq!(group.accepted_frames, 4, "{:#?}", report.frames);
+    assert_eq!(group.depth_frames, 4, "{:#?}", report.frames);
     assert_eq!(group.candidate_patches, 100);
     assert_eq!(group.common_patches, 98);
     assert!(group.curve[1].noise.is_some());
@@ -282,10 +282,135 @@ fn small_color_bayer_and_mismatched_inputs_are_reported() {
         report
             .frames
             .iter()
-            .filter(|f| f.status == "rejected")
+            .filter(|f| f.measurement_status == "failed")
             .count(),
-        4
+        3
     );
-    assert_eq!(report.groups[0].accepted_frames, 1);
+    assert_eq!(report.groups[0].measured_frames, 2);
+    assert_eq!(report.groups[0].depth_frames, 1);
     assert!(report.groups[0].curve[0].noise.is_none());
+}
+
+#[test]
+fn metrics_are_independent_of_registration_and_depth_admission() {
+    let dir = tempfile::tempdir().unwrap();
+    write_frame(
+        &dir.path().join("0.fits"),
+        7,
+        (0.0, 0.0),
+        1.0,
+        Some("Ha"),
+        400,
+    );
+    // Valid measurements, incompatible with this depth reference's dimensions.
+    write_frame(
+        &dir.path().join("1.fits"),
+        8,
+        (0.0, 0.0),
+        1.0,
+        Some("Ha"),
+        384,
+    );
+    let inputs = vec![dir.path().to_path_buf()];
+    let full = analyze(&inputs, &AnalysisOptions::default()).unwrap();
+    let metrics = analyze(
+        &inputs,
+        &AnalysisOptions {
+            metrics_only: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(full.schema_version, 2);
+    assert_eq!(full.frames[1].measurement_status, "measured");
+    assert_eq!(full.frames[1].depth_status, "unavailable");
+    assert!(full.frames[1].error.is_none());
+    assert!(
+        full.frames[1]
+            .depth_error
+            .as_ref()
+            .unwrap()
+            .contains("dimensions")
+    );
+    assert_eq!(full.groups[0].measured_frames, 2);
+    assert_eq!(full.groups[0].depth_frames, 1);
+    assert_eq!(full.groups[0].normalized_noise_frames, 1);
+    assert_eq!(metrics.groups[0].measured_frames, 2);
+    assert_eq!(metrics.groups[0].depth_frames, 0);
+    assert!(metrics.groups[0].reference.is_none());
+    assert!(metrics.groups[0].curve.is_empty());
+    assert!(metrics.groups[0].median_normalized_noise.is_none());
+    for (a, b) in full.frames.iter().zip(&metrics.frames) {
+        let a = serde_json::to_value(a).unwrap();
+        let b = serde_json::to_value(b).unwrap();
+        for key in [
+            "star_count",
+            "median_hfr",
+            "median_fwhm",
+            "median_eccentricity",
+            "median_star_snr",
+            "noise",
+            "background",
+        ] {
+            assert_eq!(a[key], b[key], "{key}");
+        }
+        assert_eq!(b["depth_status"], "not_requested");
+        assert!(b["gain"].is_null());
+        assert!(b["matched_stars"].is_null());
+    }
+    let group = &metrics.groups[0];
+    assert_eq!(full.groups[0].median_hfr, group.median_hfr);
+    assert_eq!(
+        group.median_hfr.unwrap(),
+        metrics
+            .frames
+            .iter()
+            .map(|f| f.median_hfr.unwrap())
+            .sum::<f64>()
+            / 2.0
+    );
+    assert_eq!(metrics.timings.registration_seconds, 0.0);
+    assert_eq!(metrics.timings.sampling_seconds, 0.0);
+    assert_eq!(metrics.timings.replay_seconds, 0.0);
+    assert!(metrics.timings.read_seconds > 0.0);
+    assert!(metrics.timings.measurement_seconds > 0.0);
+    let t = &full.timings;
+    assert!(
+        t.total_seconds
+            >= t.read_seconds
+                + t.measurement_seconds
+                + t.registration_seconds
+                + t.sampling_seconds
+                + t.replay_seconds
+    );
+}
+
+#[test]
+fn measurements_survive_when_no_depth_reference_can_be_built() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("flat.fits");
+    seiza_image_io::save_f32(
+        &path,
+        40,
+        40,
+        F32ImageData::Mono(&[1000.0; 1600]),
+        &Default::default(),
+    )
+    .unwrap();
+    for metrics_only in [false, true] {
+        let report = analyze(
+            std::slice::from_ref(&path),
+            &AnalysisOptions {
+                metrics_only,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(report.frames[0].measurement_status, "measured");
+        assert_eq!(report.frames[0].star_count, Some(0));
+        assert_eq!(report.groups[0].measured_frames, 1);
+        assert_eq!(report.groups[0].median_star_count, Some(0.0));
+        assert_eq!(report.groups[0].median_hfr, None);
+        assert_eq!(report.groups[0].depth_frames, 0);
+    }
 }

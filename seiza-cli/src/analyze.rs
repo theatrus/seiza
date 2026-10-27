@@ -14,6 +14,9 @@ pub struct AnalyzeArgs {
     /// Detector samples per frame, rounded down to 256-sample patches
     #[arg(long, default_value_t = 262_144)]
     samples: usize,
+    /// Measure frame quality without registration or noise-depth analysis
+    #[arg(long)]
+    metrics_only: bool,
     /// First N sorted, deduplicated paths before header filtering
     #[arg(long)]
     max_frames: Option<usize>,
@@ -36,6 +39,7 @@ pub fn run(args: AnalyzeArgs) -> Result<()> {
         &args.inputs,
         &seiza_analysis::AnalysisOptions {
             samples: args.samples,
+            metrics_only: args.metrics_only,
             filter: args.filter,
             max_frames: args.max_frames,
         },

@@ -22,11 +22,30 @@ path identity, not inode identity). `max_frames` limits that list **before**
 header-based `filter` selection. Filtering and grouping ignore case. Missing
 filters form an explicitly warned unknown group; passbands are never inferred.
 
-Each group uses its first readable frame with sufficient registration stars
+In full mode, each group uses its first readable frame with sufficient registration stars
 as its reference. Unreadable, unsupported, wrong-sized and unregistrable frames
-remain in the report with errors. Excluded filter frames also remain. A report
-can contain no accepted frames; library callers must inspect `groups`/statuses.
-The CLI writes that report but returns a failure exit status.
+remain in the report with errors. Excluded filter frames also remain. Quality measurements survive failed registration or depth admission. A report
+can contain no measured frames; library callers must inspect `groups` and
+measurement outcomes. The CLI writes that report but returns a failure exit
+status only when no frames were measured. Missing depth curves are diagnostic
+outcomes, not a command failure or quality verdict.
+
+## Metrics-only mode and comparison groups
+
+`seiza analyze panel-1.txt --metrics-only` (Python `metrics_only=True`, C JSON
+`metricsOnly: true`) performs reading, quality detection/PSF fits and native
+noise/background measurement. It skips registration, matched photometry,
+patch gathering, sample spooling and replay. Full analysis remains the default.
+The same input produces identical per-frame quality measurements in both modes.
+Registration fields, gain/offset, normalized noise and depth curves are unavailable
+in metrics-only mode. `samples` retains its normal validation but is not used.
+
+Use **one panel/pointing per input list or invocation**, then compare within each
+filter. No automatic pointing discovery is attempted. Different fields can have
+different star populations, even without registration. SNR, star count or any
+single metric is not a quality ranking; use combined evidence and caller-owned
+thresholds. SNR uses detector saturation screening, not a guaranteed physical
+full-well threshold when saturation metadata is absent.
 
 ## Measurements and physical meaning
 
@@ -53,9 +72,9 @@ header invalidate the whole patch. Without that header, saturation masking is
 unavailable and reported. Finite hot/dead pixels are not automatically repaired.
 
 Compact f32 samples are spooled to temporary files, then replayed using only
-patches valid in **every** accepted frame in their filter. This fixes the
+patches valid in **every** depth-included frame in their filter. This fixes the
 footprint across all depths and bounds memory independently of frame count.
-Disk use is approximately `4 × actual_samples × accepted_frames` bytes, across
+Disk use is approximately `4 × actual_samples × depth_frames` bytes, across
 all groups. Temporary files are automatically removed, including on errors.
 No persistent cache or full intermediate resampled image is created.
 
@@ -82,8 +101,8 @@ Advisory HFR/star-count/noise warnings never automatically exclude a frame.
 
 Per-filter baselines include `median_star_count`, `median_hfr`, `median_fwhm`,
 `median_eccentricity`, `median_noise`, `median_background`, and `median_star_snr`.
-These are medians of finite, available per-frame values among accepted frames
-only, including groups of one or two frames; unavailable values are null.
+These are medians of finite, available per-frame values among successfully measured frames
+only, independently of depth admission, including groups of one or two frames; unavailable values are null.
 Noise and background use native frame units, so their raw medians require
 consistent input units. `median_normalized_noise` instead summarizes `noise *
 gain` in reference units and is the baseline used by the noise advisory.
@@ -95,18 +114,46 @@ working-scale noise estimate. It is dimensionless peak SNR, not integrated-flux
 SNR, the frame-noise estimator, or stack SNR. Detection thresholds and changing
 star populations affect it; compare it alongside star count, shape and matching.
 Group shape baselines support caller-owned guiding/focus outlier thresholds;
-they do not classify causes or automatically reject frames. New optional fields
-can be absent when rendering older schema-1 reports.
+they do not classify causes or automatically reject frames. Older schema-1 reports remain renderable.
 
 ## Reports and hosts
 
-JSON carries `schema_version = 1` and `algorithm_version = 1`; changes to
-measurement semantics must increment the latter. Top-level keys are `options`,
-`frames`, `groups`, and `warnings`, in addition to the version fields. Frame
-statuses are `accepted`, `rejected`, or `excluded`. Null means unavailable,
-not zero. A group's `curve[].frame_index` indexes the top-level frame list.
-Each group includes reference, footprint counts, accepted count, known seconds,
-unknown-exposure count, curve, optional noise trend and warnings.
+New JSON carries `schema_version = 2` and `algorithm_version = 2`. Version 2
+separates processing outcomes and changes the quality-baseline population;
+the full-mode depth calculation itself is unchanged. Top-level keys are
+`options`, `frames`, `groups`, `timings`, `warnings`, and the version fields.
+
+- `frames[].measurement_status`: `measured`, `failed`, or `excluded` by filter.
+  `error` describes measurement failure.
+- `frames[].depth_status`: `included`, `unavailable`, or `not_requested`.
+  `depth_error` explains failure after successful measurement; if measurement
+  failed or was excluded, inspect its outcome/error instead.
+- Neither outcome is a quality verdict. Null means unavailable, not zero.
+- Groups exist whenever a filter has measured frames, even without a usable
+  reference. `measured_frames` counts that population; `depth_frames` counts
+  frames contributing to depth; `reference` is null without a depth reference.
+- Native quality medians include all measured frames with a finite value for
+  that metric. Missing measurements are omitted, not replaced with zero.
+  `normalized_noise_frames` counts finite `noise * gain` contributions to
+  `median_normalized_noise`; this narrower population requires normalization.
+- `integration_seconds`, `unknown_exposures`, footprint counts, curves and trend
+  describe **depth-included frames**, so counts are zero and curves empty when
+  depth was not requested. A curve's `frame_index` indexes the top-level frames.
+
+`timings` reports aggregate wall-clock seconds: `read_seconds`,
+`measurement_seconds`, `registration_seconds`, `sampling_seconds`,
+`replay_seconds`, `total_seconds`. Measurement includes conversion, detection,
+PSF fits and native noise/background; registration includes its separate star
+detection and reference setup; sampling includes normalization and temporary
+sample writes. Failed attempts count. Stage timings do not overlap; total also
+includes discovery, group summaries and overhead, but excludes rendering/writing
+reports. Skipped stages are exactly zero. These are measurements, not performance
+promises; compare release builds on the same inputs and machine.
+
+The renderer still accepts schema-1 reports, interprets their legacy statuses
+as depth outcomes, labels their older baseline population, and does not invent
+missing timings. New consumers should use schema 2's explicit fields rather than
+schema 1's ambiguous `status` or `accepted_frames`.
 
 HTML embeds all data, CSS and JavaScript and uses no network or external assets.
 It has filter selection, frame-count/integration axes, capture-time health plots,
@@ -125,11 +172,11 @@ it does not claim identical outputs or Smokstak's persistent cache and review UI
 ## Real-data example: small SHO dataset
 
 The MonkeyJelly sample (IC 443 / Sh2-249, ASI2600MM Pro, 6248×4176) contains
-10×180-second frames in each of H, O and S. All 30 were accepted, each group
+10×180-second frames in each of H, O and S. All 30 were measured and included in depth analysis; each group
 retained all 1024 candidate patches, and all 27 non-reference frames used
 stellar-flux normalization. No full stack was produced.
 
-| Filter | Accepted | Known exposure | Noise at N=2 | Noise at N=10 | N=10 / ideal |
+| Filter | Depth-included | Known exposure | Noise at N=2 | Noise at N=10 | N=10 / ideal |
 |---|---:|---:|---:|---:|---:|
 | H | 10 | 1800 s | 117.85 | 51.54 | 0.978 |
 | O | 10 | 1800 s | 92.73 | 42.52 | 1.025 |
@@ -144,3 +191,32 @@ which the report flags rather than inventing a detector saturation threshold.
 ![H filter noise-depth curve](../docs/images/analysis/small-sho-depth.jpg)
 
 ![H filter HFR versus capture time](../docs/images/analysis/small-sho-health.jpg)
+
+## Metrics-only timing comparison
+
+Ran both modes sequentially in a release build on the same local small SHO
+MonkeyJelly dataset: 30 mono ASI2600MM Pro frames, 6248×4176, ten 180-second
+exposures per filter. No concurrent test/build jobs ran during the comparison.
+All 30 per-frame quality measurements and all native filter medians matched
+exactly across modes. Full-mode curves also matched the earlier report exactly:
+each filter retained 1024 common patches, with all 27 non-reference frames using
+stellar-flux normalization.
+
+| Stage (seconds) | Full | Metrics-only |
+|---|---:|---:|
+| Read | 0.39 | 0.39 |
+| Quality measurement | 350.80 | 352.87 |
+| Registration (including its detector) | 2.32 | 0.00 |
+| Normalization / sampling / temporary writes | 1.49 | 0.00 |
+| Replay | 0.15 | 0.00 |
+| Total | 355.28 | 353.39 |
+
+This single paired run shows essentially unchanged runtime: quality measurement
+accounts for about 99% of the full run. Metrics-only removes depth work and its
+eligibility constraints; it does **not** promise a dramatic speedup. Stage
+measurements include detection/PSF fitting in the quality-measurement bucket,
+not a separate pure-detector benchmark. Other datasets need their own timings.
+The next performance investigation would target quality measurement, not assume
+registration is the bottleneck. Source images were not modified.
+
+![SHO metrics-only report](../docs/images/analysis/small-sho-metrics.jpg)

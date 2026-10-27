@@ -7,6 +7,8 @@ struct AnalysisRequest {
     #[serde(default = "default_samples")]
     samples: usize,
     #[serde(default)]
+    metrics_only: bool,
+    #[serde(default)]
     filter: Option<String>,
     #[serde(default)]
     max_frames: Option<usize>,
@@ -50,7 +52,7 @@ fn keys(value: serde_json::Value, camel: bool) -> serde_json::Value {
 
 /// Analyze mono FITS/XISF inputs without stacking. Request: inputs (paths,
 /// directories or text lists), samples (8192..2097152, default 262144), filter
-/// (optional), maxFrames (optional). Returns the core report with camelCase
+/// (optional), maxFrames (optional), metricsOnly (default false). Returns the core report with camelCase
 /// keys. Individual frame failures remain in the report. Free with seiza_string_free.
 ///
 /// # Safety
@@ -67,6 +69,7 @@ pub unsafe extern "C" fn seiza_analyze_project_json(
             &request.inputs,
             &seiza_analysis::AnalysisOptions {
                 samples: request.samples,
+                metrics_only: request.metrics_only,
                 filter: request.filter,
                 max_frames: request.max_frames,
             },
@@ -119,14 +122,17 @@ mod tests {
             assert!(seiza_analyze_project_json(bad.as_ptr(), &mut error).is_null());
             assert!(!error.is_null());
             seiza_string_free(error);
-            let request = CString::new(r#"{"inputs":["does-not-exist.fits"]}"#).unwrap();
+            let request =
+                CString::new(r#"{"inputs":["does-not-exist.fits"],"metricsOnly":true}"#).unwrap();
             let json = seiza_analyze_project_json(request.as_ptr(), &mut error);
             assert!(error.is_null());
             assert!(!json.is_null());
             let value: serde_json::Value =
                 serde_json::from_str(CStr::from_ptr(json).to_str().unwrap()).unwrap();
-            assert_eq!(value["schemaVersion"], 1);
-            assert_eq!(value["frames"][0]["status"], "rejected");
+            assert_eq!(value["schemaVersion"], 2);
+            assert_eq!(value["frames"][0]["measurementStatus"], "failed");
+            assert_eq!(value["frames"][0]["depthStatus"], "not_requested");
+            assert_eq!(value["timings"]["registrationSeconds"], 0.0);
             let html = seiza_analysis_html(json, &mut error);
             assert!(!html.is_null());
             assert!(error.is_null());
