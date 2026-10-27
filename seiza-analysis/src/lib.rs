@@ -45,7 +45,7 @@ impl Default for AnalysisOptions {
     }
 }
 
-/// Schema 1. Values are in each filter reference's stored physical sample units.
+/// Schema 1. Depth noise uses reference units; frame measurements use native units.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AnalysisReport {
     pub schema_version: u32,
@@ -68,6 +68,10 @@ pub struct FrameReport {
     pub median_hfr: Option<f64>,
     pub median_fwhm: Option<f64>,
     pub median_eccentricity: Option<f64>,
+    /// Median detector (peak - local background) / detector noise, unsaturated stars only.
+    /// Dimensionless peak SNR, not integrated-flux or stack SNR.
+    #[serde(default)]
+    pub median_star_snr: Option<f64>,
     pub background: Option<f64>,
     pub noise: Option<f64>,
     pub matched_stars: Option<usize>,
@@ -84,6 +88,25 @@ pub struct FilterReport {
     pub candidate_patches: usize,
     pub common_patches: usize,
     pub accepted_frames: usize,
+    /// Medians of available finite measurements from accepted frames only.
+    /// Noise/background retain native frame units; normalized noise uses noise * gain.
+    #[serde(default)]
+    pub median_star_count: Option<f64>,
+    #[serde(default)]
+    pub median_hfr: Option<f64>,
+    #[serde(default)]
+    pub median_fwhm: Option<f64>,
+    #[serde(default)]
+    pub median_eccentricity: Option<f64>,
+    #[serde(default)]
+    pub median_noise: Option<f64>,
+    #[serde(default)]
+    pub median_background: Option<f64>,
+    #[serde(default)]
+    pub median_star_snr: Option<f64>,
+    #[serde(default)]
+    pub median_normalized_noise: Option<f64>,
+
     pub integration_seconds: f64,
     pub unknown_exposures: usize,
     pub curve: Vec<DepthPoint>,
@@ -176,6 +199,7 @@ pub fn analyze(inputs: &[PathBuf], options: &AnalysisOptions) -> Result<Analysis
             median_hfr: None,
             median_fwhm: None,
             median_eccentricity: None,
+            median_star_snr: None,
             background: None,
             noise: None,
             matched_stars: None,
@@ -218,8 +242,9 @@ pub fn analyze(inputs: &[PathBuf], options: &AnalysisOptions) -> Result<Analysis
         }
         result.frames.push(row);
     }
-    for (_, group) in groups {
-        annotate_health(&group.indices, &mut result.frames);
+    for (_, mut group) in groups {
+        summarize_health(&group.indices, &result.frames, &mut group.report);
+        annotate_health(&group.indices, &mut result.frames, &group.report);
         result.groups.push(finish(group, &result.frames)?);
     }
     if result.groups.is_empty() {
@@ -329,6 +354,13 @@ fn prepare(
             .iter()
             .filter_map(|s| s.psf_model.as_ref().map(|m| m.eccentricity)),
     );
+    row.median_star_snr = sampling::median(
+        measured
+            .stars
+            .iter()
+            .filter(|s| !s.saturated)
+            .map(|s| s.snr),
+    );
     row.noise = seiza_stacking::frame_noise(&frame.image)
         .and_then(|v| v.first().copied())
         .map(f64::from);
@@ -381,6 +413,15 @@ fn new_group(
         candidate_patches: patches.len(),
         common_patches: 0,
         accepted_frames: 0,
+        median_star_count: None,
+        median_hfr: None,
+        median_fwhm: None,
+        median_eccentricity: None,
+        median_noise: None,
+        median_background: None,
+        median_star_snr: None,
+        median_normalized_noise: None,
+
         integration_seconds: 0.0,
         unknown_exposures: 0,
         curve: Vec::new(),
@@ -556,21 +597,27 @@ fn finish(mut group: Group, frames: &[FrameReport]) -> Result<FilterReport, Erro
     Ok(group.report)
 }
 
-fn annotate_health(indices: &[usize], frames: &mut [FrameReport]) {
+fn summarize_health(indices: &[usize], frames: &[FrameReport], group: &mut FilterReport) {
+    let median = |metric: fn(&FrameReport) -> Option<f64>| {
+        sampling::median(indices.iter().filter_map(|i| metric(&frames[*i])))
+    };
+    group.median_star_count = median(|f| f.star_count.map(|v| v as f64));
+    group.median_hfr = median(|f| f.median_hfr);
+    group.median_fwhm = median(|f| f.median_fwhm);
+    group.median_eccentricity = median(|f| f.median_eccentricity);
+    group.median_noise = median(|f| f.noise);
+    group.median_background = median(|f| f.background);
+    group.median_star_snr = median(|f| f.median_star_snr);
+    group.median_normalized_noise = median(|f| Some(f.noise? * f.gain?));
+}
+
+fn annotate_health(indices: &[usize], frames: &mut [FrameReport], group: &FilterReport) {
     if indices.len() < 3 {
         return;
     }
-    let hfr = sampling::median(indices.iter().filter_map(|i| frames[*i].median_hfr));
-    let stars = sampling::median(
-        indices
-            .iter()
-            .filter_map(|i| frames[*i].star_count.map(|v| v as f64)),
-    );
-    let noise = sampling::median(
-        indices
-            .iter()
-            .filter_map(|i| Some(frames[*i].noise? * frames[*i].gain?)),
-    );
+    let hfr = group.median_hfr;
+    let stars = group.median_star_count;
+    let noise = group.median_normalized_noise;
     for &i in indices {
         let f = &mut frames[i];
         if hfr
@@ -597,5 +644,50 @@ fn annotate_health(indices: &[usize], frames: &mut [FrameReport]) {
                     .into(),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod health_tests {
+    use super::*;
+
+    #[test]
+    fn baselines_use_only_accepted_indices_and_keep_native_units() {
+        let mut report = analyze(&["missing.fits".into()], &AnalysisOptions::default()).unwrap();
+        let empty = report.frames.pop().unwrap();
+        let mut frames = vec![empty; 4];
+        for (i, frame) in frames.iter_mut().enumerate() {
+            frame.median_hfr = Some([2.0, 4.0, 20.0, 999.0][i]);
+            frame.star_count = Some([100, 80, 10, 999][i]);
+            frame.noise = Some([10.0, 0.1, 40.0, 999.0][i]);
+            frame.gain = Some([1.0, 100.0, 1.0, 1.0][i]);
+            frame.median_eccentricity = Some([0.2, 0.4, 0.9, 0.99][i]);
+        }
+        frames[0].median_star_snr = Some(12.0);
+        frames[1].median_star_snr = Some(18.0);
+        let mut group: FilterReport = serde_json::from_value(serde_json::json!({
+            "filter":null,"reference":"missing.fits","candidate_patches":0,
+            "common_patches":0,"accepted_frames":3,"integration_seconds":0,
+            "unknown_exposures":3,"curve":[],"noise_trend":null,"warnings":[]
+        }))
+        .unwrap();
+        // Missing additive fields from older schema-1 reports remain readable.
+        assert_eq!(group.median_hfr, None);
+        summarize_health(&[0, 1, 2], &frames, &mut group);
+        assert_eq!(group.median_hfr, Some(4.0));
+        assert_eq!(group.median_star_count, Some(80.0));
+        assert_eq!(group.median_eccentricity, Some(0.4));
+        assert_eq!(group.median_noise, Some(10.0));
+        assert_eq!(group.median_normalized_noise, Some(10.0));
+        assert_eq!(group.median_star_snr, Some(15.0));
+        assert_eq!(group.median_background, None);
+        annotate_health(&[0, 1, 2], &mut frames, &group);
+        assert_eq!(frames[2].warnings.len(), 3);
+        assert!(frames[3].warnings.is_empty());
+        summarize_health(&[1], &frames, &mut group);
+        assert_eq!(group.median_noise, Some(0.1));
+        assert_eq!(group.median_normalized_noise, Some(10.0));
+        summarize_health(&[], &frames, &mut group);
+        assert_eq!(group.median_star_count, None);
     }
 }

@@ -79,6 +79,25 @@ the distribution core rather than total outlier energy. This diagnostic does
 not reproduce production weighting, interpolation, calibration or rejection.
 Advisory HFR/star-count/noise warnings never automatically exclude a frame.
 
+
+Per-filter baselines include `median_star_count`, `median_hfr`, `median_fwhm`,
+`median_eccentricity`, `median_noise`, `median_background`, and `median_star_snr`.
+These are medians of finite, available per-frame values among accepted frames
+only, including groups of one or two frames; unavailable values are null.
+Noise and background use native frame units, so their raw medians require
+consistent input units. `median_normalized_noise` instead summarizes `noise *
+gain` in reference units and is the baseline used by the noise advisory.
+HFR and star-count advisories use the emitted group medians too.
+
+Each frame's `median_star_snr` is the median unsaturated measured star's
+`(peak - local background) / detector noise`, using HocusFocus's existing
+working-scale noise estimate. It is dimensionless peak SNR, not integrated-flux
+SNR, the frame-noise estimator, or stack SNR. Detection thresholds and changing
+star populations affect it; compare it alongside star count, shape and matching.
+Group shape baselines support caller-owned guiding/focus outlier thresholds;
+they do not classify causes or automatically reject frames. New optional fields
+can be absent when rendering older schema-1 reports.
+
 ## Reports and hosts
 
 JSON carries `schema_version = 1` and `algorithm_version = 1`; changes to

@@ -107,7 +107,8 @@ mod tests {
     use super::*;
     #[test]
     fn key_translation_roundtrips_without_touching_values() {
-        let v = serde_json::json!({"schema_version":1,"frames":[{"capture_time":"A_B", "path":"my_file.FITS"}]});
+        let v = serde_json::json!({"schema_version":1,"frames":[{"capture_time":"A_B", "path":"my_file.FITS", "median_star_snr":12.0}]});
+        assert_eq!(keys(v.clone(), true)["frames"][0]["medianStarSnr"], 12.0);
         assert_eq!(keys(keys(v.clone(), true), false), v);
     }
     #[test]

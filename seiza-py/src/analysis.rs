@@ -2,6 +2,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use std::path::PathBuf;
 
+/// Return frame measurements and accepted-frame group baselines, including stellar peak SNR.
 #[pyfunction]
 #[pyo3(signature = (inputs, *, samples=262_144, filter=None, max_frames=None))]
 fn analyze_project(

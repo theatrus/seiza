@@ -26,6 +26,9 @@ def analyze_project(
     """Analyze mono FITS/XISF files, directories, or text lists; return schema-1 diagnostics.
 
     Keys: schema_version, algorithm_version, options, frames, groups, warnings.
+    Frames include median_star_snr (dimensionless stellar peak SNR). Groups
+    include accepted-frame metric medians; median_noise is native noise and
+    median_normalized_noise is noise * gain in reference units.
     Individual file errors stay in frames; invalid requests raise ValueError.
     """
     ...

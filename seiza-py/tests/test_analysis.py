@@ -55,3 +55,17 @@ def test_analysis_successful_project(tmp_path):
     assert group["curve"][1]["noise"] > 0
     assert report["frames"][1]["gain"] == pytest.approx(100, rel=0.03)
     assert "Frame health" in seiza.analysis_html(report)
+
+    for metric, frame_key in [
+        ("star_count", "star_count"), ("hfr", "median_hfr"),
+        ("fwhm", "median_fwhm"), ("eccentricity", "median_eccentricity"),
+        ("noise", "noise"), ("background", "background"),
+        ("star_snr", "median_star_snr"),
+    ]:
+        values = [f[frame_key] for f in report["frames"] if f[frame_key] is not None]
+        assert group["median_" + metric] == pytest.approx(float(np.median(values)))
+    assert group["median_normalized_noise"] == pytest.approx(
+        float(np.median([f["noise"] * f["gain"] for f in report["frames"]])))
+    snr = [f["median_star_snr"] for f in report["frames"]]
+    assert min(snr) > 0
+    assert max(snr) / min(snr) < 1.1  # Dimensionless despite 100x stored-unit change.

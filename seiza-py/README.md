@@ -1544,3 +1544,13 @@ formula, without PixInsight's optional saturation/SCNR processes.
 `screen_rgb_star_layer(nebula, stars, reduction=0)` screens the display layer over
 a display nebula with optional linked star reduction [0,1]. Inputs are unchanged;
 missing coverage masks whole RGB pixels. Run star separation before stretching.
+
+### Analysis baselines and stellar SNR
+
+The result dictionary uses snake_case (`median_star_snr`, `median_normalized_noise`).
+Frames now include median unsaturated-star peak SNR. Filter groups expose
+accepted-frame medians of star count, HFR, FWHM, eccentricity, noise, background
+and stellar SNR, plus gain-normalized noise. Raw noise/background retain native
+input units; normalized noise uses reference units. Missing measurements are
+null/None. See [measurement definitions](../seiza-analysis/README.md#measurements-and-physical-meaning)
+for population, units and limitations. Thresholds and rejection remain caller-owned.

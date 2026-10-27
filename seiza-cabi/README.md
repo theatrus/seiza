@@ -989,3 +989,13 @@ error_out)` screens it over a display nebula in place with optional linked
 reduction [0,1]. All buffers contain width*height*3 interleaved floats. Shared
 source normalization preserves RGB scale; inputs remain linear and unchanged.
 Errors leave writable buffers unchanged. Neither call runs an external tool.
+
+### Analysis baselines and stellar SNR
+
+The JSON response uses camelCase (`medianStarSnr`, `medianNormalizedNoise`).
+Frames now include median unsaturated-star peak SNR. Filter groups expose
+accepted-frame medians of star count, HFR, FWHM, eccentricity, noise, background
+and stellar SNR, plus gain-normalized noise. Raw noise/background retain native
+input units; normalized noise uses reference units. Missing measurements are
+null/None. See [measurement definitions](../seiza-analysis/README.md#measurements-and-physical-meaning)
+for population, units and limitations. Thresholds and rejection remain caller-owned.

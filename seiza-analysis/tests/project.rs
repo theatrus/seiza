@@ -93,6 +93,17 @@ fn independent_noise_falls_with_depth_and_flux_units_survive_scaling() {
             "{row:?}"
         );
     }
+    let snr: Vec<_> = report
+        .frames
+        .iter()
+        .map(|f| f.median_star_snr.unwrap())
+        .collect();
+    let low = snr.iter().copied().reduce(f64::min).unwrap();
+    let high = snr.iter().copied().reduce(f64::max).unwrap();
+    assert!(
+        low > 0.0 && high / low < 1.1,
+        "peak SNR should survive unit scaling: {snr:?}"
+    );
     let gain = report.frames[1].gain.unwrap();
     assert!((gain / 1000.0 - 1.0).abs() < 0.03, "gain {gain}");
     assert!(group.curve[0].noise.is_none());
