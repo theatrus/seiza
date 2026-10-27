@@ -33,7 +33,7 @@ def test_resolved_recipes_determine_sessions_and_exposure(case):
 
 def test_recipe_exposure_survives_native_master_building(tmp_path):
     import numpy as np
-    from astropy.io import fits
+    fits = pytest.importorskip("astropy.io.fits")
 
     case = json.loads((FIXTURES / 'recipes.json').read_text())['cases'][1]
     request = copy.deepcopy(case['request'])
