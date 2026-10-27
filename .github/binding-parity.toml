@@ -544,6 +544,8 @@ seiza_live_stacker_open_fits = "LiveStacker.__init__"
 seiza_live_stacker_open_fits_with_reference_image = "LiveStacker.open_fits_with_reference_image"
 seiza_live_stacker_open_fits_with_reference_image_candidates = "LiveStacker.open_fits_with_reference_image_candidates"
 seiza_live_stacker_open_fits_expanding = "LiveStacker.open_fits_expanding"
+seiza_live_stacker_open_fits_joint_canvas = "LiveStacker.open_fits_joint_canvas"
+seiza_live_stacker_open_fits_on_canvas = "LiveStacker.open_fits_on_canvas"
 seiza_live_stacker_expanded_lens_json = "LiveStacker.expanded_lens"
 seiza_live_stacker_expansion_planning_notes_json = "LiveStacker.expansion_planning_notes"
 seiza_live_stacker_pipeline_memory_json = "LiveStacker.pipeline_memory"
@@ -760,6 +762,7 @@ seiza_stretch_output_version = "STRETCH_OUTPUT_VERSION"
 # export above gives as its twin: the C export that does the same job
 # ({ c = "..." }), or why there is none.
 [python_functions]
+CanvasChannel = { none = "input value object; C hosts pass the same fields as channels_json to seiza_live_stacker_open_fits_joint_canvas" }
 
 # solving
 Star = { none = "a detected star; C hosts receive stars as JSON" }

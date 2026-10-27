@@ -4028,6 +4028,143 @@ pub unsafe extern "C" fn seiza_live_stacker_open_fits_expanding(
     .map_or(ptr::null_mut(), |stacker| Box::into_raw(Box::new(stacker)))
 }
 
+/// Plan the union of calibrated filter groups and start the selected channel
+/// (zero-based). `channels_json` is an array of objects with `paths`, optional
+/// `bias`, `dark`, `flat`, and `darkExposureSeconds`. Paths must be unique
+/// across groups. The first group's first light anchors the geometry.
+/// Push every selected-channel light; other groups contribute no pixels or
+/// normalization. Reuse this handle with `open_fits_on_canvas` for other filters.
+/// Zero `max_canvas_megasamples` uses 256. Cancellation covers both passes.
+///
+/// # Safety
+/// Required strings must be valid NUL-terminated strings; optional strings
+/// may be null. `cancel` must be null or live until return. `error_out` must
+/// be null or writable storage for one pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_live_stacker_open_fits_joint_canvas(
+    channels_json: *const c_char,
+    channel: usize,
+    options_json: *const c_char,
+    max_canvas_megasamples: usize,
+    cancel: *const SeizaCancelSignal,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaLiveStacker {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let channels: Vec<seiza_stacking::CanvasChannel> =
+            serde_json::from_str(&required_str(channels_json, "joint canvas channels")?)
+                .map_err(|error| format!("invalid joint canvas channels: {error}"))?;
+        let maximum_samples = if max_canvas_megasamples == 0 {
+            256
+        } else {
+            max_canvas_megasamples
+        }
+        .checked_mul(1_000_000)
+        .ok_or("max_canvas_megasamples is too large")?;
+        let options = expanding_stack_options(options_json)?;
+        let cancel = unsafe { cancel.as_ref() };
+        let stacker = LiveStacker::open_fits_joint_canvas(
+            &channels,
+            channel,
+            options,
+            maximum_samples,
+            |_, _, _, _| {
+                if cancel.is_some_and(|signal| signal.cancelled.load(Ordering::Relaxed)) {
+                    seiza_stacking::Continue::No
+                } else {
+                    seiza_stacking::Continue::Yes
+                }
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(SeizaLiveStacker { stacker })
+    })
+    .map_or(ptr::null_mut(), |stacker| Box::into_raw(Box::new(stacker)))
+}
+
+/// Start an empty channel stack on an existing expanded canvas, keeping its
+/// dimensions, panel geometry and WCS. Only the supplied channel lights build
+/// its normalization reference; push every light explicitly. The bin factor
+/// must match the source. Samples outside the canvas are cropped. The source
+/// may be a reopened expanded context and is never modified.
+/// Paths, calibration, options and cancellation follow
+/// [`seiza_live_stacker_open_fits_expanding`].
+///
+/// # Safety
+/// `canvas` must be a live handle retained, without concurrent mutation, until
+/// this call returns. String pointers must be NUL-terminated (optional strings
+/// may be null). `cancel` must be null or a live signal. `error_out` must be null
+/// or point to writable storage for one pointer.
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_live_stacker_open_fits_on_canvas(
+    canvas: *const SeizaLiveStacker,
+    paths_json: *const c_char,
+    bias_path: *const c_char,
+    dark_path: *const c_char,
+    flat_path: *const c_char,
+    dark_exposure_seconds: f64,
+    options_json: *const c_char,
+    cancel: *const SeizaCancelSignal,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaLiveStacker {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let source = unsafe { required_live_stacker(canvas) }?;
+        let paths_json = required_str(paths_json, "expanding stack light paths")?;
+        let paths: Vec<PathBuf> = serde_json::from_str::<Vec<String>>(&paths_json)
+            .map_err(|error| {
+                format!("expanding stack light paths must be a JSON array of strings: {error}")
+            })?
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+        if paths.is_empty() {
+            return Err("at least one light is required".into());
+        }
+        let bias_path = optional_path(bias_path)?;
+        let dark_path = optional_path(dark_path)?;
+        let flat_path = optional_path(flat_path)?;
+        for light in &paths {
+            let inputs = std::iter::once(light.clone())
+                .chain(
+                    [bias_path.clone(), dark_path.clone(), flat_path.clone()]
+                        .into_iter()
+                        .flatten(),
+                )
+                .collect::<Vec<_>>();
+            validate_distinct_stack_paths(&inputs)?;
+        }
+        if dark_path.is_none() && dark_exposure_seconds != 0.0 {
+            return Err("a master-dark exposure override requires a dark path".into());
+        }
+        let dark_exposure_seconds =
+            optional_positive_seconds(dark_exposure_seconds, "master-dark exposure override")?;
+        let options = expanding_stack_options(options_json)?;
+        let cancel = unsafe { cancel.as_ref() };
+        let stacker = source
+            .stacker
+            .open_fits_on_canvas(
+                &paths,
+                bias_path.as_deref(),
+                dark_path.as_deref(),
+                flat_path.as_deref(),
+                dark_exposure_seconds,
+                options,
+                |_, _, _, _| {
+                    if cancel.is_some_and(|signal| signal.cancelled.load(Ordering::Relaxed)) {
+                        seiza_stacking::Continue::No
+                    } else {
+                        seiza_stacking::Continue::Yes
+                    }
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(SeizaLiveStacker { stacker })
+    })
+    .map_or(ptr::null_mut(), |stacker| Box::into_raw(Box::new(stacker)))
+}
+
 /// What preparing a live stack's frames needs, frame by frame.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -10407,6 +10544,120 @@ mod tests {
             serde_json::from_str(unsafe { CStr::from_ptr(json) }.to_str().unwrap()).unwrap();
         unsafe { seiza_string_free(json) };
         value
+    }
+
+    #[test]
+    fn joint_canvas_cabi_selects_one_filter_on_the_union() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = overlapping_panels(directory.path());
+        let groups = CString::new(
+            json!([
+                {"paths": &paths[..2]}, {"paths": &paths[2..]}
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        let options = no_adjustment_stack_options();
+        let mut error = ptr::null_mut();
+        let stacker = unsafe {
+            seiza_live_stacker_open_fits_joint_canvas(
+                groups.as_ptr(),
+                0,
+                options.as_ptr(),
+                0,
+                ptr::null(),
+                &mut error,
+            )
+        };
+        assert!(
+            error.is_null(),
+            "{}",
+            unsafe { CStr::from_ptr(error) }.to_string_lossy()
+        );
+        assert!(!stacker.is_null());
+        assert!(unsafe { seiza_live_stacker_width(stacker) } >= 416);
+        assert_eq!(unsafe { seiza_live_stacker_accepted_frames(stacker) }, 0);
+        for path in &paths[..2] {
+            let path = CString::new(path.as_str()).unwrap();
+            let result =
+                unsafe { seiza_live_stacker_push_fits_json(stacker, path.as_ptr(), &mut error) };
+            assert!(error.is_null());
+            let value: Value =
+                serde_json::from_str(unsafe { CStr::from_ptr(result) }.to_str().unwrap()).unwrap();
+            assert_eq!(value["accepted"], true);
+            unsafe { seiza_string_free(result) };
+        }
+        assert_eq!(unsafe { seiza_live_stacker_accepted_frames(stacker) }, 2);
+        unsafe { seiza_live_stacker_free(stacker) };
+        let invalid = unsafe {
+            seiza_live_stacker_open_fits_joint_canvas(
+                groups.as_ptr(),
+                2,
+                options.as_ptr(),
+                0,
+                ptr::null(),
+                &mut error,
+            )
+        };
+        assert!(invalid.is_null() && !error.is_null());
+        unsafe { seiza_string_free(error) };
+    }
+
+    #[test]
+    fn shared_canvas_cabi_starts_an_independent_stack() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = overlapping_panels(directory.path());
+        let source = open_expanding(&json!(paths), None, ptr::null()).unwrap();
+        let paths = CString::new(json!(paths).to_string()).unwrap();
+        let options = no_adjustment_stack_options();
+        let mut error = ptr::null_mut();
+        let channel = unsafe {
+            seiza_live_stacker_open_fits_on_canvas(
+                source,
+                paths.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                0.0,
+                options.as_ptr(),
+                ptr::null(),
+                &mut error,
+            )
+        };
+        assert!(
+            error.is_null(),
+            "{}",
+            unsafe { CStr::from_ptr(error) }.to_string_lossy()
+        );
+        assert!(!channel.is_null());
+        assert_eq!(unsafe { seiza_live_stacker_width(source) }, unsafe {
+            seiza_live_stacker_width(channel)
+        });
+        assert_eq!(unsafe { seiza_live_stacker_height(source) }, unsafe {
+            seiza_live_stacker_height(channel)
+        });
+        assert_eq!(unsafe { seiza_live_stacker_accepted_frames(channel) }, 0);
+        // The new stack owns its geometry; the source handle can be freed.
+        unsafe {
+            seiza_live_stacker_free(source);
+            seiza_live_stacker_free(channel);
+        }
+        let invalid = unsafe {
+            seiza_live_stacker_open_fits_on_canvas(
+                ptr::null(),
+                paths.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                0.0,
+                options.as_ptr(),
+                ptr::null(),
+                &mut error,
+            )
+        };
+        assert!(invalid.is_null());
+        assert!(!error.is_null());
+        unsafe { seiza_string_free(error) };
     }
 
     #[test]

@@ -692,6 +692,23 @@ class LiveStackState:
     reference_image_path: Path | None
     reintegration_unavailable: str | None
 
+class CanvasChannel:
+    def __init__(
+        self, paths: Sequence[str | Path], *, bias: str | Path | None = None,
+        dark: str | Path | None = None, flat: str | Path | None = None,
+        dark_exposure_seconds: float | None = None,
+    ) -> None: ...
+    @property
+    def paths(self) -> list[Path]: ...
+    @property
+    def bias(self) -> Path | None: ...
+    @property
+    def dark(self) -> Path | None: ...
+    @property
+    def flat(self) -> Path | None: ...
+    @property
+    def dark_exposure_seconds(self) -> float | None: ...
+
 class LiveStacker:
     def __init__(
         self,
@@ -747,6 +764,23 @@ class LiveStacker:
         flat: str | Path | None = None,
         dark_exposure_seconds: float | None = None,
         max_canvas_megasamples: int = 256,
+        cancel: Callable[[], bool] | None = None,
+    ) -> LiveStacker: ...
+    @staticmethod
+    def open_fits_joint_canvas(
+        channels: Sequence[CanvasChannel], channel: int = 0, *,
+        options: StackOptions | None = None, max_canvas_megasamples: int = 256,
+        cancel: Callable[[], bool] | None = None,
+    ) -> LiveStacker: ...
+    def open_fits_on_canvas(
+        self,
+        paths: Sequence[str | Path],
+        *,
+        options: StackOptions | None = None,
+        bias: str | Path | None = None,
+        dark: str | Path | None = None,
+        flat: str | Path | None = None,
+        dark_exposure_seconds: float | None = None,
         cancel: Callable[[], bool] | None = None,
     ) -> LiveStacker: ...
     @staticmethod

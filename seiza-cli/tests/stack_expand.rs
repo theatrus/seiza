@@ -12,6 +12,117 @@ const WIDTH: usize = 192;
 const HEIGHT: usize = 160;
 const STEP: usize = 112;
 
+#[test]
+fn separate_filters_reuse_a_saved_expanded_canvas() {
+    let directory = tempfile::tempdir().unwrap();
+    let paths = panels(directory.path());
+    let canvas = directory.path().join("common.seiza-stack");
+    let first = directory.path().join("ha.fits");
+    let second = directory.path().join("oiii.fits");
+    let run = |output: &Path, reuse: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_seiza"));
+        command
+            .arg("stack")
+            .args(&paths)
+            .args(["--defects", "off", "--normalization", "none", "--output"])
+            .arg(output);
+        if reuse {
+            command.arg("--reference-canvas").arg(&canvas);
+        } else {
+            command
+                .args(["--reference", "expand", "--save-canvas"])
+                .arg(&canvas);
+        }
+        let result = command.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    };
+    run(&first, false);
+    run(&second, true);
+    let a = FitsFrame::open(&first).unwrap();
+    let b = FitsFrame::open(&second).unwrap();
+    assert_eq!(
+        (a.image.width, a.image.height),
+        (b.image.width, b.image.height)
+    );
+    for key in ["CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2", "CD1_1", "CD2_2"] {
+        assert_eq!(
+            a.headers.iter().find(|(k, _)| k == key),
+            b.headers.iter().find(|(k, _)| k == key),
+            "{key}"
+        );
+    }
+    // A context is an input, and cannot be overwritten by any output.
+    let result = Command::new(env!("CARGO_BIN_EXE_seiza"))
+        .arg("stack")
+        .args(&paths)
+        .arg("--reference-canvas")
+        .arg(&canvas)
+        .arg("--output")
+        .arg(&canvas)
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(LiveStacker::open_context(&canvas).is_ok());
+}
+
+#[test]
+fn joint_canvas_extends_beyond_the_integrated_filters_coverage() {
+    let directory = tempfile::tempdir().unwrap();
+    let paths = panels(directory.path());
+    let manifest = directory.path().join("other-filters.json");
+    std::fs::write(
+        &manifest,
+        serde_json::to_vec(&serde_json::json!([
+            {"paths": [&paths[2]]}
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    let output = directory.path().join("ha.fits");
+    let saved = directory.path().join("union.seiza-stack");
+    let run = |target: &Path, conflicting: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_seiza"));
+        command
+            .arg("stack")
+            .args(&paths[..2])
+            .args([
+                "--defects",
+                "off",
+                "--normalization",
+                "none",
+                "--joint-canvas",
+            ])
+            .arg(&manifest)
+            .arg("--save-canvas")
+            .arg(&saved)
+            .arg("--output")
+            .arg(target);
+        if conflicting {
+            command.arg("--reference-canvas").arg(&saved);
+        }
+        command.output().unwrap()
+    };
+    let result = run(&output, false);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let image = FitsFrame::open(&output).unwrap().image;
+    assert!(image.width >= WIDTH + 2 * STEP);
+    assert!(image.data.iter().filter(|p| p.is_nan()).count() > image.data.len() / 5);
+    let source = LiveStacker::open_context(&saved).unwrap();
+    assert_eq!(source.view().width, image.width);
+    let before = std::fs::read(&paths[2]).unwrap();
+    assert!(!run(&paths[2], false).status.success());
+    assert_eq!(std::fs::read(&paths[2]).unwrap(), before);
+    assert!(!run(&output, true).status.success());
+}
+
 fn panels(directory: &Path) -> Vec<PathBuf> {
     let sky_width = WIDTH + 2 * STEP;
     let mut sky = (0..sky_width * HEIGHT)

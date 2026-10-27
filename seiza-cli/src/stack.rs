@@ -87,6 +87,18 @@ pub(crate) struct StackArgs {
     /// no pixels unless also listed as a light. Works with --reintegrate
     #[arg(long)]
     reference_image: Option<PathBuf>,
+    /// Reuse an expanded canvas saved with --save-canvas for another filter
+    #[arg(long, conflicts_with = "reference_image")]
+    reference_canvas: Option<PathBuf>,
+    /// Plan a union with additional filter groups from a JSON file. Each group
+    /// has paths and optional bias, dark, flat, darkExposureSeconds; paths are
+    /// relative to the current directory. This command's lights remain the
+    /// only integrated filter. Use --reference-canvas instead to reuse a grid
+    #[arg(long, conflicts_with_all = ["reference_canvas", "reference_image"])]
+    joint_canvas: Option<PathBuf>,
+    /// Save the planned expanded canvas for subsequent per-filter runs
+    #[arg(long)]
+    save_canvas: Option<PathBuf>,
     /// Largest canvas --reference expand may grow, in millions of samples:
     /// pixels times color channels. A run peaks at about 40 bytes per sample
     /// [default: 256]
@@ -377,7 +389,9 @@ fn normalization_or_default(chosen: Option<NormalizationArg>, expand: bool) -> N
 }
 
 pub(crate) fn run(options: StackArgs) -> Result<()> {
-    let expand = matches!(options.reference, ReferenceArg::Expand);
+    let expand = matches!(options.reference, ReferenceArg::Expand)
+        || options.reference_canvas.is_some()
+        || options.joint_canvas.is_some();
     let normalization_arg = normalization_or_default(options.normalization, expand);
     let registration_model = options.registration_model;
     let min_overlap = options.min_overlap.unwrap_or(if expand {
@@ -385,6 +399,11 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
     } else {
         FrameAcceptanceCriteria::default().minimum_overlap_fraction
     });
+    if !expand && options.save_canvas.is_some() {
+        anyhow::bail!(
+            "--save-canvas requires --reference expand or --reference-canvas or --joint-canvas"
+        );
+    }
     if expand && options.reference_image.is_some() {
         anyhow::bail!("--reference expand cannot be combined with --reference-image");
     }
@@ -429,12 +448,46 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
         ("preview output", options.preview.as_deref()),
         ("report output", options.report.as_deref()),
         ("clipped map output", options.clipped.as_deref()),
+        ("reference canvas", options.reference_canvas.as_deref()),
+        ("joint canvas manifest", options.joint_canvas.as_deref()),
+        ("saved canvas", options.save_canvas.as_deref()),
     ] {
         if let Some(path) = path {
             path_roles.push((role.into(), path));
         }
     }
     validate_path_roles(path_roles)?;
+    let extra_channels: Vec<seiza_stacking::CanvasChannel> = options
+        .joint_canvas
+        .as_ref()
+        .map(|path| -> Result<_> {
+            let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+            serde_json::from_slice(&bytes).context("invalid joint canvas channel groups")
+        })
+        .transpose()?
+        .unwrap_or_default();
+    for path in extra_channels.iter().flat_map(|group| {
+        group
+            .paths
+            .iter()
+            .chain(group.bias.iter())
+            .chain(group.dark.iter())
+            .chain(group.flat.iter())
+    }) {
+        let mut roles = vec![("joint canvas input".into(), path.as_path())];
+        for (role, output) in [
+            ("stack output", Some(&options.output)),
+            ("preview output", options.preview.as_ref()),
+            ("report output", options.report.as_ref()),
+            ("clipped map output", options.clipped.as_ref()),
+            ("saved canvas", options.save_canvas.as_ref()),
+        ] {
+            if let Some(output) = output {
+                roles.push((role.into(), output.as_path()));
+            }
+        }
+        validate_path_roles(roles)?;
+    }
     if let Some(reference) = options.reference_image.as_deref() {
         // Sharing the reference with a light is intentional; outputs and
         // calibration masters must still be distinct from it.
@@ -623,7 +676,7 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
         .unwrap_or_else(|| ordered[0].clone());
     let reference_identity = report_path
         .as_ref()
-        .map(|_| file_identity(&reference_path))
+        .map(|_| file_identity(options.reference_canvas.as_ref().unwrap_or(&reference_path)))
         .transpose()?;
     let reference = crate::common::open_frame(&reference_path, "reference frame")?;
     let effective_maximum_drift_pixels = stack_options
@@ -703,7 +756,64 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
             reference_path.display()
         )
     };
-    let mut stacker = if expand {
+    let mut stacker = if options.joint_canvas.is_some() {
+        crate::interrupt::install();
+        let mut channels = vec![seiza_stacking::CanvasChannel {
+            paths: ordered.clone(),
+            bias: options.bias.clone(),
+            dark: options.dark.clone(),
+            flat: options.flat.clone(),
+            dark_exposure_seconds: options.dark_exposure_seconds,
+        }];
+        channels.extend(extra_channels);
+        seiza_stacking::LiveStacker::open_fits_joint_canvas(
+            &channels,
+            0,
+            stack_options,
+            maximum_samples,
+            |path, count, width, height| {
+                println!(
+                    "plan       {count} connected, {width}x{height}: {}",
+                    path.display()
+                );
+                if crate::interrupt::interrupted() {
+                    Continue::No
+                } else {
+                    Continue::Yes
+                }
+            },
+        )
+        .with_context(initialize)?
+    } else if let Some(path) = &options.reference_canvas {
+        crate::interrupt::install();
+        let source = seiza_stacking::LiveStacker::open_context_with_gpu(path, stack_options.gpu)?;
+        let view = source.view();
+        if view.width * view.height * view.channels > maximum_samples {
+            anyhow::bail!("shared canvas exceeds --max-canvas-megasamples");
+        }
+        source
+            .open_fits_on_canvas(
+                &ordered,
+                options.bias.as_deref(),
+                options.dark.as_deref(),
+                options.flat.as_deref(),
+                options.dark_exposure_seconds,
+                stack_options,
+                |path, count, width, height| {
+                    println!(
+                        "plan       {count}/{} connected, {width}x{height}: {}",
+                        ordered.len(),
+                        path.display()
+                    );
+                    if crate::interrupt::interrupted() {
+                        Continue::No
+                    } else {
+                        Continue::Yes
+                    }
+                },
+            )
+            .with_context(initialize)?
+    } else if expand {
         crate::interrupt::install();
         seiza_stacking::LiveStacker::with_expanding_reference(
             &ordered,
@@ -757,6 +867,7 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
     let normalization_identity = options
         .reference_image
         .as_ref()
+        .or(options.reference_canvas.as_ref())
         .and(report_path.as_ref())
         .map(|_| file_identity(&ordered[0]))
         .transpose()?;
@@ -912,6 +1023,9 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
         anyhow::bail!("no light frames were accepted against the reference image");
     }
 
+    if let Some(path) = &options.save_canvas {
+        stacker.save_context(path)?;
+    }
     let reference_headers = stacker.reference_headers().to_vec();
     // Read before reintegration drops the stacker: the live pass recorded it.
     let clipped = options.clipped.as_ref().map(|_| stacker.clipped_fraction());

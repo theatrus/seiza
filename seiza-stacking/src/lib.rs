@@ -171,9 +171,9 @@ pub use residual_flat::{
 pub use seiza::CancelSignal;
 pub use snr::{SIGNAL_FRACTION, SnrSample, checkpoint_depths, frame_noise, measure_depth};
 pub use stack::{
-    CfaIntegration, DeltaSigmaOptions, FrameAcceptanceCriteria, FrameDiagnostics, FrameDisposition,
-    FrameInputMode, FrameRejectionReason, FrameWeighting, FullResolutionStack, LiveStacker,
-    RejectionMode, StackExportSnapshot, StackOptions, StackSnapshot, StackView,
+    CanvasChannel, CfaIntegration, DeltaSigmaOptions, FrameAcceptanceCriteria, FrameDiagnostics,
+    FrameDisposition, FrameInputMode, FrameRejectionReason, FrameWeighting, FullResolutionStack,
+    LiveStacker, RejectionMode, StackExportSnapshot, StackOptions, StackSnapshot, StackView,
 };
 
 use std::path::PathBuf;

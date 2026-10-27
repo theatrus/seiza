@@ -87,6 +87,15 @@ exposes the **superset** of what both apps need.
   calibrated linear mono/RGB samples, while `seiza_live_stacker_open_fits`
   retains its ABI name but decodes raw linear FITS or XISF and optionally
   applies integrated bias, dark, and flat masters.
+  `seiza_live_stacker_open_fits_on_canvas` starts another filter's empty stack
+  on an existing expanded stack's grid (including a reopened context). It
+  reuses dimensions, panel geometry, lens correction and WCS, and builds
+  normalization from that filter's own calibrated lights. Push all lights
+  explicitly. The source handle is borrowed only during construction; the
+  returned handle owns its geometry. Bin factors must match. The canvas never
+  grows, so plan the complete desired field first; samples outside are cropped.
+  The Python twin is `canvas.open_fits_on_canvas(...)`; CLI users save and reuse
+  contexts with `--save-canvas` and `--reference-canvas`.
   `seiza_live_stacker_open_fits_with_reference_image` aligns a stack to an
   image shared by every filter's stack, as the CLI's `--reference-image` does,
   so their outputs share one pixel grid and WCS. One of the filter's lights,
@@ -968,3 +977,28 @@ error_out)` screens it over a display nebula in place with optional linked
 reduction [0,1]. All buffers contain width*height*3 interleaved floats. Shared
 source normalization preserves RGB scale; inputs remain linear and unchanged.
 Errors leave writable buffers unchanged. Neither call runs an external tool.
+
+### Joint or reference canvas
+
+`seiza_live_stacker_open_fits_joint_canvas(channels_json, channel, options_json,
+max_canvas_megasamples, cancel, error_out)` builds the union of connected filter
+footprints and returns an empty stack for the selected zero-based `channel`.
+Push its lights explicitly. `channels_json` is an array:
+
+```json
+[
+  {"paths": ["ha-left.fits", "ha-middle.fits"], "flat": "ha-flat.fits"},
+  {"paths": ["oiii-middle.fits", "oiii-right.fits"], "flat": "oiii-flat.fits"}
+]
+```
+
+Groups also accept optional `bias`, `dark`, `darkExposureSeconds`. The first
+group's first light anchors geometry. Each filter keeps its own calibration
+and normalization. Zero maximum uses 256 megasamples; options and cancellation
+match expanding stacks. Invalid groups, duplicate lights or invalid indices
+return errors. Disconnected frames may be omitted by registration.
+
+Use `seiza_live_stacker_open_fits_on_canvas` on the returned handle for remaining
+filters. Reference mode is faster when an existing grid already covers all
+filters. Missing coverage stays absent; normalization needs overlap within
+each filter. Joint mode adds a geometry pass across all groups, so reuse it.

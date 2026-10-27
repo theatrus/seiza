@@ -24,6 +24,252 @@ const HEIGHT: usize = 160;
 /// the last bits of `exp` and friends; an algorithm change moves far more.
 const TOLERANCE: f64 = 1e-5;
 
+#[test]
+fn joint_canvas_preserves_filter_only_coverage_and_photometry() {
+    use seiza_stacking::CanvasChannel;
+    let directory = tempfile::tempdir().unwrap();
+    let paths = mosaic_panels(&directory);
+    let mut faint = Vec::new();
+    for (i, path) in paths[2..].iter().enumerate() {
+        let mut frame = seiza_stacking::FitsFrame::open(path).unwrap();
+        for pixel in &mut frame.image.data {
+            *pixel *= 0.01;
+        }
+        let path = directory.path().join(format!("faint-{i}.fits"));
+        write_processed_image_fits_f32(&path, &frame.image, &frame.headers, &[]).unwrap();
+        faint.push(path);
+    }
+    let groups = vec![
+        CanvasChannel {
+            paths: paths[..2].to_vec(),
+            bias: None,
+            dark: None,
+            flat: None,
+            dark_exposure_seconds: None,
+        },
+        CanvasChannel {
+            paths: faint,
+            bias: None,
+            dark: None,
+            flat: None,
+            dark_exposure_seconds: None,
+        },
+    ];
+    let mut options = StackOptions {
+        normalization: NormalizationMode::Global,
+        gpu: GpuOptions {
+            enabled: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    options.acceptance.minimum_overlap_fraction = 0.1;
+    let mut first = LiveStacker::open_fits_joint_canvas(
+        &groups,
+        0,
+        options.clone(),
+        usize::MAX,
+        |_, _, _, _| Continue::Yes,
+    )
+    .unwrap();
+    assert_eq!(first.view().accepted_frames, 0);
+    assert!(first.view().width > MOSAIC_PANEL.0 * 3 / 2);
+    let mut second = first
+        .open_fits_on_canvas(
+            &groups[1].paths,
+            None,
+            None,
+            None,
+            None,
+            options.clone(),
+            |_, _, _, _| Continue::Yes,
+        )
+        .unwrap();
+    for path in &groups[0].paths {
+        admit(first.push_fits(path).unwrap());
+    }
+    for path in &groups[1].paths {
+        admit(second.push_fits(path).unwrap());
+    }
+    let a = first.snapshot().unwrap();
+    let b = second.snapshot().unwrap();
+    assert_eq!(
+        (a.image.width, a.image.height),
+        (b.image.width, b.image.height)
+    );
+    let a_only = a
+        .image
+        .data
+        .iter()
+        .zip(&b.image.data)
+        .filter(|(a, b)| a.is_finite() && !b.is_finite())
+        .count();
+    let b_only = a
+        .image
+        .data
+        .iter()
+        .zip(&b.image.data)
+        .filter(|(a, b)| !a.is_finite() && b.is_finite())
+        .count();
+    assert!(
+        a_only > a.image.data.len() / 4 && b_only > b.image.data.len() / 4,
+        "{a_only}, {b_only}"
+    );
+    let paired: Vec<_> = a
+        .image
+        .data
+        .iter()
+        .zip(&b.image.data)
+        .filter(|(a, b)| a.is_finite() && b.is_finite())
+        .collect();
+    assert!(paired.len() > 1000);
+    let ratio = paired.iter().map(|(_, b)| f64::from(**b)).sum::<f64>()
+        / paired.iter().map(|(a, _)| f64::from(**a)).sum::<f64>();
+    assert!((ratio - 0.01).abs() < 0.001, "{ratio}");
+    assert!(
+        LiveStacker::open_fits_joint_canvas(
+            &groups,
+            0,
+            options.clone(),
+            usize::MAX,
+            |_, _, _, _| Continue::No
+        )
+        .is_err()
+    );
+    assert!(
+        LiveStacker::open_fits_joint_canvas(
+            &groups,
+            2,
+            options.clone(),
+            usize::MAX,
+            |_, _, _, _| Continue::Yes
+        )
+        .is_err()
+    );
+    assert!(
+        LiveStacker::open_fits_joint_canvas(&groups, 0, options, 10, |_, _, _, _| Continue::Yes)
+            .is_err()
+    );
+}
+
+#[test]
+fn shared_mosaic_canvas_keeps_geometry_and_channel_brightness_separate() {
+    let directory = tempfile::tempdir().unwrap();
+    let paths = mosaic_panels(&directory);
+    let channel: Vec<_> = paths
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            let mut frame = seiza_stacking::FitsFrame::open(path).unwrap();
+            for pixel in &mut frame.image.data {
+                *pixel *= 0.25;
+            }
+            let path = directory.path().join(format!("oiii-{index}.fits"));
+            write_processed_image_fits_f32(&path, &frame.image, &frame.headers, &[]).unwrap();
+            path
+        })
+        .collect();
+    let mut options = StackOptions {
+        normalization: NormalizationMode::Global,
+        gpu: GpuOptions {
+            enabled: false,
+            ..GpuOptions::default()
+        },
+        ..StackOptions::default()
+    };
+    options.acceptance.minimum_overlap_fraction = 0.1;
+    let mut source = LiveStacker::open_fits_expanding(
+        &paths,
+        None,
+        None,
+        None,
+        None,
+        options.clone(),
+        usize::MAX,
+        |_, _, _, _| Continue::Yes,
+    )
+    .unwrap();
+    let context = directory.path().join("canvas.seiza-stack");
+    for path in &paths {
+        admit(source.push_fits(path).unwrap());
+    }
+    source.save_context(&context).unwrap();
+    let restored = LiveStacker::open_context(&context).unwrap();
+    let mut first = source
+        .open_fits_on_canvas(
+            &paths,
+            None,
+            None,
+            None,
+            None,
+            options.clone(),
+            |_, _, _, _| Continue::Yes,
+        )
+        .unwrap();
+    let mut second = restored
+        .open_fits_on_canvas(
+            &channel,
+            None,
+            None,
+            None,
+            None,
+            options.clone(),
+            |_, _, _, _| Continue::Yes,
+        )
+        .unwrap();
+    assert!(!second.reference_is_integrated());
+    assert_eq!(second.view().accepted_frames, 0);
+    assert_eq!(source.view().accepted_frames as usize, paths.len());
+    assert_eq!(first.reference_headers(), second.reference_headers());
+    for path in &paths {
+        admit(first.push_fits(path).unwrap());
+    }
+    for path in &channel {
+        admit(second.push_fits(path).unwrap());
+    }
+    let a = first.snapshot().unwrap();
+    let b = second.snapshot().unwrap();
+    assert_eq!(
+        (a.image.width, a.image.height),
+        (b.image.width, b.image.height)
+    );
+    let mut paired = 0;
+    for (&a, &b) in a.image.data.iter().zip(&b.image.data) {
+        if a.is_finite() && b.is_finite() {
+            assert!(
+                (a * 0.25 - b).abs() < 0.005 * a.abs().max(1.0),
+                "{a} -> {b}"
+            );
+            paired += 1;
+        }
+    }
+    assert!(paired > a.image.data.len() / 2);
+    assert!(
+        source
+            .open_fits_on_canvas(
+                &channel,
+                None,
+                None,
+                None,
+                None,
+                options.clone(),
+                |_, _, _, _| Continue::No,
+            )
+            .is_err()
+    );
+    options.bin_factor = 2;
+    assert!(
+        source
+            .open_fits_on_canvas(&channel, None, None, None, None, options, |_, _, _, _| {
+                Continue::Yes
+            },)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("bin factor")
+    );
+}
+
 #[rustfmt::skip]
 const MONO_DEFAULT: &[f64] = &[
     1.4835510e2, 2.8592231e2, 3.9204758e3, 9.7156273e1, 9.9581932e1, 1.0100323e2,

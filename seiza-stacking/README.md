@@ -1,5 +1,14 @@
 # seiza-stacking
 
+Separate filter mosaics can share a planned expanded grid. Create one with
+`LiveStacker::open_fits_expanding`, then call its `open_fits_on_canvas` for
+each other channel, supplying that channel's lights and calibration masters.
+Every new stack starts empty and builds its own photometric reference; only
+the panel geometry, dimensions, lens correction and WCS are reused. Push every
+light explicitly. A reopened expanded context can also supply the grid.
+The common canvas must already cover the desired field and the bin factor
+must match: it is not enlarged, and samples beyond it are cropped.
+
 `seiza-stacking` provides linear, incremental image stacking for
 astrophotography applications. It keeps plate solving and catalog access out of
 the stacking path while reusing Seiza's star detector for local registration.
@@ -1148,3 +1157,20 @@ only in the display layer; missing coverage masks whole RGB pixels. Linear
 inputs stay unchanged. This independently implements the published
 [SetiAstro tone](https://www.setiastro.com/pjsr-scripts), without replicating
 PixInsight's optional ColorSaturation or SCNR processes.
+
+### Joint or reference canvas
+
+`LiveStacker::open_fits_joint_canvas(&channels, channel_index, options,
+maximum_samples, progress)` plans all connected filter footprints, then returns
+an empty stack for the selected zero-based channel. Each `CanvasChannel` has
+`paths` and optional `bias`, `dark`, `flat`, `dark_exposure_seconds`. The first
+group's first light anchors geometry. Masters are applied per group; geometry
+planning disables cross-filter normalization. Push the selected channel's lights,
+then use `open_fits_on_canvas` for remaining channels. Each channel builds its
+own photometric reference; missing coverage stays NaN. Disconnected sky fields
+cannot join, and normalization still needs overlap within each filter.
+
+For faster reference mode, use `open_fits_on_canvas` directly when an existing
+canvas covers the desired field. Joint mode adds a pass over all groups; plan
+once and reuse it. Save a nonempty channel stack with `save_context` to preserve
+the union geometry, even where that filter has no coverage.

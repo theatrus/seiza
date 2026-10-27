@@ -542,6 +542,34 @@ for index, path, reason in selection.skipped:
 stacker.push_fits(selection.path)
 ```
 
+For separate filter mosaics on one grid, first plan an expanded stack covering
+the desired field, then use its `open_fits_on_canvas` method:
+
+```python
+options = seiza.StackOptions(normalization="global")
+ha = seiza.LiveStacker.open_fits_expanding(ha_paths, options=options, flat=ha_flat)
+oiii = ha.open_fits_on_canvas(oiii_paths, options=options, flat=oiii_flat)
+sii = ha.open_fits_on_canvas(sii_paths, options=options, flat=sii_flat)
+for stack, paths in [(ha, ha_paths), (oiii, oiii_paths), (sii, sii_paths)]:
+    for path in paths:
+        stack.push_fits(path)
+```
+
+Each stack starts empty. Only its own lights contribute pixels, calibration,
+normalization and noise weighting. The canvas's dimensions, panel geometry,
+lens correction and WCS (when available) are shared. A stack reopened with
+`open_context` can also supply the canvas. Saving a context requires accepting
+at least one light first.
+
+`open_fits_on_canvas(paths, *, options=None, bias=None, dark=None, flat=None,
+dark_exposure_seconds=None, cancel=None)` never grows the source canvas:
+samples outside it are cropped and missing channel coverage stays empty.
+Plan the full desired footprint first, and use the same bin factor for every
+channel. The first supplied light anchors that channel's brightness; lights
+without photometric overlap are retried after connecting panels join. Failed
+joins are rejected when pushed. Cancellation and input/calibration errors abort
+construction without changing the source stack.
+
 `LiveStacker.open_fits_expanding(paths)` grows the canvas past the anchor to
 hold every connected, overlapping light, as the CLI's `--reference expand`
 does: mosaic panels, including ones that connect only through other panels,
@@ -1510,3 +1538,29 @@ formula, without PixInsight's optional saturation/SCNR processes.
 `screen_rgb_star_layer(nebula, stars, reduction=0)` screens the display layer over
 a display nebula with optional linked star reduction [0,1]. Inputs are unchanged;
 missing coverage masks whole RGB pixels. Run star separation before stretching.
+
+### Joint or reference canvas
+
+```python
+channels = [seiza.CanvasChannel(ha_lights, flat=ha_flat),
+            seiza.CanvasChannel(oiii_lights, flat=oiii_flat)]
+ha = seiza.LiveStacker.open_fits_joint_canvas(channels, channel=0, options=options)
+for path in ha_lights:
+    ha.push_fits(path)
+ha.save_context("union.seiza-stack")
+oiii = ha.open_fits_on_canvas(oiii_lights, flat=oiii_flat, options=options)
+for path in oiii_lights:
+    oiii.push_fits(path)
+```
+
+Joint mode builds the union of connected filter footprints; the first group's
+first light anchors geometry. Each filter keeps its own calibration and
+normalization, and missing coverage stays NaN. `CanvasChannel` accepts `paths`
+and optional `bias`, `dark`, `flat`, `dark_exposure_seconds`, exposed as read-only
+properties. `open_fits_joint_canvas` also accepts `max_canvas_megasamples` and
+`cancel` like `open_fits_expanding`; `channel` is zero-based (default 0).
+
+For faster reference mode when a saved canvas already covers all filters, use
+`LiveStacker.open_context(...).open_fits_on_canvas(...)`. Joint mode adds a
+geometry pass over every group; do it once and reuse its result. Stellar overlap
+is required between panels; normalization needs overlap within each filter.

@@ -1428,6 +1428,52 @@ SeizaLiveStacker *seiza_live_stacker_open_fits_expanding(const char *paths_json,
                                                          char **error_out);
 
 /*
+ Plan the union of calibrated filter groups and start the selected channel
+ (zero-based). `channels_json` is an array of objects with `paths`, optional
+ `bias`, `dark`, `flat`, and `darkExposureSeconds`. Paths must be unique
+ across groups. The first group's first light anchors the geometry.
+ Push every selected-channel light; other groups contribute no pixels or
+ normalization. Reuse this handle with `open_fits_on_canvas` for other filters.
+ Zero `max_canvas_megasamples` uses 256. Cancellation covers both passes.
+
+ # Safety
+ Required strings must be valid NUL-terminated strings; optional strings
+ may be null. `cancel` must be null or live until return. `error_out` must
+ be null or writable storage for one pointer.
+ */
+SeizaLiveStacker *seiza_live_stacker_open_fits_joint_canvas(const char *channels_json,
+                                                            size_t channel,
+                                                            const char *options_json,
+                                                            size_t max_canvas_megasamples,
+                                                            const SeizaCancelSignal *cancel,
+                                                            char **error_out);
+
+/*
+ Start an empty channel stack on an existing expanded canvas, keeping its
+ dimensions, panel geometry and WCS. Only the supplied channel lights build
+ its normalization reference; push every light explicitly. The bin factor
+ must match the source. Samples outside the canvas are cropped. The source
+ may be a reopened expanded context and is never modified.
+ Paths, calibration, options and cancellation follow
+ [`seiza_live_stacker_open_fits_expanding`].
+
+ # Safety
+ `canvas` must be a live handle retained, without concurrent mutation, until
+ this call returns. String pointers must be NUL-terminated (optional strings
+ may be null). `cancel` must be null or a live signal. `error_out` must be null
+ or point to writable storage for one pointer.
+ */
+SeizaLiveStacker *seiza_live_stacker_open_fits_on_canvas(const SeizaLiveStacker *canvas,
+                                                         const char *paths_json,
+                                                         const char *bias_path,
+                                                         const char *dark_path,
+                                                         const char *flat_path,
+                                                         double dark_exposure_seconds,
+                                                         const char *options_json,
+                                                         const SeizaCancelSignal *cancel,
+                                                         char **error_out);
+
+/*
  The lens distortion a canvas from
  [`seiza_live_stacker_open_fits_expanding`] was planned through, as owned
  JSON, or the JSON text `null` when planning measured none, as for any

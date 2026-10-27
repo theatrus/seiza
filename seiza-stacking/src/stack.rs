@@ -762,6 +762,9 @@ pub struct LiveStacker {
     reference_image_path: Option<PathBuf>,
 }
 
+mod shared_canvas;
+pub use shared_canvas::CanvasChannel;
+
 enum ReferenceContribution {
     Expanded {
         noise: Vec<f32>,

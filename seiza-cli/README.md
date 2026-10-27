@@ -829,11 +829,27 @@ span the full canvas. A saved stack context keeps the panels, with the stars pla
 matched each by (its first frame's), and the lens planning measured, so a
 frame added after reopening registers exactly as it would have before saving.
 
-For S/H/O, run expansion separately for each filter and register the resulting
-three mosaics together afterward. Independent expansion runs may choose different
-anchors and dimensions. `--reference expand` cannot currently be combined with
-`--reference-image`; use the shared-reference option when a fixed common grid is
-required.
+For S/H/O, plan the canvas with a filter covering the desired field, save it,
+and reuse it for the other filters:
+
+```sh
+seiza stack ha/*.fits --reference expand --save-canvas common.seiza-stack --output ha.fits
+seiza stack oiii/*.fits --reference-canvas common.seiza-stack --output oiii.fits
+seiza stack sii/*.fits --reference-canvas common.seiza-stack --output sii.fits
+```
+
+Supply each filter's own calibration masters on its command. The saved canvas
+keeps the panel geometry, dimensions and WCS (when available), while each run
+builds its normalization reference from its own calibrated lights. No pixels
+from the saved stack contribute to another filter. `--save-canvas` writes a
+stack context after the lights have been accepted; it can also be reopened by
+the Python and C APIs.
+
+The reused canvas does not grow: samples outside it are cropped and uncovered
+areas remain empty. Choose a planning set covering the full desired footprint;
+for a union spanning different filters, use `--joint-canvas` as described below. All runs must use the same bin factor.
+Independent `--reference expand` runs still choose their own grids.
+`--reference-image` remains the separate fixed-image alignment option.
 
 Raw calibration sequences can be integrated into reusable masters first:
 
@@ -1472,3 +1488,28 @@ subdue stars. Zero keeps the normalized linear residual without a nonlinear
 lift. The starless nebula is stretched separately. The first command rejects
 inputs marked DISPLAY; the second requires DISPLAY on both inputs. These
 commands do not run SXT/BXT or PixInsight's optional color processes.
+
+### Joint or reference canvas
+
+`--joint-canvas other-filters.json` extends the grid using other filters.
+The file lists **additional** groups; this command's lights and calibration
+flags supply the first group and the only integrated filter. JSON paths are
+relative to the working directory, like CLI paths:
+
+```json
+[{"paths": ["oiii-middle.fits", "oiii-right.fits"], "flat": "oiii-flat.fits"}]
+```
+
+```sh
+seiza stack ha-left.fits ha-middle.fits --flat ha-flat.fits --joint-canvas other-filters.json --save-canvas union.seiza-stack -o ha.fits
+seiza stack oiii-middle.fits oiii-right.fits --flat oiii-flat.fits --reference-canvas union.seiza-stack -o oiii.fits
+```
+
+Groups also accept `bias`, `dark`, `darkExposureSeconds`. Lights must be unique
+across groups. Joint planning adds a geometry pass over all filters; calibration
+and normalization remain per filter. Missing coverage stays NaN. Panels need
+stellar overlap; normalization needs overlap within each individual filter.
+
+For faster reference-only planning, retain `--reference expand --save-canvas`
+and then `--reference-canvas`; that fixes the field to the reference filter's
+coverage. `--joint-canvas` and `--reference-canvas` are mutually exclusive.

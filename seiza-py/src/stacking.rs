@@ -27,6 +27,55 @@ fn stack_error(error: seiza_stacking::Error) -> PyErr {
     StackError::new_err(error.to_string())
 }
 
+/// Lights and calibration masters for one filter in a joint mosaic plan.
+#[pyclass(skip_from_py_object, frozen, name = "CanvasChannel", module = "seiza")]
+struct PyCanvasChannel {
+    inner: seiza_stacking::CanvasChannel,
+}
+
+#[pymethods]
+impl PyCanvasChannel {
+    #[new]
+    #[pyo3(signature = (paths, *, bias=None, dark=None, flat=None, dark_exposure_seconds=None))]
+    fn new(
+        paths: Vec<PathBuf>,
+        bias: Option<PathBuf>,
+        dark: Option<PathBuf>,
+        flat: Option<PathBuf>,
+        dark_exposure_seconds: Option<f64>,
+    ) -> Self {
+        Self {
+            inner: seiza_stacking::CanvasChannel {
+                paths,
+                bias,
+                dark,
+                flat,
+                dark_exposure_seconds,
+            },
+        }
+    }
+    #[getter]
+    fn paths(&self) -> Vec<PathBuf> {
+        self.inner.paths.clone()
+    }
+    #[getter]
+    fn bias(&self) -> Option<PathBuf> {
+        self.inner.bias.clone()
+    }
+    #[getter]
+    fn dark(&self) -> Option<PathBuf> {
+        self.inner.dark.clone()
+    }
+    #[getter]
+    fn flat(&self) -> Option<PathBuf> {
+        self.inner.flat.clone()
+    }
+    #[getter]
+    fn dark_exposure_seconds(&self) -> Option<f64> {
+        self.inner.dark_exposure_seconds
+    }
+}
+
 /// What one pipelined run did.
 #[pyclass(skip_from_py_object, frozen, name = "PipelineReport", module = "seiza")]
 #[derive(Clone, Copy)]
@@ -1522,6 +1571,150 @@ impl PyLiveStacker {
                 dark_exposure_seconds,
                 options,
                 maximum_samples,
+                |_, _, _, _| {
+                    let stop = Python::attach(|py| {
+                        let asked = py.check_signals().and_then(|()| match &cancel {
+                            Some(cancel) => cancel
+                                .call0(py)
+                                .and_then(|value| value.bind(py).is_truthy()),
+                            None => Ok(false),
+                        });
+                        asked.unwrap_or_else(|error| {
+                            // Re-raised once planning unwinds, so the caller
+                            // sees KeyboardInterrupt or their own exception.
+                            *raised.lock().unwrap() = Some(error);
+                            true
+                        })
+                    });
+                    if stop {
+                        seiza_stacking::Continue::No
+                    } else {
+                        seiza_stacking::Continue::Yes
+                    }
+                },
+            )
+        });
+        if let Some(error) = raised.lock().unwrap().take() {
+            return Err(error);
+        }
+        Ok(Self {
+            inner: Some(planned.map_err(stack_error)?),
+        })
+    }
+
+    /// Plan the union of all channels, then start only the selected channel.
+    /// Other channels supply geometry, never normalization or integrated pixels.
+    #[staticmethod]
+    #[pyo3(signature = (channels, channel=0, *, options=None, max_canvas_megasamples=256, cancel=None))]
+    fn open_fits_joint_canvas(
+        py: Python<'_>,
+        channels: Vec<PyRef<'_, PyCanvasChannel>>,
+        channel: usize,
+        options: Option<PyRef<'_, PyStackOptions>>,
+        max_canvas_megasamples: usize,
+        cancel: Option<Py<PyAny>>,
+    ) -> PyResult<Self> {
+        let channels: Vec<_> = channels.iter().map(|group| group.inner.clone()).collect();
+        let maximum_samples = max_canvas_megasamples
+            .checked_mul(1_000_000)
+            .filter(|n| *n > 0)
+            .ok_or_else(|| PyValueError::new_err("max_canvas_megasamples must be positive"))?;
+        let options = options.as_deref().map_or_else(
+            || PyStackOptions::default().expanding(),
+            PyStackOptions::expanding,
+        );
+        let raised: Mutex<Option<PyErr>> = Mutex::new(None);
+        let planned = py.detach(|| {
+            LiveStacker::open_fits_joint_canvas(
+                &channels,
+                channel,
+                options,
+                maximum_samples,
+                |_, _, _, _| {
+                    let stop = Python::attach(|py| {
+                        let asked = py.check_signals().and_then(|()| match &cancel {
+                            Some(cancel) => cancel
+                                .call0(py)
+                                .and_then(|value| value.bind(py).is_truthy()),
+                            None => Ok(false),
+                        });
+                        asked.unwrap_or_else(|error| {
+                            // Re-raised once planning unwinds, so the caller
+                            // sees KeyboardInterrupt or their own exception.
+                            *raised.lock().unwrap() = Some(error);
+                            true
+                        })
+                    });
+                    if stop {
+                        seiza_stacking::Continue::No
+                    } else {
+                        seiza_stacking::Continue::Yes
+                    }
+                },
+            )
+        });
+        if let Some(error) = raised.lock().unwrap().take() {
+            return Err(error);
+        }
+        Ok(Self {
+            inner: Some(planned.map_err(stack_error)?),
+        })
+    }
+
+    /// Start a separate filter stack on this expanded canvas, with its own
+    /// calibration and normalization. The grid is fixed; push every light.
+    #[pyo3(signature = (
+        paths,
+        *,
+        options=None,
+        bias=None,
+        dark=None,
+        flat=None,
+        dark_exposure_seconds=None,
+        cancel=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn open_fits_on_canvas(
+        &self,
+        py: Python<'_>,
+        paths: Vec<PathBuf>,
+        options: Option<PyRef<'_, PyStackOptions>>,
+        bias: Option<PathBuf>,
+        dark: Option<PathBuf>,
+        flat: Option<PathBuf>,
+        dark_exposure_seconds: Option<f64>,
+        cancel: Option<Py<PyAny>>,
+    ) -> PyResult<Self> {
+        if paths.is_empty() {
+            return Err(PyValueError::new_err("at least one light is required"));
+        }
+        validate_exposure_override(dark.as_ref(), dark_exposure_seconds, "dark")?;
+        for light in &paths {
+            let inputs = std::iter::once(light.clone())
+                .chain(
+                    [bias.clone(), dark.clone(), flat.clone()]
+                        .into_iter()
+                        .flatten(),
+                )
+                .collect::<Vec<_>>();
+            validate_distinct_paths(&inputs)?;
+        }
+        let options = options.as_deref().map_or_else(
+            || PyStackOptions::default().expanding(),
+            PyStackOptions::expanding,
+        );
+        // Planning reads every light with the GIL released, taking it back
+        // before each one to ask whether to stop.
+        let source = self.active()?;
+        let raised: Mutex<Option<PyErr>> = Mutex::new(None);
+        let planned = py.detach(|| {
+            source.open_fits_on_canvas(
+                &paths,
+                bias.as_deref(),
+                dark.as_deref(),
+                flat.as_deref(),
+                dark_exposure_seconds,
+                options,
                 |_, _, _, _| {
                     let stop = Python::attach(|py| {
                         let asked = py.check_signals().and_then(|()| match &cancel {
@@ -3177,6 +3370,7 @@ fn frame_noise(py: Python<'_>, image: PyReadonlyArrayDyn<'_, f32>) -> PyResult<O
 }
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<PyCanvasChannel>()?;
     module.add_class::<PyStackOptions>()?;
     module.add_class::<PyGpuOptions>()?;
     module.add_class::<PyDefectMap>()?;

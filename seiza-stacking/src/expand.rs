@@ -156,6 +156,19 @@ pub(crate) struct PlannedRegistration {
     starts_panel: bool,
 }
 
+impl PlannedRegistration {
+    pub(crate) fn shared(
+        result: std::result::Result<RegistrationResult, String>,
+        stamp: Option<crate::replay::SourceStamp>,
+    ) -> Self {
+        Self {
+            result,
+            stamp,
+            starts_panel: false,
+        }
+    }
+}
+
 /// The planned registration of the frame read from `path`: its placement,
 /// the reason it could not join the canvas, or `None` when it was not
 /// planned.
@@ -529,6 +542,10 @@ pub(crate) struct CanvasRegistrar {
 }
 
 impl CanvasRegistrar {
+    pub(crate) fn update_photometry(&mut self, image: &LinearImage) {
+        self.ceilings = crate::normalization::photometric_ceilings(image);
+    }
+
     /// Panels at `regions` of `canvas`, matching the stars planning saved
     /// for them, or, for a context saved before panels kept their stars,
     /// the stars of the canvas beneath them. `canvas`, its panels and `lens`
@@ -600,16 +617,16 @@ impl CanvasRegistrar {
         &self.planning_notes
     }
 
-    fn with_planning_notes(mut self, notes: Vec<String>) -> Self {
+    pub(crate) fn with_planning_notes(mut self, notes: Vec<String>) -> Self {
         self.planning_notes = notes;
         self
     }
 
-    fn with_summary(self, summary: Option<crate::ExpandedLens>) -> Self {
+    pub(crate) fn with_summary(self, summary: Option<crate::ExpandedLens>) -> Self {
         Self { summary, ..self }
     }
 
-    fn with_largest_frame(self, largest_frame: (usize, usize)) -> Self {
+    pub(crate) fn with_largest_frame(self, largest_frame: (usize, usize)) -> Self {
         Self {
             largest_frame: Some(largest_frame),
             ..self
@@ -1065,6 +1082,17 @@ pub(crate) fn plan(
     calibration: &CalibrationMasters,
     options: &StackOptions,
     maximum_samples: usize,
+    progress: impl FnMut(&Path, usize, usize, usize) -> Continue,
+) -> Result<Expansion> {
+    plan_with_calibration(paths, |_| calibration, options, maximum_samples, progress)
+}
+
+/// Use the same geometric planner with each light's own filter calibration.
+pub(crate) fn plan_with_calibration<'a>(
+    paths: &[PathBuf],
+    calibration: impl Fn(&Path) -> &'a CalibrationMasters + Sync,
+    options: &StackOptions,
+    maximum_samples: usize,
     mut progress: impl FnMut(&Path, usize, usize, usize) -> Continue,
 ) -> Result<Expansion> {
     let first = paths
@@ -1090,9 +1118,13 @@ pub(crate) fn plan(
     let frame = FitsFrame::open(first)?;
     let metadata = frame.metadata();
     let anchor_optics = OpticalMetadata::from_frame(&frame);
-    let (mut frame, anchor_cfa) =
-        crate::stack::prepare_light(frame, calibration, &options.match_tolerances, options)
-            .map_err(crate::stack::LightFailure::into_error)?;
+    let (mut frame, anchor_cfa) = crate::stack::prepare_light(
+        frame,
+        calibration(first),
+        &options.match_tolerances,
+        options,
+    )
+    .map_err(crate::stack::LightFailure::into_error)?;
     check_source(first)?;
     if frame.image.sample_count() > maximum_samples {
         return Err(Error::Stack(format!(
@@ -1182,7 +1214,7 @@ pub(crate) fn plan(
         let optics = OpticalMetadata::from_frame(&frame);
         let (frame, cfa) = crate::stack::prepare_light_at(
             frame,
-            calibration,
+            calibration(path),
             &options.match_tolerances,
             options,
             bin_factor,
