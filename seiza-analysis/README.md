@@ -159,7 +159,9 @@ HTML embeds all data, CSS and JavaScript and uses no network or external assets.
 It has filter selection, frame-count/integration axes, capture-time health plots,
 a searchable frame ledger with keyboard-accessible details, errors and measurement
 caveats. Summary cards, labeled charts and timing bars use a responsive layout;
-print styles retain the selected filter and chart labels. Metadata is inserted as text and
+print styles retain the selected filter and chart labels. A Dark mode toggle
+remembers the preference when browser storage is available; printing always
+uses the light palette. The toggle still works when storage is blocked. Metadata is inserted as text and
 embedded JSON escapes HTML delimiters. It can be opened directly or shared.
 
 C: `seiza_analyze_project_json` accepts `inputs`, `samples`, `filter`, `maxFrames`;
