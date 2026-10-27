@@ -205,3 +205,66 @@ def test_legacy_dark_screening_uses_psf_guards_current_grade_or_override_rule():
     assert dark()['dark_level_screening'] is True
     request['quality'][2]['override_choice'] = 'use'
     assert dark()['dark_level_screening'] is False
+
+
+def test_shared_master_resolution_and_retry_policy():
+    import json
+    from pathlib import Path
+    base = Path(__file__).resolve().parents[2] / 'seiza-calibration/tests/fixtures/library'
+    for case in json.loads((base / 'flat-retries.json').read_text())['cases']:
+        result = seiza.calibration_flat_retry(case['request'])
+        for field in ['action', 'inputs', 'rebuild_first']:
+            assert result[field] == case[field], case['name']
+    for case in json.loads((base / 'recipes.json').read_text())['cases']:
+        source = case['request']
+        request = dict(frames=source['frames'], lights=source['lights'],
+                       global_settings=source.get('global_settings', []))
+        plan = seiza.calibration_master_plan(request)
+        assert len(plan['recipes']) == 4
+        cohort = seiza.calibration_master_cohort(dict(kind=case['kind'], frames=source['frames']))
+        assert set(cohort) == {'kept', 'dropped'}
+    with pytest.raises(ValueError):
+        seiza.calibration_flat_retry({'candidates': [], 'first': {'used': ['missing']}})
+
+
+def test_selected_master_plan_reuses_library_decisions():
+    import json
+    from pathlib import Path
+    fixture = Path(__file__).resolve().parents[2] / 'seiza-calibration/tests/fixtures/library/psf-guard.json'
+    for case in json.loads(fixture.read_text())['cases']:
+        source = case['request']
+        result = seiza.calibration_library_plan(**source)
+        rows = {f['frame_uuid']: f for f in source['frames']}
+        for i, selection in enumerate(result['selections']):
+            request = dict(frames=[rows[key] for kind in ['bias', 'dark_flat', 'dark', 'flat'] for key in selection[kind]],
+                           lights=[source['lights'][i]], global_settings=source.get('global_settings', []), rigs=source.get('rigs', []),
+                           flat_basis=selection['flat_basis'], flat_family=selection['flat_family'], flat_held_back=selection['flat_held_back'])
+            plan = seiza.calibration_master_plan(request)
+            expected = result['sessions'][result['assignments'][i]]
+            assert plan['key'] == expected['key'], case['name']
+            assert plan['recipes'] == expected['recipes'], case['name']
+
+
+def test_master_flat_stability_measures_transient_features(tmp_path):
+    import numpy as np
+    # Standalone FITS writer keeps this policy oracle independent of optional Astropy.
+    def write(path, data):
+        cards = ["SIMPLE  =                    T", "BITPIX  =                  -32", "NAXIS   =                    2",
+                 "NAXIS1  =                  128", "NAXIS2  =                  128", "END"]
+        header = ''.join(card.ljust(80) for card in cards).encode('ascii')
+        header += b' ' * (-len(header) % 2880)
+        pixels = np.asarray(data, dtype='>f4').tobytes()
+        path.write_bytes(header + pixels + b'\0' * (-len(pixels) % 2880))
+    master = np.ones((128, 128), dtype=np.float32)
+    master[56:72, 56:72] = 0.5
+    master_path, clean_path = tmp_path / 'master.fits', tmp_path / 'clean.fits'
+    write(master_path, master)
+    write(clean_path, np.ones_like(master))
+    result = seiza.master_flat_stability({'master': str(master_path), 'inputs': [
+        {'path': str(master_path)}, {'path': str(clean_path)}, {'path': str(tmp_path / 'missing.fits')}]})
+    assert result['algorithm_version'] == 2
+    assert result['feature_pixels'] >= 16
+    assert result['disagreement'][0] == 0
+    assert result['disagreement'][1] >= result['drift_threshold']
+    assert result['disagreement'][2] == result['drift_threshold']
+    assert result['errors'][0][0] == 2

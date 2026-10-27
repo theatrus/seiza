@@ -1587,3 +1587,24 @@ calibration is withheld until a reliable fit exists. See the
 source verification, pixel checks and final recipe persistence. After building
 the masters, use `LiveStacker.open_fits_expanding_sessions` to apply the same
 assignments during mosaic planning and integration.
+
+### Shared calibration master execution
+
+`calibration_master_plan(request)` resolves already selected/verified candidates
+without matching or file access. It returns the same session/recipes as
+`calibration_library_plan`; forward cached `quality` decisions and
+`flat_star_masking`. `calibration_master_cohort(request)` supplies coherence-only
+previews using effective settings. `calibration_flat_retry(request)` decides
+trimming, alternate sessions, fallback and withholding from measured build
+feedback. Default `flat_stability` options preserve all PSF Guard retries;
+hosts may set `enabled`, `trim_unstable`, `try_next_session` or `retain_unstable`
+false. Policy algorithm version 3 includes these options in session identity.
+
+`master_flat_stability(request)` measures one source at a time against a
+`master` file, with optional `bias`, `dark`, `dark_exposure_seconds` and
+`normalized_full_scale`. `inputs` contains `{path, exposure_seconds, skipped}`.
+It returns `algorithm_version` (2), `feature_pixels`, `drift_threshold`,
+`disagreement` and indexed `errors`. Missing/incompatible inputs count as
+drifting; skipped inputs have zero disagreement. `normalized_full_scale=65535`
+preserves PSF Guard's declared-unit XISF handling. Mono, RGB and CFA data use
+separate sample planes. See [the execution contract](../docs/calibration-library.md).

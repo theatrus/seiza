@@ -4111,6 +4111,42 @@ char *seiza_calibration_library_plan_with_groups_json(const char *request_json,
                                                       char **error_out);
 
 /*
+ Resolve verified selected candidates, build options and session identity from camelCase JSON. No I/O.
+ Free the result/error with seiza_string_free.
+ # Safety
+ request_json is NUL-terminated UTF-8; error_out is null or writable.
+ */
+char *seiza_calibration_master_plan_json(const char *request_json,
+                                         char **error_out);
+
+/*
+ Resolve a coherent master cohort from camelCase JSON. No I/O.
+ Free the result/error with seiza_string_free.
+ # Safety
+ request_json is NUL-terminated UTF-8; error_out is null or writable.
+ */
+char *seiza_calibration_master_cohort_json(const char *request_json, char **error_out);
+
+/*
+ Decide flat trimming, alternate-session retry and publication from camelCase JSON. No I/O.
+ Free the result/error with seiza_string_free.
+ # Safety
+ request_json is NUL-terminated UTF-8; error_out is null or writable.
+ */
+char *seiza_calibration_flat_retry_json(const char *request_json, char **error_out);
+
+/*
+ Measure master-flat feature stability from files, one source at a time.
+ camelCase JSON: master, inputs [{path,exposureSeconds,skipped}], optional
+ bias/dark/darkExposureSeconds and normalizedFullScale. Missing/unreadable or
+ incompatible inputs count as drifting; skipped inputs have zero disagreement.
+ Free the returned JSON/error with seiza_string_free.
+ # Safety
+ request_json is NUL-terminated UTF-8; error_out is null or writable.
+ */
+char *seiza_master_flat_stability_json(const char *request_json, char **error_out);
+
+/*
  Prepare a parallax video from a JSON request (see the fields below) and
  return it, released with [`seiza_parallax_free`], or null with
  `error_out` set.

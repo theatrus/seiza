@@ -158,7 +158,7 @@ impl AngleEpochs {
 pub type FamilyEvidence = HashMap<String, Vec<FamilyEvidenceRow>>;
 
 /// How a light's response family was chosen.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
 #[serde(tag = "by", rename_all = "snake_case")]
 pub enum FamilyBasis {
     /// The only candidate, at the light's recorded angle.

@@ -313,3 +313,9 @@ pub enum Error {
 
 /// Result specialized to this crate's [`Error`].
 pub type Result<T> = std::result::Result<T, Error>;
+
+mod flat_stability;
+pub use flat_stability::{
+    FLAT_STABILITY_VERSION, FlatSetStability, FlatStabilityFileRequest, FlatStabilityInput,
+    measure_flat_stability, measure_flat_stability_files,
+};

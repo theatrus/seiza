@@ -29,7 +29,7 @@ pub enum FlatUse {
     ForcedWithoutPedestal,
     Withheld,
 }
-#[derive(Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct Application {
     pub flat_use: FlatUse,
     pub pedestal: Option<f32>,
@@ -107,6 +107,7 @@ pub(super) fn recipes(selected: &CalibrationSelection) -> Vec<MasterRecipe> {
                 .iter()
                 .map(|f| f.frame_uuid.clone())
                 .collect(),
+            coherent_inputs: subset.kept.iter().map(|f| f.frame_uuid.clone()).collect(),
             input_limit: MAX_MASTER_FRAMES,
             requires_source_verification: frames.iter().any(|f| !f.source_verified),
             failure: None,
@@ -193,14 +194,19 @@ pub(super) fn finalize(
                 }
                 recipe.action = RecipeAction::Failed;
                 recipe.failure = Some(row.reason.clone());
-            } else if recipe
+            } else if let Some(kind) = recipe
                 .dependencies
                 .iter()
-                .any(|kind| unavailable.contains(kind))
+                .find(|kind| unavailable.contains(*kind))
             {
                 recipe.action = RecipeAction::Blocked;
-                recipe.failure =
-                    Some("skipped because a declared dependency failed to build".into());
+                let kind = match kind {
+                    CalibrationKind::Bias => "bias",
+                    CalibrationKind::DarkFlat => "dark-flat",
+                    CalibrationKind::Dark => "dark",
+                    CalibrationKind::Flat => "flat",
+                };
+                recipe.failure = Some(format!("skipped because the {kind} master failed to build"));
             }
             if matches!(recipe.action, RecipeAction::Failed | RecipeAction::Blocked) {
                 unavailable.insert(recipe.kind);

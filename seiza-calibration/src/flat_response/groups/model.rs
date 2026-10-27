@@ -251,7 +251,7 @@ impl Event {
 
 /// How much a rig's flats depend on the rotator angle: same-filter sessions
 /// at different angles shot within one flat session window.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Default, serde::Deserialize)]
 pub struct AngleTerm {
     pub pairs: usize,
     pub dust: f64,
@@ -378,7 +378,7 @@ pub struct ImagingSession {
 pub use super::evidence::Side;
 
 /// How a light was put on one side of an event.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
 #[serde(tag = "by", rename_all = "snake_case")]
 pub enum Placement {
     /// Its capture time is outside the event's window.

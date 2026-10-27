@@ -3,7 +3,12 @@
 //! through the stacker's master builders. No files or database are opened here.
 mod flat_notes;
 mod grading;
+mod master_policy;
 mod recipes;
+pub use master_policy::{
+    FlatAttempt, FlatRetryAction, FlatRetryDecision, FlatRetryPolicy, FlatRetryRequest,
+    MasterCohort, MasterCohortRequest, MasterPlanRequest, flat_retry, master_cohort, plan_masters,
+};
 mod rules;
 pub use flat_notes::{
     AlikeRangeNote, ChoiceNote, EventNote, FlatBasis, FlatCorrection, FlatFamily, GroupNote,
@@ -25,7 +30,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 const MIN_MASTER_FRAMES: usize = 2;
 const MAX_MASTER_FRAMES: usize = 64;
-const POLICY_ALGORITHM_VERSION: u32 = 2;
+pub const POLICY_ALGORITHM_VERSION: u32 = 3;
 const DEFAULT_DARK_REACH_DAYS: f64 = 183.0;
 const DEFAULT_COMPLETE_DARK_FRAMES: usize = 10;
 const DEFAULT_FLAT_MAX_AGE_DAYS: f64 = 60.0;
@@ -269,7 +274,11 @@ impl Nights {
         ((at as i128 - shift as i128).div_euclid(86400)).to_string()
     }
 }
-fn session_key(selected: &CalibrationSelection, recipes: &[MasterRecipe]) -> String {
+fn session_key(
+    selected: &CalibrationSelection,
+    recipes: &[MasterRecipe],
+    stability: &FlatRetryPolicy,
+) -> String {
     let frames: HashMap<_, _> = selected
         .bias
         .iter()
@@ -310,6 +319,7 @@ fn session_key(selected: &CalibrationSelection, recipes: &[MasterRecipe]) -> Str
         selected.match_tolerances(),
         selected.rules.matching_digest(),
         selected.flat_basis.correction(),
+        stability,
     );
     hex_digest(&serde_json::to_string(&identity).expect("validated session identity"))
 }
@@ -373,6 +383,7 @@ pub struct Request {
     pub pedestal_evidence: Vec<PedestalEvidence>,
     pub force_flat_without_pedestal: bool,
     pub flat_star_masking: bool,
+    pub flat_stability: FlatRetryPolicy,
 }
 #[derive(Debug, Serialize)]
 pub struct Selection {
@@ -407,20 +418,23 @@ pub struct Snapshot {
     pub settings_digest: Option<String>,
     pub settings_schema: Vec<rules::FieldSpec>,
 }
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Session {
     pub key: String,
     pub tolerances: MatchTolerances,
     pub recipes: Vec<MasterRecipe>,
     pub application: Application,
+    pub flat_stability: FlatRetryPolicy,
 }
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct MasterRecipe {
     pub kind: CalibrationKind,
     pub action: RecipeAction,
     pub inputs: Vec<String>,
     pub dependencies: Vec<CalibrationKind>,
     pub dropped: Vec<String>,
+    /// Coherent raw cohort, including a singleton that cannot yet integrate.
+    pub coherent_inputs: Vec<String>,
     pub input_limit: usize,
     pub requires_source_verification: bool,
     pub failure: Option<String>,
@@ -429,7 +443,7 @@ pub struct MasterRecipe {
     pub flat_star_masking: bool,
     pub dark_level_screening: bool,
 }
-#[derive(Debug, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecipeAction {
     External,
@@ -704,34 +718,20 @@ fn evaluate_inner(
                 frames.truncate(MAX_MASTER_FRAMES);
             }
         }
-        let mut recipes = recipes(&selected);
-        for recipe in &mut recipes {
-            recipe.flat_star_masking =
-                recipe.kind == CalibrationKind::Flat && request.flat_star_masking;
-            recipe.dark_level_screening = matches!(
-                recipe.kind,
-                CalibrationKind::Dark | CalibrationKind::DarkFlat
-            ) && recipe.inputs.iter().any(|id| {
-                !judged.contains_key(id)
-                    && quality.get(id).is_none_or(|q| {
-                        q.override_choice.is_none()
-                            && !(q.grade.is_some()
-                                && selected_frame_current(id, q, &library.frames))
-                    })
-            });
-        }
-        let key = session_key(&selected, &recipes);
+        let session = master_policy::resolved_session(
+            &selected,
+            &quality,
+            &judged,
+            request.flat_star_masking,
+            request.flat_stability.clone(),
+        );
+        let key = session.key.clone();
         let index = match keys.get(&key) {
             Some(index) => *index,
             None => {
                 let index = sessions.len();
                 keys.insert(key.clone(), index);
-                sessions.push(Session {
-                    key,
-                    tolerances: selected.match_tolerances(),
-                    recipes,
-                    application: Application::default(),
-                });
+                sessions.push(session);
                 index
             }
         };

@@ -16,7 +16,7 @@ identity includes resolved external-master adoption or ordered raw inputs and
 their fingerprints, build options/dependencies, matching rules, the full light
 gate and flat correction. Equivalent recipes reuse a session without reordering
 the lights; unused candidates cannot hide a change in adopted master. Policy
-`algorithm_version` is 2 for this resolved-recipe identity. Failure and pedestal
+`algorithm_version` is 3: resolved-recipe identity also includes the flat retry policy. Failure and pedestal
 feedback retain the base key so hosts can submit execution results against it.
 
 ## Inputs
@@ -41,6 +41,7 @@ keys could be mistaken for schema fields. Unknown schema fields are refused.
 | `pedestal_evidence` | `{session_key, estimates, pinned}` successful native pedestal fits for the returned sample lights, or a previous stack's pinned fit |
 | `force_flat_without_pedestal` | Explicitly allow PSF Guard's forced-on flat-only behavior; default false |
 | `flat_star_masking` | Enable native master flat star masking; PSF Guard's default is false |
+| `flat_stability` | `{enabled, trim_unstable, try_next_session, retain_unstable}`; all default true, preserving PSF Guard's decisions |
 
 Metadata retains PSF Guard's row names: `exposure_s`, `camera_temp`,
 `focal_length_mm`, `rotation` on a calibration row, `rotator_position` on a
@@ -122,9 +123,20 @@ Planning opens no files and does not claim a master has been built. Hosts:
    image I/O), using the returned options. Retain actual accepted/skipped input
    provenance. Feed build failures back into the planner; never silently omit
    a failed declared bias/dark-flat while building a dependent flat.
-3. Preserve PSF Guard's post-build flat stability check and retry policy where
-   the host implements it. This value planner describes initial master inputs;
-   it does not replace that pixel check or its cache/staging orchestration.
+3. Measure post-build flat stability with `seiza_stacking::measure_flat_stability`,
+   C's `seiza_master_flat_stability_json`, or Python's `master_flat_stability`.
+   The native call accepts the loaded master and optional calibration; bindings
+   load their `master`/`bias`/`dark` paths. Source records are
+   `{path, exposure_seconds, skipped}`. Set `normalized_full_scale=65535` for
+   PSF Guard's declared-unit XISF scale. This is the original mono/RGB/CFA,
+   dip-only feature comparison, opening one source at a time. Unreadable or
+   incompatible sources count as drifting and return indexed diagnostics when
+   the master has enough features to judge; otherwise all disagreements are zero;
+   deliberately skipped sources have zero disagreement. The measurement
+   algorithm remains version 2.
+   Submit accepted UUIDs and aligned disagreement to the shared retry policy
+   described below. The host stages/publishes files only after its decision.
+
 4. Apply any `flat_basis.correction()` through the shared change-map kernels.
    A promised correction that fails is an error, rather than a stack silently
    keyed as corrected. `available_responses` is a host availability assertion,
@@ -160,3 +172,52 @@ captured PSF Guard measurements/grades for gain separation and a leaking dark,
 including its exact reason and use-anyway behavior. Rust, C and Python consume
 these shared fixtures. Tests also exercise recipe failures, fitted/pinned
 pedestals, input verification and stale/failed/unmeasured distinctions.
+
+## Resolving selected candidates and executing retries
+
+A catalog host can call `library::plan_masters(MasterPlanRequest)` after it
+verifies/remaps selected rows, without repeating grouping or selection. C uses
+`seiza_calibration_master_plan_json`; Python uses `calibration_master_plan(request)`.
+The request contains the already selected `frames` in candidate order, the
+session's `lights` (used for pedestal sampling), `quality`, global/rig settings,
+`flat_basis`, `flat_family`, `flat_held_back`, star masking and retry options.
+It also accepts the same failure/pedestal feedback as library planning. It
+returns one resolved session, with exactly the same recipes and identity as
+library planning for that selection. Different selections still need separate
+calls; this API deliberately performs no candidate matching.
+
+Forward current grade fingerprints/algorithm versions and manual overrides,
+even when pixel measurements are omitted. A current grade or personal choice
+prevents the legacy dark screen from rejudging that input. Forward star masking
+explicitly. Building directly from an unverified preview is refused by the host;
+replan after verification or changed source metadata. Recipe exposure belongs
+to the adopted master/first actual coherent input, including unknown exposure.
+`coherent_inputs` reports the raw cohort even if it has only one frame or an
+external master is preferred. `master_cohort` (C `seiza_calibration_master_cohort_json`,
+Python `calibration_master_cohort`) exposes the original permissive coherence
+helper for previews/retries using already resolved effective settings. Full
+executable planning separately validates metadata and settings records.
+
+`library::flat_retry(FlatRetryRequest)` / `seiza_calibration_flat_retry_json` /
+`calibration_flat_retry(request)` owns the post-build decision sequence. Supply
+all raw `candidates`, `held_back` UUIDs, effective `settings`, optional `policy`,
+and the first attempt's accepted `used` UUIDs, `disagreement`, `drift_threshold`,
+`feature_pixels` and `memo` flag. Optional host `label` strings affect only
+explanations. Empty disagreement means no stability measurement was available.
+
+The default policy trims a stable majority (at least two sources), then tries
+another session excluding the whole initial capture window and held-back
+sources. Set `trimmed_attempted` or `alternate_attempted` even when a retry
+fails/yields no master; supply `trimmed`/`alternate` feedback when it succeeds.
+Actions are `try_trimmed`, `try_alternate`, `publish_first`, `publish_trimmed`,
+`publish_alternate` or `withhold`. Retry actions return their candidate UUIDs.
+If no stable retry succeeds, the original is retained with its warning. A memo
+must be rebuilt when `rebuild_first` is true; it is never a usable file. Hosts
+own cancellation, staging cleanup, cache freshness and atomic publication.
+
+Hosts can disable the check, skip trimming or alternate sessions, or set
+`retain_unstable=false` to withhold a failed set. These are explicit execution
+options, separate from the unchanged 43 user settings. PSF Guard uses the full
+default policy. Changing the retry policy changes session identity. Keep final
+accepted inputs and dependencies in master provenance; a provisional recipe
+key alone cannot validate an executed master cache entry.
