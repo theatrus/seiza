@@ -8,7 +8,7 @@ use std::ptr;
 // This wire schema contains only typed records and arrays. Keyed collections
 // are arrays of pairs, so rig/frame/family identifiers are always values and
 // are never renamed. Enum values likewise keep their native spelling.
-fn field_names(value: Value, camel: bool) -> Value {
+pub(crate) fn field_names(value: Value, camel: bool) -> Value {
     match value {
         Value::Array(values) => {
             Value::Array(values.into_iter().map(|v| field_names(v, camel)).collect())

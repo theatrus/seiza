@@ -715,6 +715,8 @@ impl FrameInputMode {
 /// Incremental, bounded-memory image stack. Frames are registered to the
 /// immutable first accepted frame and integrated immediately.
 pub struct LiveStacker {
+    pub(crate) file_sessions: Option<crate::sessions::FileSessionPlan>,
+    active_file_session: Option<usize>,
     // Constant for the duration of one pipelined batch, so `pipeline` may
     // share these across preparation threads while this thread holds
     // `&mut self` for the accumulator. `set_calibration` swaps the masters
@@ -1089,6 +1091,56 @@ impl LiveStacker {
         Ok(stacker)
     }
 
+    /// Plan a canvas using each original light's assigned file-backed masters
+    /// and complete gate before detection. The returned file-input stack is
+    /// empty; push every original light, including the anchor. Assignments
+    /// remain authoritative through pushes, pipeline calls and context resume.
+    /// Master loading is bounded by planning concurrency, not session count.
+    /// Sources/masters that change or disappear invalidate the plan explicitly.
+    pub fn open_fits_expanding_sessions(
+        paths: &[PathBuf],
+        sessions: &[crate::FileCalibrationSession],
+        assignments: &[usize],
+        options: StackOptions,
+        maximum_samples: usize,
+        mut progress: impl FnMut(&Path, usize, usize, usize) -> crate::Continue,
+    ) -> Result<Self> {
+        if let Some(first) = paths.first()
+            && progress(first, 0, 0, 0) == crate::Continue::No
+        {
+            return Err(Error::Stack("expansion planning cancelled".into()));
+        }
+        let mut file_plan = crate::sessions::FileSessionPlan::new(paths, sessions, assignments)?;
+        let mut options = Self::expanding_options(options)?;
+        options.match_tolerances = file_plan.sessions[assignments[0]].tolerances;
+        let cache = crate::sessions::PlanningSessions::new(&file_plan);
+        let plan = crate::expand::plan_prepared(
+            paths,
+            &|path, frame, bin| cache.prepare(path, frame, &options, bin),
+            &options,
+            maximum_samples,
+            progress,
+        )?;
+        drop(cache);
+        file_plan.verify_masters()?;
+        let session = &file_plan.sessions[assignments[0]];
+        let calibration = session.load()?;
+        file_plan.verify_masters()?;
+        let record = session.record();
+        file_plan.bind(0, assignments[0]);
+        let mut stacker = Self::from_expansion(plan, calibration, options)?;
+        stacker.ledger.set_current_calibration(record);
+        stacker.file_sessions = Some(file_plan);
+        stacker.configuration_fingerprint = stack_configuration_fingerprint(
+            &stacker.options,
+            &stacker.calibration,
+            stacker.input_mode,
+            stacker.file_sessions.as_ref(),
+        )?;
+        stacker.active_file_session = Some(assignments[0]);
+        Ok(stacker)
+    }
+
     /// The lens distortion an expanded canvas was planned through, when
     /// planning found the panels' overlaps bent by one.
     pub fn expanded_lens(&self) -> Option<crate::ExpandedLens> {
@@ -1267,6 +1319,8 @@ impl LiveStacker {
                 },
                 ..self.options.clone()
             },
+            file_sessions: self.file_sessions.clone(),
+            active_file_session: None,
             calibration: self.calibration.clone(),
             reference,
             reference_metadata: self.reference_metadata.clone(),
@@ -1378,7 +1432,7 @@ impl LiveStacker {
     ) -> Result<Self> {
         options.validate()?;
         let configuration_fingerprint =
-            stack_configuration_fingerprint(&options, &calibration, input_mode)?;
+            stack_configuration_fingerprint(&options, &calibration, input_mode, None)?;
         let reference_is_integrated = matches!(contribution, ReferenceContribution::Integrated(_));
         let mut canvas_registrar = None;
         let (registrar, reference_noise, reference_cfa, alignment_reference) = match contribution {
@@ -1462,6 +1516,8 @@ impl LiveStacker {
             ledger.set_reference_weighting(&reference_noise);
         }
         Ok(Self {
+            file_sessions: None,
+            active_file_session: None,
             options,
             calibration,
             reference,
@@ -1666,12 +1722,18 @@ impl LiveStacker {
         // the options carry it.
         let mut ledger = restored.ledger.unwrap_or_else(crate::replay::Ledger::empty);
         ledger.set_bin_factor(restored.options.bin_factor);
+        if let Some(plan) = &restored.file_sessions {
+            ledger.validate_file_sessions(plan)?;
+        }
         let configuration_fingerprint = stack_configuration_fingerprint(
             &restored.options,
             &restored.calibration,
             restored.input_mode,
+            restored.file_sessions.as_ref(),
         )?;
         Ok(Self {
+            file_sessions: restored.file_sessions,
+            active_file_session: None,
             options: restored.options,
             calibration: restored.calibration,
             reference: restored.reference,
@@ -1741,6 +1803,7 @@ impl LiveStacker {
                 reference_noise: &self.reference_noise,
                 accepted_frames: self.accepted_frames,
                 rejected_frames: self.rejected_frames,
+                file_sessions: self.file_sessions.as_ref(),
                 input_paths: &self.input_paths,
                 input_mode: self.input_mode,
                 ledger: &self.ledger,
@@ -1813,6 +1876,16 @@ impl LiveStacker {
     /// because replay has no file to load them from again.
     pub fn set_calibration(&mut self, calibration: CalibrationMasters) -> Result<()> {
         self.require_fits_input_mode()?;
+        self.require_manual_calibration()?;
+        self.replace_calibration(calibration, self.options.match_tolerances)
+    }
+
+    fn replace_calibration(
+        &mut self,
+        calibration: CalibrationMasters,
+        tolerances: seiza_calibration::MatchTolerances,
+    ) -> Result<()> {
+        crate::calibration::check_tolerances(&tolerances)?;
         calibration.validate_master_set_signatures()?;
         crate::context::validate_calibration(
             &self.reference,
@@ -1820,9 +1893,18 @@ impl LiveStacker {
             self.reference_is_integrated,
         )
         .map_err(Error::Calibration)?;
-        let configuration_fingerprint =
-            stack_configuration_fingerprint(&self.options, &calibration, self.input_mode)?;
+        let options = StackOptions {
+            match_tolerances: tolerances,
+            ..self.options.clone()
+        };
+        let configuration_fingerprint = stack_configuration_fingerprint(
+            &options,
+            &calibration,
+            self.input_mode,
+            self.file_sessions.as_ref(),
+        )?;
         self.calibration = calibration;
+        self.options = options;
         self.configuration_fingerprint = configuration_fingerprint;
         self.ledger
             .begin_calibration(crate::replay::CalibrationRecord::default());
@@ -1853,6 +1935,7 @@ impl LiveStacker {
         dark_exposure_seconds: Option<f64>,
     ) -> Result<()> {
         self.require_fits_input_mode()?;
+        self.require_manual_calibration()?;
         if dark_path.is_none() && dark_exposure_seconds.is_some() {
             return Err(Error::Calibration(
                 "a master-dark exposure override requires a dark path".into(),
@@ -1906,8 +1989,11 @@ impl LiveStacker {
     /// Calibrate, prepare, and try to integrate a FITS frame, reporting whether
     /// it was admitted or turned away. Stacks created from prepared pixels
     /// reject this path so later inputs cannot skip the caller's preparation.
-    pub fn push(&mut self, frame: FitsFrame) -> Result<FrameDisposition> {
+    pub fn push(&mut self, mut frame: FitsFrame) -> Result<FrameDisposition> {
         self.require_fits_input_mode()?;
+        if let Some(scale) = self.select_file_session(frame.source.as_deref())? {
+            frame.rescale_declared_unit_bounds(scale);
+        }
         let source = crate::replay::FrameSource::of(&frame);
         let clipped = crate::saturation::raw_clip_mask(&frame);
         let (frame, cfa) = match prepare_light(
@@ -1990,6 +2076,7 @@ impl LiveStacker {
     /// frame, applying every admission gate. It is binned by
     /// [`StackOptions::bin_factor`] first.
     pub fn push_linear(&mut self, frame: LinearImage) -> Result<FrameDisposition> {
+        self.require_manual_calibration()?;
         let frame = match frame.into_binned(self.options.bin_factor) {
             Ok(frame) => frame,
             Err(error) => {
@@ -2224,6 +2311,11 @@ impl LiveStacker {
         self.input_paths
             .iter()
             .chain(&self.reference_image_path)
+            .chain(
+                self.file_sessions
+                    .iter()
+                    .flat_map(|plan| plan.protected_paths()),
+            )
             .cloned()
             .collect()
     }
@@ -2286,15 +2378,53 @@ impl LiveStacker {
         tolerances: seiza_calibration::MatchTolerances,
     ) -> Result<()> {
         self.require_fits_input_mode()?;
+        self.require_manual_calibration()?;
         crate::calibration::check_tolerances(&tolerances)?;
         let options = StackOptions {
             match_tolerances: tolerances,
             ..self.options.clone()
         };
-        self.configuration_fingerprint =
-            stack_configuration_fingerprint(&options, &self.calibration, self.input_mode)?;
+        self.configuration_fingerprint = stack_configuration_fingerprint(
+            &options,
+            &self.calibration,
+            self.input_mode,
+            self.file_sessions.as_ref(),
+        )?;
         self.options = options;
         Ok(())
+    }
+
+    fn require_manual_calibration(&self) -> Result<()> {
+        if self.file_sessions.is_some() {
+            return Err(Error::Calibration(
+                "this stack's file calibration assignments are immutable".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn select_file_session(&mut self, path: Option<&Path>) -> Result<Option<f32>> {
+        let Some(plan) = &self.file_sessions else {
+            return Ok(None);
+        };
+        let path = path.ok_or_else(|| {
+            Error::Calibration("a session-planned stack requires original file inputs".into())
+        })?;
+        let index = plan.assignment(path)?;
+        if self.active_file_session == Some(index) {
+            return Ok(plan.sessions[index].normalized_full_scale);
+        }
+        let session = plan.sessions[index].clone();
+        let calibration = session.load()?;
+        plan.assignment(path)?;
+        self.replace_calibration(calibration, session.tolerances)?;
+        self.ledger.set_current_calibration(session.record());
+        self.file_sessions
+            .as_mut()
+            .expect("session plan")
+            .bind(self.ledger.current_calibration(), index);
+        self.active_file_session = Some(index);
+        Ok(session.normalized_full_scale)
     }
 
     pub(crate) fn require_fits_input_mode(&self) -> Result<()> {
@@ -2507,6 +2637,7 @@ fn stack_configuration_fingerprint(
     options: &StackOptions,
     calibration: &CalibrationMasters,
     input_mode: FrameInputMode,
+    file_sessions: Option<&crate::sessions::FileSessionPlan>,
 ) -> Result<String> {
     // Where the arithmetic runs is no part of the configuration.
     let options = serde_json::to_vec(&StackOptions {
@@ -2531,6 +2662,10 @@ fn stack_configuration_fingerprint(
     hash_optional_image(&mut hasher, calibration.flat_response.as_ref());
     hash_optional_signature(&mut hasher, calibration.flat_signature.as_ref())?;
     hash_optional_bayer(&mut hasher, calibration.flat_bayer);
+    if let Some(plan) = file_sessions {
+        hasher.update(b"file-calibration-sessions-v1\0");
+        hash_bytes(&mut hasher, &plan.fingerprint_bytes()?);
+    }
     let digest = hasher.finalize();
     Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
 }
@@ -5501,6 +5636,7 @@ mod tests {
                 reference_noise: &[],
                 accepted_frames: stacker.accepted_frames,
                 rejected_frames: stacker.rejected_frames,
+                file_sessions: stacker.file_sessions.as_ref(),
                 input_paths: &stacker.input_paths,
                 input_mode: stacker.input_mode,
                 ledger: &stacker.ledger,
@@ -5624,6 +5760,7 @@ mod tests {
                 reference_noise: &stacker.reference_noise,
                 accepted_frames: stacker.accepted_frames,
                 rejected_frames: stacker.rejected_frames,
+                file_sessions: stacker.file_sessions.as_ref(),
                 input_paths: &stacker.input_paths,
                 input_mode: stacker.input_mode,
                 ledger: &stacker.ledger,
@@ -6251,6 +6388,7 @@ mod tests {
                 &options,
                 &CalibrationMasters::default(),
                 FrameInputMode::CalibrateAndPrepare,
+                None,
             )
             .unwrap()
         };

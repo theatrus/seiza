@@ -29,6 +29,7 @@ const MAXIMUM_LEDGER_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const IO_BUFFER_VALUES: usize = 16 * 1024;
 
 pub(crate) struct ContextWriteState<'a> {
+    pub file_sessions: Option<&'a crate::sessions::FileSessionPlan>,
     pub alignment_reference: Option<&'a LinearImage>,
     pub reference_image_path: Option<&'a Path>,
     pub reference_is_integrated: bool,
@@ -58,6 +59,7 @@ pub(crate) struct ContextWriteState<'a> {
 }
 
 pub(crate) struct RestoredContext {
+    pub file_sessions: Option<crate::sessions::FileSessionPlan>,
     pub alignment_reference: Option<LinearImage>,
     pub reference_image_path: Option<PathBuf>,
     pub reference_is_integrated: bool,
@@ -91,6 +93,8 @@ pub(crate) struct RestoredContext {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ContextMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    file_sessions: Option<crate::sessions::FileSessionPlan>,
     /// Omitted for existing stacks; older readers reject external-reference
     /// contexts rather than incorrectly caching the target as their first light.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -707,6 +711,7 @@ pub(crate) fn read(path: &Path) -> Result<RestoredContext> {
         .collect();
 
     Ok(RestoredContext {
+        file_sessions: metadata.file_sessions,
         alignment_reference,
         reference_image_path: metadata.reference_image_path.map(PathBuf::from),
         reference_is_integrated: !metadata.external_reference,
@@ -760,6 +765,7 @@ impl ContextMetadata {
                     })
                 })
                 .transpose()?,
+            file_sessions: state.file_sessions.cloned(),
             options: state.options.clone(),
             calibration: CalibrationMetadata::from(state.calibration),
             reference: ImageMetadata::from(state.reference),
@@ -809,6 +815,9 @@ impl ContextMetadata {
             return Err("context holds channel sites but no admitted-frame ledger".into());
         }
         self.options.validate().map_err(|error| error.to_string())?;
+        if let Some(plan) = &self.file_sessions {
+            plan.validate().map_err(|error| error.to_string())?;
+        }
         let weighted = !self.options.weighting.is_equal();
         if weighted && self.schema_version < WEIGHTED_FORMAT_VERSION {
             return Err(format!(

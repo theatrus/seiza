@@ -1523,3 +1523,29 @@ formula, without PixInsight's optional saturation/SCNR processes.
 `screen_rgb_star_layer(nebula, stars, reduction=0)` screens the display layer over
 a display nebula with optional linked star reduction [0,1]. Inputs are unchanged;
 missing coverage masks whole RGB pixels. Run star separation before stretching.
+
+### Expanded mosaics with calibration sessions
+
+`LiveStacker.open_fits_expanding_sessions` prepares every original light with
+its assigned calibration before planning the canvas. It returns an empty stack;
+push every original file, including the anchor, in its original order:
+
+```python
+sessions = [
+    {"bias": "bias-a.fits", "flat": "flat-a.fits"},
+    {"bias": "bias-b.fits", "flat": "flat-b.fits",
+     "tolerances": {"light_rotation": {"basis": "measured", "degrees": 90.0}}},
+]
+stacker = seiza.LiveStacker.open_fits_expanding_sessions(
+    paths, sessions, [0, 1, 0], max_canvas_megasamples=256)
+for path in paths:
+    stacker.push_fits(path)
+```
+
+Each session supplies a complete gate; omitted values use native defaults.
+A fitted-pedestal recipe supplies `flat` (already normalized) and `pedestal`,
+without bias or dark. `normalized_full_scale=65535` rescales only images that
+declare normalized `0:1` bounds, matching PSF Guard's loader.
+Assignments are immutable and survive checkpoints and reintegration. Changed
+sources or masters are refused. See [session planning](../docs/calibration-sessions.md)
+for file identity, memory and pipeline behavior.

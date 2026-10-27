@@ -1044,6 +1044,80 @@ def test_expanding_stack_refuses_bad_inputs_and_honours_cancel(tmp_path):
         seiza.LiveStacker.open_fits_expanding(paths, options=options, cancel=interrupt)
 
 
+def test_expanding_session_assignments_calibrate_plan_push_and_resume(tmp_path):
+    paths = overlapping_panels(tmp_path)
+    sessions = []
+    for index, bias in enumerate((500.0, 1500.0)):
+        bias_path = tmp_path / f"bias-{index}.fits"
+        header = fits.Header({"GAIN": 100 + index * 100})
+        fits.writeto(bias_path, np.full((160, 192), bias, np.float32), header)
+        sessions.append({"bias": bias_path})
+    for index, path in enumerate(paths):
+        data = fits.getdata(path)
+        session = index % 2
+        fits.writeto(path, data + (500.0 if session == 0 else 1500.0),
+                     fits.Header({"GAIN": 100 + session * 100}), overwrite=True)
+    options = seiza.StackOptions(normalization="none", rejection="none", minimum_overlap=0.1)
+    stack = seiza.LiveStacker.open_fits_expanding_sessions(paths, sessions, [0, 1, 0], options=options)
+    assert stack.accepted_frames == 0
+    for path in paths[:2]:
+        result = stack.push_fits(path)
+        assert result.accepted, result.reason
+    with pytest.raises(seiza.StackError, match="immutable"):
+        stack.set_match_tolerances(seiza.MatchTolerances())
+    context = tmp_path / "sessions.seizastack"
+    identity = stack.state().configuration_fingerprint
+    stack.save_context(context)
+    resumed = seiza.LiveStacker.open_context(context)
+    assert resumed.state().configuration_fingerprint == identity
+    assert resumed.push_fits(paths[2]).accepted
+    live = resumed.snapshot()
+    assert live.accepted_frames == 3
+    assert np.nanmedian(live.image) == pytest.approx(100, abs=3)
+    replay = resumed.reintegrate(sigma_low=100, sigma_high=100)
+    np.testing.assert_array_equal(live.coverage, replay.coverage)
+    np.testing.assert_allclose(live.image, replay.image, atol=0.02, equal_nan=True)
+    sessions[1]["bias"].unlink()
+    with pytest.raises(seiza.StackError, match="changed|missing|fingerprint"):
+        resumed.reintegrate()
+    with pytest.raises(seiza.StackError, match="changed|missing|fingerprint"):
+        seiza.LiveStacker.open_context(context)
+
+
+def test_expanding_session_plan_refuses_assignments_aliases_and_cancel(tmp_path):
+    paths = overlapping_panels(tmp_path)
+    open_plan = seiza.LiveStacker.open_fits_expanding_sessions
+    with pytest.raises(seiza.StackError, match="assignment"):
+        open_plan(paths, [{}], [0])
+    with pytest.raises(seiza.StackError, match="index"):
+        open_plan(paths, [{}], [0, 1, 0])
+    with pytest.raises(seiza.StackError, match="aliases"):
+        open_plan(paths, [{"bias": paths[1]}], [0, 0, 0])
+    with pytest.raises(seiza.StackError, match="cancel"):
+        open_plan(paths, [{}], [0, 0, 0], cancel=lambda: True)
+
+
+def test_expanding_sessions_keep_psf_guards_fitted_pedestal_recipe(tmp_path):
+    paths = overlapping_panels(tmp_path)
+    flat = tmp_path / "normalized-flat.fits"
+    fits.writeto(flat, np.ones((160, 192), np.float32), fits.Header({"FLATNORM": True}))
+    for index, path in enumerate(paths):
+        fits.writeto(path, fits.getdata(path) + (500 if index % 2 == 0 else 1500), overwrite=True)
+    sessions = [{"flat": flat, "pedestal": pedestal, "normalized_full_scale": 65535}
+                for pedestal in (500, 1500)]
+    stack = seiza.LiveStacker.open_fits_expanding_sessions(paths, sessions, [0, 1, 0],
+        options=seiza.StackOptions(normalization="none", rejection="none", minimum_overlap=0.1))
+    for path in paths:
+        assert stack.push_fits(path).accepted
+    context = tmp_path / "pedestals.stack"
+    stack.save_context(context)
+    resumed = seiza.LiveStacker.open_context(context)
+    live = resumed.snapshot()
+    replay = resumed.reintegrate(sigma_low=100, sigma_high=100)
+    assert np.nanmedian(live.image) == pytest.approx(100, abs=3)
+    np.testing.assert_allclose(live.image, replay.image, atol=0.02, equal_nan=True)
+
+
 def lights_with_a_header(tmp_path, count=3):
     image = synthetic_star_field()
     header = fits.Header()

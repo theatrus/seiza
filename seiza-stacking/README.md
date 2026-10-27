@@ -1148,3 +1148,12 @@ only in the display layer; missing coverage masks whole RGB pixels. Linear
 inputs stay unchanged. This independently implements the published
 [SetiAstro tone](https://www.setiastro.com/pjsr-scripts), without replicating
 PixInsight's optional ColorSaturation or SCNR processes.
+
+### Session-aware expanded mosaics
+
+`LiveStacker::open_fits_expanding_sessions` accepts original paths, complete
+`FileCalibrationSession` records and a session index for each path. It applies
+the assigned masters and gate during canvas planning and later integration,
+including A→B→A sequences. It returns an empty stack; push all original lights.
+See [session planning](../docs/calibration-sessions.md) for recipes, scaling,
+checkpoint/replay guarantees and bounded preparation.

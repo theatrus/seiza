@@ -750,6 +750,16 @@ class LiveStacker:
         cancel: Callable[[], bool] | None = None,
     ) -> LiveStacker: ...
     @staticmethod
+    def open_fits_expanding_sessions(
+        paths: Sequence[str | Path],
+        sessions: Sequence[Mapping[str, Any]],
+        assignments: Sequence[int],
+        *,
+        options: StackOptions | None = None,
+        max_canvas_megasamples: int = 256,
+        cancel: Callable[[], bool] | None = None,
+    ) -> LiveStacker: ...
+    @staticmethod
     def open_context(path: str | Path, *, gpu: GpuOptions | None = None) -> LiveStacker: ...
     @property
     def accepted_frames(self) -> int: ...

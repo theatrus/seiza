@@ -183,6 +183,8 @@ pub enum PipelineExecution {
     SequentialRayonFallback,
     /// The caller explicitly requested one-frame-at-a-time processing.
     SequentialRequested,
+    /// File assignments change masters/gates between ordered inputs.
+    SequentialCalibrationSessions,
 }
 
 /// Aggregate elapsed times, not CPU time. Worker sums may exceed batch time.
@@ -512,6 +514,12 @@ impl LiveStacker {
     ) -> Result<PoolPipelineReport> {
         let started = Instant::now();
         self.require_fits_input_mode()?;
+        if self.file_sessions.is_some() && normalized_full_scale.is_some() {
+            return Err(Error::Calibration(
+                "calibration sessions own their input sample scale; omit the pipeline override"
+                    .into(),
+            ));
+        }
         if paths.is_empty() {
             return Ok(PoolPipelineReport {
                 execution: PipelineExecution::SequentialRequested,
@@ -549,6 +557,12 @@ impl LiveStacker {
         // The frames' buffers go back to the allocator when the run ends.
         let _recycled = crate::recycle::Scope;
         self.require_fits_input_mode()?;
+        if self.file_sessions.is_some() && options.normalized_full_scale.is_some() {
+            return Err(Error::Calibration(
+                "calibration sessions own their input sample scale; omit the pipeline override"
+                    .into(),
+            ));
+        }
         if paths.is_empty() {
             return Ok(PoolPipelineReport::default());
         }
@@ -568,6 +582,19 @@ impl LiveStacker {
         // Resolve the budget before path metadata I/O, and settle duplicates
         // before workers start so neither path opens a frame it will discard.
         let plan = self.plan_batch(paths);
+        if self.file_sessions.is_some() {
+            let mut report = self.run_sequentially(
+                paths,
+                &plan,
+                options.normalized_full_scale,
+                compute,
+                read,
+                prepare,
+                &mut on_frame,
+            );
+            report.timings.elapsed = started.elapsed();
+            return Ok(report);
+        }
         if compute.0.is_none() && rayon::current_thread_index().is_some() {
             let mut report = self.run_in_current_pool(
                 paths,
@@ -822,6 +849,38 @@ impl LiveStacker {
             estimated_in_flight_bytes: self.pipeline_memory().sequential_bytes,
             ..PoolPipelineReport::default()
         };
+        if self.file_sessions.is_some() {
+            report.execution = PipelineExecution::SequentialCalibrationSessions;
+            for (index, path) in paths.iter().enumerate() {
+                let outcome = match &plan[index] {
+                    Planned::Duplicate => Err(duplicate_error(path)),
+                    Planned::Prepare(identity) => {
+                        let (frame, elapsed) = timed(|| read(path));
+                        report.timings.read_decode += elapsed;
+                        let (outcome, elapsed) = compute.install(|| {
+                            timed(|| {
+                                frame.and_then(|mut frame| {
+                                    if let Some(scale) = normalized_full_scale {
+                                        frame.rescale_declared_unit_bounds(scale);
+                                    }
+                                    self.push(frame)
+                                })
+                            })
+                        });
+                        report.timings.preparation += elapsed;
+                        if outcome.is_ok() {
+                            self.record_input_path(identity);
+                        }
+                        outcome
+                    }
+                };
+                report.frames.count(&outcome);
+                if on_frame(path, outcome) == Continue::No {
+                    break;
+                }
+            }
+            return report;
+        }
         let (preparation, mut integration) = self.split_for_pipeline();
         let (_, elapsed) = timed(|| integration.prepare_accumulator());
         report.timings.integration += elapsed;

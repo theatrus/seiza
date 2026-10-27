@@ -2596,6 +2596,456 @@ fn mosaic_panels(directory: &tempfile::TempDir) -> Vec<PathBuf> {
     paths
 }
 
+/// Calibration is applied to the planning anchor and every overlap frame,
+/// before star detection and mosaic photometry.
+#[test]
+fn an_expanded_mosaic_with_bias_and_flat_keeps_its_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let paths = mosaic_panels(&directory);
+    let (width, height) = MOSAIC_PANEL;
+    let flat = LinearImage::new(
+        width,
+        height,
+        1,
+        (0..width * height)
+            .map(|i| 0.6 + 0.8 * (i % width) as f32 / width as f32)
+            .collect(),
+    )
+    .unwrap();
+    let bias = LinearImage::new(width, height, 1, vec![500.0; width * height]).unwrap();
+    let bias_path = directory.path().join("bias.fits");
+    let flat_path = directory.path().join("flat.fits");
+    write_processed_image_fits_f32(&bias_path, &bias, &[], &[]).unwrap();
+    let raw_flat = LinearImage::new(
+        width,
+        height,
+        1,
+        flat.data.iter().map(|v| v * 30000.0 + 500.0).collect(),
+    )
+    .unwrap();
+    write_processed_image_fits_f32(&flat_path, &raw_flat, &[], &[]).unwrap();
+    for path in &paths {
+        let mut raw = seiza_stacking::FitsFrame::open(path).unwrap();
+        for (sample, response) in raw.image.data.iter_mut().zip(&flat.data) {
+            *sample = *sample * response + 500.0;
+        }
+        write_processed_image_fits_f32(path, &raw.image, &[], &[]).unwrap();
+    }
+    let mut options = StackOptions {
+        rejection: RejectionMode::None,
+        ..StackOptions::default()
+    };
+    options.acceptance.minimum_overlap_fraction = 0.1;
+    let session = seiza_stacking::FileCalibrationSession {
+        bias: Some(bias_path),
+        flat: Some(flat_path),
+        ..Default::default()
+    };
+    let mut stack = LiveStacker::open_fits_expanding_sessions(
+        &paths,
+        &[session.clone(), session],
+        &[0, 1, 0, 1],
+        options,
+        usize::MAX,
+        |_, _, _, _| Continue::Yes,
+    )
+    .unwrap();
+    for path in &paths {
+        admit(stack.push_fits(path).unwrap());
+    }
+    check(
+        "CALIBRATED_EXPANDED_MOSAIC",
+        &summary(&stack.snapshot().unwrap().image),
+        &[
+            2.6235708e2,
+            5.3352751e2,
+            6.2851758e3,
+            1.0048472e2,
+            1.0177873e2,
+            1.0363051e2,
+            2.3537177e2,
+            2.8652902e2,
+            1.0132631e2,
+            2.2674924e2,
+            1.4101182e3,
+            1.5279997e2,
+            2.0967374e2,
+            1.0176410e2,
+            1.0381490e2,
+            1.9029405e2,
+            1.5797566e2,
+            1.0681332e2,
+            1.0204309e2,
+            1.0312090e2,
+            1.0381401e2,
+            1.0594528e2,
+            1.0951781e2,
+            1.8868503e2,
+            1.6538675e2,
+            1.0468946e2,
+            6.2595776e2,
+            1.0693884e2,
+        ],
+    );
+}
+
+#[test]
+fn session_planning_matches_calibrated_sky_and_replays_after_resume() {
+    use seiza_calibration::{LightRotation, MatchTolerances};
+    use seiza_fits::HeaderValue as H;
+    use seiza_stacking::{FileCalibrationSession, FitsFrame, PipelineOptions};
+    let raw_dir = tempfile::tempdir().unwrap();
+    let truth_dir = tempfile::tempdir().unwrap();
+    let paths = mosaic_panels(&raw_dir);
+    let truth_paths = mosaic_panels(&truth_dir);
+    // Integer sensor ADU and binary-exact flat responses make a strict
+    // pixel oracle independent of roundoff introduced when synthesizing raw
+    // biased frames from floating sky values.
+    for path in &truth_paths {
+        let mut frame = FitsFrame::open(path).unwrap();
+        for sample in &mut frame.image.data {
+            *sample = sample.round();
+        }
+        write_processed_image_fits_f32(path, &frame.image, &[], &[]).unwrap();
+    }
+    let (width, height) = MOSAIC_PANEL;
+    let mut sessions = Vec::new();
+    for index in 0..2 {
+        let bias_level = if index == 0 { 500.0 } else { 1500.0 };
+        let bias = LinearImage::new(width, height, 1, vec![bias_level; width * height]).unwrap();
+        let bias_path = raw_dir.path().join(format!("bias-{index}.fits"));
+        let flat_path = raw_dir.path().join(format!("flat-{index}.fits"));
+        let response = |i: usize| {
+            let x = i % width;
+            if x < width / 5 {
+                if index == 0 { 0.5 } else { 2.0 }
+            } else if x > width * 4 / 5 {
+                if index == 0 { 2.0 } else { 0.5 }
+            } else {
+                1.0
+            }
+        };
+        let headers = vec![
+            ("GAIN".into(), H::Integer(100 + index * 100)),
+            ("ROTATANG".into(), H::Float(index as f64 * 90.0)),
+        ];
+        write_processed_image_fits_f32(&bias_path, &bias, &headers, &[]).unwrap();
+        let flat = LinearImage::new(
+            width,
+            height,
+            1,
+            (0..width * height)
+                .map(|i| 30000.0 * response(i) + bias_level)
+                .collect(),
+        )
+        .unwrap();
+        write_processed_image_fits_f32(&flat_path, &flat, &headers, &[]).unwrap();
+        for (i, path) in paths
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| i % 2 == index as usize)
+        {
+            let mut frame = FitsFrame::open(path).unwrap();
+            for (j, value) in frame.image.data.iter_mut().enumerate() {
+                *value = value.round() * response(j) + bias_level;
+            }
+            let mut light_headers = headers.clone();
+            if index == 1 {
+                light_headers[1].1 = H::Float(40.0);
+            }
+            write_processed_image_fits_f32(path, &frame.image, &light_headers, &[]).unwrap();
+            assert!(i < 4);
+        }
+        sessions.push(FileCalibrationSession {
+            bias: Some(bias_path),
+            flat: Some(flat_path),
+            tolerances: MatchTolerances {
+                light_rotation: if index == 1 {
+                    LightRotation::Measured { degrees: 90.0 }
+                } else {
+                    LightRotation::Recorded
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+    }
+    let mut options = StackOptions {
+        rejection: RejectionMode::None,
+        ..Default::default()
+    };
+    options.acceptance.minimum_overlap_fraction = 0.1;
+    let mut truth = LiveStacker::with_expanding_reference(
+        &truth_paths,
+        CalibrationMasters::default(),
+        options.clone(),
+        usize::MAX,
+        |_, _, _, _| Continue::Yes,
+    )
+    .unwrap();
+    for path in &truth_paths {
+        admit(truth.push_fits(path).unwrap());
+    }
+    let open = || {
+        LiveStacker::open_fits_expanding_sessions(
+            &paths,
+            &sessions,
+            &[0, 1, 0, 1],
+            options.clone(),
+            usize::MAX,
+            |_, _, _, _| Continue::Yes,
+        )
+        .unwrap()
+    };
+    let mut full = open();
+    assert_eq!(full.snapshot().unwrap().accepted_frames, 0);
+    assert!(
+        full.protected_paths()
+            .contains(&seiza_stacking::path_identity(&paths[3]))
+    );
+    assert!(full.set_calibration(CalibrationMasters::default()).is_err());
+    assert!(
+        full.set_match_tolerances(MatchTolerances::default())
+            .is_err()
+    );
+    assert!(
+        full.push_linear(LinearImage::new(width, height, 1, vec![1.0; width * height]).unwrap())
+            .is_err()
+    );
+    let report = full
+        .push_fits_pipelined(&paths, &PipelineOptions::default(), |_, outcome| {
+            admit(outcome.unwrap());
+            Continue::Yes
+        })
+        .unwrap();
+    assert_eq!(report.integrated, 4);
+    let expected = truth.snapshot().unwrap();
+    let actual = full.snapshot().unwrap();
+    assert_eq!(actual.coverage, expected.coverage);
+    for (a, b) in actual
+        .image
+        .data
+        .iter()
+        .zip(&expected.image.data)
+        .filter(|(a, b)| a.is_finite() && b.is_finite())
+    {
+        assert!((a - b).abs() < 0.02, "calibrated {a}, sky {b}");
+    }
+    let mut partial = open();
+    for path in &paths[..2] {
+        admit(partial.push_fits(path).unwrap());
+    }
+    assert_eq!(partial.match_tolerances(), sessions[1].tolerances);
+    let fingerprint = partial.configuration_fingerprint().to_owned();
+    let context = raw_dir.path().join("partial.seizastack");
+    partial.save_context(&context).unwrap();
+    let mut resumed = LiveStacker::open_context(&context).unwrap();
+    assert_eq!(resumed.configuration_fingerprint(), fingerprint);
+    admit(resumed.push_fits(&paths[2]).unwrap());
+    assert_eq!(resumed.match_tolerances(), sessions[0].tolerances);
+    admit(resumed.push_fits(&paths[3]).unwrap());
+    let live = resumed.snapshot().unwrap();
+    let replay_options = seiza_stacking::BatchStackOptions {
+        rejection: seiza_stacking::MasterRejectionOptions {
+            low_sigma: 100.0,
+            high_sigma: 100.0,
+        },
+        ..Default::default()
+    };
+    let replay = resumed.reintegrate(&replay_options, |_, _, _| {}).unwrap();
+    assert_eq!(live.accepted_frames, 4);
+    assert_eq!(live.coverage, replay.snapshot.coverage);
+    for (a, b) in live
+        .image
+        .data
+        .iter()
+        .zip(&replay.snapshot.image.data)
+        .filter(|(a, b)| a.is_finite() && b.is_finite())
+    {
+        assert!((a - b).abs() < 0.02, "live {a}, replay {b}");
+    }
+    std::fs::remove_file(sessions[1].flat.as_ref().unwrap()).unwrap();
+    assert!(
+        resumed
+            .reintegrate(&Default::default(), |_, _, _| {})
+            .is_err()
+    );
+    assert!(LiveStacker::open_context(&context).is_err());
+}
+
+#[test]
+fn fitted_pedestal_sessions_share_a_flat_and_keep_their_replay_recipes() {
+    let root = tempfile::tempdir().unwrap();
+    let paths = mosaic_panels(&root);
+    let (width, height) = MOSAIC_PANEL;
+    let flat = root.path().join("normalized-flat.fits");
+    let image = LinearImage::new(width, height, 1, vec![1.0; width * height]).unwrap();
+    write_processed_image_fits_f32(
+        &flat,
+        &image,
+        &[],
+        &[seiza_fits::WriteHeaderCard::new(
+            "FLATNORM",
+            seiza_fits::HeaderValue::Logical(true),
+        )],
+    )
+    .unwrap();
+    for (index, path) in paths.iter().enumerate() {
+        let mut frame = seiza_stacking::FitsFrame::open(path).unwrap();
+        for value in &mut frame.image.data {
+            *value += if index % 2 == 0 { 500.0 } else { 1500.0 };
+        }
+        write_processed_image_fits_f32(path, &frame.image, &[], &[]).unwrap();
+    }
+    let sessions = [500.0, 1500.0].map(|pedestal| seiza_stacking::FileCalibrationSession {
+        flat: Some(flat.clone()),
+        pedestal: Some(pedestal),
+        ..Default::default()
+    });
+    let mut options = StackOptions {
+        normalization: NormalizationMode::None,
+        rejection: RejectionMode::None,
+        ..Default::default()
+    };
+    options.acceptance.minimum_overlap_fraction = 0.1;
+    let mut stack = LiveStacker::open_fits_expanding_sessions(
+        &paths,
+        &sessions,
+        &[0, 1, 0, 1],
+        options,
+        usize::MAX,
+        |_, _, _, _| Continue::Yes,
+    )
+    .unwrap();
+    for path in &paths {
+        admit(stack.push_fits(path).unwrap());
+    }
+    let context = root.path().join("pedestals.stack");
+    stack.save_context(&context).unwrap();
+    let stack = LiveStacker::open_context(&context).unwrap();
+    let live = stack.snapshot().unwrap();
+    let replay = stack
+        .reintegrate(
+            &seiza_stacking::BatchStackOptions {
+                rejection: seiza_stacking::MasterRejectionOptions {
+                    low_sigma: 100.0,
+                    high_sigma: 100.0,
+                },
+                ..Default::default()
+            },
+            |_, _, _| {},
+        )
+        .unwrap();
+    assert_eq!(live.coverage, replay.snapshot.coverage);
+    let sky = live
+        .image
+        .data
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .fold(f32::INFINITY, f32::min);
+    assert!(sky < 110.0, "calibrated sky {sky}");
+    for (a, b) in live
+        .image
+        .data
+        .iter()
+        .zip(&replay.snapshot.image.data)
+        .filter(|(a, b)| a.is_finite() && b.is_finite())
+    {
+        assert!((a - b).abs() < 0.02, "live {a}, replay {b}");
+    }
+}
+
+#[test]
+fn declared_unit_xisf_sessions_use_the_same_scale_in_planning_and_replay() {
+    let root = tempfile::tempdir().unwrap();
+    let originals = mosaic_panels(&root);
+    let mut paths = Vec::new();
+    for path in originals {
+        let mut frame = seiza_stacking::FitsFrame::open(&path).unwrap();
+        for value in &mut frame.image.data {
+            *value = (*value + 500.0) / 65535.0;
+        }
+        let path = path.with_extension("xisf");
+        seiza_image_io::save_f32(
+            &path,
+            frame.image.width,
+            frame.image.height,
+            seiza_fits::F32ImageData::Mono(&frame.image.data),
+            &seiza_image_io::SaveOptions {
+                xisf_bounds: Some((0.0, 1.0)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        paths.push(path);
+    }
+    let (width, height) = MOSAIC_PANEL;
+    let bias_path = root.path().join("bias.fits");
+    write_processed_image_fits_f32(
+        &bias_path,
+        &LinearImage::new(width, height, 1, vec![500.0; width * height]).unwrap(),
+        &[],
+        &[],
+    )
+    .unwrap();
+    let session = seiza_stacking::FileCalibrationSession {
+        bias: Some(bias_path),
+        normalized_full_scale: Some(65535.0),
+        ..Default::default()
+    };
+    let mut options = StackOptions {
+        normalization: NormalizationMode::None,
+        rejection: RejectionMode::None,
+        ..Default::default()
+    };
+    options.acceptance.minimum_overlap_fraction = 0.1;
+    let mut stack = LiveStacker::open_fits_expanding_sessions(
+        &paths,
+        &[session],
+        &[0, 0, 0, 0],
+        options,
+        usize::MAX,
+        |_, _, _, _| Continue::Yes,
+    )
+    .unwrap();
+    for path in &paths {
+        admit(stack.push_fits(path).unwrap());
+    }
+    let live = stack.snapshot().unwrap();
+    let mut values = live
+        .image
+        .data
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .collect::<Vec<_>>();
+    values.sort_by(f32::total_cmp);
+    assert!((values[values.len() / 2] - 103.0).abs() < 5.0);
+    let replay = stack
+        .reintegrate(
+            &seiza_stacking::BatchStackOptions {
+                rejection: seiza_stacking::MasterRejectionOptions {
+                    low_sigma: 100.0,
+                    high_sigma: 100.0,
+                },
+                ..Default::default()
+            },
+            |_, _, _| {},
+        )
+        .unwrap();
+    assert_eq!(live.coverage, replay.snapshot.coverage);
+    for (a, b) in live
+        .image
+        .data
+        .iter()
+        .zip(&replay.snapshot.image.data)
+        .filter(|(a, b)| a.is_finite() && b.is_finite())
+    {
+        assert!((a - b).abs() < 0.02, "live {a}, replay {b}");
+    }
+}
+
 /// Three overlapping camera pointings through an off-centre radial lens,
 /// two dithered exposures per pointing. Sky stars are projected from rays,
 /// rather than translated on a flat plane, so panel-edge registration has

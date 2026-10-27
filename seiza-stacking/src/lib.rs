@@ -76,6 +76,8 @@ mod registration;
 mod replay;
 mod residual_flat;
 mod saturation;
+mod sessions;
+pub use sessions::FileCalibrationSession;
 mod snr;
 mod stack;
 mod star_stretch;

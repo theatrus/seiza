@@ -4671,6 +4671,35 @@ char *seiza_satellite_catalog_tracks_json(const SeizaSatelliteCatalog *catalog,
  */
 void seiza_satellite_catalog_free(SeizaSatelliteCatalog *catalog);
 
+/*
+ Plan an empty expanded stack with per-light calibration sessions.
+ `paths_json` is an array of original file paths, `assignments_json` an
+ equally long array of session indices, and `sessions_json` an array of
+ `{bias, dark, flat, darkExposureSeconds, pedestal, normalizedFullScale,
+ tolerances}` records (paths may
+ be omitted/null). Tolerances use camelCase and include the lightRotation
+ basis. Omitted tolerances use the complete native default gate.
+
+ Assignments apply automatically when pushing these files, including after
+ context restore. Manual master/gate changes and anonymous pixel pushes
+ are refused. Pipelines process assigned inputs in order with one active
+ master set. Sources and historical masters remain protected from output
+ overwrite and are checked for changes before use/replay. The canvas limit,
+ cancellation, ownership and options follow the ordinary expanded opener.
+
+ # Safety
+ The three required JSON pointers must name NUL-terminated UTF-8 strings.
+ `options_json` may be null. `cancel` must be null or a live cancel signal.
+ When non-null, `error_out` must point to writable storage for one pointer.
+ */
+SeizaLiveStacker *seiza_live_stacker_open_fits_expanding_sessions(const char *paths_json,
+                                                                  const char *sessions_json,
+                                                                  const char *assignments_json,
+                                                                  const char *options_json,
+                                                                  size_t max_canvas_megasamples,
+                                                                  const SeizaCancelSignal *cancel,
+                                                                  char **error_out);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif  // __cplusplus

@@ -2494,6 +2494,7 @@ dependencies = [
  "pollster",
  "postcard",
  "rayon",
+ "same-file",
  "seiza",
  "seiza-calibration",
  "seiza-fits",

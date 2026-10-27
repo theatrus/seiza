@@ -487,8 +487,33 @@ impl Ledger {
         Ok(())
     }
 
-    fn current_calibration(&self) -> u32 {
+    pub(crate) fn current_calibration(&self) -> u32 {
         self.calibrations.len().saturating_sub(1) as u32
+    }
+
+    pub(crate) fn validate_file_sessions(
+        &self,
+        plan: &crate::sessions::FileSessionPlan,
+    ) -> Result<()> {
+        for index in 0..self.calibrations.len() {
+            plan.recipe(index as u32)?;
+        }
+        for frame in &self.frames {
+            let source = frame
+                .source
+                .as_ref()
+                .ok_or_else(|| Error::Stack("assigned frame has no original file".into()))?;
+            let assigned = plan.assignment(&source.path)?;
+            let recipe = plan.recipe(frame.calibration)?;
+            if &plan.sessions[assigned] != recipe
+                || LightGate::of(&frame.tolerances) != LightGate::of(&recipe.tolerances)
+            {
+                return Err(Error::Stack(
+                    "frame calibration assignment does not match its saved recipe and gate".into(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn validate(&self, accepted_frames: u32) -> std::result::Result<(), String> {
@@ -2114,13 +2139,16 @@ impl MastersCache {
             }
             rayon::current_thread_index().is_none().then_some(loaded)
         };
-        let masters = std::sync::Arc::new(
+        let masters = std::sync::Arc::new(if let Some(plan) = &stacker.file_sessions {
+            plan.verify_recipe(calibration)?;
+            plan.recipe(calibration)?.load()?
+        } else {
             stacker.ledger.calibrations[calibration as usize]
                 .load()
                 .ok_or_else(|| {
                     Error::Stack("calibration masters are no longer available".into())
-                })??,
-        );
+                })??
+        });
         let mut loaded = match held {
             Some(loaded) => loaded,
             None => {
@@ -2696,6 +2724,9 @@ impl LiveStacker {
         mut progress: impl FnMut(BatchStackPass, usize, usize),
         banded: bool,
     ) -> Result<(BatchStackResult, Option<DrizzleResult>)> {
+        if let Some(plan) = &self.file_sessions {
+            plan.verify_masters()?;
+        }
         if options.mosaic_panels.is_some() {
             return Err(Error::Stack("mosaic_panels belongs to registered-frame integration; a live stack manages its own backgrounds".into()));
         }
