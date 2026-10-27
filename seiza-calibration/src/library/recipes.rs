@@ -18,7 +18,7 @@ pub struct PedestalEvidence {
     pub estimates: Vec<f32>,
     pub pinned: Option<f32>,
 }
-#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FlatUse {
     #[default]
@@ -29,7 +29,8 @@ pub enum FlatUse {
     ForcedWithoutPedestal,
     Withheld,
 }
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Application {
     pub flat_use: FlatUse,
     pub pedestal: Option<f32>,

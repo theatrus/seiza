@@ -1598,7 +1598,31 @@ previews using effective settings. `calibration_flat_retry(request)` decides
 trimming, alternate sessions, fallback and withholding from measured build
 feedback. Default `flat_stability` options preserve all PSF Guard retries;
 hosts may set `enabled`, `trim_unstable`, `try_next_session` or `retain_unstable`
-false. Policy algorithm version 3 includes these options in session identity.
+false. Policy algorithm version 4 includes these options and held-back inputs
+in session identity. `enabled` controls retry decisions; pixel measurement is
+independently callable.
+
+The four request APIs also accept keyword fields, with typed requests/results
+such as `CalibrationMasterPlanRequest`, `CalibrationSession`, `FlatRetryPolicy`
+and `CalibrationFlatRetryDecision`. Use either a mapping or keyword fields.
+Unknown/invalid/duplicate settings raise `ValueError` with the setting and layer.
+Pass the returned session directly to retry planning:
+
+```python
+session = seiza.calibration_master_plan(
+    frames=selected, lights=lights, quality=cached_quality,
+    flat_stability=seiza.FlatRetryPolicy(retain_unstable=False),
+)
+decision = seiza.calibration_flat_retry(
+    session=session, candidates=selected_raw_flats, first=first_attempt,
+)
+```
+
+This retains policy, held-back inputs and the rig's resolved time window.
+Successful `trimmed`/`alternate` feedback implies attempted; set the respective
+`*_attempted=True` flag when a retry fails without feedback. A
+[complete host execution loop](examples/calibration_retry.py) demonstrates retry
+feedback, memo rebuilding, publication and cleanup.
 
 `master_flat_stability(request)` measures one source at a time against a
 `master` file, with optional `bias`, `dark`, `dark_exposure_seconds` and
@@ -1608,3 +1632,14 @@ It returns `algorithm_version` (2), `feature_pixels`, `drift_threshold`,
 drifting; skipped inputs have zero disagreement. `normalized_full_scale=65535`
 preserves PSF Guard's declared-unit XISF handling. Mono, RGB and CFA data use
 separate sample planes. See [the execution contract](../docs/calibration-library.md).
+
+
+`master_flat_stability_images(master, inputs, *, bias=None, dark=None,
+input_metadata=None, bayer=None, dark_exposure_seconds=None,
+dark_bias_subtracted=False)` measures cached float32 NumPy images without file
+I/O. Arrays must be C-contiguous mono `(H,W)` or interleaved RGB `(H,W,3)`;
+raw CFA uses mono plus `bayer={pattern, x_offset, y_offset}`. All pixels already
+use the same units. Metadata is omitted/empty or aligned to inputs, with
+`exposure_seconds`, `bayer` and `skipped`. The bindings copy buffers for the call;
+the host retains its original caches. File and cached-image measurement execute
+the same algorithm and return `FlatSetStability`.

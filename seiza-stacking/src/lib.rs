@@ -316,6 +316,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 mod flat_stability;
 pub use flat_stability::{
-    FLAT_STABILITY_VERSION, FlatSetStability, FlatStabilityFileRequest, FlatStabilityInput,
-    measure_flat_stability, measure_flat_stability_files,
+    FLAT_STABILITY_VERSION, FlatSetStability, FlatStabilityBayer, FlatStabilityFileRequest,
+    FlatStabilityImageMetadata, FlatStabilityImageOptions, FlatStabilityInput,
+    measure_flat_stability, measure_flat_stability_files, measure_flat_stability_images,
 };

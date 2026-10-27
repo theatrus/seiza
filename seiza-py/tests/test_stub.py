@@ -8,6 +8,7 @@ it declares exists, and every function takes the parameters it declares.
 import ast
 import inspect
 import pathlib
+import typing
 
 import pytest
 import seiza
@@ -30,6 +31,9 @@ def declared():
         elif isinstance(node, ast.ClassDef):
             owner = getattr(seiza, node.name, None)
             yield node.name, owner, node
+            if typing.is_typeddict(owner):
+                # These declare dictionary keys, not attributes of the class.
+                continue
             for item in node.body:
                 if isinstance(item, ast.FunctionDef):
                     name = item.name
@@ -41,6 +45,19 @@ def declared():
 
 
 DECLARED = list(declared())
+
+
+def test_calibration_record_types_match_runtime_and_stub():
+    source = pathlib.Path(__file__).parents[1] / "src/library_types.py"
+    definitions = ast.parse(source.read_text())
+    stub_types = {node.name: node for node in STUB.body if isinstance(node, ast.ClassDef)}
+    for node in definitions.body:
+        if isinstance(node, ast.ClassDef):
+            assert ast.dump(node) == ast.dump(stub_types[node.name]), node.name
+            value = getattr(seiza, node.name)
+            assert typing.is_typeddict(value)
+            keys = {item.target.id for item in node.body if isinstance(item, ast.AnnAssign)}
+            assert set(value.__annotations__) == keys
 
 
 @pytest.mark.parametrize("name, value, node", DECLARED, ids=[name for name, _, _ in DECLARED])

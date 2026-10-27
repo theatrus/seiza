@@ -22,24 +22,35 @@ pub struct MasterPlanRequest {
     pub force_flat_without_pedestal: bool,
 }
 
-fn rule_book(global: Vec<Setting>, rigs: Vec<RigSettings>) -> crate::Result<RuleBook> {
-    let values = |rows: Vec<Setting>| -> crate::Result<rules::RuleValues> {
-        let mut result = rules::RuleValues::new();
-        for row in rows {
-            if result.insert(row.key, row.value).is_some() {
-                return Err(invalid("duplicate setting key"));
-            }
+fn setting_values(rows: Vec<Setting>, scope: &str) -> crate::Result<rules::RuleValues> {
+    let mut result = rules::RuleValues::new();
+    for row in rows {
+        let spec = rules::fields()
+            .iter()
+            .find(|spec| spec.key == row.key)
+            .ok_or_else(|| invalid(format!("{scope}: unknown setting '{}'", row.key)))?;
+        rules::validate(spec, &row.value)
+            .map_err(|error| invalid(format!("{scope}.{}: {error}", row.key)))?;
+        if result.insert(row.key.clone(), row.value).is_some() {
+            return Err(invalid(format!(
+                "{scope}: duplicate setting key '{}'",
+                row.key
+            )));
         }
-        Ok(result)
-    };
+    }
+    Ok(result)
+}
+
+pub(super) fn rule_book(global: Vec<Setting>, rigs: Vec<RigSettings>) -> crate::Result<RuleBook> {
     let mut layers = BTreeMap::new();
     for rig in rigs {
+        let values = setting_values(rig.settings, &format!("rigs[{}].settings", rig.rig_uuid))?;
         if layers
             .insert(
                 rig.rig_uuid,
                 rules::RigLayer {
                     name: rig.name,
-                    values: values(rig.settings)?,
+                    values,
                 },
             )
             .is_some()
@@ -47,7 +58,10 @@ fn rule_book(global: Vec<Setting>, rigs: Vec<RigSettings>) -> crate::Result<Rule
             return Err(invalid("duplicate rig settings"));
         }
     }
-    Ok(RuleBook::new(values(global)?, layers))
+    Ok(RuleBook::new(
+        setting_values(global, "global_settings")?,
+        layers,
+    ))
 }
 fn validate_frames(frames: &[CalibrationFrame]) -> crate::Result<()> {
     let mut ids = BTreeSet::new();
@@ -170,6 +184,7 @@ pub(super) fn resolved_session(
         recipes,
         application: Application::default(),
         flat_stability: stability,
+        flat_held_back: selected.flat_held_back.clone(),
     }
 }
 
@@ -187,20 +202,16 @@ pub struct MasterCohort {
     pub dropped: Vec<String>,
 }
 /// Select a complete/coherent cohort using the same policy as master recipes.
-pub fn master_cohort(request: MasterCohortRequest) -> MasterCohort {
-    // Effective settings follow the legacy coherence helper's permissive
-    // resolution. Full executable planning separately validates its inputs.
-    let values = request
-        .settings
-        .into_iter()
-        .map(|s| (s.key, s.value))
-        .collect();
+/// Settings are validated. Metadata remains permissive for catalog previews;
+/// plan_masters validates executable input identities and source records.
+pub fn master_cohort(request: MasterCohortRequest) -> crate::Result<MasterCohort> {
+    let values = setting_values(request.settings, "settings")?;
     let rules = RuleBook::new(values, BTreeMap::new()).for_rig("");
     let subset = master_subset_report(request.kind, &request.frames, &rules);
-    MasterCohort {
+    Ok(MasterCohort {
         kept: subset.kept.into_iter().map(|f| f.frame_uuid).collect(),
         dropped: subset.dropped.into_iter().map(|f| f.frame_uuid).collect(),
-    }
+    })
 }
 
 /// Defaults preserve PSF Guard's trim, alternate-session and honest fallback.
@@ -248,12 +259,16 @@ impl FlatAttempt {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FlatRetryRequest {
+    /// Pass the returned session directly to retain its policy, held-back rows
+    /// and resolved time window. Conflicting explicit overrides are rejected.
+    pub session: Option<Session>,
     pub candidates: Vec<CalibrationFrame>,
     pub held_back: Vec<String>,
     pub settings: Vec<Setting>,
-    pub policy: FlatRetryPolicy,
+    pub policy: Option<FlatRetryPolicy>,
     pub first: FlatAttempt,
-    /// True even when the retry failed or yielded no master.
+    /// Set true when the retry failed/yielded no master. Successful feedback
+    /// implies attempted, so callers need not duplicate that state.
     pub trimmed_attempted: bool,
     pub trimmed: Option<FlatAttempt>,
     pub alternate_attempted: bool,
@@ -279,6 +294,38 @@ pub struct FlatRetryDecision {
 /// Decide the next flat retry/publication from immutable execution feedback.
 /// Hosts retain staging, cancellation, cache publication and pixel measurement.
 pub fn flat_retry(request: FlatRetryRequest) -> crate::Result<FlatRetryDecision> {
+    let rules = RuleBook::new(
+        setting_values(request.settings.clone(), "settings")?,
+        BTreeMap::new(),
+    )
+    .for_rig("");
+    let default_policy = FlatRetryPolicy::default();
+    let (policy, held_back, window) = if let Some(session) = &request.session {
+        session.tolerances.validate()?;
+        if request
+            .policy
+            .as_ref()
+            .is_some_and(|p| p != &session.flat_stability)
+            || (!request.held_back.is_empty() && request.held_back != session.flat_held_back)
+            || (!request.settings.is_empty()
+                && rules.flat_session_seconds != session.tolerances.flat_session_seconds)
+        {
+            return Err(invalid(
+                "flat retry overrides conflict with the supplied session",
+            ));
+        }
+        (
+            &session.flat_stability,
+            &session.flat_held_back,
+            session.tolerances.flat_session_seconds,
+        )
+    } else {
+        (
+            request.policy.as_ref().unwrap_or(&default_policy),
+            &request.held_back,
+            rules.flat_session_seconds,
+        )
+    };
     validate_frames(&request.candidates)?;
     let ids: BTreeSet<_> = request.candidates.iter().map(|f| &f.frame_uuid).collect();
     for attempt in std::iter::once(&request.first)
@@ -300,11 +347,8 @@ pub fn flat_retry(request: FlatRetryRequest) -> crate::Result<FlatRetryDecision>
             ));
         }
     }
-    if (!request.trimmed_attempted && request.trimmed.is_some())
-        || (!request.alternate_attempted && request.alternate.is_some())
-    {
-        return Err(invalid("flat retry feedback needs its attempted flag"));
-    }
+    let trimmed_attempted = request.trimmed_attempted || request.trimmed.is_some();
+    let alternate_attempted = request.alternate_attempted || request.alternate.is_some();
     if request.first.used.is_empty()
         || request
             .candidates
@@ -324,7 +368,6 @@ pub fn flat_retry(request: FlatRetryRequest) -> crate::Result<FlatRetryDecision>
             "trim feedback contains an input outside the stable first cohort",
         ));
     }
-    let rules = rule_book(request.settings, Vec::new())?.for_rig("");
     let first = &request.first;
     let drifting = first.drifting();
     let mut result = FlatRetryDecision {
@@ -333,14 +376,14 @@ pub fn flat_retry(request: FlatRetryRequest) -> crate::Result<FlatRetryDecision>
         rebuild_first: first.memo,
         note: None,
     };
-    if !request.policy.enabled || drifting.is_empty() {
+    if !policy.enabled || drifting.is_empty() {
         return Ok(result);
     }
     let used = first.used.len();
     let stable = used - drifting.len();
     let spots = "spots that come and go across the run: dew or frost on the sensor window?";
-    let trim = request.policy.trim_unstable && stable >= MIN_MASTER_FRAMES && stable * 2 >= used;
-    if trim && !request.trimmed_attempted {
+    let trim = policy.trim_unstable && stable >= MIN_MASTER_FRAMES && stable * 2 >= used;
+    if trim && !trimmed_attempted {
         result.action = FlatRetryAction::TryTrimmed;
         result.inputs = first
             .used
@@ -370,9 +413,10 @@ pub fn flat_retry(request: FlatRetryRequest) -> crate::Result<FlatRetryDecision>
         .collect();
     let start = first_rows.iter().filter_map(|f| f.captured_at).min();
     let end = first_rows.iter().filter_map(|f| f.captured_at).max();
-    let window = rules.flat_session_seconds as i64;
+    let window =
+        i64::try_from(window).map_err(|_| invalid("flat retry session window is too large"))?;
     let eligible_alternate = |f: &CalibrationFrame| {
-        !request.held_back.contains(&f.frame_uuid)
+        !held_back.contains(&f.frame_uuid)
             && !first.used.contains(&f.frame_uuid)
             && !matches!((start, end, f.captured_at), (Some(a), Some(b), Some(t)) if t >= a.saturating_sub(window) && t <= b.saturating_add(window))
     };
@@ -389,7 +433,7 @@ pub fn flat_retry(request: FlatRetryRequest) -> crate::Result<FlatRetryDecision>
             "alternate feedback contains an input in the original/held-back session",
         ));
     }
-    if request.policy.try_next_session && !request.alternate_attempted {
+    if policy.try_next_session && !alternate_attempted {
         result.action = FlatRetryAction::TryAlternate;
         result.inputs = request
             .candidates
@@ -399,7 +443,7 @@ pub fn flat_retry(request: FlatRetryRequest) -> crate::Result<FlatRetryDecision>
             .collect();
         return Ok(result);
     }
-    if request.policy.try_next_session
+    if policy.try_next_session
         && let Some(attempt) = &request.alternate
         && attempt.drifting().is_empty()
         && !attempt.memo
@@ -419,7 +463,7 @@ pub fn flat_retry(request: FlatRetryRequest) -> crate::Result<FlatRetryDecision>
         ));
         return Ok(result);
     }
-    result.action = if request.policy.retain_unstable {
+    result.action = if policy.retain_unstable {
         FlatRetryAction::PublishFirst
     } else {
         FlatRetryAction::Withhold

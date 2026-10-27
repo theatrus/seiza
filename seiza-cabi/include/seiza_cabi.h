@@ -483,6 +483,18 @@ typedef struct {
 typedef void (*SeizaRcAstroProgressCallback)(float, void*);
 
 /*
+ Borrowed, row-major float image. RGB channels are interleaved. Samples use
+ the same units as the other images in this measurement. No pointer is retained.
+ */
+typedef struct {
+  const float *data;
+  size_t length;
+  size_t width;
+  size_t height;
+  size_t channels;
+} SeizaFlatStabilityImage;
+
+/*
  Progress for the parallax functions: one event as JSON, valid only for
  the call, plus the caller's context pointer. Events are
  `{"kind":"note","message":...}` for a step done or a choice made,
@@ -4064,6 +4076,29 @@ char *seiza_dust_match_features_json(const char *earlier_json,
                                      char **error_out);
 
 /*
+ Measure cached master/source images without file I/O, using the same core
+ algorithm as seiza_master_flat_stability_json. Nullable options_json is
+ camelCase FlatStabilityImageOptions: inputs (aligned exposureSeconds, bayer,
+ skipped records), bayer {pattern,xOffset,yOffset}, darkExposureSeconds and
+ darkBiasSubtracted. Empty inputs metadata uses defaults for all sources.
+ Bias/dark are optional; pixels are already on the same scale. Buffers are
+ copied for the call and never retained. Free result/error with seiza_string_free.
+ # Safety
+ master is a valid descriptor; inputs points to input_count descriptors (or
+ is null when count is zero). Bias/dark are null or valid descriptors. Every
+ data pointer holds length aligned readable floats. Descriptors and buffers
+ remain immutable for this call. options_json is null or NUL-terminated UTF-8;
+ error_out is null or writable pointer storage.
+ */
+char *seiza_master_flat_stability_images_json(const SeizaFlatStabilityImage *master,
+                                              const SeizaFlatStabilityImage *inputs,
+                                              size_t input_count,
+                                              const SeizaFlatStabilityImage *bias,
+                                              const SeizaFlatStabilityImage *dark,
+                                              const char *options_json,
+                                              char **error_out);
+
+/*
  Prepare a reusable grouping book from camelCase flat-group request JSON.
  No file I/O. Free the returned handle with seiza_flat_groups_free.
  # Safety
@@ -4083,7 +4118,7 @@ void seiza_flat_groups_free(SeizaFlatGroups *groups);
  Grade and select a calibration library using PSF Guard's shared policy.
  `request_json` is a camelCase library::Request: frames, lights, quality,
  globalSettings, rigs, grouping, availableResponses, nightShifts, regrade, masterFailures, pedestalEvidence,
- forceFlatWithoutPedestal and flatStarMasking.
+ forceFlatWithoutPedestal, flatStarMasking and flatStability.
  Missing collections are empty. Settings are {key,value} records; identifiers,
  enum values and arbitrary setting values are preserved. The returned snapshot
  contains grades, selections, complete gates, sessions, assignments and master

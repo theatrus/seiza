@@ -342,7 +342,7 @@ core = "seiza-satellites::PixelSegment"
 # by the C ABI; otherwise an entry says why not. "crate::*" covers a whole
 # crate of building blocks.
 [core_functions]
-"seiza-stacking::measure_flat_stability" = { none = "C and Python reach the identical loaded-image measurement through measure_flat_stability_files; native hosts can reuse an existing master image without opening it again" }
+"seiza-stacking::measure_flat_stability" = { none = "C and Python offer both file and cached-image measurement; this native hybrid accepts a loaded master and streams file sources through the same algorithm" }
 objects = [
     "seiza-parallax::Parallax",
     "seiza-stacking::LiveStacker",
@@ -509,6 +509,7 @@ seiza_flat_group_plan_json = "flat_group_plan"
 seiza_live_stacker_open_fits_expanding_sessions = "LiveStacker.open_fits_expanding_sessions"
 
 seiza_master_flat_stability_json = "master_flat_stability"
+seiza_master_flat_stability_images_json = "master_flat_stability_images"
 seiza_calibration_master_plan_json = "calibration_master_plan"
 seiza_calibration_master_cohort_json = "calibration_master_cohort"
 seiza_calibration_flat_retry_json = "calibration_flat_retry"

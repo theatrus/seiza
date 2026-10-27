@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 const MIN_MASTER_FRAMES: usize = 2;
 const MAX_MASTER_FRAMES: usize = 64;
-pub const POLICY_ALGORITHM_VERSION: u32 = 3;
+pub const POLICY_ALGORITHM_VERSION: u32 = 4;
 const DEFAULT_DARK_REACH_DAYS: f64 = 183.0;
 const DEFAULT_COMPLETE_DARK_FRAMES: usize = 10;
 const DEFAULT_FLAT_MAX_AGE_DAYS: f64 = 60.0;
@@ -320,6 +320,7 @@ fn session_key(
         selected.rules.matching_digest(),
         selected.flat_basis.correction(),
         stability,
+        selected.flat_held_back.iter().collect::<BTreeSet<_>>(),
     );
     hex_digest(&serde_json::to_string(&identity).expect("validated session identity"))
 }
@@ -418,15 +419,19 @@ pub struct Snapshot {
     pub settings_digest: Option<String>,
     pub settings_schema: Vec<rules::FieldSpec>,
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Session {
     pub key: String,
     pub tolerances: MatchTolerances,
     pub recipes: Vec<MasterRecipe>,
     pub application: Application,
     pub flat_stability: FlatRetryPolicy,
+    #[serde(default)]
+    pub flat_held_back: Vec<String>,
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MasterRecipe {
     pub kind: CalibrationKind,
     pub action: RecipeAction,
@@ -443,7 +448,7 @@ pub struct MasterRecipe {
     pub flat_star_masking: bool,
     pub dark_level_screening: bool,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecipeAction {
     External,
@@ -508,31 +513,7 @@ fn evaluate_inner(
     for light in &request.lights {
         validate_values(&light_signature(light).seiza)?;
     }
-    let values = |settings: Vec<Setting>| -> crate::Result<rules::RuleValues> {
-        let mut values = rules::RuleValues::new();
-        for setting in settings {
-            if values.insert(setting.key, setting.value).is_some() {
-                return Err(invalid("duplicate setting key"));
-            }
-        }
-        Ok(values)
-    };
-    let mut rigs = BTreeMap::new();
-    for rig in request.rigs {
-        if rigs
-            .insert(
-                rig.rig_uuid,
-                rules::RigLayer {
-                    name: rig.name,
-                    values: values(rig.settings)?,
-                },
-            )
-            .is_some()
-        {
-            return Err(invalid("duplicate rig settings"));
-        }
-    }
-    let rules = RuleBook::new(values(request.global_settings)?, rigs);
+    let rules = master_policy::rule_book(request.global_settings, request.rigs)?;
     if let Some(book) = &prepared {
         for session in &book.sessions {
             let rig = &session.row.rig_uuid;

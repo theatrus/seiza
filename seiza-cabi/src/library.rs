@@ -1,5 +1,7 @@
 //! The C ABI translates the shared library policy's immutable value snapshot.
-use super::{clear_error, ffi_result, owned_json, required_str};
+use super::{
+    clear_error, display_length, ffi_result, owned_json, required_f32_slice, required_str,
+};
 use seiza_calibration::library;
 use serde_json::Value;
 use std::ffi::c_char;
@@ -9,6 +11,103 @@ use std::sync::Arc;
 /// Immutable measured grouping book. Safe for concurrent read-only planning.
 pub struct SeizaFlatGroups {
     book: Arc<seiza_calibration::flat_response::groups::Book>,
+}
+
+/// Borrowed, row-major float image. RGB channels are interleaved. Samples use
+/// the same units as the other images in this measurement. No pointer is retained.
+#[repr(C)]
+pub struct SeizaFlatStabilityImage {
+    pub data: *const f32,
+    pub length: usize,
+    pub width: usize,
+    pub height: usize,
+    pub channels: usize,
+}
+
+unsafe fn cached_image(
+    image: &SeizaFlatStabilityImage,
+) -> Result<seiza_stacking::LinearImage, String> {
+    let length = display_length(image.width, image.height, image.channels)?;
+    if length != image.length {
+        return Err("cached image length must match width * height * channels".into());
+    }
+    let data = unsafe { required_f32_slice(image.data, length, "cached image") }?;
+    seiza_stacking::LinearImage::new(image.width, image.height, image.channels, data.to_vec())
+        .map_err(|e| e.to_string())
+}
+
+/// Measure cached master/source images without file I/O, using the same core
+/// algorithm as seiza_master_flat_stability_json. Nullable options_json is
+/// camelCase FlatStabilityImageOptions: inputs (aligned exposureSeconds, bayer,
+/// skipped records), bayer {pattern,xOffset,yOffset}, darkExposureSeconds and
+/// darkBiasSubtracted. Empty inputs metadata uses defaults for all sources.
+/// Bias/dark are optional; pixels are already on the same scale. Buffers are
+/// copied for the call and never retained. Free result/error with seiza_string_free.
+/// # Safety
+/// master is a valid descriptor; inputs points to input_count descriptors (or
+/// is null when count is zero). Bias/dark are null or valid descriptors. Every
+/// data pointer holds length aligned readable floats. Descriptors and buffers
+/// remain immutable for this call. options_json is null or NUL-terminated UTF-8;
+/// error_out is null or writable pointer storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_master_flat_stability_images_json(
+    master: *const SeizaFlatStabilityImage,
+    inputs: *const SeizaFlatStabilityImage,
+    input_count: usize,
+    bias: *const SeizaFlatStabilityImage,
+    dark: *const SeizaFlatStabilityImage,
+    options_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let master = unsafe { master.as_ref() }.ok_or("master image is required")?;
+        if input_count > isize::MAX as usize / std::mem::size_of::<SeizaFlatStabilityImage>()
+            || (input_count > 0 && inputs.is_null())
+        {
+            return Err("input image descriptors are missing or their count overflows".into());
+        }
+        let inputs = if input_count == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(inputs, input_count) }
+        };
+        let options = if options_json.is_null() {
+            Default::default()
+        } else {
+            let value: Value =
+                serde_json::from_str(&required_str(options_json, "flat image options")?)
+                    .map_err(|e| e.to_string())?;
+            if field_names(field_names(value.clone(), false), true) != value {
+                return Err("flat image option field names must be camelCase".into());
+            }
+            serde_json::from_value(field_names(value, false)).map_err(|e| e.to_string())?
+        };
+        let master = unsafe { cached_image(master) }?;
+        let inputs = inputs
+            .iter()
+            .map(|image| unsafe { cached_image(image) })
+            .collect::<Result<Vec<_>, _>>()?;
+        let bias = unsafe { bias.as_ref() }
+            .map(|image| unsafe { cached_image(image) })
+            .transpose()?;
+        let dark = unsafe { dark.as_ref() }
+            .map(|image| unsafe { cached_image(image) })
+            .transpose()?;
+        let result = seiza_stacking::measure_flat_stability_images(
+            &master,
+            &inputs,
+            bias.as_ref(),
+            dark.as_ref(),
+            options,
+        )
+        .map_err(|e| e.to_string())?;
+        owned_json(&field_names(
+            serde_json::to_value(result).map_err(|e| e.to_string())?,
+            true,
+        ))
+    })
+    .unwrap_or(ptr::null_mut())
 }
 
 /// Prepare a reusable grouping book from camelCase flat-group request JSON.
@@ -92,7 +191,7 @@ fn field_names(value: Value, camel: bool) -> Value {
 /// Grade and select a calibration library using PSF Guard's shared policy.
 /// `request_json` is a camelCase library::Request: frames, lights, quality,
 /// globalSettings, rigs, grouping, availableResponses, nightShifts, regrade, masterFailures, pedestalEvidence,
-/// forceFlatWithoutPedestal and flatStarMasking.
+/// forceFlatWithoutPedestal, flatStarMasking and flatStability.
 /// Missing collections are empty. Settings are {key,value} records; identifiers,
 /// enum values and arbitrary setting values are preserved. The returned snapshot
 /// contains grades, selections, complete gates, sessions, assignments and master
@@ -190,7 +289,7 @@ pub unsafe extern "C" fn seiza_calibration_master_cohort_json(
         }
         let request: library::MasterCohortRequest =
             serde_json::from_value(field_names(value, false)).map_err(|e| e.to_string())?;
-        let result = library::master_cohort(request);
+        let result = library::master_cohort(request).map_err(|e| e.to_string())?;
         owned_json(&field_names(
             serde_json::to_value(result).map_err(|e| e.to_string())?,
             true,
@@ -444,7 +543,11 @@ mod tests {
     fn schema_is_strict_but_setting_values_are_opaque() {
         let value = serde_json::json!({"globalSettings":[{"key":"future_Setting","value":{"user_key":"Preserve_This"}}]});
         assert_eq!(field_names(field_names(value.clone(), false), true), value);
-        assert!(run(value).is_ok());
+        assert!(
+            run(value)
+                .unwrap_err()
+                .contains("unknown setting 'future_Setting'")
+        );
         assert!(run(serde_json::json!({"global_settings":[]})).is_err());
         assert!(run(serde_json::json!({"unknown":1})).is_err());
     }
@@ -454,6 +557,141 @@ mod tests {
 mod master_policy_tests {
     use super::*;
     use std::ffi::CString;
+
+    #[test]
+    fn cached_pixels_cross_the_c_abi_and_bad_lengths_are_rejected() {
+        let mut master =
+            seiza_stacking::LinearImage::new(128, 128, 1, vec![1.; 128 * 128]).unwrap();
+        for y in 56..72 {
+            for x in 56..72 {
+                master.data[y * 128 + x] = 0.5;
+            }
+        }
+        let clean = seiza_stacking::LinearImage::new(128, 128, 1, vec![1.; 128 * 128]).unwrap();
+        let expected = seiza_stacking::measure_flat_stability_images(
+            &master,
+            &[master.clone(), clean.clone()],
+            None,
+            None,
+            Default::default(),
+        )
+        .unwrap();
+        let descriptor = |image: &seiza_stacking::LinearImage| SeizaFlatStabilityImage {
+            data: image.data.as_ptr(),
+            length: image.data.len(),
+            width: image.width,
+            height: image.height,
+            channels: image.channels,
+        };
+        let master_buffer = descriptor(&master);
+        let inputs = [descriptor(&master), descriptor(&clean)];
+        let mut error = ptr::null_mut();
+        let result = unsafe {
+            seiza_master_flat_stability_images_json(
+                &master_buffer,
+                inputs.as_ptr(),
+                inputs.len(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                &mut error,
+            )
+        };
+        assert!(error.is_null());
+        assert!(!result.is_null());
+        let value: Value = serde_json::from_str(
+            unsafe { std::ffi::CStr::from_ptr(result) }
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            field_names(value, false),
+            serde_json::to_value(expected).unwrap()
+        );
+        unsafe {
+            crate::seiza_string_free(result);
+        }
+        let bad_master = SeizaFlatStabilityImage {
+            length: 1,
+            ..master_buffer
+        };
+        let result = unsafe {
+            seiza_master_flat_stability_images_json(
+                &bad_master,
+                ptr::null(),
+                0,
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                &mut error,
+            )
+        };
+        assert!(result.is_null());
+        assert!(
+            unsafe { std::ffi::CStr::from_ptr(error) }
+                .to_str()
+                .unwrap()
+                .contains("length must match")
+        );
+        unsafe {
+            crate::seiza_string_free(error);
+        }
+    }
+
+    #[test]
+    fn session_policy_and_strict_settings_cross_the_c_abi() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../seiza-calibration/tests/fixtures/library/flat-retries.json"
+        ))
+        .unwrap();
+        let retry = &fixture["cases"][0]["request"];
+        let session = unsafe {
+            call(
+                serde_json::json!({
+                    "frames": retry["candidates"], "lights": [{}],
+                    "flat_stability": {"enabled": false}, "flat_held_back": retry["held_back"],
+                }),
+                seiza_calibration_master_plan_json,
+            )
+        };
+        let result = unsafe {
+            call(
+                serde_json::json!({
+                    "session":session, "candidates":retry["candidates"], "first":retry["first"],
+                }),
+                seiza_calibration_flat_retry_json,
+            )
+        };
+        assert_eq!(result["action"], "publish_first");
+        for (field, function) in [
+            (
+                "globalSettings",
+                seiza_calibration_master_plan_json as unsafe extern "C" fn(_, _) -> _,
+            ),
+            ("settings", seiza_calibration_master_cohort_json),
+            ("settings", seiza_calibration_flat_retry_json),
+        ] {
+            let mut request = serde_json::json!({"lights":[{}]});
+            if field == "settings" {
+                request.as_object_mut().unwrap().remove("lights");
+            }
+            request[field] = serde_json::json!([{"key":"use_darks", "value":"false"}]);
+            let request = CString::new(request.to_string()).unwrap();
+            let mut error = ptr::null_mut();
+            let result = unsafe { function(request.as_ptr(), &mut error) };
+            assert!(result.is_null());
+            assert!(
+                unsafe { std::ffi::CStr::from_ptr(error) }
+                    .to_str()
+                    .unwrap()
+                    .contains("use_darks")
+            );
+            unsafe {
+                crate::seiza_string_free(error);
+            }
+        }
+    }
     unsafe fn call(
         request: Value,
         function: unsafe extern "C" fn(*const c_char, *mut *mut c_char) -> *mut c_char,
@@ -526,9 +764,9 @@ mod master_policy_tests {
             );
             let request =
                 serde_json::json!({"kind":case["kind"], "frames":case["request"]["frames"]});
-            let expected = serde_json::to_value(library::master_cohort(
-                serde_json::from_value(request.clone()).unwrap(),
-            ))
+            let expected = serde_json::to_value(
+                library::master_cohort(serde_json::from_value(request.clone()).unwrap()).unwrap(),
+            )
             .unwrap();
             assert_eq!(
                 unsafe { call(request, seiza_calibration_master_cohort_json) },

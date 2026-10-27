@@ -16,7 +16,8 @@ identity includes resolved external-master adoption or ordered raw inputs and
 their fingerprints, build options/dependencies, matching rules, the full light
 gate and flat correction. Equivalent recipes reuse a session without reordering
 the lights; unused candidates cannot hide a change in adopted master. Policy
-`algorithm_version` is 3: resolved-recipe identity also includes the flat retry policy. Failure and pedestal
+`algorithm_version` is 4: resolved-recipe identity includes the flat retry policy
+and held-back inputs that affect alternate-session execution. Failure and pedestal
 feedback retain the base key so hosts can submit execution results against it.
 
 ## Inputs
@@ -24,7 +25,12 @@ feedback retain the base key so hosts can submit execution results against it.
 Python/native records use snake_case. C JSON uses camelCase of those fields.
 Identifiers, enum strings, setting keys and arbitrary setting values retain their
 spelling. Collections of settings are `{key, value}` records, never maps whose
-keys could be mistaken for schema fields. Unknown schema fields are refused.
+keys could be mistaken for schema fields. Unknown schema fields, unknown setting
+keys, invalid setting values and duplicate setting keys are refused at every
+planning/cohort/retry boundary. Errors identify the setting and its global/rig
+layer. The 43-field `settings_schema` describes accepted values and ranges.
+The internal stored-settings resolver still tolerates old values when PSF Guard
+loads its catalog; hosts submit its resolved, valid records to these APIs.
 
 | Request field | Contents |
 | --- | --- |
@@ -194,30 +200,108 @@ replan after verification or changed source metadata. Recipe exposure belongs
 to the adopted master/first actual coherent input, including unknown exposure.
 `coherent_inputs` reports the raw cohort even if it has only one frame or an
 external master is preferred. `master_cohort` (C `seiza_calibration_master_cohort_json`,
-Python `calibration_master_cohort`) exposes the original permissive coherence
-helper for previews/retries using already resolved effective settings. Full
-executable planning separately validates metadata and settings records.
+Python `calibration_master_cohort`) exposes the original metadata-tolerant
+coherence helper for previews/retries using effective settings. It validates
+settings just like executable planning; full planning also validates metadata,
+source-verification records and identities. Rust now returns `Result<MasterCohort>`.
+`FlatRetryRequest.policy` is `Option<FlatRetryPolicy>` so an omitted policy can
+be distinguished from an explicit override; existing JSON policy objects retain
+their shape.
 
 `library::flat_retry(FlatRetryRequest)` / `seiza_calibration_flat_retry_json` /
 `calibration_flat_retry(request)` owns the post-build decision sequence. Supply
-all raw `candidates`, `held_back` UUIDs, effective `settings`, optional `policy`,
-and the first attempt's accepted `used` UUIDs, `disagreement`, `drift_threshold`,
+the returned `session` object and all selected raw `candidates`, then the first attempt's accepted `used` UUIDs, `disagreement`, `drift_threshold`,
 `feature_pixels` and `memo` flag. Optional host `label` strings affect only
 explanations. Empty disagreement means no stability measurement was available.
+The session carries `flat_stability`, `flat_held_back` and the resolved
+`flat_session_seconds` tolerance into execution. Conflicting explicit policy,
+held-back or time-window overrides are rejected. Without a session, the existing
+`policy`, `held_back` and effective `settings` fields remain supported; omitted
+policy means all four defaults are true. Prefer passing the session to preserve
+rig-specific settings and explicit disabling decisions.
 
 The default policy trims a stable majority (at least two sources), then tries
 another session excluding the whole initial capture window and held-back
-sources. Set `trimmed_attempted` or `alternate_attempted` even when a retry
-fails/yields no master; supply `trimmed`/`alternate` feedback when it succeeds.
+sources. Supply `trimmed`/`alternate` feedback when a retry succeeds; its
+presence implies attempted. When a retry fails/yields no master, set
+`trimmed_attempted` or `alternate_attempted` instead so it is not repeated.
 Actions are `try_trimmed`, `try_alternate`, `publish_first`, `publish_trimmed`,
 `publish_alternate` or `withhold`. Retry actions return their candidate UUIDs.
 If no stable retry succeeds, the original is retained with its warning. A memo
 must be rebuilt when `rebuild_first` is true; it is never a usable file. Hosts
 own cancellation, staging cleanup, cache freshness and atomic publication.
 
-Hosts can disable the check, skip trimming or alternate sessions, or set
+Hosts can disable retry decisions, skip trimming or alternate sessions, or set
 `retain_unstable=false` to withhold a failed set. These are explicit execution
 options, separate from the unchanged 43 user settings. PSF Guard uses the full
 default policy. Changing the retry policy changes session identity. Keep final
 accepted inputs and dependencies in master provenance; a provisional recipe
 key alone cannot validate an executed master cache entry.
+
+
+### Python records and execution example
+
+`calibration_master_plan`, `calibration_master_cohort`, `calibration_flat_retry`
+and `master_flat_stability` accept either a request mapping or keyword fields;
+mixing the two raises `ValueError`. Python exports `TypedDict` records and
+`Literal` actions for completion and static checking, including
+`CalibrationMasterPlanRequest`, `CalibrationSession`, `FlatRetryPolicy`,
+`FlatAttempt`, `CalibrationFlatRetryDecision` and `FlatSetStability`. They remain
+ordinary dictionaries; core validation applies at runtime.
+
+```python
+session = seiza.calibration_master_plan(
+    frames=selected_frames, lights=session_lights, quality=cached_quality,
+    flat_held_back=held_back,
+    flat_stability=seiza.FlatRetryPolicy(retain_unstable=False),
+)
+decision = seiza.calibration_flat_retry(
+    session=session, candidates=selected_raw_flats, first=first_attempt,
+)
+```
+
+The [complete host loop](../seiza-py/examples/calibration_retry.py) dispatches
+build/retry/publication actions, carries the same session through feedback,
+handles failed retries and memo rebuilds, and discards unpublished attempts on
+exit or cancellation. It contains no independent flat-selection decisions.
+
+For C, insert the returned session object unchanged into the camelCase retry
+request's `session` field. Its `flatStability`, `flatHeldBack` and
+`tolerances.flatSessionSeconds` are consumed together. Result/error strings are
+owned by the caller and freed with `seiza_string_free`; the planner retains no
+JSON buffers between calls.
+
+### Measuring cached pixels
+
+File measurement remains available through `measure_flat_stability_files`,
+`seiza_master_flat_stability_json` and `master_flat_stability`. To reuse cached
+pixels, call `measure_flat_stability_images`,
+`seiza_master_flat_stability_images_json`, or Python:
+
+```python
+measurement = seiza.master_flat_stability_images(
+    master_array, source_arrays, bias=bias_array, dark=dark_array,
+    dark_exposure_seconds=2.0,
+    input_metadata=[{'exposure_seconds': 2.0} for _ in source_arrays],
+    bayer={'pattern': 'RGGB', 'x_offset': 0, 'y_offset': 0},  # raw CFA only
+)
+```
+
+Python accepts C-contiguous float32 arrays shaped `(height, width)` or
+`(height, width, 3)`. C accepts `SeizaFlatStabilityImage` descriptors with
+row-major, interleaved samples and a checked length. Both bindings copy buffers
+for the duration of the call and retain no caller memory. The
+[standalone C example](../seiza-cabi/examples/master_flat_stability.c) shows the
+buffer layout, call and error/result ownership. Native Rust borrows
+input images and copies one source at a time only when calibration is needed.
+All cached pixels must already use the same units; this path does not infer
+headers or rescale values. `dark_bias_subtracted=true` requires a supplied bias.
+Omit `bayer` for mono/RGB; CFA offsets are zero or one. Source metadata may
+override the default CFA layout and carries exposure and skipped flags. Empty
+metadata uses defaults; otherwise its length must match the source count.
+
+The file and image APIs use one measurement algorithm, including mono/RGB/CFA
+planes and indexed geometry/calibration diagnostics. Sources are reported in
+input order, so feedback UUIDs must have that same order. `enabled=false` on
+`FlatRetryPolicy` skips retry decisions; the measurement functions remain
+independently callable. Measurement algorithm version stays 2.
