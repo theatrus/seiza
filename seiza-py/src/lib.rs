@@ -11,6 +11,7 @@ mod continuum;
 mod deconvolution;
 mod emission;
 mod field_objects;
+mod flat_groups;
 mod flat_response;
 mod imgproc;
 mod parallax;
@@ -1240,6 +1241,7 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     calibration::register(m)?;
     constellations::register(m)?;
     flat_response::register(m)?;
+    flat_groups::register(m)?;
     screening::register(m)?;
     stretch::register(m)?;
     m.add("SolveError", m.py().get_type::<SolveError>())?;

@@ -1,5 +1,9 @@
 # seiza-calibration
 
+[`flat_response::groups`](../docs/flat-groups.md) provides PSF Guard's measured
+flat families, change events, angle epochs, light placements and override
+resolution as a pure policy stage. Rust, C and Python share one implementation.
+
 `seiza-calibration` provides host-neutral pixel kernels for calibration
 responses, rules for matching calibration frames to lights, and grades for the
 bias, dark, and flat frames that go into a master. It accepts caller-owned

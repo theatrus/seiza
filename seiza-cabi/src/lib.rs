@@ -3,6 +3,7 @@ mod emission;
 
 use image::DynamicImage;
 mod constellations;
+mod flat_groups;
 mod flat_response;
 mod parallax;
 mod resample;

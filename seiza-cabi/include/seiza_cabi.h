@@ -3687,6 +3687,27 @@ char *seiza_constellations_project_json(const char *wcs_json,
                                         char **error_out);
 
 /*
+ Evaluate measured flat families, groups, changes and light placements.
+ `request_json` is `flat_response::groups::Request` with camelCase field
+ names; omitted collections are empty. Responses, comparisons, evidence,
+ imaging sessions, rig limits, group overrides, night boundaries, epoch
+ samples, family evidence, light choices and light queries are arrays.
+ The returned `Snapshot` uses camelCase too. See the shared flat-group
+ schema documentation for records, units and index meanings.
+
+ This pure stage does not select darks, grade frames, or build masters.
+ Light queries must supply families that passed the host's hard matching
+ gates. Automatic choices and personal overrides are returned separately.
+ Returns null and sets `error_out` on failure. Free either returned string
+ with `seiza_string_free`.
+
+ # Safety
+ `request_json` must be a NUL-terminated UTF-8 string. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_flat_group_plan_json(const char *request_json, char **error_out);
+
+/*
  The block factor that brings a `width × height` frame's long side within
  the response size: each response pixel covers `factor × factor` sensor
  pixels. With `cfa` true the blocks cover whole 2×2 colour cells.

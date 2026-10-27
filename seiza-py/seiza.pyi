@@ -1861,3 +1861,21 @@ def stretch_rgb_stars(original: npt.NDArray[np.float32], starless: npt.NDArray[n
 def screen_rgb_star_layer(nebula: npt.NDArray[np.float32], stars: npt.NDArray[np.float32], reduction: float = 0.0) -> npt.NDArray[np.float32]:
     """Screen display stars over a display nebula, optionally reducing stars [0,1]."""
     ...
+
+# Shared measured grouping policy. Record schema: docs/flat-groups.md.
+def flat_group_plan(
+    *,
+    responses: Sequence[Mapping[str, Any]] | None = None,
+    comparisons: Sequence[Mapping[str, Any]] | None = None,
+    evidence: Sequence[Mapping[str, Any]] | None = None,
+    imaging: Sequence[Mapping[str, Any]] | None = None,
+    imaging_lights: Sequence[tuple[int, str | None, int]] | None = None,
+    profile_rigs: Sequence[tuple[str | None, Sequence[str]]] | None = None,
+    limits: Sequence[Mapping[str, Any]] | None = None,
+    group_overrides: Sequence[Mapping[str, Any]] | None = None,
+    night_boundaries: Sequence[Mapping[str, Any]] | None = None,
+    epoch_samples: Sequence[Mapping[str, Any]] | None = None,
+    family_evidence: Sequence[Mapping[str, Any]] | None = None,
+    light_choices: Sequence[Mapping[str, Any]] | None = None,
+    lights: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]: ...

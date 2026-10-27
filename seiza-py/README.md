@@ -1115,6 +1115,19 @@ a few lights' own sky against a change or a set of candidate responses;
 `flat_encode_plane` and `flat_decode_plane` keep planes in a cache. Options
 are a dict of `DustOptions` fields, such as `{"edge_sigma": 3.0}`.
 
+`flat_group_plan` shares PSF Guard's measured grouping policy: response families,
+groups, changes, angle epochs, uncertain light placements and resolved personal
+choices. Pass `responses`, `comparisons`, `evidence`, `imaging` (or
+`imaging_lights` with `profile_rigs`), `limits`, `group_overrides`,
+`night_boundaries`, `epoch_samples`, `family_evidence`, `light_choices`, and
+`lights` as keyword collections. Records/results use snake_case; times are Unix
+seconds, angles degrees, levels ADU, dust/broad fractions of background. Omitted
+collections are empty. The result includes measurement jobs and evidence keys
+for subsequent pixel passes. Compatible families must already pass the host's
+sensor/optics gates. Automatic results and personal choices stay distinct. This
+stage does not grade frames or build masters. See [the schema and executable
+fixture](../docs/flat-groups.md). `flat_group_plan()` evaluates an empty library.
+
 ### Constellation figures
 
 `project_constellations(wcs, width, height)` gives a solved image's
