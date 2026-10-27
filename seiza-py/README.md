@@ -1,5 +1,43 @@
 # seiza (Python)
 
+## Project analysis
+
+```python
+from pathlib import Path
+import json
+import seiza
+
+report = seiza.analyze_project([Path("lights")], filter="Ha", samples=262144)
+Path("analysis.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+Path("analysis.html").write_text(seiza.analysis_html(report), encoding="utf-8")
+```
+
+`analyze_project(inputs, *, samples=262144, filter=None, max_frames=None, metrics_only=False)`
+accepts paths to files, nonrecursive directories or UTF-8 text lists; relative
+list entries resolve beside the list. `max_frames` limits sorted deduplicated
+paths before header filtering. It releases the GIL during analysis and returns
+a snake_case dictionary with `schema_version`, `algorithm_version`, `options`,
+`frames`, `groups`, `timings`, and `warnings` (schema/algorithm version 2). Invalid requests raise `ValueError`;
+individual inputs stay in `frames` with separate `measurement_status` and
+`depth_status`. Measurement failures use `error`; depth failures use `depth_error`.
+Measured frames contribute to native quality medians even if registration fails.
+`metrics_only=True` skips registration, normalization, sampling and replay;
+normalized noise and depth results remain unavailable. Groups count
+`measured_frames`, `depth_frames` and `normalized_noise_frames` separately.
+Use separate invocations per panel/pointing. No outcome is a quality verdict.
+
+Mono non-Bayer FITS/XISF frames are measured without producing a full stack.
+Per-filter groups contain registration/photometry diagnostics, common-footprint
+noise curves, known integration time, unknown-exposure counts and optional
+conditional trend estimates. `analysis_html(report)` returns a portable HTML
+dashboard with embedded data, filter controls and capture-time health plots.
+Neither function writes reports or modifies source images.
+
+Noise measurements at even depths use balanced frame differences, which cancel
+shared systematic errors as well as scene structure. They do not reproduce
+production weighting/rejection or guarantee improvement with more exposure.
+See [the complete method and schema](../seiza-analysis/README.md).
+
 `balance_narrowband(image, shadow_protection=1, oiii_boost=1, sii_boost=1,
 max_samples=1000000)` accepts interleaved display samples in `[0, 1]`, with
 three physical planes H-alpha/OIII/SII, and returns `(image, report)` without
@@ -1643,3 +1681,13 @@ use the same units. Metadata is omitted/empty or aligned to inputs, with
 `exposure_seconds`, `bayer` and `skipped`. The bindings copy buffers for the call;
 the host retains its original caches. File and cached-image measurement execute
 the same algorithm and return `FlatSetStability`.
+
+### Analysis baselines and stellar SNR
+
+The result dictionary uses snake_case (`median_star_snr`, `median_normalized_noise`).
+Frames now include median unsaturated-star peak SNR. Filter groups expose
+measured-frame medians of star count, HFR, FWHM, eccentricity, noise, background
+and stellar SNR, plus gain-normalized noise. Raw noise/background retain native
+input units; normalized noise uses reference units. Missing measurements are
+null/None. See [measurement definitions](../seiza-analysis/README.md#measurements-and-physical-meaning)
+for population, units and limitations. Thresholds and rejection remain caller-owned.

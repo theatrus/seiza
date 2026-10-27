@@ -19,7 +19,7 @@ PyPI**. They are cut from a single "Release `<version>`" PR followed by two tags
   grep -L 'version.workspace = true' seiza-*/Cargo.toml
   ```
 
-  At the time of writing that is `seiza-background`, `seiza-calibration`,
+  At the time of writing that is `seiza-analysis`, `seiza-background`, `seiza-calibration`,
   `seiza-core`, `seiza-deconvolution`, `seiza-download`, `seiza-draw`, `seiza-fits`,
   `seiza-image-io`, `seiza-imgproc`, `seiza-parallax`, `seiza-satellites`,
   `seiza-sources`, `seiza-stacking`, `seiza-stars`, `seiza-stats`,
@@ -103,7 +103,7 @@ seiza-stats  →  seiza-stretch  →  seiza-imgproc  →  seiza-fits  →  seiza
 →  seiza-core  →  seiza-image-io  →  seiza-background  →  seiza-calibration
 →  seiza-deconvolution  →  seiza-sources  →  seiza-download  →  seiza
 →  seiza-satellites  →  seiza-stacking  →  seiza-stars  →  seiza-draw
-→  seiza-parallax  →  seiza-cabi  →  seiza-cli
+→  seiza-parallax  →  seiza-analysis  →  seiza-cabi  →  seiza-cli
 ```
 
 `seiza-calibration` sits before `seiza-stacking`, which depends on it, and

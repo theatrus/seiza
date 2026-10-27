@@ -1,5 +1,31 @@
 # seiza-cabi
 
+## Project analysis
+
+`seiza_analyze_project_json(request_json, error_out)` analyzes mono, non-Bayer
+FITS/XISF projects without producing a stack. Example request:
+
+```json
+{"inputs":["lights"],"samples":262144,"filter":"Ha","maxFrames":100,"metricsOnly":true}
+```
+
+Only `inputs` is required. Inputs may be files, nonrecursive directories or
+UTF-8 text lists. The response is the core analysis report with camelCase
+keys (`schemaVersion`, `algorithmVersion`, `options`, `frames`, `groups`,
+`timings`, `warnings`), with schema/algorithm version 2. `metricsOnly` defaults
+to false; true skips registration, normalization, sampling and replay. Frames
+have separate `measurementStatus` and `depthStatus`, with `error` and
+`depthError` respectively. Groups expose `measuredFrames`, `depthFrames` and
+`normalizedNoiseFrames`; native quality medians use all measured frames.
+An empty `groups` array means no frames were measured. Use separate invocations
+per panel/pointing; processing outcomes are not quality verdicts. Invalid requests return null and set `error_out`.
+`seiza_analysis_html(report_json, error_out)` renders that camelCase result as
+self-contained HTML. Both return owned strings freed with `seiza_string_free`.
+These calls write no source images or report files. The Python counterparts are
+`analyze_project` and `analysis_html`.
+
+See [the analysis contract and limitations](../seiza-analysis/README.md).
+
 A C ABI over Seiza for native application front-ends. It is the single, shared
 successor to the near-identical `seiza-cabi` crates that previously lived in the
 [`seiza-win`](https://github.com/theatrus/seiza-win) (.NET) and
@@ -968,3 +994,13 @@ error_out)` screens it over a display nebula in place with optional linked
 reduction [0,1]. All buffers contain width*height*3 interleaved floats. Shared
 source normalization preserves RGB scale; inputs remain linear and unchanged.
 Errors leave writable buffers unchanged. Neither call runs an external tool.
+
+### Analysis baselines and stellar SNR
+
+The JSON response uses camelCase (`medianStarSnr`, `medianNormalizedNoise`).
+Frames now include median unsaturated-star peak SNR. Filter groups expose
+measured-frame medians of star count, HFR, FWHM, eccentricity, noise, background
+and stellar SNR, plus gain-normalized noise. Raw noise/background retain native
+input units; normalized noise uses reference units. Missing measurements are
+null/None. See [measurement definitions](../seiza-analysis/README.md#measurements-and-physical-meaning)
+for population, units and limitations. Thresholds and rejection remain caller-owned.

@@ -117,6 +117,10 @@ pub(crate) struct StackArgs {
     /// Integrated master flat FITS or XISF in the light frame's raw sampling
     #[arg(long)]
     flat: Option<PathBuf>,
+    /// Allow a master flat with different gain or offset only when its
+    /// calibration headers record DARKSUB=T. Other matching checks still apply
+    #[arg(long, requires = "flat")]
+    allow_flat_gain_offset_mismatch: bool,
     /// Override master-dark exposure time in seconds
     #[arg(long, requires = "dark")]
     dark_exposure_seconds: Option<f64>,
@@ -560,6 +564,9 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
         ..StackOptions::default()
     };
     stack_options.acceptance.maximum_registration_rms_pixels = options.max_registration_rms;
+    stack_options
+        .match_tolerances
+        .allow_flat_gain_offset_mismatch = options.allow_flat_gain_offset_mismatch;
     stack_options.acceptance.minimum_overlap_fraction = min_overlap;
     stack_options.registration.maximum_drift_pixels = options.max_registration_drift;
     stack_options.registration.model = match registration_model {

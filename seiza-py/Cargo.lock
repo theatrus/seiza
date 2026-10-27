@@ -2317,6 +2317,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "seiza-analysis"
+version = "0.1.0"
+dependencies = [
+ "seiza-image-io",
+ "seiza-stacking",
+ "seiza-stars",
+ "seiza-stats",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "seiza-background"
 version = "0.3.1"
 dependencies = [
@@ -2439,6 +2453,7 @@ dependencies = [
  "numpy",
  "pyo3",
  "seiza",
+ "seiza-analysis",
  "seiza-background",
  "seiza-calibration",
  "seiza-deconvolution",

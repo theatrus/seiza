@@ -16,6 +16,7 @@ use seiza_satellites::{
 };
 use std::path::PathBuf;
 
+mod analyze;
 mod astap;
 mod background;
 mod build_data;
@@ -407,6 +408,8 @@ impl From<DetectionBackendArg> for DetectBackend {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Measure a mono FITS/XISF project without producing a stack
+    Analyze(analyze::AnalyzeArgs),
     /// Inspect JPEG EXIF metadata and display-oriented raster dimensions as JSON
     ImageInfo {
         /// Raster image file (JPEG, PNG, TIFF)
@@ -1296,6 +1299,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Setup(args) => setup::run(args),
         Command::InstallSolveField { dir } => solve_field::install_layout(&dir),
+        Command::Analyze(args) => analyze::run(args),
         Command::ImageInfo { image } => {
             anyhow::ensure!(
                 !is_astronomy_image_path(&image),

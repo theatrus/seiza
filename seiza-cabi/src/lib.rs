@@ -1,3 +1,4 @@
+mod analysis;
 mod continuum;
 mod emission;
 

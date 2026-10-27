@@ -29,6 +29,7 @@ default = []
 extension-module = ["pyo3/extension-module"]
 
 [dependencies]
+seiza-analysis = { path = "../seiza-analysis" }
 seiza = { path = "../seiza", features = ["downloads"] }
 seiza-background = { path = "../seiza-background" }
 seiza-calibration = { path = "../seiza-calibration" }

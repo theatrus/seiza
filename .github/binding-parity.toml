@@ -29,6 +29,9 @@ ignore = ["starless", "stars", "wcs", "progress", "cancel"]
 [rust.SceneRequest]
 core = "seiza-parallax::SceneOptions"
 
+[rust.AnalysisRequest]
+core = "seiza-analysis::AnalysisOptions"
+
 [rust.VideoRequest]
 core = "seiza-parallax::VideoOptions"
 image_shaped_size = { c = "size" }
@@ -489,6 +492,8 @@ objects = [
 # ("solve_blind", "ParallaxVideo") or "Class.member" ("ParallaxVideo.reconfigure",
 # "LiveStacker.accepted_frames") — or why Python has none.
 [functions]
+seiza_analyze_project_json = "analyze_project"
+seiza_analysis_html = "analysis_html"
 
 # --- constellation figures --------------------------------------------------
 seiza_constellation_figures_json = "constellation_figures"

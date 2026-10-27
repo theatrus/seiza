@@ -1,5 +1,36 @@
 # seiza-cli
 
+## Analyze a project without stacking
+
+```sh
+seiza analyze ./lights
+seiza analyze ./panel-1.txt --metrics-only
+seiza analyze ./frames.txt --filter Ha --samples 262144 \
+  --json ha-analysis.json --html ha-analysis.html
+```
+
+Writes versioned JSON and a self-contained HTML dashboard (default:
+`project-analysis.json` and `project-analysis.html`). Destinations must not
+already exist. Input images are never modified. Files, nonrecursive directories,
+and UTF-8 text lists are accepted; relative list entries resolve beside the list.
+`--max-frames N` limits sorted, deduplicated paths before header filtering.
+
+The initial scope is monochrome non-Bayer FITS/XISF. Each filter gets its own
+reference, registration, photometric normalization, common sampling footprint
+and noise curve in full mode. `--metrics-only` skips all depth processing.
+Use separate input lists/invocations per panel or pointing. Measurement and depth
+outcomes are separate processing outcomes, not quality verdicts. Quality medians
+include every measured frame, regardless of depth participation. Errors remain
+visible per frame; if no frame can be measured,
+the reports are still written and the command exits unsuccessfully.
+
+The dashboard includes HFR/FWHM, eccentricity, star counts, capture-time health
+plots, warnings, and conditional depth trends. Split noise is measured only at
+even depths and requires at least 32 patches common to every depth-included frame.
+Shared systematic errors cancel in the difference: this is not a prediction of
+production stacking or a guarantee that more exposure will help. See
+[the analysis method and report contract](../seiza-analysis/README.md).
+
 The `seiza` command-line tool: star detection, hinted and blind plate
 solving, and star/object dataset management for astrophotography. The
 library lives in the [seiza](https://crates.io/crates/seiza) crate.
@@ -945,6 +976,10 @@ bias-subtracted dark or calibrated flat is not subtracted twice. Each light is
 checked against what the masters' headers record: gain, offset, binning, the
 dark's sensor temperature (`CCD-TEMP` or `SET-TEMP`) and the flat's filter and
 optics. A master dark that records no temperature is used with a warning.
+Use `--flat master-flat.fits --allow-flat-gain-offset-mismatch` to allow a
+flat shot at a different gain or offset, provided it was calibrated with
+matching flat-darks and records `DARKSUB=T`. The default still rejects these
+mismatches. The flag does not relax bias/dark matching or any other flat checks.
 Planar RGB flats are normalized independently per channel. CFA flats remain
 one-channel and are applied before debayering. See the
 [stacking design](https://github.com/theatrus/seiza/blob/main/docs/design/image-stacking.md)
