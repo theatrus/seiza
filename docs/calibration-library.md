@@ -12,8 +12,12 @@ groups grading peers; screens bias, dark, dark-flat and flat measurements;
 applies manual eligibility choices; selects calibration candidates; chooses
 complete dark/bias cohorts, named readout modes and flat families; and produces
 master dependencies, session assignments and complete light gates. Session
-identity retains PSF Guard's coherent-input, matching-rule and flat-correction
-identity. Identical selections reuse a session without reordering the lights.
+identity includes resolved external-master adoption or ordered raw inputs and
+their fingerprints, build options/dependencies, matching rules, the full light
+gate and flat correction. Equivalent recipes reuse a session without reordering
+the lights; unused candidates cannot hide a change in adopted master. Policy
+`algorithm_version` is 2 for this resolved-recipe identity. Failure and pedestal
+feedback retain the base key so hosts can submit execution results against it.
 
 ## Inputs
 
@@ -54,6 +58,24 @@ separate states and never become an invented OK grade. Stored grades and
 legacy stray-light eligibility retain PSF Guard's precedence. A `use` override
 restores eligibility but cannot bypass sensor, optics or validity gates.
 
+### Reusing a host catalog and caches
+
+PSF Guard can populate these records directly from its existing database. File
+paths are opaque identifiers during planning: the planner never opens them,
+scans directories, measures pixels or requires a Seiza-owned database. Supply
+cached metadata in `frames`/`lights`, cached measurements and stored decisions
+in `quality`, and cached response/comparison records and overrides in `grouping`.
+Use `regrade=false` to retain stored grading, or `true` to regrade the supplied
+current measurements without measuring the files again. `available_responses`
+declares which correction responses the host can retrieve from its cache.
+
+The host remains responsible for cache freshness and can reuse prior source
+verification while its fingerprint and metadata assertions remain valid. It
+can reuse compatible cached master pixels and execute only missing recipes.
+A CLI without a catalog gathers metadata and measurements from disk to fill
+the same request; persistence and scanning are host choices. Neither host needs
+to duplicate the matching policy.
+
 ## Results and master execution
 
 `grades` retains input frame order. `selections` and `assignments` retain input
@@ -62,10 +84,15 @@ master recipes and an application policy. Selections also report kept-out
 frames, available library kinds, flat basis/family, held-back flats, personal
 choices and nondefault rule notes. `settings_schema` exposes the original
 settings table, limits and defaults; apps do not need their own threshold table.
+Native Rust consumers can name these result models through `library` reexports,
+including `FlatBasis`, `FlatFamily`, `RuleNote`, `FieldSpec` and `FieldKind`, and
+pattern-match them directly without serializing through JSON.
 
 A recipe's action is `external`, `integrate`, `unavailable`, `failed` or
 `blocked`. It names input UUIDs, declared dependencies, coherence exclusions,
-exposure and native builder options. Build order is bias, dark-flat, dark, flat.
+exposure and native builder options. Exposure comes from the adopted external
+master or first selected coherent raw input, and remains absent if that input
+does not record it. Build order is bias, dark-flat, dark, flat.
 An external master is adopted as-is, never integrated with raw frames. The
 prefer/fallback/ignore decision follows PSF Guard's coherent raw-frame count.
 Flat defect suppression is enabled; dark hot pixels remain intact. Legacy dark

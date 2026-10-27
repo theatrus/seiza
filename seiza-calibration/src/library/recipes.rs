@@ -62,15 +62,20 @@ pub(super) fn recipes(selected: &CalibrationSelection) -> Vec<MasterRecipe> {
             }
             _ => None,
         };
-        let (action, inputs) = if let Some(master) = adopt {
-            (RecipeAction::External, vec![master.frame_uuid.clone()])
+        let (action, inputs, exposure_seconds) = if let Some(master) = adopt {
+            (
+                RecipeAction::External,
+                vec![master.frame_uuid.clone()],
+                master.exposure_s,
+            )
         } else if subset.kept.len() >= MIN_MASTER_FRAMES {
             (
                 RecipeAction::Integrate,
                 subset.kept.iter().map(|f| f.frame_uuid.clone()).collect(),
+                subset.kept.first().and_then(|f| f.exposure_s),
             )
         } else {
-            (RecipeAction::Unavailable, Vec::new())
+            (RecipeAction::Unavailable, Vec::new(), None)
         };
         let dependencies = if matches!(action, RecipeAction::Integrate) {
             recipes
@@ -105,7 +110,7 @@ pub(super) fn recipes(selected: &CalibrationSelection) -> Vec<MasterRecipe> {
             input_limit: MAX_MASTER_FRAMES,
             requires_source_verification: frames.iter().any(|f| !f.source_verified),
             failure: None,
-            exposure_seconds: frames.first().and_then(|f| f.exposure_s),
+            exposure_seconds,
             defect_suppression: kind == CalibrationKind::Flat,
             flat_star_masking: false,
             dark_level_screening: false,

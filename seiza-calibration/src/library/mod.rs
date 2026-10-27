@@ -5,8 +5,12 @@ mod flat_notes;
 mod grading;
 mod recipes;
 mod rules;
+pub use flat_notes::{
+    AlikeRangeNote, ChoiceNote, EventNote, FlatBasis, FlatCorrection, FlatFamily, GroupNote,
+};
 pub use recipes::{Application, FlatUse, MasterFailure, PedestalEvidence};
 use recipes::{finalize, recipes};
+pub use rules::{ChoiceOption, Effect, FieldKind, FieldSpec, Group, RuleNote, RuleSource};
 mod selection;
 use crate::{
     BiasScreening, DarkMeasurement, DarkScreening, Finding, FindingCode, FlatMeasurement,
@@ -21,6 +25,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 const MIN_MASTER_FRAMES: usize = 2;
 const MAX_MASTER_FRAMES: usize = 64;
+const POLICY_ALGORITHM_VERSION: u32 = 2;
 const DEFAULT_DARK_REACH_DAYS: f64 = 183.0;
 const DEFAULT_COMPLETE_DARK_FRAMES: usize = 10;
 const DEFAULT_FLAT_MAX_AGE_DAYS: f64 = 60.0;
@@ -35,16 +40,6 @@ pub enum CalibrationKind {
     Dark,
     DarkFlat,
     Flat,
-}
-impl CalibrationKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Bias => "bias",
-            Self::Dark => "dark",
-            Self::DarkFlat => "dark_flat",
-            Self::Flat => "flat",
-        }
-    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -274,42 +269,49 @@ impl Nights {
         ((at as i128 - shift as i128).div_euclid(86400)).to_string()
     }
 }
-fn session_key(selected: &CalibrationSelection) -> String {
-    let mut parts = Vec::new();
-    for (kind, frames) in [
-        (CalibrationKind::Bias, &selected.bias),
-        (CalibrationKind::Dark, &selected.dark),
-        (CalibrationKind::DarkFlat, &selected.dark_flat),
-        (CalibrationKind::Flat, &selected.flat),
-    ] {
-        let subset = coherent_master_subset(kind, frames, &selected.rules);
-        let mut values = subset
-            .iter()
-            .map(|frame| format!("{}:{}", frame.frame_uuid, frame.source_fingerprint))
-            .collect::<Vec<_>>();
-        values.sort();
-        parts.push(format!("{}={}", kind.as_str(), values.join(",")));
-    }
-    // Lights of two rigs whose settings match differently build apart,
-    // even from the same frames: a master's other choices follow its rules.
-    if let Some(rules) = selected.rules.matching_digest() {
-        parts.push(format!("rules={rules}"));
-    }
-    if let Some(correction) = selected.flat_basis.correction() {
-        parts.push(format!("flat-correction={}", correction.key));
-    }
-    // Its stack gate admits flats from another angle, and every light of
-    // one session shares the session's gate.
-    if let Some(tolerance) = selected.flat_basis.rotation_tolerance() {
-        parts.push(format!("flat-rotation-tolerance={tolerance:.3}"));
-    }
-    // So does a gate that reads the light at its flats' measured angle.
-    if let Some(family) = &selected.flat_family
-        && !family.light_rotation.is_recorded()
-    {
-        parts.push(format!("flat-light-rotation={:?}", family.light_rotation));
-    }
-    hex_digest(&parts.join("\u{1e}"))
+fn session_key(selected: &CalibrationSelection, recipes: &[MasterRecipe]) -> String {
+    let frames: HashMap<_, _> = selected
+        .bias
+        .iter()
+        .chain(&selected.dark)
+        .chain(&selected.dark_flat)
+        .chain(&selected.flat)
+        .map(|frame| (frame.frame_uuid.as_str(), frame))
+        .collect();
+    let resolved: Vec<_> = recipes
+        .iter()
+        .map(|recipe| {
+            // Input order is meaningful: the first input anchors the master's
+            // metadata/exposure. Unused candidates and exclusions are not inputs.
+            let inputs: Vec<_> = recipe
+                .inputs
+                .iter()
+                .map(|id| (id, &frames[id.as_str()].source_fingerprint))
+                .collect();
+            (
+                recipe.kind,
+                &recipe.action,
+                inputs,
+                &recipe.dependencies,
+                recipe.exposure_seconds,
+                recipe.defect_suppression,
+                recipe.flat_star_masking,
+                recipe.dark_level_screening,
+                recipe.requires_source_verification,
+            )
+        })
+        .collect();
+    // Resolve adoption, builder options and the complete gate before deduping.
+    // Failure and pedestal evidence refer back to this base key, so neither
+    // finalization outcome participates in it.
+    let identity = (
+        POLICY_ALGORITHM_VERSION,
+        resolved,
+        selected.match_tolerances(),
+        selected.rules.matching_digest(),
+        selected.flat_basis.correction(),
+    );
+    hex_digest(&serde_json::to_string(&identity).expect("validated session identity"))
 }
 fn hex_digest(value: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -664,7 +666,23 @@ pub fn evaluate(mut request: Request) -> crate::Result<Snapshot> {
                 frames.truncate(MAX_MASTER_FRAMES);
             }
         }
-        let key = session_key(&selected);
+        let mut recipes = recipes(&selected);
+        for recipe in &mut recipes {
+            recipe.flat_star_masking =
+                recipe.kind == CalibrationKind::Flat && request.flat_star_masking;
+            recipe.dark_level_screening = matches!(
+                recipe.kind,
+                CalibrationKind::Dark | CalibrationKind::DarkFlat
+            ) && recipe.inputs.iter().any(|id| {
+                !judged.contains_key(id)
+                    && quality.get(id).is_none_or(|q| {
+                        q.override_choice.is_none()
+                            && !(q.grade.is_some()
+                                && selected_frame_current(id, q, &library.frames))
+                    })
+            });
+        }
+        let key = session_key(&selected, &recipes);
         let index = match keys.get(&key) {
             Some(index) => *index,
             None => {
@@ -673,25 +691,7 @@ pub fn evaluate(mut request: Request) -> crate::Result<Snapshot> {
                 sessions.push(Session {
                     key,
                     tolerances: selected.match_tolerances(),
-                    recipes: {
-                        let mut recipes = recipes(&selected);
-                        for recipe in &mut recipes {
-                            recipe.flat_star_masking =
-                                recipe.kind == CalibrationKind::Flat && request.flat_star_masking;
-                            recipe.dark_level_screening = matches!(
-                                recipe.kind,
-                                CalibrationKind::Dark | CalibrationKind::DarkFlat
-                            ) && recipe.inputs.iter().any(|id| {
-                                !judged.contains_key(id)
-                                    && quality.get(id).is_none_or(|q| {
-                                        q.override_choice.is_none()
-                                            && !(q.grade.is_some()
-                                                && selected_frame_current(id, q, &library.frames))
-                                    })
-                            });
-                        }
-                        recipes
-                    },
+                    recipes,
                     application: Application::default(),
                 });
                 index
@@ -724,7 +724,7 @@ pub fn evaluate(mut request: Request) -> crate::Result<Snapshot> {
         request.force_flat_without_pedestal,
     )?;
     Ok(Snapshot {
-        algorithm_version: 1,
+        algorithm_version: POLICY_ALGORITHM_VERSION,
         selections,
         grades,
         sessions,

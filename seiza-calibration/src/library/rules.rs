@@ -234,17 +234,6 @@ pub enum LightNightSplit {
     Catalog,
 }
 
-impl LightNightSplit {
-    /// A view's override from the link: `rig` or `catalog`.
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "rig" => Some(Self::Rig),
-            "catalog" => Some(Self::Catalog),
-            _ => None,
-        }
-    }
-}
-
 /// How a rig's flats of different nights may share a master.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum FlatGrouping {
@@ -886,10 +875,6 @@ pub fn fields() -> &'static [FieldSpec] {
     &FIELDS
 }
 
-pub fn field(key: &str) -> Option<&'static FieldSpec> {
-    FIELDS.iter().find(|field| field.key == key)
-}
-
 fn finite(value: &Value) -> Option<f64> {
     value.as_f64().filter(|value| value.is_finite())
 }
@@ -1239,44 +1224,6 @@ impl Rules {
             flat,
             resolved,
         }
-    }
-
-    pub fn mode(&self, check: Check) -> CheckMode {
-        self.checks[check.index()]
-    }
-
-    /// Where one setting's value came from.
-    pub fn source(&self, key: &str) -> RuleSource {
-        self.resolved
-            .get(key)
-            .map(|(_, source)| *source)
-            .unwrap_or(RuleSource::Default)
-    }
-
-    /// Who set a value, in words, or `None` when it is the default: "set
-    /// globally" or "set for SpaceCat61 · ASI2600MM Pro".
-    pub fn set_by(&self, key: &str) -> Option<String> {
-        let (value, source) = self.resolved.get(key)?;
-        if field(key).is_some_and(|spec| equivalent(&spec.default, value)) {
-            return None;
-        }
-        match source {
-            RuleSource::Default => None,
-            RuleSource::Global => Some("set globally".into()),
-            RuleSource::Rig => Some(format!(
-                "set for {}",
-                self.rig
-                    .as_ref()
-                    .map_or("this rig", |rig| rig.name.as_str())
-            )),
-        }
-    }
-
-    /// `", set …"` after a limit, or nothing for a default.
-    pub fn set_by_suffix(&self, key: &str) -> String {
-        self.set_by(key)
-            .map(|by| format!(", {by}"))
-            .unwrap_or_default()
     }
 
     /// The settings that differ from their defaults for these rules, in

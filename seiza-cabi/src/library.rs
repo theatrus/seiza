@@ -179,6 +179,43 @@ mod tests {
     }
 
     #[test]
+    fn resolved_recipe_regressions_cross_the_c_abi() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../seiza-calibration/tests/fixtures/library/recipes.json"
+        ))
+        .unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let result = run(field_names(case["request"].clone(), true)).unwrap();
+            assert_eq!(
+                result["assignments"], case["assignments"],
+                "{}",
+                case["name"]
+            );
+            assert_eq!(
+                result["sessions"].as_array().unwrap().len(),
+                case["recipes"].as_array().unwrap().len()
+            );
+            for (session, expected) in result["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .zip(case["recipes"].as_array().unwrap())
+            {
+                let recipe = session["recipes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|r| r["kind"] == case["kind"])
+                    .unwrap();
+                let expected = field_names(expected.clone(), true);
+                for key in ["action", "inputs", "exposureSeconds"] {
+                    assert_eq!(recipe[key], expected[key], "{}: {key}", case["name"]);
+                }
+                assert_eq!(recipe["requiresSourceVerification"], false);
+            }
+        }
+    }
+    #[test]
     fn schema_is_strict_but_setting_values_are_opaque() {
         let value = serde_json::json!({"globalSettings":[{"key":"future_Setting","value":{"user_key":"Preserve_This"}}]});
         assert_eq!(field_names(field_names(value.clone(), false), true), value);

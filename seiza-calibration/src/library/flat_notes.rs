@@ -37,7 +37,7 @@ pub struct EventNote {
 }
 
 impl EventNote {
-    pub fn of(event: &Event, rules: &Rules) -> Self {
+    pub(super) fn of(event: &Event, rules: &Rules) -> Self {
         Self {
             key: event.key.clone(),
             start: event.start,
@@ -219,7 +219,7 @@ pub struct GroupNote {
 }
 
 impl GroupNote {
-    pub fn of(book: &Book, family: usize, group: usize) -> Option<Self> {
+    pub(super) fn of(book: &Book, family: usize, group: usize) -> Option<Self> {
         let sessions = book.families.get(family)?.groups.get(group)?;
         let night = |index: usize| book.sessions[index].row.night.clone();
         Some(Self {
@@ -273,7 +273,7 @@ pub struct ChoiceNote {
 }
 
 impl ChoiceNote {
-    pub fn of(row: &overrides::LightChoiceRow, orphaned: Option<String>) -> Option<Self> {
+    pub(super) fn of(row: &overrides::LightChoiceRow, orphaned: Option<String>) -> Option<Self> {
         Some(Self {
             choice: row.choice?,
             change_key: (row.change_key != overrides::GROUP_CHOICE_KEY)
@@ -471,7 +471,11 @@ pub struct AlikeRangeNote {
 }
 
 impl AlikeRangeNote {
-    pub fn of(range: &model::AlikeRange, flats_angle: f64, flats_group: Option<usize>) -> Self {
+    pub(super) fn of(
+        range: &model::AlikeRange,
+        flats_angle: f64,
+        flats_group: Option<usize>,
+    ) -> Self {
         Self {
             flats_angle,
             low: range.span.low,
@@ -485,7 +489,7 @@ impl AlikeRangeNote {
 }
 
 impl FlatFamily {
-    pub fn of(book: &Book, choice: &lights::FamilyChoice) -> Self {
+    pub(super) fn of(book: &Book, choice: &lights::FamilyChoice) -> Self {
         let label = |family: usize| family_label(book, family);
         Self {
             key: book.families[choice.family].key.clone(),

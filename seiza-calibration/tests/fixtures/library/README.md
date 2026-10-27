@@ -22,3 +22,10 @@ synthetic identifiers and timestamps are adapted; measurement numbers, grades,
 reasons and selected source names are unchanged. The capture source is in
 `theatrus/seiza-mac` branch `codex/stack-calibration-plan`,
 `Tests/Fixtures/CalibrationParity/capture.rs`.
+
+`recipes.json` contains synthetic regression requests for Seiza's recipe
+resolution layer: shared raw candidates with distinct adopted external masters
+in A→B→A order, raw fallback past an unused external master, and external
+adoption past an unused raw candidate. Expected recipes are specified directly
+from the chosen sources, independently of planner output. These cases supplement
+the pinned PSF Guard captures above; they are not regenerated reference captures.

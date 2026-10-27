@@ -9,6 +9,40 @@ import seiza
 FIXTURES = Path(__file__).resolve().parents[2] / 'seiza-calibration/tests/fixtures/library'
 
 
+@pytest.mark.parametrize('case', json.loads((FIXTURES / 'recipes.json').read_text())['cases'], ids=lambda c: c['name'])
+def test_resolved_recipes_determine_sessions_and_exposure(case):
+    result = seiza.calibration_library_plan(**case['request'])
+    assert result['assignments'] == case['assignments']
+    assert len(result['sessions']) == len(case['recipes'])
+    for session, expected in zip(result['sessions'], case['recipes']):
+        recipe = next(r for r in session['recipes'] if r['kind'] == case['kind'])
+        for key in ('action', 'inputs', 'exposure_seconds'):
+            assert recipe[key] == expected[key]
+        assert recipe['requires_source_verification'] is False
+
+
+def test_recipe_exposure_survives_native_master_building(tmp_path):
+    import numpy as np
+    from astropy.io import fits
+
+    case = json.loads((FIXTURES / 'recipes.json').read_text())['cases'][1]
+    request = copy.deepcopy(case['request'])
+    for frame in request['frames']:
+        path = tmp_path / (frame['frame_uuid'] + '.fits')
+        frame['source_path'] = str(path)
+        # Only raw recipe inputs exist; an unused catalog master needs no I/O.
+        if not frame['is_master']:
+            fits.writeto(path, np.full((64, 64), 300.0, dtype=np.float32),
+                         fits.Header({'IMAGETYP': 'DARK', 'EXPTIME': 300.0}))
+    plan = seiza.calibration_library_plan(**request)
+    recipe = next(r for r in plan['sessions'][0]['recipes'] if r['kind'] == 'dark')
+    paths = {f['frame_uuid']: f['source_path'] for f in request['frames']}
+    output = tmp_path / 'master.fits'
+    seiza.build_dark([paths[id] for id in recipe['inputs']], output,
+                     exposure_seconds=recipe['exposure_seconds'])
+    assert fits.getheader(output)['EXPTIME'] == 300.0
+
+
 @pytest.mark.parametrize('case', json.loads((FIXTURES / 'psf-guard.json').read_text())['cases'], ids=lambda c: c['name'])
 def test_psf_guard_selection_reference(case):
     result = seiza.calibration_library_plan(**case['request'])

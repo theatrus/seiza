@@ -1,0 +1,697 @@
+{
+  "cases": [
+    {
+      "name": "adopted_masters_split_a_b_a_with_shared_raw_cohort",
+      "request": {
+        "frames": [
+          {
+            "id": 0,
+            "frame_uuid": "f0",
+            "rig_uuid": "r",
+            "kind": "bias",
+            "source_path": "/f0.fits",
+            "source_fingerprint": "fp0",
+            "captured_at": 50,
+            "camera": "Camera",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "camera_temp": -20,
+            "exposure_s": 300,
+            "is_master": false,
+            "source_verified": true
+          },
+          {
+            "id": 1,
+            "frame_uuid": "f1",
+            "rig_uuid": "r",
+            "kind": "bias",
+            "source_path": "/f1.fits",
+            "source_fingerprint": "fp1",
+            "captured_at": 50,
+            "camera": "Camera",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "camera_temp": -20,
+            "exposure_s": 300,
+            "is_master": false,
+            "source_verified": true
+          },
+          {
+            "id": 2,
+            "frame_uuid": "f2",
+            "rig_uuid": "r",
+            "kind": "bias",
+            "source_path": "/f2.fits",
+            "source_fingerprint": "fp2",
+            "captured_at": 50,
+            "camera": "Camera",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "camera_temp": -20,
+            "exposure_s": 300,
+            "is_master": false,
+            "source_verified": true
+          },
+          {
+            "id": 3,
+            "frame_uuid": "f3",
+            "rig_uuid": "r",
+            "kind": "bias",
+            "source_path": "/f3.fits",
+            "source_fingerprint": "fp3",
+            "captured_at": 50,
+            "camera": "Camera",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "camera_temp": -20,
+            "exposure_s": 300,
+            "is_master": false,
+            "source_verified": true
+          },
+          {
+            "id": 4,
+            "frame_uuid": "f4",
+            "rig_uuid": "r",
+            "kind": "bias",
+            "source_path": "/f4.fits",
+            "source_fingerprint": "fp4",
+            "captured_at": 50,
+            "camera": "Camera",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "camera_temp": -20,
+            "exposure_s": 300,
+            "is_master": false,
+            "source_verified": true
+          },
+          {
+            "id": 5,
+            "frame_uuid": "f5",
+            "rig_uuid": "r",
+            "kind": "bias",
+            "source_path": "/f5.fits",
+            "source_fingerprint": "fp5",
+            "captured_at": 50,
+            "camera": "Camera",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "camera_temp": -20,
+            "exposure_s": 300,
+            "is_master": false,
+            "source_verified": true
+          },
+          {
+            "id": 6,
+            "frame_uuid": "f6",
+            "rig_uuid": "r",
+            "kind": "bias",
+            "source_path": "/f6.fits",
+            "source_fingerprint": "fp6",
+            "captured_at": 50,
+            "camera": "Camera",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "camera_temp": -20,
+            "exposure_s": 300,
+            "is_master": false,
+            "source_verified": true
+          },
+          {
+            "id": 7,
+            "frame_uuid": "f7",
+            "rig_uuid": "r",
+            "kind": "bias",
+            "source_path": "/f7.fits",
+            "source_fingerprint": "fp7",
+            "captured_at": 50,
+            "camera": "Camera",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "camera_temp": -20,
+            "exposure_s": 300,
+            "is_master": false,
+            "source_verified": true
+          },
+          {
+            "id": 8,
+            "frame_uuid": "f8",
+            "rig_uuid": "r",
+            "kind": "bias",
+            "source_path": "/f8.fits",
+            "source_fingerprint": "fp8",
+            "captured_at": 50,
+            "camera": "Camera",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "camera_temp": -20,
+            "exposure_s": 300,
+            "is_master": false,
+            "source_verified": true
+          },
+          {
+            "id": 9,
+            "frame_uuid": "f9",
+            "rig_uuid": "r",
+            "kind": "bias",
+            "source_path": "/f9.fits",
+            "source_fingerprint": "fp9",
+            "captured_at": 50,
+            "camera": "Camera",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "camera_temp": -20,
+            "exposure_s": 300,
+            "is_master": false,
+            "source_verified": true
+          },
+          {
+            "id": 100,
+            "frame_uuid": "f100",
+            "rig_uuid": "r",
+            "kind": "bias",
+            "source_path": "/f100.fits",
+            "source_fingerprint": "fp100",
+            "captured_at": 0,
+            "camera": "Camera",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "camera_temp": -10,
+            "exposure_s": 300,
+            "is_master": true,
+            "source_verified": true
+          },
+          {
+            "id": 101,
+            "frame_uuid": "f101",
+            "rig_uuid": "r",
+            "kind": "bias",
+            "source_path": "/f101.fits",
+            "source_fingerprint": "fp101",
+            "captured_at": 100,
+            "camera": "Camera",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "camera_temp": -4,
+            "exposure_s": 300,
+            "is_master": true,
+            "source_verified": true
+          }
+        ],
+        "lights": [
+          {
+            "path": "/light-0.fits",
+            "rig_uuid": "r",
+            "timestamp": 0,
+            "camera": "Camera",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "camera_temp": -10,
+            "exposure_s": 300
+          },
+          {
+            "path": "/light-100.fits",
+            "rig_uuid": "r",
+            "timestamp": 100,
+            "camera": "Camera",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "camera_temp": -10,
+            "exposure_s": 300
+          },
+          {
+            "path": "/light-0.fits",
+            "rig_uuid": "r",
+            "timestamp": 0,
+            "camera": "Camera",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "camera_temp": -10,
+            "exposure_s": 300
+          }
+        ]
+      },
+      "assignments": [
+        0,
+        1,
+        0
+      ],
+      "kind": "bias",
+      "recipes": [
+        {
+          "action": "external",
+          "inputs": [
+            "f100"
+          ],
+          "exposure_seconds": 300.0
+        },
+        {
+          "action": "external",
+          "inputs": [
+            "f101"
+          ],
+          "exposure_seconds": 300.0
+        }
+      ]
+    },
+    {
+      "name": "fallback_exposure_comes_from_raw_cohort",
+      "request": {
+        "frames": [
+          {
+            "id": 0,
+            "frame_uuid": "f0",
+            "rig_uuid": "r",
+            "kind": "dark",
+            "source_path": "/f0.fits",
+            "source_fingerprint": "fp0",
+            "captured_at": 0,
+            "camera": "Camera",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "camera_temp": -10,
+            "exposure_s": 30,
+            "is_master": true,
+            "source_verified": true
+          },
+          {
+            "id": 1,
+            "frame_uuid": "f1",
+            "rig_uuid": "r",
+            "kind": "dark",
+            "source_path": "/f1.fits",
+            "source_fingerprint": "fp1",
+            "captured_at": 20,
+            "camera": "Camera",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "camera_temp": -10,
+            "exposure_s": 300,
+            "is_master": false,
+            "source_verified": true
+          },
+          {
+            "id": 2,
+            "frame_uuid": "f2",
+            "rig_uuid": "r",
+            "kind": "dark",
+            "source_path": "/f2.fits",
+            "source_fingerprint": "fp2",
+            "captured_at": 21,
+            "camera": "Camera",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "camera_temp": -10,
+            "exposure_s": 300,
+            "is_master": false,
+            "source_verified": true
+          }
+        ],
+        "lights": [
+          {
+            "path": "/light-0.fits",
+            "rig_uuid": "r",
+            "timestamp": 0,
+            "camera": "Camera",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "camera_temp": -10
+          }
+        ],
+        "global_settings": [
+          {
+            "key": "external_masters",
+            "value": "fallback"
+          }
+        ]
+      },
+      "assignments": [
+        0
+      ],
+      "kind": "dark",
+      "recipes": [
+        {
+          "action": "integrate",
+          "inputs": [
+            "f1",
+            "f2"
+          ],
+          "exposure_seconds": 300.0
+        }
+      ]
+    },
+    {
+      "name": "external_exposure_comes_from_adopted_master",
+      "request": {
+        "frames": [
+          {
+            "id": 0,
+            "frame_uuid": "f0",
+            "rig_uuid": "r",
+            "kind": "dark",
+            "source_path": "/f0.fits",
+            "source_fingerprint": "fp0",
+            "captured_at": 0,
+            "camera": "Camera",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "camera_temp": -10,
+            "exposure_s": 30,
+            "is_master": false,
+            "source_verified": true
+          },
+          {
+            "id": 1,
+            "frame_uuid": "f1",
+            "rig_uuid": "r",
+            "kind": "dark",
+            "source_path": "/f1.fits",
+            "source_fingerprint": "fp1",
+            "captured_at": 20,
+            "camera": "Camera",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "camera_temp": -10,
+            "exposure_s": 300,
+            "is_master": true,
+            "source_verified": true
+          }
+        ],
+        "lights": [
+          {
+            "path": "/light-0.fits",
+            "rig_uuid": "r",
+            "timestamp": 0,
+            "camera": "Camera",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "camera_temp": -10
+          }
+        ]
+      },
+      "assignments": [
+        0
+      ],
+      "kind": "dark",
+      "recipes": [
+        {
+          "action": "external",
+          "inputs": [
+            "f1"
+          ],
+          "exposure_seconds": 300.0
+        }
+      ]
+    },
+    {
+      "name": "exposure_comes_from_cohort_after_singleton_mode",
+      "request": {
+        "frames": [
+          {
+            "id": 0,
+            "frame_uuid": "f0",
+            "rig_uuid": "r",
+            "kind": "dark",
+            "source_path": "/f0.fits",
+            "source_fingerprint": "fp0",
+            "captured_at": 0,
+            "camera": "Camera",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "camera_temp": -10,
+            "exposure_s": 30,
+            "is_master": false,
+            "source_verified": true,
+            "readout_mode_name": "singleton"
+          },
+          {
+            "id": 1,
+            "frame_uuid": "f1",
+            "rig_uuid": "r",
+            "kind": "dark",
+            "source_path": "/f1.fits",
+            "source_fingerprint": "fp1",
+            "captured_at": 20,
+            "camera": "Camera",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "camera_temp": -10,
+            "exposure_s": 300,
+            "is_master": false,
+            "source_verified": true,
+            "readout_mode_name": "coherent"
+          },
+          {
+            "id": 2,
+            "frame_uuid": "f2",
+            "rig_uuid": "r",
+            "kind": "dark",
+            "source_path": "/f2.fits",
+            "source_fingerprint": "fp2",
+            "captured_at": 21,
+            "camera": "Camera",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "camera_temp": -10,
+            "exposure_s": 300,
+            "is_master": false,
+            "source_verified": true,
+            "readout_mode_name": "coherent"
+          }
+        ],
+        "lights": [
+          {
+            "path": "/light-0.fits",
+            "rig_uuid": "r",
+            "timestamp": 0,
+            "camera": "Camera",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "camera_temp": -10
+          }
+        ]
+      },
+      "assignments": [
+        0
+      ],
+      "kind": "dark",
+      "recipes": [
+        {
+          "action": "integrate",
+          "inputs": [
+            "f1",
+            "f2"
+          ],
+          "exposure_seconds": 300.0
+        }
+      ]
+    },
+    {
+      "name": "unknown_adopted_exposure_stays_unknown",
+      "request": {
+        "frames": [
+          {
+            "id": 0,
+            "frame_uuid": "f0",
+            "rig_uuid": "r",
+            "kind": "dark",
+            "source_path": "/f0.fits",
+            "source_fingerprint": "fp0",
+            "captured_at": 0,
+            "camera": "Camera",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "camera_temp": -10,
+            "exposure_s": 30,
+            "is_master": false,
+            "source_verified": true
+          },
+          {
+            "id": 1,
+            "frame_uuid": "f1",
+            "rig_uuid": "r",
+            "kind": "dark",
+            "source_path": "/f1.fits",
+            "source_fingerprint": "fp1",
+            "captured_at": 20,
+            "camera": "Camera",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "camera_temp": -10,
+            "exposure_s": null,
+            "is_master": true,
+            "source_verified": true
+          }
+        ],
+        "lights": [
+          {
+            "path": "/light-0.fits",
+            "rig_uuid": "r",
+            "timestamp": 0,
+            "camera": "Camera",
+            "width": 64,
+            "height": 64,
+            "channels": 1,
+            "binning_x": 1,
+            "binning_y": 1,
+            "gain": 100,
+            "offset": 20,
+            "camera_temp": -10
+          }
+        ]
+      },
+      "assignments": [
+        0
+      ],
+      "kind": "dark",
+      "recipes": [
+        {
+          "action": "external",
+          "inputs": [
+            "f1"
+          ],
+          "exposure_seconds": null
+        }
+      ]
+    }
+  ]
+}
