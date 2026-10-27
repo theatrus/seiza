@@ -157,7 +157,9 @@ schema 1's ambiguous `status` or `accepted_frames`.
 
 HTML embeds all data, CSS and JavaScript and uses no network or external assets.
 It has filter selection, frame-count/integration axes, capture-time health plots,
-hover details, errors and measurement caveats. Metadata is inserted as text and
+a searchable frame ledger with keyboard-accessible details, errors and measurement
+caveats. Summary cards, labeled charts and timing bars use a responsive layout;
+print styles retain the selected filter and chart labels. Metadata is inserted as text and
 embedded JSON escapes HTML delimiters. It can be opened directly or shared.
 
 C: `seiza_analyze_project_json` accepts `inputs`, `samples`, `filter`, `maxFrames`;
@@ -188,9 +190,7 @@ geometric checkpoints for a fitted trend, so the conditional improvement
 estimate is correctly absent. The source headers do not declare `SATURATE`,
 which the report flags rather than inventing a detector saturation threshold.
 
-![H filter noise-depth curve](../docs/images/analysis/small-sho-depth.jpg)
-
-![H filter HFR versus capture time](../docs/images/analysis/small-sho-health.jpg)
+![SHO report with depth and capture-time health charts](../docs/images/analysis/report-overview.jpg)
 
 ## Metrics-only timing comparison
 
@@ -219,4 +219,4 @@ not a separate pure-detector benchmark. Other datasets need their own timings.
 The next performance investigation would target quality measurement, not assume
 registration is the bottleneck. Source images were not modified.
 
-![SHO metrics-only report](../docs/images/analysis/small-sho-metrics.jpg)
+![SHO metrics-only report](../docs/images/analysis/report-metrics.jpg)

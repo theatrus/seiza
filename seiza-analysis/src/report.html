@@ -1,54 +1,214 @@
 <!doctype html>
-<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Seiza project analysis</title>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Seiza · Project analysis</title>
 <style>
-:root{color-scheme:dark;font:15px system-ui;background:#101722;color:#dce4ef}body{max-width:1200px;margin:auto;padding:32px}h1{font-size:30px}h2{font-size:20px}small,.muted{color:#9cabc0}select{padding:8px;background:#202d40;color:inherit;border:1px solid #52617a;border-radius:5px}section{background:#172233;padding:20px;border-radius:10px;margin:18px 0}.scroll{overflow:auto}table{border-collapse:collapse;width:100%;font-size:13px}th,td{text-align:left;border-bottom:1px solid #344056;padding:9px;white-space:nowrap}td:first-child{max-width:360px;overflow:hidden;text-overflow:ellipsis}svg{width:100%;height:auto;max-height:380px}.warning{color:#e9bf7c}li{margin:8px 0}a{color:#8ec7ff}
+:root{color-scheme:light;--paper:#f5f6f8;--surface:#fff;--ink:#182b40;--muted:#5f6f80;--line:#dde3ea;--blue:#2563a5;--teal:#187a72;--amber:#94601a;font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--paper);color:var(--ink)}
+*{box-sizing:border-box}body{margin:0}main{max-width:1440px;margin:auto;padding:40px 48px 28px}h1,h2,h3,p{margin:0}h1{font-size:32px;font-weight:650;letter-spacing:-1.1px;line-height:1.2}h2{font-size:17px;font-weight:650;letter-spacing:-.3px}h3{font-size:13px;font-weight:600}small,.muted{color:var(--muted)}a{color:var(--blue)}button,select,input{font:inherit;color:inherit}select,input{background:var(--surface);border:1px solid #bcc8d4;border-radius:5px;padding:7px 30px 7px 10px;min-height:36px}input{padding-right:10px;min-width:240px}button{border:1px solid #bcc8d4;background:var(--surface);border-radius:5px;padding:7px 14px;cursor:pointer}button:hover{background:#edf2f7}:focus-visible{outline:3px solid #6f9fe0;outline-offset:3px}[hidden]{display:none!important}
+.masthead{display:flex;justify-content:space-between;align-items:start;gap:24px;padding-bottom:28px;border-bottom:2px solid var(--ink)}.eyebrow{display:flex;align-items:center;gap:10px;font-size:11px;text-transform:uppercase;letter-spacing:2px;font-weight:700;margin-bottom:15px}.mark{width:18px;height:18px;display:inline-block;position:relative;color:var(--blue)}.mark:before,.mark:after{content:"";position:absolute;background:currentColor;left:8px;top:0;width:2px;height:18px}.mark:after{transform:rotate(90deg)}.subtitle{color:var(--muted);margin-top:10px}.mode{display:inline-block;border:1px solid var(--line);padding:4px 9px;border-radius:4px;font-size:12px;background:var(--surface);margin-top:12px}.top-actions{text-align:right}.top-actions small{display:block;margin-top:12px}
+.selection{display:flex;justify-content:space-between;align-items:center;gap:20px;margin:24px 0 18px}.selection label{display:flex;gap:12px;align-items:center;font-weight:600}.selection select{min-width:180px}.selection p{font-size:12px;color:var(--muted);max-width:550px;text-align:right}.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border:1px solid var(--line);border-radius:8px;background:var(--surface);overflow:hidden;margin-bottom:22px}.stat{padding:18px 22px;border-right:1px solid var(--line)}.stat:last-child{border:0}.stat-label{font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);font-weight:600}.stat-value{font-size:28px;line-height:1.4;font-weight:600;letter-spacing:-.8px;font-variant-numeric:tabular-nums}.stat-note{font-size:12px;color:var(--muted)}
+.charts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px;align-items:stretch}.charts.metrics-only{grid-template-columns:1fr}.panel{background:var(--surface);border:1px solid var(--line);border-radius:8px;min-width:0}.panel-head{padding:20px 22px 0}.panel-head p{font-size:12px;color:var(--muted);margin-top:3px}.controls{display:flex;gap:14px;flex-wrap:wrap;padding:14px 22px 0}.controls label{font-size:11px;color:var(--muted);display:flex;align-items:center;gap:7px}.controls select{font-size:12px;padding-top:5px;padding-bottom:5px;min-height:32px;max-width:210px}.chart{padding:6px 14px 0;min-height:260px;display:flex;align-items:center}.chart svg{width:100%;display:block;overflow:visible}.metrics-only .chart{max-width:760px;margin:auto}.chart-empty{padding:64px 24px;text-align:center;color:var(--muted);width:100%;font-size:13px}.legend{display:flex;gap:18px;flex-wrap:wrap;padding:0 22px 15px;font-size:11px;color:var(--muted)}.legend span{display:inline-flex;align-items:center;gap:6px}.swatch{width:18px;height:2px;background:var(--blue)}.swatch.dashed{background:none;border-top:2px dashed #8392a3}.swatch.dot{width:6px;height:6px;border-radius:50%;background:var(--teal)}.panel-foot{border-top:1px solid var(--line);padding:13px 22px;font-size:12px;color:var(--muted)}.panel-foot strong{color:var(--ink);font-weight:600}.baseline{margin:10px 22px 0;font-size:12px;color:var(--muted)}
+.ledger{margin-top:22px}.ledger-head{padding:20px 22px;display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap}.ledger-head p{font-size:12px;color:var(--muted);margin-top:3px}.table-scroll{overflow:auto;max-height:580px;border-top:1px solid var(--line)}table{border-collapse:separate;border-spacing:0;width:100%;font-size:12px;font-variant-numeric:tabular-nums}th,td{padding:12px 14px;border-bottom:1px solid #e9edf2;white-space:nowrap;text-align:right}th{background:#f6f8fa;color:var(--muted);font-weight:600;font-size:10px;letter-spacing:.5px;text-transform:uppercase;position:sticky;top:0;z-index:1}th:first-child,td:first-child{text-align:left;padding-left:22px}th:nth-child(2),th:nth-child(3),td:nth-child(2),td:nth-child(3){text-align:left}tbody tr:hover{background:#f8fafc}tbody tr:last-child td{border-bottom:0}.file{min-width:235px;max-width:310px;white-space:normal}.file summary{cursor:pointer;color:var(--ink);overflow-wrap:anywhere;line-height:1.45}.file details[open]{min-width:290px}.file details[open] summary{font-weight:600;margin-bottom:10px}.frame-detail{color:var(--muted);font-size:11px;white-space:normal;overflow-wrap:anywhere;line-height:1.6}.frame-detail p{margin-bottom:7px}.badge{font-size:10px;padding:3px 7px;border-radius:4px;display:inline-block;background:#edf2f6;color:#536476}.badge.measured{background:#eaf4f1;color:#226456}.badge.failed{background:#fff1e8;color:#965521}.badge.included{background:#edf3fb;color:#315d8f}.notice{font-size:10px;display:block;color:var(--amber);margin-top:4px}.ledger-end{padding:12px 22px;color:var(--muted);font-size:11px}.support{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-top:22px}.support .panel{padding:20px 22px}.runtime{display:grid;gap:9px;margin-top:16px}.runtime-row{display:grid;grid-template-columns:105px 1fr 65px;align-items:center;gap:12px;font-size:11px;color:var(--muted)}.track{height:5px;background:#edf1f5;border-radius:5px;overflow:hidden}.fill{height:100%;background:#7593b1;border-radius:5px;min-width:0}.runtime-row b{font-weight:500;text-align:right;font-variant-numeric:tabular-nums}.runtime-total{font-weight:600;color:var(--ink);margin-top:14px}.support details{margin-top:14px;font-size:12px;color:var(--muted)}.support summary{cursor:pointer;color:var(--ink);font-weight:500}.support details p{margin-top:10px}.support ul{padding-left:18px;margin:10px 0 0}.support li{margin:7px 0}.warning{color:var(--amber)}.reference{overflow-wrap:anywhere;font-size:11px;margin-top:12px;color:var(--muted)}footer{display:flex;justify-content:space-between;gap:20px;font-size:11px;color:var(--muted);padding-top:22px;margin-top:26px;border-top:1px solid var(--line)}
+@media(max-width:1000px){main{padding:28px 24px}.charts,.support{grid-template-columns:1fr}.chart{min-height:240px}.stat{padding:16px}.stat-value{font-size:25px}}
+@media(max-width:600px){main{padding:22px 14px}.masthead{gap:12px}h1{font-size:26px}.top-actions small{display:none}.selection{align-items:start;flex-direction:column;gap:10px}.selection p{text-align:left}.stats{grid-template-columns:1fr 1fr}.stat:nth-child(2){border-right:0}.stat:nth-child(-n+2){border-bottom:1px solid var(--line)}.controls{padding-left:16px;gap:8px}.controls label{flex-wrap:wrap}.panel-head,.panel-foot{padding-left:16px;padding-right:16px}.chart{padding-left:2px;padding-right:2px;min-height:190px}input{min-width:0;width:100%}.ledger-head label{width:100%}footer{flex-direction:column;gap:5px}}
+@media print{body{background:white}main{padding:0;max-width:none}.top-actions,select,input,.controls,.selection{display:none}.stats,.panel{break-inside:avoid}.charts,.support{display:block}.panel{margin-bottom:14px}.table-scroll{max-height:none;overflow:visible}th{position:static}.file{min-width:100px;max-width:200px}th,td{white-space:normal;padding:6px;font-size:9px}.chart svg{max-height:240px}.ledger-head{padding:12px}.stats{margin-top:16px}.support details{display:block}footer{margin-top:12px}}
 </style>
-<h1>Seiza project analysis</h1><p class="muted" id="mode"></p><p class="muted">Processing outcomes are not quality verdicts. Compare combined measurements within one panel/pointing and filter.</p>
-<section><label>Filter <select id="filter"></select></label> <label>Horizontal axis <select id="axis"><option value="frame_count">Frame count</option><option value="integration_seconds">Known integration seconds</option></select></label><p id="summary"></p><div id="plot"></div><p id="depthLegend" class="muted">Blue: measured split noise at even depths. Dashed: independent equal-quality comparison anchored at two frames. Values use this filter reference’s physical sample units.</p><ul id="groupWarnings" class="warning"></ul></section>
-<section id="depthTrend"><h2>Depth trend</h2><p id="trend"></p><p class="muted">A descriptive log-log fit, using geometric even-depth checkpoints over the last fourfold window. Cumulative observations are correlated; R² is not a confidence interval. A conditional estimate assumes the fitted trend continues and cannot detect shared systematic errors.</p></section>
-<section><h2>Frame health</h2><label>Measurement <select id="metric"><option value="median_hfr">HFR (px)</option><option value="median_fwhm">FWHM (px)</option><option value="star_count">Star count</option><option value="median_eccentricity">Eccentricity</option><option value="median_star_snr">Stellar peak SNR</option><option value="background">Native background</option><option value="noise">Native frame noise</option></select></label> <label>Horizontal axis <select id="healthAxis"><option value="order">Input order</option><option value="time">Capture time</option></select></label><p id="baseline" class="muted"></p><div id="health"></div><p class="muted">Capture time comes only from headers; missing or unparseable dates are omitted. Raw frame noise uses each frame’s units. Warnings are advisory and never automatically cull frames.</p></section>
-<section><h2>Frame measurements</h2><p class="muted">Sorted path order. Hover a path for registration, normalization and warnings. Missing values are shown as —.</p><div class="scroll"><table><thead><tr><th>Frame</th><th>Measurement</th><th>Depth participation</th><th>Capture time (header)</th><th>Exposure s</th><th>Stars</th><th>HFR px</th><th>FWHM px</th><th>Eccentricity</th><th>Stellar peak SNR</th><th>Noise</th></tr></thead><tbody id="frames"></tbody></table></div></section>
-<section><h2>Runtime</h2><p id="timings"></p><p class="muted">Wall-clock seconds, including failed attempts. Registration includes its own star detection; measurement includes conversion, quality detection/PSF fits and native noise/background. Sampling includes photometry and temporary sample writes. Total includes overhead, excludes HTML/JSON rendering and writing.</p></section><section><h2>Method and limitations</h2><ul id="warnings"></ul><p class="muted">Schema <span id="schema"></span>. Non-overlapping 16×16 patches at two-pixel pitch in the central 80%; only patches valid in every depth-included frame contribute. Noise is the median patch MAD × 1.4826 of (odd sum − even sum)/N. At least 32 common patches are required. Odd depths have no split measurement. Robust noise describes the distribution core, not total outlier energy.</p></section>
+</head>
+<body>
+<main>
+<header class="masthead">
+ <div><div class="eyebrow"><span class="mark" aria-hidden="true"></span>Seiza / Observing report</div><h1>Project analysis</h1><p class="subtitle">Frame measurements &amp; integration diagnostics</p><p id="scope" class="subtitle"></p><span id="mode" class="mode"></span></div>
+ <div class="top-actions"><button id="print" type="button">Print / Save PDF</button><small>Self-contained · offline ready</small></div>
+</header>
+<div class="selection"><label>Filter group <select id="filter"></select></label><p>Compare frames within one pointing and filter.<br>Processing outcomes describe participation, not image quality.</p></div>
+<div id="summary" class="stats" aria-live="polite"></div>
+<div id="charts" class="charts">
+ <section id="depthPanel" class="panel" aria-labelledby="depthTitle">
+  <div class="panel-head"><h2 id="depthTitle">Integration depth</h2><p>Measured noise against an independent-frame comparison</p></div>
+  <div class="controls"><label>Horizontal axis <select id="axis"><option value="frame_count">Frame count</option><option value="integration_seconds">Known integration (s)</option></select></label></div>
+  <div id="plot" class="chart"></div>
+  <div class="legend"><span><i class="swatch"></i>Measured split noise</span><span><i class="swatch dashed"></i>Ideal 1/√N comparison</span></div>
+  <div id="depthTrend" class="panel-foot"><p id="trend"></p></div>
+ </section>
+ <section class="panel" aria-labelledby="healthTitle">
+  <div class="panel-head"><h2 id="healthTitle">Frame health</h2><p>Inspect variation; use combined metrics to assess quality</p></div>
+  <div class="controls"><label>Metric <select id="metric"><option value="median_hfr">HFR (px)</option><option value="median_fwhm">FWHM (px)</option><option value="star_count">Star count</option><option value="median_eccentricity">Eccentricity</option><option value="median_star_snr">Stellar peak SNR</option><option value="background">Native background</option><option value="noise">Native frame noise</option></select></label><label>Order <select id="healthAxis"><option value="order">Input order</option><option value="time">Capture time</option></select></label></div>
+  <p id="baseline" class="baseline"></p><div id="health" class="chart"></div>
+  <div class="legend"><span><i class="swatch dot"></i>Measured frame</span><span><i class="swatch dot" style="background:var(--amber)"></i>Partial measurement</span><span><i class="swatch dashed"></i>Group median</span></div>
+  <p id="healthNote" class="panel-foot"></p>
+ </section>
+</div>
+<section class="panel ledger" aria-labelledby="ledgerTitle">
+ <div class="ledger-head"><div><h2 id="ledgerTitle">Frame measurements</h2><p>Open a filename for its path, registration details and advisories.</p></div><label><span class="muted">Find a frame </span><input id="search" type="search" placeholder="Search filename or path" aria-label="Search filename or path"></label></div>
+ <div class="table-scroll" tabindex="0" role="region" aria-label="Frame measurement table"><table><thead><tr><th scope="col">Frame / details</th><th scope="col">Measurement</th><th scope="col">Depth</th><th scope="col">Exposure s</th><th scope="col">Stars</th><th scope="col">HFR px</th><th scope="col">FWHM px</th><th scope="col">Eccentricity</th><th scope="col">Peak SNR</th><th scope="col">Noise</th></tr></thead><tbody id="frames"></tbody></table></div>
+ <p id="tableCount" class="ledger-end" aria-live="polite"></p>
+</section>
+<div class="support">
+ <section class="panel"><h2>Processing time</h2><div id="timings"></div><details><summary>What the timings include</summary><p>Wall-clock seconds, including failed attempts. Measurement includes conversion, quality detection, PSF fits and native noise/background. Registration includes its own star detection. Sampling includes normalization and temporary writes. Total includes overhead, but excludes report rendering and writing. Stage times do not overlap.</p></details></section>
+ <section class="panel"><h2>Method &amp; interpretation</h2><p class="muted" style="font-size:12px;margin-top:8px">Advisories never automatically exclude a frame. A high SNR or star count alone is not a quality verdict.</p><ul id="groupWarnings" class="warning"></ul><p id="reference" class="reference"></p><details><summary>Assumptions &amp; limitations</summary><ul id="warnings"></ul><p>Full-depth analysis uses non-overlapping 16×16 patches at two-pixel pitch in the central 80%. Only patches valid in every depth-included frame contribute. Noise is median patch MAD × 1.4826 of (odd sum − even sum)/N; at least 32 common patches are required. Odd depths have no split measurement. Shared systematic errors cancel; robust noise describes the distribution core, not total outlier energy.</p><p>The ideal 1/√N comparison assumes independent, equal-quality frames and is anchored at two frames. Trend fits use geometric even-depth checkpoints over the last fourfold window. Cumulative observations are correlated: R² is descriptive, not a confidence interval. Any conditional estimate assumes the fitted trend persists.</p></details></section>
+</div>
+<footer><span>Seiza project analysis · source images unchanged</span><span id="schema"></span></footer>
+</main>
+<noscript>This report requires JavaScript to display its embedded measurements. No network connection is needed.</noscript>
 <script type="application/json" id="data">__REPORT_DATA__</script>
 <script>
 'use strict';
-const report=JSON.parse(document.getElementById('data').textContent),$=id=>document.getElementById(id),fmt=v=>v==null?'—':typeof v==='number'?Number(v.toPrecision(5)).toString():String(v);
-const legacy=report.schema_version===1,metricsOnly=report.options.metrics_only===true;
-const measurement=f=>legacy?(f.measurement_status==='accepted'?'measured':f.measurement_status==='excluded'?'excluded':f.star_count!=null?'measured':'failed'):f.measurement_status;
-const depth=f=>legacy?(f.measurement_status==='accepted'?'included':'unavailable'):f.depth_status;
-$('mode').textContent=metricsOnly?'Frame metrics only · depth analysis not requested':'Frame metrics and sampled integration depth · no full stack produced';
-$('depthTrend').hidden=metricsOnly;
-$('depthLegend').hidden=metricsOnly;
-$('axis').disabled=metricsOnly;
-const tm=report.timings;
-$('timings').textContent=legacy?'Timings unavailable in this legacy report.':`Read ${fmt(tm.read_seconds)} s · measurements ${fmt(tm.measurement_seconds)} s · registration ${fmt(tm.registration_seconds)} s · sampling ${fmt(tm.sampling_seconds)} s · replay ${fmt(tm.replay_seconds)} s · total ${fmt(tm.total_seconds)} s`;
-function warnings(id,items){$(id).replaceChildren(...items.map(text=>{const li=document.createElement('li');li.textContent=text;return li}));}
-report.groups.forEach((g,i)=>{const o=document.createElement('option');o.value=i;o.textContent=g.filter??'Unknown passband';$('filter').append(o)});
-const all=document.createElement('option');all.value='all';all.textContent='All frames (table only)';$('filter').append(all);
-warnings('warnings',report.warnings);$('schema').textContent=report.schema_version+' · algorithm '+report.algorithm_version;
-function health(g){
- const metric=$('metric').value,timed=$('healthAxis').value==='time';
- const baseline=metric==='star_count'?'median_star_count':metric.startsWith('median_')?metric:'median_'+metric;
- $('baseline').textContent=g?(legacy?'Legacy depth-included group median: ':'Measured-frame group median: ')+fmt(g[baseline])+'. Stellar SNR is median unsaturated-star peak signal / detector noise; it is not stack SNR.':'Select a filter to compare its group median.';
- const rows=report.frames.map((f,i)=>({f,x:timed?Date.parse(f.capture_time&&(/[Zz]|[+-]\d\d:\d\d$/.test(f.capture_time)?f.capture_time:f.capture_time+'Z')):i+1,y:f[metric]})).filter(p=>(!g||(p.f.filter??'').toLowerCase()===(g.filter??'').toLowerCase())&&p.y!=null&&Number.isFinite(p.x));
- $('health').replaceChildren();if(!rows.length){$('health').textContent='No measurements for this selection.';return;}
- const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg');svg.setAttribute('viewBox','0 0 1000 320');svg.setAttribute('role','img');svg.setAttribute('aria-label','Frame health: '+metric);
- const lo=Math.min(...rows.map(p=>p.x)),hi=Math.max(...rows.map(p=>p.x)),top=Math.max(1e-20,...rows.map(p=>p.y))*1.1;
- function el(name,attrs,text){const e=document.createElementNS(ns,name);Object.entries(attrs).forEach(([k,v])=>e.setAttribute(k,v));if(text!=null)e.textContent=text;svg.append(e);return e;}
- for(let i=0;i<=4;i++){const yy=275-245*i/4;el('line',{x1:65,x2:965,y1:yy,y2:yy,stroke:'#344056'});el('text',{x:2,y:yy+4,fill:'#9cabc0','font-size':12},fmt(top*i/4));const xx=lo+(hi-lo)*i/4;el('text',{x:65+850*i/4,y:302,fill:'#9cabc0','font-size':11},timed?new Date(xx).toISOString().slice(5,19):fmt(xx));}
- for(const p of rows){const c=el('circle',{cx:65+900*(p.x-lo)/Math.max(1,hi-lo),cy:275-245*p.y/top,r:4,fill:measurement(p.f)==='measured'?'#8ec7ff':'#e9bf7c'}),t=document.createElementNS(ns,'title');t.textContent=p.f.path+'\n'+metric+': '+fmt(p.y)+'\n'+p.f.warnings.join('\n');c.append(t);}$('health').append(svg);
+const report = JSON.parse(document.getElementById('data').textContent);
+const $ = id => document.getElementById(id);
+const legacy = report.schema_version === 1;
+const metricsOnly = report.options.metrics_only === true;
+const fmt = v => v == null ? '—' : typeof v === 'number' ? new Intl.NumberFormat('en', {maximumSignificantDigits:5}).format(v) : String(v);
+const short = v => new Intl.NumberFormat('en', {maximumSignificantDigits:3, notation:Math.abs(v)>=10000?'compact':'standard'}).format(v);
+const measurement = f => legacy ? ((f.measurement_status ?? f.status)==='accepted'?'measured':(f.measurement_status ?? f.status)==='excluded'?'excluded':f.star_count!=null?'measured':'failed') : f.measurement_status;
+const depth = f => legacy ? ((f.measurement_status ?? f.status)==='accepted'?'included':'unavailable') : f.depth_status;
+const depthCount = g => g.depth_frames ?? g.accepted_frames ?? 0;
+const basename = path => String(path).split(/[\\/]/).pop();
+const sameFilter = (f,g) => !g || (f.filter??'').toLowerCase()===(g.filter??'').toLowerCase();
+function node(tag, text, className) {
+ const el = document.createElement(tag);
+ if(text!=null) el.textContent=text;
+ if(className) el.className=className;
+ return el;
 }
-function draw(){const g=report.groups[Number($('filter').value)],axis=$('axis').value;
-health(g);const t=g?.noise_trend;$('trend').textContent=t?`Noise exponent ${fmt(t.exponent)} (independent equal-quality expectation: −0.5), R² ${fmt(t.r_squared)}, ${t.checkpoints} checkpoints from ${t.first_frame_count} to ${t.last_frame_count} frames. `+(t.conditional_double_depth_noise_factor!=null?`If this trend persists, doubling frame count would multiply noise by ${fmt(t.conditional_double_depth_noise_factor)}.`:'No conditional improvement estimate is supported.'):'Insufficient geometric checkpoints for a trend estimate (at least five spanning a factor of two are required).';
-$('summary').textContent=g?(metricsOnly?`${g.measured_frames} measured frames · depth analysis not requested`:`${legacy?'Legacy baseline':g.measured_frames+' measured frames'} · ${g.depth_frames} included in depth analysis · ${fmt(g.integration_seconds)} depth-included seconds · ${g.unknown_exposures} unknown exposures · ${g.common_patches}/${g.candidate_patches} common patches · reference: ${fmt(g.reference)}`):'All input outcomes';
-warnings('groupWarnings',g?g.warnings:[]);$('plot').replaceChildren();
-if(metricsOnly){$('plot').textContent='Depth analysis not requested. Registration, normalized noise and depth curves are unavailable.';}else if(g){const points=g.curve.filter(p=>p.noise!=null);if(points.length){const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg');svg.setAttribute('viewBox','0 0 1000 320');svg.setAttribute('role','img');svg.setAttribute('aria-label','Noise versus '+axis);const xmax=Math.max(1,...g.curve.map(p=>p[axis])),ymax=Math.max(1e-20,...points.map(p=>Math.max(p.noise,p.ideal_noise??0)))*1.1;
-const x=p=>65+900*p[axis]/xmax,y=v=>275-245*v/ymax;
-function el(name,attrs,text){const e=document.createElementNS(ns,name);Object.entries(attrs).forEach(([k,v])=>e.setAttribute(k,v));if(text!=null)e.textContent=text;svg.append(e);return e}
-for(let i=0;i<=4;i++){const yy=275-245*i/4;el('line',{x1:65,x2:965,y1:yy,y2:yy,stroke:'#344056'});el('text',{x:2,y:yy+4,fill:'#9cabc0','font-size':12},fmt(ymax*i/4));el('text',{x:65+900*i/4,y:302,fill:'#9cabc0','font-size':12},fmt(xmax*i/4));}
-for(const [key,color,dash]of[['noise','#8ec7ff',''],['ideal_noise','#aebacb','6 5']]){const ps=g.curve.filter(p=>p[key]!=null);el('polyline',{points:ps.map(p=>`${x(p)},${y(p[key])}`).join(' '),fill:'none',stroke:color,'stroke-width':2,'stroke-dasharray':dash})}
-for(const p of points){const c=el('circle',{cx:x(p),cy:y(p.noise),r:4,fill:'#8ec7ff'}),t=document.createElementNS(ns,'title');t.textContent=`N=${p.frame_count}, noise=${fmt(p.noise)}, seconds=${fmt(p.integration_seconds)}`;c.append(t)}$('plot').append(svg)}else{$('plot').textContent='Insufficient data for a noise curve.'}}
-$('frames').replaceChildren();report.frames.filter(f=>!g||(f.filter??'').toLowerCase()===(g.filter??'').toLowerCase()).forEach(f=>{const tr=document.createElement('tr');[f.path,measurement(f),depth(f),f.capture_time,f.exposure_seconds,f.star_count,f.median_hfr,f.median_fwhm,f.median_eccentricity,f.median_star_snr,f.noise].forEach(v=>{const td=document.createElement('td');td.textContent=fmt(v);tr.append(td)});tr.title=[f.path,f.error,f.depth_error,`Registration RMS: ${fmt(f.registration_rms_pixels)} px; gain: ${fmt(f.gain)}; normalization: ${fmt(f.normalization)}`,...f.warnings].filter(Boolean).join('\n');$('frames').append(tr)});}
-$('filter').addEventListener('change',draw);$('axis').addEventListener('change',draw);$('metric').addEventListener('change',draw);$('healthAxis').addEventListener('change',draw);draw();
-</script></html>
+function warnings(id, values) { $(id).replaceChildren(...values.map(s=>node('li',s))); }
+function empty(id, message) { $(id).replaceChildren(node('p',message,'chart-empty')); }
+function stat(label, value, note) {
+ const card=node('div',null,'stat');
+ card.append(node('p',label,'stat-label'),node('p',value,'stat-value'),node('p',note,'stat-note'));
+ return card;
+}
+function chart(id, {xmin,xmax,ymin,ymax,xlabel,ylabel,time=false,integer=false}) {
+ const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
+ svg.setAttribute('viewBox','0 0 600 280');
+ svg.setAttribute('role','img');
+ svg.setAttribute('aria-label',ylabel+' versus '+xlabel);
+ function el(tag,attrs,text) {
+  const e=document.createElementNS(svg.namespaceURI,tag);
+  for(const [k,v] of Object.entries(attrs)) e.setAttribute(k,v);
+  if(text!=null)e.textContent=text;
+  svg.append(e);return e;
+ }
+ if(xmin===xmax){xmin-=time?1000:.5;xmax+=time?1000:.5;}
+ if(ymin===ymax){const pad=Math.max(Math.abs(ymin)*.05,.05);ymin-=pad;ymax+=pad;}
+ const x=v=>64+510*(v-xmin)/(xmax-xmin),y=v=>225-190*(v-ymin)/(ymax-ymin);
+ for(let i=0;i<=4;i++){
+  const value=ymin+(ymax-ymin)*i/4,yy=y(value);
+  el('line',{x1:64,x2:574,y1:yy,y2:yy,stroke:'#e6ebf0','stroke-width':1});
+  el('text',{x:54,y:yy+4,fill:'#5f6f80','font-size':11,'text-anchor':'end'},Math.abs(value)>=10000||Math.abs(ymax-ymin)<1e-8?fmt(value):new Intl.NumberFormat('en',{maximumFractionDigits:Math.min(12,Math.max(0,Math.ceil(-Math.log10((ymax-ymin)/4))))}).format(value));
+ }
+ const ticks=new Set();
+ for(let i=0;i<=4;i++){
+  let value=xmin+(xmax-xmin)*i/4;
+  if(integer)value=Math.round(value);
+  if(ticks.has(value)||value<xmin||value>xmax)continue;
+  ticks.add(value);
+  const label=time?new Date(value).toISOString().slice(11,19):short(value);
+  el('text',{x:x(value),y:246,fill:'#5f6f80','font-size':11,'text-anchor':'middle'},label);
+ }
+ el('text',{x:64,y:18,fill:'#5f6f80','font-size':11},ylabel);
+ el('text',{x:319,y:272,fill:'#5f6f80','font-size':11,'text-anchor':'middle'},xlabel);
+ $(id).replaceChildren(svg);
+ return {el,x,y};
+}
+function dot(c,x,y,color,text) {
+ const point=c.el('circle',{cx:c.x(x),cy:c.y(y),r:3.7,fill:color,stroke:'#fff','stroke-width':1.3});
+ const title=document.createElementNS(point.namespaceURI,'title');title.textContent=text;point.append(title);
+}
+function drawHealth(g) {
+ const metric=$('metric').value,timed=$('healthAxis').value==='time';
+ const key=metric==='star_count'?'median_star_count':metric.startsWith('median_')?metric:'median_'+metric;
+ const median=g?.[key];
+ $('baseline').textContent=g?(legacy?'Legacy depth-included group median: ':'Measured-frame group median: ')+fmt(median):'All filters shown; select one filter for a comparable group median.';
+ const rows=report.frames.map((f,i)=>{
+  const stamp=f.capture_time;
+  const x=timed?(stamp?Date.parse(/[Zz]|[+-]\d\d:\d\d$/.test(stamp)?stamp:stamp+'Z'):NaN):i+1;
+  return {f,x,y:f[metric]};
+ }).filter(p=>sameFilter(p.f,g)&&Number.isFinite(p.x)&&Number.isFinite(p.y));
+ const note=metric==='median_star_snr'?'Peak signal above local background / detector noise; not integrated or stack SNR.':metric==='noise'||metric==='background'?'Values retain each frame’s native units; compare only consistently scaled inputs.':'The vertical axis follows the observed range to make small variations visible.';
+ const dates=timed&&rows.length?' Capture dates (UTC): '+new Date(Math.min(...rows.map(p=>p.x))).toISOString().slice(0,10)+' to '+new Date(Math.max(...rows.map(p=>p.x))).toISOString().slice(0,10)+'. Missing or unparseable capture times are omitted.':'';
+ $('healthNote').textContent=note+dates;
+ if(!rows.length){empty('health',timed?'No dated measurements for this selection. Try input order.':'No measurements for this selection.');return;}
+ const values=rows.map(p=>p.y);if(Number.isFinite(median))values.push(median);
+ const low=Math.min(...values),high=Math.max(...values),pad=Math.max((high-low)*.18,Math.abs(high)*.01,.001);
+ const c=chart('health',{xmin:Math.min(...rows.map(p=>p.x)),xmax:Math.max(...rows.map(p=>p.x)),ymin:metric==='background'?low-pad:Math.max(0,low-pad),ymax:high+pad,xlabel:timed?'Capture time · UTC':'Input order',ylabel:$('metric').selectedOptions[0].textContent,time:timed,integer:!timed});
+ if(Number.isFinite(median))c.el('line',{x1:64,x2:574,y1:c.y(median),y2:c.y(median),stroke:'#8392a3','stroke-dasharray':'4 4'});
+ for(const p of rows)dot(c,p.x,p.y,measurement(p.f)==='measured'?'#187a72':'#94601a',basename(p.f.path)+'\n'+fmt(p.y));
+}
+function drawDepth(g) {
+ if(!g){empty('plot','Select a filter group to inspect its depth curve.');$('trend').textContent='Depth curves are compared within a filter, not across filters.';return;}
+ const axis=$('axis').value,points=g.curve.filter(p=>Number.isFinite(p.noise));
+ if(!points.length)empty('plot','Insufficient common samples or frames for a noise curve.');
+ else{
+  const ymax=Math.max(...points.map(p=>Math.max(p.noise,p.ideal_noise??0)))*1.12;
+  const c=chart('plot',{xmin:0,xmax:Math.max(1,...g.curve.map(p=>p[axis])),ymin:0,ymax:Math.max(1e-20,ymax),xlabel:axis==='frame_count'?'Frames in depth calculation':'Known integration · seconds',ylabel:'Noise · reference units',integer:axis==='frame_count'});
+  for(const [key,color,dash] of [['noise','#2563a5',''],['ideal_noise','#8392a3','5 4']]){
+   const ps=g.curve.filter(p=>Number.isFinite(p[key]));
+   c.el('polyline',{points:ps.map(p=>`${c.x(p[axis])},${c.y(p[key])}`).join(' '),fill:'none',stroke:color,'stroke-width':2,'stroke-dasharray':dash,'stroke-linejoin':'round'});
+  }
+  for(const p of points)dot(c,p[axis],p.noise,'#2563a5',`N=${p.frame_count} · noise ${fmt(p.noise)} · ${fmt(p.integration_seconds)} s`);
+ }
+ const t=g.noise_trend;
+ $('trend').textContent=t?`Trend exponent ${fmt(t.exponent)} · R² ${fmt(t.r_squared)} · ${t.checkpoints} checkpoints from ${t.first_frame_count} to ${t.last_frame_count} frames. `+(t.conditional_double_depth_noise_factor!=null?`If this trend persists, doubling frames multiplies noise by ${fmt(t.conditional_double_depth_noise_factor)}.`:'No conditional improvement estimate supported.'):'Trend not estimated: requires at least five geometric checkpoints spanning a factor of two.';
+}
+function drawTable(g) {
+ const needle=$('search').value.trim().toLowerCase();
+ const selected=report.frames.filter(f=>sameFilter(f,g));
+ const rows=selected.filter(f=>f.path.toLowerCase().includes(needle));
+ $('frames').replaceChildren();
+ for(const f of rows){
+  const tr=node('tr'),td=node('td',null,'file'),details=node('details'),info=node('div',null,'frame-detail');
+  details.append(node('summary',basename(f.path)));
+  info.append(node('p',`Native background: ${fmt(f.background)}`));
+  info.append(node('p',f.path),node('p','Captured: '+fmt(f.capture_time)),node('p',`Registration RMS: ${fmt(f.registration_rms_pixels)} px · matched stars: ${fmt(f.matched_stars)}`),node('p',`Gain: ${fmt(f.gain)} · offset: ${fmt(f.offset)} · normalization: ${fmt(f.normalization)}`));
+  for(const message of [f.error,f.depth_error,...f.warnings].filter(Boolean))info.append(node('p',message));
+  details.append(info);td.append(details);
+  if(f.error||f.depth_error||f.warnings.length)td.append(node('span',(f.error||f.depth_error?'Processing note':'Advisories')+' · open details','notice'));
+  tr.append(td);
+  for(const status of [measurement(f),depth(f)]){
+   const cell=node('td');cell.append(node('span',status?.replaceAll('_',' ')??'—','badge '+(status??'')));tr.append(cell);
+  }
+  for(const value of [f.exposure_seconds,f.star_count,f.median_hfr,f.median_fwhm,f.median_eccentricity,f.median_star_snr,f.noise])tr.append(node('td',fmt(value)));
+  $('frames').append(tr);
+ }
+ if(!rows.length){const tr=node('tr'),td=node('td','No frames match this selection.');td.colSpan=10;td.style.textAlign='center';tr.append(td);$('frames').append(tr);}
+ $('tableCount').textContent=`${rows.length} of ${selected.length} frames shown · sorted path order · — means unavailable. Search filters this table only.`;
+}
+function currentGroup(){return $('filter').value==='all'?undefined:report.groups[Number($('filter').value)];}
+function draw() {
+ const g=currentGroup(),frames=report.frames.filter(f=>sameFilter(f,g));
+ $('scope').textContent=(g?(g.filter??'Unknown passband')+' filter':'All filters')+' · '+frames.length+' input frames';
+ const measured=frames.filter(f=>measurement(f)==='measured').length;
+ const exposure=frames.reduce((sum,f)=>sum+(Number.isFinite(f.exposure_seconds)?f.exposure_seconds:0),0);
+ const unknown=frames.filter(f=>!Number.isFinite(f.exposure_seconds)).length;
+ const stars=g?.median_star_count;
+ $('summary').replaceChildren(stat('Measured frames',fmt(measured),`${frames.length} inputs in selection`),stat(metricsOnly?'Known exposure':'Included in depth',metricsOnly?fmt(exposure)+' s':fmt(g?depthCount(g):report.groups.reduce((n,v)=>n+depthCount(v),0)),metricsOnly?`${unknown} unknown exposures`:'Participation is not a quality score'),stat('Median star count',fmt(stars),g?(legacy?'Legacy depth-included population':'Measured-frame population'):'Select a filter group'),stat(metricsOnly?'Median HFR':'Common patches',metricsOnly?fmt(g?.median_hfr)+' px':g?fmt(g.common_patches)+' / '+fmt(g.candidate_patches):'—',metricsOnly?'Measured-frame population':'Fixed footprint across depth'));
+ $('reference').textContent=metricsOnly?'Depth analysis not requested. Registration, normalized noise and depth curves are unavailable.':g?'Reference: '+fmt(g.reference)+' · '+fmt(g.integration_seconds)+' depth-included seconds · '+g.unknown_exposures+' unknown exposures.':'Select a filter to view its depth reference.';
+ warnings('groupWarnings',g?g.warnings:[]);
+ drawHealth(g);if(!metricsOnly)drawDepth(g);drawTable(g);
+}
+function drawTimings() {
+ const tm=report.timings;
+ if(legacy||!tm){$('timings').append(node('p','Timings unavailable in this legacy report.','muted'));return;}
+ const list=node('div',null,'runtime');
+ for(const [label,key] of [['Read','read_seconds'],['Measurement','measurement_seconds'],['Registration','registration_seconds'],['Sampling','sampling_seconds'],['Replay','replay_seconds']]){
+  const row=node('div',null,'runtime-row'),track=node('div',null,'track'),fill=node('div',null,'fill');
+  fill.style.width=Math.max(0,Math.min(100,100*tm[key]/Math.max(tm.total_seconds,1e-20)))+'%';track.append(fill);
+  row.append(node('span',label),track,node('b',fmt(tm[key])+' s'));list.append(row);
+ }
+ $('timings').append(list,node('p','Total elapsed · '+fmt(tm.total_seconds)+' s','runtime-total'));
+}
+for(const [i,g] of report.groups.entries()) {const option=node('option',g.filter??'Unknown passband');option.value=String(i);$('filter').append(option);}
+const all=node('option','All filters');all.value='all';$('filter').append(all);
+$('mode').textContent=metricsOnly?'Metrics only':'Metrics + integration depth';
+$('depthPanel').hidden=metricsOnly;$('charts').classList.toggle('metrics-only',metricsOnly);
+$('schema').textContent=`Schema ${report.schema_version} · algorithm ${report.algorithm_version}`;
+warnings('warnings',report.warnings);drawTimings();
+for(const id of ['filter','axis','metric','healthAxis'])$(id).addEventListener('change',draw);
+$('search').addEventListener('input',()=>drawTable(currentGroup()));
+$('print').addEventListener('click',()=>window.print());
+draw();
+</script>
+</body>
+</html>
