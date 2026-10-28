@@ -5,9 +5,6 @@
 use crate::{CancelSignal, FileCalibrationSession, FitsFrame, FrameSourceRole};
 use seiza_calibration::library::{self as policy, CalibrationKind as Kind, RecipeAction};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-#[cfg(test)]
-use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
@@ -16,33 +13,13 @@ use std::path::{Path, PathBuf};
 pub mod json;
 mod planning;
 mod responses;
-pub use planning::{GroupingReview, Selection, Snapshot};
-use planning::{Planner, RigSettings, Setting};
+use planning::Planner;
+pub use planning::{GroupingReview, Snapshot};
 pub use responses::{
     ChangeOption, FlatCorrectionPlan, FlatWorkReview, GroupEdge, GroupOption, LightOptions,
 };
 
-type Result<T> = std::result::Result<T, String>;
-#[derive(Default)]
-struct Request {
-    rules: Option<policy::rules::RuleBook>,
-    operation: String,
-    library: PathBuf,
-    lights: Vec<PathBuf>,
-    cache: PathBuf,
-    settings: Vec<Setting>,
-    rigs: Vec<RigSettings>,
-    choices: Vec<Choice>,
-    review_key: Option<String>,
-    incomplete: String,
-    flat_star_masking: bool,
-    flat_stability: policy::FlatRetryPolicy,
-    flat_association: policy::Association,
-    dark_association: policy::Association,
-    provided: Vec<PathBuf>,
-    group_overrides: Vec<seiza_calibration::flat_response::groups::GroupOverrideRow>,
-    light_choices: Vec<LightChoice>,
-}
+type Result<T> = std::result::Result<T, PreparationError>;
 /// A quality override tied to the exact reviewed source.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -76,6 +53,13 @@ pub struct LightChoice {
     pub fingerprint: String,
     /// The unchanged native command row, resolved by Seiza.
     pub row: seiza_calibration::flat_response::groups::LightChoiceRow,
+}
+/// A file refused for what it is, so that a library holding lights or
+/// processed images is not decoded again on every call to say so.
+#[derive(Deserialize, Serialize)]
+struct Refused {
+    source: Source,
+    reason: String,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct Cached {
@@ -159,12 +143,12 @@ fn digest(value: impl AsRef<[u8]>) -> String {
         .map(|b| format!("{b:02x}"))
         .collect()
 }
-fn error(e: impl std::fmt::Display) -> String {
-    e.to_string()
+fn error(e: impl std::fmt::Display) -> PreparationError {
+    PreparationError::Failed(e.to_string())
 }
 fn check(cancel: &CancelSignal) -> Result<()> {
     if cancel.is_cancelled() {
-        Err("Calibration preparation was cancelled.".into())
+        Err(PreparationError::Cancelled)
     } else {
         Ok(())
     }
@@ -173,7 +157,7 @@ fn stamp(path: &Path) -> Result<Source> {
     let path = path.canonicalize().map_err(error)?;
     let m = std::fs::metadata(&path).map_err(error)?;
     if !m.is_file() {
-        return Err(format!("{} is not a file", path.display()));
+        return Err(format!("{} is not a file", path.display()).into());
     }
     #[cfg(unix)]
     let fingerprint = {
@@ -201,10 +185,9 @@ fn stamp(path: &Path) -> Result<Source> {
 fn verify(sources: &[Source]) -> Result<()> {
     for source in sources {
         if stamp(&source.path)?.fingerprint != source.fingerprint {
-            return Err(format!(
-                "{} changed. Analyze calibration again.",
-                source.path.display()
-            ));
+            return Err(PreparationError::ReviewChanged {
+                changed: Some(source.path.clone()),
+            });
         }
     }
     Ok(())
@@ -307,6 +290,21 @@ fn inspect(path: &Path, cache: &Path, light: bool, cancel: &CancelSignal) -> Res
         }
         return Ok(row);
     }
+    let refused = cache.join(format!("{cache_key}.refused.json"));
+    if let Ok(bytes) = std::fs::read(&refused)
+        && let Ok(row) = serde_json::from_slice::<Refused>(&bytes)
+        && row.source.fingerprint == source.fingerprint
+    {
+        return Err(PreparationError::Failed(row.reason));
+    }
+    let refuse = |reason: String| -> Result<Cached> {
+        let row = Refused {
+            source: source.clone(),
+            reason,
+        };
+        atomic_json(&refused, &row)?;
+        Err(PreparationError::Failed(row.reason))
+    };
     let mut input = FitsFrame::open(&source.path).map_err(error)?;
     let meta = input.metadata();
     let preprocessed = meta.calibration_state.bias_subtracted
@@ -317,13 +315,13 @@ fn inspect(path: &Path, cache: &Path, light: bool, cancel: &CancelSignal) -> Res
             || preprocessed
             || !matches!(meta.role, FrameSourceRole::Light | FrameSourceRole::Unknown))
     {
-        return Err(format!(
+        return refuse(format!(
             "{} is not a raw light frame",
             source.path.display()
         ));
     }
     if !light && !meta.is_master && preprocessed {
-        return Err(format!("{} is already calibrated", source.path.display()));
+        return refuse(format!("{} is already calibrated", source.path.display()));
     }
     let kind = match meta.role {
         FrameSourceRole::Bias => Kind::Bias,
@@ -332,7 +330,7 @@ fn inspect(path: &Path, cache: &Path, light: bool, cancel: &CancelSignal) -> Res
         FrameSourceRole::Flat => Kind::Flat,
         _ if light => Kind::Bias, // Not used as a calibration row.
         _ => {
-            return Err(format!(
+            return refuse(format!(
                 "{} is not a calibration frame",
                 source.path.display()
             ));
@@ -454,8 +452,23 @@ fn discover(
     if root.starts_with(cache) {
         return Ok(());
     }
-    let metadata = std::fs::symlink_metadata(root).map_err(error)?;
-    if metadata.file_type().is_symlink() {
+    // A linked file is calibration like any other. A linked directory is not
+    // walked, so no link can loop or lead into the cache; nor is a broken link.
+    let linked = std::fs::symlink_metadata(root)
+        .map_err(error)?
+        .file_type()
+        .is_symlink();
+    let metadata = match std::fs::metadata(root) {
+        Ok(metadata) => metadata,
+        Err(_) if linked => return Ok(()),
+        Err(e) => return Err(error(e)),
+    };
+    if linked
+        && (metadata.is_dir()
+            || root
+                .canonicalize()
+                .map_or(true, |target| target.starts_with(cache)))
+    {
         return Ok(());
     }
     if metadata.is_dir() {
@@ -477,28 +490,25 @@ fn discover(
     Ok(())
 }
 
+/// Review `files`, then, given the key of the review to execute, build and
+/// publish its masters.
 fn run(
-    request: Request,
-    cancel: CancelSignal,
+    files: &FileCalibration,
+    reviewed: Option<&str>,
+    cancel: &CancelSignal,
     progress: &dyn Fn(&PreparationProgress),
-) -> Result<PreparationReport> {
-    if !["analyze", "execute"].contains(&request.operation.as_str()) {
-        return Err("Unknown calibration operation".into());
-    }
-    if request.lights.is_empty() || request.cache.as_os_str().is_empty() {
+) -> std::result::Result<PreparationReport, PreparationError> {
+    let options = &files.options;
+    if files.lights.is_empty() || files.cache.as_os_str().is_empty() {
         return Err("Choose lights and a calibration cache".into());
     }
-    // Validate all native settings before touching image files.
-    if request.rules.is_none() {
-        planning::rules(&request.settings, &request.rigs)?;
-    }
-    std::fs::create_dir_all(&request.cache).map_err(error)?;
-    let cache = request.cache.canonicalize().map_err(error)?;
-    let library = if request.library.as_os_str().is_empty() {
-        None
-    } else {
-        Some(request.library.canonicalize().map_err(error)?)
-    };
+    std::fs::create_dir_all(&files.cache).map_err(error)?;
+    let cache = files.cache.canonicalize().map_err(error)?;
+    let library = files
+        .library
+        .as_ref()
+        .map(|path| path.canonicalize().map_err(error))
+        .transpose()?;
     if library.as_ref().is_some_and(|p| p.starts_with(&cache)) {
         return Err("The calibration library cannot be inside its cache".into());
     }
@@ -510,23 +520,23 @@ fn run(
         .open(cache.join("library.lock"))
         .map_err(error)?;
     loop {
-        check(&cancel)?;
+        check(cancel)?;
         match fs2::FileExt::try_lock_exclusive(&lock) {
             Ok(()) => break,
             Err(e) if e.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
                 std::thread::sleep(std::time::Duration::from_millis(50))
             }
-            Err(e) => return Err(e.to_string()),
+            Err(e) => return Err(e.to_string().into()),
         }
     }
     progress(&PreparationProgress {
-        phase: "discover",
+        phase: PreparationPhase::Discover,
         completed: 0,
         total: 0,
     });
-    let mut found = request.provided.clone();
+    let mut found = files.provided.clone();
     if let Some(library) = &library {
-        discover(library, &cache, &mut found, &cancel)?;
+        discover(library, &cache, &mut found, cancel)?;
     }
     if found.is_empty() {
         return Err("Choose calibration files or a library containing calibration frames".into());
@@ -538,7 +548,7 @@ fn run(
     let count = found.len();
     for (index, path) in found.into_iter().enumerate() {
         progress(&PreparationProgress {
-            phase: "measure_calibration",
+            phase: PreparationPhase::MeasureCalibration,
             completed: index,
             total: count,
         });
@@ -546,33 +556,33 @@ fn run(
         if !visited.insert(same_file::Handle::from_path(&path).map_err(error)?) {
             continue;
         }
-        match inspect(&path, &cache, false, &cancel) {
+        match inspect(&path, &cache, false, cancel) {
             Ok(row) => {
                 identities.insert(id);
                 rows.push(row);
             }
             Err(e) => {
-                check(&cancel)?;
-                warnings.push(e);
+                check(cancel)?;
+                warnings.push(e.to_string());
             }
         }
     }
     let mut lights = Vec::new();
     let mut light_ids = HashSet::new();
-    for (index, path) in request.lights.iter().enumerate() {
+    for (index, path) in files.lights.iter().enumerate() {
         progress(&PreparationProgress {
-            phase: "measure_lights",
+            phase: PreparationPhase::MeasureLights,
             completed: index,
-            total: request.lights.len(),
+            total: files.lights.len(),
         });
         let id = same_file::Handle::from_path(path).map_err(error)?;
         if identities.contains(&id) || !light_ids.insert(id) {
             return Err("Lights and calibration files must be distinct physical files".into());
         }
-        lights.push(inspect(path, &cache, true, &cancel)?);
+        lights.push(inspect(path, &cache, true, cancel)?);
     }
     for row in &mut rows {
-        if let Some(choice) = request
+        if let Some(choice) = options
             .choices
             .iter()
             .find(|c| c.path == row.source.path && c.fingerprint == row.source.fingerprint)
@@ -580,9 +590,9 @@ fn run(
             row.quality.override_choice = Some(choice.choice);
         }
     }
-    let mut planner = Planner::new(&request, &rows, &lights)?;
-    planner.grouping.group_overrides = request.group_overrides.clone();
-    for choice in request
+    let mut planner = Planner::new(&files.rules, options, &rows, &lights)?;
+    planner.grouping.group_overrides = options.group_overrides.clone();
+    for choice in options
         .light_choices
         .iter()
         .filter(|choice| lights.iter().any(|light| light.source.path == choice.path))
@@ -607,12 +617,12 @@ fn run(
         }
     }
     progress(&PreparationProgress {
-        phase: "evidence",
+        phase: PreparationPhase::Evidence,
         completed: 0,
-        total: request.lights.len(),
+        total: files.lights.len(),
     });
-    let mut responses = responses::prepare(&planner, &rows, &cache, &cancel, &mut warnings)?;
-    let work = responses.connect(&mut planner, &lights, &cache, &cancel, &mut warnings)?;
+    let mut responses = responses::prepare(&planner, &rows, &cache, cancel, &mut warnings)?;
+    let work = responses.connect(&mut planner, &lights, &cache, cancel, &mut warnings)?;
     let grouping_snapshot = planning::grouping(planner.library()?.flat_book());
     let light_options = responses.light_options(&lights)?;
     let flat_work = work;
@@ -634,26 +644,23 @@ fn run(
     let review_key = digest(
         serde_json::to_vec(&(
             &sources,
-            &request.settings,
-            &request.rigs,
-            &request.choices,
-            &request.incomplete,
-            request.flat_star_masking,
-            &request.flat_stability,
-            request.flat_association,
-            request.dark_association,
+            &options.choices,
+            options.masters.flat_star_masking,
+            &options.masters.flat_stability,
+            options.associations.flat,
+            options.associations.dark,
             &grouping_snapshot,
             &flat_work,
-            &request.group_overrides,
-            &request.light_choices,
+            &options.group_overrides,
+            &options.light_choices,
             planner.rules.digest(),
             policy::POLICY_ALGORITHM_VERSION,
             crate::OUTPUT_VERSION,
         ))
         .map_err(error)?,
     );
-    if request.operation == "execute" && request.review_key.as_deref() != Some(&review_key) {
-        return Err("The library, inputs, choices or settings changed. Analyze calibration again before stacking.".into());
+    if reviewed.is_some_and(|key| key != review_key) {
+        return Err(PreparationError::ReviewChanged { changed: None });
     }
     let by_id: BTreeMap<_, _> = rows
         .iter()
@@ -732,17 +739,17 @@ fn run(
         });
     }
     let mut file_sessions = Vec::new();
-    if request.operation == "execute" {
-        if missing.iter().any(|v| *v) && request.incomplete == "stop" {
-            return Err("Some lights lack usable graded calibration. Review the plan or change Incomplete lights.".into());
-        }
-        if !["stop", "keep", "exclude"].contains(&request.incomplete.as_str()) {
-            return Err("Choose an incomplete-light policy".into());
+    let stop = options.incomplete == IncompleteLights::Stop;
+    if reviewed.is_some() {
+        if stop && missing.iter().any(|v| *v) {
+            return Err(PreparationError::Incomplete(
+                "Some lights lack usable graded calibration. Review the plan or change Incomplete lights.".into(),
+            ));
         }
         for (session_index, session) in snapshot.sessions.iter().enumerate() {
-            check(&cancel)?;
+            check(cancel)?;
             progress(&PreparationProgress {
-                phase: "masters",
+                phase: PreparationPhase::Masters,
                 completed: session_index,
                 total: snapshot.sessions.len(),
             });
@@ -761,7 +768,7 @@ fn run(
                 &lights,
                 &responses,
                 &cache,
-                &cancel,
+                cancel,
                 &mut warnings,
             )?;
             // A retry or pedestal fit can withhold a flat after the preview.
@@ -779,8 +786,10 @@ fn run(
             }
             file_sessions.push(file);
         }
-        if request.incomplete == "stop" && missing.iter().any(|v| *v) {
-            return Err("A flat was withheld during preparation. Review calibration or choose how to handle incomplete lights.".into());
+        if stop && missing.iter().any(|v| *v) {
+            return Err(PreparationError::Incomplete(
+                "A flat was withheld during preparation. Review calibration or choose how to handle incomplete lights.".into(),
+            ));
         }
         for file in &file_sessions {
             for path in [&file.bias, &file.dark, &file.flat].into_iter().flatten() {
@@ -788,12 +797,12 @@ fn run(
             }
         }
     }
-    check(&cancel)?;
+    check(cancel)?;
     verify(&sources)?;
     progress(&PreparationProgress {
-        phase: "complete",
-        completed: request.lights.len(),
-        total: request.lights.len(),
+        phase: PreparationPhase::Complete,
+        completed: files.lights.len(),
+        total: files.lights.len(),
     });
     Ok(PreparationReport {
         review_key,
@@ -838,7 +847,7 @@ fn build_set(
             .map(|id| {
                 rows.get(id)
                     .copied()
-                    .ok_or("Unknown master input".to_owned())
+                    .ok_or_else(|| error("Unknown master input"))
             })
             .collect::<Result<Vec<_>>>()?;
         if recipe.action == RecipeAction::External {
@@ -1032,15 +1041,15 @@ fn flat_attempt(
 // alternate flat exposure must select its own dark-flat rather than inherit the
 // first flat's dependencies. Only the permitted flat candidates are narrowed.
 fn retry_context(context: &Planner, ids: &[String]) -> Result<(Planner, policy::Session)> {
-    let mut request = context.clone();
-    request
+    let mut narrowed = context.clone();
+    narrowed
         .frames
         .retain(|f| f.kind != Kind::Flat || ids.contains(&f.frame_uuid));
-    let snapshot = request.snapshot()?;
+    let snapshot = narrowed.snapshot()?;
     if snapshot.sessions.len() != 1 {
         return Err("The retry no longer has a shared calibration session".into());
     }
-    Ok((request, snapshot.sessions.into_iter().next().unwrap()))
+    Ok((narrowed, snapshot.sessions.into_iter().next().unwrap()))
 }
 #[allow(clippy::too_many_arguments)]
 fn execute(
@@ -1103,7 +1112,7 @@ fn execute(
                         let (request, retry) = retry_context(context, &decision.inputs)?;
                         let built = build_set(&retry, rows, cache, cancel, warnings)?;
                         let attempt = flat_attempt(&retry, &built, rows, cancel, warnings)?;
-                        Ok::<_, String>((attempt, (request, retry, built)))
+                        Ok::<_, PreparationError>((attempt, (request, retry, built)))
                     })();
                     match action {
                         A::TryTrimmed => match result {
@@ -1283,14 +1292,43 @@ pub struct PreparationOptions {
     /// Per-light group/side choices, bound to exact source paths and stamps.
     pub light_choices: Vec<LightChoice>,
 }
+/// The stage a [`PreparationProgress`] update reports, in the order they run.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreparationPhase {
+    /// Walking the library directory; the total is not known yet.
+    Discover,
+    /// Measuring calibration files, one unit per file.
+    MeasureCalibration,
+    /// Measuring lights, one unit per light.
+    MeasureLights,
+    /// Measuring flat responses and grouping evidence.
+    Evidence,
+    /// Building masters, one unit per calibration session.
+    Masters,
+    /// Done.
+    Complete,
+}
+impl std::fmt::Display for PreparationPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Discover => "discover",
+            Self::MeasureCalibration => "measure_calibration",
+            Self::MeasureLights => "measure_lights",
+            Self::Evidence => "evidence",
+            Self::Masters => "masters",
+            Self::Complete => "complete",
+        })
+    }
+}
 /// A bounded progress update, emitted synchronously by the coordinator.
 /// `total == 0` denotes discovery whose total is not known yet.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Serialize)]
 pub struct PreparationProgress {
-    /// `discover`, `measure_calibration`, `measure_lights`, `evidence`,
-    /// `masters`, or `complete`. No callback or context is retained.
-    pub phase: &'static str,
+    /// The stage reached. No callback or context is retained.
+    pub phase: PreparationPhase,
     /// Work units already reached in this phase.
     pub completed: usize,
     /// Units in this phase, or zero while discovering.
@@ -1303,12 +1341,33 @@ pub enum PreparationError {
     /// Cancellation was observed; completed immutable cache entries remain reusable.
     #[error("Calibration preparation was cancelled")]
     Cancelled,
-    /// Sources, settings or choices changed since the review being executed.
-    #[error("Calibration review changed; analyze again before preparation")]
-    ReviewChanged,
+    /// Sources, settings or choices changed since the review being executed,
+    /// or a reviewed file changed while it was in use: analyze again.
+    #[error(
+        "Calibration review changed{}; analyze again before preparation",
+        changed.as_ref().map(|path| format!(": {} changed", path.display())).unwrap_or_default()
+    )]
+    ReviewChanged {
+        /// The reviewed file that changed, when one did.
+        changed: Option<PathBuf>,
+    },
+    /// [`IncompleteLights::Stop`] refused lights without complete
+    /// calibration: before building, or after a flat was withheld.
+    #[error("{0}")]
+    Incomplete(String),
     /// File, configuration or master preparation failed, with a concrete reason.
     #[error("{0}")]
     Failed(String),
+}
+impl From<String> for PreparationError {
+    fn from(reason: String) -> Self {
+        Self::Failed(reason)
+    }
+}
+impl From<&str> for PreparationError {
+    fn from(reason: &str) -> Self {
+        Self::Failed(reason.to_owned())
+    }
 }
 /// File-backed calibration coordinator shared by desktop/CLI hosts. It does
 /// not hold security bookmarks, UI preferences or database state. Rust callers
@@ -1364,36 +1423,14 @@ impl FileCalibration {
     }
     fn perform(
         &self,
-        key: Option<&str>,
+        reviewed: Option<&str>,
         cancel: CancelSignal,
         progress: &dyn Fn(&PreparationProgress),
     ) -> std::result::Result<PreparationReport, PreparationError> {
-        let request = Request {
-            rules: Some(self.rules.clone()),
-            operation: if key.is_some() { "execute" } else { "analyze" }.into(),
-            lights: self.lights.clone(),
-            cache: self.cache.clone(),
-            library: self.library.clone().unwrap_or_default(),
-            provided: self.provided.clone(),
-            review_key: key.map(str::to_owned),
-            incomplete: self.options.incomplete.to_string(),
-            choices: self.options.choices.clone(),
-            group_overrides: self.options.group_overrides.clone(),
-            light_choices: self.options.light_choices.clone(),
-            flat_star_masking: self.options.masters.flat_star_masking,
-            flat_stability: self.options.masters.flat_stability.clone(),
-            flat_association: self.options.associations.flat,
-            dark_association: self.options.associations.dark,
-            ..Default::default()
-        };
-        run(request, cancel.clone(), progress).map_err(|reason| {
-            if cancel.is_cancelled() {
-                PreparationError::Cancelled
-            } else if reason.starts_with("The library, inputs, choices or settings changed.") {
-                PreparationError::ReviewChanged
-            } else {
-                PreparationError::Failed(reason)
-            }
+        // A kernel stopped by the signal fails with its own error.
+        run(self, reviewed, &cancel, progress).map_err(|error| match error {
+            PreparationError::Failed(_) if cancel.is_cancelled() => PreparationError::Cancelled,
+            error => error,
         })
     }
 }
@@ -1401,47 +1438,61 @@ impl FileCalibration {
 /// Unix stamps include device/inode; other platforms use canonical path, size,
 /// modification and creation times. These are metadata identities, not pixel hashes.
 pub fn verify_sources(sources: &[Source]) -> std::result::Result<(), PreparationError> {
-    verify(sources).map_err(|_| PreparationError::ReviewChanged)
+    verify(sources)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Keep original #92 file fixtures while asserting the native records.
-    fn presentation(value: Value) -> Value {
-        match value {
-            Value::Array(v) => Value::Array(v.into_iter().map(presentation).collect()),
-            Value::Object(v) => Value::Object(
-                v.into_iter()
-                    .map(|(k, v)| {
-                        let k = match k.as_str() {
-                            "review_key" => "reviewKey",
-                            "file_sessions" => "fileSessions",
-                            "light_options" => "lightOptions",
-                            "flat_work" => "flatWork",
-                            other => other,
-                        }
-                        .to_owned();
-                        (k, presentation(v))
-                    })
-                    .collect(),
-            ),
-            other => other,
+    use serde_json::{Value, json};
+    // Reports are compared as their serialized records.
+    fn analyze(files: &FileCalibration) -> Value {
+        serde_json::to_value(files.analyze(CancelSignal::new(|| false), |_| {}).unwrap()).unwrap()
+    }
+    fn prepare(files: &FileCalibration, review: &Value) -> Value {
+        let key = review["review_key"].as_str().unwrap();
+        serde_json::to_value(
+            files
+                .prepare(key, CancelSignal::new(|| false), |_| {})
+                .unwrap(),
+        )
+        .unwrap()
+    }
+    /// The same lights, library, rules and incomplete-light policy, without
+    /// any other options or choices.
+    fn fresh(files: &FileCalibration) -> FileCalibration {
+        FileCalibration {
+            options: PreparationOptions {
+                incomplete: files.options.incomplete,
+                ..Default::default()
+            },
+            ..files.clone()
         }
+    }
+    fn library(files: &FileCalibration) -> PathBuf {
+        files.library.clone().unwrap()
+    }
+    fn rules(values: &[(&str, Value)]) -> policy::rules::RuleBook {
+        policy::rules::RuleBook::validated(
+            values
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), value.clone()))
+                .collect(),
+            BTreeMap::new(),
+        )
+        .unwrap()
     }
     #[test]
     fn native_coordinator_progress_review_binding_and_cache_lock_cancellation() {
         use std::cell::RefCell;
-        let (_dir, request) = fixture();
-        let mut files = FileCalibration::new(request.lights.clone(), request.cache.clone());
-        files.library = Some(request.library.clone());
+        let (_dir, mut files) = fixture();
         let phases = RefCell::new(Vec::new());
         let review = files
             .analyze(CancelSignal::new(|| false), |p| {
                 phases.borrow_mut().push(p.phase)
             })
             .unwrap();
-        assert!(phases.borrow().contains(&"evidence"));
+        assert!(phases.borrow().contains(&PreparationPhase::Evidence));
         assert!(review.file_sessions.is_empty());
         let built = files
             .prepare(&review.review_key, CancelSignal::new(|| false), |_| {})
@@ -1449,19 +1500,15 @@ mod tests {
         assert_eq!(built.snapshot.assignments, vec![0, 1, 0]);
         assert_eq!(built.file_sessions.len(), 2);
         verify_sources(&built.sources).unwrap();
-        files.rules = policy::rules::RuleBook::validated(
-            BTreeMap::from([("use_darks".into(), json!(false))]),
-            BTreeMap::new(),
-        )
-        .unwrap();
+        files.rules = rules(&[("use_darks", json!(false))]);
         assert!(matches!(
             files.prepare(&review.review_key, CancelSignal::new(|| false), |_| {}),
-            Err(PreparationError::ReviewChanged)
+            Err(PreparationError::ReviewChanged { .. })
         ));
         let lock = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .open(request.cache.join("library.lock"))
+            .open(files.cache.join("library.lock"))
             .unwrap();
         fs2::FileExt::lock_exclusive(&lock).unwrap();
         let polls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1491,7 +1538,7 @@ mod tests {
             },
         )
     }
-    fn fixture() -> (tempfile::TempDir, Request) {
+    fn fixture() -> (tempfile::TempDir, FileCalibration) {
         let dir = tempfile::tempdir().unwrap();
         let library = dir.path().join("library");
         std::fs::create_dir(&library).unwrap();
@@ -1512,17 +1559,9 @@ mod tests {
                 );
             }
         }
-        (
-            dir,
-            Request {
-                operation: "analyze".into(),
-                library,
-                cache,
-                lights,
-                incomplete: "stop".into(),
-                ..Default::default()
-            },
-        )
+        let mut files = FileCalibration::new(lights, cache);
+        files.library = Some(library);
+        (dir, files)
     }
     fn write(path: &Path, kind: &str, gain: i64, level: f32) {
         use seiza_fits::HeaderValue as H;
@@ -1558,20 +1597,14 @@ mod tests {
         )
         .unwrap();
     }
-    fn call(request: Request) -> Value {
-        presentation(
-            serde_json::to_value(run(request, CancelSignal::new(|| false), &|_| {}).unwrap())
-                .unwrap(),
-        )
-    }
 
-    fn response_fixture(correction: bool, families: bool) -> (tempfile::TempDir, Request) {
+    fn response_fixture(correction: bool, families: bool) -> (tempfile::TempDir, FileCalibration) {
         use seiza_fits::HeaderValue as H;
-        let (dir, mut request) = fixture();
-        for path in std::fs::read_dir(&request.library).unwrap() {
+        let (dir, mut files) = fixture();
+        for path in std::fs::read_dir(library(&files)).unwrap() {
             std::fs::remove_file(path.unwrap().path()).unwrap();
         }
-        request.lights.clear();
+        files.lights.clear();
         let write = |path: &Path, kind: &str, filter: &str, angle: f64, day: u8, dust: usize| {
             let data = response_pixels(dust)
                 .into_iter()
@@ -1626,7 +1659,7 @@ mod tests {
         };
         for i in 0..3 {
             write(
-                &request.library.join(format!("bias-{i}.fits")),
+                &library(&files).join(format!("bias-{i}.fits")),
                 "BIAS",
                 "Ha",
                 0.0,
@@ -1650,7 +1683,7 @@ mod tests {
         for (set, (filter, angle, day, dust)) in sets.into_iter().enumerate() {
             for i in 0..3 {
                 write(
-                    &request.library.join(format!("flat-{set}-{i}.fits")),
+                    &library(&files).join(format!("flat-{set}-{i}.fits")),
                     "FLAT",
                     filter,
                     angle,
@@ -1681,9 +1714,9 @@ mod tests {
                 },
                 usize::from(!correction),
             );
-            request.lights.push(path);
+            files.lights.push(path);
         }
-        (dir, request)
+        (dir, files)
     }
     fn response_pixels(dust: usize) -> Vec<f32> {
         (0..240 * 160)
@@ -1708,13 +1741,13 @@ mod tests {
     }
     #[test]
     fn light_change_evidence_is_measured_cached_and_used_in_selection() {
-        let (_dir, mut request) = response_fixture(false, false);
-        let review = call(request_from(&request, "analyze", None));
+        let (_dir, files) = response_fixture(false, false);
+        let review = analyze(&fresh(&files));
         assert_eq!(
-            review["flatWork"]["grouping"]["evidence"][0]["verdict"], "after",
+            review["flat_work"]["grouping"]["evidence"][0]["verdict"], "after",
             "{review}"
         );
-        let evidence = std::fs::read_dir(&request.cache)
+        let evidence = std::fs::read_dir(&files.cache)
             .unwrap()
             .filter_map(|e| e.ok())
             .filter(|e| {
@@ -1724,10 +1757,8 @@ mod tests {
             .map(|e| stamp(&e.path()).unwrap())
             .collect::<Vec<_>>();
         assert!(!evidence.is_empty());
-        request.operation = "execute".into();
-        request.review_key = review["reviewKey"].as_str().map(str::to_owned);
-        let built = call(request);
-        assert_eq!(built["reviewKey"], review["reviewKey"]);
+        let built = prepare(&files, &review);
+        assert_eq!(built["review_key"], review["review_key"]);
         assert_eq!(built["missing"], json!([false, false, false, false, false]));
         assert_eq!(
             built["snapshot"]["selections"][0]["flat_held_back"]
@@ -1750,24 +1781,12 @@ mod tests {
         );
         verify(&evidence).unwrap();
     }
-    fn request_from(request: &Request, operation: &str, key: Option<String>) -> Request {
-        Request {
-            operation: operation.into(),
-            library: request.library.clone(),
-            cache: request.cache.clone(),
-            lights: request.lights.clone(),
-            settings: request.settings.clone(),
-            review_key: key,
-            incomplete: request.incomplete.clone(),
-            ..Default::default()
-        }
-    }
     #[test]
     fn light_family_pixels_select_the_matching_response() {
-        let (_dir, request) = response_fixture(false, true);
-        let review = call(request);
+        let (_dir, files) = response_fixture(false, true);
+        let review = analyze(&files);
         assert!(
-            review["flatWork"]["grouping"]["family_evidence"][0]["chosen"].is_string(),
+            review["flat_work"]["grouping"]["family_evidence"][0]["chosen"].is_string(),
             "{review}"
         );
         assert_eq!(
@@ -1779,30 +1798,29 @@ mod tests {
     #[test]
     fn manual_group_and_path_scoped_side_choices_reach_native_policy() {
         use seiza_calibration::flat_response::groups as G;
-        let (_dir, mut request) = response_fixture(false, false);
+        let (_dir, mut files) = response_fixture(false, false);
         // Identical basenames/timestamps are common across acquisition folders.
-        let second = request.cache.parent().unwrap().join("second");
+        let second = files.cache.parent().unwrap().join("second");
         std::fs::create_dir(&second).unwrap();
-        let copy = second.join(request.lights[0].file_name().unwrap());
-        std::fs::copy(&request.lights[0], &copy).unwrap();
-        request.lights.push(copy);
-        let review = call(request_from(&request, "analyze", None));
-        let option = &review["lightOptions"][0];
+        let copy = second.join(files.lights[0].file_name().unwrap());
+        std::fs::copy(&files.lights[0], &copy).unwrap();
+        files.lights.push(copy);
+        let review = analyze(&fresh(&files));
+        let option = &review["light_options"][0];
         let change = &option["changes"][0];
         let row:G::LightChoiceRow=serde_json::from_value(json!({
             "light_guid":option["guid"],"change_key":change["key"],"rig_uuid":option["rig_uuid"],
             "change_start":change["start"],"change_end":change["end"],"choice":"before",
             "group_frame":null,"group_session_key":null,"label":"Before camera cleaning","chosen_at":1
         })).unwrap();
-        request.light_choices = vec![LightChoice {
+        files.options.light_choices = vec![LightChoice {
             path: PathBuf::from(option["path"].as_str().unwrap()),
             fingerprint: option["fingerprint"].as_str().unwrap().into(),
             row,
         }];
-        let picked = call(Request {
-            light_choices: request.light_choices.clone(),
-            ..request_from(&request, "analyze", None)
-        });
+        let mut picked = fresh(&files);
+        picked.options.light_choices = files.options.light_choices.clone();
+        let picked = analyze(&picked);
         assert!(
             !picked["snapshot"]["selections"][0]["flat_choices"]
                 .as_array()
@@ -1819,12 +1837,11 @@ mod tests {
             picked["snapshot"]["assignments"][0],
             picked["snapshot"]["assignments"][5]
         );
-        let mut stale = request.light_choices.clone();
+        let mut stale = files.options.light_choices.clone();
         stale[0].fingerprint = "old-source".into();
-        let ignored = call(Request {
-            light_choices: stale,
-            ..request_from(&request, "analyze", None)
-        });
+        let mut ignored = fresh(&files);
+        ignored.options.light_choices = stale;
+        let ignored = analyze(&ignored);
         assert!(
             ignored["snapshot"]["selections"][0]["flat_choices"]
                 .as_array()
@@ -1839,12 +1856,11 @@ mod tests {
                 .any(|w| w.as_str().unwrap().contains("saved flat choice"))
         );
         let mut edge: G::GroupOverrideRow =
-            serde_json::from_value(review["flatWork"]["group_edges"][0]["row"].clone()).unwrap();
+            serde_json::from_value(review["flat_work"]["group_edges"][0]["row"].clone()).unwrap();
         edge.choice = Some(G::GroupChoice::Join);
-        let joined = call(Request {
-            group_overrides: vec![edge],
-            ..request_from(&request, "analyze", None)
-        });
+        let mut joined = fresh(&files);
+        joined.options.group_overrides = vec![edge];
+        let joined = analyze(&joined);
         assert_eq!(
             joined["grouping"]["families"][0]["groups"]
                 .as_array()
@@ -1852,43 +1868,39 @@ mod tests {
                 .len(),
             1,
             "{}",
-            joined["flatWork"]["overrides"]
+            joined["flat_work"]["overrides"]
         );
         assert_eq!(
-            joined["flatWork"]["overrides"][0]["status"]["status"],
+            joined["flat_work"]["overrides"][0]["status"]["status"],
             "applied"
         );
     }
     #[test]
     fn unavailable_light_background_stays_undetermined() {
-        let (_dir, request) = response_fixture(false, false);
-        for path in &request.lights {
+        let (_dir, files) = response_fixture(false, false);
+        for path in &files.lights {
             let mut frame = FitsFrame::open(path).unwrap();
             frame.image.data.fill(500.0);
             crate::write_processed_image_fits_f32(path, &frame.image, &frame.headers, &[]).unwrap();
         }
-        let review = call(request);
+        let review = analyze(&files);
         assert_eq!(
-            review["flatWork"]["grouping"]["evidence"][0]["verdict"],
+            review["flat_work"]["grouping"]["evidence"][0]["verdict"],
             "undecided"
         );
         assert_eq!(review["missing"], json!([true, true, true, true, true]));
     }
     #[test]
     fn native_correction_is_applied_to_the_published_flat_and_reused() {
-        let (_dir, request) = response_fixture(true, false);
-        let review = call(request_from(&request, "analyze", None));
+        let (_dir, files) = response_fixture(true, false);
+        let review = analyze(&fresh(&files));
         assert_eq!(
-            review["flatWork"]["corrections"].as_array().unwrap().len(),
+            review["flat_work"]["corrections"].as_array().unwrap().len(),
             1,
             "{review}"
         );
-        let built = call(request_from(
-            &request,
-            "execute",
-            review["reviewKey"].as_str().map(str::to_owned),
-        ));
-        let flat = PathBuf::from(built["fileSessions"][0]["flat"].as_str().unwrap());
+        let built = prepare(&fresh(&files), &review);
+        let flat = PathBuf::from(built["file_sessions"][0]["flat"].as_str().unwrap());
         assert!(
             flat.file_name()
                 .unwrap()
@@ -1919,17 +1931,13 @@ mod tests {
                 < 0.005
         );
         let source = stamp(&flat).unwrap();
-        call(request_from(
-            &request,
-            "execute",
-            review["reviewKey"].as_str().map(str::to_owned),
-        ));
+        prepare(&fresh(&files), &review);
         verify(&[source]).unwrap();
     }
     #[test]
     fn native_sessions_share_master_sets_despite_candidate_order_and_unrelated_options() {
-        let (_dir, mut request) = fixture();
-        request.lights = vec![request.lights[0].clone(), request.lights[2].clone()];
+        let (_dir, mut files) = fixture();
+        files.lights = vec![files.lights[0].clone(), files.lights[2].clone()];
         let redated = |path: &Path, day: u8| {
             let mut frame = FitsFrame::open(path).unwrap();
             frame.headers.retain(|(key, _)| key != "DATE-OBS");
@@ -1939,56 +1947,40 @@ mod tests {
             ));
             publish_frame(path, &frame).unwrap();
         };
-        redated(&request.lights[1], 22);
+        redated(&files.lights[1], 22);
         for index in 0..3 {
             redated(
-                &request.library.join(format!("bias-100-{index}.fits")),
+                &library(&files).join(format!("bias-100-{index}.fits")),
                 20 + index,
             );
         }
-        let review = call(request_from(&request, "analyze", None));
+        let review = analyze(&fresh(&files));
         assert_ne!(
             review["snapshot"]["selections"][0]["bias"][0],
             review["snapshot"]["selections"][1]["bias"][0]
         );
         assert_eq!(review["snapshot"]["assignments"], json!([0, 0]));
-        let built = call(request_from(
-            &request,
-            "execute",
-            review["reviewKey"].as_str().map(str::to_owned),
-        ));
-        assert_eq!(built["fileSessions"].as_array().unwrap().len(), 1);
-        request.flat_star_masking = true;
-        let changed = call(Request {
-            flat_star_masking: true,
-            ..request_from(&request, "analyze", None)
-        });
-        assert_ne!(review["reviewKey"], changed["reviewKey"]);
+        let built = prepare(&fresh(&files), &review);
+        assert_eq!(built["file_sessions"].as_array().unwrap().len(), 1);
+        let mut masking = fresh(&files);
+        masking.options.masters.flat_star_masking = true;
+        let changed = analyze(&masking);
+        assert_ne!(review["review_key"], changed["review_key"]);
         assert_eq!(
             review["snapshot"]["sessions"][0]["key"],
             changed["snapshot"]["sessions"][0]["key"]
         );
-        let rebuilt = call(Request {
-            flat_star_masking: true,
-            ..request_from(
-                &request,
-                "execute",
-                changed["reviewKey"].as_str().map(str::to_owned),
-            )
-        });
-        assert_eq!(built["fileSessions"], rebuilt["fileSessions"]);
+        let rebuilt = prepare(&masking, &changed);
+        assert_eq!(built["file_sessions"], rebuilt["file_sessions"]);
     }
     #[test]
     fn measured_response_groups_reach_association_and_reuse_cached_pixels() {
-        let (dir, mut request) = fixture();
-        request.lights = vec![request.lights[0].clone()];
-        request.settings = vec![Setting {
-            key: "flat_session_hours".into(),
-            value: json!(240.0),
-        }];
-        let input = FitsFrame::open(&request.lights[0]).unwrap();
+        let (dir, mut files) = fixture();
+        files.lights = vec![files.lights[0].clone()];
+        files.rules = rules(&[("flat_session_hours", json!(240.0))]);
+        let input = FitsFrame::open(&files.lights[0]).unwrap();
         crate::write_processed_image_fits_f32(
-            &request.lights[0],
+            &files.lights[0],
             &input.image,
             &input.headers,
             &[
@@ -2008,7 +2000,7 @@ mod tests {
         // different vignette; the first two should form one measured group.
         for (day, depth) in [(20, 0.1_f32), (23, 0.1), (26, 0.35)] {
             for index in 0..3 {
-                let path = request.library.join(format!("flat-{day}-{index}.fits"));
+                let path = library(&files).join(format!("flat-{day}-{index}.fits"));
                 use seiza_fits::HeaderValue as H;
                 let cards = vec![
                     ("IMAGETYP", H::String("FLAT".into())),
@@ -2042,14 +2034,7 @@ mod tests {
                 .unwrap();
             }
         }
-        let before = call(Request {
-            operation: "analyze".into(),
-            library: request.library.clone(),
-            settings: request.settings.clone(),
-            lights: request.lights.clone(),
-            cache: request.cache.clone(),
-            ..Default::default()
-        });
+        let before = analyze(&files);
         assert_eq!(
             before["grouping"]["sessions"].as_array().unwrap().len(),
             3,
@@ -2066,7 +2051,7 @@ mod tests {
                 .iter()
                 .any(|v| v.as_str().unwrap().contains("not measured"))
         );
-        let measurements: Vec<_> = std::fs::read_dir(&request.cache)
+        let measurements: Vec<_> = std::fs::read_dir(&files.cache)
             .unwrap()
             .filter_map(|e| e.ok())
             .filter(|e| {
@@ -2098,19 +2083,12 @@ mod tests {
             .find(|r| r["kind"] == "flat")
             .unwrap();
         assert_eq!(flat_recipe["inputs"].as_array().unwrap().len(), 6);
-        let again = call(Request {
-            operation: "analyze".into(),
-            library: request.library.clone(),
-            settings: request.settings.clone(),
-            lights: request.lights.clone(),
-            cache: request.cache.clone(),
-            ..Default::default()
-        });
-        assert_eq!(before["reviewKey"], again["reviewKey"]);
+        let again = analyze(&files);
+        assert_eq!(before["review_key"], again["review_key"]);
         verify(&measurements).unwrap();
         // One-set changes only association; the measured caches survive.
-        request.flat_association = policy::Association::OneSet;
-        let explicit = call(request);
+        files.options.associations.flat = policy::Association::OneSet;
+        let explicit = analyze(&files);
         assert_eq!(
             explicit["snapshot"]["selections"][0]["flat"]
                 .as_array()
@@ -2124,17 +2102,17 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        assert_ne!(before["reviewKey"], explicit["reviewKey"]);
+        assert_ne!(before["review_key"], explicit["review_key"]);
         verify(&measurements).unwrap();
         drop(dir);
     }
     #[test]
     fn one_dark_set_builds_all_supplied_inputs_across_nights() {
-        let (_dir, mut request) = fixture();
-        request.lights.truncate(1);
-        request.dark_association = policy::Association::OneSet;
+        let (_dir, mut files) = fixture();
+        files.lights.truncate(1);
+        files.options.associations.dark = policy::Association::OneSet;
         for i in 0..80 {
-            let path = request.library.join(format!("dark-{i}.fits"));
+            let path = library(&files).join(format!("dark-{i}.fits"));
             write(&path, "DARK", 100, 800.0);
             if i >= 40 {
                 let bytes = std::fs::read(&path).unwrap();
@@ -2145,15 +2123,7 @@ mod tests {
                 std::fs::write(path, bytes).unwrap();
             }
         }
-        let review = call(Request {
-            operation: "analyze".into(),
-            library: request.library.clone(),
-            cache: request.cache.clone(),
-            lights: request.lights.clone(),
-            dark_association: request.dark_association,
-            incomplete: request.incomplete.clone(),
-            ..Default::default()
-        });
+        let review = analyze(&files);
         let dark = review["snapshot"]["sessions"][0]["recipes"]
             .as_array()
             .unwrap()
@@ -2161,10 +2131,8 @@ mod tests {
             .find(|r| r["kind"] == "dark")
             .unwrap();
         assert_eq!(dark["inputs"].as_array().unwrap().len(), 80);
-        request.operation = "execute".into();
-        request.review_key = Some(review["reviewKey"].as_str().unwrap().into());
-        let report = call(request);
-        let dark_path = report["fileSessions"][0]["dark"].as_str().unwrap();
+        let report = prepare(&files, &review);
+        let dark_path = report["file_sessions"][0]["dark"].as_str().unwrap();
         let memo = Path::new(dark_path).with_extension("json");
         let built: Built = serde_json::from_slice(&std::fs::read(memo).unwrap()).unwrap();
         assert_eq!(built.used.len(), 80);
@@ -2172,30 +2140,61 @@ mod tests {
         assert!((image.image.data[0] - 300.0).abs() < 1.0);
     }
     #[test]
+    #[cfg(unix)]
+    fn linked_files_count_refusals_are_remembered_and_incomplete_is_not_reviewed() {
+        let (dir, mut files) = fixture();
+        let shared = dir.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        let original = library(&files).join("bias-100-0.fits");
+        let moved = shared.join("bias-100-0.fits");
+        std::fs::rename(&original, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &original).unwrap();
+        // Only a walked directory would find this one.
+        write(&shared.join("bias-extra.fits"), "BIAS", 100, 500.0);
+        std::os::unix::fs::symlink(&shared, library(&files).join("linked")).unwrap();
+        write(&library(&files).join("stray.fits"), "LIGHT", 100, 1000.0);
+        let review = analyze(&files);
+        assert_eq!(review["frames"].as_array().unwrap().len(), 6, "{review}");
+        let refused = |report: &Value, reason: &str| {
+            report["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w.as_str().unwrap().contains(reason))
+        };
+        assert!(refused(&review, "stray.fits is not a calibration frame"));
+        let memo = std::fs::read_dir(&files.cache)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| p.to_string_lossy().ends_with(".refused.json"))
+            .unwrap();
+        let mut row: Value = serde_json::from_slice(&std::fs::read(&memo).unwrap()).unwrap();
+        row["reason"] = json!("remembered refusal");
+        std::fs::write(&memo, serde_json::to_vec(&row).unwrap()).unwrap();
+        assert!(refused(&analyze(&files), "remembered refusal"));
+        // Choosing what to do with incomplete lights needs no new review.
+        files.options.incomplete = IncompleteLights::Keep;
+        assert_eq!(prepare(&files, &review)["review_key"], review["review_key"]);
+    }
+    #[test]
     fn explicit_files_need_no_library() {
-        let (_dir, mut request) = fixture();
-        request.lights.truncate(1);
-        request.provided = std::fs::read_dir(&request.library)
+        let (_dir, mut files) = fixture();
+        files.lights.truncate(1);
+        files.provided = std::fs::read_dir(library(&files))
             .unwrap()
             .filter_map(|e| e.ok())
             .map(|e| e.path())
             .collect();
-        request.library = PathBuf::new();
-        let report = call(request);
+        files.library = None;
+        let report = analyze(&files);
         assert_eq!(report["frames"].as_array().unwrap().len(), 6);
         assert_eq!(report["missing"], json!([false]));
     }
     #[test]
     fn library_grades_and_builds_shared_aba_assignments() {
-        let (_dir, mut request) = fixture();
-        let report = call(Request {
-            operation: "analyze".into(),
-            library: request.library.clone(),
-            cache: request.cache.clone(),
-            lights: request.lights.clone(),
-            incomplete: "stop".into(),
-            ..Default::default()
-        });
+        let (_dir, files) = fixture();
+        let report = analyze(&files);
         assert_eq!(report["snapshot"]["assignments"], json!([0, 1, 0]));
         assert_eq!(report["missing"], json!([false, false, false]));
         assert!(
@@ -2206,90 +2205,85 @@ mod tests {
                 .all(|f| f["grade"] == "ok")
         );
         assert_eq!(
-            std::fs::read_dir(&request.cache)
+            std::fs::read_dir(&files.cache)
                 .unwrap()
                 .filter_map(|e| e.ok())
                 .filter(|e| e.file_name().to_string_lossy().starts_with("master-"))
                 .count(),
             0
         );
-        request.operation = "execute".into();
-        request.review_key = Some(report["reviewKey"].as_str().unwrap().into());
-        let built = call(request);
-        assert_eq!(built["fileSessions"].as_array().unwrap().len(), 2);
-        for session in built["fileSessions"].as_array().unwrap() {
+        let built = prepare(&files, &report);
+        assert_eq!(built["file_sessions"].as_array().unwrap().len(), 2);
+        for session in built["file_sessions"].as_array().unwrap() {
             let frame = FitsFrame::open(session["bias"].as_str().unwrap()).unwrap();
             assert!((frame.image.data[0] - 497.0).abs() < 0.01);
         }
     }
     #[test]
     fn settings_regrade_memos_and_changed_review_is_refused() {
-        let (_dir, mut request) = fixture();
-        let original = call(Request {
-            operation: "analyze".into(),
-            library: request.library.clone(),
-            cache: request.cache.clone(),
-            lights: request.lights.clone(),
-            incomplete: "stop".into(),
-            ..Default::default()
-        });
-        let before: Vec<_> = std::fs::read_dir(&request.cache)
+        let (_dir, mut files) = fixture();
+        let original = analyze(&files);
+        let before: Vec<_> = std::fs::read_dir(&files.cache)
             .unwrap()
             .filter_map(|e| e.ok())
             .map(|e| stamp(&e.path()).unwrap())
             .collect();
-        request.settings = vec![Setting {
-            key: "grade_bias_level".into(),
-            value: json!({"suspect":null,"poor":null}),
-        }];
-        request.operation = "execute".into();
-        request.review_key = Some(original["reviewKey"].as_str().unwrap().into());
-        assert!(
-            run(request, CancelSignal::new(|| false), &|_| {})
-                .unwrap_err()
-                .contains("changed")
-        );
+        files.rules = rules(&[("grade_bias_level", json!({"suspect":null,"poor":null}))]);
+        let key = original["review_key"].as_str().unwrap();
+        assert!(matches!(
+            files.prepare(key, CancelSignal::new(|| false), |_| {}),
+            Err(PreparationError::ReviewChanged { .. })
+        ));
         verify(&before).unwrap(); // Settings reused measured pixels without rewriting their memos.
     }
     #[test]
-    fn source_changes_and_invalid_settings_fail_closed() {
-        let (_dir, mut request) = fixture();
-        let source = stamp(&request.lights[0]).unwrap();
-        write(&request.lights[0], "LIGHT", 100, 1200.0);
-        assert!(verify(&[source]).unwrap_err().contains("changed"));
-        request.settings = vec![Setting {
-            key: "unknown_setting".into(),
-            value: json!(true),
-        }];
-        let cache = request.cache.clone();
-        assert!(
-            run(request, CancelSignal::new(|| false), &|_| {})
-                .unwrap_err()
-                .contains("unknown setting")
-        );
-        assert!(!cache.exists());
+    fn source_changes_fail_closed() {
+        let (_dir, files) = fixture();
+        let source = stamp(&files.lights[0]).unwrap();
+        write(&files.lights[0], "LIGHT", 100, 1200.0);
+        assert!(matches!(
+            verify(&[source]),
+            Err(PreparationError::ReviewChanged { changed: Some(_) })
+        ));
+    }
+    #[test]
+    #[cfg(feature = "schema")]
+    fn the_c_call_refuses_unknown_settings_before_touching_files() {
+        let (_dir, files) = fixture();
+        let request: json::Request = serde_json::from_value(json!({
+            "operation": "analyze",
+            "lights": files.lights,
+            "library": files.library,
+            "cache": files.cache,
+            "settings": [{"key": "unknown_setting", "value": true}],
+        }))
+        .unwrap();
+        let error = json::run(request, CancelSignal::new(|| false), |_| {})
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unknown setting"), "{error}");
+        assert!(!files.cache.exists());
     }
     #[test]
     #[cfg(unix)]
     fn physical_aliases_are_not_separate_light_inputs() {
-        let (dir, mut request) = fixture();
+        let (dir, mut files) = fixture();
         let alias = dir.path().join("alias.fits");
-        std::fs::hard_link(&request.lights[0], &alias).unwrap();
-        request.lights.push(alias);
-        assert!(
-            run(request, CancelSignal::new(|| false), &|_| {})
-                .unwrap_err()
-                .contains("distinct physical files")
-        );
+        std::fs::hard_link(&files.lights[0], &alias).unwrap();
+        files.lights.push(alias);
+        let error = files
+            .analyze(CancelSignal::new(|| false), |_| {})
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("distinct physical files"));
     }
     #[test]
     fn cancellation_and_staged_cache_changes_are_observed() {
-        let (_dir, request) = fixture();
-        assert!(
-            run(request, CancelSignal::new(|| true), &|_| {})
-                .unwrap_err()
-                .contains("cancelled")
-        );
+        let (_dir, files) = fixture();
+        assert!(matches!(
+            files.analyze(CancelSignal::new(|| true), |_| {}),
+            Err(PreparationError::Cancelled)
+        ));
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.fits");
         write(&path, "LIGHT", 100, 2000.0);
@@ -2299,15 +2293,15 @@ mod tests {
     }
     #[test]
     fn manual_use_does_not_relax_sensor_gates() {
-        let (_dir, mut request) = fixture();
-        let path = request.library.join("bias-100-0.fits");
+        let (_dir, mut files) = fixture();
+        let path = library(&files).join("bias-100-0.fits");
         let source = stamp(&path).unwrap();
-        request.choices.push(Choice {
+        files.options.choices.push(Choice {
             path: source.path,
             fingerprint: source.fingerprint,
             choice: policy::QualityOverride::Use,
         });
-        let report = call(request);
+        let report = analyze(&files);
         let frames = report["frames"].as_array().unwrap();
         let wrong = frames
             .iter()
@@ -2323,18 +2317,10 @@ mod tests {
     }
     #[test]
     fn poor_grades_stay_out_until_explicit_use_and_regrade_is_native() {
-        let (_dir, mut request) = fixture();
-        let bad = request.library.join("bias-bad.fits");
+        let (_dir, mut files) = fixture();
+        let bad = library(&files).join("bias-bad.fits");
         write(&bad, "BIAS", 100, 5000.0);
-        let first = Request {
-            operation: "analyze".into(),
-            library: request.library.clone(),
-            cache: request.cache.clone(),
-            lights: request.lights.clone(),
-            incomplete: "stop".into(),
-            ..Default::default()
-        };
-        let report = call(first);
+        let report = analyze(&files);
         let bad_frame = report["frames"]
             .as_array()
             .unwrap()
@@ -2349,12 +2335,12 @@ mod tests {
                 .contains(&bad_frame["id"])
         );
         let source = stamp(&bad).unwrap();
-        request.choices.push(Choice {
+        files.options.choices.push(Choice {
             path: source.path,
             fingerprint: source.fingerprint,
             choice: policy::QualityOverride::Use,
         });
-        let chosen = call(request);
+        let chosen = analyze(&files);
         assert!(
             chosen["snapshot"]["selections"][0]["bias"]
                 .as_array()
@@ -2364,30 +2350,21 @@ mod tests {
     }
     #[test]
     fn raw_flats_build_after_bias_and_run_shared_stability_policy() {
-        let (_dir, mut request) = fixture();
+        let (_dir, files) = fixture();
         for gain in [100, 200] {
             for index in 0..3 {
                 write(
-                    &request.library.join(format!("flat-{gain}-{index}.fits")),
+                    &library(&files).join(format!("flat-{gain}-{index}.fits")),
                     "FLAT",
                     gain,
                     20000.0,
                 );
             }
         }
-        let report = call(Request {
-            operation: "analyze".into(),
-            library: request.library.clone(),
-            cache: request.cache.clone(),
-            lights: request.lights.clone(),
-            incomplete: "stop".into(),
-            ..Default::default()
-        });
+        let report = analyze(&files);
         assert_eq!(report["missing"], json!([false, false, false]));
-        request.operation = "execute".into();
-        request.review_key = Some(report["reviewKey"].as_str().unwrap().into());
-        let built = call(request);
-        for session in built["fileSessions"].as_array().unwrap() {
+        let built = prepare(&files, &report);
+        for session in built["file_sessions"].as_array().unwrap() {
             let flat = FitsFrame::open(session["flat"].as_str().unwrap()).unwrap();
             assert!(flat.metadata().calibration_state.bias_subtracted);
             assert!(flat.metadata().calibration_state.flat_normalized);
@@ -2396,21 +2373,21 @@ mod tests {
     }
     #[test]
     fn tampered_staging_is_regenerated_instead_of_reusing_measurement_row() {
-        let (_dir, request) = fixture();
-        std::fs::create_dir_all(&request.cache).unwrap();
+        let (_dir, files) = fixture();
+        std::fs::create_dir_all(&files.cache).unwrap();
         let row = inspect(
-            &request.lights[0],
-            &request.cache,
+            &files.lights[0],
+            &files.cache,
             true,
             &CancelSignal::new(|| false),
         )
         .unwrap();
-        let fake = request.cache.join("stage.fits");
+        let fake = files.cache.join("stage.fits");
         std::fs::copy(&row.processed, &fake).unwrap();
         let mut altered = row.clone();
         altered.processed = fake.clone();
         altered.processed_source = stamp(&fake).unwrap();
-        let memo = std::fs::read_dir(&request.cache)
+        let memo = std::fs::read_dir(&files.cache)
             .unwrap()
             .filter_map(|e| e.ok())
             .find(|e| e.path().extension().is_some_and(|e| e == "json"))
@@ -2419,8 +2396,8 @@ mod tests {
         atomic_json(&memo, &altered).unwrap();
         write(&fake, "LIGHT", 100, 3333.0);
         let fresh = inspect(
-            &request.lights[0],
-            &request.cache,
+            &files.lights[0],
+            &files.cache,
             true,
             &CancelSignal::new(|| false),
         )
@@ -2429,10 +2406,10 @@ mod tests {
     }
     #[test]
     fn drifting_flat_feedback_runs_native_trim_and_rebuild() {
-        let (_dir, mut request) = fixture();
-        request.lights = vec![request.lights[0].clone(), request.lights[2].clone()];
+        let (_dir, mut files) = fixture();
+        files.lights = vec![files.lights[0].clone(), files.lights[2].clone()];
         for index in 0..11 {
-            let path = request.library.join(format!("flat-{index:02}.fits"));
+            let path = library(&files).join(format!("flat-{index:02}.fits"));
             write(&path, "FLAT", 100, 20000.0);
             if index < 10 {
                 let mut frame = FitsFrame::open(&path).unwrap();
@@ -2444,24 +2421,14 @@ mod tests {
                 publish_frame(&path, &frame).unwrap();
             }
             let source = stamp(&path).unwrap();
-            request.choices.push(Choice {
+            files.options.choices.push(Choice {
                 path: source.path,
                 fingerprint: source.fingerprint,
                 choice: policy::QualityOverride::Use,
             });
         }
-        let preview = call(Request {
-            operation: "analyze".into(),
-            library: request.library.clone(),
-            cache: request.cache.clone(),
-            lights: request.lights.clone(),
-            choices: request.choices.clone(),
-            incomplete: "stop".into(),
-            ..Default::default()
-        });
-        request.operation = "execute".into();
-        request.review_key = Some(preview["reviewKey"].as_str().unwrap().into());
-        let built = call(request);
+        let preview = analyze(&files);
+        let built = prepare(&files, &preview);
         assert!(
             built["warnings"]
                 .as_array()
@@ -2470,13 +2437,13 @@ mod tests {
                 .any(|w| w.as_str().unwrap().contains("Left out")),
             "{built}"
         );
-        let master = FitsFrame::open(built["fileSessions"][0]["flat"].as_str().unwrap()).unwrap();
+        let master = FitsFrame::open(built["file_sessions"][0]["flat"].as_str().unwrap()).unwrap();
         assert!(master.image.data[32 * 64 + 32] < 0.55);
     }
     #[test]
     fn flat_only_fits_pedestal_through_shared_policy_and_materializes_a_bias() {
-        let (dir, mut request) = fixture();
-        for file in std::fs::read_dir(&request.library).unwrap() {
+        let (dir, mut files) = fixture();
+        for file in std::fs::read_dir(library(&files)).unwrap() {
             std::fs::remove_file(file.unwrap().path()).unwrap();
         }
         let width = 512;
@@ -2511,12 +2478,12 @@ mod tests {
         };
         for i in 0..2 {
             write_large(
-                &request.library.join(format!("flat-{i}.fits")),
+                &library(&files).join(format!("flat-{i}.fits")),
                 "FLAT",
                 response.iter().map(|r| r * 20000.0).collect(),
             );
         }
-        request.lights.clear();
+        files.lights.clear();
         for i in 0..2 {
             let path = dir.path().join(format!("fit-light-{i}.fits"));
             write_large(
@@ -2524,27 +2491,18 @@ mod tests {
                 "LIGHT",
                 response.iter().map(|r| r * 900.0 + 500.0).collect(),
             );
-            request.lights.push(path);
+            files.lights.push(path);
         }
-        let preview = call(Request {
-            operation: "analyze".into(),
-            library: request.library.clone(),
-            cache: request.cache.clone(),
-            lights: request.lights.clone(),
-            incomplete: "stop".into(),
-            ..Default::default()
-        });
+        let preview = analyze(&files);
         assert_eq!(
             preview["snapshot"]["sessions"][0]["application"]["flat_use"],
             "needs_pedestal_fit"
         );
-        request.operation = "execute".into();
-        request.review_key = Some(preview["reviewKey"].as_str().unwrap().into());
-        let built = call(request);
-        let bias = FitsFrame::open(built["fileSessions"][0]["bias"].as_str().unwrap()).unwrap();
+        let built = prepare(&files, &preview);
+        let bias = FitsFrame::open(built["file_sessions"][0]["bias"].as_str().unwrap()).unwrap();
         assert!(bias.metadata().is_master);
         assert_eq!(bias.metadata().role, FrameSourceRole::Bias);
-        let flat = FitsFrame::open(built["fileSessions"][0]["flat"].as_str().unwrap()).unwrap();
+        let flat = FitsFrame::open(built["file_sessions"][0]["flat"].as_str().unwrap()).unwrap();
         let light = FitsFrame::open(dir.path().join("fit-light-0.fits")).unwrap();
         let expected = seiza_calibration::fit_flat_pedestal(
             image_ref(&light).unwrap(),
@@ -2553,7 +2511,7 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!((bias.image.data[0] - expected).abs() < 0.001);
-        assert!(built["fileSessions"][0]["flat"].is_string());
+        assert!(built["file_sessions"][0]["flat"].is_string());
     }
     #[test]
     fn normalized_xisf_staging_preserves_role_and_recovers_from_cache_tampering() {

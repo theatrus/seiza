@@ -3093,12 +3093,18 @@ struct MasterExtras {
 /// Ctrl-C as well as an explicit `cancel` predicate. An error either raises
 /// is kept in the second value, to raise once the work unwinds, so the
 /// caller sees KeyboardInterrupt or their own exception rather than a
-/// generic StackError.
-fn python_cancel_signal(cancel: Option<Py<PyAny>>) -> (CancelSignal, Arc<Mutex<Option<PyErr>>>) {
+/// generic StackError. A caller's other callbacks may keep their errors
+/// there too: the signal then stops the work, and the first error stays.
+pub(crate) fn python_cancel_signal(
+    cancel: Option<Py<PyAny>>,
+) -> (CancelSignal, Arc<Mutex<Option<PyErr>>>) {
     let raised: Arc<Mutex<Option<PyErr>>> = Arc::new(Mutex::new(None));
     let signal = {
         let raised = Arc::clone(&raised);
         CancelSignal::new(move || {
+            if raised.lock().is_ok_and(|slot| slot.is_some()) {
+                return true;
+            }
             Python::attach(|py| {
                 let asked = py.check_signals().and_then(|()| match &cancel {
                     Some(cancel) => cancel
@@ -3109,7 +3115,7 @@ fn python_cancel_signal(cancel: Option<Py<PyAny>>) -> (CancelSignal, Arc<Mutex<O
                 match asked {
                     Ok(stop) => stop,
                     Err(error) => {
-                        *raised.lock().unwrap() = Some(error);
+                        keep_first(&raised, error);
                         true
                     }
                 }
@@ -3117,6 +3123,15 @@ fn python_cancel_signal(cancel: Option<Py<PyAny>>) -> (CancelSignal, Arc<Mutex<O
         })
     };
     (signal, raised)
+}
+
+/// Keep `error` to raise later, unless an earlier one is kept already.
+pub(crate) fn keep_first(raised: &Mutex<Option<PyErr>>, error: PyErr) {
+    if let Ok(mut slot) = raised.lock()
+        && slot.is_none()
+    {
+        *slot = Some(error);
+    }
 }
 
 /// What :func:`integrate_registered_frames` did with one input.

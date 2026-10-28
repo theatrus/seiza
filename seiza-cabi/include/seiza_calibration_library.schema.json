@@ -5444,6 +5444,31 @@
       ],
       "type": "object"
     },
+    "Operation": {
+      "description": "What a C workflow call does.",
+      "oneOf": [
+        {
+          "const": "analyze",
+          "description": "[`FileCalibration::analyze`].",
+          "type": "string"
+        },
+        {
+          "const": "execute",
+          "description": "[`FileCalibration::prepare`] of `review_key`.",
+          "type": "string"
+        },
+        {
+          "const": "verify",
+          "description": "[`verify_sources`] of `sources`.",
+          "type": "string"
+        },
+        {
+          "const": "schema",
+          "description": "The native settings panel's fields.",
+          "type": "string"
+        }
+      ]
+    },
     "Optics": {
       "additionalProperties": false,
       "description": "The light cone at the sensor, to size dust shadows and say where the dust\nsits.",
@@ -6350,8 +6375,7 @@
           "type": "array"
         },
         "operation": {
-          "default": "",
-          "type": "string"
+          "$ref": "#/$defs/Operation"
         },
         "provided": {
           "default": [],
@@ -6389,6 +6413,9 @@
           "type": "array"
         }
       },
+      "required": [
+        "operation"
+      ],
       "type": "object"
     },
     "ResolvedChoices": {
@@ -6742,7 +6769,8 @@
       ],
       "type": "object"
     },
-    "Selection": {
+    "SelectionSummary": {
+      "description": "A [`CalibrationSelection`] as a review shows it: frames by UUID, with the\ngate and the explanations, from [`CalibrationSelection::summary`].",
       "properties": {
         "bias": {
           "items": {
@@ -6803,103 +6831,7 @@
           "$ref": "#/$defs/LibraryKinds"
         },
         "ruleNotes": {
-          "items": {
-            "$ref": "#/$defs/RuleNote"
-          },
-          "type": "array"
-        },
-        "tolerances": {
-          "$ref": "#/$defs/MatchTolerances"
-        }
-      },
-      "required": [
-        "bias",
-        "dark",
-        "darkFlat",
-        "flat",
-        "keptOut",
-        "library",
-        "tolerances",
-        "flatBasis",
-        "flatHeldBack",
-        "flatChoices",
-        "ruleNotes"
-      ],
-      "type": "object"
-    },
-    "Selection2": {
-      "description": "The identifiers and native explanations of one light's selected calibration.",
-      "properties": {
-        "bias": {
-          "description": "Selected bias frame identifiers.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "dark": {
-          "description": "Selected dark frame identifiers.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "darkFlat": {
-          "description": "Selected dark-flat frame identifiers.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "flat": {
-          "description": "Selected flat frame identifiers.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "flatBasis": {
-          "$ref": "#/$defs/FlatBasis",
-          "description": "Native explanation, placement and any required correction."
-        },
-        "flatChoices": {
-          "description": "Applied and orphaned personal commands.",
-          "items": {
-            "$ref": "#/$defs/ChoiceNote"
-          },
-          "type": "array"
-        },
-        "flatFamily": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/FlatFamily"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Native family choice and its supporting basis."
-        },
-        "flatHeldBack": {
-          "description": "Far-side flats unavailable to native alternate retries.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "keptOut": {
-          "description": "Compatible frames excluded by native quality/validity policy.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "library": {
-          "$ref": "#/$defs/LibraryKinds",
-          "description": "Kinds the native library could provide for this light."
-        },
-        "ruleNotes": {
-          "description": "Resolved per-light rule explanations.",
+          "description": "The light's resolved rules, explained.",
           "items": {
             "$ref": "#/$defs/RuleNote"
           },
@@ -6907,7 +6839,7 @@
         },
         "tolerances": {
           "$ref": "#/$defs/MatchTolerances",
-          "description": "The complete native physical matching gate."
+          "description": "[`CalibrationSelection::match_tolerances`]."
         }
       },
       "required": [
@@ -7259,7 +7191,7 @@
         },
         "selections": {
           "items": {
-            "$ref": "#/$defs/Selection"
+            "$ref": "#/$defs/SelectionSummary"
           },
           "type": "array"
         },
@@ -7313,7 +7245,7 @@
         "selections": {
           "description": "Per-light native selection records in original order.",
           "items": {
-            "$ref": "#/$defs/Selection2"
+            "$ref": "#/$defs/SelectionSummary"
           },
           "type": "array"
         },

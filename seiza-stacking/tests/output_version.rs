@@ -8,12 +8,12 @@
 
 use seiza_fits::{HeaderValue, WriteHeaderCard};
 use seiza_stacking::{
-    BatchStackOptions, CalibrationMasters, CfaIntegration, Continue, DefectDetectionOptions,
-    Demosaic, DrizzleOptions, FrameAcceptanceCriteria, FrameDisposition, FrameWeighting,
-    GpuOptions, ImpulseFilterOptions, Interpolation, LinearImage, LiveStacker, MasterBuildOptions,
-    MasterFrameKind, NormalizationMode, RegistrationModel, RejectionMode, StackOptions,
-    StackSnapshot, build_master_from_fits, detect_defects, write_master_fits_f32,
-    write_processed_image_fits_f32,
+    BatchStackOptions, CalibrationMasters, CancelSignal, CfaIntegration, Continue,
+    DefectDetectionOptions, Demosaic, DrizzleOptions, FileCalibration, FitsFrame,
+    FrameAcceptanceCriteria, FrameDisposition, FrameWeighting, GpuOptions, ImpulseFilterOptions,
+    Interpolation, LinearImage, LiveStacker, MasterBuildOptions, MasterFrameKind,
+    NormalizationMode, RegistrationModel, RejectionMode, StackOptions, StackSnapshot,
+    build_master_from_fits, detect_defects, write_master_fits_f32, write_processed_image_fits_f32,
 };
 use std::path::PathBuf;
 
@@ -2599,6 +2599,268 @@ const SHIFTS: [(f32, f32); 8] = [
     (0.7, 4.4),
     (-4.2, -0.5),
     (3.4, 3.1),
+];
+
+/// The file coordinator's corrected flat (#406): flats measured on either
+/// side of a dust change, and the measured change map applied to the master
+/// from the far side. Its corrected masters are cached under OUTPUT_VERSION.
+#[test]
+fn a_file_prepared_corrected_flat_keeps_its_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let library = directory.path().join("library");
+    std::fs::create_dir(&library).unwrap();
+    let (width, height) = (240, 160);
+    let response = |dust: bool, rotated: bool| {
+        (0..width * height)
+            .map(|i| {
+                let (x, y) = ((i % width) as f32, (i / width) as f32);
+                let dimple = |cx: f32, cy: f32, depth: f32| {
+                    let distance = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
+                    1.0 - depth * ((14.0 - distance) / 2.0).clamp(0.0, 1.0)
+                };
+                let mut v = 1.0
+                    - 0.3 * ((x - 120.0).powi(2) + (y - 80.0).powi(2))
+                        / (120.0f32.powi(2) + 80.0f32.powi(2));
+                if dust {
+                    v *= dimple(60.0, 90.0, 0.03);
+                }
+                if rotated {
+                    v *= dimple(170.0, 40.0, 0.04);
+                }
+                v
+            })
+            .collect::<Vec<f32>>()
+    };
+    let write = |path: PathBuf, kind: &str, filter: &str, angle: f64, day: u8, dust: bool| {
+        let data = response(dust, angle == 90.0)
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| {
+                let noise = ((i * 17 + i / 240 * 13) % 101) as f32 / 100.0 - 0.5;
+                match kind {
+                    "BIAS" => 500.0 + noise * 2.0,
+                    "FLAT" => 500.0 + 20000.0 * v + noise * 3.0,
+                    _ => 500.0 + 1000.0 * v + noise * 2.0,
+                }
+            })
+            .collect::<Vec<_>>();
+        let cards = [
+            ("IMAGETYP", HeaderValue::String(kind.into())),
+            ("FILTER", HeaderValue::String(filter.into())),
+            ("ROTATANG", HeaderValue::Float(angle)),
+            ("INSTRUME", HeaderValue::String("TestCam".into())),
+            ("GAIN", HeaderValue::Integer(100)),
+            ("OFFSET", HeaderValue::Integer(50)),
+            ("XBINNING", HeaderValue::Integer(1)),
+            ("YBINNING", HeaderValue::Integer(1)),
+            (
+                "EXPTIME",
+                HeaderValue::Float(if kind == "BIAS" { 0.01 } else { 30.0 }),
+            ),
+            (
+                "DATE-OBS",
+                HeaderValue::String(format!("2026-10-{day}T20:00:00Z")),
+            ),
+            ("OBJECT", HeaderValue::String("M42".into())),
+        ]
+        .map(|(key, value)| WriteHeaderCard::new(key, value));
+        let image = LinearImage::new(width, height, 1, data).unwrap();
+        write_processed_image_fits_f32(&path, &image, &[], &cards).unwrap();
+        path
+    };
+    for i in 0..3 {
+        write(
+            library.join(format!("bias-{i}.fits")),
+            "BIAS",
+            "Ha",
+            0.0,
+            20,
+            false,
+        );
+    }
+    let sets = [
+        ("Ha", 0.0, 20, false),
+        ("OIII", 0.0, 20, false),
+        ("Ha", 0.0, 26, true),
+        ("OIII", 0.0, 26, true),
+        ("Ha", 90.0, 26, true),
+    ];
+    for (set, (filter, angle, day, dust)) in sets.into_iter().enumerate() {
+        for i in 0..3 {
+            let path = library.join(format!("flat-{set}-{i}.fits"));
+            write(path, "FLAT", filter, angle, day, dust);
+        }
+    }
+    let lights = (0..5)
+        .map(|i| {
+            let path = directory.path().join(format!("sky-{i}.fits"));
+            write(path, "LIGHT", "Ha", 90.0, 19, false)
+        })
+        .collect();
+    let mut files = FileCalibration::new(lights, directory.path().join("cache"));
+    files.library = Some(library);
+    let review = files.analyze(CancelSignal::new(|| false), |_| {}).unwrap();
+    assert_eq!(review.flat_work.corrections.len(), 1);
+    let prepared = files
+        .prepare(&review.review_key, CancelSignal::new(|| false), |_| {})
+        .unwrap();
+    let flat = FitsFrame::open(prepared.file_sessions[0].flat.as_ref().unwrap()).unwrap();
+    check(
+        "FILE_CORRECTED_FLAT",
+        &summary(&flat.image),
+        FILE_CORRECTED_FLAT,
+    );
+}
+
+/// The file coordinator's flat-only session (#406): the pedestal fitted from
+/// its lights, written as a constant bias master, and the flat it calibrates.
+#[test]
+fn a_file_prepared_pedestal_and_its_flat_keep_their_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let library = directory.path().join("library");
+    std::fs::create_dir(&library).unwrap();
+    let (width, height) = (512, 512);
+    let response = (0..width * height)
+        .map(|i| {
+            let x = (i % width) as f32 - 256.0;
+            let y = (i / width) as f32 - 256.0;
+            1.0 - 0.35 * (x * x + y * y) / (2.0 * 256.0 * 256.0)
+        })
+        .collect::<Vec<f32>>();
+    let write = |path: PathBuf, kind: &str, data: Vec<f32>| {
+        let cards = [
+            ("IMAGETYP", HeaderValue::String(kind.into())),
+            ("INSTRUME", HeaderValue::String("TestCam".into())),
+            ("GAIN", HeaderValue::Integer(100)),
+            ("OFFSET", HeaderValue::Integer(50)),
+            ("XBINNING", HeaderValue::Integer(1)),
+            ("YBINNING", HeaderValue::Integer(1)),
+            ("EXPTIME", HeaderValue::Float(30.0)),
+            (
+                "DATE-OBS",
+                HeaderValue::String("2026-10-20T20:00:00Z".into()),
+            ),
+        ]
+        .map(|(key, value)| WriteHeaderCard::new(key, value));
+        let image = LinearImage::new(width, height, 1, data).unwrap();
+        write_processed_image_fits_f32(&path, &image, &[], &cards).unwrap();
+        path
+    };
+    for i in 0..2 {
+        let data = response.iter().map(|r| r * 20000.0).collect();
+        write(library.join(format!("flat-{i}.fits")), "FLAT", data);
+    }
+    let lights = (0..2)
+        .map(|i| {
+            let data = response.iter().map(|r| r * 900.0 + 500.0).collect();
+            write(
+                directory.path().join(format!("light-{i}.fits")),
+                "LIGHT",
+                data,
+            )
+        })
+        .collect();
+    let mut files = FileCalibration::new(lights, directory.path().join("cache"));
+    files.library = Some(library);
+    let review = files.analyze(CancelSignal::new(|| false), |_| {}).unwrap();
+    let prepared = files
+        .prepare(&review.review_key, CancelSignal::new(|| false), |_| {})
+        .unwrap();
+    let session = &prepared.file_sessions[0];
+    let bias = FitsFrame::open(session.bias.as_ref().unwrap()).unwrap();
+    let flat = FitsFrame::open(session.flat.as_ref().unwrap()).unwrap();
+    let mut values = summary(&bias.image);
+    values.extend(summary(&flat.image));
+    check("FILE_PEDESTAL_AND_FLAT", &values, FILE_PEDESTAL_AND_FLAT);
+}
+
+const FILE_CORRECTED_FLAT: &[f64] = &[
+    9.8896090e-1,
+    9.9174969e-1,
+    1.0994818e0,
+    8.6298949e-1,
+    9.9167120e-1,
+    1.0345374e0,
+    9.9164367e-1,
+    8.6299002e-1,
+    9.1174918e-1,
+    1.0403754e0,
+    1.0832415e0,
+    9.9873310e-1,
+    9.1174960e-1,
+    9.2797613e-1,
+    1.0566025e0,
+    1.0994685e0,
+    1.0566303e0,
+    9.2797667e-1,
+    9.1172606e-1,
+    1.0403522e0,
+    1.0832739e0,
+    1.0403801e0,
+    9.1172653e-1,
+    8.6299890e-1,
+    9.9162489e-1,
+    1.0345467e0,
+    9.9165303e-1,
+    8.6299938e-1,
+];
+const FILE_PEDESTAL_AND_FLAT: &[f64] = &[
+    4.7951474e2,
+    4.7951474e2,
+    4.7951474e2,
+    4.7951474e2,
+    4.7951474e2,
+    4.7951474e2,
+    4.7951474e2,
+    4.7951474e2,
+    4.7951474e2,
+    4.7951474e2,
+    4.7951474e2,
+    4.7951474e2,
+    4.7951474e2,
+    4.7951474e2,
+    4.7951474e2,
+    4.7951474e2,
+    4.7951474e2,
+    4.7951474e2,
+    4.7951474e2,
+    4.7951474e2,
+    4.7951474e2,
+    4.7951474e2,
+    4.7951474e2,
+    4.7951474e2,
+    4.7951474e2,
+    4.7951474e2,
+    4.7951474e2,
+    4.7951474e2,
+    9.9409221e-1,
+    9.9755448e-1,
+    1.1253883e0,
+    7.7919948e-1,
+    9.0902025e-1,
+    9.5229387e-1,
+    9.0902025e-1,
+    7.7919948e-1,
+    9.0902025e-1,
+    1.0388410e0,
+    1.0821147e0,
+    1.0388410e0,
+    9.0902025e-1,
+    9.5229387e-1,
+    1.0821147e0,
+    1.1253883e0,
+    1.0821147e0,
+    9.5229387e-1,
+    9.0902025e-1,
+    1.0388410e0,
+    1.0821147e0,
+    1.0388410e0,
+    9.0902025e-1,
+    7.7919948e-1,
+    9.0902025e-1,
+    9.5229387e-1,
+    9.0902025e-1,
+    7.7919948e-1,
 ];
 
 fn mono_stack(options: StackOptions) -> Vec<f64> {

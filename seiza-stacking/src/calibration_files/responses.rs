@@ -175,7 +175,7 @@ pub(super) fn prepare(
             Err(e) => {
                 check(cancel)?;
                 warnings.push(format!("Flat response {}: {e}", row.session_key));
-                row.error = Some(e);
+                row.error = Some(e.to_string());
             }
         }
         grouping.responses.push(row);
@@ -247,6 +247,7 @@ pub(super) fn prepare(
     }
     Ok(Prepared {
         grouping,
+        planes: sources.clone(),
         sources,
         measured,
     })
@@ -254,7 +255,10 @@ pub(super) fn prepare(
 
 pub(super) struct Prepared {
     pub grouping: groups::Request,
+    /// Every cached file the review read: response planes, then evidence.
     pub sources: Vec<Source>,
+    /// The response planes alone, which evidence is measured against.
+    planes: Vec<Source>,
     measured: BTreeMap<String, Measured>,
 }
 fn read_binned(light: &Cached, cache: &Path, cancel: &CancelSignal) -> Result<metric::Plane> {
@@ -394,14 +398,15 @@ impl Prepared {
                     .ok()
                     .and_then(|i| lights.get(i))
                     .map(|l| (&l.source, &l.processed_source))
-                    .ok_or_else(|| "Missing evidence source".to_owned())
+                    .ok_or_else(|| error("Missing evidence source"))
             })
             .collect::<Result<Vec<_>>>()?;
         digest_key(&(
             "flat-evidence-1",
             question,
             sources,
-            &self.sources,
+            // Not `sources`: one answer's memo must not key the next question.
+            &self.planes,
             seiza_calibration::flat_response::evidence::EVIDENCE_ALGORITHM_VERSION,
             seiza_calibration::flat_response::choice::CHOICE_ALGORITHM_VERSION,
         ))

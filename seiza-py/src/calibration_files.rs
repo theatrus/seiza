@@ -1,6 +1,7 @@
 //! Python's file coordinator binds native methods, independently of C's JSON.
 use crate::convert::{from_python, to_python};
 use crate::library::PyCalibrationRules;
+use crate::stacking::{keep_first, python_cancel_signal};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use seiza_calibration::library;
@@ -8,7 +9,7 @@ use seiza_stacking::calibration_files::{
     FileCalibration, PreparationOptions, PreparationProgress, Source,
 };
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 fn invalid(e: impl std::fmt::Display) -> PyErr {
     PyValueError::new_err(e.to_string())
@@ -106,36 +107,18 @@ impl PyCalibrationFiles {
         cancel: Option<Py<PyAny>>,
         progress: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let raised: Arc<Mutex<Option<PyErr>>> = Arc::new(Mutex::new(None));
-        let errors = Arc::clone(&raised);
-        let signal = seiza_stacking::CancelSignal::new(move || {
-            if errors.lock().unwrap().is_some() {
-                return true;
-            }
-            Python::attach(|py| {
-                match py.check_signals().and_then(|()| match &cancel {
-                    Some(f) => f.call0(py)?.bind(py).is_truthy(),
-                    None => Ok(false),
-                }) {
-                    Ok(stop) => stop,
-                    Err(e) => {
-                        *errors.lock().unwrap() = Some(e);
-                        true
-                    }
-                }
-            })
-        });
+        let (signal, raised) = python_cancel_signal(cancel);
         let errors = Arc::clone(&raised);
         let report = py.detach(|| {
             let notify = |update: &PreparationProgress| {
                 if let Some(callback) = &progress {
                     Python::attach(|py| {
-                        if errors.lock().unwrap().is_some() {
+                        if errors.lock().is_ok_and(|slot| slot.is_some()) {
                             return;
                         }
                         let result = to_python(py, update).and_then(|v| callback.call1(py, (v,)));
                         if let Err(e) = result {
-                            *errors.lock().unwrap() = Some(e);
+                            keep_first(&errors, e);
                         }
                     });
                 }
@@ -145,7 +128,7 @@ impl PyCalibrationFiles {
                 None => self.inner.analyze(signal, notify),
             }
         });
-        if let Some(error) = raised.lock().unwrap().take() {
+        if let Some(error) = raised.lock().ok().and_then(|mut slot| slot.take()) {
             return Err(error);
         }
         to_python(py, &report.map_err(invalid)?)

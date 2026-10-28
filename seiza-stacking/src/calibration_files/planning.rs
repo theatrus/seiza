@@ -1,52 +1,9 @@
-//! Desktop orchestration of Seiza's native objects. JSON is only the Swift
-//! presentation boundary; grading, selection and master decisions stay native.
+//! Desktop orchestration of Seiza's native objects: grading, selection and
+//! master decisions stay in `seiza_calibration::library`.
 use super::*;
 use seiza_calibration::flat_response::groups;
-use seiza_calibration::library::rules::{self, RigLayer, RuleBook};
+use seiza_calibration::library::rules::RuleBook;
 use std::sync::Arc;
-
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct Setting {
-    pub key: String,
-    pub value: Value,
-}
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct RigSettings {
-    pub rig_uuid: String,
-    pub settings: Vec<Setting>,
-}
-pub(super) fn rules(settings: &[Setting], rigs: &[RigSettings]) -> Result<RuleBook> {
-    let values = |settings: &[Setting]| -> Result<BTreeMap<String, Value>> {
-        let mut values = BTreeMap::new();
-        for setting in settings {
-            if values
-                .insert(setting.key.clone(), setting.value.clone())
-                .is_some()
-            {
-                return Err(format!("Duplicate calibration setting: {}", setting.key));
-            }
-        }
-        Ok(values)
-    };
-    let mut layers = BTreeMap::new();
-    for rig in rigs {
-        if layers
-            .insert(
-                rig.rig_uuid.clone(),
-                RigLayer {
-                    name: None,
-                    values: values(&rig.settings)?,
-                },
-            )
-            .is_some()
-        {
-            return Err("Duplicate calibration rig settings".into());
-        }
-    }
-    RuleBook::validated(values(settings)?, layers).map_err(error)
-}
 
 #[derive(Clone)]
 pub(super) struct Planner {
@@ -62,11 +19,13 @@ pub(super) struct Planner {
     pub associations: policy::Associations,
 }
 impl Planner {
-    pub fn new(request: &Request, rows: &[Cached], lights: &[Cached]) -> Result<Self> {
-        let rules = match &request.rules {
-            Some(rules) => rules.clone(),
-            None => rules(&request.settings, &request.rigs)?,
-        };
+    pub fn new(
+        rules: &RuleBook,
+        options: &PreparationOptions,
+        rows: &[Cached],
+        lights: &[Cached],
+    ) -> Result<Self> {
+        let rules = rules.clone();
         let mut frames = rows.iter().map(|r| r.frame.clone()).collect::<Vec<_>>();
         for frame in &frames {
             frame.check().map_err(error)?;
@@ -88,14 +47,8 @@ impl Planner {
             nights,
             grouping: groups::Request::default(),
             available_responses: Vec::new(),
-            options: policy::SessionOptions {
-                flat_star_masking: request.flat_star_masking,
-                flat_stability: request.flat_stability.clone(),
-            },
-            associations: policy::Associations {
-                flat: request.flat_association,
-                dark: request.dark_association,
-            },
+            options: options.masters.clone(),
+            associations: options.associations,
         };
         planner.library()?;
         Ok(planner)
@@ -135,7 +88,7 @@ impl Planner {
                 sessions.len() - 1
             });
             assignments.push(index);
-            selections.push(Selection::from(&selection));
+            selections.push(selection.summary());
         }
         for (index, session) in sessions.iter_mut().enumerate() {
             session.plan_flat_use(
@@ -180,68 +133,19 @@ impl Planner {
 }
 
 /// Native selection and master sessions, with assignments in light order.
-// Swift review records: identifiers and descriptions from native selections.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize)]
 pub struct Snapshot {
     /// Version of the native planning records.
     pub algorithm_version: u32,
     /// Per-light native selection records in original order.
-    pub selections: Vec<Selection>,
+    pub selections: Vec<policy::SelectionSummary>,
     /// Unique master sessions or measured flat sessions.
     pub sessions: Vec<policy::Session>,
     /// Index of each light's session in sessions.
     pub assignments: Vec<usize>,
     /// Native digest of resolved settings.
     pub settings_digest: Option<String>,
-}
-/// The identifiers and native explanations of one light's selected calibration.
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Serialize)]
-pub struct Selection {
-    /// Selected bias frame identifiers.
-    pub bias: Vec<String>,
-    /// Selected dark frame identifiers.
-    pub dark: Vec<String>,
-    /// Selected dark-flat frame identifiers.
-    pub dark_flat: Vec<String>,
-    /// Selected flat frame identifiers.
-    pub flat: Vec<String>,
-    /// Compatible frames excluded by native quality/validity policy.
-    pub kept_out: Vec<String>,
-    /// Kinds the native library could provide for this light.
-    pub library: policy::LibraryKinds,
-    /// The complete native physical matching gate.
-    pub tolerances: seiza_calibration::MatchTolerances,
-    /// Native explanation, placement and any required correction.
-    pub flat_basis: policy::FlatBasis,
-    /// Far-side flats unavailable to native alternate retries.
-    pub flat_held_back: Vec<String>,
-    /// Native family choice and its supporting basis.
-    pub flat_family: Option<policy::FlatFamily>,
-    /// Applied and orphaned personal commands.
-    pub flat_choices: Vec<policy::ChoiceNote>,
-    /// Resolved per-light rule explanations.
-    pub rule_notes: Vec<rules::RuleNote>,
-}
-impl From<&policy::CalibrationSelection> for Selection {
-    fn from(s: &policy::CalibrationSelection) -> Self {
-        let ids = |v: &[policy::CalibrationFrame]| v.iter().map(|f| f.frame_uuid.clone()).collect();
-        Self {
-            bias: ids(&s.bias),
-            dark: ids(&s.dark),
-            dark_flat: ids(&s.dark_flat),
-            flat: ids(&s.flat),
-            kept_out: ids(&s.kept_out),
-            library: s.library,
-            tolerances: s.match_tolerances(),
-            flat_basis: s.flat_basis.clone(),
-            flat_held_back: s.flat_held_back.clone(),
-            flat_family: s.flat_family.clone(),
-            flat_choices: s.flat_choices.clone(),
-            rule_notes: s.rules.notes(),
-        }
-    }
 }
 /// Measured native grouping visible to file-based hosts.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

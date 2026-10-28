@@ -58,7 +58,9 @@ fn setting_error(error: rules::SettingError, scope: &str) -> crate::Error {
     }
 }
 
-pub(super) fn rule_book(global: Vec<Setting>, rigs: Vec<RigSettings>) -> crate::Result<RuleBook> {
+/// A request's settings as a [`RuleBook`], each layer checked the way a
+/// settings panel saves it. Duplicate keys or rigs are refused.
+pub fn rule_book(global: Vec<Setting>, rigs: Vec<RigSettings>) -> crate::Result<RuleBook> {
     let mut layers = BTreeMap::new();
     for rig in rigs {
         let values = setting_values(rig.settings, &format!("rigs[{}].settings", rig.rig_uuid))?;

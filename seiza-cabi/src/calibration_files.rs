@@ -55,7 +55,7 @@ pub unsafe extern "C" fn seiza_calibration_files_json(
             .unwrap_or_else(|| seiza_stacking::CancelSignal::new(|| false));
         let report = seiza_stacking::calibration_files::json::run(request, cancel, |event| {
             if let Some(progress) = progress {
-                let phase = CString::new(event.phase).expect("static phase has no NUL");
+                let phase = CString::new(event.phase.to_string()).expect("a phase has no NUL");
                 unsafe { progress(phase.as_ptr(), event.completed, event.total, context) };
             }
         })

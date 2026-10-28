@@ -87,42 +87,6 @@ impl Request {
 }
 #[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize)]
-pub struct Selection {
-    pub bias: Vec<String>,
-    pub dark: Vec<String>,
-    pub dark_flat: Vec<String>,
-    pub flat: Vec<String>,
-    pub kept_out: Vec<String>,
-    pub library: LibraryKinds,
-    pub tolerances: MatchTolerances,
-    pub flat_basis: flat_groups::FlatBasis,
-    pub flat_held_back: Vec<String>,
-    pub flat_family: Option<flat_groups::FlatFamily>,
-    pub flat_choices: Vec<flat_groups::ChoiceNote>,
-    pub rule_notes: Vec<rules::RuleNote>,
-}
-impl Selection {
-    fn of(selected: &CalibrationSelection) -> Self {
-        let names =
-            |frames: &[CalibrationFrame]| frames.iter().map(|f| f.frame_uuid.clone()).collect();
-        Self {
-            bias: names(&selected.bias),
-            dark: names(&selected.dark),
-            dark_flat: names(&selected.dark_flat),
-            flat: names(&selected.flat),
-            kept_out: names(&selected.kept_out),
-            library: selected.library,
-            tolerances: selected.match_tolerances(),
-            flat_basis: selected.flat_basis.clone(),
-            flat_held_back: selected.flat_held_back.clone(),
-            flat_family: selected.flat_family.clone(),
-            flat_choices: selected.flat_choices.clone(),
-            rule_notes: selected.rules.notes(),
-        }
-    }
-}
-#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
-#[derive(Debug, Serialize)]
 pub struct FrameGrade {
     pub frame_uuid: String,
     pub judged: Option<Judged>,
@@ -134,7 +98,7 @@ pub struct FrameGrade {
 #[derive(Debug, Serialize)]
 pub struct Snapshot {
     pub algorithm_version: u32,
-    pub selections: Vec<Selection>,
+    pub selections: Vec<SelectionSummary>,
     pub grades: Vec<FrameGrade>,
     pub sessions: Vec<Session>,
     pub assignments: Vec<usize>,
@@ -259,7 +223,7 @@ fn evaluate_inner(
             sessions.len() - 1
         });
         assignments.push(index);
-        selections.push(Selection::of(&selected));
+        selections.push(selected.summary());
     }
     finalize(
         &mut sessions,

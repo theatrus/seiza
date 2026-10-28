@@ -37,20 +37,25 @@ seiza_stacking::calibration_files::verify_sources(&prepared.sources)?;
 quality/group/side choices. Defaults stop when a light's calibration is
 incomplete. `Keep` prepares available calibration; `Exclude` returns original
 order and `missing` flags so the host can omit those lights without reordering
-the rest. Review integrates no masters. Execution rebuilds the review from
+the rest. The review's `missing` flags come before that choice, so changing
+`options.incomplete` after analysis needs no new review. Review integrates no
+masters. Execution rebuilds the review from
 current sources/settings/choices before accepting its identity. A required
 correction that cannot be produced is an error, never an uncorrected flat
 presented as corrected. Source inputs are never modified.
 
 Rust receives typed report records and native session/selection explanations.
 There is no JSON call between the Rust coordinator and the calibration engine.
-`PreparationError::Cancelled` and `ReviewChanged` distinguish cancellation and
-stale review from `Failed(reason)`. Cancellation interrupts cache lock waits,
+`PreparationError` says what the host does next: `Cancelled`; `ReviewChanged`
+(analyze again; `changed` names the reviewed file that changed, when one did);
+`Incomplete` (`IncompleteLights::Stop` refused lights without complete
+calibration: review them or choose another policy); or `Failed(reason)`.
+Cancellation interrupts cache lock waits,
 measurement boundaries and master building; completed immutable cache entries
 remain reusable. No partial master is published.
 
-Progress is synchronous on the coordinating thread: phase, completed and total.
-A zero total denotes discovery. Callbacks must not reenter the same cache;
+Progress is synchronous on the coordinating thread: a `PreparationPhase`,
+completed and total. A zero total denotes discovery. Callbacks must not reenter the same cache;
 platform adapters should dispatch UI updates without blocking on a waiting UI
 thread. No callback is retained after the method returns.
 
@@ -111,15 +116,19 @@ or C-only request objects. Database callers retain the independent
 
 The host selects an explicit cache directory. Calls serialize per cache through
 a portable file lock. File aliases/hard links are recognized on supported
-platforms; duplicate lights and calibration/light aliases are refused. Recursive
-directory symlinks are not traversed, and the cache is excluded from discovery.
+platforms; duplicate lights and calibration/light aliases are refused. Linked
+files are read like any other; linked directories, and links into the cache,
+are not followed, and the cache is excluded from discovery. A library file
+refused for what it is (a light, an already calibrated frame) is remembered
+by its stamp, so it is not decoded again on the next call.
 Native readers/writers handle FITS and XISF through `seiza-image-io`.
 
 Measurements, raw response planes, light bins, evidence, integrated masters and
 corrected masters have separate identities. Rule changes regrade cached
 measurements rather than rereading pixels. Master/evidence identities include
 source stamps, native policy/metric versions, relevant options and output
-versions. Settings and all source-bound choices participate in review identity.
+versions. Settings and all source-bound choices participate in review identity;
+the incomplete-light policy does not.
 
 Stamps are metadata identities rather than pixel hashes: canonical path, size
 and high-resolution modification time, plus Unix device/inode or other
