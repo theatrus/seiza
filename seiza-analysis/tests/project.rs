@@ -277,14 +277,14 @@ fn small_color_bayer_and_mismatched_inputs_are_reported() {
         .unwrap();
     }
     let report = analyze(&[dir.path().to_path_buf()], &AnalysisOptions::default()).unwrap();
-    assert_eq!(report.frames.len(), 5);
+    assert_eq!(report.frames.len(), 10);
     assert_eq!(
         report
             .frames
             .iter()
             .filter(|f| f.measurement_status == "failed")
             .count(),
-        3
+        5
     );
     assert_eq!(report.groups[0].measured_frames, 2);
     assert_eq!(report.groups[0].depth_frames, 1);
@@ -321,7 +321,7 @@ fn metrics_are_independent_of_registration_and_depth_admission() {
         },
     )
     .unwrap();
-    assert_eq!(full.schema_version, 2);
+    assert_eq!(full.schema_version, 3);
     assert_eq!(full.frames[1].measurement_status, "measured");
     assert_eq!(full.frames[1].depth_status, "unavailable");
     assert!(full.frames[1].error.is_none());
@@ -413,4 +413,140 @@ fn measurements_survive_when_no_depth_reference_can_be_built() {
         assert_eq!(report.groups[0].median_hfr, None);
         assert_eq!(report.groups[0].depth_frames, 0);
     }
+}
+
+#[test]
+fn osc_components_keep_native_noise_and_do_not_mix_layouts() {
+    let dir = tempfile::tempdir().unwrap();
+    let inputs = dir.path().join("inputs");
+    std::fs::create_dir(&inputs).unwrap();
+    let side = 400;
+    for i in 0..6 {
+        let mut planes = Vec::new();
+        for c in 0..4 {
+            let path = dir.path().join(format!("plane-{i}-{c}.fits"));
+            write_frame(
+                &path,
+                100 + i * 4 + c,
+                (0., 0.),
+                (c + 1) as f64,
+                Some("OSC"),
+                side,
+            );
+            planes.push(
+                seiza_image_io::read_astronomy(&path)
+                    .unwrap()
+                    .image
+                    .into_physical_f32(),
+            );
+        }
+        let mut mosaic = vec![0.; side * side * 4];
+        let mut rgb = vec![0.; side * side * 3];
+        for y in 0..side {
+            for x in 0..side {
+                for c in 0..4 {
+                    mosaic[(2 * y + c / 2) * (2 * side) + 2 * x + c % 2] = planes[c][y * side + x];
+                }
+                for (c, src) in [0, 1, 3].iter().enumerate() {
+                    rgb[(y * side + x) * 3 + c] = planes[*src][y * side + x];
+                }
+            }
+        }
+        let mut headers = vec![
+            WriteHeaderCard::new("FILTER", HeaderValue::String("OSC".into())),
+            WriteHeaderCard::new("EXPTIME", HeaderValue::Float(60.)),
+        ];
+        seiza_image_io::save_f32(
+            &inputs.join(format!(
+                "rgb-{i}.{}",
+                if i % 2 == 0 { "fits" } else { "xisf" }
+            )),
+            side,
+            side,
+            F32ImageData::RgbInterleaved(&rgb),
+            &seiza_image_io::SaveOptions {
+                headers: &headers,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        headers.push(WriteHeaderCard::new(
+            "BAYERPAT",
+            HeaderValue::String("RGGB".into()),
+        ));
+        seiza_image_io::save_f32(
+            &inputs.join(format!(
+                "cfa-{i}.{}",
+                if i % 2 == 0 { "fits" } else { "xisf" }
+            )),
+            side * 2,
+            side * 2,
+            F32ImageData::Mono(&mosaic),
+            &seiza_image_io::SaveOptions {
+                headers: &headers,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let report = analyze(
+        &[inputs],
+        &AnalysisOptions {
+            samples: 32768,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(report.schema_version, 3);
+    assert_eq!(report.frames.len(), 42);
+    assert_eq!(report.groups.len(), 7);
+    assert!(
+        report
+            .frames
+            .iter()
+            .all(|r| r.measurement_status == "measured" && r.depth_status == "included"),
+        "{:?}",
+        report.frames
+    );
+    for g in &report.groups {
+        assert_eq!(g.measured_frames, 6);
+        assert_eq!(g.depth_frames, 6);
+        assert_eq!(g.integration_seconds, 360.);
+        let c = match g.component.as_deref().unwrap() {
+            "R" => 1.,
+            "G" | "G_red" => 2.,
+            "G_blue" => 3.,
+            "B" => 4.,
+            _ => panic!(),
+        };
+        assert!((g.median_background.unwrap() / c - 1000.).abs() < 5.);
+        let first = g.curve[1].noise.unwrap();
+        let last = g.curve[5].noise.unwrap();
+        assert!((first / c - 10. / 2f64.sqrt()).abs() < 1.2, "{g:?}");
+        assert!((last / first - (2f64 / 6.).sqrt()).abs() < 0.12, "{g:?}");
+    }
+    for component in ["R", "B"] {
+        let cfa = report
+            .groups
+            .iter()
+            .find(|g| {
+                g.image_kind.as_deref() == Some("cfa") && g.component.as_deref() == Some(component)
+            })
+            .unwrap();
+        let rgb = report
+            .groups
+            .iter()
+            .find(|g| {
+                g.image_kind.as_deref() == Some("rgb") && g.component.as_deref() == Some(component)
+            })
+            .unwrap();
+        assert!((cfa.median_fwhm.unwrap() - 2. * rgb.median_fwhm.unwrap()).abs() < 1e-6);
+        assert_eq!(cfa.curve[5].noise, rgb.curve[5].noise);
+    }
+    let html = seiza_analysis::render_html(&report).unwrap();
+    assert!(html.contains("sameFilter"));
+    eprintln!(
+        "OSC fixture: 12 sources / 42 component records, {:.3}s total, {:.3}s measurement",
+        report.timings.total_seconds, report.timings.measurement_seconds
+    );
 }

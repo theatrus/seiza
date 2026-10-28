@@ -11,7 +11,7 @@ pub struct AnalyzeArgs {
     /// Filter header to include (case insensitive)
     #[arg(long)]
     filter: Option<String>,
-    /// Detector samples per frame, rounded down to 256-sample patches
+    /// Detector samples per component, rounded down to 256-sample patches
     #[arg(long, default_value_t = 262_144)]
     samples: usize,
     /// Measure frame quality without registration or noise-depth analysis
@@ -58,7 +58,13 @@ pub fn run(args: AnalyzeArgs) -> Result<()> {
             .with_context(|| format!("writing {}", path.display()))?;
     }
     eprintln!(
-        "Analyzed {} inputs in {} filter groups. Reports: {}, {}",
+        "Analyzed {} sources ({} component records) in {} filter/component groups. Reports: {}, {}",
+        report
+            .frames
+            .iter()
+            .map(|f| &f.path)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
         report.frames.len(),
         report.groups.len(),
         args.json.display(),

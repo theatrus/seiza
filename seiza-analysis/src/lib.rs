@@ -2,7 +2,9 @@
 //! detector samples, a common footprint, and balanced odd/even differences.
 //! This is an equal-weight diagnostic, not a prediction of production rejection.
 
+mod color;
 mod report;
+pub use color::SamplingInfo;
 mod sampling;
 mod trend;
 pub use report::{
@@ -29,7 +31,8 @@ pub enum Error {
     Json(#[from] serde_json::Error),
 }
 
-/// Analysis settings shared by all hosts. Sample counts round down to whole 256-sample patches.
+/// Analysis settings shared by all hosts. Samples are budgeted per component,
+/// rounded down to whole 256-sample patches.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AnalysisOptions {
@@ -52,7 +55,7 @@ impl Default for AnalysisOptions {
     }
 }
 
-/// Schema 2. Depth noise uses reference units; frame measurements use native units.
+/// Schema 3. One frame record per source/component; mono retains one record per source. Depth noise uses reference units; frame measurements use native units.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AnalysisReport {
     #[serde(default)]
@@ -66,6 +69,9 @@ pub struct AnalysisReport {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FrameReport {
+    /// Native sample layout; absent in legacy schema 1/2.
+    #[serde(default)]
+    pub sampling: Option<SamplingInfo>,
     pub path: PathBuf,
     pub filter: Option<String>,
     pub capture_time: Option<String>,
@@ -98,6 +104,11 @@ pub struct FrameReport {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct FilterReport {
+    /// Groups never mix mono, CFA lattices or RGB components.
+    #[serde(default)]
+    pub image_kind: Option<String>,
+    #[serde(default)]
+    pub component: Option<String>,
     pub filter: Option<String>,
     pub reference: Option<PathBuf>,
     pub candidate_patches: usize,
@@ -226,7 +237,7 @@ pub fn analyze(inputs: &[PathBuf], options: &AnalysisOptions) -> Result<Analysis
     if paths.is_empty() {
         return Err(Error::Invalid("no FITS/XISF inputs found".into()));
     }
-    let mut result = AnalysisReport { schema_version: 2, algorithm_version: 2, timings: AnalysisTimings::default(),
+    let mut result = AnalysisReport { schema_version: 3, algorithm_version: 3, timings: AnalysisTimings::default(),
         options: options.clone(), frames: Vec::new(), groups: Vec::new(),
         warnings: vec!["Equal-weight nearest-detector diagnostic. Shared scene structure and shared systematic errors cancel in split noise; seeing, registration and illumination changes may remain. This does not reproduce production weighting or rejection.".into(),
         "Curves follow sorted path order, not capture-time or quality order. Ideal noise assumes independent equal-quality frames; it is not an improvement forecast.".into()] };
@@ -238,10 +249,12 @@ pub fn analyze(inputs: &[PathBuf], options: &AnalysisOptions) -> Result<Analysis
         );
     }
     result.warnings.push("Measurement and depth outcomes are processing outcomes, not quality verdicts. Compare combined metrics within one panel/pointing and filter; separate pointings into separate input lists or invocations.".into());
-    let mut measured_groups: BTreeMap<Option<String>, Vec<usize>> = BTreeMap::new();
-    let mut groups: BTreeMap<Option<String>, Group> = BTreeMap::new();
+    let mut measured_groups: BTreeMap<(Option<String>, String, String), Vec<usize>> =
+        BTreeMap::new();
+    let mut groups: BTreeMap<(Option<String>, String, String), Group> = BTreeMap::new();
     for path in paths {
-        let mut row = FrameReport {
+        let mut base_row = FrameReport {
+            sampling: None,
             path: path.clone(),
             filter: None,
             capture_time: None,
@@ -269,48 +282,94 @@ pub fn analyze(inputs: &[PathBuf], options: &AnalysisOptions) -> Result<Analysis
             normalization: None,
             warnings: Vec::new(),
         };
-        let index = result.frames.len();
-        match prepare(&path, options, &mut row, &mut result.timings) {
-            Ok(Some((frame, measured))) => {
-                let key = row.filter.as_ref().map(|s| s.to_lowercase());
-                row.measurement_status = "measured".into();
-                measured_groups.entry(key.clone()).or_default().push(index);
-                if options.metrics_only {
-                    result.frames.push(row);
-                    continue;
-                }
-                if let Some(group) = groups.get_mut(&key) {
-                    match sample_frame(group, &frame, &measured, &mut row, &mut result.timings) {
-                        Ok(values) => {
-                            timed(&mut result.timings.sampling_seconds, || {
-                                append(group, &values, index)
-                            })?;
-                            row.depth_status = "included".into();
-                        }
-                        Err(error) => row.depth_error = Some(error),
-                    }
-                } else {
-                    match new_group(&frame, measured, &row, options, &mut result.timings) {
-                        Ok(mut group) => {
-                            let values = group.reference_samples.clone();
-                            timed(&mut result.timings.sampling_seconds, || {
-                                append(&mut group, &values, index)
-                            })?;
-                            row.depth_status = "included".into();
-                            row.gain = Some(1.0);
-                            row.offset = Some(0.0);
-                            row.normalization = Some("reference".into());
-                            row.warnings.push("Reference frame: identity placement is not an independent registration measurement.".into());
-                            groups.insert(key, group);
-                        }
-                        Err(error) => row.depth_error = Some(error),
-                    }
-                }
+        let raw = match timed(&mut result.timings.read_seconds, || {
+            seiza_image_io::read_astronomy(&path)
+        }) {
+            Ok(raw) => raw,
+            Err(error) => {
+                base_row.error = Some(error.to_string());
+                result.frames.push(base_row);
+                continue;
             }
-            Ok(None) => {}
-            Err(error) => row.error = Some(error),
+        };
+        base_row.filter = raw
+            .image
+            .header_str("FILTER")
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        base_row.capture_time = seiza_image_io::capture_time_from_headers(&raw.image.headers);
+        if options.filter.as_ref().is_some_and(|f| {
+            !base_row
+                .filter
+                .as_ref()
+                .is_some_and(|v| v.eq_ignore_ascii_case(f))
+        }) {
+            base_row.measurement_status = "excluded".into();
+            result.frames.push(base_row);
+            continue;
         }
-        result.frames.push(row);
+        let images = match timed(&mut result.timings.measurement_seconds, || {
+            color::split(raw.image)
+        }) {
+            Ok(images) => images,
+            Err(error) => {
+                base_row.error = Some(error);
+                result.frames.push(base_row);
+                continue;
+            }
+        };
+        for (image, sampling) in images {
+            let mut row = base_row.clone();
+            row.sampling = Some(sampling);
+            let index = result.frames.len();
+            match prepare(image, &path, &mut row, &mut result.timings) {
+                Ok((frame, measured)) => {
+                    let layout = row.sampling.as_ref().unwrap();
+                    let key = (
+                        row.filter.as_ref().map(|s| s.to_lowercase()),
+                        layout.image_kind.clone(),
+                        layout.component.clone(),
+                    );
+                    row.measurement_status = "measured".into();
+                    measured_groups.entry(key.clone()).or_default().push(index);
+                    if options.metrics_only {
+                        result.frames.push(row);
+                        continue;
+                    }
+                    if let Some(group) = groups.get_mut(&key) {
+                        match sample_frame(group, &frame, &measured, &mut row, &mut result.timings)
+                        {
+                            Ok(values) => {
+                                timed(&mut result.timings.sampling_seconds, || {
+                                    append(group, &values, index)
+                                })?;
+                                row.depth_status = "included".into();
+                            }
+                            Err(error) => row.depth_error = Some(error),
+                        }
+                    } else {
+                        match new_group(&frame, measured, &row, options, &mut result.timings) {
+                            Ok(mut group) => {
+                                let values = group.reference_samples.clone();
+                                timed(&mut result.timings.sampling_seconds, || {
+                                    append(&mut group, &values, index)
+                                })?;
+                                row.depth_status = "included".into();
+                                row.gain = Some(1.0);
+                                row.offset = Some(0.0);
+                                row.normalization = Some("reference".into());
+                                row.warnings.push("Reference frame: identity placement is not an independent registration measurement.".into());
+                                groups.insert(key, group);
+                            }
+                            Err(error) => row.depth_error = Some(error),
+                        }
+                    }
+                }
+                Err(error) => row.error = Some(error),
+            }
+            result.frames.push(row);
+        }
     }
     for (key, indices) in measured_groups {
         let mut group = if let Some(depth) = groups.remove(&key) {
@@ -320,6 +379,8 @@ pub fn analyze(inputs: &[PathBuf], options: &AnalysisOptions) -> Result<Analysis
         } else {
             FilterReport {
                 filter: result.frames[indices[0]].filter.clone(),
+                image_kind: Some(key.1.clone()),
+                component: Some(key.2.clone()),
                 ..Default::default()
             }
         };
@@ -328,10 +389,30 @@ pub fn analyze(inputs: &[PathBuf], options: &AnalysisOptions) -> Result<Analysis
         annotate_health(&indices, &mut result.frames, &group);
         result.groups.push(group);
     }
+    result.groups.sort_by_key(|g| {
+        (
+            g.filter.as_ref().map(|f| f.to_lowercase()),
+            g.image_kind.clone(),
+            match g.component.as_deref() {
+                Some("R") => 0,
+                Some("G" | "G_red") => 1,
+                Some("G_blue") => 2,
+                Some("B") => 3,
+                _ => 0,
+            },
+        )
+    });
     if result.groups.is_empty() {
         result
             .warnings
             .push("No measured frames; inspect measurement errors and filter selection.".into());
+    }
+    if result
+        .frames
+        .iter()
+        .any(|f| f.sampling.as_ref().is_some_and(|s| s.image_kind != "mono"))
+    {
+        result.warnings.push("Color analysis has one record per source/component. CFA uses four separate, un-interpolated half-resolution lattices (R, G on the red row, G on the blue row, B); HFR/FWHM and registration RMS are in original-image pixels. Sparse CFA sampling can bias undersampled star shapes. RGB components retain any prior demosaicing correlations. Do not sum exposure across components or compare native noise across unlike layouts.".into());
     }
     result.timings.total_seconds = started.elapsed().as_secs_f64();
     Ok(result)
@@ -371,51 +452,31 @@ fn astronomy(path: &Path) -> bool {
     seiza_image_io::Format::from_path(path).is_some_and(|f| f.is_astronomy())
 }
 fn prepare(
+    image: seiza_fits::FitsImage,
     path: &Path,
-    options: &AnalysisOptions,
     row: &mut FrameReport,
     timings: &mut AnalysisTimings,
-) -> Result<Option<(FitsFrame, HocusFocusDetectionResult)>, String> {
-    let raw = timed(&mut timings.read_seconds, || {
-        seiza_image_io::read_astronomy(path)
-    })
-    .map_err(|e| e.to_string())?;
+) -> Result<(FitsFrame, HocusFocusDetectionResult), String> {
     timed(&mut timings.measurement_seconds, || {
-        row.filter = raw
-            .image
-            .header_str("FILTER")
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned);
-        row.capture_time = seiza_image_io::capture_time_from_headers(&raw.image.headers);
-        if options.filter.as_ref().is_some_and(|f| {
-            !row.filter
-                .as_ref()
-                .is_some_and(|v| v.eq_ignore_ascii_case(f))
-        }) {
-            row.measurement_status = "excluded".into();
-            return Ok(None);
+        if image.width < 40 || image.height < 40 {
+            return Err(
+                "image too small for analysis (minimum 40 samples per component axis)".into(),
+            );
         }
-        if raw.image.planes != 1 || raw.image.bayer_pattern_in_storage_order().is_some() {
-            return Err("analysis currently requires monochrome, non-Bayer frames".into());
-        }
-        if raw.image.width < 40 || raw.image.height < 40 {
-            return Err("image too small for analysis (minimum 40 pixels per axis)".into());
-        }
-        let luma = seiza_image_io::luma_u16(&raw.image);
+        let luma = seiza_image_io::luma_u16(&image);
         let mut measured = seiza_stars::detect_stars_hocus_focus(
             &luma,
-            raw.image.width,
-            raw.image.height,
+            image.width,
+            image.height,
             &HocusFocusParams {
                 psf_type: PSFType::Gaussian,
                 ..Default::default()
             },
         );
         let luma = luma.into_owned();
-        let saturation = raw.image.header_f64("SATURATE").filter(|v| v.is_finite());
+        let saturation = image.header_f64("SATURATE").filter(|v| v.is_finite());
         let mut frame =
-            FitsFrame::from_fits(raw.image, Some(path.to_path_buf())).map_err(|e| e.to_string())?;
+            FitsFrame::from_fits(image, Some(path.to_path_buf())).map_err(|e| e.to_string())?;
         // The measurement detector works on u16. Its flux must be converted back
         // to physical units: per-frame min/max scaling otherwise erases transparency.
         let endpoints = luma
@@ -433,8 +494,9 @@ fn prepare(
         }
         row.exposure_seconds = frame.exposure_seconds;
         row.star_count = Some(measured.stars.len());
-        row.median_hfr = sampling::median(measured.stars.iter().map(|s| s.hfr));
-        row.median_fwhm = sampling::median(measured.stars.iter().map(|s| s.fwhm));
+        let spacing = f64::from(row.sampling.as_ref().unwrap().spacing_pixels);
+        row.median_hfr = sampling::median(measured.stars.iter().map(|s| s.hfr * spacing));
+        row.median_fwhm = sampling::median(measured.stars.iter().map(|s| s.fwhm * spacing));
         row.median_eccentricity = sampling::median(
             measured
                 .stars
@@ -476,7 +538,7 @@ fn prepare(
                 "No SATURATE header; detector-sample saturation masking is unavailable.".into(),
             );
         }
-        Ok(Some((frame, measured)))
+        Ok((frame, measured))
     })
 }
 
@@ -503,6 +565,8 @@ fn new_group(
         let (reference_samples, common) = sampling::gather(&frame.image, &patches, None);
         let report = FilterReport {
             filter: row.filter.clone(),
+            image_kind: row.sampling.as_ref().map(|s| s.image_kind.clone()),
+            component: row.sampling.as_ref().map(|s| s.component.clone()),
             reference: Some(row.path.clone()),
             candidate_patches: patches.len(),
             ..Default::default()
@@ -538,7 +602,10 @@ fn sample_frame(
     .map_err(|e| e.to_string())?;
     timed(&mut timings.sampling_seconds, || {
         row.matched_stars = Some(registration.matched_stars);
-        row.registration_rms_pixels = Some(registration.rms_error_pixels);
+        row.registration_rms_pixels = Some(
+            registration.rms_error_pixels
+                * f64::from(row.sampling.as_ref().unwrap().spacing_pixels),
+        );
         let (mut values, valid) =
             sampling::gather(&frame.image, &group.patches, Some(&registration));
         let ratios = stellar_ratios(&group.measured, measured, &registration);

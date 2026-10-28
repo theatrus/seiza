@@ -1,0 +1,98 @@
+[
+  {
+    "component_records": 24,
+    "height": 800,
+    "kind": "cfa",
+    "repeat": 0,
+    "source_count": 6,
+    "timings": {
+      "measurement_seconds": 6.089263400000001,
+      "read_seconds": 0.0099422,
+      "registration_seconds": 0.08235039999999999,
+      "replay_seconds": 0.012303500000000002,
+      "sampling_seconds": 0.04845130000000001,
+      "total_seconds": 6.2463736
+    },
+    "width": 800
+  },
+  {
+    "component_records": 18,
+    "height": 800,
+    "kind": "rgb",
+    "repeat": 0,
+    "source_count": 6,
+    "timings": {
+      "measurement_seconds": 7.157775800000001,
+      "read_seconds": 0.026213999999999994,
+      "registration_seconds": 0.0915043,
+      "replay_seconds": 0.011750899999999998,
+      "sampling_seconds": 0.045113600000000004,
+      "total_seconds": 7.3366661
+    },
+    "width": 800
+  },
+  {
+    "component_records": 18,
+    "height": 800,
+    "kind": "rgb",
+    "repeat": 1,
+    "source_count": 6,
+    "timings": {
+      "measurement_seconds": 7.0900481,
+      "read_seconds": 0.027023500000000002,
+      "registration_seconds": 0.09123769999999999,
+      "replay_seconds": 0.011930899999999998,
+      "sampling_seconds": 0.04485979999999999,
+      "total_seconds": 7.2694595
+    },
+    "width": 800
+  },
+  {
+    "component_records": 24,
+    "height": 800,
+    "kind": "cfa",
+    "repeat": 1,
+    "source_count": 6,
+    "timings": {
+      "measurement_seconds": 6.0893278,
+      "read_seconds": 0.0099334,
+      "registration_seconds": 0.0828759,
+      "replay_seconds": 0.012318,
+      "sampling_seconds": 0.04850530000000001,
+      "total_seconds": 6.2474505
+    },
+    "width": 800
+  },
+  {
+    "component_records": 24,
+    "height": 800,
+    "kind": "cfa",
+    "repeat": 2,
+    "source_count": 6,
+    "timings": {
+      "measurement_seconds": 6.161119,
+      "read_seconds": 0.010086600000000001,
+      "registration_seconds": 0.0834966,
+      "replay_seconds": 0.0124722,
+      "sampling_seconds": 0.047619199999999993,
+      "total_seconds": 6.3188198
+    },
+    "width": 800
+  },
+  {
+    "component_records": 18,
+    "height": 800,
+    "kind": "rgb",
+    "repeat": 2,
+    "source_count": 6,
+    "timings": {
+      "measurement_seconds": 7.0940475,
+      "read_seconds": 0.026689900000000003,
+      "registration_seconds": 0.09063800000000002,
+      "replay_seconds": 0.0122776,
+      "sampling_seconds": 0.045416099999999994,
+      "total_seconds": 7.2735255
+    },
+    "width": 800
+  }
+]

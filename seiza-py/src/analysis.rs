@@ -2,7 +2,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use std::path::PathBuf;
 
-/// Return frame measurements and measured-frame group baselines, including stellar peak SNR.
+/// Return schema-3 mono/CFA/RGB component measurements and filter/component baselines.
+/// Sampling geometry maps CFA sizes to original-image pixels without debayering.
 #[pyfunction]
 #[pyo3(signature = (inputs, *, samples=262_144, filter=None, max_frames=None, metrics_only=false))]
 fn analyze_project(

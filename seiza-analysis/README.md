@@ -1,7 +1,7 @@
 # seiza-analysis
 
 Project diagnostics without producing a full stack. The CLI, C ABI and Python
-call this same engine. The initial scope is monochrome, non-Bayer FITS/XISF.
+call this same engine. Mono, raw Bayer and planar RGB FITS/XISF are supported.
 
 ```rust,no_run
 let report = seiza_analysis::analyze(
@@ -118,7 +118,7 @@ they do not classify causes or automatically reject frames. Older schema-1 repor
 
 ## Reports and hosts
 
-New JSON carries `schema_version = 2` and `algorithm_version = 2`. Version 2
+Schema 2 introduced `schema_version = 2` and `algorithm_version = 2`. Version 2
 separates processing outcomes and changes the quality-baseline population;
 the full-mode depth calculation itself is unchanged. Top-level keys are
 `options`, `frames`, `groups`, `timings`, `warnings`, and the version fields.
@@ -298,3 +298,41 @@ The mode does not alter registration, integration, weighting, rejection or
 `OUTPUT_VERSION`. A collection can contain cheap, rich and legacy reports.
 
 See the [release-build report benchmarks](../docs/stack-report-benchmarks.md) for measured costs and reproduction instructions.
+
+
+### OSC / RGB analysis (schema 3)
+
+Analysis automatically recognizes mono, raw Bayer and three-plane RGB sources.
+No extra option is needed, including for rich post-stack reports. The input list
+is read once per source; measurement and registration run per component.
+`max_frames` limits source paths; `samples` is the budget **per component**.
+
+A schema-3 `frames` record represents one **source/component**, not necessarily
+one file. CFA produces `R`, `G_red` (green on a red row), `G_blue` (green on a blue
+row), and `B`; RGB produces `R`, `G`, `B`; mono produces `Mono`. Source-level read
+failures or filter exclusions produce one record without sampling metadata.
+Groups separate `(filter, image_kind, component)`, so CFA/RGB/mono never share
+normalization or noise baselines. Do not sum exposure across color components.
+
+Frame `sampling` records `image_kind`, `component`, `source_width`,
+`source_height`, `spacing_pixels`, `offset_pixels`, declared `bayer_pattern`,
+`storage_bayer_pattern` (row-order adjusted, before offsets), `bayer_offsets`,
+and declared `row_order`. C JSON uses camelCase spellings of these same keys.
+Native CFA sample `(x,y)` is at original stored-image pixel
+`(2*x + offset_pixels[0], 2*y + offset_pixels[1])`. Each lattice retains every
+native sample, including odd edges. No demosaicing, green averaging, white
+balance or new calibration occurs. Unrecognized Bayer declarations and invalid
+origin offsets are reported as failures rather than guessed as mono.
+
+HFR, FWHM and registration RMS are in **original-image pixels** (CFA component
+values multiplied by two); this does not recover details lost to sparse CFA
+sampling. Undersampled stars can have biased shapes. Noise/background retain
+native component units; depth noise uses that component's reference units.
+Registration and photometric normalization are independent per component. A
+component with too few stars/common patches can keep measurements while its
+noise curve is unavailable. RGB retains existing demosaicing/resampling
+correlations; it must not be interpreted as independent raw detector samples.
+
+Both HTML renderers select filter/layout/component explicitly. Schema 1/2
+reports remain renderable; new reports use schema/algorithm version 3.
+Stacking and stretching numerical output versions do not change.
