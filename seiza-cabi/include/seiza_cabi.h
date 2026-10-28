@@ -4302,6 +4302,8 @@ char *seiza_calibration_master_plan_json(const char *request_json,
                                          char **error_out);
 
 /*
+ Light choices may use exact full paths; these take precedence over basename
+ entries, preserving existing catalog lookup for other lights.
  Plan raw-flat response sessions and bounded samples from a camelCase
  library::Request. Returns plans, resolved limits/night boundaries, grades
  and unplanned frame IDs. Pure metadata/measurement policy; no pixel I/O.

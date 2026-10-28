@@ -707,3 +707,44 @@ fn psf_guard_family_ties_and_unfitted_pairs_are_resolved_in_core() {
     };
     assert_eq!(row.chosen, None);
 }
+
+#[test]
+fn path_scoped_light_choices_do_not_leak_between_identical_basenames() {
+    use crate::flat_response::groups;
+    let mut request = work_fixture().library;
+    request.lights.truncate(2);
+    request.lights[0].path = "/first/shared.fits".into();
+    request.lights[1] = request.lights[0].clone();
+    request.lights[1].path = "/second/shared.fits".into();
+    let book = groups::prepare(
+        plan_flat_work(FlatWorkRequest {
+            library: request.clone(),
+            ..Default::default()
+        })
+        .unwrap()
+        .grouping,
+    )
+    .unwrap();
+    let event = &book.events[0];
+    request.grouping.light_choices = vec![groups::LightChoiceEntry {
+        light_id: 0,
+        file_name: "/first/shared.fits".into(),
+        filter: Some("Ha".into()),
+        at: request.lights[0].timestamp,
+        row: groups::LightChoiceRow {
+            light_guid: "first".into(),
+            change_key: event.key.clone(),
+            rig_uuid: event.rig_uuid.clone(),
+            change_start: Some(event.start),
+            change_end: Some(event.end),
+            choice: Some(groups::LightChoice::Before),
+            group_frame: None,
+            group_session_key: None,
+            label: "before".into(),
+            chosen_at: 1,
+        },
+    }];
+    let result = evaluate(request).unwrap();
+    assert!(!result.selections[0].flat_choices.is_empty());
+    assert!(result.selections[1].flat_choices.is_empty());
+}

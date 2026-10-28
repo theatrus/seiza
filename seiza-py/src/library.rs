@@ -33,6 +33,7 @@ fn records<T: serde::de::DeserializeOwned>(
     }
 }
 /// Grade and select an immutable calibration library; no file or catalog I/O.
+/// Exact full-path light choices take precedence over catalog basename choices.
 #[pyfunction]
 #[pyo3(signature=(*,frames=None,lights=None,quality=None,global_settings=None,rigs=None,grouping=None,available_responses=None,night_shifts=None,regrade=false, master_failures=None, pedestal_evidence=None, force_flat_without_pedestal=false, flat_star_masking=false, flat_stability=None, prepared_grouping=None, flat_association="automatic", dark_association="automatic"))]
 #[allow(clippy::too_many_arguments)]

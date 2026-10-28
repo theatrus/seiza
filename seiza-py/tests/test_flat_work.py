@@ -70,3 +70,19 @@ def test_cached_response_pedestal_removal_uses_the_native_kernel():
     corrected = seiza.flat_response_without_pedestal(plane, level=100.0, pedestal=20.0)
     np.testing.assert_allclose(corrected, [[1.0, .75]], atol=1e-7)
     np.testing.assert_array_equal(plane, [[1.0, np.float32(.8)]])
+
+
+def test_path_scoped_manual_choices_keep_identical_basenames_separate():
+    source = library()
+    source['lights'] = [dict(source['lights'][0], path='/first/shared.fits'),
+                        dict(source['lights'][0], path='/second/shared.fits')]
+    prepared = seiza.calibration_flat_work_plan(library=source)['grouping']
+    event = seiza.flat_group_plan(**prepared)['events'][0]
+    source['grouping']['light_choices'] = [dict(light_id=0, file_name='/first/shared.fits',
+        filter='Ha', at=source['lights'][0]['timestamp'], row=dict(light_guid='first',
+        change_key=event['key'], rig_uuid=event['rig_uuid'], change_start=event['start'],
+        change_end=event['end'], choice='before', group_frame=None, group_session_key=None,
+        label='before', chosen_at=1))]
+    selected = seiza.calibration_library_plan(**source)['selections']
+    assert selected[0]['flat_choices']
+    assert not selected[1]['flat_choices']

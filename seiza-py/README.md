@@ -1864,3 +1864,7 @@ Manual `group_overrides` and `light_choices` are already core features on groupi
 requests. Feed PSF Guard's existing rows directly; the library selector enforces
 hard physical gates and resolves stale/orphaned choices. The desktop UI need not
 expose every core choice for PSF Guard to retain it.
+
+Manual light-choice entries can use an exact full path in `file_name`. It takes
+precedence over basename entries for that light, keeping same-named files from
+different folders separate. Catalog clients retain their existing basename keys.

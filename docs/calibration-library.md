@@ -357,3 +357,8 @@ No response sample plan alone constitutes measured light evidence. Missing image
 remain retryable host failures; inconclusive pixels remain undecided and do not
 become a positive family or side verdict. Current cached answers request no
 sample reads, preserving PSF Guard's database/cache advantage over a file-only CLI.
+
+Path-based hosts may key `LightChoiceEntry.file_name` by the exact light path.
+The selector prefers that key when present and otherwise uses the basename,
+preserving existing PSF Guard catalog semantics. This prevents same-name/time
+files in different directories from sharing a personal choice.

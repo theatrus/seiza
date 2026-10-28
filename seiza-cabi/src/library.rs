@@ -271,6 +271,8 @@ pub unsafe extern "C" fn seiza_calibration_master_plan_json(
     .unwrap_or(ptr::null_mut())
 }
 
+/// Light choices may use exact full paths; these take precedence over basename
+/// entries, preserving existing catalog lookup for other lights.
 /// Plan raw-flat response sessions and bounded samples from a camelCase
 /// library::Request. Returns plans, resolved limits/night boundaries, grades
 /// and unplanned frame IDs. Pure metadata/measurement policy; no pixel I/O.
@@ -783,6 +785,33 @@ mod master_policy_tests {
         assert!(!output.is_null());
         let result = unsafe { CString::from_raw(output) };
         field_names(serde_json::from_slice(result.as_bytes()).unwrap(), false)
+    }
+    #[test]
+    fn full_path_light_choices_do_not_cross_same_name_files() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../seiza-calibration/tests/fixtures/library/psf-guard.json"
+        ))
+        .unwrap();
+        let mut request = fixture["cases"][13]["request"].clone();
+        request["lights"][0]["path"] = serde_json::json!("/first/shared.fits");
+        request["lights"][1] = request["lights"][0].clone();
+        request["lights"][1]["path"] = serde_json::json!("/second/shared.fits");
+        let first = unsafe { call(request.clone(), seiza_calibration_library_plan_json) };
+        let event = &first["selections"][0]["flat_basis"]["event"];
+        request["grouping"]["light_choices"] = serde_json::json!([{"light_id":0,"file_name":"/first/shared.fits","filter":"Ha","at":request["lights"][0]["timestamp"],"row":{"light_guid":"first","change_key":event["key"],"rig_uuid":request["lights"][0]["rig_uuid"],"change_start":event["start"],"change_end":event["end"],"choice":"before","group_frame":null,"group_session_key":null,"label":"before","chosen_at":1}}]);
+        let result = unsafe { call(request, seiza_calibration_library_plan_json) };
+        assert!(
+            !result["selections"][0]["flat_choices"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            result["selections"][1]["flat_choices"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
     }
     #[test]
     fn cached_record_workflow_and_feedback_cross_the_c_abi() {

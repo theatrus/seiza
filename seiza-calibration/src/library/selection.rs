@@ -18,8 +18,16 @@ impl LibrarySnapshot {
         else {
             return Default::default();
         };
+        // A path-scoped host can distinguish identical basenames captured at
+        // the same time. Existing catalog clients retain basename lookup.
+        let full_path = light.path.to_string_lossy();
+        let name = if book.light_choices.contains_key(full_path.as_ref()) {
+            full_path.as_ref()
+        } else {
+            &name
+        };
         let mut choices = book.light_choices(
-            &name,
+            name,
             light.filter.as_deref(),
             &light.rig_uuid.clone(),
             light.timestamp,
