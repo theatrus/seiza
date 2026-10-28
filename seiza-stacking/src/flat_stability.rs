@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::path::PathBuf;
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FlatStabilityInput {
@@ -31,6 +32,7 @@ const FLAT_SMOOTH_RADIUS: usize = 16;
 /// optical path (a dust shadow, a dead cluster) and corrects the lights. A
 /// feature the frames disagree about was changing while they were shot, and
 /// the master's copy of it corrects nothing.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct FlatSetStability {
     pub algorithm_version: u32,
@@ -311,6 +313,7 @@ fn box_mean_plane(plane: &[f32], width: usize, height: usize, radius: usize) -> 
 }
 
 /// CFA pattern and phase for cached mono images. Offsets are zero or one.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FlatStabilityBayer {
@@ -338,6 +341,7 @@ impl FlatStabilityBayer {
 
 /// Metadata for a cached source image. Pixels must already use the same units
 /// as the master and optional bias/dark; no file headers or rescaling are used.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FlatStabilityImageMetadata {
@@ -347,6 +351,7 @@ pub struct FlatStabilityImageMetadata {
 }
 
 /// Options shared by the C buffer and Python NumPy measurement entry points.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FlatStabilityImageOptions {
@@ -460,6 +465,7 @@ pub fn measure_flat_stability_images(
 }
 
 /// File form of the loaded-master measurement, shared by C and Python.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FlatStabilityFileRequest {

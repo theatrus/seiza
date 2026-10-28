@@ -4,6 +4,7 @@ use super::*;
 
 /// Resolve already selected candidates after host verification/remapping.
 /// Candidate order is significant. No matching, scanning or pixel I/O occurs.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MasterPlanRequest {
@@ -121,6 +122,7 @@ pub fn plan_masters(request: MasterPlanRequest) -> crate::Result<Session> {
 }
 
 /// Coherence alone, for previews and build retries; accepts caller-ordered rows.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MasterCohortRequest {
@@ -128,6 +130,7 @@ pub struct MasterCohortRequest {
     pub frames: Vec<CalibrationFrame>,
     pub settings: Vec<Setting>,
 }
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize)]
 pub struct MasterCohort {
     pub kept: Vec<String>,
@@ -146,6 +149,7 @@ pub fn master_cohort(request: MasterCohortRequest) -> crate::Result<MasterCohort
     })
 }
 
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FlatRetryRequest {
@@ -195,7 +199,10 @@ pub fn flat_retry(request: FlatRetryRequest) -> crate::Result<FlatRetryDecision>
         rules.dark_temperature_c = session.tolerances.dark_temperature_c;
         (session.flat_stability.clone(), &session.flat_held_back)
     } else {
-        (request.policy.clone().unwrap_or_default(), &request.held_back)
+        (
+            request.policy.clone().unwrap_or_default(),
+            &request.held_back,
+        )
     };
     check_request(&request.candidates, &[], Vec::new(), Vec::new(), Vec::new())?;
     let mut retry = FlatRetry::new(

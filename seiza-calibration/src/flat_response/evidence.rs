@@ -24,6 +24,7 @@ use seiza_imgproc::components::{Connectivity, connected_components};
 use serde::{Deserialize, Serialize};
 
 /// Which side of a change something stands on.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Side {
@@ -34,6 +35,7 @@ pub enum Side {
 }
 
 /// What a few lights' own background says about one change.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Verdict {
@@ -103,6 +105,7 @@ const LIGHT_STAR_GROW: usize = 1;
 
 /// A background weighed against one change: how much of it the background
 /// carries, how sure that is, and the side that says.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Fit {
     /// How much of the change the lights carry: 0 none, 1 all of it.
@@ -110,6 +113,7 @@ pub struct Fit {
     /// Spread of that estimate over placebo positions; infinite when no
     /// shadow had room for enough placebos (written as `null`).
     #[serde(with = "spread")]
+    #[cfg_attr(feature = "json", schemars(with = "Option<f64>"))]
     pub spread: f64,
     /// The side the fit decides for, or undecided.
     pub verdict: Verdict,

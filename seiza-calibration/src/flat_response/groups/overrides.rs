@@ -18,6 +18,7 @@ use super::model::{Book, Side};
 use serde::{Deserialize, Serialize};
 
 /// What a person did to one edge between groups.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GroupChoice {
@@ -45,6 +46,7 @@ impl GroupChoice {
 }
 
 /// One split or join as the catalog keeps it.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GroupOverrideRow {
@@ -75,6 +77,7 @@ pub struct GroupOverrideRow {
 }
 
 /// Which side of a change, or which group, a person put a light on.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LightChoice {
@@ -118,6 +121,7 @@ pub const LIGHT_TIME_TOLERANCE_SECONDS: i64 = 2;
 pub const GROUP_CHOICE_KEY: &str = "group";
 
 /// One light's choice as the catalog keeps it.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LightChoiceRow {
@@ -141,6 +145,7 @@ pub struct LightChoiceRow {
 
 /// A light's choices with what the book needs to find the light again: the
 /// file name its frame is read from, its filter and capture time.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LightChoiceEntry {
@@ -152,6 +157,7 @@ pub struct LightChoiceEntry {
 }
 
 /// Where one group override stands in the book.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum OverrideStatus {
@@ -162,6 +168,7 @@ pub enum OverrideStatus {
 }
 
 /// One group override as the book applied it.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct OverrideState {
     pub row: GroupOverrideRow,
@@ -185,6 +192,7 @@ impl OverrideState {
 }
 
 /// A light's choices, resolved against the book.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct ResolvedChoices {
     /// The side of each change a person chose, by event index.
@@ -195,6 +203,7 @@ pub struct ResolvedChoices {
     pub orphaned: Vec<(LightChoiceRow, String)>,
 }
 
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct GroupPick {
     pub family: usize,

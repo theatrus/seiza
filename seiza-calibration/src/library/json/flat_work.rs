@@ -5,6 +5,7 @@ use crate::flat_response::{choice, evidence};
 use crate::library::flat_work::{FamilyRowOf, angle_gap, family_row};
 use std::path::Path;
 
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FlatLightContext {
@@ -17,12 +18,14 @@ pub struct FlatLightContext {
     /// the light's gain and offset.
     pub pedestal_adu: Option<f64>,
 }
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FlatWorkRequest {
     pub library: Request,
     pub light_context: Vec<FlatLightContext>,
 }
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FlatFamilyCandidate {
@@ -30,6 +33,7 @@ pub struct FlatFamilyCandidate {
     pub response: Option<groups::ResponseRow>,
     pub angle_gap: Option<f64>,
 }
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FlatFamilyQuestion {
@@ -50,6 +54,7 @@ pub struct FlatFamilyQuestion {
     pub candidates: Vec<FlatFamilyCandidate>,
     pub alike: Vec<(usize, usize)>,
 }
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FlatChangeFilter {
@@ -63,6 +68,7 @@ pub struct FlatChangeFilter {
     pub after: groups::ResponseRow,
     pub vignetting_changes: Vec<crate::dust::VignettingChange>,
 }
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FlatChangeQuestion {
@@ -72,6 +78,7 @@ pub struct FlatChangeQuestion {
     pub answered: bool,
     pub filters: Vec<FlatChangeFilter>,
 }
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Serialize)]
 pub struct FlatCorrectionPlan {
     pub light_indices: Vec<usize>,
@@ -81,6 +88,7 @@ pub struct FlatCorrectionPlan {
     pub bin: usize,
     pub divide: bool,
 }
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize)]
 pub struct FlatWorkPlans {
     pub algorithm_version: u32,
@@ -378,6 +386,7 @@ pub fn plan_flat_work(mut request: FlatWorkRequest) -> crate::Result<FlatWorkPla
     })
 }
 
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FlatWorkAnswer {
@@ -391,6 +400,7 @@ pub enum FlatWorkAnswer {
         fits: Vec<groups::EvidenceFit>,
     },
 }
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FlatWorkResult {

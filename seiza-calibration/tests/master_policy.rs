@@ -1,7 +1,10 @@
 // The C ABI's JSON calls: built with the `json` feature.
 #![cfg(feature = "json")]
 
-use seiza_calibration::library::{self, json::{FlatRetryRequest, MasterPlanRequest, Request}};
+use seiza_calibration::library::{
+    self,
+    json::{FlatRetryRequest, MasterPlanRequest, Request},
+};
 use serde_json::Value;
 
 #[test]
@@ -10,7 +13,8 @@ fn flat_retry_preserves_psf_guard_decisions_and_optional_host_choices() {
         serde_json::from_str(include_str!("fixtures/library/flat-retries.json")).unwrap();
     for case in fixture["cases"].as_array().unwrap() {
         let result = serde_json::to_value(
-            library::json::flat_retry(serde_json::from_value(case["request"].clone()).unwrap()).unwrap(),
+            library::json::flat_retry(serde_json::from_value(case["request"].clone()).unwrap())
+                .unwrap(),
         )
         .unwrap();
         for field in ["action", "inputs", "rebuild_first"] {

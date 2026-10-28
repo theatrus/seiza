@@ -614,6 +614,7 @@ pub(crate) fn subtract_local_median(map: &mut [f32], width: usize, height: usize
 }
 
 /// What a spot is.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SpotKind {
@@ -626,6 +627,7 @@ pub enum SpotKind {
 }
 
 /// One difference of dust between two sessions.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Spot {
     /// New, gone or moved.

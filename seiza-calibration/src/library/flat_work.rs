@@ -37,7 +37,10 @@ pub(in crate::library) fn picked<T>(values: &[T]) -> Vec<&T> {
 
 /// Groups of lights within `tolerance` of each other's angle, around the
 /// circle, each in angle order.
-pub(in crate::library) fn angle_groups(mut lights: Vec<EvidenceLight>, tolerance: f64) -> Vec<Vec<EvidenceLight>> {
+pub(in crate::library) fn angle_groups(
+    mut lights: Vec<EvidenceLight>,
+    tolerance: f64,
+) -> Vec<Vec<EvidenceLight>> {
     lights.sort_by(|a, b| {
         a.angle
             .unwrap_or(f64::NAN)

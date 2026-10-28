@@ -188,6 +188,188 @@ pub(crate) fn field_names(value: Value, camel: bool) -> Value {
     }
 }
 
+/// The JSON Schema (draft 2020-12) of the calibration library's JSON calls:
+/// `calls` maps each export to the schema of its request and of its answer,
+/// and `$defs` holds the types they share. Property names are camelCase, as
+/// the calls take and return them; enum values are as given. Rust hosts call
+/// the native API instead, and Python binds it. Free the result or error
+/// with seiza_string_free.
+///
+/// # Safety
+/// When non-null, `error_out` must point to writable storage for one pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_calibration_library_schema_json(
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || owned_json(&library_schema())).unwrap_or(ptr::null_mut())
+}
+
+/// The document [`seiza_calibration_library_schema_json`] returns.
+pub(crate) fn library_schema() -> Value {
+    use library::json as calls;
+    use seiza_calibration::flat_response::groups;
+    let mut generator = schemars::generate::SchemaSettings::draft2020_12().into_generator();
+    // A call that takes no request has none; one that returns a handle has
+    // no answer.
+    let call = |request: Option<schemars::Schema>, answer: Option<schemars::Schema>| serde_json::json!({ "request": request, "answer": answer });
+    let mut documented = serde_json::Map::new();
+    let mut add = |name: &str, entry: Value| {
+        documented.insert(name.to_string(), entry);
+    };
+    add(
+        "seiza_calibration_settings_schema_json",
+        call(
+            None,
+            Some(generator.subschema_for::<Vec<library::rules::FieldSpec>>()),
+        ),
+    );
+    add(
+        "seiza_calibration_setting_check_json",
+        call(
+            Some(generator.subschema_for::<calls::Setting>()),
+            Some(generator.subschema_for::<library::rules::SettingCheck>()),
+        ),
+    );
+    for name in [
+        "seiza_calibration_library_plan_json",
+        "seiza_calibration_library_plan_with_groups_json",
+    ] {
+        add(
+            name,
+            call(
+                Some(generator.subschema_for::<calls::Request>()),
+                Some(generator.subschema_for::<calls::Snapshot>()),
+            ),
+        );
+    }
+    add(
+        "seiza_calibration_flat_response_plan_json",
+        call(
+            Some(generator.subschema_for::<calls::Request>()),
+            Some(generator.subschema_for::<calls::FlatResponsePlans>()),
+        ),
+    );
+    add(
+        "seiza_calibration_master_plan_json",
+        call(
+            Some(generator.subschema_for::<calls::MasterPlanRequest>()),
+            Some(generator.subschema_for::<library::Session>()),
+        ),
+    );
+    add(
+        "seiza_calibration_master_cohort_json",
+        call(
+            Some(generator.subschema_for::<calls::MasterCohortRequest>()),
+            Some(generator.subschema_for::<calls::MasterCohort>()),
+        ),
+    );
+    add(
+        "seiza_calibration_flat_retry_json",
+        call(
+            Some(generator.subschema_for::<calls::FlatRetryRequest>()),
+            Some(generator.subschema_for::<library::FlatRetryDecision>()),
+        ),
+    );
+    add(
+        "seiza_calibration_flat_work_plan_json",
+        call(
+            Some(generator.subschema_for::<calls::FlatWorkRequest>()),
+            Some(generator.subschema_for::<calls::FlatWorkPlans>()),
+        ),
+    );
+    add(
+        "seiza_calibration_flat_work_finish_json",
+        call(
+            Some(generator.subschema_for::<calls::FlatWorkAnswer>()),
+            Some(generator.subschema_for::<calls::FlatWorkResult>()),
+        ),
+    );
+    add(
+        "seiza_flat_groups_prepare_json",
+        call(Some(generator.subschema_for::<groups::Request>()), None),
+    );
+    add(
+        "seiza_flat_group_plan_json",
+        call(
+            Some(generator.subschema_for::<groups::Request>()),
+            Some(generator.subschema_for::<groups::Snapshot>()),
+        ),
+    );
+    add(
+        "seiza_master_flat_stability_json",
+        call(
+            Some(generator.subschema_for::<seiza_stacking::FlatStabilityFileRequest>()),
+            Some(generator.subschema_for::<seiza_stacking::FlatSetStability>()),
+        ),
+    );
+    add(
+        "seiza_master_flat_stability_images_json",
+        call(
+            Some(generator.subschema_for::<seiza_stacking::FlatStabilityImageOptions>()),
+            Some(generator.subschema_for::<seiza_stacking::FlatSetStability>()),
+        ),
+    );
+    let definitions = generator.take_definitions(true);
+    schema_names(serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Seiza calibration library C ABI",
+        "calls": documented,
+        "$defs": definitions,
+    }))
+}
+
+/// A schema with its property names as the C ABI spells them: every key of
+/// a `properties` object, and every name `required` lists, in camelCase.
+fn schema_names(value: Value) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(values.into_iter().map(schema_names).collect()),
+        Value::Object(fields) => Value::Object(
+            fields
+                .into_iter()
+                .map(|(key, value)| {
+                    let value = match (key.as_str(), value) {
+                        ("properties", Value::Object(properties)) => Value::Object(
+                            properties
+                                .into_iter()
+                                .map(|(name, schema)| (camel_case(&name), schema_names(schema)))
+                                .collect(),
+                        ),
+                        ("required", Value::Array(names)) => Value::Array(
+                            names
+                                .into_iter()
+                                .map(|name| match name {
+                                    Value::String(name) => Value::String(camel_case(&name)),
+                                    other => other,
+                                })
+                                .collect(),
+                        ),
+                        (_, value) => schema_names(value),
+                    };
+                    (key, value)
+                })
+                .collect(),
+        ),
+        value => value,
+    }
+}
+
+fn camel_case(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut upper = false;
+    for ch in name.chars() {
+        if ch == '_' {
+            upper = true;
+        } else if upper {
+            out.push(ch.to_ascii_uppercase());
+            upper = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 /// The calibration settings a library request takes, in the order a settings
 /// panel shows them: each key, group, label, help, effect, kind with its range
 /// and default. camelCase JSON array. Free the result or error with
@@ -916,7 +1098,8 @@ mod master_policy_tests {
         );
         let request = serde_json::json!({"library":library,"light_context":[{"light_index":0,"id":100,"target":"M42","pedestal_adu":123.0}]});
         let expected =
-            library::json::plan_flat_work(serde_json::from_value(request.clone()).unwrap()).unwrap();
+            library::json::plan_flat_work(serde_json::from_value(request.clone()).unwrap())
+                .unwrap();
         let actual = unsafe { call(request, seiza_calibration_flat_work_plan_json) };
         assert_eq!(actual, serde_json::to_value(expected).unwrap());
         let question = actual["changes"][0].clone();
@@ -936,7 +1119,8 @@ mod master_policy_tests {
         })).collect();
         let request = serde_json::json!({"frames":frames});
         let core =
-            library::json::plan_flat_responses(serde_json::from_value(request.clone()).unwrap()).unwrap();
+            library::json::plan_flat_responses(serde_json::from_value(request.clone()).unwrap())
+                .unwrap();
         assert_eq!(
             unsafe { call(request.clone(), seiza_calibration_flat_response_plan_json) },
             serde_json::to_value(core).unwrap()
@@ -1006,7 +1190,8 @@ mod master_policy_tests {
         for case in fixture["cases"].as_array().unwrap() {
             let request = serde_json::json!({"frames": case["request"]["frames"], "lights": case["request"]["lights"], "global_settings": case["request"].get("global_settings").cloned().unwrap_or_else(|| serde_json::json!([]))});
             let expected = serde_json::to_value(
-                library::json::plan_masters(serde_json::from_value(request.clone()).unwrap()).unwrap(),
+                library::json::plan_masters(serde_json::from_value(request.clone()).unwrap())
+                    .unwrap(),
             )
             .unwrap();
             assert_eq!(
@@ -1016,13 +1201,189 @@ mod master_policy_tests {
             let request =
                 serde_json::json!({"kind":case["kind"], "frames":case["request"]["frames"]});
             let expected = serde_json::to_value(
-                library::json::master_cohort(serde_json::from_value(request.clone()).unwrap()).unwrap(),
+                library::json::master_cohort(serde_json::from_value(request.clone()).unwrap())
+                    .unwrap(),
             )
             .unwrap();
             assert_eq!(
                 unsafe { call(request, seiza_calibration_master_cohort_json) },
                 expected
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+    use std::ffi::{CStr, CString};
+
+    const SCHEMA_FILE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/include/seiza_calibration_library.schema.json"
+    );
+    const SCHEMA_URL: &str = "https://seiza.invalid/calibration-library.schema.json";
+
+    type Export = unsafe extern "C" fn(*const c_char, *mut *mut c_char) -> *mut c_char;
+
+    fn call(export: Export, request: &Value) -> Result<Value, String> {
+        let json = CString::new(request.to_string()).unwrap();
+        let mut error = ptr::null_mut();
+        let output = unsafe { export(json.as_ptr(), &mut error) };
+        let pointer = if output.is_null() { error } else { output };
+        let text = unsafe { CStr::from_ptr(pointer) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        unsafe { crate::seiza_string_free(pointer) };
+        if output.is_null() {
+            Err(text)
+        } else {
+            Ok(serde_json::from_str(&text).unwrap())
+        }
+    }
+
+    #[test]
+    fn the_checked_in_schema_is_the_one_the_calls_take() {
+        let generated = serde_json::to_string_pretty(&library_schema()).unwrap() + "\n";
+        if std::env::var_os("SEIZA_UPDATE_SCHEMA").is_some() {
+            std::fs::write(SCHEMA_FILE, &generated).unwrap();
+        }
+        let kept = std::fs::read_to_string(SCHEMA_FILE).unwrap_or_default();
+        assert!(
+            kept == generated,
+            "the calibration library's JSON changed: run `SEIZA_UPDATE_SCHEMA=1 cargo test -p \
+             seiza-cabi schema` and commit include/seiza_calibration_library.schema.json"
+        );
+    }
+
+    /// Every fixture request, as C sends it, against the schema of the call
+    /// it goes to, and the call's answer against the answer's schema. A
+    /// request the schema refuses must be one the call refuses too.
+    #[test]
+    fn fixture_requests_and_answers_follow_the_schema() {
+        let mut compiler = boon::Compiler::new();
+        compiler.add_resource(SCHEMA_URL, library_schema()).unwrap();
+        let mut schemas = boon::Schemas::new();
+        let mut compile = |call: &str, part: &str| {
+            compiler
+                .compile(&format!("{SCHEMA_URL}#/calls/{call}/{part}"), &mut schemas)
+                .unwrap_or_else(|error| panic!("{call} {part}: {error}"))
+        };
+        let calls: [(&str, Export, &str); 5] = [
+            (
+                "seiza_calibration_library_plan_json",
+                seiza_calibration_library_plan_json,
+                "psf-guard.json",
+            ),
+            (
+                "seiza_calibration_library_plan_json",
+                seiza_calibration_library_plan_json,
+                "grading.json",
+            ),
+            (
+                "seiza_calibration_library_plan_json",
+                seiza_calibration_library_plan_json,
+                "recipes.json",
+            ),
+            (
+                "seiza_calibration_flat_response_plan_json",
+                seiza_calibration_flat_response_plan_json,
+                "psf-guard.json",
+            ),
+            (
+                "seiza_calibration_flat_retry_json",
+                seiza_calibration_flat_retry_json,
+                "flat-retries.json",
+            ),
+        ];
+        let indices: Vec<_> = calls
+            .iter()
+            .map(|(name, _, _)| (compile(name, "request"), compile(name, "answer")))
+            .collect();
+        let plan_request = indices[0].0;
+        let group_request = compile("seiza_flat_group_plan_json", "request");
+        let group_answer = compile("seiza_flat_group_plan_json", "answer");
+        let mut checked = 0;
+        for ((name, export, fixture), (request_schema, answer_schema)) in calls.iter().zip(indices)
+        {
+            let path = format!(
+                "{}/../seiza-calibration/tests/fixtures/library/{fixture}",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            let cases: Value =
+                serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            for case in cases["cases"].as_array().unwrap() {
+                let request = field_names(case["request"].clone(), true);
+                let fits = schemas.validate(&request, request_schema);
+                match (fits, call(*export, &request)) {
+                    (_, Ok(answer)) => {
+                        if let Err(error) = schemas.validate(&request, request_schema) {
+                            panic!(
+                                "{name} {fixture} {}: the call takes a request its schema refuses: {error}",
+                                case["name"]
+                            );
+                        }
+                        if let Err(error) = schemas.validate(&answer, answer_schema) {
+                            panic!(
+                                "{name} {fixture} {}: its answer does not follow the schema: {error}",
+                                case["name"]
+                            );
+                        }
+                        checked += 1;
+                    }
+                    (Ok(()), Err(_)) | (Err(_), Err(_)) => {}
+                }
+                if *name == "seiza_calibration_library_plan_json"
+                    && !case["request"]["grouping"].is_null()
+                {
+                    let grouping = field_names(case["request"]["grouping"].clone(), true);
+                    if let Ok(answer) =
+                        call(crate::flat_groups::seiza_flat_group_plan_json, &grouping)
+                    {
+                        schemas.validate(&grouping, group_request).unwrap();
+                        schemas.validate(&answer, group_answer).unwrap();
+                    }
+                }
+            }
+        }
+        assert!(checked >= 30, "only {checked} answers were checked");
+        // The schema holds C to its own spelling and to known fields.
+        let refused = |request: Value| schemas.validate(&request, plan_request).is_err();
+        assert!(refused(serde_json::json!({"global_settings": []})));
+        assert!(refused(serde_json::json!({"frames": [], "bogus": 1})));
+        assert!(!refused(
+            serde_json::json!({"globalSettings": [], "frames": []})
+        ));
+    }
+
+    #[test]
+    fn settings_calls_follow_the_schema() {
+        let mut compiler = boon::Compiler::new();
+        compiler.add_resource(SCHEMA_URL, library_schema()).unwrap();
+        let mut schemas = boon::Schemas::new();
+        let mut compile = |part: &str, call: &str| {
+            compiler
+                .compile(&format!("{SCHEMA_URL}#/calls/{call}/{part}"), &mut schemas)
+                .unwrap()
+        };
+        let table = compile("answer", "seiza_calibration_settings_schema_json");
+        let request = compile("request", "seiza_calibration_setting_check_json");
+        let answer = compile("answer", "seiza_calibration_setting_check_json");
+        let mut error = ptr::null_mut();
+        let output = unsafe { seiza_calibration_settings_schema_json(&mut error) };
+        let fields: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(output) }.to_str().unwrap()).unwrap();
+        unsafe { crate::seiza_string_free(output) };
+        schemas.validate(&fields, table).unwrap();
+        for setting in [
+            serde_json::json!({"key": "rotationToleranceDeg", "value": 3.0}),
+            serde_json::json!({"key": "rotation_tolerance_deg", "value": 3.0}),
+            serde_json::json!({"key": "from_the_future", "value": true}),
+        ] {
+            schemas.validate(&setting, request).unwrap();
+            let checked = call(seiza_calibration_setting_check_json, &setting).unwrap();
+            schemas.validate(&checked, answer).unwrap();
         }
     }
 }

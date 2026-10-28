@@ -1,6 +1,7 @@
 //! Explicit supplied-set policy. Automatic defaults retain the existing library
 //! contract. OneSet removes temporal/cohort selection, never physical gates.
 use super::*;
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Association {

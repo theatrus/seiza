@@ -1,11 +1,13 @@
 //! The C ABI's flat response planning call, on [`plan_flat_sessions`].
 use super::*;
 
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Serialize)]
 pub struct FlatResponsePlan {
     pub row: groups::ResponseRow,
     pub sample_frames: Vec<String>,
 }
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize)]
 pub struct FlatResponsePlans {
     pub algorithm_version: u32,

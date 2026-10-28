@@ -138,6 +138,7 @@ pub type FlatFeature = dust::DustFeature;
 
 /// A coarse map of how light falls across a flat: vignetting, gradients, and
 /// broad shadows.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct IlluminationProfile {
     /// Cells across.
@@ -150,6 +151,7 @@ pub struct IlluminationProfile {
 }
 
 /// What [`measure_flat`] found in one flat frame.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FlatMeasurement {
     /// [`FLAT_QUALITY_ALGORITHM_VERSION`] when this was measured; 1 when

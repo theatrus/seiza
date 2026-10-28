@@ -6,6 +6,7 @@
 use super::*;
 
 /// How a session's flat master applies to its lights.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FlatUse {
@@ -77,6 +78,7 @@ words!(FlatWithoutMasters {
 });
 
 /// How a session's flat applies, once its masters are built.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Application {
@@ -542,4 +544,3 @@ pub fn pedestal_from_fits(estimates: &[f32], hint: Option<f64>) -> Result<f32, P
     }
     Ok(pedestal)
 }
-

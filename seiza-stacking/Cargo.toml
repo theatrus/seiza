@@ -17,6 +17,9 @@ default = ["gpu"]
 # where each request's GpuOptions allow it. Without it, every pass runs on
 # the CPU.
 gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck", "dep:objc2-metal", "dep:windows"]
+# JSON Schema for the types the C ABI's flat stability calls carry. Only
+# seiza-cabi enables it.
+schema = ["dep:schemars"]
 
 [dependencies]
 nalgebra.workspace = true
@@ -26,6 +29,7 @@ pollster = { workspace = true, optional = true }
 bytemuck = { workspace = true, optional = true }
 rayon.workspace = true
 same-file = "1.0"
+schemars = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 postcard.workspace = true

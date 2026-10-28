@@ -535,6 +535,7 @@ seiza_calibration_flat_work_finish_json = "calibration_flat_work_finish"
 seiza_calibration_master_plan_json = "calibration_master_plan"
 seiza_calibration_master_cohort_json = "calibration_master_cohort"
 seiza_calibration_settings_schema_json = "calibration_settings_schema"
+seiza_calibration_library_schema_json = { none = "the JSON Schema of the C ABI's calibration JSON calls; Python binds the native API, whose types seiza.pyi declares" }
 seiza_calibration_setting_check_json = "calibration_setting_check"
 seiza_calibration_flat_retry_json = "calibration_flat_retry"
 seiza_calibration_library_plan_json = "calibration_library_plan"

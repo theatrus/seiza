@@ -59,6 +59,7 @@ pub fn half(difference: f64) -> f64 {
 }
 
 /// One run of lights of a rig with one sky − mechanical offset.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Epoch {
     pub start: i64,
@@ -158,6 +159,7 @@ impl AngleEpochs {
 pub type FamilyEvidence = HashMap<String, Vec<FamilyEvidenceRow>>;
 
 /// How a light's response family was chosen.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
 #[serde(tag = "by", rename_all = "snake_case")]
 pub enum FamilyBasis {
@@ -191,6 +193,7 @@ pub enum FamilyBasis {
 }
 
 /// The response family a light's flats come from.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FamilyChoice {
     /// Index into the book's families.

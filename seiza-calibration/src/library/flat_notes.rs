@@ -8,6 +8,7 @@ pub(crate) use crate::flat_response::groups::{lights, model, overrides};
 use crate::flat_response::{groups::Book, metric};
 use sha2::{Digest, Sha256};
 /// A change as a light's account names it.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventNote {
     pub key: String,
@@ -138,6 +139,7 @@ pub fn describe_spots(spots: &[metric::Spot], dust: f64, broad: f64) -> String {
 
 /// The correction a light's flat master takes: the flats at its angle,
 /// from the other side of a change, carried across it by the change's map.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FlatCorrection {
     pub event: String,
@@ -152,6 +154,7 @@ pub struct FlatCorrection {
 }
 
 /// Why a light's flats are the ones they are.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(tag = "basis", rename_all = "snake_case")]
 pub enum FlatBasis {
@@ -205,6 +208,7 @@ pub enum FlatBasis {
 }
 
 /// A group of one family, as a light's account names it.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GroupNote {
     /// The family's label: "R at 104.0°".
@@ -253,6 +257,7 @@ pub fn family_label(book: &Book, family: usize) -> String {
 }
 
 /// A person's choice for a light, as its account shows it.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChoiceNote {
     pub choice: overrides::LightChoice,
@@ -396,6 +401,7 @@ impl FlatBasis {
 /// The response family a light's flats come from, when grouping measured
 /// it: which family, how it was chosen, and the gate a stack holds the
 /// light to for it.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FlatFamily {
     /// The family's key (`model::Family::key`).
@@ -451,6 +457,7 @@ pub fn place_light(
 }
 
 /// A family's [`model::AlikeRange`] as a light's account names it.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AlikeRangeNote {
     /// The angle of the flats the light's master is built from.

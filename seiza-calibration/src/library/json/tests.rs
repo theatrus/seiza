@@ -2,8 +2,10 @@ use super::*;
 
 #[test]
 fn selections_and_master_cohorts_match_psf_guard_reference() {
-    let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../../../tests/fixtures/library/psf-guard.json")).unwrap();
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/library/psf-guard.json"
+    ))
+    .unwrap();
     for case in fixture["cases"].as_array().unwrap() {
         let request: Request = serde_json::from_value(case["request"].clone()).unwrap();
         let result = evaluate(request.clone()).unwrap();
@@ -347,8 +349,10 @@ fn response_preparation_preserves_explicit_night_boundaries_and_one_set_needs_no
 }
 
 fn work_fixture() -> FlatWorkRequest {
-    let cases: serde_json::Value =
-        serde_json::from_str(include_str!("../../../tests/fixtures/library/psf-guard.json")).unwrap();
+    let cases: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/library/psf-guard.json"
+    ))
+    .unwrap();
     let mut library: Request =
         serde_json::from_value(cases["cases"][12]["request"].clone()).unwrap();
     library.grouping.lights.clear();

@@ -38,6 +38,7 @@ pub use rows::{
 };
 
 /// Limits for one rig; every rig with usable responses must have an entry.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RigLimits {
@@ -46,6 +47,7 @@ pub struct RigLimits {
 }
 
 /// A rig's sky-minus-mechanical angle, modulo a half turn, at a Unix time.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EpochSample {
@@ -56,6 +58,7 @@ pub struct EpochSample {
 
 /// Local-noon shift for one flat, unwrapped (12h minus UTC offset). Unlisted flats use
 /// noon UTC. The stable frame identity, rather than a database id, names it.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NightBoundary {
@@ -67,6 +70,7 @@ pub struct NightBoundary {
 /// One light to place. `compatible_families` names families that already
 /// passed the host's hard sensor/optics gates; empty means no candidates.
 /// A missing capture time leaves its event placements unknown.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LightQuery {
@@ -82,6 +86,7 @@ pub struct LightQuery {
 /// A complete, immutable snapshot of inputs for the grouping stage. Vectors
 /// of keyed records avoid converting user identifiers when bindings translate
 /// field names. Omitted collections are empty; unknown fields are refused.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Request {
@@ -138,6 +143,7 @@ impl Request {
 
 /// An automatic event placement and the response pair from which a correction
 /// map can be measured. Personal choices are returned separately on the light.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize)]
 pub struct EventPlacement {
     pub event: usize,
@@ -149,6 +155,7 @@ pub struct EventPlacement {
 /// Inputs for a host's response-choice pixel pass. Candidate and representative
 /// indices refer to this snapshot. Reuse `key` on the resulting family evidence
 /// row; changes to the candidates or their measurements invalidate old evidence.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize)]
 pub struct FamilyProbe {
     pub key: String,
@@ -159,6 +166,7 @@ pub struct FamilyProbe {
 /// Results in request order. Automatic results deliberately remain distinct
 /// from resolved personal choices, as in the native book: the selector can
 /// explain both and enforce its hard calibration gates before using a choice.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize)]
 pub struct LightResult {
     pub automatic_family: Option<FamilyChoice>,
@@ -169,6 +177,7 @@ pub struct LightResult {
 
 /// Indices refer to this snapshot's arrays, never to host database rows.
 /// Keyed outputs are sorted lists of pairs, so their wire format is stable.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize)]
 pub struct Snapshot {
     pub algorithm_version: u32,

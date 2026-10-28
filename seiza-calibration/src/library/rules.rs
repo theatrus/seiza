@@ -6,8 +6,8 @@
 //!
 //! Extracted from theatrus/psf-guard at 79f5e31d53b8371e8fcd0b22a9b69692412cd8b4.
 //! Copyright the PSF Guard contributors; Apache-2.0.
-use super::Light;
 use super::DEFAULT_COMPLETE_DARK_FRAMES;
+use super::Light;
 use super::{DEFAULT_DARK_REACH_DAYS, DEFAULT_FLAT_MAX_AGE_DAYS};
 use crate::{BiasScreening, DarkScreening, FlatScreening, Limits, MatchTolerances};
 use serde::{Deserialize, Serialize};
@@ -366,6 +366,21 @@ impl Serialize for SettingKey {
     }
 }
 
+#[cfg(feature = "json")]
+impl schemars::JsonSchema for SettingKey {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "SettingKey".into()
+    }
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let keys: Vec<&str> = fields().iter().map(|spec| spec.key.as_str()).collect();
+        schemars::json_schema!({
+            "type": "string",
+            "description": "A setting, by its key in the settings table.",
+            "enum": keys,
+        })
+    }
+}
+
 impl<'de> Deserialize<'de> for SettingKey {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let text = String::deserialize(deserializer)?;
@@ -374,6 +389,7 @@ impl<'de> Deserialize<'de> for SettingKey {
 }
 
 /// Which layer a value came from.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuleSource {
@@ -391,6 +407,7 @@ words!(RuleSource {
 });
 
 /// What changing a setting changes.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Effect {
@@ -405,6 +422,7 @@ pub enum Effect {
 }
 
 /// Where the panel shows a setting.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Group {
@@ -446,6 +464,7 @@ words!(FlatGrouping {
     Time => "time",
 });
 
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize)]
 pub struct ChoiceOption {
     pub value: &'static str,
@@ -453,6 +472,7 @@ pub struct ChoiceOption {
 }
 
 /// What kind of value a setting holds, with its range.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FieldKind {
@@ -493,6 +513,7 @@ pub enum FieldKind {
 }
 
 /// One setting.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize)]
 pub struct FieldSpec {
     pub key: SettingKey,
@@ -1277,6 +1298,7 @@ fn describe(spec: &FieldSpec, value: &Value) -> String {
 }
 
 /// A setting value judged the way a settings panel saves it.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SettingCheck {
     pub key: String,
@@ -1331,6 +1353,7 @@ pub struct RigLabel {
 }
 
 /// One setting that differs from its default for a light, and who set it.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RuleNote {
     pub key: SettingKey,
@@ -1465,7 +1488,8 @@ impl Rules {
                 .and_then(|text| text.trim().to_ascii_lowercase().parse().ok())
                 .unwrap_or_default(),
             dark_reach_days: number(SettingKey::DarkReachDays),
-            complete_dark_frames: count(SettingKey::CompleteDarkFrames).max(super::MIN_MASTER_FRAMES),
+            complete_dark_frames: count(SettingKey::CompleteDarkFrames)
+                .max(super::MIN_MASTER_FRAMES),
             dark_choice: match value(SettingKey::DarkChoice).as_str() {
                 Some("nearest") => DarkChoice::Nearest,
                 _ => DarkChoice::Complete,
@@ -1645,7 +1669,8 @@ impl RuleBook {
                     key: key.clone(),
                     problem,
                 };
-                let setting: SettingKey = key.parse().map_err(|_| refuse(SettingProblem::Unknown))?;
+                let setting: SettingKey =
+                    key.parse().map_err(|_| refuse(SettingProblem::Unknown))?;
                 field(setting)
                     .validate(value)
                     .map_err(|error| refuse(SettingProblem::Invalid(error)))?;
@@ -1920,7 +1945,10 @@ mod tests {
         assert_eq!(rig_rules.dark_reach_days, 400.0);
         assert_eq!(rig_rules.source(key("dark_reach_days")), RuleSource::Rig);
         assert_eq!(rig_rules.thin_master_frames, 4, "inherits the global value");
-        assert_eq!(rig_rules.source(key("thin_master_frames")), RuleSource::Global);
+        assert_eq!(
+            rig_rules.source(key("thin_master_frames")),
+            RuleSource::Global
+        );
         assert_eq!(rig_rules.complete_dark_frames, 10, "inherits the default");
         assert_eq!(
             rig_rules.source(key("complete_dark_frames")),

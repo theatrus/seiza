@@ -25,7 +25,8 @@ seiza-image-io = { workspace = true }
 seiza-parallax = { workspace = true }
 seiza-satellites.workspace = true
 seiza-xisf = { workspace = true }
-seiza-stacking = { workspace = true }
+seiza-stacking = { workspace = true, features = ["schema"] }
+schemars.workspace = true
 seiza-sources = { workspace = true }
 seiza-stars = { workspace = true }
 seiza-stretch = { workspace = true }
@@ -38,5 +39,6 @@ tokio = { workspace = true, features = ["net"] }
 cbindgen = "0.29"
 
 [dev-dependencies]
+boon = "0.6.1"
 seiza-image-io = { workspace = true, features = ["test-support"] }
 tempfile = "3"

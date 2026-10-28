@@ -4272,6 +4272,19 @@ SeizaFlatGroups *seiza_flat_groups_prepare_json(const char *request_json, char *
 void seiza_flat_groups_free(SeizaFlatGroups *groups);
 
 /*
+ The JSON Schema (draft 2020-12) of the calibration library's JSON calls:
+ `calls` maps each export to the schema of its request and of its answer,
+ and `$defs` holds the types they share. Property names are camelCase, as
+ the calls take and return them; enum values are as given. Rust hosts call
+ the native API instead, and Python binds it. Free the result or error
+ with seiza_string_free.
+
+ # Safety
+ When non-null, `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_calibration_library_schema_json(char **error_out);
+
+/*
  The calibration settings a library request takes, in the order a settings
  panel shows them: each key, group, label, help, effect, kind with its range
  and default. camelCase JSON array. Free the result or error with

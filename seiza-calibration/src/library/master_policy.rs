@@ -5,6 +5,7 @@ use super::*;
 /// Which retries a flat master may take when its frames disagree about
 /// spots that come and go. The default is PSF Guard's: leave a minority
 /// out, else take the next session, else keep the set and say so.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FlatRetryPolicy {
@@ -31,6 +32,7 @@ impl Default for FlatRetryPolicy {
 
 /// One flat master build, as its judgement needs it: the frames the
 /// integrator combined and how far each disagreed with the master.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FlatAttempt {
@@ -69,6 +71,7 @@ impl FlatAttempt {
 }
 
 /// What a flat master does next.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FlatRetryAction {
@@ -89,6 +92,7 @@ pub enum FlatRetryAction {
 }
 
 /// A flat retry's next step.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct FlatRetryDecision {
     pub action: FlatRetryAction,
@@ -297,9 +301,10 @@ impl<'a> FlatRetry<'a> {
             || (!attempt.disagreement.is_empty()
                 && (attempt.disagreement.len() != attempt.used.len()
                     || attempt.drift_threshold == 0))
-            || attempt.used.iter().any(|id| {
-                !self.candidates.iter().any(|f| &f.frame_uuid == id) || !seen.insert(id)
-            })
+            || attempt
+                .used
+                .iter()
+                .any(|id| !self.candidates.iter().any(|f| &f.frame_uuid == id) || !seen.insert(id))
         {
             return Err(invalid(
                 "flat feedback needs unique candidate inputs and aligned disagreement",
@@ -318,7 +323,8 @@ impl<'a> FlatRetry<'a> {
         let first = set.iter().filter_map(|frame| frame.captured_at).min();
         let last = set.iter().filter_map(|frame| frame.captured_at).max();
         let same_session = |candidate: &CalibrationFrame| {
-            set.iter().any(|frame| frame.frame_uuid == candidate.frame_uuid)
+            set.iter()
+                .any(|frame| frame.frame_uuid == candidate.frame_uuid)
                 || match (first, last, candidate.captured_at) {
                     (Some(first), Some(last), Some(at)) => {
                         at >= first.saturating_sub(window) && at <= last.saturating_add(window)
@@ -328,9 +334,7 @@ impl<'a> FlatRetry<'a> {
         };
         self.candidates
             .iter()
-            .filter(|f| {
-                !f.is_master && !self.held_back.contains(&f.frame_uuid) && !same_session(f)
-            })
+            .filter(|f| !f.is_master && !self.held_back.contains(&f.frame_uuid) && !same_session(f))
             .collect()
     }
 

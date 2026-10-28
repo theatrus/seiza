@@ -71,7 +71,11 @@ impl FlatSessionPlan {
 
     /// The row a host keeps for this session once it has read its
     /// [`FlatSessionPlan::combined`] flats.
-    pub fn measured_row(&self, pedestal: Option<f64>, read: ResponseRead<'_>) -> groups::ResponseRow {
+    pub fn measured_row(
+        &self,
+        pedestal: Option<f64>,
+        read: ResponseRead<'_>,
+    ) -> groups::ResponseRow {
         let ResponseRead {
             read,
             bin,

@@ -43,8 +43,8 @@ pub use master_policy::{
 };
 pub use recipes::{
     Application, FlatUse, FlatWithoutMasters, MAX_PEDESTAL_ADU, PedestalRefusal, SessionOptions,
-    adopted_master, dark_level_screening, pedestal_from_fits,
-    pedestal_hint, pedestal_sample_lights, resolve_session,
+    adopted_master, dark_level_screening, pedestal_from_fits, pedestal_hint,
+    pedestal_sample_lights, resolve_session,
 };
 pub use response_plan::{
     FlatSessionPlan, PedestalLevel, PedestalTable, ResponseRead, family_key, focal_classes,
@@ -92,6 +92,7 @@ pub const DEFAULT_COMPLETE_DARK_FRAMES: usize = 10;
 pub const DEFAULT_FLAT_MAX_AGE_DAYS: f64 = 60.0;
 const DARK_SESSION_SECONDS: u64 = 86400;
 
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
 )]
@@ -140,6 +141,7 @@ impl CalibrationKind {
 /// Which lights a calibration frame may serve, relative to its own capture
 /// time: marked around an optical change, so a frame never serves imaging
 /// on the other side of it.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ValidDirection {
@@ -155,6 +157,7 @@ words!(ValidDirection {
 
 /// One catalog row: a raw calibration frame, or a master another program
 /// integrated.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CalibrationFrame {
@@ -201,6 +204,7 @@ pub struct CalibrationFrame {
     pub source_verified: bool,
 }
 /// A light as matching reads it: its file and header.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Light {
@@ -265,6 +269,7 @@ pub struct CalibrationSelection {
 /// Which kinds of usable frame the library holds for one light's sensor,
 /// whatever their optics, exposure, age or validity mark. A light only
 /// lacks what its library could have given it.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct LibraryKinds {
     pub bias: bool,
@@ -542,7 +547,9 @@ impl QualityIndex {
         let row = self.rows.get(&frame.frame_uuid);
         KeptOut {
             choice: row.and_then(|r| r.override_choice),
-            grade: judged.map(|g| g.grade).or_else(|| row.and_then(|r| r.grade)),
+            grade: judged
+                .map(|g| g.grade)
+                .or_else(|| row.and_then(|r| r.grade)),
             grade_reason: judged
                 .and_then(|g| g.reason.as_deref())
                 .or_else(|| row.and_then(|r| r.reason.as_deref())),
@@ -585,6 +592,7 @@ impl QualityIndex {
     }
 }
 
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QualityOverride {
@@ -596,6 +604,7 @@ words!(QualityOverride {
     Exclude => "exclude",
 });
 /// What was measured on one frame, as stored.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StoredMeasurement {
@@ -607,6 +616,7 @@ pub enum StoredMeasurement {
 /// A flat's measurement, with the light cone its header recorded so its
 /// session's dust, found later on the stack, can be placed too. Stored as
 /// the measurement's own fields plus `optics`.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FlatRecord {
     #[serde(flatten)]
@@ -626,6 +636,7 @@ impl std::ops::DerefMut for FlatRecord {
     }
 }
 /// A frame's grade against its peers, as [`grade`] judges it.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Serialize)]
 pub struct Judged {
     pub grade: Grade,
@@ -639,6 +650,7 @@ pub struct Judged {
 }
 
 /// What is known of a frame's measurement.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MeasurementState {
@@ -663,6 +675,7 @@ words!(MeasurementState {
 
 /// A frame's stored quality: its measurement, grade, and a person's choice.
 /// A stale algorithm/fingerprint is not regraded.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct QualityRecord {
@@ -684,6 +697,7 @@ pub struct QualityRecord {
 /// The masters one light's selection builds, and how its flat applies:
 /// [`resolve_session`]. Lights whose sessions share a key calibrate
 /// identically.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Session {
@@ -699,6 +713,7 @@ pub struct Session {
     pub flat_held_back: Vec<String>,
 }
 /// How one master of a session is made.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MasterRecipe {
@@ -728,6 +743,7 @@ pub struct MasterRecipe {
     /// yet ([`dark_level_screening`]).
     pub dark_level_screening: bool,
 }
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecipeAction {

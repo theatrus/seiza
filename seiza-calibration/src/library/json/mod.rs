@@ -15,6 +15,7 @@ pub use masters::*;
 pub use responses::*;
 
 /// A master that failed to build, by its session's key.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MasterFailure {
@@ -25,6 +26,7 @@ pub struct MasterFailure {
 /// Successful per-light fits from fit_flat_pedestal, in the returned sample
 /// set, by session key ([`Session::accept_pedestal`]). A pinned value
 /// reproduces a previous stack and wins over fresh estimates.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PedestalEvidence {
@@ -32,13 +34,16 @@ pub struct PedestalEvidence {
     pub estimates: Vec<f32>,
     pub pinned: Option<f32>,
 }
-/// Setting identifiers and values remain opaque in both bindings.
+/// One setting a request sets, by the key the settings table names it.
+/// Its value is checked against the table, not here.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Setting {
     pub key: String,
     pub value: serde_json::Value,
 }
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RigSettings {
@@ -48,6 +53,7 @@ pub struct RigSettings {
 }
 /// Host-resolved local-noon shift, unwrapped (12h minus UTC offset).
 pub type NightShift = groups::NightBoundary;
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Request {
@@ -77,6 +83,7 @@ impl Request {
         }
     }
 }
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize)]
 pub struct Selection {
     pub bias: Vec<String>,
@@ -112,6 +119,7 @@ impl Selection {
         }
     }
 }
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize)]
 pub struct FrameGrade {
     pub frame_uuid: String,
@@ -120,6 +128,7 @@ pub struct FrameGrade {
     pub measurement_state: MeasurementState,
     pub measure_error: Option<String>,
 }
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize)]
 pub struct Snapshot {
     pub algorithm_version: u32,
@@ -256,8 +265,7 @@ fn evaluate_inner(
     let mut assignments = Vec::new();
     let mut keys = BTreeMap::new();
     for light in &request.lights {
-        let selected =
-            library.select_associated(light, rules.for_light(light), associations);
+        let selected = library.select_associated(light, rules.for_light(light), associations);
         let session = resolve_session(&selected, &quality, &options);
         // The first light whose masters share a key stands for every light
         // they serve: its candidates' order anchors the masters.
