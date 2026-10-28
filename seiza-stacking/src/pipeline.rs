@@ -520,9 +520,15 @@ impl LiveStacker {
                     .into(),
             ));
         }
+        // Calibration sessions report their own ordered execution.
+        let execution = if self.file_sessions.is_some() {
+            PipelineExecution::SequentialCalibrationSessions
+        } else {
+            PipelineExecution::SequentialRequested
+        };
         if paths.is_empty() {
             return Ok(PoolPipelineReport {
-                execution: PipelineExecution::SequentialRequested,
+                execution,
                 ..PoolPipelineReport::default()
             });
         }
@@ -536,7 +542,7 @@ impl LiveStacker {
             &prepare_decoded,
             &mut on_frame,
         );
-        report.execution = PipelineExecution::SequentialRequested;
+        report.execution = execution;
         report.timings.elapsed = started.elapsed();
         Ok(report)
     }
@@ -732,11 +738,15 @@ impl LiveStacker {
     /// them is opened.
     fn plan_batch(&self, paths: &[PathBuf]) -> Vec<Planned> {
         let mut seen: HashSet<PathBuf> = self.input_identities();
+        let plan = self.file_sessions.as_ref();
         paths
             .iter()
             .map(|path| {
                 let identity = path_identity(path);
-                if seen.insert(identity.clone()) {
+                // A light a session plan found to be another's file.
+                if plan.is_some_and(|plan| plan.is_duplicate(&identity)) {
+                    Planned::Duplicate
+                } else if seen.insert(identity.clone()) {
                     Planned::Prepare(identity)
                 } else {
                     Planned::Duplicate

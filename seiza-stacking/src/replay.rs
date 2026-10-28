@@ -71,7 +71,11 @@ pub(crate) struct SourceStamp {
 
 impl SourceStamp {
     pub(crate) fn of(path: &Path) -> Option<Self> {
-        let metadata = std::fs::metadata(path).ok()?;
+        Self::from_metadata(&std::fs::metadata(path).ok()?)
+    }
+
+    /// [`Self::of`] from metadata already read.
+    pub(crate) fn from_metadata(metadata: &std::fs::Metadata) -> Option<Self> {
         let modified = metadata
             .modified()
             .ok()?
@@ -517,6 +521,8 @@ impl Ledger {
         self.calibrations.len().saturating_sub(1) as u32
     }
 
+    /// Whether every admitted frame's recipe and gate are its light's
+    /// assignment. Reads no file: sources are checked when replayed.
     pub(crate) fn validate_file_sessions(
         &self,
         plan: &crate::sessions::FileSessionPlan,
@@ -529,7 +535,7 @@ impl Ledger {
                 .source
                 .as_ref()
                 .ok_or_else(|| Error::Stack("assigned frame has no original file".into()))?;
-            let assigned = plan.assignment(&source.path)?;
+            let assigned = plan.session_of(&source.path)?;
             let recipe = plan.recipe(frame.calibration)?;
             if &plan.sessions[assigned] != recipe
                 || LightGate::of(&frame.tolerances) != LightGate::of(&recipe.tolerances)
@@ -2166,8 +2172,7 @@ impl MastersCache {
             rayon::current_thread_index().is_none().then_some(loaded)
         };
         let masters = std::sync::Arc::new(if let Some(plan) = &stacker.file_sessions {
-            plan.verify_recipe(calibration)?;
-            plan.recipe(calibration)?.load()?
+            plan.load_recipe(calibration)?
         } else {
             stacker.ledger.calibrations[calibration as usize]
                 .load()
@@ -2751,7 +2756,19 @@ impl LiveStacker {
         banded: bool,
     ) -> Result<(BatchStackResult, Option<DrizzleResult>)> {
         if let Some(plan) = &self.file_sessions {
-            plan.verify_masters()?;
+            // Refuse a changed historical master before any work. The current
+            // set is held in memory, and a session no frame used is not read.
+            let current = self.ledger.current_calibration();
+            let historical = self
+                .ledger
+                .frames
+                .iter()
+                .map(|frame| frame.calibration)
+                .filter(|calibration| *calibration != current)
+                .collect::<std::collections::BTreeSet<_>>();
+            for calibration in historical {
+                plan.verify_recipe(calibration)?;
+            }
         }
         if options.mosaic_panels.is_some() {
             return Err(Error::Stack("mosaic_panels belongs to registered-frame integration; a live stack manages its own backgrounds".into()));

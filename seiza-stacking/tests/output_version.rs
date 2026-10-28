@@ -3120,7 +3120,11 @@ fn session_planning_matches_calibrated_sky_and_replays_after_resume() {
             .reintegrate(&Default::default(), |_, _, _| {})
             .is_err()
     );
-    assert!(LiveStacker::open_context(&context).is_err());
+    // The context still opens: each session's masters are checked when it
+    // is used, so only its lights fail.
+    let mut reopened = LiveStacker::open_context(&context).unwrap();
+    assert!(reopened.push_fits(&paths[3]).is_err());
+    admit(reopened.push_fits(&paths[2]).unwrap());
 }
 
 #[test]
