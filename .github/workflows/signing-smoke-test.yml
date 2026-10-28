@@ -28,10 +28,6 @@ jobs:
     # `repo:theatrus/seiza:environment:release`. Remove this and OIDC
     # fails with an unhelpful audience/subject error.
     environment: release
-    # No sccache: what this builds is signed as us, so it must not come from a
-    # cache any branch job can write. See release.yml.
-    env:
-      RUSTC_WRAPPER: ""
     steps:
       - name: Show what we are about to use
         shell: bash

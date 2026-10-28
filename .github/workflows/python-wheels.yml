@@ -1,11 +1,5 @@
 name: Python wheels
 
-# Linux jobs run on ephemeral 32-core spot runners (tfinfra
-# roots/github-runners, docs/github-runners-plan.md). Windows, macOS, every
-# pull request from a fork, and PyPI publishing stay on GitHub's runners: a
-# fork's code never runs on ours. Job names are unchanged, so the required checks
-# still match.
-
 on:
   push:
     branches: [main]
@@ -39,14 +33,11 @@ env:
 
 jobs:
   test:
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","ghr-linux-x64"]') }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2.9.3
-        # Our runners compile through sccache in S3 instead; GitHub's cache would
-        # only duplicate it, and saving it to GitHub is slow from AWS.
-        if: ${{ !startsWith(runner.name, 'ghr-') }}
         with:
           workspaces: seiza-py
       # The default is the last: the oldest and newest the wheel supports
@@ -104,18 +95,13 @@ jobs:
             target: universal2-apple-darwin
           - os: windows-latest
             target: x64
-    runs-on: ${{ (github.event.pull_request.head.repo.fork || matrix.os == 'macos-latest' || matrix.os == 'windows-latest') && matrix.os || fromJSON('["self-hosted","linux","ghr-linux-x64"]') }}
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - uses: PyO3/maturin-action@v1
-        # Our runners set RUSTC_WRAPPER=sccache, and maturin passes it into its
-        # manylinux container, which has no sccache (and could not reach the
-        # cache's credentials). Empty means no wrapper.
-        env:
-          RUSTC_WRAPPER: ""
         with:
           working-directory: seiza-py
           rust-toolchain: 1.99.1
@@ -129,7 +115,7 @@ jobs:
 
   sdist:
     needs: test
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","linux","ghr-linux-x64"]') }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: PyO3/maturin-action@v1
