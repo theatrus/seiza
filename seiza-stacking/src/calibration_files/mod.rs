@@ -1473,6 +1473,24 @@ mod tests {
             Err(PreparationError::Cancelled)
         ));
     }
+    fn write_test_image(
+        path: &Path,
+        width: usize,
+        height: usize,
+        pixels: seiza_fits::F32ImageData<'_>,
+        headers: &[seiza_fits::WriteHeaderCard],
+    ) -> std::result::Result<(), seiza_image_io::Error> {
+        seiza_image_io::save_f32(
+            path,
+            width,
+            height,
+            pixels,
+            &seiza_image_io::SaveOptions {
+                headers,
+                ..Default::default()
+            },
+        )
+    }
     fn fixture() -> (tempfile::TempDir, Request) {
         let dir = tempfile::tempdir().unwrap();
         let library = dir.path().join("library");
@@ -1528,7 +1546,7 @@ mod tests {
             (0..4096).map(|i| level + (i % 7) as f32 - 3.0).collect(),
         )
         .unwrap();
-        seiza_fits::write_f32_image(
+        write_test_image(
             path,
             64,
             64,
@@ -1597,7 +1615,7 @@ mod tests {
             .into_iter()
             .map(|(k, v)| seiza_fits::WriteHeaderCard::new(k, v))
             .collect::<Vec<_>>();
-            seiza_fits::write_f32_image(
+            write_test_image(
                 path,
                 240,
                 160,
@@ -2011,7 +2029,7 @@ mod tests {
                         20000.0 * (1.0 - depth * (x * x + y * y)) + (i % 7) as f32 - 3.0
                     })
                     .collect();
-                seiza_fits::write_f32_image(
+                write_test_image(
                     &path,
                     64,
                     64,
@@ -2482,7 +2500,7 @@ mod tests {
                 C::new("EXPTIME", H::Float(30.0)),
                 C::new("DATE-OBS", H::String("2026-10-20T20:00:00Z".into())),
             ];
-            seiza_fits::write_f32_image(
+            write_test_image(
                 path,
                 width,
                 height,
