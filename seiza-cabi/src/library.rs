@@ -1249,7 +1249,10 @@ mod schema_tests {
         if std::env::var_os("SEIZA_UPDATE_SCHEMA").is_some() {
             std::fs::write(SCHEMA_FILE, &generated).unwrap();
         }
-        let kept = std::fs::read_to_string(SCHEMA_FILE).unwrap_or_default();
+        // A Windows checkout may give the file CRLF line endings.
+        let kept = std::fs::read_to_string(SCHEMA_FILE)
+            .unwrap_or_default()
+            .replace("\r\n", "\n");
         assert!(
             kept == generated,
             "the calibration library's JSON changed: run `SEIZA_UPDATE_SCHEMA=1 cargo test -p \
