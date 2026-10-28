@@ -2237,8 +2237,6 @@ def calibration_master_plan(
     quality: Sequence[CalibrationQuality] | None = None,
     global_settings: Sequence[CalibrationSetting] | None = None,
     rigs: Sequence[CalibrationRigSettings] | None = None,
-    flat_association: CalibrationAssociation | None = None,
-    dark_association: CalibrationAssociation | None = None,
     flat_basis: Mapping[str, Any] | None = None,
     flat_family: Mapping[str, Any] | None = None,
     flat_held_back: Sequence[str] | None = None,
@@ -2247,6 +2245,8 @@ def calibration_master_plan(
     master_failures: Sequence[CalibrationMasterFailure] | None = None,
     pedestal_evidence: Sequence[CalibrationPedestalEvidence] | None = None,
     force_flat_without_pedestal: bool | None = None,
+    flat_association: CalibrationAssociation | None = None,
+    dark_association: CalibrationAssociation | None = None,
 ) -> CalibrationSession: ...
 
 def calibration_master_cohort(

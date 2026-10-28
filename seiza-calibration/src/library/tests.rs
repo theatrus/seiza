@@ -384,3 +384,32 @@ fn raw_flat_response_plans_group_nights_modes_and_bound_samples() {
         serde_json::to_value(plan_flat_responses(reversed).unwrap().plans).unwrap()
     );
 }
+
+#[test]
+fn response_preparation_preserves_explicit_night_boundaries_and_one_set_needs_no_dates() {
+    let mut frame = supplied_frame(1, CalibrationKind::Flat, 0);
+    frame.captured_at = Some(1_700_000_000);
+    let mut request = Request {
+        frames: vec![frame],
+        ..Default::default()
+    };
+    request.grouping.night_boundaries = vec![crate::flat_response::groups::NightBoundary {
+        rig_uuid: "supplied-rig".into(),
+        frame_uuid: "supplied-Flat-1".into(),
+        seconds: 0,
+    }];
+    let first = plan_flat_responses(request.clone()).unwrap();
+    assert_eq!(first.night_boundaries[0].seconds, 0);
+    request.night_shifts = vec![NightShift {
+        rig_uuid: "supplied-rig".into(),
+        frame_uuid: "supplied-Flat-1".into(),
+        seconds: 86400,
+    }];
+    let second = plan_flat_responses(request.clone()).unwrap();
+    assert_ne!(first.plans[0].row.night, second.plans[0].row.night);
+    request.frames[0].captured_at = None;
+    request.flat_association = Association::OneSet;
+    let explicit = plan_flat_responses(request).unwrap();
+    assert!(explicit.plans.is_empty());
+    assert!(explicit.unplanned.is_empty());
+}

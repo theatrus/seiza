@@ -26,7 +26,10 @@ fn key(value: impl Serialize) -> String {
 /// the resulting planes, and pass the rows back to evaluate in grouping.
 pub fn plan_flat_responses(mut request: Request) -> crate::Result<FlatResponsePlans> {
     request.lights.clear();
-    request.grouping = Default::default();
+    request.grouping = groups::Request {
+        night_boundaries: std::mem::take(&mut request.grouping.night_boundaries),
+        ..Default::default()
+    };
     let snapshot = evaluate(request.clone())?;
     let rules = master_policy::rule_book(request.global_settings.clone(), request.rigs.clone())?;
     let nights = resolve_nights(&mut request, &rules)?;
@@ -47,7 +50,7 @@ pub fn plan_flat_responses(mut request: Request) -> crate::Result<FlatResponsePl
     flats.sort_by_key(|f| (f.captured_at, f.id, &f.frame_uuid));
     let unplanned = flats
         .iter()
-        .filter(|f| f.captured_at.is_none())
+        .filter(|f| request.flat_association != Association::OneSet && f.captured_at.is_none())
         .map(|f| f.frame_uuid.clone())
         .collect();
     let mut plans: Vec<FlatResponsePlan> = Vec::new();
