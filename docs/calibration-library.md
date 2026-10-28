@@ -1,9 +1,8 @@
 # Shared calibration library policy
 
-`seiza_calibration::library::evaluate`,
-`seiza_calibration_library_plan_json` and Python's
-`seiza.calibration_library_plan` evaluate the same immutable library snapshot.
-The policy was extracted from PSF Guard revision
+`seiza_calibration::library` holds PSF Guard's calibration library policy, so
+every host matches, grades and builds alike. The policy was extracted from
+PSF Guard revision
 `79f5e31d53b8371e8fcd0b22a9b69692412cd8b4`, rather than reconstructed from
 metadata matching. The grouping stage is described in [flat-groups.md](flat-groups.md).
 
@@ -13,9 +12,20 @@ applies manual eligibility choices; selects calibration candidates; chooses
 complete dark/bias cohorts, named readout modes and flat families; and produces
 master dependencies, session assignments and complete light gates.
 
-The code is PSF Guard's, moved: a Rust host calls it as its own (see
-[Native hosts](#native-hosts)), and the C ABI and Python reach the same
-functions through the JSON calls below, which are built from them.
+The code is PSF Guard's, moved, and there are three ways in:
+
+- **Rust hosts call the native API** as their own code: PSF Guard does
+  ([Native hosts](#native-hosts)).
+- **Python binds the same native API**: the same objects and calls, as
+  Python classes ([Python](#python)).
+- **The C ABI runs a whole workflow as one JSON call** (`library::json`, built
+  with the `json` feature that only seiza-cabi enables), so the apps need few
+  exports. Each call checks its request and runs the native API; it holds no
+  policy of its own. `seiza_calibration_library_schema_json` returns the JSON
+  Schema of every call's request and answer, and
+  `seiza-cabi/include/seiza_calibration_library.schema.json` is the same
+  document, for an app build to generate its types from. Most of this page
+  describes these calls' records; the native types are the same records.
 
 Session identity covers what each master is made from and how: resolved
 external-master adoption, or the raw inputs as a set with their
@@ -30,7 +40,8 @@ feedback retain the base key so hosts can submit execution results against it.
 
 ## Inputs
 
-Python/native records use snake_case. C JSON uses camelCase of those fields.
+Native records and Python use snake_case. C JSON uses camelCase of those
+fields, as the schema spells them.
 Identifiers, enum strings, setting keys and arbitrary setting values retain their
 spelling. Collections of settings are `{key, value}` records, never maps whose
 keys could be mistaken for schema fields. Unknown schema fields, unknown setting
@@ -40,8 +51,9 @@ layer. The 43-field `settings_schema` describes accepted values and ranges; C
 `seiza_calibration_settings_schema_json` and Python `calibration_settings_schema`
 list it on their own, and `seiza_calibration_setting_check_json` /
 `calibration_setting_check` judge one value as a settings panel saves it.
-The internal stored-settings resolver still tolerates old values when PSF Guard
-loads its catalog; hosts submit its resolved, valid records to these APIs.
+Natively, a setting is named by `rules::SettingKey`, and `RuleBook::validated`
+checks layers the same way; `RuleBook::new` is the stored-settings resolver,
+which tolerates values a newer build wrote when PSF Guard loads its catalog.
 
 | Request field | Contents |
 | --- | --- |
@@ -94,12 +106,13 @@ A CLI without a catalog gathers metadata and measurements from disk to fill
 the same request; persistence and scanning are host choices. Neither host needs
 to duplicate the matching policy.
 
-For repeated selection, Rust hosts pass their existing `Arc<groups::Book>` to
-`library::evaluate_with_book`. C hosts call `seiza_flat_groups_prepare_json` once
-and reuse its immutable handle with `seiza_calibration_library_plan_with_groups_json`,
-then call `seiza_flat_groups_free`. Python uses `FlatGroups(grouping_request)` and
-`calibration_library_plan(..., prepared_grouping=book)`. Preparation takes the
-same grouping records as `flat_group_plan`, including explicit rig `limits`.
+For repeated selection, Rust hosts build one `Library` over their existing
+`Arc<groups::Book>`. C hosts call `seiza_flat_groups_prepare_json` once and
+reuse its immutable handle with
+`seiza_calibration_library_plan_with_groups_json`, then call
+`seiza_flat_groups_free`; `library::json::evaluate_with_book` is that call.
+Preparation takes the same grouping records as `flat_group_plan`, including
+explicit rig `limits`.
 Selection reuses the book and accepts no additional `grouping` rows; its
 resolved limits must agree with the library settings. Hosts invalidate cached
 books when source rows, night boundaries or settings change. C handles may be
@@ -110,33 +123,48 @@ shared for concurrent reads but must outlive all calls borrowing them.
 A Rust host holds the model and calls the functions PSF Guard's code called,
 in its own flow, with its own catalog, caches, files and threads:
 
-- `library::rules`: the settings table (`fields`, `field`, `validate`,
-  `describe`, `check_setting`), `RuleBook` layers and their resolution into
-  `Rules`, with each value's source, check modes and grouping limits. A
-  stored value this build cannot read falls through to the next layer.
+- `library::rules`: the settings table (`fields`, `field`, `SettingKey`,
+  `FieldSpec::{validate, describe, is_default}`, `check_setting`), and
+  `RuleBook` layers (`new`, `validated`, `with_global`) resolved into each
+  rig's `Rules`: values by key, who set them (`source`, `set_by`), check
+  modes, tolerances and grouping limits. A stored value this build cannot
+  read falls through to the next layer.
+- `QualityIndex::new(records)` holds the stored measurements, grades and
+  choices; `regrade(frames, rules, nights)` judges the current measurements
+  against their peers (`grade`), `kept_out`/`keep_out` decide each frame's
+  kept-out reason (`KeptOut`), and `measurement_state` reports it. The host's
+  nights come in through `NightSplit`, and `night_of` names them.
 - `Library::new(frames, book, available_responses)` holds a catalog once;
   `Library::select(light, rules)` matches one light by borrowing it,
-  `light_choices` and `flat_family_compatible` answer a choice panel, and
-  `library::matching` holds the tests a refusal explains.
-- `grade(measured, rules, nights)` judges current measurements against their
-  peers; the host's nights come in through `NightSplit`, and `night_of` names
-  them. `kept_out_reason`, `describe_finding` and the stored measurement
-  records are the ones hosts persist.
-- `coherent_cohort`, `adopted_master`, `master_dependencies`,
-  `dark_level_screening`, `pedestal_sample_lights`, `pedestal_hint`,
-  `accept_pedestal`, `trims_to_majority`, `same_session_as`, `flat_set_label`
-  and the retry notes are the decisions a master build makes.
-  `resolve_session` resolves a verified selection into its session, and
-  `Session::record_failure`, `plan_flat_use` and `accept_pedestal` take
-  execution results.
-- The flat grouping job's planning: `plan_sessions`, `SessionPlan` (its
-  sample, response key and response row), `PedestalTable`, `pedestal_moved`,
-  `family_questions` and `FamilyQuestion`, `change_question` and
+  `select_associated` takes `Associations` of supplied sets, `light_choices`
+  and `flat_family_compatible` answer a choice panel, and `library::matching`
+  holds the tests a refusal explains. `CalibrationSelection::of_frames`
+  stands for candidates a host chose itself.
+- `resolve_session(selection, quality, options)` resolves a verified
+  selection into its `Session`; `Session::record_failure`,
+  `plan_flat_use(lights, FlatWithoutMasters)` and `accept_pedestal(estimates,
+  pinned)` take what building showed. `FlatUse::decide` is the flat's rule
+  on its own, and `adopted_master`, `CalibrationKind::dependencies`,
+  `dark_level_screening`, `pedestal_sample_lights`, `pedestal_hint` and
+  `pedestal_from_fits` are the decisions a master build makes.
+- `FlatRetry` decides a flat master's retries one step at a time from each
+  build's `FlatAttempt`: trim, the next session, or the first set with a
+  note (`FlatRetryDecision`). The host builds, stages and publishes.
+- The flat grouping job's planning: `plan_flat_sessions` and
+  `FlatSessionPlan` (its sample, response key, and `pending_row` /
+  `measured_row`), `PedestalTable` (`light_pedestal`, `flat_pedestal`),
+  `pedestal_moved`, `family_questions` and `FamilyQuestion` (with
+  `RetentionKey` and `Representatives`), `change_question` and
   `ChangeFilter`. A host gives each imaging session's lights and reads the
   headers and pixels they ask for.
 
-`evaluate` is these calls over one request, so a native host and a host that
-submits records reach the same answers.
+`library::json::evaluate` is these calls over one request, so a native host
+and a C host that submits records reach the same answers.
+
+### Python
+
+Python binds the native API above; it does not use the JSON calls. See the
+[Python README](../seiza-py/README.md#calibration-library) for its classes.
 
 ## Results and master execution
 
@@ -146,9 +174,9 @@ master recipes and an application policy. Selections also report kept-out
 frames, available library kinds, flat basis/family, held-back flats, personal
 choices and nondefault rule notes. `settings_schema` exposes the original
 settings table, limits and defaults; apps do not need their own threshold table.
-Native Rust consumers can name these result models through `library` reexports,
-including `FlatBasis`, `FlatFamily`, `RuleNote`, `FieldSpec` and `FieldKind`, and
-pattern-match them directly without serializing through JSON.
+Native Rust consumers hold these models directly (`CalibrationSelection`,
+`Session`, `FlatBasis`, `FlatFamily`, `rules::RuleNote`, `rules::FieldSpec`)
+and pattern-match them without serializing through JSON.
 
 A recipe's action is `external`, `integrate`, `unavailable`, `failed` or
 `blocked`. It names input UUIDs, declared dependencies, coherence exclusions,
@@ -184,8 +212,9 @@ Planning opens no files and does not claim a master has been built. Hosts:
    the master has enough features to judge; otherwise all disagreements are zero;
    deliberately skipped sources have zero disagreement. The measurement
    algorithm remains version 2.
-   Submit accepted UUIDs and aligned disagreement to the shared retry policy
-   described below. The host stages/publishes files only after its decision.
+   Give the accepted UUIDs and aligned disagreement to the shared retry
+   policy (`FlatRetry`, described below). The host stages/publishes files
+   only after its decision.
 
 4. Apply any `flat_basis.correction()` through the shared change-map kernels.
    A promised correction that fails is an error, rather than a stack silently
@@ -225,9 +254,10 @@ pedestals, input verification and stale/failed/unmeasured distinctions.
 
 ## Resolving selected candidates and executing retries
 
-A catalog host can call `library::plan_masters(MasterPlanRequest)` after it
-verifies/remaps selected rows, without repeating grouping or selection. C uses
-`seiza_calibration_master_plan_json`; Python uses `calibration_master_plan(request)`.
+A C host can call `seiza_calibration_master_plan_json`
+(`library::json::plan_masters`) after it verifies/remaps selected rows, without
+repeating grouping or selection; a native host builds
+`CalibrationSelection::of_frames` and calls `resolve_session`.
 The request contains the already selected `frames` in candidate order, the
 session's `lights` (used for pedestal sampling), `quality`, global/rig settings,
 `flat_basis`, `flat_family`, `flat_held_back`, star masking and retry options.
@@ -243,18 +273,17 @@ explicitly. Building directly from an unverified preview is refused by the host;
 replan after verification or changed source metadata. Recipe exposure belongs
 to the adopted master/first actual coherent input, including unknown exposure.
 `coherent_inputs` reports the raw cohort even if it has only one frame or an
-external master is preferred. `master_cohort` (C `seiza_calibration_master_cohort_json`,
-Python `calibration_master_cohort`) exposes the original metadata-tolerant
-coherence helper for previews/retries using effective settings. It validates
-settings just like executable planning; full planning also validates metadata,
-source-verification records and identities. Rust now returns `Result<MasterCohort>`.
-`FlatRetryRequest.policy` is `Option<FlatRetryPolicy>` so an omitted policy can
-be distinguished from an explicit override; existing JSON policy objects retain
-their shape.
+external master is preferred. `coherent_cohort` (C
+`seiza_calibration_master_cohort_json`) is the original metadata-tolerant
+coherence helper for previews/retries using effective settings. The C call
+validates settings just like executable planning; full planning also validates
+metadata, source-verification records and identities.
+`FlatRetryRequest.policy` is optional so an omitted policy can be
+distinguished from an explicit override.
 
-`library::flat_retry(FlatRetryRequest)` / `seiza_calibration_flat_retry_json` /
-`calibration_flat_retry(request)` owns the post-build decision sequence, built
-from the decision functions a native host calls. An alternate set is the next
+`FlatRetry` owns the post-build decision sequence; the C ABI's
+`seiza_calibration_flat_retry_json` (`library::json::flat_retry`) runs it from
+one request. An alternate set is the next
 session out, clustered as one master takes it from the remaining raw
 candidates nearest first, never every flat outside the first window. Supply
 the returned `session` object and all selected raw `candidates`, then the first attempt's accepted `used` UUIDs, `disagreement`, `drift_threshold`,
@@ -363,9 +392,9 @@ grades, explicit exclusions, source checks and physical compatibility. It
 refuses incompatible sets and multiple/mixed external masters. Flat retries
 can trim unstable frames but cannot switch to another session in this mode.
 
-`library::plan_flat_responses` (`seiza_calibration_flat_response_plan_json`,
-Python `calibration_flat_response_plan`) runs PSF Guard's session planning
-(`plan_sessions`) over library request records. Eligible raw flats group by
+`seiza_calibration_flat_response_plan_json` (`library::json::plan_flat_responses`)
+runs PSF Guard's session planning (`plan_flat_sessions`) over library request
+records. Eligible raw flats group by
 family (rig, filter, focal length class, frame size, binning, gain, offset and
 readout mode name), night and rotation, under the family, session and response
 keys PSF Guard keeps its responses by, so a host that adopts this keeps its
@@ -381,13 +410,10 @@ exists merely because sessions have been prepared.
 
 ## Light evidence, correction planning and personal choices
 
-The same core boundary covers the remaining workflow:
-`library::plan_flat_work(FlatWorkRequest {library,light_context})` and
-`library::finish_flat_work(FlatWorkAnswer)`. Their C exports are
+For C hosts the same boundary covers the remaining workflow:
 `seiza_calibration_flat_work_plan_json` and
-`seiza_calibration_flat_work_finish_json` (camelCase); Python offers
-`calibration_flat_work_plan` / `calibration_flat_work_finish` with mapping or
-keyword calls and the same snake_case records.
+`seiza_calibration_flat_work_finish_json` (`library::json::plan_flat_work` and
+`finish_flat_work`). Native hosts and Python call the stages themselves.
 
 Cached light metadata, catalog IDs/profiles/targets/exclusions and optional
 pedestal estimates drive questions without paths being opened. The questions
