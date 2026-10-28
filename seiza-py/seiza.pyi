@@ -24,9 +24,15 @@ def analyze_project(
     filter: str | None = None, max_frames: int | None = None,
     metrics_only: bool = False,
 ) -> dict[str, Any]:
-    """Analyze mono FITS/XISF files, directories, or text lists; return schema-2 diagnostics.
+    """Analyze mono/CFA/RGB FITS/XISF inputs; return schema-3 component diagnostics.
 
     Keys: schema_version, algorithm_version, options, frames, groups, timings, warnings.
+    Each frame is one source/component record. sampling includes image_kind,
+    component, source_width/height, spacing_pixels, offset_pixels, bayer_pattern,
+    storage_bayer_pattern, bayer_offsets and row_order. CFA has R/G_red/G_blue/B;
+    RGB has R/G/B. HFR/FWHM and registration RMS use original-image pixels.
+    Groups separate filter, image_kind and component. Do not sum exposures
+    across components; max_frames limits source paths, samples is per component.
     metrics_only skips registration, normalization and depth analysis.
     measurement_status and depth_status describe processing, not quality.
     Frames include median_star_snr (dimensionless stellar peak SNR). Groups

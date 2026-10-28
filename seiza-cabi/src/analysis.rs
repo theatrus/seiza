@@ -50,10 +50,11 @@ fn keys(value: serde_json::Value, camel: bool) -> serde_json::Value {
     }
 }
 
-/// Analyze mono FITS/XISF inputs without stacking. Request: inputs (paths,
+/// Analyze mono, raw Bayer or RGB FITS/XISF inputs without stacking. Request: inputs (paths,
 /// directories or text lists), samples (8192..2097152, default 262144), filter
 /// (optional), maxFrames (optional), metricsOnly (default false). Returns the core report with camelCase
-/// keys. Individual frame failures remain in the report. Free with seiza_string_free.
+/// keys (schema 3). Frames are source/component records with sampling geometry;
+/// groups separate filter, imageKind and component. Individual frame failures remain in the report. Free with seiza_string_free.
 ///
 /// # Safety
 /// request_json must be NUL-terminated UTF-8. error_out must be null or writable.
@@ -339,6 +340,51 @@ mod tests {
         assert_eq!(keys(keys(v.clone(), true), false), v);
     }
     #[test]
+    fn osc_entry_point_preserves_component_geometry_and_camel_case() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("osc.fits");
+        let headers = [seiza_fits::WriteHeaderCard::new(
+            "BAYERPAT",
+            seiza_fits::HeaderValue::String("RGGB".into()),
+        )];
+        seiza_image_io::save_f32(
+            &path,
+            80,
+            80,
+            seiza_fits::F32ImageData::Mono(&vec![1000.; 6400]),
+            &seiza_image_io::SaveOptions {
+                headers: &headers,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        unsafe {
+            let mut error = ptr::null_mut();
+            let request =
+                CString::new(serde_json::json!({"inputs":[path],"metricsOnly":true}).to_string())
+                    .unwrap();
+            let json = seiza_analyze_project_json(request.as_ptr(), &mut error);
+            assert!(error.is_null());
+            assert!(!json.is_null());
+            let value: serde_json::Value =
+                serde_json::from_str(CStr::from_ptr(json).to_str().unwrap()).unwrap();
+            assert_eq!(value["schemaVersion"], 3);
+            assert_eq!(value["frames"].as_array().unwrap().len(), 4);
+            assert_eq!(value["frames"][0]["sampling"]["component"], "R");
+            assert_eq!(value["frames"][0]["sampling"]["spacingPixels"], 2);
+            assert_eq!(
+                value["frames"][0]["sampling"]["storageBayerPattern"],
+                "RGGB"
+            );
+            assert_eq!(value["groups"][0]["imageKind"], "cfa");
+            let html = seiza_analysis_html(json, &mut error);
+            assert!(error.is_null());
+            assert!(!html.is_null());
+            seiza_string_free(html);
+            seiza_string_free(json);
+        }
+    }
+    #[test]
     fn entry_point_reports_invalid_options_and_missing_frame() {
         unsafe {
             let mut error = ptr::null_mut();
@@ -353,7 +399,7 @@ mod tests {
             assert!(!json.is_null());
             let value: serde_json::Value =
                 serde_json::from_str(CStr::from_ptr(json).to_str().unwrap()).unwrap();
-            assert_eq!(value["schemaVersion"], 2);
+            assert_eq!(value["schemaVersion"], 3);
             assert_eq!(value["frames"][0]["measurementStatus"], "failed");
             assert_eq!(value["frames"][0]["depthStatus"], "not_requested");
             assert_eq!(value["timings"]["registrationSeconds"], 0.0);

@@ -3,7 +3,7 @@ use crate::{AnalysisReport, Error};
 /// Render a portable, network-free HTML report. Embedded data cannot terminate
 /// its script element; filenames and metadata are inserted as text, never HTML.
 pub fn render_html(report: &AnalysisReport) -> Result<String, Error> {
-    if !matches!(report.schema_version, 1 | 2) {
+    if !matches!(report.schema_version, 1..=3) {
         return Err(Error::Invalid("unsupported analysis report schema".into()));
     }
     let json = serde_json::to_string(report)?
@@ -125,7 +125,7 @@ fn validate_stack(r: &seiza_stacking::PostStackReport) -> Result<(), Error> {
         .filter(|a| !a.is_null())
     {
         let analysis: AnalysisReport = serde_json::from_value(analysis.clone())?;
-        if !matches!(analysis.schema_version, 1 | 2) {
+        if !matches!(analysis.schema_version, 1..=3) {
             return Err(Error::Invalid("unsupported rich analysis schema".into()));
         }
     }

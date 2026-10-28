@@ -15,7 +15,7 @@ try { if(localStorage.getItem('seiza-report-theme')==='dark') document.documentE
  <div><div class="eyebrow"><span class="mark" aria-hidden="true"></span>Seiza / Observing report</div><h1>Project analysis</h1><p class="subtitle">Frame measurements &amp; integration diagnostics</p><p id="scope" class="subtitle"></p><span id="mode" class="mode"></span></div>
  <div class="top-actions"><div class="action-buttons"><button id="theme" type="button" aria-pressed="false">Dark mode</button><a id="downloadJson" class="action-link" download="seiza-analysis.json" title="Download the complete report data, including all filters and frames">Download JSON</a><button id="print" type="button">Print / Save PDF</button></div><small>Self-contained · offline ready</small></div>
 </header>
-<div class="selection"><label>Filter group <select id="filter"></select></label><p>Compare frames within one pointing and filter.<br>Processing outcomes describe participation, not image quality.</p></div>
+<div class="selection"><label>Filter / component <select id="filter"></select></label><p>Compare frames within one pointing and filter.<br>Processing outcomes describe participation, not image quality.</p></div>
 <div id="summary" class="stats" aria-live="polite"></div>
 <div id="charts" class="charts">
  <section id="depthPanel" class="panel" aria-labelledby="depthTitle">
@@ -27,7 +27,7 @@ try { if(localStorage.getItem('seiza-report-theme')==='dark') document.documentE
  </section>
  <section class="panel" aria-labelledby="healthTitle">
   <div class="panel-head"><h2 id="healthTitle">Frame health</h2><p>Inspect variation; use combined metrics to assess quality</p></div>
-  <div class="controls"><label>Metric <select id="metric"><option value="median_hfr">HFR (px)</option><option value="median_fwhm">FWHM (px)</option><option value="star_count">Star count</option><option value="median_eccentricity">Eccentricity</option><option value="median_star_snr">Stellar peak SNR</option><option value="background">Native background</option><option value="noise">Native frame noise</option></select></label><label>Order <select id="healthAxis"><option value="order">Input order</option><option value="time">Capture time</option></select></label></div>
+  <div class="controls"><label>Metric <select id="metric"><option value="median_hfr">HFR (image px)</option><option value="median_fwhm">FWHM (image px)</option><option value="star_count">Star count</option><option value="median_eccentricity">Eccentricity</option><option value="median_star_snr">Stellar peak SNR</option><option value="background">Native background</option><option value="noise">Native frame noise</option></select></label><label>Order <select id="healthAxis"><option value="order">Input order</option><option value="time">Capture time</option></select></label></div>
   <p id="baseline" class="baseline"></p><div id="health" class="chart"></div>
   <div class="legend"><span><i class="swatch dot"></i>Measured frame</span><span><i class="swatch dot" style="background:var(--amber)"></i>Partial measurement</span><span><i class="swatch dashed"></i>Group median</span></div>
   <p id="healthNote" class="panel-foot"></p>
@@ -40,7 +40,7 @@ try { if(localStorage.getItem('seiza-report-theme')==='dark') document.documentE
 </section>
 <div class="support">
  <section class="panel"><h2>Processing time</h2><div id="timings"></div><details><summary>What the timings include</summary><p>Wall-clock seconds, including failed attempts. Measurement includes conversion, quality detection, PSF fits and native noise/background. Registration includes its own star detection. Sampling includes normalization and temporary writes. Total includes overhead, but excludes report rendering and writing. Stage times do not overlap.</p></details></section>
- <section class="panel"><h2>Method &amp; interpretation</h2><p class="muted" style="font-size:12px;margin-top:8px">Advisories never automatically exclude a frame. A high SNR or star count alone is not a quality verdict.</p><ul id="groupWarnings" class="warning"></ul><p id="reference" class="reference"></p><details><summary>Assumptions &amp; limitations</summary><ul id="warnings"></ul><p>Full-depth analysis uses non-overlapping 16×16 patches at two-pixel pitch in the central 80%. Only patches valid in every depth-included frame contribute. Noise is median patch MAD × 1.4826 of (odd sum − even sum)/N; at least 32 common patches are required. Odd depths have no split measurement. Shared systematic errors cancel; robust noise describes the distribution core, not total outlier energy.</p><p>The ideal 1/√N comparison assumes independent, equal-quality frames and is anchored at two frames. Trend fits use geometric even-depth checkpoints over the last fourfold window. Cumulative observations are correlated: R² is descriptive, not a confidence interval. Any conditional estimate assumes the fitted trend persists.</p></details></section>
+ <section class="panel"><h2>Method &amp; interpretation</h2><p class="muted" style="font-size:12px;margin-top:8px">Advisories never automatically exclude a frame. A high SNR or star count alone is not a quality verdict.</p><ul id="groupWarnings" class="warning"></ul><p id="reference" class="reference"></p><details><summary>Assumptions &amp; limitations</summary><ul id="warnings"></ul><p>Full-depth analysis uses non-overlapping 16×16 patches at two-component-sample pitch in the central 80%. Only patches valid in every depth-included frame contribute. Noise is median patch MAD × 1.4826 of (odd sum − even sum)/N; at least 32 common patches are required. Odd depths have no split measurement. Shared systematic errors cancel; robust noise describes the distribution core, not total outlier energy.</p><p>The ideal 1/√N comparison assumes independent, equal-quality frames and is anchored at two frames. Trend fits use geometric even-depth checkpoints over the last fourfold window. Cumulative observations are correlated: R² is descriptive, not a confidence interval. Any conditional estimate assumes the fitted trend persists.</p></details></section>
 </div>
 <footer><span>Seiza project analysis · source images unchanged</span><span id="schema"></span></footer>
 </main>
@@ -57,7 +57,9 @@ const measurement = f => legacy ? ((f.measurement_status ?? f.status)==='accepte
 const depth = f => legacy ? ((f.measurement_status ?? f.status)==='accepted'?'included':'unavailable') : f.depth_status;
 const depthCount = g => g.depth_frames ?? g.accepted_frames ?? 0;
 const basename = path => String(path).split(/[\\/]/).pop();
-const sameFilter = (f,g) => !g || (f.filter??'').toLowerCase()===(g.filter??'').toLowerCase();
+const componentLabel=c=>c==='G_red'?'G (red row)':c==='G_blue'?'G (blue row)':c;
+const groupLabel=g=>(g.filter??'Unknown passband')+(g.component?' · '+g.image_kind.toUpperCase()+' / '+componentLabel(g.component):'');
+const sameFilter = (f,g) => !g || ((f.filter??'').toLowerCase()===(g.filter??'').toLowerCase() && (f.sampling?.image_kind??null)===(g.image_kind??null) && (f.sampling?.component??null)===(g.component??null));
 function node(tag, text, className) {
  const el = document.createElement(tag);
  if(text!=null) el.textContent=text;
@@ -77,11 +79,11 @@ function drawHealth(g) {
  const key=metric==='star_count'?'median_star_count':metric.startsWith('median_')?metric:'median_'+metric;
  const median=g?.[key];
  $('baseline').textContent=g?(legacy?'Legacy depth-included group median: ':'Measured-frame group median: ')+fmt(median):'All filters shown; select one filter for a comparable group median.';
- const rows=report.frames.map((f,i)=>{
+ const rows=report.frames.filter(f=>sameFilter(f,g)).map((f,i)=>{
   const stamp=f.capture_time;
   const x=timed?(stamp?Date.parse(/[Zz]|[+-]\d\d:\d\d$/.test(stamp)?stamp:stamp+'Z'):NaN):i+1;
   return {f,x,y:f[metric]};
- }).filter(p=>sameFilter(p.f,g)&&Number.isFinite(p.x)&&Number.isFinite(p.y));
+ }).filter(p=>Number.isFinite(p.x)&&Number.isFinite(p.y));
  const note=metric==='median_star_snr'?'Peak signal above local background / detector noise; not integrated or stack SNR.':metric==='noise'||metric==='background'?'Values retain each frame’s native units; compare only consistently scaled inputs.':'The vertical axis follows the observed range to make small variations visible.';
  const dates=timed&&rows.length?' Capture dates (UTC): '+new Date(Math.min(...rows.map(p=>p.x))).toISOString().slice(0,10)+' to '+new Date(Math.max(...rows.map(p=>p.x))).toISOString().slice(0,10)+'. Missing or unparseable capture times are omitted.':'';
  $('healthNote').textContent=note+dates;
@@ -120,11 +122,12 @@ function drawTable(g) {
   info.id='frame-details-'+index;info.hidden=true;
   toggle.setAttribute('aria-controls',info.id);toggle.setAttribute('aria-expanded','false');
   chevron.setAttribute('aria-hidden','true');
-  toggle.append(chevron,node('span',basename(f.path)));
+  toggle.append(chevron,node('span',basename(f.path)+(f.sampling&&f.sampling.image_kind!=='mono'?' · '+componentLabel(f.sampling.component):'')));
   toggle.addEventListener('click',()=>{
    info.hidden=!info.hidden;
    toggle.setAttribute('aria-expanded',String(!info.hidden));
   });
+  if(f.sampling){const s=f.sampling;info.append(node('p',s.image_kind.toUpperCase()+' / '+componentLabel(s.component)+' · source '+s.source_width+' × '+s.source_height+' · sample spacing '+s.spacing_pixels+' image px · origin ('+s.offset_pixels.join(', ')+')'));if(s.image_kind==='cfa')info.append(node('p','Bayer '+s.bayer_pattern+' · stored pattern '+s.storage_bayer_pattern+' · origin offsets ('+s.bayer_offsets.join(', ')+') · row order '+(s.row_order??'unspecified')));}
   info.append(node('p',`Native background: ${fmt(f.background)}`));
   info.append(node('p',f.path),node('p','Captured: '+fmt(f.capture_time)),node('p',`Registration RMS: ${fmt(f.registration_rms_pixels)} px · matched stars: ${fmt(f.matched_stars)}`),node('p',`Gain: ${fmt(f.gain)} · offset: ${fmt(f.offset)} · normalization: ${fmt(f.normalization)}`));
   for(const message of [f.error,f.depth_error,...f.warnings].filter(Boolean))info.append(node('p',message));
@@ -137,17 +140,18 @@ function drawTable(g) {
   $('frames').append(tr);
  }
  if(!rows.length){const tr=node('tr'),td=node('td','No frames match this selection.');td.colSpan=10;td.style.textAlign='center';tr.append(td);$('frames').append(tr);}
- $('tableCount').textContent=`${rows.length} of ${selected.length} frames shown · sorted path order · — means unavailable. Search filters this table only.`;
+ $('tableCount').textContent=`${rows.length} of ${selected.length} component records shown · sorted path order · — means unavailable. Search filters this table only.`;
 }
 function currentGroup(){return $('filter').value==='all'?undefined:report.groups[Number($('filter').value)];}
 function draw() {
  const g=currentGroup(),frames=report.frames.filter(f=>sameFilter(f,g));
- $('scope').textContent=(g?(g.filter??'Unknown passband')+' filter':'All filters')+' · '+frames.length+' input frames';
+ $('scope').textContent=(g?groupLabel(g):'All filter/components')+' · '+new Set(frames.map(f=>f.path)).size+' source images · '+frames.length+' component records';
  const measured=frames.filter(f=>measurement(f)==='measured').length;
- const exposure=frames.reduce((sum,f)=>sum+(Number.isFinite(f.exposure_seconds)?f.exposure_seconds:0),0);
- const unknown=frames.filter(f=>!Number.isFinite(f.exposure_seconds)).length;
+ const uniqueFrames=[...new Map(frames.map(f=>[f.path,f])).values()];
+ const exposure=uniqueFrames.reduce((sum,f)=>sum+(Number.isFinite(f.exposure_seconds)?f.exposure_seconds:0),0);
+ const unknown=uniqueFrames.filter(f=>!Number.isFinite(f.exposure_seconds)).length;
  const stars=g?.median_star_count;
- $('summary').replaceChildren(stat('Measured frames',fmt(measured),`${frames.length} inputs in selection`),stat(metricsOnly?'Known exposure':'Included in depth',metricsOnly?fmt(exposure)+' s':fmt(g?depthCount(g):report.groups.reduce((n,v)=>n+depthCount(v),0)),metricsOnly?`${unknown} unknown exposures`:'Participation is not a quality score'),stat('Median star count',fmt(stars),g?(legacy?'Legacy depth-included population':'Measured-frame population'):'Select a filter group'),stat(metricsOnly?'Median HFR':'Common patches',metricsOnly?fmt(g?.median_hfr)+' px':g?fmt(g.common_patches)+' / '+fmt(g.candidate_patches):'—',metricsOnly?'Measured-frame population':'Fixed footprint across depth'));
+ $('summary').replaceChildren(stat(g?'Measured frames':'Measured records',fmt(measured),`${frames.length} component records in selection`),stat(metricsOnly?'Known exposure':g?'Included in depth':'Included records',metricsOnly?fmt(exposure)+' s':fmt(g?depthCount(g):report.groups.reduce((n,v)=>n+depthCount(v),0)),metricsOnly?`${unknown} unknown exposures`:'Participation is not a quality score'),stat('Median star count',fmt(stars),g?(legacy?'Legacy depth-included population':'Measured-frame population'):'Select a filter group'),stat(metricsOnly?'Median HFR':'Common patches',metricsOnly?fmt(g?.median_hfr)+' px':g?fmt(g.common_patches)+' / '+fmt(g.candidate_patches):'—',metricsOnly?'Measured-frame population':'Fixed footprint across depth'));
  $('reference').textContent=metricsOnly?'Depth analysis not requested. Registration, normalized noise and depth curves are unavailable.':g?'Reference: '+fmt(g.reference)+' · '+fmt(g.integration_seconds)+' depth-included seconds · '+g.unknown_exposures+' unknown exposures.':'Select a filter to view its depth reference.';
  warnings('groupWarnings',g?g.warnings:[]);
  drawHealth(g);if(!metricsOnly)drawDepth(g);drawTable(g);
@@ -163,8 +167,8 @@ function drawTimings() {
  }
  $('timings').append(list,node('p','Total elapsed · '+fmt(tm.total_seconds)+' s','runtime-total'));
 }
-for(const [i,g] of report.groups.entries()) {const option=node('option',g.filter??'Unknown passband');option.value=String(i);$('filter').append(option);}
-const all=node('option','All filters');all.value='all';$('filter').append(all);
+for(const [i,g] of report.groups.entries()) {const option=node('option',groupLabel(g));option.value=String(i);$('filter').append(option);}
+const all=node('option','All filter/components');all.value='all';$('filter').append(all);
 $('mode').textContent=metricsOnly?'Metrics only':'Metrics + integration depth';
 $('depthPanel').hidden=metricsOnly;$('charts').classList.toggle('metrics-only',metricsOnly);
 $('schema').textContent=`Schema ${report.schema_version} · algorithm ${report.algorithm_version}`;

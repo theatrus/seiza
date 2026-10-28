@@ -5,8 +5,8 @@ import seiza
 
 def test_analysis_rejected_frame_and_portable_html(tmp_path):
     report = seiza.analyze_project([tmp_path / "missing.fits"])
-    assert report["schema_version"] == 2
-    assert report["algorithm_version"] == 2
+    assert report["schema_version"] == 3
+    assert report["algorithm_version"] == 3
     assert report["groups"] == []
     frame = report["frames"][0]
     assert frame["measurement_status"] == "failed"
@@ -83,3 +83,32 @@ def test_analysis_successful_project(tmp_path):
             assert a[key] == b[key]
     assert metrics["timings"]["registration_seconds"] == 0
     assert "Depth analysis not requested" in seiza.analysis_html(metrics)
+
+@pytest.mark.parametrize("kind,components", [("cfa", ["R", "G_red", "G_blue", "B"]), ("rgb", ["R", "G", "B"])])
+def test_color_component_schema_and_sampling(tmp_path, kind, components):
+    fits = pytest.importorskip("astropy.io.fits")
+    import numpy as np
+    path = tmp_path / "osc.fits"
+    header = fits.Header({"FILTER": "OSC", "EXPTIME": 60.0})
+    if kind == "cfa":
+        header["BAYERPAT"] = "RGGB"
+        header["XBAYROFF"] = 1
+        image = np.full((80, 80), 1000, dtype="float32")
+    else:
+        image = np.stack([np.full((80, 80), 1000 * i, dtype="float32") for i in (1, 2, 3)])
+    fits.writeto(path, image, header)
+    report = seiza.analyze_project([path], metrics_only=True)
+    assert [g["component"] for g in report["groups"]] == components
+    assert all(g["image_kind"] == kind for g in report["groups"])
+    assert all(g["measured_frames"] == 1 for g in report["groups"])
+    for frame in report["frames"]:
+        assert frame["measurement_status"] == "measured"
+        assert frame["depth_status"] == "not_requested"
+        assert frame["sampling"]["source_width"] == 80
+        assert frame["sampling"]["spacing_pixels"] == (2 if kind == "cfa" else 1)
+    if kind == "cfa":
+        assert report["frames"][0]["sampling"]["offset_pixels"] == [1, 0]
+        assert report["frames"][0]["sampling"]["bayer_offsets"] == [1, 0]
+    else:
+        assert [f["background"] for f in report["frames"]] == [1000, 2000, 3000]
+    assert "Filter / component" in seiza.analysis_html(report)

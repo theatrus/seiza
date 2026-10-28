@@ -17,7 +17,7 @@ accepts paths to files, nonrecursive directories or UTF-8 text lists; relative
 list entries resolve beside the list. `max_frames` limits sorted deduplicated
 paths before header filtering. It releases the GIL during analysis and returns
 a snake_case dictionary with `schema_version`, `algorithm_version`, `options`,
-`frames`, `groups`, `timings`, and `warnings` (schema/algorithm version 2). Invalid requests raise `ValueError`;
+`frames`, `groups`, `timings`, and `warnings` (schema/algorithm version 3). Invalid requests raise `ValueError`;
 individual inputs stay in `frames` with separate `measurement_status` and
 `depth_status`. Measurement failures use `error`; depth failures use `depth_error`.
 Measured frames contribute to native quality medians even if registration fails.
@@ -26,7 +26,7 @@ normalized noise and depth results remain unavailable. Groups count
 `measured_frames`, `depth_frames` and `normalized_noise_frames` separately.
 Use separate invocations per panel/pointing. No outcome is a quality verdict.
 
-Mono non-Bayer FITS/XISF frames are measured without producing a full stack.
+Mono, raw Bayer and RGB FITS/XISF frames are measured without producing a full stack.
 Per-filter groups contain registration/photometry diagnostics, common-footprint
 noise curves, known integration time, unknown-exposure counts and optional
 conditional trend estimates. `analysis_html(report)` returns a portable HTML
@@ -1881,3 +1881,41 @@ to cheap removes the rich-analysis payload without reading source images.
 The C twin is `seiza_prepare_stack_report_json`, taking `{report, level, inputs}`
 with camelCase report keys and returning camelCase JSON (`null` for none).
 Whole-file checksums are CLI provenance behavior, not performed by this helper.
+
+
+### OSC / RGB analysis (schema 3)
+
+Analysis automatically recognizes mono, raw Bayer and three-plane RGB sources.
+No extra option is needed, including for rich post-stack reports. The input list
+is read once per source; measurement and registration run per component.
+`max_frames` limits source paths; `samples` is the budget **per component**.
+
+A schema-3 `frames` record represents one **source/component**, not necessarily
+one file. CFA produces `R`, `G_red` (green on a red row), `G_blue` (green on a blue
+row), and `B`; RGB produces `R`, `G`, `B`; mono produces `Mono`. Source-level read
+failures or filter exclusions produce one record without sampling metadata.
+Groups separate `(filter, image_kind, component)`, so CFA/RGB/mono never share
+normalization or noise baselines. Do not sum exposure across color components.
+
+Frame `sampling` records `image_kind`, `component`, `source_width`,
+`source_height`, `spacing_pixels`, `offset_pixels`, declared `bayer_pattern`,
+`storage_bayer_pattern` (row-order adjusted, before offsets), `bayer_offsets`,
+and declared `row_order`. C JSON uses camelCase spellings of these same keys.
+Native CFA sample `(x,y)` is at original stored-image pixel
+`(2*x + offset_pixels[0], 2*y + offset_pixels[1])`. Each lattice retains every
+native sample, including odd edges. No demosaicing, green averaging, white
+balance or new calibration occurs. Unrecognized Bayer declarations and invalid
+origin offsets are reported as failures rather than guessed as mono.
+
+HFR, FWHM and registration RMS are in **original-image pixels** (CFA component
+values multiplied by two); this does not recover details lost to sparse CFA
+sampling. Undersampled stars can have biased shapes. Noise/background retain
+native component units; depth noise uses that component's reference units.
+Registration and photometric normalization are independent per component. A
+component with too few stars/common patches can keep measurements while its
+noise curve is unavailable. RGB retains existing demosaicing/resampling
+correlations; it must not be interpreted as independent raw detector samples.
+
+Both HTML renderers select filter/layout/component explicitly. Schema 1/2
+reports remain renderable; new reports use schema/algorithm version 3.
+Stacking and stretching numerical output versions do not change.
