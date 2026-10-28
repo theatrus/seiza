@@ -26,37 +26,22 @@ fn analyze_project(
             )
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    crate::flat_response::to_python(py, &report)
+    crate::convert::to_python(py, &report)
 }
 #[pyfunction]
 fn analysis_html(report: &Bound<'_, PyAny>) -> PyResult<String> {
-    let json: String = report
-        .py()
-        .import("json")?
-        .call_method1("dumps", (report,))?
-        .extract()?;
-    let report = serde_json::from_str(&json).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let report = crate::convert::from_python(report, "report")?;
     seiza_analysis::render_html(&report).map_err(|e| PyValueError::new_err(e.to_string()))
 }
 #[pyfunction]
 fn stack_report_html(report: &Bound<'_, PyAny>) -> PyResult<String> {
-    let json: String = report
-        .py()
-        .import("json")?
-        .call_method1("dumps", (report,))?
-        .extract()?;
-    let report = serde_json::from_str(&json).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let report = crate::convert::from_python(report, "report")?;
     seiza_analysis::render_stack_html(&report).map_err(|e| PyValueError::new_err(e.to_string()))
 }
 /// Render a schema-1 collection of labeled completed-stack reports.
 #[pyfunction]
 fn stack_collection_html(report: &Bound<'_, PyAny>) -> PyResult<String> {
-    let json: String = report
-        .py()
-        .import("json")?
-        .call_method1("dumps", (report,))?
-        .extract()?;
-    let report = serde_json::from_str(&json).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let report = crate::convert::from_python(report, "report")?;
     seiza_analysis::render_stack_collection_html(&report)
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
@@ -70,15 +55,12 @@ fn prepare_stack_report<'py>(
     inputs: Vec<PathBuf>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let report = report
-        .map(|r| -> PyResult<_> {
-            let json: String = py.import("json")?.call_method1("dumps", (r,))?.extract()?;
-            serde_json::from_str(&json).map_err(|e| PyValueError::new_err(e.to_string()))
-        })
+        .map(|r| crate::convert::from_python(r, "report"))
         .transpose()?;
     let result = py
         .detach(|| seiza_analysis::prepare_stack_report(report, level, &inputs))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    crate::flat_response::to_python(py, &result)
+    crate::convert::to_python(py, &result)
 }
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(analyze_project, m)?)?;

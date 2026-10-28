@@ -1,5 +1,5 @@
 //! Python's batch interface to the shared flat grouping policy.
-use crate::flat_response::{from_python, to_python};
+use crate::convert::{from_python, to_python};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use seiza_calibration::flat_response::groups;

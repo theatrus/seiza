@@ -1,6 +1,6 @@
 //! Thin translations of Seiza's linear continuum model and diagnostics.
 use crate::arrays::{into_image_array, linear_image};
-use crate::flat_response::to_python;
+use crate::convert::{from_python, to_python};
 use numpy::{PyArrayDyn, PyReadonlyArrayDyn, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -8,14 +8,6 @@ use seiza_stacking::{
     ContinuumFitOptions, ContinuumPhotometryOptions, ContinuumPlan, ContinuumSources, ContinuumStar,
 };
 
-pub(crate) fn from_python<T: serde::de::DeserializeOwned>(value: &Bound<'_, PyAny>) -> PyResult<T> {
-    let json: String = value
-        .py()
-        .import("json")?
-        .call_method1("dumps", (value,))?
-        .extract()?;
-    serde_json::from_str(&json).map_err(|e| PyValueError::new_err(e.to_string()))
-}
 pub(crate) fn core_error(error: seiza_stacking::Error) -> PyErr {
     PyValueError::new_err(error.to_string())
 }
@@ -30,9 +22,12 @@ fn fit_continuum<'py>(
     sources: &Bound<'_, PyAny>,
     options: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let stars: Vec<ContinuumStar> = from_python(stars)?;
-    let sources: ContinuumSources = from_python(sources)?;
-    let options: ContinuumFitOptions = options.map(from_python).transpose()?.unwrap_or_default();
+    let stars: Vec<ContinuumStar> = from_python(stars, "stars")?;
+    let sources: ContinuumSources = from_python(sources, "sources")?;
+    let options: ContinuumFitOptions = options
+        .map(|value| from_python(value, "fit options"))
+        .transpose()?
+        .unwrap_or_default();
     let result = py
         .detach(move || seiza_stacking::fit_continuum(&stars, &sources, &options))
         .map_err(core_error)?;
@@ -57,13 +52,13 @@ fn measure_and_fit_continuum<'py>(
         .into_iter()
         .map(linear_image)
         .collect::<PyResult<Vec<_>>>()?;
-    let sources: ContinuumSources = from_python(sources)?;
+    let sources: ContinuumSources = from_python(sources, "sources")?;
     let fit_options: ContinuumFitOptions = fit_options
-        .map(from_python)
+        .map(|value| from_python(value, "fit options"))
         .transpose()?
         .unwrap_or_default();
     let photometry_options: ContinuumPhotometryOptions = photometry_options
-        .map(from_python)
+        .map(|value| from_python(value, "photometry options"))
         .transpose()?
         .unwrap_or_default();
     let positions = positions.unwrap_or_default();
@@ -114,13 +109,13 @@ fn measure_and_fit_continuum_masked<'py>(
             Ok(array.as_slice()?.to_vec())
         })
         .collect::<PyResult<Vec<_>>>()?;
-    let sources: ContinuumSources = from_python(sources)?;
+    let sources: ContinuumSources = from_python(sources, "sources")?;
     let options: ContinuumFitOptions = fit_options
-        .map(from_python)
+        .map(|value| from_python(value, "fit options"))
         .transpose()?
         .unwrap_or_default();
     let photometry: ContinuumPhotometryOptions = photometry_options
-        .map(from_python)
+        .map(|value| from_python(value, "photometry options"))
         .transpose()?
         .unwrap_or_default();
     let positions = positions.unwrap_or_default();
@@ -158,8 +153,8 @@ fn subtract_continuum<'py>(
         .into_iter()
         .map(linear_image)
         .collect::<PyResult<Vec<_>>>()?;
-    let sources: ContinuumSources = from_python(sources)?;
-    let plan: ContinuumPlan = from_python(plan)?;
+    let sources: ContinuumSources = from_python(sources, "sources")?;
+    let plan: ContinuumPlan = from_python(plan, "continuum plan")?;
     let result = py
         .detach(move || {
             let references: Vec<_> = references.iter().collect();

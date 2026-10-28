@@ -2,12 +2,13 @@
 //! and `seiza_calibration::dust`), as the C ABI's `seiza_flat_*` and
 //! `seiza_dust_*` calls offer them.
 //!
-//! Planes are 2-D float32 arrays. Results are dicts parsed from the core's
-//! own JSON, the form the C calls return, so both bindings give the same
-//! keys. Options are a dict of `DustOptions` fields, any left out taking
+//! Planes are 2-D float32 arrays. Results are dicts of the core's own
+//! values, with the keys the C calls' JSON has, so both bindings give the
+//! same keys. Options are a dict of `DustOptions` fields, any left out taking
 //! their defaults.
 
 use crate::arrays::{float_array, float_image_view};
+use crate::convert::{from_python, to_python};
 use numpy::{PyArrayDyn, PyReadonlyArrayDyn, PyReadwriteArrayDyn, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -53,30 +54,6 @@ fn as_planes(arrays: Vec<PyReadonlyArrayDyn<'_, f32>>, name: &str) -> PyResult<V
 
 fn plane_array(py: Python<'_>, plane: Plane) -> PyResult<Bound<'_, PyArrayDyn<f32>>> {
     float_array(py, plane.width, plane.height, 1, plane.data)
-}
-
-/// The core's JSON for `value` as Python objects.
-pub(crate) fn to_python<'py>(
-    py: Python<'py>,
-    value: &impl serde::Serialize,
-) -> PyResult<Bound<'py, PyAny>> {
-    let json =
-        serde_json::to_string(value).map_err(|error| PyValueError::new_err(error.to_string()))?;
-    py.import("json")?.call_method1("loads", (json,))
-}
-
-/// A Python value (a dict, a list, a string) as the core type `T`.
-pub(crate) fn from_python<T: serde::de::DeserializeOwned>(
-    value: &Bound<'_, PyAny>,
-    name: &str,
-) -> PyResult<T> {
-    let json: String = value
-        .py()
-        .import("json")?
-        .call_method1("dumps", (value,))?
-        .extract()?;
-    serde_json::from_str(&json)
-        .map_err(|error| PyValueError::new_err(format!("invalid {name}: {error}")))
 }
 
 fn dust_options(options: Option<&Bound<'_, PyAny>>) -> PyResult<DustOptions> {
