@@ -1,6 +1,7 @@
-"""Typed calibration records. Optional fields use the core's documented defaults.
+"""Typed calibration records: the values the native classes take and give.
 
 These are ordinary dictionaries at runtime; validation remains in Seiza core.
+Optional fields use the core's documented defaults.
 """
 from typing import Any, Literal, Mapping, NotRequired, Required, Sequence, TypedDict
 
@@ -8,18 +9,6 @@ CalibrationAssociation = Literal["automatic", "one_set"]
 CalibrationKind = Literal["bias", "dark", "dark_flat", "flat"]
 CalibrationRecipeAction = Literal["external", "integrate", "unavailable", "failed", "blocked"]
 FlatRetryAction = Literal["publish_first", "try_trimmed", "publish_trimmed", "try_alternate", "publish_alternate", "withhold"]
-
-class CalibrationFlatResponsePlan(TypedDict):
-    row: dict[str, Any]
-    sample_frames: list[str]
-
-class CalibrationFlatResponsePlans(TypedDict):
-    algorithm_version: int
-    plans: list[CalibrationFlatResponsePlan]
-    limits: list[dict[str, Any]]
-    night_boundaries: list[dict[str, Any]]
-    unplanned: list[str]
-    grades: list[dict[str, Any]]
 
 class CalibrationFrame(TypedDict, total=False):
     id: int
@@ -73,9 +62,14 @@ class CalibrationLight(TypedDict, total=False):
     camera_temp: float | None
     timestamp: int | None
 
-class CalibrationSetting(TypedDict):
-    key: str
-    value: Any
+class CalibrationRigLayer(TypedDict, total=False):
+    name: str | None
+    values: Mapping[str, Any]
+
+class CalibrationNightBoundary(TypedDict):
+    rig_uuid: str
+    frame_uuid: str
+    seconds: int
 
 class CalibrationSettingCheck(TypedDict):
     key: str
@@ -84,21 +78,42 @@ class CalibrationSettingCheck(TypedDict):
     text: str | None
     default: bool
 
-class CalibrationRigSettings(TypedDict, total=False):
-    rig_uuid: str
-    name: str | None
-    settings: Sequence[CalibrationSetting]
-
-class CalibrationQuality(TypedDict, total=False):
+class CalibrationQualityRecord(TypedDict, total=False):
     frame_uuid: str
     source_fingerprint: str | None
     algorithm_version: int | None
     measurement: Mapping[str, Any] | None
     measure_error: str | None
-    grade: str | None
+    grade: Literal["ok", "suspect", "poor"] | None
     reason: str | None
     stray_light: str | None
     override_choice: Literal["use", "exclude"] | None
+
+class CalibrationJudged(TypedDict):
+    grade: Literal["ok", "suspect", "poor"]
+    code: str | None
+    reason: str | None
+    findings: list[dict[str, Any]]
+    stray_light: str | None
+
+class CalibrationCohort(TypedDict):
+    kept: list[CalibrationFrame]
+    dropped: list[CalibrationFrame]
+
+class CalibrationEvidenceLight(TypedDict):
+    path: str
+    at: int
+    angle: NotRequired[float | None]
+    filter: NotRequired[str]
+    target: NotRequired[str]
+
+class CalibrationPedestalLevel(TypedDict):
+    rig_uuid: str
+    gain: NotRequired[int | None]
+    offset: NotRequired[int | None]
+    kind: CalibrationKind
+    exposure_s: NotRequired[float | None]
+    level: float
 
 class FlatRetryPolicy(TypedDict, total=False):
     """All flags default true. enabled controls retry decisions, not measurement."""
@@ -143,58 +158,13 @@ class CalibrationApplication(TypedDict):
     sample_lights: list[str]
     pedestal_hint: float | None
 
-class CalibrationSession(TypedDict):
+class CalibrationSessionRecord(TypedDict):
     key: str
     tolerances: CalibrationTolerances
     recipes: list[CalibrationMasterRecipe]
     application: CalibrationApplication
     flat_stability: FlatRetryPolicy
     flat_held_back: list[str]
-
-class CalibrationLibrarySnapshot(TypedDict):
-    algorithm_version: int
-    selections: list[Mapping[str, Any]]
-    grades: list[Mapping[str, Any]]
-    sessions: list[CalibrationSession]
-    assignments: list[int]
-    settings_digest: str | None
-    settings_schema: list[Mapping[str, Any]]
-
-class CalibrationMasterFailure(TypedDict):
-    session_key: str
-    kind: CalibrationKind
-    reason: str
-
-class CalibrationPedestalEvidence(TypedDict, total=False):
-    session_key: str
-    estimates: Sequence[float]
-    pinned: float | None
-
-class CalibrationMasterPlanRequest(TypedDict, total=False):
-    flat_association: CalibrationAssociation
-    dark_association: CalibrationAssociation
-    frames: Sequence[CalibrationFrame]
-    lights: Sequence[CalibrationLight]
-    quality: Sequence[CalibrationQuality]
-    global_settings: Sequence[CalibrationSetting]
-    rigs: Sequence[CalibrationRigSettings]
-    flat_basis: Mapping[str, Any]
-    flat_family: Mapping[str, Any] | None
-    flat_held_back: Sequence[str]
-    flat_star_masking: bool
-    flat_stability: FlatRetryPolicy
-    master_failures: Sequence[CalibrationMasterFailure]
-    pedestal_evidence: Sequence[CalibrationPedestalEvidence]
-    force_flat_without_pedestal: bool
-
-class CalibrationMasterCohortRequest(TypedDict, total=False):
-    kind: CalibrationKind
-    frames: Sequence[CalibrationFrame]
-    settings: Sequence[CalibrationSetting]
-
-class CalibrationMasterCohort(TypedDict):
-    kept: list[str]
-    dropped: list[str]
 
 class FlatAttempt(TypedDict, total=False):
     used: Required[Sequence[str]]
@@ -203,18 +173,6 @@ class FlatAttempt(TypedDict, total=False):
     feature_pixels: int
     memo: bool
     label: str | None
-
-class CalibrationFlatRetryRequest(TypedDict, total=False):
-    session: CalibrationSession | None
-    candidates: Sequence[CalibrationFrame]
-    held_back: Sequence[str]
-    settings: Sequence[CalibrationSetting]
-    policy: FlatRetryPolicy | None
-    first: Required[FlatAttempt]
-    trimmed_attempted: bool
-    trimmed: FlatAttempt | None
-    alternate_attempted: bool
-    alternate: FlatAttempt | None
 
 class CalibrationFlatRetryDecision(TypedDict):
     action: FlatRetryAction
@@ -252,36 +210,32 @@ class FlatStabilityImageMetadata(TypedDict, total=False):
     bayer: FlatStabilityBayer | None
     skipped: bool
 
-
-class CalibrationFlatLightContext(TypedDict, total=False):
-    light_index: Required[int]
-    id: int | None
-    profile: str | None
-    target: str
-    excluded: bool
-    pedestal_adu: float | None
-
-class CalibrationFlatWorkRequest(TypedDict, total=False):
-    library: Mapping[str, Any]
-    light_context: Sequence[CalibrationFlatLightContext]
-
-class CalibrationFlatWorkPlans(TypedDict):
-    algorithm_version: int
-    grouping: dict[str, Any]
-    families: list[dict[str, Any]]
-    changes: list[dict[str, Any]]
-    corrections: list[dict[str, Any]]
-    overrides: list[dict[str, Any]]
-
-class CalibrationFlatWorkAnswer(TypedDict, total=False):
-    kind: Required[Literal["family", "change"]]
-    question: Required[Mapping[str, Any]]
-    choice: Mapping[str, Any]
-    lights: int
-    fits: Sequence[Mapping[str, Any]]
-
-class CalibrationFlatWorkResult(TypedDict):
-    kind: Literal["family", "change"]
-    row: dict[str, Any]
-
-_calibration_exports = ["CalibrationFlatLightContext", "CalibrationFlatWorkRequest", "CalibrationFlatWorkPlans", "CalibrationFlatWorkAnswer", "CalibrationFlatWorkResult",'CalibrationAssociation', 'CalibrationFlatResponsePlan', 'CalibrationFlatResponsePlans', 'CalibrationLibrarySnapshot', 'CalibrationKind', 'CalibrationRecipeAction', 'FlatRetryAction', 'CalibrationFrame', 'CalibrationLight', 'CalibrationSetting', 'CalibrationSettingCheck', 'CalibrationRigSettings', 'CalibrationQuality', 'FlatRetryPolicy', 'CalibrationLightRotation', 'CalibrationTolerances', 'CalibrationMasterRecipe', 'CalibrationApplication', 'CalibrationSession', 'CalibrationMasterFailure', 'CalibrationPedestalEvidence', 'CalibrationMasterPlanRequest', 'CalibrationMasterCohortRequest', 'CalibrationMasterCohort', 'FlatAttempt', 'CalibrationFlatRetryRequest', 'CalibrationFlatRetryDecision', 'FlatStabilityInput', 'FlatStabilityRequest', 'FlatSetStability', 'FlatStabilityBayer', 'FlatStabilityImageMetadata']
+_calibration_exports = [
+    'CalibrationAssociation',
+    'CalibrationKind',
+    'CalibrationRecipeAction',
+    'FlatRetryAction',
+    'CalibrationFrame',
+    'CalibrationLight',
+    'CalibrationRigLayer',
+    'CalibrationNightBoundary',
+    'CalibrationSettingCheck',
+    'CalibrationQualityRecord',
+    'CalibrationJudged',
+    'CalibrationCohort',
+    'CalibrationEvidenceLight',
+    'CalibrationPedestalLevel',
+    'FlatRetryPolicy',
+    'CalibrationLightRotation',
+    'CalibrationTolerances',
+    'CalibrationMasterRecipe',
+    'CalibrationApplication',
+    'CalibrationSessionRecord',
+    'FlatAttempt',
+    'CalibrationFlatRetryDecision',
+    'FlatStabilityInput',
+    'FlatStabilityRequest',
+    'FlatSetStability',
+    'FlatStabilityBayer',
+    'FlatStabilityImageMetadata',
+]

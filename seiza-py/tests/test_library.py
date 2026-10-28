@@ -1,31 +1,19 @@
-"""Reference outputs captured from PSF Guard, through the public Python API."""
+"""Reference outputs captured from PSF Guard, through the native Python API."""
 import copy
-import json
-from pathlib import Path
 
 import pytest
 import seiza
 
-FIXTURES = Path(__file__).resolve().parents[2] / 'seiza-calibration/tests/fixtures/library'
+from calibration_host import FIXTURES, KINDS, cases, groups_of, ids, plan, retry, rules_of, selection_record
 
 
-def prepare_grouping(grouping):
-    grouping = copy.deepcopy(grouping)
-    grouping['limits'] = [
-        {'rig_uuid': rig, 'limits': {'measured': True, 'dust': 0.01, 'broad': 0.02,
-                                    'window': 86400, 'rotation': 2.0}}
-        for rig in sorted({r['rig_uuid'] for r in grouping.get('responses', [])})
-    ]
-    return seiza.FlatGroups(grouping)
-
-
-@pytest.mark.parametrize('case', json.loads((FIXTURES / 'recipes.json').read_text())['cases'], ids=lambda c: c['name'])
+@pytest.mark.parametrize('case', cases('recipes.json'), ids=lambda c: c['name'])
 def test_resolved_recipes_determine_sessions_and_exposure(case):
-    result = seiza.calibration_library_plan(**case['request'])
+    result = plan(case['request'])
     assert result['assignments'] == case['assignments']
     assert len(result['sessions']) == len(case['recipes'])
     for session, expected in zip(result['sessions'], case['recipes']):
-        recipe = next(r for r in session['recipes'] if r['kind'] == case['kind'])
+        recipe = session.recipe(case['kind'])
         for key in ('action', 'inputs', 'exposure_seconds'):
             assert recipe[key] == expected[key]
         assert recipe['requires_source_verification'] is False
@@ -35,8 +23,7 @@ def test_recipe_exposure_survives_native_master_building(tmp_path):
     import numpy as np
     fits = pytest.importorskip("astropy.io.fits")
 
-    case = json.loads((FIXTURES / 'recipes.json').read_text())['cases'][1]
-    request = copy.deepcopy(case['request'])
+    request = copy.deepcopy(cases('recipes.json')[1]['request'])
     for frame in request['frames']:
         path = tmp_path / (frame['frame_uuid'] + '.fits')
         frame['source_path'] = str(path)
@@ -44,8 +31,7 @@ def test_recipe_exposure_survives_native_master_building(tmp_path):
         if not frame['is_master']:
             fits.writeto(path, np.full((64, 64), 300.0, dtype=np.float32),
                          fits.Header({'IMAGETYP': 'DARK', 'EXPTIME': 300.0}))
-    plan = seiza.calibration_library_plan(**request)
-    recipe = next(r for r in plan['sessions'][0]['recipes'] if r['kind'] == 'dark')
+    recipe = plan(request)['sessions'][0].recipe('dark')
     paths = {f['frame_uuid']: f['source_path'] for f in request['frames']}
     output = tmp_path / 'master.fits'
     seiza.build_dark([paths[id] for id in recipe['inputs']], output,
@@ -53,35 +39,42 @@ def test_recipe_exposure_survives_native_master_building(tmp_path):
     assert fits.getheader(output)['EXPTIME'] == 300.0
 
 
-@pytest.mark.parametrize('case', json.loads((FIXTURES / 'psf-guard.json').read_text())['cases'], ids=lambda c: c['name'])
+@pytest.mark.parametrize('case', cases('psf-guard.json'), ids=lambda c: c['name'])
 def test_psf_guard_selection_reference(case):
-    result = seiza.calibration_library_plan(**case['request'])
+    result = plan(case['request'])
+    selected = selection_record(result['selections'][0])
     for key in ('bias', 'dark', 'dark_flat', 'flat', 'kept_out', 'tolerances', 'flat_basis', 'flat_family'):
-        assert result['selections'][0][key] == case['expected'][key]
+        assert selected[key] == case['expected'][key]
     assert result['assignments'] == [0, 0]
+    sessions = [session.to_dict() for session in result['sessions']]
     reversed_request = copy.deepcopy(case['request'])
     reversed_request['frames'].reverse()
-    assert seiza.calibration_library_plan(**reversed_request)['sessions'] == result['sessions']
-    cached_request = copy.deepcopy(case['request'])
-    book = prepare_grouping(cached_request.pop('grouping', {}))
-    assert seiza.calibration_library_plan(**cached_request, prepared_grouping=book) == result
+    assert [s.to_dict() for s in plan(reversed_request)['sessions']] == sessions
+    # A host's cached book selects as the one built from the same rows.
+    rules = result['rules']
+    nights = seiza.CalibrationNights(case['request'].get('grouping', {}).get('night_boundaries', []),
+                                     frames=case['request']['frames'], rules=rules)
+    book = groups_of(case['request'].get('grouping', {}), rules, nights)
+    cached = plan(case['request'], groups=book)
+    assert [s.to_dict() for s in cached['sessions']] == sessions
+    assert [selection_record(s) for s in cached['selections']] == [selection_record(s) for s in result['selections']]
 
 
-def test_prepared_grouping_rejects_conflicting_rows_and_limits():
-    request = copy.deepcopy(json.loads((FIXTURES / 'psf-guard.json').read_text())['cases'][13]['request'])
-    book = prepare_grouping(request.pop('grouping'))
-    with pytest.raises(ValueError, match='either'):
-        seiza.calibration_library_plan(**request, grouping={'epoch_samples': [{'rig_uuid': 'r', 'at': 1, 'offset': 2}]}, prepared_grouping=book)
+def test_a_book_groups_each_rig_by_its_own_limits():
+    request = copy.deepcopy(cases('psf-guard.json')[13]['request'])
     request['global_settings'] = [{'key': 'flat_split_dust_pct', 'value': 5.0}]
-    with pytest.raises(ValueError, match='limits'):
-        seiza.calibration_library_plan(**request, prepared_grouping=book)
+    rules = rules_of(request)
+    groups = plan(request)['library'].groups
+    for row in request['grouping']['responses']:
+        assert groups.limits(row['rig_uuid']) == rules.for_rig(row['rig_uuid']).grouping_limits()
+    assert rules.for_rig(request['grouping']['responses'][0]['rig_uuid']).grouping_limits()['dust'] == 0.05
 
 
-@pytest.mark.parametrize('case', json.loads((FIXTURES / 'grading.json').read_text())['cases'], ids=lambda c: c['name'])
+@pytest.mark.parametrize('case', cases('grading.json'), ids=lambda c: c['name'])
 def test_psf_guard_grades_and_overrides(case):
-    result = seiza.calibration_library_plan(**case['request'])
+    result = plan(case['request'])
     for key in ('bias', 'dark', 'dark_flat', 'flat', 'kept_out'):
-        assert sorted(result['selections'][0][key]) == case['expected'][key]
+        assert sorted(selection_record(result['selections'][0])[key]) == case['expected'][key]
     for grade, expected in zip(result['grades'], case['grades']):
         assert grade['frame_uuid'] == expected['frame_uuid']
         assert grade['judged']['grade'] == expected['grade']
@@ -89,41 +82,43 @@ def test_psf_guard_grades_and_overrides(case):
         assert grade['kept_out'] == expected['kept_out']
     request = copy.deepcopy(case['request'])
     request['regrade'] = False
-    ungraded = seiza.calibration_library_plan(**request)
+    ungraded = plan(request)
     assert all(g['judged'] is None for g in ungraded['grades'])
     for key in ('bias', 'dark', 'dark_flat', 'flat', 'kept_out'):
-        assert sorted(ungraded['selections'][0][key]) == case['ungraded'][key]
+        assert sorted(selection_record(ungraded['selections'][0])[key]) == case['ungraded'][key]
     if case['use_anyway']:
         request['regrade'] = True
         request['quality'][-1]['override_choice'] = 'use'
-        result = seiza.calibration_library_plan(**request)
+        result = plan(request)
         for key in ('bias', 'dark', 'dark_flat', 'flat', 'kept_out'):
-            assert sorted(result['selections'][0][key]) == case['use_anyway'][key]
+            assert sorted(selection_record(result['selections'][0])[key]) == case['use_anyway'][key]
 
 
 def test_stale_failed_and_missing_measurements_stay_distinct():
-    request = copy.deepcopy(json.loads((FIXTURES / 'grading.json').read_text())['cases'][0]['request'])
+    request = copy.deepcopy(cases('grading.json')[0]['request'])
     request['quality'][0]['source_fingerprint'] = 'changed'
     request['quality'][1]['measurement'] = None
     request['quality'][1]['measure_error'] = 'cannot read'
     request['quality'] = request['quality'][:2]
-    result = seiza.calibration_library_plan(**request)
+    result = plan(request)
     assert [g['measurement_state'] for g in result['grades'][:3]] == ['stale', 'failed', 'unmeasured']
     assert all(g['judged'] is None for g in result['grades'][:3])
 
 
-def test_library_schema_refuses_duplicate_identities_and_unknown_fields():
+def test_records_refuse_duplicate_identities_and_unknown_fields():
     with pytest.raises(ValueError, match='unique'):
-        seiza.calibration_library_plan(frames=[{'frame_uuid': 'a'}, {'frame_uuid': 'a'}])
+        seiza.CalibrationQuality([{'frame_uuid': 'a'}, {'frame_uuid': 'a'}])
     with pytest.raises(ValueError):
-        seiza.calibration_library_plan(lights=[{'unknown': True}])
+        seiza.CalibrationLibrary([{'frame_uuid': 'a', 'unknown': True}])
+    library = seiza.CalibrationLibrary([])
+    with pytest.raises(ValueError):
+        library.select({'unknown': True}, seiza.CalibrationRules().global_rules())
     with pytest.raises(ValueError, match='duplicate setting'):
-        seiza.calibration_library_plan(global_settings=[{'key': 'use_darks', 'value': True}] * 2)
+        rules_of({'global_settings': [{'key': 'use_darks', 'value': True}] * 2})
 
 
 def flat_only_request():
-    case = json.loads((FIXTURES / 'psf-guard.json').read_text())['cases'][9]
-    request = copy.deepcopy(case['request'])
+    request = copy.deepcopy(cases('psf-guard.json')[9]['request'])
     for frame in request['frames']:
         frame['exposure_s'] = 2.0
         frame['camera_temp'] = -10.0
@@ -135,21 +130,21 @@ def flat_only_request():
 
 def test_flat_only_recipes_require_a_reliable_pedestal_and_reuse_a_pin():
     request = flat_only_request()
-    result = seiza.calibration_library_plan(**request)
-    session = result['sessions'][0]
-    application = session['application']
+    session = plan(request)['sessions'][0]
+    application = session.application
     assert application['flat_use'] == 'needs_pedestal_fit'
     assert application['sample_lights'] == ['/a.fits', '/c.fits', '/d.fits']
-    key = session['key']
-    request['pedestal_evidence'] = [{'session_key': key, 'estimates': [298, 300, 302]}]
-    application = seiza.calibration_library_plan(**request)['sessions'][0]['application']
-    assert (application['flat_use'], application['pedestal']) == ('fitted_pedestal', 300)
-    request['pedestal_evidence'][0]['estimates'] = [100, 300, 700]
-    assert seiza.calibration_library_plan(**request)['sessions'][0]['application']['flat_use'] == 'withheld'
+    session.accept_pedestal([298, 300, 302])
+    assert (session.application['flat_use'], session.application['pedestal']) == ('fitted_pedestal', 300)
+    key = session.key
+    request['pedestal_evidence'] = [{'session_key': key, 'estimates': [100, 300, 700]}]
+    assert plan(request)['sessions'][0].application['flat_use'] == 'withheld'
     request['pedestal_evidence'][0]['pinned'] = 123
-    assert seiza.calibration_library_plan(**request)['sessions'][0]['application']['pedestal'] == 123
+    assert plan(request)['sessions'][0].application['pedestal'] == 123
     request['force_flat_without_pedestal'] = True
-    assert seiza.calibration_library_plan(**request)['sessions'][0]['application']['flat_use'] == 'forced_without_pedestal'
+    assert plan(request)['sessions'][0].application['flat_use'] == 'forced_without_pedestal'
+    with pytest.raises(ValueError, match='at most three'):
+        plan(flat_only_request())['sessions'][0].accept_pedestal([1, 2, 3, 4])
 
 
 def test_master_failures_skip_declared_dependents():
@@ -160,21 +155,21 @@ def test_master_failures_skip_declared_dependents():
                      exposure_s=300.0 if kind == 'dark' else 2.0,
                      source_path=f'/{kind}-{index}.fits', source_fingerprint=f'{kind}-{index}')
         request['frames'].append(frame)
-    result = seiza.calibration_library_plan(**request)
-    session = result['sessions'][0]
-    recipes = {r['kind']: r for r in session['recipes']}
+    session = plan(request)['sessions'][0]
+    recipes = {r['kind']: r for r in session.recipes}
     assert recipes['flat']['dependencies'] == ['bias', 'dark_flat']
     assert recipes['dark']['dark_level_screening'] is True
     assert recipes['flat']['defect_suppression'] is True
-    assert session['application']['flat_use'] == 'with_masters'
-    request['master_failures'] = [{'session_key': session['key'], 'kind': 'bias', 'reason': 'read error'}]
-    session = seiza.calibration_library_plan(**request)['sessions'][0]
-    assert [r['action'] for r in session['recipes']] == ['failed', 'blocked', 'blocked', 'blocked']
-    assert session['application']['flat_use'] == 'unavailable'
+    assert session.application['flat_use'] == 'with_masters'
+    session.record_failure('bias', 'read error')
+    session.plan_flat_use(request['lights'])
+    assert [r['action'] for r in session.recipes] == ['failed', 'blocked', 'blocked', 'blocked']
+    assert session.recipe('flat')['failure'] == 'skipped because the bias master failed to build'
+    assert session.application['flat_use'] == 'unavailable'
 
 
 def test_only_verified_candidates_receive_psf_guards_master_input_cap():
-    request = json.loads((FIXTURES / 'psf-guard.json').read_text())['cases'][1]['request']
+    request = copy.deepcopy(cases('psf-guard.json')[1]['request'])
     base = request['frames'][2]
     request['frames'] = []
     for index in range(100):
@@ -182,24 +177,22 @@ def test_only_verified_candidates_receive_psf_guards_master_input_cap():
         frame.update(id=index, frame_uuid=f'b{index}', source_path=f'/b{index}.fits',
                      source_fingerprint=f'fp{index}', source_verified=True)
         request['frames'].append(frame)
-    result = seiza.calibration_library_plan(**request)
-    recipe = result['sessions'][0]['recipes'][0]
+    recipe = plan(request)['sessions'][0].recipes[0]
     assert len(recipe['inputs']) == 64
     assert recipe['input_limit'] == 64
     assert recipe['requires_source_verification'] is False
     for frame in request['frames']:
         frame['source_verified'] = False
-    result = seiza.calibration_library_plan(**request)
-    assert result['sessions'][0]['recipes'][0]['requires_source_verification'] is True
+    assert plan(request)['sessions'][0].recipes[0]['requires_source_verification'] is True
 
 
 def test_legacy_dark_screening_uses_psf_guards_current_grade_or_override_rule():
-    request = copy.deepcopy(json.loads((FIXTURES / 'psf-guard.json').read_text())['cases'][0]['request'])
+    request = copy.deepcopy(cases('psf-guard.json')[0]['request'])
     request['quality'] = [
         {'frame_uuid': f['frame_uuid'], 'source_fingerprint': f['source_fingerprint'],
          'algorithm_version': 1, 'grade': 'ok'} for f in request['frames']
     ]
-    dark = lambda: seiza.calibration_library_plan(**request)['sessions'][0]['recipes'][2]
+    dark = lambda: plan(request)['sessions'][0].recipes[2]
     assert dark()['dark_level_screening'] is False
     request['quality'][2]['source_fingerprint'] = 'stale'
     assert dark()['dark_level_screening'] is True
@@ -207,42 +200,44 @@ def test_legacy_dark_screening_uses_psf_guards_current_grade_or_override_rule():
     assert dark()['dark_level_screening'] is False
 
 
-def test_shared_master_resolution_and_retry_policy():
-    import json
-    from pathlib import Path
-    base = Path(__file__).resolve().parents[2] / 'seiza-calibration/tests/fixtures/library'
-    for case in json.loads((base / 'flat-retries.json').read_text())['cases']:
-        result = seiza.calibration_flat_retry(case['request'])
-        for field in ['action', 'inputs', 'rebuild_first']:
-            assert result[field] == case[field], case['name']
-    for case in json.loads((base / 'recipes.json').read_text())['cases']:
+@pytest.mark.parametrize('case', cases('flat-retries.json'), ids=lambda c: c['name'])
+def test_flat_retry_follows_psf_guards_decisions(case):
+    result = retry(case['request'])
+    for field in ['action', 'inputs', 'rebuild_first']:
+        assert result[field] == case[field], case['name']
+
+
+def test_master_sessions_and_cohorts_of_chosen_frames():
+    for case in cases('recipes.json'):
         source = case['request']
-        request = dict(frames=source['frames'], lights=source['lights'],
-                       global_settings=source.get('global_settings', []))
-        plan = seiza.calibration_master_plan(request)
-        assert len(plan['recipes']) == 4
-        cohort = seiza.calibration_master_cohort(dict(kind=case['kind'], frames=source['frames']))
+        rules = rules_of(source)
+        light = source['lights'][0]
+        selection = seiza.CalibrationSelection(source['frames'], rules.for_light(light))
+        session = seiza.calibration_resolve_session(selection, seiza.CalibrationQuality())
+        assert len(session.recipes) == 4
+        cohort = seiza.calibration_coherent_cohort(case['kind'], source['frames'], rules.global_rules())
         assert set(cohort) == {'kept', 'dropped'}
+        assert all(frame['kind'] == case['kind'] for frame in cohort['kept'])
+    candidates = cases('flat-retries.json')[0]['request']['candidates']
     with pytest.raises(ValueError):
-        seiza.calibration_flat_retry({'candidates': [], 'first': {'used': ['missing']}})
+        seiza.FlatRetry({'used': ['missing']}, candidates, seiza.CalibrationRules().global_rules())
 
 
-def test_selected_master_plan_reuses_library_decisions():
-    import json
-    from pathlib import Path
-    fixture = Path(__file__).resolve().parents[2] / 'seiza-calibration/tests/fixtures/library/psf-guard.json'
-    for case in json.loads(fixture.read_text())['cases']:
+def test_a_selection_of_chosen_frames_resolves_as_the_library_did():
+    for case in cases('psf-guard.json'):
         source = case['request']
-        result = seiza.calibration_library_plan(**source)
+        result = plan(source)
         rows = {f['frame_uuid']: f for f in source['frames']}
         for i, selection in enumerate(result['selections']):
-            request = dict(frames=[rows[key] for kind in ['bias', 'dark_flat', 'dark', 'flat'] for key in selection[kind]],
-                           lights=[source['lights'][i]], global_settings=source.get('global_settings', []), rigs=source.get('rigs', []),
-                           flat_basis=selection['flat_basis'], flat_family=selection['flat_family'], flat_held_back=selection['flat_held_back'])
-            plan = seiza.calibration_master_plan(request)
+            frames = [rows[key] for kind in ('bias', 'dark_flat', 'dark', 'flat') for key in ids(selection.of_kind(kind))]
+            chosen = seiza.CalibrationSelection(
+                frames, result['rules'].for_light(source['lights'][i]), flat_basis=selection.flat_basis,
+                flat_family=selection.flat_family, flat_held_back=selection.flat_held_back,
+            )
+            session = seiza.calibration_resolve_session(chosen, seiza.CalibrationQuality())
             expected = result['sessions'][result['assignments'][i]]
-            assert plan['key'] == expected['key'], case['name']
-            assert plan['recipes'] == expected['recipes'], case['name']
+            assert session.key == expected.key, case['name']
+            assert session.recipes == expected.recipes, case['name']
 
 
 def test_master_flat_stability_measures_transient_features(tmp_path):
@@ -260,8 +255,8 @@ def test_master_flat_stability_measures_transient_features(tmp_path):
     master_path, clean_path = tmp_path / 'master.fits', tmp_path / 'clean.fits'
     write(master_path, master)
     write(clean_path, np.ones_like(master))
-    result = seiza.master_flat_stability({'master': str(master_path), 'inputs': [
-        {'path': str(master_path)}, {'path': str(clean_path)}, {'path': str(tmp_path / 'missing.fits')}]})
+    result = seiza.master_flat_stability(master=str(master_path), inputs=[
+        {'path': master_path}, {'path': str(clean_path)}, {'path': str(tmp_path / 'missing.fits')}])
     assert result['algorithm_version'] == 2
     assert result['feature_pixels'] >= 16
     assert result['disagreement'][0] == 0
@@ -270,38 +265,57 @@ def test_master_flat_stability_measures_transient_features(tmp_path):
     assert result['errors'][0][0] == 2
 
 
-def test_supplied_sets_and_response_preparation_share_core_rules():
+def test_supplied_sets_and_flat_sessions_share_core_rules():
     frames = [dict(frame_uuid=f"flat-{i}", rig_uuid="r", kind="flat",
                    source_path=f"/flat-{i}.fits", source_fingerprint=f"stamp-{i}",
                    source_verified=True, captured_at=1_700_000_000 + (i // 20) * 259200,
                    width=512, height=512, channels=1, gain=100, offset=20,
                    filter="Ha", rotation=0.0, exposure_s=30.0) for i in range(80)]
-    prepared = seiza.calibration_flat_response_plan(frames=frames)
-    assert len(prepared['plans']) == 4
-    assert all(len(p['sample_frames']) == 16 for p in prepared['plans'])
-    assert prepared['unplanned'] == []
-    assert len(prepared['grades']) == 80
-    assert seiza.calibration_flat_response_plan(dict(frames=frames)) == prepared
-    assert seiza.calibration_flat_response_plan(frames=frames, flat_association="one_set")['plans'] == []
+    rules = seiza.CalibrationRules()
+    nights = seiza.CalibrationNights(frames=frames, rules=rules)
+    sessions = [s for s in seiza.calibration_flat_sessions(frames, nights, rules) if s.measurable()]
+    assert len(sessions) == 4
+    assert all(len(s.combined()) == 16 for s in sessions)
+    pedestals = seiza.PedestalTable(frames)
+    rows = [s.pending_row(pedestals.for_session(s)) for s in sessions]
+    assert all(row['bin'] is None and row['error'] is None for row in rows)
+    assert len({row['response_key'] for row in rows}) == 4
     light = dict(path="/light.fits", rig_uuid="r", width=512, height=512, channels=1,
                  gain=100, offset=20, filter="Ha", rotator_position=0.0,
                  exposure_s=30.0, timestamp=1_700_000_000)
-    result = seiza.calibration_library_plan(frames=frames, lights=[light], flat_association="one_set")
-    session = result['sessions'][0]
-    flat = next(r for r in session['recipes'] if r['kind'] == 'flat')
+    session = plan(dict(frames=frames, lights=[light], flat_association="one_set"))['sessions'][0]
+    flat = session.recipe('flat')
     assert len(flat['inputs']) == 80
     assert flat['input_limit'] == 80
-    assert session['flat_stability']['try_next_session'] is False
-    direct = seiza.calibration_master_plan(frames=frames, lights=[light], flat_association="one_set")
-    assert direct['recipes'] == session['recipes']
+    assert session.flat_stability['try_next_session'] is False
+    chosen = seiza.CalibrationSelection(frames, rules.for_light(light), flat_association="one_set")
+    direct = seiza.calibration_resolve_session(chosen, seiza.CalibrationQuality())
+    assert direct.recipes == session.recipes
     frames[0]['gain'] = 200
     with pytest.raises(ValueError, match='compatible'):
-        seiza.calibration_library_plan(frames=frames, lights=[light], flat_association="one_set")
+        plan(dict(frames=frames, lights=[light], flat_association="one_set"))
     with pytest.raises(ValueError):
-        seiza.calibration_library_plan(flat_association="invalid")
+        plan(dict(flat_association="invalid"))
 
 
-def test_settings_schema_and_checks_follow_the_shared_table():
+def test_measured_rows_carry_the_response_and_what_would_not_read():
+    import numpy as np
+    frames = [dict(frame_uuid=f"flat-{i}", rig_uuid="r", kind="flat", source_fingerprint=f"s{i}",
+                   captured_at=1_700_000_000 + i, width=64, height=64, filter="Ha", rotation=0.0)
+              for i in range(8)]
+    rules = seiza.CalibrationRules()
+    plan_ = seiza.calibration_flat_sessions(frames, seiza.CalibrationNights(), rules)[0]
+    planes = [np.full((16, 16), 1000.0 + i, dtype=np.float32) for i in range(8)]
+    response = seiza.flat_build_response(planes, 4)
+    row = plan_.measured_row(20.0, 8, 4, response)
+    assert row['frames'] == 8 and row['bin'] == 4 and row['error'] is None
+    assert row['pedestal_adu'] == 20.0 and row['width'] == 16
+    unread = [{'frame_uuid': 'flat-0', 'kind': 'missing', 'reason': 'not on disk'}]
+    failed = plan_.measured_row(None, 1, 4, None, unread)
+    assert failed['error'].startswith('1 of 8 flats could not be read')
+
+
+def test_settings_follow_the_shared_table():
     schema = seiza.calibration_settings_schema()
     keys = [field["key"] for field in schema]
     assert "rotation_tolerance_deg" in keys and len(keys) == len(set(keys))
@@ -317,3 +331,18 @@ def test_settings_schema_and_checks_follow_the_shared_table():
     assert not wide["valid"] and "Flat rotation" in wide["error"]
     unknown = seiza.calibration_setting_check("from_the_future", True)
     assert not unknown["valid"] and "unknown setting" in unknown["error"]
+    rules = seiza.CalibrationRules({'dark_reach_days': 90}, {'rig-a': {'name': 'SpaceCat', 'values': {'dark_reach_days': 400}}})
+    rig = rules.for_rig('rig-a')
+    assert rig.value('dark_reach_days') == 400
+    assert (rig.source('dark_reach_days'), rig.set_by('dark_reach_days')) == ('rig', 'rig')
+    assert rules.for_rig('other').source('dark_reach_days') == 'global'
+    assert rig.set_by('complete_dark_frames') is None
+    assert rig.mode('check_no_flat') == 'flag'
+    assert rig.rig == {'rig_uuid': 'rig-a', 'name': 'SpaceCat'}
+    assert rules.rig_sets('rig-a', 'dark_reach_days') and not rules.rig_sets('rig-a', 'use_darks')
+    assert [note['key'] for note in rig.notes()] == ['dark_reach_days']
+    assert rules.digest is not None and seiza.CalibrationRules().digest is None
+    with pytest.raises(ValueError, match='is not a setting'):
+        rig.value('from_the_future')
+    with pytest.raises(ValueError, match='not a light check'):
+        rig.mode('use_darks')

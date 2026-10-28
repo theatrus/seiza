@@ -396,9 +396,6 @@ objects = [
 "seiza-calibration::flat_response::metric::star_mask" = { none = "a step inside compare and find_dust" }
 "seiza-calibration::flat_response::metric::star_mask_grown" = { none = "a step inside compare and find_dust" }
 "seiza-calibration::library::night_of" = { none = "a night's date label; every planning call that splits nights by date calls it" }
-"seiza-calibration::library::rules::validate" = { none = "a step of check_setting, which both bindings call" }
-"seiza-calibration::library::rules::describe" = { none = "a step of check_setting, which both bindings call" }
-"seiza-calibration::library::rules::equivalent" = { none = "a step of check_setting, which both bindings call" }
 "seiza-calibration::library::rules::field" = { none = "a step of check_setting, which both bindings call" }
 "seiza-calibration::library::rules::stacker_accepts" = { none = "a step of check_setting, which both bindings call" }
 "seiza-calibration::dust::session_dust_from_lists" = { none = "Rust-only: hosts that keep features already hold Rust DustFeature lists" }
@@ -529,17 +526,17 @@ seiza_live_stacker_open_fits_expanding_sessions = "LiveStacker.open_fits_expandi
 
 seiza_master_flat_stability_json = "master_flat_stability"
 seiza_master_flat_stability_images_json = "master_flat_stability_images"
-seiza_calibration_flat_response_plan_json = "calibration_flat_response_plan"
-seiza_calibration_flat_work_plan_json = "calibration_flat_work_plan"
-seiza_calibration_flat_work_finish_json = "calibration_flat_work_finish"
-seiza_calibration_master_plan_json = "calibration_master_plan"
-seiza_calibration_master_cohort_json = "calibration_master_cohort"
+seiza_calibration_flat_response_plan_json = { none = "the C ABI's one-call flat response planning; Python binds the native stages: calibration_flat_sessions, FlatSessionPlan and PedestalTable" }
+seiza_calibration_flat_work_plan_json = { none = "the C ABI's one-call flat work planning; Python binds the native stages: calibration_family_questions and calibration_change_question" }
+seiza_calibration_flat_work_finish_json = { none = "the C ABI's one-call flat work answer; Python's FamilyQuestion.row, FamilyQuestion.decide and ChangeQuestion.row make the rows natively" }
+seiza_calibration_master_plan_json = { none = "the C ABI's one-call master planning; Python builds a CalibrationSelection of chosen frames and resolves it with calibration_resolve_session" }
+seiza_calibration_master_cohort_json = "calibration_coherent_cohort"
 seiza_calibration_settings_schema_json = "calibration_settings_schema"
 seiza_calibration_library_schema_json = { none = "the JSON Schema of the C ABI's calibration JSON calls; Python binds the native API, whose types seiza.pyi declares" }
 seiza_calibration_setting_check_json = "calibration_setting_check"
-seiza_calibration_flat_retry_json = "calibration_flat_retry"
-seiza_calibration_library_plan_json = "calibration_library_plan"
-seiza_calibration_library_plan_with_groups_json = "calibration_library_plan"
+seiza_calibration_flat_retry_json = { none = "the C ABI's one-call retry decision from all feedback at once; Python's FlatRetry takes the feedback step by step" }
+seiza_calibration_library_plan_json = { none = "the C ABI's one-call library workflow; Python binds the native API it runs: CalibrationRules, CalibrationQuality, CalibrationLibrary and calibration_resolve_session" }
+seiza_calibration_library_plan_with_groups_json = { none = "the C ABI's one-call library workflow on a prepared book; Python passes a FlatGroups book to CalibrationLibrary" }
 seiza_flat_groups_prepare_json = "FlatGroups.__init__"
 seiza_flat_groups_free = { none = "frees a C grouping handle; Python garbage collection frees FlatGroups" }
 seiza_flat_encode_plane = "flat_encode_plane"
@@ -800,6 +797,81 @@ seiza_stretch_output_version = "STRETCH_OUTPUT_VERSION"
 # export above gives as its twin: the C export that does the same job
 # ({ c = "..." }), or why there is none.
 [python_functions]
+# calibration library: the native API, whose steps the C ABI's one-call
+# JSON workflows run
+"CalibrationGrades.get" = { c = "seiza_calibration_library_plan_json" }
+"CalibrationGrades.to_dict" = { c = "seiza_calibration_library_plan_json" }
+CalibrationLibrary = { c = "seiza_calibration_library_plan_json" }
+"CalibrationLibrary.check_associations" = { c = "seiza_calibration_library_plan_json" }
+"CalibrationLibrary.flat_family_compatible" = { c = "seiza_calibration_library_plan_json" }
+"CalibrationLibrary.light_choices" = { c = "seiza_calibration_library_plan_json" }
+"CalibrationLibrary.select" = { c = "seiza_calibration_library_plan_json" }
+CalibrationNights = { c = "seiza_calibration_library_plan_json" }
+"CalibrationNights.boundaries" = { c = "seiza_calibration_library_plan_json" }
+"CalibrationNights.boundary" = { c = "seiza_calibration_library_plan_json" }
+"CalibrationNights.night_of_frame" = { c = "seiza_calibration_library_plan_json" }
+CalibrationQuality = { c = "seiza_calibration_library_plan_json" }
+"CalibrationQuality.get" = { c = "seiza_calibration_library_plan_json" }
+"CalibrationQuality.judged" = { c = "seiza_calibration_library_plan_json" }
+"CalibrationQuality.keep_out" = { c = "seiza_calibration_library_plan_json" }
+"CalibrationQuality.kept_out" = { c = "seiza_calibration_library_plan_json" }
+"CalibrationQuality.measurement_state" = { c = "seiza_calibration_library_plan_json" }
+"CalibrationQuality.regrade" = { c = "seiza_calibration_library_plan_json" }
+"CalibrationRigRules.coherence_tolerances" = { c = "seiza_calibration_library_plan_json" }
+"CalibrationRigRules.grouping_limits" = { c = "seiza_calibration_library_plan_json" }
+"CalibrationRigRules.mode" = { c = "seiza_calibration_library_plan_json" }
+"CalibrationRigRules.notes" = { c = "seiza_calibration_library_plan_json" }
+"CalibrationRigRules.set_by" = { c = "seiza_calibration_library_plan_json" }
+"CalibrationRigRules.source" = { c = "seiza_calibration_library_plan_json" }
+"CalibrationRigRules.tolerances" = { c = "seiza_calibration_library_plan_json" }
+"CalibrationRigRules.value" = { c = "seiza_calibration_library_plan_json" }
+CalibrationRules = { c = "seiza_calibration_library_plan_json" }
+"CalibrationRules.for_light" = { c = "seiza_calibration_library_plan_json" }
+"CalibrationRules.for_rig" = { c = "seiza_calibration_library_plan_json" }
+"CalibrationRules.global_rules" = { c = "seiza_calibration_library_plan_json" }
+"CalibrationRules.grades_differ" = { c = "seiza_calibration_library_plan_json" }
+"CalibrationRules.rig_sets" = { c = "seiza_calibration_library_plan_json" }
+CalibrationSelection = { c = "seiza_calibration_master_plan_json" }
+"CalibrationSelection.frames" = { c = "seiza_calibration_library_plan_json" }
+"CalibrationSelection.is_empty" = { c = "seiza_calibration_library_plan_json" }
+"CalibrationSelection.match_tolerances" = { c = "seiza_calibration_library_plan_json" }
+"CalibrationSelection.of_kind" = { c = "seiza_calibration_library_plan_json" }
+"CalibrationSession.accept_pedestal" = { c = "seiza_calibration_library_plan_json" }
+"CalibrationSession.plan_flat_use" = { c = "seiza_calibration_library_plan_json" }
+"CalibrationSession.recipe" = { c = "seiza_calibration_library_plan_json" }
+"CalibrationSession.record_failure" = { c = "seiza_calibration_library_plan_json" }
+"CalibrationSession.to_dict" = { c = "seiza_calibration_library_plan_json" }
+"ChangeFilter.change_map" = { c = "seiza_calibration_flat_work_plan_json" }
+"ChangeFilter.fit" = { c = "seiza_calibration_flat_work_finish_json" }
+"ChangeFilter.map_responses" = { c = "seiza_calibration_flat_work_plan_json" }
+"ChangeQuestion.row" = { c = "seiza_calibration_flat_work_finish_json" }
+"FamilyQuestion.decide" = { c = "seiza_calibration_flat_work_finish_json" }
+"FamilyQuestion.representatives" = { c = "seiza_calibration_flat_work_plan_json" }
+"FamilyQuestion.retention_key" = { c = "seiza_calibration_flat_work_plan_json" }
+"FamilyQuestion.row" = { c = "seiza_calibration_flat_work_finish_json" }
+"FamilyQuestion.sample" = { c = "seiza_calibration_flat_work_plan_json" }
+"FlatGroups.limits" = { c = "seiza_calibration_flat_work_plan_json" }
+"FlatGroups.sessions_in_windows" = { c = "seiza_calibration_flat_work_plan_json" }
+"FlatGroups.sessions_needing_evidence" = { c = "seiza_calibration_flat_work_plan_json" }
+FlatRetry = { c = "seiza_calibration_flat_retry_json" }
+"FlatRetry.alternate" = { c = "seiza_calibration_flat_retry_json" }
+"FlatRetry.next" = { c = "seiza_calibration_flat_retry_json" }
+"FlatRetry.trimmed" = { c = "seiza_calibration_flat_retry_json" }
+"FlatSessionPlan.combined" = { c = "seiza_calibration_flat_response_plan_json" }
+"FlatSessionPlan.measurable" = { c = "seiza_calibration_flat_response_plan_json" }
+"FlatSessionPlan.measured_row" = { c = "seiza_calibration_flat_response_plan_json" }
+"FlatSessionPlan.pending_row" = { c = "seiza_calibration_flat_response_plan_json" }
+"FlatSessionPlan.response_key" = { c = "seiza_calibration_flat_response_plan_json" }
+PedestalTable = { c = "seiza_calibration_flat_response_plan_json" }
+"PedestalTable.flat_pedestal" = { c = "seiza_calibration_flat_response_plan_json" }
+"PedestalTable.for_session" = { c = "seiza_calibration_flat_response_plan_json" }
+"PedestalTable.insert" = { c = "seiza_calibration_flat_response_plan_json" }
+"PedestalTable.light_pedestal" = { c = "seiza_calibration_flat_response_plan_json" }
+calibration_change_question = { c = "seiza_calibration_flat_work_plan_json" }
+calibration_family_questions = { c = "seiza_calibration_flat_work_plan_json" }
+calibration_flat_sessions = { c = "seiza_calibration_flat_response_plan_json" }
+calibration_resolve_session = { c = "seiza_calibration_library_plan_json" }
+
 CanvasChannel = { none = "input value object; C hosts pass the same fields as channels_json to seiza_live_stacker_open_fits_joint_canvas" }
 
 # solving

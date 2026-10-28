@@ -17,7 +17,7 @@ use seiza_calibration::dust::{self, DustFeature, DustMap, DustOptions};
 use seiza_calibration::flat_response::{Plane, Side, Verdict, choice, evidence, metric};
 
 /// A 2-D float32 array as a plane.
-fn as_plane(array: &PyReadonlyArrayDyn<'_, f32>, name: &str) -> PyResult<Plane> {
+pub(crate) fn as_plane(array: &PyReadonlyArrayDyn<'_, f32>, name: &str) -> PyResult<Plane> {
     let view = float_image_view(array)?;
     if view.channels != 1 {
         return Err(PyValueError::new_err(format!(
@@ -52,7 +52,7 @@ fn as_planes(arrays: Vec<PyReadonlyArrayDyn<'_, f32>>, name: &str) -> PyResult<V
     Ok(planes)
 }
 
-fn plane_array(py: Python<'_>, plane: Plane) -> PyResult<Bound<'_, PyArrayDyn<f32>>> {
+pub(crate) fn plane_array(py: Python<'_>, plane: Plane) -> PyResult<Bound<'_, PyArrayDyn<f32>>> {
     float_array(py, plane.width, plane.height, 1, plane.data)
 }
 

@@ -1959,73 +1959,334 @@ def flat_group_plan(
     lights: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]: ...
 
-# PSF Guard's shared library policy; records use snake_case.
-class FlatGroups:
-    def __init__(self, request: Mapping[str, Any]) -> None: ...
+# The calibration library's native API (seiza_calibration::library), as
+# Rust hosts hold it. Records are dicts of the types below.
+class CalibrationRules:
+    """The settings in force: the server's layer and each rig's, checked
+    the way a settings panel saves them."""
+    def __init__(
+        self,
+        global_settings: Mapping[str, Any] | None = None,
+        rigs: Mapping[str, CalibrationRigLayer] | None = None,
+    ) -> None: ...
+    def for_rig(self, rig_uuid: str) -> CalibrationRigRules: ...
+    def for_light(self, light: CalibrationLight) -> CalibrationRigRules: ...
+    def global_rules(self) -> CalibrationRigRules: ...
+    def rig_sets(self, rig_uuid: str, key: str) -> bool: ...
+    def grades_differ(self, other: CalibrationRules) -> bool: ...
+    @property
+    def digest(self) -> str | None: ...
+    @property
+    def global_values(self) -> dict[str, Any]: ...
+    @property
+    def rigs(self) -> dict[str, CalibrationRigLayer]: ...
 
-def calibration_library_plan(
-    *, frames: Sequence[CalibrationFrame] | None = None,
-    lights: Sequence[CalibrationLight] | None = None,
-    quality: Sequence[CalibrationQuality] | None = None,
-    global_settings: Sequence[CalibrationSetting] | None = None,
-    rigs: Sequence[CalibrationRigSettings] | None = None,
-    grouping: Mapping[str, Any] | None = None,
-    available_responses: Sequence[str] | None = None,
-    night_shifts: Sequence[Mapping[str, Any]] | None = None,
-    regrade: bool = False,
-    master_failures: Sequence[CalibrationMasterFailure] | None = None,
-    pedestal_evidence: Sequence[CalibrationPedestalEvidence] | None = None,
-    force_flat_without_pedestal: bool = False,
+class CalibrationRigRules:
+    """Every setting resolved for one rig: its own, else the server's, else the default."""
+    @property
+    def rig(self) -> dict[str, str] | None: ...
+    def value(self, key: str) -> Any: ...
+    def source(self, key: str) -> Literal["default", "global", "rig"]: ...
+    def set_by(self, key: str) -> Literal["global", "rig"] | None: ...
+    def mode(self, key: str) -> Literal["flag", "advisory", "off"]: ...
+    def notes(self) -> list[dict[str, Any]]: ...
+    def tolerances(self) -> CalibrationTolerances: ...
+    def coherence_tolerances(self) -> CalibrationTolerances: ...
+    def grouping_limits(self) -> dict[str, Any]: ...
+    @property
+    def matching_digest(self) -> str | None: ...
+
+def calibration_settings_schema() -> list[dict[str, Any]]: ...
+def calibration_setting_check(key: str, value: Any) -> CalibrationSettingCheck: ...
+
+class CalibrationNights:
+    """Where each frame's night begins; with frames and rules, each rig's
+    night_zone setting in force over its frames."""
+    def __init__(
+        self,
+        boundaries: Sequence[CalibrationNightBoundary] | None = None, *,
+        frames: Sequence[CalibrationFrame] | None = None,
+        rules: CalibrationRules | None = None,
+    ) -> None: ...
+    def boundary(self, rig_uuid: str, frame_uuid: str) -> int: ...
+    def night_of_frame(self, rig_uuid: str, frame_uuid: str, at: int) -> str: ...
+    def boundaries(self) -> list[CalibrationNightBoundary]: ...
+
+class CalibrationGrades:
+    """Fresh grades by frame UUID, from CalibrationQuality.regrade."""
+    def __len__(self) -> int: ...
+    def get(self, frame_uuid: str) -> CalibrationJudged | None: ...
+    def to_dict(self) -> dict[str, CalibrationJudged]: ...
+
+class CalibrationQuality:
+    """The stored quality of a library's frames, by frame."""
+    def __init__(self, records: Sequence[CalibrationQualityRecord] | None = None) -> None: ...
+    def get(self, frame_uuid: str) -> CalibrationQualityRecord | None: ...
+    def regrade(self, frames: Sequence[CalibrationFrame], rules: CalibrationRules, nights: CalibrationNights) -> CalibrationGrades: ...
+    def kept_out(self, frame: CalibrationFrame, judged: CalibrationGrades | None = None) -> str | None: ...
+    def keep_out(self, frames: Sequence[CalibrationFrame], judged: CalibrationGrades | None = None) -> list[CalibrationFrame]: ...
+    def measurement_state(self, frame: CalibrationFrame) -> Literal["external", "unmeasured", "stale", "current", "failed"]: ...
+    def judged(self, frame: CalibrationFrame) -> bool: ...
+
+class FlatGroups:
+    """A measured flat grouping book, built from stored rows (docs/flat-groups.md)."""
+    def __init__(self, request: Mapping[str, Any]) -> None: ...
+    @property
+    def imaging(self) -> list[dict[str, Any]]: ...
+    @property
+    def sessions(self) -> list[dict[str, Any]]: ...
+    @property
+    def families(self) -> list[dict[str, Any]]: ...
+    @property
+    def boundaries(self) -> list[dict[str, Any]]: ...
+    @property
+    def events(self) -> list[dict[str, Any]]: ...
+    def limits(self, rig_uuid: str) -> dict[str, Any] | None: ...
+    def sessions_in_windows(self) -> list[tuple[int, int, str]]: ...
+    def sessions_needing_evidence(self) -> list[tuple[int, int]]: ...
+
+class CalibrationLibrary:
+    """Every frame of a library, held once so many lights select against it."""
+    def __init__(
+        self,
+        frames: Sequence[CalibrationFrame], *,
+        groups: FlatGroups | None = None,
+        available_responses: Sequence[str] = (),
+    ) -> None: ...
+    @property
+    def frames(self) -> list[CalibrationFrame]: ...
+    @property
+    def groups(self) -> FlatGroups: ...
+    def select(
+        self, light: CalibrationLight, rules: CalibrationRigRules, *,
+        flat_association: CalibrationAssociation = "automatic",
+        dark_association: CalibrationAssociation = "automatic",
+    ) -> CalibrationSelection: ...
+    def check_associations(
+        self, rules: CalibrationRules, *,
+        flat_association: CalibrationAssociation = "automatic",
+        dark_association: CalibrationAssociation = "automatic",
+    ) -> None: ...
+    def flat_family_compatible(self, light: CalibrationLight, rules: CalibrationRigRules) -> list[int]: ...
+    def light_choices(self, light: CalibrationLight, rules: CalibrationRigRules) -> dict[str, Any]: ...
+
+class CalibrationSelection:
+    """The frames one light matched, per kind, nearest first, and why."""
+    def __init__(
+        self, frames: Sequence[CalibrationFrame], rules: CalibrationRigRules, *,
+        flat_association: CalibrationAssociation = "automatic",
+        dark_association: CalibrationAssociation = "automatic",
+        flat_basis: Mapping[str, Any] | None = None,
+        flat_family: Mapping[str, Any] | None = None,
+        flat_held_back: Sequence[str] = (),
+    ) -> None: ...
+    @property
+    def bias(self) -> list[CalibrationFrame]: ...
+    @property
+    def dark(self) -> list[CalibrationFrame]: ...
+    @property
+    def dark_flat(self) -> list[CalibrationFrame]: ...
+    @property
+    def flat(self) -> list[CalibrationFrame]: ...
+    @property
+    def kept_out(self) -> list[CalibrationFrame]: ...
+    @property
+    def library(self) -> dict[str, bool]: ...
+    @property
+    def rules(self) -> CalibrationRigRules: ...
+    @property
+    def flat_basis(self) -> dict[str, Any]: ...
+    @property
+    def flat_held_back(self) -> list[str]: ...
+    @property
+    def flat_family(self) -> dict[str, Any] | None: ...
+    @property
+    def flat_choices(self) -> list[dict[str, Any]]: ...
+    @property
+    def one_set(self) -> list[CalibrationKind]: ...
+    def match_tolerances(self) -> CalibrationTolerances: ...
+    def is_empty(self) -> bool: ...
+    def of_kind(self, kind: CalibrationKind) -> list[CalibrationFrame]: ...
+    def frames(self) -> list[CalibrationFrame]: ...
+
+class CalibrationSession:
+    """The masters one light's selection builds, and how its flat applies."""
+    @property
+    def key(self) -> str: ...
+    @property
+    def tolerances(self) -> CalibrationTolerances: ...
+    @property
+    def recipes(self) -> list[CalibrationMasterRecipe]: ...
+    @property
+    def application(self) -> CalibrationApplication: ...
+    @property
+    def flat_stability(self) -> FlatRetryPolicy: ...
+    @property
+    def flat_held_back(self) -> list[str]: ...
+    def recipe(self, kind: CalibrationKind) -> CalibrationMasterRecipe | None: ...
+    def record_failure(self, kind: CalibrationKind, reason: str) -> None: ...
+    def plan_flat_use(self, lights: Sequence[CalibrationLight], *, without_masters: Literal["fit_pedestal", "force"] = "fit_pedestal") -> None: ...
+    def accept_pedestal(self, estimates: Sequence[float], pinned: float | None = None) -> None: ...
+    def to_dict(self) -> CalibrationSessionRecord: ...
+
+def calibration_resolve_session(
+    selection: CalibrationSelection, quality: CalibrationQuality, *,
     flat_star_masking: bool = False,
     flat_stability: FlatRetryPolicy | None = None,
-    prepared_grouping: FlatGroups | None = None,
-    flat_association: CalibrationAssociation = "automatic",
-    dark_association: CalibrationAssociation = "automatic",
-) -> CalibrationLibrarySnapshot: ...
+) -> CalibrationSession: ...
 
-def calibration_flat_work_plan(
-    request: CalibrationFlatWorkRequest | None = None, *,
-    library: Mapping[str, Any] | None = None,
-    light_context: Sequence[CalibrationFlatLightContext] | None = None,
-) -> CalibrationFlatWorkPlans: ...
+def calibration_coherent_cohort(kind: CalibrationKind, frames: Sequence[CalibrationFrame], rules: CalibrationRigRules) -> CalibrationCohort: ...
 
-def calibration_flat_work_finish(
-    request: CalibrationFlatWorkAnswer | None = None, *,
-    kind: Literal["family", "change"] | None = None,
-    question: Mapping[str, Any] | None = None,
-    choice: Mapping[str, Any] | None = None,
-    lights: int | None = None,
-    fits: Sequence[Mapping[str, Any]] | None = None,
-) -> CalibrationFlatWorkResult: ...
+class FlatRetry:
+    """A flat master's retries, one step at a time."""
+    def __init__(
+        self, first: FlatAttempt, candidates: Sequence[CalibrationFrame], rules: CalibrationRigRules, *,
+        held_back: Sequence[str] = (),
+        policy: FlatRetryPolicy | None = None,
+    ) -> None: ...
+    def trimmed(self, attempt: FlatAttempt | None = None) -> None: ...
+    def alternate(self, attempt: FlatAttempt | None = None) -> None: ...
+    def next(self) -> CalibrationFlatRetryDecision: ...
 
-def calibration_flat_response_plan(
-    request: Mapping[str, Any] | None = None, *,
-    frames: Sequence[CalibrationFrame] | None = None,
-    quality: Sequence[CalibrationQuality] | None = None,
-    global_settings: Sequence[CalibrationSetting] | None = None,
-    rigs: Sequence[CalibrationRigSettings] | None = None,
-    night_shifts: Sequence[Mapping[str, Any]] | None = None,
-    regrade: bool | None = None,
-    flat_association: CalibrationAssociation | None = None,
-) -> CalibrationFlatResponsePlans: ...
+class FlatSessionPlan:
+    """One flat session about to be measured: one night of one family."""
+    @property
+    def session_key(self) -> str: ...
+    @property
+    def family_key(self) -> str: ...
+    @property
+    def rig_uuid(self) -> str: ...
+    @property
+    def night(self) -> str: ...
+    @property
+    def filter(self) -> str | None: ...
+    @property
+    def rotation(self) -> float | None: ...
+    @property
+    def frames(self) -> list[CalibrationFrame]: ...
+    def combined(self) -> list[CalibrationFrame]: ...
+    def response_key(self) -> str: ...
+    def measurable(self) -> bool: ...
+    def pending_row(self, pedestal: float | None = None) -> dict[str, Any]: ...
+    def measured_row(
+        self, pedestal: float | None, read: int, bin: int,
+        response: Mapping[str, Any] | None = None,
+        unread: Sequence[Mapping[str, Any]] | None = None,
+    ) -> dict[str, Any]: ...
+
+def calibration_flat_sessions(frames: Sequence[CalibrationFrame], nights: CalibrationNights, rules: CalibrationRules) -> list[FlatSessionPlan]: ...
+
+class PedestalTable:
+    """Bias and dark-flat levels by rig, gain and offset."""
+    def __init__(self, frames: Sequence[CalibrationFrame] | None = None, quality: CalibrationQuality | None = None) -> None: ...
+    def insert(self, level: CalibrationPedestalLevel) -> None: ...
+    def light_pedestal(self, rig_uuid: str, gain: int | None = None, offset: int | None = None) -> float | None: ...
+    def flat_pedestal(self, rig_uuid: str, gain: int | None = None, offset: int | None = None, exposure_s: float | None = None) -> float | None: ...
+    def for_session(self, plan: FlatSessionPlan) -> float | None: ...
+
+class FamilyRepresentatives:
+    @property
+    def sessions(self) -> list[int]: ...
+
+class FamilyQuestion:
+    """A group of an imaging session's lights the family stage asks."""
+    @property
+    def session(self) -> int: ...
+    @property
+    def rig(self) -> str: ...
+    @property
+    def filter(self) -> str: ...
+    @property
+    def target(self) -> str: ...
+    @property
+    def lights(self) -> list[CalibrationEvidenceLight]: ...
+    @property
+    def candidates(self) -> list[int]: ...
+    @property
+    def angle(self) -> float: ...
+    @property
+    def low(self) -> float: ...
+    @property
+    def high(self) -> float: ...
+    @property
+    def start(self) -> int: ...
+    @property
+    def end(self) -> int: ...
+    @property
+    def key(self) -> str: ...
+    @property
+    def answered(self) -> bool: ...
+    def retention_key(self) -> dict[str, str]: ...
+    def representatives(self) -> FamilyRepresentatives | None: ...
+    def sample(self) -> list[CalibrationEvidenceLight]: ...
+    def decide(
+        self, representatives: FamilyRepresentatives,
+        binned: Sequence[npt.NDArray[np.float32]],
+        planes: Sequence[npt.NDArray[np.float32] | None],
+        pedestal: float | None = None,
+    ) -> dict[str, Any]: ...
+    def row(self, choice: Mapping[str, Any], lights: int) -> dict[str, Any]: ...
+
+def calibration_family_questions(
+    library: CalibrationLibrary, rules: CalibrationRules, rig: str,
+    lights_of: Callable[[dict[str, Any]], Sequence[CalibrationEvidenceLight]],
+    header: Callable[[str], CalibrationLight | None],
+) -> list[FamilyQuestion]: ...
+
+class ChangeFilter:
+    @property
+    def filter(self) -> str: ...
+    @property
+    def lights(self) -> list[CalibrationEvidenceLight]: ...
+    @property
+    def reference(self) -> int: ...
+    @property
+    def reference_side(self) -> Literal["before", "after"]: ...
+    @property
+    def map(self) -> int: ...
+    def map_responses(self) -> tuple[dict[str, Any], dict[str, Any]]: ...
+    def change_map(self, before: npt.NDArray[np.float32], after: npt.NDArray[np.float32]) -> npt.NDArray[np.float32] | None: ...
+    def fit(
+        self, binned: Sequence[npt.NDArray[np.float32]],
+        reference: npt.NDArray[np.float32], map: npt.NDArray[np.float32],
+        pedestal: float | None = None,
+    ) -> dict[str, Any] | None: ...
+
+class ChangeQuestion:
+    @property
+    def event(self) -> int: ...
+    @property
+    def session(self) -> int: ...
+    @property
+    def filters(self) -> list[ChangeFilter]: ...
+    def row(self, fits: Sequence[Mapping[str, Any]]) -> dict[str, Any]: ...
+
+def calibration_change_question(groups: FlatGroups, event: int, session: int, lights: Sequence[CalibrationEvidenceLight]) -> ChangeQuestion | None: ...
+
+def master_flat_stability(
+    *, master: str,
+    inputs: Sequence[FlatStabilityInput],
+    bias: str | None = None,
+    dark: str | None = None,
+    dark_exposure_seconds: float | None = None,
+    normalized_full_scale: float | None = None,
+) -> FlatSetStability: ...
+
+def master_flat_stability_images(
+    master: npt.NDArray[np.float32], inputs: Sequence[npt.NDArray[np.float32]], *,
+    bias: npt.NDArray[np.float32] | None = None,
+    dark: npt.NDArray[np.float32] | None = None,
+    input_metadata: Sequence[FlatStabilityImageMetadata] | None = None,
+    bayer: FlatStabilityBayer | None = None,
+    dark_exposure_seconds: float | None = None,
+    dark_bias_subtracted: bool = False,
+) -> FlatSetStability: ...
 
 # Shared calibration types; kept identical to src/library_types.py.
 CalibrationAssociation = Literal["automatic", "one_set"]
 CalibrationKind = Literal["bias", "dark", "dark_flat", "flat"]
 CalibrationRecipeAction = Literal["external", "integrate", "unavailable", "failed", "blocked"]
 FlatRetryAction = Literal["publish_first", "try_trimmed", "publish_trimmed", "try_alternate", "publish_alternate", "withhold"]
-
-class CalibrationFlatResponsePlan(TypedDict):
-    row: dict[str, Any]
-    sample_frames: list[str]
-
-class CalibrationFlatResponsePlans(TypedDict):
-    algorithm_version: int
-    plans: list[CalibrationFlatResponsePlan]
-    limits: list[dict[str, Any]]
-    night_boundaries: list[dict[str, Any]]
-    unplanned: list[str]
-    grades: list[dict[str, Any]]
 
 class CalibrationFrame(TypedDict, total=False):
     id: int
@@ -2079,9 +2340,14 @@ class CalibrationLight(TypedDict, total=False):
     camera_temp: float | None
     timestamp: int | None
 
-class CalibrationSetting(TypedDict):
-    key: str
-    value: Any
+class CalibrationRigLayer(TypedDict, total=False):
+    name: str | None
+    values: Mapping[str, Any]
+
+class CalibrationNightBoundary(TypedDict):
+    rig_uuid: str
+    frame_uuid: str
+    seconds: int
 
 class CalibrationSettingCheck(TypedDict):
     key: str
@@ -2090,21 +2356,42 @@ class CalibrationSettingCheck(TypedDict):
     text: str | None
     default: bool
 
-class CalibrationRigSettings(TypedDict, total=False):
-    rig_uuid: str
-    name: str | None
-    settings: Sequence[CalibrationSetting]
-
-class CalibrationQuality(TypedDict, total=False):
+class CalibrationQualityRecord(TypedDict, total=False):
     frame_uuid: str
     source_fingerprint: str | None
     algorithm_version: int | None
     measurement: Mapping[str, Any] | None
     measure_error: str | None
-    grade: str | None
+    grade: Literal["ok", "suspect", "poor"] | None
     reason: str | None
     stray_light: str | None
     override_choice: Literal["use", "exclude"] | None
+
+class CalibrationJudged(TypedDict):
+    grade: Literal["ok", "suspect", "poor"]
+    code: str | None
+    reason: str | None
+    findings: list[dict[str, Any]]
+    stray_light: str | None
+
+class CalibrationCohort(TypedDict):
+    kept: list[CalibrationFrame]
+    dropped: list[CalibrationFrame]
+
+class CalibrationEvidenceLight(TypedDict):
+    path: str
+    at: int
+    angle: NotRequired[float | None]
+    filter: NotRequired[str]
+    target: NotRequired[str]
+
+class CalibrationPedestalLevel(TypedDict):
+    rig_uuid: str
+    gain: NotRequired[int | None]
+    offset: NotRequired[int | None]
+    kind: CalibrationKind
+    exposure_s: NotRequired[float | None]
+    level: float
 
 class FlatRetryPolicy(TypedDict, total=False):
     """All flags default true. enabled controls retry decisions, not measurement."""
@@ -2149,58 +2436,13 @@ class CalibrationApplication(TypedDict):
     sample_lights: list[str]
     pedestal_hint: float | None
 
-class CalibrationSession(TypedDict):
+class CalibrationSessionRecord(TypedDict):
     key: str
     tolerances: CalibrationTolerances
     recipes: list[CalibrationMasterRecipe]
     application: CalibrationApplication
     flat_stability: FlatRetryPolicy
     flat_held_back: list[str]
-
-class CalibrationLibrarySnapshot(TypedDict):
-    algorithm_version: int
-    selections: list[Mapping[str, Any]]
-    grades: list[Mapping[str, Any]]
-    sessions: list[CalibrationSession]
-    assignments: list[int]
-    settings_digest: str | None
-    settings_schema: list[Mapping[str, Any]]
-
-class CalibrationMasterFailure(TypedDict):
-    session_key: str
-    kind: CalibrationKind
-    reason: str
-
-class CalibrationPedestalEvidence(TypedDict, total=False):
-    session_key: str
-    estimates: Sequence[float]
-    pinned: float | None
-
-class CalibrationMasterPlanRequest(TypedDict, total=False):
-    flat_association: CalibrationAssociation
-    dark_association: CalibrationAssociation
-    frames: Sequence[CalibrationFrame]
-    lights: Sequence[CalibrationLight]
-    quality: Sequence[CalibrationQuality]
-    global_settings: Sequence[CalibrationSetting]
-    rigs: Sequence[CalibrationRigSettings]
-    flat_basis: Mapping[str, Any]
-    flat_family: Mapping[str, Any] | None
-    flat_held_back: Sequence[str]
-    flat_star_masking: bool
-    flat_stability: FlatRetryPolicy
-    master_failures: Sequence[CalibrationMasterFailure]
-    pedestal_evidence: Sequence[CalibrationPedestalEvidence]
-    force_flat_without_pedestal: bool
-
-class CalibrationMasterCohortRequest(TypedDict, total=False):
-    kind: CalibrationKind
-    frames: Sequence[CalibrationFrame]
-    settings: Sequence[CalibrationSetting]
-
-class CalibrationMasterCohort(TypedDict):
-    kept: list[str]
-    dropped: list[str]
 
 class FlatAttempt(TypedDict, total=False):
     used: Required[Sequence[str]]
@@ -2209,18 +2451,6 @@ class FlatAttempt(TypedDict, total=False):
     feature_pixels: int
     memo: bool
     label: str | None
-
-class CalibrationFlatRetryRequest(TypedDict, total=False):
-    session: CalibrationSession | None
-    candidates: Sequence[CalibrationFrame]
-    held_back: Sequence[str]
-    settings: Sequence[CalibrationSetting]
-    policy: FlatRetryPolicy | None
-    first: Required[FlatAttempt]
-    trimmed_attempted: bool
-    trimmed: FlatAttempt | None
-    alternate_attempted: bool
-    alternate: FlatAttempt | None
 
 class CalibrationFlatRetryDecision(TypedDict):
     action: FlatRetryAction
@@ -2258,104 +2488,9 @@ class FlatStabilityImageMetadata(TypedDict, total=False):
     bayer: FlatStabilityBayer | None
     skipped: bool
 
-# Request mappings and keyword fields are mutually exclusive.
-def calibration_master_plan(
-    request: CalibrationMasterPlanRequest | None = None, *,
-    frames: Sequence[CalibrationFrame] | None = None,
-    lights: Sequence[CalibrationLight] | None = None,
-    quality: Sequence[CalibrationQuality] | None = None,
-    global_settings: Sequence[CalibrationSetting] | None = None,
-    rigs: Sequence[CalibrationRigSettings] | None = None,
-    flat_basis: Mapping[str, Any] | None = None,
-    flat_family: Mapping[str, Any] | None = None,
-    flat_held_back: Sequence[str] | None = None,
-    flat_star_masking: bool | None = None,
-    flat_stability: FlatRetryPolicy | None = None,
-    master_failures: Sequence[CalibrationMasterFailure] | None = None,
-    pedestal_evidence: Sequence[CalibrationPedestalEvidence] | None = None,
-    force_flat_without_pedestal: bool | None = None,
-    flat_association: CalibrationAssociation | None = None,
-    dark_association: CalibrationAssociation | None = None,
-) -> CalibrationSession: ...
-
-def calibration_settings_schema() -> list[dict[str, Any]]: ...
-def calibration_setting_check(key: str, value: Any) -> CalibrationSettingCheck: ...
-
-def calibration_master_cohort(
-    request: CalibrationMasterCohortRequest | None = None, *,
-    kind: CalibrationKind | None = None,
-    frames: Sequence[CalibrationFrame] | None = None,
-    settings: Sequence[CalibrationSetting] | None = None,
-) -> CalibrationMasterCohort: ...
-
-def calibration_flat_retry(
-    request: CalibrationFlatRetryRequest | None = None, *,
-    session: CalibrationSession | None = None,
-    candidates: Sequence[CalibrationFrame] | None = None,
-    held_back: Sequence[str] | None = None,
-    settings: Sequence[CalibrationSetting] | None = None,
-    policy: FlatRetryPolicy | None = None,
-    first: FlatAttempt | None = None,
-    trimmed_attempted: bool | None = None,
-    trimmed: FlatAttempt | None = None,
-    alternate_attempted: bool | None = None,
-    alternate: FlatAttempt | None = None,
-) -> CalibrationFlatRetryDecision: ...
-
-def master_flat_stability(
-    request: FlatStabilityRequest | None = None, *,
-    master: str | None = None,
-    inputs: Sequence[FlatStabilityInput] | None = None,
-    bias: str | None = None,
-    dark: str | None = None,
-    dark_exposure_seconds: float | None = None,
-    normalized_full_scale: float | None = None,
-) -> FlatSetStability: ...
-
-def master_flat_stability_images(
-    master: npt.NDArray[np.float32], inputs: Sequence[npt.NDArray[np.float32]], *,
-    bias: npt.NDArray[np.float32] | None = None,
-    dark: npt.NDArray[np.float32] | None = None,
-    input_metadata: Sequence[FlatStabilityImageMetadata] | None = None,
-    bayer: FlatStabilityBayer | None = None,
-    dark_exposure_seconds: float | None = None,
-    dark_bias_subtracted: bool = False,
-) -> FlatSetStability: ...
-
 
 def stack_collection_html(report: Mapping[str, Any]) -> str: ...
 
-
-class CalibrationFlatLightContext(TypedDict, total=False):
-    light_index: Required[int]
-    id: int | None
-    profile: str | None
-    target: str
-    excluded: bool
-    pedestal_adu: float | None
-
-class CalibrationFlatWorkRequest(TypedDict, total=False):
-    library: Mapping[str, Any]
-    light_context: Sequence[CalibrationFlatLightContext]
-
-class CalibrationFlatWorkPlans(TypedDict):
-    algorithm_version: int
-    grouping: dict[str, Any]
-    families: list[dict[str, Any]]
-    changes: list[dict[str, Any]]
-    corrections: list[dict[str, Any]]
-    overrides: list[dict[str, Any]]
-
-class CalibrationFlatWorkAnswer(TypedDict, total=False):
-    kind: Required[Literal["family", "change"]]
-    question: Required[Mapping[str, Any]]
-    choice: Mapping[str, Any]
-    lights: int
-    fits: Sequence[Mapping[str, Any]]
-
-class CalibrationFlatWorkResult(TypedDict):
-    kind: Literal["family", "change"]
-    row: dict[str, Any]
 
 def prepare_stack_report(report: Mapping[str, Any] | None = None, *, level: str = "cheap", inputs: Sequence[Union[str, Path]] = ()) -> dict[str, Any] | None:
     """none skips reporting; cheap uses retained data; rich rereads sources for analysis."""

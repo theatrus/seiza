@@ -107,8 +107,9 @@ the same request; persistence and scanning are host choices. Neither host needs
 to duplicate the matching policy.
 
 For repeated selection, Rust hosts build one `Library` over their existing
-`Arc<groups::Book>`. C hosts call `seiza_flat_groups_prepare_json` once and
-reuse its immutable handle with
+`Arc<groups::Book>`, and Python builds `FlatGroups(grouping_request)` once and
+passes it to every `CalibrationLibrary`. C hosts call
+`seiza_flat_groups_prepare_json` once and reuse its immutable handle with
 `seiza_calibration_library_plan_with_groups_json`, then call
 `seiza_flat_groups_free`; `library::json::evaluate_with_book` is that call.
 Preparation takes the same grouping records as `flat_group_plan`, including
@@ -257,7 +258,9 @@ pedestals, input verification and stale/failed/unmeasured distinctions.
 A C host can call `seiza_calibration_master_plan_json`
 (`library::json::plan_masters`) after it verifies/remaps selected rows, without
 repeating grouping or selection; a native host builds
-`CalibrationSelection::of_frames` and calls `resolve_session`.
+`CalibrationSelection::of_frames` and calls `resolve_session`, as Python does
+with `CalibrationSelection(frames, rules, ...)` and
+`calibration_resolve_session`.
 The request contains the already selected `frames` in candidate order, the
 session's `lights` (used for pedestal sampling), `quality`, global/rig settings,
 `flat_basis`, `flat_family`, `flat_held_back`, star masking and retry options.
@@ -274,16 +277,17 @@ replan after verification or changed source metadata. Recipe exposure belongs
 to the adopted master/first actual coherent input, including unknown exposure.
 `coherent_inputs` reports the raw cohort even if it has only one frame or an
 external master is preferred. `coherent_cohort` (C
-`seiza_calibration_master_cohort_json`) is the original metadata-tolerant
-coherence helper for previews/retries using effective settings. The C call
-validates settings just like executable planning; full planning also validates
-metadata, source-verification records and identities.
-`FlatRetryRequest.policy` is optional so an omitted policy can be
-distinguished from an explicit override.
+`seiza_calibration_master_cohort_json`, Python `calibration_coherent_cohort`)
+is the original metadata-tolerant coherence helper for previews/retries using
+effective settings. The C call validates settings just like executable
+planning; full planning also validates metadata, source-verification records
+and identities. `FlatRetryRequest.policy` is optional so an omitted policy can
+be distinguished from an explicit override.
 
-`FlatRetry` owns the post-build decision sequence; the C ABI's
-`seiza_calibration_flat_retry_json` (`library::json::flat_retry`) runs it from
-one request. An alternate set is the next
+`FlatRetry` owns the post-build decision sequence, one step at a time: Rust
+hosts and Python's `FlatRetry` feed it each build as it is made, and the C
+ABI's `seiza_calibration_flat_retry_json` (`library::json::flat_retry`) takes
+all the feedback at once. An alternate set is the next
 session out, clustered as one master takes it from the remaining raw
 candidates nearest first, never every flat outside the first window. Supply
 the returned `session` object and all selected raw `candidates`, then the first attempt's accepted `used` UUIDs, `disagreement`, `drift_threshold`,
@@ -317,23 +321,23 @@ key alone cannot validate an executed master cache entry.
 
 ### Python records and execution example
 
-`calibration_master_plan`, `calibration_master_cohort`, `calibration_flat_retry`
-and `master_flat_stability` accept either a request mapping or keyword fields;
-mixing the two raises `ValueError`. Python exports `TypedDict` records and
-`Literal` actions for completion and static checking, including
-`CalibrationMasterPlanRequest`, `CalibrationSession`, `FlatRetryPolicy`,
-`FlatAttempt`, `CalibrationFlatRetryDecision` and `FlatSetStability`. They remain
-ordinary dictionaries; core validation applies at runtime.
+Python binds the native objects: `CalibrationRules`, `CalibrationQuality`,
+`CalibrationLibrary`, `CalibrationSelection`, `CalibrationSession` and
+`FlatRetry`. Records it takes and gives are `TypedDict`s and `Literal`s for
+completion and static checking, including `CalibrationFrame`,
+`CalibrationLight`, `CalibrationQualityRecord`, `CalibrationSessionRecord`,
+`FlatRetryPolicy`, `FlatAttempt`, `CalibrationFlatRetryDecision` and
+`FlatSetStability`. They remain ordinary dictionaries; core validation applies
+at runtime.
 
 ```python
-session = seiza.calibration_master_plan(
-    frames=selected_frames, lights=session_lights, quality=cached_quality,
-    flat_held_back=held_back,
-    flat_stability=seiza.FlatRetryPolicy(retain_unstable=False),
+selection = library.select(light, rules.for_light(light))
+session = seiza.calibration_resolve_session(
+    selection, quality, flat_stability=seiza.FlatRetryPolicy(retain_unstable=False),
 )
-decision = seiza.calibration_flat_retry(
-    session=session, candidates=selected_raw_flats, first=first_attempt,
-)
+retry = seiza.FlatRetry(first_attempt, selected_raw_flats, selection.rules,
+                        held_back=session.flat_held_back, policy=session.flat_stability)
+decision = retry.next()
 ```
 
 The [complete host loop](../seiza-py/examples/calibration_retry.py) dispatches
@@ -394,7 +398,8 @@ can trim unstable frames but cannot switch to another session in this mode.
 
 `seiza_calibration_flat_response_plan_json` (`library::json::plan_flat_responses`)
 runs PSF Guard's session planning (`plan_flat_sessions`) over library request
-records. Eligible raw flats group by
+records; Python binds the stage itself (`calibration_flat_sessions`,
+`FlatSessionPlan`, `PedestalTable`). Eligible raw flats group by
 family (rig, filter, focal length class, frame size, binning, gain, offset and
 readout mode name), night and rotation, under the family, session and response
 keys PSF Guard keeps its responses by, so a host that adopts this keeps its
@@ -413,7 +418,9 @@ exists merely because sessions have been prepared.
 For C hosts the same boundary covers the remaining workflow:
 `seiza_calibration_flat_work_plan_json` and
 `seiza_calibration_flat_work_finish_json` (`library::json::plan_flat_work` and
-`finish_flat_work`). Native hosts and Python call the stages themselves.
+`finish_flat_work`). Native hosts call the stages themselves, and Python binds
+them: `calibration_family_questions`, `calibration_change_question` and their
+questions' `decide`, `fit` and `row`.
 
 Cached light metadata, catalog IDs/profiles/targets/exclusions and optional
 pedestal estimates drive questions without paths being opened. The questions

@@ -18,6 +18,7 @@ class Attempt:
 
 def execute_flat(
     session: seiza.CalibrationSession,
+    rules: seiza.CalibrationRigRules,
     candidates: Sequence[seiza.CalibrationFrame],
     build: Callable[[Sequence[str], bool], Attempt | None],
     publish: Callable[[Attempt, str | None], None],
@@ -25,12 +26,13 @@ def execute_flat(
 ) -> Attempt | None:
     """Execute an integrate recipe; adoption and dependencies precede this call.
 
-    The host verifies sources, builds/measures pixels, and atomically publishes.
-    All trimming, alternate-session and retention choices come from Seiza.
+    `rules` are the light's, from its selection. The host verifies sources,
+    builds/measures pixels, and atomically publishes. All trimming,
+    alternate-session and retention choices come from Seiza's FlatRetry.
     A published master's provenance must record its final accepted inputs.
     """
-    recipe = next(r for r in session['recipes'] if r['kind'] == 'flat')
-    if recipe['action'] != 'integrate':
+    recipe = session.recipe('flat')
+    if recipe is None or recipe['action'] != 'integrate':
         raise ValueError('execute_flat needs an integrate recipe')
     first = build(recipe['inputs'], True)
     if first is None:
@@ -38,30 +40,21 @@ def execute_flat(
     attempts = [first]
     retained: Attempt | None = None
     by_stage = {'first': first}
-    request: seiza.CalibrationFlatRetryRequest = dict(
-        session=session, candidates=candidates, first=first.feedback,
-    )
+    retry = seiza.FlatRetry(first.feedback, candidates, rules,
+                            held_back=session.flat_held_back, policy=session.flat_stability)
     try:
         while True:
-            decision = seiza.calibration_flat_retry(request)
+            decision = retry.next()
             action = decision['action']
             if action in ('try_trimmed', 'try_alternate'):
                 stage = 'trimmed' if action == 'try_trimmed' else 'alternate'
                 attempt = build(decision['inputs'], True)
-                if attempt is None:
-                    if stage == 'trimmed':
-                        request['trimmed_attempted'] = True
-                    else:
-                        request['alternate_attempted'] = True
-                else:
+                if attempt is not None:
                     attempts.append(attempt)
                     by_stage[stage] = attempt
-                    # Successful feedback implies attempted. A failed retry
-                    # instead needs the explicit flag above.
-                    if stage == 'trimmed':
-                        request['trimmed'] = attempt.feedback
-                    else:
-                        request['alternate'] = attempt.feedback
+                # A failed retry is recorded as None: it was tried.
+                feedback = attempt.feedback if attempt is not None else None
+                (retry.trimmed if stage == 'trimmed' else retry.alternate)(feedback)
                 continue
             if action == 'withhold':
                 return None
