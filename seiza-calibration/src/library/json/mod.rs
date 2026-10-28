@@ -369,19 +369,7 @@ fn resolve_nights(request: &mut Request, rules: &RuleBook) -> crate::Result<Nigh
         }
         rows.insert((shift.rig_uuid.clone(), shift.frame_uuid.clone()), shift);
     }
-    for frame in &request.frames {
-        if let Some(offset) = rules.for_rig(&frame.rig_uuid).night_offset_seconds {
-            rows.insert(
-                (frame.rig_uuid.clone(), frame.frame_uuid.clone()),
-                groups::NightBoundary {
-                    rig_uuid: frame.rig_uuid.clone(),
-                    frame_uuid: frame.frame_uuid.clone(),
-                    seconds: 43200 - offset,
-                },
-            );
-        }
-    }
-    let nights = NightShifts::new(rows.into_values());
+    let nights = NightShifts::new(rows.into_values()).with_zones(&request.frames, rules);
     request.grouping.night_boundaries = nights.boundaries();
     Ok(nights)
 }

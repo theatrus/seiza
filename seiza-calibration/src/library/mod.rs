@@ -461,6 +461,8 @@ pub struct NightShifts {
     shifts: BTreeMap<(String, String), i64>,
 }
 impl NightShifts {
+    /// The boundaries of `rows`, one per frame; a later row for a frame
+    /// replaces an earlier one.
     pub fn new(rows: impl IntoIterator<Item = groups::NightBoundary>) -> Self {
         Self {
             shifts: rows
@@ -468,6 +470,20 @@ impl NightShifts {
                 .map(|row| ((row.rig_uuid, row.frame_uuid), row.seconds))
                 .collect(),
         }
+    }
+    /// These boundaries with each rig's `night_zone` setting in force over
+    /// them for its `frames`: a rig set to a UTC offset splits its nights at
+    /// local noon there, whatever its frames were given.
+    pub fn with_zones(mut self, frames: &[CalibrationFrame], rules: &RuleBook) -> Self {
+        for frame in frames {
+            if let Some(offset) = rules.for_rig(&frame.rig_uuid).night_offset_seconds {
+                self.shifts.insert(
+                    (frame.rig_uuid.clone(), frame.frame_uuid.clone()),
+                    43200 - offset,
+                );
+            }
+        }
+        self
     }
     /// The boundaries held, one per frame.
     pub fn boundaries(&self) -> Vec<groups::NightBoundary> {
