@@ -3629,6 +3629,16 @@ char *seiza_stack_report_html(const char *report_json, char **error_out);
 char *seiza_stack_collection_html(const char *report_json, char **error_out);
 
 /*
+ Select none, cheap retained diagnostics, or rich source analysis. Request:
+ {report: optional camelCase stack report, level: string, inputs: source paths}.
+ Returns owned camelCase JSON (JSON null for none), freed with seiza_string_free.
+ Rich reads inputs again; it never changes the completed stack.
+ # Safety
+ request_json must be NUL-terminated UTF-8; error_out null or writable.
+ */
+char *seiza_prepare_stack_report_json(const char *request_json, char **error_out);
+
+/*
  Fit premeasured common stellar fluxes. Request JSON contains sources, stars
  and optional options, as defined by the continuum core. Returns a tagged
  fitted/skipped JSON outcome; free it with seiza_string_free. A skip is not

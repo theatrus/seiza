@@ -1878,3 +1878,28 @@ expose every core choice for PSF Guard to retain it.
 Manual light-choice entries can use an exact full path in `file_name`. It takes
 precedence over basename entries for that light, keeping same-named files from
 different folders separate. Catalog clients retain their existing basename keys.
+
+### No report, cheap report, rich report
+
+Skip context/report construction entirely when reporting is disabled. The shared
+`prepare_stack_report(report=None, *, level="cheap", inputs=())` helper returns
+`None` for `level="none"` and does not open inputs. Cheap uses the existing
+completed-stack report; rich adds an explicit source-analysis pass:
+
+```python
+report = snapshot.report(context)
+cheap = seiza.prepare_stack_report(report, level="cheap")
+rich = seiza.prepare_stack_report(report, level="rich", inputs=light_paths)
+Path("rich.html").write_text(seiza.stack_report_html(rich), encoding="utf-8")
+```
+
+Rich requires explicit source paths and retains failed measurements. It reads
+original source pixels without stack calibration, measures stellar quality,
+and computes sampled equal-weight depth curves; these are not final-stack
+noise/SNR estimates. Results and per-stage timings are in
+`report["provenance"]["reporting"]["analysis"]`. No mode changes the stack.
+Cheap chart rendering also works on previously saved reports. Downgrading rich
+to cheap removes the rich-analysis payload without reading source images.
+The C twin is `seiza_prepare_stack_report_json`, taking `{report, level, inputs}`
+with camelCase report keys and returning camelCase JSON (`null` for none).
+Whole-file checksums are CLI provenance behavior, not performed by this helper.

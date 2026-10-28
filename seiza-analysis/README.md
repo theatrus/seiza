@@ -277,3 +277,24 @@ restoration of the interactive state. It uses 1,001 synthetic admitted inputs an
 ![Combined completed stacks in light mode](../docs/images/stacking/collection-light.jpg)
 
 ![Combined completed stacks in dark mode](../docs/images/stacking/collection-dark.jpg)
+
+### Report detail and diagnostic charts
+
+The lightweight renderer plots admission RMS, recorded drift, rotation,
+normalization gain and each input's final rejected finite-sample percentage.
+Missing measurements stay absent; online results without final counts show an
+explicit empty state. These charts also work on previously saved reports.
+
+`prepare_stack_report(report, level, inputs)` selects `none`, `cheap`, or `rich`.
+None returns `None` before source I/O. Cheap retains the numerical summaries
+and does no source-image reading. Rich runs the existing source-analysis engine
+on explicit inputs and stores its result and stage timings under
+`provenance.reporting.analysis`. The extra pass uses source pixels, not stack
+calibration or final integrated pixels. Its charts are labeled separately.
+C and Python expose the same operation. CLI rich mode additionally fingerprints
+source, calibration and output files; cheap provenance uses metadata only.
+
+The mode does not alter registration, integration, weighting, rejection or
+`OUTPUT_VERSION`. A collection can contain cheap, rich and legacy reports.
+
+See the [release-build report benchmarks](../docs/stack-report-benchmarks.md) for measured costs and reproduction instructions.

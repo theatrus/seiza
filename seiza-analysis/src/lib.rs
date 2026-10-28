@@ -6,8 +6,8 @@ mod report;
 mod sampling;
 mod trend;
 pub use report::{
-    NamedStackReport, StackReportCollection, render_html, render_stack_collection_html,
-    render_stack_html,
+    NamedStackReport, StackReportCollection, prepare_stack_report, render_html,
+    render_stack_collection_html, render_stack_html,
 };
 
 use seiza_stacking::{FitsFrame, GpuOptions, Registrar, RegistrationOptions, RegistrationResult};

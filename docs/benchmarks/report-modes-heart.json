@@ -1,0 +1,136 @@
+{
+  "inputs": 8,
+  "input_bytes": 978808320,
+  "threads": 8,
+  "cache": "warm local filesystem; no cold-cache claim",
+  "records": [
+    {
+      "mode": "none",
+      "name": "warmup-none",
+      "warmup": true,
+      "wall_seconds": 5.92396349972114,
+      "fits_sha256": "ee489cd3237d2430c4a490cba57d2eaa8ee48204fcc71b44cc759fe05af14511"
+    },
+    {
+      "mode": "cheap",
+      "name": "warmup-cheap",
+      "warmup": true,
+      "wall_seconds": 6.743385400157422,
+      "fits_sha256": "ee489cd3237d2430c4a490cba57d2eaa8ee48204fcc71b44cc759fe05af14511",
+      "accepted_frames": 8,
+      "report_bytes": 575581
+    },
+    {
+      "mode": "none",
+      "name": "0-none",
+      "warmup": false,
+      "wall_seconds": 5.810068299993873,
+      "fits_sha256": "ee489cd3237d2430c4a490cba57d2eaa8ee48204fcc71b44cc759fe05af14511"
+    },
+    {
+      "mode": "cheap",
+      "name": "0-cheap",
+      "warmup": false,
+      "wall_seconds": 6.5947989001870155,
+      "fits_sha256": "ee489cd3237d2430c4a490cba57d2eaa8ee48204fcc71b44cc759fe05af14511",
+      "accepted_frames": 8,
+      "report_bytes": 575576
+    },
+    {
+      "mode": "rich",
+      "name": "0-rich",
+      "warmup": false,
+      "wall_seconds": 198.66250189999118,
+      "fits_sha256": "ee489cd3237d2430c4a490cba57d2eaa8ee48204fcc71b44cc759fe05af14511",
+      "accepted_frames": 8,
+      "report_bytes": 584449,
+      "analysis_timings": {
+        "measurement_seconds": 188.66321089999997,
+        "read_seconds": 0.2538628,
+        "registration_seconds": 1.7809453999999998,
+        "replay_seconds": 0.0427833,
+        "sampling_seconds": 0.8185992,
+        "total_seconds": 191.6065533
+      }
+    },
+    {
+      "mode": "cheap",
+      "name": "1-cheap",
+      "warmup": false,
+      "wall_seconds": 6.833432599902153,
+      "fits_sha256": "ee489cd3237d2430c4a490cba57d2eaa8ee48204fcc71b44cc759fe05af14511",
+      "accepted_frames": 8,
+      "report_bytes": 575576
+    },
+    {
+      "mode": "rich",
+      "name": "1-rich",
+      "warmup": false,
+      "wall_seconds": 197.56229459960014,
+      "fits_sha256": "ee489cd3237d2430c4a490cba57d2eaa8ee48204fcc71b44cc759fe05af14511",
+      "accepted_frames": 8,
+      "report_bytes": 584450,
+      "analysis_timings": {
+        "measurement_seconds": 187.4191043,
+        "read_seconds": 0.2809273,
+        "registration_seconds": 1.8326472999999999,
+        "replay_seconds": 0.0403134,
+        "sampling_seconds": 0.7991866999999999,
+        "total_seconds": 190.422348
+      }
+    },
+    {
+      "mode": "none",
+      "name": "1-none",
+      "warmup": false,
+      "wall_seconds": 6.099666399881244,
+      "fits_sha256": "ee489cd3237d2430c4a490cba57d2eaa8ee48204fcc71b44cc759fe05af14511"
+    },
+    {
+      "mode": "rich",
+      "name": "2-rich",
+      "warmup": false,
+      "wall_seconds": 198.3521020002663,
+      "fits_sha256": "ee489cd3237d2430c4a490cba57d2eaa8ee48204fcc71b44cc759fe05af14511",
+      "accepted_frames": 8,
+      "report_bytes": 584447,
+      "analysis_timings": {
+        "measurement_seconds": 187.27606899999998,
+        "read_seconds": 0.25549,
+        "registration_seconds": 1.9504688000000001,
+        "replay_seconds": 0.0408502,
+        "sampling_seconds": 0.8089421,
+        "total_seconds": 190.3785593
+      }
+    },
+    {
+      "mode": "none",
+      "name": "2-none",
+      "warmup": false,
+      "wall_seconds": 5.8822101997211576,
+      "fits_sha256": "ee489cd3237d2430c4a490cba57d2eaa8ee48204fcc71b44cc759fe05af14511"
+    },
+    {
+      "mode": "cheap",
+      "name": "2-cheap",
+      "warmup": false,
+      "wall_seconds": 6.795861499849707,
+      "fits_sha256": "ee489cd3237d2430c4a490cba57d2eaa8ee48204fcc71b44cc759fe05af14511",
+      "accepted_frames": 8,
+      "report_bytes": 575576
+    }
+  ],
+  "medians_seconds": {
+    "none": 5.8822101997211576,
+    "cheap": 6.795861499849707,
+    "rich": 198.3521020002663
+  },
+  "hardware": {
+    "cpu": "AMD Ryzen 9 5950X (16 cores / 32 threads)",
+    "gpu_available": "NVIDIA GeForce RTX 2080 SUPER",
+    "os": "Windows",
+    "build": "cargo build --release -p seiza-cli --locked",
+    "binary_sha256": "67e94a6d19505fa6d2cec574c3eb2b5d95bb56a7a196754fa884a06b07de79b3",
+    "date": "2026-10-27"
+  }
+}

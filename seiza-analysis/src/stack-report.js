@@ -10,7 +10,7 @@ $('subtitle').textContent=entries.length+' independent stack result(s)';
 const views=entries.map((entry,i)=>{const host=el('section',null,'stack-view');host.setAttribute('aria-label',entry.label);host.id='stack-'+i;host.hidden=i!==0;$('views').append(host);return host});
 function ensure(i){if(!views[i].children.length)renderReport(entries[i].report,views[i],i,entries[i].label)}
 function select(i){selected=i;views.forEach((v,j)=>v.hidden=i!==j);[...$('selector').children].forEach((b,j)=>b.setAttribute('aria-pressed',String(i===j)));ensure(i)}
-if(documentReport.stacks){
+if(documentReport.stacks&&entries.length>1){
  $('overview').hidden=false;
  entries.forEach((entry,i)=>{const r=entry.report,known=(r.context?.frames||[]).filter(f=>Number.isFinite(f.exposure_seconds)&&f.exposure_seconds>0),unknown=r.accepted_frames-known.length;
  const row=el('tr');[entry.label,r.stage+' · '+r.width+' × '+r.height+' · '+r.channels+' component(s)',fmt(known.reduce((n,f)=>n+f.exposure_seconds,0))+' s'+(unknown?' · '+unknown+' unknown':''),r.accepted_frames+' / '+r.rejected_frames,r.support.map(s=>fmt(100*s.supported_pixels/s.total_pixels)+'%').join(' / '),r.support.map(s=>fmt(s.support_mean)).join(' / ')+(r.stage==='drizzled'?' area × weight':' observations'),r.support.map(s=>fmt(s.rejected_samples)).join(' / ')].forEach(v=>row.append(el('td',v)));$('comparison').append(row);
@@ -21,9 +21,9 @@ function theme(){const dark=document.documentElement.dataset.theme==='dark';$('t
 $('theme').onclick=()=>{const dark=document.documentElement.dataset.theme!=='dark';document.documentElement.dataset.theme=dark?'dark':'light';try{localStorage.setItem('seiza-report-theme',dark?'dark':'light')}catch(_){}theme()};theme();
 $('download').href=URL.createObjectURL(new Blob([document.getElementById('data').textContent],{type:'application/json'}));$('print').onclick=()=>window.print();
 // Print every stack, including all filtered-out or paginated records. Restore interactive state afterwards.
-let savedViews;
-window.addEventListener('beforeprint',()=>{if(printing)return;printing=true;savedViews=views.map(v=>[...v.childNodes]);views.forEach((v,i)=>{renderReport(entries[i].report,v,i,entries[i].label);v.querySelectorAll('.attempts').forEach(d=>d.open=true)})});
-window.addEventListener('afterprint',()=>{if(!printing)return;printing=false;views.forEach((v,i)=>v.replaceChildren(...savedViews[i]));select(selected)});
+let savedViews,savedOverview;
+window.addEventListener('beforeprint',()=>{if(printing)return;printing=true;savedOverview=$('overview').open;$('overview').open=true;savedViews=views.map(v=>[...v.childNodes]);views.forEach((v,i)=>{renderReport(entries[i].report,v,i,entries[i].label);v.querySelectorAll('.report-disclosure,.analysis-method,.attempts').forEach(d=>d.open=true)})});
+window.addEventListener('afterprint',()=>{if(!printing)return;printing=false;$('overview').open=savedOverview;views.forEach((v,i)=>v.replaceChildren(...savedViews[i]));select(selected)});
 select(0);
 function renderReport(r,host,index,label){
  host.replaceChildren(document.getElementById('stack-view').content.cloneNode(true));
@@ -35,6 +35,7 @@ const frames=ctx?.frames?.length?ctx.frames:(r.final_samples||[]).map(()=>({sour
 for(const [label,value,note] of [['Output grid',r.width+' × '+r.height,r.channels+' channel(s)'],['Admitted frames',fmt(r.accepted_frames),'Includes the reference only when integrated'],['Rejected attempts',fmt(r.rejected_frames),'Admission outcomes, separate from sample rejection'],['Known exposure',fmt(known.reduce((s,f)=>s+f.exposure_seconds,0))+' s',unknown+' admitted exposure(s) unavailable']]) {
  const d=el('div',null,'stat');d.append(el('div',label,'stat-label'),el('div',value,'stat-value'),el('div',note,'stat-note'));$('summary').append(d);
 }
+renderStackCharts(r,$('charts'),frames);
 $('support-note').textContent=r.stage==='drizzled'?'Accumulated drop area × frame weight; these values are not frame counts.':'Accepted observations per output sample, after this stage’s sample decisions.';
 function mapPanel(map,c,title,stats){
  const box=el('div',null,'map');box.append(el('h3',title));const canvas=el('canvas');canvas.width=map.width;canvas.height=map.height;canvas.style.aspectRatio=r.width+'/'+r.height;canvas.setAttribute('role','img');
@@ -68,7 +69,7 @@ if(failed.length){
  const table=el('table'),thead=el('thead'),header=el('tr');header.append(el('th','Source'),el('th','Reason'));thead.append(header);table.append(thead);const body=el('tbody');table.append(body);scroll.append(table);section.append(scroll);
  const foot=el('div',null,'ledger-end'),note=el('p'),controls=el('div',null,'paging'),prev=el('button','Previous'),next=el('button','Next');controls.append(prev,next);foot.append(note,controls);section.append(foot);let page=0;
  const draw=()=>{const matches=failed.filter(f=>(String(f.source?.path||'Unknown source')+' '+String(f.reason||f.disposition)).toLowerCase().includes(search.value.toLowerCase()));body.replaceChildren();(printing?matches:matches.slice(page*100,(page+1)*100)).forEach(f=>{const row=el('tr');row.append(el('td',f.source?.path||'Unknown source'),el('td',f.reason||f.disposition));body.append(row)});note.textContent=body.children.length+' shown / '+matches.length+' matching attempts';prev.disabled=page===0;next.disabled=(page+1)*100>=matches.length};
- search.oninput=()=>{page=0;draw()};prev.onclick=()=>{page--;draw()};next.onclick=()=>{page++;draw()};section.ontoggle=()=>{if(section.open)draw()};draw();host.querySelector('.support').before(section);
+ search.oninput=()=>{page=0;draw()};prev.onclick=()=>{page--;draw()};next.onclick=()=>{page++;draw()};section.ontoggle=()=>{if(section.open)draw()};draw();host.querySelector('.ledger').after(section);
 }
 r.warnings.forEach(w=>$('warnings').append(el('li',w)));
 if(r.accepted_frames<3)$('warnings').prepend(el('li','Only '+r.accepted_frames+' admitted input(s). Sample rejection and noise interpretation are limited for this sparse result.'));

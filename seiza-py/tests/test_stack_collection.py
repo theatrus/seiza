@@ -48,3 +48,27 @@ def test_collection_preserves_rgb_components_different_grids_and_drizzle_units()
     drizzle["support_map"]["quantity"] = "accepted_observations"
     with pytest.raises(ValueError):
         seiza.stack_collection_html(data)
+
+
+def test_report_levels_skip_reads_preserve_result_and_validate(tmp_path):
+    missing = tmp_path / "missing.fits"
+    assert seiza.prepare_stack_report(level="none", inputs=[missing]) is None
+    with pytest.raises(ValueError, match="level"):
+        seiza.prepare_stack_report(REPORT, level="unexpected")
+    with pytest.raises(ValueError, match="required"):
+        seiza.prepare_stack_report(level="cheap")
+    with pytest.raises(ValueError, match="inputs"):
+        seiza.prepare_stack_report(REPORT, level="rich")
+    cheap = seiza.prepare_stack_report(REPORT, level="cheap", inputs=[missing])
+    assert cheap["provenance"]["reporting"] == {"level": "cheap", "analysis": None}
+    rich = seiza.prepare_stack_report(REPORT, level="rich", inputs=[missing])
+    analysis = rich["provenance"]["reporting"]["analysis"]
+    assert analysis["frames"][0]["measurement_status"] == "failed"
+    assert analysis["frames"][0]["error"]
+    assert analysis["timings"]["total_seconds"] >= 0
+    for key in ["support", "support_map", "rejection_map", "accepted_frames", "final_samples"]:
+        assert rich[key] == cheap[key] == REPORT[key]
+    assert seiza.prepare_stack_report(rich, level="cheap")["provenance"]["reporting"]["analysis"] is None
+    assert REPORT["provenance"] is None
+    html = seiza.stack_report_html(rich)
+    assert "Image quality & integration depth" in html and "__CHART_SCRIPT__" not in html

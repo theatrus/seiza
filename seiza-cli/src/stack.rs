@@ -1,5 +1,7 @@
 use crate::preview::{PreviewTransfer, write_preview};
-use crate::provenance::{FileIdentity, file_identity, validate_path_roles, write_json_atomic};
+use crate::provenance::{
+    ReportFileIdentity as FileIdentity, validate_path_roles, write_json_atomic,
+};
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
 use rayon::prelude::*;
@@ -10,6 +12,22 @@ use seiza_stacking::{
 use seiza_stacking::{Continue, PipelineOptions};
 use serde::Serialize;
 use std::path::PathBuf;
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ReportLevel {
+    None,
+    Cheap,
+    Rich,
+}
+impl ReportLevel {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Cheap => "cheap",
+            Self::Rich => "rich",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum NormalizationArg {
@@ -117,12 +135,16 @@ pub(crate) struct StackArgs {
     /// SATURATE or SATLEVEL, or the frames' integer encoding
     #[arg(long)]
     clipped: Option<PathBuf>,
-    /// JSON admission/provenance report with SHA-256 input identities
+    /// JSON completed-stack report; cheap by default, rich includes SHA-256 identities
     #[arg(long)]
     report: Option<PathBuf>,
     /// Self-contained post-stack HTML report (also collects admission provenance)
     #[arg(long)]
     report_html: Option<PathBuf>,
+    /// Report detail: none (default without destinations), cheap (retained data),
+    /// rich (extra source-analysis pass and SHA-256 checksums). Reporting never changes pixels.
+    #[arg(long, value_enum)]
+    report_level: Option<ReportLevel>,
     /// Integrated master bias FITS or XISF
     #[arg(long)]
     bias: Option<PathBuf>,
@@ -441,6 +463,27 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
     let reintegrate = options.reintegrate || drizzle.is_some();
     let report_path = options.report.clone();
     let report_requested = options.report.as_ref().or(options.report_html.as_ref());
+    let report_level =
+        options
+            .report_level
+            .map(ReportLevel::as_str)
+            .unwrap_or(if report_requested.is_some() {
+                "cheap"
+            } else {
+                "none"
+            });
+    if (report_level == "none") == report_requested.is_some() {
+        anyhow::bail!(
+            "--report-level none requires no report destinations; cheap/rich requires --report or --report-html"
+        );
+    }
+    let file_identity = |path: &std::path::Path| {
+        if report_level == "rich" {
+            crate::provenance::file_identity(path).map(Into::into)
+        } else {
+            crate::provenance::file_metadata(path)
+        }
+    };
     let preview_path = options.preview.clone();
     let mut path_roles = options
         .images
@@ -942,8 +985,7 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
         configuration_report.registration_effective_maximum_drift_pixels,
     );
 
-    // Fingerprint every frame up front, on all cores, so the report costs the
-    // stacking loop nothing.
+    // Rich provenance fingerprints inputs; cheap mode only reads file metadata.
     // An integrated reference is already in the stack.
     let paths = ordered[usize::from(options.reference_image.is_none() && !expand)..].to_vec();
     let mut source_identities = match report_requested {
@@ -1167,7 +1209,7 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
     }
     if report_requested.is_some() {
         let report = StackReport {
-            schema_version: 1,
+            schema_version: 2,
             output: file_identity(&options.output)?,
             preview: preview_path.map(|path| path.display().to_string()),
             reference: reference_identity.expect("report identity was prepared"),
@@ -1199,7 +1241,16 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
         };
         let mut document = serde_json::to_value(&report)?;
         post_stack.provenance = Some(document.clone());
-        // Preserve schema 1 admission/provenance fields; final measurements are an additive extension.
+        if report_level == "rich" {
+            eprintln!(
+                "rich report: analyzing source frames in a separate pass (not final-stack noise)"
+            );
+        }
+        post_stack =
+            seiza_analysis::prepare_stack_report(Some(post_stack), report_level, &ordered)?
+                .expect("reporting is enabled");
+        document["report_level"] = serde_json::json!(report_level);
+        // Envelope schema 2 makes SHA-256 explicitly optional; post_stack remains schema 1.
         document["post_stack"] = serde_json::to_value(&post_stack)?;
         if let Some(path) = report_path {
             write_json_atomic(&path, &document)?;

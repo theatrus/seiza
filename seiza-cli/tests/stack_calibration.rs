@@ -618,8 +618,9 @@ fn completed_reports_preserve_pixels_and_existing_provenance() {
         assert_eq!(plain.image.data, with_report.image.data);
         let document: serde_json::Value =
             serde_json::from_slice(&std::fs::read(json).unwrap()).unwrap();
-        assert_eq!(document["schema_version"], 1);
-        assert!(document["output"]["sha256"].is_string());
+        assert_eq!(document["schema_version"], 2);
+        assert!(document["output"]["sha256"].is_null());
+        assert_eq!(document["report_level"], "cheap");
         assert!(document["frames"].is_array());
         assert_eq!(
             document["post_stack"]["stage"],
@@ -664,7 +665,7 @@ fn html_report_alone_collects_provenance_and_protects_inputs() {
         .next()
         .unwrap();
     let report: serde_json::Value = serde_json::from_str(embedded).unwrap();
-    assert!(report["provenance"]["output"]["sha256"].is_string());
+    assert!(report["provenance"]["output"]["sha256"].is_null());
     assert!(report["provenance"]["frames"].is_array());
     let before = std::fs::read(&lights[0]).unwrap();
     let result = Command::new(env!("CARGO_BIN_EXE_seiza"))
@@ -678,4 +679,75 @@ fn html_report_alone_collects_provenance_and_protects_inputs() {
         .unwrap();
     assert!(!result.status.success());
     assert_eq!(std::fs::read(&lights[0]).unwrap(), before);
+}
+
+#[test]
+fn report_levels_preserve_pixels_and_validate_destinations() {
+    let directory = tempfile::tempdir().unwrap();
+    let lights = write_lights(directory.path());
+    let mut pixels = None;
+    for level in ["none", "cheap", "rich"] {
+        let output = directory.path().join(format!("{level}.fits"));
+        let json = directory.path().join(format!("{level}.json"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_seiza"));
+        command
+            .arg("stack")
+            .args(&lights)
+            .args(["--report-level", level])
+            .arg("--output")
+            .arg(&output);
+        if level != "none" {
+            command.arg("--report").arg(&json);
+        }
+        let result = command.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let frame = seiza_stacking::FitsFrame::open(&output).unwrap();
+        if let Some(expected) = &pixels {
+            assert_eq!(&frame.image.data, expected);
+        } else {
+            pixels = Some(frame.image.data);
+        }
+        if level == "none" {
+            assert!(!json.exists());
+            continue;
+        }
+        let report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(json).unwrap()).unwrap();
+        assert_eq!(report["report_level"], level);
+        assert_eq!(report["output"]["sha256"].is_string(), level == "rich");
+        assert_eq!(report["reference"]["sha256"].is_string(), level == "rich");
+        for frame in report["frames"].as_array().unwrap() {
+            assert_eq!(frame["source"]["sha256"].is_string(), level == "rich");
+        }
+        let details = &report["post_stack"]["provenance"]["reporting"];
+        assert_eq!(details["level"], level);
+        assert_eq!(details["analysis"].is_object(), level == "rich");
+        if level == "rich" {
+            assert_eq!(
+                details["analysis"]["frames"].as_array().unwrap().len(),
+                lights.len()
+            );
+        }
+    }
+    for (level, destination) in [("none", true), ("cheap", false), ("rich", false)] {
+        let output = directory.path().join(format!("invalid-{level}.fits"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_seiza"));
+        command
+            .arg("stack")
+            .args(&lights)
+            .args(["--report-level", level])
+            .arg("--output")
+            .arg(&output);
+        if destination {
+            command
+                .arg("--report")
+                .arg(directory.path().join("invalid.json"));
+        }
+        assert!(!command.output().unwrap().status.success());
+        assert!(!output.exists());
+    }
 }

@@ -279,6 +279,32 @@ mod stack_report_tests {
                 serde_json::from_str(CStr::from_ptr(json).to_str().unwrap()).unwrap();
             assert_eq!(report["supportMap"]["quantity"], "accepted_observations");
             assert_eq!(report["finalSamples"][0]["integratedSamples"], 1);
+            for level in ["none", "cheap", "rich"] {
+                let request = CString::new(
+                    serde_json::json!({"report":report,"level":level,"inputs":["missing.fits"]})
+                        .to_string(),
+                )
+                .unwrap();
+                let prepared = seiza_prepare_stack_report_json(request.as_ptr(), &mut error);
+                assert!(error.is_null());
+                assert!(!prepared.is_null());
+                let value: serde_json::Value =
+                    serde_json::from_str(CStr::from_ptr(prepared).to_str().unwrap()).unwrap();
+                if level == "none" {
+                    assert!(value.is_null());
+                } else {
+                    assert_eq!(value["supportMap"], report["supportMap"]);
+                    assert_eq!(value["provenance"]["reporting"]["level"], level);
+                    if level == "rich" {
+                        assert_eq!(
+                            value["provenance"]["reporting"]["analysis"]["frames"][0]["measurementStatus"],
+                            "failed"
+                        );
+                    }
+                }
+                seiza_string_free(prepared);
+            }
+
             let html = seiza_stack_report_html(json, &mut error);
             assert!(error.is_null());
             assert!(!html.is_null());
@@ -338,4 +364,42 @@ mod tests {
             seiza_string_free(json);
         }
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StackReportRequest {
+    #[serde(default)]
+    report: Option<serde_json::Value>,
+    level: String,
+    #[serde(default)]
+    inputs: Vec<PathBuf>,
+}
+/// Select none, cheap retained diagnostics, or rich source analysis. Request:
+/// {report: optional camelCase stack report, level: string, inputs: source paths}.
+/// Returns owned camelCase JSON (JSON null for none), freed with seiza_string_free.
+/// Rich reads inputs again; it never changes the completed stack.
+/// # Safety
+/// request_json must be NUL-terminated UTF-8; error_out null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_prepare_stack_report_json(
+    request_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let request: StackReportRequest = parse_request(request_json, "stack report options")?;
+        let report = request
+            .report
+            .map(|r| serde_json::from_value(keys(r, false)))
+            .transpose()
+            .map_err(|e| e.to_string())?;
+        let result = seiza_analysis::prepare_stack_report(report, &request.level, &request.inputs)
+            .map_err(|e| e.to_string())?;
+        owned_json(&keys(
+            serde_json::to_value(result).map_err(|e| e.to_string())?,
+            true,
+        ))
+    })
+    .unwrap_or(ptr::null_mut())
 }

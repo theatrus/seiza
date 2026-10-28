@@ -2356,3 +2356,7 @@ class CalibrationFlatWorkAnswer(TypedDict, total=False):
 class CalibrationFlatWorkResult(TypedDict):
     kind: Literal["family", "change"]
     row: dict[str, Any]
+
+def prepare_stack_report(report: Mapping[str, Any] | None = None, *, level: str = "cheap", inputs: Sequence[Union[str, Path]] = ()) -> dict[str, Any] | None:
+    """none skips reporting; cheap uses retained data; rich rereads sources for analysis."""
+    ...

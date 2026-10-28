@@ -924,7 +924,7 @@ display-only stretch and never feeds pixels back into the stack. Incoming
 frames are admitted atomically: incompatible images, weak registrations,
 excess transform drift, low overlap, or implausible normalization leave the
 existing additive stack unchanged. The optional `--report` JSON records
-SHA-256 identities for every source and calibration master, the complete
+file identities (SHA-256 in rich mode), the complete
 configuration, and the ordered accepted/rejected disposition ledger. Without
 `--reference-image`, the reference light is integrated, so it counts toward `accepted_frames` but has
 no entry in the per-frame `frames` ledger; that ledger lists only the frames
@@ -956,7 +956,7 @@ so default normalization remains enabled without matching different filters
 to one brightness scale. Only listed lights count toward the stack.
 With this option, the report's `reference_integrated` is false
 and `frames` contains every listed light, even when the reference is one of
-them. The alignment image retains its SHA-256 identity in `reference`, and
+them. The alignment image retains its file identity in `reference` (SHA-256 in rich mode), and
 `normalization_reference` identifies the selected channel light.
 
 Mono inputs produce a one-plane linear FITS stack. Three-plane FITS/XISF inputs
@@ -1551,10 +1551,33 @@ coverage. `--joint-canvas` and `--reference-canvas` are mutually exclusive.
 
 ## Completed-stack report
 
-Add `--report-html stack.html` to `seiza stack` for an offline report of the
-actual output. `--report stack.json` keeps the existing schema-1 admission and
-SHA-256 provenance fields and adds a `post_stack` section. Either report option
-collects provenance; HTML embeds its full report data with a JSON download.
+Reporting has three levels:
+
+| Level | Work added |
+| --- | --- |
+| `none` | No report context, maps, provenance, checksums, analysis or report files. Default with no report destination. |
+| `cheap` | Summarizes retained stack maps and admission/final-sample records; reads file metadata only. Includes diagnostic charts. No extra pixel reads, SHA-256, star detection or analysis. Default with a report destination. |
+| `rich` | Everything in cheap, plus SHA-256 identities and a separate source-analysis pass for HFR, FWHM, eccentricity, star counts, native background/noise, stellar peak SNR and sampled depth curves. Can be substantially slower. |
+
+```sh
+seiza stack lights/*.fits --output stack.fits --report-level none
+seiza stack lights/*.fits --output stack.fits --report-level cheap --report-html stack.html
+seiza stack lights/*.fits --output stack.fits --report-level rich --report stack.json --report-html stack.html
+```
+
+`none` rejects report destinations; `cheap` and `rich` require `--report` or
+`--report-html`. HTML embeds the report with a JSON download. The CLI envelope
+is now **schema 2**: file identities retain `path` and `bytes`, with `sha256: null`
+when not computed. Consumers requiring hashes must request rich mode. The
+nested `post_stack` document remains schema 1.
+
+Rich source analysis is stored in `post_stack.provenance.reporting.analysis`,
+with per-stage wall timings. It reads the original supplied lights, including
+unsuccessful admission attempts, **without applying the stack's calibration**.
+Its sorted-path, sampled, equal-weight noise curve is a source diagnostic,
+not a measurement or prediction of final-stack noise, weighting or rejection.
+Unsupported/unreadable inputs stay visible as analysis failures. Stacking
+finishes before the extra analysis pass, and every level preserves numerical output.
 
 The report separates admission decisions from final reintegration sample counts,
 shows bounded support and rejection maps, and records admitted inputs,
@@ -1574,3 +1597,5 @@ files containing `post_stack`. No source images are opened; no stacking is run.
 The first label is selected initially. Labels must be nonempty and unique.
 Destinations must be new files. `--json` is optional. Reports with missing
 context, different dimensions or RGB components retain those distinctions.
+
+See the [release-build report benchmarks](../docs/stack-report-benchmarks.md) for measured costs and reproduction instructions.

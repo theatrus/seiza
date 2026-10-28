@@ -51,6 +51,33 @@ pub(crate) fn file_identity(path: &Path) -> Result<FileIdentity> {
     })
 }
 
+/// Stack reporting can explicitly omit whole-file checksums.
+#[derive(Serialize)]
+pub(crate) struct ReportFileIdentity {
+    pub(crate) path: String,
+    pub(crate) bytes: u64,
+    pub(crate) sha256: Option<String>,
+}
+impl From<FileIdentity> for ReportFileIdentity {
+    fn from(value: FileIdentity) -> Self {
+        Self {
+            path: value.path,
+            bytes: value.bytes,
+            sha256: Some(value.sha256),
+        }
+    }
+}
+/// Metadata-only identity: no pixel read or checksum work.
+pub(crate) fn file_metadata(path: &Path) -> Result<ReportFileIdentity> {
+    Ok(ReportFileIdentity {
+        path: path.display().to_string(),
+        bytes: std::fs::metadata(path)
+            .with_context(|| format!("failed to stat {}", path.display()))?
+            .len(),
+        sha256: None,
+    })
+}
+
 pub(crate) fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
     let parent = path
         .parent()

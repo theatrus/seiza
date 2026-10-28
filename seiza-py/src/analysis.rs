@@ -60,8 +60,29 @@ fn stack_collection_html(report: &Bound<'_, PyAny>) -> PyResult<String> {
     seiza_analysis::render_stack_collection_html(&report)
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
+/// Select cheap retained diagnostics or rich source analysis, independently of stacking.
+#[pyfunction]
+#[pyo3(signature = (report=None, *, level="cheap", inputs=Vec::new()))]
+fn prepare_stack_report<'py>(
+    py: Python<'py>,
+    report: Option<&Bound<'py, PyAny>>,
+    level: &str,
+    inputs: Vec<PathBuf>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let report = report
+        .map(|r| -> PyResult<_> {
+            let json: String = py.import("json")?.call_method1("dumps", (r,))?.extract()?;
+            serde_json::from_str(&json).map_err(|e| PyValueError::new_err(e.to_string()))
+        })
+        .transpose()?;
+    let result = py
+        .detach(|| seiza_analysis::prepare_stack_report(report, level, &inputs))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    crate::flat_response::to_python(py, &result)
+}
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(analyze_project, m)?)?;
+    m.add_function(wrap_pyfunction!(prepare_stack_report, m)?)?;
     m.add_function(wrap_pyfunction!(analysis_html, m)?)?;
     m.add_function(wrap_pyfunction!(stack_report_html, m)?)?;
     m.add_function(wrap_pyfunction!(stack_collection_html, m)?)?;

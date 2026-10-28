@@ -12,12 +12,60 @@ pub fn render_html(report: &AnalysisReport) -> Result<String, Error> {
         .replace('>', "\\u003e");
     Ok(include_str!("report.html")
         .replace("__REPORT_STYLE__", include_str!("report.css"))
+        .replace("__CHART_SCRIPT__", include_str!("chart.js"))
         .replace("__REPORT_DATA__", &json))
 }
 /// Render a completed-stack report with bounded support maps and embedded JSON.
 pub fn render_stack_html(report: &seiza_stacking::PostStackReport) -> Result<String, Error> {
     validate_stack(report)?;
     stack_document(report)
+}
+
+/// Select report detail without changing numerical stack results.
+/// `none` returns immediately without reading inputs. `cheap` uses retained data.
+/// `rich` performs a separate, uncalibrated source-analysis pass; its depth curve
+/// is an equal-weight diagnostic, not a reconstruction of final integration.
+/// Inputs are explicit so hosts can include unsuccessful admission attempts too.
+pub fn prepare_stack_report(
+    report: Option<seiza_stacking::PostStackReport>,
+    level: &str,
+    inputs: &[std::path::PathBuf],
+) -> Result<Option<seiza_stacking::PostStackReport>, Error> {
+    if !matches!(level, "none" | "cheap" | "rich") {
+        return Err(Error::Invalid(
+            "report level must be none, cheap or rich".into(),
+        ));
+    }
+    if level == "none" {
+        return Ok(None);
+    }
+    let mut report =
+        report.ok_or_else(|| Error::Invalid("a completed stack report is required".into()))?;
+    validate_stack(&report)?;
+    if report.provenance.as_ref().is_some_and(|p| !p.is_object()) {
+        return Err(Error::Invalid("report provenance must be an object".into()));
+    }
+    let analysis = if level == "rich" {
+        if inputs.is_empty() {
+            return Err(Error::Invalid(
+                "rich reporting requires explicit source inputs".into(),
+            ));
+        }
+        Some(crate::analyze(inputs, &crate::AnalysisOptions::default())?)
+    } else {
+        None
+    };
+    let provenance = report
+        .provenance
+        .get_or_insert_with(|| serde_json::json!({}));
+    let provenance = provenance
+        .as_object_mut()
+        .ok_or_else(|| Error::Invalid("report provenance must be an object".into()))?;
+    provenance.insert(
+        "reporting".into(),
+        serde_json::json!({"level":level,"analysis":analysis}),
+    );
+    Ok(Some(report))
 }
 
 /// Named independent stack. Labels are unique within a collection; order is preserved.
@@ -62,11 +110,25 @@ fn stack_document(report: &impl serde::Serialize) -> Result<String, Error> {
         .replace('>', "\\u003e");
     Ok(include_str!("stack-report.html")
         .replace("__REPORT_STYLE__", include_str!("report.css"))
+        .replace("__CHART_SCRIPT__", include_str!("chart.js"))
         .replace("__STACK_SCRIPT__", include_str!("stack-report.js"))
+        .replace("__STACK_CHARTS__", include_str!("stack-charts.js"))
         .replace("__REPORT_DATA__", &json))
 }
 
 fn validate_stack(r: &seiza_stacking::PostStackReport) -> Result<(), Error> {
+    if let Some(analysis) = r
+        .provenance
+        .as_ref()
+        .and_then(|p| p.get("reporting"))
+        .and_then(|p| p.get("analysis"))
+        .filter(|a| !a.is_null())
+    {
+        let analysis: AnalysisReport = serde_json::from_value(analysis.clone())?;
+        if !matches!(analysis.schema_version, 1 | 2) {
+            return Err(Error::Invalid("unsupported rich analysis schema".into()));
+        }
+    }
     let invalid =
         || Error::Invalid("invalid post-stack report dimensions, maps, counts or schema".into());
     let pixels = r
@@ -206,6 +268,36 @@ mod collection_tests {
                 report,
             }],
         }
+    }
+    #[test]
+    fn report_levels_skip_source_io_and_preserve_final_statistics() {
+        let report = fixture().stacks.remove(0).report;
+        let missing = vec![std::path::PathBuf::from("missing.fits")];
+        assert!(
+            prepare_stack_report(None, "none", &missing)
+                .unwrap()
+                .is_none()
+        );
+        assert!(prepare_stack_report(None, "cheap", &missing).is_err());
+        assert!(prepare_stack_report(Some(report.clone()), "invalid", &missing).is_err());
+        let cheap = prepare_stack_report(Some(report.clone()), "cheap", &missing)
+            .unwrap()
+            .unwrap();
+        let rich = prepare_stack_report(Some(report), "rich", &missing)
+            .unwrap()
+            .unwrap();
+        assert!(cheap.provenance.as_ref().unwrap()["reporting"]["analysis"].is_null());
+        assert_eq!(
+            rich.provenance.as_ref().unwrap()["reporting"]["analysis"]["frames"][0]["measurement_status"],
+            "failed"
+        );
+        assert_eq!(
+            serde_json::to_value(&cheap.support).unwrap(),
+            serde_json::to_value(&rich.support).unwrap()
+        );
+        let html = render_stack_html(&rich).unwrap();
+        assert!(html.contains("function renderStackCharts"));
+        assert!(!html.contains("__CHART_SCRIPT__"));
     }
     #[test]
     fn collection_embeds_exact_data_and_reuses_single_renderer() {
