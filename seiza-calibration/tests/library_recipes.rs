@@ -1,4 +1,7 @@
-use seiza_calibration::library::{Request, evaluate};
+// The C ABI's JSON calls: built with the `json` feature.
+#![cfg(feature = "json")]
+
+use seiza_calibration::library::json::{Request, evaluate};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -29,7 +32,7 @@ fn cached_grouping_preserves_library_results_and_rejects_conflicting_inputs() {
             })
             .collect();
         let book = Arc::new(groups::prepare(grouping).unwrap());
-        let result = library::evaluate_with_book(request.clone(), Arc::clone(&book)).unwrap();
+        let result = library::json::evaluate_with_book(request.clone(), Arc::clone(&book)).unwrap();
         assert_eq!(
             serde_json::to_value(result).unwrap(),
             expected,
@@ -38,18 +41,18 @@ fn cached_grouping_preserves_library_results_and_rejects_conflicting_inputs() {
         );
         if !book.sessions.is_empty() {
             let mut changed = request.clone();
-            changed.global_settings.push(library::Setting {
+            changed.global_settings.push(library::json::Setting {
                 key: "flat_split_dust_pct".into(),
                 value: 5.0.into(),
             });
-            assert!(library::evaluate_with_book(changed, Arc::clone(&book)).is_err());
+            assert!(library::json::evaluate_with_book(changed, Arc::clone(&book)).is_err());
         }
         request.grouping.epoch_samples.push(groups::EpochSample {
             rig_uuid: "r".into(),
             at: 1,
             offset: 2.0,
         });
-        assert!(library::evaluate_with_book(request, book).is_err());
+        assert!(library::json::evaluate_with_book(request, book).is_err());
     }
 }
 

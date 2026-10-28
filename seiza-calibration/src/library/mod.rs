@@ -11,6 +11,8 @@
 mod flat_notes;
 mod flat_work;
 mod grading;
+#[cfg(feature = "json")]
+pub mod json;
 mod master_policy;
 mod recipes;
 mod response_plan;
@@ -24,31 +26,22 @@ pub use flat_notes::{
     vignetting_leads,
 };
 pub use flat_work::{
-    ChangeFilter, ChangeQuestion, EvidenceLight, FamilyQuestion, FlatChangeFilter,
-    FlatChangeQuestion, FlatCorrectionPlan, FlatFamilyCandidate, FlatFamilyQuestion,
-    FlatLightContext, FlatWorkAnswer, FlatWorkPlans, FlatWorkRequest, FlatWorkResult,
-    change_question, family_questions, finish_flat_work, plan_flat_work,
+    ChangeFilter, ChangeQuestion, EvidenceLight, FamilyQuestion, change_question,
+    family_questions,
 };
 pub use grading::{describe_finding, grade, kept_out_reason};
 pub use master_policy::{
-    FlatAttempt, FlatRetryAction, FlatRetryDecision, FlatRetryPolicy, FlatRetryRequest,
-    MasterCohort, MasterCohortRequest, MasterPlanRequest, alternate_note, flat_retry,
-    flat_set_label, master_cohort, plan_masters, same_session_as, trimmed_note, trims_to_majority,
-    unstable_note,
+    FlatAttempt, FlatRetry, FlatRetryAction, FlatRetryDecision, FlatRetryPolicy, flat_set_label,
 };
 pub use recipes::{
-    Application, FlatUse, MAX_PEDESTAL_ADU, MasterFailure, PedestalEvidence, PedestalRefusal,
-    SessionOptions, accept_pedestal, adopted_master, dark_level_screening, master_dependencies,
+    Application, FlatUse, FlatWithoutMasters, MAX_PEDESTAL_ADU, PedestalRefusal, SessionOptions,
+    adopted_master, dark_level_screening, pedestal_from_fits,
     pedestal_hint, pedestal_sample_lights, resolve_session,
 };
 pub use response_plan::{
-    FlatResponsePlan, FlatResponsePlans, PedestalTable, SessionPlan, family_key, focal_classes,
-    pedestal_moved, plan_flat_responses, plan_sessions,
+    PedestalTable, SessionPlan, family_key, focal_classes, pedestal_moved, plan_sessions,
 };
-pub use rules::{
-    ChoiceOption, Effect, FieldKind, FieldSpec, Group, RigLayer, RuleBook, RuleNote, RuleSource,
-    RuleValues, Rules,
-};
+use rules::{DarkChoice, ExternalMasterPolicy, RuleBook, Rules};
 pub use selection::{Cohort, coherent_cohort};
 pub use supplied::Association;
 
@@ -69,7 +62,6 @@ use crate::{
     FrameSignature, FrameVerdict, Grade, MatchTolerances,
 };
 use flat_notes as flat_groups;
-use recipes::finalize;
 use selection::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -100,18 +92,37 @@ pub enum CalibrationKind {
     DarkFlat,
     Flat,
 }
+words!(CalibrationKind {
+    Bias => "bias",
+    Dark => "dark",
+    DarkFlat => "dark_flat",
+    Flat => "flat",
+});
 impl CalibrationKind {
-    pub const ALL: [CalibrationKind; 4] = [Self::Bias, Self::Dark, Self::DarkFlat, Self::Flat];
-    pub fn as_str(self) -> &'static str {
+    /// The kind in words: "bias", "dark", "dark-flat" or "flat".
+    pub fn label(self) -> &'static str {
         match self {
-            Self::Bias => "bias",
-            Self::Dark => "dark",
-            Self::DarkFlat => "dark_flat",
-            Self::Flat => "flat",
+            Self::DarkFlat => "dark-flat",
+            other => other.as_str(),
         }
     }
-    pub fn parse(value: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|kind| kind.as_str() == value)
+    /// The masters a master of this kind is built on: a dark or dark-flat
+    /// on its bias, a flat on its bias and dark-flat. One whose dependency
+    /// failed is skipped rather than built without it.
+    pub fn dependencies(self) -> &'static [CalibrationKind] {
+        match self {
+            Self::Bias => &[],
+            Self::Dark | Self::DarkFlat => &[Self::Bias],
+            Self::Flat => &[Self::Bias, Self::DarkFlat],
+        }
+    }
+    /// The version of the measurement a stored grade of this kind must have
+    /// been made with to be current.
+    pub fn measurement_version(self) -> u32 {
+        match self {
+            Self::Flat => crate::FLAT_QUALITY_ALGORITHM_VERSION,
+            _ => crate::FRAME_QUALITY_ALGORITHM_VERSION,
+        }
     }
 }
 
@@ -126,68 +137,10 @@ pub enum ValidDirection {
     /// Only lights captured at or before this frame.
     Backward,
 }
-impl ValidDirection {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Forward => "forward",
-            Self::Backward => "backward",
-        }
-    }
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "forward" => Some(Self::Forward),
-            "backward" => Some(Self::Backward),
-            _ => None,
-        }
-    }
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum DarkChoice {
-    #[default]
-    Complete,
-    Nearest,
-}
-impl DarkChoice {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Complete => "complete",
-            Self::Nearest => "nearest",
-        }
-    }
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "complete" => Some(Self::Complete),
-            "nearest" => Some(Self::Nearest),
-            _ => None,
-        }
-    }
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum ExternalMasterPolicy {
-    #[default]
-    Prefer,
-    Fallback,
-    Ignore,
-}
-impl ExternalMasterPolicy {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Prefer => "prefer",
-            Self::Fallback => "fallback",
-            Self::Ignore => "ignore",
-        }
-    }
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "prefer" => Some(Self::Prefer),
-            "fallback" => Some(Self::Fallback),
-            "ignore" => Some(Self::Ignore),
-            _ => None,
-        }
-    }
-}
+words!(ValidDirection {
+    Forward => "forward",
+    Backward => "backward",
+});
 
 /// One catalog row: a raw calibration frame, or a master another program
 /// integrated.
@@ -260,7 +213,6 @@ pub struct Light {
     pub camera_temp: Option<f64>,
     pub timestamp: Option<i64>,
 }
-type FrameMeta = Light;
 
 /// The frames one light matched, per kind, nearest first, and why.
 #[derive(Clone, Debug, Default)]
@@ -477,7 +429,8 @@ impl NightShifts {
                 .collect(),
         }
     }
-    fn rows(&self) -> Vec<groups::NightBoundary> {
+    /// The boundaries held, one per frame.
+    pub fn boundaries(&self) -> Vec<groups::NightBoundary> {
         self.shifts
             .iter()
             .map(|((rig_uuid, frame_uuid), seconds)| groups::NightBoundary {
@@ -525,12 +478,7 @@ impl QualityIndex {
     /// measurement.
     pub fn current(frame: &CalibrationFrame, row: &QualityRecord) -> bool {
         !frame.is_master
-            && row.algorithm_version
-                == Some(if frame.kind == CalibrationKind::Flat {
-                    crate::FLAT_QUALITY_ALGORITHM_VERSION
-                } else {
-                    crate::FRAME_QUALITY_ALGORITHM_VERSION
-                })
+            && row.algorithm_version == Some(frame.kind.measurement_version())
             && row.source_fingerprint.as_deref() == Some(&frame.source_fingerprint)
     }
     /// Whether a person chose for `frame`, or it carries a grade made from
@@ -549,21 +497,10 @@ pub enum QualityOverride {
     Use,
     Exclude,
 }
-impl QualityOverride {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Use => "use",
-            Self::Exclude => "exclude",
-        }
-    }
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "use" => Some(Self::Use),
-            "exclude" => Some(Self::Exclude),
-            _ => None,
-        }
-    }
-}
+words!(QualityOverride {
+    Use => "use",
+    Exclude => "exclude",
+});
 /// What was measured on one frame, as stored.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -617,96 +554,6 @@ pub struct QualityRecord {
     pub stray_light: Option<String>,
     pub override_choice: Option<QualityOverride>,
 }
-/// Setting identifiers and values remain opaque in both bindings.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Setting {
-    pub key: String,
-    pub value: serde_json::Value,
-}
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct RigSettings {
-    pub rig_uuid: String,
-    pub name: Option<String>,
-    pub settings: Vec<Setting>,
-}
-/// Host-resolved local-noon shift, unwrapped (12h minus UTC offset).
-pub type NightShift = groups::NightBoundary;
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Request {
-    pub frames: Vec<CalibrationFrame>,
-    pub lights: Vec<Light>,
-    pub quality: Vec<QualityRecord>,
-    pub global_settings: Vec<Setting>,
-    pub rigs: Vec<RigSettings>,
-    pub grouping: groups::Request,
-    pub available_responses: Vec<String>,
-    pub night_shifts: Vec<NightShift>,
-    pub regrade: bool,
-    pub master_failures: Vec<MasterFailure>,
-    pub pedestal_evidence: Vec<PedestalEvidence>,
-    pub force_flat_without_pedestal: bool,
-    pub flat_star_masking: bool,
-    pub flat_stability: FlatRetryPolicy,
-    /// Automatic association, or one explicit supplied set for every compatible light.
-    pub flat_association: Association,
-    pub dark_association: Association,
-}
-#[derive(Debug, Serialize)]
-pub struct Selection {
-    pub bias: Vec<String>,
-    pub dark: Vec<String>,
-    pub dark_flat: Vec<String>,
-    pub flat: Vec<String>,
-    pub kept_out: Vec<String>,
-    pub library: LibraryKinds,
-    pub tolerances: MatchTolerances,
-    pub flat_basis: flat_groups::FlatBasis,
-    pub flat_held_back: Vec<String>,
-    pub flat_family: Option<flat_groups::FlatFamily>,
-    pub flat_choices: Vec<flat_groups::ChoiceNote>,
-    pub rule_notes: Vec<rules::RuleNote>,
-}
-impl Selection {
-    fn of(selected: &CalibrationSelection) -> Self {
-        let names =
-            |frames: &[CalibrationFrame]| frames.iter().map(|f| f.frame_uuid.clone()).collect();
-        Self {
-            bias: names(&selected.bias),
-            dark: names(&selected.dark),
-            dark_flat: names(&selected.dark_flat),
-            flat: names(&selected.flat),
-            kept_out: names(&selected.kept_out),
-            library: selected.library,
-            tolerances: selected.match_tolerances(),
-            flat_basis: selected.flat_basis.clone(),
-            flat_held_back: selected.flat_held_back.clone(),
-            flat_family: selected.flat_family.clone(),
-            flat_choices: selected.flat_choices.clone(),
-            rule_notes: selected.rules.notes(),
-        }
-    }
-}
-#[derive(Debug, Serialize)]
-pub struct FrameGrade {
-    pub frame_uuid: String,
-    pub judged: Option<Judged>,
-    pub kept_out: Option<String>,
-    pub measurement_state: String,
-    pub measure_error: Option<String>,
-}
-#[derive(Debug, Serialize)]
-pub struct Snapshot {
-    pub algorithm_version: u32,
-    pub selections: Vec<Selection>,
-    pub grades: Vec<FrameGrade>,
-    pub sessions: Vec<Session>,
-    pub assignments: Vec<usize>,
-    pub settings_digest: Option<String>,
-    pub settings_schema: Vec<rules::FieldSpec>,
-}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Session {
@@ -739,12 +586,24 @@ pub struct MasterRecipe {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecipeAction {
+    /// Adopt an external master as it is.
     External,
+    /// Integrate the raw inputs.
     Integrate,
+    /// Nothing to build: no usable frames of this kind.
     Unavailable,
+    /// The build failed ([`MasterRecipe::failure`] says why).
     Failed,
+    /// Not built, because a master it depends on failed.
     Blocked,
 }
+words!(RecipeAction {
+    External => "external",
+    Integrate => "integrate",
+    Unavailable => "unavailable",
+    Failed => "failed",
+    Blocked => "blocked",
+});
 
 fn invalid(message: impl Into<String>) -> crate::Error {
     crate::Error::CalibrationLibrary(message.into())
@@ -756,316 +615,6 @@ fn hex_digest(value: &str) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
-}
-
-/// Run grading and selection against an immutable library snapshot.
-/// Selections and assignments retain light order; sessions reuse identical recipes.
-/// Recipes still require host source verification and the native pixel builders.
-pub fn evaluate(request: Request) -> crate::Result<Snapshot> {
-    evaluate_inner(request, None)
-}
-
-/// Select against the host's immutable cached grouping book. No grouping rows
-/// may also be supplied. The host invalidates the book when its source rows,
-/// night boundaries or settings change; resolved grouping limits are checked.
-pub fn evaluate_with_book(request: Request, book: Arc<groups::Book>) -> crate::Result<Snapshot> {
-    if !request.grouping.is_empty() {
-        return Err(invalid(
-            "supply either a prepared grouping book or grouping rows",
-        ));
-    }
-    evaluate_inner(request, Some(book))
-}
-
-/// A request's settings, frames and quality, checked once for every
-/// planning call that takes them.
-struct Checked {
-    rules: RuleBook,
-    nights: NightShifts,
-    quality: QualityIndex,
-}
-
-/// Refuse what no host should send: duplicate or empty frame identities,
-/// verified rows without a source, non-finite or nonpositive metadata,
-/// unknown or invalid settings, and quality rows for frames not supplied.
-fn check_request(
-    frames: &[CalibrationFrame],
-    lights: &[Light],
-    quality: Vec<QualityRecord>,
-    global: Vec<Setting>,
-    rigs: Vec<RigSettings>,
-) -> crate::Result<(RuleBook, QualityIndex)> {
-    let mut ids = BTreeSet::new();
-    for frame in frames {
-        if frame.frame_uuid.is_empty() || !ids.insert(frame.frame_uuid.as_str()) {
-            return Err(invalid(
-                "calibration frame UUIDs must be nonempty and unique",
-            ));
-        }
-        if frame.source_verified
-            && (frame.source_path.as_os_str().is_empty() || frame.source_fingerprint.is_empty())
-        {
-            return Err(invalid("verified sources need a path and fingerprint"));
-        }
-        validate_values(&frame_signature(frame).seiza)?;
-    }
-    for light in lights {
-        validate_values(&light_signature(light).seiza)?;
-    }
-    if let Some(row) = quality
-        .iter()
-        .find(|row| !ids.contains(row.frame_uuid.as_str()))
-    {
-        return Err(invalid(format!(
-            "quality row {} names no supplied calibration frame",
-            row.frame_uuid
-        )));
-    }
-    let rules = master_policy::rule_book(global, rigs)?;
-    Ok((rules, QualityIndex::new(quality)?))
-}
-
-fn evaluate_inner(
-    mut request: Request,
-    prepared: Option<Arc<groups::Book>>,
-) -> crate::Result<Snapshot> {
-    if !request.grouping.lights.is_empty() {
-        return Err(invalid(
-            "library lights belong in lights, not grouping.lights",
-        ));
-    }
-    // Light evidence is kept per imaging session: without the sessions it
-    // was measured for, it would place nothing, silently.
-    let grouping = &request.grouping;
-    if (!grouping.evidence.is_empty() || !grouping.family_evidence.is_empty())
-        && grouping.imaging.is_empty()
-        && grouping.imaging_lights.is_empty()
-    {
-        return Err(invalid(
-            "light evidence needs the imaging sessions it was measured for: submit the grouping plan_flat_work returns",
-        ));
-    }
-    let checked = checked(&mut request)?;
-    if let Some(book) = &prepared {
-        for session in &book.sessions {
-            let rig = &session.row.rig_uuid;
-            if book.limits(rig) != Some(checked.rules.for_rig(rig).grouping_limits()) {
-                return Err(invalid(
-                    "prepared grouping limits differ from the library settings",
-                ));
-            }
-        }
-    }
-    let Checked {
-        rules,
-        nights,
-        mut quality,
-    } = checked;
-    // Only current, fingerprint-matching measurements are regraded; stale,
-    // failed and absent ones keep their state and never become a grade.
-    let judged = if request.regrade {
-        let measured = request.frames.iter().filter_map(|frame| {
-            let row = quality.get(&frame.frame_uuid)?;
-            QualityIndex::current(frame, row).then_some((frame, row.measurement.as_ref()?))
-        });
-        grade(measured, &rules, &nights)
-    } else {
-        HashMap::new()
-    };
-    quality.fresh = judged.keys().cloned().collect();
-    let grades = apply_grades(&mut request.frames, &quality, &judged);
-    let flat_book = match prepared {
-        Some(book) => book,
-        None => Arc::new(groups::prepare(std::mem::take(&mut request.grouping))?),
-    };
-    let library = Library::new(request.frames, flat_book, request.available_responses);
-    library.check_associations(&rules, request.flat_association, request.dark_association)?;
-    let options = SessionOptions {
-        flat_star_masking: request.flat_star_masking,
-        flat_stability: request.flat_stability,
-    };
-    let mut selections = Vec::new();
-    let mut sessions: Vec<Session> = Vec::new();
-    let mut assignments = Vec::new();
-    let mut keys = BTreeMap::new();
-    for light in &request.lights {
-        let selected = library.select_associated(
-            light,
-            rules.for_light(light),
-            request.flat_association,
-            request.dark_association,
-        );
-        let session = resolve_session(&selected, &quality, &options);
-        // The first light whose masters share a key stands for every light
-        // they serve: its candidates' order anchors the masters.
-        let index = *keys.entry(session.key.clone()).or_insert_with(|| {
-            sessions.push(session);
-            sessions.len() - 1
-        });
-        assignments.push(index);
-        selections.push(Selection::of(&selected));
-    }
-    finalize(
-        &mut sessions,
-        &assignments,
-        &request.lights,
-        &request.master_failures,
-        &request.pedestal_evidence,
-        request.force_flat_without_pedestal,
-    )?;
-    Ok(Snapshot {
-        algorithm_version: POLICY_ALGORITHM_VERSION,
-        selections,
-        grades,
-        sessions,
-        assignments,
-        settings_digest: rules.digest(),
-        settings_schema: rules::fields().to_vec(),
-    })
-}
-
-/// Check a request and resolve the settings and night boundaries its
-/// grouping, grading and selection share. The grouping takes each rig's
-/// limits from the same settings, so a separate grouping request cannot
-/// silently give its rig another threshold.
-fn checked(request: &mut Request) -> crate::Result<Checked> {
-    let (rules, quality) = check_request(
-        &request.frames,
-        &request.lights,
-        std::mem::take(&mut request.quality),
-        std::mem::take(&mut request.global_settings),
-        std::mem::take(&mut request.rigs),
-    )?;
-    let group_rigs: BTreeSet<_> = request
-        .grouping
-        .responses
-        .iter()
-        .map(|r| r.rig_uuid.clone())
-        .collect();
-    request.grouping.limits = group_rigs
-        .into_iter()
-        .map(|rig_uuid| groups::RigLimits {
-            limits: rules.for_rig(&rig_uuid).grouping_limits(),
-            rig_uuid,
-        })
-        .collect();
-    let nights = resolve_nights(request, &rules)?;
-    Ok(Checked {
-        rules,
-        nights,
-        quality,
-    })
-}
-
-/// Each frame's kept-out reason from its quality row and any fresh grade,
-/// and its grade as the snapshot reports it, in frame order.
-fn apply_grades(
-    frames: &mut [CalibrationFrame],
-    quality: &QualityIndex,
-    judged: &HashMap<String, Judged>,
-) -> Vec<FrameGrade> {
-    let mut grades = Vec::with_capacity(frames.len());
-    for frame in frames {
-        let row = quality.get(&frame.frame_uuid);
-        let grade = judged.get(&frame.frame_uuid);
-        let grade_name = grade
-            .map(|g| g.grade.as_str())
-            .or_else(|| row.and_then(|r| r.grade.as_deref()));
-        let reason = grade
-            .and_then(|g| g.reason.clone())
-            .or_else(|| row.and_then(|r| r.reason.clone()));
-        let stray = grade
-            .and_then(|g| g.stray_light.clone())
-            .or_else(|| row.and_then(|r| r.stray_light.clone()));
-        // A supplied legacy kept-out reason represents the catalog's old
-        // stray-light mark when no quality row exists.
-        frame.kept_out = kept_out_reason(
-            stray.or_else(|| frame.kept_out.clone()),
-            grade_name,
-            reason,
-            row.and_then(|r| r.override_choice),
-        );
-        let state = if frame.is_master {
-            "external"
-        } else {
-            match row {
-                None => "unmeasured",
-                Some(r) if !QualityIndex::current(frame, r) => "stale",
-                Some(r) if r.measurement.is_some() => "current",
-                Some(r) if r.measure_error.is_some() => "failed",
-                _ => "unmeasured",
-            }
-        };
-        grades.push(FrameGrade {
-            frame_uuid: frame.frame_uuid.clone(),
-            judged: grade.cloned(),
-            kept_out: frame.kept_out.clone(),
-            measurement_state: state.into(),
-            measure_error: row.and_then(|r| r.measure_error.clone()),
-        });
-    }
-    grades
-}
-
-/// Merge a request's night boundaries: the grouping's, then explicit
-/// shifts, then each rig's `night_zone` setting. The grouping then holds
-/// the merged set, so grouping and grading split nights alike.
-fn resolve_nights(request: &mut Request, rules: &RuleBook) -> crate::Result<NightShifts> {
-    let mut rows: BTreeMap<_, _> = std::mem::take(&mut request.grouping.night_boundaries)
-        .into_iter()
-        .map(|s| ((s.rig_uuid.clone(), s.frame_uuid.clone()), s))
-        .collect();
-    let mut explicit = BTreeSet::new();
-    for shift in std::mem::take(&mut request.night_shifts) {
-        if !(-86400..=129600).contains(&shift.seconds)
-            || !explicit.insert((shift.rig_uuid.clone(), shift.frame_uuid.clone()))
-        {
-            return Err(invalid(
-                "night shifts must be unique and within one day of noon UTC",
-            ));
-        }
-        rows.insert((shift.rig_uuid.clone(), shift.frame_uuid.clone()), shift);
-    }
-    for frame in &request.frames {
-        if let Some(offset) = rules.for_rig(&frame.rig_uuid).night_offset_seconds {
-            rows.insert(
-                (frame.rig_uuid.clone(), frame.frame_uuid.clone()),
-                groups::NightBoundary {
-                    rig_uuid: frame.rig_uuid.clone(),
-                    frame_uuid: frame.frame_uuid.clone(),
-                    seconds: 43200 - offset,
-                },
-            );
-        }
-    }
-    let nights = NightShifts::new(rows.into_values());
-    request.grouping.night_boundaries = nights.rows();
-    Ok(nights)
-}
-
-fn validate_values(s: &FrameSignature) -> crate::Result<()> {
-    if [
-        s.focal_length_mm,
-        s.rotation_deg,
-        s.exposure_seconds,
-        s.camera_temp_c,
-    ]
-    .into_iter()
-    .flatten()
-    .any(|v| !v.is_finite())
-    {
-        return Err(invalid("frame metadata must be finite"));
-    }
-    if [s.width, s.height, s.channels, s.binning_x, s.binning_y]
-        .into_iter()
-        .flatten()
-        .any(|v| v <= 0)
-    {
-        return Err(invalid(
-            "known frame dimensions and binning must be positive",
-        ));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

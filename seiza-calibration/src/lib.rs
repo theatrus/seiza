@@ -24,6 +24,40 @@
 //! three or more frames. The screens say what the pixels show, never why, and
 //! never judge a flat by its temperature.
 
+/// `as_str`, `Display` and `FromStr` for an enum spelled as one word per
+/// value, the word its serde form and the settings use.
+macro_rules! words {
+    ($type:ident { $($variant:ident => $word:literal),+ $(,)? }) => {
+        impl $type {
+            /// Every value, in declaration order.
+            pub const ALL: [Self; [$($word),+].len()] = [$(Self::$variant),+];
+            /// The word for this value.
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $word,)+
+                }
+            }
+        }
+        impl std::fmt::Display for $type {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+        impl std::str::FromStr for $type {
+            type Err = $crate::UnknownWord;
+            fn from_str(text: &str) -> std::result::Result<Self, Self::Err> {
+                match text {
+                    $($word => Ok(Self::$variant),)+
+                    _ => Err($crate::UnknownWord {
+                        what: stringify!($type),
+                        text: text.to_string(),
+                    }),
+                }
+            }
+        }
+    };
+}
+
 pub mod dust;
 pub mod flat_response;
 pub mod library;
@@ -178,6 +212,16 @@ pub enum Error {
     /// [`MatchTolerances::validate`].
     #[error("invalid match tolerance: {0}")]
     InvalidTolerance(String),
+}
+
+/// A word no value of a type is spelled as: what `FromStr` refuses.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{text:?} is not a {what}")]
+pub struct UnknownWord {
+    /// The type the word was read as.
+    pub what: &'static str,
+    /// The word.
+    pub text: String,
 }
 
 /// Result specialized to this crate's [`Error`].

@@ -67,16 +67,11 @@ pub enum Grade {
     Poor,
 }
 
-impl Grade {
-    /// Stable lowercase name for logs and reports.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Ok => "ok",
-            Self::Suspect => "suspect",
-            Self::Poor => "poor",
-        }
-    }
-}
+words!(Grade {
+    Ok => "ok",
+    Suspect => "suspect",
+    Poor => "poor",
+});
 
 /// What a finding measured. The name is stable and machine-readable; each
 /// variant says what [`Finding::value`] holds.

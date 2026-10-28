@@ -4,10 +4,16 @@ use super::*;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Association {
+    /// Each light's frames chosen by time, cohort and validity.
     #[default]
     Automatic,
+    /// Every compatible frame of the kind taken whole, as one supplied set.
     OneSet,
 }
+words!(Association {
+    Automatic => "automatic",
+    OneSet => "one_set",
+});
 pub(super) fn validate(
     frames: &[CalibrationFrame],
     rules: &RuleBook,

@@ -26,7 +26,7 @@ impl Library {
     /// book. Grouping by time keeps every choice and applies none.
     pub fn light_choices(
         &self,
-        light: &FrameMeta,
+        light: &Light,
         rules: &Rules,
     ) -> flat_groups::overrides::ResolvedChoices {
         let book = &self.flat_book;
@@ -69,7 +69,7 @@ impl Library {
     }
     pub(super) fn select_choosing(
         &self,
-        light: &FrameMeta,
+        light: &Light,
         rules: Arc<Rules>,
         choices: flat_groups::overrides::ResolvedChoices,
     ) -> CalibrationSelection {
@@ -288,7 +288,7 @@ impl Library {
     }
     pub(super) fn select_dark_flats(
         &self,
-        light: &FrameMeta,
+        light: &Light,
         rules: &Rules,
         selected: &mut CalibrationSelection,
     ) {
@@ -315,7 +315,7 @@ impl Library {
     }
     pub(super) fn flat_family(
         &self,
-        light: &FrameMeta,
+        light: &Light,
         rules: &Rules,
     ) -> Option<flat_groups::lights::FamilyChoice> {
         if rules.flat_grouping != rules::FlatGrouping::Measured
@@ -337,7 +337,7 @@ impl Library {
     /// The response families whose flats could serve `light` by sensor,
     /// optics and validity, at any angle: the candidates its own pixels may
     /// choose among.
-    pub fn flat_family_compatible(&self, light: &FrameMeta, rules: &Rules) -> Vec<usize> {
+    pub fn flat_family_compatible(&self, light: &Light, rules: &Rules) -> Vec<usize> {
         let book = &self.flat_book;
         let light_signature = light_signature(light);
         let mut tolerances = rules.tolerances();
@@ -364,7 +364,7 @@ impl Library {
     pub(super) fn family_admits(
         &self,
         family: Option<&flat_groups::lights::FamilyChoice>,
-        light: &FrameMeta,
+        light: &Light,
         candidate: &CalibrationFrame,
         rules: &Rules,
         choices: &flat_groups::overrides::ResolvedChoices,
@@ -422,7 +422,7 @@ impl Library {
     }
     pub(super) fn at_lights_angle(
         &self,
-        light: &FrameMeta,
+        light: &Light,
         frame: &CalibrationFrame,
         rules: &Rules,
     ) -> bool {
@@ -433,7 +433,7 @@ impl Library {
     }
     pub(super) fn not_across_a_known_change(
         &self,
-        light: &FrameMeta,
+        light: &Light,
         candidate: &CalibrationFrame,
         choices: &flat_groups::overrides::ResolvedChoices,
     ) -> bool {
@@ -456,7 +456,7 @@ impl Library {
     }
     pub(super) fn on_lights_side_of_changes(
         &self,
-        light: &FrameMeta,
+        light: &Light,
         candidate: &CalibrationFrame,
         choices: &flat_groups::overrides::ResolvedChoices,
     ) -> bool {
@@ -487,7 +487,7 @@ impl Library {
     }
     pub(super) fn keep_unknown_angles_last(
         &self,
-        light: &FrameMeta,
+        light: &Light,
         rules: &Rules,
         flats: &mut Vec<CalibrationFrame>,
         choices: &flat_groups::overrides::ResolvedChoices,
@@ -540,7 +540,7 @@ impl Library {
     }
     pub(super) fn choose_flats_around_changes(
         &self,
-        light: &FrameMeta,
+        light: &Light,
         rules: &Rules,
         selected: &mut CalibrationSelection,
         choices: &flat_groups::overrides::ResolvedChoices,
@@ -754,7 +754,7 @@ impl Library {
     }
     pub(super) fn other_angle_flats(
         &self,
-        light: &FrameMeta,
+        light: &Light,
         rules: &Rules,
         keep: &dyn Fn(&CalibrationFrame) -> bool,
     ) -> Option<(Option<f64>, Vec<CalibrationFrame>)> {
@@ -839,7 +839,7 @@ pub(super) fn choice_notes(
         .collect()
 }
 pub(super) fn family_light_rotation(
-    light: &FrameMeta,
+    light: &Light,
     flats: &[CalibrationFrame],
     rules: &Rules,
 ) -> flat_groups::LightRotation {
@@ -885,7 +885,7 @@ pub fn readout_names_agree(left: &Signature, right: &Signature) -> bool {
 pub fn readout_names_equal(left: &str, right: &str) -> bool {
     left.trim().eq_ignore_ascii_case(right.trim())
 }
-pub fn light_signature(light: &FrameMeta) -> Signature {
+pub fn light_signature(light: &Light) -> Signature {
     let signature = crate::FrameSignature {
         camera: light.camera.clone(),
         telescope: light.telescope.clone(),
@@ -974,7 +974,7 @@ pub(super) fn nearest_complete_dark_session(
         kept
     }
 }
-pub fn sensor_matches(light: &FrameMeta, candidate: &CalibrationFrame) -> bool {
+pub fn sensor_matches(light: &Light, candidate: &CalibrationFrame) -> bool {
     let (light, candidate_signature) = (light_signature(light), frame_signature(candidate));
     if candidate.is_master {
         signature_sensor_consistent(&light, &candidate_signature)
@@ -982,7 +982,7 @@ pub fn sensor_matches(light: &FrameMeta, candidate: &CalibrationFrame) -> bool {
         signature_sensor_matches(&light, &candidate_signature)
     }
 }
-pub fn flat_matches(light: &FrameMeta, candidate: &CalibrationFrame, rules: &Rules) -> bool {
+pub fn flat_matches(light: &Light, candidate: &CalibrationFrame, rules: &Rules) -> bool {
     let (light, candidate_signature) = (light_signature(light), frame_signature(candidate));
     let tolerances = rules.tolerances();
     if candidate.is_master {

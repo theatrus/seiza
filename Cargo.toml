@@ -68,6 +68,7 @@ fs2 = "0.4"
 futures-util = "0.3"
 directories = "6"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "json", "gzip", "form", "query"] }
+schemars = { version = "1.2", default-features = false, features = ["derive", "std"] }
 serde = { version = "1", features = ["derive"] }
 # rustls with the system's certificates and aws-lc-rs, as reqwest's
 # downloads use; ureq takes the crypto provider from rustls.

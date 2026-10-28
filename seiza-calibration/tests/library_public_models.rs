@@ -1,8 +1,12 @@
+// The C ABI's JSON calls: built with the `json` feature.
+#![cfg(feature = "json")]
+
 // Compiled as an external crate, like a PSF Guard consumer. Private-module
 // unit tests cannot catch an otherwise public result model being unnameable.
 use seiza_calibration::library::{
-    AlikeRangeNote, ChoiceNote, ChoiceOption, Effect, EventNote, FieldKind, FieldSpec, FlatBasis,
-    FlatCorrection, FlatFamily, Group, GroupNote, Request, RuleNote, RuleSource, evaluate,
+    AlikeRangeNote, ChoiceNote, EventNote, FlatBasis, FlatCorrection, FlatFamily, GroupNote,
+    json::{Request, evaluate},
+    rules::{ChoiceOption, Effect, FieldKind, FieldSpec, Group, RuleNote, RuleSource},
 };
 
 #[test]

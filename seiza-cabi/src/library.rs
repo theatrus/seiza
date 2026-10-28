@@ -226,7 +226,7 @@ pub unsafe extern "C" fn seiza_calibration_setting_check_json(
     clear_error(error_out);
     ffi_result(error_out, || {
         let json = required_str(request_json, "setting")?;
-        let setting: library::Setting =
+        let setting: library::json::Setting =
             serde_json::from_str(&json).map_err(|e| format!("invalid setting: {e}"))?;
         let check = library::rules::check_setting(&setting.key, &setting.value);
         owned_json(&field_names(
@@ -238,7 +238,7 @@ pub unsafe extern "C" fn seiza_calibration_setting_check_json(
 }
 
 /// Grade and select a calibration library using PSF Guard's shared policy.
-/// `request_json` is a camelCase library::Request: frames, lights, quality,
+/// `request_json` is a camelCase library::json::Request: frames, lights, quality,
 /// globalSettings, rigs, grouping, availableResponses, nightShifts, regrade, masterFailures, pedestalEvidence,
 /// forceFlatWithoutPedestal, flatStarMasking, flatStability, flatAssociation and darkAssociation.
 /// Missing collections are empty. Settings are {key,value} records; identifiers,
@@ -278,11 +278,11 @@ pub unsafe extern "C" fn seiza_calibration_library_plan_with_groups_json(
         if field_names(field_names(value.clone(), false), true) != value {
             return Err("calibration library request field names must be camelCase".into());
         }
-        let request: library::Request = serde_json::from_value(field_names(value, false))
+        let request: library::json::Request = serde_json::from_value(field_names(value, false))
             .map_err(|e| format!("invalid calibration library request: {e}"))?;
         let result = match unsafe { groups.as_ref() } {
-            Some(groups) => library::evaluate_with_book(request, Arc::clone(&groups.book)),
-            None => library::evaluate(request),
+            Some(groups) => library::json::evaluate_with_book(request, Arc::clone(&groups.book)),
+            None => library::json::evaluate(request),
         }
         .map_err(|e| e.to_string())?;
         owned_json(&field_names(
@@ -309,9 +309,9 @@ pub unsafe extern "C" fn seiza_calibration_master_plan_json(
         if field_names(field_names(value.clone(), false), true) != value {
             return Err("master policy field names must be camelCase".into());
         }
-        let request: library::MasterPlanRequest =
+        let request: library::json::MasterPlanRequest =
             serde_json::from_value(field_names(value, false)).map_err(|e| e.to_string())?;
-        let result = library::plan_masters(request).map_err(|e| e.to_string())?;
+        let result = library::json::plan_masters(request).map_err(|e| e.to_string())?;
         owned_json(&field_names(
             serde_json::to_value(result).map_err(|e| e.to_string())?,
             true,
@@ -323,7 +323,7 @@ pub unsafe extern "C" fn seiza_calibration_master_plan_json(
 /// Light choices may use exact full paths; these take precedence over basename
 /// entries, preserving existing catalog lookup for other lights.
 /// Plan raw-flat response sessions and bounded samples from a camelCase
-/// library::Request. Returns plans, resolved limits/night boundaries, grades
+/// library::json::Request. Returns plans, resolved limits/night boundaries, grades
 /// and unplanned frame IDs. Pure metadata/measurement policy; no pixel I/O.
 /// flatAssociation/darkAssociation accept automatic (default) or one_set in
 /// library and master requests. OneSet keeps all eligible compatible inputs;
@@ -343,9 +343,9 @@ pub unsafe extern "C" fn seiza_calibration_flat_response_plan_json(
         if field_names(field_names(value.clone(), false), true) != value {
             return Err("flat response plan field names must be camelCase".into());
         }
-        let request: library::Request =
+        let request: library::json::Request =
             serde_json::from_value(field_names(value, false)).map_err(|e| e.to_string())?;
-        let result = library::plan_flat_responses(request).map_err(|e| e.to_string())?;
+        let result = library::json::plan_flat_responses(request).map_err(|e| e.to_string())?;
         owned_json(&field_names(
             serde_json::to_value(result).map_err(|e| e.to_string())?,
             true,
@@ -387,7 +387,7 @@ pub unsafe extern "C" fn seiza_calibration_flat_work_plan_json(
     request_json: *const c_char,
     error_out: *mut *mut c_char,
 ) -> *mut c_char {
-    work_json(request_json, error_out, library::plan_flat_work)
+    work_json(request_json, error_out, library::json::plan_flat_work)
 }
 /// Finalize native family-choice/change-fit feedback as a cached evidence row.
 /// camelCase FlatWorkAnswer is kind=family {question,choice,lights} or
@@ -399,7 +399,7 @@ pub unsafe extern "C" fn seiza_calibration_flat_work_finish_json(
     request_json: *const c_char,
     error_out: *mut *mut c_char,
 ) -> *mut c_char {
-    work_json(request_json, error_out, library::finish_flat_work)
+    work_json(request_json, error_out, library::json::finish_flat_work)
 }
 
 /// Resolve a coherent master cohort from camelCase JSON. No I/O.
@@ -418,9 +418,9 @@ pub unsafe extern "C" fn seiza_calibration_master_cohort_json(
         if field_names(field_names(value.clone(), false), true) != value {
             return Err("master policy field names must be camelCase".into());
         }
-        let request: library::MasterCohortRequest =
+        let request: library::json::MasterCohortRequest =
             serde_json::from_value(field_names(value, false)).map_err(|e| e.to_string())?;
-        let result = library::master_cohort(request).map_err(|e| e.to_string())?;
+        let result = library::json::master_cohort(request).map_err(|e| e.to_string())?;
         owned_json(&field_names(
             serde_json::to_value(result).map_err(|e| e.to_string())?,
             true,
@@ -445,9 +445,9 @@ pub unsafe extern "C" fn seiza_calibration_flat_retry_json(
         if field_names(field_names(value.clone(), false), true) != value {
             return Err("master policy field names must be camelCase".into());
         }
-        let request: library::FlatRetryRequest =
+        let request: library::json::FlatRetryRequest =
             serde_json::from_value(field_names(value, false)).map_err(|e| e.to_string())?;
-        let result = library::flat_retry(request).map_err(|e| e.to_string())?;
+        let result = library::json::flat_retry(request).map_err(|e| e.to_string())?;
         owned_json(&field_names(
             serde_json::to_value(result).map_err(|e| e.to_string())?,
             true,
@@ -916,7 +916,7 @@ mod master_policy_tests {
         );
         let request = serde_json::json!({"library":library,"light_context":[{"light_index":0,"id":100,"target":"M42","pedestal_adu":123.0}]});
         let expected =
-            library::plan_flat_work(serde_json::from_value(request.clone()).unwrap()).unwrap();
+            library::json::plan_flat_work(serde_json::from_value(request.clone()).unwrap()).unwrap();
         let actual = unsafe { call(request, seiza_calibration_flat_work_plan_json) };
         assert_eq!(actual, serde_json::to_value(expected).unwrap());
         let question = actual["changes"][0].clone();
@@ -936,7 +936,7 @@ mod master_policy_tests {
         })).collect();
         let request = serde_json::json!({"frames":frames});
         let core =
-            library::plan_flat_responses(serde_json::from_value(request.clone()).unwrap()).unwrap();
+            library::json::plan_flat_responses(serde_json::from_value(request.clone()).unwrap()).unwrap();
         assert_eq!(
             unsafe { call(request.clone(), seiza_calibration_flat_response_plan_json) },
             serde_json::to_value(core).unwrap()
@@ -990,7 +990,7 @@ mod master_policy_tests {
         .unwrap();
         for case in fixture["cases"].as_array().unwrap() {
             let expected = serde_json::to_value(
-                library::flat_retry(serde_json::from_value(case["request"].clone()).unwrap())
+                library::json::flat_retry(serde_json::from_value(case["request"].clone()).unwrap())
                     .unwrap(),
             )
             .unwrap();
@@ -1006,7 +1006,7 @@ mod master_policy_tests {
         for case in fixture["cases"].as_array().unwrap() {
             let request = serde_json::json!({"frames": case["request"]["frames"], "lights": case["request"]["lights"], "global_settings": case["request"].get("global_settings").cloned().unwrap_or_else(|| serde_json::json!([]))});
             let expected = serde_json::to_value(
-                library::plan_masters(serde_json::from_value(request.clone()).unwrap()).unwrap(),
+                library::json::plan_masters(serde_json::from_value(request.clone()).unwrap()).unwrap(),
             )
             .unwrap();
             assert_eq!(
@@ -1016,7 +1016,7 @@ mod master_policy_tests {
             let request =
                 serde_json::json!({"kind":case["kind"], "frames":case["request"]["frames"]});
             let expected = serde_json::to_value(
-                library::master_cohort(serde_json::from_value(request.clone()).unwrap()).unwrap(),
+                library::json::master_cohort(serde_json::from_value(request.clone()).unwrap()).unwrap(),
             )
             .unwrap();
             assert_eq!(

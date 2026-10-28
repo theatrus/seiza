@@ -1,4 +1,7 @@
-use seiza_calibration::library::{self, FlatRetryRequest, MasterPlanRequest, Request};
+// The C ABI's JSON calls: built with the `json` feature.
+#![cfg(feature = "json")]
+
+use seiza_calibration::library::{self, json::{FlatRetryRequest, MasterPlanRequest, Request}};
 use serde_json::Value;
 
 #[test]
@@ -7,7 +10,7 @@ fn flat_retry_preserves_psf_guard_decisions_and_optional_host_choices() {
         serde_json::from_str(include_str!("fixtures/library/flat-retries.json")).unwrap();
     for case in fixture["cases"].as_array().unwrap() {
         let result = serde_json::to_value(
-            library::flat_retry(serde_json::from_value(case["request"].clone()).unwrap()).unwrap(),
+            library::json::flat_retry(serde_json::from_value(case["request"].clone()).unwrap()).unwrap(),
         )
         .unwrap();
         for field in ["action", "inputs", "rebuild_first"] {
@@ -36,7 +39,7 @@ fn verified_selected_planning_matches_library_recipes_options_and_identity() {
         serde_json::from_str(include_str!("fixtures/library/recipes.json")).unwrap();
     for case in fixture["cases"].as_array().unwrap() {
         let request: Request = serde_json::from_value(case["request"].clone()).unwrap();
-        let result = library::evaluate(request.clone()).unwrap();
+        let result = library::json::evaluate(request.clone()).unwrap();
         for (index, selection) in result.selections.iter().enumerate() {
             let mut frames = Vec::new();
             for ids in [
@@ -54,7 +57,7 @@ fn verified_selected_planning_matches_library_recipes_options_and_identity() {
                         .clone()
                 }));
             }
-            let selected = library::plan_masters(MasterPlanRequest {
+            let selected = library::json::plan_masters(MasterPlanRequest {
                 frames,
                 lights: vec![request.lights[index].clone()],
                 global_settings: request.global_settings.clone(),
@@ -98,12 +101,12 @@ fn recipe_respects_cached_grades_overrides_and_star_masking() {
         ..Default::default()
     };
     let screening = |request: MasterPlanRequest| {
-        library::plan_masters(request).unwrap().recipes[2].dark_level_screening
+        library::json::plan_masters(request).unwrap().recipes[2].dark_level_screening
     };
     assert!(
         screening(request.clone()),
         "{:?}",
-        library::plan_masters(request.clone()).unwrap()
+        library::json::plan_masters(request.clone()).unwrap()
     );
     request.quality = request
         .frames
@@ -126,9 +129,9 @@ fn recipe_respects_cached_grades_overrides_and_star_masking() {
         .iter_mut()
         .for_each(|f| f.kind = library::CalibrationKind::Flat);
     request.quality.clear();
-    let a = library::plan_masters(request.clone()).unwrap();
+    let a = library::json::plan_masters(request.clone()).unwrap();
     request.flat_star_masking = true;
-    let b = library::plan_masters(request).unwrap();
+    let b = library::json::plan_masters(request).unwrap();
     assert!(!a.recipes[3].flat_star_masking);
     assert!(b.recipes[3].flat_star_masking);
     assert_ne!(a.key, b.key);
@@ -142,14 +145,14 @@ fn invalid_retry_feedback_is_rejected() {
         serde_json::from_value(fixture["cases"][0]["request"].clone()).unwrap();
     let mut invalid = request.clone();
     invalid.first.disagreement.pop();
-    assert!(library::flat_retry(invalid).is_err());
+    assert!(library::json::flat_retry(invalid).is_err());
     let mut invalid = request.clone();
     invalid.first.used[0] = "unknown".into();
-    assert!(library::flat_retry(invalid).is_err());
+    assert!(library::json::flat_retry(invalid).is_err());
     let mut invalid = request.clone();
     invalid.trimmed_attempted = true;
     invalid.trimmed = Some(library::FlatAttempt::default());
-    assert!(library::flat_retry(invalid).is_err());
+    assert!(library::json::flat_retry(invalid).is_err());
     let mut invalid = request.clone();
     invalid.trimmed_attempted = true;
     invalid.alternate_attempted = true;
@@ -157,15 +160,15 @@ fn invalid_retry_feedback_is_rejected() {
         used: vec!["f0".into(), "f1".into()],
         ..Default::default()
     });
-    assert!(library::flat_retry(invalid).is_err());
+    assert!(library::json::flat_retry(invalid).is_err());
     let mut invalid = request;
     invalid.first.drift_threshold = 0;
-    assert!(library::flat_retry(invalid).is_err());
+    assert!(library::json::flat_retry(invalid).is_err());
 }
 
 #[test]
 fn every_policy_endpoint_validates_settings_with_context() {
-    use library::{MasterCohortRequest, RigSettings, Setting};
+    use library::json::{MasterCohortRequest, RigSettings, Setting};
     for (rows, expected) in [
         (
             vec![("external_masterz", serde_json::json!("ignore"))],
@@ -196,32 +199,32 @@ fn every_policy_endpoint_validates_settings_with_context() {
             })
             .collect();
         let errors = [
-            library::evaluate(Request {
+            library::json::evaluate(Request {
                 global_settings: settings.clone(),
                 ..Default::default()
             })
             .unwrap_err()
             .to_string(),
-            library::plan_masters(MasterPlanRequest {
+            library::json::plan_masters(MasterPlanRequest {
                 lights: vec![Default::default()],
                 global_settings: settings.clone(),
                 ..Default::default()
             })
             .unwrap_err()
             .to_string(),
-            library::master_cohort(MasterCohortRequest {
+            library::json::master_cohort(MasterCohortRequest {
                 settings: settings.clone(),
                 ..Default::default()
             })
             .unwrap_err()
             .to_string(),
-            library::flat_retry(FlatRetryRequest {
+            library::json::flat_retry(FlatRetryRequest {
                 settings: settings.clone(),
                 ..Default::default()
             })
             .unwrap_err()
             .to_string(),
-            library::evaluate(Request {
+            library::json::evaluate(Request {
                 rigs: vec![RigSettings {
                     rig_uuid: "camera-a".into(),
                     settings,
@@ -252,12 +255,12 @@ fn returned_session_carries_retry_policy_window_and_exclusions() {
         ..Default::default()
     };
     plan.flat_stability.enabled = false;
-    let session = library::plan_masters(plan.clone()).unwrap();
+    let session = library::json::plan_masters(plan.clone()).unwrap();
     let mut without_exclusions = plan.clone();
     without_exclusions.flat_held_back.clear();
     assert_ne!(
         session.key,
-        library::plan_masters(without_exclusions).unwrap().key
+        library::json::plan_masters(without_exclusions).unwrap().key
     );
     // A JSON round trip is exactly how C/Python hosts forward the result.
     let session = serde_json::from_value(serde_json::to_value(session).unwrap()).unwrap();
@@ -267,12 +270,12 @@ fn returned_session_carries_retry_policy_window_and_exclusions() {
         ..original.clone()
     };
     assert_eq!(
-        library::flat_retry(retry.clone()).unwrap().action,
+        library::json::flat_retry(retry.clone()).unwrap().action,
         library::FlatRetryAction::PublishFirst
     );
     retry.policy = Some(Default::default());
     assert!(
-        library::flat_retry(retry)
+        library::json::flat_retry(retry)
             .unwrap_err()
             .to_string()
             .contains("conflict")
@@ -280,17 +283,17 @@ fn returned_session_carries_retry_policy_window_and_exclusions() {
 
     plan.flat_stability.enabled = true;
     plan.flat_stability.trim_unstable = false;
-    plan.global_settings = vec![library::Setting {
+    plan.global_settings = vec![library::json::Setting {
         key: "flat_session_hours".into(),
         value: serde_json::json!(48),
     }];
     let mut retry = FlatRetryRequest {
-        session: Some(library::plan_masters(plan).unwrap()),
+        session: Some(library::json::plan_masters(plan).unwrap()),
         held_back: vec![],
         ..original
     };
     assert!(
-        library::flat_retry(retry.clone())
+        library::json::flat_retry(retry.clone())
             .unwrap()
             .inputs
             .is_empty(),
@@ -302,18 +305,18 @@ fn returned_session_carries_retry_policy_window_and_exclusions() {
         .unwrap()
         .tolerances
         .flat_session_seconds = 86400;
-    let result = library::flat_retry(retry.clone()).unwrap();
+    let result = library::json::flat_retry(retry.clone()).unwrap();
     assert_eq!(
         result.inputs,
         ["f4", "f5"],
         "held-back f6 travels with the session"
     );
-    retry.settings = vec![library::Setting {
+    retry.settings = vec![library::json::Setting {
         key: "flat_session_hours".into(),
         value: serde_json::json!(48),
     }];
     assert!(
-        library::flat_retry(retry)
+        library::json::flat_retry(retry)
             .unwrap_err()
             .to_string()
             .contains("conflict")
@@ -333,17 +336,17 @@ fn successful_retry_feedback_implies_attempted_but_failed_retry_needs_a_flag() {
     let mut request: FlatRetryRequest = serde_json::from_value(case["request"].clone()).unwrap();
     request.trimmed_attempted = false;
     assert_eq!(
-        library::flat_retry(request.clone()).unwrap().action,
+        library::json::flat_retry(request.clone()).unwrap().action,
         library::FlatRetryAction::PublishTrimmed
     );
     request.trimmed = None;
     assert_eq!(
-        library::flat_retry(request.clone()).unwrap().action,
+        library::json::flat_retry(request.clone()).unwrap().action,
         library::FlatRetryAction::TryTrimmed
     );
     request.trimmed_attempted = true;
     assert_eq!(
-        library::flat_retry(request).unwrap().action,
+        library::json::flat_retry(request).unwrap().action,
         library::FlatRetryAction::TryAlternate
     );
 }
@@ -381,7 +384,7 @@ fn an_alternate_flat_set_is_the_next_session_alone_without_masters() {
         },
         ..Default::default()
     };
-    let decision = library::flat_retry(request).unwrap();
+    let decision = library::json::flat_retry(request).unwrap();
     assert_eq!(decision.action, library::FlatRetryAction::TryAlternate);
     assert_eq!(decision.inputs, ["b0", "b1"]);
 }

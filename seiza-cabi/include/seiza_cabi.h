@@ -4297,7 +4297,7 @@ char *seiza_calibration_setting_check_json(const char *request_json, char **erro
 
 /*
  Grade and select a calibration library using PSF Guard's shared policy.
- `request_json` is a camelCase library::Request: frames, lights, quality,
+ `request_json` is a camelCase library::json::Request: frames, lights, quality,
  globalSettings, rigs, grouping, availableResponses, nightShifts, regrade, masterFailures, pedestalEvidence,
  forceFlatWithoutPedestal, flatStarMasking, flatStability, flatAssociation and darkAssociation.
  Missing collections are empty. Settings are {key,value} records; identifiers,
@@ -4339,7 +4339,7 @@ char *seiza_calibration_master_plan_json(const char *request_json,
  Light choices may use exact full paths; these take precedence over basename
  entries, preserving existing catalog lookup for other lights.
  Plan raw-flat response sessions and bounded samples from a camelCase
- library::Request. Returns plans, resolved limits/night boundaries, grades
+ library::json::Request. Returns plans, resolved limits/night boundaries, grades
  and unplanned frame IDs. Pure metadata/measurement policy; no pixel I/O.
  flatAssociation/darkAssociation accept automatic (default) or one_set in
  library and master requests. OneSet keeps all eligible compatible inputs;

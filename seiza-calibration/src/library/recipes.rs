@@ -5,52 +5,89 @@
 //! and estimate_flat_pedestal. Apache-2.0.
 use super::*;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MasterFailure {
-    pub session_key: String,
-    pub kind: CalibrationKind,
-    pub reason: String,
-}
-/// Successful per-light fits from fit_flat_pedestal, in the returned sample set.
-/// A pinned value reproduces a previous stack and wins over fresh estimates.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct PedestalEvidence {
-    pub session_key: String,
-    pub estimates: Vec<f32>,
-    pub pinned: Option<f32>,
-}
-impl PedestalEvidence {
-    fn validate(&self) -> crate::Result<()> {
-        if self.estimates.len() > 3
-            || self.estimates.iter().any(|v| !v.is_finite())
-            || self.pinned.is_some_and(|v| !v.is_finite() || v < 0.0)
-        {
-            return Err(invalid(
-                "pedestal evidence needs at most three finite estimates and a nonnegative finite pinned value",
-            ));
-        }
-        Ok(())
-    }
-}
+/// How a session's flat master applies to its lights.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FlatUse {
+    /// No flat master serves.
     #[default]
     Unavailable,
+    /// After a bias or dark master removed the pedestal.
     WithMasters,
+    /// With neither master: a pedestal must be fitted from sample lights
+    /// first ([`Application::sample_lights`]).
     NeedsPedestalFit,
+    /// After subtracting the pedestal fitted from the lights.
     FittedPedestal,
+    /// With neither master nor a pedestal, because the host forced it:
+    /// vignetted edges may brighten.
     ForcedWithoutPedestal,
+    /// Not at all: no reliable pedestal could be fitted.
     Withheld,
 }
+words!(FlatUse {
+    Unavailable => "unavailable",
+    WithMasters => "with_masters",
+    NeedsPedestalFit => "needs_pedestal_fit",
+    FittedPedestal => "fitted_pedestal",
+    ForcedWithoutPedestal => "forced_without_pedestal",
+    Withheld => "withheld",
+});
+impl FlatUse {
+    /// How a flat applies to a light, before any pedestal fit: only into a
+    /// light whose pedestal a bias or dark master removed. With neither,
+    /// the division amplifies the pedestal by 1/vignette at the frame
+    /// edges, the vignette comes out inverted, and that is worse than no
+    /// flat at all; so the pedestal is fitted from the lights first, unless
+    /// `without_masters` forces the flat regardless.
+    pub fn decide(flat: bool, pedestal_removed: bool, without_masters: FlatWithoutMasters) -> Self {
+        match (flat, pedestal_removed, without_masters) {
+            (false, _, _) => Self::Unavailable,
+            (true, true, _) => Self::WithMasters,
+            (true, false, FlatWithoutMasters::Force) => Self::ForcedWithoutPedestal,
+            (true, false, FlatWithoutMasters::FitPedestal) => Self::NeedsPedestalFit,
+        }
+    }
+    /// How a flat that needed a pedestal fit applies, given the pedestal
+    /// accepted: after subtracting it, or not at all.
+    pub fn after_fit(pedestal: Option<f32>) -> Self {
+        if pedestal.is_some() {
+            Self::FittedPedestal
+        } else {
+            Self::Withheld
+        }
+    }
+}
+
+/// What a flat does for a light no bias or dark master removes the
+/// pedestal from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlatWithoutMasters {
+    /// Fit the pedestal from the lights, and withhold the flat when no
+    /// reliable one fits.
+    #[default]
+    FitPedestal,
+    /// Apply the flat anyway: the host forced calibration on.
+    Force,
+}
+words!(FlatWithoutMasters {
+    FitPedestal => "fit_pedestal",
+    Force => "force",
+});
+
+/// How a session's flat applies, once its masters are built.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Application {
     pub flat_use: FlatUse,
+    /// The pedestal subtracted before the flat, in ADU, for
+    /// [`FlatUse::FittedPedestal`].
     pub pedestal: Option<f32>,
+    /// The lights to fit the pedestal from, for
+    /// [`FlatUse::NeedsPedestalFit`]: [`pedestal_sample_lights`].
     pub sample_lights: Vec<PathBuf>,
+    /// The pedestal the camera's recorded offset predicts: [`pedestal_hint`].
     pub pedestal_hint: Option<f64>,
 }
 
@@ -178,17 +215,6 @@ fn session_key(
     hex_digest(&serde_json::to_string(&identity).expect("validated session identity"))
 }
 
-/// The masters a master of `kind` is built on: a dark or dark-flat on its
-/// bias, a flat on its bias and dark-flat. One whose dependency failed is
-/// skipped rather than built without it.
-pub fn master_dependencies(kind: CalibrationKind) -> &'static [CalibrationKind] {
-    match kind {
-        CalibrationKind::Bias => &[],
-        CalibrationKind::Dark | CalibrationKind::DarkFlat => &[CalibrationKind::Bias],
-        CalibrationKind::Flat => &[CalibrationKind::Bias, CalibrationKind::DarkFlat],
-    }
-}
-
 /// The external master a light takes for `kind` from its candidates,
 /// nearest first, used as it is and never integrated with raw frames: the
 /// nearest one under `prefer`, the nearest one when the raw frames cannot
@@ -285,7 +311,7 @@ pub(super) fn recipes(selected: &CalibrationSelection) -> Vec<MasterRecipe> {
         let dependencies = if action == RecipeAction::Integrate {
             recipes
                 .iter()
-                .filter(|r| r.serves() && master_dependencies(kind).contains(&r.kind))
+                .filter(|r| r.serves() && kind.dependencies().contains(&r.kind))
                 .map(|r| r.kind)
                 .collect()
         } else {
@@ -361,13 +387,10 @@ impl Session {
                     .find(|kind| unavailable.contains(*kind))
             {
                 recipe.action = RecipeAction::Blocked;
-                let kind = match kind {
-                    CalibrationKind::Bias => "bias",
-                    CalibrationKind::DarkFlat => "dark-flat",
-                    CalibrationKind::Dark => "dark",
-                    CalibrationKind::Flat => "flat",
-                };
-                recipe.failure = Some(format!("skipped because the {kind} master failed to build"));
+                recipe.failure = Some(format!(
+                    "skipped because the {} master failed to build",
+                    kind.label()
+                ));
             }
             if matches!(recipe.action, RecipeAction::Failed | RecipeAction::Blocked) {
                 unavailable.insert(recipe.kind);
@@ -386,41 +409,49 @@ impl Session {
     /// division amplifies the light's pedestal by 1/vignette at the frame
     /// edges, so the session needs a pedestal fitted from sample lights
     /// first, unless `force` applies the flat regardless.
-    pub fn plan_flat_use(&mut self, lights: &[&Light], force: bool) {
-        self.application = Application::default();
-        if !self.serves(CalibrationKind::Flat) {
-            return;
+    pub fn plan_flat_use<'a>(
+        &mut self,
+        lights: impl IntoIterator<Item = &'a Light>,
+        without_masters: FlatWithoutMasters,
+    ) {
+        self.application = Application {
+            flat_use: FlatUse::decide(
+                self.serves(CalibrationKind::Flat),
+                self.serves(CalibrationKind::Bias) || self.serves(CalibrationKind::Dark),
+                without_masters,
+            ),
+            ..Application::default()
+        };
+        if self.application.flat_use == FlatUse::NeedsPedestalFit {
+            let lights: Vec<&Light> = lights.into_iter().collect();
+            let paths: Vec<_> = lights.iter().map(|l| l.path.clone()).collect();
+            self.application.sample_lights = pedestal_sample_lights(&paths);
+            self.application.pedestal_hint = lights.first().and_then(|l| pedestal_hint(l));
         }
-        if self.serves(CalibrationKind::Bias) || self.serves(CalibrationKind::Dark) {
-            self.application.flat_use = FlatUse::WithMasters;
-            return;
-        }
-        if force {
-            self.application.flat_use = FlatUse::ForcedWithoutPedestal;
-            return;
-        }
-        let paths: Vec<_> = lights.iter().map(|l| l.path.clone()).collect();
-        self.application.sample_lights = pedestal_sample_lights(&paths);
-        self.application.pedestal_hint = lights.first().and_then(|l| pedestal_hint(l));
-        self.application.flat_use = FlatUse::NeedsPedestalFit;
     }
 
     /// Accept or refuse the pedestal fitted from the sample lights
-    /// [`Session::plan_flat_use`] asked for. A pinned value reproduces a
-    /// previous stack. Fits that disagree, or a pedestal far from the
-    /// camera's recorded offset, withhold the flat.
-    pub fn accept_pedestal(&mut self, evidence: &PedestalEvidence) -> crate::Result<()> {
-        evidence.validate()?;
+    /// [`Session::plan_flat_use`] asked for: `estimates`, one per light
+    /// that fitted, at most three. A `pinned` value reproduces a previous
+    /// stack and wins. Fits that disagree, or a pedestal far from the
+    /// camera's recorded offset, withhold the flat
+    /// ([`pedestal_from_fits`]).
+    pub fn accept_pedestal(&mut self, estimates: &[f32], pinned: Option<f32>) -> crate::Result<()> {
+        if estimates.len() > 3
+            || estimates.iter().any(|v| !v.is_finite())
+            || pinned.is_some_and(|v| !v.is_finite() || v < 0.0)
+        {
+            return Err(invalid(
+                "pedestal evidence needs at most three finite estimates and a nonnegative finite pinned value",
+            ));
+        }
         if self.application.flat_use != FlatUse::NeedsPedestalFit {
             return Ok(());
         }
-        let pedestal = accepted_pedestal(evidence, self.application.pedestal_hint);
+        let pedestal =
+            pinned.or_else(|| pedestal_from_fits(estimates, self.application.pedestal_hint).ok());
         self.application.pedestal = pedestal;
-        self.application.flat_use = if pedestal.is_some() {
-            FlatUse::FittedPedestal
-        } else {
-            FlatUse::Withheld
-        };
+        self.application.flat_use = FlatUse::after_fit(pedestal);
         Ok(())
     }
 }
@@ -467,6 +498,7 @@ pub enum PedestalRefusal {
     /// likely a sky gradient than a pedestal.
     ContradictsOffset { pedestal: f32, hint: f64 },
 }
+impl std::error::Error for PedestalRefusal {}
 impl std::fmt::Display for PedestalRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -488,7 +520,7 @@ impl std::fmt::Display for PedestalRefusal {
 /// The pedestal under a session's lights from the fits of its sample
 /// lights: their median, when they agree, lie in range, and do not
 /// contradict the camera's recorded offset.
-pub fn accept_pedestal(estimates: &[f32], hint: Option<f64>) -> Result<f32, PedestalRefusal> {
+pub fn pedestal_from_fits(estimates: &[f32], hint: Option<f64>) -> Result<f32, PedestalRefusal> {
     let mut estimates = estimates.to_vec();
     if estimates.is_empty() {
         return Err(PedestalRefusal::NoFit);
@@ -511,64 +543,3 @@ pub fn accept_pedestal(estimates: &[f32], hint: Option<f64>) -> Result<f32, Pede
     Ok(pedestal)
 }
 
-fn accepted_pedestal(evidence: &PedestalEvidence, hint: Option<f64>) -> Option<f32> {
-    evidence
-        .pinned
-        .or_else(|| accept_pedestal(&evidence.estimates, hint).ok())
-}
-
-/// Apply a request's execution feedback to its sessions: failures, then
-/// each session's flat use for its own lights, then pedestal fits.
-pub(super) fn finalize(
-    sessions: &mut [Session],
-    assignments: &[usize],
-    lights: &[Light],
-    failures: &[MasterFailure],
-    evidence: &[PedestalEvidence],
-    force: bool,
-) -> crate::Result<()> {
-    let keys: BTreeSet<_> = sessions.iter().map(|s| s.key.as_str()).collect();
-    let mut failed = BTreeSet::new();
-    for row in failures {
-        if !keys.contains(row.session_key.as_str()) || !failed.insert((&row.session_key, row.kind))
-        {
-            return Err(invalid(
-                "master failures must name unique session/kind recipes",
-            ));
-        }
-    }
-    let mut fits = BTreeSet::new();
-    for row in evidence {
-        row.validate()?;
-        if !keys.contains(row.session_key.as_str()) || !fits.insert(&row.session_key) {
-            return Err(invalid("pedestal evidence needs a unique session"));
-        }
-    }
-    for (index, session) in sessions.iter_mut().enumerate() {
-        // In build order, so a failure blocks what was built after it.
-        for kind in [
-            CalibrationKind::Bias,
-            CalibrationKind::DarkFlat,
-            CalibrationKind::Dark,
-            CalibrationKind::Flat,
-        ] {
-            if let Some(row) = failures
-                .iter()
-                .find(|row| row.session_key == session.key && row.kind == kind)
-            {
-                session.record_failure(kind, row.reason.clone())?;
-            }
-        }
-        let own: Vec<&Light> = lights
-            .iter()
-            .zip(assignments)
-            .filter(|(_, a)| **a == index)
-            .map(|(l, _)| l)
-            .collect();
-        session.plan_flat_use(&own, force);
-        if let Some(row) = evidence.iter().find(|row| row.session_key == session.key) {
-            session.accept_pedestal(row)?;
-        }
-    }
-    Ok(())
-}

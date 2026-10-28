@@ -6,8 +6,8 @@
 //!
 //! Extracted from theatrus/psf-guard at 79f5e31d53b8371e8fcd0b22a9b69692412cd8b4.
 //! Copyright the PSF Guard contributors; Apache-2.0.
-use super::FrameMeta;
-use super::{DEFAULT_COMPLETE_DARK_FRAMES, DarkChoice, ExternalMasterPolicy};
+use super::Light;
+use super::DEFAULT_COMPLETE_DARK_FRAMES;
 use super::{DEFAULT_DARK_REACH_DAYS, DEFAULT_FLAT_MAX_AGE_DAYS};
 use crate::{BiasScreening, DarkScreening, FlatScreening, Limits, MatchTolerances};
 use serde::{Deserialize, Serialize};
@@ -41,6 +41,38 @@ pub const DEFAULT_FLAT_SPLIT_DUST_PCT: f64 = 1.0;
 /// background: the per-frame light-pattern suspect limit within a session.
 pub const DEFAULT_FLAT_SPLIT_PATTERN_PCT: f64 = 2.0;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+/// Which darks a light takes when several sets would serve.
+pub enum DarkChoice {
+    /// The nearest set with enough frames for a complete master.
+    #[default]
+    Complete,
+    /// The nearest set, however few frames it has.
+    Nearest,
+}
+words!(DarkChoice {
+    Complete => "complete",
+    Nearest => "nearest",
+});
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+/// How masters another program integrated stand in for raw frames.
+pub enum ExternalMasterPolicy {
+    /// The nearest external master, before the raw frames.
+    #[default]
+    Prefer,
+    /// Only when the raw frames cannot make a master.
+    Fallback,
+    /// Never.
+    Ignore,
+}
+words!(ExternalMasterPolicy {
+    Prefer => "prefer",
+    Fallback => "fallback",
+    Ignore => "ignore",
+});
+
 /// What a light check does when it finds something.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -56,14 +88,14 @@ pub enum CheckMode {
     Off,
 }
 
+words!(CheckMode {
+    Flag => "flag",
+    Advisory => "advisory",
+    Off => "off",
+});
 impl CheckMode {
-    fn parse(value: &Value) -> Option<Self> {
-        match value.as_str()? {
-            "flag" => Some(Self::Flag),
-            "advisory" => Some(Self::Advisory),
-            "off" => Some(Self::Off),
-            _ => None,
-        }
+    fn of(value: &Value) -> Option<Self> {
+        value.as_str()?.parse().ok()
     }
 }
 
@@ -126,7 +158,7 @@ impl Check {
 }
 
 /// A frame-grade check: which measurement, for which kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum GradeCheck {
     BiasLevel,
     BiasNoise,
@@ -212,14 +244,151 @@ impl GradeCheck {
     }
 }
 
+/// A setting, by name: its key in the settings table ([`fields`]) and in
+/// stored layers ([`RuleValues`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum SettingKey {
+    RotationToleranceDeg,
+    FocalLengthToleranceMm,
+    DarkTemperatureToleranceC,
+    FlatSessionHours,
+    UseDarks,
+    ExternalMasters,
+    NightZone,
+    LightNights,
+    DarkReachDays,
+    CompleteDarkFrames,
+    DarkChoice,
+    FlatGrouping,
+    FlatSplitDustPct,
+    FlatSplitPatternPct,
+    FlatMaxAgeDays,
+    FlatCheckAgeDays,
+    ThinMasterFrames,
+    /// A light check's mode.
+    Check(Check),
+    /// A frame grade's limits.
+    Grade(GradeCheck),
+}
+
+impl SettingKey {
+    /// The key as the table and stored layers spell it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RotationToleranceDeg => "rotation_tolerance_deg",
+            Self::FocalLengthToleranceMm => "focal_length_tolerance_mm",
+            Self::DarkTemperatureToleranceC => "dark_temperature_tolerance_c",
+            Self::FlatSessionHours => "flat_session_hours",
+            Self::UseDarks => "use_darks",
+            Self::ExternalMasters => "external_masters",
+            Self::NightZone => "night_zone",
+            Self::LightNights => "light_nights",
+            Self::DarkReachDays => "dark_reach_days",
+            Self::CompleteDarkFrames => "complete_dark_frames",
+            Self::DarkChoice => "dark_choice",
+            Self::FlatGrouping => "flat_grouping",
+            Self::FlatSplitDustPct => "flat_split_dust_pct",
+            Self::FlatSplitPatternPct => "flat_split_pattern_pct",
+            Self::FlatMaxAgeDays => "flat_max_age_days",
+            Self::FlatCheckAgeDays => "flat_check_age_days",
+            Self::ThinMasterFrames => "thin_master_frames",
+            Self::Check(check) => check.key(),
+            Self::Grade(grade) => grade.key(),
+        }
+    }
+
+    /// The setting's row in the table.
+    pub fn field(self) -> &'static FieldSpec {
+        field(self)
+    }
+}
+
+impl From<Check> for SettingKey {
+    fn from(check: Check) -> Self {
+        Self::Check(check)
+    }
+}
+
+impl From<GradeCheck> for SettingKey {
+    fn from(grade: GradeCheck) -> Self {
+        Self::Grade(grade)
+    }
+}
+
+impl std::fmt::Display for SettingKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for SettingKey {
+    type Err = crate::UnknownWord;
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        Ok(match text {
+            "rotation_tolerance_deg" => Self::RotationToleranceDeg,
+            "focal_length_tolerance_mm" => Self::FocalLengthToleranceMm,
+            "dark_temperature_tolerance_c" => Self::DarkTemperatureToleranceC,
+            "flat_session_hours" => Self::FlatSessionHours,
+            "use_darks" => Self::UseDarks,
+            "external_masters" => Self::ExternalMasters,
+            "night_zone" => Self::NightZone,
+            "light_nights" => Self::LightNights,
+            "dark_reach_days" => Self::DarkReachDays,
+            "complete_dark_frames" => Self::CompleteDarkFrames,
+            "dark_choice" => Self::DarkChoice,
+            "flat_grouping" => Self::FlatGrouping,
+            "flat_split_dust_pct" => Self::FlatSplitDustPct,
+            "flat_split_pattern_pct" => Self::FlatSplitPatternPct,
+            "flat_max_age_days" => Self::FlatMaxAgeDays,
+            "flat_check_age_days" => Self::FlatCheckAgeDays,
+            "thin_master_frames" => Self::ThinMasterFrames,
+            _ => Check::ALL
+                .into_iter()
+                .find(|check| check.key() == text)
+                .map(Self::Check)
+                .or_else(|| {
+                    GradeCheck::ALL
+                        .into_iter()
+                        .find(|grade| grade.key() == text)
+                        .map(Self::Grade)
+                })
+                .ok_or_else(|| crate::UnknownWord {
+                    what: "setting",
+                    text: text.to_string(),
+                })?,
+        })
+    }
+}
+
+impl Serialize for SettingKey {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for SettingKey {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        text.parse().map_err(serde::de::Error::custom)
+    }
+}
+
 /// Which layer a value came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuleSource {
+    /// The built-in default.
     Default,
+    /// The server's layer.
     Global,
+    /// The rig's own layer.
     Rig,
 }
+words!(RuleSource {
+    Default => "default",
+    Global => "global",
+    Rig => "rig",
+});
 
 /// What changing a setting changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -257,15 +426,10 @@ pub enum LightNightSplit {
     Catalog,
 }
 
-impl LightNightSplit {
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "rig" => Some(Self::Rig),
-            "catalog" => Some(Self::Catalog),
-            _ => None,
-        }
-    }
-}
+words!(LightNightSplit {
+    Rig => "rig",
+    Catalog => "catalog",
+});
 
 /// How a rig's flats of different nights may share a master.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -277,6 +441,10 @@ pub enum FlatGrouping {
     /// By time alone: the flat session around the nearest flat.
     Time,
 }
+words!(FlatGrouping {
+    Measured => "measured",
+    Time => "time",
+});
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ChoiceOption {
@@ -327,7 +495,7 @@ pub enum FieldKind {
 /// One setting.
 #[derive(Debug, Clone, Serialize)]
 pub struct FieldSpec {
-    pub key: &'static str,
+    pub key: SettingKey,
     pub group: Group,
     pub label: &'static str,
     pub help: &'static str,
@@ -338,7 +506,7 @@ pub struct FieldSpec {
 
 #[allow(clippy::too_many_arguments)]
 fn number(
-    key: &'static str,
+    key: SettingKey,
     group: Group,
     effect: Effect,
     label: &'static str,
@@ -367,7 +535,7 @@ fn number(
 
 fn check(check: Check, label: &'static str, help: &'static str, poor: bool) -> FieldSpec {
     FieldSpec {
-        key: check.key(),
+        key: check.into(),
         group: Group::Checks,
         label,
         help,
@@ -389,7 +557,7 @@ fn grade(
 ) -> FieldSpec {
     let limits = grade.default_limits();
     FieldSpec {
-        key: grade.key(),
+        key: grade.into(),
         group: Group::Grades,
         label,
         help,
@@ -480,7 +648,7 @@ static FIELDS: LazyLock<Vec<FieldSpec>> = LazyLock::new(|| {
     vec![
         // Matching: which frames a light takes.
         number(
-            "rotation_tolerance_deg",
+            SettingKey::RotationToleranceDeg,
             Group::Matching,
             Effect::Matching,
             "Flat rotation",
@@ -491,7 +659,7 @@ static FIELDS: LazyLock<Vec<FieldSpec>> = LazyLock::new(|| {
             tolerances.rotation_deg,
         ),
         number(
-            "focal_length_tolerance_mm",
+            SettingKey::FocalLengthToleranceMm,
             Group::Matching,
             Effect::Matching,
             "Flat focal length",
@@ -502,7 +670,7 @@ static FIELDS: LazyLock<Vec<FieldSpec>> = LazyLock::new(|| {
             tolerances.focal_length_mm,
         ),
         number(
-            "dark_temperature_tolerance_c",
+            SettingKey::DarkTemperatureToleranceC,
             Group::Matching,
             Effect::Matching,
             "Dark temperature",
@@ -513,7 +681,7 @@ static FIELDS: LazyLock<Vec<FieldSpec>> = LazyLock::new(|| {
             tolerances.dark_temperature_c,
         ),
         number(
-            "flat_session_hours",
+            SettingKey::FlatSessionHours,
             Group::Matching,
             Effect::Matching,
             "Flat session",
@@ -524,7 +692,7 @@ static FIELDS: LazyLock<Vec<FieldSpec>> = LazyLock::new(|| {
             tolerances.flat_session_seconds as f64 / 3600.0,
         ),
         FieldSpec {
-            key: "use_darks",
+            key: SettingKey::UseDarks,
             group: Group::Matching,
             label: "Use darks",
             help: "Turn off to calibrate lights with bias and flats only, without flagging missing darks.",
@@ -533,7 +701,7 @@ static FIELDS: LazyLock<Vec<FieldSpec>> = LazyLock::new(|| {
             default: json!(true),
         },
         FieldSpec {
-            key: "external_masters",
+            key: SettingKey::ExternalMasters,
             group: Group::Matching,
             label: "External masters",
             help: "Masters from PixInsight, Siril and other tools, matched by their headers.",
@@ -557,7 +725,7 @@ static FIELDS: LazyLock<Vec<FieldSpec>> = LazyLock::new(|| {
             default: json!("prefer"),
         },
         FieldSpec {
-            key: "night_zone",
+            key: SettingKey::NightZone,
             group: Group::Matching,
             label: "Rig's time zone",
             help: "Calibration nights end at local noon so dawn flats remain in one session. Automatic uses the site longitude recorded in frame headers, then the clock if no longitude is available. Choose an offset if that information is missing or incorrect.",
@@ -575,7 +743,7 @@ static FIELDS: LazyLock<Vec<FieldSpec>> = LazyLock::new(|| {
             default: json!("auto"),
         },
         FieldSpec {
-            key: "light_nights",
+            key: SettingKey::LightNights,
             group: Group::Matching,
             label: "Nights end",
             help: "Where a light's night ends: at its rig's local noon, or at one time for \
@@ -601,7 +769,7 @@ static FIELDS: LazyLock<Vec<FieldSpec>> = LazyLock::new(|| {
         },
         // Dark masters.
         number(
-            "dark_reach_days",
+            SettingKey::DarkReachDays,
             Group::Darks,
             Effect::Matching,
             "Maximum time difference for darks",
@@ -612,7 +780,7 @@ static FIELDS: LazyLock<Vec<FieldSpec>> = LazyLock::new(|| {
             DEFAULT_DARK_REACH_DAYS,
         ),
         FieldSpec {
-            key: "complete_dark_frames",
+            key: SettingKey::CompleteDarkFrames,
             group: Group::Darks,
             label: "Minimum darks for a single-night master",
             help: "If the nearest night has this many matching darks, build the master from that night alone. Otherwise, combine nights within the allowed time range.",
@@ -625,7 +793,7 @@ static FIELDS: LazyLock<Vec<FieldSpec>> = LazyLock::new(|| {
             default: json!(DEFAULT_COMPLETE_DARK_FRAMES),
         },
         FieldSpec {
-            key: "dark_choice",
+            key: SettingKey::DarkChoice,
             group: Group::Darks,
             label: "Dark selection preference",
             help: "Choose whether to prefer a complete set of darks over a nearer set with fewer frames. This preference also applies to bias masters and WBPP exports.",
@@ -646,7 +814,7 @@ static FIELDS: LazyLock<Vec<FieldSpec>> = LazyLock::new(|| {
         },
         // Flat groups.
         FieldSpec {
-            key: "flat_grouping",
+            key: SettingKey::FlatGrouping,
             group: Group::FlatGroups,
             label: "Group flats",
             help: "By measurement: combine nights only when their flats match, and use flats from the same side of a measured change as the light. By time only: build one master per flat session.",
@@ -666,7 +834,7 @@ static FIELDS: LazyLock<Vec<FieldSpec>> = LazyLock::new(|| {
             default: json!("measured"),
         },
         number(
-            "flat_split_dust_pct",
+            SettingKey::FlatSplitDustPct,
             Group::FlatGroups,
             Effect::Matching,
             "Dust split",
@@ -677,7 +845,7 @@ static FIELDS: LazyLock<Vec<FieldSpec>> = LazyLock::new(|| {
             DEFAULT_FLAT_SPLIT_DUST_PCT,
         ),
         number(
-            "flat_split_pattern_pct",
+            SettingKey::FlatSplitPatternPct,
             Group::FlatGroups,
             Effect::Matching,
             "Light pattern split",
@@ -689,7 +857,7 @@ static FIELDS: LazyLock<Vec<FieldSpec>> = LazyLock::new(|| {
         ),
         // Light checks.
         number(
-            "flat_max_age_days",
+            SettingKey::FlatMaxAgeDays,
             Group::Checks,
             Effect::Flags,
             "Flat age limit",
@@ -700,7 +868,7 @@ static FIELDS: LazyLock<Vec<FieldSpec>> = LazyLock::new(|| {
             DEFAULT_FLAT_MAX_AGE_DAYS,
         ),
         number(
-            "flat_check_age_days",
+            SettingKey::FlatCheckAgeDays,
             Group::Checks,
             Effect::Flags,
             "Flat age warning",
@@ -711,7 +879,7 @@ static FIELDS: LazyLock<Vec<FieldSpec>> = LazyLock::new(|| {
             DEFAULT_FLAT_CHECK_AGE_DAYS,
         ),
         FieldSpec {
-            key: "thin_master_frames",
+            key: SettingKey::ThinMasterFrames,
             group: Group::Checks,
             label: "Minimum frames in bias and dark masters",
             help: "Flag bias or dark masters with fewer source frames than this threshold because they can add read noise.",
@@ -908,9 +1076,12 @@ pub fn fields() -> &'static [FieldSpec] {
     &FIELDS
 }
 
-/// One setting by its key.
-pub fn field(key: &str) -> Option<&'static FieldSpec> {
-    fields().iter().find(|field| field.key == key)
+/// One setting's row.
+pub fn field(key: SettingKey) -> &'static FieldSpec {
+    fields()
+        .iter()
+        .find(|field| field.key == key)
+        .expect("every setting key has a row in the table")
 }
 
 fn finite(value: &Value) -> Option<f64> {
@@ -918,7 +1089,7 @@ fn finite(value: &Value) -> Option<f64> {
 }
 
 /// Two stored values that mean the same: `2` and `2.0` are one tolerance.
-pub fn equivalent(left: &Value, right: &Value) -> bool {
+fn equivalent(left: &Value, right: &Value) -> bool {
     match (left, right) {
         (Value::Number(left), Value::Number(right)) => left.as_f64() == right.as_f64(),
         (Value::Object(left), Value::Object(right)) => {
@@ -949,15 +1120,32 @@ fn canonical(value: &Value) -> String {
     }
 }
 
+impl FieldSpec {
+    /// Check a value against this setting. `Err` says what is wrong in
+    /// words a person can act on.
+    pub fn validate(&self, value: &Value) -> Result<(), String> {
+        validate(self, value)
+    }
+
+    /// A value in words, the way a light's account names it.
+    pub fn describe(&self, value: &Value) -> String {
+        describe(self, value)
+    }
+
+    /// Whether `value` means this setting's default: `2` and `2.0` are one
+    /// tolerance.
+    pub fn is_default(&self, value: &Value) -> bool {
+        equivalent(value, &self.default)
+    }
+}
+
 /// Read a stored value the way resolution does: anything this build cannot
 /// read is `None`, and the next layer decides.
 fn readable(spec: &FieldSpec, value: &Value) -> bool {
     validate(spec, value).is_ok()
 }
 
-/// Check a value against its setting. `Err` says what is wrong in words a
-/// person can act on.
-pub fn validate(spec: &FieldSpec, value: &Value) -> Result<(), String> {
+fn validate(spec: &FieldSpec, value: &Value) -> Result<(), String> {
     let label = spec.label;
     match &spec.kind {
         FieldKind::Number { min, max, unit, .. } => match finite(value) {
@@ -989,7 +1177,7 @@ pub fn validate(spec: &FieldSpec, value: &Value) -> Result<(), String> {
                     .join(", ")
             )),
         },
-        FieldKind::Check { .. } => CheckMode::parse(value)
+        FieldKind::Check { .. } => CheckMode::of(value)
             .map(|_| ())
             .ok_or_else(|| format!("{label} must be flag, advisory or off")),
         FieldKind::Limits {
@@ -1045,8 +1233,7 @@ fn format_number(value: f64) -> String {
     if text == "-0" { "0".into() } else { text }
 }
 
-/// A value in words, the way the light's account names it.
-pub fn describe(spec: &FieldSpec, value: &Value) -> String {
+fn describe(spec: &FieldSpec, value: &Value) -> String {
     match &spec.kind {
         FieldKind::Number { unit, zero, .. } => match (finite(value), zero) {
             (Some(0.0), Some(zero)) => (*zero).to_string(),
@@ -1066,7 +1253,7 @@ pub fn describe(spec: &FieldSpec, value: &Value) -> String {
             .find(|option| Some(option.value) == value.as_str())
             .map(|option| option.label.to_string())
             .unwrap_or_else(|| value.to_string()),
-        FieldKind::Check { levels } => match CheckMode::parse(value) {
+        FieldKind::Check { levels } => match CheckMode::of(value) {
             Some(CheckMode::Flag) => if levels.contains(&"poor") {
                 "flag"
             } else {
@@ -1104,9 +1291,9 @@ pub struct SettingCheck {
     pub default: bool,
 }
 
-/// Judge one stored `value` for setting `key`.
+/// Judge one stored `value` for the setting a panel names `key`.
 pub fn check_setting(key: &str, value: &Value) -> SettingCheck {
-    let Some(spec) = field(key) else {
+    let Ok(setting) = key.parse::<SettingKey>() else {
         return SettingCheck {
             key: key.to_string(),
             valid: false,
@@ -1115,8 +1302,9 @@ pub fn check_setting(key: &str, value: &Value) -> SettingCheck {
             default: false,
         };
     };
+    let spec = field(setting);
     let error = validate(spec, value)
-        .and_then(|()| stacker_accepts(key, value))
+        .and_then(|()| stacker_accepts(setting, value))
         .err();
     SettingCheck {
         key: key.to_string(),
@@ -1145,7 +1333,7 @@ pub struct RigLabel {
 /// One setting that differs from its default for a light, and who set it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RuleNote {
-    pub key: &'static str,
+    pub key: SettingKey,
     pub label: &'static str,
     pub value: Value,
     /// The value in words.
@@ -1188,7 +1376,7 @@ pub struct Rules {
     pub dark: DarkScreening,
     pub flat: FlatScreening,
     /// Each setting's resolved value and where it came from.
-    resolved: BTreeMap<&'static str, (Value, RuleSource)>,
+    resolved: BTreeMap<SettingKey, (Value, RuleSource)>,
 }
 
 impl Default for Rules {
@@ -1204,9 +1392,11 @@ impl Rules {
         let mut resolved = BTreeMap::new();
         for spec in fields() {
             let from_rig = rig
-                .and_then(|(_, layer)| layer.values.get(spec.key))
+                .and_then(|(_, layer)| layer.values.get(spec.key.as_str()))
                 .filter(|value| readable(spec, value));
-            let from_global = global.get(spec.key).filter(|value| readable(spec, value));
+            let from_global = global
+                .get(spec.key.as_str())
+                .filter(|value| readable(spec, value));
             let (value, source) = match (from_rig, from_global) {
                 (Some(value), _) => (value.clone(), RuleSource::Rig),
                 (None, Some(value)) => (value.clone(), RuleSource::Global),
@@ -1214,15 +1404,15 @@ impl Rules {
             };
             resolved.insert(spec.key, (value, source));
         }
-        let value = |key: &str| &resolved[key].0;
-        let number = |key: &str| finite(value(key)).unwrap_or(0.0);
-        let count = |key: &str| value(key).as_u64().unwrap_or(0) as usize;
-        let days_or_never = |key: &str| match number(key) {
+        let value = |key: SettingKey| &resolved[&key].0;
+        let number = |key: SettingKey| finite(value(key)).unwrap_or(0.0);
+        let count = |key: SettingKey| value(key).as_u64().unwrap_or(0) as usize;
+        let days_or_never = |key: SettingKey| match number(key) {
             0.0 => f64::INFINITY,
             days => days,
         };
         let limits = |grade: GradeCheck| {
-            let stored = value(grade.key());
+            let stored = value(grade.into());
             let never = if grade.lower_is_worse() {
                 f64::NEG_INFINITY
             } else {
@@ -1254,7 +1444,7 @@ impl Rules {
         };
         let mut checks = [CheckMode::Flag; Check::ALL.len()];
         for check in Check::ALL {
-            checks[check.index()] = CheckMode::parse(value(check.key())).unwrap_or_default();
+            checks[check.index()] = CheckMode::of(value(check.into())).unwrap_or_default();
         }
         Self {
             rig: rig.map(|(uuid, layer)| RigLabel {
@@ -1265,32 +1455,32 @@ impl Rules {
                     .filter(|name| !name.trim().is_empty())
                     .unwrap_or_else(|| "this rig".into()),
             }),
-            rotation_deg: number("rotation_tolerance_deg"),
-            focal_length_mm: number("focal_length_tolerance_mm"),
-            dark_temperature_c: number("dark_temperature_tolerance_c"),
-            flat_session_seconds: (number("flat_session_hours") * 3600.0).round() as u64,
-            use_darks: value("use_darks").as_bool().unwrap_or(true),
-            external_masters: value("external_masters")
+            rotation_deg: number(SettingKey::RotationToleranceDeg),
+            focal_length_mm: number(SettingKey::FocalLengthToleranceMm),
+            dark_temperature_c: number(SettingKey::DarkTemperatureToleranceC),
+            flat_session_seconds: (number(SettingKey::FlatSessionHours) * 3600.0).round() as u64,
+            use_darks: value(SettingKey::UseDarks).as_bool().unwrap_or(true),
+            external_masters: value(SettingKey::ExternalMasters)
                 .as_str()
-                .and_then(ExternalMasterPolicy::parse)
+                .and_then(|text| text.trim().to_ascii_lowercase().parse().ok())
                 .unwrap_or_default(),
-            dark_reach_days: number("dark_reach_days"),
-            complete_dark_frames: count("complete_dark_frames").max(super::MIN_MASTER_FRAMES),
-            dark_choice: match value("dark_choice").as_str() {
+            dark_reach_days: number(SettingKey::DarkReachDays),
+            complete_dark_frames: count(SettingKey::CompleteDarkFrames).max(super::MIN_MASTER_FRAMES),
+            dark_choice: match value(SettingKey::DarkChoice).as_str() {
                 Some("nearest") => DarkChoice::Nearest,
                 _ => DarkChoice::Complete,
             },
-            flat_max_age_days: days_or_never("flat_max_age_days"),
-            flat_check_age_days: days_or_never("flat_check_age_days"),
-            thin_master_frames: count("thin_master_frames"),
-            flat_grouping: match value("flat_grouping").as_str() {
+            flat_max_age_days: days_or_never(SettingKey::FlatMaxAgeDays),
+            flat_check_age_days: days_or_never(SettingKey::FlatCheckAgeDays),
+            thin_master_frames: count(SettingKey::ThinMasterFrames),
+            flat_grouping: match value(SettingKey::FlatGrouping).as_str() {
                 Some("time") => FlatGrouping::Time,
                 _ => FlatGrouping::Measured,
             },
-            flat_split_dust_pct: number("flat_split_dust_pct"),
-            flat_split_pattern_pct: number("flat_split_pattern_pct"),
-            night_offset_seconds: night_offset_seconds(value("night_zone")),
-            light_nights: match value("light_nights").as_str() {
+            flat_split_dust_pct: number(SettingKey::FlatSplitDustPct),
+            flat_split_pattern_pct: number(SettingKey::FlatSplitPatternPct),
+            night_offset_seconds: night_offset_seconds(value(SettingKey::NightZone)),
+            light_nights: match value(SettingKey::LightNights).as_str() {
                 Some("catalog") => LightNightSplit::Catalog,
                 _ => LightNightSplit::Rig,
             },
@@ -1308,16 +1498,21 @@ impl Rules {
     }
 
     /// Where one setting's value came from.
-    pub fn source(&self, key: &str) -> RuleSource {
-        self.resolved
-            .get(key)
-            .map(|(_, source)| *source)
-            .unwrap_or(RuleSource::Default)
+    pub fn source(&self, key: impl Into<SettingKey>) -> RuleSource {
+        self.resolved[&key.into()].1
     }
 
     /// One setting's resolved value.
-    pub fn value(&self, key: &str) -> Option<&Value> {
-        self.resolved.get(key).map(|(value, _)| value)
+    pub fn value(&self, key: impl Into<SettingKey>) -> &Value {
+        &self.resolved[&key.into()].0
+    }
+
+    /// Who set a setting to something other than its default: the server
+    /// or the rig, or `None` when it is the default, whoever stored it.
+    pub fn set_by(&self, key: impl Into<SettingKey>) -> Option<RuleSource> {
+        let key = key.into();
+        let (value, source) = &self.resolved[&key];
+        (*source != RuleSource::Default && !field(key).is_default(value)).then_some(*source)
     }
 
     /// The settings that differ from their defaults for these rules, in
@@ -1326,7 +1521,7 @@ impl Rules {
         fields()
             .iter()
             .filter_map(|spec| {
-                let (value, source) = self.resolved.get(spec.key)?;
+                let (value, source) = self.resolved.get(&spec.key)?;
                 (!equivalent(value, &spec.default)).then(|| RuleNote {
                     key: spec.key,
                     label: spec.label,
@@ -1381,7 +1576,7 @@ impl Rules {
             .iter()
             .filter(|spec| spec.effect == Effect::Matching)
             .filter_map(|spec| {
-                let (value, _) = self.resolved.get(spec.key)?;
+                let (value, _) = self.resolved.get(&spec.key)?;
                 (!equivalent(value, &spec.default))
                     .then(|| format!("{}={}", spec.key, canonical(value)))
             })
@@ -1414,6 +1609,9 @@ impl Default for RuleBook {
 }
 
 impl RuleBook {
+    /// The server's layer and each rig's, as stored. A key a newer build
+    /// wrote is kept, and a value this build cannot read falls through to
+    /// the next layer.
     pub fn new(global: RuleValues, rigs: BTreeMap<String, RigLayer>) -> Self {
         let global_rules = Arc::new(Rules::resolve(&global, None));
         let rig_rules = rigs
@@ -1432,6 +1630,39 @@ impl RuleBook {
             global_rules,
             rig_rules,
         }
+    }
+
+    /// The layers checked the way a settings panel saves them: a key this
+    /// build does not know, or a value out of its range, is refused.
+    pub fn validated(
+        global: RuleValues,
+        rigs: BTreeMap<String, RigLayer>,
+    ) -> Result<Self, SettingError> {
+        let check = |rig: Option<&String>, values: &RuleValues| {
+            for (key, value) in values {
+                let refuse = |problem| SettingError {
+                    rig: rig.cloned(),
+                    key: key.clone(),
+                    problem,
+                };
+                let setting: SettingKey = key.parse().map_err(|_| refuse(SettingProblem::Unknown))?;
+                field(setting)
+                    .validate(value)
+                    .map_err(|error| refuse(SettingProblem::Invalid(error)))?;
+            }
+            Ok(())
+        };
+        check(None, &global)?;
+        for (uuid, layer) in &rigs {
+            check(Some(uuid), &layer.values)?;
+        }
+        Ok(Self::new(global, rigs))
+    }
+
+    /// This book with the server's layer replaced by `global`, every rig's
+    /// kept.
+    pub fn with_global(&self, global: RuleValues) -> Self {
+        Self::new(global, self.rigs.clone())
     }
 
     /// The server's own layer, as stored.
@@ -1453,10 +1684,11 @@ impl RuleBook {
     }
 
     /// Whether a rig sets `key` for itself rather than inheriting it.
-    pub fn rig_sets(&self, rig_uuid: &str, key: &str) -> bool {
+    pub fn rig_sets(&self, rig_uuid: &str, key: impl Into<SettingKey>) -> bool {
+        let key = key.into();
         self.rigs
             .get(rig_uuid)
-            .is_some_and(|layer| layer.values.contains_key(key))
+            .is_some_and(|layer| layer.values.contains_key(key.as_str()))
     }
 
     /// The rules every rig without settings of its own follows.
@@ -1472,7 +1704,7 @@ impl RuleBook {
     }
 
     /// The rules a light is matched and checked with: its rig's.
-    pub fn for_light(&self, light: &FrameMeta) -> Arc<Rules> {
+    pub fn for_light(&self, light: &Light) -> Arc<Rules> {
         if self.rig_rules.is_empty() {
             return self.global();
         }
@@ -1510,8 +1742,9 @@ impl RuleBook {
                 values
                     .iter()
                     .filter(|(key, _)| {
-                        GRADING_GROUPS.contains(&key.as_str())
-                            || field(key).is_some_and(|spec| spec.effect == Effect::Grades)
+                        key.parse::<SettingKey>().is_ok_and(|key| {
+                            GRADING_GROUPS.contains(&key) || field(key).effect == Effect::Grades
+                        })
                     })
                     .map(|(key, value)| (key.clone(), value.clone()))
                     .collect()
@@ -1528,46 +1761,95 @@ impl RuleBook {
     }
 }
 
+/// A stored setting [`RuleBook::validated`] refused.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SettingError {
+    /// The rig whose layer holds it, or `None` for the server's.
+    pub rig: Option<String>,
+    pub key: String,
+    pub problem: SettingProblem,
+}
+
+/// What is wrong with a stored setting.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SettingProblem {
+    /// This build has no such setting.
+    Unknown,
+    /// Out of its range, or the wrong kind of value, in words.
+    Invalid(String),
+}
+
+impl std::fmt::Display for SettingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(rig) = &self.rig {
+            write!(f, "rig {rig}: ")?;
+        }
+        match &self.problem {
+            SettingProblem::Unknown => write!(f, "unknown setting '{}'", self.key),
+            SettingProblem::Invalid(problem) => write!(f, "{}: {problem}", self.key),
+        }
+    }
+}
+
+impl std::error::Error for SettingError {}
+
 /// Matching settings that grading reads too: a dark is graded against the
 /// darks within its rig's temperature tolerance, and a flat against the
 /// flats its rig's rotation and focal length tolerances put in its session.
 /// Changing one regroups the peers, so the frames are graded again.
-pub const GRADING_GROUPS: [&str; 3] = [
-    "dark_temperature_tolerance_c",
-    "rotation_tolerance_deg",
-    "focal_length_tolerance_mm",
+pub const GRADING_GROUPS: [SettingKey; 3] = [
+    SettingKey::DarkTemperatureToleranceC,
+    SettingKey::RotationToleranceDeg,
+    SettingKey::FocalLengthToleranceMm,
 ];
 
 /// Whether the stacker takes a tolerance as it is, beyond this setting's
 /// own range: it refuses a non-finite, negative or over-wide one rather
 /// than clamp it. A setting that is not a tolerance passes.
-pub fn stacker_accepts(key: &str, value: &Value) -> Result<(), String> {
+pub fn stacker_accepts(key: SettingKey, value: &Value) -> Result<(), String> {
     let mut tolerances = MatchTolerances::default();
     let Some(number) = value.as_f64() else {
         return Ok(());
     };
     match key {
-        "rotation_tolerance_deg" => tolerances.rotation_deg = number,
-        "focal_length_tolerance_mm" => tolerances.focal_length_mm = number,
-        "dark_temperature_tolerance_c" => tolerances.dark_temperature_c = number,
-        "flat_session_hours" => tolerances.flat_session_seconds = (number * 3600.0).round() as u64,
+        SettingKey::RotationToleranceDeg => tolerances.rotation_deg = number,
+        SettingKey::FocalLengthToleranceMm => tolerances.focal_length_mm = number,
+        SettingKey::DarkTemperatureToleranceC => tolerances.dark_temperature_c = number,
+        SettingKey::FlatSessionHours => {
+            tolerances.flat_session_seconds = (number * 3600.0).round() as u64
+        }
         _ => return Ok(()),
     }
-    tolerances.validate().map_err(|error| {
-        let label = field(key).map(|spec| spec.label).unwrap_or(key);
-        format!("{label}: {error}")
-    })
+    tolerances
+        .validate()
+        .map_err(|error| format!("{}: {error}", field(key).label))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn key(text: &str) -> SettingKey {
+        text.parse().unwrap()
+    }
+
     fn values(pairs: &[(&str, Value)]) -> RuleValues {
         pairs
             .iter()
             .map(|(key, value)| (key.to_string(), value.clone()))
             .collect()
+    }
+
+    #[test]
+    fn every_setting_key_names_one_row_and_reads_back() {
+        let mut seen = std::collections::BTreeSet::new();
+        for spec in fields() {
+            assert!(seen.insert(spec.key), "{} is listed twice", spec.key);
+            assert_eq!(spec.key.as_str().parse::<SettingKey>(), Ok(spec.key));
+            assert_eq!(field(spec.key).key, spec.key);
+        }
+        assert_eq!(seen.len(), 17 + Check::ALL.len() + GradeCheck::ALL.len());
+        assert!("from_the_future".parse::<SettingKey>().is_err());
     }
 
     #[test]
@@ -1616,7 +1898,7 @@ mod tests {
         for spec in fields() {
             assert_eq!(validate(spec, &spec.default), Ok(()), "{}", spec.key);
         }
-        let mut keys: Vec<&str> = fields().iter().map(|spec| spec.key).collect();
+        let mut keys: Vec<&str> = fields().iter().map(|spec| spec.key.as_str()).collect();
         keys.sort_unstable();
         keys.dedup();
         assert_eq!(keys.len(), fields().len(), "keys are unique");
@@ -1636,12 +1918,12 @@ mod tests {
 
         let rig_rules = book.for_rig("rig-a");
         assert_eq!(rig_rules.dark_reach_days, 400.0);
-        assert_eq!(rig_rules.source("dark_reach_days"), RuleSource::Rig);
+        assert_eq!(rig_rules.source(key("dark_reach_days")), RuleSource::Rig);
         assert_eq!(rig_rules.thin_master_frames, 4, "inherits the global value");
-        assert_eq!(rig_rules.source("thin_master_frames"), RuleSource::Global);
+        assert_eq!(rig_rules.source(key("thin_master_frames")), RuleSource::Global);
         assert_eq!(rig_rules.complete_dark_frames, 10, "inherits the default");
         assert_eq!(
-            rig_rules.source("complete_dark_frames"),
+            rig_rules.source(key("complete_dark_frames")),
             RuleSource::Default
         );
 
@@ -1728,7 +2010,7 @@ mod tests {
 
     #[test]
     fn validation_names_the_setting_and_its_range() {
-        let spec = field("dark_temperature_tolerance_c").unwrap();
+        let spec = field(key("dark_temperature_tolerance_c"));
         assert!(validate(spec, &json!(2.0)).is_ok());
         assert!(validate(spec, &json!(0)).is_ok());
         // Wider than Seiza's default: stacks check each light with its rig's own.
@@ -1740,14 +2022,14 @@ mod tests {
                 .contains("from 0 to 20")
         );
         assert!(validate(spec, &json!("2")).is_err());
-        let count = field("thin_master_frames").unwrap();
+        let count = field(key("thin_master_frames"));
         assert!(validate(count, &json!(4.5)).is_err());
         assert!(validate(count, &json!(1)).is_err());
         assert!(validate(count, &json!(64)).is_ok());
-        let mode = field("check_no_flat").unwrap();
+        let mode = field(key("check_no_flat"));
         assert!(validate(mode, &json!("advisory")).is_ok());
         assert!(validate(mode, &json!("poor")).is_err());
-        let limits = field("grade_flat_dim").unwrap();
+        let limits = field(key("grade_flat_dim"));
         assert!(validate(limits, &json!({"suspect": 0.05, "poor": 0.02})).is_ok());
         assert!(
             validate(limits, &json!({"suspect": 0.02, "poor": 0.05}))
@@ -1755,7 +2037,7 @@ mod tests {
                 .contains("suspect before")
         );
         assert!(validate(limits, &json!({"suspect": 0.05, "bad": 0.02})).is_err());
-        let higher = field("grade_flat_illumination").unwrap();
+        let higher = field(key("grade_flat_illumination"));
         assert!(validate(higher, &json!({"suspect": 0.1, "poor": 0.05})).is_err());
         assert!(validate(higher, &json!({"suspect": null, "poor": null})).is_ok());
     }
@@ -1790,14 +2072,14 @@ mod tests {
     /// passes.
     #[test]
     fn a_tolerance_seiza_would_refuse_is_refused_by_name() {
-        assert!(stacker_accepts("rotation_tolerance_deg", &json!(6)).is_ok());
-        assert!(stacker_accepts("dark_temperature_tolerance_c", &json!(10)).is_ok());
-        assert!(stacker_accepts("flat_session_hours", &json!(72)).is_ok());
-        let refused = stacker_accepts("rotation_tolerance_deg", &json!(181)).unwrap_err();
+        assert!(stacker_accepts(key("rotation_tolerance_deg"), &json!(6)).is_ok());
+        assert!(stacker_accepts(key("dark_temperature_tolerance_c"), &json!(10)).is_ok());
+        assert!(stacker_accepts(key("flat_session_hours"), &json!(72)).is_ok());
+        let refused = stacker_accepts(key("rotation_tolerance_deg"), &json!(181)).unwrap_err();
         assert!(refused.starts_with("Flat rotation: "), "{refused}");
-        let refused = stacker_accepts("focal_length_tolerance_mm", &json!(-1)).unwrap_err();
+        let refused = stacker_accepts(key("focal_length_tolerance_mm"), &json!(-1)).unwrap_err();
         assert!(refused.starts_with("Flat focal length: "), "{refused}");
-        assert!(stacker_accepts("thin_master_frames", &json!(-1)).is_ok());
+        assert!(stacker_accepts(key("thin_master_frames"), &json!(-1)).is_ok());
     }
 
     /// Grading screens flats by session, and sessions are nights, so a
@@ -1892,7 +2174,7 @@ mod tests {
         let notes = book.for_rig("rig").notes();
         let texts: Vec<(&str, &str, RuleSource)> = notes
             .iter()
-            .map(|note| (note.key, note.text.as_str(), note.source))
+            .map(|note| (note.key.as_str(), note.text.as_str(), note.source))
             .collect();
         assert_eq!(
             texts,

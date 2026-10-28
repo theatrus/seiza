@@ -18,7 +18,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 seiza-analysis.workspace = true
 seiza = { workspace = true, features = ["downloads"] }
 seiza-background.workspace = true
-seiza-calibration.workspace = true
+seiza-calibration = { workspace = true, features = ["json"] }
 seiza-deconvolution.workspace = true
 seiza-fits = { workspace = true }
 seiza-image-io = { workspace = true }
