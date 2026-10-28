@@ -358,7 +358,7 @@ impl Session {
         paths.sort();
         paths.dedup();
         self.application.sample_lights = match paths.len() {
-            0 | 1 | 2 => paths,
+            0..=2 => paths,
             len => vec![
                 paths[0].clone(),
                 paths[len / 2].clone(),

@@ -24,9 +24,10 @@ pub use flat_notes::{
     vignetting_leads,
 };
 pub use flat_work::{
-    FlatChangeFilter, FlatChangeQuestion, FlatCorrectionPlan, FlatFamilyCandidate,
-    FlatFamilyQuestion, FlatLightContext, FlatWorkAnswer, FlatWorkPlans, FlatWorkRequest,
-    FlatWorkResult, finish_flat_work, plan_flat_work,
+    ChangeFilter, ChangeQuestion, EvidenceLight, FamilyQuestion, FlatChangeFilter,
+    FlatChangeQuestion, FlatCorrectionPlan, FlatFamilyCandidate, FlatFamilyQuestion,
+    FlatLightContext, FlatWorkAnswer, FlatWorkPlans, FlatWorkRequest, FlatWorkResult,
+    change_question, family_questions, finish_flat_work, plan_flat_work,
 };
 pub use grading::{describe_finding, grade, kept_out_reason};
 pub use master_policy::{
@@ -36,7 +37,10 @@ pub use master_policy::{
 pub use recipes::{
     Application, FlatUse, MasterFailure, PedestalEvidence, SessionOptions, resolve_session,
 };
-pub use response_plan::{FlatResponsePlan, FlatResponsePlans, plan_flat_responses};
+pub use response_plan::{
+    FlatResponsePlan, FlatResponsePlans, PedestalTable, SessionPlan, family_key, focal_classes,
+    pedestal_moved, plan_flat_responses, plan_sessions,
+};
 pub use rules::{
     ChoiceOption, Effect, FieldKind, FieldSpec, Group, RigLayer, RuleBook, RuleNote, RuleSource,
     RuleValues, Rules,
@@ -824,6 +828,17 @@ fn evaluate_inner(
     if !request.grouping.lights.is_empty() {
         return Err(invalid(
             "library lights belong in lights, not grouping.lights",
+        ));
+    }
+    // Light evidence is kept per imaging session: without the sessions it
+    // was measured for, it would place nothing, silently.
+    let grouping = &request.grouping;
+    if (!grouping.evidence.is_empty() || !grouping.family_evidence.is_empty())
+        && grouping.imaging.is_empty()
+        && grouping.imaging_lights.is_empty()
+    {
+        return Err(invalid(
+            "light evidence needs the imaging sessions it was measured for: submit the grouping plan_flat_work returns",
         ));
     }
     let checked = checked(&mut request)?;

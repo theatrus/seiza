@@ -349,9 +349,21 @@ fn raw_flat_response_plans_group_nights_modes_and_bound_samples() {
     let mut frames = (0..40)
         .map(|i| supplied_frame(i, CalibrationKind::Flat, (i / 20) as i64 * 3))
         .collect::<Vec<_>>();
+    // PSF Guard's family key: a readout mode's name splits sessions, its
+    // index does not.
+    let mut index_only = supplied_frame(42, CalibrationKind::Flat, 0);
+    index_only.readout_mode = Some(2);
+    frames.push(index_only);
     let mut other = supplied_frame(40, CalibrationKind::Flat, 0);
-    other.readout_mode = Some(2);
+    other.readout_mode_name = Some("High Gain Mode".into());
     frames.push(other);
+    let mut other = supplied_frame(43, CalibrationKind::Flat, 0);
+    other.readout_mode_name = Some("High Gain Mode".into());
+    frames.push(other);
+    // A session of one flat cannot make a response.
+    let mut alone = supplied_frame(44, CalibrationKind::Flat, 0);
+    alone.readout_mode_name = Some("Low Noise".into());
+    frames.push(alone);
     let mut untimed = supplied_frame(41, CalibrationKind::Flat, 0);
     untimed.captured_at = None;
     frames.push(untimed);
@@ -365,9 +377,10 @@ fn raw_flat_response_plans_group_nights_modes_and_bound_samples() {
     let large = result
         .plans
         .iter()
-        .filter(|p| p.row.frame_uuids.len() == 20)
+        .filter(|p| p.row.frame_uuids.len() >= 20)
         .collect::<Vec<_>>();
     assert_eq!(large.len(), 2);
+    assert!(large.iter().any(|p| p.row.frame_uuids.len() == 21));
     for plan in large {
         assert_eq!(
             plan.sample_frames.len(),
@@ -389,25 +402,29 @@ fn raw_flat_response_plans_group_nights_modes_and_bound_samples() {
 fn response_preparation_preserves_explicit_night_boundaries_and_one_set_needs_no_dates() {
     let mut frame = supplied_frame(1, CalibrationKind::Flat, 0);
     frame.captured_at = Some(1_700_000_000);
+    let mut second = supplied_frame(2, CalibrationKind::Flat, 0);
+    second.captured_at = Some(1_700_000_060);
     let mut request = Request {
-        frames: vec![frame],
+        frames: vec![frame, second],
         ..Default::default()
     };
-    request.grouping.night_boundaries = vec![crate::flat_response::groups::NightBoundary {
+    let shift = |frame: &str, seconds| crate::flat_response::groups::NightBoundary {
         rig_uuid: "supplied-rig".into(),
-        frame_uuid: "supplied-Flat-1".into(),
-        seconds: 0,
-    }];
+        frame_uuid: frame.into(),
+        seconds,
+    };
+    request.grouping.night_boundaries =
+        vec![shift("supplied-Flat-1", 0), shift("supplied-Flat-2", 0)];
     let first = plan_flat_responses(request.clone()).unwrap();
     assert_eq!(first.night_boundaries[0].seconds, 0);
-    request.night_shifts = vec![NightShift {
-        rig_uuid: "supplied-rig".into(),
-        frame_uuid: "supplied-Flat-1".into(),
-        seconds: 86400,
-    }];
+    request.night_shifts = vec![
+        shift("supplied-Flat-1", 86400),
+        shift("supplied-Flat-2", 86400),
+    ];
     let second = plan_flat_responses(request.clone()).unwrap();
     assert_ne!(first.plans[0].row.night, second.plans[0].row.night);
     request.frames[0].captured_at = None;
+    request.frames[1].captured_at = None;
     request.flat_association = Association::OneSet;
     let explicit = plan_flat_responses(request).unwrap();
     assert!(explicit.plans.is_empty());
