@@ -141,6 +141,12 @@ So these steps are not optional, and a PR that skips them is not done.
   FITS `CRPIX` is the internal value plus 1.
 - Building `seiza-cabi` regenerates `seiza-cabi/include/seiza_cabi.h`;
   commit it with the change.
+- The C ABI's calibration JSON calls are described by
+  `seiza-cabi/include/seiza_calibration_library.schema.json`, generated from
+  the Rust types. A change to what they take or return changes it: run
+  `SEIZA_UPDATE_SCHEMA=1 cargo test -p seiza-cabi schema` and commit it.
+  A type such a call carries derives `schemars::JsonSchema` behind the
+  `json` (seiza-calibration) or `schema` (seiza-stacking) feature.
 - `seiza-py` is outside the workspace. Format, lint and check it on its own.
 
 ## Before opening a PR
