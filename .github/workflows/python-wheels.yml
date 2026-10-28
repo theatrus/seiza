@@ -1,9 +1,9 @@
 name: Python wheels
 
-# Linux and Windows jobs run on ephemeral 32-core spot runners (tfinfra
-# roots/github-runners, docs/github-runners-plan.md). macOS, every pull
-# request from a fork, and PyPI publishing stay on GitHub's runners: a fork's
-# code never runs on ours. Job names are unchanged, so the required checks
+# Linux jobs run on ephemeral 32-core spot runners (tfinfra
+# roots/github-runners, docs/github-runners-plan.md). Windows, macOS, every
+# pull request from a fork, and PyPI publishing stay on GitHub's runners: a
+# fork's code never runs on ours. Job names are unchanged, so the required checks
 # still match.
 
 on:
@@ -104,7 +104,7 @@ jobs:
             target: universal2-apple-darwin
           - os: windows-latest
             target: x64
-    runs-on: ${{ (github.event.pull_request.head.repo.fork || matrix.os == 'macos-latest') && matrix.os || fromJSON(matrix.os == 'windows-latest' && '["self-hosted","windows","ghr-windows-x64"]' || '["self-hosted","linux","ghr-linux-x64"]') }}
+    runs-on: ${{ (github.event.pull_request.head.repo.fork || matrix.os == 'macos-latest' || matrix.os == 'windows-latest') && matrix.os || fromJSON('["self-hosted","linux","ghr-linux-x64"]') }}
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-python@v7

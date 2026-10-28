@@ -1,7 +1,7 @@
 name: Release packages
 
-# Every job builds on ephemeral 32-core runners (tfinfra roots/github-runners,
-# docs/github-runners-plan.md). Only a tag push or a dispatch by someone with
+# Linux jobs build on ephemeral 32-core runners (tfinfra roots/github-runners,
+# docs/github-runners-plan.md); Windows builds on GitHub's. Only a tag push or a dispatch by someone with
 # write access starts this workflow, so no fork's code reaches them.
 
 on:
@@ -75,7 +75,7 @@ jobs:
           path: dist/*.rpm
 
   windows:
-    runs-on: [self-hosted, windows, ghr-windows-x64]
+    runs-on: windows-latest
     # The Entra federated credential is bound to the subject
     # `repo:theatrus/seiza:environment:release`, so this job has to run in the
     # `release` environment or the OIDC token will not match and azure/login
