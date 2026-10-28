@@ -68,18 +68,12 @@ pub(super) fn apply(
     dark: Association,
 ) {
     let frames = library.frames();
-    // The whole set in capture order: one master serves every light, so
-    // its first frame does not depend on which light asks.
     let all = |kind| {
-        let mut set = frames
+        frames
             .iter()
             .filter(|f| f.kind == kind && f.kept_out.is_none())
             .cloned()
-            .collect::<Vec<_>>();
-        set.sort_by(|a, b| {
-            (a.captured_at, a.id, &a.frame_uuid).cmp(&(b.captured_at, b.id, &b.frame_uuid))
-        });
-        set
+            .collect::<Vec<_>>()
     };
     let rules = &selected.rules;
     if dark == Association::OneSet && rules.use_darks {

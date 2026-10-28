@@ -32,10 +32,14 @@ pub use flat_work::{
 pub use grading::{describe_finding, grade, kept_out_reason};
 pub use master_policy::{
     FlatAttempt, FlatRetryAction, FlatRetryDecision, FlatRetryPolicy, FlatRetryRequest,
-    MasterCohort, MasterCohortRequest, MasterPlanRequest, flat_retry, master_cohort, plan_masters,
+    MasterCohort, MasterCohortRequest, MasterPlanRequest, alternate_note, flat_retry,
+    flat_set_label, master_cohort, plan_masters, same_session_as, trimmed_note, trims_to_majority,
+    unstable_note,
 };
 pub use recipes::{
-    Application, FlatUse, MasterFailure, PedestalEvidence, SessionOptions, resolve_session,
+    Application, FlatUse, MAX_PEDESTAL_ADU, MasterFailure, PedestalEvidence, PedestalRefusal,
+    SessionOptions, accept_pedestal, adopted_master, dark_level_screening, master_dependencies,
+    pedestal_hint, pedestal_sample_lights, resolve_session,
 };
 pub use response_plan::{
     FlatResponsePlan, FlatResponsePlans, PedestalTable, SessionPlan, family_key, focal_classes,

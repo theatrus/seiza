@@ -178,6 +178,64 @@ fn session_key(
     hex_digest(&serde_json::to_string(&identity).expect("validated session identity"))
 }
 
+/// The masters a master of `kind` is built on: a dark or dark-flat on its
+/// bias, a flat on its bias and dark-flat. One whose dependency failed is
+/// skipped rather than built without it.
+pub fn master_dependencies(kind: CalibrationKind) -> &'static [CalibrationKind] {
+    match kind {
+        CalibrationKind::Bias => &[],
+        CalibrationKind::Dark | CalibrationKind::DarkFlat => &[CalibrationKind::Bias],
+        CalibrationKind::Flat => &[CalibrationKind::Bias, CalibrationKind::DarkFlat],
+    }
+}
+
+/// The external master a light takes for `kind` from its candidates,
+/// nearest first, used as it is and never integrated with raw frames: the
+/// nearest one under `prefer`, the nearest one when the raw frames cannot
+/// make a master under `fallback`, none under `ignore`. A flat master from
+/// the far side of a measured change (`held_back`) never stands in.
+pub fn adopted_master<'a>(
+    kind: CalibrationKind,
+    frames: &'a [CalibrationFrame],
+    held_back: &[String],
+    rules: &Rules,
+) -> Option<&'a CalibrationFrame> {
+    adopted_with(kind, frames, held_back, rules.external_masters, || {
+        let raw: Vec<CalibrationFrame> = frames.iter().filter(|f| !f.is_master).cloned().collect();
+        coherent_cohort(kind, &raw, rules).kept.len()
+    })
+}
+
+fn adopted_with<'a>(
+    kind: CalibrationKind,
+    frames: &'a [CalibrationFrame],
+    held_back: &[String],
+    policy: ExternalMasterPolicy,
+    coherent_raw: impl FnOnce() -> usize,
+) -> Option<&'a CalibrationFrame> {
+    let mut masters = frames.iter().filter(|f| {
+        f.is_master && !(kind == CalibrationKind::Flat && held_back.contains(&f.frame_uuid))
+    });
+    match policy {
+        ExternalMasterPolicy::Prefer => masters.next(),
+        ExternalMasterPolicy::Fallback if coherent_raw() < MIN_MASTER_FRAMES => masters.next(),
+        _ => None,
+    }
+}
+
+/// Whether the integrator screens `inputs` for stray light by their level.
+/// The screen is for darks the library has not graded yet: once every one
+/// is graded or chosen, the grades have kept the poor ones out, and the
+/// screen would only overrule a person who chose to use one anyway.
+pub fn dark_level_screening<'a>(
+    kind: CalibrationKind,
+    inputs: impl IntoIterator<Item = &'a CalibrationFrame>,
+    quality: &QualityIndex,
+) -> bool {
+    matches!(kind, CalibrationKind::Dark | CalibrationKind::DarkFlat)
+        && inputs.into_iter().any(|frame| !quality.judged(frame))
+}
+
 pub(super) fn recipes(selected: &CalibrationSelection) -> Vec<MasterRecipe> {
     let mut recipes: Vec<MasterRecipe> = Vec::new();
     for kind in [
@@ -187,30 +245,28 @@ pub(super) fn recipes(selected: &CalibrationSelection) -> Vec<MasterRecipe> {
         CalibrationKind::Flat,
     ] {
         let frames = selected.of_kind(kind);
-        let masters: Vec<_> = frames
-            .iter()
-            .filter(|f| {
-                f.is_master
-                    && !(kind == CalibrationKind::Flat
-                        && selected.flat_held_back.contains(&f.frame_uuid))
-            })
-            .collect();
         let raw: Vec<_> = frames.iter().filter(|f| !f.is_master).cloned().collect();
         let subset = if selected.one_set.contains(&kind) {
+            // One supplied set serves every light in capture order, so its
+            // first frame does not depend on which light or host asks.
+            let mut kept = raw.clone();
+            kept.sort_by(|a, b| {
+                (a.captured_at, a.id, &a.frame_uuid).cmp(&(b.captured_at, b.id, &b.frame_uuid))
+            });
             Cohort {
-                kept: raw.clone(),
+                kept,
                 dropped: Vec::new(),
             }
         } else {
             coherent_cohort(kind, &raw, &selected.rules)
         };
-        let adopt = match selected.rules.external_masters {
-            ExternalMasterPolicy::Prefer => masters.first().copied(),
-            ExternalMasterPolicy::Fallback if subset.kept.len() < MIN_MASTER_FRAMES => {
-                masters.first().copied()
-            }
-            _ => None,
-        };
+        let adopt = adopted_with(
+            kind,
+            frames,
+            &selected.flat_held_back,
+            selected.rules.external_masters,
+            || subset.kept.len(),
+        );
         let (action, inputs, exposure_seconds) = if let Some(master) = adopt {
             (
                 RecipeAction::External,
@@ -229,18 +285,7 @@ pub(super) fn recipes(selected: &CalibrationSelection) -> Vec<MasterRecipe> {
         let dependencies = if action == RecipeAction::Integrate {
             recipes
                 .iter()
-                .filter(|r| {
-                    r.serves()
-                        && match kind {
-                            CalibrationKind::Bias => false,
-                            CalibrationKind::Dark | CalibrationKind::DarkFlat => {
-                                r.kind == CalibrationKind::Bias
-                            }
-                            CalibrationKind::Flat => {
-                                matches!(r.kind, CalibrationKind::Bias | CalibrationKind::DarkFlat)
-                            }
-                        }
-                })
+                .filter(|r| r.serves() && master_dependencies(kind).contains(&r.kind))
                 .map(|r| r.kind)
                 .collect()
         } else {
@@ -354,18 +399,9 @@ impl Session {
             self.application.flat_use = FlatUse::ForcedWithoutPedestal;
             return;
         }
-        let mut paths: Vec<_> = lights.iter().map(|l| l.path.clone()).collect();
-        paths.sort();
-        paths.dedup();
-        self.application.sample_lights = match paths.len() {
-            0..=2 => paths,
-            len => vec![
-                paths[0].clone(),
-                paths[len / 2].clone(),
-                paths[len - 1].clone(),
-            ],
-        };
-        self.application.pedestal_hint = lights.first().and_then(|l| header_pedestal_hint(l));
+        let paths: Vec<_> = lights.iter().map(|l| l.path.clone()).collect();
+        self.application.sample_lights = pedestal_sample_lights(&paths);
+        self.application.pedestal_hint = lights.first().and_then(|l| pedestal_hint(l));
         self.application.flat_use = FlatUse::NeedsPedestalFit;
     }
 
@@ -389,32 +425,96 @@ impl Session {
     }
 }
 
-fn header_pedestal_hint(light: &Light) -> Option<f64> {
+/// The pedestal a camera's recorded offset predicts, in ADU, where its
+/// driver is known to record it: a ZWO camera's offset times ten.
+pub fn pedestal_hint(light: &Light) -> Option<f64> {
     let offset = light.offset.filter(|value| *value > 0)?;
     let camera = light.camera.as_deref()?.to_ascii_uppercase();
     (camera.contains("ZWO") || camera.contains("ASI")).then_some(offset as f64 * 10.0)
 }
-fn accepted_pedestal(evidence: &PedestalEvidence, hint: Option<f64>) -> Option<f32> {
-    if let Some(pinned) = evidence.pinned {
-        return Some(pinned);
+
+/// The lights a flat pedestal is fitted from: by sorted path, so the
+/// estimate does not depend on the caller's light order, the first, middle
+/// and last.
+pub fn pedestal_sample_lights(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut sorted = paths.to_vec();
+    sorted.sort();
+    sorted.dedup();
+    match sorted.len() {
+        0..=2 => sorted,
+        len => vec![
+            sorted[0].clone(),
+            sorted[len / 2].clone(),
+            sorted[len - 1].clone(),
+        ],
     }
-    let mut estimates = evidence.estimates.clone();
+}
+
+/// The most fitted pedestal a flat is applied after, in ADU: 20% of the
+/// 16-bit scale.
+pub const MAX_PEDESTAL_ADU: f32 = 13_107.0;
+
+/// Why fitted pedestals were refused.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PedestalRefusal {
+    /// No light produced a usable fit.
+    NoFit,
+    /// The per-light estimates disagree.
+    Disagree(Vec<f32>),
+    /// Outside 0 to [`MAX_PEDESTAL_ADU`].
+    OutOfRange(f32),
+    /// More than 3x either way from the camera's recorded offset: more
+    /// likely a sky gradient than a pedestal.
+    ContradictsOffset { pedestal: f32, hint: f64 },
+}
+impl std::fmt::Display for PedestalRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoFit => write!(f, "no light produced a usable fit"),
+            Self::Disagree(estimates) => {
+                write!(f, "per-light estimates disagree ({estimates:?} ADU)")
+            }
+            Self::OutOfRange(pedestal) => {
+                write!(f, "{pedestal:.1} ADU is outside the sane range")
+            }
+            Self::ContradictsOffset { pedestal, hint } => write!(
+                f,
+                "{pedestal:.1} ADU contradicts the camera's recorded offset (~{hint:.0} ADU)"
+            ),
+        }
+    }
+}
+
+/// The pedestal under a session's lights from the fits of its sample
+/// lights: their median, when they agree, lie in range, and do not
+/// contradict the camera's recorded offset.
+pub fn accept_pedestal(estimates: &[f32], hint: Option<f64>) -> Result<f32, PedestalRefusal> {
+    let mut estimates = estimates.to_vec();
     if estimates.is_empty() {
-        return None;
+        return Err(PedestalRefusal::NoFit);
     }
     estimates.sort_by(f32::total_cmp);
     let pedestal = estimates[estimates.len() / 2];
     let spread = estimates[estimates.len() - 1] - estimates[0];
-    if spread > (pedestal * 0.25).max(64.0) || !(0.0..=13_107.0).contains(&pedestal) {
-        return None;
+    if spread > (pedestal * 0.25).max(64.0) {
+        return Err(PedestalRefusal::Disagree(estimates));
+    }
+    if !(0.0..=MAX_PEDESTAL_ADU).contains(&pedestal) {
+        return Err(PedestalRefusal::OutOfRange(pedestal));
     }
     if let Some(hint) = hint {
-        let hint = hint as f32;
-        if pedestal < hint / 3.0 || pedestal > hint * 3.0 {
-            return None;
+        let h = hint as f32;
+        if pedestal < h / 3.0 || pedestal > h * 3.0 {
+            return Err(PedestalRefusal::ContradictsOffset { pedestal, hint });
         }
     }
-    Some(pedestal)
+    Ok(pedestal)
+}
+
+fn accepted_pedestal(evidence: &PedestalEvidence, hint: Option<f64>) -> Option<f32> {
+    evidence
+        .pinned
+        .or_else(|| accept_pedestal(&evidence.estimates, hint).ok())
 }
 
 /// Apply a request's execution feedback to its sessions: failures, then

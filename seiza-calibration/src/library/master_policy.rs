@@ -220,6 +220,101 @@ pub struct FlatRetryDecision {
     pub rebuild_first: bool,
     pub note: Option<String>,
 }
+/// Whether a flat set whose `drifting` of `used` frames disagree with the
+/// master still holds a stable majority that makes an honest master alone.
+pub fn trims_to_majority(used: usize, drifting: usize) -> bool {
+    let stable = used.saturating_sub(drifting);
+    stable >= MIN_MASTER_FRAMES && stable * 2 >= used
+}
+
+/// The candidates shot within one flat session of `set`: the set itself
+/// and whatever the clusterer left out of it from the same run, within
+/// `window_seconds` of its first and last frames. The next set never comes
+/// from these: they saw the same window.
+pub fn same_session_as(
+    set: &[CalibrationFrame],
+    candidates: &[CalibrationFrame],
+    window_seconds: u64,
+) -> Vec<CalibrationFrame> {
+    let window = i64::try_from(window_seconds).unwrap_or(i64::MAX);
+    let first = set.iter().filter_map(|frame| frame.captured_at).min();
+    let last = set.iter().filter_map(|frame| frame.captured_at).max();
+    candidates
+        .iter()
+        .filter(|candidate| {
+            set.iter()
+                .any(|frame| frame.frame_uuid == candidate.frame_uuid)
+                || match (first, last, candidate.captured_at) {
+                    (Some(first), Some(last), Some(at)) => {
+                        at >= first.saturating_sub(window) && at <= last.saturating_add(window)
+                    }
+                    _ => false,
+                }
+        })
+        .cloned()
+        .collect()
+}
+
+/// "20 G flats from 2026-09-10", for a note about one flat set.
+pub fn flat_set_label(frames: &[CalibrationFrame]) -> String {
+    let filter = frames
+        .iter()
+        .find_map(|frame| frame.filter.as_deref())
+        .map(|name| format!("{name} "))
+        .unwrap_or_default();
+    let day = |timestamp: i64| {
+        chrono::DateTime::from_timestamp(timestamp, 0)
+            .map(|at| at.format("%Y-%m-%d").to_string())
+            .unwrap_or_else(|| timestamp.to_string())
+    };
+    let first = frames.iter().filter_map(|frame| frame.captured_at).min();
+    let last = frames.iter().filter_map(|frame| frame.captured_at).max();
+    let when = match (first, last) {
+        (Some(first), Some(last)) if day(first) != day(last) => {
+            format!(" from {} to {}", day(first), day(last))
+        }
+        (Some(first), _) => format!(" from {}", day(first)),
+        _ => String::new(),
+    };
+    format!("{} {filter}flats{when}", frames.len())
+}
+
+const SPOTS: &str = "spots that come and go across the run: dew or frost on the sensor window?";
+
+/// The note for a master built after leaving out the frames that disagreed.
+pub fn trimmed_note(left_out: usize, used: usize, feature_pixels: usize) -> String {
+    format!(
+        "Left out {left_out} of {used} flats that disagreed with the rest of the set at \
+         {feature_pixels} pixels ({SPOTS})"
+    )
+}
+
+/// The note for a master built from the next set instead of the nearest.
+pub fn alternate_note(first: &str, other: &str, feature_pixels: usize) -> String {
+    format!(
+        "The nearest {first} disagree with each other at {feature_pixels} pixels ({SPOTS}); \
+         used {other} instead"
+    )
+}
+
+/// The note for the nearest set kept, or withheld, though unstable.
+pub fn unstable_note(
+    drifting: usize,
+    used: usize,
+    feature_pixels: usize,
+    withheld: bool,
+) -> String {
+    let disposition = if withheld {
+        "Withheld an unstable flat set"
+    } else {
+        "Built from an unstable flat set"
+    };
+    format!(
+        "{disposition}: {drifting} of {used} frames disagree with the master at \
+         {feature_pixels} pixels ({SPOTS}). Retake these flats"
+    )
+}
+
 /// Decide the next flat retry/publication from immutable execution feedback.
 /// Hosts retain staging, cancellation, cache publication and pixel measurement.
 pub fn flat_retry(request: FlatRetryRequest) -> crate::Result<FlatRetryDecision> {
@@ -315,9 +410,7 @@ pub fn flat_retry(request: FlatRetryRequest) -> crate::Result<FlatRetryDecision>
         return Ok(result);
     }
     let used = first.used.len();
-    let stable = used - drifting.len();
-    let spots = "spots that come and go across the run: dew or frost on the sensor window?";
-    let trim = policy.trim_unstable && stable >= MIN_MASTER_FRAMES && stable * 2 >= used;
+    let trim = policy.trim_unstable && trims_to_majority(used, drifting.len());
     if trim && !trimmed_attempted {
         result.action = FlatRetryAction::TryTrimmed;
         result.inputs = first
@@ -334,27 +427,22 @@ pub fn flat_retry(request: FlatRetryRequest) -> crate::Result<FlatRetryDecision>
         && !attempt.memo
     {
         result.action = FlatRetryAction::PublishTrimmed;
-        result.note = Some(format!(
-            "Left out {} of {used} flats that disagreed with the rest of the set at {} pixels ({spots})",
-            drifting.len(),
-            first.feature_pixels
-        ));
+        result.note = Some(trimmed_note(drifting.len(), used, first.feature_pixels));
         return Ok(result);
     }
-    let first_rows: Vec<_> = request
-        .candidates
-        .iter()
-        .filter(|f| first.used.contains(&f.frame_uuid))
+    let rows_of = |used: &[String]| -> Vec<CalibrationFrame> {
+        used.iter()
+            .filter_map(|id| request.candidates.iter().find(|f| &f.frame_uuid == id))
+            .cloned()
+            .collect()
+    };
+    let first_rows = rows_of(&first.used);
+    let same_session: BTreeSet<String> = same_session_as(&first_rows, &request.candidates, window)
+        .into_iter()
+        .map(|f| f.frame_uuid)
         .collect();
-    let start = first_rows.iter().filter_map(|f| f.captured_at).min();
-    let end = first_rows.iter().filter_map(|f| f.captured_at).max();
-    let window =
-        i64::try_from(window).map_err(|_| invalid("flat retry session window is too large"))?;
     let eligible_alternate = |f: &CalibrationFrame| {
-        !f.is_master
-            && !held_back.contains(&f.frame_uuid)
-            && !first.used.contains(&f.frame_uuid)
-            && !matches!((start, end, f.captured_at), (Some(a), Some(b), Some(t)) if t >= a.saturating_sub(window) && t <= b.saturating_add(window))
+        !f.is_master && !held_back.contains(&f.frame_uuid) && !same_session.contains(&f.frame_uuid)
     };
     let alternate_ids: BTreeSet<_> = request
         .candidates
@@ -395,14 +483,13 @@ pub fn flat_retry(request: FlatRetryRequest) -> crate::Result<FlatRetryDecision>
             attempt
                 .label
                 .clone()
-                .unwrap_or_else(|| format!("{} flats", attempt.used.len()))
+                .unwrap_or_else(|| flat_set_label(&rows_of(&attempt.used)))
         };
         result.action = FlatRetryAction::PublishAlternate;
-        result.note = Some(format!(
-            "The nearest {} disagree with each other at {} pixels ({spots}); used {} instead",
-            label(first),
+        result.note = Some(alternate_note(
+            &label(first),
+            &label(attempt),
             first.feature_pixels,
-            label(attempt)
         ));
         return Ok(result);
     }
@@ -411,15 +498,11 @@ pub fn flat_retry(request: FlatRetryRequest) -> crate::Result<FlatRetryDecision>
     } else {
         FlatRetryAction::Withhold
     };
-    let disposition = if result.action == FlatRetryAction::Withhold {
-        "Withheld an unstable flat set"
-    } else {
-        "Built from an unstable flat set"
-    };
-    result.note = Some(format!(
-        "{disposition}: {} of {used} frames disagree with the master at {} pixels ({spots}). Retake these flats",
+    result.note = Some(unstable_note(
         drifting.len(),
-        first.feature_pixels
+        used,
+        first.feature_pixels,
+        result.action == FlatRetryAction::Withhold,
     ));
     Ok(result)
 }
