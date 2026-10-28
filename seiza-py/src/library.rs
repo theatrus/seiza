@@ -282,7 +282,7 @@ impl PyCalibrationNights {
         rules: Option<PyRef<'_, PyCalibrationRules>>,
     ) -> PyResult<Self> {
         let rows: Vec<groups::NightBoundary> = optional(boundaries, "night boundaries")?;
-        let mut nights = library::NightShifts::new(rows);
+        let mut nights = library::NightShifts::checked(rows).map_err(invalid)?;
         if let Some(rules) = rules {
             let frames: Vec<library::CalibrationFrame> = optional(frames, "frames")?;
             nights = nights.with_zones(&frames, &rules.book);
@@ -376,6 +376,8 @@ impl PyCalibrationQuality {
     }
 
     /// Why `frame` stays out of masters and exports, or None when it serves.
+    /// Its own `kept_out` is read as the stray-light mark an older build
+    /// left: give frames as the catalog stores them.
     #[pyo3(signature = (frame, judged=None))]
     fn kept_out(
         &self,
@@ -389,7 +391,8 @@ impl PyCalibrationQuality {
         Ok(self.quality.kept_out(&frame, grade))
     }
 
-    /// `frames` with each one's kept-out reason set.
+    /// `frames`, as the catalog stores them, with each one's kept-out reason
+    /// set. Apply it to the stored frames, not to frames it returned.
     #[pyo3(signature = (frames, judged=None))]
     fn keep_out<'py>(
         &self,
@@ -556,19 +559,31 @@ pub(crate) struct PyCalibrationLibrary {
 impl PyCalibrationLibrary {
     /// A library of `frames`, with kept-out reasons decided; `groups`, the
     /// measured flat grouping book, and the correction responses the host
-    /// can read.
+    /// can read. Repeated or empty frame UUIDs, unverifiable sources and
+    /// non-finite metadata raise ValueError. Given the `rules`, a book
+    /// grouped by other limits than they give its rigs does too.
     #[new]
-    #[pyo3(signature = (frames, *, groups=None, available_responses=Vec::new()))]
+    #[pyo3(signature = (frames, *, groups=None, available_responses=Vec::new(), rules=None))]
     fn new(
         frames: &Bound<'_, PyAny>,
         groups: Option<PyRef<'_, PyFlatGroups>>,
         available_responses: Vec<String>,
+        rules: Option<PyRef<'_, PyCalibrationRules>>,
     ) -> PyResult<Self> {
         let frames: Vec<library::CalibrationFrame> = from_python(frames, "frames")?;
         let book = groups.map_or_else(Default::default, |groups| Arc::clone(&groups.book));
-        Ok(Self {
-            library: library::Library::new(frames, book, available_responses),
-        })
+        let library =
+            library::Library::checked(frames, book, available_responses).map_err(invalid)?;
+        if let Some(rules) = rules {
+            library.check_limits(&rules.book).map_err(invalid)?;
+        }
+        Ok(Self { library })
+    }
+
+    /// Raise ValueError when the flat grouping book was grouped by other
+    /// limits than `rules` give its rigs.
+    fn check_limits(&self, rules: PyRef<'_, PyCalibrationRules>) -> PyResult<()> {
+        self.library.check_limits(&rules.book).map_err(invalid)
     }
 
     /// The frames, newest first.
@@ -597,6 +612,7 @@ impl PyCalibrationLibrary {
         dark_association: &str,
     ) -> PyResult<PyCalibrationSelection> {
         let light: library::Light = from_python(light, "light")?;
+        light.check().map_err(invalid)?;
         let associations = associations(flat_association, dark_association)?;
         let rules = Arc::clone(&rules.rules);
         let selection = py.detach(|| self.library.select_associated(&light, rules, associations));
@@ -878,6 +894,99 @@ fn calibration_coherent_cohort<'py>(
     Ok(result.into_any())
 }
 
+/// The external master a light takes for `kind` from `frames`, its
+/// candidates nearest first, used as it is and never integrated with raw
+/// frames; None when the rules prefer the raw frames or ignore masters.
+/// `held_back` flats, from the far side of a measured change, never stand in.
+#[pyfunction]
+#[pyo3(signature = (kind, frames, rules, *, held_back=Vec::new()))]
+fn calibration_adopted_master<'py>(
+    py: Python<'py>,
+    kind: &str,
+    frames: &Bound<'py, PyAny>,
+    rules: PyRef<'_, PyCalibrationRigRules>,
+    held_back: Vec<String>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let frames: Vec<library::CalibrationFrame> = from_python(frames, "frames")?;
+    let adopted = library::adopted_master(word(kind)?, &frames, &held_back, &rules.rules);
+    to_python(py, &adopted)
+}
+
+/// Whether the integrator should screen a dark or dark-flat master's
+/// `inputs` for stray light itself: when one of them has no current grade
+/// or personal choice in `quality`.
+#[pyfunction]
+fn calibration_dark_level_screening(
+    kind: &str,
+    inputs: &Bound<'_, PyAny>,
+    quality: PyRef<'_, PyCalibrationQuality>,
+) -> PyResult<bool> {
+    let inputs: Vec<library::CalibrationFrame> = from_python(inputs, "inputs")?;
+    Ok(library::dark_level_screening(
+        word(kind)?,
+        &inputs,
+        &quality.quality,
+    ))
+}
+
+/// The pedestal under a session's lights, in ADU, from the fits of its
+/// sample lights: their median, when they agree, lie in range and do not
+/// contradict the camera's recorded offset `hint`. Raises ValueError saying
+/// why they were refused.
+#[pyfunction]
+#[pyo3(signature = (estimates, hint=None))]
+fn calibration_pedestal_from_fits(estimates: Vec<f32>, hint: Option<f64>) -> PyResult<f32> {
+    library::pedestal_from_fits(&estimates, hint).map_err(invalid)
+}
+
+/// The pedestal a camera's recorded offset predicts, in ADU, where its
+/// driver is known to record it; None otherwise.
+#[pyfunction]
+fn calibration_pedestal_hint(light: &Bound<'_, PyAny>) -> PyResult<Option<f64>> {
+    let light: library::Light = from_python(light, "light")?;
+    Ok(library::pedestal_hint(&light))
+}
+
+/// The lights a flat pedestal is fitted from: by sorted path, the first,
+/// middle and last.
+#[pyfunction]
+fn calibration_pedestal_sample_lights(
+    py: Python<'_>,
+    paths: Vec<PathBuf>,
+) -> PyResult<Bound<'_, PyAny>> {
+    to_python(py, &library::pedestal_sample_lights(&paths))
+}
+
+/// "20 G flats from 2026-09-10", for a note about one flat set.
+#[pyfunction]
+fn calibration_flat_set_label(frames: &Bound<'_, PyAny>) -> PyResult<String> {
+    let frames: Vec<library::CalibrationFrame> = from_python(frames, "frames")?;
+    Ok(library::flat_set_label(&frames))
+}
+
+/// A grade's finding in words, for a frame of `kind`.
+#[pyfunction]
+fn calibration_describe_finding(finding: &Bound<'_, PyAny>, kind: &str) -> PyResult<String> {
+    let finding: seiza_calibration::Finding = from_python(finding, "finding")?;
+    Ok(library::describe_finding(&finding, word(kind)?))
+}
+
+/// The family a flat belongs to, rotation aside, with its focal length
+/// class: the key flat responses are kept by.
+#[pyfunction]
+#[pyo3(signature = (frame, focal=None))]
+fn calibration_family_key(frame: &Bound<'_, PyAny>, focal: Option<f64>) -> PyResult<String> {
+    let frame: library::CalibrationFrame = from_python(frame, "frame")?;
+    Ok(library::family_key(&frame, focal))
+}
+
+/// Whether a kept response's pedestal moved enough to measure it again.
+#[pyfunction]
+#[pyo3(signature = (kept, now))]
+fn calibration_pedestal_moved(kept: Option<f64>, now: Option<f64>) -> bool {
+    library::pedestal_moved(kept, now)
+}
+
 // --- flat retry ------------------------------------------------------------------
 
 /// A flat master's way to a set that agrees with itself, one step at a
@@ -887,6 +996,9 @@ fn calibration_coherent_cohort<'py>(
 pub(crate) struct PyFlatRetry {
     first: library::FlatAttempt,
     candidates: Vec<library::CalibrationFrame>,
+    /// The session the master is for, whose policy and held-back flats
+    /// stand in for `held_back` and `policy`.
+    session: Option<library::Session>,
     held_back: Vec<String>,
     rules: Arc<rules::Rules>,
     policy: library::FlatRetryPolicy,
@@ -898,13 +1010,21 @@ impl PyFlatRetry {
     /// The native retry with what it has been told: built each time, since
     /// it borrows the candidates this object owns.
     fn retry(&self) -> PyResult<library::FlatRetry<'_>> {
-        let mut retry = library::FlatRetry::new(
-            self.first.clone(),
-            &self.candidates,
-            &self.held_back,
-            &self.rules,
-            self.policy.clone(),
-        )
+        let mut retry = match &self.session {
+            Some(session) => library::FlatRetry::for_session(
+                self.first.clone(),
+                &self.candidates,
+                session,
+                &self.rules,
+            ),
+            None => library::FlatRetry::new(
+                self.first.clone(),
+                &self.candidates,
+                &self.held_back,
+                &self.rules,
+                self.policy.clone(),
+            ),
+        }
         .map_err(invalid)?;
         if let Some(attempt) = &self.trimmed {
             retry.trimmed(attempt.clone()).map_err(invalid)?;
@@ -921,18 +1041,27 @@ impl PyFlatRetry {
     /// The retry of a flat master first built as `first` from `candidates`,
     /// the light's flats nearest first, by `rules` (the selection's).
     /// `held_back` frames never stand in; `policy` defaults to all retries.
+    /// Given the `session` the master is for, its policy and held-back flats
+    /// are used instead, so a supplied set never takes another session.
     #[new]
-    #[pyo3(signature = (first, candidates, rules, *, held_back=Vec::new(), policy=None))]
+    #[pyo3(signature = (first, candidates, rules, *, held_back=Vec::new(), policy=None, session=None))]
     fn new(
         first: &Bound<'_, PyAny>,
         candidates: &Bound<'_, PyAny>,
         rules: PyRef<'_, PyCalibrationRigRules>,
         held_back: Vec<String>,
         policy: Option<&Bound<'_, PyAny>>,
+        session: Option<PyRef<'_, PyCalibrationSession>>,
     ) -> PyResult<Self> {
+        if session.is_some() && (!held_back.is_empty() || policy.is_some_and(|p| !p.is_none())) {
+            return Err(invalid(
+                "give the session, or held_back and policy, not both",
+            ));
+        }
         let retry = Self {
             first: from_python(first, "first attempt")?,
             candidates: from_python(candidates, "candidates")?,
+            session: session.map(|session| session.session.clone()),
             held_back,
             rules: Arc::clone(&rules.rules),
             policy: optional(policy, "flat retry policy")?,
@@ -1602,7 +1731,8 @@ impl PyChangeQuestion {
     /// The evidence row its filters' fits make.
     fn row<'py>(&self, py: Python<'py>, fits: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let fits: Vec<groups::EvidenceFit> = from_python(fits, "evidence fits")?;
-        to_python(py, &self.question.row(&self.book, fits))
+        let row = self.question.row(&self.book, fits).map_err(invalid)?;
+        to_python(py, &row)
     }
 }
 
@@ -1732,6 +1862,18 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(calibration_setting_check, module)?)?;
     module.add_function(wrap_pyfunction!(calibration_resolve_session, module)?)?;
     module.add_function(wrap_pyfunction!(calibration_coherent_cohort, module)?)?;
+    module.add_function(wrap_pyfunction!(calibration_adopted_master, module)?)?;
+    module.add_function(wrap_pyfunction!(calibration_dark_level_screening, module)?)?;
+    module.add_function(wrap_pyfunction!(calibration_pedestal_from_fits, module)?)?;
+    module.add_function(wrap_pyfunction!(calibration_pedestal_hint, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        calibration_pedestal_sample_lights,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(calibration_flat_set_label, module)?)?;
+    module.add_function(wrap_pyfunction!(calibration_describe_finding, module)?)?;
+    module.add_function(wrap_pyfunction!(calibration_family_key, module)?)?;
+    module.add_function(wrap_pyfunction!(calibration_pedestal_moved, module)?)?;
     module.add_function(wrap_pyfunction!(calibration_flat_sessions, module)?)?;
     module.add_function(wrap_pyfunction!(calibration_family_questions, module)?)?;
     module.add_function(wrap_pyfunction!(calibration_change_question, module)?)?;

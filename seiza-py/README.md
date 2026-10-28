@@ -1674,7 +1674,7 @@ nights = seiza.CalibrationNights(night_boundaries, frames=frames, rules=rules)
 quality = seiza.CalibrationQuality(quality_rows)
 grades = quality.regrade(frames, rules, nights)   # current measurements only
 frames = quality.keep_out(frames, grades)         # each frame's kept-out reason
-library = seiza.CalibrationLibrary(frames, groups=seiza.FlatGroups(grouping_rows))
+library = seiza.CalibrationLibrary(frames, groups=seiza.FlatGroups(grouping_rows), rules=rules)
 for light in lights:
     selection = library.select(light, rules.for_light(light))
     session = seiza.calibration_resolve_session(selection, quality)
@@ -1694,7 +1694,9 @@ the order a panel shows them, with labels, help, ranges and defaults, and
 and rules, each rig's `night_zone` setting applies over its frames.
 `CalibrationQuality.regrade` grades only current, fingerprint-matching
 measurements and returns `CalibrationGrades`; `measurement_state(frame)`
-tells stale, failed and missing measurements apart. A `FlatGroups` book is
+tells stale, failed and missing measurements apart. `keep_out` reads each
+frame's `kept_out` as the stray-light mark an older build left, so give it
+the frames as the catalog stores them, not frames it returned. A `FlatGroups` book is
 built once from stored grouping rows, with each rig's limits from
 `rules.for_rig(rig).grouping_limits()`, and reused across selections.
 
@@ -1727,18 +1729,25 @@ pedestal fitted from `application["sample_lights"]`, which
 `session.accept_pedestal(estimates, pinned=None)` accepts or refuses
 (`without_masters="force"` applies the flat regardless).
 `calibration_coherent_cohort(kind, frames, rules)` gives the frames one
-master integrates and those it drops, for previews.
+master integrates and those it drops, for previews. A host that builds its
+own masters, as PSF Guard does, makes the decisions a session's recipes are
+made of with the same calls: `calibration_adopted_master` (the external
+master a light takes), `calibration_dark_level_screening`,
+`calibration_pedestal_sample_lights`, `calibration_pedestal_hint`,
+`calibration_pedestal_from_fits`, `calibration_family_key`,
+`calibration_pedestal_moved`, `calibration_flat_set_label` and
+`calibration_describe_finding`.
 
-`FlatRetry(first, candidates, rules, held_back=..., policy=...)` decides a
-flat master's retries from measured build feedback (`FlatAttempt`): leave a
-drifting minority out, else take the next flat session, else keep the first
-set with a note, or withhold it when the policy keeps no unstable set. Take
-`held_back` and `policy` from the session (`flat_held_back`,
-`flat_stability`) and `rules` from the selection:
+`FlatRetry(first, candidates, rules, session=...)` decides a flat master's
+retries from measured build feedback (`FlatAttempt`): leave a drifting
+minority out, else take the next flat session, else keep the first set with
+a note, or withhold it when the policy keeps no unstable set. The session
+gives the retry policy and held-back flats (a supplied set never takes
+another session), and `rules` come from the selection; without a session,
+pass `held_back` and `policy`:
 
 ```python
-retry = seiza.FlatRetry(first_attempt, raw_flats, selection.rules,
-                        held_back=session.flat_held_back, policy=session.flat_stability)
+retry = seiza.FlatRetry(first_attempt, raw_flats, selection.rules, session=session)
 decision = retry.next()
 while decision["action"] in ("try_trimmed", "try_alternate"):
     built = build(decision["inputs"])              # None when no master came of it

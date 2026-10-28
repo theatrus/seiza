@@ -179,22 +179,10 @@ fn check_request(
     global: Vec<Setting>,
     rigs: Vec<RigSettings>,
 ) -> crate::Result<(RuleBook, QualityIndex)> {
-    let mut ids = BTreeSet::new();
-    for frame in frames {
-        if frame.frame_uuid.is_empty() || !ids.insert(frame.frame_uuid.as_str()) {
-            return Err(invalid(
-                "calibration frame UUIDs must be nonempty and unique",
-            ));
-        }
-        if frame.source_verified
-            && (frame.source_path.as_os_str().is_empty() || frame.source_fingerprint.is_empty())
-        {
-            return Err(invalid("verified sources need a path and fingerprint"));
-        }
-        validate_values(&frame_signature(frame).seiza)?;
-    }
+    check_frames(frames)?;
+    let ids: BTreeSet<&str> = frames.iter().map(|f| f.frame_uuid.as_str()).collect();
     for light in lights {
-        validate_values(&light_signature(light).seiza)?;
+        light.check()?;
     }
     if let Some(row) = quality
         .iter()
@@ -231,14 +219,7 @@ fn evaluate_inner(
     }
     let checked = checked(&mut request)?;
     if let Some(book) = &prepared {
-        for session in &book.sessions {
-            let rig = &session.row.rig_uuid;
-            if book.limits(rig) != Some(checked.rules.for_rig(rig).grouping_limits()) {
-                return Err(invalid(
-                    "prepared grouping limits differ from the library settings",
-                ));
-            }
-        }
+        check_book_limits(book, &checked.rules)?;
     }
     let Checked {
         rules,
@@ -267,7 +248,9 @@ fn evaluate_inner(
     let mut assignments = Vec::new();
     let mut keys = BTreeMap::new();
     for light in &request.lights {
-        let selected = library.select_associated(light, rules.for_light(light), associations);
+        let mut selected = library.select_associated(light, rules.for_light(light), associations);
+        // A light's selection reports the frames its masters take.
+        selected.cap_verified();
         let session = resolve_session(&selected, &quality, &options);
         // The first light whose masters share a key stands for every light
         // they serve: its candidates' order anchors the masters.
@@ -360,45 +343,14 @@ fn resolve_nights(request: &mut Request, rules: &RuleBook) -> crate::Result<Nigh
         .into_iter()
         .map(|s| ((s.rig_uuid.clone(), s.frame_uuid.clone()), s))
         .collect();
-    let mut explicit = BTreeSet::new();
-    for shift in std::mem::take(&mut request.night_shifts) {
-        if !(-86400..=129600).contains(&shift.seconds)
-            || !explicit.insert((shift.rig_uuid.clone(), shift.frame_uuid.clone()))
-        {
-            return Err(invalid(
-                "night shifts must be unique and within one day of noon UTC",
-            ));
-        }
+    let shifts = std::mem::take(&mut request.night_shifts);
+    NightShifts::checked(shifts.iter().cloned())?;
+    for shift in shifts {
         rows.insert((shift.rig_uuid.clone(), shift.frame_uuid.clone()), shift);
     }
     let nights = NightShifts::new(rows.into_values()).with_zones(&request.frames, rules);
     request.grouping.night_boundaries = nights.boundaries();
     Ok(nights)
-}
-
-fn validate_values(s: &FrameSignature) -> crate::Result<()> {
-    if [
-        s.focal_length_mm,
-        s.rotation_deg,
-        s.exposure_seconds,
-        s.camera_temp_c,
-    ]
-    .into_iter()
-    .flatten()
-    .any(|v| !v.is_finite())
-    {
-        return Err(invalid("frame metadata must be finite"));
-    }
-    if [s.width, s.height, s.channels, s.binning_x, s.binning_y]
-        .into_iter()
-        .flatten()
-        .any(|v| v <= 0)
-    {
-        return Err(invalid(
-            "known frame dimensions and binning must be positive",
-        ));
-    }
-    Ok(())
 }
 
 /// Apply a request's execution feedback to its sessions: failures, then

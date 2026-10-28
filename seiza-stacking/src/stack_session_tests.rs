@@ -208,7 +208,8 @@ fn a_repeated_or_linked_light_is_a_duplicate_frame_not_a_refused_plan() {
     let link = night.directory.path().join("linked.fits");
     std::fs::hard_link(&night.paths[5], &link).unwrap();
     let paths = [&night.paths[..], &[night.paths[3].clone(), link.clone()]].concat();
-    let assignments = [&night.assignments[..], &[0, 1]].concat();
+    // Twin rows of one light name its own session; a link is another file.
+    let assignments = [&night.assignments[..], &[night.assignments[3], 0]].concat();
     let mut stack = night.open(&paths, &assignments).unwrap();
     let outcomes = push_pipelined(&mut stack, &paths);
     for (path, error) in &outcomes[..8] {
@@ -230,6 +231,19 @@ fn a_repeated_or_linked_light_is_a_duplicate_frame_not_a_refused_plan() {
     let mut resumed = LiveStacker::open_context(&context).unwrap();
     assert!(resumed.push_fits(&link).is_err());
     assert_eq!(resumed.snapshot().unwrap().accepted_frames, 8);
+
+    // One light given two sessions contradicts itself.
+    let paths = [&night.paths[..], &[night.paths[3].clone()]].concat();
+    let assignments = [&night.assignments[..], &[(night.assignments[3] + 1) % 3]].concat();
+    let Err(refused) = night.open(&paths, &assignments) else {
+        panic!("a light assigned to two sessions refuses the plan");
+    };
+    assert!(
+        refused
+            .to_string()
+            .contains("assigned to two calibration sessions"),
+        "{refused}"
+    );
 
     let master = night.directory.path().join("bias-alias.fits");
     std::fs::hard_link(night.sessions[0].bias.as_ref().unwrap(), &master).unwrap();

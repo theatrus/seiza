@@ -170,6 +170,24 @@ impl<'a> FlatRetry<'a> {
         Ok(retry)
     }
 
+    /// [`FlatRetry::new`] for a flat master of `session`, with the retry
+    /// policy and held-back flats it was resolved with: a supplied set's
+    /// session never takes another session's flats.
+    pub fn for_session(
+        first: FlatAttempt,
+        candidates: &'a [CalibrationFrame],
+        session: &'a Session,
+        rules: &'a Rules,
+    ) -> crate::Result<Self> {
+        Self::new(
+            first,
+            candidates,
+            &session.flat_held_back,
+            rules,
+            session.flat_stability.clone(),
+        )
+    }
+
     /// Record the trimmed build, or `None` when it made no master.
     pub fn trimmed(&mut self, attempt: Option<FlatAttempt>) -> crate::Result<()> {
         if let Some(attempt) = &attempt {

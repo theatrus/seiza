@@ -2,7 +2,7 @@
 //! library request's lights, on the native stages.
 use super::*;
 use crate::flat_response::{choice, evidence};
-use crate::library::flat_work::{FamilyRowOf, angle_gap, check_choice, family_row};
+use crate::library::flat_work::{FamilyRowOf, angle_gap, check_choice, check_fits, family_row};
 use std::path::Path;
 
 #[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
@@ -439,18 +439,7 @@ pub fn finish_flat_work(answer: FlatWorkAnswer) -> crate::Result<FlatWorkResult>
             Ok(FlatWorkResult::Family { row })
         }
         FlatWorkAnswer::Change { question, fits } => {
-            let mut filters = BTreeSet::new();
-            if fits.iter().any(|fit| {
-                fit.lights > evidence::MAX_LIGHTS
-                    || !fit.carried.is_finite()
-                    || fit.spread.is_some_and(|v| !v.is_finite())
-                    || !question.filters.iter().any(|q| q.filter == fit.filter)
-                    || !filters.insert(fit.filter.clone())
-            }) {
-                return Err(invalid(
-                    "change fits must uniquely name question filters with finite measurements and bounded light counts",
-                ));
-            }
+            check_fits(&fits, question.filters.iter().map(|q| q.filter.as_str()))?;
             let verdict = evidence::combine(&fits.iter().map(|f| f.verdict).collect::<Vec<_>>());
             Ok(FlatWorkResult::Change {
                 row: groups::EvidenceRow {

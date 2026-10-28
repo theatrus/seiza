@@ -115,6 +115,13 @@ def test_change_filters_fit_the_lights_against_the_reference_and_map():
     if change_map is not None:
         fit = flat.fit([plane] * 4, plane, change_map, pedestal=10.0)
         assert fit is None or fit['filter'] == flat.filter
+    # Fits the question could not have made are refused, as through C.
+    fit = dict(filter=flat.filter, targets=[], lights=3, carried=.5, spread=None,
+               verdict='undecided')
+    assert change.row([fit])['fits'] == [fit]
+    for fits in ([fit, fit], [dict(fit, filter='not-in-question')], [dict(fit, carried=float('nan'))]):
+        with pytest.raises(ValueError, match='uniquely name question filters'):
+            change.row(fits)
 
 
 def test_dust_evidence_map_has_the_same_array_surface_as_other_kernels():

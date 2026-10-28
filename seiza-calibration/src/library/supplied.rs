@@ -104,35 +104,43 @@ pub(super) fn apply(
     associations: Associations,
 ) {
     let frames = library.frames();
-    let all = |kind| {
+    // A set for this light: every frame of the kind on its side of any
+    // marked optical change. Those kept out stay out, and are reported.
+    let set = |kind| -> (Vec<CalibrationFrame>, Vec<CalibrationFrame>) {
         frames
             .iter()
-            .filter(|f| f.kind == kind && f.kept_out.is_none())
+            .filter(|f| f.kind == kind && validity_admits(f, light.timestamp))
             .cloned()
-            .collect::<Vec<_>>()
+            .partition(|f| f.kept_out.is_none())
     };
-    let rules = &selected.rules;
+    let rules = Arc::clone(&selected.rules);
     if associations.dark == Association::OneSet && rules.use_darks {
-        let candidates = all(CalibrationKind::Dark);
-        selected.library.dark = frames.iter().any(|f| f.kind == CalibrationKind::Dark);
-        selected.dark = if candidates.iter().all(|f| {
+        let fits = |f: &CalibrationFrame| {
             sensor_matches(light, f)
                 && exposure_matches(light.exposure_s, f.exposure_s)
-                && temperature_admits(light.camera_temp, f, rules)
-        }) {
+                && temperature_admits(light.camera_temp, f, &rules)
+        };
+        let (candidates, kept) = set(CalibrationKind::Dark);
+        selected.library.dark = frames.iter().any(|f| f.kind == CalibrationKind::Dark);
+        selected.dark = if candidates.iter().all(fits) {
             candidates
         } else {
             Vec::new()
         };
+        selected
+            .kept_out
+            .retain(|f| f.kind != CalibrationKind::Dark);
+        selected
+            .kept_out
+            .extend(kept.into_iter().filter(|f| fits(f)));
         selected.one_set.insert(CalibrationKind::Dark);
     }
     if associations.flat == Association::OneSet {
-        let candidates = all(CalibrationKind::Flat);
+        let fits =
+            |f: &CalibrationFrame| sensor_matches(light, f) && flat_matches(light, f, &rules);
+        let (candidates, kept) = set(CalibrationKind::Flat);
         selected.library.flat = frames.iter().any(|f| f.kind == CalibrationKind::Flat);
-        selected.flat = if candidates
-            .iter()
-            .all(|f| sensor_matches(light, f) && flat_matches(light, f, rules))
-        {
+        selected.flat = if candidates.iter().all(fits) {
             candidates
         } else {
             Vec::new()
@@ -142,6 +150,13 @@ pub(super) fn apply(
         selected.flat_held_back.clear();
         selected.flat_choices.clear();
         selected.one_set.insert(CalibrationKind::Flat);
+        // The dark-flats follow the supplied flats, and are chosen again.
+        selected
+            .kept_out
+            .retain(|f| !matches!(f.kind, CalibrationKind::Flat | CalibrationKind::DarkFlat));
+        selected
+            .kept_out
+            .extend(kept.into_iter().filter(|f| fits(f)));
         library.select_dark_flats(light, &Arc::clone(&selected.rules), selected);
     }
 }

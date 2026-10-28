@@ -902,10 +902,18 @@ pub fn signature_sensor_consistent(left: &Signature, right: &Signature) -> bool 
 }
 /// Whether two readout mode names agree, or either is unknown.
 pub fn readout_names_agree(left: &Signature, right: &Signature) -> bool {
-    match (&left.readout_mode_name, &right.readout_mode_name) {
+    match (
+        named_mode(&left.readout_mode_name),
+        named_mode(&right.readout_mode_name),
+    ) {
         (Some(left), Some(right)) => readout_names_equal(left, right),
         _ => true,
     }
+}
+/// A readout mode name, or `None` for none or a blank one: a header that
+/// spelled no name names no mode.
+fn named_mode(name: &Option<String>) -> Option<&str> {
+    name.as_deref().filter(|name| !name.trim().is_empty())
 }
 /// Whether two readout mode names are one, ignoring case and surrounding
 /// space.
@@ -936,7 +944,7 @@ pub fn light_signature(light: &Light) -> Signature {
     };
     Signature {
         seiza: signature,
-        readout_mode_name: light.readout_mode_name.clone(),
+        readout_mode_name: named_mode(&light.readout_mode_name).map(str::to_string),
     }
 }
 /// A frame's settings as matching compares them:
@@ -964,7 +972,7 @@ pub fn frame_signature(frame: &CalibrationFrame) -> Signature {
     };
     Signature {
         seiza: signature,
-        readout_mode_name: frame.readout_mode_name.clone(),
+        readout_mode_name: named_mode(&frame.readout_mode_name).map(str::to_string),
     }
 }
 /// Whether a dark is within the rules' reach of a light shot at
@@ -1103,7 +1111,7 @@ fn master_subset_by_mode(
     // wins, and frames that never named a mode ride along with any group.
     let mut tried: Vec<&str> = Vec::new();
     for frame in frames {
-        let Some(name) = frame.readout_mode_name.as_deref() else {
+        let Some(name) = named_mode(&frame.readout_mode_name) else {
             continue;
         };
         if tried.iter().any(|seen| readout_names_equal(seen, name)) {
@@ -1113,9 +1121,7 @@ fn master_subset_by_mode(
         let group: Vec<CalibrationFrame> = frames
             .iter()
             .filter(|candidate| {
-                candidate
-                    .readout_mode_name
-                    .as_deref()
+                named_mode(&candidate.readout_mode_name)
                     .is_none_or(|other| readout_names_equal(other, name))
             })
             .cloned()

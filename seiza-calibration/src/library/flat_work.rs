@@ -413,6 +413,27 @@ pub(in crate::library) struct FamilyRowOf<'a> {
     pub(in crate::library) key: &'a str,
 }
 
+/// Refuse change fits that are not one per filter of `filters`, with finite
+/// measurements and a light count a question samples.
+pub(in crate::library) fn check_fits<'a>(
+    fits: &[groups::EvidenceFit],
+    filters: impl Iterator<Item = &'a str> + Clone,
+) -> crate::Result<()> {
+    let mut seen = BTreeSet::new();
+    if fits.iter().any(|fit| {
+        fit.lights > evidence::MAX_LIGHTS
+            || !fit.carried.is_finite()
+            || fit.spread.is_some_and(|v| !v.is_finite())
+            || !filters.clone().any(|filter| filter == fit.filter)
+            || !seen.insert(fit.filter.clone())
+    }) {
+        return Err(invalid(
+            "change fits must uniquely name question filters with finite measurements and bounded light counts",
+        ));
+    }
+    Ok(())
+}
+
 /// Refuse a choice among `candidates` responses from `lights` lights that
 /// the family stage could not have made: indices past the candidates, pairs
 /// that are not each pair once in order, winners without the pairs that
@@ -641,16 +662,23 @@ impl ChangeFilter {
 impl ChangeQuestion {
     /// The row its filters' fits make. Lights found but nothing to fit are
     /// kept as undecided, so they are not read again until a map or
-    /// reference changes the key.
-    pub fn row(&self, book: &groups::Book, fits: Vec<groups::EvidenceFit>) -> groups::EvidenceRow {
+    /// reference changes the key. Fits that are not one per filter of this
+    /// question, with finite measurements and a light count it could have
+    /// sampled, are refused.
+    pub fn row(
+        &self,
+        book: &groups::Book,
+        fits: Vec<groups::EvidenceFit>,
+    ) -> crate::Result<groups::EvidenceRow> {
+        check_fits(&fits, self.filters.iter().map(|f| f.filter.as_str()))?;
         let event = &book.events[self.event];
         let session = &book.imaging[self.session];
         let verdicts: Vec<evidence::Verdict> = fits.iter().map(|fit| fit.verdict).collect();
-        groups::EvidenceRow {
+        Ok(groups::EvidenceRow {
             session_key: session.key.clone(),
             event_key: book.evidence_key(event, session),
             verdict: evidence::combine(&verdicts),
             fits,
-        }
+        })
     }
 }

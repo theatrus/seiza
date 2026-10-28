@@ -40,8 +40,7 @@ def execute_flat(
     attempts = [first]
     retained: Attempt | None = None
     by_stage = {'first': first}
-    retry = seiza.FlatRetry(first.feedback, candidates, rules,
-                            held_back=session.flat_held_back, policy=session.flat_stability)
+    retry = seiza.FlatRetry(first.feedback, candidates, rules, session=session)
     try:
         while True:
             decision = retry.next()

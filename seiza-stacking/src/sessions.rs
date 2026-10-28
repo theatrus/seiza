@@ -243,7 +243,14 @@ impl FileSessionPlan {
             if masters.contains_key(&path) {
                 return Err(error("a light aliases a calibration master"));
             }
-            if lights.contains_key(&path) {
+            // A light listed again goes to the same session once; listed
+            // for another session, the plan contradicts itself.
+            if let Some((assigned, _)) = lights.get(&path) {
+                if assigned != session {
+                    return Err(error(
+                        "a light is assigned to two calibration sessions in the plan",
+                    ));
+                }
                 continue;
             }
             let (metadata, key) = first_observation(&path)?;
@@ -642,23 +649,31 @@ pub(crate) mod tests {
         assert!(FileSessionPlan::new(&[other], &[session], &[0]).is_err());
     }
 
-    /// Twin catalog rows: the first assignment stands, and the repeat is
-    /// left to the stack's duplicate check.
+    /// Twin catalog rows name one light's session twice: the repeat is left
+    /// to the stack's duplicate check. Two sessions for one light is a plan
+    /// that contradicts itself.
     #[test]
-    fn a_light_given_twice_keeps_its_first_assignment() {
+    fn a_light_given_twice_keeps_one_session() {
         let root = tempfile::tempdir().unwrap();
         let light = file(root.path(), "light.data");
         let other = file(root.path(), "other.data");
+        let sessions = [Default::default(), Default::default()];
         let plan = FileSessionPlan::new(
             &[light.clone(), other.clone(), light.clone()],
-            &[Default::default(), Default::default()],
-            &[1, 0, 0],
+            &sessions,
+            &[1, 0, 1],
         )
         .unwrap();
         assert_eq!(plan.lights.len(), 2);
         assert_eq!(plan.assignment(&light).unwrap(), 1);
         assert_eq!(plan.assignment(&other).unwrap(), 0);
         assert!(!plan.is_duplicate(&light));
+        let Err(refused) =
+            FileSessionPlan::new(&[light.clone(), other, light], &sessions, &[1, 0, 0])
+        else {
+            panic!("a light given two sessions refuses the plan");
+        };
+        assert!(refused.to_string().contains("two calibration sessions"));
     }
 
     /// Within one process a file replaced under the same size and time is

@@ -6,7 +6,9 @@ use pyo3::prelude::*;
 /// `value` as Python objects: structs and maps become dicts, sequences and
 /// tuples lists, unit enum variants their names, and a float that is not
 /// finite `None`. The values are those of the C ABI's JSON for the same
-/// value.
+/// value: an `f32` comes through at its exact value (0.1 as
+/// 0.10000000149011612), as the C ABI writes it, where a JSON text round
+/// trip printed it shortest.
 pub(crate) fn to_python<'py>(
     py: Python<'py>,
     value: &impl serde::Serialize,

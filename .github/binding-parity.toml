@@ -395,6 +395,33 @@ objects = [
 "seiza-calibration::flat_response::metric::sampled_median" = { none = "a step inside build_response and background" }
 "seiza-calibration::flat_response::metric::star_mask" = { none = "a step inside compare and find_dust" }
 "seiza-calibration::flat_response::metric::star_mask_grown" = { none = "a step inside compare and find_dust" }
+"seiza-calibration::flat_response::groups::canonical_filter" = { none = "the filter name grouping compares; C hosts get it in seiza_flat_group_plan_json's families, Python in FlatGroups' families" }
+"seiza-calibration::flat_response::groups::half" = { none = "an angle helper inside grouping; the book's placements use it" }
+"seiza-calibration::flat_response::groups::wrap" = { none = "an angle helper inside grouping; the book's placements use it" }
+"seiza-calibration::flat_response::groups::imaging_sessions" = { none = "the imaging sessions a book builds from imaging_lights rows; C prepares a book (seiza_flat_groups_prepare_json) and Python builds FlatGroups from the same rows" }
+"seiza-calibration::library::resolve_session" = { none = "the native session resolution; the C ABI's library and master plan calls run it, and Python binds it as calibration_resolve_session" }
+"seiza-calibration::library::grade" = { none = "the native peer grading; the C ABI's regrade requests run it, and Python reaches it through CalibrationQuality.regrade" }
+"seiza-calibration::library::coherent_cohort" = { none = "the C ABI's seiza_calibration_master_cohort_json runs it from a request; Python binds it as calibration_coherent_cohort" }
+"seiza-calibration::library::adopted_master" = { none = "a decision inside resolve_session, which the C ABI's plan calls run; Python binds it as calibration_adopted_master" }
+"seiza-calibration::library::dark_level_screening" = { none = "a decision inside resolve_session, which the C ABI's plan calls run; Python binds it as calibration_dark_level_screening" }
+"seiza-calibration::library::pedestal_from_fits" = { none = "the pedestal acceptance a session's pedestal evidence goes through in the C ABI's plan calls; Python binds it as calibration_pedestal_from_fits" }
+"seiza-calibration::library::pedestal_hint" = { none = "part of a session's application in the C ABI's plan answers; Python binds it as calibration_pedestal_hint" }
+"seiza-calibration::library::pedestal_sample_lights" = { none = "part of a session's application in the C ABI's plan answers; Python binds it as calibration_pedestal_sample_lights" }
+"seiza-calibration::library::flat_set_label" = { none = "the set label in the C ABI's flat retry notes; Python binds it as calibration_flat_set_label" }
+"seiza-calibration::library::describe_finding" = { none = "the words of a finding in the C ABI's grade answers; Python binds it as calibration_describe_finding" }
+"seiza-calibration::library::family_key" = { none = "the family key in the C ABI's flat response plans; Python binds it as calibration_family_key" }
+"seiza-calibration::library::pedestal_moved" = { none = "a host's cache freshness test for a kept response; Python binds it as calibration_pedestal_moved, and C hosts compare the pedestals the response plan gives" }
+"seiza-calibration::library::focal_classes" = { none = "a step of plan_flat_sessions, which the C ABI's flat response plan runs and Python binds as calibration_flat_sessions" }
+"seiza-calibration::library::plan_flat_sessions" = { none = "the C ABI's seiza_calibration_flat_response_plan_json runs it from a request; Python binds it as calibration_flat_sessions" }
+"seiza-calibration::library::family_questions" = { none = "the C ABI's seiza_calibration_flat_work_plan_json runs it from a request; Python binds it as calibration_family_questions" }
+"seiza-calibration::library::change_question" = { none = "the C ABI's seiza_calibration_flat_work_plan_json runs it from a request; Python binds it as calibration_change_question" }
+"seiza-calibration::library::correction_key" = { none = "words of a flat basis's notes, which the C ABI's and Python's selections carry already written" }
+"seiza-calibration::library::describe_spots" = { none = "words of a flat basis's notes, which the C ABI's and Python's selections carry already written" }
+"seiza-calibration::library::describe_what" = { none = "words of a flat basis's notes, which the C ABI's and Python's selections carry already written" }
+"seiza-calibration::library::edge_words" = { none = "words of a flat basis's notes, which the C ABI's and Python's selections carry already written" }
+"seiza-calibration::library::family_label" = { none = "words of a flat basis's notes, which the C ABI's and Python's selections carry already written" }
+"seiza-calibration::library::place_light" = { none = "words of a flat basis's notes, which the C ABI's and Python's selections carry already written" }
+"seiza-calibration::library::vignetting_leads" = { none = "words of a flat basis's notes, which the C ABI's and Python's selections carry already written" }
 "seiza-calibration::library::night_of" = { none = "a night's date label; every planning call that splits nights by date calls it" }
 "seiza-calibration::library::rules::field" = { none = "a step of check_setting, which both bindings call" }
 "seiza-calibration::library::rules::stacker_accepts" = { none = "a step of check_setting, which both bindings call" }
@@ -855,6 +882,16 @@ CalibrationSelection = { c = "seiza_calibration_master_plan_json" }
 "FlatGroups.sessions_needing_evidence" = { c = "seiza_calibration_flat_work_plan_json" }
 "FlatGroups.pairs_to_compare" = { c = "seiza_flat_group_plan_json" }
 "FlatGroups.place_light" = { c = "seiza_flat_group_plan_json" }
+"CalibrationLibrary.check_limits" = { c = "seiza_calibration_library_plan_with_groups_json" }
+"calibration_adopted_master" = { c = "seiza_calibration_master_plan_json" }
+"calibration_dark_level_screening" = { c = "seiza_calibration_master_plan_json" }
+"calibration_pedestal_from_fits" = { c = "seiza_calibration_master_plan_json" }
+"calibration_pedestal_hint" = { c = "seiza_calibration_master_plan_json" }
+"calibration_pedestal_sample_lights" = { c = "seiza_calibration_master_plan_json" }
+"calibration_flat_set_label" = { c = "seiza_calibration_flat_retry_json" }
+"calibration_describe_finding" = { c = "seiza_calibration_library_plan_json" }
+"calibration_family_key" = { c = "seiza_calibration_flat_response_plan_json" }
+"calibration_pedestal_moved" = { c = "seiza_calibration_flat_response_plan_json" }
 FlatRetry = { c = "seiza_calibration_flat_retry_json" }
 "FlatRetry.alternate" = { c = "seiza_calibration_flat_retry_json" }
 "FlatRetry.next" = { c = "seiza_calibration_flat_retry_json" }

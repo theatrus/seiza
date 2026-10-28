@@ -155,6 +155,25 @@ fn supplied_light() -> Light {
     }
 }
 #[test]
+fn a_selection_reports_the_verified_frames_its_masters_take() {
+    let frames: Vec<_> = (0..80)
+        .map(|i| supplied_frame(i, CalibrationKind::Bias, 0))
+        .collect();
+    let request = Request {
+        frames,
+        lights: vec![supplied_light()],
+        ..Default::default()
+    };
+    let result = evaluate(request.clone()).unwrap();
+    assert_eq!(result.selections[0].bias.len(), MAX_MASTER_FRAMES);
+    // A preview of unverified frames keeps every candidate.
+    let mut unverified = request;
+    unverified.frames[0].source_verified = false;
+    let result = evaluate(unverified).unwrap();
+    assert_eq!(result.selections[0].bias.len(), 80);
+}
+
+#[test]
 fn supplied_one_set_keeps_all_eligible_frames_across_nights_without_the_auto_cap() {
     for kind in [CalibrationKind::Flat, CalibrationKind::Dark] {
         let frames: Vec<_> = (0..80)

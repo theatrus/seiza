@@ -346,6 +346,32 @@ impl CalibrationSelection {
             CalibrationKind::Flat => &mut self.flat,
         }
     }
+    /// Cut each kind whose candidates are all verified to its nearest
+    /// [`MAX_MASTER_FRAMES`], as a master takes them; a kind taken as one
+    /// supplied set keeps every frame. An unverified kind is a preview and
+    /// keeps its candidates until the host verifies and selects again.
+    pub fn cap_verified(&mut self) {
+        for kind in CalibrationKind::ALL {
+            if self.capped_kind(kind) {
+                self.of_kind_mut(kind).truncate(MAX_MASTER_FRAMES);
+            }
+        }
+    }
+
+    /// Whether [`CalibrationSelection::cap_verified`] would cut anything.
+    pub(super) fn needs_cap(&self) -> bool {
+        CalibrationKind::ALL
+            .into_iter()
+            .any(|kind| self.capped_kind(kind))
+    }
+
+    fn capped_kind(&self, kind: CalibrationKind) -> bool {
+        let frames = self.of_kind(kind);
+        !self.one_set.contains(&kind)
+            && frames.len() > MAX_MASTER_FRAMES
+            && frames.iter().all(|f| f.source_verified)
+    }
+
     /// Every selected frame, bias, dark, dark-flat then flat.
     pub fn frames(&self) -> impl Iterator<Item = &CalibrationFrame> {
         self.bias
@@ -366,7 +392,104 @@ pub struct Library {
     flat_book: Arc<groups::Book>,
     available_responses: BTreeSet<String>,
 }
+impl CalibrationFrame {
+    /// Refuse a row no host should send: an empty UUID, a verified source
+    /// without a path and fingerprint, or metadata that is not finite or
+    /// dimensions and binning that are not positive.
+    pub fn check(&self) -> crate::Result<()> {
+        if self.frame_uuid.is_empty() {
+            return Err(invalid(
+                "calibration frame UUIDs must be nonempty and unique",
+            ));
+        }
+        if self.source_verified
+            && (self.source_path.as_os_str().is_empty() || self.source_fingerprint.is_empty())
+        {
+            return Err(invalid("verified sources need a path and fingerprint"));
+        }
+        validate_values(&frame_signature(self).seiza)
+    }
+}
+
+impl Light {
+    /// Refuse metadata that is not finite, or dimensions and binning that
+    /// are not positive.
+    pub fn check(&self) -> crate::Result<()> {
+        validate_values(&light_signature(self).seiza)
+    }
+}
+
+/// Refuse frames that repeat a UUID, or one that fails
+/// [`CalibrationFrame::check`].
+fn check_frames(frames: &[CalibrationFrame]) -> crate::Result<()> {
+    let mut ids = BTreeSet::new();
+    for frame in frames {
+        frame.check()?;
+        if !ids.insert(frame.frame_uuid.as_str()) {
+            return Err(invalid(
+                "calibration frame UUIDs must be nonempty and unique",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Refuse a grouping book whose rig limits differ from the rules'.
+fn check_book_limits(book: &groups::Book, rules: &RuleBook) -> crate::Result<()> {
+    for session in &book.sessions {
+        let rig = &session.row.rig_uuid;
+        if book.limits(rig) != Some(rules.for_rig(rig).grouping_limits()) {
+            return Err(invalid(
+                "prepared grouping limits differ from the library settings",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_values(s: &FrameSignature) -> crate::Result<()> {
+    if [
+        s.focal_length_mm,
+        s.rotation_deg,
+        s.exposure_seconds,
+        s.camera_temp_c,
+    ]
+    .into_iter()
+    .flatten()
+    .any(|v| !v.is_finite())
+    {
+        return Err(invalid("frame metadata must be finite"));
+    }
+    if [s.width, s.height, s.channels, s.binning_x, s.binning_y]
+        .into_iter()
+        .flatten()
+        .any(|v| v <= 0)
+    {
+        return Err(invalid(
+            "known frame dimensions and binning must be positive",
+        ));
+    }
+    Ok(())
+}
+
 impl Library {
+    /// [`Library::new`] for rows a host has not checked itself: refuses
+    /// repeated or empty UUIDs and rows that fail [`CalibrationFrame::check`].
+    pub fn checked(
+        frames: Vec<CalibrationFrame>,
+        flat_book: Arc<groups::Book>,
+        available_responses: impl IntoIterator<Item = String>,
+    ) -> crate::Result<Self> {
+        check_frames(&frames)?;
+        Ok(Self::new(frames, flat_book, available_responses))
+    }
+
+    /// Refuse a grouping book grouped by other limits than `rules` give its
+    /// rigs: a book a host cached across a change of settings.
+    pub fn check_limits(&self, rules: &RuleBook) -> crate::Result<()> {
+        check_book_limits(&self.flat_book, rules)
+    }
+
     /// A library of `frames`. Their order does not matter: matching walks
     /// them newest first, the id and then the UUID breaking a tie. A blank
     /// readout mode name reads as none.
@@ -461,6 +584,22 @@ pub struct NightShifts {
     shifts: BTreeMap<(String, String), i64>,
 }
 impl NightShifts {
+    /// The boundaries of `rows`, refusing two for one frame or a shift more
+    /// than a day from noon UTC.
+    pub fn checked(rows: impl IntoIterator<Item = groups::NightBoundary>) -> crate::Result<Self> {
+        let rows: Vec<groups::NightBoundary> = rows.into_iter().collect();
+        let mut seen = BTreeSet::new();
+        for row in &rows {
+            if !(-86400..=129600).contains(&row.seconds)
+                || !seen.insert((row.rig_uuid.as_str(), row.frame_uuid.as_str()))
+            {
+                return Err(invalid(
+                    "night shifts must be unique and within one day of noon UTC",
+                ));
+            }
+        }
+        Ok(Self::new(rows))
+    }
     /// The boundaries of `rows`, one per frame; a later row for a frame
     /// replaces an earlier one.
     pub fn new(rows: impl IntoIterator<Item = groups::NightBoundary>) -> Self {
@@ -558,7 +697,9 @@ impl QualityIndex {
 
     /// Why `frame` stays out of masters and exports, from a fresh grade in
     /// `judged` or else its stored row; for a frame with neither, the
-    /// stray-light mark it carries.
+    /// stray-light mark it carries. `frame.kept_out` is read as that mark,
+    /// which an older build left in the catalog: give frames as the catalog
+    /// stores them, not ones this has already decided for.
     pub fn kept_out(&self, frame: &CalibrationFrame, judged: Option<&Judged>) -> Option<String> {
         let row = self.rows.get(&frame.frame_uuid);
         KeptOut {
@@ -577,7 +718,8 @@ impl QualityIndex {
         .reason()
     }
 
-    /// Set every frame's kept-out reason ([`QualityIndex::kept_out`]).
+    /// Set every frame's kept-out reason ([`QualityIndex::kept_out`]), once,
+    /// on frames as the catalog stores them.
     pub fn keep_out(&self, frames: &mut [CalibrationFrame], judged: &HashMap<String, Judged>) {
         for frame in frames {
             frame.kept_out = self.kept_out(frame, judged.get(&frame.frame_uuid));

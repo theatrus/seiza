@@ -112,19 +112,11 @@ pub fn resolve_session(
     quality: &QualityIndex,
     options: &SessionOptions,
 ) -> Session {
-    let mut capped = None;
-    for kind in CalibrationKind::ALL {
-        let frames = selected.of_kind(kind);
-        if !selected.one_set.contains(&kind)
-            && frames.len() > MAX_MASTER_FRAMES
-            && frames.iter().all(|f| f.source_verified)
-        {
-            capped
-                .get_or_insert_with(|| selected.clone())
-                .of_kind_mut(kind)
-                .truncate(MAX_MASTER_FRAMES);
-        }
-    }
+    let capped = selected.needs_cap().then(|| {
+        let mut capped = selected.clone();
+        capped.cap_verified();
+        capped
+    });
     let selected = capped.as_ref().unwrap_or(selected);
     let mut recipes = recipes(selected);
     for recipe in &mut recipes {

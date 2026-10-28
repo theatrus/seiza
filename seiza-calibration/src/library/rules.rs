@@ -13,7 +13,7 @@ use crate::{BiasScreening, DarkScreening, FlatScreening, Limits, MatchTolerances
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, LazyLock};
 
 /// The widest dark temperature tolerance, in °C. Stacks check each light
@@ -1760,29 +1760,25 @@ impl RuleBook {
     /// Whether any setting grading reads differs between two books, so a
     /// change of settings knows whether grading must run again: every
     /// frame-grade limit, and the matching tolerances grading groups peers
-    /// by ([`GRADING_GROUPS`]).
+    /// by ([`GRADING_GROUPS`]). Values are compared as they resolve for the
+    /// server and each rig, so `2` for `2.0`, a rig value equal to the one
+    /// it inherits, or a value this build cannot read changes nothing.
     pub fn grades_differ(&self, other: &RuleBook) -> bool {
-        let grade_values = |book: &RuleBook| {
-            let pick = |values: &RuleValues| -> BTreeMap<String, Value> {
-                values
-                    .iter()
-                    .filter(|(key, _)| {
-                        key.parse::<SettingKey>().is_ok_and(|key| {
-                            GRADING_GROUPS.contains(&key) || field(key).effect == Effect::Grades
-                        })
-                    })
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect()
-            };
-            let rigs: BTreeMap<String, BTreeMap<String, Value>> = book
-                .rigs
+        let grading: Vec<SettingKey> = fields()
+            .iter()
+            .map(|spec| spec.key)
+            .filter(|key| GRADING_GROUPS.contains(key) || field(*key).effect == Effect::Grades)
+            .collect();
+        let differ = |a: &Rules, b: &Rules| {
+            grading
                 .iter()
-                .map(|(uuid, layer)| (uuid.clone(), pick(&layer.values)))
-                .filter(|(_, values)| !values.is_empty())
-                .collect();
-            (pick(&book.global), rigs)
+                .any(|key| !equivalent(a.value(*key), b.value(*key)))
         };
-        grade_values(self) != grade_values(other)
+        let rigs: BTreeSet<&str> = self.rig_uuids().chain(other.rig_uuids()).collect();
+        differ(&self.global(), &other.global())
+            || rigs
+                .into_iter()
+                .any(|rig| differ(&self.for_rig(rig), &other.for_rig(rig)))
     }
 }
 

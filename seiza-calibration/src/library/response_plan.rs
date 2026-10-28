@@ -240,7 +240,11 @@ pub fn plan_flat_sessions(
                 && frame.captured_at.is_some()
         })
         .collect();
-    flats.sort_by_key(|frame| (frame.captured_at, frame.id));
+    // Capture order; the id, then the UUID, break a tie, so the session a
+    // first frame names does not depend on the order frames were given.
+    flats.sort_by(|a, b| {
+        (a.captured_at, a.id, &a.frame_uuid).cmp(&(b.captured_at, b.id, &b.frame_uuid))
+    });
     let focal = focal_classes(flats.iter().copied(), |rig| {
         rules.for_rig(rig).coherence_tolerances().focal_length_mm
     });

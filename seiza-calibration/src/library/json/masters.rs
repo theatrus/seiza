@@ -178,7 +178,7 @@ pub fn flat_retry(request: FlatRetryRequest) -> crate::Result<FlatRetryDecision>
     )
     .global())
     .clone();
-    let (policy, held_back) = if let Some(session) = &request.session {
+    if let Some(session) = &request.session {
         session.tolerances.validate()?;
         if request
             .policy
@@ -192,26 +192,27 @@ pub fn flat_retry(request: FlatRetryRequest) -> crate::Result<FlatRetryDecision>
                 "flat retry overrides conflict with the supplied session",
             ));
         }
-        // An alternate set is clustered as the session's own flats were.
+        // A C host gives no rig rules: the session's gate stands for them,
+        // so an alternate set is clustered within the tolerances the
+        // session's lights were matched with. Native hosts pass the rig's.
         rules.flat_session_seconds = session.tolerances.flat_session_seconds;
         rules.rotation_deg = session.tolerances.rotation_deg;
         rules.focal_length_mm = session.tolerances.focal_length_mm;
         rules.dark_temperature_c = session.tolerances.dark_temperature_c;
-        (session.flat_stability.clone(), &session.flat_held_back)
-    } else {
-        (
-            request.policy.clone().unwrap_or_default(),
-            &request.held_back,
-        )
-    };
+    }
     check_request(&request.candidates, &[], Vec::new(), Vec::new(), Vec::new())?;
-    let mut retry = FlatRetry::new(
-        request.first,
-        &request.candidates,
-        held_back,
-        &rules,
-        policy,
-    )?;
+    let mut retry = match &request.session {
+        Some(session) => {
+            FlatRetry::for_session(request.first, &request.candidates, session, &rules)?
+        }
+        None => FlatRetry::new(
+            request.first,
+            &request.candidates,
+            &request.held_back,
+            &rules,
+            request.policy.clone().unwrap_or_default(),
+        )?,
+    };
     // A successful build implies it was tried.
     if request.trimmed_attempted || request.trimmed.is_some() {
         retry.trimmed(request.trimmed)?;

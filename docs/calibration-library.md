@@ -336,7 +336,7 @@ session = seiza.calibration_resolve_session(
     selection, quality, flat_stability=seiza.FlatRetryPolicy(retain_unstable=False),
 )
 retry = seiza.FlatRetry(first_attempt, selected_raw_flats, selection.rules,
-                        held_back=session.flat_held_back, policy=session.flat_stability)
+                        session=session)
 decision = retry.next()
 ```
 
