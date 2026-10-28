@@ -200,11 +200,19 @@ fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
     file.persist(path).map_err(error)?;
     Ok(())
 }
-fn publish_frame(path: &Path, frame: &FitsFrame) -> Result<()> {
-    let temp = tempfile::Builder::new()
+/// A closed temporary path beside `path`. Seiza's writers replace a file
+/// atomically and sync it, which Windows refuses while a handle holds it
+/// open, so only the path is kept until it is renamed into place.
+fn temporary_beside(path: &Path) -> Result<tempfile::TempPath> {
+    let directory = path.parent().ok_or("Missing cache directory")?;
+    Ok(tempfile::Builder::new()
         .suffix(".fits")
-        .tempfile_in(path.parent().unwrap())
-        .map_err(error)?;
+        .tempfile_in(directory)
+        .map_err(error)?
+        .into_temp_path())
+}
+fn publish_frame(path: &Path, frame: &FitsFrame) -> Result<()> {
+    let temp = temporary_beside(path)?;
     let mut cards: Vec<_> = frame
         .headers
         .iter()
@@ -222,9 +230,8 @@ fn publish_frame(path: &Path, frame: &FitsFrame) -> Result<()> {
             seiza_fits::HeaderValue::String(mode),
         ));
     }
-    crate::write_processed_image_fits_f32(temp.path(), &frame.image, &frame.headers, &cards)
+    crate::write_processed_image_fits_f32(&temp, &frame.image, &frame.headers, &cards)
         .map_err(error)?;
-    temp.as_file().sync_all().map_err(error)?;
     temp.persist(path).map_err(error)?;
     Ok(())
 }
@@ -962,18 +969,14 @@ fn build_set(
             .map(|r| r.frame.frame_uuid.clone())
             .collect();
         check(cancel)?;
-        let temp = tempfile::Builder::new()
-            .suffix(".fits")
-            .tempfile_in(cache)
-            .map_err(error)?;
-        crate::write_master_fits_f32(temp.path(), &master).map_err(error)?;
+        let temp = temporary_beside(&path)?;
+        crate::write_master_fits_f32(&temp, &master).map_err(error)?;
         verify(
             &inputs
                 .iter()
                 .flat_map(|r| [r.source.clone(), r.processed_source.clone()])
                 .collect::<Vec<_>>(),
         )?;
-        temp.as_file().sync_all().map_err(error)?;
         temp.persist(&path).map_err(error)?;
         let built = Built {
             source: stamp(&path)?,
