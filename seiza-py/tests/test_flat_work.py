@@ -80,7 +80,7 @@ def test_cached_metadata_questions_feedback_and_no_read_reuse():
     assert families[0].answered
     assert families[0].sample() == []
     assert changes[0][1]
-    with pytest.raises(ValueError, match='lacks'):
+    with pytest.raises(ValueError, match='exceed the question'):
         question.row(dict(winners=[99], pairs=[]), 3)
 
 

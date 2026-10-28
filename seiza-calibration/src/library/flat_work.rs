@@ -337,14 +337,27 @@ impl FamilyQuestion {
             }),
             None => choice::ResponseChoice::default(),
         };
-        self.row(book, &picked, binned.len())
+        self.row_of(book, &picked, binned.len())
     }
 
     /// The row a choice among this question's candidates makes. Several
     /// winners alike with each other: the nearest of them to the lights'
     /// angle stands for them; a pair the background could not be weighed
     /// against leaves nothing to choose among.
+    ///
+    /// A choice this question could not have made, its indices past the
+    /// candidates or its pairs incomplete, is refused.
     pub fn row(
+        &self,
+        book: &groups::Book,
+        picked: &choice::ResponseChoice,
+        lights: usize,
+    ) -> crate::Result<groups::FamilyEvidenceRow> {
+        check_choice(picked, self.candidates.len(), lights)?;
+        Ok(self.row_of(book, picked, lights))
+    }
+
+    fn row_of(
         &self,
         book: &groups::Book,
         picked: &choice::ResponseChoice,
@@ -398,6 +411,43 @@ pub(in crate::library) struct FamilyRowOf<'a> {
     pub(in crate::library) start: i64,
     pub(in crate::library) end: i64,
     pub(in crate::library) key: &'a str,
+}
+
+/// Refuse a choice among `candidates` responses from `lights` lights that
+/// the family stage could not have made: indices past the candidates, pairs
+/// that are not each pair once in order, winners without the pairs that
+/// chose them, or a light count outside what a question samples.
+pub(in crate::library) fn check_choice(
+    choice: &choice::ResponseChoice,
+    candidates: usize,
+    lights: usize,
+) -> crate::Result<()> {
+    let n = candidates;
+    let mut pairs = BTreeSet::new();
+    let expected_pairs = n
+        .checked_mul(n.saturating_sub(1))
+        .and_then(|v| v.checked_div(2));
+    if lights == 0
+        || (lights < evidence::MIN_LIGHTS && !choice.winners.is_empty())
+        || lights > evidence::MAX_LIGHTS
+        || n < 2
+        || (choice.pairs.is_empty() && !choice.winners.is_empty())
+        || (!choice.pairs.is_empty() && expected_pairs != Some(choice.pairs.len()))
+        || choice
+            .pairs
+            .iter()
+            .any(|p| !pairs.insert((p.first, p.second)))
+        || choice.winners.iter().any(|i| *i >= n)
+        || choice
+            .pairs
+            .iter()
+            .any(|p| p.first >= n || p.second >= n || p.first >= p.second)
+    {
+        return Err(invalid(
+            "family feedback indices or light count exceed the question",
+        ));
+    }
+    Ok(())
 }
 
 pub(in crate::library) fn family_row(

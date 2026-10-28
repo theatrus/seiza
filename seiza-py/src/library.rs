@@ -1367,16 +1367,11 @@ impl PyFamilyQuestion {
     ) -> PyResult<Bound<'py, PyAny>> {
         let choice: seiza_calibration::flat_response::choice::ResponseChoice =
             from_python(choice, "response choice")?;
-        // The native row indexes the candidates by these.
-        let n = self.question.candidates.len();
-        if choice.winners.iter().any(|i| *i >= n)
-            || choice.pairs.iter().any(|p| p.first >= n || p.second >= n)
-        {
-            return Err(invalid(
-                "a response choice names a candidate this question lacks",
-            ));
-        }
-        to_python(py, &self.question.row(&self.book, &choice, lights))
+        let row = self
+            .question
+            .row(&self.book, &choice, lights)
+            .map_err(invalid)?;
+        to_python(py, &row)
     }
 }
 

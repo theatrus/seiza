@@ -2,7 +2,7 @@
 //! library request's lights, on the native stages.
 use super::*;
 use crate::flat_response::{choice, evidence};
-use crate::library::flat_work::{FamilyRowOf, angle_gap, family_row};
+use crate::library::flat_work::{FamilyRowOf, angle_gap, check_choice, family_row};
 use std::path::Path;
 
 #[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
@@ -176,15 +176,10 @@ pub fn plan_flat_work(mut request: FlatWorkRequest) -> crate::Result<FlatWorkPla
         mut quality,
     } = checked(&mut library_request)?;
     let judged = if library_request.regrade {
-        let measured = library_request.frames.iter().filter_map(|frame| {
-            let row = quality.get(&frame.frame_uuid)?;
-            QualityIndex::current(frame, row).then_some((frame, row.measurement.as_ref()?))
-        });
-        grade(measured, &rules, &nights)
+        quality.regrade(&library_request.frames, &rules, &nights)
     } else {
         HashMap::new()
     };
-    quality.fresh = judged.keys().cloned().collect();
     apply_grades(&mut library_request.frames, &quality, &judged);
     let pedestals = response_plan::PedestalTable::new(&library_request.frames, &quality);
     let grouping = library_request.grouping.clone();
@@ -417,31 +412,7 @@ pub fn finish_flat_work(answer: FlatWorkAnswer) -> crate::Result<FlatWorkResult>
             choice,
             lights,
         } => {
-            let n = q.candidates.len();
-            let mut pairs = BTreeSet::new();
-            let expected_pairs = n
-                .checked_mul(n.saturating_sub(1))
-                .and_then(|v| v.checked_div(2));
-            if lights == 0
-                || (lights < evidence::MIN_LIGHTS && !choice.winners.is_empty())
-                || lights > evidence::MAX_LIGHTS
-                || n < 2
-                || (choice.pairs.is_empty() && !choice.winners.is_empty())
-                || (!choice.pairs.is_empty() && expected_pairs != Some(choice.pairs.len()))
-                || choice
-                    .pairs
-                    .iter()
-                    .any(|p| !pairs.insert((p.first, p.second)))
-                || choice.winners.iter().any(|i| *i >= n)
-                || choice
-                    .pairs
-                    .iter()
-                    .any(|p| p.first >= n || p.second >= n || p.first >= p.second)
-            {
-                return Err(invalid(
-                    "family feedback indices or light count exceed the question",
-                ));
-            }
+            check_choice(&choice, q.candidates.len(), lights)?;
             let keys: Vec<String> = q.candidates.iter().map(|c| c.key.clone()).collect();
             let gaps: Vec<f64> = q
                 .candidates

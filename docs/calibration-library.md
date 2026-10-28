@@ -165,7 +165,7 @@ and a C host that submits records reach the same answers.
 ### Python
 
 Python binds the native API above; it does not use the JSON calls. See the
-[Python README](../seiza-py/README.md#calibration-library) for its classes.
+[Python README](../seiza-py/README.md#calibration-library-grading-and-selection) for its classes.
 
 ## Results and master execution
 
