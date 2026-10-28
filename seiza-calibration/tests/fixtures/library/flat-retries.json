@@ -8,43 +8,50 @@
             "frame_uuid": "f0",
             "kind": "flat",
             "captured_at": 0,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f1",
             "kind": "flat",
             "captured_at": 1,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f2",
             "kind": "flat",
             "captured_at": 2,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f3",
             "kind": "flat",
             "captured_at": 3,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f4",
             "kind": "flat",
             "captured_at": 100000,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f5",
             "kind": "flat",
             "captured_at": 100001,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f6",
             "kind": "flat",
             "captured_at": 100002,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           }
         ],
         "first": {
@@ -84,43 +91,50 @@
             "frame_uuid": "f0",
             "kind": "flat",
             "captured_at": 0,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f1",
             "kind": "flat",
             "captured_at": 1,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f2",
             "kind": "flat",
             "captured_at": 2,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f3",
             "kind": "flat",
             "captured_at": 3,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f4",
             "kind": "flat",
             "captured_at": 100000,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f5",
             "kind": "flat",
             "captured_at": 100001,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f6",
             "kind": "flat",
             "captured_at": 100002,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           }
         ],
         "first": {
@@ -170,43 +184,50 @@
             "frame_uuid": "f0",
             "kind": "flat",
             "captured_at": 0,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f1",
             "kind": "flat",
             "captured_at": 1,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f2",
             "kind": "flat",
             "captured_at": 2,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f3",
             "kind": "flat",
             "captured_at": 3,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f4",
             "kind": "flat",
             "captured_at": 100000,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f5",
             "kind": "flat",
             "captured_at": 100001,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f6",
             "kind": "flat",
             "captured_at": 100002,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           }
         ],
         "first": {
@@ -246,43 +267,50 @@
             "frame_uuid": "f0",
             "kind": "flat",
             "captured_at": 0,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f1",
             "kind": "flat",
             "captured_at": 1,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f2",
             "kind": "flat",
             "captured_at": 2,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f3",
             "kind": "flat",
             "captured_at": 3,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f4",
             "kind": "flat",
             "captured_at": 100000,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f5",
             "kind": "flat",
             "captured_at": 100001,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f6",
             "kind": "flat",
             "captured_at": 100002,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           }
         ],
         "first": {
@@ -335,43 +363,50 @@
             "frame_uuid": "f0",
             "kind": "flat",
             "captured_at": 0,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f1",
             "kind": "flat",
             "captured_at": 1,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f2",
             "kind": "flat",
             "captured_at": 2,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f3",
             "kind": "flat",
             "captured_at": 3,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f4",
             "kind": "flat",
             "captured_at": 100000,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f5",
             "kind": "flat",
             "captured_at": 100001,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f6",
             "kind": "flat",
             "captured_at": 100002,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           }
         ],
         "first": {
@@ -421,43 +456,50 @@
             "frame_uuid": "f0",
             "kind": "flat",
             "captured_at": 0,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f1",
             "kind": "flat",
             "captured_at": 1,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f2",
             "kind": "flat",
             "captured_at": 2,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f3",
             "kind": "flat",
             "captured_at": 3,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f4",
             "kind": "flat",
             "captured_at": 100000,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f5",
             "kind": "flat",
             "captured_at": 100001,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f6",
             "kind": "flat",
             "captured_at": 100002,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           }
         ],
         "first": {
@@ -495,43 +537,50 @@
             "frame_uuid": "f0",
             "kind": "flat",
             "captured_at": 0,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f1",
             "kind": "flat",
             "captured_at": 1,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f2",
             "kind": "flat",
             "captured_at": 2,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f3",
             "kind": "flat",
             "captured_at": 3,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f4",
             "kind": "flat",
             "captured_at": 100000,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f5",
             "kind": "flat",
             "captured_at": 100001,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f6",
             "kind": "flat",
             "captured_at": 100002,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           }
         ],
         "first": {
@@ -570,43 +619,50 @@
             "frame_uuid": "f0",
             "kind": "flat",
             "captured_at": 0,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f1",
             "kind": "flat",
             "captured_at": 1,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f2",
             "kind": "flat",
             "captured_at": 2,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f3",
             "kind": "flat",
             "captured_at": 3,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f4",
             "kind": "flat",
             "captured_at": 100000,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f5",
             "kind": "flat",
             "captured_at": 100001,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f6",
             "kind": "flat",
             "captured_at": 100002,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           }
         ],
         "first": {
@@ -647,43 +703,50 @@
             "frame_uuid": "f0",
             "kind": "flat",
             "captured_at": 0,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f1",
             "kind": "flat",
             "captured_at": 1,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f2",
             "kind": "flat",
             "captured_at": 2,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f3",
             "kind": "flat",
             "captured_at": 3,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f4",
             "kind": "flat",
             "captured_at": 100000,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f5",
             "kind": "flat",
             "captured_at": 100001,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f6",
             "kind": "flat",
             "captured_at": 100002,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           }
         ],
         "first": {
@@ -722,43 +785,50 @@
             "frame_uuid": "f0",
             "kind": "flat",
             "captured_at": 0,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f1",
             "kind": "flat",
             "captured_at": 1,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f2",
             "kind": "flat",
             "captured_at": 2,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f3",
             "kind": "flat",
             "captured_at": 3,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f4",
             "kind": "flat",
             "captured_at": 100000,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f5",
             "kind": "flat",
             "captured_at": 100001,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f6",
             "kind": "flat",
             "captured_at": 100002,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           }
         ],
         "first": {
@@ -800,43 +870,50 @@
             "frame_uuid": "f0",
             "kind": "flat",
             "captured_at": 0,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f1",
             "kind": "flat",
             "captured_at": 1,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f2",
             "kind": "flat",
             "captured_at": 2,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f3",
             "kind": "flat",
             "captured_at": 3,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f4",
             "kind": "flat",
             "captured_at": 100000,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f5",
             "kind": "flat",
             "captured_at": 100001,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f6",
             "kind": "flat",
             "captured_at": 100002,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           }
         ],
         "first": {
@@ -876,43 +953,50 @@
             "frame_uuid": "f0",
             "kind": "flat",
             "captured_at": 0,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f1",
             "kind": "flat",
             "captured_at": 1,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f2",
             "kind": "flat",
             "captured_at": 2,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f3",
             "kind": "flat",
             "captured_at": 3,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f4",
             "kind": "flat",
             "captured_at": 100000,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f5",
             "kind": "flat",
             "captured_at": 100001,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f6",
             "kind": "flat",
             "captured_at": 100002,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           }
         ],
         "first": {
@@ -948,43 +1032,50 @@
             "frame_uuid": "f0",
             "kind": "flat",
             "captured_at": 0,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f1",
             "kind": "flat",
             "captured_at": 1,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f2",
             "kind": "flat",
             "captured_at": 2,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f3",
             "kind": "flat",
             "captured_at": 3,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f4",
             "kind": "flat",
             "captured_at": 100000,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f5",
             "kind": "flat",
             "captured_at": 100001,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           },
           {
             "frame_uuid": "f6",
             "kind": "flat",
             "captured_at": 100002,
-            "filter": "Ha"
+            "filter": "Ha",
+            "camera": "Camera"
           }
         ],
         "first": {

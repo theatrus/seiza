@@ -67,7 +67,7 @@ fn a_master_never_mixes_readout_mode_names() {
         .map(|id| dark(id, Some("High Gain Mode")))
         .chain((2..22).map(|id| dark(id, Some("Extend Fullwell 2CMS"))))
         .collect();
-    let report = master_subset_report(CalibrationKind::Dark, &frames, &Rules::default());
+    let report = coherent_cohort(CalibrationKind::Dark, &frames, &Rules::default());
     assert_eq!(report.kept.len(), 2);
     assert!(report.dropped.is_empty());
 
@@ -75,7 +75,7 @@ fn a_master_never_mixes_readout_mode_names() {
     let frames: Vec<CalibrationFrame> = std::iter::once(dark(0, Some("High Gain Mode")))
         .chain((1..6).map(|id| dark(id, Some("Extend Fullwell 2CMS"))))
         .collect();
-    let report = master_subset_report(CalibrationKind::Dark, &frames, &Rules::default());
+    let report = coherent_cohort(CalibrationKind::Dark, &frames, &Rules::default());
     assert_eq!(report.kept.len(), 5);
     assert!(
         report

@@ -175,7 +175,7 @@ pub fn plan_flat_responses(mut request: Request) -> crate::Result<FlatResponsePl
     let limits = rigs
         .into_iter()
         .map(|rig_uuid| groups::RigLimits {
-            limits: flat_notes::limits_of(&rules.for_rig(&rig_uuid)),
+            limits: rules.for_rig(&rig_uuid).grouping_limits(),
             rig_uuid,
         })
         .collect();

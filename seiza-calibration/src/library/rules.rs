@@ -1,5 +1,11 @@
-// Extracted from theatrus/psf-guard at 79f5e31d53b8371e8fcd0b22a9b69692412cd8b4.
-// Copyright the PSF Guard contributors; Apache-2.0.
+//! The calibration checks a person can tune, for the whole server and for
+//! one rig: their table, their validation, and their resolution into
+//! [`Rules`]. A value comes from the rig's own settings when it has one,
+//! then the server's, then the built-in default; a stored value this build
+//! cannot read falls through to the next layer.
+//!
+//! Extracted from theatrus/psf-guard at 79f5e31d53b8371e8fcd0b22a9b69692412cd8b4.
+//! Copyright the PSF Guard contributors; Apache-2.0.
 use super::FrameMeta;
 use super::{DEFAULT_COMPLETE_DARK_FRAMES, DarkChoice, ExternalMasterPolicy};
 use super::{DEFAULT_DARK_REACH_DAYS, DEFAULT_FLAT_MAX_AGE_DAYS};
@@ -139,6 +145,23 @@ pub enum GradeCheck {
 }
 
 impl GradeCheck {
+    pub const ALL: [GradeCheck; 14] = [
+        GradeCheck::BiasLevel,
+        GradeCheck::BiasNoise,
+        GradeCheck::BiasBanding,
+        GradeCheck::DarkLevel,
+        GradeCheck::DarkNoise,
+        GradeCheck::DarkHotPixels,
+        GradeCheck::DarkBanding,
+        GradeCheck::FlatClipped,
+        GradeCheck::FlatBright,
+        GradeCheck::FlatDim,
+        GradeCheck::FlatIllumination,
+        GradeCheck::FlatSpots,
+        GradeCheck::FlatChangingSpots,
+        GradeCheck::FlatCarriedSpots,
+    ];
+
     pub fn key(self) -> &'static str {
         match self {
             GradeCheck::BiasLevel => "grade_bias_level",
@@ -232,6 +255,16 @@ pub enum LightNightSplit {
     #[default]
     Rig,
     Catalog,
+}
+
+impl LightNightSplit {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "rig" => Some(Self::Rig),
+            "catalog" => Some(Self::Catalog),
+            _ => None,
+        }
+    }
 }
 
 /// How a rig's flats of different nights may share a master.
@@ -875,6 +908,11 @@ pub fn fields() -> &'static [FieldSpec] {
     &FIELDS
 }
 
+/// One setting by its key.
+pub fn field(key: &str) -> Option<&'static FieldSpec> {
+    fields().iter().find(|field| field.key == key)
+}
+
 fn finite(value: &Value) -> Option<f64> {
     value.as_f64().filter(|value| value.is_finite())
 }
@@ -1226,6 +1264,24 @@ impl Rules {
         }
     }
 
+    /// How a light check is set to act.
+    pub fn mode(&self, check: Check) -> CheckMode {
+        self.checks[check.index()]
+    }
+
+    /// Where one setting's value came from.
+    pub fn source(&self, key: &str) -> RuleSource {
+        self.resolved
+            .get(key)
+            .map(|(_, source)| *source)
+            .unwrap_or(RuleSource::Default)
+    }
+
+    /// One setting's resolved value.
+    pub fn value(&self, key: &str) -> Option<&Value> {
+        self.resolved.get(key).map(|(value, _)| value)
+    }
+
     /// The settings that differ from their defaults for these rules, in
     /// the panel's order.
     pub fn notes(&self) -> Vec<RuleNote> {
@@ -1242,6 +1298,17 @@ impl Rules {
                 })
             })
             .collect()
+    }
+
+    /// The limits flat grouping splits this rig's flats by.
+    pub fn grouping_limits(&self) -> crate::flat_response::groups::Limits {
+        crate::flat_response::groups::Limits {
+            measured: self.flat_grouping == FlatGrouping::Measured,
+            dust: self.flat_split_dust_pct / 100.0,
+            broad: self.flat_split_pattern_pct / 100.0,
+            window: self.flat_session_seconds as i64,
+            rotation: self.coherence_tolerances().rotation_deg,
+        }
     }
 
     /// The tolerances a candidate is matched to a light with.
@@ -1329,6 +1396,31 @@ impl RuleBook {
         }
     }
 
+    /// The server's own layer, as stored.
+    pub fn global_values(&self) -> &RuleValues {
+        &self.global
+    }
+
+    /// Every rig's layer, as stored.
+    pub fn rigs(&self) -> &BTreeMap<String, RigLayer> {
+        &self.rigs
+    }
+
+    /// The rigs with settings of their own.
+    pub fn rig_uuids(&self) -> impl Iterator<Item = &str> {
+        self.rigs
+            .iter()
+            .filter(|(_, layer)| !layer.values.is_empty())
+            .map(|(uuid, _)| uuid.as_str())
+    }
+
+    /// Whether a rig sets `key` for itself rather than inheriting it.
+    pub fn rig_sets(&self, rig_uuid: &str, key: &str) -> bool {
+        self.rigs
+            .get(rig_uuid)
+            .is_some_and(|layer| layer.values.contains_key(key))
+    }
+
     /// The rules every rig without settings of its own follows.
     pub fn global(&self) -> Arc<Rules> {
         Arc::clone(&self.global_rules)
@@ -1341,11 +1433,12 @@ impl RuleBook {
             .unwrap_or_else(|| self.global())
     }
 
-    pub(crate) fn for_light(&self, light: &FrameMeta) -> Arc<Rules> {
+    /// The rules a light is matched and checked with: its rig's.
+    pub fn for_light(&self, light: &FrameMeta) -> Arc<Rules> {
         if self.rig_rules.is_empty() {
             return self.global();
         }
-        self.for_rig(&light_rig_uuid(light))
+        self.for_rig(&light.rig_uuid)
     }
 
     /// Whether nothing is set anywhere.
@@ -1368,8 +1461,62 @@ impl RuleBook {
             &json!({ "global": self.global, "rigs": rigs }).to_string()
         ))
     }
+
+    /// Whether any setting grading reads differs between two books, so a
+    /// change of settings knows whether grading must run again: every
+    /// frame-grade limit, and the matching tolerances grading groups peers
+    /// by ([`GRADING_GROUPS`]).
+    pub fn grades_differ(&self, other: &RuleBook) -> bool {
+        let grade_values = |book: &RuleBook| {
+            let pick = |values: &RuleValues| -> BTreeMap<String, Value> {
+                values
+                    .iter()
+                    .filter(|(key, _)| {
+                        GRADING_GROUPS.contains(&key.as_str())
+                            || field(key).is_some_and(|spec| spec.effect == Effect::Grades)
+                    })
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect()
+            };
+            let rigs: BTreeMap<String, BTreeMap<String, Value>> = book
+                .rigs
+                .iter()
+                .map(|(uuid, layer)| (uuid.clone(), pick(&layer.values)))
+                .filter(|(_, values)| !values.is_empty())
+                .collect();
+            (pick(&book.global), rigs)
+        };
+        grade_values(self) != grade_values(other)
+    }
 }
 
-fn light_rig_uuid(light: &FrameMeta) -> String {
-    light.rig_uuid.clone()
+/// Matching settings that grading reads too: a dark is graded against the
+/// darks within its rig's temperature tolerance, and a flat against the
+/// flats its rig's rotation and focal length tolerances put in its session.
+/// Changing one regroups the peers, so the frames are graded again.
+pub const GRADING_GROUPS: [&str; 3] = [
+    "dark_temperature_tolerance_c",
+    "rotation_tolerance_deg",
+    "focal_length_tolerance_mm",
+];
+
+/// Whether the stacker takes a tolerance as it is, beyond this setting's
+/// own range: it refuses a non-finite, negative or over-wide one rather
+/// than clamp it. A setting that is not a tolerance passes.
+pub fn stacker_accepts(key: &str, value: &Value) -> Result<(), String> {
+    let mut tolerances = MatchTolerances::default();
+    let Some(number) = value.as_f64() else {
+        return Ok(());
+    };
+    match key {
+        "rotation_tolerance_deg" => tolerances.rotation_deg = number,
+        "focal_length_tolerance_mm" => tolerances.focal_length_mm = number,
+        "dark_temperature_tolerance_c" => tolerances.dark_temperature_c = number,
+        "flat_session_hours" => tolerances.flat_session_seconds = (number * 3600.0).round() as u64,
+        _ => return Ok(()),
+    }
+    tolerances.validate().map_err(|error| {
+        let label = field(key).map(|spec| spec.label).unwrap_or(key);
+        format!("{label}: {error}")
+    })
 }

@@ -65,94 +65,47 @@ pub(super) fn rule_book(global: Vec<Setting>, rigs: Vec<RigSettings>) -> crate::
         layers,
     ))
 }
-fn validate_frames(frames: &[CalibrationFrame]) -> crate::Result<()> {
-    let mut ids = BTreeSet::new();
-    for frame in frames {
-        if frame.frame_uuid.is_empty() || !ids.insert(&frame.frame_uuid) {
-            return Err(invalid(
-                "calibration frame UUIDs must be nonempty and unique",
-            ));
-        }
-        validate_values(&frame_signature(frame).seiza)?;
-        if frame.source_verified
-            && (frame.source_path.as_os_str().is_empty() || frame.source_fingerprint.is_empty())
-        {
-            return Err(invalid("verified sources need a path and fingerprint"));
-        }
-    }
-    Ok(())
-}
-
 /// Produce the same recipes/identity as library planning from selected rows.
 /// Hosts must replan after changed verification, grades, options or sources.
 pub fn plan_masters(request: MasterPlanRequest) -> crate::Result<Session> {
-    validate_frames(&request.frames)?;
     let light = request
         .lights
         .first()
         .ok_or_else(|| invalid("master planning needs a light"))?;
-    for light in &request.lights {
-        validate_values(&light_signature(light).seiza)?;
-    }
-    let rules = rule_book(request.global_settings.clone(), request.rigs.clone())?.for_light(light);
+    let (rules, quality) = check_request(
+        &request.frames,
+        &request.lights,
+        request.quality,
+        request.global_settings,
+        request.rigs,
+    )?;
+    supplied::validate(
+        &request.frames,
+        &rules,
+        request.flat_association,
+        request.dark_association,
+    )?;
     let mut selected = CalibrationSelection {
-        rules,
+        rules: rules.for_light(light),
         flat_basis: request.flat_basis,
         flat_family: request.flat_family,
         flat_held_back: request.flat_held_back,
         ..Default::default()
     };
-    let ids: BTreeSet<_> = request
-        .frames
-        .iter()
-        .map(|f| f.frame_uuid.clone())
-        .collect();
-    let mut quality = BTreeMap::new();
-    for row in request.quality {
-        if !ids.contains(&row.frame_uuid) || quality.insert(row.frame_uuid.clone(), row).is_some() {
-            return Err(invalid("quality rows must name unique selected frames"));
-        }
-    }
-    let modes = (request.flat_association, request.dark_association);
-    supplied::validate(
-        &request.frames,
-        &rule_book(request.global_settings.clone(), request.rigs.clone())?,
-        modes.0,
-        modes.1,
-    )?;
     for frame in request.frames {
-        match frame.kind {
-            CalibrationKind::Bias => &mut selected.bias,
-            CalibrationKind::Dark => &mut selected.dark,
-            CalibrationKind::DarkFlat => &mut selected.dark_flat,
-            CalibrationKind::Flat => &mut selected.flat,
-        }
-        .push(frame);
+        selected.of_kind_mut(frame.kind).push(frame);
     }
-    if modes.0 == Association::OneSet {
+    if request.flat_association == Association::OneSet {
         selected.one_set.insert(CalibrationKind::Flat);
     }
-    if modes.1 == Association::OneSet {
+    if request.dark_association == Association::OneSet {
         selected.one_set.insert(CalibrationKind::Dark);
     }
-    for (kind, frames) in [
-        (CalibrationKind::Bias, &mut selected.bias),
-        (CalibrationKind::Dark, &mut selected.dark),
-        (CalibrationKind::DarkFlat, &mut selected.dark_flat),
-        (CalibrationKind::Flat, &mut selected.flat),
-    ] {
-        if !selected.one_set.contains(&kind) && frames.iter().all(|f| f.source_verified) {
-            frames.truncate(MAX_MASTER_FRAMES);
-        }
-    }
-    let session = resolved_session(
-        &selected,
-        &quality,
-        &HashMap::new(),
-        request.flat_star_masking,
-        request.flat_stability,
-    );
-    let mut sessions = vec![session];
+    let options = SessionOptions {
+        flat_star_masking: request.flat_star_masking,
+        flat_stability: request.flat_stability,
+    };
+    let mut sessions = vec![resolve_session(&selected, &quality, &options)];
     finalize(
         &mut sessions,
         &vec![0; request.lights.len()],
@@ -162,49 +115,6 @@ pub fn plan_masters(request: MasterPlanRequest) -> crate::Result<Session> {
         request.force_flat_without_pedestal,
     )?;
     Ok(sessions.remove(0))
-}
-
-pub(super) fn resolved_session(
-    selected: &CalibrationSelection,
-    quality: &BTreeMap<String, QualityRecord>,
-    judged: &HashMap<String, Judged>,
-    masking: bool,
-    stability: FlatRetryPolicy,
-) -> Session {
-    let mut recipes = recipes(selected);
-    let frames: Vec<_> = selected
-        .bias
-        .iter()
-        .chain(&selected.dark)
-        .chain(&selected.dark_flat)
-        .chain(&selected.flat)
-        .cloned()
-        .collect();
-    for recipe in &mut recipes {
-        recipe.flat_star_masking = recipe.kind == CalibrationKind::Flat && masking;
-        recipe.dark_level_screening = matches!(
-            recipe.kind,
-            CalibrationKind::Dark | CalibrationKind::DarkFlat
-        ) && recipe.inputs.iter().any(|id| {
-            !judged.contains_key(id)
-                && quality.get(id).is_none_or(|q| {
-                    q.override_choice.is_none()
-                        && !(q.grade.is_some() && selected_frame_current(id, q, &frames))
-                })
-        });
-    }
-    let mut stability = stability;
-    if selected.one_set.contains(&CalibrationKind::Flat) {
-        stability.try_next_session = false;
-    }
-    Session {
-        key: session_key(selected, &recipes, &stability),
-        tolerances: selected.match_tolerances(),
-        recipes,
-        application: Application::default(),
-        flat_stability: stability,
-        flat_held_back: selected.flat_held_back.clone(),
-    }
 }
 
 /// Coherence alone, for previews and build retries; accepts caller-ordered rows.
@@ -225,8 +135,8 @@ pub struct MasterCohort {
 /// plan_masters validates executable input identities and source records.
 pub fn master_cohort(request: MasterCohortRequest) -> crate::Result<MasterCohort> {
     let values = setting_values(request.settings, "settings")?;
-    let rules = RuleBook::new(values, BTreeMap::new()).for_rig("");
-    let subset = master_subset_report(request.kind, &request.frames, &rules);
+    let rules = RuleBook::new(values, BTreeMap::new()).global();
+    let subset = coherent_cohort(request.kind, &request.frames, &rules);
     Ok(MasterCohort {
         kept: subset.kept.into_iter().map(|f| f.frame_uuid).collect(),
         dropped: subset.dropped.into_iter().map(|f| f.frame_uuid).collect(),
@@ -313,11 +223,12 @@ pub struct FlatRetryDecision {
 /// Decide the next flat retry/publication from immutable execution feedback.
 /// Hosts retain staging, cancellation, cache publication and pixel measurement.
 pub fn flat_retry(request: FlatRetryRequest) -> crate::Result<FlatRetryDecision> {
-    let rules = RuleBook::new(
+    let mut rules = (*RuleBook::new(
         setting_values(request.settings.clone(), "settings")?,
         BTreeMap::new(),
     )
-    .for_rig("");
+    .global())
+    .clone();
     let default_policy = FlatRetryPolicy::default();
     let (policy, held_back, window) = if let Some(session) = &request.session {
         session.tolerances.validate()?;
@@ -333,6 +244,11 @@ pub fn flat_retry(request: FlatRetryRequest) -> crate::Result<FlatRetryDecision>
                 "flat retry overrides conflict with the supplied session",
             ));
         }
+        // An alternate set is clustered as the session's own flats were.
+        rules.flat_session_seconds = session.tolerances.flat_session_seconds;
+        rules.rotation_deg = session.tolerances.rotation_deg;
+        rules.focal_length_mm = session.tolerances.focal_length_mm;
+        rules.dark_temperature_c = session.tolerances.dark_temperature_c;
         (
             &session.flat_stability,
             &session.flat_held_back,
@@ -345,7 +261,7 @@ pub fn flat_retry(request: FlatRetryRequest) -> crate::Result<FlatRetryDecision>
             rules.flat_session_seconds,
         )
     };
-    validate_frames(&request.candidates)?;
+    check_request(&request.candidates, &[], Vec::new(), Vec::new(), Vec::new())?;
     let ids: BTreeSet<_> = request.candidates.iter().map(|f| &f.frame_uuid).collect();
     for attempt in std::iter::once(&request.first)
         .chain(request.trimmed.iter())
@@ -435,7 +351,8 @@ pub fn flat_retry(request: FlatRetryRequest) -> crate::Result<FlatRetryDecision>
     let window =
         i64::try_from(window).map_err(|_| invalid("flat retry session window is too large"))?;
     let eligible_alternate = |f: &CalibrationFrame| {
-        !held_back.contains(&f.frame_uuid)
+        !f.is_master
+            && !held_back.contains(&f.frame_uuid)
             && !first.used.contains(&f.frame_uuid)
             && !matches!((start, end, f.captured_at), (Some(a), Some(b), Some(t)) if t >= a.saturating_sub(window) && t <= b.saturating_add(window))
     };
@@ -453,14 +370,21 @@ pub fn flat_retry(request: FlatRetryRequest) -> crate::Result<FlatRetryDecision>
         ));
     }
     if policy.try_next_session && !alternate_attempted {
-        result.action = FlatRetryAction::TryAlternate;
-        result.inputs = request
+        // The next session out, as one master takes it: the nearest
+        // cluster of the remaining candidates, given nearest first, not
+        // every flat outside the first window.
+        let remaining: Vec<CalibrationFrame> = request
             .candidates
             .iter()
             .filter(|f| eligible_alternate(f))
-            .map(|f| f.frame_uuid.clone())
+            .cloned()
             .collect();
-        return Ok(result);
+        let cohort = coherent_cohort(CalibrationKind::Flat, &remaining, &rules);
+        if cohort.kept.len() >= MIN_MASTER_FRAMES {
+            result.action = FlatRetryAction::TryAlternate;
+            result.inputs = cohort.kept.into_iter().map(|f| f.frame_uuid).collect();
+            return Ok(result);
+        }
     }
     if policy.try_next_session
         && let Some(attempt) = &request.alternate

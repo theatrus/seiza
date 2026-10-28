@@ -7,15 +7,6 @@ use crate::flat_response::groups::{AngleTerm, Event, Placement};
 pub(crate) use crate::flat_response::groups::{lights, model, overrides};
 use crate::flat_response::{groups::Book, metric};
 use sha2::{Digest, Sha256};
-pub(super) fn limits_of(rules: &Rules) -> model::Limits {
-    model::Limits {
-        measured: rules.flat_grouping == rules::FlatGrouping::Measured,
-        dust: rules.flat_split_dust_pct / 100.0,
-        broad: rules.flat_split_pattern_pct / 100.0,
-        window: rules.flat_session_seconds as i64,
-        rotation: rules.coherence_tolerances().rotation_deg,
-    }
-}
 /// A change as a light's account names it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventNote {
@@ -57,7 +48,12 @@ impl EventNote {
 pub fn describe_what(event: &Event, rules: &Rules) -> String {
     if event.by_hand {
         "split by you where the flats measure alike".into()
-    } else if vignetting_leads(event.dust, event.broad, event.vignetting, &limits_of(rules)) {
+    } else if vignetting_leads(
+        event.dust,
+        event.broad,
+        event.vignetting,
+        &rules.grouping_limits(),
+    ) {
         format!(
             "vignetting changed at the {}",
             event

@@ -18,9 +18,16 @@ pub(super) fn validate(
         if mode != Association::OneSet {
             continue;
         }
+        // Masters the rig ignores take no part in its set.
         let kept: Vec<_> = frames
             .iter()
-            .filter(|f| f.kind == kind && f.kept_out.is_none())
+            .filter(|f| {
+                f.kind == kind
+                    && f.kept_out.is_none()
+                    && !(f.is_master
+                        && rules.for_rig(&f.rig_uuid).external_masters
+                            == ExternalMasterPolicy::Ignore)
+            })
             .collect();
         if kept.iter().filter(|f| f.is_master).count() > 1
             || (kept.iter().any(|f| f.is_master) && kept.iter().any(|f| !f.is_master))
@@ -54,19 +61,25 @@ pub(super) fn validate(
     Ok(())
 }
 pub(super) fn apply(
-    library: &LibrarySnapshot,
+    library: &Library,
     light: &Light,
     selected: &mut CalibrationSelection,
-    frames: &[CalibrationFrame],
     flat: Association,
     dark: Association,
 ) {
+    let frames = library.frames();
+    // The whole set in capture order: one master serves every light, so
+    // its first frame does not depend on which light asks.
     let all = |kind| {
-        frames
+        let mut set = frames
             .iter()
             .filter(|f| f.kind == kind && f.kept_out.is_none())
             .cloned()
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        set.sort_by(|a, b| {
+            (a.captured_at, a.id, &a.frame_uuid).cmp(&(b.captured_at, b.id, &b.frame_uuid))
+        });
+        set
     };
     let rules = &selected.rules;
     if dark == Association::OneSet && rules.use_darks {

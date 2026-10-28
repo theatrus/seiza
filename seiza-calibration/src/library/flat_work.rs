@@ -151,7 +151,7 @@ pub fn plan_flat_work(mut request: FlatWorkRequest) -> crate::Result<FlatWorkPla
         .collect::<BTreeSet<_>>()
         .into_iter()
         .map(|rig_uuid| groups::RigLimits {
-            limits: flat_notes::limits_of(&rules.for_rig(&rig_uuid)),
+            limits: rules.for_rig(&rig_uuid).grouping_limits(),
             rig_uuid,
         })
         .collect();
@@ -234,16 +234,11 @@ pub fn plan_flat_work(mut request: FlatWorkRequest) -> crate::Result<FlatWorkPla
     for (frame, grade) in frames.iter_mut().zip(&snapshot.grades) {
         frame.kept_out = grade.kept_out.clone();
     }
-    let library = LibrarySnapshot {
+    let library = Library::new(
         frames,
-        flat_book: Arc::clone(&book),
-        available_responses: request
-            .library
-            .available_responses
-            .iter()
-            .cloned()
-            .collect(),
-    };
+        Arc::clone(&book),
+        request.library.available_responses.iter().cloned(),
+    );
     let eligible = |session: &groups::ImagingSession, rig: &str| {
         lights
             .iter()

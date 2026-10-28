@@ -1,11 +1,30 @@
-// Extracted from theatrus/psf-guard at 79f5e31d53b8371e8fcd0b22a9b69692412cd8b4.
-// Copyright the PSF Guard contributors; Apache-2.0.
+//! Matching lights to calibration frames, and the cohort a master takes.
+//!
+//! Extracted from theatrus/psf-guard at 79f5e31d53b8371e8fcd0b22a9b69692412cd8b4.
+//! Copyright the PSF Guard contributors; Apache-2.0.
 use super::*;
-impl LibrarySnapshot {
+
+/// A frame's settings as matching compares them.
+pub struct Signature {
+    pub seiza: FrameSignature,
+    pub readout_mode_name: Option<String>,
+}
+
+/// The frames a master integrates from a set of candidates, and those that
+/// clustered with them but would not integrate with its first.
+#[derive(Clone, Debug, Default)]
+pub struct Cohort {
+    pub kept: Vec<CalibrationFrame>,
+    pub dropped: Vec<CalibrationFrame>,
+}
+
+impl Library {
     pub(super) fn of_kind(&self, kind: CalibrationKind) -> impl Iterator<Item = &CalibrationFrame> {
         self.frames.iter().filter(move |frame| frame.kind == kind)
     }
-    pub(super) fn light_choices(
+    /// A person's choices for this light's flats, resolved against the
+    /// book. Grouping by time keeps every choice and applies none.
+    pub fn light_choices(
         &self,
         light: &FrameMeta,
         rules: &Rules,
@@ -315,7 +334,10 @@ impl LibrarySnapshot {
             rules.rotation_deg,
         )
     }
-    pub(crate) fn flat_family_compatible(&self, light: &FrameMeta, rules: &Rules) -> Vec<usize> {
+    /// The response families whose flats could serve `light` by sensor,
+    /// optics and validity, at any angle: the candidates its own pixels may
+    /// choose among.
+    pub fn flat_family_compatible(&self, light: &FrameMeta, rules: &Rules) -> Vec<usize> {
         let book = &self.flat_book;
         let light_signature = light_signature(light);
         let mut tolerances = rules.tolerances();
@@ -843,27 +865,27 @@ pub(super) fn family_light_rotation(
         None => LightRotation::Recorded,
     }
 }
-pub(super) fn rotation_gap(left: f64, right: f64) -> f64 {
+pub fn rotation_gap(left: f64, right: f64) -> f64 {
     let difference = (left - right).rem_euclid(360.0);
     difference.min(360.0 - difference)
 }
-pub(super) fn signature_sensor_matches(reference: &Signature, candidate: &Signature) -> bool {
+pub fn signature_sensor_matches(reference: &Signature, candidate: &Signature) -> bool {
     crate::sensor_matches(&reference.seiza, &candidate.seiza)
         && readout_names_agree(reference, candidate)
 }
-pub(super) fn signature_sensor_consistent(left: &Signature, right: &Signature) -> bool {
+pub fn signature_sensor_consistent(left: &Signature, right: &Signature) -> bool {
     crate::sensor_consistent(&left.seiza, &right.seiza) && readout_names_agree(left, right)
 }
-pub(super) fn readout_names_agree(left: &Signature, right: &Signature) -> bool {
+pub fn readout_names_agree(left: &Signature, right: &Signature) -> bool {
     match (&left.readout_mode_name, &right.readout_mode_name) {
         (Some(left), Some(right)) => readout_names_equal(left, right),
         _ => true,
     }
 }
-pub(super) fn readout_names_equal(left: &str, right: &str) -> bool {
+pub fn readout_names_equal(left: &str, right: &str) -> bool {
     left.trim().eq_ignore_ascii_case(right.trim())
 }
-pub(super) fn light_signature(light: &FrameMeta) -> Signature {
+pub fn light_signature(light: &FrameMeta) -> Signature {
     let signature = crate::FrameSignature {
         camera: light.camera.clone(),
         telescope: light.telescope.clone(),
@@ -889,7 +911,7 @@ pub(super) fn light_signature(light: &FrameMeta) -> Signature {
         readout_mode_name: light.readout_mode_name.clone(),
     }
 }
-pub(super) fn frame_signature(frame: &CalibrationFrame) -> Signature {
+pub fn frame_signature(frame: &CalibrationFrame) -> Signature {
     let signature = crate::FrameSignature {
         camera: frame.camera.clone(),
         telescope: frame.telescope.clone(),
@@ -915,7 +937,7 @@ pub(super) fn frame_signature(frame: &CalibrationFrame) -> Signature {
         readout_mode_name: frame.readout_mode_name.clone(),
     }
 }
-pub(super) fn dark_within_reach(
+pub fn dark_within_reach(
     candidate: &CalibrationFrame,
     light_timestamp: Option<i64>,
     rules: &Rules,
@@ -952,7 +974,7 @@ pub(super) fn nearest_complete_dark_session(
         kept
     }
 }
-pub(super) fn sensor_matches(light: &FrameMeta, candidate: &CalibrationFrame) -> bool {
+pub fn sensor_matches(light: &FrameMeta, candidate: &CalibrationFrame) -> bool {
     let (light, candidate_signature) = (light_signature(light), frame_signature(candidate));
     if candidate.is_master {
         signature_sensor_consistent(&light, &candidate_signature)
@@ -960,7 +982,7 @@ pub(super) fn sensor_matches(light: &FrameMeta, candidate: &CalibrationFrame) ->
         signature_sensor_matches(&light, &candidate_signature)
     }
 }
-pub(super) fn flat_matches(light: &FrameMeta, candidate: &CalibrationFrame, rules: &Rules) -> bool {
+pub fn flat_matches(light: &FrameMeta, candidate: &CalibrationFrame, rules: &Rules) -> bool {
     let (light, candidate_signature) = (light_signature(light), frame_signature(candidate));
     let tolerances = rules.tolerances();
     if candidate.is_master {
@@ -969,7 +991,7 @@ pub(super) fn flat_matches(light: &FrameMeta, candidate: &CalibrationFrame, rule
         crate::optics_match(&light.seiza, &candidate_signature.seiza, &tolerances)
     }
 }
-pub(super) fn temperature_admits(
+pub fn temperature_admits(
     light_temp: Option<f64>,
     candidate: &CalibrationFrame,
     rules: &Rules,
@@ -979,10 +1001,10 @@ pub(super) fn temperature_admits(
     }
     temperature_matches(light_temp, candidate.camera_temp, rules)
 }
-pub(super) fn frame_pair_matches(left: &CalibrationFrame, right: &CalibrationFrame) -> bool {
+pub fn frame_pair_matches(left: &CalibrationFrame, right: &CalibrationFrame) -> bool {
     signature_sensor_matches(&frame_signature(left), &frame_signature(right))
 }
-pub(super) fn exposure_matches(left: Option<f64>, right: Option<f64>) -> bool {
+pub fn exposure_matches(left: Option<f64>, right: Option<f64>) -> bool {
     let signature = |exposure| crate::FrameSignature {
         exposure_seconds: exposure,
         ..Default::default()
@@ -993,7 +1015,7 @@ pub(super) fn exposure_matches(left: Option<f64>, right: Option<f64>) -> bool {
         &crate::MatchTolerances::default(),
     )
 }
-pub(super) fn temperature_matches(left: Option<f64>, right: Option<f64>, rules: &Rules) -> bool {
+pub fn temperature_matches(left: Option<f64>, right: Option<f64>, rules: &Rules) -> bool {
     let signature = |temperature| crate::FrameSignature {
         camera_temp_c: temperature,
         ..Default::default()
@@ -1005,24 +1027,29 @@ pub(super) fn coherent_master_subset(
     frames: &[CalibrationFrame],
     rules: &Rules,
 ) -> Vec<CalibrationFrame> {
-    master_subset_report(kind, frames, rules).kept
+    coherent_cohort(kind, frames, rules).kept
 }
-pub(super) fn master_subset_report(
+/// The frames one master of `kind` integrates from `frames`, given nearest
+/// first: one readout mode, then the nearest cluster of agreeing frames (a
+/// complete set first for darks and biases unless the rules take the
+/// nearest), anchored on the first as the integrator anchors it. A dark
+/// master keeps to its nearest complete night.
+pub fn coherent_cohort(
     kind: CalibrationKind,
     frames: &[CalibrationFrame],
     rules: &Rules,
-) -> MasterSubset {
+) -> Cohort {
     let mut subset = master_subset_by_mode(kind, frames, rules);
     if kind == CalibrationKind::Dark {
         subset.kept = nearest_complete_dark_session(subset.kept, rules);
     }
     subset
 }
-pub(super) fn master_subset_by_mode(
+fn master_subset_by_mode(
     kind: CalibrationKind,
     frames: &[CalibrationFrame],
     rules: &Rules,
-) -> MasterSubset {
+) -> Cohort {
     // Seiza clusters by temperature, session and angle, and knows nothing
     // of the readout mode's name. Left to the anchor test below, a nearest
     // stray in one mode would set aside a whole set in the other and blame
@@ -1055,11 +1082,11 @@ pub(super) fn master_subset_by_mode(
     }
     master_subset_of_one_mode(kind, frames, rules)
 }
-pub(super) fn master_subset_of_one_mode(
+fn master_subset_of_one_mode(
     kind: CalibrationKind,
     frames: &[CalibrationFrame],
     rules: &Rules,
-) -> MasterSubset {
+) -> Cohort {
     let signatures: Vec<_> = frames.iter().map(frame_signature).collect();
     let seiza_signatures: Vec<_> = signatures
         .iter()
@@ -1113,7 +1140,7 @@ pub(super) fn master_subset_of_one_mode(
             Some(_) => dropped.push(frames[index].clone()),
         }
     }
-    MasterSubset { kept, dropped }
+    Cohort { kept, dropped }
 }
 pub(super) fn integrates_with(
     kind: CalibrationKind,
@@ -1136,7 +1163,7 @@ pub(super) fn sort_candidates(frames: &mut [CalibrationFrame], reference_at: Opt
         _ => 0,
     });
 }
-pub(super) fn validity_admits(candidate: &CalibrationFrame, light_timestamp: Option<i64>) -> bool {
+pub fn validity_admits(candidate: &CalibrationFrame, light_timestamp: Option<i64>) -> bool {
     let (Some(direction), Some(light), Some(frame)) = (
         candidate.valid_direction,
         light_timestamp,

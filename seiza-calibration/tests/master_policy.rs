@@ -347,3 +347,41 @@ fn successful_retry_feedback_implies_attempted_but_failed_retry_needs_a_flag() {
         library::FlatRetryAction::TryAlternate
     );
 }
+
+#[test]
+fn an_alternate_flat_set_is_the_next_session_alone_without_masters() {
+    let flat = |id: &str, at: i64, master: bool| library::CalibrationFrame {
+        frame_uuid: id.into(),
+        kind: library::CalibrationKind::Flat,
+        captured_at: Some(at),
+        camera: Some("Camera".into()),
+        filter: Some("Ha".into()),
+        is_master: master,
+        ..Default::default()
+    };
+    // The first set drifted entirely; two later sessions each match the
+    // light, a dust state apart, and an external master is on offer too.
+    let candidates = vec![
+        flat("a0", 0, false),
+        flat("a1", 1, false),
+        flat("m", 50_000, true),
+        flat("b0", 100_000, false),
+        flat("b1", 100_001, false),
+        flat("c0", 400_000, false),
+        flat("c1", 400_001, false),
+    ];
+    let request = FlatRetryRequest {
+        candidates,
+        first: library::FlatAttempt {
+            used: vec!["a0".into(), "a1".into()],
+            disagreement: vec![30, 30],
+            drift_threshold: 16,
+            feature_pixels: 80,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let decision = library::flat_retry(request).unwrap();
+    assert_eq!(decision.action, library::FlatRetryAction::TryAlternate);
+    assert_eq!(decision.inputs, ["b0", "b1"]);
+}

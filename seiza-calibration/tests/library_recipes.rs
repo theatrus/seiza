@@ -130,7 +130,7 @@ fn identity_tracks_effective_inputs_options_and_gate() {
 }
 
 #[test]
-fn input_order_keeps_each_master_metadata_anchor() {
+fn lights_whose_masters_take_the_same_frames_share_one_session() {
     let fixture: Value =
         serde_json::from_str(include_str!("fixtures/library/recipes.json")).unwrap();
     let mut request = fixture["cases"][1]["request"].clone();
@@ -140,7 +140,11 @@ fn input_order_keeps_each_master_metadata_anchor() {
     b["timestamp"] = 21.into();
     request["lights"] = serde_json::json!([a, b, a]);
     let result = evaluate(serde_json::from_value(request).unwrap()).unwrap();
-    assert_eq!(result.assignments, [0, 1, 0]);
+    // Each light's nearest frame differs, but the master takes the same two
+    // frames for both: one master, anchored as the first light orders them.
+    assert_eq!(result.selections[0].dark, ["f1", "f2", "f0"]);
+    assert_eq!(result.selections[1].dark, ["f2", "f1", "f0"]);
+    assert_eq!(result.assignments, [0, 0, 0]);
+    assert_eq!(result.sessions.len(), 1);
     assert_eq!(result.sessions[0].recipes[2].inputs, ["f1", "f2"]);
-    assert_eq!(result.sessions[1].recipes[2].inputs, ["f2", "f1"]);
 }

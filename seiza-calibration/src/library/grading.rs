@@ -1,7 +1,70 @@
-// Extracted from theatrus/psf-guard at 79f5e31d53b8371e8fcd0b22a9b69692412cd8b4.
-// Copyright the PSF Guard contributors; Apache-2.0.
+//! Peer grading of calibration frames.
+//!
+//! Extracted from theatrus/psf-guard at 79f5e31d53b8371e8fcd0b22a9b69692412cd8b4.
+//! Copyright the PSF Guard contributors; Apache-2.0.
 use super::*;
-pub(super) fn kept_out_reason(
+
+struct Measured<'a> {
+    frame: &'a CalibrationFrame,
+    signature: Signature,
+    measurement: &'a StoredMeasurement,
+}
+
+#[derive(PartialEq, Eq)]
+struct FlatSessionKey {
+    rig: String,
+    night: String,
+    filter: Option<String>,
+    width: usize,
+    height: usize,
+}
+
+/// Judge every measured raw frame against its peers, by its rig's limits.
+///
+/// Peers are the frames that should agree. A bias or dark is judged against
+/// every frame that could stand in for it: same kind, rig and sensor
+/// settings, matching exposure and temperature, from any night, so a morning
+/// whose darks all caught light is still caught by a clean set from another
+/// night. Flats are judged within their session: one night, rig, filter,
+/// rotation and sensor mode. Give only current measurements; their order
+/// does not matter. Masters and measurements of the wrong kind are skipped.
+pub fn grade<'a>(
+    measured: impl IntoIterator<Item = (&'a CalibrationFrame, &'a StoredMeasurement)>,
+    rules: &RuleBook,
+    nights: &dyn NightSplit,
+) -> HashMap<String, Judged> {
+    let mut measured: Vec<Measured> = measured
+        .into_iter()
+        .filter(|(frame, measurement)| {
+            !frame.is_master
+                && matches!(measurement, StoredMeasurement::Flat(_))
+                    == (frame.kind == CalibrationKind::Flat)
+        })
+        .map(|(frame, measurement)| Measured {
+            frame,
+            signature: frame_signature(frame),
+            measurement,
+        })
+        .collect();
+    // Oldest first, the id breaking equal capture times: a session's first
+    // flat anchors it.
+    measured.sort_by(|a, b| {
+        (a.frame.captured_at, a.frame.id, &a.frame.frame_uuid).cmp(&(
+            b.frame.captured_at,
+            b.frame.id,
+            &b.frame.frame_uuid,
+        ))
+    });
+    let mut judged = HashMap::new();
+    judge_darks(&measured, &mut judged, rules);
+    judge_flats(&measured, nights, &mut judged, rules);
+    judged
+}
+
+/// Why a frame stays out of masters and exports, or `None` when it serves.
+/// A person's choice comes first; then the grade; a frame not graded yet
+/// keeps the stray-light mark an older build may have left on it.
+pub fn kept_out_reason(
     stray_light: Option<String>,
     grade: Option<&str>,
     reason: Option<String>,
@@ -17,7 +80,7 @@ pub(super) fn kept_out_reason(
         },
     }
 }
-pub(super) fn judge_darks(
+fn judge_darks(
     measured: &[Measured],
     judged: &mut HashMap<String, Judged>,
     book: &rules::RuleBook,
@@ -25,7 +88,7 @@ pub(super) fn judge_darks(
     let mut buckets: HashMap<(CalibrationKind, &str), Vec<(&Measured, &DarkMeasurement)>> =
         HashMap::new();
     for entry in measured {
-        if let StoredMeasurement::Dark(dark) = &entry.measurement
+        if let StoredMeasurement::Dark(dark) = entry.measurement
             && entry.frame.kind != CalibrationKind::Flat
         {
             buckets
@@ -97,16 +160,16 @@ fn stray_light_text(
         quietest.sigma
     ))
 }
-pub(super) fn judge_flats(
+fn judge_flats(
     measured: &[Measured],
-    nights: &Nights,
+    nights: &dyn NightSplit,
     judged: &mut HashMap<String, Judged>,
     book: &rules::RuleBook,
 ) {
     for set in flat_sessions(measured, nights, book) {
         let measurements: Vec<FlatMeasurement> = set
             .iter()
-            .filter_map(|entry| match &entry.measurement {
+            .filter_map(|entry| match entry.measurement {
                 StoredMeasurement::Flat(flat) => Some(flat.measurement.clone()),
                 StoredMeasurement::Dark(_) => None,
             })
@@ -116,12 +179,10 @@ pub(super) fn judge_flats(
             continue;
         };
         let rules = book.for_rig(rig);
-        let report = match crate::screen_flats(&measurements, &rules.flat) {
-            Ok(report) => report,
-            Err(error) => {
-                let _ = error;
-                continue;
-            }
+        // A session the screen refuses (mismatched sizes) keeps its stored
+        // grades.
+        let Ok(report) = crate::screen_flats(&measurements, &rules.flat) else {
+            continue;
         };
         for (entry, verdict) in set.iter().zip(report.frames) {
             judged.insert(
@@ -131,14 +192,14 @@ pub(super) fn judge_flats(
         }
     }
 }
-fn flat_sessions<'a>(
-    measured: &'a [Measured],
-    nights: &Nights,
+fn flat_sessions<'a, 'b>(
+    measured: &'b [Measured<'a>],
+    nights: &dyn NightSplit,
     book: &rules::RuleBook,
-) -> Vec<Vec<&'a Measured>> {
+) -> Vec<Vec<&'b Measured<'a>>> {
     let mut sessions: Vec<(FlatSessionKey, Vec<&Measured>)> = Vec::new();
     for entry in measured {
-        let StoredMeasurement::Flat(flat) = &entry.measurement else {
+        let StoredMeasurement::Flat(flat) = entry.measurement else {
             continue;
         };
         if entry.frame.kind != CalibrationKind::Flat {

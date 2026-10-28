@@ -102,6 +102,40 @@ pub struct Request {
     pub lights: Vec<LightQuery>,
 }
 
+impl Request {
+    /// Whether the request holds no rows at all.
+    pub fn is_empty(&self) -> bool {
+        let Self {
+            responses,
+            comparisons,
+            evidence,
+            imaging,
+            imaging_lights,
+            profile_rigs,
+            limits,
+            group_overrides,
+            night_boundaries,
+            epoch_samples,
+            family_evidence,
+            light_choices,
+            lights,
+        } = self;
+        responses.is_empty()
+            && comparisons.is_empty()
+            && evidence.is_empty()
+            && imaging.is_empty()
+            && imaging_lights.is_empty()
+            && profile_rigs.is_empty()
+            && limits.is_empty()
+            && group_overrides.is_empty()
+            && night_boundaries.is_empty()
+            && epoch_samples.is_empty()
+            && family_evidence.is_empty()
+            && light_choices.is_empty()
+            && lights.is_empty()
+    }
+}
+
 /// An automatic event placement and the response pair from which a correction
 /// map can be measured. Personal choices are returned separately on the light.
 #[derive(Debug, Clone, Serialize)]
