@@ -7,10 +7,12 @@
 use super::*;
 
 mod flat_work;
+mod group_plan;
 mod masters;
 mod responses;
 
 pub use flat_work::*;
+pub use group_plan::*;
 pub use masters::*;
 pub use responses::*;
 

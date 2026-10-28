@@ -293,7 +293,7 @@ pub(crate) fn library_schema() -> Value {
         "seiza_flat_group_plan_json",
         call(
             Some(generator.subschema_for::<groups::Request>()),
-            Some(generator.subschema_for::<groups::Snapshot>()),
+            Some(generator.subschema_for::<calls::FlatGroupPlan>()),
         ),
     );
     add(

@@ -1181,18 +1181,34 @@ a few lights' own sky against a change or a set of candidate responses;
 `flat_encode_plane` and `flat_decode_plane` keep planes in a cache. Options
 are a dict of `DustOptions` fields, such as `{"edge_sigma": 3.0}`.
 
-`flat_group_plan` shares PSF Guard's measured grouping policy: response families,
+`FlatGroups` holds PSF Guard's measured grouping policy: response families,
 groups, changes, angle epochs, uncertain light placements and resolved personal
-choices. Pass `responses`, `comparisons`, `evidence`, `imaging` (or
-`imaging_lights` with `profile_rigs`), `limits`, `group_overrides`,
-`night_boundaries`, `epoch_samples`, `family_evidence`, `light_choices`, and
-`lights` as keyword collections. Records/results use snake_case; times are Unix
-seconds, angles degrees, levels ADU, dust/broad fractions of background. Omitted
-collections are empty. The result includes measurement jobs and evidence keys
-for subsequent pixel passes. Compatible families must already pass the host's
-sensor/optics gates. Automatic results and personal choices stay distinct. This
-stage does not grade frames or build masters. See [the schema and executable
-fixture](../docs/flat-groups.md). `flat_group_plan()` evaluates an empty library.
+choices. Build it once from the stored rows, a mapping of `responses`,
+`comparisons`, `evidence`, `imaging` (or `imaging_lights` with `profile_rigs`),
+`limits`, `group_overrides`, `night_boundaries`, `epoch_samples`,
+`family_evidence` and `light_choices`; omitted collections are empty. Its
+properties are the book (`families`, `boundaries`, `events`, `overrides`,
+`outliers`, `spanning`, `angle_terms`, `epochs`), and `pairs_to_compare`,
+`sessions_in_windows` and `sessions_needing_evidence` are the measurement jobs
+and evidence keys for later pixel passes. `place_light(light)` says where one
+light stands: its automatic family among the `compatible_families` it names,
+the pixel question that would settle a close call, its resolved choices, and
+its placement against each change. Records use snake_case; times are Unix
+seconds, angles degrees, levels ADU, dust/broad fractions of background.
+Compatible families must already pass the host's sensor/optics gates.
+Automatic results and personal choices stay distinct. This stage does not
+grade frames or build masters. See [the schema and executable
+fixture](../docs/flat-groups.md).
+
+```python
+groups = seiza.FlatGroups(rows)
+groups.families[0]["groups"]
+placed = groups.place_light({"file_name": "L_0001.fits", "rig_uuid": rig,
+                             "filter": "Ha", "at": captured_at, "angle": 12.0,
+                             "compatible_families": [groups.families[0]["key"]],
+                             "rotation_tolerance": 2.0})
+placed["events"][0]["placement"]
+```
 
 ### Constellation figures
 

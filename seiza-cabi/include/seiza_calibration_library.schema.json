@@ -2708,6 +2708,192 @@
       ],
       "type": "object"
     },
+    "FlatGroupPlan": {
+      "description": "A flat group plan: the book a request's rows make, and where each of its\nlights stands. Indices refer to this plan's arrays, never to host\ndatabase rows. Keyed outputs are sorted lists of pairs, so their wire\nformat is stable.",
+      "properties": {
+        "algorithmVersion": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "angleTerms": {
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/$defs/AngleTerm"
+              }
+            ],
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "boundaries": {
+          "items": {
+            "$ref": "#/$defs/Boundary"
+          },
+          "type": "array"
+        },
+        "epochs": {
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "$ref": "#/$defs/Epoch"
+                },
+                "type": "array"
+              }
+            ],
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "events": {
+          "items": {
+            "$ref": "#/$defs/Event"
+          },
+          "type": "array"
+        },
+        "families": {
+          "items": {
+            "$ref": "#/$defs/Family"
+          },
+          "type": "array"
+        },
+        "imaging": {
+          "items": {
+            "$ref": "#/$defs/ImagingSession"
+          },
+          "type": "array"
+        },
+        "lights": {
+          "items": {
+            "$ref": "#/$defs/LightResult"
+          },
+          "type": "array"
+        },
+        "outliers": {
+          "items": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "overrides": {
+          "items": {
+            "$ref": "#/$defs/OverrideState"
+          },
+          "type": "array"
+        },
+        "pairsToCompare": {
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            ],
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "sessions": {
+          "items": {
+            "$ref": "#/$defs/Session2"
+          },
+          "type": "array"
+        },
+        "sessionsInWindows": {
+          "items": {
+            "maxItems": 3,
+            "minItems": 3,
+            "prefixItems": [
+              {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "sessionsNeedingEvidence": {
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            ],
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "spanning": {
+          "items": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "algorithmVersion",
+        "imaging",
+        "sessions",
+        "families",
+        "boundaries",
+        "events",
+        "overrides",
+        "outliers",
+        "spanning",
+        "angleTerms",
+        "epochs",
+        "pairsToCompare",
+        "sessionsInWindows",
+        "sessionsNeedingEvidence",
+        "lights"
+      ],
+      "type": "object"
+    },
     "FlatLightContext": {
       "additionalProperties": false,
       "properties": {
@@ -6273,192 +6459,6 @@
       ],
       "type": "object"
     },
-    "Snapshot2": {
-      "description": "Indices refer to this snapshot's arrays, never to host database rows.\nKeyed outputs are sorted lists of pairs, so their wire format is stable.",
-      "properties": {
-        "algorithmVersion": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "angleTerms": {
-          "items": {
-            "maxItems": 2,
-            "minItems": 2,
-            "prefixItems": [
-              {
-                "type": "string"
-              },
-              {
-                "$ref": "#/$defs/AngleTerm"
-              }
-            ],
-            "type": "array"
-          },
-          "type": "array"
-        },
-        "boundaries": {
-          "items": {
-            "$ref": "#/$defs/Boundary"
-          },
-          "type": "array"
-        },
-        "epochs": {
-          "items": {
-            "maxItems": 2,
-            "minItems": 2,
-            "prefixItems": [
-              {
-                "type": "string"
-              },
-              {
-                "items": {
-                  "$ref": "#/$defs/Epoch"
-                },
-                "type": "array"
-              }
-            ],
-            "type": "array"
-          },
-          "type": "array"
-        },
-        "events": {
-          "items": {
-            "$ref": "#/$defs/Event"
-          },
-          "type": "array"
-        },
-        "families": {
-          "items": {
-            "$ref": "#/$defs/Family"
-          },
-          "type": "array"
-        },
-        "imaging": {
-          "items": {
-            "$ref": "#/$defs/ImagingSession"
-          },
-          "type": "array"
-        },
-        "lights": {
-          "items": {
-            "$ref": "#/$defs/LightResult"
-          },
-          "type": "array"
-        },
-        "outliers": {
-          "items": {
-            "format": "uint",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "type": "array",
-          "uniqueItems": true
-        },
-        "overrides": {
-          "items": {
-            "$ref": "#/$defs/OverrideState"
-          },
-          "type": "array"
-        },
-        "pairsToCompare": {
-          "items": {
-            "maxItems": 2,
-            "minItems": 2,
-            "prefixItems": [
-              {
-                "format": "uint",
-                "minimum": 0,
-                "type": "integer"
-              },
-              {
-                "format": "uint",
-                "minimum": 0,
-                "type": "integer"
-              }
-            ],
-            "type": "array"
-          },
-          "type": "array"
-        },
-        "sessions": {
-          "items": {
-            "$ref": "#/$defs/Session2"
-          },
-          "type": "array"
-        },
-        "sessionsInWindows": {
-          "items": {
-            "maxItems": 3,
-            "minItems": 3,
-            "prefixItems": [
-              {
-                "format": "uint",
-                "minimum": 0,
-                "type": "integer"
-              },
-              {
-                "format": "uint",
-                "minimum": 0,
-                "type": "integer"
-              },
-              {
-                "type": "string"
-              }
-            ],
-            "type": "array"
-          },
-          "type": "array"
-        },
-        "sessionsNeedingEvidence": {
-          "items": {
-            "maxItems": 2,
-            "minItems": 2,
-            "prefixItems": [
-              {
-                "format": "uint",
-                "minimum": 0,
-                "type": "integer"
-              },
-              {
-                "format": "uint",
-                "minimum": 0,
-                "type": "integer"
-              }
-            ],
-            "type": "array"
-          },
-          "type": "array"
-        },
-        "spanning": {
-          "items": {
-            "format": "uint",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "type": "array",
-          "uniqueItems": true
-        }
-      },
-      "required": [
-        "algorithmVersion",
-        "imaging",
-        "sessions",
-        "families",
-        "boundaries",
-        "events",
-        "overrides",
-        "outliers",
-        "spanning",
-        "angleTerms",
-        "epochs",
-        "pairsToCompare",
-        "sessionsInWindows",
-        "sessionsNeedingEvidence",
-        "lights"
-      ],
-      "type": "object"
-    },
     "Spot": {
       "description": "One difference of dust between two sessions.",
       "properties": {
@@ -6839,7 +6839,7 @@
     },
     "seiza_flat_group_plan_json": {
       "answer": {
-        "$ref": "#/$defs/Snapshot2"
+        "$ref": "#/$defs/FlatGroupPlan"
       },
       "request": {
         "$ref": "#/$defs/Request2"

@@ -143,7 +143,7 @@ def test_path_scoped_manual_choices_keep_identical_basenames_separate():
     _, _, grouping = flat_work(source)
     rules = rules_of(source)
     nights = seiza.CalibrationNights(frames=source['frames'], rules=rules)
-    event = seiza.flat_group_plan(**resolved(grouping, rules, nights))['events'][0]
+    event = seiza.FlatGroups(resolved(grouping, rules, nights)).events[0]
     source['grouping'] = grouping
     source['grouping']['light_choices'] = [dict(light_id=0, file_name='/first/shared.fits',
         filter='Ha', at=source['lights'][0]['timestamp'], row=dict(light_guid='first',

@@ -1,8 +1,9 @@
 //! Measured flat families, change events, and light assignments.
 //!
 //! Extracted from PSF Guard rather than reconstructed from metadata matching.
-//! [`evaluate`] is the batch interface used by C and Python. Native hosts may
-//! use [`Book`] directly. Neither interface reads a catalog, files, or pixels.
+//! Hosts build a [`Book`] from their stored rows ([`prepare`]) and ask it
+//! about each light ([`Book::place_light`]). The C ABI's one-call plan is
+//! `library::json::flat_group_plan`. Neither interface reads a catalog, files, or pixels.
 //! Hosts supply the response/comparison/evidence measurements and the families
 //! that passed their hard sensor/optics gates. This is one stage of calibration
 //! selection, not a replacement for grading, dark selection, or master recipes.
@@ -175,137 +176,114 @@ pub struct LightResult {
     pub events: Vec<EventPlacement>,
 }
 
-/// Indices refer to this snapshot's arrays, never to host database rows.
-/// Keyed outputs are sorted lists of pairs, so their wire format is stable.
-#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Serialize)]
-pub struct Snapshot {
-    pub algorithm_version: u32,
-    pub imaging: Vec<ImagingSession>,
-    pub sessions: Vec<Session>,
-    pub families: Vec<Family>,
-    pub boundaries: Vec<Boundary>,
-    pub events: Vec<Event>,
-    pub overrides: Vec<OverrideState>,
-    pub outliers: BTreeSet<usize>,
-    pub spanning: BTreeSet<usize>,
-    pub angle_terms: Vec<(String, AngleTerm)>,
-    pub epochs: Vec<(String, Vec<Epoch>)>,
-    pub pairs_to_compare: Vec<(usize, usize)>,
-    pub sessions_in_windows: Vec<(usize, usize, String)>,
-    pub sessions_needing_evidence: Vec<(usize, usize)>,
-    pub lights: Vec<LightResult>,
+/// Whether a Unix time is within the range grouping's arithmetic supports.
+fn safe_time(at: i64) -> bool {
+    (-(1_i64 << 50)..=(1_i64 << 50)).contains(&at)
 }
 
-/// Build measured families and changes, then evaluate the requested lights.
-/// Missing measurements remain missing: no metadata-only verdict is invented.
-pub fn evaluate(request: Request) -> crate::Result<Snapshot> {
-    let lights_request = request.lights.clone();
-    let book = prepare(request)?;
-    let lights = lights_request
-        .into_iter()
-        .map(|light| {
-            let compatible = light
-                .compatible_families
-                .iter()
-                .map(|key| {
-                    let index = book
-                        .families
-                        .iter()
-                        .position(|family| family.key == *key)
-                        .ok_or_else(|| invalid(format!("unknown compatible family {key:?}")))?;
-                    let family = &book.families[index];
-                    if family.rig_uuid != light.rig_uuid
-                        || family.filter.as_deref().map(model::canonical_filter)
-                            != light.filter.as_deref().map(model::canonical_filter)
-                    {
-                        return Err(invalid(format!(
-                            "compatible family {key:?} has another rig or filter"
-                        )));
-                    }
-                    Ok(index)
-                })
-                .collect::<crate::Result<Vec<_>>>()?;
-            let automatic_family = book.choose_family(
-                &light.rig_uuid,
-                light.filter.as_deref(),
-                light.at,
-                light.angle,
-                &compatible,
-                light.rotation_tolerance,
-            );
-            let family_probe = light.at.zip(light.angle).map(|(at, angle)| {
-                let candidates: Vec<_> = book
-                    .family_candidates(&light.rig_uuid, Some(at), angle, &compatible)
-                    .into_iter()
-                    .map(|(family, _)| family)
-                    .collect();
-                let key = book.family_evidence_key(&candidates, &light.rig_uuid, at, angle);
-                let representatives = candidates
+impl LightQuery {
+    /// Refuse a capture time outside the supported range, a non-finite
+    /// angle, or a negative or non-finite rotation tolerance.
+    pub fn check(&self) -> crate::Result<()> {
+        if self.at.is_some_and(|at| !safe_time(at)) {
+            return Err(invalid("capture time is outside the supported range"));
+        }
+        if !self.rotation_tolerance.is_finite()
+            || self.rotation_tolerance < 0.0
+            || self.angle.is_some_and(|angle| !angle.is_finite())
+        {
+            return Err(invalid(
+                "light angles and nonnegative rotation tolerances must be finite",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Book {
+    /// Where one light stands in this book: its automatic family among
+    /// `light.compatible_families`, the pixel question that would settle a
+    /// close call, a person's resolved choices, and its placement against
+    /// each change of its rig and filter. Missing measurements stay missing:
+    /// no metadata-only verdict is invented.
+    pub fn place_light(&self, light: &LightQuery) -> crate::Result<LightResult> {
+        light.check()?;
+        let compatible = light
+            .compatible_families
+            .iter()
+            .map(|key| {
+                let index = self
+                    .families
                     .iter()
-                    .map(|family| book.family_representative(*family, &light.rig_uuid, at, angle))
-                    .collect();
-                FamilyProbe {
-                    key,
-                    candidates,
-                    representatives,
+                    .position(|family| family.key == *key)
+                    .ok_or_else(|| invalid(format!("unknown compatible family {key:?}")))?;
+                let family = &self.families[index];
+                if family.rig_uuid != light.rig_uuid
+                    || family.filter.as_deref().map(model::canonical_filter)
+                        != light.filter.as_deref().map(model::canonical_filter)
+                {
+                    return Err(invalid(format!(
+                        "compatible family {key:?} has another rig or filter"
+                    )));
                 }
-            });
-            let choices = book.light_choices(
-                &light.file_name,
-                light.filter.as_deref(),
-                &light.rig_uuid,
-                light.at,
-            );
-            let events = book
-                .events
-                .iter()
-                .enumerate()
-                .filter(|(_, event)| {
-                    event.rig_uuid == light.rig_uuid && event.applies_to(light.filter.as_deref())
-                })
-                .map(|(index, event)| EventPlacement {
-                    event: index,
-                    placement: light.at.map(|at| book.place(event, at)),
-                    map_source: book.map_source(index, light.filter.as_deref()),
-                    evidence_reference: light
-                        .at
-                        .zip(light.filter.as_deref())
-                        .and_then(|(at, filter)| book.evidence_reference(event, filter, at)),
-                })
-                .collect();
-            Ok(LightResult {
-                automatic_family,
-                family_probe,
-                choices,
-                events,
+                Ok(index)
             })
+            .collect::<crate::Result<Vec<_>>>()?;
+        let automatic_family = self.choose_family(
+            &light.rig_uuid,
+            light.filter.as_deref(),
+            light.at,
+            light.angle,
+            &compatible,
+            light.rotation_tolerance,
+        );
+        let family_probe = light.at.zip(light.angle).map(|(at, angle)| {
+            let candidates: Vec<_> = self
+                .family_candidates(&light.rig_uuid, Some(at), angle, &compatible)
+                .into_iter()
+                .map(|(family, _)| family)
+                .collect();
+            let key = self.family_evidence_key(&candidates, &light.rig_uuid, at, angle);
+            let representatives = candidates
+                .iter()
+                .map(|family| self.family_representative(*family, &light.rig_uuid, at, angle))
+                .collect();
+            FamilyProbe {
+                key,
+                candidates,
+                representatives,
+            }
+        });
+        let choices = self.light_choices(
+            &light.file_name,
+            light.filter.as_deref(),
+            &light.rig_uuid,
+            light.at,
+        );
+        let events = self
+            .events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| {
+                event.rig_uuid == light.rig_uuid && event.applies_to(light.filter.as_deref())
+            })
+            .map(|(index, event)| EventPlacement {
+                event: index,
+                placement: light.at.map(|at| self.place(event, at)),
+                map_source: self.map_source(index, light.filter.as_deref()),
+                evidence_reference: light
+                    .at
+                    .zip(light.filter.as_deref())
+                    .and_then(|(at, filter)| self.evidence_reference(event, filter, at)),
+            })
+            .collect();
+        Ok(LightResult {
+            automatic_family,
+            family_probe,
+            choices,
+            events,
         })
-        .collect::<crate::Result<Vec<_>>>()?;
-    let pairs_to_compare = book.pairs_to_compare();
-    let sessions_in_windows = book.sessions_in_windows();
-    let sessions_needing_evidence = book.sessions_needing_evidence();
-    let mut angle_terms: Vec<_> = book.angle_terms.into_iter().collect();
-    angle_terms.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut epochs: Vec<_> = book.epochs.by_rig.into_iter().collect();
-    epochs.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(Snapshot {
-        algorithm_version: ALGORITHM_VERSION,
-        imaging: book.imaging,
-        sessions: book.sessions,
-        families: book.families,
-        boundaries: book.boundaries,
-        events: book.events,
-        overrides: book.overrides,
-        outliers: book.outliers,
-        spanning: book.spanning,
-        angle_terms,
-        epochs,
-        pairs_to_compare,
-        sessions_in_windows,
-        sessions_needing_evidence,
-        lights,
-    })
+    }
 }
 
 /// Assemble the same measured book for grouping and library selection.
@@ -435,7 +413,6 @@ fn validate(request: &Request) -> crate::Result<()> {
     // Leave ample headroom for the policy's timestamp differences and windows.
     // This accepts Unix seconds millions of years from the present, and refuses
     // integer extrema before subtraction can overflow in either build profile.
-    let safe_time = |at: i64| (-(1_i64 << 50)..=(1_i64 << 50)).contains(&at);
     let times = request
         .responses
         .iter()
@@ -457,20 +434,12 @@ fn validate(request: &Request) -> crate::Result<()> {
                 .iter()
                 .flat_map(|row| [row.row.change_start, row.row.change_end])
                 .flatten(),
-        )
-        .chain(request.lights.iter().filter_map(|row| row.at));
+        );
     if times.into_iter().any(|at| !safe_time(at)) {
         return Err(invalid("capture time is outside the supported range"));
     }
     for row in &request.lights {
-        if !row.rotation_tolerance.is_finite()
-            || row.rotation_tolerance < 0.0
-            || row.angle.is_some_and(|angle| !angle.is_finite())
-        {
-            return Err(invalid(
-                "light angles and nonnegative rotation tolerances must be finite",
-            ));
-        }
+        row.check()?;
     }
     let mut nights = BTreeSet::new();
     for row in &request.night_boundaries {

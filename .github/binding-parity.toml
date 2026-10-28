@@ -521,7 +521,7 @@ seiza_flat_lights_background = "flat_lights_background"
 seiza_flat_fit_change_json = "flat_fit_change"
 seiza_flat_combine_verdicts_json = "flat_combine_verdicts"
 seiza_flat_choose_response_json = "flat_choose_response"
-seiza_flat_group_plan_json = "flat_group_plan"
+seiza_flat_group_plan_json = { none = "the C ABI's one-call grouping plan; Python binds the book it builds: FlatGroups and FlatGroups.place_light" }
 seiza_live_stacker_open_fits_expanding_sessions = "LiveStacker.open_fits_expanding_sessions"
 
 seiza_master_flat_stability_json = "master_flat_stability"
@@ -853,6 +853,8 @@ CalibrationSelection = { c = "seiza_calibration_master_plan_json" }
 "FlatGroups.limits" = { c = "seiza_calibration_flat_work_plan_json" }
 "FlatGroups.sessions_in_windows" = { c = "seiza_calibration_flat_work_plan_json" }
 "FlatGroups.sessions_needing_evidence" = { c = "seiza_calibration_flat_work_plan_json" }
+"FlatGroups.pairs_to_compare" = { c = "seiza_flat_group_plan_json" }
+"FlatGroups.place_light" = { c = "seiza_flat_group_plan_json" }
 FlatRetry = { c = "seiza_calibration_flat_retry_json" }
 "FlatRetry.alternate" = { c = "seiza_calibration_flat_retry_json" }
 "FlatRetry.next" = { c = "seiza_calibration_flat_retry_json" }

@@ -112,8 +112,8 @@ passes it to every `CalibrationLibrary`. C hosts call
 `seiza_flat_groups_prepare_json` once and reuse its immutable handle with
 `seiza_calibration_library_plan_with_groups_json`, then call
 `seiza_flat_groups_free`; `library::json::evaluate_with_book` is that call.
-Preparation takes the same grouping records as `flat_group_plan`, including
-explicit rig `limits`.
+Preparation takes the same grouping records as `FlatGroups` and C's
+`seiza_flat_group_plan_json`, including explicit rig `limits`.
 Selection reuses the book and accepts no additional `grouping` rows; its
 resolved limits must agree with the library settings. Hosts invalidate cached
 books when source rows, night boundaries or settings change. C handles may be

@@ -370,7 +370,7 @@ pub fn plan_flat_work(mut request: FlatWorkRequest) -> crate::Result<FlatWorkPla
             after,
         });
     }
-    let overrides = groups::evaluate(grouping.clone())?.overrides;
+    let overrides = book.overrides.clone();
     Ok(FlatWorkPlans {
         algorithm_version: 2,
         grouping,

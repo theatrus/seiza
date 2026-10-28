@@ -1947,24 +1947,6 @@ def screen_rgb_star_layer(nebula: npt.NDArray[np.float32], stars: npt.NDArray[np
     """Screen display stars over a display nebula, optionally reducing stars [0,1]."""
     ...
 
-# Shared measured grouping policy. Record schema: docs/flat-groups.md.
-def flat_group_plan(
-    *,
-    responses: Sequence[Mapping[str, Any]] | None = None,
-    comparisons: Sequence[Mapping[str, Any]] | None = None,
-    evidence: Sequence[Mapping[str, Any]] | None = None,
-    imaging: Sequence[Mapping[str, Any]] | None = None,
-    imaging_lights: Sequence[tuple[int, str | None, int]] | None = None,
-    profile_rigs: Sequence[tuple[str | None, Sequence[str]]] | None = None,
-    limits: Sequence[Mapping[str, Any]] | None = None,
-    group_overrides: Sequence[Mapping[str, Any]] | None = None,
-    night_boundaries: Sequence[Mapping[str, Any]] | None = None,
-    epoch_samples: Sequence[Mapping[str, Any]] | None = None,
-    family_evidence: Sequence[Mapping[str, Any]] | None = None,
-    light_choices: Sequence[Mapping[str, Any]] | None = None,
-    lights: Sequence[Mapping[str, Any]] | None = None,
-) -> dict[str, Any]: ...
-
 # The calibration library's native API (seiza_calibration::library), as
 # Rust hosts hold it. Records are dicts of the types below.
 class CalibrationRules:
@@ -2050,6 +2032,18 @@ class FlatGroups:
     def limits(self, rig_uuid: str) -> dict[str, Any] | None: ...
     def sessions_in_windows(self) -> list[tuple[int, int, str]]: ...
     def sessions_needing_evidence(self) -> list[tuple[int, int]]: ...
+    @property
+    def overrides(self) -> list[dict[str, Any]]: ...
+    @property
+    def outliers(self) -> list[int]: ...
+    @property
+    def spanning(self) -> list[int]: ...
+    @property
+    def angle_terms(self) -> dict[str, dict[str, Any]]: ...
+    @property
+    def epochs(self) -> dict[str, list[dict[str, Any]]]: ...
+    def pairs_to_compare(self) -> list[tuple[int, int]]: ...
+    def place_light(self, light: Mapping[str, Any]) -> dict[str, Any]: ...
 
 class CalibrationLibrary:
     """Every frame of a library, held once so many lights select against it."""

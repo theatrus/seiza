@@ -484,6 +484,59 @@ impl PyFlatGroups {
     fn sessions_needing_evidence(&self) -> Vec<(usize, usize)> {
         self.book.sessions_needing_evidence()
     }
+
+    /// A person's splits and joins, as applied, with whether each still
+    /// finds what it was made for.
+    #[getter]
+    fn overrides<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        to_python(py, &self.book.overrides)
+    }
+
+    /// Boundaries on either side of one night unlike the nights around it,
+    /// which measure alike with each other: a hazy dawn, not a change. They
+    /// split groups but make no event. By index.
+    #[getter]
+    fn outliers(&self) -> Vec<usize> {
+        self.book.outliers.iter().copied().collect()
+    }
+
+    /// Boundaries across two changes another family tells apart: they date
+    /// neither, and make no event of their own. By index.
+    #[getter]
+    fn spanning(&self) -> Vec<usize> {
+        self.book.spanning.iter().copied().collect()
+    }
+
+    /// Each rig's term for how its families' angles relate, by rig UUID.
+    #[getter]
+    fn angle_terms<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        to_python(py, &self.book.angle_terms)
+    }
+
+    /// Each rig's sky-minus-mechanical angle epochs, by rig UUID.
+    #[getter]
+    fn epochs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        to_python(py, &self.book.epochs.by_rig)
+    }
+
+    /// Flat session pairs whose comparison the book still needs, by index.
+    fn pairs_to_compare(&self) -> Vec<(usize, usize)> {
+        self.book.pairs_to_compare()
+    }
+
+    /// Where one light stands: its automatic family among the
+    /// `compatible_families` it names, the pixel question that would settle
+    /// a close call, a person's resolved choices, and its placement against
+    /// each change of its rig and filter.
+    fn place_light<'py>(
+        &self,
+        py: Python<'py>,
+        light: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let light: groups::LightQuery = from_python(light, "light")?;
+        let placed = self.book.place_light(&light).map_err(invalid)?;
+        to_python(py, &placed)
+    }
 }
 
 // --- library and selection -----------------------------------------------------
