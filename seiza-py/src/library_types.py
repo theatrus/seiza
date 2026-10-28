@@ -77,6 +77,13 @@ class CalibrationSetting(TypedDict):
     key: str
     value: Any
 
+class CalibrationSettingCheck(TypedDict):
+    key: str
+    valid: bool
+    error: str | None
+    text: str | None
+    default: bool
+
 class CalibrationRigSettings(TypedDict, total=False):
     rig_uuid: str
     name: str | None
@@ -277,4 +284,4 @@ class CalibrationFlatWorkResult(TypedDict):
     kind: Literal["family", "change"]
     row: dict[str, Any]
 
-_calibration_exports = ["CalibrationFlatLightContext", "CalibrationFlatWorkRequest", "CalibrationFlatWorkPlans", "CalibrationFlatWorkAnswer", "CalibrationFlatWorkResult",'CalibrationAssociation', 'CalibrationFlatResponsePlan', 'CalibrationFlatResponsePlans', 'CalibrationLibrarySnapshot', 'CalibrationKind', 'CalibrationRecipeAction', 'FlatRetryAction', 'CalibrationFrame', 'CalibrationLight', 'CalibrationSetting', 'CalibrationRigSettings', 'CalibrationQuality', 'FlatRetryPolicy', 'CalibrationLightRotation', 'CalibrationTolerances', 'CalibrationMasterRecipe', 'CalibrationApplication', 'CalibrationSession', 'CalibrationMasterFailure', 'CalibrationPedestalEvidence', 'CalibrationMasterPlanRequest', 'CalibrationMasterCohortRequest', 'CalibrationMasterCohort', 'FlatAttempt', 'CalibrationFlatRetryRequest', 'CalibrationFlatRetryDecision', 'FlatStabilityInput', 'FlatStabilityRequest', 'FlatSetStability', 'FlatStabilityBayer', 'FlatStabilityImageMetadata']
+_calibration_exports = ["CalibrationFlatLightContext", "CalibrationFlatWorkRequest", "CalibrationFlatWorkPlans", "CalibrationFlatWorkAnswer", "CalibrationFlatWorkResult",'CalibrationAssociation', 'CalibrationFlatResponsePlan', 'CalibrationFlatResponsePlans', 'CalibrationLibrarySnapshot', 'CalibrationKind', 'CalibrationRecipeAction', 'FlatRetryAction', 'CalibrationFrame', 'CalibrationLight', 'CalibrationSetting', 'CalibrationSettingCheck', 'CalibrationRigSettings', 'CalibrationQuality', 'FlatRetryPolicy', 'CalibrationLightRotation', 'CalibrationTolerances', 'CalibrationMasterRecipe', 'CalibrationApplication', 'CalibrationSession', 'CalibrationMasterFailure', 'CalibrationPedestalEvidence', 'CalibrationMasterPlanRequest', 'CalibrationMasterCohortRequest', 'CalibrationMasterCohort', 'FlatAttempt', 'CalibrationFlatRetryRequest', 'CalibrationFlatRetryDecision', 'FlatStabilityInput', 'FlatStabilityRequest', 'FlatSetStability', 'FlatStabilityBayer', 'FlatStabilityImageMetadata']

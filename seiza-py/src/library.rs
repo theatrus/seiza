@@ -96,6 +96,23 @@ fn calibration_library_plan<'py>(
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     to_python(py, &result)
 }
+/// The calibration settings a library request takes, in the order a settings
+/// panel shows them, with their ranges and defaults.
+#[pyfunction]
+fn calibration_settings_schema(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+    to_python(py, &library::rules::fields())
+}
+/// Judge one setting value as a settings panel saves it.
+#[pyfunction]
+fn calibration_setting_check<'py>(
+    py: Python<'py>,
+    key: &str,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let value: serde_json::Value = from_python(value, "setting value")?;
+    to_python(py, &library::rules::check_setting(key, &value))
+}
+
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     let code = std::ffi::CString::new(include_str!("library_types.py"))
         .expect("type definitions contain no NUL");
@@ -116,6 +133,8 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(calibration_master_plan, module)?)?;
     module.add_function(wrap_pyfunction!(calibration_master_cohort, module)?)?;
     module.add_function(wrap_pyfunction!(calibration_flat_retry, module)?)?;
+    module.add_function(wrap_pyfunction!(calibration_settings_schema, module)?)?;
+    module.add_function(wrap_pyfunction!(calibration_setting_check, module)?)?;
     Ok(())
 }
 

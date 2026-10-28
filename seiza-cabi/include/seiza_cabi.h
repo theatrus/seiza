@@ -4262,6 +4262,30 @@ SeizaFlatGroups *seiza_flat_groups_prepare_json(const char *request_json, char *
 void seiza_flat_groups_free(SeizaFlatGroups *groups);
 
 /*
+ The calibration settings a library request takes, in the order a settings
+ panel shows them: each key, group, label, help, effect, kind with its range
+ and default. camelCase JSON array. Free the result or error with
+ seiza_string_free.
+
+ # Safety
+ When non-null, `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_calibration_settings_schema_json(char **error_out);
+
+/*
+ Judge one setting value as a settings panel saves it. `request_json` is
+ camelCase `{key, value}`; the value stays as given. Returns camelCase
+ `{key, valid, error, text, default}`: whether it can be saved, why not, the
+ value in words, and whether it means the default. Free the result or
+ error with seiza_string_free.
+
+ # Safety
+ `request_json` must point to NUL-terminated UTF-8. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_calibration_setting_check_json(const char *request_json, char **error_out);
+
+/*
  Grade and select a calibration library using PSF Guard's shared policy.
  `request_json` is a camelCase library::Request: frames, lights, quality,
  globalSettings, rigs, grouping, availableResponses, nightShifts, regrade, masterFailures, pedestalEvidence,

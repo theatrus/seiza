@@ -395,6 +395,12 @@ objects = [
 "seiza-calibration::flat_response::metric::sampled_median" = { none = "a step inside build_response and background" }
 "seiza-calibration::flat_response::metric::star_mask" = { none = "a step inside compare and find_dust" }
 "seiza-calibration::flat_response::metric::star_mask_grown" = { none = "a step inside compare and find_dust" }
+"seiza-calibration::library::night_of" = { none = "a night's date label; every planning call that splits nights by date calls it" }
+"seiza-calibration::library::rules::validate" = { none = "a step of check_setting, which both bindings call" }
+"seiza-calibration::library::rules::describe" = { none = "a step of check_setting, which both bindings call" }
+"seiza-calibration::library::rules::equivalent" = { none = "a step of check_setting, which both bindings call" }
+"seiza-calibration::library::rules::field" = { none = "a step of check_setting, which both bindings call" }
+"seiza-calibration::library::rules::stacker_accepts" = { none = "a step of check_setting, which both bindings call" }
 "seiza-calibration::dust::session_dust_from_lists" = { none = "Rust-only: hosts that keep features already hold Rust DustFeature lists" }
 
 # Building blocks: whole crates the hosts reach through others.
@@ -527,6 +533,8 @@ seiza_calibration_flat_work_plan_json = "calibration_flat_work_plan"
 seiza_calibration_flat_work_finish_json = "calibration_flat_work_finish"
 seiza_calibration_master_plan_json = "calibration_master_plan"
 seiza_calibration_master_cohort_json = "calibration_master_cohort"
+seiza_calibration_settings_schema_json = "calibration_settings_schema"
+seiza_calibration_setting_check_json = "calibration_setting_check"
 seiza_calibration_flat_retry_json = "calibration_flat_retry"
 seiza_calibration_library_plan_json = "calibration_library_plan"
 seiza_calibration_library_plan_with_groups_json = "calibration_library_plan"

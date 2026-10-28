@@ -1089,6 +1089,44 @@ pub fn describe(spec: &FieldSpec, value: &Value) -> String {
     }
 }
 
+/// A setting value judged the way a settings panel saves it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SettingCheck {
+    pub key: String,
+    /// Whether the value can be saved: a known setting, in its range, and
+    /// a tolerance the stacker takes as it is.
+    pub valid: bool,
+    /// What is wrong, in words a person can act on.
+    pub error: Option<String>,
+    /// The value in words, as a light's account names it.
+    pub text: Option<String>,
+    /// Whether the value means the setting's default.
+    pub default: bool,
+}
+
+/// Judge one stored `value` for setting `key`.
+pub fn check_setting(key: &str, value: &Value) -> SettingCheck {
+    let Some(spec) = field(key) else {
+        return SettingCheck {
+            key: key.to_string(),
+            valid: false,
+            error: Some(format!("unknown setting '{key}'")),
+            text: None,
+            default: false,
+        };
+    };
+    let error = validate(spec, value)
+        .and_then(|()| stacker_accepts(key, value))
+        .err();
+    SettingCheck {
+        key: key.to_string(),
+        valid: error.is_none(),
+        text: error.is_none().then(|| describe(spec, value)),
+        default: equivalent(value, &spec.default),
+        error,
+    }
+}
+
 /// One rig's settings, as the registry keeps them.
 #[derive(Debug, Clone, Default)]
 pub struct RigLayer {

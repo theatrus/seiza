@@ -299,3 +299,21 @@ def test_supplied_sets_and_response_preparation_share_core_rules():
         seiza.calibration_library_plan(frames=frames, lights=[light], flat_association="one_set")
     with pytest.raises(ValueError):
         seiza.calibration_library_plan(flat_association="invalid")
+
+
+def test_settings_schema_and_checks_follow_the_shared_table():
+    schema = seiza.calibration_settings_schema()
+    keys = [field["key"] for field in schema]
+    assert "rotation_tolerance_deg" in keys and len(keys) == len(set(keys))
+    ok = seiza.calibration_setting_check("rotation_tolerance_deg", 3.0)
+    assert ok == {
+        "key": "rotation_tolerance_deg",
+        "valid": True,
+        "error": None,
+        "text": "3°",
+        "default": False,
+    }
+    wide = seiza.calibration_setting_check("rotation_tolerance_deg", 1000.0)
+    assert not wide["valid"] and "Flat rotation" in wide["error"]
+    unknown = seiza.calibration_setting_check("from_the_future", True)
+    assert not unknown["valid"] and "unknown setting" in unknown["error"]

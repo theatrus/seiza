@@ -188,6 +188,55 @@ pub(crate) fn field_names(value: Value, camel: bool) -> Value {
     }
 }
 
+/// The calibration settings a library request takes, in the order a settings
+/// panel shows them: each key, group, label, help, effect, kind with its range
+/// and default. camelCase JSON array. Free the result or error with
+/// seiza_string_free.
+///
+/// # Safety
+/// When non-null, `error_out` must point to writable storage for one pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_calibration_settings_schema_json(
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        owned_json(&field_names(
+            serde_json::to_value(library::rules::fields()).map_err(|e| e.to_string())?,
+            true,
+        ))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+/// Judge one setting value as a settings panel saves it. `request_json` is
+/// camelCase `{key, value}`; the value stays as given. Returns camelCase
+/// `{key, valid, error, text, default}`: whether it can be saved, why not, the
+/// value in words, and whether it means the default. Free the result or
+/// error with seiza_string_free.
+///
+/// # Safety
+/// `request_json` must point to NUL-terminated UTF-8. When non-null,
+/// `error_out` must point to writable storage for one pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_calibration_setting_check_json(
+    request_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let json = required_str(request_json, "setting")?;
+        let setting: library::Setting =
+            serde_json::from_str(&json).map_err(|e| format!("invalid setting: {e}"))?;
+        let check = library::rules::check_setting(&setting.key, &setting.value);
+        owned_json(&field_names(
+            serde_json::to_value(check).map_err(|e| e.to_string())?,
+            true,
+        ))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
 /// Grade and select a calibration library using PSF Guard's shared policy.
 /// `request_json` is a camelCase library::Request: frames, lights, quality,
 /// globalSettings, rigs, grouping, availableResponses, nightShifts, regrade, masterFailures, pedestalEvidence,
@@ -785,6 +834,40 @@ mod master_policy_tests {
         assert!(!output.is_null());
         let result = unsafe { CString::from_raw(output) };
         field_names(serde_json::from_slice(result.as_bytes()).unwrap(), false)
+    }
+    #[test]
+    fn settings_schema_and_checks_follow_the_shared_table() {
+        let mut error = ptr::null_mut();
+        let output = unsafe { seiza_calibration_settings_schema_json(&mut error) };
+        assert!(error.is_null());
+        let schema: Value =
+            serde_json::from_slice(unsafe { CString::from_raw(output) }.as_bytes()).unwrap();
+        assert_eq!(
+            schema.as_array().unwrap().len(),
+            library::rules::fields().len()
+        );
+        assert!(schema[0].get("key").is_some());
+        let check = |key: &str, value: Value| unsafe {
+            call(
+                serde_json::json!({"key": key, "value": value}),
+                seiza_calibration_setting_check_json,
+            )
+        };
+        let ok = check("rotation_tolerance_deg", serde_json::json!(3.0));
+        assert_eq!(ok["valid"], true);
+        assert_eq!(ok["text"], "3°");
+        assert_eq!(ok["default"], false);
+        let wide = check("rotation_tolerance_deg", serde_json::json!(1000.0));
+        assert_eq!(wide["valid"], false);
+        assert!(wide["error"].as_str().unwrap().contains("Flat rotation"));
+        let unknown = check("from_the_future", serde_json::json!(true));
+        assert_eq!(unknown["valid"], false);
+        assert!(
+            unknown["error"]
+                .as_str()
+                .unwrap()
+                .contains("unknown setting")
+        );
     }
     #[test]
     fn full_path_light_choices_do_not_cross_same_name_files() {

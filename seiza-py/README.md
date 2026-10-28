@@ -1708,9 +1708,18 @@ previews using effective settings. `calibration_flat_retry(request)` decides
 trimming, alternate sessions, fallback and withholding from measured build
 feedback. Default `flat_stability` options preserve all PSF Guard retries;
 hosts may set `enabled`, `trim_unstable`, `try_next_session` or `retain_unstable`
-false. Policy algorithm version 4 includes these options and held-back inputs
-in session identity. `enabled` controls retry decisions; pixel measurement is
-independently callable.
+false. Policy algorithm version 5 keys a session by what its masters are made
+from, as a set: lights whose masters take the same frames share one session.
+The retry options and held-back flats key only a session that integrates raw
+flats. `enabled` controls retry decisions; pixel measurement is independently
+callable. An alternate set is the next session out, clustered as one master
+takes it.
+
+`calibration_settings_schema()` lists the settings these calls take, in the
+order a settings panel shows them, with each one's label, help, range and
+default. `calibration_setting_check(key, value)` judges one value as the panel
+saves it: `valid`, the `error` in words, the value as `text`, and whether it
+means the `default`.
 
 The four request APIs also accept keyword fields, with typed requests/results
 such as `CalibrationMasterPlanRequest`, `CalibrationSession`, `FlatRetryPolicy`

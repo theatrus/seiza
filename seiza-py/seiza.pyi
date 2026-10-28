@@ -2083,6 +2083,13 @@ class CalibrationSetting(TypedDict):
     key: str
     value: Any
 
+class CalibrationSettingCheck(TypedDict):
+    key: str
+    valid: bool
+    error: str | None
+    text: str | None
+    default: bool
+
 class CalibrationRigSettings(TypedDict, total=False):
     rig_uuid: str
     name: str | None
@@ -2270,6 +2277,9 @@ def calibration_master_plan(
     flat_association: CalibrationAssociation | None = None,
     dark_association: CalibrationAssociation | None = None,
 ) -> CalibrationSession: ...
+
+def calibration_settings_schema() -> list[dict[str, Any]]: ...
+def calibration_setting_check(key: str, value: Any) -> CalibrationSettingCheck: ...
 
 def calibration_master_cohort(
     request: CalibrationMasterCohortRequest | None = None, *,
