@@ -413,3 +413,297 @@ fn response_preparation_preserves_explicit_night_boundaries_and_one_set_needs_no
     assert!(explicit.plans.is_empty());
     assert!(explicit.unplanned.is_empty());
 }
+
+fn work_fixture() -> FlatWorkRequest {
+    let cases: serde_json::Value =
+        serde_json::from_str(include_str!("../../tests/fixtures/library/psf-guard.json")).unwrap();
+    let mut library: Request =
+        serde_json::from_value(cases["cases"][12]["request"].clone()).unwrap();
+    library.grouping.lights.clear();
+    library.grouping.responses[0].rotation = Some(86.0);
+    library.grouping.comparisons[0].dust = 0.03;
+    for frame in &mut library.frames {
+        if frame.frame_uuid.starts_with("a-") {
+            frame.rotation = Some(86.0);
+        }
+    }
+    let mut light = library.lights[0].clone();
+    light.rotator_position = Some(89.0);
+    library.lights = (0..12)
+        .map(|i| {
+            let mut l = light.clone();
+            l.path = format!("/does-not-exist/light-{i}.fits").into();
+            l.timestamp = Some(345600 + i * 60);
+            l
+        })
+        .collect();
+    let light_context = (0..12)
+        .map(|i| FlatLightContext {
+            light_index: i,
+            id: Some(100 + i as i64),
+            target: "M42".into(),
+            pedestal_adu: Some(123.0),
+            ..Default::default()
+        })
+        .collect();
+    FlatWorkRequest {
+        library,
+        light_context,
+    }
+}
+#[test]
+fn cached_metadata_drives_family_and_change_questions_without_files() {
+    let request = work_fixture();
+    let plan = plan_flat_work(request.clone()).unwrap();
+    assert_eq!(plan.families.len(), 1, "{plan:?}");
+    assert_eq!(plan.changes.len(), 1, "{plan:?}");
+    let q = &plan.families[0];
+    assert_eq!(q.candidates.len(), 2);
+    assert_eq!(q.sample_lights.len(), 8);
+    assert_eq!(q.sample_lights.first(), Some(&100));
+    assert_eq!(q.sample_lights.last(), Some(&111));
+    assert_eq!(q.pedestal_adu, Some(123.0));
+    assert_eq!(plan.changes[0].filters.len(), 1);
+    assert_eq!(plan.changes[0].filters[0].sample_lights.len(), 8);
+    let answer = finish_flat_work(FlatWorkAnswer::Family {
+        question: q.clone(),
+        choice: crate::flat_response::choice::ResponseChoice::default(),
+        lights: 8,
+    })
+    .unwrap();
+    let FlatWorkResult::Family { row } = answer else {
+        panic!("family row")
+    };
+    assert_eq!(row.chosen, None);
+    let mut repeat = request.clone();
+    repeat.library.grouping = plan.grouping.clone();
+    repeat.library.grouping.family_evidence.push(row);
+    let change = finish_flat_work(FlatWorkAnswer::Change {
+        question: plan.changes[0].clone(),
+        fits: vec![crate::flat_response::groups::EvidenceFit {
+            filter: "Ha".into(),
+            targets: vec!["M42".into()],
+            lights: 8,
+            carried: 0.0,
+            spread: Some(0.01),
+            verdict: crate::flat_response::evidence::Verdict::Before,
+        }],
+    })
+    .unwrap();
+    let FlatWorkResult::Change { row } = change else {
+        panic!("change row")
+    };
+    assert_eq!(row.verdict, crate::flat_response::evidence::Verdict::Before);
+    repeat.library.grouping.evidence.push(row);
+    let cached = plan_flat_work(repeat).unwrap();
+    assert!(cached.families[0].answered);
+    assert!(cached.families[0].sample_lights.is_empty());
+    assert!(cached.changes[0].answered);
+    assert!(cached.changes[0].filters[0].sample_lights.is_empty());
+    let mut excluded = request;
+    for context in &mut excluded.light_context {
+        context.excluded = true;
+    }
+    let empty = plan_flat_work(excluded).unwrap();
+    assert!(empty.families.is_empty());
+    assert!(empty.changes.is_empty());
+}
+#[test]
+fn evidence_questions_keep_targets_modes_and_personal_group_choices() {
+    let mut request = work_fixture();
+    for i in 0..3 {
+        request.light_context[i].target = "M31".into();
+    }
+    let plan = plan_flat_work(request.clone()).unwrap();
+    assert_eq!(plan.families.len(), 2);
+    for question in plan.families {
+        assert!(
+            question
+                .sample_lights
+                .iter()
+                .all(|id| if question.target == "M31" {
+                    *id < 103
+                } else {
+                    *id >= 103
+                })
+        );
+    }
+    // A manual split is resolved in the core, not interpreted by the caller.
+    let row = &request.library.grouping.responses[2];
+    request
+        .library
+        .grouping
+        .group_overrides
+        .push(crate::flat_response::groups::GroupOverrideRow {
+            anchor_frame: row.frame_uuids[0].clone(),
+            session_key: row.session_key.clone(),
+            family_key: row.family_key.clone(),
+            rig_uuid: row.rig_uuid.clone(),
+            choice: Some(crate::flat_response::groups::GroupChoice::Split),
+            before_frame: None,
+            before_session_key: None,
+            label: "manual edge".into(),
+            chosen_at: 1,
+            night: Some(row.night.clone()),
+            before_night: None,
+            rotation: row.rotation,
+            before_rotation: None,
+        });
+    let manual = plan_flat_work(request).unwrap();
+    assert_eq!(manual.overrides.len(), 1);
+    assert!(manual.overrides[0].applied());
+    assert_eq!(
+        manual.grouping.group_overrides[0].choice,
+        Some(crate::flat_response::groups::GroupChoice::Split)
+    );
+}
+#[test]
+fn work_feedback_refuses_invalid_indices_duplicate_filters_and_empty_pixel_reads() {
+    use crate::flat_response::{choice, evidence, groups};
+    let plan = plan_flat_work(work_fixture()).unwrap();
+    let q = plan.families[0].clone();
+    assert!(
+        finish_flat_work(FlatWorkAnswer::Family {
+            question: q.clone(),
+            choice: choice::ResponseChoice {
+                winners: vec![99],
+                pairs: vec![]
+            },
+            lights: 8
+        })
+        .is_err()
+    );
+    assert!(
+        finish_flat_work(FlatWorkAnswer::Family {
+            question: q,
+            choice: Default::default(),
+            lights: 0
+        })
+        .is_err()
+    );
+    let fit = groups::EvidenceFit {
+        filter: "Ha".into(),
+        targets: vec![],
+        lights: 8,
+        carried: 0.0,
+        spread: None,
+        verdict: evidence::Verdict::Before,
+    };
+    assert!(
+        finish_flat_work(FlatWorkAnswer::Change {
+            question: plan.changes[0].clone(),
+            fits: vec![fit.clone(), fit]
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn correction_plans_keep_response_dependencies_side_and_shared_identity() {
+    let mut request = work_fixture();
+    let mut other = Vec::new();
+    for source in request.library.grouping.responses.iter().skip(1) {
+        let mut row = source.clone();
+        row.response_key = format!("oiii-{}", row.response_key);
+        row.session_key = format!("oiii-{}", row.session_key);
+        row.family_key = "oiii-sensor".into();
+        row.filter = Some("OIII".into());
+        row.frame_uuids = row
+            .frame_uuids
+            .iter()
+            .map(|id| format!("oiii-{id}"))
+            .collect();
+        other.push(row);
+    }
+    let spot=serde_json::from_value(serde_json::json!({"kind":"new","darker":true,"x":500.0,"y":300.0,"radius":30.0,"area":2827.0,"peak":0.03})).unwrap();
+    request.library.grouping.comparisons[2].spots = vec![spot];
+    let mut compare = request.library.grouping.comparisons[2].clone();
+    compare.earlier_key = "oiii-b".into();
+    compare.later_key = "oiii-c".into();
+    request.library.grouping.comparisons.push(compare);
+    request.library.grouping.responses.extend(other);
+    request
+        .library
+        .frames
+        .retain(|f| !f.frame_uuid.starts_with("b-"));
+    request.library.available_responses = request
+        .library
+        .grouping
+        .responses
+        .iter()
+        .map(|r| r.response_key.clone())
+        .collect();
+    for light in &mut request.library.lights {
+        light.timestamp = Some(172800);
+        light.rotator_position = Some(90.0);
+    }
+    let plan = plan_flat_work(request).unwrap();
+    assert_eq!(plan.corrections.len(), 1, "{plan:?}");
+    let correction = &plan.corrections[0];
+    assert_eq!(correction.light_indices.len(), 12);
+    assert_eq!(correction.before.response_key, "b");
+    assert_eq!(correction.after.response_key, "c");
+    assert!(correction.divide);
+    assert_eq!(correction.bin, 10);
+    assert_eq!(
+        correction.correction.light_side,
+        crate::flat_response::evidence::Side::Before
+    );
+}
+#[test]
+fn psf_guard_family_ties_and_unfitted_pairs_are_resolved_in_core() {
+    use crate::flat_response::{choice, evidence};
+    let mut q = plan_flat_work(work_fixture()).unwrap().families.remove(0);
+    q.candidates[0].angle_gap = Some(2.0);
+    q.candidates[1].angle_gap = Some(1.0);
+    let mut third = q.candidates[0].clone();
+    third.key = "third".into();
+    q.candidates.push(third);
+    let fit = choice::PairOutcome::Fit(evidence::Fit {
+        carried: 0.0,
+        spread: 0.01,
+        verdict: evidence::Verdict::Before,
+    });
+    let choice = choice::ResponseChoice {
+        winners: vec![0, 1],
+        pairs: vec![
+            choice::PairFit {
+                first: 0,
+                second: 1,
+                outcome: choice::PairOutcome::Alike,
+            },
+            choice::PairFit {
+                first: 0,
+                second: 2,
+                outcome: fit,
+            },
+            choice::PairFit {
+                first: 1,
+                second: 2,
+                outcome: fit,
+            },
+        ],
+    };
+    let answer = finish_flat_work(FlatWorkAnswer::Family {
+        question: q.clone(),
+        choice: choice.clone(),
+        lights: 8,
+    })
+    .unwrap();
+    let FlatWorkResult::Family { row } = answer else {
+        panic!()
+    };
+    assert_eq!(row.chosen, Some(q.candidates[1].key.clone()));
+    let mut unknown = choice;
+    unknown.pairs[0].outcome = choice::PairOutcome::Unfitted;
+    let answer = finish_flat_work(FlatWorkAnswer::Family {
+        question: q,
+        choice: unknown,
+        lights: 8,
+    })
+    .unwrap();
+    let FlatWorkResult::Family { row } = answer else {
+        panic!()
+    };
+    assert_eq!(row.chosen, None);
+}

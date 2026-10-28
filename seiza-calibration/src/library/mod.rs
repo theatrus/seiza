@@ -16,7 +16,13 @@ pub use flat_notes::{
 pub use recipes::{Application, FlatUse, MasterFailure, PedestalEvidence};
 use recipes::{finalize, recipes};
 pub use rules::{ChoiceOption, Effect, FieldKind, FieldSpec, Group, RuleNote, RuleSource};
+mod flat_work;
 mod response_plan;
+pub use flat_work::{
+    FlatChangeFilter, FlatChangeQuestion, FlatCorrectionPlan, FlatFamilyCandidate,
+    FlatFamilyQuestion, FlatLightContext, FlatWorkAnswer, FlatWorkPlans, FlatWorkRequest,
+    FlatWorkResult, finish_flat_work, plan_flat_work,
+};
 mod selection;
 mod supplied;
 use crate::{

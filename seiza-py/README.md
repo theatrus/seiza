@@ -1809,3 +1809,58 @@ CLI provenance additionally hashes input/output files. Reporting never enables
 reintegration by itself.
 
 Python: `html = seiza.stack_collection_html(collection)` returns a string and raises `ValueError` for invalid collections or nested reports.
+
+### Cached flat evidence and correction workflow
+
+`calibration_flat_work_plan(library=records, light_context=contexts)` drives the
+remaining flat workflow from **cached records**, with no file/header/pixel I/O.
+`records` is the same library request (frames, lights, quality, rules and measured
+`grouping`). Optional `CalibrationFlatLightContext` records name a `light_index`
+and can supply catalog `id`, `profile`, `target`, `excluded` and a cached
+`pedestal_adu`. Without contexts, light indices identify samples and rigs identify
+profiles. Existing catalog imaging sessions, epochs, manual choices and cached
+evidence in `grouping` remain authoritative inputs. No database is required.
+
+The result is `CalibrationFlatWorkPlans`:
+
+- `families`: questions grouped by imaging session, filter, target, physical
+  sensor mode and recorded angle. The core supplies at most eight `sample_lights`,
+  representative response rows, measured `alike` pairs and the evidence key.
+- `changes`: each imaging session/change question, with per-filter bounded light
+  samples, targets, reference response/side, map source pair and vignetting masks.
+- `corrections`: shared correction identities and affected light indices, full
+  before/after response dependencies, `bin` and `divide`. Only actually available
+  responses listed in the library's `available_responses` can permit correction.
+- `grouping`: resolved rules/night/profile inputs for storing answers and replanning;
+  `overrides` reports applied/orphaned manual split/join choices.
+
+An `answered` question has no requested samples: the host reuses its cached row
+without reopening files. PSF Guard may keep its own IDs, caches, image loading,
+publication and persistence. The CLI can instead load files and create the same
+records. Selection, sampling, tie resolution, change verdicts and correction
+policy belong to the core in either case.
+
+Use `flat_response_without_pedestal(plane, level, pedestal)` on cached response
+planes and `flat_lights_background` on the requested binned lights. Feed
+`flat_choose_response`'s result to
+`calibration_flat_work_finish(kind="family", question=q, choice=result, lights=n)`.
+The core keeps PSF Guard's nearest-angle tie policy and refuses missing fits as
+proof of similarity. For change evidence, use
+`flat_evidence_change_map(before, after, changes=q_filter["vignetting_changes"], bin=...)`
+then `flat_fit_change`; submit per-filter `EvidenceFit` records to
+`calibration_flat_work_finish(kind="change", question=q, fits=fits)` for the
+combined verdict. Store the returned `row` in `grouping.family_evidence` or
+`grouping.evidence` unchanged and replan. No lights read means retry later;
+some lights read but no useful background/fit can be stored as undecided.
+
+Correction masters use **`flat_change_map`**, preserving the full compact map;
+`flat_evidence_change_map` masks border vignetting specifically for light fitting.
+Apply a correction with `flat_apply_change_map(..., bin=plan["bin"],
+divide=plan["divide"])`. Keep the original master metadata and include the returned
+correction key in cache identity. File verification, atomic publication and failed
+cache recovery remain host responsibilities.
+
+Manual `group_overrides` and `light_choices` are already core features on grouping
+requests. Feed PSF Guard's existing rows directly; the library selector enforces
+hard physical gates and resolves stale/orphaned choices. The desktop UI need not
+expose every core choice for PSF Guard to retain it.

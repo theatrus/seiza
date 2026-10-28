@@ -1836,6 +1836,13 @@ def flat_compare(
 def flat_change_map(
     before: npt.NDArray[np.float32], after: npt.NDArray[np.float32]
 ) -> npt.NDArray[np.float32] | None: ...
+def flat_response_without_pedestal(
+    plane: npt.NDArray[np.float32], level: float, pedestal: float,
+) -> npt.NDArray[np.float32]: ...
+def flat_evidence_change_map(
+    before: npt.NDArray[np.float32], after: npt.NDArray[np.float32],
+    changes: Sequence[Mapping[str, Any]] | None = None, bin: int = 1,
+) -> npt.NDArray[np.float32] | None: ...
 def flat_apply_change_map(
     image: npt.NDArray[np.float32], map: npt.NDArray[np.float32], bin: int, divide: bool
 ) -> None: ...
@@ -1975,6 +1982,21 @@ def calibration_library_plan(
     flat_association: CalibrationAssociation = "automatic",
     dark_association: CalibrationAssociation = "automatic",
 ) -> CalibrationLibrarySnapshot: ...
+
+def calibration_flat_work_plan(
+    request: CalibrationFlatWorkRequest | None = None, *,
+    library: Mapping[str, Any] | None = None,
+    light_context: Sequence[CalibrationFlatLightContext] | None = None,
+) -> CalibrationFlatWorkPlans: ...
+
+def calibration_flat_work_finish(
+    request: CalibrationFlatWorkAnswer | None = None, *,
+    kind: Literal["family", "change"] | None = None,
+    question: Mapping[str, Any] | None = None,
+    choice: Mapping[str, Any] | None = None,
+    lights: int | None = None,
+    fits: Sequence[Mapping[str, Any]] | None = None,
+) -> CalibrationFlatWorkResult: ...
 
 def calibration_flat_response_plan(
     request: Mapping[str, Any] | None = None, *,
@@ -2292,3 +2314,35 @@ def master_flat_stability_images(
 
 
 def stack_collection_html(report: Mapping[str, Any]) -> str: ...
+
+
+class CalibrationFlatLightContext(TypedDict, total=False):
+    light_index: Required[int]
+    id: int | None
+    profile: str | None
+    target: str
+    excluded: bool
+    pedestal_adu: float | None
+
+class CalibrationFlatWorkRequest(TypedDict, total=False):
+    library: Mapping[str, Any]
+    light_context: Sequence[CalibrationFlatLightContext]
+
+class CalibrationFlatWorkPlans(TypedDict):
+    algorithm_version: int
+    grouping: dict[str, Any]
+    families: list[dict[str, Any]]
+    changes: list[dict[str, Any]]
+    corrections: list[dict[str, Any]]
+    overrides: list[dict[str, Any]]
+
+class CalibrationFlatWorkAnswer(TypedDict, total=False):
+    kind: Required[Literal["family", "change"]]
+    question: Required[Mapping[str, Any]]
+    choice: Mapping[str, Any]
+    lights: int
+    fits: Sequence[Mapping[str, Any]]
+
+class CalibrationFlatWorkResult(TypedDict):
+    kind: Literal["family", "change"]
+    row: dict[str, Any]

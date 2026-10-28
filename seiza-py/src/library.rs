@@ -108,6 +108,8 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<FlatGroups>()?;
     module.add_function(wrap_pyfunction!(calibration_library_plan, module)?)?;
     module.add_function(wrap_pyfunction!(calibration_flat_response_plan, module)?)?;
+    module.add_function(wrap_pyfunction!(calibration_flat_work_plan, module)?)?;
+    module.add_function(wrap_pyfunction!(calibration_flat_work_finish, module)?)?;
     module.add_function(wrap_pyfunction!(master_flat_stability, module)?)?;
     module.add_function(wrap_pyfunction!(master_flat_stability_images, module)?)?;
     module.add_function(wrap_pyfunction!(calibration_master_plan, module)?)?;
@@ -365,6 +367,55 @@ fn master_flat_stability_images<'py>(
                 options,
             )
         })
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    to_python(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(signature=(request=None,*,library=None,light_context=None))]
+fn calibration_flat_work_plan<'py>(
+    py: Python<'py>,
+    request: Option<&Bound<'py, PyAny>>,
+    library: Option<&Bound<'py, PyAny>>,
+    light_context: Option<&Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let request: library::FlatWorkRequest = request_or_keywords(
+        py,
+        request,
+        &[("library", library), ("light_context", light_context)],
+        "flat workflow request",
+    )?;
+    let result = py
+        .detach(|| library::plan_flat_work(request))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    to_python(py, &result)
+}
+#[pyfunction]
+#[pyo3(signature=(request=None,*,kind=None,question=None,choice=None,lights=None,fits=None))]
+#[allow(clippy::too_many_arguments)]
+fn calibration_flat_work_finish<'py>(
+    py: Python<'py>,
+    request: Option<&Bound<'py, PyAny>>,
+    kind: Option<&Bound<'py, PyAny>>,
+    question: Option<&Bound<'py, PyAny>>,
+    choice: Option<&Bound<'py, PyAny>>,
+    lights: Option<&Bound<'py, PyAny>>,
+    fits: Option<&Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let request: library::FlatWorkAnswer = request_or_keywords(
+        py,
+        request,
+        &[
+            ("kind", kind),
+            ("question", question),
+            ("choice", choice),
+            ("lights", lights),
+            ("fits", fits),
+        ],
+        "flat workflow feedback",
+    )?;
+    let result = py
+        .detach(|| library::finish_flat_work(request))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     to_python(py, &result)
 }

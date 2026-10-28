@@ -3931,6 +3931,41 @@ int32_t seiza_flat_change_map(const float *before,
                               char **error_out);
 
 /*
+ Remove a response's pedestal using the shared FlatResponse calculation.
+ The normalized input plane and ADU level/pedestal produce width*height samples.
+ # Safety
+ data holds width*height readable floats; out holds out_length writable floats.
+ error_out is null or writable pointer storage.
+ */
+bool seiza_flat_response_without_pedestal(const float *data,
+                                          size_t width,
+                                          size_t height,
+                                          float level,
+                                          float pedestal,
+                                          float *out,
+                                          size_t out_length,
+                                          char **error_out);
+
+/*
+ Dust-only change map for light evidence. Vignetting changes are masked by
+ the core's PSF Guard policy; master corrections use seiza_flat_change_map.
+ changes_json is a camelCase array of VignettingChange, or null for none.
+ Returns 1 (written), 0 (no map), or -1 (error).
+ # Safety
+ before/after hold width*height readable floats, out holds out_length
+ writable floats. JSON is null or NUL-terminated UTF-8; error_out is writable.
+ */
+int32_t seiza_flat_evidence_change_map(const float *before,
+                                       const float *after,
+                                       size_t width,
+                                       size_t height,
+                                       const char *changes_json,
+                                       size_t bin,
+                                       float *out,
+                                       size_t out_length,
+                                       char **error_out);
+
+/*
  Carry a flat across a change in place: divide `data` (`width × height ×
  channels` interleaved samples, sensor-aligned) by the change map
  (`map_width × map_height`, binned by `bin`) for a light shot before the
@@ -4278,6 +4313,25 @@ char *seiza_calibration_master_plan_json(const char *request_json,
  request_json is NUL-terminated UTF-8; error_out is null or writable.
  */
 char *seiza_calibration_flat_response_plan_json(const char *request_json, char **error_out);
+
+/*
+ Plan light evidence, correction inputs and manual choice resolution from
+ camelCase FlatWorkRequest {library,lightContext}. Pure cached-record policy;
+ no file/header/pixel I/O. Results identify bounded samples and response keys.
+ Free result/error with seiza_string_free.
+ # Safety
+ request_json is NUL-terminated UTF-8; error_out is null or writable.
+ */
+char *seiza_calibration_flat_work_plan_json(const char *request_json, char **error_out);
+
+/*
+ Finalize native family-choice/change-fit feedback as a cached evidence row.
+ camelCase FlatWorkAnswer is kind=family {question,choice,lights} or
+ kind=change {question,fits}; the core resolves ties and aggregate verdicts.
+ # Safety
+ request_json is NUL-terminated UTF-8; error_out is null or writable.
+ */
+char *seiza_calibration_flat_work_finish_json(const char *request_json, char **error_out);
 
 /*
  Resolve a coherent master cohort from camelCase JSON. No I/O.

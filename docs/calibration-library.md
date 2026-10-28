@@ -326,3 +326,34 @@ limits and night boundaries needed to prepare a grouping book. Missing capture
 times are explicitly reported as unplanned; hosts must not fabricate dates.
 Hosts supply measured response planes and pair comparisons; this API does not
 claim pixel evidence exists merely because sessions have been prepared.
+
+## Light evidence, correction planning and personal choices
+
+The same core boundary covers the remaining workflow:
+`library::plan_flat_work(FlatWorkRequest {library,light_context})` and
+`library::finish_flat_work(FlatWorkAnswer)`. Their C exports are
+`seiza_calibration_flat_work_plan_json` and
+`seiza_calibration_flat_work_finish_json` (camelCase); Python offers
+`calibration_flat_work_plan` / `calibration_flat_work_finish` with mapping or
+keyword calls and the same snake_case records.
+
+Cached light metadata, catalog IDs/profiles/targets/exclusions and optional
+pedestal estimates drive questions without paths being opened. Native grading,
+hard family compatibility, imaging sessions, angle groups, bounded samples,
+representatives, evidence-current keys, PSF Guard's tie policy, change verdict
+aggregation and correction dependencies/direction live in core. Family backgrounds
+partition physical sensor modes as well as target/filter/angle. Native split/join
+and light-side/group choice rows pass through grouping unchanged and report their
+resolved/orphaned status. Hosts retain database and file/cache mechanisms.
+
+Pixel entrypoints support cached arrays as well: response pedestal removal,
+light-background generation, pairwise response choice, dust-only evidence maps,
+change fitting, compact correction maps and correction application. Dust-only
+evidence maps mask vignetting using the policy extracted from PSF Guard's job;
+correction maps intentionally use the full compact change. These are distinct
+operations. See the Python README's cached workflow for the feedback protocol.
+
+No response sample plan alone constitutes measured light evidence. Missing images
+remain retryable host failures; inconclusive pixels remain undecided and do not
+become a positive family or side verdict. Current cached answers request no
+sample reads, preserving PSF Guard's database/cache advantage over a file-only CLI.

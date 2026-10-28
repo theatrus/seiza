@@ -245,4 +245,36 @@ class FlatStabilityImageMetadata(TypedDict, total=False):
     bayer: FlatStabilityBayer | None
     skipped: bool
 
-_calibration_exports = ['CalibrationAssociation', 'CalibrationFlatResponsePlan', 'CalibrationFlatResponsePlans', 'CalibrationLibrarySnapshot', 'CalibrationKind', 'CalibrationRecipeAction', 'FlatRetryAction', 'CalibrationFrame', 'CalibrationLight', 'CalibrationSetting', 'CalibrationRigSettings', 'CalibrationQuality', 'FlatRetryPolicy', 'CalibrationLightRotation', 'CalibrationTolerances', 'CalibrationMasterRecipe', 'CalibrationApplication', 'CalibrationSession', 'CalibrationMasterFailure', 'CalibrationPedestalEvidence', 'CalibrationMasterPlanRequest', 'CalibrationMasterCohortRequest', 'CalibrationMasterCohort', 'FlatAttempt', 'CalibrationFlatRetryRequest', 'CalibrationFlatRetryDecision', 'FlatStabilityInput', 'FlatStabilityRequest', 'FlatSetStability', 'FlatStabilityBayer', 'FlatStabilityImageMetadata']
+
+class CalibrationFlatLightContext(TypedDict, total=False):
+    light_index: Required[int]
+    id: int | None
+    profile: str | None
+    target: str
+    excluded: bool
+    pedestal_adu: float | None
+
+class CalibrationFlatWorkRequest(TypedDict, total=False):
+    library: Mapping[str, Any]
+    light_context: Sequence[CalibrationFlatLightContext]
+
+class CalibrationFlatWorkPlans(TypedDict):
+    algorithm_version: int
+    grouping: dict[str, Any]
+    families: list[dict[str, Any]]
+    changes: list[dict[str, Any]]
+    corrections: list[dict[str, Any]]
+    overrides: list[dict[str, Any]]
+
+class CalibrationFlatWorkAnswer(TypedDict, total=False):
+    kind: Required[Literal["family", "change"]]
+    question: Required[Mapping[str, Any]]
+    choice: Mapping[str, Any]
+    lights: int
+    fits: Sequence[Mapping[str, Any]]
+
+class CalibrationFlatWorkResult(TypedDict):
+    kind: Literal["family", "change"]
+    row: dict[str, Any]
+
+_calibration_exports = ["CalibrationFlatLightContext", "CalibrationFlatWorkRequest", "CalibrationFlatWorkPlans", "CalibrationFlatWorkAnswer", "CalibrationFlatWorkResult",'CalibrationAssociation', 'CalibrationFlatResponsePlan', 'CalibrationFlatResponsePlans', 'CalibrationLibrarySnapshot', 'CalibrationKind', 'CalibrationRecipeAction', 'FlatRetryAction', 'CalibrationFrame', 'CalibrationLight', 'CalibrationSetting', 'CalibrationRigSettings', 'CalibrationQuality', 'FlatRetryPolicy', 'CalibrationLightRotation', 'CalibrationTolerances', 'CalibrationMasterRecipe', 'CalibrationApplication', 'CalibrationSession', 'CalibrationMasterFailure', 'CalibrationPedestalEvidence', 'CalibrationMasterPlanRequest', 'CalibrationMasterCohortRequest', 'CalibrationMasterCohort', 'FlatAttempt', 'CalibrationFlatRetryRequest', 'CalibrationFlatRetryDecision', 'FlatStabilityInput', 'FlatStabilityRequest', 'FlatSetStability', 'FlatStabilityBayer', 'FlatStabilityImageMetadata']

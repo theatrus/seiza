@@ -150,6 +150,54 @@ pub fn background(binned: &[Plane], pedestal: f32, bin: usize) -> Option<Plane> 
     metric::build_response(&less, bin).map(|response| response.plane)
 }
 
+/// Dust-only event map for light-side evidence. A correction master uses
+/// metric::change_map instead: evidence must mask vignetting whose border
+/// structure can be confused with the light's own sky. Extracted from PSF Guard.
+pub fn change_map(
+    before: &Plane,
+    after: &Plane,
+    changes: &[crate::dust::VignettingChange],
+    bin: usize,
+) -> Option<Plane> {
+    let mut map = metric::change_map(before, after)?;
+    without_vignetting(&mut map, changes, bin);
+    Some(map)
+}
+
+fn without_vignetting(map: &mut Plane, changes: &[crate::dust::VignettingChange], bin: usize) {
+    use crate::dust::Edge;
+    let (width, height) = (map.width as f32, map.height as f32);
+    let scale = bin.max(1) as f32;
+    for change in changes {
+        let area = change.vignetting.area / (scale * scale) * 1.5;
+        let corner = match change.vignetting.edge {
+            Edge::TopLeft => Some((0.0, 0.0)),
+            Edge::TopRight => Some((width, 0.0)),
+            Edge::BottomLeft => Some((0.0, height)),
+            Edge::BottomRight => Some((width, height)),
+            _ => None,
+        };
+        let radius = (4.0 * area / std::f32::consts::PI).sqrt();
+        let band = |along: f32| (area / along.max(1.0)).max(1.0);
+        for y in 0..map.height {
+            for x in 0..map.width {
+                let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                let inside = match (corner, change.vignetting.edge) {
+                    (Some((cx, cy)), _) => (px - cx).hypot(py - cy) <= radius,
+                    (None, Edge::Top) => py <= band(width),
+                    (None, Edge::Bottom) => py >= height - band(width),
+                    (None, Edge::Left) => px <= band(height),
+                    (None, Edge::Right) => px >= width - band(height),
+                    _ => false,
+                };
+                if inside {
+                    map.data[y * map.width + x] = 1.0;
+                }
+            }
+        }
+    }
+}
+
 /// The least-squares weight of `template` in `residual`, the template moved
 /// by `(dx, dy)` response pixels. Pixels that leave the frame or were
 /// excluded take no part; at least half the template must.
@@ -704,5 +752,35 @@ mod tests {
             Verdict::Undecided
         );
         assert_eq!(combine(&[]), Verdict::Undecided);
+    }
+}
+
+#[cfg(test)]
+mod workflow_map_tests {
+    use super::*;
+    #[test]
+    fn psf_guard_corner_mask_preserves_dust_and_other_corners() {
+        use crate::dust::{Edge, Vignetting, VignettingChange};
+        let (width, height) = (400, 300);
+        let mut map = Plane {
+            width,
+            height,
+            data: vec![0.98; width * height],
+        };
+        let corner = VignettingChange {
+            darker: true,
+            vignetting: Vignetting {
+                edge: Edge::BottomLeft,
+                x: 300.0,
+                y: 2700.0,
+                area: std::f32::consts::PI * 400.0 * 400.0 / 4.0,
+                depth: 0.02,
+            },
+        };
+        without_vignetting(&mut map, &[corner], 10);
+        assert_eq!(map.data[(height - 5) * width + 5], 1.0);
+        assert_eq!(map.data[(height - 30) * width + 30], 1.0);
+        assert_eq!(map.data[150 * width + 200], 0.98);
+        assert_eq!(map.data[(height - 5) * width + width - 5], 0.98);
     }
 }

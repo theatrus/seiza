@@ -150,7 +150,7 @@ pub unsafe extern "C" fn seiza_flat_groups_free(groups: *mut SeizaFlatGroups) {
 
 // Settings are keyed records. Their identifiers and JSON values are opaque;
 // only schema fields, including those in measurements/grouping, change case.
-fn field_names(value: Value, camel: bool) -> Value {
+pub(crate) fn field_names(value: Value, camel: bool) -> Value {
     match value {
         Value::Array(values) => {
             Value::Array(values.into_iter().map(|v| field_names(v, camel)).collect())
@@ -301,6 +301,54 @@ pub unsafe extern "C" fn seiza_calibration_flat_response_plan_json(
         ))
     })
     .unwrap_or(ptr::null_mut())
+}
+
+fn work_json<T: serde::de::DeserializeOwned, R: serde::Serialize>(
+    request: *const c_char,
+    error_out: *mut *mut c_char,
+    operation: impl FnOnce(T) -> seiza_calibration::Result<R>,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let value: Value = serde_json::from_str(&required_str(request, "flat workflow request")?)
+            .map_err(|e| e.to_string())?;
+        if field_names(field_names(value.clone(), false), true) != value {
+            return Err("flat workflow field names must be camelCase".into());
+        }
+        let request =
+            serde_json::from_value(field_names(value, false)).map_err(|e| e.to_string())?;
+        let result = operation(request).map_err(|e| e.to_string())?;
+        owned_json(&field_names(
+            serde_json::to_value(result).map_err(|e| e.to_string())?,
+            true,
+        ))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+/// Plan light evidence, correction inputs and manual choice resolution from
+/// camelCase FlatWorkRequest {library,lightContext}. Pure cached-record policy;
+/// no file/header/pixel I/O. Results identify bounded samples and response keys.
+/// Free result/error with seiza_string_free.
+/// # Safety
+/// request_json is NUL-terminated UTF-8; error_out is null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_calibration_flat_work_plan_json(
+    request_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    work_json(request_json, error_out, library::plan_flat_work)
+}
+/// Finalize native family-choice/change-fit feedback as a cached evidence row.
+/// camelCase FlatWorkAnswer is kind=family {question,choice,lights} or
+/// kind=change {question,fits}; the core resolves ties and aggregate verdicts.
+/// # Safety
+/// request_json is NUL-terminated UTF-8; error_out is null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_calibration_flat_work_finish_json(
+    request_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    work_json(request_json, error_out, library::finish_flat_work)
 }
 
 /// Resolve a coherent master cohort from camelCase JSON. No I/O.
@@ -735,6 +783,35 @@ mod master_policy_tests {
         assert!(!output.is_null());
         let result = unsafe { CString::from_raw(output) };
         field_names(serde_json::from_slice(result.as_bytes()).unwrap(), false)
+    }
+    #[test]
+    fn cached_record_workflow_and_feedback_cross_the_c_abi() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../seiza-calibration/tests/fixtures/library/psf-guard.json"
+        ))
+        .unwrap();
+        let mut library = fixture["cases"][12]["request"].clone();
+        library["grouping"]["lights"] = serde_json::json!([]);
+        let light = library["lights"][0].clone();
+        library["lights"] = serde_json::json!(
+            (0..12)
+                .map(|i| {
+                    let mut l = light.clone();
+                    l["timestamp"] = serde_json::json!(345600 + i * 60);
+                    l
+                })
+                .collect::<Vec<_>>()
+        );
+        let request = serde_json::json!({"library":library,"light_context":[{"light_index":0,"id":100,"target":"M42","pedestal_adu":123.0}]});
+        let expected =
+            library::plan_flat_work(serde_json::from_value(request.clone()).unwrap()).unwrap();
+        let actual = unsafe { call(request, seiza_calibration_flat_work_plan_json) };
+        assert_eq!(actual, serde_json::to_value(expected).unwrap());
+        let question = actual["changes"][0].clone();
+        let feedback = serde_json::json!({"kind":"change","question":question,"fits":[]});
+        let row = unsafe { call(feedback, seiza_calibration_flat_work_finish_json) };
+        assert_eq!(row["kind"], "change");
+        assert_eq!(row["row"]["verdict"], "undecided");
     }
     #[test]
     fn response_preparation_and_supplied_sets_cross_the_c_abi() {

@@ -413,6 +413,8 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(flat_build_response, module)?)?;
     module.add_function(wrap_pyfunction!(flat_compare, module)?)?;
     module.add_function(wrap_pyfunction!(flat_change_map, module)?)?;
+    module.add_function(wrap_pyfunction!(flat_evidence_change_map, module)?)?;
+    module.add_function(wrap_pyfunction!(flat_response_without_pedestal, module)?)?;
     module.add_function(wrap_pyfunction!(flat_apply_change_map, module)?)?;
     module.add_function(wrap_pyfunction!(flat_lights_background, module)?)?;
     module.add_function(wrap_pyfunction!(flat_fit_change, module)?)?;
@@ -426,4 +428,46 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(dust_find_changes, module)?)?;
     module.add_function(wrap_pyfunction!(dust_match_features, module)?)?;
     Ok(())
+}
+
+#[pyfunction]
+#[pyo3(signature=(before,after,changes=None,bin=1))]
+fn flat_evidence_change_map<'py>(
+    py: Python<'py>,
+    before: PyReadonlyArrayDyn<'py, f32>,
+    after: PyReadonlyArrayDyn<'py, f32>,
+    changes: Option<&Bound<'py, PyAny>>,
+    bin: usize,
+) -> PyResult<Option<Bound<'py, PyArrayDyn<f32>>>> {
+    if bin == 0 {
+        return Err(PyValueError::new_err("bin must be at least 1"));
+    }
+    let changes = match changes {
+        None => Vec::new(),
+        Some(value) if value.is_none() => Vec::new(),
+        Some(value) => from_python(value, "vignetting changes")?,
+    };
+    let before = as_plane(&before, "before")?;
+    let after = as_plane(&after, "after")?;
+    py.detach(|| evidence::change_map(&before, &after, &changes, bin))
+        .map(|p| plane_array(py, p))
+        .transpose()
+}
+
+#[pyfunction]
+fn flat_response_without_pedestal<'py>(
+    py: Python<'py>,
+    plane: PyReadonlyArrayDyn<'py, f32>,
+    level: f32,
+    pedestal: f32,
+) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
+    let plane = as_plane(&plane, "response")?;
+    let response = metric::FlatResponse {
+        plane,
+        bin: 1,
+        level,
+        noise: 0.0,
+        frames: 0,
+    };
+    plane_array(py, py.detach(|| response.without_pedestal(pedestal)))
 }
