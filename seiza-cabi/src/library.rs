@@ -310,6 +310,13 @@ pub(crate) fn library_schema() -> Value {
             Some(generator.subschema_for::<seiza_stacking::FlatSetStability>()),
         ),
     );
+    add(
+        "seiza_calibration_files_json",
+        call(
+            Some(generator.subschema_for::<seiza_stacking::calibration_files::json::Request>()),
+            Some(generator.subschema_for::<seiza_stacking::calibration_files::json::Answer>()),
+        ),
+    );
     let definitions = generator.take_definitions(true);
     schema_names(serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",

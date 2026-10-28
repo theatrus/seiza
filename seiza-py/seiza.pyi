@@ -2507,3 +2507,38 @@ def stack_collection_html(report: Mapping[str, Any]) -> str: ...
 def prepare_stack_report(report: Mapping[str, Any] | None = None, *, level: str = "cheap", inputs: Sequence[Union[str, Path]] = ()) -> dict[str, Any] | None:
     """none skips reporting; cheap uses retained data; rich rereads sources for analysis."""
     ...
+
+
+class CalibrationFiles:
+    """File-backed graded calibration, shared by desktop and CLI hosts.
+
+    Native report records use snake_case. Analyze makes no masters; prepare
+    revalidates review_key before publishing dependencies and corrected flats.
+    Call verify immediately before stacking. File grants/cache lifecycle remain
+    the host's responsibility. Database clients may use CalibrationLibrary's
+    individual native stages and their own caches instead.
+    """
+    def __init__(
+        self, lights: Sequence[str | Path], cache: str | Path, *,
+        library: str | Path | None = None,
+        provided: Sequence[str | Path] | None = None,
+        rules: CalibrationRules | None = None,
+        incomplete: Literal["stop", "keep", "exclude"] = "stop",
+        flat_association: Literal["automatic", "one_set"] = "automatic",
+        dark_association: Literal["automatic", "one_set"] = "automatic",
+        flat_star_masking: bool = False,
+        flat_stability: Mapping[str, Any] | None = None,
+        choices: Sequence[Mapping[str, Any]] | None = None,
+        group_overrides: Sequence[Mapping[str, Any]] | None = None,
+        light_choices: Sequence[Mapping[str, Any]] | None = None,
+    ) -> None: ...
+    def analyze(
+        self, *, cancel: Callable[[], bool] | None = None,
+        progress: Callable[[dict[str, Any]], Any] | None = None,
+    ) -> dict[str, Any]: ...
+    def prepare(
+        self, review_key: str, *, cancel: Callable[[], bool] | None = None,
+        progress: Callable[[dict[str, Any]], Any] | None = None,
+    ) -> dict[str, Any]: ...
+    @staticmethod
+    def verify(sources: Sequence[Mapping[str, Any]]) -> None: ...

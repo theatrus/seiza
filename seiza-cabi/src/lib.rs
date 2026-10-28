@@ -3,6 +3,7 @@ mod continuum;
 mod emission;
 
 use image::DynamicImage;
+mod calibration_files;
 mod constellations;
 mod flat_groups;
 mod flat_response;

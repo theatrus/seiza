@@ -5,6 +5,7 @@ mod analysis;
 mod arrays;
 mod background;
 mod calibration;
+mod calibration_files;
 mod color;
 mod color_calibration;
 mod constellations;
@@ -1244,6 +1245,7 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     constellations::register(m)?;
     flat_response::register(m)?;
     library::register(m)?;
+    calibration_files::register(m)?;
     screening::register(m)?;
     stretch::register(m)?;
     m.add("SolveError", m.py().get_type::<SolveError>())?;

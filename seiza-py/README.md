@@ -1944,3 +1944,23 @@ correlations; it must not be interpreted as independent raw detector samples.
 Both HTML renderers select filter/layout/component explicitly. Schema 1/2
 reports remain renderable; new reports use schema/algorithm version 3.
 Stacking and stretching numerical output versions do not change.
+
+### File-backed calibration coordinator
+
+`CalibrationFiles(lights, cache, *, library=None, provided=None,
+rules=None, incomplete="stop", flat_association="automatic",
+dark_association="automatic", flat_star_masking=False, flat_stability=None,
+choices=None, group_overrides=None, light_choices=None)` uses the same native
+file coordinator as the desktop C ABI. `rules` is a `CalibrationRules` object.
+`analyze(cancel=None, progress=None)` grades/groups/matches without building
+masters; `prepare(review_key, cancel=None, progress=None)` revalidates the review
+and publishes each unique dependency and corrected flat atomically. Reports
+are snake_case records including `snapshot`, `flat_work`, `missing`,
+`light_paths`, staged `paths`, `file_sessions` and `sources`.
+`CalibrationFiles.verify(sources)` refuses changed inputs/masters before use.
+Callback exceptions and Ctrl-C are preserved; work releases the GIL.
+
+The coordinator is optional. Database-backed applications can keep using the
+individual native calibration, quality, session and evidence classes with
+their own caches and pixels. See [file calibration](../docs/calibration-files.md)
+for native Rust/C examples, cache identities, cancellation and source rules.

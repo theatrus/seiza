@@ -171,6 +171,42 @@
       ],
       "type": "object"
     },
+    "Answer": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PreparationReport",
+          "description": "Review or executed file sessions."
+        },
+        {
+          "description": "Requested source stamps still match.",
+          "properties": {
+            "valid": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "valid"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The native settings panel schema.",
+          "properties": {
+            "settings": {
+              "items": {
+                "$ref": "#/$defs/FieldSpec"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "settings"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "The operation's native return value, before C property-name translation."
+    },
     "Application": {
       "additionalProperties": false,
       "description": "How a session's flat applies, once its masters are built.",
@@ -552,6 +588,60 @@
         "flat"
       ],
       "type": "string"
+    },
+    "ChangeOption": {
+      "description": "A measured optical change to which a personal side choice can refer.",
+      "properties": {
+        "end": {
+          "description": "Last boundary time, Unix seconds.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "key": {
+          "description": "Stable native event or evidence identity.",
+          "type": "string"
+        },
+        "rigUuid": {
+          "description": "Native camera/telescope rig identity.",
+          "type": "string"
+        },
+        "start": {
+          "description": "First boundary time, Unix seconds.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "key",
+        "start",
+        "end",
+        "rigUuid"
+      ],
+      "type": "object"
+    },
+    "Choice": {
+      "additionalProperties": false,
+      "description": "A quality override tied to the exact reviewed source.",
+      "properties": {
+        "choice": {
+          "$ref": "#/$defs/QualityOverride",
+          "description": "A user quality decision; physical gates still apply."
+        },
+        "fingerprint": {
+          "description": "Metadata identity captured when this file was inspected.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Canonical source path.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "fingerprint",
+        "choice"
+      ],
+      "type": "object"
     },
     "ChoiceNote": {
       "description": "A person's choice for a light, as its account shows it.",
@@ -1868,6 +1958,72 @@
       ],
       "type": "object"
     },
+    "FileCalibrationSession": {
+      "additionalProperties": false,
+      "description": "One file-backed calibration recipe and its complete light-matching gate.\nThe rotation basis is part of `tolerances`; no previous session's settings\nare inherited. Paths name already-built masters, not raw master inputs.",
+      "properties": {
+        "bias": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dark": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "darkExposureSeconds": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "flat": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "normalizedFullScale": {
+          "default": null,
+          "description": "Convert only a declared 0:1 source range to this full scale, as PSF\nGuard's image loader does with 65535 ADU. None preserves stored units.",
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "pedestal": {
+          "default": null,
+          "description": "PSF Guard's fitted-pedestal fallback: a calibrated/normalized flat\nplus a synthetic constant bias applied to the lights. Requires no\nbias or dark file. The host retains the fit's evidence in its recipe.",
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "tolerances": {
+          "$ref": "#/$defs/MatchTolerances",
+          "default": {
+            "dark_temperature_c": 3.0,
+            "exposure_fraction": 0.001,
+            "exposure_seconds": 0.05,
+            "flat_session_seconds": 86400,
+            "focal_length_mm": 1.0,
+            "master_temperature_c": 1.0,
+            "rotation_deg": 2.0
+          }
+        }
+      },
+      "type": "object"
+    },
     "FileStamp": {
       "additionalProperties": false,
       "description": "A file's size and modification time, in nanoseconds since 1970.",
@@ -2388,6 +2544,51 @@
           "type": "boolean"
         },
         "lightIndices": {
+          "items": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "lightIndices",
+        "correction",
+        "before",
+        "after",
+        "bin",
+        "divide"
+      ],
+      "type": "object"
+    },
+    "FlatCorrectionPlan2": {
+      "description": "A native correction with exact response dependencies and affected lights.",
+      "properties": {
+        "after": {
+          "$ref": "#/$defs/ResponseRow",
+          "description": "Exact after-side response dependency."
+        },
+        "before": {
+          "$ref": "#/$defs/ResponseRow",
+          "description": "Exact before-side response dependency."
+        },
+        "bin": {
+          "description": "Response sampling bin factor.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "correction": {
+          "$ref": "#/$defs/FlatCorrection",
+          "description": "Native correction identity and direction."
+        },
+        "divide": {
+          "description": "Whether the full change map divides the source flat.",
+          "type": "boolean"
+        },
+        "lightIndices": {
+          "description": "Affected indices in the original light order.",
           "items": {
             "format": "uint",
             "minimum": 0,
@@ -3743,6 +3944,113 @@
         }
       ]
     },
+    "FlatWorkReview": {
+      "description": "Evidence and corrections, with the exact native rows used for selection.",
+      "properties": {
+        "algorithmVersion": {
+          "description": "Version of the native planning records.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "corrections": {
+          "description": "Corrections that must be applied before stacking.",
+          "items": {
+            "$ref": "#/$defs/FlatCorrectionPlan2"
+          },
+          "type": "array"
+        },
+        "groupEdges": {
+          "description": "Native edge rows a host can offer to split/join.",
+          "items": {
+            "$ref": "#/$defs/GroupEdge"
+          },
+          "type": "array"
+        },
+        "grouping": {
+          "$ref": "#/$defs/Request2",
+          "description": "The measured native grouping used for this review."
+        },
+        "overrides": {
+          "description": "Applied/orphaned native group edge commands.",
+          "items": {
+            "$ref": "#/$defs/OverrideState"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "algorithmVersion",
+        "grouping",
+        "corrections",
+        "overrides",
+        "groupEdges"
+      ],
+      "type": "object"
+    },
+    "Frame": {
+      "description": "The native quality decision shown for one calibration file.",
+      "properties": {
+        "error": {
+          "description": "Input measurement failure, when present.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fingerprint": {
+          "description": "Metadata identity captured when this file was inspected.",
+          "type": "string"
+        },
+        "grade": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Grade"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Native grade, absent for unmeasured/external records."
+        },
+        "id": {
+          "description": "Stable native identity.",
+          "type": "string"
+        },
+        "isMaster": {
+          "description": "Whether metadata identifies an existing external master.",
+          "type": "boolean"
+        },
+        "kind": {
+          "$ref": "#/$defs/CalibrationKind",
+          "description": "Calibration frame kind identified from its metadata."
+        },
+        "measurementState": {
+          "$ref": "#/$defs/MeasurementState",
+          "description": "Whether the cached measurement is current, stale, missing, failed or external."
+        },
+        "path": {
+          "description": "Canonical source path.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Native grading or exclusion explanation.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "fingerprint",
+        "id",
+        "kind",
+        "isMaster",
+        "measurementState"
+      ],
+      "type": "object"
+    },
     "FrameGrade": {
       "properties": {
         "frameUuid": {
@@ -3826,6 +4134,29 @@
         }
       ]
     },
+    "GroupEdge": {
+      "description": "A native edge on which a host can offer split/join commands.",
+      "properties": {
+        "id": {
+          "description": "Stable native identity.",
+          "type": "string"
+        },
+        "label": {
+          "description": "Human-readable native capture/group label.",
+          "type": "string"
+        },
+        "row": {
+          "$ref": "#/$defs/GroupOverrideRow",
+          "description": "The unchanged native command row, resolved by Seiza."
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "row"
+      ],
+      "type": "object"
+    },
     "GroupNote": {
       "description": "A group of one family, as a light's account names it.",
       "properties": {
@@ -3850,6 +4181,31 @@
         "firstNight",
         "lastNight",
         "sessions"
+      ],
+      "type": "object"
+    },
+    "GroupOption": {
+      "description": "A native measured group a personal choice can name.",
+      "properties": {
+        "frame": {
+          "description": "A flat frame anchoring this native group.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "description": "Human-readable native capture/group label.",
+          "type": "string"
+        },
+        "sessionKey": {
+          "description": "Native session identity anchoring this choice.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionKey",
+        "label"
       ],
       "type": "object"
     },
@@ -3966,6 +4322,69 @@
       ],
       "type": "object"
     },
+    "GroupingReview": {
+      "description": "Measured native grouping visible to file-based hosts.",
+      "properties": {
+        "algorithmVersion": {
+          "description": "Version of the native planning records.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "boundaries": {
+          "description": "Measured or manually chosen response boundaries.",
+          "items": {
+            "$ref": "#/$defs/Boundary"
+          },
+          "type": "array"
+        },
+        "events": {
+          "description": "Optical changes resolved by the native grouping book.",
+          "items": {
+            "$ref": "#/$defs/Event"
+          },
+          "type": "array"
+        },
+        "families": {
+          "description": "Measured native response families.",
+          "items": {
+            "$ref": "#/$defs/Family"
+          },
+          "type": "array"
+        },
+        "imaging": {
+          "description": "Imaging sessions formed from acquisition identities and times.",
+          "items": {
+            "$ref": "#/$defs/ImagingSession"
+          },
+          "type": "array"
+        },
+        "overrides": {
+          "description": "Applied/orphaned native group edge commands.",
+          "items": {
+            "$ref": "#/$defs/OverrideState"
+          },
+          "type": "array"
+        },
+        "sessions": {
+          "description": "Unique master sessions or measured flat sessions.",
+          "items": {
+            "$ref": "#/$defs/Session2"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "algorithmVersion",
+        "imaging",
+        "sessions",
+        "families",
+        "boundaries",
+        "events",
+        "overrides"
+      ],
+      "type": "object"
+    },
     "HandEdge": {
       "description": "How a person's choice changed an edge between groups.",
       "enum": [
@@ -4050,6 +4469,26 @@
         "lights"
       ],
       "type": "object"
+    },
+    "IncompleteLights": {
+      "description": "How preparation treats lights with missing, ungraded or undecided calibration.",
+      "oneOf": [
+        {
+          "const": "stop",
+          "description": "Refuse preparation until the host reviews incomplete lights.",
+          "type": "string"
+        },
+        {
+          "const": "keep",
+          "description": "Prepare the available calibration and retain incomplete lights.",
+          "type": "string"
+        },
+        {
+          "const": "exclude",
+          "description": "Mark incomplete lights for the host to omit from its original input list.",
+          "type": "string"
+        }
+      ]
     },
     "Judged": {
       "description": "A frame's grade against its peers, as [`grade`] judges it.",
@@ -4287,6 +4726,30 @@
       ],
       "type": "string"
     },
+    "LightChoice2": {
+      "additionalProperties": false,
+      "description": "A personal flat choice tied to one exact light source.",
+      "properties": {
+        "fingerprint": {
+          "description": "Metadata identity captured when this file was inspected.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Canonical source path.",
+          "type": "string"
+        },
+        "row": {
+          "$ref": "#/$defs/LightChoiceRow",
+          "description": "The unchanged native command row, resolved by Seiza."
+        }
+      },
+      "required": [
+        "path",
+        "fingerprint",
+        "row"
+      ],
+      "type": "object"
+    },
     "LightChoiceEntry": {
       "additionalProperties": false,
       "description": "A light's choices with what the book needs to find the light again: the\nfile name its frame is read from, its filter and capture time.",
@@ -4389,6 +4852,50 @@
         "rigUuid",
         "label",
         "chosenAt"
+      ],
+      "type": "object"
+    },
+    "LightOptions": {
+      "description": "Applicable native choices for one source, bound to its reviewed identity.",
+      "properties": {
+        "changes": {
+          "description": "Applicable native change commands.",
+          "items": {
+            "$ref": "#/$defs/ChangeOption"
+          },
+          "type": "array"
+        },
+        "fingerprint": {
+          "description": "Metadata identity captured when this file was inspected.",
+          "type": "string"
+        },
+        "groups": {
+          "description": "Measured native groups available for review.",
+          "items": {
+            "$ref": "#/$defs/GroupOption"
+          },
+          "type": "array"
+        },
+        "guid": {
+          "description": "Stable identity of this reviewed light.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Canonical source path.",
+          "type": "string"
+        },
+        "rigUuid": {
+          "description": "Native camera/telescope rig identity.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "fingerprint",
+        "guid",
+        "rigUuid",
+        "changes",
+        "groups"
       ],
       "type": "object"
     },
@@ -5301,6 +5808,106 @@
         }
       ]
     },
+    "PreparationReport": {
+      "description": "A review or prepared master plan preserving the original light order.",
+      "properties": {
+        "fileSessions": {
+          "description": "Published master paths and complete gates; empty during analysis.",
+          "items": {
+            "$ref": "#/$defs/FileCalibrationSession"
+          },
+          "type": "array"
+        },
+        "flatWork": {
+          "$ref": "#/$defs/FlatWorkReview",
+          "description": "Evidence rows, required corrections and manual edge choices."
+        },
+        "frames": {
+          "description": "Calibration file quality records in discovered order.",
+          "items": {
+            "$ref": "#/$defs/Frame"
+          },
+          "type": "array"
+        },
+        "grouping": {
+          "$ref": "#/$defs/GroupingReview",
+          "description": "The measured native grouping used for this review."
+        },
+        "lightOptions": {
+          "description": "Applicable group/side commands for each original light.",
+          "items": {
+            "$ref": "#/$defs/LightOptions"
+          },
+          "type": "array"
+        },
+        "lightPaths": {
+          "description": "Original canonical light paths in the requested order.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "missing": {
+          "description": "Incomplete calibration flags in original light order.",
+          "items": {
+            "type": "boolean"
+          },
+          "type": "array"
+        },
+        "paths": {
+          "description": "Physical-sample input paths, including staged declared-unit XISF sources.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "reviewKey": {
+          "description": "Identity of ordered sources, rules, choices and algorithm versions.",
+          "type": "string"
+        },
+        "rigs": {
+          "description": "Camera/telescope rig identities available for settings.",
+          "items": {
+            "$ref": "#/$defs/Rig"
+          },
+          "type": "array"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/Snapshot2",
+          "description": "Native per-light selections, shared master sessions and assignments."
+        },
+        "sources": {
+          "description": "Reviewed input, staged, response, evidence and master stamps.",
+          "items": {
+            "$ref": "#/$defs/Source"
+          },
+          "type": "array"
+        },
+        "warnings": {
+          "description": "Concrete skipped inputs and native preparation notes.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "reviewKey",
+        "frames",
+        "rigs",
+        "snapshot",
+        "grouping",
+        "flatWork",
+        "lightOptions",
+        "warnings",
+        "missing",
+        "paths",
+        "lightPaths",
+        "fileSessions",
+        "sources"
+      ],
+      "type": "object"
+    },
     "QualityOverride": {
       "enum": [
         "use",
@@ -5674,6 +6281,116 @@
       },
       "type": "object"
     },
+    "Request3": {
+      "additionalProperties": false,
+      "description": "C-only workflow input. Fields use Rust names here; the C binding checks and\ntranslates camelCase. Database-backed hosts use native library stages.",
+      "properties": {
+        "cache": {
+          "default": "",
+          "type": "string"
+        },
+        "choices": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Choice"
+          },
+          "type": "array"
+        },
+        "darkAssociation": {
+          "$ref": "#/$defs/Association",
+          "default": "automatic"
+        },
+        "flatAssociation": {
+          "$ref": "#/$defs/Association",
+          "default": "automatic"
+        },
+        "flatStability": {
+          "$ref": "#/$defs/FlatRetryPolicy",
+          "default": {
+            "enabled": true,
+            "retain_unstable": true,
+            "trim_unstable": true,
+            "try_next_session": true
+          }
+        },
+        "flatStarMasking": {
+          "default": false,
+          "type": "boolean"
+        },
+        "groupOverrides": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/GroupOverrideRow"
+          },
+          "type": "array"
+        },
+        "incomplete": {
+          "$ref": "#/$defs/IncompleteLights",
+          "default": "stop"
+        },
+        "library": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lightChoices": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/LightChoice2"
+          },
+          "type": "array"
+        },
+        "lights": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "operation": {
+          "default": "",
+          "type": "string"
+        },
+        "provided": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "reviewKey": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rigs": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RigSettings"
+          },
+          "type": "array"
+        },
+        "settings": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Setting"
+          },
+          "type": "array"
+        },
+        "sources": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Source"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "ResolvedChoices": {
       "description": "A light's choices, resolved against the book.",
       "properties": {
@@ -5897,6 +6614,24 @@
       ],
       "type": "object"
     },
+    "Rig": {
+      "description": "The camera/telescope rig named in review.",
+      "properties": {
+        "id": {
+          "description": "Stable native rig identity.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Capture metadata label.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "type": "object"
+    },
     "RigLimits": {
       "additionalProperties": false,
       "description": "Limits for one rig; every rig with usable responses must have an entry.",
@@ -6075,6 +6810,104 @@
         },
         "tolerances": {
           "$ref": "#/$defs/MatchTolerances"
+        }
+      },
+      "required": [
+        "bias",
+        "dark",
+        "darkFlat",
+        "flat",
+        "keptOut",
+        "library",
+        "tolerances",
+        "flatBasis",
+        "flatHeldBack",
+        "flatChoices",
+        "ruleNotes"
+      ],
+      "type": "object"
+    },
+    "Selection2": {
+      "description": "The identifiers and native explanations of one light's selected calibration.",
+      "properties": {
+        "bias": {
+          "description": "Selected bias frame identifiers.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "dark": {
+          "description": "Selected dark frame identifiers.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "darkFlat": {
+          "description": "Selected dark-flat frame identifiers.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "flat": {
+          "description": "Selected flat frame identifiers.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "flatBasis": {
+          "$ref": "#/$defs/FlatBasis",
+          "description": "Native explanation, placement and any required correction."
+        },
+        "flatChoices": {
+          "description": "Applied and orphaned personal commands.",
+          "items": {
+            "$ref": "#/$defs/ChoiceNote"
+          },
+          "type": "array"
+        },
+        "flatFamily": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FlatFamily"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Native family choice and its supporting basis."
+        },
+        "flatHeldBack": {
+          "description": "Far-side flats unavailable to native alternate retries.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "keptOut": {
+          "description": "Compatible frames excluded by native quality/validity policy.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "library": {
+          "$ref": "#/$defs/LibraryKinds",
+          "description": "Kinds the native library could provide for this light."
+        },
+        "ruleNotes": {
+          "description": "Resolved per-light rule explanations.",
+          "items": {
+            "$ref": "#/$defs/RuleNote"
+          },
+          "type": "array"
+        },
+        "tolerances": {
+          "$ref": "#/$defs/MatchTolerances",
+          "description": "The complete native physical matching gate."
         }
       },
       "required": [
@@ -6459,6 +7292,73 @@
       ],
       "type": "object"
     },
+    "Snapshot2": {
+      "description": "Native selection and master sessions, with assignments in light order.",
+      "properties": {
+        "algorithmVersion": {
+          "description": "Version of the native planning records.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "assignments": {
+          "description": "Index of each light's session in sessions.",
+          "items": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "selections": {
+          "description": "Per-light native selection records in original order.",
+          "items": {
+            "$ref": "#/$defs/Selection2"
+          },
+          "type": "array"
+        },
+        "sessions": {
+          "description": "Unique master sessions or measured flat sessions.",
+          "items": {
+            "$ref": "#/$defs/Session"
+          },
+          "type": "array"
+        },
+        "settingsDigest": {
+          "description": "Native digest of resolved settings.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "algorithmVersion",
+        "selections",
+        "sessions",
+        "assignments"
+      ],
+      "type": "object"
+    },
+    "Source": {
+      "additionalProperties": false,
+      "description": "An immutable path and metadata stamp used to reject stale inputs.",
+      "properties": {
+        "fingerprint": {
+          "description": "Metadata identity captured when this file was inspected.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Canonical source path.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "fingerprint"
+      ],
+      "type": "object"
+    },
     "Spot": {
       "description": "One difference of dust between two sessions.",
       "properties": {
@@ -6756,6 +7656,14 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "calls": {
+    "seiza_calibration_files_json": {
+      "answer": {
+        "$ref": "#/$defs/Answer"
+      },
+      "request": {
+        "$ref": "#/$defs/Request3"
+      }
+    },
     "seiza_calibration_flat_response_plan_json": {
       "answer": {
         "$ref": "#/$defs/FlatResponsePlans"

@@ -483,6 +483,16 @@ typedef struct {
 typedef void (*SeizaRcAstroProgressCallback)(float, void*);
 
 /*
+ Synchronous phase progress, called on the coordinating thread. `phase` is
+ borrowed UTF-8 for this callback only; total zero denotes discovery. Callback
+ and context are never retained. Do not unwind or reenter the same cache.
+ */
+typedef void (*SeizaCalibrationProgressCallback)(const char *phase,
+                                                 size_t completed,
+                                                 size_t total,
+                                                 void *context);
+
+/*
  Borrowed, row-major float image. RGB channels are interleaved. Samples use
  the same units as the other images in this measurement. No pointer is retained.
  */
@@ -3790,6 +3800,31 @@ char *seiza_emission_flux_json(const float *residuals,
                                const char *request_json,
                                float *output,
                                char **error_out);
+
+/*
+ Grade/group/match provided FITS/XISF files or a recursive library and prepare
+ cached masters through the native file coordinator. Run off the UI thread.
+ camelCase request: operation (analyze/execute/verify/schema), lights, library
+ (optional), provided, cache, settings/rigs, choices/groupOverrides/lightChoices,
+ incomplete (stop/keep/exclude), flatStarMasking/flatStability, flatAssociation/
+ darkAssociation. Analyze builds no masters; execute requires its reviewKey.
+ Verify takes sources; schema returns native settings. Reports retain original
+ order, per-light assignments, evidence and corrected master paths. Refuse
+ changed reviews, missing required corrections and unsafe aliases explicitly.
+ Cooperative cancel also interrupts cache-lock waits. Completed immutable cache
+ entries survive cancellation; no partial master is published. Free result or
+ error with seiza_string_free. Source grants and UI remain host responsibilities.
+ Request/report schemas: seiza_calibration_library_schema_json.
+ # Safety
+ request_json is NUL-terminated UTF-8. cancel is null or a live cancellation
+ handle until return. progress/context remain valid until return; progress may
+ be null. error_out is null or writable pointer storage.
+ */
+char *seiza_calibration_files_json(const char *request_json,
+                                   const SeizaCancelSignal *cancel,
+                                   SeizaCalibrationProgressCallback progress,
+                                   void *context,
+                                   char **error_out);
 
 /*
  Every constellation figure and the stars its lines use, for a host that

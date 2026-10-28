@@ -1183,3 +1183,12 @@ the assigned masters and gate during canvas planning and later integration,
 including A→B→A sequences. It returns an empty stack; push all original lights.
 See [session planning](../docs/calibration-sessions.md) for recipes, scaling,
 checkpoint/replay guarantees and bounded preparation.
+
+### Graded file calibration
+
+`FileCalibration` coordinates analysis, native evidence, master dependencies,
+stability retries and corrected-master publication for file-only hosts. Its
+`analyze` and `prepare` methods return typed records, use explicit host-owned
+cache storage, and accept progress/cancellation. C and Python wrap the same
+native object. Database hosts may retain the lower-level calibration APIs.
+See [the coordinator guide](../docs/calibration-files.md).
