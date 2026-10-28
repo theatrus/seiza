@@ -1558,3 +1558,354 @@ pub fn stacker_accepts(key: &str, value: &Value) -> Result<(), String> {
         format!("{label}: {error}")
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn values(pairs: &[(&str, Value)]) -> RuleValues {
+        pairs
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn the_defaults_are_the_values_the_checks_were_written_with() {
+        let rules = Rules::default();
+        let tolerances = MatchTolerances::default();
+        assert_eq!(rules.tolerances().rotation_deg, tolerances.rotation_deg);
+        assert_eq!(
+            rules.tolerances().focal_length_mm,
+            tolerances.focal_length_mm
+        );
+        assert_eq!(
+            rules.tolerances().dark_temperature_c,
+            tolerances.dark_temperature_c
+        );
+        assert_eq!(
+            rules.tolerances().flat_session_seconds,
+            tolerances.flat_session_seconds
+        );
+        assert_eq!(
+            rules.tolerances().master_temperature_c,
+            tolerances.master_temperature_c
+        );
+        assert_eq!(rules.coherence_tolerances().rotation_deg, 2.0);
+        assert!(rules.use_darks);
+        assert_eq!(rules.external_masters, ExternalMasterPolicy::Prefer);
+        assert_eq!(rules.dark_reach_days, 183.0);
+        assert_eq!(rules.complete_dark_frames, 10);
+        assert_eq!(rules.dark_choice, DarkChoice::Complete);
+        assert_eq!(rules.flat_max_age_days, 60.0);
+        assert_eq!(rules.flat_check_age_days, 30.0);
+        assert_eq!(rules.thin_master_frames, 5);
+        for check in Check::ALL {
+            assert_eq!(rules.mode(check), CheckMode::Flag, "{check:?}");
+        }
+        assert_eq!(rules.bias, BiasScreening::default());
+        assert_eq!(rules.dark, DarkScreening::default());
+        assert_eq!(rules.flat, FlatScreening::default());
+        assert_eq!(rules.matching_digest(), None);
+        assert!(rules.notes().is_empty());
+        assert!(RuleBook::default().digest().is_none());
+    }
+
+    #[test]
+    fn every_default_passes_its_own_validation() {
+        for spec in fields() {
+            assert_eq!(validate(spec, &spec.default), Ok(()), "{}", spec.key);
+        }
+        let mut keys: Vec<&str> = fields().iter().map(|spec| spec.key).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), fields().len(), "keys are unique");
+    }
+
+    #[test]
+    fn a_rig_value_beats_the_global_one_which_beats_the_default() {
+        let global = values(&[
+            ("dark_reach_days", json!(90)),
+            ("thin_master_frames", json!(4)),
+        ]);
+        let rig = RigLayer {
+            name: Some("SpaceCat61 · ASI2600MM Pro".into()),
+            values: values(&[("dark_reach_days", json!(400))]),
+        };
+        let book = RuleBook::new(global, BTreeMap::from([("rig-a".to_string(), rig)]));
+
+        let rig_rules = book.for_rig("rig-a");
+        assert_eq!(rig_rules.dark_reach_days, 400.0);
+        assert_eq!(rig_rules.source("dark_reach_days"), RuleSource::Rig);
+        assert_eq!(rig_rules.thin_master_frames, 4, "inherits the global value");
+        assert_eq!(rig_rules.source("thin_master_frames"), RuleSource::Global);
+        assert_eq!(rig_rules.complete_dark_frames, 10, "inherits the default");
+        assert_eq!(
+            rig_rules.source("complete_dark_frames"),
+            RuleSource::Default
+        );
+
+        let other = book.for_rig("rig-b");
+        assert_eq!(other.dark_reach_days, 90.0, "another rig takes the global");
+        assert_eq!(other.rig, None);
+        assert!(book.digest().is_some());
+    }
+
+    #[test]
+    fn a_rig_names_its_night_zone_and_others_follow_the_global_or_their_site() {
+        assert_eq!(Rules::default().night_offset_seconds, None, "auto");
+        let global = values(&[("night_zone", json!("5.75"))]);
+        let rig = RigLayer {
+            name: Some("C925".into()),
+            values: values(&[("night_zone", json!("-8"))]),
+        };
+        let book = RuleBook::new(global, BTreeMap::from([("c925".to_string(), rig)]));
+        assert_eq!(book.for_rig("c925").night_offset_seconds, Some(-8 * 3600));
+        assert_eq!(
+            book.for_rig("other").night_offset_seconds,
+            Some(5 * 3600 + 45 * 60)
+        );
+        // A zone the list does not offer falls through, as any unreadable
+        // value does; "auto" at the rig beats a global offset.
+        let book = RuleBook::new(
+            values(&[("night_zone", json!("-8"))]),
+            BTreeMap::from([
+                (
+                    "odd".to_string(),
+                    RigLayer {
+                        name: None,
+                        values: values(&[("night_zone", json!("-7.25"))]),
+                    },
+                ),
+                (
+                    "auto".to_string(),
+                    RigLayer {
+                        name: None,
+                        values: values(&[("night_zone", json!("auto"))]),
+                    },
+                ),
+            ]),
+        );
+        assert_eq!(book.for_rig("odd").night_offset_seconds, Some(-8 * 3600));
+        assert_eq!(book.for_rig("auto").night_offset_seconds, None);
+    }
+
+    #[test]
+    fn a_value_this_build_cannot_read_falls_through_to_the_next_layer() {
+        let global = values(&[
+            ("dark_choice", json!("by_gain")),
+            ("rotation_tolerance_deg", json!(4.0)),
+        ]);
+        let rig = RigLayer {
+            name: None,
+            values: values(&[
+                ("rotation_tolerance_deg", json!("wide")),
+                ("check_no_flat", json!("sometimes")),
+            ]),
+        };
+        let book = RuleBook::new(global, BTreeMap::from([("rig".to_string(), rig)]));
+        let rules = book.for_rig("rig");
+        assert_eq!(rules.dark_choice, DarkChoice::Complete);
+        assert_eq!(rules.rotation_deg, 4.0);
+        assert_eq!(rules.mode(Check::NoFlat), CheckMode::Flag);
+    }
+
+    #[test]
+    fn grade_limits_turn_off_a_step_with_null() {
+        let global = values(&[
+            (
+                "grade_flat_illumination",
+                json!({"suspect": 0.05, "poor": null}),
+            ),
+            ("grade_flat_dim", json!({"suspect": null, "poor": 0.01})),
+        ]);
+        let rules = RuleBook::new(global, BTreeMap::new()).global();
+        assert_eq!(rules.flat.illumination.suspect, 0.05);
+        assert_eq!(rules.flat.illumination.poor, f64::INFINITY);
+        assert_eq!(rules.flat.dim.suspect, f64::NEG_INFINITY);
+        assert_eq!(rules.flat.dim.poor, 0.01);
+    }
+
+    #[test]
+    fn validation_names_the_setting_and_its_range() {
+        let spec = field("dark_temperature_tolerance_c").unwrap();
+        assert!(validate(spec, &json!(2.0)).is_ok());
+        assert!(validate(spec, &json!(0)).is_ok());
+        // Wider than Seiza's default: stacks check each light with its rig's own.
+        assert!(validate(spec, &json!(3.5)).is_ok());
+        assert!(validate(spec, &json!(20.0)).is_ok());
+        assert!(
+            validate(spec, &json!(20.5))
+                .unwrap_err()
+                .contains("from 0 to 20")
+        );
+        assert!(validate(spec, &json!("2")).is_err());
+        let count = field("thin_master_frames").unwrap();
+        assert!(validate(count, &json!(4.5)).is_err());
+        assert!(validate(count, &json!(1)).is_err());
+        assert!(validate(count, &json!(64)).is_ok());
+        let mode = field("check_no_flat").unwrap();
+        assert!(validate(mode, &json!("advisory")).is_ok());
+        assert!(validate(mode, &json!("poor")).is_err());
+        let limits = field("grade_flat_dim").unwrap();
+        assert!(validate(limits, &json!({"suspect": 0.05, "poor": 0.02})).is_ok());
+        assert!(
+            validate(limits, &json!({"suspect": 0.02, "poor": 0.05}))
+                .unwrap_err()
+                .contains("suspect before")
+        );
+        assert!(validate(limits, &json!({"suspect": 0.05, "bad": 0.02})).is_err());
+        let higher = field("grade_flat_illumination").unwrap();
+        assert!(validate(higher, &json!({"suspect": 0.1, "poor": 0.05})).is_err());
+        assert!(validate(higher, &json!({"suspect": null, "poor": null})).is_ok());
+    }
+
+    #[test]
+    fn only_changed_matching_settings_change_a_stacks_key() {
+        let flags_only = RuleBook::new(
+            values(&[
+                ("thin_master_frames", json!(3)),
+                ("check_mixed_flats", json!("off")),
+                ("grade_flat_dim", json!({"suspect": 0.05, "poor": 0.02})),
+            ]),
+            BTreeMap::new(),
+        );
+        assert_eq!(flags_only.global().matching_digest(), None);
+        let same_as_default = RuleBook::new(
+            values(&[("rotation_tolerance_deg", json!(2.0))]),
+            BTreeMap::new(),
+        );
+        assert_eq!(same_as_default.global().matching_digest(), None);
+        let wider = RuleBook::new(
+            values(&[("rotation_tolerance_deg", json!(5.0))]),
+            BTreeMap::new(),
+        );
+        assert!(wider.global().matching_digest().is_some());
+        assert_eq!(wider.global().coherence_tolerances().rotation_deg, 2.0);
+        assert_eq!(wider.global().tolerances().rotation_deg, 5.0);
+    }
+
+    /// Seiza refuses a tolerance it cannot use rather than clamp it, so the
+    /// settings refuse it first, naming the setting; a wide one it can use
+    /// passes.
+    #[test]
+    fn a_tolerance_seiza_would_refuse_is_refused_by_name() {
+        assert!(stacker_accepts("rotation_tolerance_deg", &json!(6)).is_ok());
+        assert!(stacker_accepts("dark_temperature_tolerance_c", &json!(10)).is_ok());
+        assert!(stacker_accepts("flat_session_hours", &json!(72)).is_ok());
+        let refused = stacker_accepts("rotation_tolerance_deg", &json!(181)).unwrap_err();
+        assert!(refused.starts_with("Flat rotation: "), "{refused}");
+        let refused = stacker_accepts("focal_length_tolerance_mm", &json!(-1)).unwrap_err();
+        assert!(refused.starts_with("Flat focal length: "), "{refused}");
+        assert!(stacker_accepts("thin_master_frames", &json!(-1)).is_ok());
+    }
+
+    /// Grading screens flats by session, and sessions are nights, so a
+    /// night_zone change grades again; it picks no frames itself, so it
+    /// does not re-key every master and stack of the rig.
+    #[test]
+    fn a_night_zone_grades_again_and_keys_no_master() {
+        let base = RuleBook::new(BTreeMap::new(), BTreeMap::new());
+        let rig = RigLayer {
+            name: None,
+            values: values(&[("night_zone", json!("-8"))]),
+        };
+        let zoned = RuleBook::new(BTreeMap::new(), BTreeMap::from([("c925".to_string(), rig)]));
+        assert!(
+            base.grades_differ(&zoned),
+            "a new night split regroups flat grading sessions"
+        );
+        assert_eq!(
+            zoned.for_rig("c925").matching_digest(),
+            None,
+            "night_zone alone re-keys every master and stack of the rig"
+        );
+    }
+
+    #[test]
+    fn grades_differ_only_when_a_grade_setting_changes() {
+        let base = RuleBook::new(values(&[("thin_master_frames", json!(3))]), BTreeMap::new());
+        let flags = RuleBook::new(values(&[("thin_master_frames", json!(4))]), BTreeMap::new());
+        assert!(!base.grades_differ(&flags));
+        let rig = RigLayer {
+            name: None,
+            values: values(&[(
+                "grade_flat_illumination",
+                json!({"suspect": 0.05, "poor": 0.1}),
+            )]),
+        };
+        let grades = RuleBook::new(
+            values(&[("thin_master_frames", json!(3))]),
+            BTreeMap::from([("rig".to_string(), rig)]),
+        );
+        assert!(base.grades_differ(&grades));
+    }
+
+    /// Grading groups a dark's peers by the dark temperature tolerance and
+    /// a flat's session by the rotation and focal length tolerances, so
+    /// changing one, globally or for a rig, grades the frames again. Other
+    /// matching settings leave the grades alone.
+    #[test]
+    fn the_tolerances_grading_groups_by_grade_again() {
+        let base = RuleBook::new(values(&[]), BTreeMap::new());
+        for (key, value) in [
+            ("dark_temperature_tolerance_c", json!(1)),
+            ("rotation_tolerance_deg", json!(1)),
+            ("focal_length_tolerance_mm", json!(0.5)),
+        ] {
+            let global = RuleBook::new(values(&[(key, value.clone())]), BTreeMap::new());
+            assert!(base.grades_differ(&global), "{key} globally");
+            let rig = RigLayer {
+                name: None,
+                values: values(&[(key, value)]),
+            };
+            let for_rig = RuleBook::new(values(&[]), BTreeMap::from([("rig".to_string(), rig)]));
+            assert!(base.grades_differ(&for_rig), "{key} for a rig");
+        }
+        for (key, value) in [
+            ("dark_reach_days", json!(30)),
+            ("flat_session_hours", json!(72)),
+            ("use_darks", json!(false)),
+        ] {
+            let other = RuleBook::new(values(&[(key, value)]), BTreeMap::new());
+            assert!(!base.grades_differ(&other), "{key}");
+        }
+    }
+
+    #[test]
+    fn notes_list_what_differs_with_its_source_in_words() {
+        let rig = RigLayer {
+            name: Some("Askar · 533".into()),
+            values: values(&[
+                ("check_no_bias_or_dark", json!("advisory")),
+                (
+                    "grade_flat_illumination",
+                    json!({"suspect": 0.05, "poor": 0.1}),
+                ),
+                ("flat_max_age_days", json!(0)),
+            ]),
+        };
+        let book = RuleBook::new(
+            values(&[("dark_temperature_tolerance_c", json!(2))]),
+            BTreeMap::from([("rig".to_string(), rig)]),
+        );
+        let notes = book.for_rig("rig").notes();
+        let texts: Vec<(&str, &str, RuleSource)> = notes
+            .iter()
+            .map(|note| (note.key, note.text.as_str(), note.source))
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                ("dark_temperature_tolerance_c", "2 °C", RuleSource::Global),
+                ("flat_max_age_days", "no limit", RuleSource::Rig),
+                ("check_no_bias_or_dark", "advisory", RuleSource::Rig),
+                (
+                    "grade_flat_illumination",
+                    "suspect 5%, poor 10%",
+                    RuleSource::Rig
+                ),
+            ]
+        );
+    }
+}

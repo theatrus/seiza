@@ -11,13 +11,21 @@ The extracted code resolves PSF Guard's defaults and global/rig settings;
 groups grading peers; screens bias, dark, dark-flat and flat measurements;
 applies manual eligibility choices; selects calibration candidates; chooses
 complete dark/bias cohorts, named readout modes and flat families; and produces
-master dependencies, session assignments and complete light gates. Session
-identity includes resolved external-master adoption or ordered raw inputs and
-their fingerprints, build options/dependencies, matching rules, the full light
-gate and flat correction. Equivalent recipes reuse a session without reordering
-the lights; unused candidates cannot hide a change in adopted master. Policy
-`algorithm_version` is 4: resolved-recipe identity includes the flat retry policy
-and held-back inputs that affect alternate-session execution. Failure and pedestal
+master dependencies, session assignments and complete light gates.
+
+The code is PSF Guard's, moved: a Rust host calls it as its own (see
+[Native hosts](#native-hosts)), and the C ABI and Python reach the same
+functions through the JSON calls below, which are built from them.
+
+Session identity covers what each master is made from and how: resolved
+external-master adoption, or the raw inputs as a set with their
+fingerprints, the build options and dependencies that apply, the matching
+rules, the full light gate and flat correction. Lights whose masters take the
+same frames share a session whichever light's nearest frame anchors them, as
+PSF Guard partitioned them; the first light stands for the rest. Unused
+candidates cannot hide a change in adopted master. Policy `algorithm_version`
+is 5: inputs key as a set, and star masking, dark screening, the flat retry
+policy and held-back flats key only recipes they apply to. Failure and pedestal
 feedback retain the base key so hosts can submit execution results against it.
 
 ## Inputs
@@ -28,7 +36,10 @@ spelling. Collections of settings are `{key, value}` records, never maps whose
 keys could be mistaken for schema fields. Unknown schema fields, unknown setting
 keys, invalid setting values and duplicate setting keys are refused at every
 planning/cohort/retry boundary. Errors identify the setting and its global/rig
-layer. The 43-field `settings_schema` describes accepted values and ranges.
+layer. The 43-field `settings_schema` describes accepted values and ranges; C
+`seiza_calibration_settings_schema_json` and Python `calibration_settings_schema`
+list it on their own, and `seiza_calibration_setting_check_json` /
+`calibration_setting_check` judge one value as a settings panel saves it.
 The internal stored-settings resolver still tolerates old values when PSF Guard
 loads its catalog; hosts submit its resolved, valid records to these APIs.
 
@@ -93,6 +104,39 @@ Selection reuses the book and accepts no additional `grouping` rows; its
 resolved limits must agree with the library settings. Hosts invalidate cached
 books when source rows, night boundaries or settings change. C handles may be
 shared for concurrent reads but must outlive all calls borrowing them.
+
+### Native hosts
+
+A Rust host holds the model and calls the functions PSF Guard's code called,
+in its own flow, with its own catalog, caches, files and threads:
+
+- `library::rules`: the settings table (`fields`, `field`, `validate`,
+  `describe`, `check_setting`), `RuleBook` layers and their resolution into
+  `Rules`, with each value's source, check modes and grouping limits. A
+  stored value this build cannot read falls through to the next layer.
+- `Library::new(frames, book, available_responses)` holds a catalog once;
+  `Library::select(light, rules)` matches one light by borrowing it,
+  `light_choices` and `flat_family_compatible` answer a choice panel, and
+  `library::matching` holds the tests a refusal explains.
+- `grade(measured, rules, nights)` judges current measurements against their
+  peers; the host's nights come in through `NightSplit`, and `night_of` names
+  them. `kept_out_reason`, `describe_finding` and the stored measurement
+  records are the ones hosts persist.
+- `coherent_cohort`, `adopted_master`, `master_dependencies`,
+  `dark_level_screening`, `pedestal_sample_lights`, `pedestal_hint`,
+  `accept_pedestal`, `trims_to_majority`, `same_session_as`, `flat_set_label`
+  and the retry notes are the decisions a master build makes.
+  `resolve_session` resolves a verified selection into its session, and
+  `Session::record_failure`, `plan_flat_use` and `accept_pedestal` take
+  execution results.
+- The flat grouping job's planning: `plan_sessions`, `SessionPlan` (its
+  sample, response key and response row), `PedestalTable`, `pedestal_moved`,
+  `family_questions` and `FamilyQuestion`, `change_question` and
+  `ChangeFilter`. A host gives each imaging session's lights and reads the
+  headers and pixels they ask for.
+
+`evaluate` is these calls over one request, so a native host and a host that
+submits records reach the same answers.
 
 ## Results and master execution
 
@@ -209,7 +253,10 @@ be distinguished from an explicit override; existing JSON policy objects retain
 their shape.
 
 `library::flat_retry(FlatRetryRequest)` / `seiza_calibration_flat_retry_json` /
-`calibration_flat_retry(request)` owns the post-build decision sequence. Supply
+`calibration_flat_retry(request)` owns the post-build decision sequence, built
+from the decision functions a native host calls. An alternate set is the next
+session out, clustered as one master takes it from the remaining raw
+candidates nearest first, never every flat outside the first window. Supply
 the returned `session` object and all selected raw `candidates`, then the first attempt's accepted `used` UUIDs, `disagreement`, `drift_threshold`,
 `feature_pixels` and `memo` flag. Optional host `label` strings affect only
 explanations. Empty disagreement means no stability measurement was available.
@@ -317,15 +364,20 @@ refuses incompatible sets and multiple/mixed external masters. Flat retries
 can trim unstable frames but cannot switch to another session in this mode.
 
 `library::plan_flat_responses` (`seiza_calibration_flat_response_plan_json`,
-Python `calibration_flat_response_plan`) is a pure preparation step extracted
-from PSF Guard's file job. It accepts library request records, groups eligible
-raw flats by sensor/optical family, night and rotation, and chooses bounded,
-deterministic response samples. It resolves pedestal estimates using the same
-bias/dark-flat matcher and cached dark levels. Results include the native rig
-limits and night boundaries needed to prepare a grouping book. Missing capture
-times are explicitly reported as unplanned; hosts must not fabricate dates.
-Hosts supply measured response planes and pair comparisons; this API does not
-claim pixel evidence exists merely because sessions have been prepared.
+Python `calibration_flat_response_plan`) runs PSF Guard's session planning
+(`plan_sessions`) over library request records. Eligible raw flats group by
+family (rig, filter, focal length class, frame size, binning, gain, offset and
+readout mode name), night and rotation, under the family, session and response
+keys PSF Guard keeps its responses by, so a host that adopts this keeps its
+cached planes. Each session samples at most `metric::MAX_FRAMES` flats, evenly
+spaced. Sessions too small to make a response, and rigs grouped by time, are
+not planned. The pedestal under a session's flats is the median of the
+dark-flats within 5% of its exposure, else of the rig's biases at that gain and
+offset (`PedestalTable`). Results include the native rig limits and night
+boundaries needed to prepare a grouping book. Missing capture times are
+reported as unplanned; hosts must not fabricate dates. Hosts supply measured
+response planes and pair comparisons; this API does not claim pixel evidence
+exists merely because sessions have been prepared.
 
 ## Light evidence, correction planning and personal choices
 
@@ -338,13 +390,18 @@ The same core boundary covers the remaining workflow:
 keyword calls and the same snake_case records.
 
 Cached light metadata, catalog IDs/profiles/targets/exclusions and optional
-pedestal estimates drive questions without paths being opened. Native grading,
-hard family compatibility, imaging sessions, angle groups, bounded samples,
-representatives, evidence-current keys, PSF Guard's tie policy, change verdict
-aggregation and correction dependencies/direction live in core. Family backgrounds
-partition physical sensor modes as well as target/filter/angle. Native split/join
-and light-side/group choice rows pass through grouping unchanged and report their
-resolved/orphaned status. Hosts retain database and file/cache mechanisms.
+pedestal estimates drive questions without paths being opened. The questions
+are PSF Guard's family and change stages (`family_questions`,
+`change_question`) over the request's lights: each imaging session's lights by
+filter and target, then by angle within the rig's rotation tolerance; family
+compatibility from the first light's sensor and optics; bounded samples;
+representatives; evidence-current keys; the tie and missing-fit rules; and the
+change verdict. A light's pedestal is its context's, else the rig's bias level
+at its gain and offset. Native split/join and light-side/group choice rows pass
+through grouping unchanged and report their resolved/orphaned status. Hosts
+retain database and file/cache mechanisms. `evaluate` refuses light evidence
+without the imaging sessions it was measured for: submit the `grouping` this
+call returns.
 
 Pixel entrypoints support cached arrays as well: response pedestal removal,
 light-background generation, pairwise response choice, dust-only evidence maps,

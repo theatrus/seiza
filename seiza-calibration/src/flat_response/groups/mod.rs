@@ -22,11 +22,11 @@ pub const ALGORITHM_VERSION: u32 = 1;
 
 pub use lights::{
     ANGLE_PRIOR_DEG, AngleEpochs, EPOCH_JUMP_DEG, Epoch, FAMILY_EVIDENCE_VERSION, FamilyBasis,
-    FamilyChoice,
+    FamilyChoice, half, wrap,
 };
 pub use model::{
     AlikeRange, AngleSpan, AngleTerm, Book, Boundary, Event, Family, HandEdge, ImagingSession,
-    Limits, Placement, ROTATION_CLUSTER_DEG, Session,
+    Limits, Placement, ROTATION_CLUSTER_DEG, Session, canonical_filter, imaging_sessions,
 };
 pub use overrides::{
     GROUP_CHOICE_KEY, GroupChoice, GroupOverrideRow, GroupPick, LightChoice, LightChoiceEntry,

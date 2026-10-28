@@ -1832,9 +1832,10 @@ evidence in `grouping` remain authoritative inputs. No database is required.
 
 The result is `CalibrationFlatWorkPlans`:
 
-- `families`: questions grouped by imaging session, filter, target, physical
-  sensor mode and recorded angle. The core supplies at most eight `sample_lights`,
-  representative response rows, measured `alike` pairs and the evidence key.
+- `families`: PSF Guard's family questions, grouped by imaging session, filter,
+  target and recorded angle, compatible by the first light's sensor and optics.
+  The core supplies at most eight `sample_lights`, representative response rows,
+  measured `alike` pairs and the evidence key.
 - `changes`: each imaging session/change question, with per-filter bounded light
   samples, targets, reference response/side, map source pair and vignetting masks.
 - `corrections`: shared correction identities and affected light indices, full

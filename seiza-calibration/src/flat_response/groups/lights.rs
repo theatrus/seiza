@@ -449,7 +449,7 @@ impl Book {
     /// The families a light at `angle` has flats of at that angle, within
     /// the rig's `tolerance`. An alike range never counts here: it hands a
     /// light flats only through `family_admits`, from its own side.
-    pub(crate) fn at_recorded(&self, families: &[usize], angle: f64, tolerance: f64) -> Vec<usize> {
+    pub fn at_recorded(&self, families: &[usize], angle: f64, tolerance: f64) -> Vec<usize> {
         families
             .iter()
             .copied()
