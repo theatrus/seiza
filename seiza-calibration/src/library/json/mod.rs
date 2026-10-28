@@ -69,6 +69,14 @@ pub struct Request {
     pub flat_association: Association,
     pub dark_association: Association,
 }
+impl Request {
+    fn associations(&self) -> Associations {
+        Associations {
+            flat: self.flat_association,
+            dark: self.dark_association,
+        }
+    }
+}
 #[derive(Debug, Serialize)]
 pub struct Selection {
     pub bias: Vec<String>,
@@ -109,7 +117,7 @@ pub struct FrameGrade {
     pub frame_uuid: String,
     pub judged: Option<Judged>,
     pub kept_out: Option<String>,
-    pub measurement_state: String,
+    pub measurement_state: MeasurementState,
     pub measure_error: Option<String>,
 }
 #[derive(Debug, Serialize)]
@@ -226,25 +234,19 @@ fn evaluate_inner(
         nights,
         mut quality,
     } = checked;
-    // Only current, fingerprint-matching measurements are regraded; stale,
-    // failed and absent ones keep their state and never become a grade.
     let judged = if request.regrade {
-        let measured = request.frames.iter().filter_map(|frame| {
-            let row = quality.get(&frame.frame_uuid)?;
-            QualityIndex::current(frame, row).then_some((frame, row.measurement.as_ref()?))
-        });
-        grade(measured, &rules, &nights)
+        quality.regrade(&request.frames, &rules, &nights)
     } else {
         HashMap::new()
     };
-    quality.fresh = judged.keys().cloned().collect();
     let grades = apply_grades(&mut request.frames, &quality, &judged);
     let flat_book = match prepared {
         Some(book) => book,
         None => Arc::new(groups::prepare(std::mem::take(&mut request.grouping))?),
     };
+    let associations = request.associations();
     let library = Library::new(request.frames, flat_book, request.available_responses);
-    library.check_associations(&rules, request.flat_association, request.dark_association)?;
+    library.check_associations(&rules, associations)?;
     let options = SessionOptions {
         flat_star_masking: request.flat_star_masking,
         flat_stability: request.flat_stability,
@@ -254,12 +256,8 @@ fn evaluate_inner(
     let mut assignments = Vec::new();
     let mut keys = BTreeMap::new();
     for light in &request.lights {
-        let selected = library.select_associated(
-            light,
-            rules.for_light(light),
-            request.flat_association,
-            request.dark_association,
-        );
+        let selected =
+            library.select_associated(light, rules.for_light(light), associations);
         let session = resolve_session(&selected, &quality, &options);
         // The first light whose masters share a key stands for every light
         // they serve: its candidates' order anchors the masters.
@@ -329,47 +327,19 @@ fn apply_grades(
     quality: &QualityIndex,
     judged: &HashMap<String, Judged>,
 ) -> Vec<FrameGrade> {
-    let mut grades = Vec::with_capacity(frames.len());
-    for frame in frames {
-        let row = quality.get(&frame.frame_uuid);
-        let grade = judged.get(&frame.frame_uuid);
-        let grade_name = grade
-            .map(|g| g.grade.as_str())
-            .or_else(|| row.and_then(|r| r.grade.as_deref()));
-        let reason = grade
-            .and_then(|g| g.reason.clone())
-            .or_else(|| row.and_then(|r| r.reason.clone()));
-        let stray = grade
-            .and_then(|g| g.stray_light.clone())
-            .or_else(|| row.and_then(|r| r.stray_light.clone()));
-        // A supplied legacy kept-out reason represents the catalog's old
-        // stray-light mark when no quality row exists.
-        frame.kept_out = kept_out_reason(
-            stray.or_else(|| frame.kept_out.clone()),
-            grade_name,
-            reason,
-            row.and_then(|r| r.override_choice),
-        );
-        let state = if frame.is_master {
-            "external"
-        } else {
-            match row {
-                None => "unmeasured",
-                Some(r) if !QualityIndex::current(frame, r) => "stale",
-                Some(r) if r.measurement.is_some() => "current",
-                Some(r) if r.measure_error.is_some() => "failed",
-                _ => "unmeasured",
-            }
-        };
-        grades.push(FrameGrade {
+    quality.keep_out(frames, judged);
+    frames
+        .iter()
+        .map(|frame| FrameGrade {
             frame_uuid: frame.frame_uuid.clone(),
-            judged: grade.cloned(),
+            judged: judged.get(&frame.frame_uuid).cloned(),
             kept_out: frame.kept_out.clone(),
-            measurement_state: state.into(),
-            measure_error: row.and_then(|r| r.measure_error.clone()),
-        });
-    }
-    grades
+            measurement_state: quality.measurement_state(frame),
+            measure_error: quality
+                .get(&frame.frame_uuid)
+                .and_then(|r| r.measure_error.clone()),
+        })
+        .collect()
 }
 
 /// Merge a request's night boundaries: the grouping's, then explicit

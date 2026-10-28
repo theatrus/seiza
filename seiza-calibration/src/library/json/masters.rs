@@ -93,28 +93,17 @@ pub fn plan_masters(request: MasterPlanRequest) -> crate::Result<Session> {
         request.global_settings,
         request.rigs,
     )?;
-    supplied::validate(
-        &request.frames,
-        &rules,
-        request.flat_association,
-        request.dark_association,
-    )?;
-    let mut selected = CalibrationSelection {
-        rules: rules.for_light(light),
+    let associations = Associations {
+        flat: request.flat_association,
+        dark: request.dark_association,
+    };
+    associations.check(&request.frames, &rules)?;
+    let selected = CalibrationSelection {
         flat_basis: request.flat_basis,
         flat_family: request.flat_family,
         flat_held_back: request.flat_held_back,
-        ..Default::default()
+        ..CalibrationSelection::of_frames(request.frames, rules.for_light(light), associations)
     };
-    for frame in request.frames {
-        selected.of_kind_mut(frame.kind).push(frame);
-    }
-    if request.flat_association == Association::OneSet {
-        selected.one_set.insert(CalibrationKind::Flat);
-    }
-    if request.dark_association == Association::OneSet {
-        selected.one_set.insert(CalibrationKind::Dark);
-    }
     let options = SessionOptions {
         flat_star_masking: request.flat_star_masking,
         flat_stability: request.flat_stability,

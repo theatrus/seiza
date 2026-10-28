@@ -115,7 +115,7 @@ fn recipe_respects_cached_grades_overrides_and_star_masking() {
             frame_uuid: f.frame_uuid.clone(),
             source_fingerprint: Some(f.source_fingerprint.clone()),
             algorithm_version: Some(seiza_calibration::FRAME_QUALITY_ALGORITHM_VERSION),
-            grade: Some("ok".into()),
+            grade: Some(seiza_calibration::Grade::Ok),
             ..Default::default()
         })
         .collect();

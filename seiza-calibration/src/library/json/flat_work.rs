@@ -210,12 +210,7 @@ pub fn plan_flat_work(mut request: FlatWorkRequest) -> crate::Result<FlatWorkPla
     let pedestal_of = |path: &Path| {
         let light = by_path.get(path)?;
         light.context.pedestal_adu.or_else(|| {
-            pedestals.pedestal_for(
-                &light.meta.rig_uuid,
-                light.meta.gain,
-                light.meta.offset,
-                None,
-            )
+            pedestals.light_pedestal(&light.meta.rig_uuid, light.meta.gain, light.meta.offset)
         })
     };
     let mut families = Vec::new();
@@ -231,13 +226,8 @@ pub fn plan_flat_work(mut request: FlatWorkRequest) -> crate::Result<FlatWorkPla
                 &library,
                 &rules,
                 rig,
-                &mut |session| evidence_lights(session, rig),
-                &mut |path| {
-                    by_path
-                        .get(path)
-                        .map(|l| l.meta.clone())
-                        .unwrap_or_default()
-                },
+                |session| evidence_lights(session, rig),
+                |path| by_path.get(path).map(|l| l.meta.clone()),
             );
             for question in questions {
                 let representatives = question.representatives(&book);
@@ -251,13 +241,13 @@ pub fn plan_flat_work(mut request: FlatWorkRequest) -> crate::Result<FlatWorkPla
                             key: book.families[*family].key.clone(),
                             response: representatives
                                 .as_ref()
-                                .map(|reps| book.sessions[reps[position]].row.clone()),
+                                .map(|reps| book.sessions[reps.sessions()[position]].row.clone()),
                             angle_gap: gap.is_finite().then_some(gap),
                         }
                     })
                     .collect();
                 let mut alike = Vec::new();
-                if let Some(reps) = &representatives {
+                if let Some(reps) = representatives.as_ref().map(|r| r.sessions()) {
                     for a in 0..reps.len() {
                         for b in a + 1..reps.len() {
                             if book.measured_alike(&[reps[a], reps[b]]) {
@@ -348,8 +338,7 @@ pub fn plan_flat_work(mut request: FlatWorkRequest) -> crate::Result<FlatWorkPla
         let selection = library.select_associated(
             light,
             rules.for_light(light),
-            library_request.flat_association,
-            library_request.dark_association,
+            library_request.associations(),
         );
         let Some(correction) = selection.flat_basis.correction() else {
             continue;

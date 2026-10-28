@@ -4,10 +4,27 @@
 //! Copyright the PSF Guard contributors; Apache-2.0.
 use super::*;
 
-/// A frame's settings as matching compares them.
+/// A frame's settings as matching compares them: the crate's
+/// [`FrameSignature`], and the readout mode's name, matched apart from its
+/// numeric index.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Signature {
     pub seiza: FrameSignature,
     pub readout_mode_name: Option<String>,
+}
+
+impl Light {
+    /// Its settings as matching compares them.
+    pub fn signature(&self) -> Signature {
+        light_signature(self)
+    }
+}
+
+impl CalibrationFrame {
+    /// Its settings as matching compares them.
+    pub fn signature(&self) -> Signature {
+        frame_signature(self)
+    }
 }
 
 /// The frames a master integrates from a set of candidates, and those that
@@ -865,26 +882,37 @@ pub(super) fn family_light_rotation(
         None => LightRotation::Recorded,
     }
 }
+/// The angle between two rotator positions, in degrees, the short way
+/// round: 0 to 180.
 pub fn rotation_gap(left: f64, right: f64) -> f64 {
     let difference = (left - right).rem_euclid(360.0);
     difference.min(360.0 - difference)
 }
+/// Whether a raw `candidate` was shot with the `reference`'s sensor
+/// settings: camera, size, binning, gain, offset and readout mode.
 pub fn signature_sensor_matches(reference: &Signature, candidate: &Signature) -> bool {
     crate::sensor_matches(&reference.seiza, &candidate.seiza)
         && readout_names_agree(reference, candidate)
 }
+/// Whether two signatures do not contradict each other's sensor settings:
+/// the lenient test an external master takes, its producer having
+/// stripped most of them.
 pub fn signature_sensor_consistent(left: &Signature, right: &Signature) -> bool {
     crate::sensor_consistent(&left.seiza, &right.seiza) && readout_names_agree(left, right)
 }
+/// Whether two readout mode names agree, or either is unknown.
 pub fn readout_names_agree(left: &Signature, right: &Signature) -> bool {
     match (&left.readout_mode_name, &right.readout_mode_name) {
         (Some(left), Some(right)) => readout_names_equal(left, right),
         _ => true,
     }
 }
+/// Whether two readout mode names are one, ignoring case and surrounding
+/// space.
 pub fn readout_names_equal(left: &str, right: &str) -> bool {
     left.trim().eq_ignore_ascii_case(right.trim())
 }
+/// A light's settings as matching compares them: [`Light::signature`].
 pub fn light_signature(light: &Light) -> Signature {
     let signature = crate::FrameSignature {
         camera: light.camera.clone(),
@@ -911,6 +939,8 @@ pub fn light_signature(light: &Light) -> Signature {
         readout_mode_name: light.readout_mode_name.clone(),
     }
 }
+/// A frame's settings as matching compares them:
+/// [`CalibrationFrame::signature`].
 pub fn frame_signature(frame: &CalibrationFrame) -> Signature {
     let signature = crate::FrameSignature {
         camera: frame.camera.clone(),
@@ -937,6 +967,8 @@ pub fn frame_signature(frame: &CalibrationFrame) -> Signature {
         readout_mode_name: frame.readout_mode_name.clone(),
     }
 }
+/// Whether a dark is within the rules' reach of a light shot at
+/// `light_timestamp`: days apart, unless a person marked its validity.
 pub fn dark_within_reach(
     candidate: &CalibrationFrame,
     light_timestamp: Option<i64>,
@@ -974,6 +1006,9 @@ pub(super) fn nearest_complete_dark_session(
         kept
     }
 }
+/// Whether `candidate` shares the light's sensor settings: exactly for a
+/// raw frame, leniently for an external master. Unlike the crate's
+/// [`crate::sensor_matches`], it takes a library light and frame.
 pub fn sensor_matches(light: &Light, candidate: &CalibrationFrame) -> bool {
     let (light, candidate_signature) = (light_signature(light), frame_signature(candidate));
     if candidate.is_master {
@@ -982,6 +1017,8 @@ pub fn sensor_matches(light: &Light, candidate: &CalibrationFrame) -> bool {
         signature_sensor_matches(&light, &candidate_signature)
     }
 }
+/// Whether a flat `candidate` shares the light's optics within the rules'
+/// tolerances: rotation, focal length and filter.
 pub fn flat_matches(light: &Light, candidate: &CalibrationFrame, rules: &Rules) -> bool {
     let (light, candidate_signature) = (light_signature(light), frame_signature(candidate));
     let tolerances = rules.tolerances();
@@ -991,6 +1028,8 @@ pub fn flat_matches(light: &Light, candidate: &CalibrationFrame, rules: &Rules) 
         crate::optics_match(&light.seiza, &candidate_signature.seiza, &tolerances)
     }
 }
+/// Whether a dark's temperature admits it for a light at `light_temp`; an
+/// external master that recorded none is admitted.
 pub fn temperature_admits(
     light_temp: Option<f64>,
     candidate: &CalibrationFrame,
@@ -1001,9 +1040,13 @@ pub fn temperature_admits(
     }
     temperature_matches(light_temp, candidate.camera_temp, rules)
 }
+/// Whether two raw frames share their sensor settings.
 pub fn frame_pair_matches(left: &CalibrationFrame, right: &CalibrationFrame) -> bool {
     signature_sensor_matches(&frame_signature(left), &frame_signature(right))
 }
+/// Whether two exposures, in seconds, match as a dark and light must;
+/// either unknown matches. Unlike the crate's [`crate::exposure_matches`],
+/// it takes the exposures themselves.
 pub fn exposure_matches(left: Option<f64>, right: Option<f64>) -> bool {
     let signature = |exposure| crate::FrameSignature {
         exposure_seconds: exposure,
@@ -1015,6 +1058,8 @@ pub fn exposure_matches(left: Option<f64>, right: Option<f64>) -> bool {
         &crate::MatchTolerances::default(),
     )
 }
+/// Whether two sensor temperatures, in °C, are within the rules' dark
+/// tolerance; either unknown matches.
 pub fn temperature_matches(left: Option<f64>, right: Option<f64>, rules: &Rules) -> bool {
     let signature = |temperature| crate::FrameSignature {
         camera_temp_c: temperature,

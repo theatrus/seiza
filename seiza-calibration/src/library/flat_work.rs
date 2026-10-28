@@ -88,15 +88,16 @@ pub struct FamilyQuestion {
 /// The family questions of one rig's imaging sessions: per session, its
 /// lights by filter and target ([`evidence::MIN_LIGHTS`] or more), then by
 /// angle within the rig's rotation tolerance. `lights_of` gives a
-/// session's lights; `header` reads one light's header, asked only for the
-/// first of a group that needs one: to fill angles its capture did not
-/// record, and for the sensor and optics of a question not yet answered.
+/// session's lights; `header` reads one light's header, `None` when it
+/// cannot, asked only for the first of a group that needs one: to fill
+/// angles its capture did not record, and for the sensor and optics of a
+/// question not yet answered.
 pub fn family_questions(
     library: &Library,
     rules: &RuleBook,
     rig: &str,
-    lights_of: &mut dyn FnMut(&groups::ImagingSession) -> Vec<EvidenceLight>,
-    header: &mut dyn FnMut(&Path) -> Light,
+    mut lights_of: impl FnMut(&groups::ImagingSession) -> Vec<EvidenceLight>,
+    mut header: impl FnMut(&Path) -> Option<Light>,
 ) -> Vec<FamilyQuestion> {
     let book = library.flat_book();
     let mut out = Vec::new();
@@ -129,8 +130,9 @@ pub fn family_questions(
                 continue;
             }
             // Lights the capture recorded no angle for: their header's.
-            if lights.iter().any(|light| light.angle.is_none()) {
-                let meta = header(&lights[0].path);
+            if lights.iter().any(|light| light.angle.is_none())
+                && let Some(meta) = header(&lights[0].path)
+            {
                 for light in lights.iter_mut().filter(|light| light.angle.is_none()) {
                     light.angle = meta.rotator_position;
                 }
@@ -181,7 +183,9 @@ pub fn family_questions(
                     continue;
                 }
                 // The first light's header: its sensor, optics and rig.
-                let mut meta = header(&group[0].path);
+                let Some(mut meta) = header(&group[0].path) else {
+                    continue;
+                };
                 if meta.rig_uuid != rig {
                     continue;
                 }
@@ -228,29 +232,68 @@ pub fn family_questions(
     out
 }
 
+/// Where a family evidence row is kept: its imaging session, filter,
+/// target, angle and evidence key.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RetentionKey {
+    pub session_key: String,
+    /// Canonical.
+    pub filter: String,
+    pub target: String,
+    /// The lowest angle, to a tenth of a degree.
+    pub angle: String,
+    pub key: String,
+}
+impl RetentionKey {
+    /// Where `row` is kept.
+    pub fn of(row: &groups::FamilyEvidenceRow) -> Self {
+        Self {
+            session_key: row.session_key.clone(),
+            filter: row.filter.clone(),
+            target: row.target.clone(),
+            angle: row.angle_key(),
+            key: row.key.clone(),
+        }
+    }
+}
+
+/// The flat session standing for each candidate of a [`FamilyQuestion`],
+/// in the candidates' order: [`FamilyQuestion::representatives`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Representatives(Vec<usize>);
+impl Representatives {
+    /// The flat sessions, by index in the book.
+    pub fn sessions(&self) -> &[usize] {
+        &self.0
+    }
+}
+
 impl FamilyQuestion {
-    /// Where its row is kept: the session, filter, target, angle and key a
-    /// store retains it under.
-    pub fn retention_key(&self, book: &groups::Book) -> (String, String, String, String, String) {
-        (
-            book.imaging[self.session].key.clone(),
-            self.filter.clone(),
-            self.target.clone(),
-            format!("{:.1}", self.low),
-            self.key.clone(),
-        )
+    /// Where its row is kept.
+    ///
+    /// # Panics
+    /// When `book` is not the one the question was asked of.
+    pub fn retention_key(&self, book: &groups::Book) -> RetentionKey {
+        RetentionKey {
+            session_key: book.imaging[self.session].key.clone(),
+            filter: self.filter.clone(),
+            target: self.target.clone(),
+            angle: format!("{:.1}", self.low),
+            key: self.key.clone(),
+        }
     }
 
     /// The flat session standing for each candidate, nearest the lights in
     /// time; `None` when one has none, and the question cannot be weighed.
-    pub fn representatives(&self, book: &groups::Book) -> Option<Vec<usize>> {
+    pub fn representatives(&self, book: &groups::Book) -> Option<Representatives> {
         let start = book.imaging[self.session].start;
         let representatives: Vec<usize> = self
             .candidates
             .iter()
             .filter_map(|family| book.family_representative(*family, &self.rig, start, self.angle))
             .collect();
-        (representatives.len() == self.candidates.len()).then_some(representatives)
+        (!representatives.is_empty() && representatives.len() == self.candidates.len())
+            .then_some(Representatives(representatives))
     }
 
     /// The lights to read: at most [`evidence::MAX_LIGHTS`], evenly spaced.
@@ -258,18 +301,21 @@ impl FamilyQuestion {
         picked(&self.lights)
     }
 
-    /// Answer from the sampled lights' binned planes and each
-    /// representative's response plane, pedestal out (`None` when not on
-    /// disk: an empty plane, never weighed, so nothing wins past it). The
-    /// lights' background is fitted against every pair of candidates.
+    /// Answer from the sampled lights' binned planes, their `pedestal`
+    /// (none when no bias measured it), and each representative's response
+    /// plane, pedestal out (`None` when not on disk: an empty plane, never
+    /// weighed, so nothing wins past it). The lights' background is fitted
+    /// against every pair of candidates.
     pub fn decide(
         &self,
         book: &groups::Book,
-        representatives: &[usize],
+        representatives: &Representatives,
         binned: Vec<Plane>,
         planes: Vec<Option<Plane>>,
-        pedestal: f32,
+        pedestal: Option<f64>,
     ) -> groups::FamilyEvidenceRow {
+        let representatives = representatives.sessions();
+        let pedestal = pedestal.unwrap_or(0.0) as f32;
         let planes: Vec<Plane> = planes
             .into_iter()
             .map(|plane| plane.unwrap_or_else(|| Plane::filled(0, 0, 1.0)))
@@ -507,15 +553,17 @@ impl ChangeFilter {
     }
 
     /// Fit the lights' background, from their binned planes at the map's
-    /// size, against the reference session's plane and the change map.
+    /// size and their `pedestal` (none when no bias measured it), against
+    /// the reference session's plane and the change map.
     pub fn fit(
         &self,
         book: &groups::Book,
         binned: Vec<Plane>,
         reference: &Plane,
         map: &Plane,
-        pedestal: f32,
+        pedestal: Option<f64>,
     ) -> Option<groups::EvidenceFit> {
+        let pedestal = pedestal.unwrap_or(0.0) as f32;
         let binned: Vec<Plane> = binned
             .into_iter()
             .filter(|plane| plane.width == map.width && plane.height == map.height)

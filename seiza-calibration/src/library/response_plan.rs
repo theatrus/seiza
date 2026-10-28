@@ -1,7 +1,7 @@
 //! Raw flat sessions, their response identities and pedestals: what a host
 //! measures before flat grouping can compare anything. The planning opens
 //! no file; hosts read the flats, build each response with
-//! [`metric::build_response`], and keep the row [`SessionPlan::response_row`]
+//! [`metric::build_response`], and keep the row [`FlatSessionPlan::measured_row`]
 //! gives.
 //!
 //! Extracted from theatrus/psf-guard at 79f5e31d, `calibration/flat_groups/job.rs`.
@@ -13,7 +13,7 @@ use crate::flat_response::{groups, metric};
 /// whose rotator angle lies within [`groups::ROTATION_CLUSTER_DEG`] of the
 /// session's first.
 #[derive(Clone, Debug)]
-pub struct SessionPlan {
+pub struct FlatSessionPlan {
     pub session_key: String,
     pub family_key: String,
     pub rig_uuid: String,
@@ -24,7 +24,7 @@ pub struct SessionPlan {
     pub frames: Vec<CalibrationFrame>,
 }
 
-impl SessionPlan {
+impl FlatSessionPlan {
     /// The frames the response combines: at most [`metric::MAX_FRAMES`],
     /// evenly spaced.
     pub fn combined(&self) -> Vec<&CalibrationFrame> {
@@ -59,18 +59,25 @@ impl SessionPlan {
         self.frames.len() >= metric::MIN_FRAMES
     }
 
+    /// The row a planner shows for this session before any flat is read:
+    /// its identity and pedestal, no measurement and no error.
+    pub fn pending_row(&self, pedestal: Option<f64>) -> groups::ResponseRow {
+        groups::ResponseRow {
+            bin: None,
+            error: None,
+            ..self.measured_row(pedestal, ResponseRead::default())
+        }
+    }
+
     /// The row a host keeps for this session once it has read its
-    /// [`SessionPlan::combined`] flats: `read` planes binned by `bin`, the
-    /// `response` they built (`None` when they would not combine), and the
-    /// flats that would not read.
-    pub fn response_row(
-        &self,
-        pedestal: Option<f64>,
-        read: usize,
-        bin: usize,
-        response: Option<&metric::FlatResponse>,
-        unread: Vec<groups::UnreadFlat>,
-    ) -> groups::ResponseRow {
+    /// [`FlatSessionPlan::combined`] flats.
+    pub fn measured_row(&self, pedestal: Option<f64>, read: ResponseRead<'_>) -> groups::ResponseRow {
+        let ResponseRead {
+            read,
+            bin,
+            response,
+            unread,
+        } = read;
         let combined = self.combined().len();
         let error = match response {
             Some(_) => None,
@@ -102,6 +109,29 @@ impl SessionPlan {
             algorithm_version: metric::RESPONSE_ALGORITHM_VERSION,
             error,
             unread,
+        }
+    }
+}
+
+/// What a host read of a session's flats.
+#[derive(Clone, Debug)]
+pub struct ResponseRead<'a> {
+    /// The planes read.
+    pub read: usize,
+    /// The block factor they were binned by.
+    pub bin: usize,
+    /// The response they built, or `None` when they would not combine.
+    pub response: Option<&'a metric::FlatResponse>,
+    /// The flats that would not read, and why.
+    pub unread: Vec<groups::UnreadFlat>,
+}
+impl Default for ResponseRead<'_> {
+    fn default() -> Self {
+        Self {
+            read: 0,
+            bin: 1,
+            response: None,
+            unread: Vec::new(),
         }
     }
 }
@@ -192,11 +222,11 @@ pub fn focal_classes<'a>(
 /// The flat sessions in use: raw flats that serve and record a capture
 /// time, one night of one family each, frames whose rotator angle lies
 /// within [`groups::ROTATION_CLUSTER_DEG`] of the session's first.
-pub fn plan_sessions(
+pub fn plan_flat_sessions(
     frames: &[CalibrationFrame],
     nights: &dyn NightSplit,
     rules: &RuleBook,
-) -> Vec<SessionPlan> {
+) -> Vec<FlatSessionPlan> {
     let mut flats: Vec<&CalibrationFrame> = frames
         .iter()
         .filter(|frame| {
@@ -210,7 +240,7 @@ pub fn plan_sessions(
     let focal = focal_classes(flats.iter().copied(), |rig| {
         rules.for_rig(rig).coherence_tolerances().focal_length_mm
     });
-    let mut sessions: Vec<SessionPlan> = Vec::new();
+    let mut sessions: Vec<FlatSessionPlan> = Vec::new();
     for frame in flats {
         let night = nights.night_of_frame(
             &frame.rig_uuid,
@@ -218,7 +248,7 @@ pub fn plan_sessions(
             frame.captured_at.unwrap_or_default(),
         );
         let family = family_key(frame, focal.get(&frame.frame_uuid).copied().flatten());
-        let joins = |session: &SessionPlan| {
+        let joins = |session: &FlatSessionPlan| {
             session.family_key == family
                 && session.night == night
                 && match (session.rotation, frame.rotation) {
@@ -229,7 +259,7 @@ pub fn plan_sessions(
         };
         match sessions.iter_mut().find(|session| joins(session)) {
             Some(session) => session.frames.push(frame.clone()),
-            None => sessions.push(SessionPlan {
+            None => sessions.push(FlatSessionPlan {
                 session_key: short_hex(&format!("{family}\u{1f}{night}\u{1f}{}", frame.frame_uuid)),
                 family_key: family,
                 rig_uuid: frame.rig_uuid.clone(),
@@ -247,6 +277,18 @@ pub fn plan_sessions(
 type SensorSetting = (String, Option<i64>, Option<i64>);
 /// One measured level: the frame's kind, exposure and level in ADU.
 type Level = (CalibrationKind, Option<f64>, f64);
+
+/// One measured bias or dark-flat level, for [`PedestalTable`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PedestalLevel<'a> {
+    pub rig_uuid: &'a str,
+    pub gain: Option<i64>,
+    pub offset: Option<i64>,
+    pub kind: CalibrationKind,
+    pub exposure_s: Option<f64>,
+    /// In ADU.
+    pub level: f64,
+}
 
 /// Bias and dark-flat levels by rig, gain and offset: what lies under a
 /// session's flats, and under the lights whose evidence is fitted.
@@ -269,39 +311,38 @@ impl PedestalTable {
                 .get(&frame.frame_uuid)
                 .and_then(|row| row.measurement.as_ref())
             {
-                table.insert(
-                    &frame.rig_uuid,
-                    frame.gain,
-                    frame.offset,
-                    frame.kind,
-                    frame.exposure_s,
-                    f64::from(measurement.level),
-                );
+                table.insert(PedestalLevel {
+                    rig_uuid: &frame.rig_uuid,
+                    gain: frame.gain,
+                    offset: frame.offset,
+                    kind: frame.kind,
+                    exposure_s: frame.exposure_s,
+                    level: f64::from(measurement.level),
+                });
             }
         }
         table
     }
 
     /// Add one measured bias or dark-flat level.
-    pub fn insert(
-        &mut self,
-        rig_uuid: &str,
-        gain: Option<i64>,
-        offset: Option<i64>,
-        kind: CalibrationKind,
-        exposure: Option<f64>,
-        level: f64,
-    ) {
+    pub fn insert(&mut self, level: PedestalLevel<'_>) {
         self.rows
-            .entry((rig_uuid.to_string(), gain, offset))
+            .entry((level.rig_uuid.to_string(), level.gain, level.offset))
             .or_default()
-            .push((kind, exposure, level));
+            .push((level.kind, level.exposure_s, level.level));
     }
 
-    /// The pedestal under frames of a rig at this gain, offset and
+    /// The pedestal under lights of a rig at this gain and offset: the
+    /// median of the rig's biases there, or nothing. A dark-flat measures
+    /// a flat's exposure, not a light's.
+    pub fn light_pedestal(&self, rig: &str, gain: Option<i64>, offset: Option<i64>) -> Option<f64> {
+        self.flat_pedestal(rig, gain, offset, None)
+    }
+
+    /// The pedestal under flats of a rig at this gain, offset and
     /// exposure: the median of the dark-flats within 5% of the exposure,
     /// else the median of the rig's biases there, else nothing.
-    pub fn pedestal_for(
+    pub fn flat_pedestal(
         &self,
         rig: &str,
         gain: Option<i64>,
@@ -331,9 +372,9 @@ impl PedestalTable {
     }
 
     /// The pedestal under one session's flats, by its first.
-    pub fn for_session(&self, plan: &SessionPlan) -> Option<f64> {
-        let first = &plan.frames[0];
-        self.pedestal_for(&plan.rig_uuid, first.gain, first.offset, first.exposure_s)
+    pub fn for_session(&self, plan: &FlatSessionPlan) -> Option<f64> {
+        let first = plan.frames.first()?;
+        self.flat_pedestal(&plan.rig_uuid, first.gain, first.offset, first.exposure_s)
     }
 }
 

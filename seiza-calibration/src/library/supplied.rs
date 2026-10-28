@@ -14,13 +14,43 @@ words!(Association {
     Automatic => "automatic",
     OneSet => "one_set",
 });
-pub(super) fn validate(
+
+/// How a light's flats and darks are chosen: each by time, or as one
+/// supplied set.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Associations {
+    pub flat: Association,
+    pub dark: Association,
+}
+impl Associations {
+    /// The kinds taken as one supplied set.
+    pub fn one_set(self) -> BTreeSet<CalibrationKind> {
+        [
+            (CalibrationKind::Flat, self.flat),
+            (CalibrationKind::Dark, self.dark),
+        ]
+        .into_iter()
+        .filter(|(_, association)| *association == Association::OneSet)
+        .map(|(kind, _)| kind)
+        .collect()
+    }
+
+    /// Whether `frames` can stand as one supplied set for each kind taken
+    /// whole: raw frames that integrate together, or one existing master.
+    /// Masters a rig ignores take no part.
+    pub fn check(self, frames: &[CalibrationFrame], rules: &RuleBook) -> crate::Result<()> {
+        validate(frames, rules, self)
+    }
+}
+fn validate(
     frames: &[CalibrationFrame],
     rules: &RuleBook,
-    flat: Association,
-    dark: Association,
+    associations: Associations,
 ) -> crate::Result<()> {
-    for (kind, mode) in [(CalibrationKind::Flat, flat), (CalibrationKind::Dark, dark)] {
+    for (kind, mode) in [
+        (CalibrationKind::Flat, associations.flat),
+        (CalibrationKind::Dark, associations.dark),
+    ] {
         if mode != Association::OneSet {
             continue;
         }
@@ -70,8 +100,7 @@ pub(super) fn apply(
     library: &Library,
     light: &Light,
     selected: &mut CalibrationSelection,
-    flat: Association,
-    dark: Association,
+    associations: Associations,
 ) {
     let frames = library.frames();
     let all = |kind| {
@@ -82,7 +111,7 @@ pub(super) fn apply(
             .collect::<Vec<_>>()
     };
     let rules = &selected.rules;
-    if dark == Association::OneSet && rules.use_darks {
+    if associations.dark == Association::OneSet && rules.use_darks {
         let candidates = all(CalibrationKind::Dark);
         selected.library.dark = frames.iter().any(|f| f.kind == CalibrationKind::Dark);
         selected.dark = if candidates.iter().all(|f| {
@@ -96,7 +125,7 @@ pub(super) fn apply(
         };
         selected.one_set.insert(CalibrationKind::Dark);
     }
-    if flat == Association::OneSet {
+    if associations.flat == Association::OneSet {
         let candidates = all(CalibrationKind::Flat);
         selected.library.flat = frames.iter().any(|f| f.kind == CalibrationKind::Flat);
         selected.flat = if candidates

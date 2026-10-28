@@ -61,23 +61,35 @@ pub fn grade<'a>(
     judged
 }
 
-/// Why a frame stays out of masters and exports, or `None` when it serves.
-/// A person's choice comes first; then the grade; a frame not graded yet
-/// keeps the stray-light mark an older build may have left on it.
-pub fn kept_out_reason(
-    stray_light: Option<String>,
-    grade: Option<&str>,
-    reason: Option<String>,
-    choice: Option<QualityOverride>,
-) -> Option<String> {
-    match choice {
-        Some(QualityOverride::Use) => None,
-        Some(QualityOverride::Exclude) => Some("by hand".into()),
-        None => match grade {
-            Some("poor") => Some(reason.unwrap_or_else(|| "graded poor".into())),
-            Some(_) => None,
-            None => stray_light,
-        },
+/// What decides whether a frame stays out of masters and exports.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct KeptOut<'a> {
+    /// A person's choice for the frame, which comes first.
+    pub choice: Option<QualityOverride>,
+    /// Its grade: a poor one keeps it out.
+    pub grade: Option<Grade>,
+    /// Why it was graded as it was.
+    pub grade_reason: Option<&'a str>,
+    /// The stray-light mark an older build left on a frame not graded yet.
+    pub stray_light: Option<&'a str>,
+}
+impl KeptOut<'_> {
+    /// Why the frame stays out, or `None` when it serves: "by hand", the
+    /// poor grade's reason, or for a frame not graded yet its stray-light
+    /// mark.
+    pub fn reason(&self) -> Option<String> {
+        match self.choice {
+            Some(QualityOverride::Use) => None,
+            Some(QualityOverride::Exclude) => Some("by hand".into()),
+            None => match self.grade {
+                Some(Grade::Poor) => Some(
+                    self.grade_reason
+                        .map_or_else(|| "graded poor".into(), str::to_string),
+                ),
+                Some(_) => None,
+                None => self.stray_light.map(str::to_string),
+            },
+        }
     }
 }
 fn judge_darks(

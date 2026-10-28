@@ -1,4 +1,4 @@
-//! The C ABI's flat response planning call, on [`plan_sessions`].
+//! The C ABI's flat response planning call, on [`plan_flat_sessions`].
 use super::*;
 
 #[derive(Clone, Debug, Serialize)]
@@ -36,15 +36,10 @@ pub fn plan_flat_responses(mut request: Request) -> crate::Result<FlatResponsePl
         mut quality,
     } = checked(&mut request)?;
     let judged = if request.regrade {
-        let measured = request.frames.iter().filter_map(|frame| {
-            let row = quality.get(&frame.frame_uuid)?;
-            QualityIndex::current(frame, row).then_some((frame, row.measurement.as_ref()?))
-        });
-        grade(measured, &rules, &nights)
+        quality.regrade(&request.frames, &rules, &nights)
     } else {
         HashMap::new()
     };
-    quality.fresh = judged.keys().cloned().collect();
     let grades = apply_grades(&mut request.frames, &quality, &judged);
     let one_set = request.flat_association == Association::OneSet;
     let unplanned = request
@@ -63,16 +58,13 @@ pub fn plan_flat_responses(mut request: Request) -> crate::Result<FlatResponsePl
     let plans: Vec<FlatResponsePlan> = if one_set {
         Vec::new()
     } else {
-        plan_sessions(&request.frames, &nights, &rules)
+        plan_flat_sessions(&request.frames, &nights, &rules)
             .into_iter()
             .filter(|plan| {
                 plan.measurable() && rules.for_rig(&plan.rig_uuid).grouping_limits().measured
             })
             .map(|plan| {
-                let mut row =
-                    plan.response_row(pedestals.for_session(&plan), 0, 1, None, Vec::new());
-                row.bin = None;
-                row.error = None;
+                let row = plan.pending_row(pedestals.for_session(&plan));
                 FlatResponsePlan {
                     sample_frames: plan
                         .combined()

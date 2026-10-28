@@ -3,11 +3,19 @@
 //! light's frames, and resolving the masters they build. Nothing here opens
 //! files or a database.
 //!
-//! Native Rust hosts hold the model directly: a [`Library`] of catalog rows
-//! selects for each light ([`Library::select`]), [`grade`] judges stored
-//! measurements, and [`resolve_session`] turns a verified selection into its
-//! master recipes. C and Python submit one [`Request`] to [`evaluate`], which
-//! runs the same calls.
+//! This is the API. Rust hosts call it as their own code, and Python binds
+//! it: a [`rules::RuleBook`] holds the settings, a [`QualityIndex`] the
+//! stored measurements ([`QualityIndex::regrade`] judges them afresh), a
+//! [`Library`] of catalog rows selects for each light
+//! ([`Library::select`]), [`resolve_session`] turns a verified selection
+//! into its master recipes, and the [`Session`] takes what building them
+//! showed. [`FlatRetry`] decides a flat master's retries, and
+//! [`plan_flat_sessions`], [`family_questions`] and [`change_question`] the
+//! measuring of flat grouping.
+//!
+//! The C ABI runs whole workflows as one JSON call each instead, built on
+//! these: `library::json`, compiled with the `json` feature. Nothing else
+//! uses it.
 mod flat_notes;
 mod flat_work;
 mod grading;
@@ -26,10 +34,10 @@ pub use flat_notes::{
     vignetting_leads,
 };
 pub use flat_work::{
-    ChangeFilter, ChangeQuestion, EvidenceLight, FamilyQuestion, change_question,
-    family_questions,
+    ChangeFilter, ChangeQuestion, EvidenceLight, FamilyQuestion, Representatives, RetentionKey,
+    change_question, family_questions,
 };
-pub use grading::{describe_finding, grade, kept_out_reason};
+pub use grading::{KeptOut, describe_finding, grade};
 pub use master_policy::{
     FlatAttempt, FlatRetry, FlatRetryAction, FlatRetryDecision, FlatRetryPolicy, flat_set_label,
 };
@@ -39,11 +47,12 @@ pub use recipes::{
     pedestal_hint, pedestal_sample_lights, resolve_session,
 };
 pub use response_plan::{
-    PedestalTable, SessionPlan, family_key, focal_classes, pedestal_moved, plan_sessions,
+    FlatSessionPlan, PedestalLevel, PedestalTable, ResponseRead, family_key, focal_classes,
+    pedestal_moved, plan_flat_sessions,
 };
 use rules::{DarkChoice, ExternalMasterPolicy, RuleBook, Rules};
 pub use selection::{Cohort, coherent_cohort};
-pub use supplied::Association;
+pub use supplied::{Association, Associations};
 
 /// The tests a light and a candidate frame pass to match, as selection
 /// applies them. Hosts that explain a refusal ask the same questions.
@@ -74,7 +83,9 @@ pub const MIN_MASTER_FRAMES: usize = 2;
 pub const MAX_MASTER_FRAMES: usize = 64;
 /// The version of session identity: what a session key covers and how.
 pub const POLICY_ALGORITHM_VERSION: u32 = 5;
+/// How far a dark may be from a light, in days, when no setting says.
 pub const DEFAULT_DARK_REACH_DAYS: f64 = 183.0;
+/// The darks of one night that make a complete set, when no setting says.
 pub const DEFAULT_COMPLETE_DARK_FRAMES: usize = 10;
 /// How far a light's nearest flats may be, in days, before it counts as one
 /// that cannot be calibrated, when no setting says otherwise.
@@ -189,10 +200,12 @@ pub struct CalibrationFrame {
     /// checked against this catalog row's hard settings.
     pub source_verified: bool,
 }
+/// A light as matching reads it: its file and header.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Light {
     pub path: PathBuf,
+    /// The library rig it was shot with, by the key rigs are filed under.
     pub rig_uuid: String,
     pub camera: Option<String>,
     pub telescope: Option<String>,
@@ -208,9 +221,12 @@ pub struct Light {
     pub readout_mode: Option<i64>,
     pub readout_mode_name: Option<String>,
     pub focal_length_mm: Option<f64>,
+    /// Rotator angle in degrees at capture.
     pub rotator_position: Option<f64>,
     pub exposure_s: Option<f64>,
+    /// Sensor temperature, °C.
     pub camera_temp: Option<f64>,
+    /// Capture time, Unix seconds.
     pub timestamp: Option<i64>,
 }
 
@@ -269,6 +285,27 @@ impl LibraryKinds {
     }
 }
 impl CalibrationSelection {
+    /// The selection of exactly `frames`, each under its kind, in the order
+    /// given, matched by `rules`: candidates a host chose or verified
+    /// itself rather than ones [`Library::select`] found. The kinds
+    /// `associations` takes whole are one supplied set. Check them with
+    /// [`Library::check_associations`].
+    pub fn of_frames(
+        frames: impl IntoIterator<Item = CalibrationFrame>,
+        rules: Arc<Rules>,
+        associations: Associations,
+    ) -> Self {
+        let mut selected = Self {
+            rules,
+            one_set: associations.one_set(),
+            ..Self::default()
+        };
+        for frame in frames {
+            selected.of_kind_mut(frame.kind).push(frame);
+        }
+        selected
+    }
+
     /// The tolerances a stack holds this light to against its masters, its
     /// gate: its rig's, with the rotation widened just enough for flats
     /// taken from the nearest other angle. Its calibration session carries it.
@@ -377,11 +414,10 @@ impl Library {
         &self,
         light: &Light,
         rules: Arc<Rules>,
-        flat: Association,
-        dark: Association,
+        associations: Associations,
     ) -> CalibrationSelection {
         let mut selected = self.select(light, rules);
-        supplied::apply(self, light, &mut selected, flat, dark);
+        supplied::apply(self, light, &mut selected, associations);
         selected
     }
     /// Whether the library's frames can stand as one supplied set for each
@@ -389,10 +425,9 @@ impl Library {
     pub fn check_associations(
         &self,
         rules: &RuleBook,
-        flat: Association,
-        dark: Association,
+        associations: Associations,
     ) -> crate::Result<()> {
-        supplied::validate(&self.frames, rules, flat, dark)
+        associations.check(&self.frames, rules)
     }
 }
 
@@ -481,6 +516,65 @@ impl QualityIndex {
             && row.algorithm_version == Some(frame.kind.measurement_version())
             && row.source_fingerprint.as_deref() == Some(&frame.source_fingerprint)
     }
+    /// Grade afresh every frame of `frames` whose stored measurement is
+    /// current, by `rules` and `nights`, and count those frames judged from
+    /// now on. Stale, failed and absent measurements keep their state and
+    /// never become a grade.
+    pub fn regrade(
+        &mut self,
+        frames: &[CalibrationFrame],
+        rules: &RuleBook,
+        nights: &dyn NightSplit,
+    ) -> HashMap<String, Judged> {
+        let measured = frames.iter().filter_map(|frame| {
+            let row = self.rows.get(&frame.frame_uuid)?;
+            Self::current(frame, row).then_some((frame, row.measurement.as_ref()?))
+        });
+        let judged = grade(measured, rules, nights);
+        self.fresh.extend(judged.keys().cloned());
+        judged
+    }
+
+    /// Why `frame` stays out of masters and exports, from a fresh grade in
+    /// `judged` or else its stored row; for a frame with neither, the
+    /// stray-light mark it carries.
+    pub fn kept_out(&self, frame: &CalibrationFrame, judged: Option<&Judged>) -> Option<String> {
+        let row = self.rows.get(&frame.frame_uuid);
+        KeptOut {
+            choice: row.and_then(|r| r.override_choice),
+            grade: judged.map(|g| g.grade).or_else(|| row.and_then(|r| r.grade)),
+            grade_reason: judged
+                .and_then(|g| g.reason.as_deref())
+                .or_else(|| row.and_then(|r| r.reason.as_deref())),
+            stray_light: judged
+                .and_then(|g| g.stray_light.as_deref())
+                .or_else(|| row.and_then(|r| r.stray_light.as_deref()))
+                .or(frame.kept_out.as_deref()),
+        }
+        .reason()
+    }
+
+    /// Set every frame's kept-out reason ([`QualityIndex::kept_out`]).
+    pub fn keep_out(&self, frames: &mut [CalibrationFrame], judged: &HashMap<String, Judged>) {
+        for frame in frames {
+            frame.kept_out = self.kept_out(frame, judged.get(&frame.frame_uuid));
+        }
+    }
+
+    /// What is known of `frame`'s measurement.
+    pub fn measurement_state(&self, frame: &CalibrationFrame) -> MeasurementState {
+        if frame.is_master {
+            return MeasurementState::External;
+        }
+        match self.rows.get(&frame.frame_uuid) {
+            None => MeasurementState::Unmeasured,
+            Some(row) if !Self::current(frame, row) => MeasurementState::Stale,
+            Some(row) if row.measurement.is_some() => MeasurementState::Current,
+            Some(row) if row.measure_error.is_some() => MeasurementState::Failed,
+            _ => MeasurementState::Unmeasured,
+        }
+    }
+
     /// Whether a person chose for `frame`, or it carries a grade made from
     /// its current file: its grade already keeps it out if it is poor.
     pub fn judged(&self, frame: &CalibrationFrame) -> bool {
@@ -531,56 +625,107 @@ impl std::ops::DerefMut for FlatRecord {
         &mut self.measurement
     }
 }
+/// A frame's grade against its peers, as [`grade`] judges it.
 #[derive(Clone, Debug, Serialize)]
 pub struct Judged {
     pub grade: Grade,
+    /// The finding that decided the grade.
     pub code: Option<FindingCode>,
+    /// That finding in words.
     pub reason: Option<String>,
     pub findings: Vec<Finding>,
+    /// The stray-light mark, for a dark that caught light.
     pub stray_light: Option<String>,
 }
 
-/// One measured raw row. A stale algorithm/fingerprint is not regraded.
+/// What is known of a frame's measurement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MeasurementState {
+    /// A master another program integrated: never measured.
+    External,
+    /// No measurement stored.
+    Unmeasured,
+    /// Measured from another file, or by another build's measurement.
+    Stale,
+    /// Measured from the frame as it stands.
+    Current,
+    /// The measurement failed.
+    Failed,
+}
+words!(MeasurementState {
+    External => "external",
+    Unmeasured => "unmeasured",
+    Stale => "stale",
+    Current => "current",
+    Failed => "failed",
+});
+
+/// A frame's stored quality: its measurement, grade, and a person's choice.
+/// A stale algorithm/fingerprint is not regraded.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct QualityRecord {
     pub frame_uuid: String,
+    /// The fingerprint of the file the measurement was made from.
     pub source_fingerprint: Option<String>,
+    /// The measurement's version ([`CalibrationKind::measurement_version`]).
     pub algorithm_version: Option<u32>,
     pub measurement: Option<StoredMeasurement>,
+    /// Why the measurement failed.
     pub measure_error: Option<String>,
-    pub grade: Option<String>,
+    /// The stored grade and its reason.
+    pub grade: Option<Grade>,
     pub reason: Option<String>,
     pub stray_light: Option<String>,
+    /// A person's choice to use or exclude the frame.
     pub override_choice: Option<QualityOverride>,
 }
+/// The masters one light's selection builds, and how its flat applies:
+/// [`resolve_session`]. Lights whose sessions share a key calibrate
+/// identically.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Session {
+    /// What the masters are made from and how ([`POLICY_ALGORITHM_VERSION`]).
     pub key: String,
+    /// The gate a stack holds the light to against its masters.
     pub tolerances: MatchTolerances,
+    /// Bias, dark-flat, dark and flat, in build order.
     pub recipes: Vec<MasterRecipe>,
     pub application: Application,
     pub flat_stability: FlatRetryPolicy,
     #[serde(default)]
     pub flat_held_back: Vec<String>,
 }
+/// How one master of a session is made.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MasterRecipe {
     pub kind: CalibrationKind,
     pub action: RecipeAction,
+    /// The frames it integrates or adopts, by UUID, nearest first.
     pub inputs: Vec<String>,
+    /// The masters it is built on ([`CalibrationKind::dependencies`]).
     pub dependencies: Vec<CalibrationKind>,
+    /// Candidates left out of its cohort.
     pub dropped: Vec<String>,
     /// Coherent raw cohort, including a singleton that cannot yet integrate.
     pub coherent_inputs: Vec<String>,
+    /// The most frames an automatic master takes ([`MAX_MASTER_FRAMES`]).
     pub input_limit: usize,
+    /// Its inputs must be checked against their files before it builds.
     pub requires_source_verification: bool,
+    /// Why it failed or was blocked.
     pub failure: Option<String>,
+    /// The exposure the master stands for: a dark's, scaled to the light.
     pub exposure_seconds: Option<f64>,
+    /// Repair hot and cold pixels while integrating.
     pub defect_suppression: bool,
+    /// Mask stars in a master flat.
     pub flat_star_masking: bool,
+    /// Screen darks for stray light while integrating: for darks not graded
+    /// yet ([`dark_level_screening`]).
     pub dark_level_screening: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

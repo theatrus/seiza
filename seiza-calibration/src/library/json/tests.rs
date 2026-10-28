@@ -225,7 +225,7 @@ fn one_supplied_set_preserves_grades_manual_choices_and_excludes_poor_inputs() {
         .collect::<Vec<_>>();
     let quality = vec![QualityRecord {
         frame_uuid: frames[1].frame_uuid.clone(),
-        grade: Some("poor".into()),
+        grade: Some(crate::Grade::Poor),
         reason: Some("bad flat".into()),
         ..Default::default()
     }];
