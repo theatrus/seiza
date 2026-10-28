@@ -1099,7 +1099,12 @@ impl LiveStacker {
     /// empty; push every original light, including the anchor. Assignments
     /// remain authoritative through pushes, pipeline calls and context resume.
     /// Master loading is bounded by planning concurrency, not session count.
-    /// Sources/masters that change or disappear invalidate the plan explicitly.
+    /// A light is checked against the plan when it is pushed and a session's
+    /// masters when they are loaded, so one that changed or disappeared fails
+    /// only the frames that need it, after a context resume too. A path given
+    /// twice keeps its first assignment, and its repeat, like a light that is
+    /// another's file under a second name, is refused as a duplicate when
+    /// pushed. A light that is a master's file refuses the whole plan.
     pub fn open_fits_expanding_sessions(
         paths: &[PathBuf],
         sessions: &[crate::FileCalibrationSession],
@@ -1125,11 +1130,8 @@ impl LiveStacker {
             progress,
         )?;
         drop(cache);
-        file_plan.verify_masters()?;
-        let session = &file_plan.sessions[assignments[0]];
-        let calibration = session.load()?;
-        file_plan.verify_masters()?;
-        let record = session.record();
+        let calibration = file_plan.load_session(assignments[0])?;
+        let record = file_plan.sessions[assignments[0]].record();
         file_plan.bind(0, assignments[0]);
         let mut stacker = Self::from_expansion(plan, calibration, options)?;
         stacker.ledger.set_current_calibration(record);
@@ -2065,9 +2067,13 @@ impl LiveStacker {
     }
 
     fn is_duplicate_input(&self, path: &Path) -> bool {
-        self.input_paths
-            .iter()
-            .any(|input| paths_refer_to_same_file(input, path))
+        self.file_sessions
+            .as_ref()
+            .is_some_and(|plan| plan.is_duplicate(path))
+            || self
+                .input_paths
+                .iter()
+                .any(|input| paths_refer_to_same_file(input, path))
     }
 
     /// Retain a consumed path in resumable context state.
@@ -2413,13 +2419,18 @@ impl LiveStacker {
         let path = path.ok_or_else(|| {
             Error::Calibration("a session-planned stack requires original file inputs".into())
         })?;
+        if plan.is_duplicate(path) {
+            return Err(Error::Stack(format!(
+                "FITS frame {} is the same file as an earlier light of this calibration plan",
+                path.display()
+            )));
+        }
         let index = plan.assignment(path)?;
         if self.active_file_session == Some(index) {
             return Ok(plan.sessions[index].normalized_full_scale);
         }
         let session = plan.sessions[index].clone();
-        let calibration = session.load()?;
-        plan.assignment(path)?;
+        let calibration = plan.load_session(index)?;
         self.replace_calibration(calibration, session.tolerances)?;
         self.ledger.set_current_calibration(session.record());
         self.file_sessions
@@ -4536,6 +4547,10 @@ mod canvas_tests;
 #[cfg(test)]
 #[path = "stack_binned_tests.rs"]
 mod binned_tests;
+
+#[cfg(test)]
+#[path = "stack_session_tests.rs"]
+mod session_tests;
 
 #[cfg(test)]
 mod tests {

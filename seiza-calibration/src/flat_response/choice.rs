@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 pub const CHOICE_ALGORITHM_VERSION: u32 = 1;
 
 /// What the background said of one pair of candidates.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum PairOutcome {
@@ -54,6 +55,7 @@ pub enum PairOutcome {
 }
 
 /// How the background fared between two candidates.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PairFit {
     /// The first candidate of the pair, by index.
@@ -89,6 +91,7 @@ impl PairFit {
 }
 
 /// Which candidates a background follows.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ResponseChoice {
     /// Candidates that beat every candidate they can be told apart from and

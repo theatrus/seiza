@@ -566,16 +566,16 @@ fn calibrate_and_stretch(
 ) -> PyResult<PyCalibratedStretch> {
     let image = linear_image(image)?;
     let clipped = clipped.map(linear_image).transpose()?;
-    let json = py.import("json")?;
-    let text: String = json.call_method1("dumps", (stretch,))?.extract()?;
-    let value: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|error| PyValueError::new_err(format!("invalid stretch: {error}")))?;
-    let stack = if value.is_array() {
-        serde_json::from_value::<StretchStack>(value)
+    // A list of stages, or one stage on its own.
+    let stack = if stretch.is_instance_of::<pyo3::types::PyList>()
+        || stretch.is_instance_of::<pyo3::types::PyTuple>()
+    {
+        crate::convert::from_python::<StretchStack>(&stretch, "stretch")?
     } else {
-        serde_json::from_value::<StretchConfig>(value).map(StretchStack::single)
-    }
-    .map_err(|error| PyValueError::new_err(format!("invalid stretch: {error}")))?;
+        StretchStack::single(crate::convert::from_python::<StretchConfig>(
+            &stretch, "stretch",
+        )?)
+    };
     let input = GaiaInput {
         sources: gaia.as_deref().map(gaia_sources).transpose()?,
         catalog,
@@ -603,8 +603,7 @@ fn calibrate_and_stretch(
             )
         })
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-    let plans = serde_json::to_string(&result.stretch_plans)
-        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    let plans = crate::convert::to_python(py, &result.stretch_plans)?;
     Ok(PyCalibratedStretch {
         image: image_array(py, &result.image)?.unbind(),
         calibration: Py::new(
@@ -613,7 +612,7 @@ fn calibrate_and_stretch(
                 inner: result.calibration,
             },
         )?,
-        stretch_plans: json.call_method1("loads", (plans,))?.unbind(),
+        stretch_plans: plans.unbind(),
         linked_stages: result.linked_stages,
     })
 }

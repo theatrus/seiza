@@ -9,7 +9,7 @@ use seiza_fits::{F32ImageData, write_f32_image};
 /// overlapping by about 12% on each side, over a crowded field, with
 /// `dithers` frames per panel a few pixels apart, in one channel or three.
 /// Returns each frame's path, panel by panel.
-fn mosaic(
+pub(super) fn mosaic(
     directory: &Path,
     grid: (usize, usize),
     size: (usize, usize),

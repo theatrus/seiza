@@ -12,11 +12,18 @@ keywords = ["astronomy", "astrophotography", "calibration", "flat-field"]
 categories = ["science", "multimedia::images"]
 
 [dependencies]
+chrono.workspace = true
 nalgebra.workspace = true
 rayon.workspace = true
+schemars = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 seiza-imgproc.workspace = true
 seiza-stats.workspace = true
 thiserror.workspace = true
+
+[features]
+# The C ABI's JSON calls (`library::json`) and their JSON Schema. Only
+# seiza-cabi enables it: Rust hosts call the native API, and Python binds it.
+json = ["dep:schemars"]

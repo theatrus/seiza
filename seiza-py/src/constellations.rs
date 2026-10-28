@@ -7,7 +7,7 @@
 //! both functions return.
 
 use crate::PyWcs;
-use crate::flat_response::to_python;
+use crate::convert::to_python;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use seiza::constellations;

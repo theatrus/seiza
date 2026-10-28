@@ -53,6 +53,7 @@ const fn first_flat_quality_algorithm_version() -> u32 {
 const MIN_PEERS: usize = 3;
 
 /// How a frame came out of screening, from best to worst.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
@@ -67,19 +68,15 @@ pub enum Grade {
     Poor,
 }
 
-impl Grade {
-    /// Stable lowercase name for logs and reports.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Ok => "ok",
-            Self::Suspect => "suspect",
-            Self::Poor => "poor",
-        }
-    }
-}
+words!(Grade {
+    Ok => "ok",
+    Suspect => "suspect",
+    Poor => "poor",
+});
 
 /// What a finding measured. The name is stable and machine-readable; each
 /// variant says what [`Finding::value`] holds.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -140,6 +137,7 @@ impl FindingCode {
 }
 
 /// One measurement that crossed a limit, with the numbers behind it.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Finding {
     /// What was measured.
@@ -175,6 +173,7 @@ impl FrameVerdict {
 /// The two values of one measurement at which a frame turns suspect and then
 /// poor. Each check says whether a higher or a lower value is worse. An
 /// infinite limit on the bad side turns that step off.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Limits {
     /// The value at which a frame becomes suspect.

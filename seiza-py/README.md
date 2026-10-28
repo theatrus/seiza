@@ -1181,18 +1181,34 @@ a few lights' own sky against a change or a set of candidate responses;
 `flat_encode_plane` and `flat_decode_plane` keep planes in a cache. Options
 are a dict of `DustOptions` fields, such as `{"edge_sigma": 3.0}`.
 
-`flat_group_plan` shares PSF Guard's measured grouping policy: response families,
+`FlatGroups` holds PSF Guard's measured grouping policy: response families,
 groups, changes, angle epochs, uncertain light placements and resolved personal
-choices. Pass `responses`, `comparisons`, `evidence`, `imaging` (or
-`imaging_lights` with `profile_rigs`), `limits`, `group_overrides`,
-`night_boundaries`, `epoch_samples`, `family_evidence`, `light_choices`, and
-`lights` as keyword collections. Records/results use snake_case; times are Unix
-seconds, angles degrees, levels ADU, dust/broad fractions of background. Omitted
-collections are empty. The result includes measurement jobs and evidence keys
-for subsequent pixel passes. Compatible families must already pass the host's
-sensor/optics gates. Automatic results and personal choices stay distinct. This
-stage does not grade frames or build masters. See [the schema and executable
-fixture](../docs/flat-groups.md). `flat_group_plan()` evaluates an empty library.
+choices. Build it once from the stored rows, a mapping of `responses`,
+`comparisons`, `evidence`, `imaging` (or `imaging_lights` with `profile_rigs`),
+`limits`, `group_overrides`, `night_boundaries`, `epoch_samples`,
+`family_evidence` and `light_choices`; omitted collections are empty. Its
+properties are the book (`families`, `boundaries`, `events`, `overrides`,
+`outliers`, `spanning`, `angle_terms`, `epochs`), and `pairs_to_compare`,
+`sessions_in_windows` and `sessions_needing_evidence` are the measurement jobs
+and evidence keys for later pixel passes. `place_light(light)` says where one
+light stands: its automatic family among the `compatible_families` it names,
+the pixel question that would settle a close call, its resolved choices, and
+its placement against each change. Records use snake_case; times are Unix
+seconds, angles degrees, levels ADU, dust/broad fractions of background.
+Compatible families must already pass the host's sensor/optics gates.
+Automatic results and personal choices stay distinct. This stage does not
+grade frames or build masters. See [the schema and executable
+fixture](../docs/flat-groups.md).
+
+```python
+groups = seiza.FlatGroups(rows)
+groups.families[0]["groups"]
+placed = groups.place_light({"file_name": "L_0001.fits", "rig_uuid": rig,
+                             "filter": "Ha", "at": captured_at, "angle": 12.0,
+                             "compatible_families": [groups.families[0]["key"]],
+                             "rotation_tolerance": 2.0})
+placed["events"][0]["placement"]
+```
 
 ### Constellation figures
 
@@ -1642,89 +1658,115 @@ Assignments are immutable and survive checkpoints and reintegration. Changed
 sources or masters are refused. See [session planning](../docs/calibration-sessions.md)
 for file identity, memory and pipeline behavior.
 
-### PSF Guard library grading and selection
+### Calibration library: grading and selection
 
-`seiza.calibration_library_plan` runs PSF Guard's extracted library policy.
-For repeated calls, construct `book = seiza.FlatGroups(grouping_request)` once
-and pass `prepared_grouping=book` with no `grouping` rows. Preparation uses the
-`flat_group_plan` record schema, including rig limits. Planning reuses the
-immutable book, refuses conflicting limits, and performs no file I/O. Recreate
-the book when its source rows, night boundaries or settings change.
-
-For example, without a prepared book:
+Python holds the calibration library as Rust hosts such as PSF Guard do
+(`seiza_calibration::library`): the same objects and calls, no request
+round trip. Records are snake_case dicts of the `Calibration*` types (frames,
+lights, quality rows); nothing here opens a file.
 
 ```python
-plan = seiza.calibration_library_plan(
-    frames=calibration_rows, lights=ordered_light_rows,
-    quality=measurement_rows, grouping=measured_flat_groups, regrade=True,
-    global_settings=[{"key": "dark_choice", "value": "complete"}],
+rules = seiza.CalibrationRules(
+    {"dark_choice": "complete"},                              # the server's layer
+    {rig_uuid: {"name": "SpaceCat61", "values": {"dark_reach_days": 400}}},
 )
-print(plan["grades"], plan["selections"])
-print(plan["sessions"], plan["assignments"])
+nights = seiza.CalibrationNights(night_boundaries, frames=frames, rules=rules)
+quality = seiza.CalibrationQuality(quality_rows)
+grades = quality.regrade(frames, rules, nights)   # current measurements only
+frames = quality.keep_out(frames, grades)         # each frame's kept-out reason
+library = seiza.CalibrationLibrary(frames, groups=seiza.FlatGroups(grouping_rows), rules=rules)
+for light in lights:
+    selection = library.select(light, rules.for_light(light))
+    session = seiza.calibration_resolve_session(selection, quality)
+    print(session.key, session.recipes)
 ```
 
-All records/results use snake_case. Optional keywords are `frames`, `lights`,
-`quality`, `global_settings`, `rigs`, `grouping`, `available_responses`,
-`night_shifts`, `regrade=False`, `master_failures`, `pedestal_evidence`,
-`force_flat_without_pedestal=False` and `flat_star_masking=False`. Settings use
-`{key, value}` records. Outputs include the original settings schema and
-nondefault rule notes; peer grading, overrides, temporal selection and complete
-session gates use one resolved rule layer.
+`CalibrationRules(global_settings, rigs)` checks every value the way a
+settings panel saves it and raises `ValueError` naming the setting (and rig).
+`for_rig` and `for_light` give a `CalibrationRigRules`: `value(key)`,
+`source(key)`, `set_by(key)`, `mode(check)`, `notes()`, `tolerances()` and
+`grouping_limits()`. `calibration_settings_schema()` lists the settings in
+the order a panel shows them, with labels, help, ranges and defaults, and
+`calibration_setting_check(key, value)` judges one value: `valid`, the
+`error` in words, the value as `text`, and whether it means the `default`.
 
-This call plans native master builds; it opens no files and does not publish a
-master. Verify sources and replan, execute the dependency recipes, and return
-failures or native pedestal-fit evidence when required. Automatic flat-only
-calibration is withheld until a reliable fit exists. See the
-[shared library contract](../docs/calibration-library.md) for schemas, units,
-source verification, pixel checks and final recipe persistence. After building
-the masters, use `LiveStacker.open_fits_expanding_sessions` to apply the same
-assignments during mosaic planning and integration.
+`CalibrationNights` holds where each frame's night begins; given the frames
+and rules, each rig's `night_zone` setting applies over its frames.
+`CalibrationQuality.regrade` grades only current, fingerprint-matching
+measurements and returns `CalibrationGrades`; `measurement_state(frame)`
+tells stale, failed and missing measurements apart. `keep_out` reads each
+frame's `kept_out` as the stray-light mark an older build left, so give it
+the frames as the catalog stores them, not frames it returned. A `FlatGroups` book is
+built once from stored grouping rows, with each rig's limits from
+`rules.for_rig(rig).grouping_limits()`, and reused across selections.
+
+`select(light, rules, flat_association="automatic",
+dark_association="automatic")` returns a `CalibrationSelection`: each kind's
+frames nearest first, the kept-out matches, the flat basis and family, and
+`match_tolerances()`. Set an association to `"one_set"` to take every
+eligible frame of that kind as one supplied set, without the automatic
+64-input cap; check the set first with `library.check_associations(rules,
+...)`, which raises `ValueError` for frames that cannot integrate together.
+`CalibrationSelection(frames, rules, ...)` builds the selection of frames a
+host chose or verified itself.
+
+`calibration_resolve_session(selection, quality, flat_star_masking=False,
+flat_stability=None)` gives the `CalibrationSession`: its `key` (policy
+version 5: what its masters are made from, as a set, so lights whose masters
+take the same frames share one), the stack gate `tolerances`, and the bias,
+dark-flat, dark and flat `recipes`. An unverified selection is a preview:
+verify the sources and resolve again before building. Lights with equal
+keys calibrate identically; the first one stands for the session.
 
 ### Shared calibration master execution
 
-`calibration_master_plan(request)` resolves already selected/verified candidates
-without matching or file access. It returns the same session/recipes as
-`calibration_library_plan`; forward cached `quality` decisions and
-`flat_star_masking`. `calibration_master_cohort(request)` supplies coherence-only
-previews using effective settings. `calibration_flat_retry(request)` decides
-trimming, alternate sessions, fallback and withholding from measured build
-feedback. Default `flat_stability` options preserve all PSF Guard retries;
-hosts may set `enabled`, `trim_unstable`, `try_next_session` or `retain_unstable`
-false. Policy algorithm version 4 includes these options and held-back inputs
-in session identity. `enabled` controls retry decisions; pixel measurement is
-independently callable.
+Build a session's recipes in order, telling the session what happened:
+`session.record_failure(kind, reason)` blocks every master built on a failed
+one. Once every master has built or failed, `session.plan_flat_use(lights,
+without_masters="fit_pedestal")` decides how the flat applies to the
+session's own lights; with neither a bias nor a dark master it asks for a
+pedestal fitted from `application["sample_lights"]`, which
+`session.accept_pedestal(estimates, pinned=None)` accepts or refuses
+(`without_masters="force"` applies the flat regardless).
+`calibration_coherent_cohort(kind, frames, rules)` gives the frames one
+master integrates and those it drops, for previews. A host that builds its
+own masters, as PSF Guard does, makes the decisions a session's recipes are
+made of with the same calls: `calibration_adopted_master` (the external
+master a light takes), `calibration_dark_level_screening`,
+`calibration_pedestal_sample_lights`, `calibration_pedestal_hint`,
+`calibration_pedestal_from_fits`, `calibration_family_key`,
+`calibration_pedestal_moved`, `calibration_flat_set_label` and
+`calibration_describe_finding`.
 
-The four request APIs also accept keyword fields, with typed requests/results
-such as `CalibrationMasterPlanRequest`, `CalibrationSession`, `FlatRetryPolicy`
-and `CalibrationFlatRetryDecision`. Use either a mapping or keyword fields.
-Unknown/invalid/duplicate settings raise `ValueError` with the setting and layer.
-Pass the returned session directly to retry planning:
+`FlatRetry(first, candidates, rules, session=...)` decides a flat master's
+retries from measured build feedback (`FlatAttempt`): leave a drifting
+minority out, else take the next flat session, else keep the first set with
+a note, or withhold it when the policy keeps no unstable set. The session
+gives the retry policy and held-back flats (a supplied set never takes
+another session), and `rules` come from the selection; without a session,
+pass `held_back` and `policy`:
 
 ```python
-session = seiza.calibration_master_plan(
-    frames=selected, lights=lights, quality=cached_quality,
-    flat_stability=seiza.FlatRetryPolicy(retain_unstable=False),
-)
-decision = seiza.calibration_flat_retry(
-    session=session, candidates=selected_raw_flats, first=first_attempt,
-)
+retry = seiza.FlatRetry(first_attempt, raw_flats, selection.rules, session=session)
+decision = retry.next()
+while decision["action"] in ("try_trimmed", "try_alternate"):
+    built = build(decision["inputs"])              # None when no master came of it
+    (retry.trimmed if decision["action"] == "try_trimmed" else retry.alternate)(built)
+    decision = retry.next()
 ```
 
-This retains policy, held-back inputs and the rig's resolved time window.
-Successful `trimmed`/`alternate` feedback implies attempted; set the respective
-`*_attempted=True` flag when a retry fails without feedback. A
-[complete host execution loop](examples/calibration_retry.py) demonstrates retry
-feedback, memo rebuilding, publication and cleanup.
+`rebuild_first` says the first build is a memo to build again for real. A
+[complete host execution loop](examples/calibration_retry.py) shows retries,
+memo rebuilding, publication and cleanup.
 
-`master_flat_stability(request)` measures one source at a time against a
-`master` file, with optional `bias`, `dark`, `dark_exposure_seconds` and
-`normalized_full_scale`. `inputs` contains `{path, exposure_seconds, skipped}`.
-It returns `algorithm_version` (2), `feature_pixels`, `drift_threshold`,
-`disagreement` and indexed `errors`. Missing/incompatible inputs count as
+`master_flat_stability(master=..., inputs=[{path, exposure_seconds,
+skipped}], bias=None, dark=None, dark_exposure_seconds=None,
+normalized_full_scale=None)` measures each source against a master file. It
+returns `algorithm_version` (2), `feature_pixels`, `drift_threshold`,
+`disagreement` and indexed `errors`. Missing or incompatible inputs count as
 drifting; skipped inputs have zero disagreement. `normalized_full_scale=65535`
 preserves PSF Guard's declared-unit XISF handling. Mono, RGB and CFA data use
 separate sample planes. See [the execution contract](../docs/calibration-library.md).
-
 
 `master_flat_stability_images(master, inputs, *, bias=None, dark=None,
 input_metadata=None, bayer=None, dark_exposure_seconds=None,
@@ -1791,6 +1833,54 @@ CLI provenance additionally hashes input/output files. Reporting never enables
 reintegration by itself.
 
 Python: `html = seiza.stack_collection_html(collection)` returns a string and raises `ValueError` for invalid collections or nested reports.
+
+### Cached flat evidence and correction workflow
+
+The measuring stages of flat grouping are the ones PSF Guard runs, on
+records the host keeps; the host reads headers and pixels when asked.
+
+- `calibration_flat_sessions(frames, nights, rules)` gives the raw flat
+  sessions to measure, one night of one family each. A `FlatSessionPlan`
+  names the `combined()` flats to read, its `response_key()`, and the
+  `pending_row(pedestal)` or `measured_row(pedestal, read, bin, response,
+  unread)` to keep, `response` being `flat_build_response`'s answer.
+  `PedestalTable(frames, quality)` gives each session's pedestal
+  (`for_session`) and the pedestal under lights (`light_pedestal`).
+- `calibration_family_questions(library, rules, rig, lights_of, header)`
+  asks the lights of each imaging session which response family their flats
+  come from. `lights_of(session)` returns a session's lights as `{path, at,
+  angle, filter, target}`; `header(path)` returns a light's header record,
+  or None. A `FamilyQuestion` that is `answered` needs nothing read.
+  Otherwise read its `sample()` lights binned, take each
+  `representatives()` session's response plane with its pedestal out
+  (`flat_response_without_pedestal`), and keep `decide(representatives,
+  binned, planes, pedestal)`'s row in the grouping's `family_evidence`.
+- `calibration_change_question(groups, event, session, lights)` asks the
+  lights shot during a change which side of it they stand on, for each
+  `(event, session)` of `groups.sessions_in_windows()`; those in
+  `groups.sessions_needing_evidence()` have no answer yet. For each
+  `ChangeFilter`, measure `change_map(before, after)` from its
+  `map_responses()` and keep `ChangeQuestion.row(fits)` with each filter's
+  `fit(binned, reference, map, pedestal)` in the grouping's `evidence`.
+
+Store the rows unchanged and build the `FlatGroups` book again. No lights
+read means retry later; lights read but no useful background or fit are
+kept as undecided. The core keeps PSF Guard's nearest-angle tie policy and
+refuses missing fits as proof of similarity.
+
+Correction masters use **`flat_change_map`**, preserving the full compact map;
+`flat_evidence_change_map` masks border vignetting specifically for light fitting.
+Apply a correction with `flat_apply_change_map(..., bin=..., divide=...)`. Keep
+the original master metadata and include the correction key in cache identity.
+File verification, atomic publication and failed cache recovery remain host
+responsibilities.
+
+Manual `group_overrides` and `light_choices` are already core features on grouping
+rows. Feed PSF Guard's existing rows directly; the library selector enforces
+hard physical gates and resolves stale/orphaned choices. Manual light-choice
+entries can use an exact full path in `file_name`. It takes precedence over
+basename entries for that light, keeping same-named files from different
+folders separate.
 
 ### No report, cheap report, rich report
 

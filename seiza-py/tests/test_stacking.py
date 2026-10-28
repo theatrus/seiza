@@ -1276,8 +1276,11 @@ def test_expanding_session_assignments_calibrate_plan_push_and_resume(tmp_path):
     sessions[1]["bias"].unlink()
     with pytest.raises(seiza.StackError, match="changed|missing|fingerprint"):
         resumed.reintegrate()
-    with pytest.raises(seiza.StackError, match="changed|missing|fingerprint"):
-        seiza.LiveStacker.open_context(context)
+    # Masters are checked when their session is used, so the context opens.
+    reopened = seiza.LiveStacker.open_context(context)
+    assert reopened.push_fits(paths[2]).accepted
+    with pytest.raises(seiza.StackError, match="changed|missing"):
+        reopened.reintegrate()
 
 
 def test_session_canvas_can_be_reused_by_an_independent_filter(tmp_path):

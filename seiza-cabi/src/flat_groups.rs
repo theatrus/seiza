@@ -73,8 +73,9 @@ pub unsafe extern "C" fn seiza_flat_group_plan_json(
         }
         let request: groups::Request = serde_json::from_value(field_names(value, false))
             .map_err(|error| format!("invalid flat group request: {error}"))?;
-        let snapshot = groups::evaluate(request).map_err(|error| error.to_string())?;
-        let value = serde_json::to_value(snapshot).map_err(|error| error.to_string())?;
+        let plan = seiza_calibration::library::json::flat_group_plan(request)
+            .map_err(|error| error.to_string())?;
+        let value = serde_json::to_value(plan).map_err(|error| error.to_string())?;
         owned_json(&field_names(value, true))
     })
     .unwrap_or(ptr::null_mut())

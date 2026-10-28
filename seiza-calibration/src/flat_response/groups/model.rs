@@ -71,6 +71,7 @@ pub const SAME_SHADOW_SIZE: f32 = 0.5;
 pub const MIN_SHADOW_PEAK: f32 = 0.0025;
 
 /// The limits one rig's sessions are held to.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {
@@ -115,6 +116,7 @@ impl Limits {
 
 /// The recorded angles of one rotation cluster of a family, lowest to
 /// highest going round the circle from `low`.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct AngleSpan {
     pub low: f64,
@@ -144,6 +146,7 @@ impl AngleSpan {
 }
 
 /// One measured flat session.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize)]
 pub struct Session {
     #[serde(flatten)]
@@ -156,6 +159,7 @@ pub struct Session {
 }
 
 /// Why two neighbouring groups stay apart.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Boundary {
     /// Index into the book's families.
@@ -188,6 +192,7 @@ pub struct Boundary {
 }
 
 /// How a person's choice changed an edge between groups.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HandEdge {
@@ -197,6 +202,7 @@ pub enum HandEdge {
 
 /// A rig-wide change: boundaries of one rig that overlap in time and share
 /// a spot.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize)]
 pub struct Event {
     pub key: String,
@@ -251,6 +257,7 @@ impl Event {
 
 /// How much a rig's flats depend on the rotator angle: same-filter sessions
 /// at different angles shot within one flat session window.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Default, serde::Deserialize)]
 pub struct AngleTerm {
     pub pairs: usize,
@@ -283,6 +290,7 @@ pub const ALIKE_RANGE_MIN_NIGHTS: usize = 2;
 /// term, from pairs of its sessions compared directly. A flat at one end
 /// serves the family's lights at the other (see [`AlikeRange::serves`]),
 /// from the light's side of every change.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AlikeRange {
     /// The recorded angles of the sessions at each end, the short way
@@ -328,6 +336,7 @@ impl AlikeRange {
 }
 
 /// A family of sessions: one rig, filter, sensor mode and rotation cluster.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize)]
 pub struct Family {
     pub key: String,
@@ -361,6 +370,7 @@ pub struct Family {
 }
 
 /// A continuous run of lights of one profile.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImagingSession {
@@ -378,6 +388,7 @@ pub struct ImagingSession {
 pub use super::evidence::Side;
 
 /// How a light was put on one side of an event.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
 #[serde(tag = "by", rename_all = "snake_case")]
 pub enum Placement {

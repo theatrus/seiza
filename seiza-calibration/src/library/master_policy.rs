@@ -1,226 +1,22 @@
-//! PSF Guard's remaining master decisions, independent of files and catalogs.
+//! PSF Guard's flat master retries, independent of files and catalogs.
 //! Adapted from theatrus/psf-guard 835961cb, calibration.rs (Apache-2.0).
 use super::*;
 
-/// Resolve already selected candidates after host verification/remapping.
-/// Candidate order is significant. No matching, scanning or pixel I/O occurs.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct MasterPlanRequest {
-    pub frames: Vec<CalibrationFrame>,
-    pub lights: Vec<Light>,
-    pub quality: Vec<QualityRecord>,
-    pub global_settings: Vec<Setting>,
-    pub rigs: Vec<RigSettings>,
-    pub flat_basis: FlatBasis,
-    pub flat_family: Option<FlatFamily>,
-    pub flat_held_back: Vec<String>,
-    pub flat_star_masking: bool,
-    pub flat_stability: FlatRetryPolicy,
-    pub master_failures: Vec<MasterFailure>,
-    pub pedestal_evidence: Vec<PedestalEvidence>,
-    pub force_flat_without_pedestal: bool,
-}
-
-fn setting_values(rows: Vec<Setting>, scope: &str) -> crate::Result<rules::RuleValues> {
-    let mut result = rules::RuleValues::new();
-    for row in rows {
-        let spec = rules::fields()
-            .iter()
-            .find(|spec| spec.key == row.key)
-            .ok_or_else(|| invalid(format!("{scope}: unknown setting '{}'", row.key)))?;
-        rules::validate(spec, &row.value)
-            .map_err(|error| invalid(format!("{scope}.{}: {error}", row.key)))?;
-        if result.insert(row.key.clone(), row.value).is_some() {
-            return Err(invalid(format!(
-                "{scope}: duplicate setting key '{}'",
-                row.key
-            )));
-        }
-    }
-    Ok(result)
-}
-
-pub(super) fn rule_book(global: Vec<Setting>, rigs: Vec<RigSettings>) -> crate::Result<RuleBook> {
-    let mut layers = BTreeMap::new();
-    for rig in rigs {
-        let values = setting_values(rig.settings, &format!("rigs[{}].settings", rig.rig_uuid))?;
-        if layers
-            .insert(
-                rig.rig_uuid,
-                rules::RigLayer {
-                    name: rig.name,
-                    values,
-                },
-            )
-            .is_some()
-        {
-            return Err(invalid("duplicate rig settings"));
-        }
-    }
-    Ok(RuleBook::new(
-        setting_values(global, "global_settings")?,
-        layers,
-    ))
-}
-fn validate_frames(frames: &[CalibrationFrame]) -> crate::Result<()> {
-    let mut ids = BTreeSet::new();
-    for frame in frames {
-        if frame.frame_uuid.is_empty() || !ids.insert(&frame.frame_uuid) {
-            return Err(invalid(
-                "calibration frame UUIDs must be nonempty and unique",
-            ));
-        }
-        validate_values(&frame_signature(frame).seiza)?;
-        if frame.source_verified
-            && (frame.source_path.as_os_str().is_empty() || frame.source_fingerprint.is_empty())
-        {
-            return Err(invalid("verified sources need a path and fingerprint"));
-        }
-    }
-    Ok(())
-}
-
-/// Produce the same recipes/identity as library planning from selected rows.
-/// Hosts must replan after changed verification, grades, options or sources.
-pub fn plan_masters(request: MasterPlanRequest) -> crate::Result<Session> {
-    validate_frames(&request.frames)?;
-    let light = request
-        .lights
-        .first()
-        .ok_or_else(|| invalid("master planning needs a light"))?;
-    for light in &request.lights {
-        validate_values(&light_signature(light).seiza)?;
-    }
-    let rules = rule_book(request.global_settings, request.rigs)?.for_light(light);
-    let mut selected = CalibrationSelection {
-        rules,
-        flat_basis: request.flat_basis,
-        flat_family: request.flat_family,
-        flat_held_back: request.flat_held_back,
-        ..Default::default()
-    };
-    let ids: BTreeSet<_> = request
-        .frames
-        .iter()
-        .map(|f| f.frame_uuid.clone())
-        .collect();
-    let mut quality = BTreeMap::new();
-    for row in request.quality {
-        if !ids.contains(&row.frame_uuid) || quality.insert(row.frame_uuid.clone(), row).is_some() {
-            return Err(invalid("quality rows must name unique selected frames"));
-        }
-    }
-    for frame in request.frames {
-        match frame.kind {
-            CalibrationKind::Bias => &mut selected.bias,
-            CalibrationKind::Dark => &mut selected.dark,
-            CalibrationKind::DarkFlat => &mut selected.dark_flat,
-            CalibrationKind::Flat => &mut selected.flat,
-        }
-        .push(frame);
-    }
-    for frames in [
-        &mut selected.bias,
-        &mut selected.dark,
-        &mut selected.dark_flat,
-        &mut selected.flat,
-    ] {
-        if frames.iter().all(|f| f.source_verified) {
-            frames.truncate(MAX_MASTER_FRAMES);
-        }
-    }
-    let session = resolved_session(
-        &selected,
-        &quality,
-        &HashMap::new(),
-        request.flat_star_masking,
-        request.flat_stability,
-    );
-    let mut sessions = vec![session];
-    finalize(
-        &mut sessions,
-        &vec![0; request.lights.len()],
-        &request.lights,
-        &request.master_failures,
-        &request.pedestal_evidence,
-        request.force_flat_without_pedestal,
-    )?;
-    Ok(sessions.remove(0))
-}
-
-pub(super) fn resolved_session(
-    selected: &CalibrationSelection,
-    quality: &BTreeMap<String, QualityRecord>,
-    judged: &HashMap<String, Judged>,
-    masking: bool,
-    stability: FlatRetryPolicy,
-) -> Session {
-    let mut recipes = recipes(selected);
-    let frames: Vec<_> = selected
-        .bias
-        .iter()
-        .chain(&selected.dark)
-        .chain(&selected.dark_flat)
-        .chain(&selected.flat)
-        .cloned()
-        .collect();
-    for recipe in &mut recipes {
-        recipe.flat_star_masking = recipe.kind == CalibrationKind::Flat && masking;
-        recipe.dark_level_screening = matches!(
-            recipe.kind,
-            CalibrationKind::Dark | CalibrationKind::DarkFlat
-        ) && recipe.inputs.iter().any(|id| {
-            !judged.contains_key(id)
-                && quality.get(id).is_none_or(|q| {
-                    q.override_choice.is_none()
-                        && !(q.grade.is_some() && selected_frame_current(id, q, &frames))
-                })
-        });
-    }
-    Session {
-        key: session_key(selected, &recipes, &stability),
-        tolerances: selected.match_tolerances(),
-        recipes,
-        application: Application::default(),
-        flat_stability: stability,
-        flat_held_back: selected.flat_held_back.clone(),
-    }
-}
-
-/// Coherence alone, for previews and build retries; accepts caller-ordered rows.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct MasterCohortRequest {
-    pub kind: CalibrationKind,
-    pub frames: Vec<CalibrationFrame>,
-    pub settings: Vec<Setting>,
-}
-#[derive(Debug, Serialize)]
-pub struct MasterCohort {
-    pub kept: Vec<String>,
-    pub dropped: Vec<String>,
-}
-/// Select a complete/coherent cohort using the same policy as master recipes.
-/// Settings are validated. Metadata remains permissive for catalog previews;
-/// plan_masters validates executable input identities and source records.
-pub fn master_cohort(request: MasterCohortRequest) -> crate::Result<MasterCohort> {
-    let values = setting_values(request.settings, "settings")?;
-    let rules = RuleBook::new(values, BTreeMap::new()).for_rig("");
-    let subset = master_subset_report(request.kind, &request.frames, &rules);
-    Ok(MasterCohort {
-        kept: subset.kept.into_iter().map(|f| f.frame_uuid).collect(),
-        dropped: subset.dropped.into_iter().map(|f| f.frame_uuid).collect(),
-    })
-}
-
-/// Defaults preserve PSF Guard's trim, alternate-session and honest fallback.
+/// Which retries a flat master may take when its frames disagree about
+/// spots that come and go. The default is PSF Guard's: leave a minority
+/// out, else take the next session, else keep the set and say so.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FlatRetryPolicy {
+    /// Judge a flat set at all; off, the first build always serves.
     pub enabled: bool,
+    /// Rebuild without a minority of frames that disagree.
     pub trim_unstable: bool,
+    /// Take the next flat session when the set as a whole disagrees.
     pub try_next_session: bool,
+    /// Keep an unstable set nothing replaces, with a note, rather than
+    /// withhold the flat.
     pub retain_unstable: bool,
 }
 impl Default for FlatRetryPolicy {
@@ -233,105 +29,291 @@ impl Default for FlatRetryPolicy {
         }
     }
 }
-/// Accepted input UUIDs and measured disagreement in identical order.
-/// A missing stability measurement is represented by empty disagreement.
+
+/// One flat master build, as its judgement needs it: the frames the
+/// integrator combined and how far each disagreed with the master.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FlatAttempt {
+    /// The frames combined, by UUID, in the order they were offered.
     pub used: Vec<String>,
+    /// For each of `used`, the master's feature pixels it disagrees at;
+    /// empty when the stability was not measured.
     pub disagreement: Vec<usize>,
+    /// The disagreement at which a frame drifts: it was looking through a
+    /// different sensor window.
     pub drift_threshold: usize,
+    /// The master's feature pixels the frames were compared at.
     pub feature_pixels: usize,
+    /// A remembered judgement of a set once found unstable: its record
+    /// remains, its file does not, so it never serves as it is.
     pub memo: bool,
-    /// Optional host label for explanations; never affects the decision.
+    /// What a note calls the set; "20 G flats from 2026-09-10" when absent.
+    /// Never affects the decision.
     pub label: Option<String>,
 }
 impl FlatAttempt {
-    fn drifting(&self) -> Vec<&String> {
+    /// The frames whose disagreement reaches the threshold.
+    pub fn drifting(&self) -> Vec<&str> {
         self.used
             .iter()
             .zip(&self.disagreement)
             .filter(|(_, n)| **n >= self.drift_threshold)
-            .map(|(id, _)| id)
+            .map(|(id, _)| id.as_str())
             .collect()
     }
+    /// Whether this build makes an honest master: nothing drifts and it
+    /// has a file.
+    pub fn stable(&self) -> bool {
+        self.drifting().is_empty() && !self.memo
+    }
 }
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct FlatRetryRequest {
-    /// Pass the returned session directly to retain its policy, held-back rows
-    /// and resolved time window. Conflicting explicit overrides are rejected.
-    pub session: Option<Session>,
-    pub candidates: Vec<CalibrationFrame>,
-    pub held_back: Vec<String>,
-    pub settings: Vec<Setting>,
-    pub policy: Option<FlatRetryPolicy>,
-    pub first: FlatAttempt,
-    /// Set true when the retry failed/yielded no master. Successful feedback
-    /// implies attempted, so callers need not duplicate that state.
-    pub trimmed_attempted: bool,
-    pub trimmed: Option<FlatAttempt>,
-    pub alternate_attempted: bool,
-    pub alternate: Option<FlatAttempt>,
-}
+
+/// What a flat master does next.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FlatRetryAction {
+    /// Publish the first build: it is stable, or nothing replaces it.
     PublishFirst,
+    /// Build again from [`FlatRetryDecision::inputs`], the first set less
+    /// the frames that drift.
     TryTrimmed,
+    /// Publish the trimmed build.
     PublishTrimmed,
+    /// Build the next flat session, [`FlatRetryDecision::inputs`].
     TryAlternate,
+    /// Publish the next session's build.
     PublishAlternate,
+    /// Publish no flat master: the set is unstable and the policy keeps
+    /// none such.
     Withhold,
 }
-#[derive(Debug, Serialize)]
+
+/// A flat retry's next step.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct FlatRetryDecision {
     pub action: FlatRetryAction,
+    /// The frames to build, by UUID, for a `Try` action; empty otherwise.
     pub inputs: Vec<String>,
+    /// The first build is a memo: should it serve, build it again for real
+    /// first.
     pub rebuild_first: bool,
+    /// What the master's card says about the choice.
     pub note: Option<String>,
 }
-/// Decide the next flat retry/publication from immutable execution feedback.
-/// Hosts retain staging, cancellation, cache publication and pixel measurement.
-pub fn flat_retry(request: FlatRetryRequest) -> crate::Result<FlatRetryDecision> {
-    let rules = RuleBook::new(
-        setting_values(request.settings.clone(), "settings")?,
-        BTreeMap::new(),
-    )
-    .for_rig("");
-    let default_policy = FlatRetryPolicy::default();
-    let (policy, held_back, window) = if let Some(session) = &request.session {
-        session.tolerances.validate()?;
-        if request
-            .policy
-            .as_ref()
-            .is_some_and(|p| p != &session.flat_stability)
-            || (!request.held_back.is_empty() && request.held_back != session.flat_held_back)
-            || (!request.settings.is_empty()
-                && rules.flat_session_seconds != session.tolerances.flat_session_seconds)
-        {
-            return Err(invalid(
-                "flat retry overrides conflict with the supplied session",
-            ));
+impl FlatRetryDecision {
+    /// The candidates [`FlatRetryDecision::inputs`] names, in its order.
+    pub fn frames<'a>(&self, candidates: &'a [CalibrationFrame]) -> Vec<&'a CalibrationFrame> {
+        self.inputs
+            .iter()
+            .filter_map(|id| candidates.iter().find(|f| &f.frame_uuid == id))
+            .collect()
+    }
+}
+
+/// A flat master's way to a set that agrees with itself, decided one step
+/// at a time from what each build showed. A minority of drifting frames is
+/// left out; a set that disagrees as a whole gives way to the next flat
+/// session; when nothing better builds, the first set serves with a note.
+/// The host builds, measures, stages and publishes; this decides which.
+///
+/// ```text
+/// let mut retry = FlatRetry::new(first, &flats, &held_back, &rules, policy)?;
+/// loop {
+///     let step = retry.next();
+///     match step.action {
+///         FlatRetryAction::TryTrimmed => retry.trimmed(build(step.frames(&flats)))?,
+///         FlatRetryAction::TryAlternate => retry.alternate(build(step.frames(&flats)))?,
+///         _ => return publish(step),
+///     }
+/// }
+/// ```
+#[derive(Clone, Debug)]
+pub struct FlatRetry<'a> {
+    first: FlatAttempt,
+    candidates: &'a [CalibrationFrame],
+    held_back: &'a [String],
+    rules: &'a Rules,
+    policy: FlatRetryPolicy,
+    /// Tried: the build, or `None` when it made no master.
+    trimmed: Option<Option<FlatAttempt>>,
+    alternate: Option<Option<FlatAttempt>>,
+}
+impl<'a> FlatRetry<'a> {
+    /// The retry of a flat master first built as `first` from `candidates`,
+    /// the light's flats nearest first. `held_back` frames, from the far
+    /// side of a measured change, never stand in for it. `rules` give the
+    /// flat session window and the coherence of the next set.
+    pub fn new(
+        first: FlatAttempt,
+        candidates: &'a [CalibrationFrame],
+        held_back: &'a [String],
+        rules: &'a Rules,
+        policy: FlatRetryPolicy,
+    ) -> crate::Result<Self> {
+        if first.used.is_empty() || candidates.iter().any(|f| f.kind != CalibrationKind::Flat) {
+            return Err(invalid("flat feedback needs a nonempty first flat cohort"));
         }
-        (
-            &session.flat_stability,
+        let retry = Self {
+            first,
+            candidates,
+            held_back,
+            rules,
+            policy,
+            trimmed: None,
+            alternate: None,
+        };
+        retry.check(&retry.first)?;
+        Ok(retry)
+    }
+
+    /// [`FlatRetry::new`] for a flat master of `session`, with the retry
+    /// policy and held-back flats it was resolved with: a supplied set's
+    /// session never takes another session's flats.
+    pub fn for_session(
+        first: FlatAttempt,
+        candidates: &'a [CalibrationFrame],
+        session: &'a Session,
+        rules: &'a Rules,
+    ) -> crate::Result<Self> {
+        Self::new(
+            first,
+            candidates,
             &session.flat_held_back,
-            session.tolerances.flat_session_seconds,
+            rules,
+            session.flat_stability.clone(),
         )
-    } else {
-        (
-            request.policy.as_ref().unwrap_or(&default_policy),
-            &request.held_back,
-            rules.flat_session_seconds,
-        )
-    };
-    validate_frames(&request.candidates)?;
-    let ids: BTreeSet<_> = request.candidates.iter().map(|f| &f.frame_uuid).collect();
-    for attempt in std::iter::once(&request.first)
-        .chain(request.trimmed.iter())
-        .chain(request.alternate.iter())
-    {
+    }
+
+    /// Record the trimmed build, or `None` when it made no master.
+    pub fn trimmed(&mut self, attempt: Option<FlatAttempt>) -> crate::Result<()> {
+        if let Some(attempt) = &attempt {
+            self.check(attempt)?;
+            let drifting = self.first.drifting();
+            if attempt
+                .used
+                .iter()
+                .any(|id| !self.first.used.contains(id) || drifting.contains(&id.as_str()))
+            {
+                return Err(invalid(
+                    "trim feedback contains an input outside the stable first cohort",
+                ));
+            }
+        }
+        self.trimmed = Some(attempt);
+        Ok(())
+    }
+
+    /// Record the next session's build, or `None` when it made no master.
+    pub fn alternate(&mut self, attempt: Option<FlatAttempt>) -> crate::Result<()> {
+        if let Some(attempt) = &attempt {
+            self.check(attempt)?;
+            let eligible = self.next_session_frames();
+            if attempt
+                .used
+                .iter()
+                .any(|id| !eligible.iter().any(|f| &f.frame_uuid == id))
+            {
+                return Err(invalid(
+                    "alternate feedback contains an input in the original/held-back session",
+                ));
+            }
+        }
+        self.alternate = Some(attempt);
+        Ok(())
+    }
+
+    /// The next step.
+    pub fn next(&self) -> FlatRetryDecision {
+        let first = &self.first;
+        let drifting = first.drifting();
+        let decide = |action, inputs, note| FlatRetryDecision {
+            action,
+            inputs,
+            rebuild_first: first.memo,
+            note,
+        };
+        if !self.policy.enabled || drifting.is_empty() {
+            return decide(FlatRetryAction::PublishFirst, Vec::new(), None);
+        }
+        let used = first.used.len();
+        let pixels = first.feature_pixels;
+        let stable = used.saturating_sub(drifting.len());
+        // A minority of odd frames: the rest of this set still make an
+        // honest master. Only this set's frames are offered, so the trim
+        // cannot slide onto another session while the card speaks of
+        // leaving frames out.
+        let trim = self.policy.trim_unstable && stable >= MIN_MASTER_FRAMES && stable * 2 >= used;
+        if trim {
+            match &self.trimmed {
+                None => {
+                    let rest = first
+                        .used
+                        .iter()
+                        .filter(|id| !drifting.contains(&id.as_str()))
+                        .cloned()
+                        .collect();
+                    return decide(FlatRetryAction::TryTrimmed, rest, None);
+                }
+                Some(Some(trimmed)) if trimmed.stable() => {
+                    let note = format!(
+                        "Left out {} of {used} flats that disagreed with the rest of the set at \
+                         {pixels} pixels ({SPOTS})",
+                        drifting.len()
+                    );
+                    return decide(FlatRetryAction::PublishTrimmed, Vec::new(), Some(note));
+                }
+                Some(_) => {}
+            }
+        }
+        // The set disagrees with itself: the next set takes its place when
+        // there is one, as one master takes it: the nearest coherent
+        // cluster of what remains, given nearest first.
+        if self.policy.try_next_session {
+            match &self.alternate {
+                None => {
+                    let remaining: Vec<CalibrationFrame> =
+                        self.next_session_frames().into_iter().cloned().collect();
+                    let cohort = coherent_cohort(CalibrationKind::Flat, &remaining, self.rules);
+                    if cohort.kept.len() >= MIN_MASTER_FRAMES {
+                        let inputs = cohort.kept.into_iter().map(|f| f.frame_uuid).collect();
+                        return decide(FlatRetryAction::TryAlternate, inputs, None);
+                    }
+                }
+                Some(Some(alternate)) if alternate.stable() => {
+                    let note = format!(
+                        "The nearest {} disagree with each other at {pixels} pixels ({SPOTS}); \
+                         used {} instead",
+                        self.label(first),
+                        self.label(alternate)
+                    );
+                    return decide(FlatRetryAction::PublishAlternate, Vec::new(), Some(note));
+                }
+                Some(_) => {}
+            }
+        }
+        let (action, disposition) = if self.policy.retain_unstable {
+            (
+                FlatRetryAction::PublishFirst,
+                "Built from an unstable flat set",
+            )
+        } else {
+            (FlatRetryAction::Withhold, "Withheld an unstable flat set")
+        };
+        let note = format!(
+            "{disposition}: {} of {used} frames disagree with the master at {pixels} pixels \
+             ({SPOTS}). Retake these flats",
+            drifting.len()
+        );
+        decide(action, Vec::new(), Some(note))
+    }
+
+    /// Refuse feedback that names frames twice, frames that are not
+    /// candidates, or disagreement that does not line up with them.
+    fn check(&self, attempt: &FlatAttempt) -> crate::Result<()> {
         let mut seen = BTreeSet::new();
         if attempt.used.len() < MIN_MASTER_FRAMES
             || (!attempt.disagreement.is_empty()
@@ -340,143 +322,77 @@ pub fn flat_retry(request: FlatRetryRequest) -> crate::Result<FlatRetryDecision>
             || attempt
                 .used
                 .iter()
-                .any(|id| !ids.contains(id) || !seen.insert(id))
+                .any(|id| !self.candidates.iter().any(|f| &f.frame_uuid == id) || !seen.insert(id))
         {
             return Err(invalid(
                 "flat feedback needs unique candidate inputs and aligned disagreement",
             ));
         }
+        Ok(())
     }
-    let trimmed_attempted = request.trimmed_attempted || request.trimmed.is_some();
-    let alternate_attempted = request.alternate_attempted || request.alternate.is_some();
-    if request.first.used.is_empty()
-        || request
-            .candidates
-            .iter()
-            .any(|f| f.kind != CalibrationKind::Flat)
-    {
-        return Err(invalid("flat feedback needs a nonempty first flat cohort"));
-    }
-    let drifting = request.first.drifting();
-    if request.trimmed.as_ref().is_some_and(|attempt| {
-        attempt
-            .used
-            .iter()
-            .any(|id| !request.first.used.contains(id) || drifting.contains(&id))
-    }) {
-        return Err(invalid(
-            "trim feedback contains an input outside the stable first cohort",
-        ));
-    }
-    let first = &request.first;
-    let drifting = first.drifting();
-    let mut result = FlatRetryDecision {
-        action: FlatRetryAction::PublishFirst,
-        inputs: Vec::new(),
-        rebuild_first: first.memo,
-        note: None,
-    };
-    if !policy.enabled || drifting.is_empty() {
-        return Ok(result);
-    }
-    let used = first.used.len();
-    let stable = used - drifting.len();
-    let spots = "spots that come and go across the run: dew or frost on the sensor window?";
-    let trim = policy.trim_unstable && stable >= MIN_MASTER_FRAMES && stable * 2 >= used;
-    if trim && !trimmed_attempted {
-        result.action = FlatRetryAction::TryTrimmed;
-        result.inputs = first
-            .used
-            .iter()
-            .filter(|id| !drifting.contains(id))
-            .cloned()
-            .collect();
-        return Ok(result);
-    }
-    if trim
-        && let Some(attempt) = &request.trimmed
-        && attempt.drifting().is_empty()
-        && !attempt.memo
-    {
-        result.action = FlatRetryAction::PublishTrimmed;
-        result.note = Some(format!(
-            "Left out {} of {used} flats that disagreed with the rest of the set at {} pixels ({spots})",
-            drifting.len(),
-            first.feature_pixels
-        ));
-        return Ok(result);
-    }
-    let first_rows: Vec<_> = request
-        .candidates
-        .iter()
-        .filter(|f| first.used.contains(&f.frame_uuid))
-        .collect();
-    let start = first_rows.iter().filter_map(|f| f.captured_at).min();
-    let end = first_rows.iter().filter_map(|f| f.captured_at).max();
-    let window =
-        i64::try_from(window).map_err(|_| invalid("flat retry session window is too large"))?;
-    let eligible_alternate = |f: &CalibrationFrame| {
-        !held_back.contains(&f.frame_uuid)
-            && !first.used.contains(&f.frame_uuid)
-            && !matches!((start, end, f.captured_at), (Some(a), Some(b), Some(t)) if t >= a.saturating_sub(window) && t <= b.saturating_add(window))
-    };
-    let alternate_ids: BTreeSet<_> = request
-        .candidates
-        .iter()
-        .filter(|f| eligible_alternate(f))
-        .map(|f| &f.frame_uuid)
-        .collect();
-    if request.alternate.as_ref().is_some_and(|attempt| {
-        attempt.used.is_empty() || attempt.used.iter().any(|id| !alternate_ids.contains(id))
-    }) {
-        return Err(invalid(
-            "alternate feedback contains an input in the original/held-back session",
-        ));
-    }
-    if policy.try_next_session && !alternate_attempted {
-        result.action = FlatRetryAction::TryAlternate;
-        result.inputs = request
-            .candidates
-            .iter()
-            .filter(|f| eligible_alternate(f))
-            .map(|f| f.frame_uuid.clone())
-            .collect();
-        return Ok(result);
-    }
-    if policy.try_next_session
-        && let Some(attempt) = &request.alternate
-        && attempt.drifting().is_empty()
-        && !attempt.memo
-    {
-        let label = |attempt: &FlatAttempt| {
-            attempt
-                .label
-                .clone()
-                .unwrap_or_else(|| format!("{} flats", attempt.used.len()))
+
+    /// The candidates the next session may come from: raw frames, not held
+    /// back, and not shot within one flat session of the first set. The
+    /// frames the clusterer dropped from the first set's run saw the same
+    /// window, so they go with it.
+    fn next_session_frames(&self) -> Vec<&'a CalibrationFrame> {
+        let window = i64::try_from(self.rules.flat_session_seconds).unwrap_or(i64::MAX);
+        let set: Vec<&CalibrationFrame> = self.rows(&self.first.used);
+        let first = set.iter().filter_map(|frame| frame.captured_at).min();
+        let last = set.iter().filter_map(|frame| frame.captured_at).max();
+        let same_session = |candidate: &CalibrationFrame| {
+            set.iter()
+                .any(|frame| frame.frame_uuid == candidate.frame_uuid)
+                || match (first, last, candidate.captured_at) {
+                    (Some(first), Some(last), Some(at)) => {
+                        at >= first.saturating_sub(window) && at <= last.saturating_add(window)
+                    }
+                    _ => false,
+                }
         };
-        result.action = FlatRetryAction::PublishAlternate;
-        result.note = Some(format!(
-            "The nearest {} disagree with each other at {} pixels ({spots}); used {} instead",
-            label(first),
-            first.feature_pixels,
-            label(attempt)
-        ));
-        return Ok(result);
+        self.candidates
+            .iter()
+            .filter(|f| !f.is_master && !self.held_back.contains(&f.frame_uuid) && !same_session(f))
+            .collect()
     }
-    result.action = if policy.retain_unstable {
-        FlatRetryAction::PublishFirst
-    } else {
-        FlatRetryAction::Withhold
-    };
-    let disposition = if result.action == FlatRetryAction::Withhold {
-        "Withheld an unstable flat set"
-    } else {
-        "Built from an unstable flat set"
-    };
-    result.note = Some(format!(
-        "{disposition}: {} of {used} frames disagree with the master at {} pixels ({spots}). Retake these flats",
-        drifting.len(),
-        first.feature_pixels
-    ));
-    Ok(result)
+
+    fn rows(&self, used: &[String]) -> Vec<&'a CalibrationFrame> {
+        used.iter()
+            .filter_map(|id| self.candidates.iter().find(|f| &f.frame_uuid == id))
+            .collect()
+    }
+
+    fn label(&self, attempt: &FlatAttempt) -> String {
+        attempt.label.clone().unwrap_or_else(|| {
+            let rows: Vec<CalibrationFrame> =
+                self.rows(&attempt.used).into_iter().cloned().collect();
+            flat_set_label(&rows)
+        })
+    }
 }
+
+/// "20 G flats from 2026-09-10", for a note about one flat set.
+pub fn flat_set_label(frames: &[CalibrationFrame]) -> String {
+    let filter = frames
+        .iter()
+        .find_map(|frame| frame.filter.as_deref())
+        .map(|name| format!("{name} "))
+        .unwrap_or_default();
+    let day = |timestamp: i64| {
+        chrono::DateTime::from_timestamp(timestamp, 0)
+            .map(|at| at.format("%Y-%m-%d").to_string())
+            .unwrap_or_else(|| timestamp.to_string())
+    };
+    let first = frames.iter().filter_map(|frame| frame.captured_at).min();
+    let last = frames.iter().filter_map(|frame| frame.captured_at).max();
+    let when = match (first, last) {
+        (Some(first), Some(last)) if day(first) != day(last) => {
+            format!(" from {} to {}", day(first), day(last))
+        }
+        (Some(first), _) => format!(" from {}", day(first)),
+        _ => String::new(),
+    };
+    format!("{} {filter}flats{when}", frames.len())
+}
+
+const SPOTS: &str = "spots that come and go across the run: dew or frost on the sensor window?";

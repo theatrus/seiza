@@ -45,6 +45,7 @@ seiza-stars = { path = "../seiza-stars" }
 seiza-stretch = { path = "../seiza-stretch" }
 pyo3 = { version = "0.29", features = ["abi3-py311"] }
 numpy = "0.29"
+pythonize = "0.29"
 image = { version = "0.25", default-features = false }
 tokio = { version = "1", features = ["rt"] }
 serde = "1"

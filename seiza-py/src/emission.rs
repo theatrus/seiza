@@ -1,6 +1,7 @@
 //! Thin translations of emission projection and display structure blending.
 use crate::arrays::{into_image_array, linear_image};
-use crate::continuum::{core_error, from_python};
+use crate::continuum::core_error;
+use crate::convert::{from_python, to_python};
 use numpy::{PyArrayDyn, PyReadonlyArrayDyn};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -20,7 +21,7 @@ fn blend_emission_rgb<'py>(
         .into_iter()
         .map(linear_image)
         .collect::<PyResult<Vec<_>>>()?;
-    let lines: Vec<EmissionBlendLine> = from_python(lines)?;
+    let lines: Vec<EmissionBlendLine> = from_python(lines, "emission lines")?;
     let negative = match negative {
         "preserve" => EmissionNegativePolicy::Preserve,
         "positive_contribution" => EmissionNegativePolicy::PositiveContribution,
@@ -96,8 +97,9 @@ fn solve_emission_flux<'py>(
         .into_iter()
         .map(linear_image)
         .collect::<PyResult<Vec<_>>>()?;
-    let plans: Vec<seiza_stacking::ContinuumPlan> = from_python(plans)?;
-    let calibration: seiza_stacking::EmissionFluxCalibration = from_python(calibration)?;
+    let plans: Vec<seiza_stacking::ContinuumPlan> = from_python(plans, "continuum plans")?;
+    let calibration: seiza_stacking::EmissionFluxCalibration =
+        from_python(calibration, "flux calibration")?;
     let (images, report) = py
         .detach(move || {
             seiza_stacking::solve_emission_flux(
@@ -111,7 +113,7 @@ fn solve_emission_flux<'py>(
         .into_iter()
         .map(|image| into_image_array(py, image))
         .collect::<PyResult<Vec<_>>>()?;
-    Ok((images, crate::flat_response::to_python(py, &report)?))
+    Ok((images, to_python(py, &report)?))
 }
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(reduce_green_excess, m)?)?;

@@ -261,6 +261,87 @@ pub unsafe extern "C" fn seiza_flat_change_map(
     .unwrap_or(-1)
 }
 
+/// Remove a response's pedestal using the shared FlatResponse calculation.
+/// The normalized input plane and ADU level/pedestal produce width*height samples.
+/// # Safety
+/// data holds width*height readable floats; out holds out_length writable floats.
+/// error_out is null or writable pointer storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_flat_response_without_pedestal(
+    data: *const f32,
+    width: usize,
+    height: usize,
+    level: f32,
+    pedestal: f32,
+    out: *mut f32,
+    out_length: usize,
+    error_out: *mut *mut c_char,
+) -> bool {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let plane = unsafe { plane(data, width, height, "response") }?;
+        let response = metric::FlatResponse {
+            plane,
+            bin: 1,
+            level,
+            noise: 0.0,
+            frames: 0,
+        };
+        unsafe { write_plane(&response.without_pedestal(pedestal), out, out_length) }?;
+        Ok(())
+    })
+    .is_some()
+}
+
+/// Dust-only change map for light evidence. Vignetting changes are masked by
+/// the core's PSF Guard policy; master corrections use seiza_flat_change_map.
+/// changes_json is a camelCase array of VignettingChange, or null for none.
+/// Returns 1 (written), 0 (no map), or -1 (error).
+/// # Safety
+/// before/after hold width*height readable floats, out holds out_length
+/// writable floats. JSON is null or NUL-terminated UTF-8; error_out is writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_flat_evidence_change_map(
+    before: *const f32,
+    after: *const f32,
+    width: usize,
+    height: usize,
+    changes_json: *const c_char,
+    bin: usize,
+    out: *mut f32,
+    out_length: usize,
+    error_out: *mut *mut c_char,
+) -> i32 {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        if bin == 0 {
+            return Err("bin must be at least 1".into());
+        }
+        let changes = if changes_json.is_null() {
+            Vec::new()
+        } else {
+            let value: serde_json::Value =
+                serde_json::from_str(&required_str(changes_json, "vignetting changes")?)
+                    .map_err(|e| e.to_string())?;
+            if super::library::field_names(super::library::field_names(value.clone(), false), true)
+                != value
+            {
+                return Err("vignetting fields must be camelCase".into());
+            }
+            serde_json::from_value(super::library::field_names(value, false))
+                .map_err(|e| e.to_string())?
+        };
+        let before = unsafe { plane(before, width, height, "before") }?;
+        let after = unsafe { plane(after, width, height, "after") }?;
+        let Some(map) = evidence::change_map(&before, &after, &changes, bin) else {
+            return Ok(0);
+        };
+        unsafe { write_plane(&map, out, out_length) }?;
+        Ok(1)
+    })
+    .unwrap_or(-1)
+}
+
 /// Carry a flat across a change in place: divide `data` (`width × height ×
 /// channels` interleaved samples, sensor-aligned) by the change map
 /// (`map_width × map_height`, binned by `bin`) for a light shot before the
@@ -1099,5 +1180,71 @@ mod tests {
         };
         assert!(refused.is_null());
         assert!(take(error).contains("unknown field"));
+    }
+}
+
+#[cfg(test)]
+mod shared_workflow_tests {
+    use super::*;
+    #[test]
+    fn cached_response_pedestal_and_evidence_map_use_native_pixels() {
+        let mut failure = ptr::null_mut();
+        let input = [1.0_f32, 0.8];
+        let mut output = [0.0_f32; 2];
+        assert!(unsafe {
+            seiza_flat_response_without_pedestal(
+                input.as_ptr(),
+                2,
+                1,
+                100.0,
+                20.0,
+                output.as_mut_ptr(),
+                2,
+                &mut failure,
+            )
+        });
+        assert!(failure.is_null());
+        assert!((output[1] - 0.75).abs() < 1e-6);
+        let before = vec![1.0_f32; 64 * 64];
+        let mut after = before.clone();
+        for y in 24..40 {
+            for x in 24..40 {
+                after[y * 64 + x] = 0.9;
+            }
+        }
+        let mut out = vec![0.0_f32; 64 * 64];
+        assert_eq!(
+            unsafe {
+                seiza_flat_evidence_change_map(
+                    before.as_ptr(),
+                    after.as_ptr(),
+                    64,
+                    64,
+                    ptr::null(),
+                    1,
+                    out.as_mut_ptr(),
+                    out.len(),
+                    &mut failure,
+                )
+            },
+            1
+        );
+        assert!(failure.is_null());
+        let expected = evidence::change_map(
+            &Plane {
+                width: 64,
+                height: 64,
+                data: before,
+            },
+            &Plane {
+                width: 64,
+                height: 64,
+                data: after,
+            },
+            &[],
+            1,
+        )
+        .unwrap();
+        assert_eq!(out, expected.data);
     }
 }

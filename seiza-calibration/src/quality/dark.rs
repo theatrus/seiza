@@ -53,6 +53,7 @@ impl Default for DarkMeasureOptions {
 
 /// What [`measure_dark`] found in one bias or dark frame. Values are in the
 /// frame's own sample units.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DarkMeasurement {
     /// [`super::FRAME_QUALITY_ALGORITHM_VERSION`] when this was measured.

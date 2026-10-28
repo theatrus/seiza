@@ -67,7 +67,7 @@ fn a_master_never_mixes_readout_mode_names() {
         .map(|id| dark(id, Some("High Gain Mode")))
         .chain((2..22).map(|id| dark(id, Some("Extend Fullwell 2CMS"))))
         .collect();
-    let report = master_subset_report(CalibrationKind::Dark, &frames, &Rules::default());
+    let report = coherent_cohort(CalibrationKind::Dark, &frames, &Rules::default());
     assert_eq!(report.kept.len(), 2);
     assert!(report.dropped.is_empty());
 
@@ -75,7 +75,7 @@ fn a_master_never_mixes_readout_mode_names() {
     let frames: Vec<CalibrationFrame> = std::iter::once(dark(0, Some("High Gain Mode")))
         .chain((1..6).map(|id| dark(id, Some("Extend Fullwell 2CMS"))))
         .collect();
-    let report = master_subset_report(CalibrationKind::Dark, &frames, &Rules::default());
+    let report = coherent_cohort(CalibrationKind::Dark, &frames, &Rules::default());
     assert_eq!(report.kept.len(), 5);
     assert!(
         report
@@ -83,108 +83,4 @@ fn a_master_never_mixes_readout_mode_names() {
             .iter()
             .all(|frame| frame.readout_mode_name.as_deref() == Some("Extend Fullwell 2CMS"))
     );
-}
-
-#[test]
-fn selections_and_master_cohorts_match_psf_guard_reference() {
-    let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../../tests/fixtures/library/psf-guard.json")).unwrap();
-    for case in fixture["cases"].as_array().unwrap() {
-        let request: Request = serde_json::from_value(case["request"].clone()).unwrap();
-        let result = evaluate(request.clone()).unwrap();
-        let actual = serde_json::to_value(&result).unwrap();
-        let expected = &case["expected"];
-        for key in [
-            "bias",
-            "dark",
-            "dark_flat",
-            "flat",
-            "kept_out",
-            "tolerances",
-            "flat_basis",
-            "flat_family",
-        ] {
-            assert_eq!(
-                actual["selections"][0][key], expected[key],
-                "{}: {key}",
-                case["name"]
-            );
-        }
-        assert_eq!(result.assignments, vec![0, 0]);
-        let rules = RuleBook::new(
-            request
-                .global_settings
-                .into_iter()
-                .map(|s| (s.key, s.value))
-                .collect(),
-            BTreeMap::new(),
-        )
-        .global();
-        for (kind, key) in [
-            (CalibrationKind::Bias, "bias"),
-            (CalibrationKind::Dark, "dark"),
-            (CalibrationKind::DarkFlat, "dark_flat"),
-            (CalibrationKind::Flat, "flat"),
-        ] {
-            let frames: Vec<_> = expected[key]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|id| {
-                    request
-                        .frames
-                        .iter()
-                        .find(|f| f.frame_uuid == id.as_str().unwrap())
-                        .unwrap()
-                        .clone()
-                })
-                .collect();
-            assert_eq!(
-                coherent_master_subset(kind, &frames, &rules).len() as u64,
-                expected["master_counts"][key].as_u64().unwrap(),
-                "{}: {key}",
-                case["name"]
-            );
-        }
-    }
-}
-
-#[test]
-fn grades_and_eligibility_match_psf_guards_captured_measurements() {
-    let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../../tests/fixtures/library/grading.json")).unwrap();
-    for case in fixture["cases"].as_array().unwrap() {
-        let mut request: Request = serde_json::from_value(case["request"].clone()).unwrap();
-        request.regrade = false;
-        let ungraded = serde_json::to_value(evaluate(request.clone()).unwrap()).unwrap();
-        for key in ["bias", "dark", "dark_flat", "flat", "kept_out"] {
-            let mut actual = ungraded["selections"][0][key].as_array().unwrap().clone();
-            actual.sort_by_key(|v| v.as_str().unwrap().to_owned());
-            assert_eq!(
-                serde_json::json!(actual),
-                case["ungraded"][key],
-                "{}: {key}",
-                case["name"]
-            );
-        }
-        request.regrade = true;
-        let result = evaluate(request.clone()).unwrap();
-        for expected in case["grades"].as_array().unwrap() {
-            let grade = result
-                .grades
-                .iter()
-                .find(|g| g.frame_uuid == expected["frame_uuid"].as_str().unwrap())
-                .unwrap();
-            let judged = serde_json::to_value(grade.judged.as_ref().unwrap()).unwrap();
-            assert_eq!(judged["grade"], expected["grade"]);
-            assert_eq!(judged["code"], expected["code"]);
-            assert_eq!(serde_json::json!(grade.kept_out), expected["kept_out"]);
-        }
-        if !case["use_anyway"].is_null() {
-            request.quality.last_mut().unwrap().override_choice = Some(QualityOverride::Use);
-            let result = evaluate(request).unwrap();
-            assert!(result.selections[0].kept_out.is_empty());
-            assert_eq!(result.selections[0].dark.len(), 4);
-        }
-    }
 }

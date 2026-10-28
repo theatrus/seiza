@@ -272,8 +272,21 @@ def crate_functions(root: Path, crate: str) -> list[str]:
 def module_functions(root: Path, crate: str) -> list[str]:
     """The functions a core crate's public modules hold: `module::name` for
     each `pub fn` in a module reached through `pub mod` declarations from
-    lib.rs. A public module's functions are as public as the root's."""
+    lib.rs, and each function such a module `pub use`s from its own private
+    modules. A public module's functions are as public as the root's."""
     found: list[str] = []
+    sources = [without_tests(path.read_text()) for path in sorted((root / crate / "src").rglob("*.rs"))]
+
+    def defined(name: str) -> bool:
+        pattern = rf"^pub\s+(?:const\s+)?(?:async\s+)?fn\s+{re.escape(name)}\b"
+        return any(re.search(pattern, source, re.M) for source in sources)
+
+    def reexported(source: str) -> set[str]:
+        names: set[str] = set()
+        for group in re.findall(r"^pub\s+use\s+(?:crate::|self::|super::)?[\w:]+::\{([^}]*)\}", source, re.M):
+            names |= {item.strip().split(" as ")[-1].strip() for item in group.split(",")}
+        names |= set(re.findall(r"^pub\s+use\s+(?:crate::|self::|super::)?[\w:]+::([a-z_][a-z0-9_]*)\s*;", source, re.M))
+        return {name for name in names if name and name[0].islower() and defined(name)}
 
     def module_file(directory: Path, name: str) -> Path | None:
         for candidate in (directory / f"{name}.rs", directory / name / "mod.rs"):
@@ -284,10 +297,8 @@ def module_functions(root: Path, crate: str) -> list[str]:
     def walk(path: list[str], file: Path) -> None:
         source = without_tests(file.read_text())
         if path:
-            found.extend(
-                "::".join(path + [name])
-                for name in re.findall(r"^pub\s+(?:const\s+)?(?:async\s+)?fn\s+(\w+)", source, re.M)
-            )
+            own = set(re.findall(r"^pub\s+(?:const\s+)?(?:async\s+)?fn\s+(\w+)", source, re.M))
+            found.extend("::".join(path + [name]) for name in sorted(own | reexported(source)))
         directory = file.parent if file.name in ("lib.rs", "mod.rs") else file.parent / file.stem
         for name in re.findall(r"^pub\s+mod\s+(\w+)\s*;", source, re.M):
             child = module_file(directory, name)

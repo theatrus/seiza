@@ -2,12 +2,13 @@
 //! and `seiza_calibration::dust`), as the C ABI's `seiza_flat_*` and
 //! `seiza_dust_*` calls offer them.
 //!
-//! Planes are 2-D float32 arrays. Results are dicts parsed from the core's
-//! own JSON, the form the C calls return, so both bindings give the same
-//! keys. Options are a dict of `DustOptions` fields, any left out taking
+//! Planes are 2-D float32 arrays. Results are dicts of the core's own
+//! values, with the keys the C calls' JSON has, so both bindings give the
+//! same keys. Options are a dict of `DustOptions` fields, any left out taking
 //! their defaults.
 
 use crate::arrays::{float_array, float_image_view};
+use crate::convert::{from_python, to_python};
 use numpy::{PyArrayDyn, PyReadonlyArrayDyn, PyReadwriteArrayDyn, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -16,7 +17,7 @@ use seiza_calibration::dust::{self, DustFeature, DustMap, DustOptions};
 use seiza_calibration::flat_response::{Plane, Side, Verdict, choice, evidence, metric};
 
 /// A 2-D float32 array as a plane.
-fn as_plane(array: &PyReadonlyArrayDyn<'_, f32>, name: &str) -> PyResult<Plane> {
+pub(crate) fn as_plane(array: &PyReadonlyArrayDyn<'_, f32>, name: &str) -> PyResult<Plane> {
     let view = float_image_view(array)?;
     if view.channels != 1 {
         return Err(PyValueError::new_err(format!(
@@ -51,32 +52,8 @@ fn as_planes(arrays: Vec<PyReadonlyArrayDyn<'_, f32>>, name: &str) -> PyResult<V
     Ok(planes)
 }
 
-fn plane_array(py: Python<'_>, plane: Plane) -> PyResult<Bound<'_, PyArrayDyn<f32>>> {
+pub(crate) fn plane_array(py: Python<'_>, plane: Plane) -> PyResult<Bound<'_, PyArrayDyn<f32>>> {
     float_array(py, plane.width, plane.height, 1, plane.data)
-}
-
-/// The core's JSON for `value` as Python objects.
-pub(crate) fn to_python<'py>(
-    py: Python<'py>,
-    value: &impl serde::Serialize,
-) -> PyResult<Bound<'py, PyAny>> {
-    let json =
-        serde_json::to_string(value).map_err(|error| PyValueError::new_err(error.to_string()))?;
-    py.import("json")?.call_method1("loads", (json,))
-}
-
-/// A Python value (a dict, a list, a string) as the core type `T`.
-pub(crate) fn from_python<T: serde::de::DeserializeOwned>(
-    value: &Bound<'_, PyAny>,
-    name: &str,
-) -> PyResult<T> {
-    let json: String = value
-        .py()
-        .import("json")?
-        .call_method1("dumps", (value,))?
-        .extract()?;
-    serde_json::from_str(&json)
-        .map_err(|error| PyValueError::new_err(format!("invalid {name}: {error}")))
 }
 
 fn dust_options(options: Option<&Bound<'_, PyAny>>) -> PyResult<DustOptions> {
@@ -413,6 +390,8 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(flat_build_response, module)?)?;
     module.add_function(wrap_pyfunction!(flat_compare, module)?)?;
     module.add_function(wrap_pyfunction!(flat_change_map, module)?)?;
+    module.add_function(wrap_pyfunction!(flat_evidence_change_map, module)?)?;
+    module.add_function(wrap_pyfunction!(flat_response_without_pedestal, module)?)?;
     module.add_function(wrap_pyfunction!(flat_apply_change_map, module)?)?;
     module.add_function(wrap_pyfunction!(flat_lights_background, module)?)?;
     module.add_function(wrap_pyfunction!(flat_fit_change, module)?)?;
@@ -426,4 +405,46 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(dust_find_changes, module)?)?;
     module.add_function(wrap_pyfunction!(dust_match_features, module)?)?;
     Ok(())
+}
+
+#[pyfunction]
+#[pyo3(signature=(before,after,changes=None,bin=1))]
+fn flat_evidence_change_map<'py>(
+    py: Python<'py>,
+    before: PyReadonlyArrayDyn<'py, f32>,
+    after: PyReadonlyArrayDyn<'py, f32>,
+    changes: Option<&Bound<'py, PyAny>>,
+    bin: usize,
+) -> PyResult<Option<Bound<'py, PyArrayDyn<f32>>>> {
+    if bin == 0 {
+        return Err(PyValueError::new_err("bin must be at least 1"));
+    }
+    let changes = match changes {
+        None => Vec::new(),
+        Some(value) if value.is_none() => Vec::new(),
+        Some(value) => from_python(value, "vignetting changes")?,
+    };
+    let before = as_plane(&before, "before")?;
+    let after = as_plane(&after, "after")?;
+    py.detach(|| evidence::change_map(&before, &after, &changes, bin))
+        .map(|p| plane_array(py, p))
+        .transpose()
+}
+
+#[pyfunction]
+fn flat_response_without_pedestal<'py>(
+    py: Python<'py>,
+    plane: PyReadonlyArrayDyn<'py, f32>,
+    level: f32,
+    pedestal: f32,
+) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
+    let plane = as_plane(&plane, "response")?;
+    let response = metric::FlatResponse {
+        plane,
+        bin: 1,
+        level,
+        noise: 0.0,
+        frames: 0,
+    };
+    plane_array(py, py.detach(|| response.without_pedestal(pedestal)))
 }

@@ -1,9 +1,11 @@
 # Shared measured flat grouping
 
 `seiza_calibration::flat_response::groups` owns the measured grouping policy
-extracted from PSF Guard. Rust calls `groups::evaluate`, C calls
-`seiza_flat_group_plan_json`, and Python calls `flat_group_plan`. Native Rust
-hosts may also use the re-exported `Book` and record types. See
+extracted from PSF Guard. Rust hosts build a `Book` from their stored rows
+(`groups::prepare`) and ask it where each light stands
+(`Book::place_light`); Python binds the same (`FlatGroups`, `place_light`).
+The C ABI's `seiza_flat_group_plan_json` (`library::json::flat_group_plan`)
+does both in one call and returns the book with every light placed. See
 [provenance](../seiza-calibration/src/flat_response/groups/PROVENANCE.md).
 
 This stage builds measured families/groups and change events, resolves
@@ -86,9 +88,9 @@ Each `lights` result, in query order, contains:
   correction maps, and reference session indices for evidence fits. Missing
   time gives null placement; insufficient evidence can give `undetermined`.
 
-Evaluate without light queries first to discover family keys, gate families
-for each light, then evaluate with queries. Pixel passes feed their evidence
-into the next immutable request. No files or previous results are modified.
+Build the book first to discover family keys, gate families for each light,
+then place the lights. Pixel passes feed their evidence into the next
+immutable set of rows. No files or previous results are modified.
 
 ## Relationship to seiza-mac #92
 

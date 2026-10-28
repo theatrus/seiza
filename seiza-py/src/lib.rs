@@ -9,10 +9,10 @@ mod color;
 mod color_calibration;
 mod constellations;
 mod continuum;
+mod convert;
 mod deconvolution;
 mod emission;
 mod field_objects;
-mod flat_groups;
 mod flat_response;
 mod imgproc;
 mod library;
@@ -1038,8 +1038,7 @@ fn read_photo_metadata(
         value["scale_ranges"] = serde_json::to_value(search.ranges)
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
     }
-    let json = py.import("json")?;
-    Ok(json.call_method1("loads", (value.to_string(),))?.unbind())
+    Ok(crate::convert::to_python(py, &value)?.unbind())
 }
 
 /// When the image at `path` was taken, ISO 8601 in UTC: from a FITS or
@@ -1244,7 +1243,6 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     calibration::register(m)?;
     constellations::register(m)?;
     flat_response::register(m)?;
-    flat_groups::register(m)?;
     library::register(m)?;
     screening::register(m)?;
     stretch::register(m)?;

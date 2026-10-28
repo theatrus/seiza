@@ -1030,13 +1030,7 @@ impl PyStackSnapshot {
         context: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let context: Option<seiza_stacking::StackReportContext> = context
-            .map(|value| -> PyResult<_> {
-                let json: String = py
-                    .import("json")?
-                    .call_method1("dumps", (value,))?
-                    .extract()?;
-                serde_json::from_str(&json).map_err(|e| PyValueError::new_err(e.to_string()))
-            })
+            .map(|value| crate::convert::from_python(value, "report context"))
             .transpose()?;
         let report = seiza_stacking::stack_report(
             &self.inner,
@@ -1044,7 +1038,7 @@ impl PyStackSnapshot {
             self.final_samples.as_deref(),
         )
         .map_err(stack_error)?;
-        crate::flat_response::to_python(py, &report)
+        crate::convert::to_python(py, &report)
     }
 
     #[getter]
@@ -1150,13 +1144,7 @@ impl PyDrizzleResult {
         context: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let context: Option<seiza_stacking::StackReportContext> = context
-            .map(|value| -> PyResult<_> {
-                let json: String = py
-                    .import("json")?
-                    .call_method1("dumps", (value,))?
-                    .extract()?;
-                serde_json::from_str(&json).map_err(|e| PyValueError::new_err(e.to_string()))
-            })
+            .map(|value| crate::convert::from_python(value, "report context"))
             .transpose()?;
         let report = seiza_stacking::drizzle_report(
             &self.inner,
@@ -1166,7 +1154,7 @@ impl PyDrizzleResult {
             self.final_samples.as_deref(),
         )
         .map_err(stack_error)?;
-        crate::flat_response::to_python(py, &report)
+        crate::convert::to_python(py, &report)
     }
 
     #[getter]
@@ -1325,7 +1313,7 @@ pub(crate) struct PyLiveStacker {
 impl PyLiveStacker {
     /// Capture recorded admitted inputs and settings without rereading images.
     fn report_context<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        crate::flat_response::to_python(py, &self.active()?.report_context())
+        crate::convert::to_python(py, &self.active()?.report_context())
     }
 
     #[new]
@@ -1834,16 +1822,10 @@ impl PyLiveStacker {
         if paths.is_empty() {
             return Err(PyValueError::new_err("at least one light is required"));
         }
-        let keywords = pyo3::types::PyDict::new(py);
-        keywords.set_item("default", py.import("os")?.getattr("fspath")?)?;
-        let json: String = py
-            .import("json")?
-            .call_method("dumps", (sessions,), Some(&keywords))?
-            .extract()?;
-        let sessions: Vec<seiza_stacking::FileCalibrationSession> = serde_json::from_str(&json)
-            .map_err(|error| {
-                PyValueError::new_err(format!("invalid calibration sessions: {error}"))
-            })?;
+        let sessions: Vec<seiza_stacking::FileCalibrationSession> = crate::convert::from_python(
+            &crate::convert::with_fspaths(sessions)?,
+            "calibration sessions",
+        )?;
         let maximum_samples = max_canvas_megasamples
             .checked_mul(1_000_000)
             .filter(|samples| *samples > 0)

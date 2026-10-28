@@ -7,16 +7,8 @@ use crate::flat_response::groups::{AngleTerm, Event, Placement};
 pub(crate) use crate::flat_response::groups::{lights, model, overrides};
 use crate::flat_response::{groups::Book, metric};
 use sha2::{Digest, Sha256};
-pub(super) fn limits_of(rules: &Rules) -> model::Limits {
-    model::Limits {
-        measured: rules.flat_grouping == rules::FlatGrouping::Measured,
-        dust: rules.flat_split_dust_pct / 100.0,
-        broad: rules.flat_split_pattern_pct / 100.0,
-        window: rules.flat_session_seconds as i64,
-        rotation: rules.coherence_tolerances().rotation_deg,
-    }
-}
 /// A change as a light's account names it.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventNote {
     pub key: String,
@@ -37,7 +29,7 @@ pub struct EventNote {
 }
 
 impl EventNote {
-    pub(super) fn of(event: &Event, rules: &Rules) -> Self {
+    pub fn of(event: &Event, rules: &Rules) -> Self {
         Self {
             key: event.key.clone(),
             start: event.start,
@@ -57,7 +49,12 @@ impl EventNote {
 pub fn describe_what(event: &Event, rules: &Rules) -> String {
     if event.by_hand {
         "split by you where the flats measure alike".into()
-    } else if vignetting_leads(event.dust, event.broad, event.vignetting, &limits_of(rules)) {
+    } else if vignetting_leads(
+        event.dust,
+        event.broad,
+        event.vignetting,
+        &rules.grouping_limits(),
+    ) {
         format!(
             "vignetting changed at the {}",
             event
@@ -142,6 +139,7 @@ pub fn describe_spots(spots: &[metric::Spot], dust: f64, broad: f64) -> String {
 
 /// The correction a light's flat master takes: the flats at its angle,
 /// from the other side of a change, carried across it by the change's map.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FlatCorrection {
     pub event: String,
@@ -156,6 +154,7 @@ pub struct FlatCorrection {
 }
 
 /// Why a light's flats are the ones they are.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(tag = "basis", rename_all = "snake_case")]
 pub enum FlatBasis {
@@ -209,6 +208,7 @@ pub enum FlatBasis {
 }
 
 /// A group of one family, as a light's account names it.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GroupNote {
     /// The family's label: "R at 104.0°".
@@ -219,7 +219,7 @@ pub struct GroupNote {
 }
 
 impl GroupNote {
-    pub(super) fn of(book: &Book, family: usize, group: usize) -> Option<Self> {
+    pub fn of(book: &Book, family: usize, group: usize) -> Option<Self> {
         let sessions = book.families.get(family)?.groups.get(group)?;
         let night = |index: usize| book.sessions[index].row.night.clone();
         Some(Self {
@@ -257,6 +257,7 @@ pub fn family_label(book: &Book, family: usize) -> String {
 }
 
 /// A person's choice for a light, as its account shows it.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChoiceNote {
     pub choice: overrides::LightChoice,
@@ -273,7 +274,7 @@ pub struct ChoiceNote {
 }
 
 impl ChoiceNote {
-    pub(super) fn of(row: &overrides::LightChoiceRow, orphaned: Option<String>) -> Option<Self> {
+    pub fn of(row: &overrides::LightChoiceRow, orphaned: Option<String>) -> Option<Self> {
         Some(Self {
             choice: row.choice?,
             change_key: (row.change_key != overrides::GROUP_CHOICE_KEY)
@@ -400,6 +401,7 @@ impl FlatBasis {
 /// The response family a light's flats come from, when grouping measured
 /// it: which family, how it was chosen, and the gate a stack holds the
 /// light to for it.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FlatFamily {
     /// The family's key (`model::Family::key`).
@@ -455,6 +457,7 @@ pub fn place_light(
 }
 
 /// A family's [`model::AlikeRange`] as a light's account names it.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AlikeRangeNote {
     /// The angle of the flats the light's master is built from.
@@ -471,11 +474,7 @@ pub struct AlikeRangeNote {
 }
 
 impl AlikeRangeNote {
-    pub(super) fn of(
-        range: &model::AlikeRange,
-        flats_angle: f64,
-        flats_group: Option<usize>,
-    ) -> Self {
+    pub fn of(range: &model::AlikeRange, flats_angle: f64, flats_group: Option<usize>) -> Self {
         Self {
             flats_angle,
             low: range.span.low,
@@ -489,7 +488,7 @@ impl AlikeRangeNote {
 }
 
 impl FlatFamily {
-    pub(super) fn of(book: &Book, choice: &lights::FamilyChoice) -> Self {
+    pub fn of(book: &Book, choice: &lights::FamilyChoice) -> Self {
         let label = |family: usize| family_label(book, family);
         Self {
             key: book.families[choice.family].key.clone(),

@@ -1,0 +1,6872 @@
+{
+  "$defs": {
+    "AlikeRange": {
+      "description": "Two angles a family's flats measure alike at: the family's own angle\nterm, from pairs of its sessions compared directly. A flat at one end\nserves the family's lights at the other (see [`AlikeRange::serves`]),\nfrom the light's side of every change.",
+      "properties": {
+        "arcs": {
+          "description": "The arc each alike pair it rests on spans, going round from `low`\nto `high`, never more than a half turn.",
+          "items": {
+            "$ref": "#/$defs/AngleSpan"
+          },
+          "type": "array"
+        },
+        "class": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ends": {
+          "description": "The recorded angles of the sessions at each end, the short way\nround from the first to the second.",
+          "items": {
+            "$ref": "#/$defs/AngleSpan"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        "endsNights": {
+          "items": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        "groups": {
+          "description": "The family's groups its pairs come from, and the carrying class\nthey share ([`Family::carry_class`]): it serves flats of the groups\nof that class only.",
+          "items": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "nights": {
+          "description": "Flat nights the pairs reach, both ends together.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pairs": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sessions": {
+          "description": "Distinct sessions and flat nights at each end.",
+          "items": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        "span": {
+          "$ref": "#/$defs/AngleSpan",
+          "description": "The span from the first end to the second."
+        }
+      },
+      "required": [
+        "ends",
+        "arcs",
+        "span",
+        "pairs",
+        "sessions",
+        "endsNights",
+        "nights",
+        "groups",
+        "class"
+      ],
+      "type": "object"
+    },
+    "AlikeRangeNote": {
+      "description": "A family's [`model::AlikeRange`] as a light's account names it.",
+      "properties": {
+        "carried": {
+          "description": "Its pairs were all measured in other groups of the family than the\nflats', across camera-side dust changes only.",
+          "type": "boolean"
+        },
+        "flatsAngle": {
+          "description": "The angle of the flats the light's master is built from.",
+          "format": "double",
+          "type": "number"
+        },
+        "high": {
+          "format": "double",
+          "type": "number"
+        },
+        "label": {
+          "description": "\"101.9–102.2° and 104.2°\": the angles at its two ends.",
+          "type": "string"
+        },
+        "low": {
+          "format": "double",
+          "type": "number"
+        },
+        "nights": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pairs": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "flatsAngle",
+        "low",
+        "high",
+        "label",
+        "pairs",
+        "nights",
+        "carried"
+      ],
+      "type": "object"
+    },
+    "AngleSpan": {
+      "description": "The recorded angles of one rotation cluster of a family, lowest to\nhighest going round the circle from `low`.",
+      "properties": {
+        "high": {
+          "format": "double",
+          "type": "number"
+        },
+        "low": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "low",
+        "high"
+      ],
+      "type": "object"
+    },
+    "AngleTerm": {
+      "description": "How much a rig's flats depend on the rotator angle: same-filter sessions\nat different angles shot within one flat session window.",
+      "properties": {
+        "broad": {
+          "format": "double",
+          "type": "number"
+        },
+        "dust": {
+          "format": "double",
+          "type": "number"
+        },
+        "pairs": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "pairs",
+        "dust",
+        "broad"
+      ],
+      "type": "object"
+    },
+    "Application": {
+      "additionalProperties": false,
+      "description": "How a session's flat applies, once its masters are built.",
+      "properties": {
+        "flatUse": {
+          "$ref": "#/$defs/FlatUse"
+        },
+        "pedestal": {
+          "description": "The pedestal subtracted before the flat, in ADU, for\n[`FlatUse::FittedPedestal`].",
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "pedestalHint": {
+          "description": "The pedestal the camera's recorded offset predicts: [`pedestal_hint`].",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "sampleLights": {
+          "description": "The lights to fit the pedestal from, for\n[`FlatUse::NeedsPedestalFit`]: [`pedestal_sample_lights`].",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "flatUse",
+        "sampleLights"
+      ],
+      "type": "object"
+    },
+    "Association": {
+      "oneOf": [
+        {
+          "const": "automatic",
+          "description": "Each light's frames chosen by time, cohort and validity.",
+          "type": "string"
+        },
+        {
+          "const": "one_set",
+          "description": "Every compatible frame of the kind taken whole, as one supplied set.",
+          "type": "string"
+        }
+      ]
+    },
+    "Boundary": {
+      "description": "Why two neighbouring groups stay apart.",
+      "properties": {
+        "after": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "before": {
+          "description": "The last session before and the first after, as indices into the\nbook's sessions.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "broad": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "byHand": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HandEdge"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Set when a person's choice, not the measurements, put it here: a\nsplit where the nights measure alike, or a split the measurements\nmake that a person joined (then it lies inside a group)."
+        },
+        "drift": {
+          "description": "When the neighbours themselves are alike but the groups are not: the\nworst pair across the boundary, by session index, and its distance.",
+          "maxItems": 3,
+          "minItems": 3,
+          "prefixItems": [
+            {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "format": "double",
+              "type": "number"
+            }
+          ],
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "dust": {
+          "description": "The neighbouring pair's metrics, fractions of the background; absent\nwhen that pair was not compared.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "end": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "family": {
+          "description": "Index into the book's families.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "opens": {
+          "description": "The first session of the later group: where the edge's window ends.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "spots": {
+          "items": {
+            "$ref": "#/$defs/Spot"
+          },
+          "type": "array"
+        },
+        "start": {
+          "description": "The last flat before and the first flat after, Unix seconds.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "vignetting": {
+          "description": "The neighbouring pair's deepest change of vignetting, and the\nchanges.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "vignettingChanges": {
+          "items": {
+            "$ref": "#/$defs/VignettingChange"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "family",
+        "before",
+        "after",
+        "start",
+        "end",
+        "vignettingChanges",
+        "spots",
+        "opens"
+      ],
+      "type": "object"
+    },
+    "CalibrationFrame": {
+      "additionalProperties": false,
+      "description": "One catalog row: a raw calibration frame, or a master another program\nintegrated.",
+      "properties": {
+        "bayerPattern": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "binningX": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "binningY": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "camera": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cameraTemp": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "capturedAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "channels": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "exposureS": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "filter": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "focalLengthMm": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "frameUuid": {
+          "default": "",
+          "type": "string"
+        },
+        "gain": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "height": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "default": 0,
+          "format": "int64",
+          "type": "integer"
+        },
+        "isMaster": {
+          "default": false,
+          "description": "An integrated master from other software rather than a raw frame.\nMatched leniently (its producer strips most settings) and used as a\nmaster as-is instead of being integrated.",
+          "type": "boolean"
+        },
+        "keptOut": {
+          "default": null,
+          "description": "Why this frame stays out of masters and exports: a person kept it\nout (\"by hand\"), or its grade is poor and this is the main finding.\nA frame not graded yet keeps the stray-light mark of the older dark\ncheck. Absent when the frame serves.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/CalibrationKind",
+          "default": "bias"
+        },
+        "offset": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "readoutMode": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "readoutModeName": {
+          "default": null,
+          "description": "The readout mode's name when the header spelled it that way, matched\nindependently of its numeric index.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rigUuid": {
+          "default": "",
+          "type": "string"
+        },
+        "rotation": {
+          "default": null,
+          "description": "Rotator angle in degrees at capture, when the rig recorded one.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "sourceFingerprint": {
+          "default": "",
+          "type": "string"
+        },
+        "sourcePath": {
+          "default": "",
+          "type": "string"
+        },
+        "sourceVerified": {
+          "default": false,
+          "description": "Set after the current file (or a basename-remapped file) has been\nchecked against this catalog row's hard settings.",
+          "type": "boolean"
+        },
+        "telescope": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "validDirection": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ValidDirection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "User-set validity boundary; absent means both directions."
+        },
+        "width": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "CalibrationKind": {
+      "enum": [
+        "bias",
+        "dark",
+        "dark_flat",
+        "flat"
+      ],
+      "type": "string"
+    },
+    "ChoiceNote": {
+      "description": "A person's choice for a light, as its account shows it.",
+      "properties": {
+        "changeKey": {
+          "description": "The change it is about, as recorded; none for a group.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "choice": {
+          "$ref": "#/$defs/LightChoice"
+        },
+        "chosenAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "label": {
+          "description": "What it was about, in words.",
+          "type": "string"
+        },
+        "orphaned": {
+          "description": "Why it does not apply, when it finds nothing to apply to. It stays\nrecorded until a person resets it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "choice",
+        "label",
+        "chosenAt"
+      ],
+      "type": "object"
+    },
+    "ChoiceOption": {
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "value",
+        "label"
+      ],
+      "type": "object"
+    },
+    "ComparisonRow": {
+      "additionalProperties": false,
+      "description": "Two sessions' metrics as the catalog keeps them.",
+      "properties": {
+        "broad": {
+          "format": "double",
+          "type": "number"
+        },
+        "broadX": {
+          "format": "double",
+          "type": "number"
+        },
+        "broadY": {
+          "format": "double",
+          "type": "number"
+        },
+        "dust": {
+          "format": "double",
+          "type": "number"
+        },
+        "earlierKey": {
+          "type": "string"
+        },
+        "laterKey": {
+          "type": "string"
+        },
+        "sigma": {
+          "format": "double",
+          "type": "number"
+        },
+        "spots": {
+          "items": {
+            "$ref": "#/$defs/Spot"
+          },
+          "type": "array"
+        },
+        "vignetting": {
+          "description": "The deepest change of vignetting, a fraction of the background: a\nshadow from the border that moved or deepened, such as a guider's\nprism turned with the camera. The flats differ, so it parts groups\nas dust does, but it is not dust.",
+          "format": "double",
+          "type": "number"
+        },
+        "vignettingChanges": {
+          "items": {
+            "$ref": "#/$defs/VignettingChange"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "earlierKey",
+        "laterKey",
+        "broad",
+        "dust",
+        "sigma",
+        "spots",
+        "broadX",
+        "broadY",
+        "vignetting",
+        "vignettingChanges"
+      ],
+      "type": "object"
+    },
+    "DarkMeasurement": {
+      "description": "What [`measure_dark`] found in one bias or dark frame. Values are in the\nframe's own sample units.",
+      "properties": {
+        "algorithmVersion": {
+          "default": 1,
+          "description": "[`super::FRAME_QUALITY_ALGORITHM_VERSION`] when this was measured.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "columnBanding": {
+          "description": "Robust spread of column means once a slow trend is removed.",
+          "format": "float",
+          "type": "number"
+        },
+        "height": {
+          "description": "Image height in pixels.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "hotPixels": {
+          "description": "Samples above [`Self::hot_threshold`].",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "hotThreshold": {
+          "description": "The level plus [`DarkMeasureOptions::hot_sigma`] times the noise.",
+          "format": "float",
+          "type": "number"
+        },
+        "level": {
+          "description": "Median of every sixteenth sample: the estimator\n`seiza_stacking::DarkLevel` uses.",
+          "format": "float",
+          "type": "number"
+        },
+        "noise": {
+          "description": "Pixel-scale noise from second differences, along whichever axis is\nquieter so banding does not inflate it. Outliers are clipped, and the\nrest give a root mean square, which moves smoothly even on integer\nsamples.",
+          "format": "float",
+          "type": "number"
+        },
+        "rowBanding": {
+          "description": "Robust spread of row means once a slow trend is removed.",
+          "format": "float",
+          "type": "number"
+        },
+        "sigma": {
+          "description": "Normal-equivalent median absolute deviation of those samples around\nthe level. It includes glow and pattern as well as noise.",
+          "format": "float",
+          "type": "number"
+        },
+        "width": {
+          "description": "Image width in pixels.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "width",
+        "height",
+        "level",
+        "sigma",
+        "noise",
+        "rowBanding",
+        "columnBanding",
+        "hotPixels",
+        "hotThreshold"
+      ],
+      "type": "object"
+    },
+    "DustFeature": {
+      "description": "One dust shadow. Positions and sizes are in sensor pixels.\n\nConstruct with [`Default::default`] and set what is known; more fields may\nbe added without a major version.",
+      "properties": {
+        "bottom": {
+          "description": "Last row the shadow covers.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "depth": {
+          "description": "How much light it takes, as a fraction of the response around it:\n0.1 means a tenth less light. A compact dip's deepest point; a disk's\nor donut's ring, never its bright centre.",
+          "format": "float",
+          "type": "number"
+        },
+        "distanceMm": {
+          "description": "How far in front of the sensor the dust sits, in millimetres, from\nthe shadow's diameter and the [`Optics`]; only for disks and donuts\nmeasured with optics.",
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "hole": {
+          "description": "A donut's hole: the radius of its bright centre as a fraction of\n[`Self::radius`].",
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "left": {
+          "description": "First column the shadow covers.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pixels": {
+          "description": "Sensor pixels the shadow covers.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "radius": {
+          "default": 0.0,
+          "description": "Radius: a disk's or donut's rim; for a compact dip, that of a disc of\nthe same area. 0 in measurements made before shapes were reported.",
+          "format": "float",
+          "type": "number"
+        },
+        "right": {
+          "description": "Last column the shadow covers.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "seenIn": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SeenIn"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "In how many of a session's flats it shows, where it was found on the\nsession's stack ([`find_session_dust`]). Dust holds still across\nflats shot a minute apart; noise does not."
+        },
+        "shape": {
+          "$ref": "#/$defs/DustShape",
+          "default": "compact",
+          "description": "What it looks like."
+        },
+        "top": {
+          "description": "First row the shadow covers.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "x": {
+          "description": "Centre column: the centroid of a compact dip, the rim's centre of a\ndisk or donut.",
+          "format": "float",
+          "type": "number"
+        },
+        "y": {
+          "description": "Centre row.",
+          "format": "float",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "left",
+        "top",
+        "right",
+        "bottom",
+        "pixels",
+        "depth"
+      ],
+      "type": "object"
+    },
+    "DustShape": {
+      "description": "What a dust feature looks like.",
+      "oneOf": [
+        {
+          "const": "compact",
+          "description": "A small dip, a few pixels to a few dozen across.",
+          "type": "string"
+        },
+        {
+          "const": "irregular",
+          "description": "A small dip that is not round: elongated or ragged, as dust on the\nwindow often is.",
+          "type": "string"
+        },
+        {
+          "const": "disk",
+          "description": "A filled out-of-focus disk.",
+          "type": "string"
+        },
+        {
+          "const": "donut",
+          "description": "An out-of-focus ring around a central obstruction's bright shadow.",
+          "type": "string"
+        },
+        {
+          "const": "patch",
+          "description": "A large shadow that is not one circle: overlapping out-of-focus\nshadows, each with a rim, that do not separate. Its radius is that of\na disc of the same area.",
+          "type": "string"
+        }
+      ]
+    },
+    "Edge": {
+      "description": "Which part of the border a vignetting shadow hangs from.",
+      "enum": [
+        "top",
+        "bottom",
+        "left",
+        "right",
+        "top_left",
+        "top_right",
+        "bottom_left",
+        "bottom_right"
+      ],
+      "type": "string"
+    },
+    "Effect": {
+      "description": "What changing a setting changes.",
+      "oneOf": [
+        {
+          "const": "matching",
+          "description": "Which frames a light's masters take: stacks build new masters.",
+          "type": "string"
+        },
+        {
+          "const": "flags",
+          "description": "What the light checks flag. Nothing is rebuilt; the checks run again\non the headers they kept.",
+          "type": "string"
+        },
+        {
+          "const": "grades",
+          "description": "How calibration frames are graded. Grading runs again on the stored\nmeasurements; a frame that turns poor leaves its masters.",
+          "type": "string"
+        }
+      ]
+    },
+    "Epoch": {
+      "description": "One run of lights of a rig with one sky − mechanical offset.",
+      "properties": {
+        "end": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "lights": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "offset": {
+          "description": "Sky − mechanical, degrees, modulo a half turn (see [`half`]).",
+          "format": "double",
+          "type": "number"
+        },
+        "start": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start",
+        "end",
+        "offset",
+        "lights"
+      ],
+      "type": "object"
+    },
+    "EpochSample": {
+      "additionalProperties": false,
+      "description": "A rig's sky-minus-mechanical angle, modulo a half turn, at a Unix time.",
+      "properties": {
+        "at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "offset": {
+          "format": "double",
+          "type": "number"
+        },
+        "rigUuid": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "rigUuid",
+        "at",
+        "offset"
+      ],
+      "type": "object"
+    },
+    "Event": {
+      "description": "A rig-wide change: boundaries of one rig that overlap in time and share\na spot.",
+      "properties": {
+        "boundaries": {
+          "description": "Indices into the book's boundaries.",
+          "items": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "broad": {
+          "format": "double",
+          "type": "number"
+        },
+        "byHand": {
+          "description": "Made only of splits a person made where the flats measure alike:\nthe person's word, not a measured change.",
+          "type": "boolean"
+        },
+        "cameraSide": {
+          "description": "Seen in two filters, or in two response families of one filter: on\nthe camera side, so it applies to every filter of the rig.",
+          "type": "boolean"
+        },
+        "dust": {
+          "format": "double",
+          "type": "number"
+        },
+        "end": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "families": {
+          "description": "The response families it was seen in, by index.",
+          "items": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "filters": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "key": {
+          "type": "string"
+        },
+        "rigUuid": {
+          "type": "string"
+        },
+        "rotations": {
+          "description": "The angle of each response family it was seen in.",
+          "items": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "type": "array"
+        },
+        "spots": {
+          "description": "The spots of the member with the most dust.",
+          "items": {
+            "$ref": "#/$defs/Spot"
+          },
+          "type": "array"
+        },
+        "start": {
+          "description": "The narrowest window any member gives.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "vignetting": {
+          "description": "The deepest change of vignetting among the members, and that\nmember's changes.",
+          "format": "double",
+          "type": "number"
+        },
+        "vignettingChanges": {
+          "items": {
+            "$ref": "#/$defs/VignettingChange"
+          },
+          "type": "array"
+        },
+        "withinFlatRun": {
+          "description": "The window is shorter than one flat run ([`FLAT_RUN_SECONDS`]): the\nchange landed between the flats of one twilight, or its members\nare two changes that met there.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "key",
+        "rigUuid",
+        "start",
+        "end",
+        "boundaries",
+        "filters",
+        "rotations",
+        "families",
+        "cameraSide",
+        "dust",
+        "broad",
+        "vignetting",
+        "vignettingChanges",
+        "spots",
+        "withinFlatRun",
+        "byHand"
+      ],
+      "type": "object"
+    },
+    "EventNote": {
+      "description": "A change as a light's account names it.",
+      "properties": {
+        "broad": {
+          "format": "double",
+          "type": "number"
+        },
+        "byHand": {
+          "description": "A split a person made where the flats measure alike, not a\nmeasured change.",
+          "type": "boolean"
+        },
+        "cameraSide": {
+          "type": "boolean"
+        },
+        "dust": {
+          "description": "Fractions of the background.",
+          "format": "double",
+          "type": "number"
+        },
+        "end": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "filters": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "key": {
+          "type": "string"
+        },
+        "start": {
+          "description": "The window it happened in, Unix seconds.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "what": {
+          "description": "\"new dust: 2 shadows near (1,460, 3,570)\".",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "start",
+        "end",
+        "dust",
+        "broad",
+        "cameraSide",
+        "filters",
+        "what"
+      ],
+      "type": "object"
+    },
+    "EventPlacement": {
+      "description": "An automatic event placement and the response pair from which a correction\nmap can be measured. Personal choices are returned separately on the light.",
+      "properties": {
+        "event": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "evidenceReference": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "mapSource": {
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "placement": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Placement"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "event"
+      ],
+      "type": "object"
+    },
+    "EvidenceFit": {
+      "additionalProperties": false,
+      "description": "One filter's fit within an imaging session.",
+      "properties": {
+        "carried": {
+          "description": "How much of the change the lights carry: 0 none, 1 all of it.",
+          "format": "double",
+          "type": "number"
+        },
+        "filter": {
+          "type": "string"
+        },
+        "lights": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "spread": {
+          "description": "Spread of that estimate over placebo positions; none when too few\nplacebos fit in the frame.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "targets": {
+          "description": "Targets the lights were of.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "verdict": {
+          "$ref": "#/$defs/Verdict"
+        }
+      },
+      "required": [
+        "filter",
+        "targets",
+        "lights",
+        "carried",
+        "verdict"
+      ],
+      "type": "object"
+    },
+    "EvidenceRow": {
+      "additionalProperties": false,
+      "properties": {
+        "eventKey": {
+          "type": "string"
+        },
+        "fits": {
+          "items": {
+            "$ref": "#/$defs/EvidenceFit"
+          },
+          "type": "array"
+        },
+        "sessionKey": {
+          "type": "string"
+        },
+        "verdict": {
+          "$ref": "#/$defs/Verdict"
+        }
+      },
+      "required": [
+        "sessionKey",
+        "eventKey",
+        "verdict",
+        "fits"
+      ],
+      "type": "object"
+    },
+    "Family": {
+      "description": "A family of sessions: one rig, filter, sensor mode and rotation cluster.",
+      "properties": {
+        "alikeRanges": {
+          "description": "The angles its flats measure alike at ([`AlikeRange`]), by their\nfirst end. Empty unless enough pairs measured alike.",
+          "items": {
+            "$ref": "#/$defs/AlikeRange"
+          },
+          "type": "array"
+        },
+        "angles": {
+          "description": "The recorded angles of each rotation cluster it joins, in angle\norder: its measured angle range. Empty for flats that record none.",
+          "items": {
+            "$ref": "#/$defs/AngleSpan"
+          },
+          "type": "array"
+        },
+        "boundaries": {
+          "description": "Indices into the book's boundaries, between consecutive groups.",
+          "items": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "carryClass": {
+          "description": "Per group, the class of groups an alike range carries across: the\nnext group shares its class only when the change between them is\ncamera-side dust ([`Book::carries_angle_term`]).",
+          "items": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "familyKey": {
+          "description": "The sessions' family key: rig, filter, optics and sensor mode,\nrotation aside.",
+          "type": "string"
+        },
+        "filter": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "groups": {
+          "description": "Session indices per group, in time order.",
+          "items": {
+            "items": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "joined": {
+          "description": "Measured splits a person joined, inside a group now: indices into\nthe book's boundaries, in time order.",
+          "items": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "key": {
+          "type": "string"
+        },
+        "rigUuid": {
+          "type": "string"
+        },
+        "rotation": {
+          "description": "The middle angle of its largest rotation cluster; absent for flats\nthat record none.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "sessions": {
+          "description": "Session indices in time order.",
+          "items": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "key",
+        "rigUuid",
+        "familyKey",
+        "angles",
+        "sessions",
+        "groups",
+        "boundaries",
+        "alikeRanges",
+        "carryClass",
+        "joined"
+      ],
+      "type": "object"
+    },
+    "FamilyBasis": {
+      "description": "How a light's response family was chosen.",
+      "oneOf": [
+        {
+          "description": "The only candidate, at the light's recorded angle.",
+          "properties": {
+            "by": {
+              "const": "angle",
+              "type": "string"
+            }
+          },
+          "required": [
+            "by"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Its imaging session's own lights follow this family's flats. `moved`\nwhen that is not the family at its recorded angle; a move stands\nonly when `corroborated` says what else points there.",
+          "properties": {
+            "by": {
+              "const": "pixels",
+              "type": "string"
+            },
+            "corroborated": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "lights": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "moved": {
+              "type": "boolean"
+            },
+            "targets": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "by",
+            "lights",
+            "targets",
+            "moved"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Two or more candidates, and its lights could not tell them apart\n(`undecided`) or have not been read: the family at its recorded\nangle stands.",
+          "properties": {
+            "by": {
+              "const": "nearest",
+              "type": "string"
+            },
+            "undecided": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "by",
+            "undecided"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Its lights point to another family (`pointed`) than the one at its\nrecorded angle, and nothing confirms it: it keeps the flats at its\nrecorded angle and is flagged.",
+          "properties": {
+            "by": {
+              "const": "disputed",
+              "type": "string"
+            },
+            "lights": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "targets": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "by",
+            "lights",
+            "targets"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A person chose one of its groups for the light.",
+          "properties": {
+            "by": {
+              "const": "person",
+              "type": "string"
+            }
+          },
+          "required": [
+            "by"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "FamilyChoice": {
+      "description": "The response family a light's flats come from.",
+      "properties": {
+        "atRecorded": {
+          "description": "Whether the family has flats at the light's recorded angle.",
+          "type": "boolean"
+        },
+        "basis": {
+          "$ref": "#/$defs/FamilyBasis"
+        },
+        "candidates": {
+          "description": "The candidates, nearest first.",
+          "items": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "family": {
+          "description": "Index into the book's families.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "lightAngle": {
+          "description": "The light's recorded angle.",
+          "format": "double",
+          "type": "number"
+        },
+        "shift": {
+          "description": "How far the light's angle turns into the chosen family's nearest\nsession's epoch: 0 when nothing re-homed.",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "family",
+        "basis",
+        "candidates",
+        "lightAngle",
+        "shift",
+        "atRecorded"
+      ],
+      "type": "object"
+    },
+    "FamilyEvidenceRow": {
+      "additionalProperties": false,
+      "description": "What some of an imaging session's lights said about which response\nfamily their flats come from: the lights of one filter, one target and\none recorded angle (lights within the rig's rotation tolerance of each\nother), so a background never mixes two fields or two angles.",
+      "properties": {
+        "angle": {
+          "description": "The lights' middle recorded angle, and the lowest and highest.",
+          "format": "double",
+          "type": "number"
+        },
+        "angleHigh": {
+          "format": "double",
+          "type": "number"
+        },
+        "angleLow": {
+          "format": "double",
+          "type": "number"
+        },
+        "candidates": {
+          "description": "The candidate families' keys.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "chosen": {
+          "description": "The family the lights follow, when one stood clear.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "end": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "filter": {
+          "description": "Canonical filter name.",
+          "type": "string"
+        },
+        "key": {
+          "description": "The candidates, the sessions standing for them, which of those\nmeasured alike, and the choice algorithm, digested\n(`Book::family_evidence_key`): a row whose key is not the current\none is not read.",
+          "type": "string"
+        },
+        "lights": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pairs": {
+          "description": "Each pair of candidates, as the lights' background fitted it.",
+          "items": {
+            "$ref": "#/$defs/FamilyPairRow"
+          },
+          "type": "array"
+        },
+        "sessionKey": {
+          "type": "string"
+        },
+        "start": {
+          "description": "The first and last of the lights, Unix seconds.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "target": {
+          "type": "string"
+        },
+        "targets": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "sessionKey",
+        "filter",
+        "target",
+        "angle",
+        "angleLow",
+        "angleHigh",
+        "start",
+        "end",
+        "key",
+        "candidates",
+        "lights",
+        "targets",
+        "pairs"
+      ],
+      "type": "object"
+    },
+    "FamilyPairRow": {
+      "additionalProperties": false,
+      "description": "One pair of candidate families against a session's background.",
+      "properties": {
+        "carried": {
+          "description": "0 follows `first`, 1 follows `second`; absent when nothing compact\ntells the two apart.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "first": {
+          "type": "string"
+        },
+        "outcome": {
+          "default": "",
+          "description": "`alike` (nothing compact tells them apart), `unfitted` (the\nbackground could not be weighed against them) or `fit`.",
+          "type": "string"
+        },
+        "second": {
+          "type": "string"
+        },
+        "spread": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "verdict": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Verdict"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "first",
+        "second"
+      ],
+      "type": "object"
+    },
+    "FamilyProbe": {
+      "description": "Inputs for a host's response-choice pixel pass. Candidate and representative\nindices refer to this snapshot. Reuse `key` on the resulting family evidence\nrow; changes to the candidates or their measurements invalidate old evidence.",
+      "properties": {
+        "candidates": {
+          "items": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "key": {
+          "type": "string"
+        },
+        "representatives": {
+          "items": {
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "key",
+        "candidates",
+        "representatives"
+      ],
+      "type": "object"
+    },
+    "FieldKind": {
+      "description": "What kind of value a setting holds, with its range.",
+      "oneOf": [
+        {
+          "properties": {
+            "max": {
+              "format": "double",
+              "type": "number"
+            },
+            "min": {
+              "format": "double",
+              "type": "number"
+            },
+            "step": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": {
+              "const": "number",
+              "type": "string"
+            },
+            "unit": {
+              "type": "string"
+            },
+            "zero": {
+              "description": "What zero means, when it means something other than zero.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "min",
+            "max",
+            "step",
+            "unit"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "max": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "min": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "count",
+              "type": "string"
+            },
+            "unit": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "min",
+            "max",
+            "unit"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "toggle",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "options": {
+              "items": {
+                "$ref": "#/$defs/ChoiceOption"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "choice",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "options"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A light check's mode. `levels` are the levels it raises on its own,\nso a check that only ever says \"check\" offers no advisory step.",
+          "properties": {
+            "levels": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": {
+              "const": "check",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "levels"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A frame grade's two limits, `{\"suspect\": x, \"poor\": y}`, either of\nwhich may be `null` for never. Stored as Seiza measures them;\n`percent` asks the panel to show them times a hundred.",
+          "properties": {
+            "lowerIsWorse": {
+              "type": "boolean"
+            },
+            "max": {
+              "format": "double",
+              "type": "number"
+            },
+            "min": {
+              "format": "double",
+              "type": "number"
+            },
+            "percent": {
+              "type": "boolean"
+            },
+            "step": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": {
+              "const": "limits",
+              "type": "string"
+            },
+            "unit": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "min",
+            "max",
+            "step",
+            "unit",
+            "percent",
+            "lowerIsWorse"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "FieldSpec": {
+      "description": "One setting.",
+      "properties": {
+        "default": true,
+        "effect": {
+          "$ref": "#/$defs/Effect"
+        },
+        "group": {
+          "$ref": "#/$defs/Group"
+        },
+        "help": {
+          "type": "string"
+        },
+        "key": {
+          "$ref": "#/$defs/SettingKey"
+        },
+        "kind": {
+          "$ref": "#/$defs/FieldKind"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "group",
+        "label",
+        "help",
+        "effect",
+        "kind",
+        "default"
+      ],
+      "type": "object"
+    },
+    "FileStamp": {
+      "additionalProperties": false,
+      "description": "A file's size and modification time, in nanoseconds since 1970.",
+      "properties": {
+        "modifiedNs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "size": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "size",
+        "modifiedNs"
+      ],
+      "type": "object"
+    },
+    "Finding": {
+      "description": "One measurement that crossed a limit, with the numbers behind it.",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/FindingCode",
+          "description": "What was measured."
+        },
+        "grade": {
+          "$ref": "#/$defs/Grade",
+          "description": "[`Grade::Suspect`] or [`Grade::Poor`]."
+        },
+        "limit": {
+          "description": "The limit it reached.",
+          "format": "double",
+          "type": "number"
+        },
+        "value": {
+          "description": "The measured value, in the unit [`Self::code`] names.",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "code",
+        "grade",
+        "value",
+        "limit"
+      ],
+      "type": "object"
+    },
+    "FindingCode": {
+      "description": "What a finding measured. The name is stable and machine-readable; each\nvariant says what [`Finding::value`] holds.",
+      "oneOf": [
+        {
+          "const": "clipped",
+          "description": "Flat: share of samples at full scale.",
+          "type": "string"
+        },
+        {
+          "const": "bright",
+          "description": "Flat: median of the brightest channel as a share of full scale.",
+          "type": "string"
+        },
+        {
+          "const": "dim",
+          "description": "Flat: median of the dimmest channel as a share of full scale.",
+          "type": "string"
+        },
+        {
+          "const": "illumination",
+          "description": "Flat: largest difference between this frame's illumination pattern\nand the set's, as a fraction of the response.",
+          "type": "string"
+        },
+        {
+          "const": "features",
+          "description": "Flat: compact dips in this frame, steady or not.",
+          "type": "string"
+        },
+        {
+          "const": "changing_features",
+          "description": "Flat: compact dips in this frame that do not hold steady across the\nset.",
+          "type": "string"
+        },
+        {
+          "const": "carried_features",
+          "description": "Flat set: changing dips present in more than half the frames, which a\nmedian-based master keeps.",
+          "type": "string"
+        },
+        {
+          "const": "level",
+          "description": "Bias: distance of this frame's level from the set median, in units of\nthe set's median pixel noise.",
+          "type": "string"
+        },
+        {
+          "const": "level_excess",
+          "description": "Dark: how far this frame's level sits above the quietest frame's, in\nunits of that frame's robust pixel spread. Light reaching the sensor\nlifts the level.",
+          "type": "string"
+        },
+        {
+          "const": "noise",
+          "description": "Bias or dark: pixel noise as a ratio to the set median.",
+          "type": "string"
+        },
+        {
+          "const": "row_banding",
+          "description": "Bias or dark: spread of row levels as a ratio to the pixel noise.",
+          "type": "string"
+        },
+        {
+          "const": "column_banding",
+          "description": "Bias or dark: spread of column levels as a ratio to the pixel noise.",
+          "type": "string"
+        },
+        {
+          "const": "hot_pixels",
+          "description": "Dark: hot pixel count as a ratio to the set median.",
+          "type": "string"
+        }
+      ]
+    },
+    "Fit": {
+      "description": "A background weighed against one change: how much of it the background\ncarries, how sure that is, and the side that says.",
+      "properties": {
+        "carried": {
+          "description": "How much of the change the lights carry: 0 none, 1 all of it.",
+          "format": "double",
+          "type": "number"
+        },
+        "spread": {
+          "description": "Spread of that estimate over placebo positions; infinite when no\nshadow had room for enough placebos (written as `null`).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "verdict": {
+          "$ref": "#/$defs/Verdict",
+          "description": "The side the fit decides for, or undecided."
+        }
+      },
+      "required": [
+        "carried",
+        "verdict"
+      ],
+      "type": "object"
+    },
+    "FlatAttempt": {
+      "additionalProperties": false,
+      "description": "One flat master build, as its judgement needs it: the frames the\nintegrator combined and how far each disagreed with the master.",
+      "properties": {
+        "disagreement": {
+          "default": [],
+          "description": "For each of `used`, the master's feature pixels it disagrees at;\nempty when the stability was not measured.",
+          "items": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "driftThreshold": {
+          "default": 0,
+          "description": "The disagreement at which a frame drifts: it was looking through a\ndifferent sensor window.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "featurePixels": {
+          "default": 0,
+          "description": "The master's feature pixels the frames were compared at.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "label": {
+          "default": null,
+          "description": "What a note calls the set; \"20 G flats from 2026-09-10\" when absent.\nNever affects the decision.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "memo": {
+          "default": false,
+          "description": "A remembered judgement of a set once found unstable: its record\nremains, its file does not, so it never serves as it is.",
+          "type": "boolean"
+        },
+        "used": {
+          "default": [],
+          "description": "The frames combined, by UUID, in the order they were offered.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "FlatBasis": {
+      "description": "Why a light's flats are the ones they are.",
+      "oneOf": [
+        {
+          "description": "No measured change touches the light: the nearest flats, as always.",
+          "properties": {
+            "basis": {
+              "const": "nearest",
+              "type": "string"
+            }
+          },
+          "required": [
+            "basis"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Flats from the light's own side of each change near it.",
+          "properties": {
+            "basis": {
+              "const": "same_side",
+              "type": "string"
+            },
+            "event": {
+              "$ref": "#/$defs/EventNote"
+            },
+            "leftOut": {
+              "description": "Matching flats left out for being on the other side.",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "placement": {
+              "$ref": "#/$defs/Placement"
+            }
+          },
+          "required": [
+            "basis",
+            "event",
+            "placement",
+            "leftOut"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "None at its angle on its side; flats from the nearest other angle on\nits side, which this rig's measurements allow.",
+          "properties": {
+            "angleTerm": {
+              "$ref": "#/$defs/AngleTerm"
+            },
+            "basis": {
+              "const": "other_angle",
+              "type": "string"
+            },
+            "event": {
+              "$ref": "#/$defs/EventNote"
+            },
+            "placement": {
+              "$ref": "#/$defs/Placement"
+            },
+            "rotation": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "rotationToleranceDeg": {
+              "description": "The rotation tolerance the stacker must hold this light to so\nthose flats pass: the angle between them and the light, plus the\nrig's own tolerance. Absent when either angle is unknown.",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "basis",
+            "event",
+            "placement",
+            "angleTerm"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "None on its side at any allowed angle; flats at its angle from the\nother side, carried across by the change's map.",
+          "properties": {
+            "basis": {
+              "const": "corrected",
+              "type": "string"
+            },
+            "correction": {
+              "$ref": "#/$defs/FlatCorrection"
+            },
+            "event": {
+              "$ref": "#/$defs/EventNote"
+            },
+            "placement": {
+              "$ref": "#/$defs/Placement"
+            }
+          },
+          "required": [
+            "basis",
+            "event",
+            "placement",
+            "correction"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Its flats are all from the other side of a change, and nothing can\nstand in.",
+          "properties": {
+            "basis": {
+              "const": "no_same_side",
+              "type": "string"
+            },
+            "event": {
+              "$ref": "#/$defs/EventNote"
+            },
+            "placement": {
+              "$ref": "#/$defs/Placement"
+            }
+          },
+          "required": [
+            "basis",
+            "event",
+            "placement"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Shot while a change happened; nothing tells which side it is on.",
+          "properties": {
+            "basis": {
+              "const": "undetermined",
+              "type": "string"
+            },
+            "event": {
+              "$ref": "#/$defs/EventNote"
+            },
+            "placement": {
+              "$ref": "#/$defs/Placement"
+            },
+            "then": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/FlatBasis"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What another change it does stand clear of chose, such as\nanother angle's flats or a correction: its flats and gate are\nthat one's, and the light keeps its Check for this one."
+            }
+          },
+          "required": [
+            "basis",
+            "event",
+            "placement"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A person chose the group its flats come from, over every change.",
+          "properties": {
+            "basis": {
+              "const": "group",
+              "type": "string"
+            },
+            "group": {
+              "$ref": "#/$defs/GroupNote"
+            }
+          },
+          "required": [
+            "basis",
+            "group"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "FlatChangeFilter": {
+      "additionalProperties": false,
+      "properties": {
+        "after": {
+          "$ref": "#/$defs/ResponseRow"
+        },
+        "before": {
+          "$ref": "#/$defs/ResponseRow"
+        },
+        "filter": {
+          "type": "string"
+        },
+        "pedestalAdu": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "reference": {
+          "$ref": "#/$defs/ResponseRow"
+        },
+        "referenceSide": {
+          "$ref": "#/$defs/Side"
+        },
+        "sampleLights": {
+          "items": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "targets": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "vignettingChanges": {
+          "items": {
+            "$ref": "#/$defs/VignettingChange"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "filter",
+        "sampleLights",
+        "targets",
+        "reference",
+        "referenceSide",
+        "before",
+        "after",
+        "vignettingChanges"
+      ],
+      "type": "object"
+    },
+    "FlatChangeQuestion": {
+      "additionalProperties": false,
+      "properties": {
+        "answered": {
+          "type": "boolean"
+        },
+        "eventKey": {
+          "type": "string"
+        },
+        "filters": {
+          "items": {
+            "$ref": "#/$defs/FlatChangeFilter"
+          },
+          "type": "array"
+        },
+        "rigUuid": {
+          "type": "string"
+        },
+        "sessionKey": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionKey",
+        "eventKey",
+        "rigUuid",
+        "answered",
+        "filters"
+      ],
+      "type": "object"
+    },
+    "FlatCorrection": {
+      "description": "The correction a light's flat master takes: the flats at its angle,\nfrom the other side of a change, carried across it by the change's map.",
+      "properties": {
+        "afterResponse": {
+          "type": "string"
+        },
+        "beforeResponse": {
+          "description": "The before and after sessions the map is measured from.",
+          "type": "string"
+        },
+        "event": {
+          "type": "string"
+        },
+        "key": {
+          "description": "Key of the correction, for master and stack identities.",
+          "type": "string"
+        },
+        "lightSide": {
+          "$ref": "#/$defs/Side",
+          "description": "The side the light is on: `before` divides the flats by the map,\n`after` multiplies."
+        }
+      },
+      "required": [
+        "event",
+        "beforeResponse",
+        "afterResponse",
+        "lightSide",
+        "key"
+      ],
+      "type": "object"
+    },
+    "FlatCorrectionPlan": {
+      "properties": {
+        "after": {
+          "$ref": "#/$defs/ResponseRow"
+        },
+        "before": {
+          "$ref": "#/$defs/ResponseRow"
+        },
+        "bin": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "correction": {
+          "$ref": "#/$defs/FlatCorrection"
+        },
+        "divide": {
+          "type": "boolean"
+        },
+        "lightIndices": {
+          "items": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "lightIndices",
+        "correction",
+        "before",
+        "after",
+        "bin",
+        "divide"
+      ],
+      "type": "object"
+    },
+    "FlatFamily": {
+      "description": "The response family a light's flats come from, when grouping measured\nit: which family, how it was chosen, and the gate a stack holds the\nlight to for it.",
+      "oneOf": [
+        {
+          "description": "The only candidate, at the light's recorded angle.",
+          "properties": {
+            "by": {
+              "const": "angle",
+              "type": "string"
+            }
+          },
+          "required": [
+            "by"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Its imaging session's own lights follow this family's flats. `moved`\nwhen that is not the family at its recorded angle; a move stands\nonly when `corroborated` says what else points there.",
+          "properties": {
+            "by": {
+              "const": "pixels",
+              "type": "string"
+            },
+            "corroborated": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "lights": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "moved": {
+              "type": "boolean"
+            },
+            "targets": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "by",
+            "lights",
+            "targets",
+            "moved"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Two or more candidates, and its lights could not tell them apart\n(`undecided`) or have not been read: the family at its recorded\nangle stands.",
+          "properties": {
+            "by": {
+              "const": "nearest",
+              "type": "string"
+            },
+            "undecided": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "by",
+            "undecided"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Its lights point to another family (`pointed`) than the one at its\nrecorded angle, and nothing confirms it: it keeps the flats at its\nrecorded angle and is flagged.",
+          "properties": {
+            "by": {
+              "const": "disputed",
+              "type": "string"
+            },
+            "lights": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "targets": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "by",
+            "lights",
+            "targets"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A person chose one of its groups for the light.",
+          "properties": {
+            "by": {
+              "const": "person",
+              "type": "string"
+            }
+          },
+          "required": [
+            "by"
+          ],
+          "type": "object"
+        }
+      ],
+      "properties": {
+        "alikeRange": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AlikeRangeNote"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "When those flats lie at another angle inside a span the family's\nflats measure alike across: the span and its evidence."
+        },
+        "atRecorded": {
+          "description": "Whether the family has flats at the light's recorded angle.",
+          "type": "boolean"
+        },
+        "candidates": {
+          "description": "The candidates within the angle prior, nearest first, as labels.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "key": {
+          "description": "The family's key (`model::Family::key`).",
+          "type": "string"
+        },
+        "label": {
+          "description": "Its filter, as the flats name it, and measured angle range: \"Ha at\n72.6° & 82.2°\".",
+          "type": "string"
+        },
+        "lightAngle": {
+          "description": "The light's recorded angle, and how far the rotator's epochs turn\nit into the family's nearest session.",
+          "format": "double",
+          "type": "number"
+        },
+        "lightRotation": {
+          "$ref": "#/$defs/LightRotation",
+          "description": "How the stacker's gate reads the light's angle: as recorded, or as\nthe angle of the flats its master is built from when measurement\ngave it flats at another angle (seiza-calibration's\n`LightRotation`)."
+        },
+        "pointed": {
+          "description": "The family its lights pointed to, when that move was not confirmed\n(`disputed`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "shift": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "key",
+        "label",
+        "atRecorded",
+        "lightAngle",
+        "shift",
+        "candidates",
+        "lightRotation"
+      ],
+      "type": "object"
+    },
+    "FlatFamilyCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "angleGap": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "key": {
+          "type": "string"
+        },
+        "response": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResponseRow"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "type": "object"
+    },
+    "FlatFamilyQuestion": {
+      "additionalProperties": false,
+      "properties": {
+        "alike": {
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            ],
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "angle": {
+          "format": "double",
+          "type": "number"
+        },
+        "angleHigh": {
+          "format": "double",
+          "type": "number"
+        },
+        "angleLow": {
+          "format": "double",
+          "type": "number"
+        },
+        "answered": {
+          "type": "boolean"
+        },
+        "candidates": {
+          "items": {
+            "$ref": "#/$defs/FlatFamilyCandidate"
+          },
+          "type": "array"
+        },
+        "end": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "filter": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "pedestalAdu": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "rigUuid": {
+          "type": "string"
+        },
+        "sampleLights": {
+          "description": "IDs refer to FlatLightContext, defaulting to the library light's index.",
+          "items": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "sessionKey": {
+          "type": "string"
+        },
+        "start": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "target": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionKey",
+        "rigUuid",
+        "filter",
+        "target",
+        "angle",
+        "angleLow",
+        "angleHigh",
+        "start",
+        "end",
+        "key",
+        "answered",
+        "sampleLights",
+        "candidates",
+        "alike"
+      ],
+      "type": "object"
+    },
+    "FlatGroupPlan": {
+      "description": "A flat group plan: the book a request's rows make, and where each of its\nlights stands. Indices refer to this plan's arrays, never to host\ndatabase rows. Keyed outputs are sorted lists of pairs, so their wire\nformat is stable.",
+      "properties": {
+        "algorithmVersion": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "angleTerms": {
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/$defs/AngleTerm"
+              }
+            ],
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "boundaries": {
+          "items": {
+            "$ref": "#/$defs/Boundary"
+          },
+          "type": "array"
+        },
+        "epochs": {
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "$ref": "#/$defs/Epoch"
+                },
+                "type": "array"
+              }
+            ],
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "events": {
+          "items": {
+            "$ref": "#/$defs/Event"
+          },
+          "type": "array"
+        },
+        "families": {
+          "items": {
+            "$ref": "#/$defs/Family"
+          },
+          "type": "array"
+        },
+        "imaging": {
+          "items": {
+            "$ref": "#/$defs/ImagingSession"
+          },
+          "type": "array"
+        },
+        "lights": {
+          "items": {
+            "$ref": "#/$defs/LightResult"
+          },
+          "type": "array"
+        },
+        "outliers": {
+          "items": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "overrides": {
+          "items": {
+            "$ref": "#/$defs/OverrideState"
+          },
+          "type": "array"
+        },
+        "pairsToCompare": {
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            ],
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "sessions": {
+          "items": {
+            "$ref": "#/$defs/Session2"
+          },
+          "type": "array"
+        },
+        "sessionsInWindows": {
+          "items": {
+            "maxItems": 3,
+            "minItems": 3,
+            "prefixItems": [
+              {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "sessionsNeedingEvidence": {
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            ],
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "spanning": {
+          "items": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "algorithmVersion",
+        "imaging",
+        "sessions",
+        "families",
+        "boundaries",
+        "events",
+        "overrides",
+        "outliers",
+        "spanning",
+        "angleTerms",
+        "epochs",
+        "pairsToCompare",
+        "sessionsInWindows",
+        "sessionsNeedingEvidence",
+        "lights"
+      ],
+      "type": "object"
+    },
+    "FlatLightContext": {
+      "additionalProperties": false,
+      "properties": {
+        "excluded": {
+          "default": false,
+          "type": "boolean"
+        },
+        "id": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "lightIndex": {
+          "default": 0,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pedestalAdu": {
+          "default": null,
+          "description": "Optional cached host pedestal. None uses the library's bias level at\nthe light's gain and offset.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "profile": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "FlatRecord": {
+      "description": "A flat's measurement, with the light cone its header recorded so its\nsession's dust, found later on the stack, can be placed too. Stored as\nthe measurement's own fields plus `optics`.",
+      "properties": {
+        "algorithmVersion": {
+          "default": 1,
+          "description": "[`FLAT_QUALITY_ALGORITHM_VERSION`] when this was measured; 1 when\nstored without one.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "channelLevels": {
+          "description": "Median of each channel: one entry for mono, three for RGB, and four\nfor a CFA frame, one per site of the 2x2 pattern in the order top\nleft, top right, bottom left, bottom right.",
+          "items": {
+            "format": "float",
+            "type": "number"
+          },
+          "type": "array"
+        },
+        "clippedFraction": {
+          "description": "Share of finite samples within 0.1% of full scale.",
+          "format": "double",
+          "type": "number"
+        },
+        "detectionDepth": {
+          "description": "How deep a dip had to be to count as a feature in this frame: the\nlarger of the configured depth and the configured multiple of the\nsmoothed noise.",
+          "format": "float",
+          "type": "number"
+        },
+        "featureCount": {
+          "description": "Features found, including any beyond the kept list.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "features": {
+          "description": "Large features (disks, donuts, patches) first, deepest first, then\ncompact and irregular dips, deepest first; at most 100,000.",
+          "items": {
+            "$ref": "#/$defs/DustFeature"
+          },
+          "type": "array"
+        },
+        "fullScale": {
+          "description": "The full-scale value the frame was measured against.",
+          "format": "float",
+          "type": "number"
+        },
+        "height": {
+          "description": "Image height in pixels.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "illumination": {
+          "$ref": "#/$defs/IlluminationProfile",
+          "description": "Coarse illumination map."
+        },
+        "level": {
+          "description": "Median sample.",
+          "format": "float",
+          "type": "number"
+        },
+        "noise": {
+          "description": "Pixel-scale noise of the response, as a fraction of it. A CFA frame\nis measured on its 2x2 sums.",
+          "format": "float",
+          "type": "number"
+        },
+        "optics": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Optics"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "vignetting": {
+          "default": [],
+          "description": "Shadows hanging from the border that are not the image circle's own\nfall-off: an off-axis guider's prism, a filter holder.",
+          "items": {
+            "$ref": "#/$defs/Vignetting"
+          },
+          "type": "array"
+        },
+        "width": {
+          "description": "Image width in pixels.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "width",
+        "height",
+        "fullScale",
+        "level",
+        "channelLevels",
+        "clippedFraction",
+        "noise",
+        "detectionDepth",
+        "illumination",
+        "featureCount",
+        "features"
+      ],
+      "type": "object"
+    },
+    "FlatResponsePlan": {
+      "properties": {
+        "row": {
+          "$ref": "#/$defs/ResponseRow"
+        },
+        "sampleFrames": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "row",
+        "sampleFrames"
+      ],
+      "type": "object"
+    },
+    "FlatResponsePlans": {
+      "properties": {
+        "algorithmVersion": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "grades": {
+          "items": {
+            "$ref": "#/$defs/FrameGrade"
+          },
+          "type": "array"
+        },
+        "limits": {
+          "items": {
+            "$ref": "#/$defs/RigLimits"
+          },
+          "type": "array"
+        },
+        "nightBoundaries": {
+          "items": {
+            "$ref": "#/$defs/NightBoundary"
+          },
+          "type": "array"
+        },
+        "plans": {
+          "items": {
+            "$ref": "#/$defs/FlatResponsePlan"
+          },
+          "type": "array"
+        },
+        "unplanned": {
+          "description": "Eligible raw flats without a capture time cannot establish night/change evidence.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "algorithmVersion",
+        "plans",
+        "limits",
+        "nightBoundaries",
+        "unplanned",
+        "grades"
+      ],
+      "type": "object"
+    },
+    "FlatRetryAction": {
+      "description": "What a flat master does next.",
+      "oneOf": [
+        {
+          "const": "publish_first",
+          "description": "Publish the first build: it is stable, or nothing replaces it.",
+          "type": "string"
+        },
+        {
+          "const": "try_trimmed",
+          "description": "Build again from [`FlatRetryDecision::inputs`], the first set less\nthe frames that drift.",
+          "type": "string"
+        },
+        {
+          "const": "publish_trimmed",
+          "description": "Publish the trimmed build.",
+          "type": "string"
+        },
+        {
+          "const": "try_alternate",
+          "description": "Build the next flat session, [`FlatRetryDecision::inputs`].",
+          "type": "string"
+        },
+        {
+          "const": "publish_alternate",
+          "description": "Publish the next session's build.",
+          "type": "string"
+        },
+        {
+          "const": "withhold",
+          "description": "Publish no flat master: the set is unstable and the policy keeps\nnone such.",
+          "type": "string"
+        }
+      ]
+    },
+    "FlatRetryDecision": {
+      "description": "A flat retry's next step.",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/FlatRetryAction"
+        },
+        "inputs": {
+          "description": "The frames to build, by UUID, for a `Try` action; empty otherwise.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "note": {
+          "description": "What the master's card says about the choice.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rebuildFirst": {
+          "description": "The first build is a memo: should it serve, build it again for real\nfirst.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "action",
+        "inputs",
+        "rebuildFirst"
+      ],
+      "type": "object"
+    },
+    "FlatRetryPolicy": {
+      "additionalProperties": false,
+      "description": "Which retries a flat master may take when its frames disagree about\nspots that come and go. The default is PSF Guard's: leave a minority\nout, else take the next session, else keep the set and say so.",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "description": "Judge a flat set at all; off, the first build always serves.",
+          "type": "boolean"
+        },
+        "retainUnstable": {
+          "default": true,
+          "description": "Keep an unstable set nothing replaces, with a note, rather than\nwithhold the flat.",
+          "type": "boolean"
+        },
+        "trimUnstable": {
+          "default": true,
+          "description": "Rebuild without a minority of frames that disagree.",
+          "type": "boolean"
+        },
+        "tryNextSession": {
+          "default": true,
+          "description": "Take the next flat session when the set as a whole disagrees.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "FlatRetryRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "alternate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FlatAttempt"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "alternateAttempted": {
+          "default": false,
+          "type": "boolean"
+        },
+        "candidates": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CalibrationFrame"
+          },
+          "type": "array"
+        },
+        "first": {
+          "$ref": "#/$defs/FlatAttempt",
+          "default": {
+            "disagreement": [],
+            "drift_threshold": 0,
+            "feature_pixels": 0,
+            "label": null,
+            "memo": false,
+            "used": []
+          }
+        },
+        "heldBack": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FlatRetryPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "session": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Session"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Pass the returned session directly to retain its policy, held-back rows\nand resolved time window. Conflicting explicit overrides are rejected."
+        },
+        "settings": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Setting"
+          },
+          "type": "array"
+        },
+        "trimmed": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FlatAttempt"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "trimmedAttempted": {
+          "default": false,
+          "description": "Set true when the retry failed/yielded no master. Successful feedback\nimplies attempted, so callers need not duplicate that state.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "FlatSetStability": {
+      "description": "How the frames of one flat set agree about the features their master\nkept. A feature every frame shows the same way is a real property of the\noptical path (a dust shadow, a dead cluster) and corrects the lights. A\nfeature the frames disagree about was changing while they were shot, and\nthe master's copy of it corrects nothing.",
+      "properties": {
+        "algorithmVersion": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "disagreement": {
+          "description": "Per input frame, in `frames` order. Unreadable/incompatible inputs\nreach the drift threshold; deliberately skipped inputs are zero.",
+          "items": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "driftThreshold": {
+          "description": "Disagreeing pixels at or above which a frame counts as drifting: a\nshare of the sensor rather than of the features, so a dusty optical\npath with many honest features cannot hide a droplet run.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "errors": {
+          "description": "Input index and diagnostic for unreadable or incompatible sources.",
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "featurePixels": {
+          "description": "Master pixels that depart from the smooth response around them.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "algorithmVersion",
+        "errors",
+        "featurePixels",
+        "driftThreshold",
+        "disagreement"
+      ],
+      "type": "object"
+    },
+    "FlatStabilityBayer": {
+      "additionalProperties": false,
+      "description": "CFA pattern and phase for cached mono images. Offsets are zero or one.",
+      "properties": {
+        "pattern": {
+          "type": "string"
+        },
+        "xOffset": {
+          "default": 0,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "yOffset": {
+          "default": 0,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "pattern"
+      ],
+      "type": "object"
+    },
+    "FlatStabilityFileRequest": {
+      "additionalProperties": false,
+      "description": "File form of the loaded-master measurement, shared by C and Python.",
+      "properties": {
+        "bias": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dark": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "darkExposureSeconds": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "inputs": {
+          "items": {
+            "$ref": "#/$defs/FlatStabilityInput"
+          },
+          "type": "array"
+        },
+        "master": {
+          "type": "string"
+        },
+        "normalizedFullScale": {
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "master",
+        "inputs"
+      ],
+      "type": "object"
+    },
+    "FlatStabilityImageMetadata": {
+      "additionalProperties": false,
+      "description": "Metadata for a cached source image. Pixels must already use the same units\nas the master and optional bias/dark; no file headers or rescaling are used.",
+      "properties": {
+        "bayer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FlatStabilityBayer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "exposureSeconds": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "skipped": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "FlatStabilityImageOptions": {
+      "additionalProperties": false,
+      "description": "Options shared by the C buffer and Python NumPy measurement entry points.",
+      "properties": {
+        "bayer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FlatStabilityBayer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Default CFA layout for the master, sources and dark. A source may override it."
+        },
+        "darkBiasSubtracted": {
+          "default": false,
+          "type": "boolean"
+        },
+        "darkExposureSeconds": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "inputs": {
+          "default": [],
+          "description": "Empty uses default metadata for every source; otherwise aligned to inputs.",
+          "items": {
+            "$ref": "#/$defs/FlatStabilityImageMetadata"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "FlatStabilityInput": {
+      "additionalProperties": false,
+      "properties": {
+        "exposureSeconds": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "skipped": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "FlatUse": {
+      "description": "How a session's flat master applies to its lights.",
+      "oneOf": [
+        {
+          "const": "unavailable",
+          "description": "No flat master serves.",
+          "type": "string"
+        },
+        {
+          "const": "with_masters",
+          "description": "After a bias or dark master removed the pedestal.",
+          "type": "string"
+        },
+        {
+          "const": "needs_pedestal_fit",
+          "description": "With neither master: a pedestal must be fitted from sample lights\nfirst ([`Application::sample_lights`]).",
+          "type": "string"
+        },
+        {
+          "const": "fitted_pedestal",
+          "description": "After subtracting the pedestal fitted from the lights.",
+          "type": "string"
+        },
+        {
+          "const": "forced_without_pedestal",
+          "description": "With neither master nor a pedestal, because the host forced it:\nvignetted edges may brighten.",
+          "type": "string"
+        },
+        {
+          "const": "withheld",
+          "description": "Not at all: no reliable pedestal could be fitted.",
+          "type": "string"
+        }
+      ]
+    },
+    "FlatWorkAnswer": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "choice": {
+              "$ref": "#/$defs/ResponseChoice"
+            },
+            "kind": {
+              "const": "family",
+              "type": "string"
+            },
+            "lights": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "question": {
+              "$ref": "#/$defs/FlatFamilyQuestion"
+            }
+          },
+          "required": [
+            "kind",
+            "question",
+            "choice",
+            "lights"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "fits": {
+              "items": {
+                "$ref": "#/$defs/EvidenceFit"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "const": "change",
+              "type": "string"
+            },
+            "question": {
+              "$ref": "#/$defs/FlatChangeQuestion"
+            }
+          },
+          "required": [
+            "kind",
+            "question",
+            "fits"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "FlatWorkPlans": {
+      "properties": {
+        "algorithmVersion": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "changes": {
+          "items": {
+            "$ref": "#/$defs/FlatChangeQuestion"
+          },
+          "type": "array"
+        },
+        "corrections": {
+          "items": {
+            "$ref": "#/$defs/FlatCorrectionPlan"
+          },
+          "type": "array"
+        },
+        "families": {
+          "items": {
+            "$ref": "#/$defs/FlatFamilyQuestion"
+          },
+          "type": "array"
+        },
+        "grouping": {
+          "$ref": "#/$defs/Request2",
+          "description": "Feed evidence answers back into this resolved request. All manual rows\nand catalog imaging sessions are preserved."
+        },
+        "overrides": {
+          "items": {
+            "$ref": "#/$defs/OverrideState"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "algorithmVersion",
+        "grouping",
+        "families",
+        "changes",
+        "corrections",
+        "overrides"
+      ],
+      "type": "object"
+    },
+    "FlatWorkRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "library": {
+          "$ref": "#/$defs/Request",
+          "default": {
+            "available_responses": [],
+            "dark_association": "automatic",
+            "flat_association": "automatic",
+            "flat_stability": {
+              "enabled": true,
+              "retain_unstable": true,
+              "trim_unstable": true,
+              "try_next_session": true
+            },
+            "flat_star_masking": false,
+            "force_flat_without_pedestal": false,
+            "frames": [],
+            "global_settings": [],
+            "grouping": {
+              "comparisons": [],
+              "epoch_samples": [],
+              "evidence": [],
+              "family_evidence": [],
+              "group_overrides": [],
+              "imaging": [],
+              "imaging_lights": [],
+              "light_choices": [],
+              "lights": [],
+              "limits": [],
+              "night_boundaries": [],
+              "profile_rigs": [],
+              "responses": []
+            },
+            "lights": [],
+            "master_failures": [],
+            "night_shifts": [],
+            "pedestal_evidence": [],
+            "quality": [],
+            "regrade": false,
+            "rigs": []
+          }
+        },
+        "lightContext": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/FlatLightContext"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "FlatWorkResult": {
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "family",
+              "type": "string"
+            },
+            "row": {
+              "$ref": "#/$defs/FamilyEvidenceRow"
+            }
+          },
+          "required": [
+            "kind",
+            "row"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "change",
+              "type": "string"
+            },
+            "row": {
+              "$ref": "#/$defs/EvidenceRow"
+            }
+          },
+          "required": [
+            "kind",
+            "row"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "FrameGrade": {
+      "properties": {
+        "frameUuid": {
+          "type": "string"
+        },
+        "judged": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Judged"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "keptOut": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "measureError": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "measurementState": {
+          "$ref": "#/$defs/MeasurementState"
+        }
+      },
+      "required": [
+        "frameUuid",
+        "measurementState"
+      ],
+      "type": "object"
+    },
+    "Grade": {
+      "description": "How a frame came out of screening, from best to worst.",
+      "oneOf": [
+        {
+          "const": "ok",
+          "description": "Nothing crossed a limit.",
+          "type": "string"
+        },
+        {
+          "const": "suspect",
+          "description": "Something crossed the first limit: worth a look before use.",
+          "type": "string"
+        },
+        {
+          "const": "poor",
+          "description": "Something crossed the second limit: likely to harm a master.",
+          "type": "string"
+        }
+      ]
+    },
+    "Group": {
+      "description": "Where the panel shows a setting.",
+      "enum": [
+        "matching",
+        "darks",
+        "flat_groups",
+        "checks",
+        "grades"
+      ],
+      "type": "string"
+    },
+    "GroupChoice": {
+      "description": "What a person did to one edge between groups.",
+      "oneOf": [
+        {
+          "const": "split",
+          "description": "A new group starts at the session.",
+          "type": "string"
+        },
+        {
+          "const": "join",
+          "description": "The session's group and the one before it are one.",
+          "type": "string"
+        }
+      ]
+    },
+    "GroupNote": {
+      "description": "A group of one family, as a light's account names it.",
+      "properties": {
+        "family": {
+          "description": "The family's label: \"R at 104.0°\".",
+          "type": "string"
+        },
+        "firstNight": {
+          "type": "string"
+        },
+        "lastNight": {
+          "type": "string"
+        },
+        "sessions": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "family",
+        "firstNight",
+        "lastNight",
+        "sessions"
+      ],
+      "type": "object"
+    },
+    "GroupOverrideRow": {
+      "additionalProperties": false,
+      "description": "One split or join as the catalog keeps it.",
+      "properties": {
+        "anchorFrame": {
+          "description": "The first flat of the session that starts the later side: the edge.",
+          "type": "string"
+        },
+        "beforeFrame": {
+          "description": "For a join, the session on the earlier side.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "beforeNight": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "beforeRotation": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "beforeSessionKey": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "choice": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GroupChoice"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`None` once reset: kept, with when, so a copy's older choice does\nnot come back."
+        },
+        "chosenAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "familyKey": {
+          "description": "The family's key when the choice was made.",
+          "type": "string"
+        },
+        "label": {
+          "description": "The edge in words when it was made: \"R at 104.0°, 2026-08-11 | 2026-08-12\".",
+          "type": "string"
+        },
+        "night": {
+          "description": "The nights of the session the edge comes before, and of a join's\nearlier session: they find the session again when its first flat is\nkept out or forgotten, which renames it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rigUuid": {
+          "type": "string"
+        },
+        "rotation": {
+          "description": "The rotator angles those sessions record, beside their nights: the\nnight alone could name another angle's session of the family key.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "sessionKey": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "anchorFrame",
+        "sessionKey",
+        "familyKey",
+        "rigUuid",
+        "label",
+        "chosenAt"
+      ],
+      "type": "object"
+    },
+    "GroupPick": {
+      "properties": {
+        "family": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "group": {
+          "description": "Index into the family's groups.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "row": {
+          "$ref": "#/$defs/LightChoiceRow"
+        }
+      },
+      "required": [
+        "family",
+        "group",
+        "row"
+      ],
+      "type": "object"
+    },
+    "HandEdge": {
+      "description": "How a person's choice changed an edge between groups.",
+      "enum": [
+        "split",
+        "joined"
+      ],
+      "type": "string"
+    },
+    "IlluminationProfile": {
+      "description": "A coarse map of how light falls across a flat: vignetting, gradients, and\nbroad shadows.",
+      "properties": {
+        "columns": {
+          "description": "Cells across.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "response": {
+          "description": "Row-major median of each cell, divided by the median cell so a typical\ncell reads 1. A cell with no finite samples reads 0.",
+          "items": {
+            "format": "float",
+            "type": "number"
+          },
+          "type": "array"
+        },
+        "rows": {
+          "description": "Cells down.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "columns",
+        "rows",
+        "response"
+      ],
+      "type": "object"
+    },
+    "ImagingSession": {
+      "additionalProperties": false,
+      "description": "A continuous run of lights of one profile.",
+      "properties": {
+        "end": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "key": {
+          "type": "string"
+        },
+        "lights": {
+          "description": "`acquiredimage` ids, in time order.",
+          "items": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "profile": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rigs": {
+          "description": "The rigs its profile shot with: only their lights it can place.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "start": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "key",
+        "rigs",
+        "start",
+        "end",
+        "lights"
+      ],
+      "type": "object"
+    },
+    "Judged": {
+      "description": "A frame's grade against its peers, as [`grade`] judges it.",
+      "properties": {
+        "code": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FindingCode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The finding that decided the grade."
+        },
+        "findings": {
+          "items": {
+            "$ref": "#/$defs/Finding"
+          },
+          "type": "array"
+        },
+        "grade": {
+          "$ref": "#/$defs/Grade"
+        },
+        "reason": {
+          "description": "That finding in words.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "strayLight": {
+          "description": "The stray-light mark, for a dark that caught light.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "grade",
+        "findings"
+      ],
+      "type": "object"
+    },
+    "LibraryKinds": {
+      "description": "Which kinds of usable frame the library holds for one light's sensor,\nwhatever their optics, exposure, age or validity mark. A light only\nlacks what its library could have given it.",
+      "properties": {
+        "bias": {
+          "type": "boolean"
+        },
+        "dark": {
+          "type": "boolean"
+        },
+        "flat": {
+          "type": "boolean"
+        },
+        "unusedDark": {
+          "description": "Darks for this sensor that the light's rig does without\n([`Rules::use_darks`]): the library still holds something for it.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "bias",
+        "dark",
+        "flat",
+        "unusedDark"
+      ],
+      "type": "object"
+    },
+    "Light": {
+      "additionalProperties": false,
+      "description": "A light as matching reads it: its file and header.",
+      "properties": {
+        "bayerPattern": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "binningX": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "binningY": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "camera": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cameraTemp": {
+          "default": null,
+          "description": "Sensor temperature, °C.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "channels": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "exposureS": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "filter": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "focalLengthMm": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "gain": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "height": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "offset": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "path": {
+          "default": "",
+          "type": "string"
+        },
+        "readoutMode": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "readoutModeName": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rigUuid": {
+          "default": "",
+          "description": "The library rig it was shot with, by the key rigs are filed under.",
+          "type": "string"
+        },
+        "rotatorPosition": {
+          "default": null,
+          "description": "Rotator angle in degrees at capture.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "telescope": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timestamp": {
+          "default": null,
+          "description": "Capture time, Unix seconds.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "width": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "LightChoice": {
+      "description": "Which side of a change, or which group, a person put a light on.",
+      "enum": [
+        "before",
+        "after",
+        "group"
+      ],
+      "type": "string"
+    },
+    "LightChoiceEntry": {
+      "additionalProperties": false,
+      "description": "A light's choices with what the book needs to find the light again: the\nfile name its frame is read from, its filter and capture time.",
+      "properties": {
+        "at": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "fileName": {
+          "type": "string"
+        },
+        "filter": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lightId": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "row": {
+          "$ref": "#/$defs/LightChoiceRow"
+        }
+      },
+      "required": [
+        "lightId",
+        "fileName",
+        "row"
+      ],
+      "type": "object"
+    },
+    "LightChoiceRow": {
+      "additionalProperties": false,
+      "description": "One light's choice as the catalog keeps it.",
+      "properties": {
+        "changeEnd": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "changeKey": {
+          "description": "The change's key, or [`GROUP_CHOICE_KEY`].",
+          "type": "string"
+        },
+        "changeStart": {
+          "description": "The change's window when the choice was made: a change whose window\nlater narrows, as new flats arrive, is found again by it.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "choice": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LightChoice"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "chosenAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "groupFrame": {
+          "description": "For a group choice: a flat of a session of the group, and that\nsession's key.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "groupSessionKey": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "description": "What the choice was about, in words, for when it is orphaned.",
+          "type": "string"
+        },
+        "lightGuid": {
+          "type": "string"
+        },
+        "rigUuid": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "lightGuid",
+        "changeKey",
+        "rigUuid",
+        "label",
+        "chosenAt"
+      ],
+      "type": "object"
+    },
+    "LightQuery": {
+      "additionalProperties": false,
+      "description": "One light to place. `compatible_families` names families that already\npassed the host's hard sensor/optics gates; empty means no candidates.\nA missing capture time leaves its event placements unknown.",
+      "properties": {
+        "angle": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "at": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "compatibleFamilies": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "fileName": {
+          "type": "string"
+        },
+        "filter": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rigUuid": {
+          "type": "string"
+        },
+        "rotationTolerance": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "fileName",
+        "rigUuid",
+        "compatibleFamilies",
+        "rotationTolerance"
+      ],
+      "type": "object"
+    },
+    "LightResult": {
+      "description": "Results in request order. Automatic results deliberately remain distinct\nfrom resolved personal choices, as in the native book: the selector can\nexplain both and enforce its hard calibration gates before using a choice.",
+      "properties": {
+        "automaticFamily": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FamilyChoice"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "choices": {
+          "$ref": "#/$defs/ResolvedChoices"
+        },
+        "events": {
+          "items": {
+            "$ref": "#/$defs/EventPlacement"
+          },
+          "type": "array"
+        },
+        "familyProbe": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FamilyProbe"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "choices",
+        "events"
+      ],
+      "type": "object"
+    },
+    "LightRotation": {
+      "description": "How a light's rotator angle takes part in matching it to flats.\n\nA recorded angle is the rotator's own reading. It is usually right, and\nit is what [`MatchTolerances::rotation_deg`] compares by default. It can\nalso be wrong for the question a flat asks: a rotator re-homed or a\ncamera re-seated reads the same angle for a different position, and two\nangles far apart can describe one light path when nothing ahead of the\nrotator casts a shadow that turns. A host that measured which flats a\nlight's pixels follow — by plate solving it, or by fitting its sky\nbackground against each candidate flat set — passes what it measured\nhere, so the stacker's gate follows that measurement rather than\nrefusing the flats it chose on the light's recorded angle.\n\nSerialized as `{\"basis\": \"recorded\"}`, `{\"basis\": \"measured\",\n\"degrees\": 82.2}` or `{\"basis\": \"unknown\"}`.",
+      "oneOf": [
+        {
+          "description": "The angle the light recorded, as for any frame.",
+          "properties": {
+            "basis": {
+              "const": "recorded",
+              "type": "string"
+            }
+          },
+          "required": [
+            "basis"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "An angle the host measured for the light, in degrees, compared in\nplace of the one it recorded: the light's flats must lie within\n[`MatchTolerances::rotation_deg`] of it.",
+          "properties": {
+            "basis": {
+              "const": "measured",
+              "type": "string"
+            },
+            "degrees": {
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "basis",
+            "degrees"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The host has measured that the angle does not decide this light's\nflats: it is compared at no angle, as a light from a rig without a\nrotator is ([`rotation_matches`]), and any flat angle passes.",
+          "properties": {
+            "basis": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "basis"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Limits": {
+      "additionalProperties": false,
+      "description": "The limits one rig's sessions are held to.",
+      "properties": {
+        "broad": {
+          "format": "double",
+          "type": "number"
+        },
+        "dust": {
+          "description": "Fractions of the background.",
+          "format": "double",
+          "type": "number"
+        },
+        "measured": {
+          "type": "boolean"
+        },
+        "rotation": {
+          "description": "The rotation tolerance one master's flats are held to, degrees: a\ngap in the rig's flat angles wider than this separates two rotation\nclusters. Never taken above [`ROTATION_CLUSTER_DEG`].",
+          "format": "double",
+          "type": "number"
+        },
+        "window": {
+          "description": "The flat session window, in seconds: a master spans at most twice it.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "measured",
+        "dust",
+        "broad",
+        "window",
+        "rotation"
+      ],
+      "type": "object"
+    },
+    "MasterCohort": {
+      "properties": {
+        "dropped": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "kept": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "kept",
+        "dropped"
+      ],
+      "type": "object"
+    },
+    "MasterCohortRequest": {
+      "additionalProperties": false,
+      "description": "Coherence alone, for previews and build retries; accepts caller-ordered rows.",
+      "properties": {
+        "frames": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CalibrationFrame"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "$ref": "#/$defs/CalibrationKind",
+          "default": "bias"
+        },
+        "settings": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Setting"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "MasterFailure": {
+      "additionalProperties": false,
+      "description": "A master that failed to build, by its session's key.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/CalibrationKind"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "sessionKey": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionKey",
+        "kind",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "MasterPlanRequest": {
+      "additionalProperties": false,
+      "description": "Resolve already selected candidates after host verification/remapping.\nCandidate order is significant. No matching, scanning or pixel I/O occurs.",
+      "properties": {
+        "darkAssociation": {
+          "$ref": "#/$defs/Association",
+          "default": "automatic"
+        },
+        "flatAssociation": {
+          "$ref": "#/$defs/Association",
+          "default": "automatic"
+        },
+        "flatBasis": {
+          "$ref": "#/$defs/FlatBasis",
+          "default": {
+            "basis": "nearest"
+          }
+        },
+        "flatFamily": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FlatFamily"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "flatHeldBack": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "flatStability": {
+          "$ref": "#/$defs/FlatRetryPolicy",
+          "default": {
+            "enabled": true,
+            "retain_unstable": true,
+            "trim_unstable": true,
+            "try_next_session": true
+          }
+        },
+        "flatStarMasking": {
+          "default": false,
+          "type": "boolean"
+        },
+        "forceFlatWithoutPedestal": {
+          "default": false,
+          "type": "boolean"
+        },
+        "frames": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CalibrationFrame"
+          },
+          "type": "array"
+        },
+        "globalSettings": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Setting"
+          },
+          "type": "array"
+        },
+        "lights": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Light"
+          },
+          "type": "array"
+        },
+        "masterFailures": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MasterFailure"
+          },
+          "type": "array"
+        },
+        "pedestalEvidence": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PedestalEvidence"
+          },
+          "type": "array"
+        },
+        "quality": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/QualityRecord"
+          },
+          "type": "array"
+        },
+        "rigs": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RigSettings"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "MasterRecipe": {
+      "additionalProperties": false,
+      "description": "How one master of a session is made.",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/RecipeAction"
+        },
+        "coherentInputs": {
+          "description": "Coherent raw cohort, including a singleton that cannot yet integrate.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "darkLevelScreening": {
+          "description": "Screen darks for stray light while integrating: for darks not graded\nyet ([`dark_level_screening`]).",
+          "type": "boolean"
+        },
+        "defectSuppression": {
+          "description": "Repair hot and cold pixels while integrating.",
+          "type": "boolean"
+        },
+        "dependencies": {
+          "description": "The masters it is built on ([`CalibrationKind::dependencies`]).",
+          "items": {
+            "$ref": "#/$defs/CalibrationKind"
+          },
+          "type": "array"
+        },
+        "dropped": {
+          "description": "Candidates left out of its cohort.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "exposureSeconds": {
+          "description": "The exposure the master stands for: a dark's, scaled to the light.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "failure": {
+          "description": "Why it failed or was blocked.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "flatStarMasking": {
+          "description": "Mask stars in a master flat.",
+          "type": "boolean"
+        },
+        "inputLimit": {
+          "description": "The most frames an automatic master takes ([`MAX_MASTER_FRAMES`]).",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "inputs": {
+          "description": "The frames it integrates or adopts, by UUID, nearest first.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "$ref": "#/$defs/CalibrationKind"
+        },
+        "requiresSourceVerification": {
+          "description": "Its inputs must be checked against their files before it builds.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "action",
+        "inputs",
+        "dependencies",
+        "dropped",
+        "coherentInputs",
+        "inputLimit",
+        "requiresSourceVerification",
+        "defectSuppression",
+        "flatStarMasking",
+        "darkLevelScreening"
+      ],
+      "type": "object"
+    },
+    "MatchTolerances": {
+      "description": "How close two readings have to be to count as the same.\n\nThe defaults are the ones a rig's own scatter needs rather than what a\nspecification promises: sensors report temperature to about a degree, and\na set-point hunts by more than that over a night.\n\nDeliberately *not* `#[non_exhaustive]`, unlike [`FrameSignature`]. A new\ntolerance changes what matches, so a consumer being made to look at it when\none is added is the point, not a cost — and it keeps\n`MatchTolerances { rotation_deg: 0.5, ..Default::default() }` working,\nwhich is how a config struct wants to be written.\n\nDeserializing fills a missing field with its default, so tolerances saved\nbefore a field was added still load. An unknown field is ignored, as for\nany serde struct: these are a host's settings, and a newer file should\nstill open in an older host. A store where ignoring a newer gate would\nmatch under the wrong one — seiza-stacking's saved context is one — keeps\nits own type that refuses unknown fields.\n\nNothing stops a struct literal holding a value no comparison can use; see\n[`Self::validate`] for the API that refuses them.",
+      "properties": {
+        "allowFlatGainOffsetMismatch": {
+          "description": "Allow different gain/offset when selecting flats for lights and when\napplying a master flat that records dark subtraction. The caller must\nestablish that the camera's normalized response is transferable across\nthese settings. Dark/light and flat/dark-flat matching remain strict.",
+          "type": "boolean"
+        },
+        "darkTemperatureC": {
+          "default": 3.0,
+          "description": "Dark sensor temperature against light sensor temperature, in Celsius.",
+          "format": "double",
+          "type": "number"
+        },
+        "exposureFraction": {
+          "default": 0.001,
+          "description": "Dark exposure against light exposure: the proportional part, as a\nfraction of the longer of the two. Timing error scales with exposure,\nso past about a minute this is what decides.",
+          "format": "double",
+          "type": "number"
+        },
+        "exposureSeconds": {
+          "default": 0.05,
+          "description": "Dark exposure against light exposure: the floor, in seconds.\n\nThe comparison takes whichever of this and\n[`Self::exposure_fraction`] is larger, because neither works alone. A\nfixed 0.05 s is a tenth of a half-second flat and a six-thousandth of a\nfive-minute sub — far too loose at one end and tighter than a shutter\ncan be trusted at the other.",
+          "format": "double",
+          "type": "number"
+        },
+        "flatSessionSeconds": {
+          "default": 86400,
+          "description": "How far apart flats in one master may have been shot, in seconds.\nFlats are a session's dust and vignetting; a week-old flat describes a\ndifferent optical train even when every setting agrees.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "focalLengthMm": {
+          "default": 1.0,
+          "description": "Focal length between a flat and what it corrects, in millimetres.",
+          "format": "double",
+          "type": "number"
+        },
+        "lightRotation": {
+          "$ref": "#/$defs/LightRotation",
+          "description": "How the light's own rotator angle is read when a flat is matched to\nit: as recorded (the default), as the host measured it, or not at\nall. Only the light's side of a light-against-flat question reads\nit ([`optics_match`], [`describe_optics_mismatch`], and the\nstacker's gate); flats judged against each other keep their\nrecorded angles. Not written when it is the default, so tolerances\nsaved before it existed read and write the same."
+        },
+        "masterTemperatureC": {
+          "default": 1.0,
+          "description": "Sensor temperature within one master's input set, in Celsius. Tighter\nthan [`Self::dark_temperature_c`]: matching decides what may be used,\nthis decides what may be averaged together.",
+          "format": "double",
+          "type": "number"
+        },
+        "rotationDeg": {
+          "default": 2.0,
+          "description": "Rotator angle between a flat and what it corrects, in degrees.\n\nWide enough to absorb a rotator re-homing to the same arrangement on\nanother night: a real rig re-slewed to nominally identical framing\nwith up to about 0.8 degrees of scatter, and a 1 degree gate split\nthose nights into separate flat sessions for no optical reason. Two\ndegrees still refuses a genuinely different framing, which sits tens\nof degrees away, not fractions of one.",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "type": "object"
+    },
+    "MeasurementState": {
+      "description": "What is known of a frame's measurement.",
+      "oneOf": [
+        {
+          "const": "external",
+          "description": "A master another program integrated: never measured.",
+          "type": "string"
+        },
+        {
+          "const": "unmeasured",
+          "description": "No measurement stored.",
+          "type": "string"
+        },
+        {
+          "const": "stale",
+          "description": "Measured from another file, or by another build's measurement.",
+          "type": "string"
+        },
+        {
+          "const": "current",
+          "description": "Measured from the frame as it stands.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "The measurement failed.",
+          "type": "string"
+        }
+      ]
+    },
+    "NightBoundary": {
+      "additionalProperties": false,
+      "description": "Local-noon shift for one flat, unwrapped (12h minus UTC offset). Unlisted flats use\nnoon UTC. The stable frame identity, rather than a database id, names it.",
+      "properties": {
+        "frameUuid": {
+          "type": "string"
+        },
+        "rigUuid": {
+          "type": "string"
+        },
+        "seconds": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "rigUuid",
+        "frameUuid",
+        "seconds"
+      ],
+      "type": "object"
+    },
+    "Optics": {
+      "additionalProperties": false,
+      "description": "The light cone at the sensor, to size dust shadows and say where the dust\nsits.",
+      "properties": {
+        "focalRatio": {
+          "description": "Focal ratio at the sensor, with any reducer or extender.",
+          "format": "float",
+          "type": "number"
+        },
+        "obstruction": {
+          "default": 0.0,
+          "description": "Central obstruction as a fraction of the aperture's diameter; 0 for\na refractor.",
+          "format": "float",
+          "type": "number"
+        },
+        "pixelSizeUm": {
+          "description": "Sensor pixel size in micrometres (before binning).",
+          "format": "float",
+          "type": "number"
+        }
+      },
+      "required": [
+        "focalRatio",
+        "pixelSizeUm"
+      ],
+      "type": "object"
+    },
+    "OverrideState": {
+      "description": "One group override as the book applied it.",
+      "properties": {
+        "after": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "before": {
+          "description": "The sessions it names now: the one before (a join's) and the one\nthe edge comes before.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "boundaries": {
+          "description": "The edges it made (a split) or joined, in the book's boundaries.",
+          "items": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "conflict": {
+          "description": "A camera-side change it stands against, by key: both stay in force.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "family": {
+          "description": "The family it applies to now, by index.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "row": {
+          "$ref": "#/$defs/GroupOverrideRow"
+        },
+        "status": {
+          "$ref": "#/$defs/OverrideStatus"
+        }
+      },
+      "required": [
+        "row",
+        "status",
+        "boundaries"
+      ],
+      "type": "object"
+    },
+    "OverrideStatus": {
+      "description": "Where one group override stands in the book.",
+      "oneOf": [
+        {
+          "description": "In force. `agrees` when the measurements alone group the same.",
+          "properties": {
+            "agrees": {
+              "type": "boolean"
+            },
+            "status": {
+              "const": "applied",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "agrees"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Its flats are gone, or no longer one family: kept, shown, unused.",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "status": {
+              "const": "orphaned",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PairFit": {
+      "description": "How the background fared between two candidates.",
+      "properties": {
+        "first": {
+          "description": "The first candidate of the pair, by index.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "outcome": {
+          "$ref": "#/$defs/PairOutcome",
+          "description": "What the background said of them."
+        },
+        "second": {
+          "description": "The second candidate of the pair, by index; `first < second`.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "first",
+        "second",
+        "outcome"
+      ],
+      "type": "object"
+    },
+    "PairOutcome": {
+      "description": "What the background said of one pair of candidates.",
+      "oneOf": [
+        {
+          "description": "The two hold nothing compact apart, or the host measured them\nalike: they cannot be told apart, and correct a light alike.",
+          "properties": {
+            "outcome": {
+              "const": "alike",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The background could not be weighed against their difference.\nNothing is known: neither may win past the other.",
+          "properties": {
+            "outcome": {
+              "const": "unfitted",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/Fit",
+          "description": "The fit, `second` over `first`, weighed from `first`'s side: a\nweight of 0 follows `first`, 1 follows `second`. Its verdict is\n`Before` for `first` and `After` for `second` only when the fit\nfrom `second`'s side agrees; otherwise undecided.",
+          "properties": {
+            "outcome": {
+              "const": "fit",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PedestalEvidence": {
+      "additionalProperties": false,
+      "description": "Successful per-light fits from fit_flat_pedestal, in the returned sample\nset, by session key ([`Session::accept_pedestal`]). A pinned value\nreproduces a previous stack and wins over fresh estimates.",
+      "properties": {
+        "estimates": {
+          "default": [],
+          "items": {
+            "format": "float",
+            "type": "number"
+          },
+          "type": "array"
+        },
+        "pinned": {
+          "default": null,
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "sessionKey": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "Placement": {
+      "description": "How a light was put on one side of an event.",
+      "oneOf": [
+        {
+          "description": "Its capture time is outside the event's window.",
+          "properties": {
+            "by": {
+              "const": "time",
+              "type": "string"
+            },
+            "side": {
+              "$ref": "#/$defs/Side"
+            }
+          },
+          "required": [
+            "by",
+            "side"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Its imaging session reaches outside the window, and a change does\nnot land inside one continuous session.",
+          "properties": {
+            "by": {
+              "const": "session",
+              "type": "string"
+            },
+            "end": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "side": {
+              "$ref": "#/$defs/Side"
+            },
+            "start": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "by",
+            "side",
+            "start",
+            "end"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Its imaging session's own lights carry the change, or lack it.",
+          "properties": {
+            "by": {
+              "const": "pixels",
+              "type": "string"
+            },
+            "filters": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "lights": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "side": {
+              "$ref": "#/$defs/Side"
+            },
+            "targets": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "by",
+            "side",
+            "targets",
+            "filters",
+            "lights"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "None of those decide.",
+          "properties": {
+            "by": {
+              "const": "undetermined",
+              "type": "string"
+            },
+            "pixels": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session": {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "format": "int64",
+                  "type": "integer"
+                },
+                {
+                  "format": "int64",
+                  "type": "integer"
+                }
+              ],
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "by"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A person put it on this side, over its time, session and pixels.",
+          "properties": {
+            "by": {
+              "const": "person",
+              "type": "string"
+            },
+            "side": {
+              "$ref": "#/$defs/Side"
+            }
+          },
+          "required": [
+            "by",
+            "side"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "QualityOverride": {
+      "enum": [
+        "use",
+        "exclude"
+      ],
+      "type": "string"
+    },
+    "QualityRecord": {
+      "additionalProperties": false,
+      "description": "A frame's stored quality: its measurement, grade, and a person's choice.\nA stale algorithm/fingerprint is not regraded.",
+      "properties": {
+        "algorithmVersion": {
+          "default": null,
+          "description": "The measurement's version ([`CalibrationKind::measurement_version`]).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "frameUuid": {
+          "default": "",
+          "type": "string"
+        },
+        "grade": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Grade"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The stored grade and its reason."
+        },
+        "measureError": {
+          "default": null,
+          "description": "Why the measurement failed.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "measurement": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StoredMeasurement"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "overrideChoice": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QualityOverride"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A person's choice to use or exclude the frame."
+        },
+        "reason": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sourceFingerprint": {
+          "default": null,
+          "description": "The fingerprint of the file the measurement was made from.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "strayLight": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "RecipeAction": {
+      "oneOf": [
+        {
+          "const": "external",
+          "description": "Adopt an external master as it is.",
+          "type": "string"
+        },
+        {
+          "const": "integrate",
+          "description": "Integrate the raw inputs.",
+          "type": "string"
+        },
+        {
+          "const": "unavailable",
+          "description": "Nothing to build: no usable frames of this kind.",
+          "type": "string"
+        },
+        {
+          "const": "failed",
+          "description": "The build failed ([`MasterRecipe::failure`] says why).",
+          "type": "string"
+        },
+        {
+          "const": "blocked",
+          "description": "Not built, because a master it depends on failed.",
+          "type": "string"
+        }
+      ]
+    },
+    "Request": {
+      "additionalProperties": false,
+      "properties": {
+        "availableResponses": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "darkAssociation": {
+          "$ref": "#/$defs/Association",
+          "default": "automatic"
+        },
+        "flatAssociation": {
+          "$ref": "#/$defs/Association",
+          "default": "automatic",
+          "description": "Automatic association, or one explicit supplied set for every compatible light."
+        },
+        "flatStability": {
+          "$ref": "#/$defs/FlatRetryPolicy",
+          "default": {
+            "enabled": true,
+            "retain_unstable": true,
+            "trim_unstable": true,
+            "try_next_session": true
+          }
+        },
+        "flatStarMasking": {
+          "default": false,
+          "type": "boolean"
+        },
+        "forceFlatWithoutPedestal": {
+          "default": false,
+          "type": "boolean"
+        },
+        "frames": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CalibrationFrame"
+          },
+          "type": "array"
+        },
+        "globalSettings": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Setting"
+          },
+          "type": "array"
+        },
+        "grouping": {
+          "$ref": "#/$defs/Request2",
+          "default": {
+            "comparisons": [],
+            "epoch_samples": [],
+            "evidence": [],
+            "family_evidence": [],
+            "group_overrides": [],
+            "imaging": [],
+            "imaging_lights": [],
+            "light_choices": [],
+            "lights": [],
+            "limits": [],
+            "night_boundaries": [],
+            "profile_rigs": [],
+            "responses": []
+          }
+        },
+        "lights": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Light"
+          },
+          "type": "array"
+        },
+        "masterFailures": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MasterFailure"
+          },
+          "type": "array"
+        },
+        "nightShifts": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NightBoundary"
+          },
+          "type": "array"
+        },
+        "pedestalEvidence": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PedestalEvidence"
+          },
+          "type": "array"
+        },
+        "quality": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/QualityRecord"
+          },
+          "type": "array"
+        },
+        "regrade": {
+          "default": false,
+          "type": "boolean"
+        },
+        "rigs": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RigSettings"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "Request2": {
+      "additionalProperties": false,
+      "description": "A complete, immutable snapshot of inputs for the grouping stage. Vectors\nof keyed records avoid converting user identifiers when bindings translate\nfield names. Omitted collections are empty; unknown fields are refused.",
+      "properties": {
+        "comparisons": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ComparisonRow"
+          },
+          "type": "array"
+        },
+        "epochSamples": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EpochSample"
+          },
+          "type": "array"
+        },
+        "evidence": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EvidenceRow"
+          },
+          "type": "array"
+        },
+        "familyEvidence": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/FamilyEvidenceRow"
+          },
+          "type": "array"
+        },
+        "groupOverrides": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/GroupOverrideRow"
+          },
+          "type": "array"
+        },
+        "imaging": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ImagingSession"
+          },
+          "type": "array"
+        },
+        "imagingLights": {
+          "default": [],
+          "description": "Alternative to `imaging`: `(id, profile, captured_at)` source rows.",
+          "items": {
+            "maxItems": 3,
+            "minItems": 3,
+            "prefixItems": [
+              {
+                "format": "int64",
+                "type": "integer"
+              },
+              {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              {
+                "format": "int64",
+                "type": "integer"
+              }
+            ],
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "lightChoices": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/LightChoiceEntry"
+          },
+          "type": "array"
+        },
+        "lights": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/LightQuery"
+          },
+          "type": "array"
+        },
+        "limits": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RigLimits"
+          },
+          "type": "array"
+        },
+        "nightBoundaries": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NightBoundary"
+          },
+          "type": "array"
+        },
+        "profileRigs": {
+          "default": [],
+          "description": "`(profile, rigs)` bindings used when grouping `imaging_lights`.",
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            ],
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "responses": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ResponseRow"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "ResolvedChoices": {
+      "description": "A light's choices, resolved against the book.",
+      "properties": {
+        "group": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GroupPick"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The group a person chose: its family and its sessions."
+        },
+        "orphaned": {
+          "description": "Choices that find nothing to apply to, with why.",
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "$ref": "#/$defs/LightChoiceRow"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "sides": {
+          "description": "The side of each change a person chose, by event index.",
+          "items": {
+            "maxItems": 3,
+            "minItems": 3,
+            "prefixItems": [
+              {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "$ref": "#/$defs/Side"
+              },
+              {
+                "$ref": "#/$defs/LightChoiceRow"
+              }
+            ],
+            "type": "array"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "sides",
+        "orphaned"
+      ],
+      "type": "object"
+    },
+    "ResponseChoice": {
+      "description": "Which candidates a background follows.",
+      "properties": {
+        "pairs": {
+          "description": "Every pair's outcome, in index order.",
+          "items": {
+            "$ref": "#/$defs/PairFit"
+          },
+          "type": "array"
+        },
+        "winners": {
+          "description": "Candidates that beat every candidate they can be told apart from and\nlose to none, in index order. More than one only when they are alike\nwith each other. Empty when nothing stands clear: the background\ncould not tell, as over a nebula, a pair could not be fitted, or\nevery candidate is alike. A lone candidate wins unopposed.",
+          "items": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "winners",
+        "pairs"
+      ],
+      "type": "object"
+    },
+    "ResponseRow": {
+      "additionalProperties": false,
+      "description": "One measured flat session as the catalog keeps it.",
+      "properties": {
+        "algorithmVersion": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "bin": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "capturedFirst": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "capturedLast": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "error": {
+          "description": "Why the session could not be measured.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "familyKey": {
+          "type": "string"
+        },
+        "filter": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "frameUuids": {
+          "description": "Every flat of the session in use, in capture order.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "frames": {
+          "description": "How many of them the response combines.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "height": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "levelAdu": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "night": {
+          "type": "string"
+        },
+        "noise": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "pedestalAdu": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "responseKey": {
+          "type": "string"
+        },
+        "rigUuid": {
+          "type": "string"
+        },
+        "rotation": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "sessionKey": {
+          "type": "string"
+        },
+        "unread": {
+          "description": "The flats it combines that could not be read, and why. The session\nis read again only when one of them may read now (see\n[`UnreadKind`]).",
+          "items": {
+            "$ref": "#/$defs/UnreadFlat"
+          },
+          "type": "array"
+        },
+        "width": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "responseKey",
+        "sessionKey",
+        "rigUuid",
+        "familyKey",
+        "night",
+        "frameUuids",
+        "frames",
+        "algorithmVersion",
+        "unread"
+      ],
+      "type": "object"
+    },
+    "RigLimits": {
+      "additionalProperties": false,
+      "description": "Limits for one rig; every rig with usable responses must have an entry.",
+      "properties": {
+        "limits": {
+          "$ref": "#/$defs/Limits"
+        },
+        "rigUuid": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "rigUuid",
+        "limits"
+      ],
+      "type": "object"
+    },
+    "RigSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rigUuid": {
+          "default": "",
+          "type": "string"
+        },
+        "settings": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Setting"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "RuleNote": {
+      "description": "One setting that differs from its default for a light, and who set it.",
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/SettingKey"
+        },
+        "label": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/RuleSource"
+        },
+        "text": {
+          "description": "The value in words.",
+          "type": "string"
+        },
+        "value": true
+      },
+      "required": [
+        "key",
+        "label",
+        "value",
+        "text",
+        "source"
+      ],
+      "type": "object"
+    },
+    "RuleSource": {
+      "description": "Which layer a value came from.",
+      "oneOf": [
+        {
+          "const": "default",
+          "description": "The built-in default.",
+          "type": "string"
+        },
+        {
+          "const": "global",
+          "description": "The server's layer.",
+          "type": "string"
+        },
+        {
+          "const": "rig",
+          "description": "The rig's own layer.",
+          "type": "string"
+        }
+      ]
+    },
+    "SeenIn": {
+      "description": "In how many flats of a session a feature shows.",
+      "properties": {
+        "frames": {
+          "description": "Flats it shows in.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "of": {
+          "description": "Flats looked at.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "frames",
+        "of"
+      ],
+      "type": "object"
+    },
+    "Selection": {
+      "properties": {
+        "bias": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "dark": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "darkFlat": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "flat": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "flatBasis": {
+          "$ref": "#/$defs/FlatBasis"
+        },
+        "flatChoices": {
+          "items": {
+            "$ref": "#/$defs/ChoiceNote"
+          },
+          "type": "array"
+        },
+        "flatFamily": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FlatFamily"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "flatHeldBack": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "keptOut": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "library": {
+          "$ref": "#/$defs/LibraryKinds"
+        },
+        "ruleNotes": {
+          "items": {
+            "$ref": "#/$defs/RuleNote"
+          },
+          "type": "array"
+        },
+        "tolerances": {
+          "$ref": "#/$defs/MatchTolerances"
+        }
+      },
+      "required": [
+        "bias",
+        "dark",
+        "darkFlat",
+        "flat",
+        "keptOut",
+        "library",
+        "tolerances",
+        "flatBasis",
+        "flatHeldBack",
+        "flatChoices",
+        "ruleNotes"
+      ],
+      "type": "object"
+    },
+    "Session": {
+      "additionalProperties": false,
+      "description": "The masters one light's selection builds, and how its flat applies:\n[`resolve_session`]. Lights whose sessions share a key calibrate\nidentically.",
+      "properties": {
+        "application": {
+          "$ref": "#/$defs/Application"
+        },
+        "flatHeldBack": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "flatStability": {
+          "$ref": "#/$defs/FlatRetryPolicy"
+        },
+        "key": {
+          "description": "What the masters are made from and how ([`POLICY_ALGORITHM_VERSION`]).",
+          "type": "string"
+        },
+        "recipes": {
+          "description": "Bias, dark-flat, dark and flat, in build order.",
+          "items": {
+            "$ref": "#/$defs/MasterRecipe"
+          },
+          "type": "array"
+        },
+        "tolerances": {
+          "$ref": "#/$defs/MatchTolerances",
+          "description": "The gate a stack holds the light to against its masters."
+        }
+      },
+      "required": [
+        "key",
+        "tolerances",
+        "recipes",
+        "application",
+        "flatStability"
+      ],
+      "type": "object"
+    },
+    "Session2": {
+      "description": "One measured flat session.",
+      "properties": {
+        "algorithmVersion": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "bin": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "capturedFirst": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "capturedLast": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "error": {
+          "description": "Why the session could not be measured.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "familyKey": {
+          "type": "string"
+        },
+        "filter": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "first": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "frameUuids": {
+          "description": "Every flat of the session in use, in capture order.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "frames": {
+          "description": "How many of them the response combines.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "height": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "inferredRotation": {
+          "description": "For flats that record no angle: the angle of the rotation cluster\nthey measure alike with, when they do.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "last": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "levelAdu": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "night": {
+          "type": "string"
+        },
+        "noise": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "pedestalAdu": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "responseKey": {
+          "type": "string"
+        },
+        "rigUuid": {
+          "type": "string"
+        },
+        "rotation": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "sessionKey": {
+          "type": "string"
+        },
+        "unread": {
+          "description": "The flats it combines that could not be read, and why. The session\nis read again only when one of them may read now (see\n[`UnreadKind`]).",
+          "items": {
+            "$ref": "#/$defs/UnreadFlat"
+          },
+          "type": "array"
+        },
+        "width": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "responseKey",
+        "sessionKey",
+        "rigUuid",
+        "familyKey",
+        "night",
+        "frameUuids",
+        "frames",
+        "algorithmVersion",
+        "unread",
+        "first",
+        "last"
+      ],
+      "type": "object"
+    },
+    "Setting": {
+      "additionalProperties": false,
+      "description": "One setting a request sets, by the key the settings table names it.\nIts value is checked against the table, not here.",
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "value": true
+      },
+      "required": [
+        "key",
+        "value"
+      ],
+      "type": "object"
+    },
+    "SettingCheck": {
+      "description": "A setting value judged the way a settings panel saves it.",
+      "properties": {
+        "default": {
+          "description": "Whether the value means the setting's default.",
+          "type": "boolean"
+        },
+        "error": {
+          "description": "What is wrong, in words a person can act on.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "key": {
+          "type": "string"
+        },
+        "text": {
+          "description": "The value in words, as a light's account names it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "valid": {
+          "description": "Whether the value can be saved: a known setting, in its range, and\na tolerance the stacker takes as it is.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "key",
+        "valid",
+        "default"
+      ],
+      "type": "object"
+    },
+    "SettingKey": {
+      "description": "A setting, by its key in the settings table.",
+      "enum": [
+        "rotation_tolerance_deg",
+        "focal_length_tolerance_mm",
+        "dark_temperature_tolerance_c",
+        "flat_session_hours",
+        "use_darks",
+        "external_masters",
+        "night_zone",
+        "light_nights",
+        "dark_reach_days",
+        "complete_dark_frames",
+        "dark_choice",
+        "flat_grouping",
+        "flat_split_dust_pct",
+        "flat_split_pattern_pct",
+        "flat_max_age_days",
+        "flat_check_age_days",
+        "thin_master_frames",
+        "check_no_library",
+        "check_no_flat",
+        "check_no_bias_or_dark",
+        "check_stale_flats",
+        "check_thin_dark",
+        "check_thin_bias",
+        "check_flat_spots",
+        "check_old_flats",
+        "check_mixed_flats",
+        "check_flats_differ",
+        "check_suspect_frames",
+        "check_short_after_keep_out",
+        "grade_bias_level",
+        "grade_bias_noise",
+        "grade_bias_banding",
+        "grade_dark_level",
+        "grade_dark_noise",
+        "grade_dark_hot_pixels",
+        "grade_dark_banding",
+        "grade_flat_clipped",
+        "grade_flat_bright",
+        "grade_flat_dim",
+        "grade_flat_illumination",
+        "grade_flat_spots",
+        "grade_flat_changing_spots",
+        "grade_flat_carried_spots"
+      ],
+      "type": "string"
+    },
+    "Side": {
+      "description": "Which side of a change something stands on.",
+      "oneOf": [
+        {
+          "const": "before",
+          "description": "Before the change: the earlier state.",
+          "type": "string"
+        },
+        {
+          "const": "after",
+          "description": "After the change: the later state.",
+          "type": "string"
+        }
+      ]
+    },
+    "Snapshot": {
+      "properties": {
+        "algorithmVersion": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "assignments": {
+          "items": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "grades": {
+          "items": {
+            "$ref": "#/$defs/FrameGrade"
+          },
+          "type": "array"
+        },
+        "selections": {
+          "items": {
+            "$ref": "#/$defs/Selection"
+          },
+          "type": "array"
+        },
+        "sessions": {
+          "items": {
+            "$ref": "#/$defs/Session"
+          },
+          "type": "array"
+        },
+        "settingsDigest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "settingsSchema": {
+          "items": {
+            "$ref": "#/$defs/FieldSpec"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "algorithmVersion",
+        "selections",
+        "grades",
+        "sessions",
+        "assignments",
+        "settingsSchema"
+      ],
+      "type": "object"
+    },
+    "Spot": {
+      "description": "One difference of dust between two sessions.",
+      "properties": {
+        "area": {
+          "description": "Area in sensor pixels.",
+          "format": "float",
+          "type": "number"
+        },
+        "bounds": {
+          "default": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "description": "The box it covers, sensor pixels: left, top, right, bottom.",
+          "items": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 4,
+          "minItems": 4,
+          "type": "array"
+        },
+        "darker": {
+          "description": "Whether the later session is darker here. A moved shadow has one\nspot of each.",
+          "type": "boolean"
+        },
+        "distanceMm": {
+          "description": "How far in front of the sensor the dust sits, when the optics are\nknown.",
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "hole": {
+          "description": "A donut's hole as a fraction of its radius.",
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/SpotKind",
+          "description": "New, gone or moved."
+        },
+        "offset": {
+          "description": "How far the matched dust moved, sensor pixels.",
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "peak": {
+          "description": "Deepest departure, as a fraction of the background.",
+          "format": "float",
+          "type": "number"
+        },
+        "radius": {
+          "description": "A disk's or donut's radius; a dip's or patch's, of a disc of the same\narea. Sensor pixels.",
+          "format": "float",
+          "type": "number"
+        },
+        "shape": {
+          "$ref": "#/$defs/DustShape",
+          "default": "compact",
+          "description": "Compact, irregular, disk, donut or patch."
+        },
+        "withinTolerance": {
+          "default": false,
+          "description": "Dust both sessions hold that moved no further than focus travel\nexplains: reported, but not counted as dust.",
+          "type": "boolean"
+        },
+        "x": {
+          "description": "Centre column, in sensor pixels.",
+          "format": "float",
+          "type": "number"
+        },
+        "y": {
+          "description": "Centre row, in sensor pixels.",
+          "format": "float",
+          "type": "number"
+        }
+      },
+      "required": [
+        "kind",
+        "darker",
+        "x",
+        "y",
+        "radius",
+        "area",
+        "peak"
+      ],
+      "type": "object"
+    },
+    "SpotKind": {
+      "description": "What a spot is.",
+      "oneOf": [
+        {
+          "const": "new",
+          "description": "The later session is darker here: dust that arrived.",
+          "type": "string"
+        },
+        {
+          "const": "gone",
+          "description": "The later session is brighter here: dust that left.",
+          "type": "string"
+        },
+        {
+          "const": "moved",
+          "description": "One of a new and a gone spot of like size and depth close together.",
+          "type": "string"
+        }
+      ]
+    },
+    "StoredMeasurement": {
+      "description": "What was measured on one frame, as stored.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/DarkMeasurement",
+          "description": "A bias, dark or dark-flat.",
+          "properties": {
+            "type": {
+              "const": "dark",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/FlatRecord",
+          "description": "A flat.",
+          "properties": {
+            "type": {
+              "const": "flat",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "UnreadFlat": {
+      "additionalProperties": false,
+      "description": "A flat a session's response should have combined but could not read.",
+      "properties": {
+        "frameUuid": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/UnreadKind"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "stamp": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FileStamp"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The file's size and modification time when it failed, if it was\nthere: a file replaced at the same path differs."
+        }
+      },
+      "required": [
+        "frameUuid",
+        "kind",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "UnreadKind": {
+      "description": "Why a flat could not be read, which decides when it is tried again.",
+      "oneOf": [
+        {
+          "const": "missing",
+          "description": "No file at its path, as on a share that is away or a copy moved\nelsewhere: tried again once a file is there.",
+          "type": "string"
+        },
+        {
+          "const": "transient",
+          "description": "The file system would not give it up (permissions, a share that\ndropped, an I/O error): tried again once the file opens.",
+          "type": "string"
+        },
+        {
+          "const": "undecodable",
+          "description": "The file read but is not an image this can decode: tried again\nonly once the file at its path changes.",
+          "type": "string"
+        }
+      ]
+    },
+    "ValidDirection": {
+      "description": "Which lights a calibration frame may serve, relative to its own capture\ntime: marked around an optical change, so a frame never serves imaging\non the other side of it.",
+      "oneOf": [
+        {
+          "const": "forward",
+          "description": "Only lights captured at or after this frame.",
+          "type": "string"
+        },
+        {
+          "const": "backward",
+          "description": "Only lights captured at or before this frame.",
+          "type": "string"
+        }
+      ]
+    },
+    "Verdict": {
+      "description": "What a few lights' own background says about one change.",
+      "oneOf": [
+        {
+          "const": "before",
+          "description": "The lights lack the change: shot before it.",
+          "type": "string"
+        },
+        {
+          "const": "after",
+          "description": "The lights carry the change: shot after it.",
+          "type": "string"
+        },
+        {
+          "const": "undecided",
+          "description": "The lights cannot tell, as over a nebula.",
+          "type": "string"
+        }
+      ]
+    },
+    "Vignetting": {
+      "description": "A large, smooth shadow anchored to the border: an off-axis guider's\nprism, a filter holder, a dew shield. Not dust.",
+      "properties": {
+        "area": {
+          "description": "Sensor pixels it covers below the vignetting depth.",
+          "format": "float",
+          "type": "number"
+        },
+        "depth": {
+          "description": "Its deepest point after smoothing, as a fraction of the response.",
+          "format": "float",
+          "type": "number"
+        },
+        "edge": {
+          "$ref": "#/$defs/Edge",
+          "description": "The edge or corner it hangs from."
+        },
+        "x": {
+          "description": "Centroid column, sensor pixels.",
+          "format": "float",
+          "type": "number"
+        },
+        "y": {
+          "description": "Centroid row.",
+          "format": "float",
+          "type": "number"
+        }
+      },
+      "required": [
+        "edge",
+        "x",
+        "y",
+        "area",
+        "depth"
+      ],
+      "type": "object"
+    },
+    "VignettingChange": {
+      "description": "A vignetting shadow that changed between two sessions.",
+      "properties": {
+        "darker": {
+          "description": "Whether the later session is darker there.",
+          "type": "boolean"
+        },
+        "vignetting": {
+          "$ref": "#/$defs/Vignetting",
+          "description": "Where, and how deep the difference is."
+        }
+      },
+      "required": [
+        "darker",
+        "vignetting"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "calls": {
+    "seiza_calibration_flat_response_plan_json": {
+      "answer": {
+        "$ref": "#/$defs/FlatResponsePlans"
+      },
+      "request": {
+        "$ref": "#/$defs/Request"
+      }
+    },
+    "seiza_calibration_flat_retry_json": {
+      "answer": {
+        "$ref": "#/$defs/FlatRetryDecision"
+      },
+      "request": {
+        "$ref": "#/$defs/FlatRetryRequest"
+      }
+    },
+    "seiza_calibration_flat_work_finish_json": {
+      "answer": {
+        "$ref": "#/$defs/FlatWorkResult"
+      },
+      "request": {
+        "$ref": "#/$defs/FlatWorkAnswer"
+      }
+    },
+    "seiza_calibration_flat_work_plan_json": {
+      "answer": {
+        "$ref": "#/$defs/FlatWorkPlans"
+      },
+      "request": {
+        "$ref": "#/$defs/FlatWorkRequest"
+      }
+    },
+    "seiza_calibration_library_plan_json": {
+      "answer": {
+        "$ref": "#/$defs/Snapshot"
+      },
+      "request": {
+        "$ref": "#/$defs/Request"
+      }
+    },
+    "seiza_calibration_library_plan_with_groups_json": {
+      "answer": {
+        "$ref": "#/$defs/Snapshot"
+      },
+      "request": {
+        "$ref": "#/$defs/Request"
+      }
+    },
+    "seiza_calibration_master_cohort_json": {
+      "answer": {
+        "$ref": "#/$defs/MasterCohort"
+      },
+      "request": {
+        "$ref": "#/$defs/MasterCohortRequest"
+      }
+    },
+    "seiza_calibration_master_plan_json": {
+      "answer": {
+        "$ref": "#/$defs/Session"
+      },
+      "request": {
+        "$ref": "#/$defs/MasterPlanRequest"
+      }
+    },
+    "seiza_calibration_setting_check_json": {
+      "answer": {
+        "$ref": "#/$defs/SettingCheck"
+      },
+      "request": {
+        "$ref": "#/$defs/Setting"
+      }
+    },
+    "seiza_calibration_settings_schema_json": {
+      "answer": {
+        "items": {
+          "$ref": "#/$defs/FieldSpec"
+        },
+        "type": "array"
+      },
+      "request": null
+    },
+    "seiza_flat_group_plan_json": {
+      "answer": {
+        "$ref": "#/$defs/FlatGroupPlan"
+      },
+      "request": {
+        "$ref": "#/$defs/Request2"
+      }
+    },
+    "seiza_flat_groups_prepare_json": {
+      "answer": null,
+      "request": {
+        "$ref": "#/$defs/Request2"
+      }
+    },
+    "seiza_master_flat_stability_images_json": {
+      "answer": {
+        "$ref": "#/$defs/FlatSetStability"
+      },
+      "request": {
+        "$ref": "#/$defs/FlatStabilityImageOptions"
+      }
+    },
+    "seiza_master_flat_stability_json": {
+      "answer": {
+        "$ref": "#/$defs/FlatSetStability"
+      },
+      "request": {
+        "$ref": "#/$defs/FlatStabilityFileRequest"
+      }
+    }
+  },
+  "title": "Seiza calibration library C ABI"
+}

@@ -73,6 +73,7 @@ pub enum FrameRole {
 ///
 /// Nothing stops a struct literal holding a value no comparison can use; see
 /// [`Self::validate`] for the API that refuses them.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MatchTolerances {
@@ -141,6 +142,7 @@ pub struct MatchTolerances {
 ///
 /// Serialized as `{"basis": "recorded"}`, `{"basis": "measured",
 /// "degrees": 82.2}` or `{"basis": "unknown"}`.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "basis", rename_all = "snake_case")]
 pub enum LightRotation {

@@ -1,4 +1,7 @@
-use seiza_calibration::library::{Request, evaluate};
+// The C ABI's JSON calls: built with the `json` feature.
+#![cfg(feature = "json")]
+
+use seiza_calibration::library::json::{Request, evaluate};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -29,7 +32,7 @@ fn cached_grouping_preserves_library_results_and_rejects_conflicting_inputs() {
             })
             .collect();
         let book = Arc::new(groups::prepare(grouping).unwrap());
-        let result = library::evaluate_with_book(request.clone(), Arc::clone(&book)).unwrap();
+        let result = library::json::evaluate_with_book(request.clone(), Arc::clone(&book)).unwrap();
         assert_eq!(
             serde_json::to_value(result).unwrap(),
             expected,
@@ -38,18 +41,18 @@ fn cached_grouping_preserves_library_results_and_rejects_conflicting_inputs() {
         );
         if !book.sessions.is_empty() {
             let mut changed = request.clone();
-            changed.global_settings.push(library::Setting {
+            changed.global_settings.push(library::json::Setting {
                 key: "flat_split_dust_pct".into(),
                 value: 5.0.into(),
             });
-            assert!(library::evaluate_with_book(changed, Arc::clone(&book)).is_err());
+            assert!(library::json::evaluate_with_book(changed, Arc::clone(&book)).is_err());
         }
         request.grouping.epoch_samples.push(groups::EpochSample {
             rig_uuid: "r".into(),
             at: 1,
             offset: 2.0,
         });
-        assert!(library::evaluate_with_book(request, book).is_err());
+        assert!(library::json::evaluate_with_book(request, book).is_err());
     }
 }
 
@@ -130,7 +133,7 @@ fn identity_tracks_effective_inputs_options_and_gate() {
 }
 
 #[test]
-fn input_order_keeps_each_master_metadata_anchor() {
+fn lights_whose_masters_take_the_same_frames_share_one_session() {
     let fixture: Value =
         serde_json::from_str(include_str!("fixtures/library/recipes.json")).unwrap();
     let mut request = fixture["cases"][1]["request"].clone();
@@ -140,7 +143,11 @@ fn input_order_keeps_each_master_metadata_anchor() {
     b["timestamp"] = 21.into();
     request["lights"] = serde_json::json!([a, b, a]);
     let result = evaluate(serde_json::from_value(request).unwrap()).unwrap();
-    assert_eq!(result.assignments, [0, 1, 0]);
+    // Each light's nearest frame differs, but the master takes the same two
+    // frames for both: one master, anchored as the first light orders them.
+    assert_eq!(result.selections[0].dark, ["f1", "f2", "f0"]);
+    assert_eq!(result.selections[1].dark, ["f2", "f1", "f0"]);
+    assert_eq!(result.assignments, [0, 0, 0]);
+    assert_eq!(result.sessions.len(), 1);
     assert_eq!(result.sessions[0].recipes[2].inputs, ["f1", "f2"]);
-    assert_eq!(result.sessions[1].recipes[2].inputs, ["f2", "f1"]);
 }

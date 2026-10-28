@@ -113,6 +113,7 @@ const INSIDE_SHADOW_DEPTH: f32 = 1.5;
 
 /// The light cone at the sensor, to size dust shadows and say where the dust
 /// sits.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Optics {
@@ -173,6 +174,7 @@ impl Optics {
 }
 
 /// What a dust feature looks like.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -210,6 +212,7 @@ impl DustShape {
 ///
 /// Construct with [`Default::default`] and set what is known; more fields may
 /// be added without a major version.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct DustFeature {
@@ -256,6 +259,7 @@ pub struct DustFeature {
 }
 
 /// In how many flats of a session a feature shows.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeenIn {
     /// Flats it shows in.
@@ -304,6 +308,7 @@ impl DustFeature {
 }
 
 /// Which part of the border a vignetting shadow hangs from.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -320,6 +325,7 @@ pub enum Edge {
 
 /// A large, smooth shadow anchored to the border: an off-axis guider's
 /// prism, a filter holder, a dew shield. Not dust.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Vignetting {
     /// The edge or corner it hangs from.
@@ -484,6 +490,7 @@ pub struct DustChange {
 }
 
 /// A vignetting shadow that changed between two sessions.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VignettingChange {
     /// Whether the later session is darker there.

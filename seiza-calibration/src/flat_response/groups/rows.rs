@@ -7,6 +7,7 @@ use super::metric::Spot;
 use serde::{Deserialize, Serialize};
 
 /// One measured flat session as the catalog keeps it.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResponseRow {
@@ -39,6 +40,7 @@ pub struct ResponseRow {
 }
 
 /// A flat a session's response should have combined but could not read.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UnreadFlat {
@@ -51,6 +53,7 @@ pub struct UnreadFlat {
 }
 
 /// Why a flat could not be read, which decides when it is tried again.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnreadKind {
@@ -73,6 +76,7 @@ impl UnreadKind {
 }
 
 /// A file's size and modification time, in nanoseconds since 1970.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileStamp {
@@ -81,6 +85,7 @@ pub struct FileStamp {
 }
 
 /// Two sessions' metrics as the catalog keeps them.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ComparisonRow {
@@ -104,6 +109,7 @@ pub struct ComparisonRow {
 pub use super::evidence::Verdict;
 
 /// One filter's fit within an imaging session.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EvidenceFit {
@@ -119,6 +125,7 @@ pub struct EvidenceFit {
     pub verdict: Verdict,
 }
 
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EvidenceRow {
@@ -132,6 +139,7 @@ pub struct EvidenceRow {
 /// family their flats come from: the lights of one filter, one target and
 /// one recorded angle (lights within the rig's rotation tolerance of each
 /// other), so a background never mixes two fields or two angles.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FamilyEvidenceRow {
@@ -162,6 +170,7 @@ pub struct FamilyEvidenceRow {
 }
 
 /// One pair of candidate families against a session's background.
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FamilyPairRow {

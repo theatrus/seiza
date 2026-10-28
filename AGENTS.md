@@ -1,5 +1,46 @@
 # Notes for coding agents
 
+## The Rust API comes first
+
+Rust hosts, PSF Guard first among them, call Seiza's core crates as their
+own code. Each core crate's public Rust API is the API; the C ABI and
+Python are built on it.
+
+1. **Give Rust hosts typed values, functions and methods.** A host builds
+   Seiza's own types and calls the functions that do the work, with no JSON
+   and no request or answer struct in between. When a host needs one step
+   of a larger call, export the step. Code moved out of a host keeps its
+   shape, so the host calls it where it called its own: PSF Guard #1016
+   calls the calibration library that #403 moved out of it this way. Write
+   it the way Rust callers expect:
+   - `FromStr` and `Display` for a value spelled as a word, not `parse` and
+     `as_str` of your own.
+   - An options struct, or an enum, where a call would otherwise take a run
+     of positional `bool`s, `Option`s or numbers whose meaning the call site
+     cannot show.
+   - Methods on the type they act on, borrowed arguments (`&str`, slices)
+     where the callee does not keep them, a specific error type where the
+     caller decides what to do with each refusal.
+   - A doc comment on every public item a host calls.
+2. **The C ABI may run a whole workflow as one JSON call.** So that it
+   needs few exports, a C export may take one JSON request and return one
+   JSON answer for a workflow: `seiza_calibration_library_plan_json` grades,
+   selects and resolves sessions for many lights at once. This is allowed
+   for now, and may be revisited. The request and answer types and the
+   function that runs them (`seiza_calibration::library::evaluate`,
+   `plan_masters`, `plan_flat_work`, ...) live in the core crate, hold no
+   logic of their own, and only call the native API. They are for the C
+   ABI: Rust hosts do not use them, and neither does Python.
+3. **Python binds the native API, not the C ABI's JSON calls.** Its classes
+   and functions wrap the native types and calls a Rust host uses: a
+   Python library object selects for a light, and a session object takes a
+   failed master. Never pass a Python request to a JSON request function
+   and return its JSON answer, and never convert through JSON text
+   (`json.dumps`, `serde_json::from_str`): `from_python` and `to_python` in
+   `seiza-py` convert directly. A native call's parity entry then names the
+   C export whose request covers it, in `[python_functions]` as
+   `{ c = "<C export>" }`.
+
 ## The core, the C ABI and Python move together
 
 Seiza's core crates reach their hosts through two bindings that should
@@ -100,6 +141,12 @@ So these steps are not optional, and a PR that skips them is not done.
   FITS `CRPIX` is the internal value plus 1.
 - Building `seiza-cabi` regenerates `seiza-cabi/include/seiza_cabi.h`;
   commit it with the change.
+- The C ABI's calibration JSON calls are described by
+  `seiza-cabi/include/seiza_calibration_library.schema.json`, generated from
+  the Rust types. A change to what they take or return changes it: run
+  `SEIZA_UPDATE_SCHEMA=1 cargo test -p seiza-cabi schema` and commit it.
+  A type such a call carries derives `schemars::JsonSchema` behind the
+  `json` (seiza-calibration) or `schema` (seiza-stacking) feature.
 - `seiza-py` is outside the workspace. Format, lint and check it on its own.
 
 ## Before opening a PR

@@ -1,4 +1,4 @@
-"""Host-facing contracts: strict controls, session forwarding and cached pixels."""
+"""Host-facing contracts: strict settings, retries on a session, cached pixels."""
 import json
 from pathlib import Path
 
@@ -10,51 +10,45 @@ FIXTURES = Path(__file__).parents[2] / 'seiza-calibration/tests/fixtures/library
 
 
 @pytest.mark.parametrize('settings, message', [
-    ([{'key': 'external_masterz', 'value': 'ignore'}], "unknown setting 'external_masterz'"),
-    ([{'key': 'external_masters', 'value': 'nonsense'}], 'external_masters'),
-    ([{'key': 'use_darks', 'value': 'false'}], 'must be true or false'),
-    ([{'key': 'use_darks', 'value': True}] * 2, "duplicate setting key 'use_darks'"),
+    ({'external_masterz': 'ignore'}, "unknown setting 'external_masterz'"),
+    ({'external_masters': 'nonsense'}, 'external_masters'),
+    ({'use_darks': 'false'}, 'must be true or false'),
 ])
-def test_settings_fail_consistently_across_endpoints(settings, message):
-    for call in [
-        lambda: seiza.calibration_library_plan(global_settings=settings),
-        lambda: seiza.calibration_master_plan(lights=[{}], global_settings=settings),
-        lambda: seiza.calibration_master_cohort(settings=settings),
-        lambda: seiza.calibration_flat_retry(settings=settings),
-        lambda: seiza.calibration_library_plan(rigs=[{'rig_uuid': 'a', 'settings': settings}]),
-    ]:
-        with pytest.raises(ValueError, match=message):
-            call()
+def test_settings_are_refused_the_same_for_the_server_and_a_rig(settings, message):
+    with pytest.raises(ValueError, match=message):
+        seiza.CalibrationRules(settings)
+    with pytest.raises(ValueError, match=f'rig a: .*{message}'):
+        seiza.CalibrationRules(rigs={'a': {'values': settings}})
 
 
-def test_keyword_and_mapping_calls_agree_and_refuse_ambiguous_overrides():
-    source = json.loads((FIXTURES / 'recipes.json').read_text())['cases'][0]['request']
-    request = {k: source[k] for k in ['frames', 'lights']}
-    assert seiza.calibration_master_plan(request) == seiza.calibration_master_plan(**request)
-    cohort = dict(frames=request['frames'], kind='bias')
-    assert seiza.calibration_master_cohort(cohort) == seiza.calibration_master_cohort(**cohort)
-    with pytest.raises(ValueError, match='either a request mapping or keyword fields'):
-        seiza.calibration_master_plan(request, flat_star_masking=True)
+def session_and_rules(frames, **selection):
+    rules = seiza.CalibrationRules().for_light({})
+    policy = selection.pop('flat_stability', None)
+    chosen = seiza.CalibrationSelection(frames, rules, **selection)
+    return seiza.calibration_resolve_session(chosen, seiza.CalibrationQuality(), flat_stability=policy), rules
 
 
-def test_retry_uses_returned_session_and_successful_feedback_needs_no_extra_flag():
+def test_retry_takes_the_sessions_policy_and_held_back_flats():
     request = json.loads((FIXTURES / 'flat-retries.json').read_text())['cases'][0]['request']
-    session = seiza.calibration_master_plan(
-        frames=request['candidates'], lights=[{}], flat_stability={'enabled': False},
-        flat_held_back=request['held_back'],
-    )
-    retry = dict(session=session, candidates=request['candidates'], first=request['first'])
-    assert seiza.calibration_flat_retry(**retry)['action'] == 'publish_first'
-    with pytest.raises(ValueError, match='conflict'):
-        seiza.calibration_flat_retry(**retry, policy={'enabled': True})
-    session['flat_stability'] = {'trim_unstable': False}
+    session, rules = session_and_rules(request['candidates'], flat_stability={'enabled': False},
+                                       flat_held_back=request['held_back'])
+    assert session.flat_held_back == request['held_back']
+    retry = lambda: seiza.FlatRetry(request['first'], request['candidates'], rules,
+                                    held_back=session.flat_held_back, policy=session.flat_stability)
+    assert retry().next()['action'] == 'publish_first'
     # Missing flags use the documented true defaults, including enabled.
-    result = seiza.calibration_flat_retry(**retry)
-    assert result['action'] == 'try_alternate'
-    assert result['inputs'] == ['f4', 'f5']  # excludes f6 from the session
-    retry['alternate'] = dict(used=['f4', 'f5'], disagreement=[0, 0], drift_threshold=16)
-    assert seiza.calibration_flat_retry(**retry)['action'] == 'publish_alternate'
-    assert seiza.calibration_flat_retry(retry) == seiza.calibration_flat_retry(**retry)
+    session, rules = session_and_rules(request['candidates'], flat_stability={'trim_unstable': False},
+                                       flat_held_back=request['held_back'])
+    flat_retry = retry()
+    decision = flat_retry.next()
+    assert decision['action'] == 'try_alternate'
+    assert decision['inputs'] == ['f4', 'f5']  # excludes f6 from the session
+    flat_retry.alternate(dict(used=['f4', 'f5'], disagreement=[0, 0], drift_threshold=16))
+    assert flat_retry.next()['action'] == 'publish_alternate'
+    with pytest.raises(ValueError, match='original/held-back session'):
+        flat_retry.alternate(dict(used=['f0', 'f1'], disagreement=[0, 0], drift_threshold=16))
+    # A refused answer leaves the retry where it was.
+    assert flat_retry.next()['action'] == 'publish_alternate'
 
 
 @pytest.mark.parametrize('mode', ['mono', 'rgb', 'cfa'])
@@ -91,7 +85,6 @@ def test_cached_pixels_equal_file_measurement_with_calibration(tmp_path, mode):
     for i, (image, record) in enumerate(zip(sources, metadata)):
         request['inputs'].append(dict(path=write(f'{i}.fits', image, 'FLAT'), **record))
     assert seiza.master_flat_stability(**request) == buffered
-    assert seiza.master_flat_stability(request) == buffered
 
 
 def test_cached_pixel_validation_and_indexed_errors():
@@ -127,10 +120,8 @@ def test_complete_host_loop_cleans_up_and_publishes_core_choice(scenario):
         frame.update(camera='test', width=128, height=128, channels=1, exposure_s=2.)
     if scenario == 'memo':
         policy = {'enabled': False}
-    session = seiza.calibration_master_plan(
-        frames=request['candidates'], lights=[{}],
-        flat_held_back=request['held_back'], flat_stability=policy,
-    )
+    session, rules = session_and_rules(request['candidates'], flat_held_back=request['held_back'],
+                                       flat_stability=policy)
     built, discarded, published = [], [], []
 
     def build(ids, allow_memo):
@@ -149,10 +140,10 @@ def test_complete_host_loop_cleans_up_and_publishes_core_choice(scenario):
 
     if scenario == 'cancel':
         with pytest.raises(InterruptedError):
-            example.execute_flat(session, request['candidates'], build, publish, discarded.append)
+            example.execute_flat(session, rules, request['candidates'], build, publish, discarded.append)
         assert discarded == built and not published
         return
-    chosen = example.execute_flat(session, request['candidates'], build, publish, discarded.append)
+    chosen = example.execute_flat(session, rules, request['candidates'], build, publish, discarded.append)
     if scenario == 'withhold':
         assert chosen is None and discarded == built and not published
     else:

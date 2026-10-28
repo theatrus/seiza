@@ -449,12 +449,7 @@ fn balance_narrowband<'py>(
     let report = py
         .detach(|| seiza_stacking::balance_narrowband(&mut image, &options))
         .map_err(invalid)?;
-    let json =
-        serde_json::to_string(&report).map_err(|error| PyValueError::new_err(error.to_string()))?;
-    let report = py
-        .import("json")?
-        .call_method1("loads", (json,))?
-        .cast_into::<PyDict>()?;
+    let report = crate::convert::to_python(py, &report)?.cast_into::<PyDict>()?;
     Ok((into_image_array(py, image)?, report))
 }
 
