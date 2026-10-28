@@ -1972,12 +1972,38 @@ def calibration_library_plan(
     flat_star_masking: bool = False,
     flat_stability: FlatRetryPolicy | None = None,
     prepared_grouping: FlatGroups | None = None,
+    flat_association: CalibrationAssociation = "automatic",
+    dark_association: CalibrationAssociation = "automatic",
 ) -> CalibrationLibrarySnapshot: ...
 
+def calibration_flat_response_plan(
+    request: Mapping[str, Any] | None = None, *,
+    frames: Sequence[CalibrationFrame] | None = None,
+    quality: Sequence[CalibrationQuality] | None = None,
+    global_settings: Sequence[CalibrationSetting] | None = None,
+    rigs: Sequence[CalibrationRigSettings] | None = None,
+    night_shifts: Sequence[Mapping[str, Any]] | None = None,
+    regrade: bool | None = None,
+    flat_association: CalibrationAssociation | None = None,
+) -> CalibrationFlatResponsePlans: ...
+
 # Shared calibration types; kept identical to src/library_types.py.
+CalibrationAssociation = Literal["automatic", "one_set"]
 CalibrationKind = Literal["bias", "dark", "dark_flat", "flat"]
 CalibrationRecipeAction = Literal["external", "integrate", "unavailable", "failed", "blocked"]
 FlatRetryAction = Literal["publish_first", "try_trimmed", "publish_trimmed", "try_alternate", "publish_alternate", "withhold"]
+
+class CalibrationFlatResponsePlan(TypedDict):
+    row: dict[str, Any]
+    sample_frames: list[str]
+
+class CalibrationFlatResponsePlans(TypedDict):
+    algorithm_version: int
+    plans: list[CalibrationFlatResponsePlan]
+    limits: list[dict[str, Any]]
+    night_boundaries: list[dict[str, Any]]
+    unplanned: list[str]
+    grades: list[dict[str, Any]]
 
 class CalibrationFrame(TypedDict, total=False):
     id: int
@@ -2122,6 +2148,8 @@ class CalibrationPedestalEvidence(TypedDict, total=False):
     pinned: float | None
 
 class CalibrationMasterPlanRequest(TypedDict, total=False):
+    flat_association: CalibrationAssociation
+    dark_association: CalibrationAssociation
     frames: Sequence[CalibrationFrame]
     lights: Sequence[CalibrationLight]
     quality: Sequence[CalibrationQuality]
@@ -2209,6 +2237,8 @@ def calibration_master_plan(
     quality: Sequence[CalibrationQuality] | None = None,
     global_settings: Sequence[CalibrationSetting] | None = None,
     rigs: Sequence[CalibrationRigSettings] | None = None,
+    flat_association: CalibrationAssociation | None = None,
+    dark_association: CalibrationAssociation | None = None,
     flat_basis: Mapping[str, Any] | None = None,
     flat_family: Mapping[str, Any] | None = None,
     flat_held_back: Sequence[str] | None = None,

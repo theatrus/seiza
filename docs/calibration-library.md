@@ -305,3 +305,24 @@ planes and indexed geometry/calibration diagnostics. Sources are reported in
 input order, so feedback UUIDs must have that same order. `enabled=false` on
 `FlatRetryPolicy` skips retry decisions; the measurement functions remain
 independently callable. Measurement algorithm version stays 2.
+
+## Supplied sets and raw-flat response preparation
+
+`flat_association` and `dark_association` are independent `automatic` (default)
+or `one_set` choices on library and master-plan requests. C JSON uses
+`flatAssociation` / `darkAssociation`. One-set includes all eligible inputs,
+across nights and beyond the automatic 64-frame selection cap. It preserves
+grades, explicit exclusions, source checks and physical compatibility. It
+refuses incompatible sets and multiple/mixed external masters. Flat retries
+can trim unstable frames but cannot switch to another session in this mode.
+
+`library::plan_flat_responses` (`seiza_calibration_flat_response_plan_json`,
+Python `calibration_flat_response_plan`) is a pure preparation step extracted
+from PSF Guard's file job. It accepts library request records, groups eligible
+raw flats by sensor/optical family, night and rotation, and chooses bounded,
+deterministic response samples. It resolves pedestal estimates using the same
+bias/dark-flat matcher and cached dark levels. Results include the native rig
+limits and night boundaries needed to prepare a grouping book. Missing capture
+times are explicitly reported as unplanned; hosts must not fabricate dates.
+Hosts supply measured response planes and pair comparisons; this API does not
+claim pixel evidence exists merely because sessions have been prepared.

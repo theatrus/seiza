@@ -268,3 +268,34 @@ def test_master_flat_stability_measures_transient_features(tmp_path):
     assert result['disagreement'][1] >= result['drift_threshold']
     assert result['disagreement'][2] == result['drift_threshold']
     assert result['errors'][0][0] == 2
+
+
+def test_supplied_sets_and_response_preparation_share_core_rules():
+    frames = [dict(frame_uuid=f"flat-{i}", rig_uuid="r", kind="flat",
+                   source_path=f"/flat-{i}.fits", source_fingerprint=f"stamp-{i}",
+                   source_verified=True, captured_at=1_700_000_000 + (i // 20) * 259200,
+                   width=512, height=512, channels=1, gain=100, offset=20,
+                   filter="Ha", rotation=0.0, exposure_s=30.0) for i in range(80)]
+    prepared = seiza.calibration_flat_response_plan(frames=frames)
+    assert len(prepared['plans']) == 4
+    assert all(len(p['sample_frames']) == 16 for p in prepared['plans'])
+    assert prepared['unplanned'] == []
+    assert len(prepared['grades']) == 80
+    assert seiza.calibration_flat_response_plan(dict(frames=frames)) == prepared
+    assert seiza.calibration_flat_response_plan(frames=frames, flat_association="one_set")['plans'] == []
+    light = dict(path="/light.fits", rig_uuid="r", width=512, height=512, channels=1,
+                 gain=100, offset=20, filter="Ha", rotator_position=0.0,
+                 exposure_s=30.0, timestamp=1_700_000_000)
+    result = seiza.calibration_library_plan(frames=frames, lights=[light], flat_association="one_set")
+    session = result['sessions'][0]
+    flat = next(r for r in session['recipes'] if r['kind'] == 'flat')
+    assert len(flat['inputs']) == 80
+    assert flat['input_limit'] == 80
+    assert session['flat_stability']['try_next_session'] is False
+    direct = seiza.calibration_master_plan(frames=frames, lights=[light], flat_association="one_set")
+    assert direct['recipes'] == session['recipes']
+    frames[0]['gain'] = 200
+    with pytest.raises(ValueError, match='compatible'):
+        seiza.calibration_library_plan(frames=frames, lights=[light], flat_association="one_set")
+    with pytest.raises(ValueError):
+        seiza.calibration_library_plan(flat_association="invalid")

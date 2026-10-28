@@ -34,7 +34,7 @@ fn records<T: serde::de::DeserializeOwned>(
 }
 /// Grade and select an immutable calibration library; no file or catalog I/O.
 #[pyfunction]
-#[pyo3(signature=(*,frames=None,lights=None,quality=None,global_settings=None,rigs=None,grouping=None,available_responses=None,night_shifts=None,regrade=false, master_failures=None, pedestal_evidence=None, force_flat_without_pedestal=false, flat_star_masking=false, flat_stability=None, prepared_grouping=None))]
+#[pyo3(signature=(*,frames=None,lights=None,quality=None,global_settings=None,rigs=None,grouping=None,available_responses=None,night_shifts=None,regrade=false, master_failures=None, pedestal_evidence=None, force_flat_without_pedestal=false, flat_star_masking=false, flat_stability=None, prepared_grouping=None, flat_association="automatic", dark_association="automatic"))]
 #[allow(clippy::too_many_arguments)]
 fn calibration_library_plan<'py>(
     py: Python<'py>,
@@ -53,8 +53,16 @@ fn calibration_library_plan<'py>(
     flat_star_masking: bool,
     flat_stability: Option<&Bound<'py, PyAny>>,
     prepared_grouping: Option<PyRef<'py, FlatGroups>>,
+    flat_association: &str,
+    dark_association: &str,
 ) -> PyResult<Bound<'py, PyAny>> {
+    let mode = |value: &str| {
+        serde_json::from_value(serde_json::Value::String(value.into()))
+            .map_err(|e| PyValueError::new_err(format!("invalid association mode: {e}")))
+    };
     let request = library::Request {
+        flat_association: mode(flat_association)?,
+        dark_association: mode(dark_association)?,
         frames: records(frames, "frames")?,
         lights: records(lights, "lights")?,
         quality: records(quality, "quality")?,
@@ -99,6 +107,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     module.add_class::<FlatGroups>()?;
     module.add_function(wrap_pyfunction!(calibration_library_plan, module)?)?;
+    module.add_function(wrap_pyfunction!(calibration_flat_response_plan, module)?)?;
     module.add_function(wrap_pyfunction!(master_flat_stability, module)?)?;
     module.add_function(wrap_pyfunction!(master_flat_stability_images, module)?)?;
     module.add_function(wrap_pyfunction!(calibration_master_plan, module)?)?;
@@ -133,9 +142,44 @@ fn request_or_keywords<T: serde::de::DeserializeOwned>(
     }
 }
 
+/// Choose raw-flat response sessions and samples with shared grading/settings.
+#[pyfunction]
+#[pyo3(signature=(request=None,*,frames=None,quality=None,global_settings=None,rigs=None,night_shifts=None,regrade=None,flat_association=None))]
+#[allow(clippy::too_many_arguments)]
+fn calibration_flat_response_plan<'py>(
+    py: Python<'py>,
+    request: Option<&Bound<'py, PyAny>>,
+    frames: Option<&Bound<'py, PyAny>>,
+    quality: Option<&Bound<'py, PyAny>>,
+    global_settings: Option<&Bound<'py, PyAny>>,
+    rigs: Option<&Bound<'py, PyAny>>,
+    night_shifts: Option<&Bound<'py, PyAny>>,
+    regrade: Option<&Bound<'py, PyAny>>,
+    flat_association: Option<&Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let request: library::Request = request_or_keywords(
+        py,
+        request,
+        &[
+            ("frames", frames),
+            ("quality", quality),
+            ("global_settings", global_settings),
+            ("rigs", rigs),
+            ("night_shifts", night_shifts),
+            ("regrade", regrade),
+            ("flat_association", flat_association),
+        ],
+        "calibration_flat_response_plan request",
+    )?;
+    let result = py
+        .detach(|| library::plan_flat_responses(request))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    to_python(py, &result)
+}
+
 /// Resolve one selected session without repeating grouping, matching or file I/O.
 #[pyfunction]
-#[pyo3(signature = (request=None, *, frames=None,lights=None,quality=None,global_settings=None,rigs=None,flat_basis=None,flat_family=None,flat_held_back=None,flat_star_masking=None,flat_stability=None,master_failures=None,pedestal_evidence=None,force_flat_without_pedestal=None))]
+#[pyo3(signature = (request=None, *, frames=None,lights=None,quality=None,global_settings=None,rigs=None,flat_basis=None,flat_family=None,flat_held_back=None,flat_star_masking=None,flat_stability=None,master_failures=None,pedestal_evidence=None,force_flat_without_pedestal=None,flat_association=None,dark_association=None))]
 #[allow(clippy::too_many_arguments)]
 fn calibration_master_plan<'py>(
     py: Python<'py>,
@@ -153,6 +197,8 @@ fn calibration_master_plan<'py>(
     master_failures: Option<&Bound<'py, PyAny>>,
     pedestal_evidence: Option<&Bound<'py, PyAny>>,
     force_flat_without_pedestal: Option<&Bound<'py, PyAny>>,
+    flat_association: Option<&Bound<'py, PyAny>>,
+    dark_association: Option<&Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let request: library::MasterPlanRequest = request_or_keywords(
         py,
@@ -163,6 +209,8 @@ fn calibration_master_plan<'py>(
             ("quality", quality),
             ("global_settings", global_settings),
             ("rigs", rigs),
+            ("flat_association", flat_association),
+            ("dark_association", dark_association),
             ("flat_basis", flat_basis),
             ("flat_family", flat_family),
             ("flat_held_back", flat_held_back),

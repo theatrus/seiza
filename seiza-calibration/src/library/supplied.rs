@@ -1,0 +1,104 @@
+//! Explicit supplied-set policy. Automatic defaults retain the existing library
+//! contract. OneSet removes temporal/cohort selection, never physical gates.
+use super::*;
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Association {
+    #[default]
+    Automatic,
+    OneSet,
+}
+pub(super) fn validate(
+    frames: &[CalibrationFrame],
+    rules: &RuleBook,
+    flat: Association,
+    dark: Association,
+) -> crate::Result<()> {
+    for (kind, mode) in [(CalibrationKind::Flat, flat), (CalibrationKind::Dark, dark)] {
+        if mode != Association::OneSet {
+            continue;
+        }
+        let kept: Vec<_> = frames
+            .iter()
+            .filter(|f| f.kind == kind && f.kept_out.is_none())
+            .collect();
+        if kept.iter().filter(|f| f.is_master).count() > 1
+            || (kept.iter().any(|f| f.is_master) && kept.iter().any(|f| !f.is_master))
+        {
+            return Err(invalid(format!(
+                "one supplied {kind:?} set needs raw frames or one existing master, not several masters or a mixture"
+            )));
+        }
+        for (index, a) in kept.iter().enumerate() {
+            let tolerance = rules.for_rig(&a.rig_uuid).coherence_tolerances();
+            for b in kept.iter().skip(index + 1) {
+                let (sa, sb) = (frame_signature(a), frame_signature(b));
+                let temperatures = match (a.camera_temp, b.camera_temp) {
+                    (Some(a), Some(b)) => (a - b).abs() <= tolerance.master_temperature_c,
+                    _ => true,
+                };
+                if a.rig_uuid != b.rig_uuid
+                    || !integrates_with(kind, &sa, &sb, &tolerance)
+                    || !temperatures
+                    || (kind == CalibrationKind::Dark
+                        && !exposure_matches(a.exposure_s, b.exposure_s))
+                {
+                    return Err(invalid(format!(
+                        "{} and {} cannot form one compatible {kind:?} set; use automatic grouping or choose matching frames",
+                        a.frame_uuid, b.frame_uuid
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+pub(super) fn apply(
+    library: &LibrarySnapshot,
+    light: &Light,
+    selected: &mut CalibrationSelection,
+    frames: &[CalibrationFrame],
+    flat: Association,
+    dark: Association,
+) {
+    let all = |kind| {
+        frames
+            .iter()
+            .filter(|f| f.kind == kind && f.kept_out.is_none())
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let rules = &selected.rules;
+    if dark == Association::OneSet && rules.use_darks {
+        let candidates = all(CalibrationKind::Dark);
+        selected.library.dark = frames.iter().any(|f| f.kind == CalibrationKind::Dark);
+        selected.dark = if candidates.iter().all(|f| {
+            sensor_matches(light, f)
+                && exposure_matches(light.exposure_s, f.exposure_s)
+                && temperature_admits(light.camera_temp, f, rules)
+        }) {
+            candidates
+        } else {
+            Vec::new()
+        };
+        selected.one_set.insert(CalibrationKind::Dark);
+    }
+    if flat == Association::OneSet {
+        let candidates = all(CalibrationKind::Flat);
+        selected.library.flat = frames.iter().any(|f| f.kind == CalibrationKind::Flat);
+        selected.flat = if candidates
+            .iter()
+            .all(|f| sensor_matches(light, f) && flat_matches(light, f, rules))
+        {
+            candidates
+        } else {
+            Vec::new()
+        };
+        selected.flat_basis = Default::default();
+        selected.flat_family = None;
+        selected.flat_held_back.clear();
+        selected.flat_choices.clear();
+        selected.one_set.insert(CalibrationKind::Flat);
+        library.select_dark_flats(light, &Arc::clone(&selected.rules), selected);
+    }
+}

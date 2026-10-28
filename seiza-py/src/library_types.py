@@ -4,9 +4,22 @@ These are ordinary dictionaries at runtime; validation remains in Seiza core.
 """
 from typing import Any, Literal, Mapping, NotRequired, Required, Sequence, TypedDict
 
+CalibrationAssociation = Literal["automatic", "one_set"]
 CalibrationKind = Literal["bias", "dark", "dark_flat", "flat"]
 CalibrationRecipeAction = Literal["external", "integrate", "unavailable", "failed", "blocked"]
 FlatRetryAction = Literal["publish_first", "try_trimmed", "publish_trimmed", "try_alternate", "publish_alternate", "withhold"]
+
+class CalibrationFlatResponsePlan(TypedDict):
+    row: dict[str, Any]
+    sample_frames: list[str]
+
+class CalibrationFlatResponsePlans(TypedDict):
+    algorithm_version: int
+    plans: list[CalibrationFlatResponsePlan]
+    limits: list[dict[str, Any]]
+    night_boundaries: list[dict[str, Any]]
+    unplanned: list[str]
+    grades: list[dict[str, Any]]
 
 class CalibrationFrame(TypedDict, total=False):
     id: int
@@ -151,6 +164,8 @@ class CalibrationPedestalEvidence(TypedDict, total=False):
     pinned: float | None
 
 class CalibrationMasterPlanRequest(TypedDict, total=False):
+    flat_association: CalibrationAssociation
+    dark_association: CalibrationAssociation
     frames: Sequence[CalibrationFrame]
     lights: Sequence[CalibrationLight]
     quality: Sequence[CalibrationQuality]
@@ -230,4 +245,4 @@ class FlatStabilityImageMetadata(TypedDict, total=False):
     bayer: FlatStabilityBayer | None
     skipped: bool
 
-_calibration_exports = ['CalibrationLibrarySnapshot', 'CalibrationKind', 'CalibrationRecipeAction', 'FlatRetryAction', 'CalibrationFrame', 'CalibrationLight', 'CalibrationSetting', 'CalibrationRigSettings', 'CalibrationQuality', 'FlatRetryPolicy', 'CalibrationLightRotation', 'CalibrationTolerances', 'CalibrationMasterRecipe', 'CalibrationApplication', 'CalibrationSession', 'CalibrationMasterFailure', 'CalibrationPedestalEvidence', 'CalibrationMasterPlanRequest', 'CalibrationMasterCohortRequest', 'CalibrationMasterCohort', 'FlatAttempt', 'CalibrationFlatRetryRequest', 'CalibrationFlatRetryDecision', 'FlatStabilityInput', 'FlatStabilityRequest', 'FlatSetStability', 'FlatStabilityBayer', 'FlatStabilityImageMetadata']
+_calibration_exports = ['CalibrationAssociation', 'CalibrationFlatResponsePlan', 'CalibrationFlatResponsePlans', 'CalibrationLibrarySnapshot', 'CalibrationKind', 'CalibrationRecipeAction', 'FlatRetryAction', 'CalibrationFrame', 'CalibrationLight', 'CalibrationSetting', 'CalibrationRigSettings', 'CalibrationQuality', 'FlatRetryPolicy', 'CalibrationLightRotation', 'CalibrationTolerances', 'CalibrationMasterRecipe', 'CalibrationApplication', 'CalibrationSession', 'CalibrationMasterFailure', 'CalibrationPedestalEvidence', 'CalibrationMasterPlanRequest', 'CalibrationMasterCohortRequest', 'CalibrationMasterCohort', 'FlatAttempt', 'CalibrationFlatRetryRequest', 'CalibrationFlatRetryDecision', 'FlatStabilityInput', 'FlatStabilityRequest', 'FlatSetStability', 'FlatStabilityBayer', 'FlatStabilityImageMetadata']

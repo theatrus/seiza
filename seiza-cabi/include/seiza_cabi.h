@@ -4230,7 +4230,7 @@ void seiza_flat_groups_free(SeizaFlatGroups *groups);
  Grade and select a calibration library using PSF Guard's shared policy.
  `request_json` is a camelCase library::Request: frames, lights, quality,
  globalSettings, rigs, grouping, availableResponses, nightShifts, regrade, masterFailures, pedestalEvidence,
- forceFlatWithoutPedestal, flatStarMasking and flatStability.
+ forceFlatWithoutPedestal, flatStarMasking, flatStability, flatAssociation and darkAssociation.
  Missing collections are empty. Settings are {key,value} records; identifiers,
  enum values and arbitrary setting values are preserved. The returned snapshot
  contains grades, selections, complete gates, sessions, assignments and master
@@ -4265,6 +4265,19 @@ char *seiza_calibration_library_plan_with_groups_json(const char *request_json,
  */
 char *seiza_calibration_master_plan_json(const char *request_json,
                                          char **error_out);
+
+/*
+ Plan raw-flat response sessions and bounded samples from a camelCase
+ library::Request. Returns plans, resolved limits/night boundaries, grades
+ and unplanned frame IDs. Pure metadata/measurement policy; no pixel I/O.
+ flatAssociation/darkAssociation accept automatic (default) or one_set in
+ library and master requests. OneSet keeps all eligible compatible inputs;
+ incompatible supplied sets return an error instead of silently splitting.
+ Free the result/error with seiza_string_free.
+ # Safety
+ request_json is NUL-terminated UTF-8; error_out is null or writable.
+ */
+char *seiza_calibration_flat_response_plan_json(const char *request_json, char **error_out);
 
 /*
  Resolve a coherent master cohort from camelCase JSON. No I/O.

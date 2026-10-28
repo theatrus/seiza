@@ -20,6 +20,8 @@ pub struct MasterPlanRequest {
     pub master_failures: Vec<MasterFailure>,
     pub pedestal_evidence: Vec<PedestalEvidence>,
     pub force_flat_without_pedestal: bool,
+    pub flat_association: Association,
+    pub dark_association: Association,
 }
 
 fn setting_values(rows: Vec<Setting>, scope: &str) -> crate::Result<rules::RuleValues> {
@@ -92,7 +94,7 @@ pub fn plan_masters(request: MasterPlanRequest) -> crate::Result<Session> {
     for light in &request.lights {
         validate_values(&light_signature(light).seiza)?;
     }
-    let rules = rule_book(request.global_settings, request.rigs)?.for_light(light);
+    let rules = rule_book(request.global_settings.clone(), request.rigs.clone())?.for_light(light);
     let mut selected = CalibrationSelection {
         rules,
         flat_basis: request.flat_basis,
@@ -111,6 +113,13 @@ pub fn plan_masters(request: MasterPlanRequest) -> crate::Result<Session> {
             return Err(invalid("quality rows must name unique selected frames"));
         }
     }
+    let modes = (request.flat_association, request.dark_association);
+    supplied::validate(
+        &request.frames,
+        &rule_book(request.global_settings.clone(), request.rigs.clone())?,
+        modes.0,
+        modes.1,
+    )?;
     for frame in request.frames {
         match frame.kind {
             CalibrationKind::Bias => &mut selected.bias,
@@ -120,13 +129,19 @@ pub fn plan_masters(request: MasterPlanRequest) -> crate::Result<Session> {
         }
         .push(frame);
     }
-    for frames in [
-        &mut selected.bias,
-        &mut selected.dark,
-        &mut selected.dark_flat,
-        &mut selected.flat,
+    if modes.0 == Association::OneSet {
+        selected.one_set.insert(CalibrationKind::Flat);
+    }
+    if modes.1 == Association::OneSet {
+        selected.one_set.insert(CalibrationKind::Dark);
+    }
+    for (kind, frames) in [
+        (CalibrationKind::Bias, &mut selected.bias),
+        (CalibrationKind::Dark, &mut selected.dark),
+        (CalibrationKind::DarkFlat, &mut selected.dark_flat),
+        (CalibrationKind::Flat, &mut selected.flat),
     ] {
-        if frames.iter().all(|f| f.source_verified) {
+        if !selected.one_set.contains(&kind) && frames.iter().all(|f| f.source_verified) {
             frames.truncate(MAX_MASTER_FRAMES);
         }
     }
@@ -177,6 +192,10 @@ pub(super) fn resolved_session(
                         && !(q.grade.is_some() && selected_frame_current(id, q, &frames))
                 })
         });
+    }
+    let mut stability = stability;
+    if selected.one_set.contains(&CalibrationKind::Flat) {
+        stability.try_next_session = false;
     }
     Session {
         key: session_key(selected, &recipes, &stability),

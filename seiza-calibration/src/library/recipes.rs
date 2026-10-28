@@ -55,7 +55,14 @@ pub(super) fn recipes(selected: &CalibrationSelection) -> Vec<MasterRecipe> {
             })
             .collect();
         let raw: Vec<_> = frames.iter().filter(|f| !f.is_master).cloned().collect();
-        let subset = master_subset_report(kind, &raw, &selected.rules);
+        let subset = if selected.one_set.contains(&kind) {
+            MasterSubset {
+                kept: raw.clone(),
+                dropped: Vec::new(),
+            }
+        } else {
+            master_subset_report(kind, &raw, &selected.rules)
+        };
         let adopt = match selected.rules.external_masters {
             ExternalMasterPolicy::Prefer => masters.first().copied(),
             ExternalMasterPolicy::Fallback if subset.kept.len() < MIN_MASTER_FRAMES => {
@@ -109,7 +116,11 @@ pub(super) fn recipes(selected: &CalibrationSelection) -> Vec<MasterRecipe> {
                 .map(|f| f.frame_uuid.clone())
                 .collect(),
             coherent_inputs: subset.kept.iter().map(|f| f.frame_uuid.clone()).collect(),
-            input_limit: MAX_MASTER_FRAMES,
+            input_limit: if selected.one_set.contains(&kind) {
+                raw.len().max(MAX_MASTER_FRAMES)
+            } else {
+                MAX_MASTER_FRAMES
+            },
             requires_source_verification: frames.iter().any(|f| !f.source_verified),
             failure: None,
             exposure_seconds,

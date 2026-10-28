@@ -520,6 +520,7 @@ seiza_live_stacker_open_fits_expanding_sessions = "LiveStacker.open_fits_expandi
 
 seiza_master_flat_stability_json = "master_flat_stability"
 seiza_master_flat_stability_images_json = "master_flat_stability_images"
+seiza_calibration_flat_response_plan_json = "calibration_flat_response_plan"
 seiza_calibration_master_plan_json = "calibration_master_plan"
 seiza_calibration_master_cohort_json = "calibration_master_cohort"
 seiza_calibration_flat_retry_json = "calibration_flat_retry"

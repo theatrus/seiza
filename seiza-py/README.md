@@ -1671,6 +1671,24 @@ All records/results use snake_case. Optional keywords are `frames`, `lights`,
 nondefault rule notes; peer grading, overrides, temporal selection and complete
 session gates use one resolved rule layer.
 
+`flat_association="automatic"` and `dark_association="automatic"` independently
+select the library policy. Set either to `"one_set"` to use every eligible input
+of that kind across nights, without the automatic 64-input cap. Grading and
+manual choices still apply. Incompatible sensor/optical modes, dark exposures,
+or mixtures of masters and raw files raise `ValueError`; light compatibility
+checks remain active. Flat one-set mode disables alternate-session retries.
+
+`calibration_flat_response_plan(frames=..., quality=..., regrade=True,
+global_settings=..., rigs=..., night_shifts=...)` moves raw-flat session and
+sampling preparation into the same core. It returns `algorithm_version`,
+`plans` (each with a response `row` and bounded `sample_frames`), resolved
+`limits`, `night_boundaries`, `unplanned` IDs and `grades`. Hosts read/cache the
+sampled pixels with `flat_bin_frame` / `flat_build_response`, fill
+measurement fields, and use `FlatGroups` comparison requests before passing
+responses and comparisons back in `grouping`. No files are opened by the
+planner. `flat_association="one_set"` returns no response plans. Capture times
+are required for measured temporal groups; untimed flats appear in `unplanned`.
+
 This call plans native master builds; it opens no files and does not publish a
 master. Verify sources and replan, execute the dependency recipes, and return
 failures or native pedestal-fit evidence when required. Automatic flat-only

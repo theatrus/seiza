@@ -16,18 +16,22 @@ pub use flat_notes::{
 pub use recipes::{Application, FlatUse, MasterFailure, PedestalEvidence};
 use recipes::{finalize, recipes};
 pub use rules::{ChoiceOption, Effect, FieldKind, FieldSpec, Group, RuleNote, RuleSource};
+mod response_plan;
 mod selection;
+mod supplied;
 use crate::{
     BiasScreening, DarkMeasurement, DarkScreening, Finding, FindingCode, FlatMeasurement,
     FrameSignature, FrameVerdict, Grade, MatchTolerances,
 };
 use flat_notes as flat_groups;
+pub use response_plan::{FlatResponsePlan, FlatResponsePlans, plan_flat_responses};
 use rules::{RuleBook, Rules};
 use selection::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+pub use supplied::Association;
 const MIN_MASTER_FRAMES: usize = 2;
 const MAX_MASTER_FRAMES: usize = 64;
 pub const POLICY_ALGORITHM_VERSION: u32 = 4;
@@ -161,6 +165,7 @@ struct CalibrationSelection {
     flat_held_back: Vec<String>,
     flat_family: Option<flat_groups::FlatFamily>,
     flat_choices: Vec<flat_groups::ChoiceNote>,
+    one_set: BTreeSet<CalibrationKind>,
 }
 #[derive(Clone, Copy, Debug, Default, Serialize)]
 pub struct LibraryKinds {
@@ -385,6 +390,9 @@ pub struct Request {
     pub force_flat_without_pedestal: bool,
     pub flat_star_masking: bool,
     pub flat_stability: FlatRetryPolicy,
+    /// Automatic association, or one explicit supplied set for every compatible light.
+    pub flat_association: Association,
+    pub dark_association: Association,
 }
 #[derive(Debug, Serialize)]
 pub struct Selection {
@@ -498,7 +506,7 @@ fn evaluate_inner(
     }
     let mut ids = BTreeSet::new();
     for frame in &request.frames {
-        if frame.frame_uuid.is_empty() || !ids.insert(&frame.frame_uuid) {
+        if frame.frame_uuid.is_empty() || !ids.insert(frame.frame_uuid.clone()) {
             return Err(invalid(
                 "calibration frame UUIDs must be nonempty and unique",
             ));
@@ -513,7 +521,7 @@ fn evaluate_inner(
     for light in &request.lights {
         validate_values(&light_signature(light).seiza)?;
     }
-    let rules = master_policy::rule_book(request.global_settings, request.rigs)?;
+    let rules = master_policy::rule_book(request.global_settings.clone(), request.rigs.clone())?;
     if let Some(book) = &prepared {
         for session in &book.sessions {
             let rig = &session.row.rig_uuid;
@@ -542,42 +550,7 @@ fn evaluate_inner(
             }
         })
         .collect();
-    let mut shifts: BTreeMap<_, _> = request
-        .grouping
-        .night_boundaries
-        .iter()
-        .map(|s| ((s.rig_uuid.clone(), s.frame_uuid.clone()), s.seconds))
-        .collect();
-    let mut explicit = BTreeSet::new();
-    for shift in request.night_shifts {
-        if !(-86400..=129600).contains(&shift.seconds)
-            || !explicit.insert((shift.rig_uuid.clone(), shift.frame_uuid.clone()))
-        {
-            return Err(invalid(
-                "night shifts must be unique and within one day of noon UTC",
-            ));
-        }
-        shifts.insert((shift.rig_uuid, shift.frame_uuid), shift.seconds);
-    }
-    for frame in &request.frames {
-        if let Some(offset) = rules.for_rig(&frame.rig_uuid).night_offset_seconds {
-            shifts.insert(
-                (frame.rig_uuid.clone(), frame.frame_uuid.clone()),
-                43200 - offset,
-            );
-        }
-    }
-    request.grouping.night_boundaries = shifts
-        .iter()
-        .map(
-            |((rig_uuid, frame_uuid), seconds)| crate::flat_response::groups::NightBoundary {
-                rig_uuid: rig_uuid.clone(),
-                frame_uuid: frame_uuid.clone(),
-                seconds: *seconds,
-            },
-        )
-        .collect();
-    let nights = Nights { shifts };
+    let nights = resolve_nights(&mut request, &rules)?;
     let mut quality = BTreeMap::new();
     for row in request.quality {
         if !ids.contains(&row.frame_uuid) || quality.insert(row.frame_uuid.clone(), row).is_some() {
@@ -664,6 +637,13 @@ fn evaluate_inner(
             measure_error: row.and_then(|r| r.measure_error.clone()),
         });
     }
+    let supplied = request.frames.clone();
+    supplied::validate(
+        &supplied,
+        &rules,
+        request.flat_association,
+        request.dark_association,
+    )?;
     request.frames.sort_by(|a, b| {
         b.captured_at
             .cmp(&a.captured_at)
@@ -686,16 +666,24 @@ fn evaluate_inner(
         let rule = rules.for_light(light);
         let choices = library.light_choices(light, &rule);
         let mut selected = library.select_choosing(light, rule, choices);
+        supplied::apply(
+            &library,
+            light,
+            &mut selected,
+            &supplied,
+            request.flat_association,
+            request.dark_association,
+        );
         // PSF Guard verifies/remaps all candidates and caps each kind before
         // coherence and external-master adoption. An unverified preview is
         // not an executable recipe: the host must verify and replan first.
-        for frames in [
-            &mut selected.bias,
-            &mut selected.dark,
-            &mut selected.dark_flat,
-            &mut selected.flat,
+        for (kind, frames) in [
+            (CalibrationKind::Bias, &mut selected.bias),
+            (CalibrationKind::Dark, &mut selected.dark),
+            (CalibrationKind::DarkFlat, &mut selected.dark_flat),
+            (CalibrationKind::Flat, &mut selected.flat),
         ] {
-            if frames.iter().all(|f| f.source_verified) {
+            if !selected.one_set.contains(&kind) && frames.iter().all(|f| f.source_verified) {
                 frames.truncate(MAX_MASTER_FRAMES);
             }
         }
@@ -751,6 +739,45 @@ fn evaluate_inner(
         settings_digest: rules.digest(),
         settings_schema: rules::fields().to_vec(),
     })
+}
+
+fn resolve_nights(request: &mut Request, rules: &RuleBook) -> crate::Result<Nights> {
+    let mut shifts: BTreeMap<_, _> = request
+        .grouping
+        .night_boundaries
+        .iter()
+        .map(|s| ((s.rig_uuid.clone(), s.frame_uuid.clone()), s.seconds))
+        .collect();
+    let mut explicit = BTreeSet::new();
+    for shift in std::mem::take(&mut request.night_shifts) {
+        if !(-86400..=129600).contains(&shift.seconds)
+            || !explicit.insert((shift.rig_uuid.clone(), shift.frame_uuid.clone()))
+        {
+            return Err(invalid(
+                "night shifts must be unique and within one day of noon UTC",
+            ));
+        }
+        shifts.insert((shift.rig_uuid, shift.frame_uuid), shift.seconds);
+    }
+    for frame in &request.frames {
+        if let Some(offset) = rules.for_rig(&frame.rig_uuid).night_offset_seconds {
+            shifts.insert(
+                (frame.rig_uuid.clone(), frame.frame_uuid.clone()),
+                43200 - offset,
+            );
+        }
+    }
+    request.grouping.night_boundaries = shifts
+        .iter()
+        .map(
+            |((rig_uuid, frame_uuid), seconds)| crate::flat_response::groups::NightBoundary {
+                rig_uuid: rig_uuid.clone(),
+                frame_uuid: frame_uuid.clone(),
+                seconds: *seconds,
+            },
+        )
+        .collect();
+    Ok(Nights { shifts })
 }
 
 fn selected_frame_current(id: &str, row: &QualityRecord, frames: &[CalibrationFrame]) -> bool {

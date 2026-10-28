@@ -256,6 +256,16 @@ impl LibrarySnapshot {
             }
             family
         });
+        self.select_dark_flats(light, &rules, &mut selected);
+        selected
+    }
+    pub(super) fn select_dark_flats(
+        &self,
+        light: &FrameMeta,
+        rules: &Rules,
+        selected: &mut CalibrationSelection,
+    ) {
+        selected.dark_flat.clear();
         if let Some(flat) = selected.flat.first() {
             for candidate in self.of_kind(CalibrationKind::DarkFlat) {
                 // Dark-flats pair with the flat, but the boundary is judged
@@ -264,7 +274,7 @@ impl LibrarySnapshot {
                 if validity_admits(candidate, light.timestamp)
                     && frame_pair_matches(flat, candidate)
                     && exposure_matches(flat.exposure_s, candidate.exposure_s)
-                    && temperature_matches(flat.camera_temp, candidate.camera_temp, &rules)
+                    && temperature_matches(flat.camera_temp, candidate.camera_temp, rules)
                 {
                     if candidate.kept_out.is_some() {
                         selected.kept_out.push(candidate.clone());
@@ -275,7 +285,6 @@ impl LibrarySnapshot {
             }
         }
         sort_candidates(&mut selected.dark_flat, light.timestamp);
-        selected
     }
     pub(super) fn flat_family(
         &self,

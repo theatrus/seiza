@@ -191,7 +191,7 @@ fn field_names(value: Value, camel: bool) -> Value {
 /// Grade and select a calibration library using PSF Guard's shared policy.
 /// `request_json` is a camelCase library::Request: frames, lights, quality,
 /// globalSettings, rigs, grouping, availableResponses, nightShifts, regrade, masterFailures, pedestalEvidence,
-/// forceFlatWithoutPedestal, flatStarMasking and flatStability.
+/// forceFlatWithoutPedestal, flatStarMasking, flatStability, flatAssociation and darkAssociation.
 /// Missing collections are empty. Settings are {key,value} records; identifiers,
 /// enum values and arbitrary setting values are preserved. The returned snapshot
 /// contains grades, selections, complete gates, sessions, assignments and master
@@ -263,6 +263,38 @@ pub unsafe extern "C" fn seiza_calibration_master_plan_json(
         let request: library::MasterPlanRequest =
             serde_json::from_value(field_names(value, false)).map_err(|e| e.to_string())?;
         let result = library::plan_masters(request).map_err(|e| e.to_string())?;
+        owned_json(&field_names(
+            serde_json::to_value(result).map_err(|e| e.to_string())?,
+            true,
+        ))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+/// Plan raw-flat response sessions and bounded samples from a camelCase
+/// library::Request. Returns plans, resolved limits/night boundaries, grades
+/// and unplanned frame IDs. Pure metadata/measurement policy; no pixel I/O.
+/// flatAssociation/darkAssociation accept automatic (default) or one_set in
+/// library and master requests. OneSet keeps all eligible compatible inputs;
+/// incompatible supplied sets return an error instead of silently splitting.
+/// Free the result/error with seiza_string_free.
+/// # Safety
+/// request_json is NUL-terminated UTF-8; error_out is null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_calibration_flat_response_plan_json(
+    request_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let json = required_str(request_json, "flat response plan request")?;
+        let value: Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+        if field_names(field_names(value.clone(), false), true) != value {
+            return Err("flat response plan field names must be camelCase".into());
+        }
+        let request: library::Request =
+            serde_json::from_value(field_names(value, false)).map_err(|e| e.to_string())?;
+        let result = library::plan_flat_responses(request).map_err(|e| e.to_string())?;
         owned_json(&field_names(
             serde_json::to_value(result).map_err(|e| e.to_string())?,
             true,
@@ -703,6 +735,36 @@ mod master_policy_tests {
         assert!(!output.is_null());
         let result = unsafe { CString::from_raw(output) };
         field_names(serde_json::from_slice(result.as_bytes()).unwrap(), false)
+    }
+    #[test]
+    fn response_preparation_and_supplied_sets_cross_the_c_abi() {
+        let frames: Vec<_> = (0..80).map(|i| serde_json::json!({
+            "frame_uuid":format!("flat-{i}"), "rig_uuid":"r", "kind":"flat",
+            "source_path":format!("/flat-{i}.fits"), "source_fingerprint":format!("stamp-{i}"),
+            "source_verified":true,"captured_at":1_700_000_000_i64+(i/20)*259200,
+            "width":512,"height":512,"channels":1,"gain":100,"offset":20,
+            "filter":"Ha","rotation":0.0,"exposure_s":30.0
+        })).collect();
+        let request = serde_json::json!({"frames":frames});
+        let core =
+            library::plan_flat_responses(serde_json::from_value(request.clone()).unwrap()).unwrap();
+        assert_eq!(
+            unsafe { call(request.clone(), seiza_calibration_flat_response_plan_json) },
+            serde_json::to_value(core).unwrap()
+        );
+        let mut request = request;
+        request["flat_association"] = serde_json::json!("one_set");
+        request["dark_association"] = serde_json::json!("one_set");
+        request["lights"] = serde_json::json!([{"path":"/light.fits","rig_uuid":"r","width":512,"height":512,"channels":1,"gain":100,"offset":20,"filter":"Ha","rotator_position":0.0,"exposure_s":30.0,"timestamp":1_700_000_000}]);
+        let result = unsafe { call(request, seiza_calibration_library_plan_json) };
+        let flat = result["sessions"][0]["recipes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["kind"] == "flat")
+            .unwrap();
+        assert_eq!(flat["inputs"].as_array().unwrap().len(), 80);
+        assert_eq!(flat["input_limit"], 80);
     }
     #[test]
     fn native_flat_measurement_crosses_the_c_abi() {
