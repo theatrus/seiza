@@ -41,6 +41,7 @@ use std::path::{Path, PathBuf};
 
 mod astrometry;
 mod metadata;
+mod window;
 mod writer;
 mod xml;
 
@@ -50,6 +51,7 @@ pub use astrometry::{
 };
 use metadata::UnitMetadata;
 pub use metadata::XisfMetadata;
+pub use window::{XisfWindow, read_window};
 pub use xml::XisfElement;
 
 pub use writer::{
@@ -564,7 +566,7 @@ impl XisfImage {
     /// range, so rescaling them would destroy data rather than place it.
     /// A second call answers `false`, because the first rewrote `bounds`.
     pub fn rescale_normalized_to(&mut self, full_scale: f32) -> bool {
-        if self.info.bounds != Some((0.0, 1.0)) {
+        if !declares_unit_bounds(&self.info) {
             return false;
         }
         self.rescale_from((0.0, 1.0), full_scale)
@@ -589,38 +591,79 @@ impl XisfImage {
     /// not a finite range with `low < high`, when `full_scale` is not finite
     /// and positive, or when the samples are integers.
     pub fn rescale_from(&mut self, source: (f64, f64), full_scale: f32) -> bool {
-        // Integer samples already span their format's range, whatever buffer
-        // type they decode into.
-        if !matches!(
-            self.info.sample_format,
-            SampleFormat::Float32 | SampleFormat::Float64
-        ) {
+        let Some(rescale) = Rescale::new(self.info.sample_format, source, full_scale) else {
             return false;
-        }
-        let (low, high) = source;
-        if !low.is_finite() || !high.is_finite() || high <= low {
-            return false;
-        }
-        if !full_scale.is_finite() || full_scale <= 0.0 {
-            return false;
-        }
-        let scale = f64::from(full_scale) / (high - low);
+        };
         match &mut self.image.pixels {
             Pixels::F32(samples) => {
                 for sample in samples.iter_mut() {
-                    *sample = ((f64::from(*sample) - low) * scale) as f32;
+                    *sample = rescale.f32(*sample);
                 }
             }
             Pixels::F64(samples) => {
                 for sample in samples.iter_mut() {
-                    *sample = (*sample - low) * scale;
+                    *sample = rescale.f64(*sample);
                 }
             }
             // Integer samples already span their format's range.
             Pixels::U8(_) | Pixels::U16(_) | Pixels::I32(_) => return false,
         }
-        self.info.bounds = Some((0.0, f64::from(full_scale)));
+        self.info.bounds = Some(rescale.bounds());
         true
+    }
+}
+
+/// Whether an image declares the one range whose meaning is settled, `0:1`,
+/// which [`XisfImage::rescale_normalized_to`] acts on.
+fn declares_unit_bounds(info: &XisfImageInfo) -> bool {
+    info.bounds == Some((0.0, 1.0))
+}
+
+/// The linear map [`XisfImage::rescale_from`] applies to samples: from a
+/// source range onto `0..=full_scale`, without clamping.
+#[derive(Clone, Copy, Debug)]
+struct Rescale {
+    low: f64,
+    scale: f64,
+    full_scale: f32,
+}
+
+impl Rescale {
+    /// The map from `source` onto `0..=full_scale`, or `None` when the rules
+    /// of [`XisfImage::rescale_from`] refuse it: integer samples, a `source`
+    /// that is not a finite range with `low < high`, or a `full_scale` that
+    /// is not finite and positive.
+    fn new(format: SampleFormat, source: (f64, f64), full_scale: f32) -> Option<Self> {
+        // Integer samples already span their format's range, whatever buffer
+        // type they decode into.
+        if !matches!(format, SampleFormat::Float32 | SampleFormat::Float64) {
+            return None;
+        }
+        let (low, high) = source;
+        if !low.is_finite() || !high.is_finite() || high <= low {
+            return None;
+        }
+        if !full_scale.is_finite() || full_scale <= 0.0 {
+            return None;
+        }
+        Some(Self {
+            low,
+            scale: f64::from(full_scale) / (high - low),
+            full_scale,
+        })
+    }
+
+    fn f32(self, sample: f32) -> f32 {
+        ((f64::from(sample) - self.low) * self.scale) as f32
+    }
+
+    fn f64(self, sample: f64) -> f64 {
+        (sample - self.low) * self.scale
+    }
+
+    /// The bounds the rescaled samples have.
+    fn bounds(self) -> (f64, f64) {
+        (0.0, f64::from(self.full_scale))
     }
 }
 
@@ -3003,6 +3046,187 @@ mod tests {
         ));
     }
 
+    fn written_xisf(bytes: &[u8]) -> tempfile::NamedTempFile {
+        let file = tempfile::Builder::new().suffix(".xisf").tempfile().unwrap();
+        std::fs::write(file.path(), bytes).unwrap();
+        file
+    }
+
+    /// A window's samples against the whole image's, opened and converted to
+    /// physical units, bit for bit.
+    fn assert_window_matches_open(path: &Path, window: &seiza_fits::ImageWindow) {
+        let image = open(path).unwrap();
+        let (width, height, planes) = (image.width, image.height, image.planes);
+        assert_eq!(
+            (window.image_width, window.image_height, window.planes),
+            (width, height, planes)
+        );
+        let physical = image.into_physical_f32();
+        let mut expected = Vec::new();
+        for plane in 0..planes {
+            for y in window.y..window.y + window.height {
+                for x in window.x..window.x + window.width {
+                    expected.push(physical[(plane * height + y) * width + x].to_bits());
+                }
+            }
+        }
+        let actual: Vec<u32> = window.values.iter().map(|value| value.to_bits()).collect();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn a_window_reads_every_sample_format_and_storage_as_open_does() {
+        let (width, height) = (6_usize, 4_usize);
+        for (format, planes, storage, order) in [
+            ("UInt8", 1, "Planar", "little"),
+            ("UInt16", 1, "Planar", "little"),
+            ("UInt16", 3, "Planar", "big"),
+            ("UInt16", 3, "Normal", "little"),
+            ("UInt32", 1, "Planar", "big"),
+            ("UInt64", 1, "Planar", "little"),
+            ("Float32", 3, "Normal", "big"),
+            ("Float64", 1, "Planar", "little"),
+        ] {
+            let count = width * height * planes;
+            let raw: Vec<u8> = (0..count)
+                .flat_map(|index| {
+                    let value = (index * 2_654_435_761 % 60_000) as u64;
+                    let big = order == "big";
+                    match format {
+                        "UInt8" => vec![value as u8],
+                        "UInt16" if big => (value as u16).to_be_bytes().to_vec(),
+                        "UInt16" => (value as u16).to_le_bytes().to_vec(),
+                        "UInt32" if big => (value as u32 * 70_001).to_be_bytes().to_vec(),
+                        "UInt32" => (value as u32 * 70_001).to_le_bytes().to_vec(),
+                        "UInt64" => (value * 1_000_003).to_le_bytes().to_vec(),
+                        "Float32" if big => (value as f32 / 60_000.0).to_be_bytes().to_vec(),
+                        "Float32" => (value as f32 / 60_000.0).to_le_bytes().to_vec(),
+                        _ => (value as f64 / 7.0).to_le_bytes().to_vec(),
+                    }
+                })
+                .collect();
+            let color = if planes == 3 { "RGB" } else { "Gray" };
+            let xml = image_element(
+                0,
+                &format!("{width}:{height}:{planes}"),
+                format,
+                raw.len(),
+                &format!("colorSpace=\"{color}\" pixelStorage=\"{storage}\" byteOrder=\"{order}\""),
+                "",
+            );
+            let file = written_xisf(&monolithic(xml, &[&raw]));
+            let read = read_window(file.path(), 1, 1, 4, 2).unwrap();
+            assert_eq!(
+                (
+                    read.window.x,
+                    read.window.y,
+                    read.window.width,
+                    read.window.height
+                ),
+                (1, 1, 4, 2),
+                "{format} {storage}"
+            );
+            assert_eq!(read.window.values.len(), planes * 8, "{format} {storage}");
+            assert_window_matches_open(file.path(), &read.window);
+            assert_eq!(
+                read.info.sample_format,
+                SampleFormat::parse(format).unwrap()
+            );
+
+            let clipped = read_window(file.path(), 4, 3, 10, 10).unwrap();
+            assert_eq!((clipped.window.width, clipped.window.height), (2, 1));
+            assert_window_matches_open(file.path(), &clipped.window);
+            let outside = read_window(file.path(), 6, 0, 3, 3).unwrap();
+            assert!(outside.window.values.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_window_of_an_inline_block_reads_from_the_header() {
+        let raw: Vec<u8> = [1_u16, 2, 3, 4]
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        let hex: String = raw.iter().map(|byte| format!("{byte:02x}")).collect();
+        let xml = format!(
+            "<Image geometry=\"2:2:1\" sampleFormat=\"UInt16\" colorSpace=\"Gray\" location=\"inline:hex\">{hex}</Image>"
+        );
+        let file = written_xisf(&monolithic(xml, &[]));
+        let read = read_window(file.path(), 1, 0, 1, 2).unwrap();
+        assert_eq!(read.window.values, [2.0, 4.0]);
+    }
+
+    #[test]
+    fn a_window_refuses_what_it_cannot_reach_without_decoding_it_all() {
+        let raw = [0_u8; 2 * 2 * 2];
+        let compressed = zstd::bulk::compress(&raw, 3).unwrap();
+        let xml = image_element(
+            0,
+            "2:2:1",
+            "UInt16",
+            compressed.len(),
+            &format!("compression=\"zstd:{}\"", raw.len()),
+            "",
+        );
+        let file = written_xisf(&monolithic(xml, &[&compressed]));
+        assert!(open(file.path()).is_ok());
+        assert!(matches!(
+            read_window(file.path(), 0, 0, 1, 1),
+            Err(XisfError::Unsupported(_))
+        ));
+
+        let raw = [0_u8; 4 * 4 * 4];
+        let xml = image_element(0, "4:4:1", "Float32", raw.len(), "", "");
+        let file = written_xisf(&monolithic(xml, &[&raw]));
+        assert!(matches!(
+            read_window(file.path(), 0, 0, seiza_fits::MAX_WINDOW_EDGE + 1, 1),
+            Err(XisfError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn a_window_rescales_a_normalized_image_as_a_whole_image_rescales() {
+        let values = [0.25_f32, 0.5, 1.0, -0.5, 0.125, 2.0];
+        let raw: Vec<u8> = values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        for bounds in ["bounds=\"0:1\"", "bounds=\"0:30000\"", ""] {
+            let xml = image_element(0, "3:2:1", "Float32", raw.len(), bounds, "");
+            let file = written_xisf(&monolithic(xml, &[&raw]));
+            let mut whole = read_image(file.path()).unwrap();
+            let mut window = read_window(file.path(), 1, 0, 2, 2).unwrap();
+            let ran = whole.rescale_normalized_to(65535.0);
+            assert_eq!(window.rescale_normalized_to(65535.0), ran, "{bounds}");
+            assert_eq!(window.info.bounds, whole.info.bounds, "{bounds}");
+            assert_window_matches_open_of(&whole.image, &window.window);
+            // A second call does nothing: the bounds now say 0:65535.
+            assert!(!window.rescale_normalized_to(65535.0));
+        }
+
+        // Integer samples are never rescaled, whatever their bounds say.
+        let raw: Vec<u8> = [10_u16, 20, 30, 40]
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        let xml = image_element(0, "2:2:1", "UInt16", raw.len(), "bounds=\"0:1\"", "");
+        let file = written_xisf(&monolithic(xml, &[&raw]));
+        let mut window = read_window(file.path(), 0, 0, 2, 2).unwrap();
+        assert!(!window.rescale_from((0.0, 1.0), 65535.0));
+        assert_eq!(window.window.values, [10.0, 20.0, 30.0, 40.0]);
+    }
+
+    /// [`assert_window_matches_open`] against an image already in memory.
+    fn assert_window_matches_open_of(image: &FitsImage, window: &seiza_fits::ImageWindow) {
+        let width = image.width;
+        let physical = image.clone().into_physical_f32();
+        let expected: Vec<f32> = (window.y..window.y + window.height)
+            .flat_map(|y| (window.x..window.x + window.width).map(move |x| (x, y)))
+            .map(|(x, y)| physical[y * width + x])
+            .collect();
+        assert_eq!(window.values, expected);
+    }
+
     #[test]
     fn decodes_shuffled_subblocks_compressed_independently() {
         let values = (0..64_u16).map(|value| value * 1000).collect::<Vec<_>>();
@@ -3511,6 +3735,21 @@ mod tests {
         format!(
             "\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<xisf version=\"1.0\" xmlns=\"http://www.pixinsight.com/xisf\">{images}</xisf>"
         )
+    }
+
+    #[test]
+    fn a_window_reads_an_external_block_from_its_offset() {
+        let directory = tempfile::tempdir().unwrap();
+        let gray: Vec<u8> = (0..12).collect();
+        let blocks = data_blocks_file(&[(0x1111, &[9_u8; 4]), (0x2222, &gray)]);
+        std::fs::write(directory.path().join("blocks.xisb"), blocks).unwrap();
+        let header = header_file(
+            "<Image geometry=\"4:3:1\" sampleFormat=\"UInt8\" location=\"path(@header_dir/blocks.xisb):0x2222\"/>",
+        );
+        let path = directory.path().join("unit.xish");
+        std::fs::write(&path, header).unwrap();
+        let read = read_window(&path, 1, 1, 2, 2).unwrap();
+        assert_eq!(read.window.values, [5.0, 6.0, 9.0, 10.0]);
     }
 
     #[test]

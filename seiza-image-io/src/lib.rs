@@ -30,6 +30,7 @@ use image::{DynamicImage, ImageBuffer, ImageFormat, Luma, Rgb, Rgb32FImage};
 use raster::OrientedRaster;
 use seiza_core::prior::SolvePrior;
 use seiza_fits::{F32ImageData, FitsError, FitsImage, HeaderValue, Pixels, WriteHeaderCard};
+pub use seiza_fits::{ImageWindow, MAX_WINDOW_EDGE};
 use seiza_xisf::{XisfError, XisfImageInfo, XisfMetadata};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -337,6 +338,34 @@ fn read_astronomy_decoding(
         xisf_info: None,
         xisf_metadata: None,
     })
+}
+
+/// Read the samples of the rectangle at `(x, y)`, `width` × `height`
+/// pixels, of every plane of a FITS or XISF image, without decoding the
+/// rest: XISF when the extension says so, FITS otherwise, as
+/// [`read_astronomy`] chooses.
+///
+/// The samples are in physical units, as [`FitsImage::into_physical_f32`]
+/// gives the whole image: FITS samples with `BZERO`, `BSCALE` and `BLANK`
+/// applied, XISF samples as stored. An XISF image's declared `bounds` are
+/// not applied; [`seiza_xisf::read_window`] returns them with the window,
+/// and can place a normalized image on a camera's scale. Rows count in
+/// stored order. The rectangle is clipped to the image, and a side longer
+/// than [`MAX_WINDOW_EDGE`] is refused; see [`seiza_fits::read_window`] and
+/// [`seiza_xisf::read_window`] for what each container can window.
+pub fn read_window(
+    path: &Path,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+) -> Result<ImageWindow, Error> {
+    if Format::from_path(path) == Some(Format::Xisf) {
+        return seiza_xisf::read_window(path, x, y, width, height)
+            .map(|read| read.window)
+            .map_err(|error| Error::open(path, error));
+    }
+    seiza_fits::read_window(path, x, y, width, height).map_err(|error| Error::open(path, error))
 }
 
 /// Add FITS WCS cards for an XISF image's astrometric solution, when its
@@ -803,6 +832,60 @@ fn write_raster_atomic(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_window_reads_fits_and_xisf_alike() {
+        let directory = tempfile::tempdir().unwrap();
+        let (width, height) = (9, 7);
+        let gray = FloatImage::gray(
+            width,
+            height,
+            (0..width * height)
+                .map(|index| index as f32 / 10.0)
+                .collect(),
+        );
+        let rgb = FloatImage {
+            width,
+            height,
+            channels: 3,
+            samples: (0..width * height * 3).map(|index| index as f32).collect(),
+        };
+        for (name, image) in [("gray", &gray), ("rgb", &rgb)] {
+            for extension in ["fits", "xisf"] {
+                let path = directory.path().join(format!("{name}.{extension}"));
+                save(&path, image).unwrap();
+                let window = read_window(&path, 2, 3, 4, 2).unwrap();
+                assert_eq!(
+                    (
+                        window.x,
+                        window.y,
+                        window.width,
+                        window.height,
+                        window.planes
+                    ),
+                    (2, 3, 4, 2, image.channels),
+                    "{name}.{extension}"
+                );
+                // The saved samples are interleaved; the window's are planar.
+                for plane in 0..image.channels {
+                    for y in 3..5 {
+                        for x in 2..6 {
+                            assert_eq!(
+                                window.get(plane, x, y),
+                                Some(image.samples[(y * width + x) * image.channels + plane]),
+                                "{name}.{extension} plane {plane} ({x}, {y})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let missing = directory.path().join("missing.fits");
+        assert_eq!(
+            read_window(&missing, 0, 0, 1, 1).unwrap_err().path(),
+            missing
+        );
+    }
 
     #[test]
     fn failed_raster_writes_preserve_existing_files() {

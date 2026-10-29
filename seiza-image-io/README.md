@@ -11,6 +11,9 @@ Open and save images by their file extension, the same way across Seiza.
   files declare the 0 to 1 range when the samples lie in it.
 - `open_astronomy` reads a FITS or XISF file as Seiza's `FitsImage`, for
   callers that need its headers or stored sample type.
+- `read_window` reads a rectangle of a FITS or XISF image's samples, in
+  physical units, without decoding the rest of the file: the values under a
+  viewer's cursor, at once on an image of any size.
 - `read_solve_prior` reads what a FITS or XISF file says about where it
   points (`seiza_core::prior::SolvePrior`), without decoding its pixels.
 - `raster` opens JPEG, PNG and TIFF files, or uploaded bytes, upright by

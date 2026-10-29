@@ -9,6 +9,7 @@
 //! `BZERO`, `BSCALE` and `BLANK` to it exactly as to any other image.
 
 use crate::{FitsError, FitsHeader, HeaderValue, card_i64, card_value, read_payload_exact};
+use std::borrow::Cow;
 use std::io::Read;
 use std::sync::OnceLock;
 
@@ -244,11 +245,11 @@ enum Tile {
     F64(Vec<f64>),
 }
 
-/// A compressed image's table, read whole into memory, with what its
-/// header says about the tiles.
+/// A compressed image's table, read whole into memory or borrowed from a
+/// mapped file, with what its header says about the tiles.
 struct Table<'a> {
     cards: &'a [(String, HeaderValue)],
-    data: Vec<u8>,
+    data: Cow<'a, [u8]>,
     row_bytes: usize,
     rows: usize,
     heap: usize,
@@ -289,7 +290,34 @@ pub(crate) fn table_bytes(cards: &[(String, HeaderValue)]) -> Option<u64> {
 }
 
 impl<'a> Table<'a> {
+    /// Read the table from `reader`, which stands at its first byte.
     fn read(reader: &mut impl Read, cards: &'a [(String, HeaderValue)]) -> Result<Self, FitsError> {
+        Self::parse(cards, |length| {
+            let mut data = Vec::new();
+            data.try_reserve_exact(length)
+                .map_err(|_| malformed("table buffer allocation failed"))?;
+            data.resize(length, 0);
+            read_payload_exact(reader, &mut data)?;
+            Ok(Cow::Owned(data))
+        })
+    }
+
+    /// The table in `data`, which starts at its first byte, without copying
+    /// it: only the rows and heap arrays a caller decodes are touched.
+    fn borrowed(data: &'a [u8], cards: &'a [(String, HeaderValue)]) -> Result<Self, FitsError> {
+        Self::parse(cards, |length| {
+            data.get(..length)
+                .map(Cow::Borrowed)
+                .ok_or_else(|| malformed("data runs past EOF"))
+        })
+    }
+
+    /// Read the table's layout from `cards`, then its `length` bytes from
+    /// `data`.
+    fn parse(
+        cards: &'a [(String, HeaderValue)],
+        data: impl FnOnce(usize) -> Result<Cow<'a, [u8]>, FitsError>,
+    ) -> Result<Self, FitsError> {
         let bitpix = card_i64(cards, "ZBITPIX").ok_or_else(|| malformed("missing ZBITPIX"))?;
         if !matches!(bitpix, 8 | 16 | 32 | 64 | -32 | -64) {
             return Err(FitsError::Unsupported(format!("ZBITPIX {bitpix}")));
@@ -395,11 +423,7 @@ impl<'a> Table<'a> {
             .filter(|column| matches!(column.kind, b'P' | b'Q'))
             .ok_or_else(|| malformed("compressed image without a COMPRESSED_DATA column"))?;
 
-        let mut data = Vec::new();
-        data.try_reserve_exact(length)
-            .map_err(|_| malformed("table buffer allocation failed"))?;
-        data.resize(length, 0);
-        read_payload_exact(reader, &mut data)?;
+        let data = data(length)?;
         Ok(Self {
             cards,
             data,
@@ -942,6 +966,26 @@ pub(crate) struct Shape {
     pub(crate) planes: usize,
 }
 
+/// A rectangle of an image, every plane of it, within the image's bounds.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Region {
+    pub(crate) x: usize,
+    pub(crate) y: usize,
+    pub(crate) width: usize,
+    pub(crate) height: usize,
+}
+
+impl Region {
+    fn whole(shape: &Shape) -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            width: shape.width,
+            height: shape.height,
+        }
+    }
+}
+
 /// Decompress the tiles that cover the image `shape` describes and return
 /// the data unit it would have uncompressed: `BITPIX`-sized big-endian
 /// samples, planes in order. `header_blank` is the image's `BLANK`.
@@ -952,6 +996,35 @@ pub(crate) fn decompress(
     header_blank: Option<i64>,
 ) -> Result<Vec<u8>, FitsError> {
     let table = Table::read(reader, cards)?;
+    decompress_region(&table, cards, shape, Region::whole(shape), header_blank)
+}
+
+/// [`decompress`] for the samples of `region` alone, as the data unit of an
+/// image `region` wide and high with the image's planes. Only the tiles that
+/// cross `region` are decoded. `table` holds the table's data unit, from its
+/// first byte, when the file is mapped; otherwise it is read from `reader`.
+pub(crate) fn decompress_window(
+    table: Option<&[u8]>,
+    reader: &mut impl Read,
+    cards: &[(String, HeaderValue)],
+    shape: &Shape,
+    region: Region,
+    header_blank: Option<i64>,
+) -> Result<Vec<u8>, FitsError> {
+    let table = match table {
+        Some(data) => Table::borrowed(data, cards)?,
+        None => Table::read(reader, cards)?,
+    };
+    decompress_region(&table, cards, shape, region, header_blank)
+}
+
+fn decompress_region(
+    table: &Table<'_>,
+    cards: &[(String, HeaderValue)],
+    shape: &Shape,
+    region: Region,
+    header_blank: Option<i64>,
+) -> Result<Vec<u8>, FitsError> {
     let axes = image_axes(cards).ok_or_else(|| malformed("invalid ZNAXISn"))?;
     let tiles: Vec<u64> = (1..=axes.len())
         .map(|axis| match card_i64(cards, &format!("ZTILE{axis}")) {
@@ -977,11 +1050,15 @@ pub(crate) fn decompress(
     }
 
     let bytes_per_sample = (table.bitpix.unsigned_abs() / 8) as usize;
-    let length = shape.width * shape.height * shape.planes * bytes_per_sample;
+    let length = region.width * region.height * shape.planes * bytes_per_sample;
     let mut out = Vec::new();
     out.try_reserve_exact(length)
         .map_err(|_| malformed("pixel buffer allocation failed"))?;
     out.resize(length, 0);
+    let (columns, rows) = (
+        region.x..region.x + region.width,
+        region.y..region.y + region.height,
+    );
 
     for row in 0..total as usize {
         // The tile's index along each axis, the first axis varying fastest.
@@ -1000,23 +1077,33 @@ pub(crate) fn decompress(
         if plane_start >= shape.planes || start.iter().skip(3).any(|&start| start != 0) {
             continue;
         }
+        let tile_width = extent[0] as usize;
+        let tile_height = extent[1] as usize;
+        let (x0, y0) = (start[0] as usize, start[1] as usize);
+        // The part of the tile inside the region; a tile outside it is not
+        // decoded.
+        let (left, right) = (x0.max(columns.start), (x0 + tile_width).min(columns.end));
+        let (top, bottom) = (y0.max(rows.start), (y0 + tile_height).min(rows.end));
+        if left >= right || top >= bottom {
+            continue;
+        }
         let pixels = extent
             .iter()
             .try_fold(1_u64, |product, &length| product.checked_mul(length))
             .and_then(|pixels| usize::try_from(pixels).ok())
             .ok_or_else(|| malformed("implausible tile size"))?;
         let tile = table.tile(row, pixels, header_blank)?;
-        let tile_width = extent[0] as usize;
-        let tile_height = extent[1] as usize;
         let tile_planes = extent.get(2).copied().unwrap_or(1) as usize;
-        let (x0, y0) = (start[0] as usize, start[1] as usize);
+        let count = right - left;
         for plane in 0..tile_planes.min(shape.planes - plane_start) {
-            for y in 0..tile_height {
-                let source = (plane * tile_height + y) * tile_width;
-                let target = ((plane_start + plane) * shape.height + y0 + y) * shape.width + x0;
+            for y in top..bottom {
+                let source = (plane * tile_height + y - y0) * tile_width + left - x0;
+                let target =
+                    ((plane_start + plane) * region.height + y - rows.start) * region.width + left
+                        - columns.start;
                 let destination =
-                    &mut out[target * bytes_per_sample..(target + tile_width) * bytes_per_sample];
-                write_samples(&tile, source, tile_width, table.bitpix, destination);
+                    &mut out[target * bytes_per_sample..(target + count) * bytes_per_sample];
+                write_samples(&tile, source, count, table.bitpix, destination);
             }
         }
     }
@@ -1342,6 +1429,107 @@ mod tests {
                 "{algorithm}"
             );
         }
+    }
+
+    /// The 5x3 unsigned 16-bit image of
+    /// [`integer_tiles_decode_like_the_plain_image`] in 2x2 GZIP_1 tiles,
+    /// with tile `broken` (if any) replaced by bytes that do not inflate.
+    fn tiled_file(broken: Option<usize>) -> (Vec<u8>, Vec<u16>) {
+        let samples: Vec<u16> = (0..15).map(|index| (index * 4_099) as u16).collect();
+        let tile_bytes = |tx: usize, ty: usize| -> Vec<u8> {
+            (ty * 2..(ty * 2 + 2).min(3))
+                .flat_map(|y| (tx * 2..(tx * 2 + 2).min(5)).map(move |x| (x, y)))
+                .flat_map(|(x, y)| ((samples[y * 5 + x] ^ 0x8000) as i16).to_be_bytes())
+                .collect()
+        };
+        let tiles = (0..2)
+            .flat_map(|ty| (0..3).map(move |tx| (tx, ty)))
+            .enumerate()
+            .map(|(index, (tx, ty))| {
+                if Some(index) == broken {
+                    vec![0x1f, 0x8b, 0xff, 0xff]
+                } else {
+                    gzip(&tile_bytes(tx, ty))
+                }
+            })
+            .collect();
+        let mut image = image_cards(16, &[5, 3], &[2, 2], "GZIP_1");
+        image.extend([card("BZERO", "32768"), card("BSCALE", "1")]);
+        (
+            compressed_file(&image, &[compressed_column(tiles)], &[]),
+            samples,
+        )
+    }
+
+    fn written(bytes: &[u8]) -> tempfile::NamedTempFile {
+        let file = tempfile::Builder::new().suffix(".fits").tempfile().unwrap();
+        std::fs::write(file.path(), bytes).unwrap();
+        file
+    }
+
+    #[test]
+    fn a_window_of_a_tiled_image_reads_as_the_whole_decode() {
+        let (bytes, samples) = tiled_file(None);
+        let file = written(&bytes);
+        for (x, y, width, height) in [
+            (1, 1, 3, 2),
+            (4, 0, 1, 3),
+            (0, 2, 5, 1),
+            (0, 0, 5, 3),
+            (3, 1, 9, 9),
+        ] {
+            let window = crate::read_window(file.path(), x, y, width, height).unwrap();
+            let mut expected = Vec::new();
+            for row in window.y..window.y + window.height {
+                for column in window.x..window.x + window.width {
+                    expected.push(f32::from(samples[row * 5 + column]));
+                }
+            }
+            assert_eq!(window.values, expected, "{x} {y} {width} {height}");
+            // Read from the file without a map, the same samples.
+            let mut reader = std::fs::File::open(file.path()).unwrap();
+            let unmapped =
+                crate::window::window_from(&mut reader, None, x, y, width, height).unwrap();
+            assert_eq!(unmapped, window);
+        }
+    }
+
+    #[test]
+    fn a_window_decodes_only_the_tiles_it_crosses() {
+        // Tile 2 holds columns 4 and rows 0-1; the whole image cannot be
+        // decoded, but a window clear of that tile can.
+        let (bytes, samples) = tiled_file(Some(2));
+        let file = written(&bytes);
+        assert!(crate::FitsImage::open(file.path()).is_err());
+        let window = crate::read_window(file.path(), 0, 0, 4, 3).unwrap();
+        assert_eq!(window.get(0, 3, 1), Some(f32::from(samples[8])));
+        assert!(crate::read_window(file.path(), 3, 1, 2, 1).is_err());
+    }
+
+    #[test]
+    fn a_window_of_quantized_tiles_restores_them_as_the_whole_decode() {
+        let &(method, scale, zero, tile, _) = &QUANTIZED[1];
+        let mut image = image_cards(-32, &[64, 1], &[64, 1], "RICE_1");
+        image.extend([
+            card("ZQUANTIZ", &format!("'{method}'")),
+            card("ZDITHER0", "5000"),
+            card("ZBLANK", "-2147483648"),
+        ]);
+        let bytes = compressed_file(
+            &image,
+            &[compressed_column(vec![unhex(tile)])],
+            &[
+                ("ZSCALE", "1D", vec![scale.to_be_bytes().to_vec()]),
+                ("ZZERO", "1D", vec![zero.to_be_bytes().to_vec()]),
+            ],
+        );
+        let file = written(&bytes);
+        let whole = crate::FitsImage::open(file.path())
+            .unwrap()
+            .into_physical_f32();
+        let window = crate::read_window(file.path(), 2, 0, 20, 1).unwrap();
+        assert_bits(&window.values, &whole[2..22]);
+        assert!(window.get(0, 3, 0).unwrap().is_nan());
     }
 
     #[test]

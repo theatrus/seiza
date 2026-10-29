@@ -1259,6 +1259,20 @@ def solve_blind(
 ) -> Solution: ...
 def read_solve_prior(path: str | Path) -> dict[str, Any]: ...
 def read_capture_time(path: str | Path) -> str | None: ...
+
+class ImageWindow:
+    values: npt.NDArray[np.float32]
+    image_width: int
+    image_height: int
+    planes: int
+    x: int
+    y: int
+    width: int
+    height: int
+
+def read_image_window(
+    path: str | Path, x: int, y: int, width: int, height: int
+) -> ImageWindow: ...
 def field_objects(
     wcs: Wcs,
     width: int,

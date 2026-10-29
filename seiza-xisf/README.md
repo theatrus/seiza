@@ -43,6 +43,14 @@ dimensions other than two. As the specification requires, such an image is
 unavailable on its own: opening it fails with `Unsupported`, `inspect` lists it
 under `unavailable`, and the other images in the file stay readable.
 
+`read_window` reads a rectangle of the first image's samples without decoding
+the rest: one short read a row, from an attached, external, inline or
+embedded block, in planar or normal storage. It returns an `XisfWindow`, the
+samples with the image's `XisfImageInfo`, whose `rescale_normalized_to` and
+`rescale_from` place a normalized window on a chosen scale by the same rules
+as `XisfImage`'s. A compressed, CIELab or complex image cannot be windowed,
+because its samples are decoded as a whole, and fails with `Unsupported`.
+
 `read_image` also returns an `XisfMetadata` holding everything else the file
 says about the image and its unit: every property, keyword and core element,
 extension elements in other namespaces, and the unit's `Metadata` properties,

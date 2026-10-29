@@ -6794,6 +6794,93 @@ pub unsafe extern "C" fn seiza_read_capture_time_json(
     .unwrap_or(ptr::null_mut())
 }
 
+/// Where a window [`seiza_read_image_window`] read lies, and the image it
+/// lies in.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SeizaImageWindow {
+    /// The full image's size and plane count (1, or 3 for RGB).
+    pub image_width: usize,
+    pub image_height: usize,
+    pub planes: usize,
+    /// The part of the requested rectangle on the image, clipped to it, in
+    /// the image's stored row order. `width` and `height` are 0 when the
+    /// request missed the image.
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+    pub height: usize,
+}
+
+#[unsafe(no_mangle)]
+/// Read the samples of the rectangle at (`x`, `y`), `width` × `height`
+/// pixels, of every plane of the FITS or XISF image at `path`, without
+/// decoding the rest of it: XISF when the extension says so, FITS
+/// otherwise. Only the rows of the window are read, so a read of a few
+/// pixels is fast on an image of any size.
+///
+/// The samples go to `values` in physical units, plane by plane, each row by
+/// row: `values[(plane * height + row) * width + column]` for the clipped
+/// `width` and `height` written to `window_out`. FITS samples have `BZERO`,
+/// `BSCALE` and `BLANK` applied (a blank sample is NaN); XISF samples are as
+/// stored, without their declared `bounds`. Rows count in stored order.
+///
+/// `values` must hold `planes × width × height` floats of the clipped
+/// window; `3 × width × height` of the request always suffices. The
+/// rectangle is clipped to the image, and a side longer than 1024 is
+/// refused. Returns false with `error_out` set when the file cannot be read,
+/// when its samples cannot be reached without decoding it all (a compressed,
+/// CIELab or complex XISF image), or when `values` is too short; in that
+/// last case `window_out` still holds the window, so a caller can size the
+/// buffer and call again.
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated string, `values` must be null or
+/// point to `values_length` writable floats, and `window_out` must point to
+/// one writable `SeizaImageWindow`. When non-null, `error_out` must point to
+/// writable storage for one pointer.
+pub unsafe extern "C" fn seiza_read_image_window(
+    path: *const c_char,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+    values: *mut f32,
+    values_length: usize,
+    window_out: *mut SeizaImageWindow,
+    error_out: *mut *mut c_char,
+) -> bool {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let window_out = unsafe { window_out.as_mut() }.ok_or("window_out is required")?;
+        let path = required_path(path, "image path")?;
+        let window = seiza_image_io::read_window(&path, x, y, width, height)
+            .map_err(|error| error.to_string())?;
+        *window_out = SeizaImageWindow {
+            image_width: window.image_width,
+            image_height: window.image_height,
+            planes: window.planes,
+            x: window.x,
+            y: window.y,
+            width: window.width,
+            height: window.height,
+        };
+        if window.values.is_empty() {
+            return Ok(true);
+        }
+        if values.is_null() || values_length < window.values.len() {
+            return Err(format!(
+                "the window needs {} floats, not {values_length}",
+                window.values.len()
+            ));
+        }
+        unsafe { std::slice::from_raw_parts_mut(values, window.values.len()) }
+            .copy_from_slice(&window.values);
+        Ok(true)
+    })
+    .unwrap_or(false)
+}
+
 /// FITS header cards in the order they are written, as a JSON object of
 /// keyword to value.
 struct FitsCardsJson(Vec<(String, seiza::FitsCardValue)>);
@@ -16550,6 +16637,83 @@ mod tests {
         assert!(json.is_null());
         assert!(!error.is_null());
         unsafe { seiza_string_free(error) };
+    }
+
+    #[test]
+    fn reads_a_window_of_an_image_into_the_callers_buffer() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("window.fits");
+        let samples: Vec<f32> = (0..8 * 6).map(|index| index as f32).collect();
+        seiza_image_io::save(&path, &seiza_image_io::FloatImage::gray(8, 6, samples)).unwrap();
+        let c_path = CString::new(path.to_str().unwrap()).unwrap();
+
+        let mut values = [0.0_f32; 3 * 4 * 4];
+        let mut window = SeizaImageWindow::default();
+        let mut error = ptr::null_mut();
+        let read = unsafe {
+            seiza_read_image_window(
+                c_path.as_ptr(),
+                6,
+                2,
+                4,
+                4,
+                values.as_mut_ptr(),
+                values.len(),
+                &mut window,
+                &mut error,
+            )
+        };
+        assert!(read && error.is_null());
+        assert_eq!(
+            (window.image_width, window.image_height, window.planes),
+            (8, 6, 1)
+        );
+        assert_eq!(
+            (window.x, window.y, window.width, window.height),
+            (6, 2, 2, 4)
+        );
+        assert_eq!(
+            &values[..8],
+            [22.0, 23.0, 30.0, 31.0, 38.0, 39.0, 46.0, 47.0]
+        );
+
+        // Too short a buffer fails, but says how large the window is.
+        let mut short = [0.0_f32; 2];
+        let mut window = SeizaImageWindow::default();
+        let read = unsafe {
+            seiza_read_image_window(
+                c_path.as_ptr(),
+                0,
+                0,
+                3,
+                3,
+                short.as_mut_ptr(),
+                short.len(),
+                &mut window,
+                &mut error,
+            )
+        };
+        assert!(!read && !error.is_null());
+        unsafe { seiza_string_free(error) };
+        assert_eq!((window.width, window.height), (3, 3));
+
+        // A window off the image reads nothing, and needs no buffer.
+        let mut error = ptr::null_mut();
+        let read = unsafe {
+            seiza_read_image_window(
+                c_path.as_ptr(),
+                20,
+                0,
+                3,
+                3,
+                ptr::null_mut(),
+                0,
+                &mut window,
+                &mut error,
+            )
+        };
+        assert!(read && error.is_null());
+        assert_eq!((window.width, window.height), (0, 0));
     }
 
     #[test]
