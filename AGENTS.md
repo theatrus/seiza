@@ -40,6 +40,32 @@ Python are built on it.
    `seiza-py` convert directly. A native call's parity entry then names the
    C export whose request covers it, in `[python_functions]` as
    `{ c = "<C export>" }`.
+4. **Code that comes from a JSON host becomes native code, not a native
+   wrapper around its old request.** Code moved in from the Mac or Windows
+   app's glue was usually written around one JSON request. Rewrite its entry
+   point to take Seiza's types. Do not keep the request as a private
+   struct behind a native-looking method. #406 first arrived that way: a
+   `FileCalibration` method filled a private `Request` with
+   `operation: "execute"` and `incomplete: "stop"`, then ran the old
+   request function. It also returned `String` errors and recovered
+   `ReviewChanged` by matching an error message's opening words. The
+   direction is always from the native API to the JSON call, never the
+   other way. In code that moves in:
+   - A value that is one of a few words is an enum (`FromStr` and
+     `Display`, and serde for the C ABI), never a `String` checked against
+     a list. That includes phases and modes reported to callbacks.
+   - A refusal the caller acts on is an error variant made where it
+     happens. Never infer a variant from message text.
+   - A request or answer field that already has a type in the core uses
+     that type, or moves it to where both callers can reach it. Do not keep
+     private copies of `Setting`, `RigSettings`, a selection record or a
+     settings parser.
+   - Tests call the native API. Do not keep a private request alive so old
+     JSON fixtures still run: port the fixtures.
+
+   Before you open the PR, read your native methods' bodies. If one builds
+   a struct only to hand it to another function, or compares strings to
+   decide what to do, the port is not finished.
 
 ## The core, the C ABI and Python move together
 

@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 /// One file-backed calibration recipe and its complete light-matching gate.
 /// The rotation basis is part of `tolerances`; no previous session's settings
 /// are inherited. Paths name already-built masters, not raw master inputs.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FileCalibrationSession {

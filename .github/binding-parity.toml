@@ -345,8 +345,12 @@ core = "seiza-satellites::PixelSegment"
 # by the C ABI; otherwise an entry says why not. "crate::*" covers a whole
 # crate of building blocks.
 [core_functions]
+"seiza-stacking::calibration_files::verify_sources" = { none = "source verification reached through the C calibration-files workflow and Python CalibrationFiles.verify" }
+"seiza-stacking::FileCalibration::*" = { none = "native coordinator methods are reached through seiza_calibration_files_json and bound directly by Python CalibrationFiles" }
+
 "seiza-stacking::measure_flat_stability" = { none = "C and Python offer both file and cached-image measurement; this native hybrid accepts a loaded master and streams file sources through the same algorithm" }
 objects = [
+    "seiza-stacking::FileCalibration",
     "seiza-parallax::Parallax",
     "seiza-stacking::LiveStacker",
     "seiza-background::BackgroundFit",
@@ -562,6 +566,7 @@ seiza_calibration_settings_schema_json = "calibration_settings_schema"
 seiza_calibration_library_schema_json = { none = "the JSON Schema of the C ABI's calibration JSON calls; Python binds the native API, whose types seiza.pyi declares" }
 seiza_calibration_setting_check_json = "calibration_setting_check"
 seiza_calibration_flat_retry_json = { none = "the C ABI's one-call retry decision from all feedback at once; Python's FlatRetry takes the feedback step by step" }
+seiza_calibration_files_json = "CalibrationFiles.analyze"
 seiza_calibration_library_plan_json = { none = "the C ABI's one-call library workflow; Python binds the native API it runs: CalibrationRules, CalibrationQuality, CalibrationLibrary and calibration_resolve_session" }
 seiza_calibration_library_plan_with_groups_json = { none = "the C ABI's one-call library workflow on a prepared book; Python passes a FlatGroups book to CalibrationLibrary" }
 seiza_flat_groups_prepare_json = "FlatGroups.__init__"
@@ -824,6 +829,10 @@ seiza_stretch_output_version = "STRETCH_OUTPUT_VERSION"
 # export above gives as its twin: the C export that does the same job
 # ({ c = "..." }), or why there is none.
 [python_functions]
+CalibrationFiles = { c = "seiza_calibration_files_json" }
+"CalibrationFiles.prepare" = { c = "seiza_calibration_files_json" }
+"CalibrationFiles.verify" = { c = "seiza_calibration_files_json" }
+
 # calibration library: the native API, whose steps the C ABI's one-call
 # JSON workflows run
 "CalibrationGrades.get" = { c = "seiza_calibration_library_plan_json" }

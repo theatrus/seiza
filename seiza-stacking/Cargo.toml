@@ -19,7 +19,7 @@ default = ["gpu"]
 gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck", "dep:objc2-metal", "dep:windows"]
 # JSON Schema for the types the C ABI's flat stability calls carry. Only
 # seiza-cabi enables it.
-schema = ["dep:schemars"]
+schema = ["dep:schemars", "seiza-calibration/json"]
 
 [dependencies]
 nalgebra.workspace = true
@@ -29,6 +29,7 @@ pollster = { workspace = true, optional = true }
 bytemuck = { workspace = true, optional = true }
 rayon.workspace = true
 same-file = "1.0"
+fs2.workspace = true
 schemars = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true

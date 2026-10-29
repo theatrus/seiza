@@ -3470,6 +3470,7 @@ name = "seiza-stacking"
 version = "0.54.0"
 dependencies = [
  "bytemuck",
+ "fs2",
  "multiversion",
  "naga",
  "nalgebra",

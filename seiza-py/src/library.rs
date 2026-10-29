@@ -70,7 +70,7 @@ struct RigLayerRecord {
     module = "seiza"
 )]
 pub(crate) struct PyCalibrationRules {
-    book: rules::RuleBook,
+    pub(crate) book: rules::RuleBook,
 }
 
 #[pymethods]

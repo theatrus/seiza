@@ -266,6 +266,26 @@ pub struct CalibrationSelection {
     /// Kinds taken as one supplied set rather than chosen by time.
     pub one_set: BTreeSet<CalibrationKind>,
 }
+/// A [`CalibrationSelection`] as a review shows it: frames by UUID, with the
+/// gate and the explanations, from [`CalibrationSelection::summary`].
+#[cfg_attr(feature = "json", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Serialize)]
+pub struct SelectionSummary {
+    pub bias: Vec<String>,
+    pub dark: Vec<String>,
+    pub dark_flat: Vec<String>,
+    pub flat: Vec<String>,
+    pub kept_out: Vec<String>,
+    pub library: LibraryKinds,
+    /// [`CalibrationSelection::match_tolerances`].
+    pub tolerances: MatchTolerances,
+    pub flat_basis: flat_groups::FlatBasis,
+    pub flat_held_back: Vec<String>,
+    pub flat_family: Option<flat_groups::FlatFamily>,
+    pub flat_choices: Vec<flat_groups::ChoiceNote>,
+    /// The light's resolved rules, explained.
+    pub rule_notes: Vec<rules::RuleNote>,
+}
 /// Which kinds of usable frame the library holds for one light's sensor,
 /// whatever their optics, exposure, age or validity mark. A light only
 /// lacks what its library could have given it.
@@ -323,6 +343,25 @@ impl CalibrationSelection {
             tolerances.light_rotation = family.light_rotation;
         }
         tolerances
+    }
+    /// The selection by frame UUID, with its gate and explanations.
+    pub fn summary(&self) -> SelectionSummary {
+        let ids =
+            |frames: &[CalibrationFrame]| frames.iter().map(|f| f.frame_uuid.clone()).collect();
+        SelectionSummary {
+            bias: ids(&self.bias),
+            dark: ids(&self.dark),
+            dark_flat: ids(&self.dark_flat),
+            flat: ids(&self.flat),
+            kept_out: ids(&self.kept_out),
+            library: self.library,
+            tolerances: self.match_tolerances(),
+            flat_basis: self.flat_basis.clone(),
+            flat_held_back: self.flat_held_back.clone(),
+            flat_family: self.flat_family.clone(),
+            flat_choices: self.flat_choices.clone(),
+            rule_notes: self.rules.notes(),
+        }
     }
     pub fn is_empty(&self) -> bool {
         self.bias.is_empty()

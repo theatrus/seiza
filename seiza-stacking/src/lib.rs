@@ -43,6 +43,8 @@
 mod batch;
 mod binning;
 mod calibration;
+pub mod calibration_files;
+pub use calibration_files::FileCalibration;
 mod calibration_plan;
 mod color;
 mod color_calibration;
