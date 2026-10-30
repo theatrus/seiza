@@ -359,6 +359,18 @@ gives an empty window. A side may be at most 1024 pixels. A compressed,
 CIELab or complex XISF image cannot be read this way, because its samples
 are decoded as a whole; open it instead.
 
+`read_image_header` reads a FITS or XISF file's header without decoding its
+pixels. `headers` maps each keyword to its value; an XISF file's PixInsight
+plate solution appears there as WCS cards. `history` and `comments` hold a
+FITS file's `HISTORY` and `COMMENT` text, where calibration and stacking
+programs record what they did.
+
+```python
+header = seiza.read_image_header("light.fits")
+header["headers"]["EXPTIME"]   # 300.0
+header["history"]              # ["Calibrated with a master dark", ...]
+```
+
 ## Background extraction
 
 Fit a compact background model to a C-contiguous mono `(H, W)` or RGB

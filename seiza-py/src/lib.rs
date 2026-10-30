@@ -1161,6 +1161,37 @@ fn read_capture_time(path: PathBuf) -> PyResult<Option<String>> {
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
+/// The header of the FITS or XISF image at ``path``, read without decoding
+/// its pixels: ``{"headers": {keyword: value}, "history": [str],
+/// "comments": [str]}``. XISF when the extension says so, FITS otherwise.
+/// An XISF file's PixInsight astrometric solution appears in ``headers`` as
+/// WCS cards when it has none. ``history`` and ``comments`` hold a FITS
+/// file's ``HISTORY`` and ``COMMENT`` text in file order, where processing
+/// software records its steps; XISF keeps those as properties, so both are
+/// empty for it. Raises ``ValueError`` when the file cannot be read.
+#[pyfunction]
+fn read_image_header(py: Python<'_>, path: PathBuf) -> PyResult<Py<PyDict>> {
+    let header = py
+        .detach(|| seiza_image_io::read_header(&path))
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let headers = PyDict::new(py);
+    for (key, value) in &header.cards {
+        match value {
+            seiza_fits::HeaderValue::Logical(value) => headers.set_item(key, value)?,
+            seiza_fits::HeaderValue::Integer(value) => headers.set_item(key, value)?,
+            seiza_fits::HeaderValue::Float(value) => headers.set_item(key, value)?,
+            seiza_fits::HeaderValue::String(value) | seiza_fits::HeaderValue::Raw(value) => {
+                headers.set_item(key, value)?
+            }
+        }
+    }
+    let dict = PyDict::new(py);
+    dict.set_item("headers", headers)?;
+    dict.set_item("history", header.history)?;
+    dict.set_item("comments", header.comments)?;
+    Ok(dict.unbind())
+}
+
 /// What a FITS or XISF file says about where it points, read without
 /// decoding its pixels: ``{"wcs": Wcs or None, "center": (ra, dec) or None,
 /// "scale_arcsec_px": float or None}``, from its WCS cards or PixInsight
@@ -1337,6 +1368,7 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(read_capture_time, m)?)?;
     m.add_class::<PyImageWindow>()?;
     m.add_function(wrap_pyfunction!(read_image_window, m)?)?;
+    m.add_function(wrap_pyfunction!(read_image_header, m)?)?;
     m.add_function(wrap_pyfunction!(read_solve_prior, m)?)?;
     m.add_function(wrap_pyfunction!(solve_with_prior, m)?)?;
     m.add_function(wrap_pyfunction!(solve_image, m)?)?;

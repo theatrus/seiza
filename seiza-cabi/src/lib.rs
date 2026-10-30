@@ -6794,6 +6794,42 @@ pub unsafe extern "C" fn seiza_read_capture_time_json(
     .unwrap_or(ptr::null_mut())
 }
 
+#[unsafe(no_mangle)]
+/// The header of the FITS or XISF image at `path`, read without decoding
+/// its pixels, as `{"headers": {...}, "history": [...], "comments": [...]}`:
+/// XISF when the extension says so, FITS otherwise. `headers` maps each
+/// card's keyword to its value, as the render calls' `headers` do; an XISF
+/// file's PixInsight astrometric solution appears there as WCS cards when
+/// it has none. `history` and `comments` hold a FITS file's `HISTORY` and
+/// `COMMENT` text in file order, where processing software records its
+/// steps; XISF keeps those as properties, so both are empty for it. Free
+/// the result, or an `error_out` string, with [`seiza_string_free`].
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated string. When non-null, `error_out`
+/// must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_read_image_header_json(
+    path: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let path = required_path(path, "image path")?;
+        let header = seiza_image_io::read_header(&path).map_err(|error| error.to_string())?;
+        let headers: Map<String, Value> = header
+            .cards
+            .iter()
+            .map(|(key, value)| (key.clone(), header_json(value)))
+            .collect();
+        owned_json(&json!({
+            "headers": headers,
+            "history": header.history,
+            "comments": header.comments,
+        }))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
 /// Where a window [`seiza_read_image_window`] read lies, and the image it
 /// lies in.
 #[repr(C)]
@@ -16646,6 +16682,46 @@ mod tests {
         let json = unsafe { seiza_read_capture_time_json(missing.as_ptr(), &mut error) };
         assert!(json.is_null());
         assert!(!error.is_null());
+        unsafe { seiza_string_free(error) };
+    }
+
+    #[test]
+    fn reads_an_image_header_with_its_commentary() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("light.fits");
+        let mut header = Vec::new();
+        for card in [
+            "SIMPLE  =                    T",
+            "BITPIX  =                   16",
+            "NAXIS   =                    2",
+            "NAXIS1  =                    1",
+            "NAXIS2  =                    1",
+            "EXPTIME =                 30.0",
+            "OBJECT  = 'M42     '",
+            "HISTORY Calibrated with a master dark",
+            "END",
+        ] {
+            header.extend_from_slice(format!("{card:<80}").as_bytes());
+        }
+        header.resize(2880 * 2, 0);
+        std::fs::write(&path, header).unwrap();
+        let c_path = CString::new(path.to_str().unwrap()).unwrap();
+
+        let mut error = ptr::null_mut();
+        let json = unsafe { seiza_read_image_header_json(c_path.as_ptr(), &mut error) };
+        assert!(!json.is_null() && error.is_null());
+        let value: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(json) }.to_str().unwrap()).unwrap();
+        unsafe { seiza_string_free(json) };
+        assert_eq!(value["headers"]["EXPTIME"], 30.0);
+        assert_eq!(value["headers"]["OBJECT"], "M42");
+        assert_eq!(value["history"], json!(["Calibrated with a master dark"]));
+        assert_eq!(value["comments"], json!([]));
+
+        let missing =
+            CString::new(directory.path().join("missing.fits").to_str().unwrap()).unwrap();
+        let json = unsafe { seiza_read_image_header_json(missing.as_ptr(), &mut error) };
+        assert!(json.is_null() && !error.is_null());
         unsafe { seiza_string_free(error) };
     }
 

@@ -30,7 +30,7 @@ use image::{DynamicImage, ImageBuffer, ImageFormat, Luma, Rgb, Rgb32FImage};
 use raster::OrientedRaster;
 use seiza_core::prior::SolvePrior;
 use seiza_fits::{F32ImageData, FitsError, FitsImage, HeaderValue, Pixels, WriteHeaderCard};
-pub use seiza_fits::{ImageWindow, MAX_WINDOW_EDGE};
+pub use seiza_fits::{FitsHeader, ImageWindow, MAX_WINDOW_EDGE};
 use seiza_xisf::{XisfError, XisfImageInfo, XisfMetadata};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -60,6 +60,17 @@ impl Format {
             "tif" | "tiff" => Some(Self::Tiff),
             "fits" | "fit" | "fts" => Some(Self::Fits),
             _ => None,
+        }
+    }
+
+    /// The container [`read_astronomy`] reads `path` as: XISF when the
+    /// extension says so (`.xisf`, or a distributed unit's `.xish` header),
+    /// FITS otherwise, whatever the extension, as a FITS reader of camera
+    /// files must.
+    pub fn astronomy(path: &Path) -> Self {
+        match Self::from_path(path) {
+            Some(Self::Xisf) => Self::Xisf,
+            _ => Self::Fits,
         }
     }
 
@@ -316,7 +327,7 @@ fn read_astronomy_decoding(
     path: &Path,
     physical: Option<impl FnOnce(usize) -> Vec<f32>>,
 ) -> Result<AstronomyImage, Error> {
-    if Format::from_path(path) == Some(Format::Xisf) {
+    if Format::astronomy(path) == Format::Xisf {
         let read =
             seiza_xisf::read_image_with_options(path, 0, &seiza_xisf::ReadOptions::default())
                 .map_err(|error| Error::open(path, error))?;
@@ -373,7 +384,7 @@ pub fn read_window(
             "normalized_full_scale must be finite and positive",
         ));
     }
-    if Format::from_path(path) == Some(Format::Xisf) {
+    if Format::astronomy(path) == Format::Xisf {
         let mut read = seiza_xisf::read_window(path, x, y, width, height)
             .map_err(|error| Error::open(path, error))?;
         if let Some(scale) = normalized_full_scale {
@@ -382,6 +393,42 @@ pub fn read_window(
         return Ok(read.window);
     }
     seiza_fits::read_window(path, x, y, width, height).map_err(|error| Error::open(path, error))
+}
+
+/// Read a FITS or XISF file's header without decoding its pixels: XISF
+/// when the extension says so, FITS otherwise, as [`read_astronomy`]
+/// chooses.
+///
+/// The cards are those [`read_astronomy`] gives the image: a FITS file's
+/// from the HDU [`FitsImage::open`] reads, with its `HISTORY` and `COMMENT`
+/// text, and an XISF file's keywords and structure, with a PixInsight
+/// astrometric solution added as WCS cards when they carry none
+/// ([`add_xisf_solution_wcs`]). An XISF file keeps its processing history
+/// as properties, not commentary, so its `history` and `comments` are
+/// empty.
+pub fn read_header(path: &Path) -> Result<FitsHeader, Error> {
+    read_header_as(path, Format::astronomy(path))
+}
+
+/// [`read_header`] for a file whose name does not say its container, such
+/// as an upload streamed to a temporary name: the file at `path`, read as
+/// `format`. Only FITS and XISF have headers to read.
+pub fn read_header_as(path: &Path, format: Format) -> Result<FitsHeader, Error> {
+    match format {
+        Format::Xisf => {
+            let (mut cards, metadata) = seiza_xisf::read_header_and_metadata(path)
+                .map_err(|error| Error::open(path, error))?;
+            add_xisf_solution_wcs(&mut cards, &metadata);
+            Ok(FitsHeader {
+                cards,
+                ..FitsHeader::default()
+            })
+        }
+        Format::Fits => {
+            seiza_fits::read_header_with_commentary(path).map_err(|error| Error::open(path, error))
+        }
+        _ => Err(Error::open(path, "it is not a FITS or XISF file")),
+    }
 }
 
 /// Add FITS WCS cards for an XISF image's astrometric solution, when its
@@ -452,21 +499,29 @@ impl AstronomyImage {
         }
         solve_prior_from_headers(&headers)
     }
+
+    /// Put an XISF image the file declares as normalized (`bounds="0:1"`,
+    /// as PixInsight writes) onto `0..=full_scale`, by the rules of
+    /// [`seiza_xisf::XisfImage::rescale_normalized_to`]: only an exact
+    /// `0:1`, only floating-point samples, and only a finite, positive
+    /// `full_scale`. 65535.0 puts it on a 16-bit camera's scale, as
+    /// stacking's `normalized_full_scale` does. Answers whether it ran; on
+    /// success `xisf_info`'s bounds become `0:full_scale`. A FITS image
+    /// declares no bounds and is left alone.
+    pub fn rescale_normalized_to(&mut self, full_scale: f32) -> bool {
+        self.xisf_info
+            .as_mut()
+            .is_some_and(|info| seiza_xisf::rescale_normalized(&mut self.image, info, full_scale))
+    }
 }
 
 /// [`AstronomyImage::solve_prior`] from a FITS or XISF file's headers and
 /// metadata alone, without decoding its pixels.
 pub fn read_solve_prior(path: &Path) -> Result<SolvePrior, Error> {
     match Format::from_path(path) {
-        Some(Format::Xisf) => {
-            let (mut headers, metadata) = seiza_xisf::read_header_and_metadata(path)
-                .map_err(|error| Error::open(path, error))?;
-            add_xisf_solution_wcs(&mut headers, &metadata);
-            Ok(solve_prior_from_headers(&headers))
+        Some(format @ (Format::Xisf | Format::Fits)) => {
+            read_header_as(path, format).map(|header| solve_prior_from_headers(&header.cards))
         }
-        Some(Format::Fits) => seiza_fits::read_header(path)
-            .map(|headers| solve_prior_from_headers(&headers))
-            .map_err(|error| Error::open(path, error)),
         _ => Err(Error::open(path, "it is not a FITS or XISF file")),
     }
 }
@@ -509,12 +564,9 @@ pub fn capture_time_from_headers(headers: &[(String, HeaderValue)]) -> Option<St
 /// `None` when the file does not say; an error when it cannot be read.
 pub fn read_capture_time(path: &Path) -> Result<Option<String>, Error> {
     match Format::from_path(path) {
-        Some(Format::Xisf) => seiza_xisf::read_header_and_metadata(path)
-            .map(|(headers, _)| capture_time_from_headers(&headers))
-            .map_err(|error| Error::open(path, error)),
-        Some(Format::Fits) => seiza_fits::read_header(path)
-            .map(|headers| capture_time_from_headers(&headers))
-            .map_err(|error| Error::open(path, error)),
+        Some(format @ (Format::Xisf | Format::Fits)) => {
+            read_header_as(path, format).map(|header| capture_time_from_headers(&header.cards))
+        }
         _ => {
             std::fs::metadata(path).map_err(|error| Error::open(path, error.to_string()))?;
             Ok(raster::PhotoMetadata::read(path).capture_time_utc)
@@ -900,6 +952,186 @@ mod tests {
         assert_eq!(
             read_window(&missing, 0, 0, 1, 1, None).unwrap_err().path(),
             missing
+        );
+    }
+
+    /// A monolithic 2x2 gray float XISF of `samples`, with `extra` image
+    /// attributes and `properties` inside its Image element.
+    fn xisf_file(path: &Path, samples: [f32; 4], extra: &str, properties: &str) {
+        let pixels: Vec<u8> = samples
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        // The attachment's offset is written in the header it follows.
+        let mut offset = 0;
+        loop {
+            let header = format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?><xisf version=\"1.0\" xmlns=\"http://www.pixinsight.com/xisf\">\
+                 <Image geometry=\"2:2:1\" sampleFormat=\"Float32\" colorSpace=\"Gray\" {extra} \
+                 location=\"attachment:{offset}:{}\">{properties}</Image></xisf>",
+                pixels.len()
+            );
+            let start = 16 + header.len();
+            if start == offset {
+                let mut bytes = b"XISF0100".to_vec();
+                bytes.extend_from_slice(&(header.len() as u32).to_le_bytes());
+                bytes.extend_from_slice(&[0; 4]);
+                bytes.extend_from_slice(header.as_bytes());
+                bytes.extend_from_slice(&pixels);
+                std::fs::write(path, bytes).unwrap();
+                return;
+            }
+            offset = start;
+        }
+    }
+
+    /// PixInsight's gnomonic solution, as properties: reference at RA 83.8,
+    /// Dec -5.4 on image point (100.5, 80.5).
+    fn pixinsight_solution() -> String {
+        let vector = |id: &str, dimensions: &str, values: &[f64]| {
+            let kind = if dimensions.starts_with("rows") {
+                "F64Matrix"
+            } else {
+                "F64Vector"
+            };
+            let hex: String = values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            format!(
+                "<Property id=\"AstrometricSolution:{id}\" type=\"{kind}\" {dimensions} location=\"inline:hex\">{hex}</Property>"
+            )
+        };
+        let text = |id: &str, value: &str| {
+            format!("<Property id=\"AstrometricSolution:{id}\" type=\"String\">{value}</Property>")
+        };
+        [
+            text("Version", "1.3"),
+            text("ProjectionSystem", "Gnomonic"),
+            vector(
+                "ReferenceCelestialCoordinates",
+                "length=\"2\"",
+                &[83.8, -5.4],
+            ),
+            vector("ReferenceImageCoordinates", "length=\"2\"", &[100.5, 80.5]),
+            vector(
+                "LinearTransformationMatrix",
+                "rows=\"2\" columns=\"2\"",
+                &[-2e-4, 0.0, 0.0, 2e-4],
+            ),
+        ]
+        .concat()
+    }
+
+    #[test]
+    fn a_header_is_read_with_its_commentary_and_an_xisf_solution() {
+        let directory = tempfile::tempdir().unwrap();
+        let fits = directory.path().join("light.fits");
+        let mut header = Vec::new();
+        for card in [
+            "SIMPLE  =                    T".to_string(),
+            "BITPIX  =                  -32".to_string(),
+            "NAXIS   =                    2".to_string(),
+            "NAXIS1  =                    2".to_string(),
+            "NAXIS2  =                    2".to_string(),
+            "EXPTIME =                 30.0".to_string(),
+            "HISTORY Calibrated with a master dark".to_string(),
+            "COMMENT Written by a test".to_string(),
+            "END".to_string(),
+        ] {
+            header.extend_from_slice(format!("{card:<80}").as_bytes());
+        }
+        header.resize(2880 * 2, 0);
+        std::fs::write(&fits, header).unwrap();
+
+        let read = read_header(&fits).unwrap();
+        assert_eq!(
+            read.cards
+                .iter()
+                .find(|(key, _)| key == "EXPTIME")
+                .map(|(_, value)| value.as_f64()),
+            Some(Some(30.0))
+        );
+        assert_eq!(read.history, ["Calibrated with a master dark"]);
+        assert_eq!(read.comments, ["Written by a test"]);
+
+        // PixInsight keeps a solution only as properties; the header gains
+        // its WCS cards, as solving reads them.
+        let xisf = directory.path().join("solved.xisf");
+        xisf_file(&xisf, [0.0; 4], "", &pixinsight_solution());
+        let read = read_header(&xisf).unwrap();
+        let card = |key: &str| {
+            read.cards
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.clone())
+        };
+        assert_eq!(card("CTYPE1"), Some(HeaderValue::String("RA---TAN".into())));
+        assert_eq!(card("CRVAL1"), Some(HeaderValue::Float(83.8)));
+        assert_eq!(card("CRPIX1"), Some(HeaderValue::Float(101.0)));
+        assert!(read.history.is_empty() && read.comments.is_empty());
+        assert_eq!(
+            read_solve_prior(&xisf).unwrap().wcs.unwrap().crval,
+            (83.8, -5.4)
+        );
+
+        // XISF by its extension, FITS otherwise.
+        for (name, format) in [
+            ("a.XISF", Format::Xisf),
+            ("unit.xish", Format::Xisf),
+            ("a.fts", Format::Fits),
+            ("upload.part", Format::Fits),
+            ("photo.png", Format::Fits),
+        ] {
+            assert_eq!(Format::astronomy(Path::new(name)), format, "{name}");
+        }
+
+        // A file whose name does not say its container is read as asked.
+        let upload = directory.path().join("upload.part");
+        std::fs::copy(&xisf, &upload).unwrap();
+        assert_eq!(read_header_as(&upload, Format::Xisf).unwrap(), read);
+        assert!(read_header(&upload).is_err(), "read as FITS by its name");
+        assert!(read_header_as(&upload, Format::Png).is_err());
+    }
+
+    #[test]
+    fn a_whole_normalized_xisf_is_put_on_the_scale_asked_for() {
+        let directory = tempfile::tempdir().unwrap();
+        let normalized = directory.path().join("normalized.xisf");
+        xisf_file(&normalized, [0.0, 0.25, 0.5, 1.0], "bounds=\"0:1\"", "");
+        let mut read = read_astronomy(&normalized).unwrap();
+        assert!(read.rescale_normalized_to(65535.0));
+        assert_eq!(
+            read.image.clone().into_physical_f32(),
+            [0.0, 16383.75, 32767.5, 65535.0]
+        );
+        assert_eq!(
+            read.xisf_info.as_ref().unwrap().bounds,
+            Some((0.0, 65535.0))
+        );
+        // As the window of the same file reads it, and only once.
+        assert_eq!(
+            read_window(&normalized, 0, 0, 2, 2, Some(65535.0))
+                .unwrap()
+                .values,
+            read.image.into_physical_f32()
+        );
+
+        // Other bounds, and FITS, are left alone.
+        let physical = directory.path().join("physical.xisf");
+        xisf_file(&physical, [0.0, 0.25, 0.5, 1.0], "bounds=\"0:30000\"", "");
+        assert!(
+            !read_astronomy(&physical)
+                .unwrap()
+                .rescale_normalized_to(65535.0)
+        );
+        let fits = directory.path().join("normalized.fits");
+        save(&fits, &FloatImage::gray(2, 2, vec![0.0, 0.25, 0.5, 1.0])).unwrap();
+        assert!(
+            !read_astronomy(&fits)
+                .unwrap()
+                .rescale_normalized_to(65535.0)
         );
     }
 

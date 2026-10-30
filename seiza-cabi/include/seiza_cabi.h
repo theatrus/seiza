@@ -2752,6 +2752,23 @@ char *seiza_solve_image_with_limits_json(const char *path,
 char *seiza_read_capture_time_json(const char *path, char **error_out);
 
 /*
+ The header of the FITS or XISF image at `path`, read without decoding
+ its pixels, as `{"headers": {...}, "history": [...], "comments": [...]}`:
+ XISF when the extension says so, FITS otherwise. `headers` maps each
+ card's keyword to its value, as the render calls' `headers` do; an XISF
+ file's PixInsight astrometric solution appears there as WCS cards when
+ it has none. `history` and `comments` hold a FITS file's `HISTORY` and
+ `COMMENT` text in file order, where processing software records its
+ steps; XISF keeps those as properties, so both are empty for it. Free
+ the result, or an `error_out` string, with [`seiza_string_free`].
+
+ # Safety
+ `path` must be a valid NUL-terminated string. When non-null, `error_out`
+ must point to writable storage for one pointer.
+ */
+char *seiza_read_image_header_json(const char *path, char **error_out);
+
+/*
  Read the samples of the rectangle at (`x`, `y`), `width` × `height`
  pixels, of every plane of the FITS or XISF image at `path`, without
  decoding the rest of it: XISF when the extension says so, FITS
