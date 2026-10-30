@@ -13,7 +13,9 @@ Open and save images by their file extension, the same way across Seiza.
   callers that need its headers or stored sample type.
 - `read_window` reads a rectangle of a FITS or XISF image's samples, in
   physical units, without decoding the rest of the file: the values under a
-  viewer's cursor, at once on an image of any size.
+  viewer's cursor, at once on an image of any size. Its
+  `normalized_full_scale` puts an XISF image declared as `0:1` on a camera's
+  scale, as stacking does.
 - `read_solve_prior` reads what a FITS or XISF file says about where it
   points (`seiza_core::prior::SolvePrior`), without decoding its pixels.
 - `raster` opens JPEG, PNG and TIFF files, or uploaded bytes, upright by

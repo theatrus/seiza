@@ -347,23 +347,39 @@ fn read_astronomy_decoding(
 ///
 /// The samples are in physical units, as [`FitsImage::into_physical_f32`]
 /// gives the whole image: FITS samples with `BZERO`, `BSCALE` and `BLANK`
-/// applied, XISF samples as stored. An XISF image's declared `bounds` are
-/// not applied; [`seiza_xisf::read_window`] returns them with the window,
-/// and can place a normalized image on a camera's scale. Rows count in
-/// stored order. The rectangle is clipped to the image, and a side longer
-/// than [`MAX_WINDOW_EDGE`] is refused; see [`seiza_fits::read_window`] and
+/// applied, XISF samples as stored. Rows count in stored order. The
+/// rectangle is clipped to the image, and a side longer than
+/// [`MAX_WINDOW_EDGE`] is refused; see [`seiza_fits::read_window`] and
 /// [`seiza_xisf::read_window`] for what each container can window.
+///
+/// `normalized_full_scale` puts an XISF image the file declares as
+/// normalized (`bounds="0:1"`, as PixInsight writes) onto that scale, by the
+/// rules of [`seiza_xisf::XisfWindow::rescale_normalized_to`]: 65535.0
+/// reads it on a 16-bit camera's scale, as stacking's
+/// `normalized_full_scale` does. `None` leaves every sample as stored. A
+/// FITS image declares no bounds, so it reads the same either way. A scale
+/// that is not finite and positive is refused.
 pub fn read_window(
     path: &Path,
     x: usize,
     y: usize,
     width: usize,
     height: usize,
+    normalized_full_scale: Option<f32>,
 ) -> Result<ImageWindow, Error> {
+    if normalized_full_scale.is_some_and(|scale| !scale.is_finite() || scale <= 0.0) {
+        return Err(Error::open(
+            path,
+            "normalized_full_scale must be finite and positive",
+        ));
+    }
     if Format::from_path(path) == Some(Format::Xisf) {
-        return seiza_xisf::read_window(path, x, y, width, height)
-            .map(|read| read.window)
-            .map_err(|error| Error::open(path, error));
+        let mut read = seiza_xisf::read_window(path, x, y, width, height)
+            .map_err(|error| Error::open(path, error))?;
+        if let Some(scale) = normalized_full_scale {
+            read.rescale_normalized_to(scale);
+        }
+        return Ok(read.window);
     }
     seiza_fits::read_window(path, x, y, width, height).map_err(|error| Error::open(path, error))
 }
@@ -854,7 +870,7 @@ mod tests {
             for extension in ["fits", "xisf"] {
                 let path = directory.path().join(format!("{name}.{extension}"));
                 save(&path, image).unwrap();
-                let window = read_window(&path, 2, 3, 4, 2).unwrap();
+                let window = read_window(&path, 2, 3, 4, 2, None).unwrap();
                 assert_eq!(
                     (
                         window.x,
@@ -882,9 +898,50 @@ mod tests {
         }
         let missing = directory.path().join("missing.fits");
         assert_eq!(
-            read_window(&missing, 0, 0, 1, 1).unwrap_err().path(),
+            read_window(&missing, 0, 0, 1, 1, None).unwrap_err().path(),
             missing
         );
+    }
+
+    #[test]
+    fn a_window_puts_a_normalized_xisf_on_the_scale_asked_for() {
+        let directory = tempfile::tempdir().unwrap();
+        // Samples within 0 to 1, which save declares as bounds="0:1".
+        let normalized = FloatImage::gray(4, 3, (0..12).map(|index| index as f32 / 11.0).collect());
+        let counts = FloatImage::gray(4, 3, (0..12).map(|index| index as f32 * 100.0).collect());
+        let xisf = directory.path().join("normalized.xisf");
+        let fits = directory.path().join("normalized.fits");
+        let camera = directory.path().join("counts.xisf");
+        save(&xisf, &normalized).unwrap();
+        save(&fits, &normalized).unwrap();
+        save(&camera, &counts).unwrap();
+
+        // The samples a whole image rescaled to that scale has.
+        let mut whole = seiza_xisf::read_image(&xisf).unwrap();
+        assert!(whole.rescale_normalized_to(65535.0));
+        let scaled = read_window(&xisf, 1, 1, 3, 2, Some(65535.0)).unwrap();
+        let physical = whole.image.into_physical_f32();
+        let expected: Vec<f32> = (1..3)
+            .flat_map(|y| (1..4).map(move |x| y * 4 + x))
+            .map(|index| physical[index])
+            .collect();
+        assert_eq!(scaled.values, expected);
+
+        // As stored without a scale; a FITS file and an XISF on a camera's
+        // scale declare no 0:1, so they read as stored either way.
+        let whole_window =
+            |path: &Path, scale| read_window(path, 0, 0, 4, 3, scale).unwrap().values;
+        assert_eq!(whole_window(&xisf, None), normalized.samples);
+        assert_eq!(whole_window(&fits, Some(65535.0)), normalized.samples);
+        assert_eq!(whole_window(&camera, Some(65535.0)), counts.samples);
+
+        for scale in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            let error = read_window(&xisf, 0, 0, 1, 1, Some(scale)).unwrap_err();
+            assert!(
+                matches!(error.cause(), Cause::Invalid(_)),
+                "{scale}: {error}"
+            );
+        }
     }
 
     #[test]

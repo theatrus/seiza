@@ -2762,7 +2762,15 @@ char *seiza_read_capture_time_json(const char *path, char **error_out);
  row: `values[(plane * height + row) * width + column]` for the clipped
  `width` and `height` written to `window_out`. FITS samples have `BZERO`,
  `BSCALE` and `BLANK` applied (a blank sample is NaN); XISF samples are as
- stored, without their declared `bounds`. Rows count in stored order.
+ stored. Rows count in stored order.
+
+ `normalized_full_scale` puts an XISF image the file declares as
+ normalized (`bounds="0:1"`, as PixInsight writes) onto that scale, as
+ [`seiza_live_stacker_push_fits_pipelined_json`] does for the frames it
+ stacks: pass 65535.0 to read it on a 16-bit camera's scale, or 0 to leave
+ every sample exactly as stored. Any other value must be finite and
+ positive. A FITS image declares no bounds, so it reads the same either
+ way.
 
  `values` must hold `planes × width × height` floats of the clipped
  window; `3 × width × height` of the request always suffices. The
@@ -2784,6 +2792,7 @@ bool seiza_read_image_window(const char *path,
                              size_t y,
                              size_t width,
                              size_t height,
+                             float normalized_full_scale,
                              float *values,
                              size_t values_length,
                              SeizaImageWindow *window_out,

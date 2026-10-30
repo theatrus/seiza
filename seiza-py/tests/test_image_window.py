@@ -64,3 +64,39 @@ def test_too_large_a_window_and_a_missing_file_raise(tmp_path):
         seiza.read_image_window(path, 0, 0, 1025, 1)
     with pytest.raises(ValueError):
         seiza.read_image_window(tmp_path / "missing.fits", 0, 0, 1, 1)
+
+
+def write_normalized_xisf(path, samples):
+    """A monolithic XISF file of the gray float32 `samples` (height, width),
+    declared normalized as PixInsight writes it: bounds="0:1"."""
+    height, width = samples.shape
+    data = samples.astype("<f4").tobytes().hex()
+    header = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<xisf version="1.0" xmlns="http://www.pixinsight.com/xisf">'
+        f'<Image geometry="{width}:{height}:1" sampleFormat="Float32" bounds="0:1" '
+        f'colorSpace="Gray" location="inline:hex">{data}</Image></xisf>'
+    ).encode("utf-8")
+    path.write_bytes(b"XISF0100" + len(header).to_bytes(4, "little") + bytes(4) + header)
+
+
+def test_a_normalized_xisf_reads_as_stored_or_on_the_scale_asked_for(tmp_path):
+    samples = (np.arange(12, dtype=np.float32) / 16).reshape(3, 4)
+    path = tmp_path / "master.xisf"
+    write_normalized_xisf(path, samples)
+
+    stored = seiza.read_image_window(path, 1, 1, 2, 2)
+    np.testing.assert_array_equal(stored.values[0], samples[1:3, 1:3])
+
+    scaled = seiza.read_image_window(path, 1, 1, 2, 2, normalized_full_scale=65535.0)
+    np.testing.assert_array_equal(scaled.values[0], samples[1:3, 1:3] * np.float32(65535))
+
+    # A FITS file declares no bounds, so the scale leaves it alone.
+    fits = tmp_path / "frame.fits"
+    write_fits(fits, samples, -32)
+    unscaled = seiza.read_image_window(fits, 1, 1, 2, 2, normalized_full_scale=65535.0)
+    np.testing.assert_array_equal(unscaled.values[0], samples[1:3, 1:3])
+
+    for scale in (0.0, -1.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="normalized_full_scale"):
+            seiza.read_image_window(path, 0, 0, 1, 1, normalized_full_scale=scale)

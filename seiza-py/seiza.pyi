@@ -1271,7 +1271,13 @@ class ImageWindow:
     height: int
 
 def read_image_window(
-    path: str | Path, x: int, y: int, width: int, height: int
+    path: str | Path,
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    *,
+    normalized_full_scale: float | None = None,
 ) -> ImageWindow: ...
 def field_objects(
     wcs: Wcs,

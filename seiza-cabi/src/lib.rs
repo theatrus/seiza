@@ -6823,7 +6823,15 @@ pub struct SeizaImageWindow {
 /// row: `values[(plane * height + row) * width + column]` for the clipped
 /// `width` and `height` written to `window_out`. FITS samples have `BZERO`,
 /// `BSCALE` and `BLANK` applied (a blank sample is NaN); XISF samples are as
-/// stored, without their declared `bounds`. Rows count in stored order.
+/// stored. Rows count in stored order.
+///
+/// `normalized_full_scale` puts an XISF image the file declares as
+/// normalized (`bounds="0:1"`, as PixInsight writes) onto that scale, as
+/// [`seiza_live_stacker_push_fits_pipelined_json`] does for the frames it
+/// stacks: pass 65535.0 to read it on a 16-bit camera's scale, or 0 to leave
+/// every sample exactly as stored. Any other value must be finite and
+/// positive. A FITS image declares no bounds, so it reads the same either
+/// way.
 ///
 /// `values` must hold `planes × width × height` floats of the clipped
 /// window; `3 × width × height` of the request always suffices. The
@@ -6845,6 +6853,7 @@ pub unsafe extern "C" fn seiza_read_image_window(
     y: usize,
     width: usize,
     height: usize,
+    normalized_full_scale: f32,
     values: *mut f32,
     values_length: usize,
     window_out: *mut SeizaImageWindow,
@@ -6854,7 +6863,8 @@ pub unsafe extern "C" fn seiza_read_image_window(
     ffi_result(error_out, || {
         let window_out = unsafe { window_out.as_mut() }.ok_or("window_out is required")?;
         let path = required_path(path, "image path")?;
-        let window = seiza_image_io::read_window(&path, x, y, width, height)
+        let normalized_full_scale = (normalized_full_scale != 0.0).then_some(normalized_full_scale);
+        let window = seiza_image_io::read_window(&path, x, y, width, height, normalized_full_scale)
             .map_err(|error| error.to_string())?;
         *window_out = SeizaImageWindow {
             image_width: window.image_width,
@@ -16657,6 +16667,7 @@ mod tests {
                 2,
                 4,
                 4,
+                0.0,
                 values.as_mut_ptr(),
                 values.len(),
                 &mut window,
@@ -16687,6 +16698,7 @@ mod tests {
                 0,
                 3,
                 3,
+                0.0,
                 short.as_mut_ptr(),
                 short.len(),
                 &mut window,
@@ -16706,6 +16718,7 @@ mod tests {
                 0,
                 3,
                 3,
+                0.0,
                 ptr::null_mut(),
                 0,
                 &mut window,
@@ -16714,6 +16727,45 @@ mod tests {
         };
         assert!(read && error.is_null());
         assert_eq!((window.width, window.height), (0, 0));
+
+        // A normalized XISF image reads as stored, or on the scale asked for.
+        let normalized = directory.path().join("normalized.xisf");
+        let samples: Vec<f32> = (0..4).map(|index| index as f32 / 4.0).collect();
+        seiza_image_io::save(
+            &normalized,
+            &seiza_image_io::FloatImage::gray(2, 2, samples),
+        )
+        .unwrap();
+        let c_path = CString::new(normalized.to_str().unwrap()).unwrap();
+        let read_at = |scale: f32, error: &mut *mut c_char| {
+            let mut values = [0.0_f32; 4];
+            let mut window = SeizaImageWindow::default();
+            let read = unsafe {
+                seiza_read_image_window(
+                    c_path.as_ptr(),
+                    0,
+                    0,
+                    2,
+                    2,
+                    scale,
+                    values.as_mut_ptr(),
+                    values.len(),
+                    &mut window,
+                    error,
+                )
+            };
+            read.then_some(values)
+        };
+        let mut error = ptr::null_mut();
+        assert_eq!(read_at(0.0, &mut error), Some([0.0, 0.25, 0.5, 0.75]));
+        assert_eq!(
+            read_at(65535.0, &mut error),
+            Some([0.0, 16383.75, 32767.5, 49151.25])
+        );
+        assert!(error.is_null());
+        assert_eq!(read_at(-1.0, &mut error), None);
+        assert!(!error.is_null());
+        unsafe { seiza_string_free(error) };
     }
 
     #[test]

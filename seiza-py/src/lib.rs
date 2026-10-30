@@ -1052,7 +1052,8 @@ struct PyImageWindow {
 impl PyImageWindow {
     /// The samples, a ``float32`` array shaped ``(planes, height, width)``
     /// in physical units: FITS samples with ``BZERO``, ``BSCALE`` and
-    /// ``BLANK`` applied (a blank sample is NaN), XISF samples as stored.
+    /// ``BLANK`` applied (a blank sample is NaN), XISF samples as stored, or
+    /// on ``normalized_full_scale`` when the image is normalized.
     #[getter]
     fn values<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, numpy::PyArray3<f32>>> {
         let window = &self.inner;
@@ -1120,10 +1121,21 @@ impl PyImageWindow {
 /// few pixels is fast on an image of any size. XISF when the extension says
 /// so, FITS otherwise. The rectangle is clipped to the image (see the
 /// window's ``x``, ``y``, ``width`` and ``height``); one wholly outside it
-/// gives an empty window. Raises ``ValueError`` for a side longer than 1024,
-/// a file that cannot be read, or an XISF image whose samples cannot be
-/// reached without decoding it all: a compressed, CIELab or complex one.
+/// gives an empty window.
+///
+/// ``normalized_full_scale`` puts an XISF image the file declares as
+/// normalized (``bounds="0:1"``, as PixInsight writes) onto that scale:
+/// ``65535.0`` reads it on a 16-bit camera's scale, as stacking's
+/// ``normalized_full_scale`` puts such frames. ``None`` leaves every sample
+/// as stored. A FITS image declares no bounds, so it reads the same either
+/// way.
+///
+/// Raises ``ValueError`` for a side longer than 1024, a scale that is not
+/// finite and positive, a file that cannot be read, or an XISF image whose
+/// samples cannot be reached without decoding it all: a compressed, CIELab
+/// or complex one.
 #[pyfunction]
+#[pyo3(signature = (path, x, y, width, height, *, normalized_full_scale=None))]
 fn read_image_window(
     py: Python<'_>,
     path: PathBuf,
@@ -1131,8 +1143,9 @@ fn read_image_window(
     y: usize,
     width: usize,
     height: usize,
+    normalized_full_scale: Option<f32>,
 ) -> PyResult<PyImageWindow> {
-    py.detach(|| seiza_image_io::read_window(&path, x, y, width, height))
+    py.detach(|| seiza_image_io::read_window(&path, x, y, width, height, normalized_full_scale))
         .map(|inner| PyImageWindow { inner })
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }
