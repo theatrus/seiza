@@ -3201,7 +3201,7 @@ dependencies = [
 
 [[package]]
 name = "seiza"
-version = "0.47.0"
+version = "0.48.0"
 dependencies = [
  "directories",
  "image",
@@ -3225,7 +3225,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-analysis"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "seiza-fits",
  "seiza-image-io",
@@ -3252,7 +3252,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-cabi"
-version = "0.47.0"
+version = "0.48.0"
 dependencies = [
  "boon",
  "cbindgen",
@@ -3296,7 +3296,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-cli"
-version = "0.47.0"
+version = "0.48.0"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -3381,7 +3381,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-fits"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "flate2",
  "memmap2",
@@ -3393,7 +3393,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-image-io"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "chrono",
  "image",
@@ -3415,7 +3415,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-parallax"
-version = "0.19.5"
+version = "0.19.6"
 dependencies = [
  "ab_glyph",
  "image",
@@ -3467,7 +3467,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-stacking"
-version = "0.54.0"
+version = "0.55.0"
 dependencies = [
  "bytemuck",
  "fs2",
@@ -3529,7 +3529,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-xisf"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "flate2",
  "lz4_flex",
