@@ -110,6 +110,10 @@ core = "seiza-image-io::PhotoMetadata"
 [rust.ScaleHintResponse]
 core = "seiza-image-io::ScaleHint"
 
+[rust.SeizaImageWindow]
+core = "seiza-fits::ImageWindow"
+values = { none = "seiza_read_image_window writes the samples to the caller's buffer" }
+
 
 # calibration and stacking
 [rust.SeizaFrameSignature]
@@ -603,6 +607,7 @@ seiza_solve_image_json = "solve_image"
 seiza_solve_image_with_limits_json = "solve_image"
 seiza_read_capture_time_json = "read_capture_time"
 seiza_read_photo_metadata_json = "read_photo_metadata"
+seiza_read_image_window = "read_image_window"
 seiza_wcs_fits_header_json = "Wcs.fits_header_cards"
 
 # --- stacking ---------------------------------------------------------------

@@ -431,6 +431,28 @@ typedef void (*SeizaStackReintegrateProgressCallback)(uint32_t, size_t, size_t, 
 typedef void (*SeizaCatalogSetupProgressCallback)(const char*, void*);
 
 /*
+ Where a window [`seiza_read_image_window`] read lies, and the image it
+ lies in.
+ */
+typedef struct {
+  /*
+   The full image's size and plane count (1, or 3 for RGB).
+   */
+  size_t image_width;
+  size_t image_height;
+  size_t planes;
+  /*
+   The part of the requested rectangle on the image, clipped to it, in
+   the image's stored row order. `width` and `height` are 0 when the
+   request missed the image.
+   */
+  size_t x;
+  size_t y;
+  size_t width;
+  size_t height;
+} SeizaImageWindow;
+
+/*
  One reading of an accumulator, in the stack's own units. Only ratios
  between readings of the same stack mean anything.
  */
@@ -2728,6 +2750,53 @@ char *seiza_solve_image_with_limits_json(const char *path,
  must point to writable storage for one pointer.
  */
 char *seiza_read_capture_time_json(const char *path, char **error_out);
+
+/*
+ Read the samples of the rectangle at (`x`, `y`), `width` × `height`
+ pixels, of every plane of the FITS or XISF image at `path`, without
+ decoding the rest of it: XISF when the extension says so, FITS
+ otherwise. Only the rows of the window are read, so a read of a few
+ pixels is fast on an image of any size.
+
+ The samples go to `values` in physical units, plane by plane, each row by
+ row: `values[(plane * height + row) * width + column]` for the clipped
+ `width` and `height` written to `window_out`. FITS samples have `BZERO`,
+ `BSCALE` and `BLANK` applied (a blank sample is NaN); XISF samples are as
+ stored. Rows count in stored order.
+
+ `normalized_full_scale` puts an XISF image the file declares as
+ normalized (`bounds="0:1"`, as PixInsight writes) onto that scale, as
+ [`seiza_live_stacker_push_fits_pipelined_json`] does for the frames it
+ stacks: pass 65535.0 to read it on a 16-bit camera's scale, or 0 to leave
+ every sample exactly as stored. Any other value must be finite and
+ positive. A FITS image declares no bounds, so it reads the same either
+ way.
+
+ `values` must hold `planes × width × height` floats of the clipped
+ window; `3 × width × height` of the request always suffices. The
+ rectangle is clipped to the image, and a side longer than 1024 is
+ refused. Returns false with `error_out` set when the file cannot be read,
+ when its samples cannot be reached without decoding it all (a compressed,
+ CIELab or complex XISF image), or when `values` is too short; in that
+ last case `window_out` still holds the window, so a caller can size the
+ buffer and call again.
+
+ # Safety
+ `path` must be a valid NUL-terminated string, `values` must be null or
+ point to `values_length` writable floats, and `window_out` must point to
+ one writable `SeizaImageWindow`. When non-null, `error_out` must point to
+ writable storage for one pointer.
+ */
+bool seiza_read_image_window(const char *path,
+                             size_t x,
+                             size_t y,
+                             size_t width,
+                             size_t height,
+                             float normalized_full_scale,
+                             float *values,
+                             size_t values_length,
+                             SeizaImageWindow *window_out,
+                             char **error_out);
 
 /*
  A WCS as FITS header cards. `wcs_json` is a WCS as

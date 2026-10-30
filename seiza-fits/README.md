@@ -22,6 +22,11 @@ one linear-image API without coupling operations to the source container.
   as unsupported. Decompression is pure Rust, so it works in WebAssembly too.
 - Streams full-image opens directly into the final typed pixel vector using a
   fixed 1 MiB conversion buffer; it does not retain a second whole-file copy.
+- `read_window` reads a rectangle of an image's samples, up to 1024 × 1024 a
+  plane, in physical units, from a memory map of the file: only the window's
+  rows are read, so the values under a cursor come back at once on an image
+  of any size. A tile-compressed image decodes only the tiles that cross the
+  window.
 - Planar RGB (`NAXIS3`) support and OSC debayering from `BAYERPAT`,
   `XBAYROFF`/`YBAYROFF`, and `ROWORDER` (`TOP-DOWN` or `BOTTOM-UP`).
   Row order corrects the CFA color phase without moving pixels or changing

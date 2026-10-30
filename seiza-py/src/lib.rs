@@ -1042,6 +1042,114 @@ fn read_photo_metadata(
     Ok(crate::convert::to_python(py, &value)?.unbind())
 }
 
+/// A rectangle of an image's samples, read by :func:`read_image_window`.
+#[pyclass(skip_from_py_object, frozen, name = "ImageWindow", module = "seiza")]
+struct PyImageWindow {
+    inner: seiza_image_io::ImageWindow,
+}
+
+#[pymethods]
+impl PyImageWindow {
+    /// The samples, a ``float32`` array shaped ``(planes, height, width)``
+    /// in physical units: FITS samples with ``BZERO``, ``BSCALE`` and
+    /// ``BLANK`` applied (a blank sample is NaN), XISF samples as stored, or
+    /// on ``normalized_full_scale`` when the image is normalized.
+    #[getter]
+    fn values<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, numpy::PyArray3<f32>>> {
+        let window = &self.inner;
+        numpy::ndarray::Array3::from_shape_vec(
+            (window.planes, window.height, window.width),
+            window.values.clone(),
+        )
+        .map(|array| numpy::IntoPyArray::into_pyarray(array, py))
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))
+    }
+    /// The full image's width, from its header.
+    #[getter]
+    fn image_width(&self) -> usize {
+        self.inner.image_width
+    }
+    /// The full image's height, from its header.
+    #[getter]
+    fn image_height(&self) -> usize {
+        self.inner.image_height
+    }
+    /// 1, or 3 for an RGB image.
+    #[getter]
+    fn planes(&self) -> usize {
+        self.inner.planes
+    }
+    /// The left column of the window, clipped to the image.
+    #[getter]
+    fn x(&self) -> usize {
+        self.inner.x
+    }
+    /// The top row of the window, clipped to the image, in stored row order.
+    #[getter]
+    fn y(&self) -> usize {
+        self.inner.y
+    }
+    /// The window's width; 0 when the request missed the image.
+    #[getter]
+    fn width(&self) -> usize {
+        self.inner.width
+    }
+    /// The window's height; 0 when the request missed the image.
+    #[getter]
+    fn height(&self) -> usize {
+        self.inner.height
+    }
+
+    fn __repr__(&self) -> String {
+        let window = &self.inner;
+        format!(
+            "ImageWindow(x={}, y={}, width={}, height={}, planes={}, image_width={}, image_height={})",
+            window.x,
+            window.y,
+            window.width,
+            window.height,
+            window.planes,
+            window.image_width,
+            window.image_height,
+        )
+    }
+}
+
+/// Read the samples of the rectangle at ``(x, y)``, ``width`` × ``height``
+/// pixels, of every plane of the FITS or XISF image at ``path``, without
+/// decoding the rest: only the rows of the window are read, so a read of a
+/// few pixels is fast on an image of any size. XISF when the extension says
+/// so, FITS otherwise. The rectangle is clipped to the image (see the
+/// window's ``x``, ``y``, ``width`` and ``height``); one wholly outside it
+/// gives an empty window.
+///
+/// ``normalized_full_scale`` puts an XISF image the file declares as
+/// normalized (``bounds="0:1"``, as PixInsight writes) onto that scale:
+/// ``65535.0`` reads it on a 16-bit camera's scale, as stacking's
+/// ``normalized_full_scale`` puts such frames. ``None`` leaves every sample
+/// as stored. A FITS image declares no bounds, so it reads the same either
+/// way.
+///
+/// Raises ``ValueError`` for a side longer than 1024, a scale that is not
+/// finite and positive, a file that cannot be read, or an XISF image whose
+/// samples cannot be reached without decoding it all: a compressed, CIELab
+/// or complex one.
+#[pyfunction]
+#[pyo3(signature = (path, x, y, width, height, *, normalized_full_scale=None))]
+fn read_image_window(
+    py: Python<'_>,
+    path: PathBuf,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+    normalized_full_scale: Option<f32>,
+) -> PyResult<PyImageWindow> {
+    py.detach(|| seiza_image_io::read_window(&path, x, y, width, height, normalized_full_scale))
+        .map(|inner| PyImageWindow { inner })
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// When the image at `path` was taken, ISO 8601 in UTC: from a FITS or
 /// XISF header's ``DATE-OBS``, ``DATE-BEG`` or ``DATE-AVG``, read without
 /// decoding the pixels, or from a photo's EXIF. ``None`` when the file does
@@ -1227,6 +1335,8 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fetch_catalogs, m)?)?;
     m.add_function(wrap_pyfunction!(read_photo_metadata, m)?)?;
     m.add_function(wrap_pyfunction!(read_capture_time, m)?)?;
+    m.add_class::<PyImageWindow>()?;
+    m.add_function(wrap_pyfunction!(read_image_window, m)?)?;
     m.add_function(wrap_pyfunction!(read_solve_prior, m)?)?;
     m.add_function(wrap_pyfunction!(solve_with_prior, m)?)?;
     m.add_function(wrap_pyfunction!(solve_image, m)?)?;

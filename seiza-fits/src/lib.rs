@@ -21,6 +21,7 @@
 mod bayer;
 mod compressed;
 mod header;
+mod window;
 mod writer;
 
 pub use bayer::{
@@ -32,6 +33,7 @@ pub use seiza_stretch::{
     Statistics, StretchParams, midtones_transfer_function, statistics_u16, stretch_u16_to_u8,
     stretch_u16_to_u16,
 };
+pub use window::{ImageWindow, MAX_WINDOW_EDGE, read_window};
 pub use writer::{
     F32ImageData, WriteHeaderCard, update_header_in_place, write_f32_image, write_f32_image_to,
 };

@@ -326,6 +326,39 @@ for item in found.objects:
 print(found.object_catalog_error, found.minor_body_error)
 ```
 
+## Read pixel values from a file
+
+`read_image_window` reads a rectangle of a FITS or XISF image's samples
+without decoding the rest of the file, so a viewer can show the values under
+a cursor on an image of any size. Only the rows of the window are read. The
+samples are in physical units: FITS samples have `BZERO`, `BSCALE` and
+`BLANK` applied (a blank sample is NaN), and XISF samples are as stored.
+Rows count in the file's stored order.
+
+```python
+window = seiza.read_image_window("stack.fits", x=1200, y=840, width=16, height=16)
+window.values.shape          # (planes, height, width), float32
+window.x, window.y           # the window's corner, clipped to the image
+value = window.values[0, 3, 5]   # plane 0 at (window.x + 5, window.y + 3)
+```
+
+A PixInsight XISF image normalized to 0..1 (`bounds="0:1"`) reads as stored
+unless you pass `normalized_full_scale`, which puts it on that scale as
+stacking does: `normalized_full_scale=65535.0` shows its values on the same
+16-bit scale as camera frames. FITS images read the same either way.
+
+```python
+master = seiza.read_image_window(
+    "masterLight.xisf", x=1200, y=840, width=16, height=16,
+    normalized_full_scale=65535.0,
+)
+```
+
+A rectangle that runs off the image is clipped to it, and one wholly off it
+gives an empty window. A side may be at most 1024 pixels. A compressed,
+CIELab or complex XISF image cannot be read this way, because its samples
+are decoded as a whole; open it instead.
+
 ## Background extraction
 
 Fit a compact background model to a C-contiguous mono `(H, W)` or RGB
