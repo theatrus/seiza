@@ -566,10 +566,7 @@ impl XisfImage {
     /// range, so rescaling them would destroy data rather than place it.
     /// A second call answers `false`, because the first rewrote `bounds`.
     pub fn rescale_normalized_to(&mut self, full_scale: f32) -> bool {
-        if !declares_unit_bounds(&self.info) {
-            return false;
-        }
-        self.rescale_from((0.0, 1.0), full_scale)
+        rescale_normalized(&mut self.image, &mut self.info, full_scale)
     }
 
     /// Map floating-point samples from `source` onto `0..=full_scale`, taking
@@ -591,26 +588,50 @@ impl XisfImage {
     /// not a finite range with `low < high`, when `full_scale` is not finite
     /// and positive, or when the samples are integers.
     pub fn rescale_from(&mut self, source: (f64, f64), full_scale: f32) -> bool {
-        let Some(rescale) = Rescale::new(self.info.sample_format, source, full_scale) else {
-            return false;
-        };
-        match &mut self.image.pixels {
-            Pixels::F32(samples) => {
-                for sample in samples.iter_mut() {
-                    *sample = rescale.f32(*sample);
-                }
-            }
-            Pixels::F64(samples) => {
-                for sample in samples.iter_mut() {
-                    *sample = rescale.f64(*sample);
-                }
-            }
-            // Integer samples already span their format's range.
-            Pixels::U8(_) | Pixels::U16(_) | Pixels::I32(_) => return false,
-        }
-        self.info.bounds = Some(rescale.bounds());
-        true
+        rescale_from(&mut self.image, &mut self.info, source, full_scale)
     }
+}
+
+/// [`XisfImage::rescale_normalized_to`] for an image and its description
+/// held apart, as `seiza-image-io`'s `AstronomyImage` holds them: `image`
+/// is the decoded image `info` describes.
+pub fn rescale_normalized(
+    image: &mut FitsImage,
+    info: &mut XisfImageInfo,
+    full_scale: f32,
+) -> bool {
+    if !declares_unit_bounds(info) {
+        return false;
+    }
+    rescale_from(image, info, (0.0, 1.0), full_scale)
+}
+
+/// [`XisfImage::rescale_from`], for [`rescale_normalized`].
+fn rescale_from(
+    image: &mut FitsImage,
+    info: &mut XisfImageInfo,
+    source: (f64, f64),
+    full_scale: f32,
+) -> bool {
+    let Some(rescale) = Rescale::new(info.sample_format, source, full_scale) else {
+        return false;
+    };
+    match &mut image.pixels {
+        Pixels::F32(samples) => {
+            for sample in samples.iter_mut() {
+                *sample = rescale.f32(*sample);
+            }
+        }
+        Pixels::F64(samples) => {
+            for sample in samples.iter_mut() {
+                *sample = rescale.f64(*sample);
+            }
+        }
+        // Integer samples already span their format's range.
+        Pixels::U8(_) | Pixels::U16(_) | Pixels::I32(_) => return false,
+    }
+    info.bounds = Some(rescale.bounds());
+    true
 }
 
 /// Whether an image declares the one range whose meaning is settled, `0:1`,

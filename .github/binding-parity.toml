@@ -462,6 +462,7 @@ objects = [
 # image I/O
 "seiza-image-io::add_xisf_solution_wcs" = { none = "the C ABI reads a prior from the image it has opened (AstronomyImage::solve_prior)" }
 "seiza-image-io::read_solve_prior" = { none = "the C ABI reads a prior from the image it has opened (AstronomyImage::solve_prior)" }
+"seiza-image-io::read_header_as" = { none = "hosts name image files by their container; read_header_as is for a server reading an upload under a temporary name" }
 "seiza-image-io::solve_prior_from_headers" = { none = "the C ABI reads a prior from the image it has opened (AstronomyImage::solve_prior)" }
 "seiza-image-io::save" = { none = "the C ABI writes images through seiza-parallax and seiza-stacking, which write through seiza-image-io" }
 "seiza-image-io::save_display" = { none = "the C ABI writes images through seiza-parallax and seiza-stacking, which write through seiza-image-io" }
@@ -608,6 +609,7 @@ seiza_solve_image_with_limits_json = "solve_image"
 seiza_read_capture_time_json = "read_capture_time"
 seiza_read_photo_metadata_json = "read_photo_metadata"
 seiza_read_image_window = "read_image_window"
+seiza_read_image_header_json = "read_image_header"
 seiza_wcs_fits_header_json = "Wcs.fits_header_cards"
 
 # --- stacking ---------------------------------------------------------------
