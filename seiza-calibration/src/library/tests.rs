@@ -84,3 +84,90 @@ fn a_master_never_mixes_readout_mode_names() {
             .all(|frame| frame.readout_mode_name.as_deref() == Some("Extend Fullwell 2CMS"))
     );
 }
+
+// theatrus/psf-guard#1021: a flat master integrated at gain 0 from flats and
+// flat darks of its own, for lights shot at gain 100.
+#[test]
+fn an_external_flat_master_at_another_gain_serves_only_when_allowed() {
+    let frame = |id: i64, kind: CalibrationKind, is_master: bool| CalibrationFrame {
+        id,
+        frame_uuid: format!("f{id}"),
+        rig_uuid: "r".into(),
+        kind,
+        source_path: format!("/frame-{id}.fits").into(),
+        source_fingerprint: "x".into(),
+        captured_at: Some(1_000_000_000 + id),
+        camera: Some("ASI6200MM Pro".into()),
+        telescope: Some("SCA260".into()),
+        width: Some(9576),
+        height: Some(6388),
+        channels: Some(1),
+        binning_x: Some(1),
+        binning_y: Some(1),
+        gain: Some(0),
+        offset: Some(0),
+        is_master,
+        exposure_s: Some(3.9),
+        filter: Some("Ha".into()),
+        ..Default::default()
+    };
+    let light = Light {
+        rig_uuid: "r".into(),
+        camera: Some("ASI6200MM Pro".into()),
+        telescope: Some("SCA260".into()),
+        filter: Some("Ha".into()),
+        width: Some(9576),
+        height: Some(6388),
+        channels: Some(1),
+        binning_x: Some(1),
+        binning_y: Some(1),
+        gain: Some(100),
+        offset: Some(80),
+        exposure_s: Some(3.9),
+        timestamp: Some(1_000_050_000),
+        ..Default::default()
+    };
+    let master = frame(1, CalibrationKind::Flat, true);
+    let raw_flat = frame(2, CalibrationKind::Flat, false);
+    let dark_master = frame(3, CalibrationKind::Dark, true);
+    let library = Library::new(
+        vec![master.clone(), raw_flat.clone(), dark_master.clone()],
+        Default::default(),
+        [],
+    );
+    let ids = |frames: &[CalibrationFrame]| -> Vec<i64> { frames.iter().map(|f| f.id).collect() };
+
+    let strict = Arc::new(Rules::default());
+    assert!(!strict.admits_sensor(&light, &master));
+    let selected = library.select(&light, Arc::clone(&strict));
+    assert!(selected.flat.is_empty());
+    assert!(!selected.match_tolerances().allow_flat_gain_offset_mismatch);
+
+    let allowed = RuleBook::new(
+        rules::RuleValues::from([(
+            "allow_flat_gain_offset_mismatch".to_string(),
+            serde_json::json!(true),
+        )]),
+        Default::default(),
+    )
+    .for_rig("r");
+    assert!(allowed.admits_sensor(&light, &master));
+    // Only the master's gain and offset are let go: its camera still counts.
+    let other_camera = CalibrationFrame {
+        camera: Some("ASI2600MM Pro".into()),
+        ..master.clone()
+    };
+    assert!(!allowed.admits_sensor(&light, &other_camera));
+    // Raw flats are integrated with the light's own settings, and darks
+    // subtract the light's offset: both still match exactly.
+    assert!(!allowed.admits_sensor(&light, &raw_flat));
+    assert!(!allowed.admits_sensor(&light, &dark_master));
+
+    let selected = library.select(&light, Arc::clone(&allowed));
+    assert_eq!(ids(&selected.flat), vec![1]);
+    assert!(selected.dark.is_empty());
+    // The stack gate that judges the light against the master lets it go
+    // too, and the stack's identity changes with the setting.
+    assert!(selected.match_tolerances().allow_flat_gain_offset_mismatch);
+    assert!(allowed.matching_digest().is_some());
+}

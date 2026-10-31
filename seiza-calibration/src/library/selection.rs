@@ -128,7 +128,7 @@ impl Library {
             if candidate.is_master && policy == ExternalMasterPolicy::Ignore {
                 continue;
             }
-            let sensor = sensor_matches(light, candidate);
+            let sensor = rules.admits_sensor(light, candidate);
             // A rig that does without darks takes none, and lacks none.
             if candidate.kind == CalibrationKind::Dark && !rules.use_darks {
                 selected.library.unused_dark |= sensor;
@@ -1017,6 +1017,8 @@ pub(super) fn nearest_complete_dark_session(
 /// Whether `candidate` shares the light's sensor settings: exactly for a
 /// raw frame, leniently for an external master. Unlike the crate's
 /// [`crate::sensor_matches`], it takes a library light and frame.
+/// Selection asks [`Rules::admits_sensor`], which can let an external flat
+/// master differ in gain and offset.
 pub fn sensor_matches(light: &Light, candidate: &CalibrationFrame) -> bool {
     let (light, candidate_signature) = (light_signature(light), frame_signature(candidate));
     if candidate.is_master {

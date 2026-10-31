@@ -7113,6 +7113,7 @@
         "flat_session_hours",
         "use_darks",
         "external_masters",
+        "allow_flat_gain_offset_mismatch",
         "night_zone",
         "light_nights",
         "dark_reach_days",
