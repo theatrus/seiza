@@ -222,6 +222,15 @@ impl PyCalibrationRigRules {
         to_python(py, &self.rules.tolerances())
     }
 
+    /// Whether a frame shares the light's sensor settings under these
+    /// rules, as selection asks: a dark-subtracted flat master may differ
+    /// in gain and offset when `allow_flat_gain_offset_mismatch` is on.
+    fn admits_sensor(&self, light: &Bound<'_, PyAny>, frame: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let light: library::Light = from_python(light, "light")?;
+        let frame: library::CalibrationFrame = from_python(frame, "frame")?;
+        Ok(self.rules.admits_sensor(&light, &frame))
+    }
+
     /// The tolerances the frames of one master are held to among themselves.
     fn coherence_tolerances<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         to_python(py, &self.rules.coherence_tolerances())

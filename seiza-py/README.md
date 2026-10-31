@@ -1729,8 +1729,11 @@ for light in lights:
 `CalibrationRules(global_settings, rigs)` checks every value the way a
 settings panel saves it and raises `ValueError` naming the setting (and rig).
 `for_rig` and `for_light` give a `CalibrationRigRules`: `value(key)`,
-`source(key)`, `set_by(key)`, `mode(check)`, `notes()`, `tolerances()` and
-`grouping_limits()`. `calibration_settings_schema()` lists the settings in
+`source(key)`, `set_by(key)`, `mode(check)`, `notes()`, `tolerances()`,
+`grouping_limits()`, and `admits_sensor(light, frame)`, the sensor test
+selection asks. With `allow_flat_gain_offset_mismatch` on, it lets a flat
+master whose `dark_subtracted` is set differ from the light in gain and
+offset. `calibration_settings_schema()` lists the settings in
 the order a panel shows them, with labels, help, ranges and defaults, and
 `calibration_setting_check(key, value)` judges one value: `valid`, the
 `error` in words, the value as `text`, and whether it means the `default`.

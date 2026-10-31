@@ -752,7 +752,7 @@ static FIELDS: LazyLock<Vec<FieldSpec>> = LazyLock::new(|| {
             key: SettingKey::AllowFlatGainOffsetMismatch,
             group: Group::Matching,
             label: "External flat masters at another gain",
-            help: "Use an external flat master whose gain or offset differs from the light's. Turn on only when the master's own flat darks were subtracted, as its producer does when it records DARKSUB, and the camera's normalized response does not change with gain. Raw flats, darks and bias still match the light's gain and offset.",
+            help: "Use an external flat master whose gain or offset differs from the light's, when its own flat darks were subtracted (its header records DARKSUB). Turn on only when the camera's normalized flat does not change with gain. Raw flats, darks and bias still match the light's gain and offset.",
             effect: Effect::Matching,
             kind: FieldKind::Toggle,
             default: json!(false),
@@ -1600,14 +1600,16 @@ impl Rules {
     }
 
     /// Whether `candidate` shares the light's sensor settings under these
-    /// rules: [`super::matching::sensor_matches`], except that an external
-    /// flat master may differ in gain and offset when
-    /// [`Self::allow_flat_gain_offset_mismatch`] is on. A stack takes such a
-    /// master only when it records dark subtraction, which a host adopting
-    /// one marks.
+    /// rules: [`super::matching::sensor_matches`], except that a flat master
+    /// whose dark signal was removed ([`CalibrationFrame::dark_subtracted`])
+    /// may differ in gain and offset when
+    /// [`Self::allow_flat_gain_offset_mismatch`] is on. The stack's gate
+    /// takes such a master on the same terms: its file must record
+    /// `DARKSUB`.
     pub fn admits_sensor(&self, light: &Light, candidate: &CalibrationFrame) -> bool {
         if self.allow_flat_gain_offset_mismatch
             && candidate.is_master
+            && candidate.dark_subtracted
             && candidate.kind == CalibrationKind::Flat
         {
             let light = Light {

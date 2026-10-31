@@ -364,6 +364,7 @@ fn inspect(path: &Path, cache: &Path, light: bool, cancel: &CancelSignal) -> Res
         source_fingerprint: source.fingerprint.clone(),
         source_verified: true,
         is_master: meta.is_master,
+        dark_subtracted: meta.is_master && meta.calibration_state.dark_subtracted,
         captured_at: s.captured_at_unix,
         camera: s.camera.clone(),
         telescope: s.telescope.clone(),
@@ -2293,6 +2294,69 @@ mod tests {
         let original = stamp(&path).unwrap();
         write(&path, "LIGHT", 100, 3000.0);
         assert!(verify(&[original]).is_err());
+    }
+    /// A flat master another program integrated at gain 0 and offset 0,
+    /// recording `DARKSUB` when `dark_subtracted`.
+    fn write_flat_master(path: &Path, dark_subtracted: bool) {
+        use seiza_fits::HeaderValue as H;
+        let mut headers: Vec<(String, H)> = vec![
+            ("IMAGETYP".into(), H::String("MASTER FLAT".into())),
+            ("INSTRUME".into(), H::String("TestCam".into())),
+            ("GAIN".into(), H::Integer(0)),
+            ("OFFSET".into(), H::Integer(0)),
+            ("XBINNING".into(), H::Integer(1)),
+            ("YBINNING".into(), H::Integer(1)),
+            ("EXPTIME".into(), H::Float(3.9)),
+            ("FLATNORM".into(), H::Logical(true)),
+            ("DATE-OBS".into(), H::String("2026-10-20T19:00:00Z".into())),
+        ];
+        if dark_subtracted {
+            headers.push(("DARKSUB".into(), H::Logical(true)));
+        }
+        let image = crate::LinearImage::new(64, 64, 1, vec![1.0; 4096]).unwrap();
+        write_test_image(
+            path,
+            64,
+            64,
+            seiza_fits::F32ImageData::Mono(&image.data),
+            &headers
+                .into_iter()
+                .map(|(k, v)| seiza_fits::WriteHeaderCard::new(k, v))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    }
+    #[test]
+    fn a_dark_subtracted_flat_master_at_another_gain_serves_when_the_rules_allow_it() {
+        let (_dir, mut files) = fixture();
+        write_flat_master(&library(&files).join("master-flat-darksub.fits"), true);
+        write_flat_master(&library(&files).join("master-flat-raw.fits"), false);
+        let flats = |files: &FileCalibration| {
+            let report = analyze(files);
+            let named = |suffix: &str| {
+                report["frames"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|f| f["path"].as_str().unwrap().ends_with(suffix))
+                    .unwrap()["id"]
+                    .clone()
+            };
+            let flat = report["snapshot"]["selections"][0]["flat"]
+                .as_array()
+                .unwrap()
+                .clone();
+            (
+                flat.contains(&named("master-flat-darksub.fits")),
+                flat.contains(&named("master-flat-raw.fits")),
+            )
+        };
+        // The gain-100 light takes neither by default.
+        assert_eq!(flats(&files), (false, false));
+        // Allowed, it takes the master whose dark was removed, and only it:
+        // the stack's gate would refuse the other.
+        files.rules = rules(&[("allow_flat_gain_offset_mismatch", json!(true))]);
+        assert_eq!(flats(&files), (true, false));
     }
     #[test]
     fn manual_use_does_not_relax_sensor_gates() {

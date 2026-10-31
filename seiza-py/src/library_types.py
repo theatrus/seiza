@@ -30,6 +30,7 @@ class CalibrationFrame(TypedDict, total=False):
     readout_mode: int | None
     readout_mode_name: str | None
     is_master: bool
+    dark_subtracted: bool
     bayer_pattern: str | None
     exposure_s: float | None
     camera_temp: float | None

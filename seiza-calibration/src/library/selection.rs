@@ -310,7 +310,11 @@ impl Library {
         selected: &mut CalibrationSelection,
     ) {
         selected.dark_flat.clear();
-        if let Some(flat) = selected.flat.first() {
+        // Dark-flats calibrate raw flats before they are integrated; a
+        // master is used as it is. Pair them with the nearest raw flat, not
+        // a master that may be nearer and was shot at another exposure,
+        // gain or offset.
+        if let Some(flat) = selected.flat.iter().find(|frame| !frame.is_master) {
             for candidate in self.of_kind(CalibrationKind::DarkFlat) {
                 // Dark-flats pair with the flat, but the boundary is judged
                 // against the light: the mark protects the imaging on the

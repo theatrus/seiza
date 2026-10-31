@@ -137,7 +137,7 @@ pub(super) fn apply(
     }
     if associations.flat == Association::OneSet {
         let fits =
-            |f: &CalibrationFrame| sensor_matches(light, f) && flat_matches(light, f, &rules);
+            |f: &CalibrationFrame| rules.admits_sensor(light, f) && flat_matches(light, f, &rules);
         let (candidates, kept) = set(CalibrationKind::Flat);
         selected.library.flat = frames.iter().any(|f| f.kind == CalibrationKind::Flat);
         selected.flat = if candidates.iter().all(fits) {
