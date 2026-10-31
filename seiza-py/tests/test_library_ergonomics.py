@@ -153,3 +153,22 @@ def test_complete_host_loop_cleans_up_and_publishes_core_choice(scenario):
         assert chosen.feedback['used'] == expected_ids
         if scenario == 'memo':
             assert chosen.artifact[1] is False
+
+
+def test_an_external_flat_master_at_another_gain_serves_when_allowed():
+    sensor = {'rig_uuid': 'r', 'camera': 'ASI6200MM Pro', 'telescope': 'SCA260', 'filter': 'Ha',
+              'width': 9576, 'height': 6388, 'channels': 1, 'binning_x': 1, 'binning_y': 1}
+    master = {**sensor, 'id': 1, 'frame_uuid': 'm', 'kind': 'flat', 'is_master': True,
+              'dark_subtracted': True, 'source_path': '/master_flat_Ha.fits',
+              'captured_at': 1_000_000_000, 'gain': 0, 'offset': 0, 'exposure_s': 3.9}
+    light = {**sensor, 'path': '/light.fits', 'gain': 100, 'offset': 80, 'exposure_s': 600.0,
+             'timestamp': 1_000_050_000}
+    library = seiza.CalibrationLibrary([master])
+    strict = library.select(light, seiza.CalibrationRules().global_rules())
+    assert strict.flat == []
+    allowed = seiza.CalibrationRules({'allow_flat_gain_offset_mismatch': True}).global_rules()
+    assert [frame['frame_uuid'] for frame in library.select(light, allowed).flat] == ['m']
+    assert allowed.admits_sensor(light, master)
+    assert not seiza.CalibrationRules().global_rules().admits_sensor(light, master)
+    # A master that does not record its dark removed still matches strictly.
+    assert not allowed.admits_sensor(light, {**master, 'dark_subtracted': False})

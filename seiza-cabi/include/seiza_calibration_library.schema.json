@@ -435,6 +435,10 @@
             "null"
           ]
         },
+        "darkSubtracted": {
+          "description": "A master whose dark signal was removed before it was integrated, as\nits `DARKSUB` header records, or a host that adopts it treats it.\nOnly such a flat master may serve lights at another gain and offset\n([`rules::Rules::admits_sensor`]).",
+          "type": "boolean"
+        },
         "exposureS": {
           "default": null,
           "format": "double",
@@ -7113,6 +7117,7 @@
         "flat_session_hours",
         "use_darks",
         "external_masters",
+        "allow_flat_gain_offset_mismatch",
         "night_zone",
         "light_nights",
         "dark_reach_days",

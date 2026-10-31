@@ -7,7 +7,7 @@
 //! Extracted from theatrus/psf-guard at 79f5e31d53b8371e8fcd0b22a9b69692412cd8b4.
 //! Copyright the PSF Guard contributors; Apache-2.0.
 use super::DEFAULT_COMPLETE_DARK_FRAMES;
-use super::Light;
+use super::{CalibrationFrame, CalibrationKind, Light};
 use super::{DEFAULT_DARK_REACH_DAYS, DEFAULT_FLAT_MAX_AGE_DAYS};
 use crate::{BiasScreening, DarkScreening, FlatScreening, Limits, MatchTolerances};
 use serde::{Deserialize, Serialize};
@@ -254,6 +254,7 @@ pub enum SettingKey {
     FlatSessionHours,
     UseDarks,
     ExternalMasters,
+    AllowFlatGainOffsetMismatch,
     NightZone,
     LightNights,
     DarkReachDays,
@@ -281,6 +282,7 @@ impl SettingKey {
             Self::FlatSessionHours => "flat_session_hours",
             Self::UseDarks => "use_darks",
             Self::ExternalMasters => "external_masters",
+            Self::AllowFlatGainOffsetMismatch => "allow_flat_gain_offset_mismatch",
             Self::NightZone => "night_zone",
             Self::LightNights => "light_nights",
             Self::DarkReachDays => "dark_reach_days",
@@ -331,6 +333,7 @@ impl std::str::FromStr for SettingKey {
             "flat_session_hours" => Self::FlatSessionHours,
             "use_darks" => Self::UseDarks,
             "external_masters" => Self::ExternalMasters,
+            "allow_flat_gain_offset_mismatch" => Self::AllowFlatGainOffsetMismatch,
             "night_zone" => Self::NightZone,
             "light_nights" => Self::LightNights,
             "dark_reach_days" => Self::DarkReachDays,
@@ -744,6 +747,15 @@ static FIELDS: LazyLock<Vec<FieldSpec>> = LazyLock::new(|| {
                 ],
             },
             default: json!("prefer"),
+        },
+        FieldSpec {
+            key: SettingKey::AllowFlatGainOffsetMismatch,
+            group: Group::Matching,
+            label: "External flat masters at another gain",
+            help: "Use an external flat master whose gain or offset differs from the light's, when its own flat darks were subtracted (its header records DARKSUB). Turn on only when the camera's normalized flat does not change with gain. Raw flats, darks and bias still match the light's gain and offset.",
+            effect: Effect::Matching,
+            kind: FieldKind::Toggle,
+            default: json!(false),
         },
         FieldSpec {
             key: SettingKey::NightZone,
@@ -1376,6 +1388,10 @@ pub struct Rules {
     pub flat_session_seconds: u64,
     pub use_darks: bool,
     pub external_masters: ExternalMasterPolicy,
+    /// The `allow_flat_gain_offset_mismatch` setting: an external flat
+    /// master may differ from the light in gain and offset
+    /// ([`Self::admits_sensor`]).
+    pub allow_flat_gain_offset_mismatch: bool,
     pub dark_reach_days: f64,
     pub complete_dark_frames: usize,
     pub dark_choice: DarkChoice,
@@ -1487,6 +1503,9 @@ impl Rules {
                 .as_str()
                 .and_then(|text| text.trim().to_ascii_lowercase().parse().ok())
                 .unwrap_or_default(),
+            allow_flat_gain_offset_mismatch: value(SettingKey::AllowFlatGainOffsetMismatch)
+                .as_bool()
+                .unwrap_or(false),
             dark_reach_days: number(SettingKey::DarkReachDays),
             complete_dark_frames: count(SettingKey::CompleteDarkFrames)
                 .max(super::MIN_MASTER_FRAMES),
@@ -1575,8 +1594,32 @@ impl Rules {
             focal_length_mm: self.focal_length_mm,
             dark_temperature_c: self.dark_temperature_c,
             flat_session_seconds: self.flat_session_seconds,
+            allow_flat_gain_offset_mismatch: self.allow_flat_gain_offset_mismatch,
             ..MatchTolerances::default()
         }
+    }
+
+    /// Whether `candidate` shares the light's sensor settings under these
+    /// rules: [`super::matching::sensor_matches`], except that a flat master
+    /// whose dark signal was removed ([`CalibrationFrame::dark_subtracted`])
+    /// may differ in gain and offset when
+    /// [`Self::allow_flat_gain_offset_mismatch`] is on. The stack's gate
+    /// takes such a master on the same terms: its file must record
+    /// `DARKSUB`.
+    pub fn admits_sensor(&self, light: &Light, candidate: &CalibrationFrame) -> bool {
+        if self.allow_flat_gain_offset_mismatch
+            && candidate.is_master
+            && candidate.dark_subtracted
+            && candidate.kind == CalibrationKind::Flat
+        {
+            let light = Light {
+                gain: candidate.gain,
+                offset: candidate.offset,
+                ..light.clone()
+            };
+            return super::matching::sensor_matches(&light, candidate);
+        }
+        super::matching::sensor_matches(light, candidate)
     }
 
     /// The tolerances the frames of one master are held to among
@@ -1869,7 +1912,7 @@ mod tests {
             assert_eq!(spec.key.as_str().parse::<SettingKey>(), Ok(spec.key));
             assert_eq!(field(spec.key).key, spec.key);
         }
-        assert_eq!(seen.len(), 17 + Check::ALL.len() + GradeCheck::ALL.len());
+        assert_eq!(seen.len(), 18 + Check::ALL.len() + GradeCheck::ALL.len());
         assert!("from_the_future".parse::<SettingKey>().is_err());
     }
 

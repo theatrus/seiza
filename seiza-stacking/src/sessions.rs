@@ -78,7 +78,7 @@ impl FileCalibrationSession {
                     .as_ref()
                     .ok_or_else(|| error("a fitted pedestal requires a flat"))?,
             )?;
-            let signature = flat.metadata().signature;
+            let metadata = flat.metadata();
             let bias = crate::LinearImage::new(
                 flat.image.width,
                 flat.image.height,
@@ -94,7 +94,11 @@ impl FileCalibrationSession {
             // Moved from PSF Guard's MasterRecipe::PedestalFlat loader. Keep
             // the file's optical metadata as well as the synthesized pixels.
             let mut masters = CalibrationMasters::new(Some(bias), None, Some(flat))?;
-            masters.flat_signature = Some(signature);
+            masters.flat_signature = Some(metadata.signature);
+            // As `from_fits_paths` records it: the gate lets a flat whose
+            // dark was removed differ from the light in gain and offset
+            // when the light's tolerances allow it.
+            masters.flat_dark_subtracted = metadata.calibration_state.dark_subtracted;
             return Ok(masters);
         }
         CalibrationMasters::from_fits_paths(

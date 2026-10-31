@@ -185,6 +185,12 @@ pub struct CalibrationFrame {
     /// Matched leniently (its producer strips most settings) and used as a
     /// master as-is instead of being integrated.
     pub is_master: bool,
+    /// A master whose dark signal was removed before it was integrated, as
+    /// its `DARKSUB` header records, or a host that adopts it treats it.
+    /// Only such a flat master may serve lights at another gain and offset
+    /// ([`rules::Rules::admits_sensor`]).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub dark_subtracted: bool,
     pub bayer_pattern: Option<String>,
     pub exposure_s: Option<f64>,
     pub camera_temp: Option<f64>,

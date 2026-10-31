@@ -860,6 +860,7 @@ CalibrationQuality = { c = "seiza_calibration_library_plan_json" }
 "CalibrationQuality.kept_out" = { c = "seiza_calibration_library_plan_json" }
 "CalibrationQuality.measurement_state" = { c = "seiza_calibration_library_plan_json" }
 "CalibrationQuality.regrade" = { c = "seiza_calibration_library_plan_json" }
+"CalibrationRigRules.admits_sensor" = { c = "seiza_calibration_library_plan_json" }
 "CalibrationRigRules.coherence_tolerances" = { c = "seiza_calibration_library_plan_json" }
 "CalibrationRigRules.grouping_limits" = { c = "seiza_calibration_library_plan_json" }
 "CalibrationRigRules.mode" = { c = "seiza_calibration_library_plan_json" }
