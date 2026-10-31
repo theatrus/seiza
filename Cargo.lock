@@ -3201,7 +3201,7 @@ dependencies = [
 
 [[package]]
 name = "seiza"
-version = "0.48.0"
+version = "0.48.1"
 dependencies = [
  "directories",
  "image",
@@ -3225,7 +3225,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-analysis"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "seiza-fits",
  "seiza-image-io",
@@ -3252,7 +3252,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-cabi"
-version = "0.48.0"
+version = "0.48.1"
 dependencies = [
  "boon",
  "cbindgen",
@@ -3280,7 +3280,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-calibration"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "chrono",
  "nalgebra",
@@ -3296,7 +3296,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-cli"
-version = "0.48.0"
+version = "0.48.1"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -3467,7 +3467,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-stacking"
-version = "0.55.0"
+version = "0.56.0"
 dependencies = [
  "bytemuck",
  "fs2",
