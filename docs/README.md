@@ -57,7 +57,8 @@ internals, tradeoffs, and proposals.
 - Astrometry: [solver lessons](design/solver-lessons-from-olive-solve.md),
   [ASTAP compatibility](design/astap-mode.md), [solve-field compatibility](design/solve-field-mode.md)
 - Processing: [stacking](design/image-stacking.md), [GPU stacking](design/gpu-stacking.md),
-  [binning](design/binned-stacking.md), [background](design/background-extraction.md),
+  [distributed stacking](design/distributed-stacking.md), [binning](design/binned-stacking.md),
+  [background](design/background-extraction.md),
   [stretching](design/stretching.md), [composition](design/color-composition.md),
   [color calibration](design/color-calibration.md), [deconvolution](design/deconvolution.md)
 - Catalogs: [bundles](design/catalog-bundles.md), [lookup](design/catalog-lookup.md),
