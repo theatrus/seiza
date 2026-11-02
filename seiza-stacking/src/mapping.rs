@@ -470,6 +470,34 @@ impl RegisteredFrameMapping {
         Ok(crop)
     }
 
+    /// Resample `source` onto one region of this mapping's reference grid
+    /// by the frame's registration alone, without its normalization: for an
+    /// image that shares the frame's geometry but not its light, such as the
+    /// frame's dark, a mask or a defect map. It resamples as
+    /// [`Self::extract_region_with`] does, with the same interpolation,
+    /// warp and channel sites, so the two differ only by the normalization.
+    /// Samples outside the source, or whose interpolation neighbourhood is
+    /// not finite, are `NaN`. The frame is resampled on the GPU where the
+    /// default [`crate::GpuOptions`] allow it.
+    pub fn resample_geometry(
+        &self,
+        source: &LinearImage,
+        region: ReferenceRegion,
+        interpolation: crate::Interpolation,
+    ) -> Result<LinearImage> {
+        self.validate()?;
+        crate::registration::resample_region_sited(
+            source,
+            self.reference_width,
+            self.reference_height,
+            region,
+            self.geometry(),
+            interpolation.into(),
+            self.channel_sites,
+            &crate::GpuOptions::default(),
+        )
+    }
+
     /// [`Self::extract_region_with`]'s resampling alone, sampling as
     /// `sampling` says, with no normalization, on the GPU where `gpu`
     /// allows it.
@@ -1363,6 +1391,66 @@ mod tests {
             .unwrap();
 
         assert_eq!(crop.data, vec![2.0, 1.0, 6.0, 5.0]);
+    }
+
+    #[test]
+    fn geometry_alone_resamples_as_extraction_does_without_the_normalization() {
+        let source = LinearImage::new(
+            40,
+            30,
+            1,
+            (0..40 * 30)
+                .map(|index| ((index * 53) % 197) as f32)
+                .collect(),
+        )
+        .unwrap();
+        // A frame twice as bright and offset by 7, turned and shifted by a
+        // fraction of a pixel, so the resampling and the normalization both
+        // change every sample.
+        let reference = LinearImage::new(
+            40,
+            30,
+            1,
+            source
+                .data
+                .iter()
+                .map(|value| value.mul_add(2.0, 7.0))
+                .collect(),
+        )
+        .unwrap();
+        let normalization =
+            NormalizationMap::estimate(&reference, &source, NormalizationMode::Global).unwrap();
+        let transform = SimilarityTransform {
+            scale: 1.0,
+            rotation_radians: 0.02,
+            translation_x: 0.37,
+            translation_y: -0.61,
+        };
+        let mapping =
+            RegisteredFrameMapping::new(40, 30, transform, normalization.clone()).unwrap();
+        let region = ReferenceRegion {
+            x: 4,
+            y: 3,
+            width: 30,
+            height: 22,
+        };
+        for interpolation in [
+            crate::Interpolation::Bilinear,
+            crate::Interpolation::Lanczos3,
+        ] {
+            let geometry = mapping
+                .resample_geometry(&source, region, interpolation)
+                .unwrap();
+            let mut normalized = geometry.clone();
+            normalization
+                .apply_region(&mut normalized, region.x, region.y)
+                .unwrap();
+            let extracted = mapping
+                .extract_region_with(&source, region, interpolation)
+                .unwrap();
+            assert_eq!(normalized.data, extracted.data, "{interpolation:?}");
+            assert_ne!(geometry.data, extracted.data, "{interpolation:?}");
+        }
     }
 
     #[test]

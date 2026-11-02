@@ -5464,6 +5464,73 @@ pub unsafe extern "C" fn seiza_live_stacker_reintegrate_frames(
 }
 
 #[unsafe(no_mangle)]
+/// Resample an image onto a stacked frame's reference grid by the frame's
+/// registration alone, without its normalization, as
+/// [`RegisteredFrameMapping::resample_geometry`] does: for an image that
+/// shares the frame's geometry but not its light, such as its dark, a mask
+/// or a defect map.
+///
+/// `mapping_json` is the frame's `mapping` as a live stacker's frame report
+/// gives it, and `interpolation` is `bilinear` or `lanczos3`. `source`
+/// holds `width * height * channels` interleaved floats, one or three
+/// channels. `output` receives the mapping's whole reference grid, so
+/// `output_length` must be `reference_width * reference_height * channels`.
+/// Samples the source does not reach are NaN. Returns false and sets
+/// `error_out` on failure; free that string with [`seiza_string_free`].
+///
+/// # Safety
+/// `source` must point to `source_length` readable floats and `output` to
+/// `output_length` writable ones. `mapping_json` and `interpolation` must be
+/// valid NUL-terminated UTF-8 strings. When non-null, `error_out` must point
+/// to writable storage for one pointer.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn seiza_frame_mapping_resample(
+    mapping_json: *const c_char,
+    interpolation: *const c_char,
+    source: *const f32,
+    source_length: usize,
+    width: usize,
+    height: usize,
+    channels: usize,
+    output: *mut f32,
+    output_length: usize,
+    error_out: *mut *mut c_char,
+) -> bool {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let mapping: RegisteredFrameMapping =
+            serde_json::from_str(&required_str(mapping_json, "mapping_json")?)
+                .map_err(|error| format!("invalid frame mapping JSON: {error}"))?;
+        let interpolation: seiza_stacking::Interpolation =
+            required_str(interpolation, "interpolation")?
+                .parse()
+                .map_err(|error: seiza_stacking::Error| error.to_string())?;
+        let image = unsafe {
+            linear_image_from_ffi(source, source_length, width, height, channels, "source")?
+        };
+        let region = ReferenceRegion {
+            x: 0,
+            y: 0,
+            width: mapping.reference_width(),
+            height: mapping.reference_height(),
+        };
+        let resampled = mapping
+            .resample_geometry(&image, region, interpolation)
+            .map_err(|error| error.to_string())?;
+        if output_length != resampled.data.len() {
+            return Err(format!(
+                "output has {output_length} floats; the reference grid needs {}",
+                resampled.data.len()
+            ));
+        }
+        let samples = unsafe { required_f32_slice_mut(output, output_length, "output")? };
+        samples.copy_from_slice(&resampled.data);
+        Ok(())
+    })
+    .is_some()
+}
+
+#[unsafe(no_mangle)]
 /// [`seiza_live_stacker_reintegrate`], also drizzling every admitted frame
 /// onto a grid `scale` (1 to 4) times finer than the reference, as
 /// PixInsight's DrizzleIntegration follows ImageIntegration.
@@ -12133,6 +12200,82 @@ mod tests {
             )
         });
         unsafe { seiza_string_free(error) };
+    }
+
+    #[test]
+    fn a_frame_mapping_resamples_another_image_through_the_cabi() {
+        let source = LinearImage::new(
+            24,
+            18,
+            1,
+            (0..24 * 18)
+                .map(|index| ((index * 29) % 113) as f32)
+                .collect(),
+        )
+        .unwrap();
+        let mapping = RegisteredFrameMapping::new(
+            24,
+            18,
+            seiza_stacking::SimilarityTransform {
+                scale: 1.0,
+                rotation_radians: 0.03,
+                translation_x: 0.4,
+                translation_y: -0.7,
+            },
+            seiza_stacking::NormalizationMap::identity(&source),
+        )
+        .unwrap();
+        let mapping_json = CString::new(serde_json::to_string(&mapping).unwrap()).unwrap();
+        let region = ReferenceRegion {
+            x: 0,
+            y: 0,
+            width: 24,
+            height: 18,
+        };
+        let expected = mapping
+            .resample_geometry(&source, region, seiza_stacking::Interpolation::Lanczos3)
+            .unwrap();
+        let resample = |interpolation: &str, output: &mut [f32], error: &mut *mut c_char| {
+            let interpolation = CString::new(interpolation).unwrap();
+            unsafe {
+                seiza_frame_mapping_resample(
+                    mapping_json.as_ptr(),
+                    interpolation.as_ptr(),
+                    source.data.as_ptr(),
+                    source.data.len(),
+                    24,
+                    18,
+                    1,
+                    output.as_mut_ptr(),
+                    output.len(),
+                    error,
+                )
+            }
+        };
+        let mut output = vec![0.0f32; 24 * 18];
+        let mut error = ptr::null_mut();
+        assert!(resample("lanczos3", &mut output, &mut error));
+        assert!(error.is_null());
+        let same = output
+            .iter()
+            .zip(&expected.data)
+            .all(|(got, want)| got == want || (got.is_nan() && want.is_nan()));
+        assert!(same, "the export resamples as the core does");
+
+        for (interpolation, length, refusal) in [
+            ("nearest", 24 * 18, "bilinear or lanczos3"),
+            ("bilinear", 24 * 18 - 1, "the reference grid needs"),
+        ] {
+            let mut output = vec![0.0f32; length];
+            let mut error = ptr::null_mut();
+            assert!(!resample(interpolation, &mut output, &mut error));
+            let message = unsafe { CStr::from_ptr(error) }
+                .to_str()
+                .unwrap()
+                .to_owned();
+            unsafe { seiza_string_free(error) };
+            assert!(message.contains(refusal), "{message}");
+        }
     }
 
     #[test]

@@ -661,6 +661,7 @@ seiza_live_stacker_retain_frames_for_reintegration = "LiveStacker.retain_frames_
 # take neither cancel= nor a progress callback, which the C calls do.
 seiza_live_stacker_reintegrate = "LiveStacker.reintegrate"
 seiza_live_stacker_reintegrate_frames = "LiveStacker.reintegrate"
+seiza_frame_mapping_resample = "FrameDisposition.resample"
 seiza_live_stacker_reintegrate_drizzled = "LiveStacker.reintegrate_drizzled"
 seiza_live_stacker_reintegrate_full_resolution = "LiveStacker.reintegrate_full_resolution"
 seiza_live_stacker_bin_factor = "LiveStacker.bin_factor"

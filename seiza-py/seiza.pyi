@@ -641,6 +641,12 @@ class FrameDisposition:
     weight: list[float] | None
     @property
     def mapping(self) -> dict[str, Any] | None: ...
+    def resample(
+        self,
+        image: npt.NDArray[np.float32],
+        *,
+        interpolation: Literal["bilinear", "lanczos3"] = "lanczos3",
+    ) -> npt.NDArray[np.float32]: ...
     def __bool__(self) -> bool: ...
 
 class StackResult:

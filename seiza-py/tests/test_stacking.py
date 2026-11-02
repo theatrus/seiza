@@ -1997,3 +1997,32 @@ def test_completed_stack_reports_preserve_output_and_final_decisions(tmp_path):
     context["accepted_frames"] += 1
     with pytest.raises(seiza.StackError, match="counts"):
         snapshot.report(context)
+
+
+def test_a_frame_resamples_another_image_by_its_registration_alone():
+    reference = synthetic_star_field(noise=0.0)
+    stacker = seiza.LiveStacker.from_array(reference, options=no_adjustment_options())
+    # The frame sees the sky 3 pixels right and 2 down, a whole-pixel shift,
+    # so bilinear resampling puts it back exactly.
+    frame = np.roll(np.roll(reference, 2, axis=0), 3, axis=1)
+    disposition = stacker.push(frame.copy())
+    assert disposition.accepted
+    back = disposition.resample(frame, interpolation="bilinear")
+    assert back.shape == reference.shape and back.dtype == np.float32
+    inner = (slice(8, -8), slice(8, -8))
+    np.testing.assert_allclose(back[inner], reference[inner], atol=1e-3)
+    # The frame's registration, not its light: a dark-like image of the
+    # frame's size moves with the frame and keeps its own level.
+    pattern = np.zeros_like(frame)
+    pattern[60, 70] = 50.0
+    moved = disposition.resample(pattern, interpolation="bilinear")
+    assert np.unravel_index(np.nanargmax(moved), moved.shape) == (58, 67)
+    assert np.nanmax(moved) == pytest.approx(50.0, abs=1e-3)
+    # The reference's last rows and columns lie past the frame's edge.
+    assert np.isnan(back[-2:, :]).all() and np.isnan(back[:, -3:]).all()
+    with pytest.raises(ValueError, match="bilinear or lanczos3"):
+        disposition.resample(frame, interpolation="nearest")
+    rejected = stacker.push(np.zeros_like(frame))
+    assert not rejected.accepted
+    with pytest.raises(ValueError, match="no mapping"):
+        rejected.resample(frame)
