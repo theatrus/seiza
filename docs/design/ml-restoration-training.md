@@ -721,13 +721,21 @@ compiles the package on first load, and Seiza caches the compiled model.
 
 ### Tiling and parity
 
-Inference cuts the image into tiles of the export's static shape that
-overlap by at least half the receptive field, runs each, and blends them
-with a cosine window. Each tile carries its own PSF stamp and its own
-slices of the noise, ratio, halo and bloom maps. Peak memory is a few
-tiles' worth whatever the image's size, and the backends compile one tile
-shape. The model card records the tile shape and the overlap. A test holds
-tiled output to whole-image output.
+Inference cuts the image into tiles of the export's static shape, runs
+each, and blends them. Within half the receptive field of a tile's inner
+edge, its output saw the convolutions' padding rather than the image, so
+that band takes no weight; past it, the tile's weight rises as a raised
+cosine across the rest of the overlap. Neighbouring tiles therefore overlap
+by at least the receptive field. At the image's own edge a tile keeps its
+full weight, because whole-image inference pads there too. With that rule,
+tiled output matches whole-image output to within float error, and a test
+holds it there; a plain cosine over the whole overlap lets the padded band
+leak into the blend.
+
+Each tile carries its own PSF stamp and its own slices of the noise,
+ratio, halo and bloom maps. Peak memory is a few tiles' worth whatever the
+image's size, and the backends compile one tile shape. The model card
+records the tile shape, the overlap and the zero-weight margin.
 
 The export script writes fixture tiles with PyTorch's f32 output. Each backend
 must match them:
