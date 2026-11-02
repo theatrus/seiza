@@ -1,6 +1,6 @@
 # Distributed stacking
 
-Status: proposal
+Status: phase 1 built; paused before phase 2 (see **Phases**)
 
 ## Goal
 
@@ -689,8 +689,11 @@ AGENTS.md requires.
    the result differs from a single-machine stack only at pixels rejected
    differently.
 
-   Done in Seiza. PSF Guard's session task is deferred: hosts reach the same
-   steps through the C ABI, Python and the CLI.
+   Done in Seiza. Hosts reach the same steps through the C ABI, Python and
+   the CLI. PSF Guard has an opt-in method, off by default, that stacks each
+   session of a channel apart on its own machine and combines them. It waits
+   for the Seiza release that ships `seiza-pipeline`. Its worker task for one
+   session is deferred.
    - `LiveStacker::open_fits_sessions_with_reference_image` stacks one
      session against the shared reference, its lights calibrated by their own
      recipe, and `LiveStacker::add_session_lights` lets a reopened session
@@ -708,6 +711,14 @@ AGENTS.md requires.
    its output by `seiza-pipeline`'s `output_version` test. The resume
    invariant holds to the bit: a session extended from its context, live or
    reintegrated, gives the partial stack stacking every frame at once does.
+
+   Left from phase 1, for when work resumes:
+   - A digest cache. Every plan still reads and hashes each light to make
+     its session's key.
+   - Pruning a store: nothing yet removes partial stacks and contexts that
+     no plan names, in Seiza's store or in PSF Guard's cache.
+   - A worker task per session, so that remote workers take sessions rather
+     than whole channels, and a session's stack that can stop part way.
 2. **Measurements.** The weight map, the PSF grid with an `f32` fitter, Gaia
    zero points for mono filters, and sky cells.
 3. **Project grids.**
