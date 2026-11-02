@@ -71,7 +71,7 @@ pub fn run(args: StackReportArgs) -> Result<()> {
             .unwrap_or(Path::new("."));
         let mut file = tempfile::NamedTempFile::new_in(parent)?;
         file.write_all(bytes)?;
-        file.as_file().sync_all()?;
+        seiza_fits::sync_file(file.as_file())?;
         prepared.push((path, file));
     }
     for (path, file) in prepared {

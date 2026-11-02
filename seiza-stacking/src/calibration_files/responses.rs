@@ -17,7 +17,7 @@ fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     let mut file = tempfile::NamedTempFile::new_in(path.parent().unwrap()).map_err(error)?;
     file.write_all(bytes).map_err(error)?;
-    file.as_file().sync_all().map_err(error)?;
+    seiza_fits::sync_file(file.as_file()).map_err(error)?;
     file.persist(path).map_err(error)?;
     Ok(())
 }
