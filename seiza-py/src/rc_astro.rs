@@ -236,7 +236,10 @@ fn parameter_values(
 /// run settles. A raising cancel predicate stops the run and re-raises the
 /// same way, so Ctrl-C surfaces as KeyboardInterrupt rather than a generic
 /// run error.
-fn cancel_signal(raised: &Arc<Mutex<Option<PyErr>>>, cancel: Option<Py<PyAny>>) -> CancelSignal {
+pub(crate) fn cancel_signal(
+    raised: &Arc<Mutex<Option<PyErr>>>,
+    cancel: Option<Py<PyAny>>,
+) -> CancelSignal {
     let raised = Arc::clone(raised);
     CancelSignal::new(move || {
         if raised.lock().is_ok_and(|slot| slot.is_some()) {

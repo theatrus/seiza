@@ -1130,6 +1130,67 @@ def rc_astro_split_stars(
     cancel: Callable[[], bool] | None = None,
 ) -> tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]]: ...
 
+class MlDenoiseLocalSupport:
+    """MLDenoise's brightness mask, which protects bright structures."""
+    clip_low: float
+    background: float
+    smoothness: int
+    def __init__(
+        self, *, clip_low: float = 0.0, background: float = 0.25, smoothness: int = 2
+    ) -> None: ...
+
+class MlDenoiseModel:
+    """What an MLDenoise model file (.xmlm) declares in its header."""
+    process: str
+    format_version: str
+    created: str | None
+    mono: bool
+    rgb: bool
+    weights_sha256: str | None
+    header_sha256: str
+
+class MlDenoiseRun:
+    """A file PixInsight's MLDenoise processed."""
+    output: Path
+    pixinsight_version: str
+    model: MlDenoiseModel
+    seconds: float
+
+class MlDenoised:
+    """An image PixInsight's MLDenoise processed in memory, in the input's units and shape."""
+    image: npt.NDArray[np.float32]
+    pixinsight_version: str
+    model: MlDenoiseModel
+    seconds: float
+
+def pixinsight_locate() -> str | None: ...
+def pixinsight_ml_denoise_model(path: str | Path) -> MlDenoiseModel: ...
+def pixinsight_ml_denoise_file(
+    input: str | Path,
+    output: str | Path,
+    model: str | Path,
+    *,
+    amount: float = 0.9,
+    overlap_percent: int = 25,
+    precision: Literal["fast", "high"] = "fast",
+    local_support: MlDenoiseLocalSupport | None = None,
+    timeout_seconds: float | None = None,
+    executable: str | Path | None = None,
+    cancel: Callable[[], bool] | None = None,
+) -> MlDenoiseRun: ...
+def pixinsight_ml_denoise_image(
+    image: npt.NDArray[np.float32],
+    model: str | Path,
+    *,
+    amount: float = 0.9,
+    overlap_percent: int = 25,
+    precision: Literal["fast", "high"] = "fast",
+    local_support: MlDenoiseLocalSupport | None = None,
+    timeout_seconds: float | None = None,
+    executable: str | Path | None = None,
+    cancel: Callable[[], bool] | None = None,
+) -> MlDenoised: ...
+
 def plan_parallax_tour(
     width: int,
     height: int,

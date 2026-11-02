@@ -1028,6 +1028,25 @@ pub fn write_processed_image_fits_f32(
     reference_headers: &[(String, HeaderValue)],
     extra_cards: &[WriteHeaderCard],
 ) -> Result<()> {
+    write_processed_image_with_bounds(
+        path.as_ref(),
+        image,
+        reference_headers,
+        extra_cards,
+        SAMPLE_BOUNDS_16_BIT,
+    )
+}
+
+/// [`write_processed_image_fits_f32`] with the range an XISF file declares
+/// for its samples, such as the 0 to 1 of an image PixInsight normalized.
+/// A FITS file declares no range.
+pub(crate) fn write_processed_image_with_bounds(
+    path: &Path,
+    image: &LinearImage,
+    reference_headers: &[(String, HeaderValue)],
+    extra_cards: &[WriteHeaderCard],
+    xisf_bounds: (f64, f64),
+) -> Result<()> {
     let mut cards = extra_cards.to_vec();
     append_reference_wcs(&mut cards, reference_headers);
     for (key, value) in reference_headers {
@@ -1039,17 +1058,31 @@ pub fn write_processed_image_fits_f32(
             cards.push(card);
         }
     }
-    write_linear_fits_f32(path.as_ref(), image, cards)
+    write_linear_fits_f32_with_bounds(path, image, cards, xisf_bounds)
 }
 
 fn is_bayer_key(key: &str) -> bool {
     matches!(key, "BAYERPAT" | "XBAYROFF" | "YBAYROFF")
 }
 
+/// Stacking works in 16-bit camera counts. Declaring that range lets
+/// PixInsight load the samples on that scale rather than stretching their own
+/// minimum and maximum across the display.
+const SAMPLE_BOUNDS_16_BIT: (f64, f64) = (0.0, 65535.0);
+
 fn write_linear_fits_f32(
     path: &Path,
     image: &LinearImage,
     extra_cards: Vec<WriteHeaderCard>,
+) -> Result<()> {
+    write_linear_fits_f32_with_bounds(path, image, extra_cards, SAMPLE_BOUNDS_16_BIT)
+}
+
+fn write_linear_fits_f32_with_bounds(
+    path: &Path,
+    image: &LinearImage,
+    extra_cards: Vec<WriteHeaderCard>,
+    xisf_bounds: (f64, f64),
 ) -> Result<()> {
     let pixels = if image.channels == 3 {
         F32ImageData::RgbInterleaved(&image.data)
@@ -1064,10 +1097,7 @@ fn write_linear_fits_f32(
     let options = seiza_image_io::SaveOptions {
         format: Some(format),
         headers: &extra_cards,
-        // Stacking works in 16-bit camera counts. Declaring that range lets
-        // PixInsight load the samples on that scale rather than stretching
-        // their own minimum and maximum across the display.
-        xisf_bounds: Some((0.0, 65535.0)),
+        xisf_bounds: Some(xisf_bounds),
         // The reference frame's own ROWORDER, if any, travels in the cards.
         fits_top_down: false,
     };
