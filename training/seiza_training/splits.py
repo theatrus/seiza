@@ -15,6 +15,7 @@ much of the corpus; a held-out telescope tests the instrument, not the sky.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
 from collections import Counter, defaultdict
@@ -110,6 +111,7 @@ def assign_splits(
     for row in sets:
         members[group_of[row["id"]]].append(row)
     conflicts = []
+    group_split: dict[str, str] = {}
     with manifest.transaction():
         for group, rows in members.items():
             given = {row["split"] for row in rows if row["split"] in SPLITS}
@@ -122,12 +124,14 @@ def assign_splits(
                 split = given.pop()
             else:
                 split = draw_split(group, salt, fractions)
+            group_split[group] = split
             for row in rows:
                 held = hold_out is not None and row["telescope"] == hold_out
                 manifest.update(
                     "sets", "id", row["id"],
                     {"sky_group": group, "split": HELD_OUT if held else split},
                 )
+        stacks = assign_stack_splits(manifest, sets, group_of, group_split, hold_out, salt, fractions)
     counts = Counter(
         (row["split"]) for row in manifest.rows("SELECT split FROM sets")
     )
@@ -140,4 +144,44 @@ def assign_splits(
         "frames": dict(frames),
         "hold_out": hold_out,
         "conflicts": conflicts,
+        "stacks": stacks,
     }
+
+
+def assign_stack_splits(
+    manifest: Manifest,
+    sets: list[Any],
+    group_of: dict[str, str],
+    group_split: dict[str, str],
+    hold_out: str | None,
+    salt: str,
+    fractions: dict[str, float],
+) -> dict[str, int]:
+    """Put each finished stack in the sky group of the sets its frames came
+    from, or else of the sets of its object, or else in a group of its own.
+    A stack's frames are its sets' frames, so it must never cross a split
+    from them."""
+    by_object: dict[str, str] = {}
+    for row in sets:
+        key = object_key(row["target"])
+        if key is not None:
+            by_object.setdefault(key, group_of[row["id"]])
+    counts: Counter[str] = Counter()
+    for row in manifest.rows("SELECT * FROM stacks"):
+        groups = {group_of[set_id] for set_id in json.loads(row["sets"] or "[]") if set_id in group_of}
+        key = object_key(row["target"])
+        if not groups and key in by_object:
+            groups = {by_object[key]}
+        if groups:
+            given = {group_split[group] for group in groups}
+            # Groups that disagree keep the stack in the most protected split.
+            split = next(split for split in reversed(SPLITS) if split in given)
+            group = sorted(groups)[0]
+        else:
+            group = f"object:{key or row['id']}"
+            split = row["split"] if row["split"] in SPLITS else draw_split(group, salt, fractions)
+        held = hold_out is not None and row["telescope"] == hold_out
+        split = HELD_OUT if held else split
+        manifest.update("stacks", "id", row["id"], {"sky_group": group, "split": split})
+        counts[split] += 1
+    return dict(counts)

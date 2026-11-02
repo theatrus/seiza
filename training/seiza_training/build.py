@@ -25,6 +25,7 @@ import shutil
 import statistics
 import sys
 import time
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,8 @@ PAIR_DRAWS = 3
 # difference, is kept but marked rejected.
 PAIR_FWHM_TOLERANCE = 0.10
 PAIR_BACKGROUND_TOLERANCE = 0.25
+# The scale that divides the noise model's high and low bands, in pixels.
+BAND_SCALE_PX = 5
 
 
 def stack_options(defects: Any | None) -> seiza.StackOptions:
@@ -102,6 +105,17 @@ def mean_fwhm(paths: list[str], fwhm: dict[str, float]) -> float:
     return statistics.fmean(fwhm[path] for path in paths)
 
 
+def binned(image: np.ndarray, scale: int) -> np.ndarray:
+    """`image` averaged over `scale` × `scale` blocks, ignoring NaN."""
+    height = image.shape[0] // scale * scale
+    width = image.shape[1] // scale * scale
+    blocks = image[:height, :width].reshape(height // scale, scale, width // scale, scale)
+    with warnings.catch_warnings():
+        # A block wholly outside both halves' coverage is NaN.
+        warnings.simplefilter("ignore", RuntimeWarning)
+        return np.nanmean(blocks, axis=(1, 3))
+
+
 def pair_check(a: Any, b: Any, fwhm_a: float, fwhm_b: float) -> tuple[str, str | None, dict[str, Any]]:
     """Whether a pair's halves saw the same sky alike."""
     both = (a.coverage > 0) & (b.coverage > 0)
@@ -118,6 +132,11 @@ def pair_check(a: Any, b: Any, fwhm_a: float, fwhm_b: float) -> tuple[str, str |
         "background_offset": offset,
         "difference_sigma": sigma,
         "predicted_difference_sigma": float(np.sqrt(predicted_a + predicted_b)),
+        # Neighbouring differences see only the grain. Binned by the noise
+        # model's band scale, white noise falls by the scale and correlated
+        # noise by less, so the two together measure the low band.
+        "binned_scale_px": BAND_SCALE_PX,
+        "difference_sigma_binned": robust_sigma(binned(difference, BAND_SCALE_PX)),
     }
     if abs(fwhm_a - fwhm_b) > PAIR_FWHM_TOLERANCE * fwhm_b:
         return "rejected", "seeing-mismatch", stats

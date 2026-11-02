@@ -30,6 +30,7 @@ from the page cache rather than over the network again.
 cd training
 python -m seiza_training --store STORE crawl --corpus CORPUS --library LIBRARY
 python -m seiza_training --store STORE calibrate
+python -m seiza_training --store STORE stacks --psf-guard STACKS
 python -m seiza_training --store STORE split --hold-out TELESCOPE
 python -m seiza_training --store STORE process   # measure, then build, set by set
 python -m seiza_training --store STORE review
@@ -48,19 +49,29 @@ python -m seiza_training --store STORE status
    with `plan_calibration`, which must suit every light of the set. A set
    without a flat, or without both a dark and a bias, is left out with the
    reason.
-3. **measure** measures every frame of each calibratable set with
+3. **stacks** copies in the finished stacks PSF Guard made from the corpus:
+   one target, filter and exposure over all the nights it was imaged, under
+   `STACKS/<database>/stack-previews/<job>/group-<n>.fits`. Each PSF Guard
+   database is a telescope's scheduler database, found by the targets its
+   jobs name in `CORPUS/<telescope>/_Scheduler/schedulerdb.sqlite`. The
+   file names the scheduler recorded for a stack's frames find them in the
+   corpus, and so the sets they came from. A stack copied at its current
+   revision is not copied again.
+4. **measure** measures every frame of each calibratable set with
    `analyze_project`. A frame that lost most of its stars, whose stars are
    elongated well beyond the set's, or that could not be measured stays out
    of the set's accepted frames. The measurements decide the recipes: noise
    pairs need 40 accepted frames, and a seeing split needs a quarter of the
    frames to be at least 25% sharper than the worst quarter. One frame is
    plate solved, when catalogs are installed.
-4. **split** gives every set its train, validation or test group. Sets of
+5. **split** gives every set its train, validation or test group. Sets of
    one object, or whose fields overlap on the sky, share a group, so
    neighbouring sky never crosses a split. A group keeps the split it was
-   first given. `--hold-out` marks a telescope's sets `held-out`: never
-   trained on, and scored apart.
-5. **build** calibrates and registers each set's accepted frames once, with
+   first given. A finished stack joins the group of the sets its frames
+   came from, or else of the sets of its object. `--hold-out` marks a
+   telescope's sets and stacks `held-out`: never trained on, and scored
+   apart.
+6. **build** calibrates and registers each set's accepted frames once, with
    the CLI's default stacking options, and keeps the registered frames in
    the scratch directory while it integrates every product from them with
    `LiveStacker.reintegrate(frames=...)`. All of a set's products share one
@@ -70,8 +81,9 @@ python -m seiza_training --store STORE status
    turning past its rotation limit than it admits, the camera turned during
    the night and the reference fell in the smaller orientation, so the set
    is registered again on a reference from the larger one.
-6. **review** writes `STORE/review/index.html` and one page per built set,
-   with its stacks at one stretch, its measurements and its pair checks. Record a decision with
+7. **review** writes `STORE/review/index.html` and one page per built set,
+   with its stacks at one stretch, its measurements and its pair checks.
+   Record a decision with
    `python -m seiza_training --store STORE decide SUBJECT KIND accept|reject --reviewer NAME`,
    where `KIND` is `set` or `starless`.
 
@@ -84,6 +96,9 @@ Per set, under `STORE/products/<set id>/`:
 | `deep/` | every clear admitted frame |
 | `noise/nSS-dD/{a,b}/` | noise pair: A of `SS` frames drawn one from each stretch of the night, B of all the others; three draws `D` of 4, 8, 16 and 32 frames, at most a fifth of the set |
 | `seeing/{best,worst}/` | the best and worst quarter of the frames by FWHM, at matched counts |
+
+A finished stack's image is under `STORE/products/psf-guard/<database>/<job>/<group>/stack/`,
+as `image.npy` alone: PSF Guard keeps no variance or coverage beside it.
 
 Each stack directory holds `image.npy` and `variance.npy` (float32),
 `coverage.npy` and `rejected.npy` (uint16), as `(height, width)` or

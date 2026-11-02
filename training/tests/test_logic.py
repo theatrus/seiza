@@ -188,3 +188,23 @@ def test_a_build_needs_room_for_its_frames_and_products_together(tmp_path):
     # and the two together do not.
     with pytest.raises(RuntimeError, match="GB is free"):
         store.check_space(free // 2 + 2**30, free // 2 + 2**30)
+
+
+def test_pairs_measure_their_low_band_noise_apart_from_the_grain():
+    from types import SimpleNamespace
+
+    rng = np.random.default_rng(8)
+
+    def half(noise):
+        shape = noise.shape
+        return SimpleNamespace(image=noise, coverage=np.full(shape, 4), variance=np.full(shape, 4.0))
+
+    white = rng.normal(0.0, 1.0, (400, 400)).astype(np.float32)
+    _, _, stats = build.pair_check(half(white), half(np.zeros_like(white)), 2.0, 2.0)
+    ratio = stats["difference_sigma_binned"] * stats["binned_scale_px"] / stats["difference_sigma"]
+    assert 0.8 < ratio < 1.2, "white noise falls by the bin's side"
+    # Noise correlated over 4 x 4 pixels, as resampling and drizzle leave it.
+    coarse = np.kron(rng.normal(0.0, 1.0, (100, 100)), np.ones((4, 4))).astype(np.float32)
+    _, _, stats = build.pair_check(half(white + coarse), half(np.zeros_like(white)), 2.0, 2.0)
+    ratio = stats["difference_sigma_binned"] * stats["binned_scale_px"] / stats["difference_sigma"]
+    assert ratio > 2.0, "correlated noise survives binning"
