@@ -50,8 +50,8 @@ when exposure metadata differs. With a bias and a known master-dark duration,
 missing light exposure is a typed rejection rather than an unsafe 1:1 scaling
 assumption.
 
-Masters produced by Seiza carry `SEIZAMST`, `SEIZAVR`, `NCOMBINE`, `BIASSUB`,
-`DARKSUB`, and `FLATNORM` FITS cards. A bias-calibrated master dark is therefore
+Masters produced by Seiza carry `SEIZAMST`, `IMAGETYP`, `SEIZAVR`, `NCOMBINE`,
+`BIASSUB`, `DARKSUB`, and `FLATNORM` FITS cards. A bias-calibrated master dark is therefore
 recognized as pure dark signal and is not bias-subtracted again. A calibrated,
 normalized master flat likewise skips master-level calibration while the light
 itself still receives its configured bias and dark correction. Master dark and

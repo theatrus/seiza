@@ -822,6 +822,11 @@ pub fn write_master_fits_f32(path: impl AsRef<Path>, master: &MasterFrame) -> Re
             master.kind.fits_name(),
             "Seiza master frame kind",
         ),
+        string_card(
+            "IMAGETYP",
+            master.kind.image_type(),
+            "integrated calibration master",
+        ),
         integer_card("SEIZAVR", 1, "Seiza master header schema"),
         integer_card(
             "NCOMBINE",
@@ -1964,6 +1969,76 @@ mod tests {
     }
 
     #[test]
+    fn a_master_is_written_with_a_master_imagetyp_for_other_software() {
+        use crate::MasterFrameKind;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("master.fits");
+        for (kind, input_type, expected, role) in [
+            (
+                MasterFrameKind::Bias,
+                "BIAS",
+                "MASTER BIAS",
+                FrameSourceRole::Bias,
+            ),
+            (
+                MasterFrameKind::Dark,
+                "DARK",
+                "MASTER DARK",
+                FrameSourceRole::Dark,
+            ),
+            // Flat-darks integrate to a dark master, which PixInsight reads
+            // as a dark.
+            (
+                MasterFrameKind::Dark,
+                "DARKFLAT",
+                "MASTER DARK",
+                FrameSourceRole::Dark,
+            ),
+            (
+                MasterFrameKind::Flat,
+                "FLAT",
+                "MASTER FLAT",
+                FrameSourceRole::Flat,
+            ),
+        ] {
+            let master = MasterFrame {
+                kind,
+                image: LinearImage::new(2, 2, 1, vec![1.0; 4]).unwrap(),
+                exposure_seconds: None,
+                bayer: None,
+                input_frames: 3,
+                accepted_samples: 12,
+                rejected_samples: 0,
+                masked_samples: 0,
+                flat_star_masking: None,
+                fallback_pixels: 0,
+                defect_pixels_replaced: 0,
+                input_statistics: Vec::new(),
+                bias_subtracted: false,
+                dark_subtracted: false,
+                normalized: kind == MasterFrameKind::Flat,
+                rejection: crate::MasterRejectionOptions::default(),
+                rejection_method: crate::MasterRejectionMethod::LeaveOneOut,
+                reference_headers: vec![(
+                    "IMAGETYP".into(),
+                    HeaderValue::String(input_type.into()),
+                )],
+                skipped_inputs: Vec::new(),
+            };
+            write_master_fits_f32(&path, &master).unwrap();
+            let decoded = FitsImage::open(&path).unwrap();
+            assert_eq!(
+                decoded.header_str("IMAGETYP"),
+                Some(expected),
+                "{input_type}"
+            );
+            let frame = FitsFrame::open(&path).unwrap();
+            assert_eq!(frame.metadata().role, role, "{input_type}");
+            frame.validate_master_kind(kind.fits_name()).unwrap();
+        }
+    }
+
+    #[test]
     fn master_writer_round_trips_state_and_canonicalizes_metadata_aliases() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("master-dark.fits");
@@ -2008,6 +2083,7 @@ mod tests {
         write_master_fits_f32(&path, &master).unwrap();
         let decoded = FitsImage::open(&path).unwrap();
         assert_eq!(decoded.header_str("SEIZAMST"), Some("DARK"));
+        assert_eq!(decoded.header_str("IMAGETYP"), Some("MASTER DARK"));
         assert_eq!(decoded.row_order(), Some(RowOrder::BottomUp));
         assert_eq!(decoded.bayer_pattern(), Some(BayerPattern::Gbrg));
         assert_eq!(

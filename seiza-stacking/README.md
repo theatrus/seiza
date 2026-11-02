@@ -894,8 +894,10 @@ cache directory on their image volume; the original entry point uses OS temp.
 building masters inside a visible job can show the frame being read and a bar
 that keeps moving; see `MasterProgress` for when reports arrive.
 
-`write_master_fits_f32` records the master kind, input count, actual rejection
-method (`REJMETH`: `MEDIAN_MAD`, `LEAVE_ONE_OUT`, or `NONE` for two inputs),
+`write_master_fits_f32` records the master kind (`SEIZAMST`, which Seiza reads,
+and `IMAGETYP` as `MASTER BIAS`, `MASTER DARK` or `MASTER FLAT` for other
+software; a master from flat-darks is a `MASTER DARK`), input count, actual
+rejection method (`REJMETH`: `MEDIAN_MAD`, `LEAVE_ONE_OUT`, or `NONE` for two inputs),
 thresholds, counts, and bias/dark/normalization state in the FITS header. Those
 state fields prevent a later `CalibrationMasters` consumer from calibrating a
 prepared dark or flat twice.
