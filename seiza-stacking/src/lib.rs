@@ -250,6 +250,13 @@ pub enum Error {
     /// A frame could not be integrated into the stack.
     #[error("stacking error: {0}")]
     Stack(String),
+    /// A frame chosen for reintegration is not one the stack admitted: it
+    /// was never pushed, or was turned away.
+    #[error("{} is not an admitted frame of this stack", path.display())]
+    NotAdmitted {
+        /// The source path that matched no admitted frame.
+        path: PathBuf,
+    },
     /// The caller asked for the work to stop through a [`CancelSignal`].
     #[error("cancelled by the caller")]
     Cancelled,

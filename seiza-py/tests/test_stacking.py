@@ -854,6 +854,39 @@ def test_retained_frames_reintegrate_identically(tmp_path):
     assert list(scratch.iterdir()) == []
 
 
+def test_chosen_frames_reintegrate_on_one_grid(tmp_path):
+    clean = synthetic_star_field()
+    rng = np.random.default_rng(7)
+    paths = []
+    for index in range(8):
+        frame = (clean + rng.normal(0.0, 2.0, clean.shape)).astype(np.float32)
+        path = tmp_path / f"light-{index:03d}.fits"
+        fits.writeto(path, frame, overwrite=True)
+        paths.append(path)
+    stacker = seiza.LiveStacker(paths[0], options=no_adjustment_options())
+    stacker.retain_frames_for_reintegration()
+    for path in paths[1:]:
+        assert stacker.push_fits(path).accepted
+
+    every = stacker.reintegrate()
+    np.testing.assert_array_equal(stacker.reintegrate(frames=paths).image, every.image)
+    first = stacker.reintegrate(frames=[str(path) for path in paths[:3]])
+    rest = stacker.reintegrate(frames=paths[3:])
+    assert first.image.shape == rest.image.shape == every.image.shape
+    assert first.coverage.max() == 3
+    assert rest.coverage.max() == 5
+    # Independent halves of the same sky: their difference is noise alone.
+    difference = first.image - rest.image
+    assert abs(float(np.nanmedian(difference))) < 0.5
+
+    with pytest.raises(seiza.StackError, match="not an admitted frame"):
+        stacker.reintegrate(frames=[paths[1], tmp_path / "light-099.fits"])
+    with pytest.raises(seiza.StackError, match="twice"):
+        stacker.reintegrate(frames=[paths[1], paths[1]])
+    with pytest.raises(seiza.StackError, match="at least one"):
+        stacker.reintegrate(frames=[])
+
+
 def overlapping_panels(tmp_path, width=192, height=160, step=112):
     """Three panels across one star field, each overlapping the next by
     80 pixels; the first and third share no sky."""
@@ -880,6 +913,33 @@ def test_stack_options_choose_a_registration_model():
     assert options.registration_model == "quadratic"
     with pytest.raises(ValueError, match="registration_model"):
         seiza.StackOptions(registration_model="thin-plate")
+
+
+def test_stack_options_choose_the_interpolation(tmp_path):
+    assert seiza.StackOptions().interpolation == "bilinear"
+    options = seiza.StackOptions(interpolation="lanczos3")
+    assert options.interpolation == "lanczos3"
+    with pytest.raises(ValueError, match="interpolation"):
+        seiza.StackOptions(interpolation="cubic")
+    clean = synthetic_star_field()
+    shifted = np.roll(clean, (1, 2), axis=(0, 1)) + np.float32(0.5)
+    paths = []
+    for index, frame in enumerate([clean, shifted]):
+        path = tmp_path / f"light-{index}.fits"
+        fits.writeto(path, frame)
+        paths.append(path)
+
+    def stacked(interpolation):
+        stacker = seiza.LiveStacker(
+            paths[0],
+            options=seiza.StackOptions(
+                normalization="none", rejection="none", interpolation=interpolation
+            ),
+        )
+        assert stacker.push_fits(paths[1]).accepted
+        return stacker.snapshot().image
+
+    assert not np.array_equal(stacked("bilinear"), stacked("lanczos3"))
 
 
 @pytest.mark.parametrize("normalization", ["none", "global", "local-background"])
