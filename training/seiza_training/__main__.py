@@ -55,6 +55,36 @@ def main(argv: list[str] | None = None) -> int:
     stacks.add_argument("--again", action="store_true", help="copy stacks already copied")
     stacks.add_argument("--limit", type=int, help="at most this many stacks")
 
+    train = commands.add_parser("train-noise", help="train a noise model on the train split's noise pairs")
+    train.add_argument("--name", required=True, help="the run's name, under STORE/models/noise/")
+    train.add_argument("--steps", type=int, default=10_000)
+    train.add_argument("--width", type=int, default=16)
+    train.add_argument("--levels", type=int, default=4)
+    train.add_argument("--tile", type=int, default=256)
+    train.add_argument("--batch", type=int, default=16)
+    train.add_argument("--learning-rate", type=float, default=2e-4)
+    train.add_argument("--seed", type=int, default=0)
+    train.add_argument("--set", action="append", dest="sets", help="only this train set id")
+    train.add_argument("--validation-set", action="append", dest="validation_sets",
+                       help="measure on only this validation set id")
+    train.add_argument("--loss-weight", choices=("core", "variance"), default="core")
+    train.add_argument("--map-jitter", type=float, default=0.0,
+                       help="scale the noise map the network reads by up to exp(±this)")
+    train.add_argument("--noise-map", choices=("raw", "model"), default="raw",
+                       help="the stack's per-pixel noise map, or the modelled one")
+    train.add_argument("--huber", type=float, default=0.0,
+                       help="square each pixel's weighted error only within this of zero")
+    train.add_argument("--huber-above", type=float, default=0.0,
+                       help="make only pixels whose target is this many σ̄ above the background robust")
+    train.add_argument("--structure-sampling", type=float, default=0.0,
+                       help="draw windows 1 + this × their share of bright pixels as often")
+
+    evaluate = commands.add_parser("evaluate-noise", help="measure a trained noise model on a split")
+    evaluate.add_argument("--name", required=True)
+    evaluate.add_argument("--split", default="validation")
+    evaluate.add_argument("--limit", type=int, help="at most this many pairs")
+    evaluate.add_argument("--set", action="append", dest="sets", help="only this set id")
+
     split = commands.add_parser("split", help="assign sky groups and train/validation/test splits")
     split.add_argument("--hold-out", help="a telescope whose groups are all test")
 
@@ -131,6 +161,22 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
             manifest, store, stacks_root, Path(roots["corpus"]), again=arguments.again,
             limit=arguments.limit,
         )
+    if command == "train-noise":
+        from .noise_model import train
+
+        return train(
+            store, manifest, name=arguments.name, steps=arguments.steps, width=arguments.width,
+            levels=arguments.levels, tile=arguments.tile, batch=arguments.batch,
+            learning_rate=arguments.learning_rate, sets=only, seed=arguments.seed,
+            loss_weight=arguments.loss_weight, map_jitter=arguments.map_jitter,
+            validation_sets=set(arguments.validation_sets) if arguments.validation_sets else None,
+            noise_map=arguments.noise_map, huber=arguments.huber, huber_above=arguments.huber_above,
+            structure_sampling=arguments.structure_sampling,
+        )
+    if command == "evaluate-noise":
+        from .noise_model import evaluate_saved
+
+        return evaluate_saved(store, manifest, arguments.name, split=arguments.split, limit=arguments.limit, sets=only)
     if command == "split":
         from .splits import assign_splits
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import shutil
 import struct
+import tempfile
 import zlib
 from pathlib import Path
 from typing import Any
@@ -118,7 +119,14 @@ def save_stack(directory: Path, snapshot: Any, *, fits: bool) -> dict[str, str]:
     if fits:
         path = directory / "stack.fits"
         path.unlink(missing_ok=True)
-        snapshot.write_fits(path)
+        # Before 0.48.2, Seiza wrote an image durably by asking the file
+        # system for a full sync, which an SMB share on macOS refuses. The
+        # FITS is written on local disk and copied onto the store.
+        with tempfile.TemporaryDirectory() as local:
+            written = Path(local) / "stack.fits"
+            snapshot.write_fits(written)
+            with written.open("rb") as source, path.open("wb") as target:
+                shutil.copyfileobj(source, target, length=16 * 1024 * 1024)
         files["fits"] = path.name
     return files
 
