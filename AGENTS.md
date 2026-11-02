@@ -161,6 +161,14 @@ So these steps are not optional, and a PR that skips them is not done.
    for stretching and "0.1.0" for the pipeline, each change sets the release
    that ships it.
 
+`seiza_stacking::EXTERNAL_EXCHANGE_VERSION` does the same for the map that
+puts an image on the 0 to 1 external tools work on and takes their result
+back (`seiza-stacking/src/exchange.rs`, used by RC-Astro and PixInsight
+MLDenoise). It is a counter, not a crate version, since no output-version
+test can run the tools. A change to the map moves it up by one;
+`exchange::tests::the_map_matches_its_version` pins the map and fails
+until both are done.
+
 ## Other rules
 
 - Which crate to depend on, and how releases work: `RELEASE.md`.

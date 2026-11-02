@@ -861,6 +861,7 @@ seiza_string_free = { none = "frees a string the C ABI returned; Python manages 
 seiza_core_version = "__version__"
 seiza_stacking_output_version = "STACKING_OUTPUT_VERSION"
 seiza_stretch_output_version = "STRETCH_OUTPUT_VERSION"
+seiza_external_exchange_version = "EXTERNAL_EXCHANGE_VERSION"
 
 # Every Python function, constructor and method (not properties) that no C
 # export above gives as its twin: the C export that does the same job

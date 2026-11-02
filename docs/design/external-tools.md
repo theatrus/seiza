@@ -48,7 +48,8 @@ same map PixInsight MLDenoise uses (`seiza-stacking`'s `exchange` module):
 - Samples that are not finite, such as a stack's uncovered edges, go to the
   tool as their channel's median plus noise of the channel's robust sigma,
   and come back unchanged in the result and in the stars image. Before,
-  they reached the tool as NaN and came back as whatever it made of them.
+  they reached the tool as NaN: NoiseXTerminator 2.6.10 then returned the
+  whole image as NaN, not only the uncovered pixels.
 - The stars image, a difference of two images on 0 to 1, is restored with
   the scale alone, so `starless + stars` still reconstructs the original on
   its own scale.
@@ -65,11 +66,21 @@ starless result. Its path arrives in the event stream; a name-suffix probe
 `process_image` returns it as `ProcessedStackImage::stars` so a caller can
 stretch starless and stars independently.
 
+`split_stars` asks for unscreened stars, which restore exactly only on the
+image's own 0 to 1. It is given a stretched image, so it clamps the image's
+finite samples to 0 to 1 first; the map then leaves the image as it is, and
+a sample just outside the range no longer moves the whole image onto the
+camera scale.
+
 ## Cache keys
 
 A host caching results must include `cliVersion` and `mlVersion` from the
 schema in its cache key besides the parameter values: a CLI or model
-upgrade changes the output for identical inputs.
+upgrade changes the output for identical inputs. A host caching
+`process_image` or `split_stars` results also includes
+`EXTERNAL_EXCHANGE_VERSION` (C `seiza_external_exchange_version`, Python
+`seiza.EXTERNAL_EXCHANGE_VERSION`): a change to the map gives different
+results for the same tool and parameters.
 
 ## Bindings
 
@@ -79,9 +90,10 @@ The C ABI exposes the same surface as two JSON functions:
 JSON and an optional `SeizaCancelSignal`). Python mirrors it with
 `seiza.rc_astro_locate`, `seiza.rc_astro_tool_schema`, and
 `seiza.rc_astro_process_file`, which releases the GIL for the run and
-reports progress through an optional callback. Both bindings work at the
-file level — array round trips stay a Rust-level (`process_image`)
-concern.
+reports progress through an optional callback. Both work at the file
+level and pass files to the tool as they are. Python also runs a tool on an
+array (`seiza.rc_astro_process_image`, `seiza.rc_astro_split_stars`) through
+`process_image` and its map.
 
 ## Validation
 
@@ -155,8 +167,10 @@ exchange file is written with bounds 0:1 directly.
   depend on the brightest sample; a dim crop then sat near the top of the
   range and came back with its background biased by about 10 ADU.
 - **Samples that are not finite.** NaN marks a stack's uncovered pixels.
-  These and infinite samples reach PixInsight as their channel's median and
-  come back unchanged, so a stack keeps its coverage.
+  These and infinite samples reach PixInsight as their channel's median
+  plus noise of the channel's robust sigma, and come back unchanged, so a
+  stack keeps its coverage. A noiseless fill is not enough: MLDenoise then
+  barely denoises any of the image.
 - **Result.** PixInsight 1.9.6 saves the result as Float32 with
   `bounds="0:1"`; a result declaring other bounds is refused.
 
