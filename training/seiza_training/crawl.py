@@ -3,7 +3,8 @@
 The telescope corpus keeps raw lights by night, under
 `<telescope>/_Source/<year>/<target>/<night>/LIGHT`, and masters made by
 other software under `<telescope>/_Process`. The calibration library keeps
-masters under `<library>/<database>/calibration-masters`. Every header is
+masters under `<library>/<database>/calibration-masters`, and a calibration
+folder keeps raw darks, biases and flats, in any layout. Every header is
 read through Seiza (`probe_frame` and `read_image_header`), never parsed
 here, and a file whose size and modification time have not changed since
 the last crawl is not read again.
@@ -92,6 +93,14 @@ def library_candidates(library: Path) -> Iterator[Candidate]:
         if masters.is_dir():
             for path in image_files(masters):
                 yield Candidate(path, "library", None, None, None)
+
+
+def calibration_candidates(calibration: Path) -> Iterator[Candidate]:
+    """Raw calibration frames anywhere below `calibration`. Their headers
+    say what each is, and their camera settings, not their folders, match
+    them to lights."""
+    for path in image_files(calibration):
+        yield Candidate(path, "calibration", None, None, None)
 
 
 def number(value: Any) -> float | None:
@@ -289,16 +298,19 @@ def crawl(
     corpus: Path | None,
     library: Path | None,
     *,
+    calibration: Path | None = None,
     workers: int = 16,
     progress: bool = True,
 ) -> dict[str, Any]:
-    """Read every new or changed header under `corpus` and `library`, then
-    regroup the sets."""
+    """Read every new or changed header under `corpus`, `library` and
+    `calibration`, then regroup the sets."""
     candidates: list[Candidate] = []
     if corpus is not None:
         candidates.extend(corpus_candidates(corpus))
     if library is not None:
         candidates.extend(library_candidates(library))
+    if calibration is not None:
+        candidates.extend(calibration_candidates(calibration))
     known = manifest.frame_stamps()
     pending: list[tuple[Candidate, os.stat_result]] = []
     present = set()
@@ -329,7 +341,7 @@ def crawl(
             for item in batch:
                 manifest.upsert("frames", item)
     # Files that are gone, under the roots this crawl covered.
-    roots = [str(root) for root in (corpus, library) if root is not None]
+    roots = [str(root) for root in (corpus, library, calibration) if root is not None]
     gone = [
         path for path in known if path not in present and any(path.startswith(root) for root in roots)
     ]

@@ -30,6 +30,7 @@ def main(argv: list[str] | None = None) -> int:
     crawl = commands.add_parser("crawl", help="read every header and group lights into sets")
     crawl.add_argument("--corpus", type=Path, help="the telescope corpus (remembered)")
     crawl.add_argument("--library", type=Path, help="the calibration-master library (remembered)")
+    crawl.add_argument("--calibration", type=Path, help="raw calibration frames, darks among them (remembered)")
     crawl.add_argument("--workers", type=int, default=16)
 
     for name, text in (
@@ -55,6 +56,13 @@ def main(argv: list[str] | None = None) -> int:
     stacks.add_argument("--again", action="store_true", help="copy stacks already copied")
     stacks.add_argument("--limit", type=int, help="at most this many stacks")
 
+    dark = commands.add_parser("dark-noise", help="make noise pairs with a known clean image from dark frames")
+    dark.add_argument("--set", action="append", dest="sets", help="only this set id")
+    dark.add_argument("--size", type=int, action="append", dest="sizes",
+                      help="the A half whose frames lend their registration, by size (default 8 and 16)")
+    dark.add_argument("--again", action="store_true", help="make pairs already made")
+    dark.add_argument("--limit", type=int, help="at most this many pairs")
+
     train = commands.add_parser("train-noise", help="train a noise model on the train split's noise pairs")
     train.add_argument("--name", required=True, help="the run's name, under STORE/models/noise/")
     train.add_argument("--steps", type=int, default=10_000)
@@ -78,6 +86,8 @@ def main(argv: list[str] | None = None) -> int:
                        help="make only pixels whose target is this many σ̄ above the background robust")
     train.add_argument("--structure-sampling", type=float, default=0.0,
                        help="draw windows 1 + this × their share of bright pixels as often")
+    train.add_argument("--dark-noise-fraction", type=float, default=0.0,
+                       help="this share of every batch from the dark-noise pairs, whose target is clean")
 
     evaluate = commands.add_parser("evaluate-noise", help="measure a trained noise model on a split")
     evaluate.add_argument("--name", required=True)
@@ -129,13 +139,15 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
         roots = manifest.meta("roots") or {}
         corpus = arguments.corpus or (Path(roots["corpus"]) if roots.get("corpus") else None)
         library = arguments.library or (Path(roots["library"]) if roots.get("library") else None)
+        calibration = arguments.calibration or (Path(roots["calibration"]) if roots.get("calibration") else None)
         if corpus is None and library is None:
             raise SystemExit("crawl needs --corpus or --library the first time")
         manifest.set_meta(
             "roots",
-            {**roots, "corpus": str(corpus) if corpus else None, "library": str(library) if library else None},
+            {**roots, "corpus": str(corpus) if corpus else None, "library": str(library) if library else None,
+             "calibration": str(calibration) if calibration else None},
         )
-        return crawl(manifest, corpus, library, workers=arguments.workers)
+        return crawl(manifest, corpus, library, calibration=calibration, workers=arguments.workers)
     if command == "calibrate":
         from .calibrate import calibrate
 
@@ -161,9 +173,24 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
             manifest, store, stacks_root, Path(roots["corpus"]), again=arguments.again,
             limit=arguments.limit,
         )
-    if command == "train-noise":
-        from .noise_model import train
+    if command == "dark-noise":
+        from .dark_noise import SIZES
+        from .dark_noise import run as make_dark_noise
 
+        return make_dark_noise(
+            manifest, store, sets=only, sizes=tuple(arguments.sizes or SIZES), again=arguments.again,
+            limit=arguments.limit,
+        )
+    if command == "train-noise":
+        from .noise_model import dark_noise_bank, train
+
+        extra = {}
+        if arguments.dark_noise_fraction:
+            extra = {
+                "extra": dark_noise_bank(store, manifest, sets=only, seed=arguments.seed, noise_map=arguments.noise_map),
+                "extra_fraction": arguments.dark_noise_fraction,
+                "extra_label": "dark-noise",
+            }
         return train(
             store, manifest, name=arguments.name, steps=arguments.steps, width=arguments.width,
             levels=arguments.levels, tile=arguments.tile, batch=arguments.batch,
@@ -171,7 +198,7 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
             loss_weight=arguments.loss_weight, map_jitter=arguments.map_jitter,
             validation_sets=set(arguments.validation_sets) if arguments.validation_sets else None,
             noise_map=arguments.noise_map, huber=arguments.huber, huber_above=arguments.huber_above,
-            structure_sampling=arguments.structure_sampling,
+            structure_sampling=arguments.structure_sampling, **extra,
         )
     if command == "evaluate-noise":
         from .noise_model import evaluate_saved
