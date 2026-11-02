@@ -348,6 +348,20 @@ exposes the **superset** of what both apps need.
   and reports every written file, StarXTerminator's stars sidecar included.
   Include the schema's `cliVersion`/`mlVersion` in any cache key: a tool
   upgrade changes the output for identical inputs.
+- **PixInsight MLDenoise** — `seiza_pixinsight_locate` finds PixInsight in
+  its standard install location or on `PATH` (null without an error when
+  absent). `seiza_pixinsight_ml_denoise_model_json` reads an MLDenoise model
+  file's header: the process it is for, whether it denoises mono and RGB
+  images, and its weights' SHA-256. `seiza_pixinsight_ml_denoise_file_json`
+  denoises a FITS or XISF file through a headless PixInsight. The request
+  takes `input`, `output`, `model` and optionally `amount` (0 to 1),
+  `overlapPercent` (12 to 50), `precision` (`"fast"` or `"high"`),
+  `localSupport` (`clipLow`, `background`, `smoothness`) and `executable`.
+  The input may be on any linear scale, and the output holds 32-bit floats
+  on the same scale with the input's headers. PixInsight reports no
+  progress; the run accepts a `SeizaCancelSignal`, which closes PixInsight.
+  Key a cached result on the model's `weightsSha256`, the returned
+  `pixinsightVersion` and the options.
 - **Plate solving** — `seiza_solve_image_json`, and
   `seiza_solve_image_with_limits_json`. Both start from what the file says
   about itself: a FITS or XISF image's own WCS (FITS cards, or a PixInsight

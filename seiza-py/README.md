@@ -1355,6 +1355,60 @@ CLI's `--no-` negation, overriding a true default. A child completely
 silent for ten minutes is killed; a first run downloads ML models, which
 `rc-astro download-models` handles ahead of time.
 
+## PixInsight MLDenoise
+
+Denoise an image with MLDenoise, PixInsight's neural-network noise
+reduction, through an installed PixInsight with the MachineLearning module.
+MLDenoise reads its network from a model file (`.xmlm`) that PixInsight
+distributes separately. Seiza writes the image to a temporary XISF file,
+runs PixInsight headless to apply MLDenoise, and reads the result back.
+On Linux without a display, PixInsight runs under `xvfb-run`.
+
+```python
+import seiza
+
+print(seiza.pixinsight_locate())            # None when not installed
+
+model = "/path/to/MLDenoise_v42.xmlm"
+header = seiza.pixinsight_ml_denoise_model(model)
+print(header.mono, header.rgb, header.weights_sha256)
+
+denoised = seiza.pixinsight_ml_denoise_image(stack, model, amount=0.9)
+denoised.image                              # same shape and units as stack
+print(denoised.pixinsight_version, denoised.seconds)
+
+seiza.pixinsight_ml_denoise_file(
+    "stack.fits", "denoised.fits", model,
+    precision="high",
+    local_support=seiza.MlDenoiseLocalSupport(clip_low=0.0, background=0.25, smoothness=2),
+)
+```
+
+`pixinsight_ml_denoise_image` takes an array in any linear units. As for
+the RC-Astro calls, it maps the image onto 0..1, offset by its most
+negative sample and scaled by its span, and maps the result back. A
+one-channel image needs a model with a mono route, and an RGB image one
+with an RGB route; the model's header says which it has. The options are
+PixInsight's, with its ranges and defaults:
+
+| Option | Range | Default | Effect |
+|---|---|---|---|
+| `amount` | 0 to 1 | 0.9 | Blend: `(1 - amount) * original + amount * denoised` |
+| `overlap_percent` | 12 to 50 | 25 | Overlap of neighboring inference tiles |
+| `precision` | `"fast"`, `"high"` | `"fast"` | GPU inference precision; CPU inference is always full precision |
+| `local_support` | | none | A brightness mask that protects bright structures |
+
+`MlDenoiseLocalSupport` takes `clip_low` (-20 to 20, in robust sigma from
+the median), `background` (0 to 1, the mask's mean background level) and
+`smoothness` (0 to 7 pixels, the mask's median-filter radius).
+
+A cached result should be keyed on the model's `weights_sha256`, the
+`pixinsight_version` and the options: another model or PixInsight version
+can give another result for the same input. PixInsight reports no
+progress. Ctrl-C cancels a run within a quarter of a second and closes
+PixInsight, as does an optional `cancel=lambda: ...` predicate returning
+true.
+
 ## Parallax fly-through videos
 
 Make the video `seiza parallax-video` makes, from a starless image, its

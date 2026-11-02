@@ -3345,6 +3345,57 @@ char *seiza_rc_astro_process_file_json(const char *request_json,
                                        char **error_out);
 
 /*
+ The path of the PixInsight executable in its standard install location,
+ or on `PATH`, as a string released with [`seiza_string_free`]. Returns
+ null with `error_out` untouched when PixInsight is not installed:
+ absence is a state, not an error.
+
+ # Safety
+
+ `error_out` must be null or point to writable storage for one pointer.
+ */
+char *seiza_pixinsight_locate(char **error_out);
+
+/*
+ The header of an MLDenoise model file (`.xmlm`) as schema-1 JSON: the
+ process it is for, its format version, whether it denoises mono and RGB
+ images, and its weights' SHA-256, which a host caching results keys on.
+ Returns a string released with [`seiza_string_free`], or null with
+ `error_out` set.
+
+ # Safety
+
+ `model_path` must be a NUL-terminated UTF-8 path. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_pixinsight_ml_denoise_model_json(const char *model_path, char **error_out);
+
+/*
+ Denoise an image file with PixInsight's MLDenoise and write the result.
+ The request names the input and output (FITS or XISF, by extension), the
+ model file, and optionally `amount`, `overlapPercent`, `precision`
+ ("fast" or "high"), `localSupport` (`clipLow`, `background`,
+ `smoothness`) and the PixInsight `executable`. The image may be on any
+ linear scale: PixInsight works on it mapped onto 0 to 1, and the output
+ holds 32-bit floats on the input's scale with the input's headers.
+ PixInsight reports no progress; `cancel` stops the run within a quarter
+ of a second and closes PixInsight. Returns schema-1 JSON with the output
+ path, the PixInsight version, the model's header and the seconds
+ PixInsight took, as a string released with [`seiza_string_free`], or
+ null with `error_out` set.
+
+ # Safety
+
+ `request_json` must be a NUL-terminated UTF-8 string. `cancel` must be
+ null or a live [`SeizaCancelSignal`] retained until this call returns.
+ When non-null, `error_out` must point to writable storage for one
+ pointer.
+ */
+char *seiza_pixinsight_ml_denoise_file_json(const char *request_json,
+                                            const SeizaCancelSignal *cancel,
+                                            char **error_out);
+
+/*
  Measure one raw bias or dark frame, as a step toward judging its set
  with [`seiza_calibration_screen_bias_json`] or
  [`seiza_calibration_screen_darks_json`].

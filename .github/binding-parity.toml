@@ -289,6 +289,18 @@ core = "seiza-stacking::ExternalToolRequest"
 [rust.RcAstroProcessResponse]
 core = "seiza-stacking::ExternalToolRun"
 
+[rust.PixInsightMlDenoiseRequest]
+core = "seiza-stacking::MlDenoiseOptions"
+
+[rust.MlDenoiseLocalSupportJson]
+core = "seiza-stacking::MlDenoiseLocalSupport"
+
+[rust.MlDenoiseModelResponse]
+core = "seiza-stacking::MlDenoiseModel"
+
+[rust.PixInsightMlDenoiseResponse]
+core = "seiza-stacking::MlDenoiseRun"
+
 
 # background, deconvolution, stars
 [rust.DeconvolutionRenderRequest]
@@ -829,6 +841,9 @@ seiza_emission_flux_json = "solve_emission_flux"
 seiza_rc_astro_locate = "rc_astro_locate"
 seiza_rc_astro_tool_schema_json = "rc_astro_tool_schema"
 seiza_rc_astro_process_file_json = "rc_astro_process_file"
+seiza_pixinsight_locate = "pixinsight_locate"
+seiza_pixinsight_ml_denoise_model_json = "pixinsight_ml_denoise_model"
+seiza_pixinsight_ml_denoise_file_json = "pixinsight_ml_denoise_file"
 
 # --- satellites -------------------------------------------------------------
 # Python's fetch_celestrak and resolve take no cancel=, which the C calls do.
@@ -1025,6 +1040,8 @@ remove_structures = { none = "an image-processing primitive for Python callers" 
 # rc-astro
 rc_astro_split_stars = { c = "seiza_rc_astro_process_file_json" }
 rc_astro_process_image = { c = "seiza_rc_astro_process_file_json" }
+pixinsight_ml_denoise_image = { c = "seiza_pixinsight_ml_denoise_file_json" }
+MlDenoiseLocalSupport = { none = "MLDenoise's mask options; C requests carry the same fields as localSupport" }
 
 # Whole JSON types with no Python counterpart (field checks skipped).
 [types]

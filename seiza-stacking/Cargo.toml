@@ -43,10 +43,15 @@ seiza-image-io.workspace = true
 seiza-imgproc.workspace = true
 seiza-stats.workspace = true
 seiza-xisf.workspace = true
+quick-xml.workspace = true
 seiza-stretch.workspace = true
 tempfile = "3"
 thiserror.workspace = true
 zstd.workspace = true
+
+# Closing PixInsight's whole process group; see `pixinsight::Instance`.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 # What a Metal device's memory is and holds, which wgpu does not report;
 # the version wgpu uses.

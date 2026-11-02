@@ -3,6 +3,8 @@
 `seiza-stacking::external` drives external CLIs on stacked images. The first
 supported family is RC-Astro's `rc-astro` multi-tool: BlurXTerminator
 (`bxt`), StarXTerminator (`sxt`), and NoiseXTerminator (`nxt`).
+`seiza-stacking::pixinsight` runs PixInsight's MLDenoise through an
+installed PixInsight; see [PixInsight MLDenoise](#pixinsight-mldenoise).
 
 ## The contract
 
@@ -73,3 +75,57 @@ tested purely everywhere). The example `rc_astro_starless` drives the real
 tool; it was verified against rc-astro 2.6.6 on a 6248x4176 N.I.N.A. light
 frame — starless background 476-890 ADU with the stars image 95.6% zero and
 peaking near saturation, both restored to physical scale.
+
+## PixInsight MLDenoise
+
+MLDenoise is the neural-network noise reduction of PixInsight's
+MachineLearning module, present in PixInsight 1.9.6. It runs ONNX models that
+PixInsight distributes as `.xmlm` files. [`PixInsight`] runs it headless:
+
+- **Launch.** `PixInsight -n --automation-mode -r=<script>,<request>,<result>
+  --force-exit`: a new instance runs Seiza's script without stopping at
+  dialogs and exits when it ends. PixInsight needs a display; on Linux
+  without one, `xvfb-run` supplies a virtual one. The instance runs in its
+  own process group, so a cancel closes PixInsight itself and not only a
+  launcher (`PixInsight.sh`, `xvfb-run`).
+- **Protocol.** The script reads a JSON request (images, model and
+  parameters), applies MLDenoise, saves the result, and writes a JSON result
+  with the PixInsight version, the seconds taken and, on failure, the error
+  and the console log of the run. PixInsight's exit code says nothing about
+  the script, and its console output is kept only for a run that ends
+  without a result. A process's enumeration constants are properties of its
+  instances in PJSR (`P.Precision_High`), not of its constructor.
+- **Exchange.** The image goes to PixInsight as a float32 XISF declaring
+  `bounds="0:1"`, mapped onto that range the way RC-Astro images are (offset
+  by the most negative sample, scaled by the span), and comes back the same
+  way. Seiza's own processed-image writer declares 0 to 65535, which
+  PixInsight would rescale by, so the exchange is written directly.
+- **Parameters.** `modelPath`, `amount` (0 to 1, default 0.9),
+  `overlapPercent` (12 to 50, default 25), `precision` (`Precision_Fast`
+  or `Precision_High`) and the local-support mask: `mask`, `maskClipLow`
+  (-20 to 20), `maskBackground` (0 to 1) and `maskSmoothness` (0 to 7).
+  The ranges are the ones PixInsight 1.9.6 enforces, measured by setting
+  values in a script; [`MlDenoiseOptions::validate`] refuses values outside
+  them before PixInsight starts. `backend` stays `Backend_Auto`, `useCache`
+  off, and the previews off.
+- **Models.** An `.xmlm` file starts with `XMLM0100`, a little-endian
+  `u32` header length and four reserved bytes, followed by an XML header:
+  the process the model is for, the format version (`V3`), and one `Model`
+  element per payload (`mono.onnx`, `rgb.onnx`, `weights.bin`) with its
+  SHA-256. [`MlDenoiseModel::read`] reads only that header, so a run can
+  refuse a model for another process, or one without a route for the
+  image's channel count, before PixInsight loads 600 MB of weights.
+
+A host caching results keys on the weights' SHA-256, the PixInsight version
+and the options.
+
+The C ABI offers `seiza_pixinsight_locate`,
+`seiza_pixinsight_ml_denoise_model_json` and
+`seiza_pixinsight_ml_denoise_file_json`. Python offers the same, plus
+`pixinsight_ml_denoise_image` for arrays.
+
+Unit tests run a stand-in PixInsight, a Python script that follows the
+`-r=` protocol (Unix only). A test that runs the installed PixInsight is
+ignored by default; with PixInsight 1.9.6 and `MLDenoise_v42.xmlm` it took
+the background spread of a synthetic frame from 57.7 to 17.9 ADU in 8.2
+seconds, model loading included, and kept its star's peak.

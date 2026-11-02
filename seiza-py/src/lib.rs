@@ -19,6 +19,7 @@ mod imgproc;
 mod library;
 mod parallax;
 mod pipeline;
+mod pixinsight;
 mod rc_astro;
 mod satellites;
 mod screening;
@@ -1384,6 +1385,7 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     pipeline::register(m)?;
     stars::register(m)?;
     rc_astro::register(m)?;
+    pixinsight::register(m)?;
     parallax::register(m)?;
     calibration::register(m)?;
     constellations::register(m)?;

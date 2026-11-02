@@ -72,6 +72,7 @@ mod normalization;
 mod orientation;
 mod paths;
 mod pipeline;
+mod pixinsight;
 mod recycle;
 mod reference;
 mod registration;
@@ -160,6 +161,10 @@ pub use paths::{path_identity, paths_refer_to_same_file};
 pub use pipeline::{
     Continue, MAXIMUM_WORKERS, PipelineExecution, PipelineOptions, PipelineReport, PipelineTimings,
     PoolPipelineMemory, PoolPipelineReport,
+};
+pub use pixinsight::{
+    MlDenoiseLocalSupport, MlDenoiseModel, MlDenoiseOptions, MlDenoisePrecision, MlDenoiseRun,
+    MlDenoised, PixInsight,
 };
 pub use reference::{ReferenceScore, choose_reference, rank_references, reference_score};
 pub use registration::{
