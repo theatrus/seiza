@@ -6,7 +6,8 @@
 //! reads a tool's parameters (flags change between CLI builds, so requests
 //! should be built from the schema), and [`rc_astro_process_file`] runs a
 //! tool on an image file, returning every written file — StarXTerminator's
-//! stars sidecar included.
+//! stars sidecar included. [`rc_astro_process_image`] runs one on an array
+//! in linear units, mapped onto the tools' 0..1 range and back.
 
 use pyo3::exceptions::{PyFileNotFoundError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -132,9 +133,11 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyRcAstroParameter>()?;
     module.add_class::<PyRcAstroSchema>()?;
     module.add_class::<PyRcAstroRun>()?;
+    module.add_class::<PyRcAstroProcessed>()?;
     module.add_function(wrap_pyfunction!(rc_astro_locate, module)?)?;
     module.add_function(wrap_pyfunction!(rc_astro_tool_schema, module)?)?;
     module.add_function(wrap_pyfunction!(rc_astro_process_file, module)?)?;
+    module.add_function(wrap_pyfunction!(rc_astro_process_image, module)?)?;
     module.add_function(wrap_pyfunction!(rc_astro_split_stars, module)?)?;
     Ok(())
 }
@@ -198,6 +201,69 @@ pub(crate) fn rc_astro_tool_schema(
     Ok(schema_class(&schema))
 }
 
+/// Request parameters from a Python mapping of schema names to bools, ints
+/// and floats.
+fn parameter_values(
+    parameters: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Vec<(String, ExternalParameterValue)>> {
+    let mut values = Vec::new();
+    if let Some(parameters) = parameters {
+        for (name, value) in parameters.iter() {
+            let name: String = name.extract()?;
+            let value = if let Ok(flag) = value.extract::<bool>() {
+                ExternalParameterValue::Bool(flag)
+            } else if let Ok(whole) = value.extract::<i64>() {
+                ExternalParameterValue::Int(whole)
+            } else if let Ok(real) = value.extract::<f64>() {
+                ExternalParameterValue::Float(real)
+            } else {
+                return Err(PyValueError::new_err(format!(
+                    "parameter {name:?} must be a bool, int, or float"
+                )));
+            };
+            values.push((name, value));
+        }
+    }
+    Ok(values)
+}
+
+/// The signal that stops a run when Ctrl-C is pressed, `cancel` returns
+/// true, or a callback raised.
+///
+/// A raising progress callback must not vanish: the first exception is kept
+/// in `raised`, stops the run at the next cancel check (Ctrl-C usually lands
+/// in the progress callback as KeyboardInterrupt), and is re-raised once the
+/// run settles. A raising cancel predicate stops the run and re-raises the
+/// same way, so Ctrl-C surfaces as KeyboardInterrupt rather than a generic
+/// run error.
+fn cancel_signal(raised: &Arc<Mutex<Option<PyErr>>>, cancel: Option<Py<PyAny>>) -> CancelSignal {
+    let raised = Arc::clone(raised);
+    CancelSignal::new(move || {
+        if raised.lock().is_ok_and(|slot| slot.is_some()) {
+            return true;
+        }
+        Python::attach(|py| {
+            let asked = py.check_signals().and_then(|()| match &cancel {
+                Some(cancel) => cancel
+                    .call0(py)
+                    .and_then(|value| value.bind(py).is_truthy()),
+                None => Ok(false),
+            });
+            match asked {
+                Ok(stop) => stop,
+                Err(error) => {
+                    if let Ok(mut slot) = raised.lock()
+                        && slot.is_none()
+                    {
+                        *slot = Some(error);
+                    }
+                    true
+                }
+            }
+        })
+    })
+}
+
 /// Run one RC-Astro tool on an image file (FITS, XISF, or TIFF — whatever
 /// the installed CLI accepts), writing `output` and possibly sidecars
 /// beside it. `parameters` maps schema names to values (bools for switches
@@ -225,64 +291,14 @@ pub(crate) fn rc_astro_process_file(
     cancel: Option<Py<PyAny>>,
 ) -> PyResult<PyRcAstroRun> {
     let cli = cli(executable, host)?;
-    let mut values = Vec::new();
-    if let Some(parameters) = parameters {
-        for (name, value) in parameters.iter() {
-            let name: String = name.extract()?;
-            let value = if let Ok(flag) = value.extract::<bool>() {
-                ExternalParameterValue::Bool(flag)
-            } else if let Ok(whole) = value.extract::<i64>() {
-                ExternalParameterValue::Int(whole)
-            } else if let Ok(real) = value.extract::<f64>() {
-                ExternalParameterValue::Float(real)
-            } else {
-                return Err(PyValueError::new_err(format!(
-                    "parameter {name:?} must be a bool, int, or float"
-                )));
-            };
-            values.push((name, value));
-        }
-    }
     let request = ExternalToolRequest {
         tool: tool.to_string(),
-        parameters: values,
+        parameters: parameter_values(parameters)?,
         device,
     };
     let tool_name = tool.to_string();
-    // A raising progress callback must not vanish: the first exception is
-    // kept, stops the run at the next cancel check (Ctrl-C usually lands in
-    // the progress callback as KeyboardInterrupt), and is re-raised once the
-    // run settles. A raising cancel predicate stops the run and re-raises
-    // the same way, so Ctrl-C surfaces as KeyboardInterrupt rather than a
-    // generic run error.
     let raised: Arc<Mutex<Option<PyErr>>> = Arc::new(Mutex::new(None));
-    let signal = {
-        let raised = Arc::clone(&raised);
-        CancelSignal::new(move || {
-            if raised.lock().is_ok_and(|slot| slot.is_some()) {
-                return true;
-            }
-            Python::attach(|py| {
-                let asked = py.check_signals().and_then(|()| match &cancel {
-                    Some(cancel) => cancel
-                        .call0(py)
-                        .and_then(|value| value.bind(py).is_truthy()),
-                    None => Ok(false),
-                });
-                match asked {
-                    Ok(stop) => stop,
-                    Err(error) => {
-                        if let Ok(mut slot) = raised.lock()
-                            && slot.is_none()
-                        {
-                            *slot = Some(error);
-                        }
-                        true
-                    }
-                }
-            })
-        })
-    };
+    let signal = cancel_signal(&raised, cancel);
     let outcome = py.detach(|| {
         let schema = cli.tool_schema(&tool_name)?;
         let mut report = |fraction: f32| {
@@ -323,6 +339,104 @@ pub(crate) fn rc_astro_process_file(
     })
 }
 
+/// An image an RC-Astro tool processed in memory, from
+/// [`rc_astro_process_image`].
+#[pyclass(
+    skip_from_py_object,
+    name = "RcAstroProcessed",
+    module = "seiza",
+    frozen
+)]
+pub(crate) struct PyRcAstroProcessed {
+    /// The processed image, in the input's units and shape.
+    #[pyo3(get)]
+    image: Py<numpy::PyArrayDyn<f32>>,
+    /// StarXTerminator's stars image, when the request asked for it.
+    #[pyo3(get)]
+    stars: Option<Py<numpy::PyArrayDyn<f32>>>,
+    /// The compute device the tool reported using.
+    #[pyo3(get)]
+    device: Option<String>,
+    /// Warnings from the tool's event stream.
+    #[pyo3(get)]
+    warnings: Vec<String>,
+    /// The CLI's version, from the schema the run was built from.
+    #[pyo3(get)]
+    cli_version: String,
+    /// The tool's ML model version, when the schema gives one.
+    #[pyo3(get)]
+    ml_version: Option<i64>,
+}
+
+/// Run one RC-Astro tool on an image in memory: a float32 array of shape
+/// (height, width) or (height, width, channels) in any linear units. The
+/// tools clamp samples to 0..1, so the image is mapped onto that range on
+/// the way out, offset by its most negative sample and scaled by its span,
+/// and mapped back on the way in; a stars image comes back with the scale
+/// alone, so the processed image plus the stars gives back the original.
+/// `parameters`, `device`, `progress` and `cancel` work as for
+/// `rc_astro_process_file`; no file is left behind.
+#[pyfunction]
+#[pyo3(signature = (tool, image, *, parameters=None, device=None, executable=None, host=None, progress=None, cancel=None))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn rc_astro_process_image<'py>(
+    py: Python<'py>,
+    tool: &str,
+    image: numpy::PyReadonlyArrayDyn<'py, f32>,
+    parameters: Option<&Bound<'_, PyDict>>,
+    device: Option<String>,
+    executable: Option<PathBuf>,
+    host: Option<String>,
+    progress: Option<Py<PyAny>>,
+    cancel: Option<Py<PyAny>>,
+) -> PyResult<PyRcAstroProcessed> {
+    let linear = crate::arrays::linear_image(image)?;
+    let cli = cli(executable, host)?;
+    let request = ExternalToolRequest {
+        tool: tool.to_string(),
+        parameters: parameter_values(parameters)?,
+        device,
+    };
+    let raised: Arc<Mutex<Option<PyErr>>> = Arc::new(Mutex::new(None));
+    let signal = cancel_signal(&raised, cancel);
+    let outcome = py.detach(|| {
+        let schema = cli.tool_schema(&request.tool)?;
+        let mut report = |fraction: f32| {
+            if let Some(callback) = &progress {
+                Python::attach(|py| {
+                    if let Err(error) = callback.call1(py, (fraction,))
+                        && let Ok(mut slot) = raised.lock()
+                        && slot.is_none()
+                    {
+                        *slot = Some(error);
+                    }
+                });
+            }
+        };
+        let processed =
+            cli.process_image(&schema, &request, &linear, &[], Some(&signal), &mut report)?;
+        Ok::<_, seiza_stacking::Error>((schema, processed))
+    });
+    if let Ok(mut slot) = raised.lock()
+        && let Some(error) = slot.take()
+    {
+        return Err(error);
+    }
+    let (schema, processed) =
+        outcome.map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    Ok(PyRcAstroProcessed {
+        image: crate::arrays::into_image_array(py, processed.image)?.unbind(),
+        stars: processed
+            .stars
+            .map(|stars| crate::arrays::into_image_array(py, stars).map(Bound::unbind))
+            .transpose()?,
+        device: processed.device,
+        warnings: processed.warnings,
+        cli_version: schema.cli_version,
+        ml_version: schema.ml_version,
+    })
+}
+
 /// A starless image and its stars, as float32 arrays.
 type SplitArrays<'py> = (
     Bound<'py, numpy::PyArrayDyn<f32>>,
@@ -353,33 +467,7 @@ pub(crate) fn rc_astro_split_stars<'py>(
     }
     let cli = cli(executable, host)?;
     let raised: Arc<Mutex<Option<PyErr>>> = Arc::new(Mutex::new(None));
-    let signal = {
-        let raised = Arc::clone(&raised);
-        CancelSignal::new(move || {
-            if raised.lock().is_ok_and(|slot| slot.is_some()) {
-                return true;
-            }
-            Python::attach(|py| {
-                let asked = py.check_signals().and_then(|()| match &cancel {
-                    Some(cancel) => cancel
-                        .call0(py)
-                        .and_then(|value| value.bind(py).is_truthy()),
-                    None => Ok(false),
-                });
-                match asked {
-                    Ok(stop) => stop,
-                    Err(error) => {
-                        if let Ok(mut slot) = raised.lock()
-                            && slot.is_none()
-                        {
-                            *slot = Some(error);
-                        }
-                        true
-                    }
-                }
-            })
-        })
-    };
+    let signal = cancel_signal(&raised, cancel);
     let split = py.detach(|| {
         let mut report = |fraction: f32| {
             if let Some(callback) = &progress {

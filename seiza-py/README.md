@@ -803,8 +803,11 @@ limit in original sensor pixels. There is no running-median RMS gate.
 Plate-solve RMS measures a different fit and does not establish that a
 similarity transform aligns mosaic panels. `registration_model="quadratic"`
 can model curvature a similarity transform cannot; inspect alignment before
-choosing it. Rejections include the actual reason. Fraction thresholds accept
-equality, and their messages preserve the precision of the measured fraction.
+choosing it. `interpolation="lanczos3"` resamples each frame through Lanczos-3,
+clamped against ringing at high-contrast edges: sharper than the default
+`"bilinear"`, and the CLI's default. Rejections include the actual reason.
+Fraction thresholds accept equality, and their messages preserve the precision
+of the measured fraction.
 
 Passing `tolerances` replaces the stack's own whole: a field you leave unset
 takes the built-in default, not the stack's value. Both calls raise
@@ -856,6 +859,23 @@ Each of those reads every frame from its file and prepares it again. Calling
 frames keeps each admitted frame's registered image on disk as it is stacked,
 about four bytes per pixel per channel for each frame, so a reintegration reads
 that instead and gives the same result sooner.
+
+`reintegrate(frames=paths)` integrates only the admitted frames read from those
+files, in that order. Each is normalized and weighted as in a reintegration of
+every frame, against the same background reference, so stacks of disjoint
+subsets share one grid and one normalization and differ only by their frames.
+With retained frames, one registration serves any number of subsets:
+
+```python
+stacker.retain_frames_for_reintegration(scratch_directory="/nvme/scratch")
+...                                         # push every frame of the night
+half_a = stacker.reintegrate(frames=paths[0::2])
+half_b = stacker.reintegrate(frames=paths[1::2])
+noise = half_a.image - half_b.image         # independent noise, same sky
+```
+
+A path the stack did not admit, an empty list or a frame named twice raises
+`StackError`.
 
 For large mosaics, pass an existing writable directory on a disk with room
 as `scratch_directory` to reintegration. An unusable explicit directory is
@@ -1316,6 +1336,17 @@ run = seiza.rc_astro_process_file(
     progress=lambda fraction: print(f"{fraction:.0%}"),
 )
 print(run.primary, run.sidecars, run.device)
+```
+
+A linear stack is far outside the tools' 0..1 range, and they clamp it.
+`rc_astro_process_image` runs a tool on an array in any linear units: it
+maps the image onto 0..1, offset by its most negative sample and scaled by
+its span, and maps the result back, so the output is in the input's units.
+
+```python
+processed = seiza.rc_astro_process_image(tool, stack, parameters=values)
+processed.image                            # same shape and units as stack
+print(processed.cli_version, processed.ml_version, processed.device)
 ```
 
 Ctrl-C cancels a running tool within half a second, as does an optional

@@ -2591,7 +2591,7 @@ impl LightFailure {
     /// The reason a live stack reports for turning the light away.
     pub(crate) fn rejection(self) -> FrameRejectionReason {
         match self {
-            Self::Calibration(Error::Calibration(message)) => {
+            Self::Calibration(Error::Calibration(message) | Error::FlatRotation(message)) => {
                 FrameRejectionReason::Calibration(message)
             }
             Self::Calibration(error) | Self::Repair(error) => {

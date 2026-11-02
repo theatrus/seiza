@@ -224,6 +224,13 @@ pub enum Error {
     /// A calibration master or its metadata could not be applied.
     #[error("calibration error: {0}")]
     Calibration(String),
+    /// A master flat matches the light in everything but its rotator angle.
+    /// When the flats recorded a placeholder rather than a reading (N.I.N.A.
+    /// writes 0 when it has no rotator reading), comparing the lights at
+    /// [`LightRotation::Unknown`](seiza_calibration::LightRotation::Unknown)
+    /// accepts the flat. The message reads as a [`Self::Calibration`] one.
+    #[error("calibration error: {0}")]
+    FlatRotation(String),
     /// Per-input flat masking could not be evaluated safely.
     #[error("flat star masking failed: {0}")]
     FlatStarMasking(String),
@@ -250,6 +257,13 @@ pub enum Error {
     /// A frame could not be integrated into the stack.
     #[error("stacking error: {0}")]
     Stack(String),
+    /// A frame chosen for reintegration is not one the stack admitted: it
+    /// was never pushed, or was turned away.
+    #[error("{} is not an admitted frame of this stack", path.display())]
+    NotAdmitted {
+        /// The source path that matched no admitted frame.
+        path: PathBuf,
+    },
     /// The caller asked for the work to stop through a [`CancelSignal`].
     #[error("cancelled by the caller")]
     Cancelled,

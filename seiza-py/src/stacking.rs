@@ -406,7 +406,8 @@ impl PyStackOptions {
         weighting="equal",
         defects=None,
         bin_factor=1,
-        gpu=None
+        gpu=None,
+        interpolation="bilinear"
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -441,7 +442,17 @@ impl PyStackOptions {
         defects: Option<PyRef<'_, PyDefectMap>>,
         bin_factor: u32,
         gpu: Option<PyGpuOptions>,
+        interpolation: &str,
     ) -> PyResult<Self> {
+        let interpolation = match interpolation {
+            "bilinear" => seiza_stacking::Interpolation::Bilinear,
+            "lanczos3" => seiza_stacking::Interpolation::Lanczos3,
+            value => {
+                return Err(PyValueError::new_err(format!(
+                    "interpolation must be 'bilinear' or 'lanczos3', not {value:?}"
+                )));
+            }
+        };
         let weighting = match weighting {
             "equal" => FrameWeighting::Equal,
             "inverse-noise-variance" | "inverse_noise_variance" => {
@@ -509,6 +520,7 @@ impl PyStackOptions {
             normalization,
             rejection,
             weighting,
+            interpolation,
             defects: defects.map(|defects| defects.inner.clone()),
             ..StackOptions::default()
         };
@@ -565,6 +577,17 @@ impl PyStackOptions {
             Demosaic::Mhc => "mhc",
             Demosaic::Bilinear => "bilinear",
             Demosaic::Superpixel => "superpixel",
+        }
+    }
+
+    /// How registration resamples each frame onto the reference grid:
+    /// "bilinear", or "lanczos3", which is sharper and clamps its negative
+    /// lobes at high-contrast edges.
+    #[getter]
+    fn interpolation(&self) -> &'static str {
+        match self.inner.interpolation {
+            seiza_stacking::Interpolation::Bilinear => "bilinear",
+            seiza_stacking::Interpolation::Lanczos3 => "lanczos3",
         }
     }
 
@@ -2384,18 +2407,28 @@ impl PyLiveStacker {
     /// prepared frames wait in ``scratch_directory`` (the system temporary
     /// directory by default) between passes. The live stack is left as it
     /// was.
-    #[pyo3(signature = (*, sigma_low=3.0, sigma_high=3.0, scratch_directory=None))]
+    ///
+    /// ``frames`` integrates only the admitted frames read from those
+    /// source files, in that order, each normalized and weighted as in a
+    /// reintegration of every frame, so stacks of disjoint subsets share one
+    /// grid and one normalization. A path the stack did not admit, an empty
+    /// list or a frame named twice raises :class:`StackError`.
+    #[pyo3(signature = (*, sigma_low=3.0, sigma_high=3.0, scratch_directory=None, frames=None))]
     fn reintegrate(
         &self,
         py: Python<'_>,
         sigma_low: f32,
         sigma_high: f32,
         scratch_directory: Option<PathBuf>,
+        frames: Option<Vec<PathBuf>>,
     ) -> PyResult<PyStackSnapshot> {
         let stacker = self.active()?;
         let options = batch_options(sigma_low, sigma_high, scratch_directory)?;
         let result = py
-            .detach(|| stacker.reintegrate(&options, |_, _, _| {}))
+            .detach(|| match &frames {
+                Some(frames) => stacker.reintegrate_frames(frames, &options, |_, _, _| {}),
+                None => stacker.reintegrate(&options, |_, _, _| {}),
+            })
             .map_err(stack_error)?;
         let mut snapshot = PyStackSnapshot::of(stacker, result.snapshot);
         snapshot.final_samples = Some(result.frames);

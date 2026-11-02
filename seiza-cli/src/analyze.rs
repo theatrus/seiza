@@ -53,7 +53,7 @@ pub fn run(args: AnalyzeArgs) -> Result<()> {
             .unwrap_or(std::path::Path::new("."));
         let mut file = tempfile::NamedTempFile::new_in(parent)?;
         file.write_all(data)?;
-        file.as_file().sync_all()?;
+        seiza_fits::sync_file(file.as_file())?;
         file.persist_noclobber(path)
             .with_context(|| format!("writing {}", path.display()))?;
     }

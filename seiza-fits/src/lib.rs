@@ -36,7 +36,7 @@ pub use seiza_stretch::{
 };
 pub use window::{ImageWindow, MAX_WINDOW_EDGE, read_window};
 pub use writer::{
-    F32ImageData, ImagePart, ImageSamples, WriteHeaderCard, update_header_in_place,
+    F32ImageData, ImagePart, ImageSamples, WriteHeaderCard, sync_file, update_header_in_place,
     write_f32_image, write_f32_image_to, write_images, write_images_to,
 };
 

@@ -1,7 +1,7 @@
 [package]
 name = "seiza-fits"
 description = "Fast FITS image I/O, statistics, and MTF autostretch for astrophotography"
-version = "0.7.0"
+version = "0.7.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -18,4 +18,9 @@ multiversion = "0.9"
 rayon.workspace = true
 seiza-stretch.workspace = true
 tempfile = "3"
+
+# A plain fsync when an Apple file system refuses a full sync; see
+# `sync_file`.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+rustix = { version = "1", features = ["fs"] }
 

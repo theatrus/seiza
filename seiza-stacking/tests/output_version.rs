@@ -649,6 +649,15 @@ const REINTEGRATED: &[f64] = &[
 ];
 
 #[rustfmt::skip]
+const REINTEGRATED_CHOSEN: &[f64] = &[
+    1.4680276e2, 2.8517122e2, 3.9045286e3, 9.8006393e1, 9.9262321e1, 1.0055122e2,
+    1.1880607e2, 1.0539186e2, 9.8017815e1, 1.0012206e2, 1.0237365e2, 1.0365538e2,
+    1.0529183e2, 9.8916031e1, 1.0058815e2, 1.0281958e2, 1.0497234e2, 1.0686234e2,
+    1.0049362e2, 1.0083041e2, 1.0340578e2, 1.0562513e2, 1.0804591e2, 1.0114957e2,
+    1.7605489e2, 1.0455643e2, 1.0783926e2, 1.1210727e2,
+];
+
+#[rustfmt::skip]
 const DRIZZLED: &[f64] = &[
     1.4613605e2, 2.8698624e2, 4.1971372e3, 9.6619240e1, 9.8821266e1, 1.0033887e2,
     1.0672266e2, 1.0450388e2, 9.7934311e1, 9.9977234e1, 1.0149843e2, 1.0543295e2,
@@ -1081,6 +1090,17 @@ fn a_reintegration_and_its_drizzle_keep_their_output() {
         "REINTEGRATED",
         &summary(&reintegrated.snapshot.image),
         REINTEGRATED,
+    );
+    // Half the frames, as training pairs and frame selection use them: the
+    // other frames still set the background reference.
+    let chosen = paths.iter().skip(1).step_by(2).collect::<Vec<_>>();
+    let half = stacker
+        .reintegrate_frames(&chosen, &options, |_, _, _| {})
+        .unwrap();
+    check(
+        "REINTEGRATED_CHOSEN",
+        &summary(&half.snapshot.image),
+        REINTEGRATED_CHOSEN,
     );
     let drizzle = DrizzleOptions {
         scale: 2,

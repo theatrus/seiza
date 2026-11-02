@@ -182,6 +182,38 @@ impl LightRotation {
     }
 }
 
+/// `recorded`, `unknown`, or the measured angle in degrees.
+impl std::fmt::Display for LightRotation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Recorded => f.write_str("recorded"),
+            Self::Measured { degrees } => write!(f, "{degrees}"),
+            Self::Unknown => f.write_str("unknown"),
+        }
+    }
+}
+
+/// Reads `recorded`, `unknown`, or a finite angle in degrees, the spelling
+/// [`Display`](std::fmt::Display) writes.
+impl std::str::FromStr for LightRotation {
+    type Err = crate::UnknownWord;
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text {
+            "recorded" => Ok(Self::Recorded),
+            "unknown" => Ok(Self::Unknown),
+            _ => text
+                .parse::<f64>()
+                .ok()
+                .filter(|degrees| degrees.is_finite())
+                .map(|degrees| Self::Measured { degrees })
+                .ok_or_else(|| crate::UnknownWord {
+                    what: "light rotation: recorded, unknown or an angle in degrees",
+                    text: text.to_string(),
+                }),
+        }
+    }
+}
+
 impl Default for MatchTolerances {
     fn default() -> Self {
         Self {
@@ -1373,5 +1405,22 @@ mod tests {
             ..MatchTolerances::default()
         };
         assert!(broken.validate().is_err());
+    }
+
+    #[test]
+    fn light_rotation_reads_the_words_and_angles_it_writes() {
+        for rotation in [
+            LightRotation::Recorded,
+            LightRotation::Unknown,
+            LightRotation::Measured { degrees: 269.06 },
+            LightRotation::Measured { degrees: -90.0 },
+        ] {
+            assert_eq!(rotation.to_string().parse::<LightRotation>(), Ok(rotation));
+        }
+        for refused in ["sideways", "", "NaN", "inf", "Unknown"] {
+            let error = refused.parse::<LightRotation>().unwrap_err();
+            assert_eq!(error.text, refused);
+            assert!(error.to_string().contains("an angle in degrees"), "{error}");
+        }
     }
 }

@@ -2305,7 +2305,7 @@ dependencies = [
 
 [[package]]
 name = "seiza"
-version = "0.48.1"
+version = "0.48.2"
 dependencies = [
  "directories",
  "image",
@@ -2354,7 +2354,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-calibration"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "chrono",
  "nalgebra",
@@ -2408,19 +2408,20 @@ dependencies = [
 
 [[package]]
 name = "seiza-fits"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "flate2",
  "memmap2",
  "multiversion",
  "rayon",
+ "rustix",
  "seiza-stretch",
  "tempfile",
 ]
 
 [[package]]
 name = "seiza-image-io"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "chrono",
  "image",
@@ -2476,7 +2477,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-py"
-version = "0.48.1"
+version = "0.48.2"
 dependencies = [
  "image",
  "numpy",
@@ -2532,7 +2533,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-stacking"
-version = "0.56.0"
+version = "0.56.1"
 dependencies = [
  "bytemuck",
  "fs2",
@@ -2590,7 +2591,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-xisf"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "flate2",
  "lz4_flex",

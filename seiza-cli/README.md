@@ -888,6 +888,7 @@ Raw calibration sequences can be integrated into reusable masters first:
 seiza master bias bias/*.fits --output master-bias.fits --report master-bias.json
 seiza master dark dark/*.fits --bias master-bias.fits \
   --output master-dark.fits --report master-dark.json
+seiza master dark flat-darks/*.fits --output master-dark-flat.fits
 seiza master flat flats/*.fits --bias master-bias.fits \
   --dark-flat master-dark-flat.fits --output master-flat.fits \
   --report master-flat.json
@@ -988,7 +989,10 @@ JSON report retain the full measured rotation.
 `--flat` accepts an integrated master flat in the light frame's raw sampling.
 For legacy masters, `--bias` removes the flat's pedestal before normalization.
 Masters built by `seiza master` carry FITS calibration-state headers, so a
-bias-subtracted dark or calibrated flat is not subtracted twice. Each light is
+bias-subtracted dark or calibrated flat is not subtracted twice. They also
+record `IMAGETYP` as `MASTER BIAS`, `MASTER DARK` or `MASTER FLAT`, so software
+that sorts frames by `IMAGETYP`, such as PixInsight and PSF Guard, files them
+as calibration masters. A master from flat-darks is a `MASTER DARK`. Each light is
 checked against what the masters' headers record: gain, offset, binning, the
 dark's sensor temperature (`CCD-TEMP` or `SET-TEMP`) and the flat's filter and
 optics. A master dark that records no temperature is used with a warning.
@@ -996,6 +1000,23 @@ Use `--flat master-flat.fits --allow-flat-gain-offset-mismatch` to allow a
 flat shot at a different gain or offset, provided it was calibrated with
 matching flat-darks and records `DARKSUB=T`. The default still rejects these
 mismatches. The flag does not relax bias/dark matching or any other flat checks.
+
+`seiza stack` refuses a master flat whose rotator angle differs from a
+light's by more than 2 degrees. When the flats or the lights recorded a
+placeholder instead of a rotator reading, such as the 0 N.I.N.A. records when
+it has none, the refusal is wrong. Two options handle it:
+
+- `--light-rotation unknown` skips the angle check, so a flat at any angle is
+  accepted, including one taken at a genuinely different angle. Use it only
+  when an angle is a placeholder.
+- `--light-rotation DEGREES` compares every light at that one angle, such as a
+  plate-solved position angle, instead of the angle each light recorded.
+
+Other flat checks still apply. Both options also apply to the flats of
+`--joint-canvas` groups, and the stack report records the option under
+`calibration.light_rotation`. In Python, set
+`MatchTolerances(light_rotation="unknown")`.
+
 Planar RGB flats are normalized independently per channel. CFA flats remain
 one-channel and are applied before debayering. See the
 [stacking design](https://github.com/theatrus/seiza/blob/main/docs/design/image-stacking.md)

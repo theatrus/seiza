@@ -1545,6 +1545,10 @@ struct Replay<'a> {
     /// Whether frames prepared from their sources are resampled over their
     /// footprints on an expanded canvas.
     footprints: bool,
+    /// The admitted frames that take part, in order: each integration
+    /// position's index into the ledger. Every frame unless the caller
+    /// chose some.
+    selected: &'a [usize],
 }
 
 /// Each frame's band of rows from its scratch file, normalized as it is
@@ -1682,7 +1686,7 @@ fn source_files(admitted: &AdmittedFrame) -> Vec<PathBuf> {
 }
 
 impl Replay<'_> {
-    /// Each frame's weights, one per channel.
+    /// Each frame's weights, one per channel, by its integration position.
     fn frame_weights(&self, index: usize) -> Vec<f32> {
         match &self.options.frame_weights {
             Some(weights) => weights[index].clone(),
@@ -1725,10 +1729,11 @@ impl Replay<'_> {
     ) -> Result<Option<(BatchStackResult, Option<DrizzleResult>)>> {
         let stacker = self.stacker;
         let frames = &stacker.ledger.frames;
-        let count = frames.len();
+        let selected = self.selected;
+        let count = selected.len();
         let stored = |index: usize| cache.stored(index);
-        for frame in frames {
-            stacker.source_unchanged(frame)?;
+        for &index in selected {
+            stacker.source_unchanged(&frames[index])?;
         }
         // Fit each frame's normalization, and keep any frame the cache does
         // not hold yet. A frame whose background samples are kept is fitted
@@ -1737,7 +1742,7 @@ impl Replay<'_> {
         // memory holds, from the replay's lookahead to four; their buffers
         // are reused, saving the cost of mapping fresh memory.
         let pending = (0..count)
-            .filter(|&index| self.renormalizer.is_some() || !stored(index))
+            .filter(|&position| self.renormalizer.is_some() || !stored(selected[position]))
             .collect::<Vec<_>>();
         let frame_bytes = stacker.reference.sample_count() * std::mem::size_of::<f32>();
         let lookahead = (self.options.band_memory_bytes / 2 / frame_bytes.max(1))
@@ -1794,9 +1799,10 @@ impl Replay<'_> {
                 loop {
                     crate::batch::check_cancelled(self.options)?;
                     while in_flight.len() < lookahead
-                        && let Some(index) = pending.next()
+                        && let Some(position) = pending.next()
                     {
-                        progress(BatchStackPass::Estimate, index, count);
+                        progress(BatchStackPass::Estimate, position, count);
+                        let index = selected[position];
                         // A frame fitted from its background samples reads
                         // only their small file, so nothing is read ahead.
                         let fitted_from_samples =
@@ -1824,27 +1830,28 @@ impl Replay<'_> {
             })
         })?;
         drop(buffers);
-        if !(0..count).all(stored) {
+        if !selected.iter().all(|&index| stored(index)) {
             return Ok(None);
         }
 
-        let maps = (0..count)
-            .map(|index| self.normalization(index))
+        let maps = selected
+            .iter()
+            .map(|&index| self.normalization(index))
             .collect::<Result<Vec<_>>>()?;
         let recorded = self
             .renormalizer
             .filter(|fit| fit.preserve_recorded)
             .map(|_| {
-                frames
+                selected
                     .iter()
-                    .map(|frame| frame.mapping.normalization().clone())
+                    .map(|&index| frames[index].mapping.normalization().clone())
                     .collect::<Vec<_>>()
             });
         let reference = &stacker.reference;
         let source = CacheBands {
             cache,
             shape: (reference.width, reference.height, reference.channels),
-            frames: (0..count).collect(),
+            frames: selected.to_vec(),
             maps: &maps,
             recorded: recorded.as_deref(),
         };
@@ -1896,8 +1903,8 @@ impl Replay<'_> {
         );
         crate::tasks::ahead(|ahead| {
             std::thread::scope(|scope| {
-                let read = |index: usize| {
-                    let admitted = &frames[index];
+                let read = |position: usize| {
+                    let admitted = &frames[selected[position]];
                     let masters = self.masters.get(stacker, admitted.calibration)?;
                     stacker.read_calibrated(admitted, &masters)
                 };
@@ -1911,10 +1918,11 @@ impl Replay<'_> {
                     // allows, which are read while these are drizzled.
                     while next < count.min(last + lookahead) {
                         let frame = next;
-                        self.masters.warm(stacker, frames[frame].calibration);
+                        let admitted = &frames[selected[frame]];
+                        self.masters.warm(stacker, admitted.calibration);
                         in_flight.push_back(ahead.spawn(
                             scope,
-                            move || source_files(&frames[frame]),
+                            move || source_files(admitted),
                             move || read(frame),
                         ));
                         next += 1;
@@ -1939,16 +1947,20 @@ impl Replay<'_> {
                     let batch = (first..last)
                         .zip(&sources)
                         .zip(fates.iter().zip(&weights))
-                        .map(|((index, (image, layout)), (fates, weight))| DrizzleFrame {
-                            image,
-                            layout: *layout,
-                            mapping: sensor
-                                .as_ref()
-                                .map_or(&frames[index].mapping, |sensor| &sensor[index]),
-                            normalization: &maps[index],
-                            fates,
-                            weight,
-                        })
+                        .map(
+                            |((position, (image, layout)), (fates, weight))| DrizzleFrame {
+                                image,
+                                layout: *layout,
+                                mapping: sensor
+                                    .as_ref()
+                                    .map_or(&frames[selected[position]].mapping, |sensor| {
+                                        &sensor[selected[position]]
+                                    }),
+                                normalization: &maps[position],
+                                fates,
+                                weight,
+                            },
+                        )
                         .collect::<Vec<_>>();
                     accumulator.add_frames(&batch)?;
                     first = last;
@@ -1972,7 +1984,8 @@ impl Replay<'_> {
     ) -> Result<(BatchStackResult, Option<DrizzleResult>)> {
         let stacker = self.stacker;
         let ledger = &stacker.ledger;
-        let count = ledger.frames.len();
+        let selected = self.selected;
+        let count = selected.len();
         let options = self.options;
         let masters = self.masters;
         let renormalizer = self.renormalizer;
@@ -2008,7 +2021,8 @@ impl Replay<'_> {
         let sensor = sensor.as_ref();
         let (result, accumulator) = crate::tasks::ahead(|ahead| {
             std::thread::scope(|scope| {
-                let prepare = |pass: BatchStackPass, index: usize| {
+                let prepare = |pass: BatchStackPass, position: usize| {
+                    let index = selected[position];
                     let frame = &ledger.frames[index];
                     let masters = masters.get(stacker, frame.calibration)?;
                     let image = stacker.replay_frame(
@@ -2031,7 +2045,8 @@ impl Replay<'_> {
                 let load = |pass, index| {
                     progress(pass, index, count);
                     while next < order.len() && in_flight.len() < lookahead {
-                        let (frame_pass, frame_index) = order[next];
+                        let (frame_pass, frame_position) = order[next];
+                        let frame_index = selected[frame_position];
                         let frame = &ledger.frames[frame_index];
                         masters.warm(stacker, frame.calibration);
                         let files = move || {
@@ -2043,7 +2058,7 @@ impl Replay<'_> {
                         };
                         in_flight.push_back((
                             next,
-                            ahead.spawn(scope, files, move || prepare(frame_pass, frame_index)),
+                            ahead.spawn(scope, files, move || prepare(frame_pass, frame_position)),
                         ));
                         next += 1;
                     }
@@ -2101,13 +2116,14 @@ impl Replay<'_> {
                     }
                     None => (None, None),
                 };
-                let mut observe = |index: usize, fates: PackedFates| -> Result<()> {
+                let mut observe = |position: usize, fates: PackedFates| -> Result<()> {
                     let Some(jobs) = &jobs else {
                         return Ok(());
                     };
+                    let index = selected[position];
                     let frame = &ledger.frames[index];
                     let (image, layout) = match drizzle_source.borrow_mut().take() {
-                        Some((source_index, source)) if source_index == index => source,
+                        Some((source_position, source)) if source_position == position => source,
                         _ => stacker
                             .read_calibrated(frame, &*masters.get(stacker, frame.calibration)?)?,
                     };
@@ -2130,7 +2146,7 @@ impl Replay<'_> {
                                 layout,
                                 normalization,
                                 fates,
-                                weight: self.frame_weights(index),
+                                weight: self.frame_weights(position),
                             },
                         )
                         .map_err(|_| Error::Stack("the drizzle stopped early".into()))
@@ -2694,6 +2710,85 @@ impl LiveStacker {
         Ok(self.replay(options, None, progress)?.0)
     }
 
+    /// [`Self::reintegrate`] over some of the admitted frames alone: those
+    /// read from the files `sources`, integrated in that order.
+    ///
+    /// Each frame is prepared, normalized and weighted exactly as in a
+    /// reintegration of every frame, and its background is matched to the
+    /// same reference, made from the best of all the admitted frames. Stacks
+    /// of disjoint subsets therefore share one grid and one normalization,
+    /// and differ only by their frames, as a pair of independent exposures
+    /// of the same sky would. Frames kept by
+    /// [`Self::retain_frames_for_reintegration`] are read back rather than
+    /// prepared again, so a stack registered once can be integrated over
+    /// many subsets quickly.
+    ///
+    /// A source is matched to an admitted frame by its path as it was
+    /// pushed, or else by the file it resolves to. Fails with
+    /// [`Error::NotAdmitted`] for a source this stack did not admit, and
+    /// with [`Error::Stack`] when `sources` is empty or names a frame twice.
+    /// `options.frame_weights`, which an unweighted stack accepts, follow
+    /// `sources`. `progress` counts the chosen frames, and its frame index is
+    /// a position in `sources`.
+    pub fn reintegrate_frames<P: AsRef<Path>>(
+        &self,
+        sources: &[P],
+        options: &BatchStackOptions,
+        progress: impl FnMut(BatchStackPass, usize, usize),
+    ) -> Result<BatchStackResult> {
+        let selected = self.admitted_indices(sources)?;
+        Ok(self
+            .replay_selected(options, None, progress, true, &selected)?
+            .0)
+    }
+
+    /// The ledger index of the admitted frame read from each of `sources`.
+    fn admitted_indices<P: AsRef<Path>>(&self, sources: &[P]) -> Result<Vec<usize>> {
+        if sources.is_empty() {
+            return Err(Error::Stack(
+                "choose at least one admitted frame to reintegrate".into(),
+            ));
+        }
+        let frames = &self.ledger.frames;
+        let pushed = frames
+            .iter()
+            .map(|frame| frame.source.as_ref().map(|source| source.path.as_path()))
+            .collect::<Vec<_>>();
+        // Resolved only when a path is not found as it was pushed.
+        let resolved = std::cell::OnceCell::new();
+        let mut taken = vec![false; frames.len()];
+        let mut selected = Vec::with_capacity(sources.len());
+        for source in sources {
+            let source = source.as_ref();
+            let index = pushed
+                .iter()
+                .position(|path| *path == Some(source))
+                .or_else(|| {
+                    let wanted = std::fs::canonicalize(source).ok()?;
+                    resolved
+                        .get_or_init(|| {
+                            pushed
+                                .iter()
+                                .map(|path| path.and_then(|path| std::fs::canonicalize(path).ok()))
+                                .collect::<Vec<_>>()
+                        })
+                        .iter()
+                        .position(|path| path.as_ref() == Some(&wanted))
+                })
+                .ok_or_else(|| Error::NotAdmitted {
+                    path: source.to_path_buf(),
+                })?;
+            if std::mem::replace(&mut taken[index], true) {
+                return Err(Error::Stack(format!(
+                    "{} is chosen twice for reintegration",
+                    source.display()
+                )));
+            }
+            selected.push(index);
+        }
+        Ok(selected)
+    }
+
     /// [`Self::reintegrate`], also drizzling every admitted frame onto a
     /// grid `drizzle.scale` times the reference's.
     ///
@@ -2752,8 +2847,22 @@ impl LiveStacker {
         &self,
         options: &BatchStackOptions,
         drizzle: Option<&DrizzleOptions>,
+        progress: impl FnMut(BatchStackPass, usize, usize),
+        banded: bool,
+    ) -> Result<(BatchStackResult, Option<DrizzleResult>)> {
+        let every = (0..self.ledger.frames.len()).collect::<Vec<_>>();
+        self.replay_selected(options, drizzle, progress, banded, &every)
+    }
+
+    /// [`Self::replay_with`] over the admitted frames at ledger indices
+    /// `selected` alone, integrated in that order.
+    fn replay_selected(
+        &self,
+        options: &BatchStackOptions,
+        drizzle: Option<&DrizzleOptions>,
         mut progress: impl FnMut(BatchStackPass, usize, usize),
         banded: bool,
+        selected: &[usize],
     ) -> Result<(BatchStackResult, Option<DrizzleResult>)> {
         if let Some(plan) = &self.file_sessions {
             // Refuse a changed historical master before any work. The current
@@ -2792,10 +2901,9 @@ impl LiveStacker {
                 ));
             }
             options.frame_weights = Some(
-                ledger
-                    .frames
+                selected
                     .iter()
-                    .map(|frame| frame.weighting.weight.clone())
+                    .map(|&index| ledger.frames[index].weighting.weight.clone())
                     .collect(),
             );
         }
@@ -2838,6 +2946,7 @@ impl LiveStacker {
             masters: &masters,
             renormalizer: renormalizer.as_ref(),
             footprints,
+            selected,
         };
         let banded_result = match cache.filter(|_| banded) {
             Some(cache) => replay.bands(cache, drizzle, &mut progress)?,
@@ -4851,5 +4960,168 @@ mod tests {
                 .iter()
                 .all(|record| record.weight.is_empty())
         );
+    }
+
+    /// A stack of eight noisy frames of one star field, written to files,
+    /// locally normalized and weighted by noise, with its frames kept for
+    /// reintegration when `kept`. The frames' noise differs, so their
+    /// weights do.
+    fn chosen_frames_stack(kept: bool) -> (tempfile::TempDir, LiveStacker, Vec<PathBuf>) {
+        let directory = tempfile::tempdir().unwrap();
+        let field = crate::registration::test_star_field(false);
+        let paths = (0..8_u32)
+            .map(|frame| {
+                let mut state = 0x9e37_79b9_u32.wrapping_mul(frame + 1) | 1;
+                let amplitude = 4.0 + frame as f32;
+                let data = field
+                    .data
+                    .iter()
+                    .map(|value| {
+                        state ^= state << 13;
+                        state ^= state >> 17;
+                        state ^= state << 5;
+                        value + amplitude * ((state % 2001) as f32 / 1000.0 - 1.0)
+                    })
+                    .collect();
+                let path = directory.path().join(format!("light-{frame}.fits"));
+                crate::write_processed_image_fits_f32(
+                    &path,
+                    &LinearImage::new(field.width, field.height, 1, data).unwrap(),
+                    &[],
+                    &[],
+                )
+                .unwrap();
+                path
+            })
+            .collect::<Vec<_>>();
+        let options = crate::StackOptions {
+            normalization: crate::NormalizationMode::LocalBackground { tile_size: 64 },
+            weighting: crate::FrameWeighting::InverseNoiseVariance {
+                minimum_weight: 0.05,
+                maximum_weight: 20.0,
+            },
+            ..crate::StackOptions::default()
+        };
+        let mut stacker =
+            LiveStacker::open_fits(&paths[0], None, None, None, None, options).unwrap();
+        if kept {
+            stacker.retain_frames_for_reintegration(None).unwrap();
+        }
+        for path in &paths[1..] {
+            assert!(matches!(
+                stacker.push_fits(path).unwrap(),
+                crate::FrameDisposition::Accepted(_)
+            ));
+        }
+        (directory, stacker, paths)
+    }
+
+    #[test]
+    fn choosing_every_frame_reintegrates_as_reintegrate_does() {
+        for kept in [true, false] {
+            let (_directory, stacker, paths) = chosen_frames_stack(kept);
+            let options = BatchStackOptions::default();
+            let every = stacker.reintegrate(&options, |_, _, _| {}).unwrap();
+            let chosen = stacker
+                .reintegrate_frames(&paths, &options, |_, _, _| {})
+                .unwrap();
+            assert_eq!(
+                snapshot_bits(&every.snapshot),
+                snapshot_bits(&chosen.snapshot),
+                "kept: {kept}"
+            );
+            // In another order, each frame keeps its own weight and
+            // normalization, so only rounding differs, where no rejection
+            // decision on the edge of its threshold went the other way.
+            let reversed = paths.iter().rev().collect::<Vec<_>>();
+            let reordered = stacker
+                .reintegrate_frames(&reversed, &options, |_, _, _| {})
+                .unwrap();
+            let (every, reordered) = (&every.snapshot, &reordered.snapshot);
+            let agreeing = (0..every.image.data.len())
+                .filter(|&index| {
+                    every.coverage[index] == reordered.coverage[index]
+                        && every.rejected_samples[index] == reordered.rejected_samples[index]
+                })
+                .collect::<Vec<_>>();
+            let largest = agreeing
+                .iter()
+                .map(|&index| (every.image.data[index] - reordered.image.data[index]).abs())
+                .fold(0.0_f32, f32::max);
+            assert!(largest < 1e-2, "kept: {kept}, largest difference {largest}");
+        }
+    }
+
+    #[test]
+    fn chosen_frames_integrate_alike_in_bands_and_whole() {
+        let (_directory, stacker, paths) = chosen_frames_stack(true);
+        let options = BatchStackOptions::default();
+        let chosen = [&paths[5], &paths[2], &paths[7], &paths[0]];
+        let mut reported = Vec::new();
+        let banded = stacker
+            .reintegrate_frames(&chosen, &options, |pass, index, count| {
+                reported.push((pass, index, count))
+            })
+            .unwrap();
+        assert!(!reported.is_empty());
+        assert!(
+            reported
+                .iter()
+                .all(|&(_, index, count)| count == 4 && index < 4)
+        );
+        assert_eq!(banded.frames.len(), 4);
+        assert!(banded.snapshot.coverage.iter().all(|&count| count <= 4));
+        let selected = stacker.admitted_indices(&chosen).unwrap();
+        assert_eq!(selected, [5, 2, 7, 0]);
+        let (whole, _) = stacker
+            .replay_selected(&options, None, |_, _, _| {}, false, &selected)
+            .unwrap();
+        assert_eq!(
+            snapshot_bits(&banded.snapshot),
+            snapshot_bits(&whole.snapshot)
+        );
+        // Fewer frames make a noisier stack of the same sky.
+        let every = stacker.reintegrate(&options, |_, _, _| {}).unwrap();
+        let mean_variance = |snapshot: &crate::StackSnapshot| {
+            snapshot
+                .variance
+                .data
+                .iter()
+                .map(|&value| f64::from(value))
+                .sum::<f64>()
+                / snapshot.variance.data.len() as f64
+        };
+        assert_ne!(
+            snapshot_bits(&banded.snapshot),
+            snapshot_bits(&every.snapshot)
+        );
+        assert!(banded.snapshot.coverage.iter().max() < every.snapshot.coverage.iter().max());
+        assert!(mean_variance(&banded.snapshot).is_finite());
+    }
+
+    #[test]
+    fn chosen_frames_must_be_admitted_frames_named_once() {
+        let (directory, stacker, paths) = chosen_frames_stack(true);
+        let options = BatchStackOptions::default();
+        let none: [&Path; 0] = [];
+        assert!(matches!(
+            stacker.reintegrate_frames(&none, &options, |_, _, _| {}),
+            Err(Error::Stack(_))
+        ));
+        let stranger = directory.path().join("light-99.fits");
+        assert!(matches!(
+            stacker.reintegrate_frames(&[&paths[1], &stranger], &options, |_, _, _| {}),
+            Err(Error::NotAdmitted { path }) if path == stranger
+        ));
+        assert!(matches!(
+            stacker.reintegrate_frames(&[&paths[1], &paths[3], &paths[1]], &options, |_, _, _| {}),
+            Err(Error::Stack(_))
+        ));
+        // A path spelled another way names the same file.
+        let respelled = directory
+            .path()
+            .join(".")
+            .join(paths[3].file_name().unwrap());
+        assert_eq!(stacker.admitted_indices(&[respelled]).unwrap(), [3]);
     }
 }

@@ -103,7 +103,7 @@ pub(crate) fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<(
     serde_json::to_writer_pretty(temporary.as_file_mut(), value)?;
     temporary.as_file_mut().write_all(b"\n")?;
     temporary.as_file_mut().flush()?;
-    temporary.as_file().sync_all()?;
+    seiza_fits::sync_file(temporary.as_file())?;
     temporary
         .persist(path)
         .map_err(|error| error.error)

@@ -201,9 +201,36 @@ fn write_atomically(
     write(&mut writer)?;
     writer.flush()?;
     drop(writer);
-    temporary.as_file().sync_all()?;
+    sync_file(temporary.as_file())?;
     temporary.persist(path).map_err(|error| error.error)?;
     Ok(())
+}
+
+/// Flush a file Seiza has written to stable storage, before it is renamed
+/// over the file it replaces.
+///
+/// On Apple platforms `File::sync_all` asks for a full sync
+/// (`F_FULLFSYNC`), which SMB shares and other network file systems refuse
+/// as unsupported. The data still reaches the server with a plain `fsync`,
+/// which is all `sync_all` does on other platforms, so a refused full sync
+/// falls back to that instead of failing the write.
+pub fn sync_file(file: &std::fs::File) -> std::io::Result<()> {
+    match file.sync_all() {
+        #[cfg(target_vendor = "apple")]
+        Err(error) if full_sync_refused(&error) => {
+            rustix::fs::fsync(file).map_err(std::io::Error::from)
+        }
+        result => result,
+    }
+}
+
+/// Whether `error` is a file system refusing a full sync, not a failed one.
+#[cfg(target_vendor = "apple")]
+fn full_sync_refused(error: &std::io::Error) -> bool {
+    use rustix::io::Errno;
+    [Errno::NOTSUP, Errno::OPNOTSUPP]
+        .iter()
+        .any(|errno| error.raw_os_error() == Some(errno.raw_os_error()))
 }
 
 /// Write a primary-HDU 32-bit floating-point FITS image to an existing stream.
@@ -1339,5 +1366,26 @@ mod tests {
         let long = HeaderValue::String("x".repeat(100));
         assert!(update_header_in_place(&path, "OBJECT", &long, None).is_err());
         assert!(update_header_in_place(&path, "BAD=KEY", &HeaderValue::Integer(1), None).is_err());
+    }
+
+    #[test]
+    fn a_written_file_syncs() {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(&[0u8; BLOCK]).unwrap();
+        sync_file(&file).unwrap();
+    }
+
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn a_refused_full_sync_is_told_from_a_failed_one() {
+        use rustix::io::Errno;
+        for refused in [Errno::NOTSUP, Errno::OPNOTSUPP] {
+            let error = std::io::Error::from_raw_os_error(refused.raw_os_error());
+            assert!(full_sync_refused(&error), "{error}");
+        }
+        for failed in [Errno::IO, Errno::NOSPC, Errno::ACCESS] {
+            let error = std::io::Error::from_raw_os_error(failed.raw_os_error());
+            assert!(!full_sync_refused(&error), "{error}");
+        }
     }
 }

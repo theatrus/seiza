@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "seiza-training"
+description = "Corpus passes and training for Seiza's learned restoration models"
+version = "0.1.0"
+requires-python = ">=3.11"
+# `seiza` is built from ../seiza-py with `maturin develop`, not installed
+# from an index, so the corpus is made with the stacker in this checkout.
+dependencies = ["numpy>=1.23.2"]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "astropy>=6"]
+
+[tool.setuptools]
+packages = ["seiza_training"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
