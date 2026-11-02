@@ -89,6 +89,9 @@ enum InterpolationArg {
 }
 
 #[derive(Args)]
+// The flat-matching options apply to --flat and to the flats of
+// --joint-canvas groups alike.
+#[command(group(clap::ArgGroup::new("flats").args(["flat", "joint_canvas"]).multiple(true)))]
 pub(crate) struct StackArgs {
     /// FITS or XISF light frames, in acquisition order; see --reference
     #[arg(required = true, num_args = 2..)]
@@ -156,8 +159,22 @@ pub(crate) struct StackArgs {
     flat: Option<PathBuf>,
     /// Allow a master flat with different gain or offset only when its
     /// calibration headers record DARKSUB=T. Other matching checks still apply
-    #[arg(long, requires = "flat")]
+    #[arg(long, requires = "flats")]
     allow_flat_gain_offset_mismatch: bool,
+    /// The rotator angle each light is compared at; a master flat must lie
+    /// within 2 degrees of it. `recorded` (the default) uses the angle each
+    /// light recorded. `unknown` skips the angle check, so a flat at any
+    /// angle is accepted: use it only when the flats or the lights recorded
+    /// a placeholder, such as N.I.N.A.'s 0, instead of a rotator reading.
+    /// An angle in degrees compares every light at that one angle. Other
+    /// flat checks still apply
+    #[arg(
+        long,
+        requires = "flats",
+        allow_negative_numbers = true,
+        value_name = "recorded|unknown|DEGREES"
+    )]
+    light_rotation: Option<seiza_calibration::LightRotation>,
     /// Override master-dark exposure time in seconds
     #[arg(long, requires = "dark")]
     dark_exposure_seconds: Option<f64>,
@@ -279,6 +296,12 @@ struct CalibrationReport {
     dark: Option<FileIdentity>,
     flat: Option<FileIdentity>,
     dark_exposure_seconds: Option<f64>,
+    /// The flat-matching options, present only when set, so other reports
+    /// are unchanged.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    allow_flat_gain_offset_mismatch: bool,
+    #[serde(skip_serializing_if = "seiza_calibration::LightRotation::is_recorded")]
+    light_rotation: seiza_calibration::LightRotation,
 }
 
 #[derive(Serialize)]
@@ -418,6 +441,28 @@ fn normalization_or_default(chosen: Option<NormalizationArg>, expand: bool) -> N
 }
 
 pub(crate) fn run(options: StackArgs) -> Result<()> {
+    let recorded_angles = options.light_rotation.unwrap_or_default().is_recorded();
+    stack(options).map_err(|error| {
+        let flat_rotation = error.chain().any(|cause| {
+            matches!(
+                cause.downcast_ref(),
+                Some(seiza_stacking::Error::FlatRotation(_))
+            )
+        });
+        if flat_rotation && recorded_angles {
+            anyhow::anyhow!(
+                "{error:#}\nIf the flats or the lights recorded a placeholder angle instead of a \
+                 rotator reading (N.I.N.A. records 0 when it has none), rerun with \
+                 --light-rotation unknown to skip the angle check, or with \
+                 --light-rotation DEGREES to compare the lights at an angle you measured"
+            )
+        } else {
+            error
+        }
+    })
+}
+
+fn stack(options: StackArgs) -> Result<()> {
     let expand = matches!(options.reference, ReferenceArg::Expand)
         || options.reference_canvas.is_some()
         || options.joint_canvas.is_some();
@@ -606,6 +651,8 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
                 dark: options.dark.as_deref().map(file_identity).transpose()?,
                 flat: options.flat.as_deref().map(file_identity).transpose()?,
                 dark_exposure_seconds: options.dark_exposure_seconds,
+                allow_flat_gain_offset_mismatch: options.allow_flat_gain_offset_mismatch,
+                light_rotation: options.light_rotation.unwrap_or_default(),
             })
         })
         .transpose()?;
@@ -670,6 +717,7 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
     stack_options
         .match_tolerances
         .allow_flat_gain_offset_mismatch = options.allow_flat_gain_offset_mismatch;
+    stack_options.match_tolerances.light_rotation = options.light_rotation.unwrap_or_default();
     stack_options.acceptance.minimum_overlap_fraction = min_overlap;
     stack_options.registration.maximum_drift_pixels = options.max_registration_drift;
     stack_options.registration.model = match registration_model {

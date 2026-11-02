@@ -224,6 +224,13 @@ pub enum Error {
     /// A calibration master or its metadata could not be applied.
     #[error("calibration error: {0}")]
     Calibration(String),
+    /// A master flat matches the light in everything but its rotator angle.
+    /// When the flats recorded a placeholder rather than a reading (N.I.N.A.
+    /// writes 0 when it has no rotator reading), comparing the lights at
+    /// [`LightRotation::Unknown`](seiza_calibration::LightRotation::Unknown)
+    /// accepts the flat. The message reads as a [`Self::Calibration`] one.
+    #[error("calibration error: {0}")]
+    FlatRotation(String),
     /// Per-input flat masking could not be evaluated safely.
     #[error("flat star masking failed: {0}")]
     FlatStarMasking(String),

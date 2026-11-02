@@ -3314,6 +3314,7 @@ dependencies = [
  "seiza",
  "seiza-analysis",
  "seiza-background",
+ "seiza-calibration",
  "seiza-deconvolution",
  "seiza-download",
  "seiza-draw",

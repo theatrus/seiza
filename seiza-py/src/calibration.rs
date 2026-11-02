@@ -321,13 +321,11 @@ impl PyMatchTolerances {
 /// ``"recorded"``, ``"unknown"``, or a measured angle in degrees.
 fn parse_light_rotation(value: &Bound<'_, PyAny>) -> PyResult<LightRotation> {
     if let Ok(text) = value.extract::<String>() {
-        return match text.as_str() {
-            "recorded" => Ok(LightRotation::Recorded),
-            "unknown" => Ok(LightRotation::Unknown),
-            _ => Err(PyValueError::new_err(
+        return text.parse().map_err(|_| {
+            PyValueError::new_err(
                 "light_rotation must be \"recorded\", \"unknown\" or an angle in degrees",
-            )),
-        };
+            )
+        });
     }
     let degrees: f64 = value.extract().map_err(|_| {
         PyTypeError::new_err(
@@ -918,7 +916,8 @@ fn py_plan_calibration(
 /// display adds.
 fn calibration_message(error: seiza_stacking::Error) -> String {
     match error {
-        seiza_stacking::Error::Calibration(message) => message,
+        seiza_stacking::Error::Calibration(message)
+        | seiza_stacking::Error::FlatRotation(message) => message,
         other => other.to_string(),
     }
 }

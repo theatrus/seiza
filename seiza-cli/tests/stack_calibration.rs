@@ -193,6 +193,175 @@ fn flat_gain_offset_mismatch_requires_opt_in_and_dark_subtraction() {
     }
 }
 
+/// Issue #391: lights from a manual rotator record its real angle, and the
+/// flats, taken with no rotator reading, record N.I.N.A.'s 0 placeholder.
+/// The default refuses the flat and suggests `--light-rotation unknown`,
+/// which skips the angle check; a measured angle near the flat's passes
+/// too, and one far from it is refused without the suggestion.
+#[test]
+fn a_placeholder_flat_rotation_is_refused_until_the_lights_angle_is_unknown() {
+    let directory = tempfile::tempdir().unwrap();
+    let write_lights = |prefix: &str| -> Vec<PathBuf> {
+        [(0, 0), (3, 2)]
+            .into_iter()
+            .enumerate()
+            .map(|(index, (x, y))| {
+                let path = directory.path().join(format!("{prefix}-{index}.fits"));
+                let mut headers = sensor_cards(Some(-10.0));
+                headers.push(WriteHeaderCard::new("ROTATANG", HeaderValue::Float(269.06)));
+                seiza_image_io::save_f32(
+                    &path,
+                    WIDTH,
+                    HEIGHT,
+                    F32ImageData::Mono(&star_field(x, y)),
+                    &seiza_image_io::SaveOptions {
+                        headers: &headers,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                path
+            })
+            .collect()
+    };
+    let lights = write_lights("light");
+    let flat = directory.path().join("flat.fits");
+    seiza_image_io::save_f32(
+        &flat,
+        WIDTH,
+        HEIGHT,
+        F32ImageData::Mono(&vec![1.0; WIDTH * HEIGHT]),
+        &seiza_image_io::SaveOptions {
+            headers: &[
+                WriteHeaderCard::new("SEIZAMST", HeaderValue::String("FLAT".into())),
+                WriteHeaderCard::new("GAIN", HeaderValue::Integer(100)),
+                WriteHeaderCard::new("ROTATOR", HeaderValue::Float(0.0)),
+            ],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let output = directory.path().join("stack.fits");
+    let report = directory.path().join("stack.json");
+    let hint = "--light-rotation unknown";
+    for light_rotation in [
+        None,
+        Some("recorded"),
+        Some("unknown"),
+        Some("0.5"),
+        Some("-0.5"),
+        Some("90"),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_seiza"));
+        command
+            .arg("stack")
+            .args(&lights)
+            .arg("--flat")
+            .arg(&flat)
+            .args(["--reference", "first", "--defects", "off", "--output"])
+            .arg(&output)
+            .arg("--report")
+            .arg(&report);
+        if let Some(value) = light_rotation {
+            // As two arguments: a negative angle must not need `=`.
+            command.args(["--light-rotation", value]);
+        }
+        let result = command.output().unwrap();
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        let accepted = matches!(light_rotation, Some("unknown" | "0.5" | "-0.5"));
+        assert_eq!(
+            result.status.success(),
+            accepted,
+            "{light_rotation:?}: {stderr}"
+        );
+        if accepted {
+            let report: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+            assert_eq!(report["accepted_frames"], 2);
+            // The report records the angle the lights were compared at.
+            let expected = match light_rotation {
+                Some("unknown") => serde_json::json!({"basis": "unknown"}),
+                Some(degrees) => serde_json::json!({
+                    "basis": "measured",
+                    "degrees": degrees.parse::<f64>().unwrap(),
+                }),
+                None => unreachable!(),
+            };
+            assert_eq!(report["calibration"]["light_rotation"], expected);
+        } else {
+            assert!(stderr.contains("rotation"), "{stderr}");
+            // A measured angle is the user's own; it gets no suggestion.
+            assert_eq!(
+                stderr.contains(hint),
+                light_rotation != Some("90"),
+                "{light_rotation:?}: {stderr}"
+            );
+        }
+    }
+
+    // The flats of --joint-canvas groups are compared the same way, and the
+    // option needs no --flat there.
+    let groups = directory.path().join("groups.json");
+    std::fs::write(
+        &groups,
+        serde_json::to_vec(&serde_json::json!([
+            {"paths": write_lights("group"), "flat": &flat},
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    for light_rotation in [None, Some("unknown")] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_seiza"));
+        command
+            .arg("stack")
+            .args(&lights)
+            .arg("--joint-canvas")
+            .arg(&groups)
+            .args(["--defects", "off", "--output"])
+            .arg(&output);
+        if let Some(value) = light_rotation {
+            command.args(["--light-rotation", value]);
+        }
+        let result = command.output().unwrap();
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert_eq!(
+            result.status.success(),
+            light_rotation.is_some(),
+            "{light_rotation:?}: {stderr}"
+        );
+        if light_rotation.is_none() {
+            assert!(stderr.contains(hint), "{stderr}");
+        }
+    }
+
+    // A value that is neither recorded, unknown nor an angle is refused, and
+    // the option needs a flat to compare against.
+    let refused = Command::new(env!("CARGO_BIN_EXE_seiza"))
+        .arg("stack")
+        .args(&lights)
+        .arg("--flat")
+        .arg(&flat)
+        .args(["--light-rotation", "sideways", "--output"])
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("recorded, unknown"));
+    let no_flat = Command::new(env!("CARGO_BIN_EXE_seiza"))
+        .arg("stack")
+        .args(&lights)
+        .args(["--light-rotation", "unknown", "--output"])
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(!no_flat.status.success());
+    let stderr = String::from_utf8_lossy(&no_flat.stderr);
+    assert!(
+        stderr.contains("--flat") && stderr.contains("--joint-canvas"),
+        "{stderr}"
+    );
+}
+
 #[test]
 fn common_reference_aligns_channels_without_contributing_pixels() {
     let directory = tempfile::tempdir().unwrap();
