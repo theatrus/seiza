@@ -46,8 +46,8 @@ blending stay in Seiza's Rust code, so every backend runs the same tensors.
 
 | Model | Operation | Input | Output | Real pairs | Classical baseline |
 |---|---|---|---|---|---|
-| Noise | `denoise` | linear image, noise map | clean estimate | disjoint sub-frame stacks | wavelet shrinkage driven by the variance map |
-| PSF | `sharpen` | linear image, local PSF stamp, noise map, target-ratio map | image at the target PSF | seeing-split stacks, cross-instrument pairs | field-varying Richardson–Lucy |
+| Noise | `denoise` | linear image, noise map | clean estimate, its removed noise split into high- and low-frequency bands | disjoint sub-frame stacks | wavelet shrinkage driven by the variance map |
+| PSF | `sharpen` | linear image, local PSF stamp, noise map, target-ratio map, halo and bloom maps | image at the target PSF | seeing-split stacks, cross-instrument pairs | field-varying Richardson–Lucy |
 | Star | `separate-stars` | linear image, noise map | star layer; starless = input − stars | synthetic composites on real backgrounds | catalogue-guided PSF subtraction |
 
 The star model feeds parallax rendering, which needs separate starless and
@@ -130,6 +130,22 @@ differently integrated images. They are inputs for the reblur loss and
 references at review, never targets themselves: their processing history is
 not Seiza's.
 
+PSF Guard's finished stacks are the third source. Each is one target,
+filter and exposure over every night it was imaged, stacked by Seiza inside
+PSF Guard with the settings a user chose. They are the stacks users bring
+to the models, at full depth, and they include Askar107PHQ's, which PSF
+Guard calibrated from frames the master library does not hold yet. They
+carry no variance or coverage, so they train and are tested with the
+estimated noise map. They are inputs for the reblur loss and catalogue
+removal, references at review and inputs to the gates, and never targets:
+no independent stack of the same frames exists.
+
+The first import (2026-11-01) copied 527 stacks: 259 from Askar107PHQ, 106
+from Ultracat, 97 from C925 and 65 from the two remote rigs, all mono but
+two, 57 GB in all. Of the 56,545 frames they list, 56,044 were found in the
+corpus by file name, so 514 stacks joined their sets' split group through
+their own frames and the other 13 through their object's name.
+
 ### Building it
 
 The pipeline lives in [`training/`](../../training/README.md), one pass per
@@ -147,14 +163,19 @@ camera, gain, offset, exposure, binning and night on one telescope.
    the desktop apps use, and the plan must suit every light of the set. A
    set without a flat, or without both a dark and a bias, is left out, and
    the reason is recorded.
-3. **Measure every frame.** `seiza-analysis` records FWHM, eccentricity, star
+3. **Take in finished stacks.** Copy in each PSF Guard group stack at its
+   current revision. Its scheduler database, found by the targets its jobs
+   name, gives its telescope, and the file names the scheduler recorded for
+   its frames find them in the corpus, and so their sets. The stack joins
+   those sets' split group.
+4. **Measure every frame.** `seiza-analysis` records FWHM, eccentricity, star
    count, background and noise. One frame per set is solved, for the pixel
    scale and the WCS. A frame that lost most of its stars, or whose stars are
    elongated well beyond the set's, is flagged. Worse seeing costs stars too,
    so transparency is judged later, at registration.
-4. **Assign split groups.** Each set gets its train, validation or test group
+5. **Assign split groups.** Each set gets its train, validation or test group
    now, before any product is built (see [splits](#splits)).
-5. **Calibrate and register once per set.** Select the reference
+6. **Calibrate and register once per set.** Select the reference
    automatically. Register and resample every frame onto it, with the CLI's
    default stacking options, and keep the registered frames on local NVMe
    while the set is processed. Every subset is then integrated from those
@@ -172,7 +193,7 @@ camera, gain, offset, exposure, binning and night on one telescope.
    orientation. The limit stays: a flat taken at one angle does not fit
    frames 10° from it. The registered frames are deleted when the set is
    done.
-6. **Build the products**, then **review** them, as below.
+7. **Build the products**, then **review** them, as below.
 
 The manifest decides which sets qualify for which recipe:
 
@@ -191,6 +212,7 @@ The manifest decides which sets qualify for which recipe:
 | Seeing split | best and worst quartiles at matched frame counts, each with its PSF field | PSF model |
 | PSF field | the deep stack | conditioning, star rendering |
 | Starless candidate and star list | catalogue-guided removal on the solved deep stack | star backgrounds, once reviewed |
+| Finished stack | a PSF Guard group stack, copied in, image only | inputs at user depth, reblur loss, catalogue removal, gates |
 
 Cross-instrument pairs are built per object, across sets, once both sets'
 deep stacks exist.
@@ -274,8 +296,24 @@ noise of its difference, so the map can be checked against the data.
 
 A user's strength control scales the map before it reaches the model. A
 larger σ tells the model to remove more, as in FFDNet, so no separate model is
-needed per strength. A separate amount blends the result with the input
-afterwards, instantly and without running the model again.
+needed per strength.
+
+What the model removes is then split into two bands, each with its own
+amount: high frequency, the pixel-to-pixel grain, and low frequency, the
+blotches and mottle a few pixels and wider that resampling, drizzle and
+gradient removal leave. The removed noise `r = x − f(x)` is split by a
+Gaussian of scale `s`, 5 px by default: `r_low = G_s ∗ r` and
+`r_high = r − r_low`. The result is `x − a_high · r_high − a_low · r_low`.
+Changing either amount, or `s`, is instant and needs no second inference.
+
+So both bands must be learned, not only the grain. Real pairs carry real
+low-frequency noise: resampling correlates neighbouring pixels, and a
+night's background residuals differ between disjoint halves. Synthetic
+noise adds correlated components at scales drawn from 2 to 32 px. The loss
+and the gates are measured per band: the residual's power spectrum must be
+flat in each, and each pair records the noise of its difference at the
+pixel scale and binned by `s`, beside the prediction, so the low band's
+reduction is measured against real data, not only the grain's.
 
 ## PSF model
 
@@ -296,6 +334,21 @@ map serves every control:
 - **Uniform correction.** The map is set so that `T` is everywhere the
   field's best round PSF. This corrects tilt, coma and elongation across the
   field without sharpening the image overall.
+
+Two more maps, each an amount from 0 to 1 inside the star mask and 0
+outside it, shape the stars beyond their width:
+
+- **Halo reduction** scales the target PSF's wings, beyond the radius where
+  the core has fallen to a few percent of its peak, down from the measured
+  wings. Halos from filter reflections and scattered light shrink, and the
+  core keeps its flux.
+- **Bloom reduction** shrinks the swollen, flat-topped disc of a saturated
+  star towards the size an unsaturated star of its flux would have at `T`.
+
+At 0, both leave the stars as `T` renders them, which is what every real
+pair asks for. Star sharpening, non-stellar sharpening, halo reduction and
+bloom reduction are therefore four controls a user sets apart, in one
+inference.
 
 ### Conditioning on the local PSF
 
@@ -329,7 +382,8 @@ of trust:
    - plus noise, as for the noise model.
 
    The target is the background convolved to `T`, plus the stars rendered with
-   `T`. Extended structure has a hard limit: `T` can never be narrower than
+   `T`, with their wings scaled by the halo amount and their saturated discs
+   shrunk by the bloom amount, both drawn per composite. Extended structure has a hard limit: `T` can never be narrower than
    `P_ref`, because detail lost in the reference cannot be restored, so the
    extended part of the ratio map is clamped to that limit. Stars have no such
    limit. They are rendered exactly at any PSF, so the model learns star
@@ -345,8 +399,9 @@ of trust:
    the target PSF. Fit a linear photometric match first, because cameras and
    filters differ. These pairs validate only.
 
-Saturated star cores are masked from every loss, using the stacker's
-saturation records.
+Saturated star cores are masked from every loss on real images, using the
+stacker's saturation records. Composites render their saturated stars, so
+bloom reduction learns against exact targets there.
 
 ### Reblur consistency
 
@@ -449,8 +504,8 @@ One example holds:
 
 - the linear input, the linear target, and both variance and coverage maps;
 - the recipe: noise pair, seeing split, cross-instrument or composite, with
-  its subset sizes, PSF stamps, ratio map, rendered star list and random
-  seed;
+  its subset sizes, PSF stamps, ratio map, halo and bloom amounts, rendered
+  star list and random seed;
 - telescope, camera, filter, binning, pixel size, focal length, exposure,
   object, session and processing-history identifiers;
 - masks for saturation, bad pixels, registration boundaries, removed-star
@@ -572,8 +627,17 @@ and reviewed backgrounds are built once and cached on local NVMe.
 | R4b | star, from R4a | consistency and catalogue losses on real fields; v1-bootstrapped backgrounds | Adapt to real fields; first star model to face the gates. |
 | R5 | noise v2, PSF and star second round | sharpened noise pairs, more seeing splits and backgrounds | Second round. |
 
-Each run uses 256 × 256 patches (512 for the star model), batch 32, AdamW at
-2e-4 with cosine decay, bf16, and 200k–400k steps. By the FLOP estimate, a
+Every run works on overlapping tiles, never on whole images, so memory,
+activations and the exported graph's shape stay fixed however large the
+image. Training cuts each memory-mapped plane into 256 × 256 tiles (512 for
+the star model) on a grid whose stride is the tile less its overlap, with a
+fresh random offset each epoch. Neighbouring tiles share at least half the
+receptive field, so the model meets every sky position both near a tile's
+centre and near its edge. Validation and the gates run the inference path,
+tile, infer and blend, so their numbers include the seams.
+
+Each run uses batch 32, AdamW at 2e-4 with cosine decay, bf16, and
+200k–400k steps. By the FLOP estimate, a
 full run takes from a few hours to overnight on that GPU. Width {16, 24, 32}
 and depth are swept only on R1, R3a and R4a, and the winners carry forward.
 
@@ -657,8 +721,13 @@ compiles the package on first load, and Seiza caches the compiled model.
 
 ### Tiling and parity
 
-Tiles overlap by at least half the receptive field and are blended with a
-cosine window. A test holds tiled output to whole-image output.
+Inference cuts the image into tiles of the export's static shape that
+overlap by at least half the receptive field, runs each, and blends them
+with a cosine window. Each tile carries its own PSF stamp and its own
+slices of the noise, ratio, halo and bloom maps. Peak memory is a few
+tiles' worth whatever the image's size, and the backends compile one tile
+shape. The model card records the tile shape and the overlap. A test holds
+tiled output to whole-image output.
 
 The export script writes fixture tiles with PyTorch's f32 output. Each backend
 must match them:
@@ -681,7 +750,8 @@ let backend = Backend::detect(&BackendOptions::default())?;
 let model = NoiseModel::open(&noise_bundle, &backend)?;
 let noise = NoiseMap::from_stack(&snapshot)?; // or NoiseMap::estimate(&image)?
 let result = model.denoise(&image, &noise, &DenoiseOptions::default())?;
-let image = result.blend(0.8); // no second inference
+// Per-band amounts of the removed noise: no second inference.
+let image = result.blend(&NoiseBands { high: 0.9, low: 0.5, scale_px: 5.0 });
 
 let psf = PsfField::measure(&image, &PsfFieldOptions::default())?;
 let sharpened = PsfModel::open(&psf_bundle, &backend)?.sharpen(
@@ -690,6 +760,8 @@ let sharpened = PsfModel::open(&psf_bundle, &backend)?.sharpen(
     &noise,
     &SharpenOptions {
         target: SharpenTarget::Ratio { stars: 0.5, extended: 0.75 },
+        halo_reduction: 0.3,
+        bloom_reduction: 0.0,
         ..Default::default()
     },
 )?;
@@ -705,6 +777,10 @@ The types follow the same rules:
   its execution provider. It has `FromStr` and `Display` for a
   `--ml-backend coreml|tensorrt|cuda|cpu` flag.
 - `SharpenTarget` is `Ratio { stars, extended }` or `Uniform`.
+- `halo_reduction` and `bloom_reduction` are amounts from 0 to 1, applied
+  inside the star mask.
+- `NoiseBands` holds the high- and low-frequency amounts and the scale that
+  divides them.
 
 Refusals are variants of a `RestoreError`, made where they happen:
 

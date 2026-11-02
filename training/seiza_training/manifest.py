@@ -122,7 +122,35 @@ CREATE TABLE IF NOT EXISTS measurements (
 );
 CREATE INDEX IF NOT EXISTS measurements_set ON measurements(set_id);
 
--- One row per product: a stack or a pair half.
+-- One row per finished stack made elsewhere from the corpus, such as a PSF
+-- Guard group: a target, filter and exposure over all its nights. `sets`
+-- lists the corpus sets its frames came from.
+CREATE TABLE IF NOT EXISTS stacks (
+    id TEXT PRIMARY KEY,
+    origin TEXT NOT NULL,
+    path TEXT NOT NULL,
+    revision TEXT,
+    telescope TEXT,
+    target TEXT,
+    filter TEXT,
+    exposure_seconds REAL,
+    frames INTEGER,
+    total_exposure_seconds REAL,
+    width INTEGER,
+    height INTEGER,
+    channels INTEGER,
+    method TEXT,
+    stacking_version TEXT,
+    sets TEXT NOT NULL DEFAULT '[]',
+    sky_group TEXT,
+    split TEXT,
+    created TEXT NOT NULL,
+    status TEXT NOT NULL,
+    reason TEXT
+);
+
+-- One row per product: a stack or a pair half. A finished stack's products
+-- name its `stacks` id as their set.
 CREATE TABLE IF NOT EXISTS products (
     id TEXT PRIMARY KEY,
     set_id TEXT NOT NULL,

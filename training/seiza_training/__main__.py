@@ -1,7 +1,7 @@
 """`python -m seiza_training <pass> --store DIR ...`: run one corpus pass.
 
-The passes run in order — crawl, calibrate, split, measure, build,
-review — and each can be rerun alone. `process` measures and
+The passes run in order — crawl, calibrate, stacks, split, measure,
+build, review — and each can be rerun alone. `process` measures and
 builds one set at a time, which reads each frame over the network once.
 `status` prints what the manifest holds; `decide` records a review
 decision.
@@ -49,6 +49,11 @@ def main(argv: list[str] | None = None) -> int:
             command.add_argument("--catalog-dir", help="catalogs for plate solving")
         if name in ("build", "process"):
             command.add_argument("--keep-scratch", action="store_true")
+
+    stacks = commands.add_parser("stacks", help="copy in the finished stacks PSF Guard made from the corpus")
+    stacks.add_argument("--psf-guard", type=Path, help="PSF Guard's stacks directory (remembered)")
+    stacks.add_argument("--again", action="store_true", help="copy stacks already copied")
+    stacks.add_argument("--limit", type=int, help="at most this many stacks")
 
     split = commands.add_parser("split", help="assign sky groups and train/validation/test splits")
     split.add_argument("--hold-out", help="a telescope whose groups are all test")
@@ -98,7 +103,7 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
             raise SystemExit("crawl needs --corpus or --library the first time")
         manifest.set_meta(
             "roots",
-            {"corpus": str(corpus) if corpus else None, "library": str(library) if library else None},
+            {**roots, "corpus": str(corpus) if corpus else None, "library": str(library) if library else None},
         )
         return crawl(manifest, corpus, library, workers=arguments.workers)
     if command == "calibrate":
@@ -110,6 +115,20 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
 
         return measure(
             manifest, only=only, again=arguments.again, catalog_dir=arguments.catalog_dir,
+            limit=arguments.limit,
+        )
+    if command == "stacks":
+        from .stacks import import_stacks
+
+        roots = manifest.meta("roots") or {}
+        stacks_root = arguments.psf_guard or (Path(roots["psf_guard"]) if roots.get("psf_guard") else None)
+        if stacks_root is None:
+            raise SystemExit("stacks needs --psf-guard the first time")
+        if not roots.get("corpus"):
+            raise SystemExit("stacks needs the corpus crawled first")
+        manifest.set_meta("roots", {**roots, "psf_guard": str(stacks_root)})
+        return import_stacks(
+            manifest, store, stacks_root, Path(roots["corpus"]), again=arguments.again,
             limit=arguments.limit,
         )
     if command == "split":
@@ -148,6 +167,7 @@ def status(manifest: Manifest) -> dict:
         "measurement": counts("SELECT measurement_status, COUNT(*) FROM sets GROUP BY 1"),
         "split": counts("SELECT split, COUNT(*) FROM sets GROUP BY 1"),
         "build": counts("SELECT build_status, COUNT(*) FROM sets GROUP BY 1"),
+        "stacks": counts("SELECT telescope || ':' || status || ':' || COALESCE(split, 'unsplit'), COUNT(*) FROM stacks GROUP BY 1"),
         "products": counts("SELECT kind || ':' || status, COUNT(*) FROM products GROUP BY 1"),
         "reviews": counts("SELECT kind || ':' || decision, COUNT(*) FROM reviews GROUP BY 1"),
         "passes": [
