@@ -16,6 +16,11 @@ STRETCH_OUTPUT_VERSION: str
 """The ``seiza-stretch`` crate version, not the Seiza release, whose stretch
 output this build reproduces. Key cached stretched images on it; it moves only
 when that output changes."""
+EXTERNAL_EXCHANGE_VERSION: int
+"""The version of the map that puts an image on the 0 to 1 external tools work
+on and takes their result back (``rc_astro_process_image``,
+``rc_astro_split_stars``, ``pixinsight_ml_denoise_*``). Key cached results of
+those calls on it besides the tools' versions and parameters."""
 
 StarInput = Union["Star", tuple[float, float, float]]
 

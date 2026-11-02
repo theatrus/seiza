@@ -1401,5 +1401,10 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // what a cache of stacks or stretched images keys on.
     m.add("STACKING_OUTPUT_VERSION", seiza_stacking::OUTPUT_VERSION)?;
     m.add("STRETCH_OUTPUT_VERSION", seiza_stretch::OUTPUT_VERSION)?;
+    // The map external tools see; what a cache of their results keys on.
+    m.add(
+        "EXTERNAL_EXCHANGE_VERSION",
+        seiza_stacking::EXTERNAL_EXCHANGE_VERSION,
+    )?;
     Ok(())
 }

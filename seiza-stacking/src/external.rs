@@ -517,7 +517,27 @@ impl RcAstroCli {
             ],
             device: None,
         };
-        let processed = self.process_image(schema, &request, image, &[], cancel, progress)?;
+        // Unscreened stars restore exactly only on the image's own 0 to 1,
+        // so a stretched image goes to the tool as it is: a sample just
+        // outside that range would otherwise move the whole image onto the
+        // camera scale.
+        let clamped = LinearImage::new(
+            image.width,
+            image.height,
+            image.channels,
+            image
+                .data
+                .iter()
+                .map(|sample| {
+                    if sample.is_finite() {
+                        sample.clamp(0.0, 1.0)
+                    } else {
+                        *sample
+                    }
+                })
+                .collect(),
+        )?;
+        let processed = self.process_image(schema, &request, &clamped, &[], cancel, progress)?;
         let stars = processed
             .stars
             .ok_or_else(|| external_error("sxt", "StarXTerminator wrote no stars image"))?;
@@ -1223,6 +1243,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 cp "$input" "$out"
+cp "$input" "$(dirname "$0")/seen-input.fits"
 echo '{"event":"info","topic":"device","device":"cpu"}'
 echo '{"event":"progress","done":100.0}'
 echo "{\"event\":\"status\",\"phase\":\"complete\",\"output\":\"$out\"}"
@@ -1332,8 +1353,25 @@ fi
                 "{restored} != {original}"
             );
         }
-        // The tool saw the dim stack on the 16-bit scale, not stretched to 1.
+        // The tool saw the dim stack on the 16-bit scale, not stretched to
+        // 1, and the uncovered corner as background, not NaN.
+        let seen = FitsFrame::open(directory.path().join("seen-input.fits")).unwrap();
+        assert!(seen.image.data.iter().all(|sample| sample.is_finite()));
+        assert!((seen.image.data[3] - 1_200.0 / 65_535.0).abs() < 1e-6);
         assert!((stars.data[3] - 1_200.0).abs() < 1e-2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stretched_image_splits_on_its_own_scale_even_with_a_sample_outside_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let cli = RcAstroCli::with_executable(fake_rc_astro(directory.path()));
+        let image = LinearImage::new(2, 1, 3, vec![-1e-4, 0.2, 0.3, 0.4, 0.5, 1.0001]).unwrap();
+        cli.split_stars_with(&sxt_schema(), &image, None, &mut |_| {})
+            .unwrap();
+        // Clamped to 0..1 and sent as it is, not mapped onto the camera scale.
+        let seen = FitsFrame::open(directory.path().join("seen-input.fits")).unwrap();
+        assert_eq!(seen.image.data, vec![0.0, 0.2, 0.3, 0.4, 0.5, 1.0]);
     }
 
     #[cfg(unix)]

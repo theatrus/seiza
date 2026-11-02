@@ -1527,6 +1527,16 @@ pub extern "C" fn seiza_stretch_output_version() -> *const c_char {
     static_c_string(&TEXT, seiza_stretch::OUTPUT_VERSION)
 }
 
+/// The version of the map that puts an image on the 0 to 1 external tools
+/// work on and takes their result back (RC-Astro's tools and PixInsight
+/// MLDenoise). A host caching their results keys on it besides the tools'
+/// own versions and parameters: a new map gives new results for the same
+/// input.
+#[unsafe(no_mangle)]
+pub extern "C" fn seiza_external_exchange_version() -> u32 {
+    seiza_stacking::EXTERNAL_EXCHANGE_VERSION
+}
+
 #[unsafe(no_mangle)]
 /// Applies damped Richardson-Lucy deconvolution to interleaved linear `float`
 /// samples in place. `channels` must be one or three and `data_length` must
@@ -9685,6 +9695,10 @@ mod tests {
         assert_eq!(
             read(seiza_stretch_output_version()),
             seiza_stretch::OUTPUT_VERSION
+        );
+        assert_eq!(
+            seiza_external_exchange_version(),
+            seiza_stacking::EXTERNAL_EXCHANGE_VERSION
         );
         // The same static string each call.
         assert_eq!(

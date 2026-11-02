@@ -577,6 +577,15 @@ const char *seiza_stacking_output_version(void);
 const char *seiza_stretch_output_version(void);
 
 /*
+ The version of the map that puts an image on the 0 to 1 external tools
+ work on and takes their result back (RC-Astro's tools and PixInsight
+ MLDenoise). A host caching their results keys on it besides the tools'
+ own versions and parameters: a new map gives new results for the same
+ input.
+ */
+uint32_t seiza_external_exchange_version(void);
+
+/*
  Applies damped Richardson-Lucy deconvolution to interleaved linear `float`
  samples in place. `channels` must be one or three and `data_length` must
  equal `width * height * channels`. RGB samples are pixel-interleaved.

@@ -165,6 +165,24 @@ fn standard_normal(position: u64) -> f32 {
 mod tests {
     use super::*;
 
+    /// The map as [`crate::EXTERNAL_EXCHANGE_VERSION`] 2 defines it. A change
+    /// that fails this test changes external tools' results for the same
+    /// input: move the version, then record the new values.
+    #[test]
+    fn the_map_matches_its_version() {
+        assert_eq!(crate::EXTERNAL_EXCHANGE_VERSION, 2);
+        let image = LinearImage::new(2, 2, 1, vec![f32::NAN, 1_000.0, 1_100.0, -20.0]).unwrap();
+        let exchange = Exchange::of(&image).unwrap();
+        assert_eq!((exchange.offset, exchange.scale), (-20.0, 65535.0));
+        let normalized = exchange.normalize(&image);
+        assert_eq!(normalized[1], 1_020.0 / 65535.0);
+        assert_eq!(normalized[3], 0.0);
+        // The fill's noise at the first two positions. A tolerance, since
+        // platforms' logarithm and cosine can differ in the last bit.
+        assert!((standard_normal(0) - -0.455_219).abs() < 1e-6);
+        assert!((standard_normal(1) - 0.775_653).abs() < 1e-6);
+    }
+
     #[test]
     fn a_normalized_image_keeps_its_scale_and_a_camera_image_maps_from_16_bits() {
         let image = |data: Vec<f32>| LinearImage::new(2, 2, 1, data).unwrap();
