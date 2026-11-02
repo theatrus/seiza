@@ -5173,6 +5173,37 @@ SeizaLiveStacker *seiza_live_stacker_open_fits_expanding_sessions(const char *pa
                                                                   const SeizaCancelSignal *cancel,
                                                                   char **error_out);
 
+/*
+ Open an empty stack aligned to `reference_image_path`, with per-light
+ calibration sessions, as
+ [`seiza_live_stacker_open_fits_with_reference_image`] opens one with a
+ single set of masters. `paths_json`, `sessions_json` and
+ `assignments_json` are those of
+ [`seiza_live_stacker_open_fits_expanding_sessions`];
+ `channel_reference` is the zero-based index of the light, among
+ `paths_json`, that is calibrated by its own session and sets
+ normalization and noise weighting. `options_json` is that of
+ [`seiza_live_stacker_open_fits`].
+
+ Push the lights, the channel reference among them when it belongs to
+ this stack. Stacks that share the reference image, the channel reference
+ and its session put their lights on one grid, scale and weight, however
+ the other lights are divided among them: distributed stacking stacks one
+ session each this way.
+
+ # Safety
+ The four required pointers must name NUL-terminated UTF-8 strings.
+ `options_json` may be null. When non-null, `error_out` must point to
+ writable storage for one pointer.
+ */
+SeizaLiveStacker *seiza_live_stacker_open_fits_sessions_with_reference_image(const char *reference_image_path,
+                                                                             const char *paths_json,
+                                                                             const char *sessions_json,
+                                                                             const char *assignments_json,
+                                                                             size_t channel_reference,
+                                                                             const char *options_json,
+                                                                             char **error_out);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif  // __cplusplus

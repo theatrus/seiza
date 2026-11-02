@@ -828,6 +828,16 @@ class LiveStacker:
         cancel: Callable[[], bool] | None = None,
     ) -> LiveStacker: ...
     @staticmethod
+    def open_fits_sessions_with_reference_image(
+        reference_image: str | Path,
+        paths: Sequence[str | Path],
+        sessions: Sequence[Mapping[str, Any]],
+        assignments: Sequence[int],
+        channel_reference: int,
+        *,
+        options: StackOptions | None = None,
+    ) -> LiveStacker: ...
+    @staticmethod
     def open_context(path: str | Path, *, gpu: GpuOptions | None = None) -> LiveStacker: ...
     @property
     def accepted_frames(self) -> int: ...

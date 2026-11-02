@@ -74,6 +74,134 @@ impl Night {
     }
 }
 
+/// Stacks that share a reference image, a channel reference and its session
+/// put their lights on one grid, scale and weight: stacked a session each
+/// and combined by their weight sums, without rejection, they give the
+/// stack of every light, to rounding.
+#[test]
+fn session_stacks_on_one_reference_combine_into_the_whole_stack() {
+    let directory = tempfile::tempdir().unwrap();
+    let (width, height) = (160, 128);
+    let paths = super::canvas_tests::mosaic(directory.path(), (1, 1), (width, height), 6, 1);
+    let sessions = (0..3)
+        .map(|index| {
+            // A bias of each session's own, so each light must be
+            // calibrated by its session's.
+            let bias = directory.path().join(format!("bias-{index}.fits"));
+            let level = 0.001 * index as f32;
+            let image = LinearImage::new(width, height, 1, vec![level; width * height]).unwrap();
+            crate::write_processed_image_fits_f32(&bias, &image, &[], &[]).unwrap();
+            FileCalibrationSession {
+                bias: Some(bias),
+                ..Default::default()
+            }
+        })
+        .collect::<Vec<_>>();
+    let assignments = [0, 1, 2, 0, 1, 2];
+    // Each light carries its session's bias, which calibration takes off.
+    for (path, &session) in paths.iter().zip(&assignments) {
+        let mut frame = FitsFrame::open(path).unwrap();
+        for sample in &mut frame.image.data {
+            *sample += 0.001 * session as f32;
+        }
+        crate::write_processed_image_fits_f32(path, &frame.image, &frame.headers, &[]).unwrap();
+    }
+    let options = StackOptions {
+        normalization: NormalizationMode::None,
+        rejection: RejectionMode::None,
+        weighting: FrameWeighting::inverse_noise_variance(),
+        ..StackOptions::default()
+    };
+    let open = || {
+        LiveStacker::open_fits_sessions_with_reference_image(
+            &paths[1],
+            &paths,
+            &sessions,
+            &assignments,
+            1,
+            options.clone(),
+        )
+        .unwrap()
+    };
+    let mut whole = open();
+    assert_eq!(whole.view().accepted_frames, 0);
+    for path in &paths {
+        accepted(whole.push_fits(path).unwrap());
+    }
+    let whole = whole.into_snapshot().unwrap();
+
+    let parts = (0..3)
+        .map(|session| {
+            let mut stack = open();
+            for (path, _) in paths
+                .iter()
+                .zip(&assignments)
+                .filter(|&(_, &assigned)| assigned == session)
+            {
+                accepted(stack.push_fits(path).unwrap());
+            }
+            // Each session's stack replays from its own sources.
+            assert_eq!(reintegrate(&stack).unwrap().snapshot.accepted_frames, 2);
+            stack.into_snapshot().unwrap()
+        })
+        .collect::<Vec<_>>();
+    let mut compared = 0;
+    for sample in 0..whole.image.data.len() {
+        let (mut sum, mut weight, mut count) = (0.0_f64, 0.0_f64, 0);
+        for part in &parts {
+            if part.coverage[sample] > 0 {
+                let part_weight = f64::from(part.weight_sum.as_ref().unwrap()[sample]);
+                sum += part_weight * f64::from(part.image.data[sample]);
+                weight += part_weight;
+                count += part.coverage[sample];
+            }
+        }
+        assert_eq!(count, whole.coverage[sample]);
+        let total = f64::from(whole.weight_sum.as_ref().unwrap()[sample]);
+        assert!((weight - total).abs() <= 1e-5 * total.max(1.0));
+        if count > 0 {
+            let expected = f64::from(whole.image.data[sample]);
+            assert!(
+                (sum / weight - expected).abs() <= 1e-5 * expected.abs().max(0.01),
+                "sample {sample}: {} vs {expected}",
+                sum / weight
+            );
+            compared += 1;
+        }
+    }
+    assert!(compared > whole.image.data.len() / 2);
+    // Each session's bias was taken off: the sessions agree, where the
+    // third would sit 0.002 above the first under the first's masters.
+    let (mut offset, mut shared) = (0.0_f64, 0);
+    for sample in 0..whole.image.data.len() {
+        if parts[0].coverage[sample] > 0 && parts[2].coverage[sample] > 0 {
+            offset += f64::from(parts[2].image.data[sample] - parts[0].image.data[sample]);
+            shared += 1;
+        }
+    }
+    assert!(
+        (offset / shared as f64).abs() < 2e-4,
+        "{}",
+        offset / shared as f64
+    );
+
+    // The channel reference must be a light, and the reference image no
+    // master.
+    let refused = |reference: &Path, channel_reference| {
+        LiveStacker::open_fits_sessions_with_reference_image(
+            reference,
+            &paths,
+            &sessions,
+            &assignments,
+            channel_reference,
+            options.clone(),
+        )
+        .is_err()
+    };
+    assert!(refused(&paths[1], paths.len()));
+    assert!(refused(sessions[0].bias.as_deref().unwrap(), 1));
+}
+
 fn accepted(disposition: FrameDisposition) {
     assert!(
         matches!(disposition, FrameDisposition::Accepted(_)),

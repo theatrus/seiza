@@ -1283,6 +1283,33 @@ def test_expanding_session_assignments_calibrate_plan_push_and_resume(tmp_path):
         reopened.reintegrate()
 
 
+def test_a_session_stack_shares_a_reference_calibrated_by_another_session(tmp_path):
+    paths = overlapping_panels(tmp_path)
+    sessions = []
+    for index, bias in enumerate((500.0, 1500.0)):
+        bias_path = tmp_path / f"bias-{index}.fits"
+        header = fits.Header({"GAIN": 100 + index * 100})
+        fits.writeto(bias_path, np.full((160, 192), bias, np.float32), header)
+        sessions.append({"bias": bias_path})
+    for index, path in enumerate(paths):
+        data = fits.getdata(path, memmap=False)
+        session = index % 2
+        fits.writeto(path, data + (500.0 if session == 0 else 1500.0),
+                     fits.Header({"GAIN": 100 + session * 100}), overwrite=True)
+    options = seiza.StackOptions(normalization="none", rejection="none", minimum_overlap=0.1)
+    # Aligned to the second session's light, normalized against the first
+    # session's, and holding only the second session's.
+    stack = seiza.LiveStacker.open_fits_sessions_with_reference_image(
+        paths[1], paths, sessions, [0, 1, 0], 0, options=options)
+    assert stack.accepted_frames == 0
+    result = stack.push_fits(paths[1])
+    assert result.accepted, result.reason
+    assert np.nanmedian(stack.snapshot().image) == pytest.approx(100, abs=3)
+    with pytest.raises(seiza.StackError):
+        seiza.LiveStacker.open_fits_sessions_with_reference_image(
+            paths[1], paths, sessions, [0, 1, 0], 3, options=options)
+
+
 def test_session_canvas_can_be_reused_by_an_independent_filter(tmp_path):
     sky = overlapping_panels(tmp_path)
     raw, channel, sessions = [], [], []

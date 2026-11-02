@@ -349,6 +349,11 @@ impl FileSessionPlan {
     }
 
     /// Whether `path` is an earlier light's file under another name.
+    /// Whether `path` names one of the plan's masters.
+    pub(crate) fn is_master(&self, path: &Path) -> bool {
+        self.masters.contains_key(&path_identity(path))
+    }
+
     pub(crate) fn is_duplicate(&self, path: &Path) -> bool {
         !self.duplicates.is_empty()
             && (self.duplicates.contains(path) || self.duplicates.contains(&path_identity(path)))

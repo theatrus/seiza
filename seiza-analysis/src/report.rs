@@ -252,6 +252,7 @@ mod collection_tests {
                     data: vec![0.0; 2],
                 },
                 coverage: vec![2, 1],
+                weight_sum: None,
                 rejected_samples: vec![0, 1],
                 accepted_frames: 2,
                 rejected_frames: 1,

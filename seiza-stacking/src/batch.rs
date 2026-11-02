@@ -732,9 +732,9 @@ impl Outputs {
         let Self {
             mut mean,
             mut variance,
+            weight,
             coverage,
             rejected,
-            ..
         } = self;
         for ((integrated, variance), &coverage) in mean.iter_mut().zip(&mut variance).zip(&coverage)
         {
@@ -752,6 +752,8 @@ impl Outputs {
                 image: LinearImage::new(width, height, channels, mean)?,
                 variance: LinearImage::new(width, height, channels, variance)?,
                 coverage,
+                // Kept only for a weighted stack.
+                weight_sum: (!weight.is_empty()).then_some(weight),
                 rejected_samples: rejected,
                 accepted_frames: frame_count as u32,
                 rejected_frames: 0,
@@ -1418,6 +1420,10 @@ pub(crate) mod tests {
             bits(&expected_snapshot.variance.data)
         );
         assert_eq!(actual_snapshot.coverage, expected_snapshot.coverage);
+        assert_eq!(
+            actual_snapshot.weight_sum.as_deref().map(bits),
+            expected_snapshot.weight_sum.as_deref().map(bits)
+        );
         assert_eq!(
             actual_snapshot.rejected_samples,
             expected_snapshot.rejected_samples

@@ -1703,6 +1703,14 @@ Assignments are immutable and survive checkpoints and reintegration. Changed
 sources or masters are refused. See [session planning](../docs/calibration-sessions.md)
 for file identity, memory and pipeline behavior.
 
+`LiveStacker.open_fits_sessions_with_reference_image(reference_image, paths,
+sessions, assignments, channel_reference)` takes the same sessions on one
+reference grid instead of a canvas. `paths[channel_reference]`, calibrated by
+its own session, sets normalization and noise weighting, and the stack starts
+empty. Stacks that share the reference image, the channel reference and its
+session put their lights on one grid, scale and weight, so each session can be
+stacked on its own and the stacks combined, as distributed stacking does.
+
 ### Calibration library: grading and selection
 
 Python holds the calibration library as Rust hosts such as PSF Guard do

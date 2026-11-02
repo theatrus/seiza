@@ -72,6 +72,66 @@ pub unsafe extern "C" fn seiza_live_stacker_open_fits_expanding_sessions(
     .unwrap_or(ptr::null_mut())
 }
 
+/// Open an empty stack aligned to `reference_image_path`, with per-light
+/// calibration sessions, as
+/// [`seiza_live_stacker_open_fits_with_reference_image`] opens one with a
+/// single set of masters. `paths_json`, `sessions_json` and
+/// `assignments_json` are those of
+/// [`seiza_live_stacker_open_fits_expanding_sessions`];
+/// `channel_reference` is the zero-based index of the light, among
+/// `paths_json`, that is calibrated by its own session and sets
+/// normalization and noise weighting. `options_json` is that of
+/// [`seiza_live_stacker_open_fits`].
+///
+/// Push the lights, the channel reference among them when it belongs to
+/// this stack. Stacks that share the reference image, the channel reference
+/// and its session put their lights on one grid, scale and weight, however
+/// the other lights are divided among them: distributed stacking stacks one
+/// session each this way.
+///
+/// # Safety
+/// The four required pointers must name NUL-terminated UTF-8 strings.
+/// `options_json` may be null. When non-null, `error_out` must point to
+/// writable storage for one pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_live_stacker_open_fits_sessions_with_reference_image(
+    reference_image_path: *const c_char,
+    paths_json: *const c_char,
+    sessions_json: *const c_char,
+    assignments_json: *const c_char,
+    channel_reference: usize,
+    options_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaLiveStacker {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let reference_image_path =
+            required_path(reference_image_path, "stack reference image path")?;
+        let paths: Vec<PathBuf> = serde_json::from_str(&required_str(paths_json, "light paths")?)
+            .map_err(|e| format!("invalid light paths: {e}"))?;
+        let value: serde_json::Value =
+            serde_json::from_str(&required_str(sessions_json, "calibration sessions")?)
+                .map_err(|e| format!("invalid calibration sessions: {e}"))?;
+        let sessions: Vec<seiza_stacking::FileCalibrationSession> =
+            serde_json::from_value(crate::flat_groups::field_names(value, false))
+                .map_err(|e| format!("invalid calibration sessions: {e}"))?;
+        let assignments: Vec<usize> =
+            serde_json::from_str(&required_str(assignments_json, "calibration assignments")?)
+                .map_err(|e| format!("invalid calibration assignments: {e}"))?;
+        let stacker = LiveStacker::open_fits_sessions_with_reference_image(
+            &reference_image_path,
+            &paths,
+            &sessions,
+            &assignments,
+            channel_reference,
+            stack_options(options_json)?,
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(Box::into_raw(Box::new(SeizaLiveStacker { stacker })))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,13 +143,14 @@ mod tests {
         assigned_recipe(true);
     }
 
-    fn assigned_recipe(fitted: bool) {
-        let root = tempfile::tempdir().unwrap();
-        let paths = crate::tests::overlapping_panels(root.path());
+    /// Two sessions for `paths`, alternating, each with a bias of its own,
+    /// at 500 and 1500, added to its lights, or, `fitted`, a flat and that
+    /// pedestal. The second session measures its light rotation.
+    fn recipes(root: &std::path::Path, paths: &[String], fitted: bool) -> Vec<serde_json::Value> {
         let mut sessions = Vec::new();
         for index in 0..2 {
             let level = if index == 0 { 500.0 } else { 1500.0 };
-            let master = root.path().join(format!("bias-{index}.fits"));
+            let master = root.join(format!("bias-{index}.fits"));
             let shape = seiza_stacking::FitsFrame::open(&paths[0]).unwrap().image;
             let bias = LinearImage::new(
                 shape.width,
@@ -119,7 +180,7 @@ mod tests {
                 serde_json::json!({"basis":"recorded"})
             };
             let mut recipe = if fitted {
-                let flat = root.path().join(format!("flat-{index}.fits"));
+                let flat = root.join(format!("flat-{index}.fits"));
                 let mut normalized = bias.clone();
                 normalized.data.fill(1.0);
                 seiza_stacking::write_processed_image_fits_f32(
@@ -139,6 +200,13 @@ mod tests {
             recipe["tolerances"] = serde_json::json!({"lightRotation":rotation});
             sessions.push(recipe);
         }
+        sessions
+    }
+
+    fn assigned_recipe(fitted: bool) {
+        let root = tempfile::tempdir().unwrap();
+        let paths = crate::tests::overlapping_panels(root.path());
+        let sessions = recipes(root.path(), &paths, fitted);
         let paths_json = CString::new(serde_json::to_string(&paths).unwrap()).unwrap();
         let sessions_json = CString::new(serde_json::to_string(&sessions).unwrap()).unwrap();
         let options=c"{\"normalization\":{\"mode\":\"none\"},\"rejection\":{\"mode\":\"none\"},\"acceptance\":{\"minimum_overlap_fraction\":0.1}}";
@@ -202,6 +270,72 @@ mod tests {
         assert_eq!(unsafe { seiza_live_stacker_accepted_frames(handle) }, 3);
         unsafe {
             seiza_live_stacker_free(handle);
+        }
+    }
+
+    /// A stack of one session's lights, on a reference calibrated by
+    /// another's, takes its lights under their own recipe.
+    #[test]
+    fn a_session_stack_on_a_shared_reference_opens_through_the_c_api() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = crate::tests::overlapping_panels(root.path());
+        let sessions = recipes(root.path(), &paths, false);
+        let reference = CString::new(paths[0].as_str()).unwrap();
+        let paths_json = CString::new(serde_json::to_string(&paths).unwrap()).unwrap();
+        let sessions_json = CString::new(serde_json::to_string(&sessions).unwrap()).unwrap();
+        // The panels overlap the reference's grid only in part.
+        let options = c"{\"normalization\":{\"mode\":\"none\"},\"rejection\":{\"mode\":\"none\"},\"acceptance\":{\"minimum_overlap_fraction\":0.1,\"minimum_integrated_fraction\":0.1}}";
+        let open = |channel_reference, error: &mut *mut c_char| unsafe {
+            seiza_live_stacker_open_fits_sessions_with_reference_image(
+                reference.as_ptr(),
+                paths_json.as_ptr(),
+                sessions_json.as_ptr(),
+                c"[0,1,0]".as_ptr(),
+                channel_reference,
+                options.as_ptr(),
+                error,
+            )
+        };
+        let mut error = ptr::null_mut();
+        let handle = open(0, &mut error);
+        assert!(!handle.is_null() && error.is_null());
+        assert_eq!(unsafe { seiza_live_stacker_accepted_frames(handle) }, 0);
+        let light = CString::new(paths[1].as_str()).unwrap();
+        let output =
+            unsafe { seiza_live_stacker_push_fits_json(handle, light.as_ptr(), &mut error) };
+        assert!(error.is_null());
+        let result: serde_json::Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(output) }.to_str().unwrap()).unwrap();
+        unsafe {
+            seiza_string_free(output);
+        }
+        assert_eq!(result["accepted"], true, "{result}");
+        assert_eq!(
+            unsafe { &*handle }
+                .stacker
+                .match_tolerances()
+                .light_rotation,
+            seiza_calibration::LightRotation::Measured { degrees: 90.0 }
+        );
+        // Its bias of 1500 came off: the panel's sky is near zero.
+        let snapshot = unsafe { &*handle }.stacker.snapshot().unwrap();
+        let covered = snapshot
+            .image
+            .data
+            .iter()
+            .filter(|value| value.is_finite())
+            .map(|&value| f64::from(value))
+            .collect::<Vec<_>>();
+        let mean = covered.iter().sum::<f64>() / covered.len() as f64;
+        assert!(mean.abs() < 500.0, "{mean}");
+        unsafe {
+            seiza_live_stacker_free(handle);
+        }
+
+        let missing = open(paths.len(), &mut error);
+        assert!(missing.is_null() && !error.is_null());
+        unsafe {
+            seiza_string_free(error);
         }
     }
 }
