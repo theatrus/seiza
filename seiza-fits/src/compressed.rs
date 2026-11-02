@@ -1751,6 +1751,28 @@ mod tests {
     }
 
     #[test]
+    fn a_compressed_image_is_found_by_its_table_name() {
+        let mut image = image_cards(16, &[2, 1], &[2, 1], "GZIP_1");
+        image.push(card("EXTNAME", "'COVER'"));
+        let samples = gzip(
+            &[3_i16, 300]
+                .iter()
+                .flat_map(|value| value.to_be_bytes())
+                .collect::<Vec<_>>(),
+        );
+        let file = compressed_file(&image, &[compressed_column(vec![samples])], &[]);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("compressed.fits");
+        std::fs::write(&path, &file).unwrap();
+        let named = crate::FitsImage::open_named(&path, "cover").unwrap();
+        assert_eq!(named.into_physical_f32(), [3.0, 300.0]);
+        assert_eq!(
+            crate::read_named_header(&path, "COVER").unwrap().cards,
+            crate::FitsImage::open(&path).unwrap().headers
+        );
+    }
+
+    #[test]
     fn unsupported_and_damaged_tables_are_errors() {
         let tile = gzip(&[0_u8; 4]);
         let file = |algorithm: &str, tiles: Vec<Vec<u8>>, rows: usize| {

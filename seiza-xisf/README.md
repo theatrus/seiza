@@ -92,6 +92,13 @@ stores a subblock that would not shrink uncompressed, and the whole block
 uncompressed when nothing shrinks. It cannot write LZ4HC, since `lz4_flex`
 has no LZ4HC encoder.
 
+`write_images` writes several images to one file, each `Float32` or
+`UInt16`, mono or RGB, with its own keywords and an `id` from its name, which
+`open_image_by_id` finds it by. The first image is the one readers open by
+default, and the carried metadata and declared `bounds` belong to it; every
+other `Float32` image declares the range its samples span. Compression and
+checksums apply to every image's block.
+
 Declare the range the samples are meant to have, such as `(0.0, 1.0)` for
 normalized samples or `(0.0, 65535.0)` for 16-bit camera counts. PixInsight
 maps the declared range onto its display range when it loads a file, so the

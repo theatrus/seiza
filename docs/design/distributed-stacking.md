@@ -246,10 +246,10 @@ coordinates and file paths from the frames are left out unless a contributor
 chooses to include them. Partial stacks are meant to be shared, and capture
 software writes the observer's location into every frame.
 
-`seiza-fits` writes only a primary HDU today, and reads the primary or the
-first image extension. Writing extensions, and reading one by `EXTNAME`, is
-new work. XISF holds several images natively, but `seiza-xisf` writes one
-today. Both are reached through `seiza-image-io`, by extension.
+`seiza-image-io::save_images` writes the images to one file, `f32` or
+unsigned 16-bit: in FITS the mean as the primary HDU and the rest as image
+extensions named by `EXTNAME`, in XISF each as an image with that `id`.
+`read_astronomy_named` reads one back by its name.
 
 ## Header cards
 

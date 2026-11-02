@@ -1,11 +1,12 @@
-//! Monolithic XISF writer for 32-bit floating-point images.
+//! Monolithic XISF writer for 32-bit floating-point images, and for files
+//! of several images.
 //!
 //! The output mirrors the layout the reader supports: an `XISF0100` preamble,
 //! a UTF-8 XML header padded to a 4096-byte block boundary, and one attached
-//! little-endian `Float32` planar data block, optionally compressed and
-//! checksummed. FITS-compatible metadata is stored as `FITSKeyword` elements
-//! whose values use FITS text conventions, so files round-trip through this
-//! crate's reader and load in PixInsight.
+//! little-endian planar data block per image, `Float32` or `UInt16`, each
+//! optionally compressed and checksummed. FITS-compatible metadata is stored
+//! as `FITSKeyword` elements whose values use FITS text conventions, so files
+//! round-trip through this crate's reader and load in PixInsight.
 
 use crate::metadata::{ENCODING_PROPERTIES, PIXEL_ATTRIBUTES, SOURCE_ATTRIBUTES};
 use crate::xml::escape_attribute;
@@ -15,7 +16,7 @@ use crate::{
 };
 use quick_xml::escape::escape;
 use rayon::prelude::*;
-use seiza_fits::{F32ImageData, HeaderValue, WriteHeaderCard};
+use seiza_fits::{F32ImageData, HeaderValue, ImagePart, ImageSamples, WriteHeaderCard};
 use sha2::digest::DynDigest;
 use std::collections::BTreeSet;
 use std::collections::HashSet;
@@ -30,10 +31,12 @@ const PIXEL_CHUNK_BYTES: usize = 1024 * 1024;
 /// plane of noise, is stored uncompressed.
 const SUBBLOCK_BYTES: usize = 4 << 20;
 
-/// Choices for [`write_f32_image_with_options`].
+/// Choices for [`write_f32_image_with_options`] and [`write_images`].
 ///
 /// The default writes an uncompressed block without a checksum, which every
-/// XISF reader can open.
+/// XISF reader can open. In a file of several images, compression and the
+/// checksum apply to every image's block, and `metadata` and `bounds` to the
+/// first image only.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WriteOptions<'a> {
     pub compression: Option<WriteCompression>,
@@ -160,9 +163,62 @@ pub fn write_f32_image_with_options(
     headers: &[WriteHeaderCard],
     options: &WriteOptions<'_>,
 ) -> Result<(), XisfError> {
-    validate_image(width, height, pixels, headers)?;
+    let image = ImagePart {
+        name: None,
+        width,
+        height,
+        samples: ImageSamples::F32(pixels),
+        headers,
+    };
+    validate_image(&image)?;
     validate_options(options)?;
-    let path = path.as_ref();
+    write_atomically(path.as_ref(), |writer| {
+        write_parts(writer, &[image], options, SUBBLOCK_BYTES)
+    })
+}
+
+/// Atomically write a monolithic XISF file holding several images, in
+/// order, the first being the one readers open by default. Each image's
+/// `id` is its [`ImagePart::name`], by which [`crate::open_image_by_id`]
+/// finds it, and its samples are `Float32` or `UInt16`. A `Float32` image
+/// declares the range its samples span, or, for the first, the
+/// [`WriteOptions::bounds`] given.
+///
+/// The names follow [`seiza_fits::write_images`]: every image after the
+/// first needs one and no two may share one, whatever their case. Here a
+/// name must also be an XISF identifier: a letter or underscore, then
+/// letters, digits and underscores. The completed file is flushed and
+/// renamed over `path` only after every block has been written.
+pub fn write_images(
+    path: impl AsRef<Path>,
+    images: &[ImagePart<'_>],
+    options: &WriteOptions<'_>,
+) -> Result<(), XisfError> {
+    validate_images(images)?;
+    validate_options(options)?;
+    write_atomically(path.as_ref(), |writer| {
+        write_parts(writer, images, options, SUBBLOCK_BYTES)
+    })
+}
+
+/// [`write_images`] to an existing stream. The caller owns flushing and
+/// durability.
+pub fn write_images_to(
+    writer: impl Write,
+    images: &[ImagePart<'_>],
+    options: &WriteOptions<'_>,
+) -> Result<(), XisfError> {
+    validate_images(images)?;
+    validate_options(options)?;
+    write_parts(writer, images, options, SUBBLOCK_BYTES)
+}
+
+/// Write a file through `write` under a temporary name beside `path`, then
+/// flush, sync and rename it over `path`.
+fn write_atomically(
+    path: &Path,
+    write: impl FnOnce(&mut BufWriter<&mut std::fs::File>) -> Result<(), XisfError>,
+) -> Result<(), XisfError> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -183,7 +239,7 @@ pub fn write_f32_image_with_options(
     }
     let mut temporary = builder.tempfile_in(parent)?;
     let mut writer = BufWriter::new(temporary.as_file_mut());
-    write_f32_image_to_with_options(&mut writer, width, height, pixels, headers, options)?;
+    write(&mut writer)?;
     writer.flush()?;
     drop(writer);
     temporary.as_file().sync_all()?;
@@ -231,32 +287,62 @@ pub fn write_f32_image_to_with_options(
 }
 
 fn write_image(
-    mut writer: impl Write,
+    writer: impl Write,
     (width, height, pixels): (usize, usize, F32ImageData<'_>),
     headers: &[WriteHeaderCard],
     options: &WriteOptions<'_>,
     subblock_bytes: usize,
 ) -> Result<(), XisfError> {
-    validate_image(width, height, pixels, headers)?;
+    let image = ImagePart {
+        name: None,
+        width,
+        height,
+        samples: ImageSamples::F32(pixels),
+        headers,
+    };
+    validate_image(&image)?;
     validate_options(options)?;
-    let block = prepare_block(width, height, pixels, options, subblock_bytes)?;
-    let bounds = options.bounds.unwrap_or_else(|| {
-        let (low, high) = sample_bounds(pixels.samples());
-        (f64::from(low), f64::from(high))
-    });
-    let carried = Carried::new(options.metadata, (width, height, pixels.planes()), headers);
+    write_parts(writer, &[image], options, subblock_bytes)
+}
+
+/// Write checked images: the header, then each image's block, then the
+/// carried metadata's blocks, every block on an alignment boundary.
+fn write_parts(
+    mut writer: impl Write,
+    images: &[ImagePart<'_>],
+    options: &WriteOptions<'_>,
+    subblock_bytes: usize,
+) -> Result<(), XisfError> {
+    let blocks = images
+        .iter()
+        .map(|image| prepare_block(image, options, subblock_bytes))
+        .collect::<Result<Vec<_>, _>>()?;
+    let bounds = images
+        .iter()
+        .enumerate()
+        .map(|(index, image)| match image.samples {
+            ImageSamples::F32(pixels) => {
+                Some(options.bounds.filter(|_| index == 0).unwrap_or_else(|| {
+                    let (low, high) = sample_bounds(pixels.samples());
+                    (f64::from(low), f64::from(high))
+                }))
+            }
+            // An integer image's range is its type's.
+            ImageSamples::U16 { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    let first = &images[0];
+    let carried = Carried::new(
+        options.metadata,
+        (first.width, first.height, first.samples.planes()),
+        first.headers,
+    )
+    .named(first.name.is_some());
 
     let created = utc_timestamp(std::time::SystemTime::now());
     let mut data_offset = BLOCK_ALIGNMENT;
     let xml = loop {
-        let xml = render_xml(
-            (width, height, pixels),
-            headers,
-            bounds,
-            (data_offset, &block),
-            &carried,
-            &created,
-        );
+        let xml = render_xml(images, &bounds, (data_offset, &blocks), &carried, &created);
         let end = PREAMBLE_LEN + xml.len();
         let needed = end.div_ceil(BLOCK_ALIGNMENT) * BLOCK_ALIGNMENT;
         if needed == data_offset {
@@ -277,14 +363,19 @@ fn write_image(
     writer.write_all(xml.as_bytes())?;
     writer.write_all(&vec![b' '; data_offset - PREAMBLE_LEN - xml.len()])?;
 
-    if let Some(stored) = &block.stored {
-        for subblock in stored {
-            writer.write_all(subblock)?;
+    let mut position = data_offset;
+    for (image, block) in images.iter().zip(&blocks) {
+        let aligned = position.next_multiple_of(BLOCK_ALIGNMENT);
+        writer.write_all(&vec![0; aligned - position])?;
+        if let Some(stored) = &block.stored {
+            for subblock in stored {
+                writer.write_all(subblock)?;
+            }
+        } else {
+            write_samples(&mut writer, image.width, image.height, image.samples)?;
         }
-    } else {
-        write_samples(&mut writer, width, height, pixels)?;
+        position = aligned + block.bytes;
     }
-    let mut position = data_offset + block.bytes;
     for bytes in carried.blocks() {
         let aligned = position.next_multiple_of(BLOCK_ALIGNMENT);
         writer.write_all(&vec![0; aligned - position])?;
@@ -298,14 +389,14 @@ fn write_samples(
     mut writer: impl Write,
     width: usize,
     height: usize,
-    pixels: F32ImageData<'_>,
+    samples: ImageSamples<'_>,
 ) -> Result<(), XisfError> {
     let mut byte_buffer = Vec::with_capacity(PIXEL_CHUNK_BYTES);
-    match pixels {
-        F32ImageData::Mono(samples) | F32ImageData::RgbPlanar(samples) => {
+    match samples {
+        ImageSamples::F32(F32ImageData::Mono(samples) | F32ImageData::RgbPlanar(samples)) => {
             write_float_values(&mut writer, samples.iter().copied(), &mut byte_buffer)?;
         }
-        F32ImageData::RgbInterleaved(samples) => {
+        ImageSamples::F32(F32ImageData::RgbInterleaved(samples)) => {
             let pixel_count = width * height;
             for channel in 0..3 {
                 write_float_values(
@@ -315,8 +406,32 @@ fn write_samples(
                 )?;
             }
         }
+        ImageSamples::U16 { samples, .. } => {
+            byte_buffer.clear();
+            for chunk in samples.chunks(PIXEL_CHUNK_BYTES / 2) {
+                byte_buffer.extend(chunk.iter().flat_map(|value| value.to_le_bytes()));
+                writer.write_all(&byte_buffer)?;
+                byte_buffer.clear();
+            }
+        }
     }
     Ok(())
+}
+
+/// The number of samples `samples` holds, every plane counted.
+fn sample_count(samples: ImageSamples<'_>) -> usize {
+    match samples {
+        ImageSamples::F32(pixels) => pixels.samples().len(),
+        ImageSamples::U16 { samples, .. } => samples.len(),
+    }
+}
+
+/// The bytes of one sample of `samples`.
+fn item_bytes(samples: ImageSamples<'_>) -> usize {
+    match samples {
+        ImageSamples::F32(_) => std::mem::size_of::<f32>(),
+        ImageSamples::U16 { .. } => std::mem::size_of::<u16>(),
+    }
 }
 
 /// The metadata carried from a read into this write, less what the new
@@ -433,6 +548,14 @@ impl Carried {
         .with_block_encodings()
     }
 
+    /// Leave out a carried `id` when the image is given a name of its own.
+    fn named(mut self, named: bool) -> Self {
+        if named {
+            self.image_attributes.retain(|(name, _)| name != "id");
+        }
+        self
+    }
+
     /// Record the codecs and checksum algorithms of every carried block,
     /// wherever it is stored.
     fn with_block_encodings(mut self) -> Self {
@@ -536,23 +659,27 @@ fn validate_options(options: &WriteOptions<'_>) -> Result<(), XisfError> {
 }
 
 fn prepare_block(
-    width: usize,
-    height: usize,
-    pixels: F32ImageData<'_>,
+    image: &ImagePart<'_>,
     options: &WriteOptions<'_>,
     subblock_bytes: usize,
 ) -> Result<PreparedBlock, XisfError> {
+    let &ImagePart {
+        width,
+        height,
+        samples,
+        ..
+    } = image;
+    let item_bytes = item_bytes(samples);
     let mut block = PreparedBlock {
         stored: None,
-        bytes: std::mem::size_of_val(pixels.samples()),
+        bytes: sample_count(samples) * item_bytes,
         attributes: String::new(),
         codec: None,
         level: None,
         checksum: options.checksum,
     };
     if let Some(compression) = options.compression {
-        let item_bytes = std::mem::size_of::<f32>();
-        let input = block_bytes(width * height, pixels, compression.byte_shuffle);
+        let input = block_bytes(width * height, samples, compression.byte_shuffle);
         let subblocks = input
             .par_chunks(subblock_bytes)
             .map(|chunk| {
@@ -597,7 +724,7 @@ fn prepare_block(
         } else {
             drop(subblocks);
             let raw = if compression.byte_shuffle {
-                block_bytes(width * height, pixels, false)
+                block_bytes(width * height, samples, false)
             } else {
                 input
             };
@@ -617,7 +744,7 @@ fn prepare_block(
             // gathered into one buffer.
             None => {
                 let mut hasher = HashWriter(checksum.hasher());
-                write_samples(&mut hasher, width, height, pixels)?;
+                write_samples(&mut hasher, width, height, samples)?;
                 crate::lowercase_hex(&hasher.0.finalize())
             }
         };
@@ -680,22 +807,43 @@ fn abstract_compression_level(compression: WriteCompression) -> Option<i32> {
 /// Bytes one task fills in [`block_bytes`].
 const SHUFFLE_TASK_BYTES: usize = 1 << 20;
 
-/// The samples of `pixels` in planar order as little-endian bytes, built in
-/// parallel. With `byte_shuffle`, they follow the XISF byte shuffle: every
-/// sample's first byte, then every second byte, and so on.
-fn block_bytes(pixel_count: usize, pixels: F32ImageData<'_>, byte_shuffle: bool) -> Vec<u8> {
-    let samples = pixels.samples();
-    let sample = |index: usize| match pixels {
-        F32ImageData::Mono(samples) | F32ImageData::RgbPlanar(samples) => samples[index],
-        F32ImageData::RgbInterleaved(samples) => {
-            samples[index % pixel_count * 3 + index / pixel_count]
-        }
-    };
-    let item_bytes = std::mem::size_of::<f32>();
-    let mut bytes = vec![0_u8; std::mem::size_of_val(samples)];
+/// The samples of `samples` in planar order as little-endian bytes, built
+/// in parallel. With `byte_shuffle`, they follow the XISF byte shuffle:
+/// every sample's first byte, then every second byte, and so on.
+fn block_bytes(pixel_count: usize, samples: ImageSamples<'_>, byte_shuffle: bool) -> Vec<u8> {
+    match samples {
+        ImageSamples::F32(pixels) => sample_bytes(
+            pixels.samples().len(),
+            |index| match pixels {
+                F32ImageData::Mono(samples) | F32ImageData::RgbPlanar(samples) => {
+                    samples[index].to_le_bytes()
+                }
+                F32ImageData::RgbInterleaved(samples) => {
+                    samples[index % pixel_count * 3 + index / pixel_count].to_le_bytes()
+                }
+            },
+            byte_shuffle,
+        ),
+        ImageSamples::U16 { samples, .. } => sample_bytes(
+            samples.len(),
+            |index| samples[index].to_le_bytes(),
+            byte_shuffle,
+        ),
+    }
+}
+
+/// [`block_bytes`] for `count` samples of `N` bytes each, the bytes of the
+/// sample at each planar index given by `sample`.
+fn sample_bytes<const N: usize>(
+    count: usize,
+    sample: impl Fn(usize) -> [u8; N] + Sync,
+    byte_shuffle: bool,
+) -> Vec<u8> {
+    let item_bytes = N;
+    let mut bytes = vec![0_u8; count * N];
     if byte_shuffle {
         bytes
-            .par_chunks_mut(samples.len())
+            .par_chunks_mut(count)
             .enumerate()
             .for_each(|(lane, lane_bytes)| {
                 lane_bytes
@@ -704,7 +852,7 @@ fn block_bytes(pixel_count: usize, pixels: F32ImageData<'_>, byte_shuffle: bool)
                     .for_each(|(task, chunk)| {
                         let first = task * SHUFFLE_TASK_BYTES;
                         for (offset, byte) in chunk.iter_mut().enumerate() {
-                            *byte = sample(first + offset).to_le_bytes()[lane];
+                            *byte = sample(first + offset)[lane];
                         }
                     });
             });
@@ -715,7 +863,7 @@ fn block_bytes(pixel_count: usize, pixels: F32ImageData<'_>, byte_shuffle: bool)
             .for_each(|(task, chunk)| {
                 let first = task * SHUFFLE_TASK_BYTES / item_bytes;
                 for (offset, item) in chunk.chunks_exact_mut(item_bytes).enumerate() {
-                    item.copy_from_slice(&sample(first + offset).to_le_bytes());
+                    item.copy_from_slice(&sample(first + offset));
                 }
             });
     }
@@ -753,17 +901,24 @@ fn creator_os() -> Option<&'static str> {
 const PREAMBLE_LEN: usize = 16;
 
 fn render_xml(
-    (width, height, pixels): (usize, usize, F32ImageData<'_>),
-    headers: &[WriteHeaderCard],
-    bounds: (f64, f64),
-    (data_offset, block): (usize, &PreparedBlock),
+    images: &[ImagePart<'_>],
+    bounds: &[Option<(f64, f64)>],
+    (data_offset, blocks): (usize, &[PreparedBlock]),
     carried: &Carried,
     created: &str,
 ) -> String {
-    let planes = pixels.planes();
-    let color_space = if planes == 3 { "RGB" } else { "Gray" };
-    // Carried blocks follow the pixel block, in document order.
-    let mut position = data_offset + block.bytes;
+    // Each image's block follows the last on an alignment boundary.
+    let mut position = data_offset;
+    let offsets = blocks
+        .iter()
+        .map(|block| {
+            position = position.next_multiple_of(BLOCK_ALIGNMENT);
+            let offset = position;
+            position += block.bytes;
+            offset
+        })
+        .collect::<Vec<_>>();
+    // Carried blocks follow the pixel blocks, in document order.
     let mut locations = carried
         .blocks()
         .into_iter()
@@ -789,31 +944,54 @@ fn render_xml(
         let _ = write!(xml, " {name}=\"{}\"", escape_attribute(value));
     }
     xml.push('>');
-    let _ = write!(
-        xml,
-        "<Image geometry=\"{width}:{height}:{planes}\" sampleFormat=\"Float32\" \
-         bounds=\"{}:{}\" colorSpace=\"{color_space}\" pixelStorage=\"Planar\" \
-         location=\"attachment:{data_offset}:{}\"{}",
-        bounds.0, bounds.1, block.bytes, block.attributes
-    );
-    for (name, value) in &carried.image_attributes {
-        let _ = write!(xml, " {name}=\"{}\"", escape_attribute(value));
-    }
-    xml.push('>');
-    for element in &carried.image_elements {
-        element.write(&mut xml, &mut locations);
-    }
-    for header in headers {
-        // name, value and comment are all mandatory attributes.
+    for (index, image) in images.iter().enumerate() {
+        let (block, offset) = (&blocks[index], offsets[index]);
+        let planes = image.samples.planes();
+        let color_space = if planes == 3 { "RGB" } else { "Gray" };
+        let sample_format = match image.samples {
+            ImageSamples::F32(_) => "Float32",
+            ImageSamples::U16 { .. } => "UInt16",
+        };
         let _ = write!(
             xml,
-            "<FITSKeyword name=\"{}\" value=\"{}\" comment=\"{}\"/>",
-            escape_attribute(header.keyword()),
-            escape_attribute(&fits_value_text(header.value())),
-            escape_attribute(header.comment())
+            "<Image geometry=\"{}:{}:{planes}\" sampleFormat=\"{sample_format}\"",
+            image.width, image.height
         );
+        if let Some((low, high)) = bounds[index] {
+            let _ = write!(xml, " bounds=\"{low}:{high}\"");
+        }
+        let _ = write!(
+            xml,
+            " colorSpace=\"{color_space}\" pixelStorage=\"Planar\" \
+             location=\"attachment:{offset}:{}\"{}",
+            block.bytes, block.attributes
+        );
+        if let Some(name) = image.name {
+            let _ = write!(xml, " id=\"{}\"", escape_attribute(name));
+        }
+        if index == 0 {
+            for (name, value) in &carried.image_attributes {
+                let _ = write!(xml, " {name}=\"{}\"", escape_attribute(value));
+            }
+        }
+        xml.push('>');
+        if index == 0 {
+            for element in &carried.image_elements {
+                element.write(&mut xml, &mut locations);
+            }
+        }
+        for header in image.headers {
+            // name, value and comment are all mandatory attributes.
+            let _ = write!(
+                xml,
+                "<FITSKeyword name=\"{}\" value=\"{}\" comment=\"{}\"/>",
+                escape_attribute(header.keyword()),
+                escape_attribute(&fits_value_text(header.value())),
+                escape_attribute(header.comment())
+            );
+        }
+        xml.push_str("</Image>");
     }
-    xml.push_str("</Image>");
     let _ = write!(
         xml,
         "<Metadata><Property id=\"XISF:CreationTime\" type=\"TimePoint\" value=\"{created}\"/>\
@@ -832,10 +1010,9 @@ fn render_xml(
     );
     // The codecs and checksum algorithms of every block in the unit, the
     // carried ones included.
-    let codecs = block
-        .codec
+    let codecs = blocks
         .iter()
-        .cloned()
+        .filter_map(|block| block.codec.clone())
         .chain(carried.codecs.iter().cloned())
         .collect::<BTreeSet<_>>();
     if !codecs.is_empty() {
@@ -846,18 +1023,22 @@ fn render_xml(
             escape(list.as_str())
         );
     }
-    // One level only describes the unit when the pixel block is its only
-    // compressed block.
-    if let Some(level) = block.level.filter(|_| carried.codecs.is_empty()) {
+    // One level only describes the unit when the pixel blocks, compressed
+    // alike, are its only compressed blocks.
+    if let Some(level) = blocks
+        .iter()
+        .find_map(|block| block.level)
+        .filter(|_| carried.codecs.is_empty())
+    {
         let _ = write!(
             xml,
             "<Property id=\"XISF:CompressionLevel\" type=\"Int32\" value=\"{level}\"/>"
         );
     }
-    let checksums = block
-        .checksum
+    let checksums = blocks
+        .iter()
+        .filter_map(|block| block.checksum)
         .map(|checksum| checksum.name().to_string())
-        .into_iter()
         .chain(carried.checksums.iter().cloned())
         .collect::<BTreeSet<_>>();
     if !checksums.is_empty() {
@@ -947,23 +1128,33 @@ fn sample_bounds(samples: &[f32]) -> (f32, f32) {
     }
 }
 
-fn validate_image(
-    width: usize,
-    height: usize,
-    pixels: F32ImageData<'_>,
-    headers: &[WriteHeaderCard],
-) -> Result<(), XisfError> {
+fn validate_image(image: &ImagePart<'_>) -> Result<(), XisfError> {
+    let &ImagePart {
+        width,
+        height,
+        samples,
+        headers,
+        ..
+    } = image;
+    if let ImageSamples::U16 { planes, .. } = samples
+        && planes != 1
+        && planes != 3
+    {
+        return Err(XisfError::Malformed(format!(
+            "{planes} planes of 16-bit samples; write 1 or 3"
+        )));
+    }
     let expected = width
         .checked_mul(height)
-        .and_then(|count| count.checked_mul(pixels.planes()))
+        .and_then(|count| count.checked_mul(samples.planes()))
         .ok_or_else(|| XisfError::Malformed("image dimensions overflow".into()))?;
     if width == 0 || height == 0 || expected > MAX_SAMPLES {
         return Err(XisfError::Malformed("implausible image dimensions".into()));
     }
-    if pixels.samples().len() != expected {
+    if sample_count(samples) != expected {
         return Err(XisfError::Malformed(format!(
             "pixel buffer has {} samples; expected {expected}",
-            pixels.samples().len()
+            sample_count(samples)
         )));
     }
     let mut keywords = HashSet::with_capacity(headers.len());
@@ -987,6 +1178,52 @@ fn validate_image(
             return Err(XisfError::Malformed(format!(
                 "non-finite FITS header {}",
                 header.keyword()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Check every image of a file of several, and their names: each image
+/// after the first has one, none is repeated whatever its case, and each is
+/// an XISF identifier.
+fn validate_images(images: &[ImagePart<'_>]) -> Result<(), XisfError> {
+    if images.is_empty() {
+        return Err(XisfError::Malformed("no images to write".into()));
+    }
+    let mut names = HashSet::with_capacity(images.len());
+    for (index, image) in images.iter().enumerate() {
+        validate_image(image)?;
+        if image
+            .headers
+            .iter()
+            .any(|header| header.keyword() == "EXTNAME")
+        {
+            return Err(XisfError::Malformed(
+                "EXTNAME is the image's name; set ImagePart::name".into(),
+            ));
+        }
+        let Some(name) = image.name else {
+            if index == 0 {
+                continue;
+            }
+            return Err(XisfError::Malformed(format!(
+                "image {index} has no name; every image after the first needs one"
+            )));
+        };
+        let mut characters = name.chars();
+        let identifier = characters
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+            && characters.all(|rest| rest.is_ascii_alphanumeric() || rest == '_');
+        if !identifier {
+            return Err(XisfError::Malformed(format!(
+                "image name {name:?} is not an XISF identifier"
+            )));
+        }
+        if !names.insert(name.to_ascii_uppercase()) {
+            return Err(XisfError::Malformed(format!(
+                "two images are named {name:?}"
             )));
         }
     }
@@ -1404,20 +1641,40 @@ mod tests {
         ] {
             let pixel_count = values.len() / pixels.planes();
             let height = pixel_count / width;
+            let samples = ImageSamples::F32(pixels);
             let mut streamed = Vec::new();
-            write_samples(&mut streamed, width, height, pixels).unwrap();
-            assert_eq!(block_bytes(pixel_count, pixels, false), streamed);
+            write_samples(&mut streamed, width, height, samples).unwrap();
+            assert_eq!(block_bytes(pixel_count, samples, false), streamed);
             assert_eq!(
-                block_bytes(pixel_count, pixels, true),
+                block_bytes(pixel_count, samples, true),
                 shuffle(&streamed, 4)
             );
         }
+        let counts = (0..width * height * 3)
+            .map(|index| (index * 7) as u16)
+            .collect::<Vec<_>>();
+        let samples = ImageSamples::U16 {
+            samples: &counts,
+            planes: 3,
+        };
+        let mut streamed = Vec::new();
+        write_samples(&mut streamed, width, height, samples).unwrap();
+        let little_endian = counts
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        assert_eq!(streamed, little_endian);
+        assert_eq!(block_bytes(width * height, samples, false), streamed);
+        assert_eq!(
+            block_bytes(width * height, samples, true),
+            shuffle(&streamed, 2)
+        );
         let mut interleaved = Vec::new();
         write_samples(
             &mut interleaved,
             width,
             height,
-            F32ImageData::RgbInterleaved(&values),
+            ImageSamples::F32(F32ImageData::RgbInterleaved(&values)),
         )
         .unwrap();
         let planar_bytes = planar
@@ -1572,6 +1829,222 @@ mod tests {
         )];
         assert!(write_f32_image(&path, 1, 1, F32ImageData::Mono(&[1.0]), &invalid).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"previous complete output");
+    }
+
+    /// A partial stack's images: a mean, its weight, and 16-bit coverage,
+    /// mono and RGB.
+    struct Partial {
+        mean: Vec<f32>,
+        weight: Vec<f32>,
+        cover: Vec<u16>,
+        rgb_cover: Vec<u16>,
+        cards: [WriteHeaderCard; 1],
+    }
+
+    impl Partial {
+        /// Repeating values, so every block compresses.
+        fn new() -> Self {
+            let pixels = 64 * 48;
+            Self {
+                mean: (0..pixels)
+                    .map(|index| 100.0 + (index % 64) as f32)
+                    .collect(),
+                weight: (0..pixels).map(|index| 0.5 + (index % 5) as f32).collect(),
+                cover: (0..pixels)
+                    .map(|index| (index % 64 * 1000) as u16)
+                    .collect(),
+                rgb_cover: (0..3 * pixels)
+                    .map(|index| (index % 64 * 1000) as u16)
+                    .collect(),
+                cards: [WriteHeaderCard::new("NCOMBINE", HeaderValue::Integer(40))],
+            }
+        }
+
+        fn images(&self) -> [ImagePart<'_>; 4] {
+            let image = |name, samples, headers| ImagePart {
+                name,
+                width: 64,
+                height: 48,
+                samples,
+                headers,
+            };
+            [
+                image(
+                    None,
+                    ImageSamples::F32(F32ImageData::Mono(&self.mean)),
+                    &self.cards[..],
+                ),
+                image(
+                    Some("WEIGHT"),
+                    ImageSamples::F32(F32ImageData::Mono(&self.weight)),
+                    &[],
+                ),
+                image(
+                    Some("COVER"),
+                    ImageSamples::U16 {
+                        samples: &self.cover,
+                        planes: 1,
+                    },
+                    &[],
+                ),
+                image(
+                    Some("RGB_COVER"),
+                    ImageSamples::U16 {
+                        samples: &self.rgb_cover,
+                        planes: 3,
+                    },
+                    &[],
+                ),
+            ]
+        }
+    }
+
+    #[test]
+    fn several_images_round_trip_by_id() {
+        let partial = Partial::new();
+        let compressed = WriteOptions {
+            compression: Some(WriteCompression::recommended()),
+            checksum: Some(ChecksumAlgorithm::Sha256),
+            ..WriteOptions::default()
+        };
+        for (options, subblock_bytes) in [
+            (WriteOptions::default(), SUBBLOCK_BYTES),
+            (compressed, SUBBLOCK_BYTES),
+            (compressed, 4096),
+        ] {
+            let mut encoded = Vec::new();
+            write_parts(&mut encoded, &partial.images(), &options, subblock_bytes).unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("partial.xisf");
+            std::fs::write(&path, &encoded).unwrap();
+
+            // Readers open the first image by default.
+            let mean = crate::open(&path).unwrap();
+            assert!(matches!(mean.pixels, Pixels::F32(ref values) if values == &partial.mean));
+            assert_eq!(mean.header_f64("NCOMBINE"), Some(40.0));
+            let weight = crate::open_image_by_id(&path, "WEIGHT").unwrap();
+            assert!(matches!(weight.pixels, Pixels::F32(ref values) if values == &partial.weight));
+            let cover = crate::open_image_by_id(&path, "COVER").unwrap();
+            assert!(matches!(cover.pixels, Pixels::U16(ref values) if values == &partial.cover));
+            let rgb = crate::open_image_by_id(&path, "RGB_COVER").unwrap();
+            assert_eq!(rgb.planes, 3);
+            assert!(matches!(rgb.pixels, Pixels::U16(ref values) if values == &partial.rgb_cover));
+
+            let info = crate::inspect(&path).unwrap();
+            let ids = info
+                .images
+                .iter()
+                .map(|image| image.id.as_deref())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                ids,
+                [None, Some("WEIGHT"), Some("COVER"), Some("RGB_COVER")]
+            );
+            for image in &info.images {
+                let crate::BlockLocation::Attachment { offset, .. } = image.location else {
+                    panic!("writer must attach every block");
+                };
+                assert_eq!(offset % BLOCK_ALIGNMENT as u64, 0);
+                assert_eq!(
+                    image.compression.is_some(),
+                    options.compression.is_some(),
+                    "{options:?}"
+                );
+            }
+            assert_eq!(
+                info.images[0]
+                    .compression
+                    .as_ref()
+                    .map(|compression| compression.subblocks.len() > 1),
+                options.compression.map(|_| subblock_bytes == 4096)
+            );
+            assert_eq!(info.images[2].sample_format, crate::SampleFormat::UInt16);
+            // Each floating-point image declares the range its samples span.
+            assert_eq!(info.images[0].bounds, Some((100.0, 163.0)));
+            assert_eq!(info.images[1].bounds, Some((0.5, 4.5)));
+
+            // Every block is checked, the last one's too.
+            if options.checksum.is_some() {
+                let mut corrupt = encoded.clone();
+                let last = corrupt.len() - 1;
+                corrupt[last] ^= 0x55;
+                std::fs::write(&path, &corrupt).unwrap();
+                assert!(crate::open(&path).is_ok());
+                assert!(matches!(
+                    crate::open_image_by_id(&path, "RGB_COVER"),
+                    Err(XisfError::Malformed(message)) if message.contains("checksum mismatch")
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn bounds_and_carried_metadata_belong_to_the_first_image() {
+        let partial = Partial::new();
+        let mut images = partial.images();
+        images[0].name = Some("MEAN");
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.xisf");
+        write_images(&source, &images, &WriteOptions::default()).unwrap();
+        let metadata = crate::read_image(&source).unwrap().metadata;
+
+        // Carried again under a new name, the source's id gives way to it.
+        images[0].name = Some("AGAIN");
+        let options = WriteOptions {
+            metadata: Some(&metadata),
+            bounds: Some((0.0, 65535.0)),
+            ..WriteOptions::default()
+        };
+        let path = directory.path().join("again.xisf");
+        write_images(&path, &images, &options).unwrap();
+        let info = crate::inspect(&path).unwrap();
+        assert_eq!(info.images[0].id.as_deref(), Some("AGAIN"));
+        assert_eq!(info.images[0].bounds, Some((0.0, 65535.0)));
+        assert_eq!(info.images[1].bounds, Some((0.5, 4.5)));
+
+        // Unnamed, the first image keeps the id it carries.
+        images[0].name = None;
+        write_images(&path, &images, &options).unwrap();
+        let info = crate::inspect(&path).unwrap();
+        assert_eq!(info.images[0].id.as_deref(), Some("MEAN"));
+    }
+
+    #[test]
+    fn several_images_need_distinct_identifiers() {
+        let partial = Partial::new();
+        let refused = |images: &[ImagePart<'_>]| {
+            let mut output = Vec::new();
+            let result = write_images_to(&mut output, images, &WriteOptions::default());
+            assert_eq!(result.is_err(), output.is_empty());
+            result.is_err()
+        };
+        let images = partial.images();
+        assert!(!refused(&images));
+        assert!(refused(&[]));
+        for name in [
+            None,
+            Some(""),
+            Some("1COVER"),
+            Some("COVER-1"),
+            Some("weight"),
+        ] {
+            let mut images = partial.images();
+            images[2].name = name;
+            assert!(refused(&images), "{name:?}");
+        }
+        let extname = [WriteHeaderCard::new(
+            "EXTNAME",
+            HeaderValue::String("X".into()),
+        )];
+        let mut images = partial.images();
+        images[1].headers = &extname;
+        assert!(refused(&images));
+        let mut images = partial.images();
+        images[2].samples = ImageSamples::U16 {
+            samples: &partial.rgb_cover[..96],
+            planes: 2,
+        };
+        assert!(refused(&images));
     }
 
     #[test]

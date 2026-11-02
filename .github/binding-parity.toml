@@ -467,6 +467,9 @@ objects = [
 "seiza-image-io::save" = { none = "the C ABI writes images through seiza-parallax and seiza-stacking, which write through seiza-image-io" }
 "seiza-image-io::save_display" = { none = "the C ABI writes images through seiza-parallax and seiza-stacking, which write through seiza-image-io" }
 "seiza-image-io::save_f32" = { none = "the C ABI writes images through seiza-parallax and seiza-stacking, which write through seiza-image-io" }
+"seiza-image-io::save_images" = { none = "multi-image files hold distributed stacking's partial stacks, which hosts will write through the pipeline's own calls" }
+"seiza-image-io::read_astronomy_named" = { none = "multi-image files hold distributed stacking's partial stacks, which hosts will read through the pipeline's own calls" }
+"seiza-image-io::read_named_header" = { none = "multi-image files hold distributed stacking's partial stacks, which hosts will read through the pipeline's own calls" }
 
 # parallax
 "seiza-parallax::Parallax::dust" = { none = "the C ABI reads dust through source_dust_map, which uses it" }

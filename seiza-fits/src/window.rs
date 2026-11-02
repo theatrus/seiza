@@ -148,7 +148,7 @@ pub(crate) fn window_from<R: Read + Seek>(
         data_start,
         table,
         ..
-    } = locate_image(reader, true)?;
+    } = locate_image(reader, true, None)?;
     let spec = ImageSpec::from_headers(&header.cards)?;
     let mut window =
         ImageWindow::for_request(spec.width, spec.height, spec.planes, x, y, width, height)
