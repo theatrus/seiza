@@ -82,8 +82,9 @@ impl PartialStack {
     /// Write the stack to a FITS or XISF file, as `path`'s extension names,
     /// atomically: the mean first, which any viewer opens as an ordinary
     /// stack, with the identity and carried cards, then `WEIGHT` (`f32`),
-    /// `COVER` (unsigned 16-bit), and `REJECT` and `VARIANCE` when held.
-    /// Coverage or rejection above 65535 frames is refused.
+    /// `COVER`, and `REJECT` and `VARIANCE` when held. Counts are unsigned
+    /// 16-bit, or `f32` where one passes 65535, as a deep tile's can; a count
+    /// past 2²⁴, which `f32` cannot hold exactly, is refused.
     pub fn write(&self, path: &Path) -> Result<()> {
         self.identity.check()?;
         self.check_shape()?;
@@ -106,11 +107,11 @@ impl PartialStack {
                 cards.push(card);
             }
         }
-        let cover = planar_counts(&self.coverage, channels, COVER)?;
+        let cover = PlanarCounts::of(&self.coverage, channels, COVER)?;
         let reject = self
             .rejected
             .as_ref()
-            .map(|rejected| planar_counts(rejected, channels, REJECT))
+            .map(|rejected| PlanarCounts::of(rejected, channels, REJECT))
             .transpose()?;
         let image = |name, samples| ImagePart {
             name,
@@ -125,22 +126,10 @@ impl PartialStack {
                 ..image(None, floats(&self.mean.data))
             },
             image(Some(WEIGHT), floats(&self.weight)),
-            image(
-                Some(COVER),
-                ImageSamples::U16 {
-                    samples: &cover,
-                    planes: channels,
-                },
-            ),
+            image(Some(COVER), cover.samples(channels)),
         ];
         if let Some(reject) = &reject {
-            images.push(image(
-                Some(REJECT),
-                ImageSamples::U16 {
-                    samples: reject,
-                    planes: channels,
-                },
-            ));
+            images.push(image(Some(REJECT), reject.samples(channels)));
         }
         if let Some(variance) = &self.variance {
             images.push(image(Some(VARIANCE), floats(variance)));
@@ -222,114 +211,54 @@ impl PartialStack {
     /// others is a whole-session fault, to be left out, not clipped pixel
     /// by pixel. The stacks are taken in the order of their step keys, so
     /// the result does not depend on the order they are given in, and its
-    /// key is a digest of theirs. Stacks on another grid or of another
-    /// shape are refused.
+    /// key is a digest of theirs. Stacks on another grid, made with other
+    /// options or of another shape are refused: their weights and scales are
+    /// not comparable.
     pub fn combine(stacks: &[PartialStack]) -> Result<Self> {
-        let Some(first) = stacks.first() else {
-            return Err(Error::Invalid("there are no stacks to combine".into()));
-        };
-        for stack in stacks {
-            stack.check_shape()?;
-            if stack.identity.grid != first.identity.grid
-                || (stack.mean.width, stack.mean.height, stack.mean.channels)
-                    != (first.mean.width, first.mean.height, first.mean.channels)
-            {
-                return Err(Error::Incompatible(format!(
-                    "stack {} is not on the grid of stack {}",
-                    stack.identity.step_key, first.identity.step_key
-                )));
-            }
-        }
         let mut ordered = stacks.iter().collect::<Vec<_>>();
         ordered.sort_by_key(|stack| stack.identity.step_key);
-        if ordered
-            .windows(2)
-            .any(|pair| pair[0].identity.step_key == pair[1].identity.step_key)
-        {
-            return Err(Error::Invalid(
-                "a stack is given twice: two stacks share a step key".into(),
-            ));
-        }
-        let pooled = ordered.iter().all(|stack| stack.variance.is_some());
-        let samples = first.mean.data.len();
-        let mut mean = vec![0.0_f32; samples];
-        let mut weight = vec![0.0_f32; samples];
-        let mut coverage = vec![0_u32; samples];
-        let mut variance = vec![0.0_f32; samples];
-        mean.par_iter_mut()
-            .zip(weight.par_iter_mut())
-            .zip(coverage.par_iter_mut())
-            .zip(variance.par_iter_mut())
-            .enumerate()
-            .for_each(|(index, (((mean, weight), coverage), variance))| {
-                let (mut sum, mut total, mut count) = (0.0_f64, 0.0_f64, 0_u32);
-                for stack in &ordered {
-                    let part_weight = f64::from(stack.weight[index]);
-                    if stack.coverage[index] > 0 && part_weight > 0.0 {
-                        sum += part_weight * f64::from(stack.mean.data[index]);
-                        total += part_weight;
-                        count = count.saturating_add(stack.coverage[index]);
-                    }
-                }
-                *coverage = count;
-                *weight = total as f32;
-                if count == 0 {
-                    *mean = f32::NAN;
-                    return;
-                }
-                let combined = sum / total;
-                *mean = combined as f32;
-                if !pooled || count < 2 {
-                    return;
-                }
-                // Each stack's sum of weighted squared deviations about its
-                // own mean, and its weight times its mean's squared
-                // deviation from the whole's.
-                let mut squares = 0.0_f64;
-                for stack in &ordered {
-                    let part_count = stack.coverage[index];
-                    let part_weight = f64::from(stack.weight[index]);
-                    if part_count == 0 || part_weight <= 0.0 {
-                        continue;
-                    }
-                    let part_variance = stack.variance.as_ref().expect("pooled")[index];
-                    squares += f64::from(part_variance) * f64::from(part_count - 1);
-                    let deviation = f64::from(stack.mean.data[index]) - combined;
-                    squares += part_weight * deviation * deviation;
-                }
-                *variance = (squares / f64::from(count - 1)) as f32;
-            });
-        let rejected = ordered
-            .iter()
-            .map(|stack| stack.rejected.as_deref())
-            .collect::<Option<Vec<_>>>()
-            .map(|parts| {
-                (0..samples)
-                    .map(|index| {
-                        parts
-                            .iter()
-                            .fold(0_u32, |sum, part| sum.saturating_add(part[index]))
-                    })
-                    .collect()
-            });
         let identities = ordered
             .iter()
-            .map(|stack| &stack.identity)
+            .map(|stack| stack.identity.clone())
             .collect::<Vec<_>>();
-        Ok(Self {
-            identity: tile_identity(&identities),
-            mean: LinearImage::new(
-                first.mean.width,
-                first.mean.height,
-                first.mean.channels,
-                mean,
-            )?,
-            weight,
-            coverage,
-            rejected,
-            variance: pooled.then_some(variance),
-            headers: ordered[0].headers.clone(),
-        })
+        check_combinable(&identities)?;
+        let mut combiner = Combiner::new(ordered[0])?;
+        for stack in ordered {
+            combiner.add(stack)?;
+        }
+        Ok(combiner.finish(&identities))
+    }
+
+    /// [`Self::combine`] the stack files at `paths`, reading one at a time:
+    /// their headers first, to take them in step-key order, then each whole
+    /// in turn, so memory does not grow with their number. Gives exactly
+    /// what [`Self::combine`] gives the same stacks.
+    pub fn combine_files(paths: &[impl AsRef<Path>]) -> Result<Self> {
+        let mut ordered = paths
+            .iter()
+            .map(|path| Ok((Self::read_identity(path.as_ref())?, path.as_ref())))
+            .collect::<Result<Vec<_>>>()?;
+        ordered.sort_by_key(|(identity, _)| identity.step_key);
+        let identities = ordered
+            .iter()
+            .map(|(identity, _)| identity.clone())
+            .collect::<Vec<_>>();
+        check_combinable(&identities)?;
+        let mut combiner = None;
+        for (identity, path) in &ordered {
+            let stack = Self::open(path)?;
+            if stack.identity != *identity {
+                return Err(Error::Invalid(format!(
+                    "{} changed while it was being combined",
+                    path.display()
+                )));
+            }
+            match &mut combiner {
+                None => combiner.insert(Combiner::new(&stack)?).add(&stack)?,
+                Some(combiner) => combiner.add(&stack)?,
+            }
+        }
+        Ok(combiner.expect("checked non-empty").finish(&identities))
     }
 
     /// An error unless every per-sample layer matches the mean.
@@ -347,6 +276,160 @@ impl PartialStack {
             ));
         }
         Ok(())
+    }
+}
+
+/// An error unless stacks with these identities, in step-key order, can be
+/// combined: at least one, none given twice, all on one grid and made with
+/// the same options.
+fn check_combinable(identities: &[Identity]) -> Result<()> {
+    let Some(first) = identities.first() else {
+        return Err(Error::Invalid("there are no stacks to combine".into()));
+    };
+    if identities
+        .windows(2)
+        .any(|pair| pair[0].step_key == pair[1].step_key)
+    {
+        return Err(Error::Invalid(
+            "a stack is given twice: two stacks share a step key".into(),
+        ));
+    }
+    for identity in identities {
+        if identity.grid != first.grid {
+            return Err(Error::Incompatible(format!(
+                "stack {} is not on the grid of stack {}",
+                identity.step_key, first.step_key
+            )));
+        }
+        if identity.options != first.options {
+            return Err(Error::Incompatible(format!(
+                "stack {} was made with other options than stack {}",
+                identity.step_key, first.step_key
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Running sums over stacks added one at a time, in step-key order: per
+/// sample, the summed weight, the weighted mean and the weighted sum of
+/// squared deviations, each stack merged in by Chan's pairwise update in
+/// `f64`, and the summed counts.
+struct Combiner {
+    width: usize,
+    height: usize,
+    channels: usize,
+    weight: Vec<f64>,
+    mean: Vec<f64>,
+    squares: Vec<f64>,
+    coverage: Vec<u32>,
+    /// `None` once a stack without rejection counts is added.
+    rejected: Option<Vec<u32>>,
+    /// Whether every stack added so far holds its variance.
+    pooled: bool,
+    headers: Vec<(String, HeaderValue)>,
+}
+
+impl Combiner {
+    fn new(first: &PartialStack) -> Result<Self> {
+        let samples = first.mean.data.len();
+        Ok(Self {
+            width: first.mean.width,
+            height: first.mean.height,
+            channels: first.mean.channels,
+            weight: vec![0.0; samples],
+            mean: vec![0.0; samples],
+            squares: vec![0.0; samples],
+            coverage: vec![0; samples],
+            rejected: Some(vec![0; samples]),
+            pooled: true,
+            headers: first.headers.clone(),
+        })
+    }
+
+    fn add(&mut self, stack: &PartialStack) -> Result<()> {
+        stack.check_shape()?;
+        if (stack.mean.width, stack.mean.height, stack.mean.channels)
+            != (self.width, self.height, self.channels)
+        {
+            return Err(Error::Incompatible(format!(
+                "stack {} is not of the others' shape",
+                stack.identity.step_key
+            )));
+        }
+        self.pooled &= stack.variance.is_some();
+        let variance = stack.variance.as_deref();
+        self.weight
+            .par_iter_mut()
+            .zip(self.mean.par_iter_mut())
+            .zip(self.squares.par_iter_mut())
+            .zip(self.coverage.par_iter_mut())
+            .enumerate()
+            .for_each(|(index, (((weight, mean), squares), coverage))| {
+                let part_weight = f64::from(stack.weight[index]);
+                let part_count = stack.coverage[index];
+                if part_count == 0 || part_weight <= 0.0 {
+                    return;
+                }
+                let part_mean = f64::from(stack.mean.data[index]);
+                // The stack's own weighted sum of squared deviations.
+                let part_squares = variance.map_or(0.0, |variance| {
+                    f64::from(variance[index]) * f64::from(part_count - 1)
+                });
+                let total = *weight + part_weight;
+                let delta = part_mean - *mean;
+                *squares += part_squares + delta * delta * *weight * part_weight / total;
+                *mean += delta * part_weight / total;
+                *weight = total;
+                *coverage = coverage.saturating_add(part_count);
+            });
+        self.rejected = match (self.rejected.take(), &stack.rejected) {
+            (Some(mut sums), Some(rejected)) => {
+                for (sum, &count) in sums.iter_mut().zip(rejected) {
+                    *sum = sum.saturating_add(count);
+                }
+                Some(sums)
+            }
+            _ => None,
+        };
+        Ok(())
+    }
+
+    fn finish(self, identities: &[Identity]) -> PartialStack {
+        let references = identities.iter().collect::<Vec<_>>();
+        let mean = self
+            .mean
+            .iter()
+            .zip(&self.coverage)
+            .map(|(&mean, &count)| if count == 0 { f32::NAN } else { mean as f32 })
+            .collect();
+        let variance = self.pooled.then(|| {
+            self.squares
+                .iter()
+                .zip(&self.coverage)
+                .map(|(&squares, &count)| {
+                    if count > 1 {
+                        (squares / f64::from(count - 1)) as f32
+                    } else {
+                        0.0
+                    }
+                })
+                .collect()
+        });
+        PartialStack {
+            identity: tile_identity(&references),
+            mean: LinearImage {
+                width: self.width,
+                height: self.height,
+                channels: self.channels,
+                data: mean,
+            },
+            weight: self.weight.iter().map(|&weight| weight as f32).collect(),
+            coverage: self.coverage,
+            rejected: self.rejected,
+            variance,
+            headers: self.headers,
+        }
     }
 }
 
@@ -474,20 +557,53 @@ fn carried_card(key: &str, value: &HeaderValue) -> Option<WriteHeaderCard> {
     }
 }
 
-/// Interleaved counts as planar 16-bit samples, refusing a count above
-/// 65535.
-fn planar_counts(counts: &[u32], channels: usize, name: &str) -> Result<Vec<u16>> {
-    let pixels = counts.len() / channels;
-    let mut planar = vec![0_u16; counts.len()];
-    for (index, &count) in counts.iter().enumerate() {
-        let value = u16::try_from(count).map_err(|_| {
-            Error::Invalid(format!(
-                "{name} holds {count} frames at a sample, more than a 16-bit image can"
-            ))
-        })?;
-        planar[(index % channels) * pixels + index / channels] = value;
+/// Interleaved counts as planar samples to write: unsigned 16-bit when
+/// every count fits, `f32` otherwise.
+enum PlanarCounts {
+    U16(Vec<u16>),
+    F32(Vec<f32>),
+}
+
+impl PlanarCounts {
+    /// `counts` planar, refusing a count `f32` cannot hold exactly.
+    fn of(counts: &[u32], channels: usize, name: &str) -> Result<Self> {
+        const EXACT_IN_F32: u32 = 1 << 24;
+        let largest = counts.iter().copied().max().unwrap_or(0);
+        if largest > EXACT_IN_F32 {
+            return Err(Error::Invalid(format!(
+                "{name} holds {largest} frames at a sample, more than a stack file can"
+            )));
+        }
+        let pixels = counts.len() / channels;
+        let place = |index: usize| (index % channels) * pixels + index / channels;
+        Ok(if largest <= u32::from(u16::MAX) {
+            let mut planar = vec![0_u16; counts.len()];
+            for (index, &count) in counts.iter().enumerate() {
+                planar[place(index)] = count as u16;
+            }
+            Self::U16(planar)
+        } else {
+            let mut planar = vec![0.0_f32; counts.len()];
+            for (index, &count) in counts.iter().enumerate() {
+                planar[place(index)] = count as f32;
+            }
+            Self::F32(planar)
+        })
     }
-    Ok(planar)
+
+    fn samples(&self, channels: usize) -> ImageSamples<'_> {
+        match self {
+            Self::U16(samples) => ImageSamples::U16 {
+                samples,
+                planes: channels,
+            },
+            Self::F32(samples) => ImageSamples::F32(if channels == 3 {
+                seiza_fits::F32ImageData::RgbPlanar(samples)
+            } else {
+                seiza_fits::F32ImageData::Mono(samples)
+            }),
+        }
+    }
 }
 
 /// Planar samples, as FITS and XISF hold them, interleaved.
@@ -513,12 +629,21 @@ fn is_missing(error: &seiza_image_io::Error) -> bool {
 }
 
 /// The digest of a stack's grid on today's single reference: the image it
-/// aligns to and the bin factor.
-pub(crate) fn reference_grid(image: &Digest, bin_factor: u32) -> Digest {
+/// aligns to, the bin factor, and the light it is normalized and weighted
+/// against with that light's recipe. Weights and scales are relative to
+/// that light, so stacks made against another are not on this grid.
+pub(crate) fn reference_grid(
+    image: &Digest,
+    bin_factor: u32,
+    light: &Digest,
+    recipe: &Digest,
+) -> Digest {
     KeyHasher::new("seiza-pipeline-grid-v1")
         .text("reference")
         .digest(image)
         .number(u64::from(bin_factor))
+        .digest(light)
+        .digest(recipe)
         .finish()
 }
 
@@ -623,12 +748,20 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_count_above_sixteen_bits_or_a_short_layer_is_refused() {
+    fn deep_counts_are_written_as_floats_and_a_short_layer_is_refused() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("deep.fits");
-        let mut deep = stack(1, 1);
-        deep.coverage[0] = 70_000;
-        assert!(matches!(deep.write(&path), Err(Error::Invalid(_))));
+        for (channels, name) in [(1, "deep.fits"), (3, "deep.xisf")] {
+            let path = directory.path().join(name);
+            let mut deep = stack(channels, 1);
+            deep.coverage[0] = 70_000;
+            deep.rejected.as_mut().unwrap()[1] = 16_777_216;
+            deep.write(&path).unwrap();
+            assert_same(&PartialStack::open(&path).unwrap(), &deep);
+        }
+        let path = directory.path().join("refused.fits");
+        let mut deeper = stack(1, 1);
+        deeper.coverage[0] = 16_777_217;
+        assert!(matches!(deeper.write(&path), Err(Error::Invalid(_))));
         let mut short = stack(1, 1);
         short.weight.pop();
         assert!(matches!(short.write(&path), Err(Error::Invalid(_))));
@@ -753,7 +886,47 @@ pub(crate) mod tests {
             PartialStack::combine(&[stack(1, 1), stack(3, 2)]),
             Err(Error::Incompatible(_))
         ));
+        // Weights made under other options are not comparable.
+        let reweighted = PartialStack {
+            identity: Identity {
+                options: Digest::of_bytes(b"other weighting"),
+                ..stack(1, 2).identity
+            },
+            ..stack(1, 2)
+        };
+        assert!(matches!(
+            PartialStack::combine(&[stack(1, 1), reweighted]),
+            Err(Error::Incompatible(_))
+        ));
         assert!(PartialStack::combine(&[stack(1, 1), stack(1, 1)]).is_err());
         assert!(PartialStack::combine(&[]).is_err());
+        assert!(PartialStack::combine_files(&[] as &[&Path]).is_err());
+    }
+
+    /// Combining files, one read at a time, gives what combining the same
+    /// stacks in memory gives, to the bit.
+    #[test]
+    fn combining_files_matches_combining_in_memory() {
+        let directory = tempfile::tempdir().unwrap();
+        for channels in [1, 3] {
+            let stacks = (1..=4)
+                .map(|seed| stack(channels, seed))
+                .collect::<Vec<_>>();
+            let paths = stacks
+                .iter()
+                .enumerate()
+                .map(|(index, stack)| {
+                    let path = directory.path().join(format!("{channels}-{index}.fits"));
+                    stack.write(&path).unwrap();
+                    path
+                })
+                .collect::<Vec<_>>();
+            let mut reversed = paths.clone();
+            reversed.reverse();
+            assert_same(
+                &PartialStack::combine_files(&reversed).unwrap(),
+                &PartialStack::combine(&stacks).unwrap(),
+            );
+        }
     }
 }

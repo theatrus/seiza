@@ -79,6 +79,9 @@ def test_a_channel_runs_resumes_and_combines(tmp_path):
     assert part.coverage.max() == 3
     tile = seiza.PartialStack.combine(list(reversed(parts)))
     assert tile.identity == first["tile"]["identity"]
+    from_files = seiza.PartialStack.combine_files(
+        [session["path"] for session in first["sessions"]])
+    np.testing.assert_array_equal(from_files.mean, tile.mean)
     np.testing.assert_array_equal(tile.coverage, parts[0].coverage + parts[1].coverage)
     covered = tile.coverage > 0
     weighted = (parts[0].mean * parts[0].weight + parts[1].mean * parts[1].weight)

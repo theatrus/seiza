@@ -343,6 +343,67 @@ fn a_session_that_gains_lights_is_extended_from_its_context() {
     assert!(later.sessions[1].extended_from.is_none());
 }
 
+/// A stored context that cannot be extended here, its masters moved since
+/// it was saved, as on another machine, is passed over: the session is
+/// stacked afresh from the masters where they are now, to the same stack.
+#[test]
+fn a_context_that_cannot_be_extended_is_stacked_afresh() {
+    let night = Night::new(2, 4);
+    let kept = SessionOptions {
+        keep_context: true,
+        ..options()
+    };
+    let mut early = night.sessions.clone();
+    early[1].lights.truncate(2);
+    let store = Store::new(night.root.join("store"));
+    run(&night.plan(&early, kept.clone()), &store);
+
+    let mut moved = night.sessions.clone();
+    let old = moved[1].calibration.bias.clone().unwrap();
+    let new = night.root.join("moved-bias.fits");
+    std::fs::rename(&old, &new).unwrap();
+    moved[1].calibration.bias = Some(new);
+    let (later, events) = run(&night.plan(&moved, kept.clone()), &store);
+    assert_eq!(stacked(&events), [1]);
+    assert!(later.sessions[1].extended_from.is_none());
+
+    let fresh = Store::new(night.root.join("fresh"));
+    let (whole, _) = run(&night.plan(&moved, kept), &fresh);
+    assert_eq!(later.sessions[1].key, whole.sessions[1].key);
+    let a = PartialStack::open(later.sessions[1].path.as_deref().unwrap()).unwrap();
+    let b = PartialStack::open(whole.sessions[1].path.as_deref().unwrap()).unwrap();
+    assert_eq!(bits(&a.mean.data), bits(&b.mean.data));
+}
+
+/// What cannot be combined is refused: stacks made against another
+/// reference light, a plan that drizzles Bayer frames, and a contributor
+/// handle a FITS card cannot hold, before any frame is stacked.
+#[test]
+fn what_cannot_be_combined_is_refused() {
+    let night = Night::new(2, 3);
+    let store = Store::new(night.root.join("store"));
+    let (first, _) = run(&night.plan(&night.sessions[..1], options()), &store);
+    let mut other = night.plan(&night.sessions[1..], options());
+    other.reference.light = night.sessions[0].lights[1].clone();
+    let (second, _) = run(&other, &store);
+    assert!(matches!(
+        PartialStack::combine_files(&[&first.path, &second.path]),
+        Err(seiza_pipeline::Error::Incompatible(_))
+    ));
+
+    let mut drizzled = options();
+    drizzled.stack.cfa_integration = seiza_stacking::CfaIntegration::BayerDrizzle;
+    let mut handle = options();
+    handle.contributor = Some("Zoë".into());
+    for options in [drizzled, handle] {
+        let error = run_channel(&night.plan(&night.sessions, options), &store, |_| {}).unwrap_err();
+        assert!(
+            matches!(error, seiza_pipeline::Error::Invalid(_)),
+            "{error}"
+        );
+    }
+}
+
 #[test]
 fn a_transient_is_rejected_within_its_session() {
     let night = Night::new(2, 5);

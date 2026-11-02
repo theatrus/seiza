@@ -111,11 +111,7 @@ fn combine(stacks: &[PathBuf], output: &Path) -> Result<()> {
         !stacks.iter().any(|stack| stack == output),
         "the output must not be one of the stacks"
     );
-    let stacks = stacks
-        .iter()
-        .map(|path| PartialStack::open(path).with_context(|| format!("reading {}", path.display())))
-        .collect::<Result<Vec<_>>>()?;
-    let tile = PartialStack::combine(&stacks)?;
+    let tile = PartialStack::combine_files(stacks)?;
     tile.write(output)?;
     println!(
         "combined {} frames from {} stacks: {}",

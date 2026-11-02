@@ -348,7 +348,6 @@ impl FileSessionPlan {
         Ok(self.light(path)?.1)
     }
 
-    /// Whether `path` is an earlier light's file under another name.
     /// Assign more lights to session `session`, as one still being shot
     /// gains frames. A light the plan already assigns there is kept as it
     /// is; one it assigns to another session is refused, as is one that is
@@ -418,6 +417,7 @@ impl FileSessionPlan {
         self.masters.contains_key(&path_identity(path))
     }
 
+    /// Whether `path` is an earlier light's file under another name.
     pub(crate) fn is_duplicate(&self, path: &Path) -> bool {
         !self.duplicates.is_empty()
             && (self.duplicates.contains(path) || self.duplicates.contains(&path_identity(path)))

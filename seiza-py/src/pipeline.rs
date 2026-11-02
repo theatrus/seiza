@@ -79,6 +79,17 @@ impl PyPartialStack {
         Ok(Self { inner })
     }
 
+    /// Combine the stack files at ``paths`` as :meth:`combine` combines
+    /// stacks, reading one at a time, so memory does not grow with their
+    /// number.
+    #[staticmethod]
+    fn combine_files(py: Python<'_>, paths: Vec<PathBuf>) -> PyResult<Self> {
+        let inner = py
+            .detach(|| PartialStack::combine_files(&paths))
+            .map_err(pipeline_error)?;
+        Ok(Self { inner })
+    }
+
     /// Write the stack to a FITS or XISF file, as the path's extension
     /// names: the mean first, then WEIGHT, COVER, REJECT and VARIANCE.
     fn write(&self, py: Python<'_>, path: PathBuf) -> PyResult<()> {

@@ -154,9 +154,10 @@ pub unsafe extern "C" fn seiza_pipeline_read_identity_json(
 }
 
 /// Combine the stack files `paths_json` names, a JSON array of paths, on one
-/// grid into a tile stack, weighing each by its weight
-/// (`seiza_pipeline::PartialStack::combine`), and write it to
-/// `output_path`, FITS or XISF by its extension.
+/// grid into a tile stack, weighing each by its weight and reading one at a
+/// time (`seiza_pipeline::PartialStack::combine_files`), and write it to
+/// `output_path`, FITS or XISF by its extension. Stacks on another grid or
+/// made with other options are refused.
 ///
 /// Returns owned JSON of the tile's identity, as
 /// [`seiza_pipeline_read_identity_json`] gives it. Free it with
@@ -176,12 +177,7 @@ pub unsafe extern "C" fn seiza_pipeline_combine_json(
         let paths: Vec<PathBuf> = serde_json::from_str(&required_str(paths_json, "stack paths")?)
             .map_err(|e| format!("invalid stack paths: {e}"))?;
         let output = required_path(output_path, "output path")?;
-        let stacks = paths
-            .iter()
-            .map(|path| PartialStack::open(path))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
-        let tile = PartialStack::combine(&stacks).map_err(|e| e.to_string())?;
+        let tile = PartialStack::combine_files(&paths).map_err(|e| e.to_string())?;
         tile.write(&output).map_err(|e| e.to_string())?;
         answer(identity_answer(&tile)?)
     })

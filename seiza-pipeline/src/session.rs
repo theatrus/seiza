@@ -2,6 +2,7 @@
 //! into a partial stack, named by a key computed before it runs.
 
 use crate::digest::KeyHasher;
+use crate::identity::check_contributor;
 use crate::partial::reference_grid;
 use crate::{
     Digest, Error, Estimator, Identity, PartialStack, Result, SessionOutcome, StackKind, Store,
@@ -9,8 +10,8 @@ use crate::{
 };
 use rayon::prelude::*;
 use seiza_stacking::{
-    BatchStackOptions, FileCalibrationSession, FrameDisposition, FrameRejectionReason, LiveStacker,
-    StackOptions,
+    BatchStackOptions, CfaIntegration, FileCalibrationSession, FrameDisposition,
+    FrameRejectionReason, LiveStacker, StackOptions,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -162,11 +163,21 @@ impl SessionStep {
         if session.lights.is_empty() {
             return Err(Error::Invalid("a session needs at least one light".into()));
         }
+        // Each session's stack fills its own Bayer gaps from neighbours, and
+        // combining cannot fill the tile's again.
+        if options.stack.cfa_integration == CfaIntegration::BayerDrizzle {
+            return Err(Error::Invalid(
+                "Bayer drizzle cannot be stacked as partial stacks yet".into(),
+            ));
+        }
+        check_contributor(options.contributor.as_deref())?;
         let frames = session
             .lights
             .par_iter()
             .map(|light| Digest::of_file(light))
             .collect::<Result<Vec<_>>>()?;
+        let reference_light = Digest::of_file(&reference.light)?;
+        let reference_recipe = recipe_digest(&reference.calibration)?;
         let mut step = Self {
             reference: reference.clone(),
             session: session.clone(),
@@ -179,9 +190,11 @@ impl SessionStep {
             grid: reference_grid(
                 &Digest::of_file(&reference.image)?,
                 options.stack.bin_factor,
+                &reference_light,
+                &reference_recipe,
             ),
-            reference_light: Digest::of_file(&reference.light)?,
-            reference_recipe: recipe_digest(&reference.calibration)?,
+            reference_light,
+            reference_recipe,
         };
         step.key = step.key_for(&step.inputs);
         Ok(step)
@@ -213,7 +226,7 @@ impl SessionStep {
         let mut stacker = self.open()?;
         let rejected = push(&mut stacker, &self.session.lights)?;
         Ok(SessionStack {
-            stack: self.finish(stacker, None)?,
+            stack: self.finish(stacker)?,
             rejected,
         })
     }
@@ -230,7 +243,9 @@ impl SessionStep {
     /// context is reopened and only the lights after them are pushed. The
     /// partial stack is then, to the bit, the one stacking every light would
     /// give. A reintegrated session reintegrates every light again, from
-    /// their files.
+    /// their files. A context that cannot be extended here, such as one
+    /// another machine stored whose masters and lights are elsewhere, is
+    /// passed over and the session stacked afresh.
     pub fn run_into(&self, store: &Store) -> Result<SessionOutcome> {
         if let Some(path) = store.find(&self.key, PARTIAL)? {
             return Ok(SessionOutcome {
@@ -241,20 +256,40 @@ impl SessionStep {
                 rejected: Vec::new(),
             });
         }
-        let prefix = if self.options.keep_context {
-            self.stored_prefix(store)?
-        } else {
-            None
-        };
-        let (mut stacker, taken, extended_from) = match prefix {
-            Some((key, context, taken)) => {
-                let mut stacker = LiveStacker::open_context(&context)?;
-                stacker.add_session_lights(&self.session.lights[taken..], self.session_recipe())?;
-                (stacker, taken, Some(key))
+        if self.options.keep_context
+            && let Some((key, context, taken)) = self.stored_prefix(store)?
+        {
+            let extended = LiveStacker::open_context(&context)
+                .and_then(|mut stacker| {
+                    stacker
+                        .add_session_lights(&self.session.lights[taken..], self.session_recipe())?;
+                    Ok(stacker)
+                })
+                .map_err(Error::from)
+                .and_then(|mut stacker| {
+                    let rejected = push(&mut stacker, &self.session.lights[taken..])?;
+                    self.store_stacked(store, stacker, rejected, Some(key))
+                });
+            if let Ok(outcome) = extended {
+                return Ok(outcome);
             }
-            None => (self.open()?, 0, None),
-        };
-        let rejected = push(&mut stacker, &self.session.lights[taken..])?;
+        }
+        let mut stacker = self.open()?;
+        let rejected = push(&mut stacker, &self.session.lights)?;
+        self.store_stacked(store, stacker, rejected, None)
+    }
+
+    /// Finish `stacker`, which holds the session's lights, and store its
+    /// partial stack, and with [`SessionOptions::keep_context`] its context,
+    /// which is saved aside first and stored only once the partial stack is
+    /// made.
+    fn store_stacked(
+        &self,
+        store: &Store,
+        stacker: LiveStacker,
+        rejected: Vec<(PathBuf, FrameRejectionReason)>,
+        extended_from: Option<Digest>,
+    ) -> Result<SessionOutcome> {
         if stacker.view().accepted_frames == 0 {
             return Ok(SessionOutcome {
                 key: self.key,
@@ -264,15 +299,33 @@ impl SessionStep {
                 rejected,
             });
         }
-        let context = if self.options.keep_context {
-            let path = store.put_file(&self.key, CONTEXT, |path| {
-                stacker.save_context(path).map_err(Error::from)
+        let pending = if self.options.keep_context {
+            std::fs::create_dir_all(store.root()).map_err(|source| Error::Io {
+                path: store.root().to_path_buf(),
+                source,
             })?;
-            Some(Digest::of_file(&path)?)
+            let pending = tempfile::Builder::new()
+                .prefix(".context-")
+                .tempfile_in(store.root())
+                .map_err(|source| Error::Io {
+                    path: store.root().to_path_buf(),
+                    source,
+                })?;
+            stacker.save_context(pending.path())?;
+            Some(pending)
         } else {
             None
         };
-        let stack = self.finish(stacker, context)?;
+        let mut stack = self.finish(stacker)?;
+        if let Some(pending) = pending {
+            let context = store.put_file(&self.key, CONTEXT, |path| {
+                std::fs::rename(pending.path(), path).map_err(|source| Error::Io {
+                    path: path.to_path_buf(),
+                    source,
+                })
+            })?;
+            stack.identity.context = Some(Digest::of_file(&context)?);
+        }
         Ok(SessionOutcome {
             key: self.key,
             path: Some(store.put(&stack, PARTIAL)?),
@@ -335,7 +388,7 @@ impl SessionStep {
 
     /// The partial stack of `stacker`, which holds every light of the
     /// session it accepted: its live mean, or every light reintegrated.
-    fn finish(&self, stacker: LiveStacker, context: Option<Digest>) -> Result<PartialStack> {
+    fn finish(&self, stacker: LiveStacker) -> Result<PartialStack> {
         let accepted = stacker.view().accepted_frames;
         if accepted == 0 {
             return Err(Error::Empty);
@@ -362,7 +415,7 @@ impl SessionStep {
             options: self.stack_options,
             host: self.options.host,
             estimator,
-            context,
+            context: None,
             contributor: self.options.contributor.clone(),
             weight_source: WeightSource::Stack,
             grid: self.grid,

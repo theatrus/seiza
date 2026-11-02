@@ -688,7 +688,7 @@ seiza_stack_integrate_registered_json = "integrate_registered_frames"
 seiza_pipeline_run_channel_json = "run_channel"
 seiza_pipeline_run_session_json = "SessionStep.run_into"
 seiza_pipeline_read_identity_json = "PartialStack.read_identity"
-seiza_pipeline_combine_json = "PartialStack.combine"
+seiza_pipeline_combine_json = "PartialStack.combine_files"
 
 seiza_stack_snapshot_width = "StackSnapshot.width"
 seiza_stack_snapshot_height = "StackSnapshot.height"
@@ -856,6 +856,7 @@ seiza_stretch_output_version = "STRETCH_OUTPUT_VERSION"
 # ({ c = "..." }), or why there is none.
 [python_functions]
 # distributed stacking: the steps of the C ABI's one-call workflows
+"PartialStack.combine" = { c = "seiza_pipeline_combine_json" }
 "PartialStack.open" = { c = "seiza_pipeline_combine_json" }
 "PartialStack.write" = { c = "seiza_pipeline_combine_json" }
 "SessionStep.plan" = { c = "seiza_pipeline_run_session_json" }

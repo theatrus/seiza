@@ -233,8 +233,8 @@ as an ordinary stack. Further images carry the rest.
 |---|---|
 | Primary | Weighted mean, in the session's physical units |
 | `WEIGHT` | Inverse variance per sample, W / σ₁² |
-| `COVER` | Frames integrated per sample, `u16` |
-| `REJECT` | Rejected samples per sample, `u16` (optional) |
+| `COVER` | Frames integrated per sample, `u16`, or `f32` where a deep tile passes 65535 |
+| `REJECT` | Rejected samples per sample, `u16` or `f32` likewise (optional) |
 | `VARIANCE` | Variance of one frame of weight 1 about the mean, from the stack's own frames (optional) |
 | `PSFGRID` | One PSF model per cell |
 | `SKYCELLS` | Star-masked background means and coverage per cell |

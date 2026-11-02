@@ -280,18 +280,24 @@ impl Identity {
     /// An error unless every value fits a FITS card: a contributor's
     /// handle is printable ASCII.
     pub(crate) fn check(&self) -> Result<()> {
-        if let Some(contributor) = &self.contributor
-            && (contributor.is_empty()
-                || !contributor
-                    .bytes()
-                    .all(|byte| (b' '..=b'~').contains(&byte)))
-        {
-            return Err(Error::Invalid(format!(
-                "contributor {contributor:?} is not printable ASCII"
-            )));
-        }
-        Ok(())
+        check_contributor(self.contributor.as_deref())
     }
+}
+
+/// An error unless a contributor's handle, when there is one, fits a FITS
+/// card: printable ASCII, not empty.
+pub(crate) fn check_contributor(contributor: Option<&str>) -> Result<()> {
+    if let Some(contributor) = contributor
+        && (contributor.is_empty()
+            || !contributor
+                .bytes()
+                .all(|byte| (b' '..=b'~').contains(&byte)))
+    {
+        return Err(Error::Invalid(format!(
+            "contributor {contributor:?} is not printable ASCII"
+        )));
+    }
+    Ok(())
 }
 
 fn card_error(keyword: &'static str, problem: &str) -> Error {

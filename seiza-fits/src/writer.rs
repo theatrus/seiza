@@ -77,8 +77,11 @@ pub struct ImagePart<'a> {
     /// and no two images may share one, whatever their case. `seiza-xisf`
     /// writes it as the image's `id`, where it must be an XISF identifier.
     pub name: Option<&'a str>,
+    /// The image's width in pixels.
     pub width: usize,
+    /// The image's height in pixels.
     pub height: usize,
+    /// The samples: `width × height` of them for each plane.
     pub samples: ImageSamples<'a>,
     /// Non-structural cards for this image's own header. `EXTNAME` comes
     /// from [`Self::name`], not from here.

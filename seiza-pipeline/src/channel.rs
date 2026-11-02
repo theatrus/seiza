@@ -79,9 +79,10 @@ pub struct ChannelOutcome {
 ///
 /// Running a plan again does only what is missing: a session added since
 /// is the only one stacked, and the tile is combined again from the stored
-/// partial stacks, without reading a frame of the others. Once nothing is
-/// missing, nothing is stacked or combined. A session that accepts no light
-/// adds nothing; a channel none of whose sessions do is [`Error::Empty`].
+/// partial stacks, one read at a time. Once nothing is missing, nothing is
+/// stacked or combined. Each run still reads every light once, to hash it
+/// for its session's key. A session that accepts no light adds nothing; a
+/// channel none of whose sessions do is [`Error::Empty`].
 pub fn run_channel(
     plan: &ChannelPlan,
     store: &Store,
@@ -93,37 +94,52 @@ pub fn run_channel(
         ));
     }
     let mut sessions = Vec::with_capacity(plan.sessions.len());
+    let mut identities = Vec::with_capacity(plan.sessions.len());
     for (index, session) in plan.sessions.iter().enumerate() {
         progress(ChannelProgress::Planning { session: index });
         let step = SessionStep::plan(&plan.reference, session, &plan.options)?;
         let key = step.key;
-        progress(if store.find(&key, PARTIAL)?.is_some() {
-            ChannelProgress::Reused {
-                session: index,
-                key,
+        let outcome = match store.find(&key, PARTIAL)? {
+            Some(path) => {
+                progress(ChannelProgress::Reused {
+                    session: index,
+                    key,
+                });
+                SessionOutcome {
+                    key,
+                    path: Some(path),
+                    reused: true,
+                    extended_from: None,
+                    rejected: Vec::new(),
+                }
             }
-        } else {
-            ChannelProgress::Stacking {
-                session: index,
-                key,
+            None => {
+                progress(ChannelProgress::Stacking {
+                    session: index,
+                    key,
+                });
+                step.run_into(store)?
             }
-        });
-        sessions.push(step.run_into(store)?);
+        };
+        if let Some(path) = &outcome.path {
+            identities.push((PartialStack::read_identity(path)?, path.clone()));
+        }
+        sessions.push(outcome);
     }
-    let paths = sessions
-        .iter()
-        .filter_map(|session| session.path.as_deref())
-        .collect::<Vec<_>>();
-    if paths.is_empty() {
+    if identities.is_empty() {
         return Err(Error::Empty);
     }
-    let mut identities = paths
-        .iter()
-        .map(|path| PartialStack::read_identity(path))
-        .collect::<Result<Vec<_>>>()?;
-    identities.sort_by_key(|identity| identity.step_key);
-    identities.dedup_by_key(|identity| identity.step_key);
-    let key = tile_identity(&identities.iter().collect::<Vec<_>>()).step_key;
+    // Two sessions with the same frames and recipe are one step, stored
+    // once, and combined once.
+    identities.sort_by_key(|(identity, _)| identity.step_key);
+    identities.dedup_by_key(|(identity, _)| identity.step_key);
+    let key = tile_identity(
+        &identities
+            .iter()
+            .map(|(identity, _)| identity)
+            .collect::<Vec<_>>(),
+    )
+    .step_key;
     if let Some(path) = store.find(&key, TILE)? {
         return Ok(ChannelOutcome {
             stack: PartialStack::open(&path)?,
@@ -135,16 +151,8 @@ pub fn run_channel(
     progress(ChannelProgress::Combining {
         stacks: identities.len(),
     });
-    // Two sessions with the same frames and recipe are one step, stored
-    // once, and combined once.
-    let mut paths = paths;
-    paths.sort();
-    paths.dedup();
-    let stacks = paths
-        .iter()
-        .map(|path| PartialStack::open(path))
-        .collect::<Result<Vec<_>>>()?;
-    let stack = PartialStack::combine(&stacks)?;
+    let paths = identities.iter().map(|(_, path)| path).collect::<Vec<_>>();
+    let stack = PartialStack::combine_files(&paths)?;
     let path = store.put(&stack, TILE)?;
     Ok(ChannelOutcome {
         stack,
