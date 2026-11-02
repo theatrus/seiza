@@ -888,6 +888,7 @@ Raw calibration sequences can be integrated into reusable masters first:
 seiza master bias bias/*.fits --output master-bias.fits --report master-bias.json
 seiza master dark dark/*.fits --bias master-bias.fits \
   --output master-dark.fits --report master-dark.json
+seiza master dark flat-darks/*.fits --output master-dark-flat.fits
 seiza master flat flats/*.fits --bias master-bias.fits \
   --dark-flat master-dark-flat.fits --output master-flat.fits \
   --report master-flat.json
@@ -988,7 +989,10 @@ JSON report retain the full measured rotation.
 `--flat` accepts an integrated master flat in the light frame's raw sampling.
 For legacy masters, `--bias` removes the flat's pedestal before normalization.
 Masters built by `seiza master` carry FITS calibration-state headers, so a
-bias-subtracted dark or calibrated flat is not subtracted twice. Each light is
+bias-subtracted dark or calibrated flat is not subtracted twice. They also
+record `IMAGETYP` as `MASTER BIAS`, `MASTER DARK` or `MASTER FLAT`, so software
+that sorts frames by `IMAGETYP`, such as PixInsight and PSF Guard, files them
+as calibration masters. A master from flat-darks is a `MASTER DARK`. Each light is
 checked against what the masters' headers record: gain, offset, binning, the
 dark's sensor temperature (`CCD-TEMP` or `SET-TEMP`) and the flat's filter and
 optics. A master dark that records no temperature is used with a warning.

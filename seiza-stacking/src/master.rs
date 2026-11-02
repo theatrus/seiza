@@ -34,6 +34,19 @@ impl MasterFrameKind {
         }
     }
 
+    /// The `IMAGETYP` a master of this kind is written with, for software
+    /// that sorts calibration frames from lights by `IMAGETYP`, such as
+    /// PixInsight and PSF Guard. Seiza itself reads `SEIZAMST`. A master
+    /// integrated from flat-darks is a `MASTER DARK`, as Seiza reads it;
+    /// PixInsight does not recognize a `MASTER DARK FLAT`.
+    pub(crate) fn image_type(self) -> &'static str {
+        match self {
+            Self::Bias => "MASTER BIAS",
+            Self::Dark => "MASTER DARK",
+            Self::Flat => "MASTER FLAT",
+        }
+    }
+
     /// Stable lowercase name used by user-facing APIs and reports.
     pub fn as_str(self) -> &'static str {
         match self {
