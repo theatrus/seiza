@@ -132,7 +132,7 @@ def test_an_image_returns_in_its_own_units(tmp_path, model):
 
 @runs_stand_in
 def test_a_file_is_denoised_with_the_requested_options(tmp_path, model):
-    from astropy.io import fits
+    fits = pytest.importorskip("astropy.io.fits")
 
     stand_in = executable(tmp_path, "PixInsight", fake({"amount": 0.75, "localSupport": None}))
     source = tmp_path / "light.fits"
