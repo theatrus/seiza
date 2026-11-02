@@ -1613,6 +1613,31 @@ impl Interpolation {
     }
 }
 
+impl std::fmt::Display for Interpolation {
+    /// The word options spell it with: `bilinear` or `lanczos3`.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Bilinear => "bilinear",
+            Self::Lanczos3 => "lanczos3",
+        })
+    }
+}
+
+impl std::str::FromStr for Interpolation {
+    type Err = Error;
+
+    /// `bilinear` or `lanczos3`, as options spell it.
+    fn from_str(word: &str) -> Result<Self> {
+        match word {
+            "bilinear" => Ok(Self::Bilinear),
+            "lanczos3" => Ok(Self::Lanczos3),
+            _ => Err(Error::Registration(format!(
+                "interpolation must be bilinear or lanczos3, not {word:?}"
+            ))),
+        }
+    }
+}
+
 /// Map a debayered Bayer frame onto the reference grid without interpolating
 /// color: each output pixel takes, in the one channel it records, the sample
 /// of the source photosite nearest its position, and leaves the other two
@@ -3336,6 +3361,19 @@ pub(crate) fn test_distortion(x: f64, y: f64) -> (f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interpolation_reads_and_writes_the_words_options_use() {
+        for interpolation in [Interpolation::Bilinear, Interpolation::Lanczos3] {
+            let word = interpolation.to_string();
+            assert_eq!(word.parse::<Interpolation>().unwrap(), interpolation);
+            assert_eq!(
+                serde_json::to_string(&interpolation).unwrap(),
+                format!("\"{word}\"")
+            );
+        }
+        assert!("lanczos".parse::<Interpolation>().is_err());
+    }
 
     /// A frame large enough for the GPU: sky with a gradient and noise,
     /// 600 stars from faint to near saturation, some touching, a trail and

@@ -2158,6 +2158,38 @@ SeizaStackSnapshot *seiza_live_stacker_reintegrate_frames(const SeizaLiveStacker
                                                           char **error_out);
 
 /*
+ Resample an image onto a stacked frame's reference grid by the frame's
+ registration alone, without its normalization, as
+ [`RegisteredFrameMapping::resample_geometry`] does: for an image that
+ shares the frame's geometry but not its light, such as its dark, a mask
+ or a defect map.
+
+ `mapping_json` is the frame's `mapping` as a live stacker's frame report
+ gives it, and `interpolation` is `bilinear` or `lanczos3`. `source`
+ holds `width * height * channels` interleaved floats, one or three
+ channels. `output` receives the mapping's whole reference grid, so
+ `output_length` must be `reference_width * reference_height * channels`.
+ Samples the source does not reach are NaN. Returns false and sets
+ `error_out` on failure; free that string with [`seiza_string_free`].
+
+ # Safety
+ `source` must point to `source_length` readable floats and `output` to
+ `output_length` writable ones. `mapping_json` and `interpolation` must be
+ valid NUL-terminated UTF-8 strings. When non-null, `error_out` must point
+ to writable storage for one pointer.
+ */
+bool seiza_frame_mapping_resample(const char *mapping_json,
+                                  const char *interpolation,
+                                  const float *source,
+                                  size_t source_length,
+                                  size_t width,
+                                  size_t height,
+                                  size_t channels,
+                                  float *output,
+                                  size_t output_length,
+                                  char **error_out);
+
+/*
  [`seiza_live_stacker_reintegrate`], also drizzling every admitted frame
  onto a grid `scale` (1 to 4) times finer than the reference, as
  PixInsight's DrizzleIntegration follows ImageIntegration.

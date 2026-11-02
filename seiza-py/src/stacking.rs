@@ -735,8 +735,9 @@ pub(crate) struct PyFrameDisposition {
     /// Each channel's weight in the stack mean; empty under equal weighting.
     #[pyo3(get)]
     weight: Option<Vec<f32>>,
-    /// The core's JSON of the frame's mapping, read by the `mapping` getter.
-    mapping_json: Option<String>,
+    /// The frame's mapping onto the reference grid, for the `mapping` getter
+    /// and `resample`.
+    frame_mapping: Option<seiza_stacking::RegisteredFrameMapping>,
 }
 
 impl PyFrameDisposition {
@@ -759,7 +760,7 @@ impl PyFrameDisposition {
                 integrated_fraction: Some(diagnostics.integrated_fraction),
                 accepted_samples: Some(diagnostics.accepted_samples),
                 rejected_samples: Some(diagnostics.rejected_samples),
-                mapping_json: serde_json::to_string(&diagnostics.mapping).ok(),
+                frame_mapping: Some(*diagnostics.mapping),
                 noise: Some(diagnostics.noise),
                 weight: Some(diagnostics.weight),
             },
@@ -782,7 +783,7 @@ impl PyFrameDisposition {
                 rejected_samples: None,
                 noise: None,
                 weight: None,
-                mapping_json: None,
+                frame_mapping: None,
             },
         }
     }
@@ -810,7 +811,7 @@ impl PyFrameDisposition {
             rejected_samples: None,
             noise: None,
             weight: None,
-            mapping_json: None,
+            frame_mapping: None,
         }
     }
 }
@@ -832,10 +833,49 @@ impl PyFrameDisposition {
     /// ``channel_sites``: three [x, y] offsets in source pixels, in RGB order.
     #[getter]
     fn mapping(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
-        self.mapping_json
-            .as_deref()
-            .map(|json| json_object(py, json))
+        self.frame_mapping
+            .as_ref()
+            .map(|mapping| {
+                let json = serde_json::to_string(mapping)
+                    .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+                json_object(py, &json)
+            })
             .transpose()
+    }
+
+    /// Resample `image` onto the stack's reference grid by this frame's
+    /// registration alone, without its normalization: for an image that
+    /// shares the frame's geometry but not its light, such as its dark, a
+    /// mask or a defect map. It resamples as the stack resampled the frame,
+    /// with `interpolation` (``"bilinear"`` or ``"lanczos3"``), its warp
+    /// and its channel sites. `image` is the frame's size, ``(height,
+    /// width)`` or ``(height, width, 3)`` float32; the result is the
+    /// reference grid's, NaN where the image does not reach. A rejected
+    /// frame has no mapping and raises ``ValueError``.
+    #[pyo3(signature = (image, *, interpolation = "lanczos3"))]
+    fn resample<'py>(
+        &self,
+        py: Python<'py>,
+        image: PyReadonlyArrayDyn<'_, f32>,
+        interpolation: &str,
+    ) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
+        let mapping = self.frame_mapping.clone().ok_or_else(|| {
+            PyValueError::new_err("a rejected frame has no mapping to resample by")
+        })?;
+        let interpolation: seiza_stacking::Interpolation = interpolation
+            .parse()
+            .map_err(|error: seiza_stacking::Error| PyValueError::new_err(error.to_string()))?;
+        let image = linear_image(image)?;
+        let region = seiza_stacking::ReferenceRegion {
+            x: 0,
+            y: 0,
+            width: mapping.reference_width(),
+            height: mapping.reference_height(),
+        };
+        let resampled = py
+            .detach(move || mapping.resample_geometry(&image, region, interpolation))
+            .map_err(stack_error)?;
+        crate::arrays::into_image_array(py, resampled)
     }
 
     fn __repr__(&self) -> String {

@@ -552,8 +552,8 @@ around small ones, and `"bilinear"` is fastest. `registration_model` is
 polynomial to follow lens distortion, for example across a meridian flip; the
 CLI defaults to `"quadratic"`. `weighting` is `"equal"` (the default) or
 `"inverse-noise-variance"`, which weights each frame by the reference frame's
-noise over its own, squared. The CLI's other stacking options (interpolation,
-Bayer drizzle) are not yet exposed here.
+noise over its own, squared. The CLI's Bayer drizzle option is not yet exposed
+here.
 
 Under noise weighting, each accepted frame's `noise` and `weight` list one
 value per channel, and `LiveStacker.reference_noise` gives the reference
@@ -564,6 +564,13 @@ reference, is a dict of its registration and normalization, to keep beside
 the frame. Superpixel mappings include `channel_sites`, three `[x, y]`
 offsets in source pixels in RGB order. Saved contexts retain these offsets,
 so crop extraction from equally prepared source frames keeps colours aligned.
+
+`disposition.resample(image, interpolation="lanczos3")` resamples another
+image of the frame's size onto the stack's grid by that frame's registration
+alone, without its normalization: its dark, a mask or a defect map. It
+resamples as the stack did, warp and channel sites included, and leaves NaN
+where the image does not reach. A rejected frame has no mapping to resample
+by, and raises `ValueError`.
 
 `LiveStacker.open_prepared_fits(path)` opens a stack from a frame already
 calibrated and debayered, keeping its FITS header cards, so you can correct a

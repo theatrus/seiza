@@ -199,7 +199,10 @@ exposes the **superset** of what both apps need.
   `seiza_live_stacker_reference_noise_json` and
   `seiza_live_stacker_reference_mapping_json` give the same for the reference
   frame, whose weight is 1; `seiza_frame_noise_json` measures any linear
-  buffer's noise with the same estimator.
+  buffer's noise with the same estimator. `seiza_frame_mapping_resample`
+  takes such a `mapping` and resamples another buffer of the frame's size
+  onto the reference grid by the frame's registration alone, without its
+  normalization: the frame's dark, a mask or a defect map.
 - **Photometric colour calibration** — `seiza_gaia_photometry_cone_json` fetches
   Gaia DR3 photometry for a field from the ESA archive, and
   `seiza_gaia_photometry_catalog_cone_json` reads it from the local catalog
