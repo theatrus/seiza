@@ -573,6 +573,7 @@ class StackOptions:
     normalization: str
     local_tile_size: int | None
     demosaic: str
+    interpolation: str
     registration_model: str
     weighting: str
     rejection: str
@@ -616,6 +617,7 @@ class StackOptions:
         defects: DefectMap | None = None,
         bin_factor: int = 1,
         gpu: GpuOptions | None = None,
+        interpolation: str = "bilinear",
     ) -> None: ...
 
 class FrameDisposition:
@@ -895,6 +897,7 @@ class LiveStacker:
         sigma_low: float = 3.0,
         sigma_high: float = 3.0,
         scratch_directory: str | Path | None = None,
+        frames: Sequence[str | Path] | None = None,
     ) -> StackSnapshot: ...
     def reintegrate_drizzled(
         self,
@@ -1081,6 +1084,26 @@ def rc_astro_process_file(
     progress: Callable[[float], None] | None = None,
     cancel: Callable[[], bool] | None = None,
 ) -> RcAstroRun: ...
+class RcAstroProcessed:
+    """An image a tool processed in memory, in the input's units and shape."""
+    image: npt.NDArray[np.float32]
+    stars: npt.NDArray[np.float32] | None
+    device: str | None
+    warnings: list[str]
+    cli_version: str
+    ml_version: int | None
+
+def rc_astro_process_image(
+    tool: str,
+    image: npt.NDArray[np.float32],
+    *,
+    parameters: dict[str, float | bool | int] | None = None,
+    device: str | None = None,
+    executable: str | Path | None = None,
+    host: str | None = None,
+    progress: Callable[[float], None] | None = None,
+    cancel: Callable[[], bool] | None = None,
+) -> RcAstroProcessed: ...
 def rc_astro_split_stars(
     image: npt.NDArray[np.float32],
     *,

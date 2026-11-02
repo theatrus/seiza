@@ -60,7 +60,9 @@ internals, tradeoffs, and proposals.
   [distributed stacking](design/distributed-stacking.md), [binning](design/binned-stacking.md),
   [background](design/background-extraction.md),
   [stretching](design/stretching.md), [composition](design/color-composition.md),
-  [color calibration](design/color-calibration.md), [deconvolution](design/deconvolution.md)
+  [color calibration](design/color-calibration.md), [deconvolution](design/deconvolution.md),
+  [learned restoration](design/ml-restoration-training.md) and its
+  [training corpus](../training/README.md), [editing tools](design/editing-tools.md)
 - Catalogs: [bundles](design/catalog-bundles.md), [lookup](design/catalog-lookup.md),
   [object format](design/objects-bin-v4.md), [identifiers](design/star-identifiers.md)
 - Rendering: [depth planes](design/parallax-depth-planes.md),

@@ -117,6 +117,29 @@ def test_a_run_returns_the_stars_sidecar_and_progress(fake_rc_astro, tmp_path):
     assert output.read_bytes() == b"fake fits"
 
 
+def test_an_image_in_linear_units_comes_back_in_them(fake_rc_astro):
+    import numpy as np
+
+    # The stand-in copies its input, so a round trip shows the mapping onto
+    # 0..1 and back: a stack far above 1, with a negative background.
+    image = np.linspace(-50.0, 5000.0, 48 * 32, dtype=np.float32).reshape(48, 32)
+    fractions = []
+    processed = seiza.rc_astro_process_image(
+        "sxt", image, parameters={"stars": True}, executable=fake_rc_astro,
+        progress=fractions.append,
+    )
+    np.testing.assert_allclose(processed.image, image, atol=5050.0 * 1e-6)
+    # The stars image is a difference, restored with the scale alone.
+    np.testing.assert_allclose(processed.stars, image + 50.0, atol=5050.0 * 1e-6)
+    assert processed.image.shape == image.shape
+    assert (processed.device, processed.cli_version, processed.ml_version) == ("cpu", "2.6.6", 11)
+    assert fractions == [pytest.approx(0.5), pytest.approx(1.0)]
+    colour = np.ones((8, 8, 3), dtype=np.float32) * 300.0
+    without = seiza.rc_astro_process_image("sxt", colour, executable=fake_rc_astro)
+    assert without.stars is None
+    np.testing.assert_allclose(without.image, colour, rtol=1e-6)
+
+
 def test_a_bad_parameter_type_is_refused(fake_rc_astro, tmp_path):
     source = tmp_path / "in.fits"
     source.write_bytes(b"fake fits")

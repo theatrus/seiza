@@ -2125,6 +2125,39 @@ SeizaStackSnapshot *seiza_live_stacker_reintegrate(const SeizaLiveStacker *stack
                                                    char **error_out);
 
 /*
+ [`seiza_live_stacker_reintegrate`] over some of the admitted frames alone:
+ those read from the `source_count` files `sources`, integrated in that
+ order.
+
+ Each frame is prepared, normalized and weighted exactly as in a
+ reintegration of every frame, and its background is matched to the same
+ reference, made from the best of all the admitted frames, so stacks of
+ disjoint subsets share one grid and one normalization. Frames kept by
+ [`seiza_live_stacker_retain_frames_for_reintegration`] are read back
+ rather than prepared again, so one registration serves many subsets.
+
+ A source matches an admitted frame by its path as it was pushed, or else
+ by the file it resolves to. The call fails for a source the stack did not
+ admit, for an empty list and for a frame named twice. `progress` counts
+ the chosen frames, and its frame index is a position in `sources`;
+ otherwise the arguments, memory and failures are those of
+ [`seiza_live_stacker_reintegrate`].
+
+ # Safety
+ As for [`seiza_live_stacker_reintegrate`]. `sources` must point to
+ `source_count` NUL-terminated UTF-8 paths, read only during the call.
+ */
+SeizaStackSnapshot *seiza_live_stacker_reintegrate_frames(const SeizaLiveStacker *stacker,
+                                                          const char *const *sources,
+                                                          size_t source_count,
+                                                          float low_sigma,
+                                                          float high_sigma,
+                                                          const SeizaCancelSignal *cancel,
+                                                          SeizaStackReintegrateProgressCallback progress,
+                                                          void *context,
+                                                          char **error_out);
+
+/*
  [`seiza_live_stacker_reintegrate`], also drizzling every admitted frame
  onto a grid `scale` (1 to 4) times finer than the reference, as
  PixInsight's DrizzleIntegration follows ImageIntegration.

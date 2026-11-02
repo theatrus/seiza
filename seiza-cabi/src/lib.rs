@@ -5372,6 +5372,97 @@ pub unsafe extern "C" fn seiza_live_stacker_reintegrate(
 }
 
 #[unsafe(no_mangle)]
+/// [`seiza_live_stacker_reintegrate`] over some of the admitted frames alone:
+/// those read from the `source_count` files `sources`, integrated in that
+/// order.
+///
+/// Each frame is prepared, normalized and weighted exactly as in a
+/// reintegration of every frame, and its background is matched to the same
+/// reference, made from the best of all the admitted frames, so stacks of
+/// disjoint subsets share one grid and one normalization. Frames kept by
+/// [`seiza_live_stacker_retain_frames_for_reintegration`] are read back
+/// rather than prepared again, so one registration serves many subsets.
+///
+/// A source matches an admitted frame by its path as it was pushed, or else
+/// by the file it resolves to. The call fails for a source the stack did not
+/// admit, for an empty list and for a frame named twice. `progress` counts
+/// the chosen frames, and its frame index is a position in `sources`;
+/// otherwise the arguments, memory and failures are those of
+/// [`seiza_live_stacker_reintegrate`].
+///
+/// # Safety
+/// As for [`seiza_live_stacker_reintegrate`]. `sources` must point to
+/// `source_count` NUL-terminated UTF-8 paths, read only during the call.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn seiza_live_stacker_reintegrate_frames(
+    stacker: *const SeizaLiveStacker,
+    sources: *const *const c_char,
+    source_count: usize,
+    low_sigma: f32,
+    high_sigma: f32,
+    cancel: *const SeizaCancelSignal,
+    progress: SeizaStackReintegrateProgressCallback,
+    context: *mut c_void,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaStackSnapshot {
+    clear_error(error_out);
+    let context = context as usize;
+    ffi_result(error_out, || {
+        let stacker = unsafe { required_live_stacker(stacker)? };
+        if sources.is_null() && source_count > 0 {
+            return Err("frame sources are required".into());
+        }
+        let sources = if source_count == 0 {
+            Vec::new()
+        } else {
+            unsafe { std::slice::from_raw_parts(sources, source_count) }
+                .iter()
+                .enumerate()
+                .map(|(index, source)| required_path(*source, &format!("frame source {index}")))
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let sigma = |value: f32| {
+            if value.is_finite() && value > 0.0 {
+                value
+            } else {
+                3.0
+            }
+        };
+        let options = seiza_stacking::BatchStackOptions {
+            rejection: seiza_stacking::MasterRejectionOptions {
+                low_sigma: sigma(low_sigma),
+                high_sigma: sigma(high_sigma),
+            },
+            cancel: unsafe { cancel.as_ref() }
+                .map(|signal| CancelSignal::from(Arc::clone(&signal.cancelled))),
+            ..seiza_stacking::BatchStackOptions::default()
+        };
+        let result = stacker
+            .stacker
+            .reintegrate_frames(&sources, &options, |pass, index, count| {
+                if let Some(callback) = progress {
+                    let pass = match pass {
+                        seiza_stacking::BatchStackPass::Estimate => 0,
+                        seiza_stacking::BatchStackPass::Refine => 1,
+                        seiza_stacking::BatchStackPass::Integrate => 2,
+                    };
+                    unsafe { callback(pass, index, count, context as *mut c_void) };
+                }
+            })
+            .map_err(|error| error.to_string())?;
+        Ok(SeizaStackSnapshot {
+            final_samples: Some(result.frames),
+            snapshot: result.snapshot,
+            reference_headers: stacker.stacker.reference_headers().to_vec(),
+            input_paths: stacker.stacker.protected_paths(),
+        })
+    })
+    .map_or(ptr::null_mut(), |snapshot| {
+        Box::into_raw(Box::new(snapshot))
+    })
+}
+
+#[unsafe(no_mangle)]
 /// [`seiza_live_stacker_reintegrate`], also drizzling every admitted frame
 /// onto a grid `scale` (1 to 4) times finer than the reference, as
 /// PixInsight's DrizzleIntegration follows ImageIntegration.
@@ -12040,6 +12131,125 @@ mod tests {
             )
         });
         unsafe { seiza_string_free(error) };
+    }
+
+    #[test]
+    fn chosen_frames_reintegrate_through_the_cabi() {
+        let (width, height) = (160, 128);
+        let clean = stacking_star_field(width, height);
+        let directory = tempfile::tempdir().unwrap();
+        let paths = (0..6)
+            .map(|index| {
+                let path = directory.path().join(format!("light-{index:03}.fits"));
+                let noisy = clean
+                    .iter()
+                    .enumerate()
+                    .map(|(sample, value)| value + ((sample * 7 + index * 13) % 5) as f32 * 0.1)
+                    .collect::<Vec<_>>();
+                seiza_stacking::write_processed_image_fits_f32(
+                    &path,
+                    &LinearImage::new(width, height, 1, noisy).unwrap(),
+                    &[],
+                    &[],
+                )
+                .unwrap();
+                path.to_str().unwrap().to_owned()
+            })
+            .collect::<Vec<_>>();
+        let reference_c = CString::new(paths[0].as_str()).unwrap();
+        let others_c = CString::new(serde_json::to_string(&paths[1..]).unwrap()).unwrap();
+        let config = no_adjustment_stack_options();
+        let mut error = ptr::null_mut();
+        let stacker = unsafe {
+            seiza_live_stacker_open_fits(
+                reference_c.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                0.0,
+                config.as_ptr(),
+                &mut error,
+            )
+        };
+        assert!(!stacker.is_null());
+        assert!(unsafe {
+            seiza_live_stacker_retain_frames_for_reintegration(stacker, ptr::null(), &mut error)
+        });
+        let response = unsafe {
+            seiza_live_stacker_push_fits_pipelined_json(
+                stacker,
+                others_c.as_ptr(),
+                2,
+                0,
+                0.0,
+                &mut error,
+            )
+        };
+        assert!(!response.is_null());
+        unsafe { seiza_string_free(response) };
+        let read = |snapshot: *mut SeizaStackSnapshot| {
+            assert!(!snapshot.is_null());
+            let length = unsafe { seiza_stack_snapshot_data_length(snapshot) };
+            let image =
+                unsafe { std::slice::from_raw_parts(seiza_stack_snapshot_image(snapshot), length) }
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>();
+            let coverage = unsafe {
+                std::slice::from_raw_parts(seiza_stack_snapshot_coverage(snapshot), length)
+            }
+            .to_vec();
+            unsafe { seiza_stack_snapshot_free(snapshot) };
+            (image, coverage)
+        };
+        let choose = |chosen: &[&str], error: &mut *mut c_char| {
+            let owned = chosen
+                .iter()
+                .map(|path| CString::new(*path).unwrap())
+                .collect::<Vec<_>>();
+            let pointers = owned.iter().map(|path| path.as_ptr()).collect::<Vec<_>>();
+            unsafe {
+                seiza_live_stacker_reintegrate_frames(
+                    stacker,
+                    pointers.as_ptr(),
+                    pointers.len(),
+                    0.0,
+                    0.0,
+                    ptr::null(),
+                    None,
+                    ptr::null_mut(),
+                    error,
+                )
+            }
+        };
+        let every = read(unsafe {
+            seiza_live_stacker_reintegrate(
+                stacker,
+                0.0,
+                0.0,
+                ptr::null(),
+                None,
+                ptr::null_mut(),
+                &mut error,
+            )
+        });
+        let all = paths.iter().map(String::as_str).collect::<Vec<_>>();
+        assert_eq!(read(choose(&all, &mut error)), every);
+        let (_, coverage) = read(choose(&[&paths[4], &paths[1], &paths[2]], &mut error));
+        assert_eq!(coverage.iter().max(), Some(&3));
+
+        let stranger = directory.path().join("light-099.fits");
+        assert!(choose(&[&paths[1], stranger.to_str().unwrap()], &mut error).is_null());
+        let message = unsafe { CStr::from_ptr(error) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(message.contains("not an admitted frame"), "{message}");
+        unsafe { seiza_string_free(error) };
+        error = ptr::null_mut();
+        assert!(choose(&[], &mut error).is_null());
+        unsafe { seiza_string_free(error) };
+        unsafe { seiza_live_stacker_free(stacker) };
     }
 
     #[test]
