@@ -306,14 +306,16 @@ impl SessionStep {
                 path: store.root().to_path_buf(),
                 source,
             })?;
+            // A directory, not an open temporary file: saving replaces the
+            // file it is given, which Windows refuses while it is open.
             let pending = tempfile::Builder::new()
                 .prefix(".context-")
-                .tempfile_in(store.root())
+                .tempdir_in(store.root())
                 .map_err(|source| Error::Io {
                     path: store.root().to_path_buf(),
                     source,
                 })?;
-            stacker.save_context(pending.path())?;
+            stacker.save_context(pending.path().join(CONTEXT))?;
             Some(pending)
         } else {
             None
@@ -321,7 +323,7 @@ impl SessionStep {
         let mut stack = self.finish(stacker)?;
         if let Some(pending) = pending {
             let context = store.put_file(&self.key, CONTEXT, |path| {
-                std::fs::rename(pending.path(), path).map_err(|source| Error::Io {
+                std::fs::rename(pending.path().join(CONTEXT), path).map_err(|source| Error::Io {
                     path: path.to_path_buf(),
                     source,
                 })
