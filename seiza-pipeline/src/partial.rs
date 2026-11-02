@@ -280,8 +280,8 @@ impl PartialStack {
 }
 
 /// An error unless stacks with these identities, in step-key order, can be
-/// combined: at least one, none given twice, all on one grid and made with
-/// the same options.
+/// combined: at least one, none given twice, and all on one grid, which
+/// holds what makes their scales and weights comparable.
 fn check_combinable(identities: &[Identity]) -> Result<()> {
     let Some(first) = identities.first() else {
         return Err(Error::Invalid("there are no stacks to combine".into()));
@@ -298,12 +298,6 @@ fn check_combinable(identities: &[Identity]) -> Result<()> {
         if identity.grid != first.grid {
             return Err(Error::Incompatible(format!(
                 "stack {} is not on the grid of stack {}",
-                identity.step_key, first.step_key
-            )));
-        }
-        if identity.options != first.options {
-            return Err(Error::Incompatible(format!(
-                "stack {} was made with other options than stack {}",
                 identity.step_key, first.step_key
             )));
         }
@@ -628,23 +622,42 @@ fn is_missing(error: &seiza_image_io::Error) -> bool {
     )
 }
 
-/// The digest of a stack's grid on today's single reference: the image it
-/// aligns to, the bin factor, and the light it is normalized and weighted
-/// against with that light's recipe. Weights and scales are relative to
-/// that light, so stacks made against another are not on this grid.
+/// The digest of a stack's grid on today's single reference: what puts a
+/// stack's samples where they are and gives them their scale and weight.
+/// That is the image it aligns to, the light it is normalized and weighted
+/// against with that light's recipe, and `scale`, a digest of the options
+/// that decide how ([`scale_options`]). Stacks made otherwise in any of
+/// these are not comparable, so not on this grid; options that change only
+/// which samples are kept, such as rejection or an impulse filter, may
+/// differ.
 pub(crate) fn reference_grid(
     image: &Digest,
-    bin_factor: u32,
     light: &Digest,
     recipe: &Digest,
+    scale: &Digest,
 ) -> Digest {
     KeyHasher::new("seiza-pipeline-grid-v1")
         .text("reference")
         .digest(image)
-        .number(u64::from(bin_factor))
         .digest(light)
         .digest(recipe)
+        .digest(scale)
         .finish()
+}
+
+/// The digest of the stacking options that decide a stack's geometry, scale
+/// and weights: the bin factor, how Bayer frames reach the accumulator,
+/// background normalization and frame weighting.
+pub(crate) fn scale_options(options: &seiza_stacking::StackOptions) -> Result<Digest> {
+    fn json(value: &impl serde::Serialize) -> Result<Vec<u8>> {
+        serde_json::to_vec(value).map_err(|error| Error::Invalid(error.to_string()))
+    }
+    Ok(KeyHasher::new("seiza-pipeline-scale-v1")
+        .number(u64::from(options.bin_factor))
+        .bytes(&json(&options.cfa_integration)?)
+        .bytes(&json(&options.normalization)?)
+        .bytes(&json(&options.weighting)?)
+        .finish())
 }
 
 #[cfg(test)]
@@ -886,18 +899,16 @@ pub(crate) mod tests {
             PartialStack::combine(&[stack(1, 1), stack(3, 2)]),
             Err(Error::Incompatible(_))
         ));
-        // Weights made under other options are not comparable.
-        let reweighted = PartialStack {
+        // Options that change only which samples are kept, such as a
+        // session's own impulse filter, leave stacks on one grid.
+        let filtered = PartialStack {
             identity: Identity {
-                options: Digest::of_bytes(b"other weighting"),
+                options: Digest::of_bytes(b"impulse filtered"),
                 ..stack(1, 2).identity
             },
             ..stack(1, 2)
         };
-        assert!(matches!(
-            PartialStack::combine(&[stack(1, 1), reweighted]),
-            Err(Error::Incompatible(_))
-        ));
+        assert!(PartialStack::combine(&[stack(1, 1), filtered]).is_ok());
         assert!(PartialStack::combine(&[stack(1, 1), stack(1, 1)]).is_err());
         assert!(PartialStack::combine(&[]).is_err());
         assert!(PartialStack::combine_files(&[] as &[&Path]).is_err());

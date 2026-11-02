@@ -3,7 +3,7 @@
 
 use crate::digest::KeyHasher;
 use crate::identity::check_contributor;
-use crate::partial::reference_grid;
+use crate::partial::{reference_grid, scale_options};
 use crate::{
     Digest, Error, Estimator, Identity, PartialStack, Result, SessionOutcome, StackKind, Store,
     WeightSource,
@@ -135,7 +135,9 @@ pub struct SessionStep {
     pub calibration: Digest,
     /// `OPTSSHA`: the options that change the pixels.
     pub stack_options: Digest,
-    /// `GRIDSHA`: the reference image and bin factor.
+    /// `GRIDSHA`: the reference image, the reference light and its recipe,
+    /// and the options that decide scale and weight, which stacks combined
+    /// together must share.
     pub grid: Digest,
     reference_light: Digest,
     reference_recipe: Digest,
@@ -189,9 +191,9 @@ impl SessionStep {
             stack_options: options_digest(options)?,
             grid: reference_grid(
                 &Digest::of_file(&reference.image)?,
-                options.stack.bin_factor,
                 &reference_light,
                 &reference_recipe,
+                &scale_options(&options.stack)?,
             ),
             reference_light,
             reference_recipe,

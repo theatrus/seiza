@@ -13,10 +13,13 @@ first phase.
   runs within each session. Combining pools the variances, sums the counts,
   and does not depend on the order the stacks arrive in.
   `PartialStack::combine_files` reads the stacks one at a time, so memory
-  does not grow with their number. Stacks on another grid, made against
-  another reference light, or made with other options are refused: their
-  weights and scales are not comparable. Bayer drizzle is not stacked this
-  way yet.
+  does not grow with their number. Stacks on another grid are refused, and
+  in phase 1 the grid holds the reference light and its recipe and the
+  options that decide scale and weight (binning, colour integration,
+  normalization, weighting): stacks that differ in any are not comparable.
+  Options that change only which samples are kept, such as rejection or a
+  session's own impulse filter, may differ. Bayer drizzle is not stacked
+  this way yet.
 - **Files that describe themselves.** A stack file is FITS or XISF, by its
   extension. Its first image is the mean, so any viewer opens it as an
   ordinary stack; `WEIGHT`, `COVER`, `REJECT` and `VARIANCE` follow. Header

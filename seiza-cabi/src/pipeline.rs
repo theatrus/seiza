@@ -156,8 +156,9 @@ pub unsafe extern "C" fn seiza_pipeline_read_identity_json(
 /// Combine the stack files `paths_json` names, a JSON array of paths, on one
 /// grid into a tile stack, weighing each by its weight and reading one at a
 /// time (`seiza_pipeline::PartialStack::combine_files`), and write it to
-/// `output_path`, FITS or XISF by its extension. Stacks on another grid or
-/// made with other options are refused.
+/// `output_path`, FITS or XISF by its extension. Stacks on another grid,
+/// which holds the reference light and the options that decide scale and
+/// weight, are refused.
 ///
 /// Returns owned JSON of the tile's identity, as
 /// [`seiza_pipeline_read_identity_json`] gives it. Free it with

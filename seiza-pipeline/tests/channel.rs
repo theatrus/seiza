@@ -391,6 +391,26 @@ fn what_cannot_be_combined_is_refused() {
         Err(seiza_pipeline::Error::Incompatible(_))
     ));
 
+    // Another weighting gives weights on another scale; an impulse filter
+    // only changes which samples are kept.
+    let mut equal = options();
+    equal.stack.weighting = FrameWeighting::Equal;
+    let (reweighted, _) = run(&night.plan(&night.sessions[1..], equal), &store);
+    assert!(matches!(
+        PartialStack::combine_files(&[&first.path, &reweighted.path]),
+        Err(seiza_pipeline::Error::Incompatible(_))
+    ));
+    let mut filtered = options();
+    filtered.stack.cosmetic = Some(Default::default());
+    let (cleaned, _) = run(&night.plan(&night.sessions[1..], filtered), &store);
+    let options_of = |outcome: &seiza_pipeline::ChannelOutcome| {
+        PartialStack::read_identity(outcome.sessions[0].path.as_deref().unwrap())
+            .unwrap()
+            .options
+    };
+    assert_ne!(options_of(&cleaned), options_of(&first));
+    assert!(PartialStack::combine_files(&[&first.path, &cleaned.path]).is_ok());
+
     let mut drizzled = options();
     drizzled.stack.cfa_integration = seiza_stacking::CfaIntegration::BayerDrizzle;
     let mut handle = options();
