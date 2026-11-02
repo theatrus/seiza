@@ -51,7 +51,11 @@ pub struct SessionOutcome {
     pub path: Option<PathBuf>,
     /// Whether the store held it already.
     pub reused: bool,
-    /// The lights it turned away, and why; empty when it was reused.
+    /// The key of the step over the session's first lights it was extended
+    /// from, when it was ([`crate::SessionOptions::keep_context`]).
+    pub extended_from: Option<Digest>,
+    /// The lights it turned away, and why: those it pushed, so none when it
+    /// was reused and only the new ones when it was extended.
     pub rejected: Vec<(PathBuf, FrameRejectionReason)>,
 }
 

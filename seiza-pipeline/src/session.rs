@@ -106,6 +106,13 @@ pub struct SessionOptions {
     /// A fingerprint of the host's own decisions, written as `HOSTSHA` and
     /// held in every key.
     pub host: Option<Digest>,
+    /// Keep each session's live-stack context in the store beside its
+    /// partial stack, written as `CONTEXT`, so a session that gains lights
+    /// later is extended from it: only the new lights are pushed (see
+    /// [`SessionStep::run_into`]). A context holds the stack's moments and
+    /// reference, more than the partial stack itself. It changes no pixel,
+    /// so no key holds it.
+    pub keep_context: bool,
 }
 
 /// A session's step, planned: every file it reads hashed, and its key
@@ -129,6 +136,8 @@ pub struct SessionStep {
     pub stack_options: Digest,
     /// `GRIDSHA`: the reference image and bin factor.
     pub grid: Digest,
+    reference_light: Digest,
+    reference_recipe: Digest,
 }
 
 /// A session's partial stack, and the lights the stack turned away.
@@ -158,42 +167,40 @@ impl SessionStep {
             .par_iter()
             .map(|light| Digest::of_file(light))
             .collect::<Result<Vec<_>>>()?;
-        let mut inputs = KeyHasher::new("seiza-pipeline-frames-v1");
-        inputs.number(frames.len() as u64);
-        for frame in &frames {
-            inputs.digest(frame);
-        }
-        let inputs = inputs.finish();
-        let calibration = recipe_digest(&session.calibration)?;
-        let reference_recipe = recipe_digest(&reference.calibration)?;
-        let reference_light = Digest::of_file(&reference.light)?;
-        let grid = reference_grid(
-            &Digest::of_file(&reference.image)?,
-            options.stack.bin_factor,
-        );
-        let stack_options = options_digest(options)?;
-        let key = KeyHasher::new("seiza-pipeline-partial-v1")
-            .text(seiza_stacking::OUTPUT_VERSION)
-            .text(crate::OUTPUT_VERSION)
-            .digest(&grid)
-            .digest(&reference_light)
-            .digest(&reference_recipe)
-            .digest(&calibration)
-            .digest(&stack_options)
-            .digest(&inputs)
-            .optional_digest(options.host.as_ref())
-            .finish();
-        Ok(Self {
+        let mut step = Self {
             reference: reference.clone(),
             session: session.clone(),
             options: options.clone(),
-            key,
-            inputs,
+            key: Digest::of_bytes(&[]),
+            inputs: inputs_digest(&frames),
             frames,
-            calibration,
-            stack_options,
-            grid,
-        })
+            calibration: recipe_digest(&session.calibration)?,
+            stack_options: options_digest(options)?,
+            grid: reference_grid(
+                &Digest::of_file(&reference.image)?,
+                options.stack.bin_factor,
+            ),
+            reference_light: Digest::of_file(&reference.light)?,
+            reference_recipe: recipe_digest(&reference.calibration)?,
+        };
+        step.key = step.key_for(&step.inputs);
+        Ok(step)
+    }
+
+    /// The key of this session's step over lights whose digests give
+    /// `inputs`, everything else the same.
+    fn key_for(&self, inputs: &Digest) -> Digest {
+        KeyHasher::new("seiza-pipeline-partial-v1")
+            .text(seiza_stacking::OUTPUT_VERSION)
+            .text(crate::OUTPUT_VERSION)
+            .digest(&self.grid)
+            .digest(&self.reference_light)
+            .digest(&self.reference_recipe)
+            .digest(&self.calibration)
+            .digest(&self.stack_options)
+            .digest(inputs)
+            .optional_digest(self.options.host.as_ref())
+            .finish()
     }
 
     /// Stack the session: open a stack aligned to the reference image and
@@ -203,33 +210,132 @@ impl SessionStep {
     /// say so. A session none of whose lights is accepted is
     /// [`Error::Empty`].
     pub fn run(&self) -> Result<SessionStack> {
-        let mut recipes = vec![self.reference.calibration.clone()];
-        let session_recipe = if self.session.calibration == self.reference.calibration {
-            0
+        let mut stacker = self.open()?;
+        let rejected = push(&mut stacker, &self.session.lights)?;
+        Ok(SessionStack {
+            stack: self.finish(stacker, None)?,
+            rejected,
+        })
+    }
+
+    /// Do the step against `store`: its partial stack when the store holds
+    /// one under [`Self::key`], or else the session stacked and stored there.
+    /// A session that accepts no light stores nothing, and its outcome has
+    /// no path.
+    ///
+    /// With [`SessionOptions::keep_context`], the live stack's context is
+    /// stored beside the partial stack, and a session that has gained lights
+    /// since is extended rather than stacked again: when the store holds
+    /// this step over the session's first lights, with its context, that
+    /// context is reopened and only the lights after them are pushed. The
+    /// partial stack is then, to the bit, the one stacking every light would
+    /// give. A reintegrated session reintegrates every light again, from
+    /// their files.
+    pub fn run_into(&self, store: &Store) -> Result<SessionOutcome> {
+        if let Some(path) = store.find(&self.key, PARTIAL)? {
+            return Ok(SessionOutcome {
+                key: self.key,
+                path: Some(path),
+                reused: true,
+                extended_from: None,
+                rejected: Vec::new(),
+            });
+        }
+        let prefix = if self.options.keep_context {
+            self.stored_prefix(store)?
         } else {
-            recipes.push(self.session.calibration.clone());
-            1
+            None
         };
+        let (mut stacker, taken, extended_from) = match prefix {
+            Some((key, context, taken)) => {
+                let mut stacker = LiveStacker::open_context(&context)?;
+                stacker.add_session_lights(&self.session.lights[taken..], self.session_recipe())?;
+                (stacker, taken, Some(key))
+            }
+            None => (self.open()?, 0, None),
+        };
+        let rejected = push(&mut stacker, &self.session.lights[taken..])?;
+        if stacker.view().accepted_frames == 0 {
+            return Ok(SessionOutcome {
+                key: self.key,
+                path: None,
+                reused: false,
+                extended_from,
+                rejected,
+            });
+        }
+        let context = if self.options.keep_context {
+            let path = store.put_file(&self.key, CONTEXT, |path| {
+                stacker.save_context(path).map_err(Error::from)
+            })?;
+            Some(Digest::of_file(&path)?)
+        } else {
+            None
+        };
+        let stack = self.finish(stacker, context)?;
+        Ok(SessionOutcome {
+            key: self.key,
+            path: Some(store.put(&stack, PARTIAL)?),
+            reused: false,
+            extended_from,
+            rejected,
+        })
+    }
+
+    /// The step over the session's first lights that `store` holds with its
+    /// context, the longest first: its key, its context and how many lights
+    /// it took. A context whose digest is not the one its partial stack
+    /// records is passed over.
+    fn stored_prefix(&self, store: &Store) -> Result<Option<(Digest, PathBuf, usize)>> {
+        for taken in (1..self.frames.len()).rev() {
+            let key = self.key_for(&inputs_digest(&self.frames[..taken]));
+            let Some(partial) = store.find(&key, PARTIAL)? else {
+                continue;
+            };
+            let Some(recorded) = PartialStack::read_identity(&partial)?.context else {
+                continue;
+            };
+            let context = store.path(&key, CONTEXT);
+            if context.is_file() && Digest::of_file(&context)? == recorded {
+                return Ok(Some((key, context, taken)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The index of the session's recipe among those [`Self::open`] gives
+    /// the stack: 0 when it is the reference's own.
+    fn session_recipe(&self) -> usize {
+        usize::from(self.session.calibration != self.reference.calibration)
+    }
+
+    /// An empty stack on the reference, with the reference's recipe and the
+    /// session's, and the reference light and the session's lights in its
+    /// plan.
+    fn open(&self) -> Result<LiveStacker> {
+        let mut recipes = vec![self.reference.calibration.clone()];
+        if self.session_recipe() == 1 {
+            recipes.push(self.session.calibration.clone());
+        }
         let paths = std::iter::once(self.reference.light.clone())
             .chain(self.session.lights.iter().cloned())
             .collect::<Vec<_>>();
         let assignments = std::iter::once(0)
-            .chain(self.session.lights.iter().map(|_| session_recipe))
+            .chain(self.session.lights.iter().map(|_| self.session_recipe()))
             .collect::<Vec<_>>();
-        let mut stacker = LiveStacker::open_fits_sessions_with_reference_image(
+        Ok(LiveStacker::open_fits_sessions_with_reference_image(
             &self.reference.image,
             &paths,
             &recipes,
             &assignments,
             0,
             self.options.stack.clone(),
-        )?;
-        let mut rejected = Vec::new();
-        for light in &self.session.lights {
-            if let FrameDisposition::Rejected(reason) = stacker.push_fits(light)? {
-                rejected.push((light.clone(), reason));
-            }
-        }
+        )?)
+    }
+
+    /// The partial stack of `stacker`, which holds every light of the
+    /// session it accepted: its live mean, or every light reintegrated.
+    fn finish(&self, stacker: LiveStacker, context: Option<Digest>) -> Result<PartialStack> {
         let accepted = stacker.view().accepted_frames;
         if accepted == 0 {
             return Err(Error::Empty);
@@ -256,45 +362,12 @@ impl SessionStep {
             options: self.stack_options,
             host: self.options.host,
             estimator,
-            context: None,
+            context,
             contributor: self.options.contributor.clone(),
             weight_source: WeightSource::Stack,
             grid: self.grid,
         };
-        Ok(SessionStack {
-            stack: PartialStack::from_snapshot(snapshot, &headers, identity)?,
-            rejected,
-        })
-    }
-
-    /// Do the step against `store`: its partial stack when the store holds
-    /// one under [`Self::key`], or else [`Self::run`] stored there. A
-    /// session that accepts no light stores nothing, and its outcome has no
-    /// path.
-    pub fn run_into(&self, store: &Store) -> Result<SessionOutcome> {
-        if let Some(path) = store.find(&self.key, PARTIAL)? {
-            return Ok(SessionOutcome {
-                key: self.key,
-                path: Some(path),
-                reused: true,
-                rejected: Vec::new(),
-            });
-        }
-        match self.run() {
-            Ok(stacked) => Ok(SessionOutcome {
-                key: self.key,
-                path: Some(store.put(&stacked.stack, PARTIAL)?),
-                reused: false,
-                rejected: stacked.rejected,
-            }),
-            Err(Error::Empty) => Ok(SessionOutcome {
-                key: self.key,
-                path: None,
-                reused: false,
-                rejected: Vec::new(),
-            }),
-            Err(error) => Err(error),
-        }
+        PartialStack::from_snapshot(snapshot, &headers, identity)
     }
 
     /// The session's lights.
@@ -305,6 +378,32 @@ impl SessionStep {
 
 /// The file name a partial stack is stored under.
 pub(crate) const PARTIAL: &str = "partial.fits";
+/// The file name a partial stack's live-stack context is stored under.
+const CONTEXT: &str = "context.seizastack";
+
+/// Push `lights`, returning each one turned away and why.
+fn push(
+    stacker: &mut LiveStacker,
+    lights: &[PathBuf],
+) -> Result<Vec<(PathBuf, FrameRejectionReason)>> {
+    let mut rejected = Vec::new();
+    for light in lights {
+        if let FrameDisposition::Rejected(reason) = stacker.push_fits(light)? {
+            rejected.push((light.clone(), reason));
+        }
+    }
+    Ok(rejected)
+}
+
+/// `INPUTSHA` of lights with these digests, in order.
+fn inputs_digest(frames: &[Digest]) -> Digest {
+    let mut inputs = KeyHasher::new("seiza-pipeline-frames-v1");
+    inputs.number(frames.len() as u64);
+    for frame in frames {
+        inputs.digest(frame);
+    }
+    inputs.finish()
+}
 
 /// The digest of a calibration recipe: its masters by their digests, its
 /// dark exposure, pedestal and declared scale, and its gate.

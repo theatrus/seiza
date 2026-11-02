@@ -1166,7 +1166,10 @@ The plan names the reference, the sessions and how to stack them; each
 Each step's output is stored under a key computed from the files it reads,
 by their contents, and its options, so running the plan again does only what
 is missing: a night added to the plan is the only one stacked, and the
-channel is combined again from the stored partial stacks. Every stack file
+channel is combined again from the stored partial stacks. With
+`"keep_context": true` in `options`, each session's live-stack context is
+stored too, and a session that gains lights, such as tonight's while it is
+still being shot, is extended from it rather than stacked again. Every stack file
 opens in any viewer as an ordinary stack, with `WEIGHT`, `COVER`, `REJECT`
 and `VARIANCE` images after it. `seiza pipeline show FILE` prints its identity
 cards, and `seiza pipeline combine A.fits B.fits --output tile.fits` combines

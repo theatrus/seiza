@@ -4991,16 +4991,19 @@ void seiza_parallax_free(SeizaParallax *video);
 
  `plan_json` is `{reference: {image, light, calibration}, sessions:
  [{lights, calibration}], options: {stack, reintegration, contributor,
- host}}`: `calibration` a session record of
+ host, keepContext}}`: `calibration` a session record of
  [`seiza_live_stacker_open_fits_expanding_sessions`], `stack` the options
  of [`seiza_live_stacker_open_fits`], `reintegration` null or `{lowSigma,
- highSigma, minimumSigma, scratchDirectory}`, and `host` a 64-digit
- digest. Keys may be camelCase or snake_case.
+ highSigma, minimumSigma, scratchDirectory}`, `host` a 64-digit digest,
+ and `keepContext` true to keep each session's live-stack context in the
+ store, so a session that gains lights is extended from it rather than
+ stacked again. Keys may be camelCase or snake_case.
 
  Returns owned JSON `{tile: {path, reused, identity}, sessions: [{key,
- path, reused, rejected: [{path, reason}]}]}`, where `identity` is that of
- [`seiza_pipeline_read_identity_json`] and a session that accepted no
- light has a null `path`. Free it with [`seiza_string_free`].
+ path, reused, extendedFrom, rejected: [{path, reason}]}]}`, where
+ `identity` is that of [`seiza_pipeline_read_identity_json`], a session
+ that accepted no light has a null `path`, and `extendedFrom` is the key
+ a session was extended from, or null. Free it with [`seiza_string_free`].
 
  # Safety
  `plan_json` and `store_path` must name NUL-terminated UTF-8 strings.
@@ -5018,9 +5021,9 @@ char *seiza_pipeline_run_channel_json(const char *plan_json,
  one of the `sessions` and the `options` of
  [`seiza_pipeline_run_channel_json`]'s plan; `options_json` may be null.
 
- Returns owned JSON `{key, path, reused, rejected: [{path, reason}]}`,
- with a null `path` when the session accepted no light. Free it with
- [`seiza_string_free`].
+ Returns owned JSON `{key, path, reused, extendedFrom, rejected: [{path,
+ reason}]}`, as each session of [`seiza_pipeline_run_channel_json`]'s
+ answer. Free it with [`seiza_string_free`].
 
  # Safety
  `reference_json`, `session_json` and `store_path` must name
@@ -5287,6 +5290,25 @@ SeizaLiveStacker *seiza_live_stacker_open_fits_sessions_with_reference_image(con
                                                                              size_t channel_reference,
                                                                              const char *options_json,
                                                                              char **error_out);
+
+/*
+ Assign the lights `paths_json` names, a JSON array of paths, to session
+ `session` (a zero-based index into the stack's sessions) of a stack
+ opened with calibration sessions, as a session still being shot gains
+ frames, so they can be pushed. A light already assigned to that session
+ is kept; one assigned to another session, or that is a master's file, is
+ refused, and nothing is assigned. Works on a stack reopened from its
+ context. The configuration fingerprint changes with the plan.
+
+ # Safety
+ `stacker` must be a live `SeizaLiveStacker` pointer and `paths_json` a
+ NUL-terminated UTF-8 string. When non-null, `error_out` must point to
+ writable storage for one pointer.
+ */
+bool seiza_live_stacker_add_session_lights(SeizaLiveStacker *stacker,
+                                           const char *paths_json,
+                                           size_t session,
+                                           char **error_out);
 
 #ifdef __cplusplus
 }  // extern "C"

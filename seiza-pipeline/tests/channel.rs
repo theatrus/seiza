@@ -280,6 +280,69 @@ fn a_channel_run_again_does_only_what_is_missing() {
 
 /// Reintegrated within its session, a light's satellite trail is rejected
 /// before the session's partial stack leaves the machine.
+fn bits(values: &[f32]) -> Vec<u32> {
+    values.iter().map(|value| value.to_bits()).collect()
+}
+
+/// A session that gains lights is extended from its stored context, only
+/// the new lights pushed, and its partial stack is, to the bit, the one
+/// stacking every light gives; reintegrated, it reintegrates every light.
+/// Without a context, it is stacked again.
+#[test]
+fn a_session_that_gains_lights_is_extended_from_its_context() {
+    let night = Night::new(2, 4);
+    let mut early = night.sessions.clone();
+    early[1].lights.truncate(2);
+    for reintegration in [None, Some(Reintegration::default())] {
+        let clipped = reintegration.is_some();
+        let kept = SessionOptions {
+            keep_context: true,
+            reintegration,
+            ..options()
+        };
+        let store = Store::new(night.root.join(format!("store-{clipped}")));
+        let (first, _) = run(&night.plan(&early, kept.clone()), &store);
+        assert!(
+            first
+                .sessions
+                .iter()
+                .all(|session| session.extended_from.is_none())
+        );
+        let (later, events) = run(&night.plan(&night.sessions, kept.clone()), &store);
+        assert_eq!(stacked(&events), [1]);
+        assert!(later.sessions[0].reused);
+        assert_eq!(later.sessions[1].extended_from, Some(first.sessions[1].key));
+
+        let fresh = Store::new(night.root.join(format!("fresh-{clipped}")));
+        let (fresh, _) = run(&night.plan(&night.sessions, kept), &fresh);
+        assert!(fresh.sessions[1].extended_from.is_none());
+        assert_eq!(later.stack.identity.step_key, fresh.stack.identity.step_key);
+        let extended = PartialStack::open(later.sessions[1].path.as_deref().unwrap()).unwrap();
+        let whole = PartialStack::open(fresh.sessions[1].path.as_deref().unwrap()).unwrap();
+        assert_eq!(extended.identity.step_key, whole.identity.step_key);
+        assert_eq!(extended.identity.combined, 4);
+        assert!(extended.identity.context.is_some());
+        assert_eq!(
+            bits(&extended.mean.data),
+            bits(&whole.mean.data),
+            "{clipped}"
+        );
+        assert_eq!(bits(&extended.weight), bits(&whole.weight));
+        assert_eq!(extended.coverage, whole.coverage);
+        assert_eq!(extended.rejected, whole.rejected);
+        assert_eq!(
+            extended.variance.as_deref().map(bits),
+            whole.variance.as_deref().map(bits)
+        );
+    }
+
+    let store = Store::new(night.root.join("plain"));
+    run(&night.plan(&early, options()), &store);
+    let (later, events) = run(&night.plan(&night.sessions, options()), &store);
+    assert_eq!(stacked(&events), [1]);
+    assert!(later.sessions[1].extended_from.is_none());
+}
+
 #[test]
 fn a_transient_is_rejected_within_its_session() {
     let night = Night::new(2, 5);

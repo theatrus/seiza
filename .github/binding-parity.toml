@@ -570,6 +570,7 @@ seiza_flat_choose_response_json = "flat_choose_response"
 seiza_flat_group_plan_json = { none = "the C ABI's one-call grouping plan; Python binds the book it builds: FlatGroups and FlatGroups.place_light" }
 seiza_live_stacker_open_fits_expanding_sessions = "LiveStacker.open_fits_expanding_sessions"
 seiza_live_stacker_open_fits_sessions_with_reference_image = "LiveStacker.open_fits_sessions_with_reference_image"
+seiza_live_stacker_add_session_lights = "LiveStacker.add_session_lights"
 
 seiza_master_flat_stability_json = "master_flat_stability"
 seiza_master_flat_stability_images_json = "master_flat_stability_images"

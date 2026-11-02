@@ -349,6 +349,70 @@ impl FileSessionPlan {
     }
 
     /// Whether `path` is an earlier light's file under another name.
+    /// Assign more lights to session `session`, as one still being shot
+    /// gains frames. A light the plan already assigns there is kept as it
+    /// is; one it assigns to another session is refused, as is one that is
+    /// a master's file. One that is an earlier light's file under another
+    /// name is recorded as a duplicate, refused when pushed, as [`Self::new`]
+    /// records it. Every light is checked before any is assigned.
+    pub(crate) fn add_lights(&mut self, paths: &[PathBuf], session: usize) -> Result<()> {
+        if session >= self.sessions.len() {
+            return Err(error("calibration session index is out of range"));
+        }
+        // Sources gone since the plan was made cannot be aliased.
+        let key = |path: &Path| {
+            self.live
+                .get(path)
+                .or_else(|| observe(path).map(|(_, key)| key))
+        };
+        let mut master_files = Buckets::default();
+        for path in self.masters.keys() {
+            if let Some(key) = key(path) {
+                master_files.insert(path, key);
+            }
+        }
+        let mut light_files = Buckets::default();
+        for path in self.lights.keys() {
+            if let Some(key) = key(path) {
+                light_files.insert(path, key);
+            }
+        }
+        let mut added: Vec<(PathBuf, SourceStamp, u64, bool)> = Vec::new();
+        for path in paths {
+            let path = path_identity(path);
+            if self.masters.contains_key(&path) {
+                return Err(error("a light aliases a calibration master"));
+            }
+            if let Some((assigned, _)) = self.lights.get(&path) {
+                if *assigned != session {
+                    return Err(error(
+                        "a light is assigned to two calibration sessions in the plan",
+                    ));
+                }
+                continue;
+            }
+            if added.iter().any(|(other, ..)| *other == path) {
+                continue;
+            }
+            let (metadata, key) = first_observation(&path)?;
+            if master_files.aliases(&path, key)? {
+                return Err(error("a light aliases a calibration master"));
+            }
+            let duplicate = light_files.aliases(&path, key)?;
+            light_files.insert(&path, key);
+            added.push((path, metadata, key, duplicate));
+        }
+        for (path, metadata, key, duplicate) in added {
+            if duplicate {
+                self.duplicates.insert(path.clone());
+            }
+            self.live.confirm(&path, key);
+            self.lights
+                .insert(path, (session, SessionStamp { metadata }));
+        }
+        Ok(())
+    }
+
     /// Whether `path` names one of the plan's masters.
     pub(crate) fn is_master(&self, path: &Path) -> bool {
         self.masters.contains_key(&path_identity(path))

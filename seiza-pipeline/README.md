@@ -34,7 +34,10 @@ first phase.
   once and never replaced. `run_channel` stacks a channel on one machine,
   running only the steps whose outputs the store lacks: a night added is the
   only one stacked, and the channel is combined again from the stored
-  partial stacks.
+  partial stacks. With `SessionOptions::keep_context`, each session's
+  live-stack context is stored too, and a session that gains frames, such as
+  one still being shot, is extended from it: only the new frames are pushed,
+  and the partial stack is, to the bit, the one stacking every frame gives.
 
 ```rust
 use seiza_pipeline::{ChannelPlan, Store, run_channel};

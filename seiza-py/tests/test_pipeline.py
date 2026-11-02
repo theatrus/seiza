@@ -98,3 +98,29 @@ def test_a_channel_runs_resumes_and_combines(tmp_path):
     assert stack.identity["kind"] == "partial" and rejected == []
     with pytest.raises(seiza.StackError):
         seiza.PartialStack.read_identity(tmp_path / "missing.fits")
+
+
+def test_a_session_that_gains_lights_is_extended(tmp_path):
+    sessions = star_field(tmp_path, sessions=1, per_session=4)
+    reference = {
+        "image": sessions[0]["lights"][0],
+        "light": sessions[0]["lights"][0],
+        "calibration": sessions[0]["calibration"],
+    }
+    options = {
+        "stack": {"normalization": {"mode": "none"}, "rejection": {"mode": "none"}},
+        "keep_context": True,
+    }
+    early = {"lights": sessions[0]["lights"][:2], "calibration": sessions[0]["calibration"]}
+    store = tmp_path / "store"
+    first = seiza.SessionStep.plan(reference, early, options).run_into(store)
+    assert first["extended_from"] is None
+    later = seiza.SessionStep.plan(reference, sessions[0], options).run_into(store)
+    assert later["extended_from"] == first["key"]
+    assert not later["reused"]
+    extended = seiza.PartialStack.open(later["path"])
+    assert extended.identity["combined"] == 4
+    assert extended.identity["context"] is not None
+    whole, _ = seiza.SessionStep.plan(reference, sessions[0], options).run()
+    np.testing.assert_array_equal(extended.mean, whole.mean)
+    np.testing.assert_array_equal(extended.weight, whole.weight)

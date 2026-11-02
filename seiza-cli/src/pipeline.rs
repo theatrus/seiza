@@ -87,6 +87,9 @@ fn run_plan(plan: &Path, store: PathBuf, output: Option<&Path>) -> Result<()> {
         if session.path.is_none() {
             eprintln!("session {}: no light was accepted", index + 1);
         }
+        if let Some(from) = &session.extended_from {
+            eprintln!("session {}: extended from {from}", index + 1);
+        }
     }
     let identity = &outcome.stack.identity;
     println!(

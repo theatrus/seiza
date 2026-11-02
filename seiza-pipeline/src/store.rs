@@ -69,7 +69,23 @@ impl Store {
         if let Some(path) = self.find(key, name)? {
             return Ok(path);
         }
+        self.put_file(key, name, |path| stack.write(path))
+    }
+
+    /// Write a file of the step with `key` as `name`, by `write` given the
+    /// path to write, as [`Self::put`] writes a stack: under a hidden name,
+    /// then linked into place, keeping a copy already there. Returns its
+    /// path.
+    pub(crate) fn put_file(
+        &self,
+        key: &Digest,
+        name: &str,
+        write: impl FnOnce(&Path) -> Result<()>,
+    ) -> Result<PathBuf> {
         let path = self.path(key, name);
+        if path.is_file() {
+            return Ok(path);
+        }
         let directory = path.parent().expect("a step's file has a directory");
         std::fs::create_dir_all(directory).map_err(|source| Error::Io {
             path: directory.to_path_buf(),
@@ -82,7 +98,10 @@ impl Store {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |elapsed| elapsed.as_nanos())
         ));
-        stack.write(&temporary)?;
+        if let Err(error) = write(&temporary) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error);
+        }
         let placed = match std::fs::hard_link(&temporary, &path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),

@@ -2039,6 +2039,17 @@ impl PyLiveStacker {
             .map_err(stack_error)
     }
 
+    /// Assign ``paths`` to session ``session`` (an index into the stack's
+    /// sessions) of a stack opened with calibration sessions, as a session
+    /// still being shot gains frames, so they can be pushed. A light assigned
+    /// to another session, or that is a master's file, is refused, and
+    /// nothing is assigned. Works on a stack reopened from its context.
+    fn add_session_lights(&mut self, paths: Vec<PathBuf>, session: usize) -> PyResult<()> {
+        self.active_mut()
+            .and_then(|stacker| stacker.add_session_lights(&paths, session))
+            .map_err(stack_error)
+    }
+
     /// Atomically checkpoint this live stack without consuming it.
     fn save_context(&self, py: Python<'_>, path: PathBuf) -> PyResult<()> {
         let stacker = self.active()?;

@@ -964,7 +964,9 @@ call each:
   outputs the store lacks run, so a host calls it again as nights arrive.
 - `seiza_pipeline_run_session_json(reference_json, session_json, options_json,
   store_path, &error)` does one session's step, for a host that hands
-  sessions to machines of its own.
+  sessions to machines of its own. With `keepContext` in the options, a
+  session that gains lights is extended from its stored context, and the
+  answer's `extendedFrom` names the step it was extended from.
 - `seiza_pipeline_read_identity_json(path, &error)` reads a stack file's
   identity cards (kind, versions, step key, digests) from its header alone.
 - `seiza_pipeline_combine_json(paths_json, output_path, &error)` combines

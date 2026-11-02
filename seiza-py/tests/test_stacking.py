@@ -1309,6 +1309,16 @@ def test_a_session_stack_shares_a_reference_calibrated_by_another_session(tmp_pa
         seiza.LiveStacker.open_fits_sessions_with_reference_image(
             paths[1], paths, sessions, [0, 1, 0], 3, options=options)
 
+    # The second session gains a light, once assigned to it.
+    gained = tmp_path / "gained.fits"
+    shutil.copyfile(paths[1], gained)
+    with pytest.raises(seiza.StackError):
+        stack.push_fits(gained)
+    with pytest.raises(seiza.StackError):
+        stack.add_session_lights([paths[0]], 1)
+    stack.add_session_lights([gained], 1)
+    assert stack.push_fits(gained).accepted
+
 
 def test_session_canvas_can_be_reused_by_an_independent_filter(tmp_path):
     sky = overlapping_panels(tmp_path)

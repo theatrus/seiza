@@ -1729,6 +1729,30 @@ impl LiveStacker {
         Ok(stacker)
     }
 
+    /// Assign more lights to session `session` of this stack's file
+    /// calibration plan, as a session still being shot gains frames, so they
+    /// can be pushed like the lights the plan began with. Lights the plan
+    /// already assigns keep their sessions: one assigned to another session
+    /// is refused, as is one that is a master's file. Works on a stack
+    /// reopened from its context, which is how a session's stack is
+    /// extended rather than stacked again.
+    ///
+    /// The configuration fingerprint changes with the plan, and a context
+    /// saved afterwards holds the new lights.
+    pub fn add_session_lights(&mut self, paths: &[PathBuf], session: usize) -> Result<()> {
+        let plan = self.file_sessions.as_mut().ok_or_else(|| {
+            Error::Calibration("this stack has no file calibration sessions".into())
+        })?;
+        plan.add_lights(paths, session)?;
+        self.configuration_fingerprint = stack_configuration_fingerprint(
+            &self.options,
+            &self.calibration,
+            self.input_mode,
+            self.file_sessions.as_ref(),
+        )?;
+        Ok(())
+    }
+
     /// Restore an atomically checkpointed live stack, including its immutable
     /// registration reference, calibration, online moments, and source ledger.
     /// The stack runs under the [`crate::GpuOptions`] it was saved with; see

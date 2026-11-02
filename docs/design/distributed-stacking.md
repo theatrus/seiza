@@ -333,7 +333,14 @@ file never carries a key.
   equals `INPUTSHA`, and `CALIBSHA`, `OPTSSHA`, `HOSTSHA` and `SEIZASTK` all
   match, reopen the `CONTEXT` and push only the new frames. This is the
   proof PSF Guard's `ResumeManifest` makes, carried in the file itself. A
-  `CLIPPED` file means stacking that one session again.
+  `CLIPPED` file means reintegrating that one session again, from the
+  reopened context's ledger when one was kept and from scratch otherwise.
+
+  The step over the first `NINPUTS` frames has a key of its own, which a
+  store finds without an index: computing the keys of the new list's
+  prefixes, longest first, finds the step to extend. Phase 1 does this with
+  `SessionOptions::keep_context`, which keeps each session's context in the
+  store beside its partial stack.
 - **A new session arrives.** Only its partial stacks are new. They are
   solved against the baseline, and only the tiles they reach are combined
   again, from the partial stacks already stored. That costs little, because
@@ -682,22 +689,25 @@ AGENTS.md requires.
    the result differs from a single-machine stack only at pixels rejected
    differently.
 
-   Done in Seiza, all but PSF Guard's task, which lives in PSF Guard:
+   Done in Seiza. PSF Guard's session task is deferred: hosts reach the same
+   steps through the C ABI, Python and the CLI.
    - `LiveStacker::open_fits_sessions_with_reference_image` stacks one
      session against the shared reference, its lights calibrated by their own
-     recipe.
+     recipe, and `LiveStacker::add_session_lights` lets a reopened session
+     stack take the lights its session gained.
    - `StackSnapshot::weight_sum` keeps Σw. Until phase 2 measures σ₁,
      `WEIGHT` holds W itself, which is all that combining on one grid needs,
      and `VARIANCE` the variance of a frame of weight 1 the stack measured.
    - `SessionStep` plans a session's key from its files' contents and runs
      it, and `run_channel` runs a channel against a `Store`, doing only what
-     the store lacks.
+     the store lacks. With `keep_context`, a session that gains frames is
+     extended from its stored context, as **Resuming** describes.
    - The C ABI, Python and `seiza pipeline run` reach them.
 
    The partition invariant holds to `f32` rounding, and combining is held to
-   its output by `seiza-pipeline`'s `output_version` test. Resuming a session
-   with more frames (`ADDITIVE` with `CONTEXT`) waits for PSF Guard's task.
-   For now a session with new frames is a new step.
+   its output by `seiza-pipeline`'s `output_version` test. The resume
+   invariant holds to the bit: a session extended from its context, live or
+   reintegrated, gives the partial stack stacking every frame at once does.
 2. **Measurements.** The weight map, the PSF grid with an `f32` fitter, Gaia
    zero points for mono filters, and sky cells.
 3. **Project grids.**

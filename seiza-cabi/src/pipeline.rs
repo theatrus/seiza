@@ -25,6 +25,7 @@ fn session_answer(outcome: &SessionOutcome) -> Value {
         "key": outcome.key,
         "path": outcome.path,
         "reused": outcome.reused,
+        "extended_from": outcome.extended_from,
         "rejected": outcome
             .rejected
             .iter()
@@ -43,16 +44,19 @@ fn identity_answer(stack: &PartialStack) -> Result<Value, String> {
 ///
 /// `plan_json` is `{reference: {image, light, calibration}, sessions:
 /// [{lights, calibration}], options: {stack, reintegration, contributor,
-/// host}}`: `calibration` a session record of
+/// host, keepContext}}`: `calibration` a session record of
 /// [`seiza_live_stacker_open_fits_expanding_sessions`], `stack` the options
 /// of [`seiza_live_stacker_open_fits`], `reintegration` null or `{lowSigma,
-/// highSigma, minimumSigma, scratchDirectory}`, and `host` a 64-digit
-/// digest. Keys may be camelCase or snake_case.
+/// highSigma, minimumSigma, scratchDirectory}`, `host` a 64-digit digest,
+/// and `keepContext` true to keep each session's live-stack context in the
+/// store, so a session that gains lights is extended from it rather than
+/// stacked again. Keys may be camelCase or snake_case.
 ///
 /// Returns owned JSON `{tile: {path, reused, identity}, sessions: [{key,
-/// path, reused, rejected: [{path, reason}]}]}`, where `identity` is that of
-/// [`seiza_pipeline_read_identity_json`] and a session that accepted no
-/// light has a null `path`. Free it with [`seiza_string_free`].
+/// path, reused, extendedFrom, rejected: [{path, reason}]}]}`, where
+/// `identity` is that of [`seiza_pipeline_read_identity_json`], a session
+/// that accepted no light has a null `path`, and `extendedFrom` is the key
+/// a session was extended from, or null. Free it with [`seiza_string_free`].
 ///
 /// # Safety
 /// `plan_json` and `store_path` must name NUL-terminated UTF-8 strings.
@@ -88,9 +92,9 @@ pub unsafe extern "C" fn seiza_pipeline_run_channel_json(
 /// one of the `sessions` and the `options` of
 /// [`seiza_pipeline_run_channel_json`]'s plan; `options_json` may be null.
 ///
-/// Returns owned JSON `{key, path, reused, rejected: [{path, reason}]}`,
-/// with a null `path` when the session accepted no light. Free it with
-/// [`seiza_string_free`].
+/// Returns owned JSON `{key, path, reused, extendedFrom, rejected: [{path,
+/// reason}]}`, as each session of [`seiza_pipeline_run_channel_json`]'s
+/// answer. Free it with [`seiza_string_free`].
 ///
 /// # Safety
 /// `reference_json`, `session_json` and `store_path` must name
@@ -251,6 +255,7 @@ mod tests {
             error,
         );
         assert_eq!(first["tile"]["reused"], false);
+        assert!(first["sessions"][0]["extendedFrom"].is_null());
         assert_eq!(first["tile"]["identity"]["kind"], "tile");
         assert_eq!(first["tile"]["identity"]["combined"], 6);
         assert_eq!(first["sessions"].as_array().unwrap().len(), 2);

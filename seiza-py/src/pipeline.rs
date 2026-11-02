@@ -26,6 +26,10 @@ fn session_outcome<'py>(py: Python<'py>, outcome: &SessionOutcome) -> PyResult<B
     dict.set_item("key", outcome.key.to_string())?;
     dict.set_item("path", &outcome.path)?;
     dict.set_item("reused", outcome.reused)?;
+    dict.set_item(
+        "extended_from",
+        outcome.extended_from.as_ref().map(ToString::to_string),
+    )?;
     let rejected = PyList::empty(py);
     for (path, reason) in &outcome.rejected {
         rejected.append((path, reason.to_string()))?;
@@ -161,7 +165,7 @@ impl PySessionStep {
     /// ``{"image", "light", "calibration"}``, ``session`` ``{"lights",
     /// "calibration"}``, each ``calibration`` a session record of
     /// :meth:`LiveStacker.open_fits_expanding_sessions`, and ``options``
-    /// ``{"stack", "reintegration", "contributor", "host"}``.
+    /// ``{"stack", "reintegration", "contributor", "host", "keep_context"}``.
     #[staticmethod]
     #[pyo3(signature = (reference, session, options=None))]
     fn plan(
@@ -243,8 +247,11 @@ impl PySessionStep {
 
     /// Do the step against the store at ``store``: the stored partial stack
     /// when the store holds one under the key, or else the session stacked
-    /// and stored. Returns ``{"key", "path", "reused", "rejected"}``,
-    /// ``path`` ``None`` when no light was accepted.
+    /// and stored. With ``keep_context``, a session that has gained lights
+    /// since its context was stored is extended from it, only the new
+    /// lights pushed. Returns ``{"key", "path", "reused", "extended_from",
+    /// "rejected"}``, ``path`` ``None`` when no light was accepted and
+    /// ``extended_from`` the key it was extended from, or ``None``.
     fn run_into<'py>(&self, py: Python<'py>, store: PathBuf) -> PyResult<Bound<'py, PyDict>> {
         let store = Store::new(store);
         let outcome = py

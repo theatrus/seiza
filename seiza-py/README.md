@@ -1737,7 +1737,11 @@ tile.mean, tile.weight, tile.coverage   # numpy arrays
 
 `seiza.SessionStep.plan(reference, session, options)` computes one session's
 key from its files' contents; `run()` stacks it, and `run_into(store)` returns
-the stored partial stack or stacks and stores it. `PartialStack.read_identity`
+the stored partial stack or stacks and stores it. With `"keep_context": True`
+in the options, a session that gains lights is extended from its stored
+context, and the answer's `extended_from` names the step it was extended
+from; `LiveStacker.add_session_lights(paths, session)` is the call underneath
+for a host that pushes lights itself. `PartialStack.read_identity`
 reads a file's identity cards without its pixels, and `PartialStack.combine`
 combines stacks on one grid.
 

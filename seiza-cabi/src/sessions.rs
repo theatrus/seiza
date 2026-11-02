@@ -132,6 +132,38 @@ pub unsafe extern "C" fn seiza_live_stacker_open_fits_sessions_with_reference_im
     .unwrap_or(ptr::null_mut())
 }
 
+/// Assign the lights `paths_json` names, a JSON array of paths, to session
+/// `session` (a zero-based index into the stack's sessions) of a stack
+/// opened with calibration sessions, as a session still being shot gains
+/// frames, so they can be pushed. A light already assigned to that session
+/// is kept; one assigned to another session, or that is a master's file, is
+/// refused, and nothing is assigned. Works on a stack reopened from its
+/// context. The configuration fingerprint changes with the plan.
+///
+/// # Safety
+/// `stacker` must be a live `SeizaLiveStacker` pointer and `paths_json` a
+/// NUL-terminated UTF-8 string. When non-null, `error_out` must point to
+/// writable storage for one pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_live_stacker_add_session_lights(
+    stacker: *mut SeizaLiveStacker,
+    paths_json: *const c_char,
+    session: usize,
+    error_out: *mut *mut c_char,
+) -> bool {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let stacker = unsafe { required_live_stacker_mut(stacker)? };
+        let paths: Vec<PathBuf> = serde_json::from_str(&required_str(paths_json, "light paths")?)
+            .map_err(|e| format!("invalid light paths: {e}"))?;
+        stacker
+            .stacker
+            .add_session_lights(&paths, session)
+            .map_err(|e| e.to_string())
+    })
+    .is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,7 +360,36 @@ mod tests {
             .collect::<Vec<_>>();
         let mean = covered.iter().sum::<f64>() / covered.len() as f64;
         assert!(mean.abs() < 500.0, "{mean}");
+
+        // The second session gains a light: once assigned, it is taken;
+        // assigned to the first session too, it is refused.
+        let gained = root.path().join("gained.fits");
+        std::fs::copy(&paths[1], &gained).unwrap();
+        let gained_json = CString::new(serde_json::to_string(&[&gained]).unwrap()).unwrap();
+        let light = CString::new(gained.to_str().unwrap()).unwrap();
+        let refused =
+            unsafe { seiza_live_stacker_push_fits_json(handle, light.as_ptr(), &mut error) };
+        assert!(refused.is_null() && !error.is_null());
         unsafe {
+            seiza_string_free(error);
+        }
+        assert!(unsafe {
+            seiza_live_stacker_add_session_lights(handle, gained_json.as_ptr(), 1, &mut error)
+        });
+        assert!(error.is_null());
+        assert!(!unsafe {
+            seiza_live_stacker_add_session_lights(handle, gained_json.as_ptr(), 0, &mut error)
+        });
+        assert!(!error.is_null());
+        unsafe {
+            seiza_string_free(error);
+        }
+        error = ptr::null_mut();
+        let output =
+            unsafe { seiza_live_stacker_push_fits_json(handle, light.as_ptr(), &mut error) };
+        assert!(error.is_null() && !output.is_null());
+        unsafe {
+            seiza_string_free(output);
             seiza_live_stacker_free(handle);
         }
 

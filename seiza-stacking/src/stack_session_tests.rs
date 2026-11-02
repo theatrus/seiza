@@ -202,6 +202,95 @@ fn session_stacks_on_one_reference_combine_into_the_whole_stack() {
     assert!(refused(sessions[0].bias.as_deref().unwrap(), 1));
 }
 
+/// A session's stack saved after its first light, reopened, and given the
+/// lights the session gained since, is the stack that never stopped, to the
+/// bit: how a session still being shot is extended rather than stacked
+/// again.
+#[test]
+fn a_session_stack_reopened_takes_the_lights_its_session_gained() {
+    let directory = tempfile::tempdir().unwrap();
+    let (width, height) = (160, 128);
+    let paths = super::canvas_tests::mosaic(directory.path(), (1, 1), (width, height), 4, 1);
+    let sessions = (0..2)
+        .map(|index| {
+            let bias = directory.path().join(format!("bias-{index}.fits"));
+            let image = LinearImage::new(width, height, 1, vec![0.0; width * height]).unwrap();
+            crate::write_processed_image_fits_f32(&bias, &image, &[], &[]).unwrap();
+            FileCalibrationSession {
+                bias: Some(bias),
+                ..Default::default()
+            }
+        })
+        .collect::<Vec<_>>();
+    let options = StackOptions {
+        normalization: NormalizationMode::None,
+        weighting: FrameWeighting::inverse_noise_variance(),
+        ..StackOptions::default()
+    };
+    // The reference is the first session's light; the second session's
+    // lights are the others.
+    let open = |lights: &[PathBuf]| {
+        let paths = std::iter::once(paths[0].clone())
+            .chain(lights.iter().cloned())
+            .collect::<Vec<_>>();
+        let assignments = std::iter::once(0)
+            .chain(lights.iter().map(|_| 1))
+            .collect::<Vec<_>>();
+        LiveStacker::open_fits_sessions_with_reference_image(
+            &paths[0],
+            &paths,
+            &sessions,
+            &assignments,
+            0,
+            options.clone(),
+        )
+        .unwrap()
+    };
+    let mut whole = open(&paths[1..]);
+    for path in &paths[1..] {
+        accepted(whole.push_fits(path).unwrap());
+    }
+    let whole = whole.into_snapshot().unwrap();
+
+    let mut first = open(&paths[1..2]);
+    accepted(first.push_fits(&paths[1]).unwrap());
+    // A light the plan does not hold is refused.
+    assert!(first.push_fits(&paths[2]).is_err());
+    let context = directory.path().join("session.seizastack");
+    first.save_context(&context).unwrap();
+    let mut resumed = LiveStacker::open_context(&context).unwrap();
+    let fingerprint = resumed.configuration_fingerprint().to_string();
+    resumed.add_session_lights(&paths[2..], 1).unwrap();
+    assert_ne!(resumed.configuration_fingerprint(), fingerprint);
+    for path in &paths[2..] {
+        accepted(resumed.push_fits(path).unwrap());
+    }
+    let resumed = resumed.into_snapshot().unwrap();
+    let bits = |values: &[f32]| {
+        values
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(bits(&resumed.image.data), bits(&whole.image.data));
+    assert_eq!(bits(&resumed.variance.data), bits(&whole.variance.data));
+    assert_eq!(resumed.coverage, whole.coverage);
+    assert_eq!(resumed.weight_sum, whole.weight_sum);
+
+    // A light already in another session, a master, or a session the plan
+    // does not have is refused, and so is a stack without sessions.
+    let mut stack = open(&paths[1..2]);
+    assert!(stack.add_session_lights(&paths[1..2], 0).is_err());
+    assert!(stack.add_session_lights(&paths[0..1], 1).is_err());
+    let master = sessions[0].bias.clone().unwrap();
+    assert!(stack.add_session_lights(&[master], 1).is_err());
+    assert!(stack.add_session_lights(&paths[2..], 2).is_err());
+    stack.add_session_lights(&paths[1..], 1).unwrap();
+    let mut plain =
+        LiveStacker::open_fits(&paths[0], None, None, None, None, options.clone()).unwrap();
+    assert!(plain.add_session_lights(&paths[1..], 0).is_err());
+}
+
 fn accepted(disposition: FrameDisposition) {
     assert!(
         matches!(disposition, FrameDisposition::Accepted(_)),
