@@ -13,6 +13,8 @@ dependencies = ["numpy>=1.23.2"]
 
 [project.optional-dependencies]
 test = ["pytest>=8", "astropy>=6"]
+# Training and export; the corpus passes do without.
+train = ["torch>=2.5", "onnx>=1.16", "onnxruntime>=1.18"]
 
 [tool.setuptools]
 packages = ["seiza_training"]
