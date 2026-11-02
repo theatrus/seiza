@@ -35,10 +35,26 @@ documented `--no-<flag>` negation so it really overrides a true default.
 
 The tools clamp float samples to `[0, 1]` (the PixInsight convention). A
 stacked image on a physical ADU scale would come back flattened to white —
-verified against rc-astro 2.6.6. `process_image` therefore divides by the
-image's peak before writing the exchange FITS and multiplies the results
-back, starless and stars alike, so `starless + stars` still reconstructs
-the original on its own scale.
+verified against rc-astro 2.6.6. `process_image` therefore maps the image
+onto that range for the exchange FITS and maps the results back, with the
+same map PixInsight MLDenoise uses (`seiza-stacking`'s `exchange` module):
+
+- An image within 0 to 1 keeps its scale. Any other is offset by its most
+  negative sample, if it has one, and divided by 65535 or its span,
+  whichever is larger, the scale PixInsight gives a 16-bit camera frame.
+  Before `EXTERNAL_EXCHANGE_VERSION` 2 it was divided by its span alone,
+  so a dim image or crop sat near the top of the range, where the tools see
+  something other than what PixInsight would give them for the same data.
+- Samples that are not finite, such as a stack's uncovered edges, go to the
+  tool as their channel's median plus noise of the channel's robust sigma,
+  and come back unchanged in the result and in the stars image. Before,
+  they reached the tool as NaN and came back as whatever it made of them.
+- The stars image, a difference of two images on 0 to 1, is restored with
+  the scale alone, so `starless + stars` still reconstructs the original on
+  its own scale.
+
+A host caching `process_image` results adds `EXTERNAL_EXCHANGE_VERSION` to
+its cache key, besides the tool's versions and the parameters.
 
 ## Star removal
 

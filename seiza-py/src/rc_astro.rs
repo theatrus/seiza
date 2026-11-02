@@ -372,11 +372,12 @@ pub(crate) struct PyRcAstroProcessed {
 }
 
 /// Run one RC-Astro tool on an image in memory: a float32 array of shape
-/// (height, width) or (height, width, channels) in any linear units. The
-/// tools clamp samples to 0..1, so the image is mapped onto that range on
-/// the way out, offset by its most negative sample and scaled by its span,
-/// and mapped back on the way in; a stars image comes back with the scale
-/// alone, so the processed image plus the stars gives back the original.
+/// (height, width) or (height, width, channels). The tools clamp samples to
+/// 0..1: an image within 0..1 keeps its scale, and any other is offset by
+/// its most negative sample and divided by 65535 or its span, whichever is
+/// larger, then mapped back on the way in. A stars image comes back with
+/// the scale alone, so the processed image plus the stars gives back the
+/// original. NaN and infinite samples come back unchanged.
 /// `parameters`, `device`, `progress` and `cancel` work as for
 /// `rc_astro_process_file`; no file is left behind.
 #[pyfunction]

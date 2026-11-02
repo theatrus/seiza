@@ -56,6 +56,7 @@ mod defects;
 mod drizzle;
 mod emission;
 mod emission_flux;
+mod exchange;
 mod expand;
 mod external;
 mod fits;
@@ -194,6 +195,15 @@ use std::path::PathBuf;
 
 /// The package version of the stacking algorithms used by this build.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The version of the map that puts an image on the 0 to 1 external tools
+/// work on and takes their result back: [`RcAstroCli::process_image`] and
+/// [`PixInsight::ml_denoise_image`]. A change to the map changes their
+/// results for the same input, tool and options, so a host caching those
+/// results keys on it. Version 2 maps from 65535 or the image's span,
+/// whichever is larger, and keeps samples that are not finite; version 1,
+/// before it was named, divided by the span alone.
+pub const EXTERNAL_EXCHANGE_VERSION: u32 = 2;
 
 /// The `seiza-stacking` crate version whose output this build reproduces.
 ///

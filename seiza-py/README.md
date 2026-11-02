@@ -1346,9 +1346,11 @@ print(run.primary, run.sidecars, run.device)
 ```
 
 A linear stack is far outside the tools' 0..1 range, and they clamp it.
-`rc_astro_process_image` runs a tool on an array in any linear units: it
-maps the image onto 0..1, offset by its most negative sample and scaled by
-its span, and maps the result back, so the output is in the input's units.
+`rc_astro_process_image` runs a tool on an array and returns the result in
+the input's units. An array within 0..1 keeps its scale; any other is offset
+by its most negative sample and divided by 65535 or its span, whichever is
+larger, as PixInsight opens a 16-bit camera frame. NaN and infinite samples,
+such as a stack's uncovered edges, come back unchanged.
 
 ```python
 processed = seiza.rc_astro_process_image(tool, stack, parameters=values)

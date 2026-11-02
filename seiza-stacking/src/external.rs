@@ -24,6 +24,7 @@ use std::process::{Command, Stdio};
 use seiza_fits::HeaderValue;
 
 use crate::CancelSignal;
+use crate::exchange::Exchange;
 use crate::fits::{FitsFrame, write_processed_image_fits_f32};
 use crate::image::LinearImage;
 use crate::{Error, Result};
@@ -529,13 +530,15 @@ impl RcAstroCli {
     /// processed file keeps its provenance.
     ///
     /// The tools clamp float samples to `[0, 1]` (the PixInsight
-    /// convention), so the image is mapped onto that range on the way out
-    /// and back on the way in. The map is affine — offset by the most
-    /// negative sample (a background-subtracted stack legitimately holds
-    /// negatives), then scaled by the span. The primary restores with both
-    /// offset and scale; a difference sidecar (the stars image) restores
-    /// with the scale alone, so `starless + stars` still reconstructs the
-    /// original exactly.
+    /// convention). An image within 0 to 1 keeps its scale; any other is
+    /// offset by its most negative sample, if it has one, and divided by
+    /// 65535 or its span, whichever is larger, and mapped back. A difference
+    /// sidecar (the stars image) is restored with the scale alone, so
+    /// `starless + stars` still reconstructs the original. Samples that are
+    /// not finite, such as a stack's uncovered edges, go to the tool as
+    /// their channel's background and come back unchanged in both images.
+    /// [`crate::EXTERNAL_EXCHANGE_VERSION`] names this map for a host's
+    /// cache key.
     pub fn process_image(
         &self,
         schema: &ExternalToolSchema,
@@ -549,45 +552,21 @@ impl RcAstroCli {
             .map_err(|error| external_error(&request.tool, format!("tempdir: {error}")))?;
         let input = workdir.path().join("input.fits");
         let output = workdir.path().join("processed.fits");
-        let mut peak = f32::NEG_INFINITY;
-        let mut floor = f32::INFINITY;
-        for sample in &image.data {
-            if sample.is_finite() {
-                peak = peak.max(*sample);
-                floor = floor.min(*sample);
-            }
-        }
-        if !peak.is_finite() || !floor.is_finite() {
-            return Err(external_error(
-                &request.tool,
-                "the image has no finite samples to process",
-            ));
-        }
-        let offset = floor.min(0.0);
-        let scale = if peak - offset > 1.0 {
-            peak - offset
-        } else {
-            1.0
-        };
-        if offset != 0.0 || scale != 1.0 {
-            let scaled = LinearImage::new(
-                image.width,
-                image.height,
-                image.channels,
-                image
-                    .data
-                    .iter()
-                    .map(|sample| (sample - offset) / scale)
-                    .collect(),
-            )?;
-            write_processed_image_fits_f32(&input, &scaled, reference_headers, &[])?;
-        } else {
-            write_processed_image_fits_f32(&input, image, reference_headers, &[])?;
-        }
+        let exchange = Exchange::of(image).ok_or_else(|| {
+            external_error(&request.tool, "the image has no finite samples to process")
+        })?;
+        let normalized = LinearImage::new(
+            image.width,
+            image.height,
+            image.channels,
+            exchange.normalize(image),
+        )?;
+        write_processed_image_fits_f32(&input, &normalized, reference_headers, &[])?;
+        drop(normalized);
 
         let run = self.run_on_file(schema, request, &input, &output, cancel, progress)?;
 
-        let read_back = |path: &Path, restore_offset: f32| -> Result<LinearImage> {
+        let read_back = |path: &Path| -> Result<LinearImage> {
             let frame = FitsFrame::open(path)?;
             if frame.image.width != image.width
                 || frame.image.height != image.height
@@ -606,20 +585,17 @@ impl RcAstroCli {
                     ),
                 ));
             }
-            let mut restored = frame.image;
-            if restore_offset != 0.0 || scale != 1.0 {
-                for sample in &mut restored.data {
-                    *sample = *sample * scale + restore_offset;
-                }
-            }
-            Ok(restored)
+            Ok(frame.image)
         };
 
-        let processed = read_back(&run.primary, offset)?;
-        // The sidecar is a difference of two images in normalized space, so
-        // the offset cancels out of it: restore with scale alone.
+        let mut processed = read_back(&run.primary)?;
+        exchange.restore(&mut processed.data, &image.data);
         let stars = match run.sidecars.first() {
-            Some(sidecar) => Some(read_back(sidecar, 0.0)?),
+            Some(sidecar) => {
+                let mut stars = read_back(sidecar)?;
+                exchange.restore_difference(&mut stars.data, &image.data);
+                Some(stars)
+            }
             None => None,
         };
         // Asking for the stars image and not getting one is a failure, not
@@ -1328,6 +1304,36 @@ fi
         }
         let stars = processed.stars.unwrap();
         assert!((stars.data[1] - 65_535.0).abs() < 0.1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stacks_uncovered_samples_come_back_uncovered_in_both_images() {
+        let directory = tempfile::tempdir().unwrap();
+        let cli = RcAstroCli::with_executable(fake_rc_astro(directory.path()));
+        // A dim stack with an uncovered corner.
+        let image = LinearImage::new(2, 2, 1, vec![f32::NAN, 1_000.0, 1_100.0, 1_200.0]).unwrap();
+        let processed = cli
+            .process_image(
+                &sxt_schema(),
+                &request(vec![("stars", ExternalParameterValue::Bool(true))]),
+                &image,
+                &[],
+                None,
+                &mut |_| {},
+            )
+            .unwrap();
+        assert!(processed.image.data[0].is_nan());
+        let stars = processed.stars.unwrap();
+        assert!(stars.data[0].is_nan());
+        for (restored, original) in processed.image.data[1..].iter().zip(&image.data[1..]) {
+            assert!(
+                (restored - original).abs() < 1e-2,
+                "{restored} != {original}"
+            );
+        }
+        // The tool saw the dim stack on the 16-bit scale, not stretched to 1.
+        assert!((stars.data[3] - 1_200.0).abs() < 1e-2);
     }
 
     #[cfg(unix)]
