@@ -4495,7 +4495,8 @@ pub unsafe extern "C" fn seiza_live_stacker_validate_calibration(
         Ok(()) => 1,
         Err(error) => {
             let message = match error {
-                seiza_stacking::Error::Calibration(message) => message,
+                seiza_stacking::Error::Calibration(message)
+                | seiza_stacking::Error::FlatRotation(message) => message,
                 other => other.to_string(),
             };
             set_error(error_out, message);
@@ -8796,7 +8797,8 @@ fn probe_frame_header(path: &Path) -> Result<FrameProbeResponse, String> {
 /// its display adds.
 fn stacking_message(error: seiza_stacking::Error) -> String {
     match error {
-        seiza_stacking::Error::Calibration(message) => message,
+        seiza_stacking::Error::Calibration(message)
+        | seiza_stacking::Error::FlatRotation(message) => message,
         other => other.to_string(),
     }
 }

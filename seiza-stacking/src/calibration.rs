@@ -555,26 +555,29 @@ impl CalibrationMasters {
         };
         let kind = refusal.kind.as_str();
         let detail = &refusal.detail;
-        Err(Error::Calibration(match refusal.problem {
-            Problem::NoMetadata => format!(
+        Err(match refusal.problem {
+            Problem::NoMetadata => Error::Calibration(format!(
                 "master {kind} has no compatibility metadata; reload calibration masters before pushing more lights"
-            ),
-            Problem::Sensor => format!(
+            )),
+            Problem::Sensor => Error::Calibration(format!(
                 "master {kind} does not match the light frame's sensor or readout mode: {detail}"
+            )),
+            Problem::Temperature => Error::Calibration(format!(
+                "master dark temperature does not match the light frame: {detail}"
+            )),
+            Problem::UnknownExposure => Error::Calibration(
+                "unscaled master dark requires known positive light and master exposures".into(),
             ),
-            Problem::Temperature => {
-                format!("master dark temperature does not match the light frame: {detail}")
-            }
-            Problem::UnknownExposure => {
-                "unscaled master dark requires known positive light and master exposures".into()
-            }
-            Problem::Exposure => {
-                format!("unscaled master dark exposure does not match the light frame: {detail}")
-            }
-            Problem::Optics => format!(
+            Problem::Exposure => Error::Calibration(format!(
+                "unscaled master dark exposure does not match the light frame: {detail}"
+            )),
+            Problem::Optics => Error::Calibration(format!(
                 "master flat does not match the light frame's optical configuration: {detail}"
-            ),
-        }))
+            )),
+            Problem::Rotation => Error::FlatRotation(format!(
+                "master flat does not match the light frame's optical configuration: {detail}"
+            )),
+        })
     }
 
     /// Every active master this light cannot accept, and why: the one
@@ -663,8 +666,16 @@ impl CalibrationMasters {
                     tolerances,
                 ))
                 .then(|| {
+                    // Compared at no angle, the flat passes: its rotator
+                    // angle is the only reading that refused it.
+                    let at_no_angle = LightRotation::Unknown.apply(light);
+                    let problem = if optics_consistent(&at_no_angle, signature, tolerances) {
+                        Problem::Rotation
+                    } else {
+                        Problem::Optics
+                    };
                     (
-                        Problem::Optics,
+                        problem,
                         seiza_calibration::describe_optics_mismatch(light, signature, tolerances),
                     )
                 }),
@@ -842,6 +853,8 @@ enum Problem {
     UnknownExposure,
     Exposure,
     Optics,
+    /// The flat passes every optics check but its rotator angle.
+    Rotation,
 }
 
 /// One active master a light cannot accept: which, what failed, and the
@@ -1851,6 +1864,63 @@ mod tests {
                 .to_string()
                 .contains("optical configuration")
         );
+    }
+
+    #[test]
+    fn a_flat_refused_only_for_its_rotator_angle_is_a_flat_rotation_error() {
+        // A flat from a rig with no rotator reading records N.I.N.A.'s 0
+        // placeholder; the light records the rotator's real angle.
+        let mut flat = CalibrationMasters::new(
+            None,
+            None,
+            Some(MasterFlat::raw(mono(&[1.0, 1.1, 0.9, 1.0]))),
+        )
+        .unwrap();
+        flat.flat_signature.as_mut().unwrap().rotation_deg = Some(0.0);
+        let turned = light(
+            Some(600.0),
+            vec![("ROTATANG".into(), HeaderValue::Float(269.06))],
+        );
+        let refused = flat.validate_light_frame(&turned).unwrap_err();
+        assert!(matches!(refused, Error::FlatRotation(_)), "{refused}");
+        // It reads as any other calibration refusal; each host adds its own
+        // way to set the angle.
+        let message = refused.to_string();
+        assert!(
+            message.starts_with("calibration error: master flat"),
+            "{message}"
+        );
+        assert!(message.contains("rotation"), "{message}");
+        assert!(!message.contains("seiza stack"), "{message}");
+
+        // Compared at no angle the light is accepted. At a measured angle
+        // the flat is still refused for the angle alone.
+        let at = |light_rotation| MatchTolerances {
+            light_rotation,
+            ..MatchTolerances::default()
+        };
+        flat.validate_light_frame_with(&turned, &at(LightRotation::Unknown))
+            .unwrap();
+        let measured = flat
+            .validate_light_frame_with(&turned, &at(LightRotation::Measured { degrees: 90.0 }))
+            .unwrap_err();
+        assert!(matches!(measured, Error::FlatRotation(_)), "{measured}");
+
+        // A flat refused for another reading is a plain calibration error,
+        // also when its angle differs too: no angle would accept it.
+        flat.flat_signature.as_mut().unwrap().filter = Some("Ha".into());
+        for angle in [0.0, 269.06] {
+            let filtered = light(
+                Some(600.0),
+                vec![
+                    ("ROTATANG".into(), HeaderValue::Float(angle)),
+                    ("FILTER".into(), HeaderValue::String("OIII".into())),
+                ],
+            );
+            let refused = flat.validate_light_frame(&filtered).unwrap_err();
+            assert!(matches!(refused, Error::Calibration(_)), "{refused}");
+            assert!(refused.to_string().contains("filter"), "{refused}");
+        }
     }
 
     #[test]

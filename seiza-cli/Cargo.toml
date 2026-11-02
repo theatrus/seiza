@@ -22,6 +22,7 @@ seiza-analysis.workspace = true
 ctrlc = { version = "3", features = ["termination"] }
 seiza.workspace = true
 seiza-background.workspace = true
+seiza-calibration.workspace = true
 seiza-deconvolution.workspace = true
 seiza-download.workspace = true
 seiza-fits.workspace = true

@@ -996,6 +996,23 @@ Use `--flat master-flat.fits --allow-flat-gain-offset-mismatch` to allow a
 flat shot at a different gain or offset, provided it was calibrated with
 matching flat-darks and records `DARKSUB=T`. The default still rejects these
 mismatches. The flag does not relax bias/dark matching or any other flat checks.
+
+`seiza stack` refuses a master flat whose rotator angle differs from a
+light's by more than 2 degrees. When the flats or the lights recorded a
+placeholder instead of a rotator reading, such as the 0 N.I.N.A. records when
+it has none, the refusal is wrong. Two options handle it:
+
+- `--light-rotation unknown` skips the angle check, so a flat at any angle is
+  accepted, including one taken at a genuinely different angle. Use it only
+  when an angle is a placeholder.
+- `--light-rotation DEGREES` compares every light at that one angle, such as a
+  plate-solved position angle, instead of the angle each light recorded.
+
+Other flat checks still apply. Both options also apply to the flats of
+`--joint-canvas` groups, and the stack report records the option under
+`calibration.light_rotation`. In Python, set
+`MatchTolerances(light_rotation="unknown")`.
+
 Planar RGB flats are normalized independently per channel. CFA flats remain
 one-channel and are applied before debayering. See the
 [stacking design](https://github.com/theatrus/seiza/blob/main/docs/design/image-stacking.md)
