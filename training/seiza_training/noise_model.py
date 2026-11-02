@@ -18,6 +18,11 @@ directory, beside the registered frames. Evaluation runs whole images through
 the same overlapping-tile inference that ships, and measures the noise of
 `f(A) − B` against that of `A − B`: at the pixel scale, which is the grain,
 and binned by the band scale, which is the low band.
+
+The dark-noise pairs (`dark_noise`) have a clean target, a deep stack, so
+on them a model's error is measured directly, and their noise alone, on a
+flat sky, shows whether a model makes structure where there is none. They
+can also make up a share of every batch.
 """
 
 from __future__ import annotations
@@ -34,6 +39,7 @@ from typing import Any
 import numpy as np
 import torch
 
+from . import dark_noise
 from .build import BAND_SCALE_PX, binned
 from .manifest import Manifest, loads, now
 from .store import Store, robust_sigma, versions
@@ -162,6 +168,26 @@ def bank(store: Store, chosen: list[dict[str, Any]], *, seed: int = 0, noise_map
             yield image_a, sigma_a, image_b
 
     return cut_windows(store, f"noise-{key}", halves(), sources=len(chosen), seed=seed)
+
+
+def dark_noise_bank(
+    store: Store, manifest: Manifest, *, sets: set[str] | None = None, seed: int = 0, noise_map: str = "raw"
+) -> dict[str, np.ndarray]:
+    """Windows of the train split's dark-noise pairs: the input, its noise
+    map and the deep stack it was made from, as `cut_windows` cuts them."""
+    chosen = dark_noise.pairs(manifest, "train", sets)
+    if not chosen:
+        raise RuntimeError("no built dark-noise pairs in the train split")
+    parts = ["dark-noise"] + [p["input"]["id"] for p in chosen] + [seed, WINDOW, WINDOWS_PER_HALF, noise_map]
+    key = hashlib.sha256(json.dumps(parts).encode()).hexdigest()[:16]
+
+    def images():
+        for pair in chosen:
+            image, sigma = load_half(store, pair["input"], modelled=noise_map == "model")
+            target, _ = load_half(store, pair["target"], noise_map=False)
+            yield image, sigma, target
+
+    return cut_windows(store, f"dark-noise-{key}", images(), sources=len(chosen), seed=seed)
 
 
 BANK_PLANES = ("a", "sigma", "b")
@@ -416,6 +442,9 @@ def train(
     overlap = 2 * margin + 32
     validation = evaluate(store, manifest, model, split="validation", tile=512, overlap=overlap, margin=margin,
                           sets=validation_sets, noise_map=noise_map)
+    validation["dark_noise"] = evaluate_dark_noise(store, manifest, model, split="validation", tile=512,
+                                                   overlap=overlap, margin=margin, sets=validation_sets,
+                                                   noise_map=noise_map)
     exported = export(model, directory / "model.onnx", tile=512)
     record = {
         "name": name,
@@ -548,6 +577,120 @@ def evaluate(
     }
 
 
+def against_truth(estimate: np.ndarray, image: np.ndarray, target: np.ndarray, floor: np.ndarray,
+                  background: float, noise: float) -> dict[str, float | None]:
+    """How close `estimate` comes to a clean `target`, against how close
+    the input came, in units of `noise`: the mean squared error over all
+    pixels and by the target's level, the error's noise at the pixel and
+    band scales, and the bias on the sky. `floor` is the target's own
+    noise variance, which no estimate can remove; it is given on the sky,
+    as in star cores it holds the frames' differing seeing too."""
+    valid = np.isfinite(image) & np.isfinite(target) & np.isfinite(estimate)
+    before = np.where(valid, (image - target) / noise, np.nan)
+    after = np.where(valid, (estimate - target) / noise, np.nan)
+    result: dict[str, float | None] = {
+        "mse_before": float(np.nanmean(before**2)),
+        "mse_after": float(np.nanmean(after**2)),
+    }
+    for band, transform in (("high", lambda x: x), ("low", lambda x: binned(x, BAND_SCALE_PX))):
+        sigma_before, sigma_after = robust_sigma(transform(before)), robust_sigma(transform(after))
+        result[f"{band}_ratio"] = sigma_after / sigma_before if sigma_before else None
+    level = (target - background) / noise
+    sky = valid & (np.abs(level) < 3)
+    result["sky_bias"] = float(np.median(after[sky])) if sky.any() else None
+    result["sky_mse_floor"] = float(np.nanmean(floor[sky] / noise**2)) if sky.any() else None
+    for region, low, high in (("sky", -3, 3), ("faint", 3, 20), ("mid", 20, 200), ("core", 200, np.inf)):
+        mask = valid & (level >= low) & (level < high)
+        result[f"{region}_mse_before"] = float(np.mean(before[mask] ** 2)) if mask.any() else None
+        result[f"{region}_mse_after"] = float(np.mean(after[mask] ** 2)) if mask.any() else None
+    bright = valid & (level > 20)
+    signal = float(np.sum((target - background)[bright]))
+    result["bright_flux_change"] = float(np.sum((estimate - target)[bright]) / signal) if signal else None
+    return result
+
+
+def on_empty_sky(output: np.ndarray, image: np.ndarray, background: float, noise: float) -> dict[str, float | None]:
+    """What a model made of noise on a flat sky: the noise left at the
+    pixel and band scales, as a share of the input's, and the brightest
+    binned feature of the output in units of the input's binned noise,
+    which a model that invents structure raises."""
+    valid = np.isfinite(output) & np.isfinite(image)
+    before = np.where(valid, image - background, np.nan)
+    after = np.where(valid, output - background, np.nan)
+    result: dict[str, float | None] = {}
+    for band, transform in (("high", lambda x: x), ("low", lambda x: binned(x, BAND_SCALE_PX))):
+        sigma_before, sigma_after = robust_sigma(transform(before)), robust_sigma(transform(after))
+        result[f"{band}_ratio"] = sigma_after / sigma_before if sigma_before else None
+    low_before = robust_sigma(binned(before, BAND_SCALE_PX)) or float("nan")
+    low_after = binned(after, BAND_SCALE_PX)
+    low_after = low_after[np.isfinite(low_after)]
+    result["peak_low_sigma"] = float(np.percentile(np.abs(low_after), 99.99) / low_before) if low_after.size else None
+    result["bias"] = float(np.nanmedian(after) / noise)
+    return result
+
+
+def evaluate_dark_noise(
+    store: Store,
+    manifest: Manifest,
+    model: ResidualUNet,
+    *,
+    split: str,
+    tile: int = 512,
+    overlap: int = 136,
+    margin: int = 52,
+    sets: set[str] | None = None,
+    noise_map: str = "raw",
+) -> dict[str, Any]:
+    """Denoise each of a split's dark-noise inputs and measure it against
+    its clean target (`truth`), and denoise its noise alone on a flat sky
+    (`empty_sky`). Inference and units are `evaluate`'s."""
+    model = model.eval()
+    where = device()
+    rows = []
+    for pair in dark_noise.pairs(manifest, split, sets):
+        image, sigma = load_half(store, pair["input"])
+        target, _ = load_half(store, pair["target"], noise_map=False)
+        target_files = loads(pair["target"]["files"])
+        target_coverage = np.load(store.root / target_files["coverage"])
+        with np.errstate(divide="ignore", invalid="ignore"):
+            floor = np.load(store.root / target_files["variance"]) / target_coverage
+        background, noise = scales(image, sigma)
+        coverage = np.load(store.root / loads(pair["input"]["files"])["coverage"])
+        stated = modelled_sigma(image, sigma, coverage) if noise_map == "model" else sigma
+        input_background, input_noise = scales(image, stated)
+        run = denoiser(model, input_background, input_noise, where)
+        estimate = image + infer(run, network_input(image, stated, input_background, input_noise),
+                                 tile=tile, overlap=overlap, margin=margin)[0]
+        truth = against_truth(estimate, image, target, floor, background, noise)
+        del estimate
+
+        files = loads(pair["input"]["files"])
+        alone = np.load(store.root / files["noise"]).astype(np.float32)
+        alone_coverage = np.load(store.root / files["noise_coverage"])
+        alone_variance = np.load(store.root / files["noise_variance"]).astype(np.float32)
+        sky = np.where(alone_coverage > 0, background + alone, np.nan).astype(np.float32)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            sky_sigma = np.where(alone_coverage > 0, np.sqrt(alone_variance / alone_coverage), np.nan).astype(np.float32)
+        if noise_map == "model":
+            sky_sigma = modelled_sigma(sky, sky_sigma, alone_coverage)
+        sky_background, sky_noise = scales(sky, sky_sigma)
+        output = sky + infer(denoiser(model, sky_background, sky_noise, where),
+                             network_input(sky, sky_sigma, sky_background, sky_noise),
+                             tile=tile, overlap=overlap, margin=margin)[0]
+        empty = on_empty_sky(output, sky, background, noise)
+        rows.append({"pair": pair["input"]["id"], "set": pair["set"],
+                     "size": loads(pair["input"]["recipe"]).get("size"),
+                     **{f"truth_{key}": value for key, value in truth.items()},
+                     **{f"empty_{key}": value for key, value in empty.items()}})
+
+    def mean(key):
+        values = [row[key] for row in rows if row.get(key) is not None]
+        return float(np.mean(values)) if values else None
+
+    keys = sorted({key for row in rows for key in row if key.startswith(("truth_", "empty_"))})
+    return {"split": split, "pairs": len(rows), "mean": {key: mean(key) for key in keys}, "pairs_detail": rows}
+
+
 def export(model: ResidualUNet, path: Path, *, tile: int) -> dict[str, Any]:
     """Write the model as ONNX at a static tile shape, and hold ONNX
     Runtime's CPU output to PyTorch's on a random tile."""
@@ -576,6 +719,10 @@ def evaluate_saved(
     model.load_state_dict(torch.load(directory / "weights.pt", map_location="cpu"))
     result = evaluate(store, manifest, model, split=split, limit=limit, sets=sets,
                       noise_map=config.get("noise_map", "raw"), **record["inference"])
+    result["dark_noise"] = evaluate_dark_noise(store, manifest, model, split=split, sets=sets,
+                                               noise_map=config.get("noise_map", "raw"), **record["inference"])
     record.setdefault("evaluations", {})[split] = result
     (directory / "run.json").write_text(json.dumps(record, indent=2))
-    return {key: value for key, value in result.items() if key != "pairs_detail"}
+    return {key: value for key, value in result.items() if key != "pairs_detail"} | {
+        "dark_noise": {key: value for key, value in result["dark_noise"].items() if key != "pairs_detail"}
+    }
