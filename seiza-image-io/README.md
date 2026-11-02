@@ -16,6 +16,11 @@ Open and save images by their file extension, the same way across Seiza.
   `COMMENT` text, and an XISF file's PixInsight astrometric solution as WCS
   cards. `read_header_as` reads a file whose name does not say its
   container.
+- `save_images` writes several images to one FITS or XISF file: the first
+  as the image any reader opens, the rest named, each `f32` or unsigned
+  16-bit with its own header cards. `read_astronomy_named` and
+  `read_named_header` read one back by its name: a FITS `EXTNAME`, ignoring
+  case, or an XISF `id`, exactly.
 - `AstronomyImage::rescale_normalized_to` puts an XISF image declared as
   `0:1` on a camera's scale, as stacking's `normalized_full_scale` does.
 - `read_window` reads a rectangle of a FITS or XISF image's samples, in

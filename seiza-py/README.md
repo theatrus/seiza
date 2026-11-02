@@ -1734,6 +1734,48 @@ Assignments are immutable and survive checkpoints and reintegration. Changed
 sources or masters are refused. See [session planning](../docs/calibration-sessions.md)
 for file identity, memory and pipeline behavior.
 
+`LiveStacker.open_fits_sessions_with_reference_image(reference_image, paths,
+sessions, assignments, channel_reference)` takes the same sessions on one
+reference grid instead of a canvas. `paths[channel_reference]`, calibrated by
+its own session, sets normalization and noise weighting, and the stack starts
+empty. Stacks that share the reference image, the channel reference and its
+session put their lights on one grid, scale and weight, so each session can be
+stacked on its own and the stacks combined, as distributed stacking does.
+
+### Distributed stacking
+
+`seiza.run_channel(plan, store)` stacks a channel as partial stacks, one per
+session, into a store, and combines them, running only the steps whose
+outputs the store lacks (see
+[distributed stacking](../docs/design/distributed-stacking.md)). Each session
+aligns to the reference image and is normalized and weighted against the
+reference light, calibrated by its own recipe, so the partial stacks combine
+into what one stack of every light gives, apart from rejection, which runs
+within each session.
+
+```python
+reference = {"image": "n1/L_001.fits", "light": "n1/L_001.fits",
+             "calibration": {"bias": "n1/bias.fits"}}
+sessions = [{"lights": n1_lights, "calibration": {"bias": "n1/bias.fits"}},
+            {"lights": n2_lights, "calibration": {"bias": "n2/bias.fits"}}]
+outcome = seiza.run_channel(
+    {"reference": reference, "sessions": sessions,
+     "options": {"reintegration": {}, "contributor": "me"}},
+    "store")
+tile = seiza.PartialStack.open(outcome["tile"]["path"])
+tile.mean, tile.weight, tile.coverage   # numpy arrays
+```
+
+`seiza.SessionStep.plan(reference, session, options)` computes one session's
+key from its files' contents; `run()` stacks it, and `run_into(store)` returns
+the stored partial stack or stacks and stores it. With `"keep_context": True`
+in the options, a session that gains lights is extended from its stored
+context, and the answer's `extended_from` names the step it was extended
+from; `LiveStacker.add_session_lights(paths, session)` is the call underneath
+for a host that pushes lights itself. `PartialStack.read_identity`
+reads a file's identity cards without its pixels, and `PartialStack.combine`
+combines stacks on one grid.
+
 ### Calibration library: grading and selection
 
 Python holds the calibration library as Rust hosts such as PSF Guard do

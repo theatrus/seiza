@@ -2459,6 +2459,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "seiza-pipeline"
+version = "0.1.0"
+dependencies = [
+ "rayon",
+ "seiza-calibration",
+ "seiza-fits",
+ "seiza-image-io",
+ "seiza-stacking",
+ "seiza-xisf",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "seiza-py"
 version = "0.48.2"
 dependencies = [
@@ -2475,6 +2492,7 @@ dependencies = [
  "seiza-image-io",
  "seiza-imgproc",
  "seiza-parallax",
+ "seiza-pipeline",
  "seiza-satellites",
  "seiza-sources",
  "seiza-stacking",

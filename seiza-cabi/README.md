@@ -954,6 +954,29 @@ or `-1` error. Test for exactly `1`. `seiza_checkpoint_depths` supplies the
 doubling ladder and final depth. Generic curve fitting/projection is not yet in
 this ABI; retain measured samples if the host wants to graph them.
 
+**Distributed stacking** — a channel stacked as partial stacks, one per
+session, combined, and resumed by key (see
+[distributed stacking](../docs/design/distributed-stacking.md)), as one JSON
+call each:
+
+- `seiza_pipeline_run_channel_json(plan_json, store_path, &error)` stacks a
+  plan's sessions into the store, then combines them. Only the steps whose
+  outputs the store lacks run, so a host calls it again as nights arrive.
+- `seiza_pipeline_run_session_json(reference_json, session_json, options_json,
+  store_path, &error)` does one session's step, for a host that hands
+  sessions to machines of its own. With `keepContext` in the options, a
+  session that gains lights is extended from its stored context, and the
+  answer's `extendedFrom` names the step it was extended from.
+- `seiza_pipeline_read_identity_json(path, &error)` reads a stack file's
+  identity cards (kind, versions, step key, digests) from its header alone.
+- `seiza_pipeline_combine_json(paths_json, output_path, &error)` combines
+  stack files made elsewhere on one grid.
+
+Sessions take the records of `seiza_live_stacker_open_fits_expanding_sessions`.
+`seiza_live_stacker_open_fits_sessions_with_reference_image` opens one such
+stack on a reference image for a host that pushes the lights itself. Free each
+returned string with `seiza_string_free`.
+
 The full C declarations, plus the memory-ownership contract (which returns are
 owned vs. borrowed, and which `seiza_*_free` to call), live in
 [`include/seiza_cabi.h`](include/seiza_cabi.h).

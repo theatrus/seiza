@@ -1758,6 +1758,7 @@ mod tests {
         let snapshot = StackSnapshot {
             variance: LinearImage::new(2, 2, 1, vec![0.0; 4]).unwrap(),
             coverage: vec![3; 4],
+            weight_sum: None,
             rejected_samples: vec![0; 4],
             image,
             accepted_frames: 3,

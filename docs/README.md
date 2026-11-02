@@ -39,6 +39,7 @@ without the solver. See [dependency and release rules](../RELEASE.md).
 | [seiza-calibration](../seiza-calibration/README.md) | Calibration responses, matching, grading, and dust analysis |
 | [seiza-stretch](../seiza-stretch/README.md) | Display analysis, transfer plans, and ordered stretches |
 | [seiza-stacking](../seiza-stacking/README.md) | Calibration, registration, normalization, rejection, mosaics, and live stacking |
+| [seiza-pipeline](../seiza-pipeline/README.md) | Distributed stacking: partial stacks that describe themselves, combined and resumed by key |
 | [seiza-deconvolution](../seiza-deconvolution/README.md) | Experimental linear-image restoration |
 | [seiza-stars](../seiza-stars/src/lib.rs) | Peak-star detection and centroid refinement |
 | [seiza-draw](../seiza-draw/README.md) | Overlay drawing and labels |

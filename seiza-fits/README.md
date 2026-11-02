@@ -15,6 +15,10 @@ one linear-image API without coupling operations to the source container.
 - When the primary HDU holds no data, reads the first image extension. Its
   header comes first, followed by the primary's metadata cards, as in the
   `INHERIT` convention, so WCS and observation keywords are both found.
+- `FitsImage::open_named` and `read_named_header` read any image, primary
+  or extension, plain or tile-compressed, by its `EXTNAME`, ignoring case and
+  trailing spaces as cfitsio and astropy do. A missing name is
+  `FitsError::ImageNotFound`.
 - Reads tile-compressed images (`fpack`, cfitsio's `ZIMAGE` tables) packed
   with `RICE_1`, `GZIP_1`, `GZIP_2`, `PLIO_1` or `NOCOMPRESS`, including
   quantized floating-point data with or without subtractive dithering. The
@@ -40,6 +44,11 @@ one linear-image API without coupling operations to the source container.
   with typed non-structural headers and FITS block padding. Keywords longer
   than eight characters or holding spaces become `HIERARCH` cards, and long
   strings continue across `CONTINUE` cards.
+- `write_images` writes several images to one file: the first as the
+  primary HDU, which any reader opens as an ordinary image, the rest as
+  image extensions named by `EXTNAME`. Each image is `f32` or unsigned
+  16-bit (`BITPIX 16` with `BZERO 32768`), one plane or three, with its own
+  header cards.
 - Preserves undefined header values as `HeaderValue::Raw(String::new())`,
   distinct from quoted empty strings. Writers retain the keyword with a blank
   value field, including optional comments.

@@ -5018,6 +5018,95 @@ int32_t seiza_parallax_write_video_json(const SeizaParallax *video,
 void seiza_parallax_free(SeizaParallax *video);
 
 /*
+ Stack a channel as partial stacks, one per session, into the store at
+ `store_path`, and combine them into the channel's tile stack, doing only
+ the steps whose outputs the store lacks (`seiza_pipeline::run_channel`).
+
+ `plan_json` is `{reference: {image, light, calibration}, sessions:
+ [{lights, calibration}], options: {stack, reintegration, contributor,
+ host, keepContext}}`: `calibration` a session record of
+ [`seiza_live_stacker_open_fits_expanding_sessions`], `stack` the options
+ of [`seiza_live_stacker_open_fits`], `reintegration` null or `{lowSigma,
+ highSigma, minimumSigma, scratchDirectory}`, `host` a 64-digit digest,
+ and `keepContext` true to keep each session's live-stack context in the
+ store, so a session that gains lights is extended from it rather than
+ stacked again. Keys may be camelCase or snake_case.
+
+ Returns owned JSON `{tile: {path, reused, identity}, sessions: [{key,
+ path, reused, extendedFrom, rejected: [{path, reason}]}]}`, where
+ `identity` is that of [`seiza_pipeline_read_identity_json`], a session
+ that accepted no light has a null `path`, and `extendedFrom` is the key
+ a session was extended from, or null. Free it with [`seiza_string_free`].
+
+ # Safety
+ `plan_json` and `store_path` must name NUL-terminated UTF-8 strings.
+ When non-null, `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_pipeline_run_channel_json(const char *plan_json,
+                                      const char *store_path,
+                                      char **error_out);
+
+/*
+ Do one session's step against the store at `store_path`: plan it, and
+ return its partial stack there when the store holds one under its key,
+ or else stack the session and store it (`seiza_pipeline::SessionStep`).
+ `reference_json`, `session_json` and `options_json` are the `reference`,
+ one of the `sessions` and the `options` of
+ [`seiza_pipeline_run_channel_json`]'s plan; `options_json` may be null.
+
+ Returns owned JSON `{key, path, reused, extendedFrom, rejected: [{path,
+ reason}]}`, as each session of [`seiza_pipeline_run_channel_json`]'s
+ answer. Free it with [`seiza_string_free`].
+
+ # Safety
+ `reference_json`, `session_json` and `store_path` must name
+ NUL-terminated UTF-8 strings; `options_json` may be null. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_pipeline_run_session_json(const char *reference_json,
+                                      const char *session_json,
+                                      const char *options_json,
+                                      const char *store_path,
+                                      char **error_out);
+
+/*
+ Read a stack file's identity from its header alone, without decoding
+ pixels: how a host learns whether a step is done.
+
+ Returns owned JSON `{kind, stackingVersion, pipelineVersion, stepKey,
+ inputs, inputCount, combined, calibration, options, host, estimator,
+ context, contributor, weightSource, grid}`, the cards `SEIZAPST` to
+ `GRIDSHA`: `kind` is `partial`, `tile` or `mosaic`, `estimator`
+ `additive` or `clipped`, `weightSource` `stack` or `measured`, and each
+ digest 64 hexadecimal digits or null. Free it with [`seiza_string_free`].
+
+ # Safety
+ `path` must name a NUL-terminated UTF-8 string. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_pipeline_read_identity_json(const char *path, char **error_out);
+
+/*
+ Combine the stack files `paths_json` names, a JSON array of paths, on one
+ grid into a tile stack, weighing each by its weight and reading one at a
+ time (`seiza_pipeline::PartialStack::combine_files`), and write it to
+ `output_path`, FITS or XISF by its extension. Stacks on another grid,
+ which holds the reference light and the options that decide scale and
+ weight, are refused.
+
+ Returns owned JSON of the tile's identity, as
+ [`seiza_pipeline_read_identity_json`] gives it. Free it with
+ [`seiza_string_free`].
+
+ # Safety
+ `paths_json` and `output_path` must name NUL-terminated UTF-8 strings.
+ When non-null, `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_pipeline_combine_json(const char *paths_json,
+                                  const char *output_path,
+                                  char **error_out);
+
+/*
  Open a file of satellite orbital elements: CCSDS OMM JSON (an array or
  one object) or two- or three-line TLE text. Use it for images older than
  a few days, with elements from near their time. Returns an owned catalog
@@ -5205,6 +5294,56 @@ SeizaLiveStacker *seiza_live_stacker_open_fits_expanding_sessions(const char *pa
                                                                   size_t max_canvas_megasamples,
                                                                   const SeizaCancelSignal *cancel,
                                                                   char **error_out);
+
+/*
+ Open an empty stack aligned to `reference_image_path`, with per-light
+ calibration sessions, as
+ [`seiza_live_stacker_open_fits_with_reference_image`] opens one with a
+ single set of masters. `paths_json`, `sessions_json` and
+ `assignments_json` are those of
+ [`seiza_live_stacker_open_fits_expanding_sessions`];
+ `channel_reference` is the zero-based index of the light, among
+ `paths_json`, that is calibrated by its own session and sets
+ normalization and noise weighting. `options_json` is that of
+ [`seiza_live_stacker_open_fits`].
+
+ Push the lights, the channel reference among them when it belongs to
+ this stack. Stacks that share the reference image, the channel reference
+ and its session put their lights on one grid, scale and weight, however
+ the other lights are divided among them: distributed stacking stacks one
+ session each this way.
+
+ # Safety
+ The four required pointers must name NUL-terminated UTF-8 strings.
+ `options_json` may be null. When non-null, `error_out` must point to
+ writable storage for one pointer.
+ */
+SeizaLiveStacker *seiza_live_stacker_open_fits_sessions_with_reference_image(const char *reference_image_path,
+                                                                             const char *paths_json,
+                                                                             const char *sessions_json,
+                                                                             const char *assignments_json,
+                                                                             size_t channel_reference,
+                                                                             const char *options_json,
+                                                                             char **error_out);
+
+/*
+ Assign the lights `paths_json` names, a JSON array of paths, to session
+ `session` (a zero-based index into the stack's sessions) of a stack
+ opened with calibration sessions, as a session still being shot gains
+ frames, so they can be pushed. A light already assigned to that session
+ is kept; one assigned to another session, or that is a master's file, is
+ refused, and nothing is assigned. Works on a stack reopened from its
+ context. The configuration fingerprint changes with the plan.
+
+ # Safety
+ `stacker` must be a live `SeizaLiveStacker` pointer and `paths_json` a
+ NUL-terminated UTF-8 string. When non-null, `error_out` must point to
+ writable storage for one pointer.
+ */
+bool seiza_live_stacker_add_session_lights(SeizaLiveStacker *stacker,
+                                           const char *paths_json,
+                                           size_t session,
+                                           char **error_out);
 
 #ifdef __cplusplus
 }  // extern "C"

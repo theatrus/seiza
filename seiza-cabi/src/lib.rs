@@ -9,6 +9,7 @@ mod flat_groups;
 mod flat_response;
 mod library;
 mod parallax;
+mod pipeline;
 mod resample;
 mod satellites;
 mod sessions;

@@ -355,6 +355,7 @@ mod tests {
                 data: vec![0.0; 4],
             },
             coverage: vec![0, 2, 4, 6],
+            weight_sum: None,
             rejected_samples: vec![1, 0, 2, 3],
             accepted_frames: 6,
             rejected_frames: 1,

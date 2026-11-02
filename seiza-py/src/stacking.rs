@@ -1898,6 +1898,56 @@ impl PyLiveStacker {
         })
     }
 
+    /// :meth:`open_fits_with_reference_image` with per-light calibration
+    /// sessions, given as :meth:`open_fits_expanding_sessions` takes them.
+    /// ``channel_reference`` is the index, among ``paths``, of the light
+    /// calibrated by its own session that sets normalization and noise
+    /// weighting. The stack starts empty: push the lights, the channel
+    /// reference among them when it belongs here. Stacks sharing the
+    /// reference image, channel reference and its session put their lights on
+    /// one grid, scale and weight, so one session each can be stacked apart
+    /// and combined.
+    #[staticmethod]
+    #[pyo3(signature = (
+        reference_image,
+        paths,
+        sessions,
+        assignments,
+        channel_reference,
+        *,
+        options=None
+    ))]
+    fn open_fits_sessions_with_reference_image(
+        py: Python<'_>,
+        reference_image: PathBuf,
+        paths: Vec<PathBuf>,
+        sessions: &Bound<'_, PyAny>,
+        assignments: Vec<usize>,
+        channel_reference: usize,
+        options: Option<PyRef<'_, PyStackOptions>>,
+    ) -> PyResult<Self> {
+        let sessions: Vec<seiza_stacking::FileCalibrationSession> = crate::convert::from_python(
+            &crate::convert::with_fspaths(sessions)?,
+            "calibration sessions",
+        )?;
+        let options = options
+            .as_ref()
+            .map_or_else(StackOptions::default, |options| options.inner.clone());
+        let inner = py
+            .detach(move || {
+                LiveStacker::open_fits_sessions_with_reference_image(
+                    reference_image,
+                    &paths,
+                    &sessions,
+                    &assignments,
+                    channel_reference,
+                    options,
+                )
+            })
+            .map_err(stack_error)?;
+        Ok(Self { inner: Some(inner) })
+    }
+
     /// Reopen a versioned on-disk context and continue adding frames.
     ///
     /// The stack runs under the :class:`GpuOptions` it was saved with, or
@@ -2009,6 +2059,17 @@ impl PyLiveStacker {
         let tolerances = crate::calibration::tolerances_or_default(tolerances);
         self.active_mut()
             .and_then(|stacker| stacker.set_match_tolerances(tolerances))
+            .map_err(stack_error)
+    }
+
+    /// Assign ``paths`` to session ``session`` (an index into the stack's
+    /// sessions) of a stack opened with calibration sessions, as a session
+    /// still being shot gains frames, so they can be pushed. A light assigned
+    /// to another session, or that is a master's file, is refused, and
+    /// nothing is assigned. Works on a stack reopened from its context.
+    fn add_session_lights(&mut self, paths: Vec<PathBuf>, session: usize) -> PyResult<()> {
+        self.active_mut()
+            .and_then(|stacker| stacker.add_session_lights(&paths, session))
             .map_err(stack_error)
     }
 

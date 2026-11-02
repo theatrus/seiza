@@ -1154,6 +1154,48 @@ the CPU and never opens the GPU, and `--cpu-pass detection,resampling`,
 `--gpu-concurrency`, `--gpu-memory-mib` and `--gpu-trace` work as they do for
 stacking.
 
+### Distributed stacking
+
+`seiza pipeline run` stacks a channel as partial stacks, one per session,
+into a store, then combines them. Every session aligns to one reference
+image and is normalized and weighted against one reference light,
+calibrated by its own masters, so the partial stacks combine into what one
+stack of every light gives, apart from rejection, which runs within each
+session. See [distributed stacking](../docs/design/distributed-stacking.md).
+
+```sh
+seiza pipeline run ngc7000-ha.json --store ~/stacks/store --output ngc7000-ha.fits
+```
+
+The plan names the reference, the sessions and how to stack them; each
+`calibration` takes the session fields of the calibration-session planner
+(`bias`, `dark`, `flat`, `dark_exposure_seconds`, `pedestal`,
+`normalized_full_scale`, `tolerances`), and `stack` the stacking options.
+`reintegration` reruns each session with leave-one-out rejection:
+
+```json
+{"reference": {"image": "night1/L_001.fits", "light": "night1/L_001.fits",
+               "calibration": {"bias": "night1/bias.fits", "flat": "night1/flat.fits"}},
+ "sessions": [
+   {"lights": ["night1/L_001.fits", "night1/L_002.fits"],
+    "calibration": {"bias": "night1/bias.fits", "flat": "night1/flat.fits"}},
+   {"lights": ["night2/L_001.fits", "night2/L_002.fits"],
+    "calibration": {"bias": "night2/bias.fits", "flat": "night2/flat.fits"}}],
+ "options": {"reintegration": {}, "contributor": "me"}}
+```
+
+Each step's output is stored under a key computed from the files it reads,
+by their contents, and its options, so running the plan again does only what
+is missing: a night added to the plan is the only one stacked, and the
+channel is combined again from the stored partial stacks. With
+`"keep_context": true` in `options`, each session's live-stack context is
+stored too, and a session that gains lights, such as tonight's while it is
+still being shot, is extended from it rather than stacked again. Every stack file
+opens in any viewer as an ordinary stack, with `WEIGHT`, `COVER`, `REJECT`
+and `VARIANCE` images after it. `seiza pipeline show FILE` prints its identity
+cards, and `seiza pipeline combine A.fits B.fits --output tile.fits` combines
+stack files made elsewhere on the same grid.
+
 ## Persistent worker
 
 Applications performing repeated solves can keep a catalog and blind index

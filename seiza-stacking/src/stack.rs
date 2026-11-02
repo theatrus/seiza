@@ -644,6 +644,12 @@ pub struct StackSnapshot {
     pub variance: LinearImage,
     /// Accepted observation count for every image sample.
     pub coverage: Vec<u32>,
+    /// Per-sample sum of the accepted observations' frame weights, each
+    /// relative to the reference frame, so this stack can be combined with
+    /// another on the same grid in proportion to what its frames earned.
+    /// `None` when every frame weighs the same: the sum is then
+    /// [`Self::coverage`].
+    pub weight_sum: Option<Vec<f32>>,
     /// Rejected observation count for every image sample.
     pub rejected_samples: Vec<u32>,
     /// Number of frames admitted so far.
@@ -1658,6 +1664,95 @@ impl LiveStacker {
         Ok((stacker, used))
     }
 
+    /// [`Self::open_fits_with_reference_image`] with each light's own
+    /// file-backed calibration session, as
+    /// [`Self::open_fits_expanding_sessions`] assigns them: `assignments`
+    /// gives the index in `sessions` of each of `paths`, and every light
+    /// pushed is calibrated and gated by its session's recipe.
+    ///
+    /// The stack aligns to the image at `reference_image_path` and
+    /// normalizes and weights against the light `paths[channel_reference]`,
+    /// calibrated by its own session. It starts empty: push the lights, the
+    /// channel reference among them when it belongs to this stack. So stacks
+    /// that share the reference image, the channel reference and its session
+    /// put every light on one grid, on one scale and with one weight, however
+    /// their other lights are divided among them: distributed stacking's
+    /// partial stacks are built this way, one session each.
+    pub fn open_fits_sessions_with_reference_image(
+        reference_image_path: impl AsRef<Path>,
+        paths: &[PathBuf],
+        sessions: &[crate::FileCalibrationSession],
+        assignments: &[usize],
+        channel_reference: usize,
+        options: StackOptions,
+    ) -> Result<Self> {
+        let reference_image_path = reference_image_path.as_ref();
+        if channel_reference >= paths.len() {
+            return Err(Error::Stack(
+                "the channel reference must be one of the lights".into(),
+            ));
+        }
+        let mut file_plan = crate::sessions::FileSessionPlan::new(paths, sessions, assignments)?;
+        if file_plan.is_master(reference_image_path) {
+            return Err(Error::Calibration(
+                "the reference image aliases a calibration master".into(),
+            ));
+        }
+        let reference_session = assignments[channel_reference];
+        let session = file_plan.sessions[reference_session].clone();
+        let options = StackOptions {
+            match_tolerances: session.tolerances,
+            ..options
+        };
+        let calibration = file_plan.load_session(reference_session)?;
+        let mut channel_reference = FitsFrame::open(&paths[channel_reference])?;
+        if let Some(scale) = session.normalized_full_scale {
+            channel_reference.rescale_declared_unit_bounds(scale);
+        }
+        let mut stacker = Self::with_reference_image(
+            FitsFrame::open(reference_image_path)?,
+            channel_reference,
+            calibration,
+            options,
+        )?;
+        stacker.reference_image_path = Some(path_identity(reference_image_path));
+        stacker.ledger.set_current_calibration(session.record());
+        file_plan.bind(stacker.ledger.current_calibration(), reference_session);
+        stacker.file_sessions = Some(file_plan);
+        stacker.configuration_fingerprint = stack_configuration_fingerprint(
+            &stacker.options,
+            &stacker.calibration,
+            stacker.input_mode,
+            stacker.file_sessions.as_ref(),
+        )?;
+        stacker.active_file_session = Some(reference_session);
+        Ok(stacker)
+    }
+
+    /// Assign more lights to session `session` of this stack's file
+    /// calibration plan, as a session still being shot gains frames, so they
+    /// can be pushed like the lights the plan began with. Lights the plan
+    /// already assigns keep their sessions: one assigned to another session
+    /// is refused, as is one that is a master's file. Works on a stack
+    /// reopened from its context, which is how a session's stack is
+    /// extended rather than stacked again.
+    ///
+    /// The configuration fingerprint changes with the plan, and a context
+    /// saved afterwards holds the new lights.
+    pub fn add_session_lights(&mut self, paths: &[PathBuf], session: usize) -> Result<()> {
+        let plan = self.file_sessions.as_mut().ok_or_else(|| {
+            Error::Calibration("this stack has no file calibration sessions".into())
+        })?;
+        plan.add_lights(paths, session)?;
+        self.configuration_fingerprint = stack_configuration_fingerprint(
+            &self.options,
+            &self.calibration,
+            self.input_mode,
+            self.file_sessions.as_ref(),
+        )?;
+        Ok(())
+    }
+
     /// Restore an atomically checkpointed live stack, including its immutable
     /// registration reference, calibration, online moments, and source ledger.
     /// The stack runs under the [`crate::GpuOptions`] it was saved with; see
@@ -2194,6 +2289,7 @@ impl LiveStacker {
                 variance,
             )?,
             coverage: moments.count.to_vec(),
+            weight_sum: moments.weight_sum.map(<[f32]>::to_vec),
             rejected_samples: moments.rejected.to_vec(),
             accepted_frames: self.accepted_frames,
             rejected_frames: self.rejected_frames,
@@ -2268,7 +2364,8 @@ impl LiveStacker {
     /// snapshot. Batch callers should prefer this to avoid snapshot copies.
     pub fn into_snapshot(self) -> Result<StackSnapshot> {
         self.accumulator.check_kept()?;
-        let (mut mean, variance, coverage, rejected_samples) = self.accumulator.into_snapshot();
+        let (mut mean, variance, coverage, weight_sum, rejected_samples) =
+            self.accumulator.into_snapshot();
         if self.options.cfa_integration == CfaIntegration::BayerDrizzle {
             fill_photosite_gaps(
                 &mut mean,
@@ -2291,6 +2388,7 @@ impl LiveStacker {
                 variance,
             )?,
             coverage,
+            weight_sum,
             rejected_samples,
             accepted_frames: self.accepted_frames,
             rejected_frames: self.rejected_frames,
@@ -4223,7 +4321,10 @@ impl Accumulator {
             .collect()
     }
 
-    fn into_snapshot(mut self) -> (Vec<f32>, Vec<f32>, Vec<u32>, Vec<u32>) {
+    /// The finalized mean and variance, and the coverage, weight sum and
+    /// rejected counts, moved out.
+    #[allow(clippy::type_complexity)]
+    fn into_snapshot(mut self) -> (Vec<f32>, Vec<f32>, Vec<u32>, Option<Vec<f32>>, Vec<u32>) {
         #[cfg(feature = "gpu")]
         if self.gpu.is_some() {
             // The moments come home, from the copy read back if there is one.
@@ -4238,6 +4339,7 @@ impl Accumulator {
             self.m2 = moments.m2;
             self.count = moments.count;
             self.rejected = moments.rejected;
+            self.weight_sum = moments.weight_sum;
             self.gpu = None;
         }
         for (mean, &count) in self.mean.iter_mut().zip(&self.count) {
@@ -4246,7 +4348,13 @@ impl Accumulator {
         for (m2, &count) in self.m2.iter_mut().zip(&self.count) {
             *m2 = finalized_variance(*m2, count);
         }
-        (self.mean, self.m2, self.count, self.rejected)
+        (
+            self.mean,
+            self.m2,
+            self.count,
+            self.weight_sum,
+            self.rejected,
+        )
     }
 }
 
@@ -7470,6 +7578,18 @@ mod weighting_tests {
         assert_eq!(bits(&actual.variance.data), bits(&expected.variance.data));
         assert_eq!(actual.coverage, expected.coverage);
         assert_eq!(actual.rejected_samples, expected.rejected_samples);
+        // Equal weights keep no sum; unit weights sum to the coverage.
+        assert!(expected.weight_sum.is_none());
+        let counted = actual.coverage.iter().map(|&count| count as f32);
+        assert!(
+            actual
+                .weight_sum
+                .as_ref()
+                .unwrap()
+                .iter()
+                .copied()
+                .eq(counted)
+        );
 
         let frames = batch_frames(&reference);
         let run = |frame_weights| {
@@ -7543,6 +7663,48 @@ mod weighting_tests {
             })
             .collect();
         (stacker.into_snapshot().unwrap(), diagnostics)
+    }
+
+    /// A weighted stack keeps each sample's sum of frame weights, the
+    /// reference's 1 included, and moving it out keeps what a copy has.
+    #[test]
+    fn a_weighted_snapshot_sums_its_frames_weights() {
+        let (_, frames) = mixed_noise_frames();
+        let mut frames = frames.into_iter();
+        let (_, reference) = frames.next().unwrap();
+        let options = StackOptions {
+            normalization: NormalizationMode::None,
+            rejection: RejectionMode::None,
+            weighting: FrameWeighting::inverse_noise_variance(),
+            ..StackOptions::default()
+        };
+        let mut stacker = LiveStacker::from_linear(reference, options).unwrap();
+        let mut expected = 1.0_f64;
+        for (_, frame) in frames {
+            let FrameDisposition::Accepted(diagnostics) = stacker.push_linear(frame).unwrap()
+            else {
+                panic!("every frame is accepted");
+            };
+            expected += f64::from(diagnostics.weight[0]);
+        }
+        let copied = stacker.snapshot().unwrap();
+        let weight_sum = copied.weight_sum.clone().unwrap();
+        let full = copied.accepted_frames;
+        let covered = weight_sum
+            .iter()
+            .zip(&copied.coverage)
+            .filter(|&(_, &count)| count == full)
+            .map(|(&weight, _)| weight)
+            .collect::<Vec<_>>();
+        assert!(!covered.is_empty());
+        for weight in covered {
+            assert!((f64::from(weight) - expected).abs() < 1e-4 * expected);
+        }
+        let moved = stacker.into_snapshot().unwrap();
+        assert_eq!(
+            moved.weight_sum.as_deref().map(bits),
+            Some(bits(&weight_sum))
+        );
     }
 
     #[test]

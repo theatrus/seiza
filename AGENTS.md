@@ -117,21 +117,24 @@ stub stays a true account of Python's surface.
 
 ## Output versions: revise and test, every time
 
-`seiza_stacking::OUTPUT_VERSION` and `seiza_stretch::OUTPUT_VERSION` give the
-version of that crate, not the Seiza release, whose output a build
-reproduces. PSF Guard keys its cached stacks,
-masters and previews on them. A wrong value is worse than none: if output
+`seiza_stacking::OUTPUT_VERSION`, `seiza_stretch::OUTPUT_VERSION` and
+`seiza_pipeline::OUTPUT_VERSION` give the version of that crate, not the Seiza
+release, whose output a build reproduces. PSF Guard keys its cached stacks,
+masters and previews on them, and distributed stacking's step keys hold
+them. A wrong value is worse than none: if output
 changes and the value stays put, users keep stale stacks and are never told.
 So these steps are not optional, and a PR that skips them is not done.
 
-1. **Before you change anything in `seiza-stacking` or `seiza-stretch`, or in
-   a crate either one calls** (calibration, registration, resampling,
-   rejection, normalization, weighting, demosaicing, drizzle, defect or
-   impulse repair, masters, mosaic canvases, any stretch model), run:
+1. **Before you change anything in `seiza-stacking`, `seiza-stretch` or
+   `seiza-pipeline`, or in a crate one of them calls** (calibration,
+   registration, resampling, rejection, normalization, weighting,
+   demosaicing, drizzle, defect or impulse repair, masters, mosaic canvases,
+   any stretch model, partial stack combination), run:
 
    ```sh
    cargo test -p seiza-stacking --test output_version
    cargo test -p seiza-stretch --test output_version
+   cargo test -p seiza-pipeline --test output_version
    ```
 
 2. **Check that a case covers what you are changing, in the mode you are
@@ -142,7 +145,7 @@ So these steps are not optional, and a PR that skips them is not done.
    sky a few sigma above zero shows the clamp. A case counts only when a
    planted change in its mode makes it fail. Plant one, see it fail, and
    undo it.
-3. **Make your change and run both tests again.**
+3. **Make your change and run the tests again.**
    - **If a case fails and you meant to change output:** set that crate's
      `OUTPUT_VERSION` to the crate's next minor version (0.43.0 while it is
      0.42.x), which the test accepts and the release that ships the change
@@ -150,12 +153,13 @@ So these steps are not optional, and a PR that skips them is not done.
      give the reason in the PR.
    - **If a case fails and you did not mean to change output:** your change
      is not as neutral as you thought. Find out why before going on.
-   - **If nothing fails:** say in the PR that both tests pass unchanged, and
+   - **If nothing fails:** say in the PR that the tests pass unchanged, and
      which case covers your change.
 4. **Never** re-record a summary without moving `OUTPUT_VERSION`, loosen
    `TOLERANCE` to make a case pass, or drop a case because it fails.
-   `OUTPUT_VERSION` only moves forward: from "0.40.0" for stacking and
-   "0.3.0" for stretching, each change sets the release that ships it.
+   `OUTPUT_VERSION` only moves forward: from "0.40.0" for stacking, "0.3.0"
+   for stretching and "0.1.0" for the pipeline, each change sets the release
+   that ships it.
 
 ## Other rules
 

@@ -34,6 +34,60 @@ impl F32ImageData<'_> {
     }
 }
 
+/// Borrowed samples of one image of a file [`write_images`] writes.
+#[derive(Clone, Copy, Debug)]
+pub enum ImageSamples<'a> {
+    /// 32-bit floats, stored with `BITPIX = -32`.
+    F32(F32ImageData<'a>),
+    /// Unsigned 16-bit integers in planar order, one plane or three, stored
+    /// as cameras store them: `BITPIX = 16` with `BZERO = 32768`. The reader
+    /// gives them back as [`crate::Pixels::U16`].
+    U16 { samples: &'a [u16], planes: usize },
+}
+
+impl ImageSamples<'_> {
+    /// Number of planes.
+    pub fn planes(&self) -> usize {
+        match self {
+            Self::F32(pixels) => pixels.planes(),
+            Self::U16 { planes, .. } => *planes,
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::F32(pixels) => pixels.samples().len(),
+            Self::U16 { samples, .. } => samples.len(),
+        }
+    }
+
+    fn sample_bytes(&self) -> usize {
+        match self {
+            Self::F32(_) => std::mem::size_of::<f32>(),
+            Self::U16 { .. } => std::mem::size_of::<u16>(),
+        }
+    }
+}
+
+/// One image of a file [`write_images`] writes.
+#[derive(Clone, Copy, Debug)]
+pub struct ImagePart<'a> {
+    /// The image's `EXTNAME`, which [`crate::FitsImage::open_named`] finds it
+    /// by. The first image may go without one; every other image needs one,
+    /// and no two images may share one, whatever their case. `seiza-xisf`
+    /// writes it as the image's `id`, where it must be an XISF identifier.
+    pub name: Option<&'a str>,
+    /// The image's width in pixels.
+    pub width: usize,
+    /// The image's height in pixels.
+    pub height: usize,
+    /// The samples: `width × height` of them for each plane.
+    pub samples: ImageSamples<'a>,
+    /// Non-structural cards for this image's own header. `EXTNAME` comes
+    /// from [`Self::name`], not from here.
+    pub headers: &'a [WriteHeaderCard],
+}
+
 /// One non-structural FITS header card supplied to the image writer.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WriteHeaderCard {
@@ -81,8 +135,49 @@ pub fn write_f32_image(
     pixels: F32ImageData<'_>,
     headers: &[WriteHeaderCard],
 ) -> Result<(), FitsError> {
-    validate_image(width, height, pixels, headers)?;
-    let path = path.as_ref();
+    let image = ImagePart {
+        name: None,
+        width,
+        height,
+        samples: ImageSamples::F32(pixels),
+        headers,
+    };
+    validate_image(&image)?;
+    write_atomically(path.as_ref(), |writer| write_hdu(writer, &image, true))
+}
+
+/// Atomically write a FITS file holding several images: the first as the
+/// primary HDU, so any reader opens it as an ordinary image, and the rest
+/// as image extensions in order, each named by its `EXTNAME`.
+///
+/// The completed file is flushed and renamed over `path` only after every
+/// header and pixel block has been written.
+pub fn write_images(path: impl AsRef<Path>, images: &[ImagePart<'_>]) -> Result<(), FitsError> {
+    validate_images(images)?;
+    write_atomically(path.as_ref(), |writer| {
+        images
+            .iter()
+            .enumerate()
+            .try_for_each(|(index, image)| write_hdu(writer, image, index == 0))
+    })
+}
+
+/// [`write_images`] to an existing stream. The caller owns flushing and
+/// durability.
+pub fn write_images_to(mut writer: impl Write, images: &[ImagePart<'_>]) -> Result<(), FitsError> {
+    validate_images(images)?;
+    images
+        .iter()
+        .enumerate()
+        .try_for_each(|(index, image)| write_hdu(&mut writer, image, index == 0))
+}
+
+/// Write a file through `write` under a temporary name beside `path`, then
+/// flush, sync and rename it over `path`.
+fn write_atomically(
+    path: &Path,
+    write: impl FnOnce(&mut BufWriter<&mut std::fs::File>) -> Result<(), FitsError>,
+) -> Result<(), FitsError> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -103,7 +198,7 @@ pub fn write_f32_image(
     }
     let mut temporary = builder.tempfile_in(parent)?;
     let mut writer = BufWriter::new(temporary.as_file_mut());
-    write_f32_image_to(&mut writer, width, height, pixels, headers)?;
+    write(&mut writer)?;
     writer.flush()?;
     drop(writer);
     sync_file(temporary.as_file())?;
@@ -149,27 +244,65 @@ pub fn write_f32_image_to(
     pixels: F32ImageData<'_>,
     headers: &[WriteHeaderCard],
 ) -> Result<(), FitsError> {
-    validate_image(width, height, pixels, headers)?;
-    let planes = pixels.planes();
-    let mut cards = vec![
-        encode_card(
+    let image = ImagePart {
+        name: None,
+        width,
+        height,
+        samples: ImageSamples::F32(pixels),
+        headers,
+    };
+    validate_image(&image)?;
+    write_hdu(&mut writer, &image, true)
+}
+
+/// Write one HDU, the primary or an image extension, with its padding.
+fn write_hdu(
+    writer: &mut impl Write,
+    image: &ImagePart<'_>,
+    primary: bool,
+) -> Result<(), FitsError> {
+    let planes = image.samples.planes();
+    let mut cards = Vec::with_capacity(image.headers.len() + 12);
+    if primary {
+        cards.push(encode_card(
             "SIMPLE",
             &HeaderValue::Logical(true),
             "conforms to FITS standard",
-        )?,
-        encode_card(
+        )?);
+    } else {
+        // The standard fixes XTENSION's value in columns 11 to 20.
+        cards.push(format!(
+            "{:<CARD$}",
+            "XTENSION= 'IMAGE   '           / image extension"
+        ));
+    }
+    cards.push(match image.samples {
+        ImageSamples::F32(_) => encode_card(
             "BITPIX",
             &HeaderValue::Integer(-32),
             "32-bit IEEE floating point",
         )?,
-        encode_card(
-            "NAXIS",
-            &HeaderValue::Integer(if planes == 3 { 3 } else { 2 }),
-            "",
+        ImageSamples::U16 { .. } => encode_card(
+            "BITPIX",
+            &HeaderValue::Integer(16),
+            "16-bit integers, offset by BZERO",
         )?,
-        encode_card("NAXIS1", &HeaderValue::Integer(width as i64), "")?,
-        encode_card("NAXIS2", &HeaderValue::Integer(height as i64), "")?,
-    ];
+    });
+    cards.push(encode_card(
+        "NAXIS",
+        &HeaderValue::Integer(if planes == 3 { 3 } else { 2 }),
+        "",
+    )?);
+    cards.push(encode_card(
+        "NAXIS1",
+        &HeaderValue::Integer(image.width as i64),
+        "",
+    )?);
+    cards.push(encode_card(
+        "NAXIS2",
+        &HeaderValue::Integer(image.height as i64),
+        "",
+    )?);
     if planes == 3 {
         cards.push(encode_card(
             "NAXIS3",
@@ -177,12 +310,32 @@ pub fn write_f32_image_to(
             "RGB planes",
         )?);
     }
-    cards.push(encode_card(
-        "EXTEND",
-        &HeaderValue::Logical(true),
-        "extensions may be present",
-    )?);
-    for header in headers {
+    if primary {
+        cards.push(encode_card(
+            "EXTEND",
+            &HeaderValue::Logical(true),
+            "extensions may be present",
+        )?);
+    } else {
+        cards.push(encode_card("PCOUNT", &HeaderValue::Integer(0), "")?);
+        cards.push(encode_card("GCOUNT", &HeaderValue::Integer(1), "")?);
+    }
+    if let ImageSamples::U16 { .. } = image.samples {
+        cards.push(encode_card(
+            "BZERO",
+            &HeaderValue::Integer(32768),
+            "unsigned 16-bit samples",
+        )?);
+        cards.push(encode_card("BSCALE", &HeaderValue::Integer(1), "")?);
+    }
+    if let Some(name) = image.name {
+        cards.push(encode_card(
+            "EXTNAME",
+            &HeaderValue::String(name.into()),
+            "",
+        )?);
+    }
+    for header in image.headers {
         cards.push(encode_card(
             header.keyword(),
             header.value(),
@@ -190,51 +343,64 @@ pub fn write_f32_image_to(
         )?);
     }
     cards.push(format!("{:<CARD$}", "END"));
-    write_block_padded(&mut writer, cards.concat().as_bytes(), b' ')?;
+    write_block_padded(writer, cards.concat().as_bytes(), b' ')?;
 
     let mut byte_buffer = Vec::with_capacity(PIXEL_CHUNK_BYTES);
-    match pixels {
-        F32ImageData::Mono(samples) | F32ImageData::RgbPlanar(samples) => {
-            write_float_values(&mut writer, samples.iter().copied(), &mut byte_buffer)?;
+    match image.samples {
+        ImageSamples::F32(F32ImageData::Mono(samples) | F32ImageData::RgbPlanar(samples)) => {
+            write_float_values(writer, samples.iter().copied(), &mut byte_buffer)?;
         }
-        F32ImageData::RgbInterleaved(samples) => {
-            let pixel_count = width * height;
+        ImageSamples::F32(F32ImageData::RgbInterleaved(samples)) => {
+            let pixel_count = image.width * image.height;
             for channel in 0..3 {
                 write_float_values(
-                    &mut writer,
+                    writer,
                     (0..pixel_count).map(|index| samples[index * 3 + channel]),
                     &mut byte_buffer,
                 )?;
             }
         }
+        ImageSamples::U16 { samples, .. } => {
+            write_u16_values(writer, samples, &mut byte_buffer)?;
+        }
     }
-    let byte_len = std::mem::size_of_val(pixels.samples());
+    let byte_len = image.samples.len() * image.samples.sample_bytes();
     let padding = (BLOCK - byte_len % BLOCK) % BLOCK;
     writer.write_all(&vec![0; padding])?;
     Ok(())
 }
 
-fn validate_image(
-    width: usize,
-    height: usize,
-    pixels: F32ImageData<'_>,
-    headers: &[WriteHeaderCard],
-) -> Result<(), FitsError> {
+fn validate_image(image: &ImagePart<'_>) -> Result<(), FitsError> {
+    let ImagePart {
+        width,
+        height,
+        samples,
+        headers,
+        ..
+    } = *image;
+    if let ImageSamples::U16 { planes, .. } = samples
+        && planes != 1
+        && planes != 3
+    {
+        return Err(FitsError::Malformed(format!(
+            "{planes} planes of 16-bit samples; write 1 or 3"
+        )));
+    }
     let expected = width
         .checked_mul(height)
-        .and_then(|count| count.checked_mul(pixels.planes()))
+        .and_then(|count| count.checked_mul(samples.planes()))
         .ok_or_else(|| FitsError::Malformed("image dimensions overflow".into()))?;
     if width == 0 || height == 0 || expected > 2_000_000_000 {
         return Err(FitsError::Malformed("implausible image dimensions".into()));
     }
-    if pixels.samples().len() != expected {
+    if samples.len() != expected {
         return Err(FitsError::Malformed(format!(
             "pixel buffer has {} samples; expected {expected}",
-            pixels.samples().len()
+            samples.len()
         )));
     }
     expected
-        .checked_mul(std::mem::size_of::<f32>())
+        .checked_mul(samples.sample_bytes())
         .ok_or_else(|| FitsError::Malformed("image byte count overflows".into()))?;
 
     let mut keywords = HashSet::with_capacity(headers.len());
@@ -253,6 +419,52 @@ fn validate_image(
             )));
         }
         encode_card(header.keyword(), header.value(), header.comment())?;
+    }
+    Ok(())
+}
+
+/// Check every image of a multi-image file, and their names: each image
+/// after the first has one, none is repeated whatever its case, and each
+/// fits one `EXTNAME` card.
+fn validate_images(images: &[ImagePart<'_>]) -> Result<(), FitsError> {
+    if images.is_empty() {
+        return Err(FitsError::Malformed("no images to write".into()));
+    }
+    let mut names = HashSet::with_capacity(images.len());
+    for (index, image) in images.iter().enumerate() {
+        validate_image(image)?;
+        if image
+            .headers
+            .iter()
+            .any(|header| header.keyword() == "EXTNAME")
+        {
+            return Err(FitsError::Malformed(
+                "EXTNAME is the image's name; set ImagePart::name".into(),
+            ));
+        }
+        let Some(name) = image.name else {
+            if index == 0 {
+                continue;
+            }
+            return Err(FitsError::Malformed(format!(
+                "image {index} has no name; every image after the first needs one"
+            )));
+        };
+        if name.is_empty() || name.trim() != name {
+            return Err(FitsError::Malformed(format!(
+                "image name {name:?} is empty or starts or ends with a space"
+            )));
+        }
+        if encode_card("EXTNAME", &HeaderValue::String(name.into()), "")?.len() != CARD {
+            return Err(FitsError::Malformed(format!(
+                "image name {name:?} does not fit in one card"
+            )));
+        }
+        if !names.insert(name.to_ascii_uppercase()) {
+            return Err(FitsError::Malformed(format!(
+                "two images are named {name:?}"
+            )));
+        }
     }
     Ok(())
 }
@@ -560,6 +772,25 @@ fn write_float_values(
     Ok(())
 }
 
+fn write_u16_values(
+    writer: &mut impl Write,
+    values: &[u16],
+    buffer: &mut Vec<u8>,
+) -> std::io::Result<()> {
+    buffer.clear();
+    for &value in values {
+        // Stored signed, offset by BZERO = 32768: the top bit flipped.
+        buffer.extend_from_slice(&(value ^ 0x8000).to_be_bytes());
+        if buffer.len() >= PIXEL_CHUNK_BYTES {
+            writer.write_all(buffer)?;
+            buffer.clear();
+        }
+    }
+    writer.write_all(buffer)?;
+    buffer.clear();
+    Ok(())
+}
+
 fn write_block_padded(writer: &mut impl Write, bytes: &[u8], padding: u8) -> std::io::Result<()> {
     writer.write_all(bytes)?;
     let count = (BLOCK - bytes.len() % BLOCK) % BLOCK;
@@ -699,6 +930,224 @@ mod tests {
             write_f32_image_to(&mut output, 1, 1, F32ImageData::Mono(&[1.0]), &non_ascii).is_err()
         );
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn several_images_round_trip_by_name() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("partial.fits");
+        let mean = [-2.5_f32, 0.25, 100.0, f32::NAN, 7.0, 8.0];
+        let weight = [1.0_f32, 0.5, 0.25, 0.0, 2.0, 4.0];
+        let cover = [0_u16, 1, 32767, 32768, 65534, 65535];
+        let rgb_cover: Vec<u16> = (0..18).map(|value| value * 3000).collect();
+        let primary_cards = [
+            WriteHeaderCard::new("OBJECT", HeaderValue::String("NGC 7000".into())),
+            WriteHeaderCard::new("NCOMBINE", HeaderValue::Integer(40)),
+        ];
+        let weight_cards = [WriteHeaderCard::new(
+            "BUNIT",
+            HeaderValue::String("1/ADU2".into()),
+        )];
+        write_images(
+            &path,
+            &[
+                ImagePart {
+                    name: None,
+                    width: 3,
+                    height: 2,
+                    samples: ImageSamples::F32(F32ImageData::Mono(&mean)),
+                    headers: &primary_cards,
+                },
+                ImagePart {
+                    name: Some("WEIGHT"),
+                    width: 3,
+                    height: 2,
+                    samples: ImageSamples::F32(F32ImageData::Mono(&weight)),
+                    headers: &weight_cards,
+                },
+                ImagePart {
+                    name: Some("COVER"),
+                    width: 3,
+                    height: 2,
+                    samples: ImageSamples::U16 {
+                        samples: &cover,
+                        planes: 1,
+                    },
+                    headers: &[],
+                },
+                ImagePart {
+                    name: Some("RGBCOVER"),
+                    width: 3,
+                    height: 2,
+                    samples: ImageSamples::U16 {
+                        samples: &rgb_cover,
+                        planes: 3,
+                    },
+                    headers: &[],
+                },
+            ],
+        )
+        .unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes.len() % BLOCK, 0);
+        // Any reader opens the primary as an ordinary image.
+        let primary = FitsImage::open(&path).unwrap();
+        let Pixels::F32(ref values) = primary.pixels else {
+            panic!("the primary must be BITPIX=-32");
+        };
+        assert_eq!(values[..3], mean[..3]);
+        assert!(values[3].is_nan());
+        assert_eq!(primary.header("EXTNAME"), None);
+        assert_eq!(primary.header_str("OBJECT"), Some("NGC 7000"));
+
+        let weight_image = FitsImage::open_named(&path, "WEIGHT").unwrap();
+        assert!(matches!(weight_image.pixels, Pixels::F32(ref values) if values == &weight));
+        // An extension's own cards come first, then the primary's.
+        assert_eq!(weight_image.header_str("EXTNAME"), Some("WEIGHT"));
+        assert_eq!(weight_image.header_str("BUNIT"), Some("1/ADU2"));
+        assert_eq!(weight_image.header_f64("NCOMBINE"), Some(40.0));
+
+        // Names match whatever their case, as cfitsio and astropy match them.
+        let cover_image = FitsImage::open_named(&path, "cover").unwrap();
+        assert!(matches!(cover_image.pixels, Pixels::U16(ref values) if values == &cover));
+        let rgb = FitsImage::open_named(&path, "RgbCover").unwrap();
+        assert_eq!((rgb.width, rgb.height, rgb.planes), (3, 2, 3));
+        assert!(matches!(rgb.pixels, Pixels::U16(ref values) if values == &rgb_cover));
+
+        let header = crate::read_named_header(&path, "COVER").unwrap();
+        assert_eq!(header.cards, cover_image.headers);
+        assert!(matches!(
+            FitsImage::open_named(&path, "REJECT"),
+            Err(crate::FitsError::ImageNotFound(name)) if name == "REJECT"
+        ));
+        assert!(matches!(
+            crate::read_named_header(&path, "REJECT"),
+            Err(crate::FitsError::ImageNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn a_named_primary_is_found_by_its_name() {
+        let mut encoded = Vec::new();
+        write_images_to(
+            &mut encoded,
+            &[ImagePart {
+                name: Some("MEAN"),
+                width: 2,
+                height: 1,
+                samples: ImageSamples::F32(F32ImageData::Mono(&[1.0, 2.0])),
+                headers: &[],
+            }],
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("named.fits");
+        std::fs::write(&path, &encoded).unwrap();
+        let image = FitsImage::open_named(&path, "mean").unwrap();
+        assert!(matches!(image.pixels, Pixels::F32(ref values) if values == &[1.0, 2.0]));
+        assert_eq!(image.headers, FitsImage::open(&path).unwrap().headers);
+    }
+
+    #[test]
+    fn extension_headers_follow_the_standard_layout() {
+        let mut encoded = Vec::new();
+        write_images_to(
+            &mut encoded,
+            &[
+                ImagePart {
+                    name: None,
+                    width: 1,
+                    height: 1,
+                    samples: ImageSamples::F32(F32ImageData::Mono(&[1.0])),
+                    headers: &[],
+                },
+                ImagePart {
+                    name: Some("COVER"),
+                    width: 1,
+                    height: 1,
+                    samples: ImageSamples::U16 {
+                        samples: &[5],
+                        planes: 1,
+                    },
+                    headers: &[],
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(encoded.len(), 4 * BLOCK);
+        let extension = header_cards(&encoded[2 * BLOCK..]);
+        let keywords: Vec<&str> = extension.iter().map(|card| card[..8].trim_end()).collect();
+        assert_eq!(
+            keywords,
+            [
+                "XTENSION", "BITPIX", "NAXIS", "NAXIS1", "NAXIS2", "PCOUNT", "GCOUNT", "BZERO",
+                "BSCALE", "EXTNAME"
+            ]
+        );
+        assert!(extension[0].starts_with("XTENSION= 'IMAGE   '"));
+        // 5 is stored as 5 - 32768.
+        assert_eq!(
+            encoded[3 * BLOCK..3 * BLOCK + 2],
+            (5_i16 - 32767 - 1).to_be_bytes()
+        );
+    }
+
+    #[test]
+    fn several_images_need_distinct_names() {
+        fn image<'a>(name: Option<&'a str>, headers: &'a [WriteHeaderCard]) -> ImagePart<'a> {
+            ImagePart {
+                name,
+                width: 1,
+                height: 1,
+                samples: ImageSamples::F32(F32ImageData::Mono(&[1.0])),
+                headers,
+            }
+        }
+        let refused = |images: &[ImagePart<'_>]| {
+            let mut output = Vec::new();
+            let result = write_images_to(&mut output, images);
+            // Nothing is written before every image has been checked.
+            assert_eq!(result.is_err(), output.is_empty());
+            result.is_err()
+        };
+        assert!(refused(&[]));
+        assert!(refused(&[image(None, &[]), image(None, &[])]));
+        assert!(refused(&[
+            image(None, &[]),
+            image(Some("A"), &[]),
+            image(Some("a"), &[])
+        ]));
+        assert!(refused(&[image(Some(""), &[])]));
+        assert!(refused(&[image(Some(" A"), &[])]));
+        let (longest, too_long) = ("N".repeat(68), "N".repeat(69));
+        assert!(!refused(&[image(Some(&longest), &[])]));
+        assert!(refused(&[image(Some(&too_long), &[])]));
+        let extname = [WriteHeaderCard::new(
+            "EXTNAME",
+            HeaderValue::String("X".into()),
+        )];
+        assert!(refused(&[image(None, &extname)]));
+        assert!(refused(&[ImagePart {
+            name: None,
+            width: 1,
+            height: 1,
+            samples: ImageSamples::U16 {
+                samples: &[1, 2],
+                planes: 2,
+            },
+            headers: &[],
+        }]));
+        assert!(refused(&[ImagePart {
+            name: None,
+            width: 2,
+            height: 1,
+            samples: ImageSamples::U16 {
+                samples: &[1],
+                planes: 1,
+            },
+            headers: &[],
+        }]));
     }
 
     #[test]

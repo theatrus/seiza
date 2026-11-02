@@ -1,13 +1,14 @@
 //! Fast FITS image reading and linear `f32` writing for astrophotography.
 //!
-//! Scope: single-image FITS files as written by capture software
-//! (N.I.N.A., SGP, ASIAIR, ...) — the primary HDU with a 2D image in
-//! BITPIX 8/16/32/64/-32/-64, or, when the primary holds no data, the first
-//! image extension, tile-compressed ones included. 16-bit data stays `u16`
-//! end to end (no float
-//! inflation), statistics come from histograms rather than sorts, and the
-//! midtone-transfer-function autostretch matches N.I.N.A.'s. The writer emits
-//! primary-HDU mono or RGB float images with validated typed headers and
+//! Scope: FITS images as written by capture software (N.I.N.A., SGP,
+//! ASIAIR, ...) — the primary HDU with a 2D image in BITPIX
+//! 8/16/32/64/-32/-64, or, when the primary holds no data, the first image
+//! extension, tile-compressed ones included — and any image of a file by its
+//! `EXTNAME` ([`FitsImage::open_named`]). 16-bit data stays `u16` end to end
+//! (no float inflation), statistics come from histograms rather than sorts,
+//! and the midtone-transfer-function autostretch matches N.I.N.A.'s. The
+//! writer emits primary-HDU mono or RGB float images, or several named
+//! images in one file ([`write_images`]), with validated typed headers and
 //! atomic on-disk publication.
 //!
 //! # Threads
@@ -35,8 +36,8 @@ pub use seiza_stretch::{
 };
 pub use window::{ImageWindow, MAX_WINDOW_EDGE, read_window};
 pub use writer::{
-    F32ImageData, WriteHeaderCard, sync_file, update_header_in_place, write_f32_image,
-    write_f32_image_to,
+    F32ImageData, ImagePart, ImageSamples, WriteHeaderCard, sync_file, update_header_in_place,
+    write_f32_image, write_f32_image_to, write_images, write_images_to,
 };
 
 use rayon::prelude::*;
@@ -53,6 +54,8 @@ pub enum FitsError {
     NotFits,
     Malformed(String),
     Unsupported(String),
+    /// The file holds no image of the name asked for.
+    ImageNotFound(String),
 }
 
 impl std::fmt::Display for FitsError {
@@ -62,6 +65,7 @@ impl std::fmt::Display for FitsError {
             Self::NotFits => write!(f, "not a FITS file"),
             Self::Malformed(what) => write!(f, "malformed FITS: {what}"),
             Self::Unsupported(what) => write!(f, "unsupported FITS: {what}"),
+            Self::ImageNotFound(name) => write!(f, "no image named {name:?}"),
         }
     }
 }
@@ -505,12 +509,21 @@ struct ImageHdu {
 /// When no such extension follows, or the search meets anything but a
 /// well-formed extension header, the primary is returned, so callers report
 /// on it as they did before extensions were read.
+///
+/// With a `name`, it is instead the image HDU, primary or extension, plain
+/// or tile compressed, whose `EXTNAME` is `name` ([`is_named`]), an
+/// extension's header again combined with the primary's. When no image has
+/// that name, the search gives [`FitsError::ImageNotFound`].
 fn locate_image<R: Read + Seek>(
     reader: &mut R,
     short_first_block_is_not_fits: bool,
+    name: Option<&str>,
 ) -> Result<ImageHdu, FitsError> {
     let (primary, data_start) = read_headers_from(reader, short_first_block_is_not_fits)?;
     let data_start = data_start as u64;
+    if let Some(name) = name {
+        return locate_named_image(reader, primary, data_start, name);
+    }
     if !declares_no_data(&primary.cards) {
         return Ok(ImageHdu {
             header: primary,
@@ -561,6 +574,71 @@ fn locate_image<R: Read + Seek>(
     })
 }
 
+/// Whether an HDU's `EXTNAME` is `name`, ignoring case and trailing spaces,
+/// as cfitsio and astropy compare extension names.
+fn is_named(cards: &[(String, HeaderValue)], name: &str) -> bool {
+    card_value(cards, "EXTNAME")
+        .and_then(HeaderValue::as_str)
+        .is_some_and(|extname| extname.trim_end().eq_ignore_ascii_case(name.trim_end()))
+}
+
+/// [`locate_image`] for the image named `name`, the primary header already
+/// read and the reader at the primary's data.
+fn locate_named_image<R: Read + Seek>(
+    reader: &mut R,
+    primary: FitsHeader,
+    data_start: u64,
+    name: &str,
+) -> Result<ImageHdu, FitsError> {
+    if !declares_no_data(&primary.cards) && is_named(&primary.cards, name) {
+        reader.seek(SeekFrom::Start(data_start))?;
+        return Ok(ImageHdu {
+            header: primary,
+            header_start: 0,
+            data_start,
+            table: None,
+        });
+    }
+    let mut offset = data_unit_bytes(&primary.cards)
+        .and_then(|bytes| bytes.checked_next_multiple_of(BLOCK as u64))
+        .and_then(|bytes| data_start.checked_add(bytes))
+        .ok_or_else(|| FitsError::Malformed("implausible primary data size".into()))?;
+    loop {
+        reader.seek(SeekFrom::Start(offset))?;
+        let Some((extension, header_bytes)) = read_extension_header(reader)? else {
+            break;
+        };
+        let extension_data = offset + header_bytes;
+        if is_named(&extension.cards, name) {
+            if holds_image(&extension.cards) {
+                return Ok(ImageHdu {
+                    header: inherit_primary(extension, primary),
+                    header_start: offset,
+                    data_start: extension_data,
+                    table: None,
+                });
+            }
+            if compressed::holds_compressed_image(&extension.cards) {
+                let table = extension.cards.clone();
+                return Ok(ImageHdu {
+                    header: inherit_primary(compressed::image_header(extension), primary),
+                    header_start: offset,
+                    data_start: extension_data,
+                    table: Some(table),
+                });
+            }
+        }
+        let Some(next) = data_unit_bytes(&extension.cards)
+            .and_then(|bytes| bytes.checked_next_multiple_of(BLOCK as u64))
+            .and_then(|bytes| extension_data.checked_add(bytes))
+        else {
+            break;
+        };
+        offset = next;
+    }
+    Err(FitsError::ImageNotFound(name.to_string()))
+}
+
 /// Read only the header cards of a FITS file, without touching the pixel
 /// data — cheap metadata probes on large files.
 ///
@@ -581,7 +659,15 @@ pub fn read_header(path: &Path) -> Result<Vec<(String, HeaderValue)>, FitsError>
 /// [`read_header`], and the commentary is combined the same way.
 pub fn read_header_with_commentary(path: &Path) -> Result<FitsHeader, FitsError> {
     let mut file = std::fs::File::open(path)?;
-    locate_image(&mut file, false).map(|hdu| hdu.header)
+    locate_image(&mut file, false, None).map(|hdu| hdu.header)
+}
+
+/// Read the header of the image named `name`, with its `HISTORY` and
+/// `COMMENT` text, without touching the pixel data: the cards
+/// [`FitsImage::open_named`] gives that image.
+pub fn read_named_header(path: &Path, name: &str) -> Result<FitsHeader, FitsError> {
+    let mut file = std::fs::File::open(path)?;
+    locate_image(&mut file, false, Some(name)).map(|hdu| hdu.header)
 }
 
 /// Where the header of the HDU that [`FitsImage::open`] reads starts, and
@@ -589,7 +675,7 @@ pub fn read_header_with_commentary(path: &Path) -> Result<FitsHeader, FitsError>
 pub(crate) fn image_header_offset<R: Read + Seek>(
     reader: &mut R,
 ) -> Result<(u64, bool), FitsError> {
-    locate_image(reader, true).map(|hdu| (hdu.header_start, hdu.table.is_some()))
+    locate_image(reader, true, None).map(|hdu| (hdu.header_start, hdu.table.is_some()))
 }
 
 /// The `BLANK` card of integer data. The standard defines it for integer
@@ -948,7 +1034,16 @@ impl FitsImage {
     /// The image is the primary HDU's, or, when the primary holds no data,
     /// the first image extension's, with the headers [`read_header`] gives.
     pub fn open(path: &Path) -> Result<FitsImage, FitsError> {
-        Self::open_decoding(path, None::<fn(usize) -> Vec<f32>>)
+        Self::open_decoding(path, None::<fn(usize) -> Vec<f32>>, None)
+    }
+
+    /// Open the image named `name`: the HDU whose `EXTNAME` it is, ignoring
+    /// case and trailing spaces, as [`write_images`] names them. An image
+    /// extension's headers are combined with the primary's, as
+    /// [`Self::open`] combines them. A file with no image of that name gives
+    /// [`FitsError::ImageNotFound`].
+    pub fn open_named(path: &Path, name: &str) -> Result<FitsImage, FitsError> {
+        Self::open_decoding(path, None::<fn(usize) -> Vec<f32>>, Some(name))
     }
 
     /// [`Self::open`], decoding a camera's 16-bit data (BITPIX 16, BSCALE 1,
@@ -962,12 +1057,13 @@ impl FitsImage {
         path: &Path,
         buffer: impl FnOnce(usize) -> Vec<f32>,
     ) -> Result<FitsImage, FitsError> {
-        Self::open_decoding(path, Some(buffer))
+        Self::open_decoding(path, Some(buffer), None)
     }
 
     fn open_decoding(
         path: &Path,
         physical: Option<impl FnOnce(usize) -> Vec<f32>>,
+        name: Option<&str>,
     ) -> Result<FitsImage, FitsError> {
         let mut file = std::fs::File::open(path)?;
         // Mapped, the data unit is decoded straight from the file's pages,
@@ -975,8 +1071,8 @@ impl FitsImage {
         // Safety: the file is opened read-only; concurrent truncation would
         // fault, which is acceptable for locally-managed image files.
         match unsafe { memmap2::Mmap::map(&file) } {
-            Ok(map) => Self::decode_bytes(&map, physical),
-            Err(_) => Self::read_from(&mut file, None),
+            Ok(map) => Self::decode_bytes(&map, physical, name),
+            Err(_) => Self::read_from(&mut file, None, name),
         }
     }
 
@@ -984,20 +1080,22 @@ impl FitsImage {
     /// pipeline used by [`Self::open`]. The caller retains ownership of the
     /// input slice, so this entry point does not reduce its memory footprint.
     pub fn from_bytes(data: &[u8]) -> Result<FitsImage, FitsError> {
-        Self::decode_bytes(data, None::<fn(usize) -> Vec<f32>>)
+        Self::decode_bytes(data, None::<fn(usize) -> Vec<f32>>, None)
     }
 
     /// [`Self::from_bytes`], with camera data decoded straight to physical
-    /// f32 into the vector `physical` gives, as [`Self::open_with`] does.
+    /// f32 into the vector `physical` gives, as [`Self::open_with`] does,
+    /// and the image named `name` in place of the default one.
     fn decode_bytes(
         data: &[u8],
         physical: Option<impl FnOnce(usize) -> Vec<f32>>,
+        name: Option<&str>,
     ) -> Result<FitsImage, FitsError> {
         let mut reader = std::io::Cursor::new(data);
-        let hdu = locate_image(&mut reader, true)?;
+        let hdu = locate_image(&mut reader, true, name)?;
         if hdu.table.is_some() {
             let mut reader = std::io::Cursor::new(data);
-            return Self::read_from(&mut reader, Some(data.len() as u64));
+            return Self::read_from(&mut reader, Some(data.len() as u64), name);
         }
         let headers = hdu.header.cards;
         let spec = ImageSpec::from_headers(&headers)?;
@@ -1029,13 +1127,14 @@ impl FitsImage {
     fn read_from<R: Read + Seek>(
         reader: &mut R,
         available_bytes: Option<u64>,
+        name: Option<&str>,
     ) -> Result<FitsImage, FitsError> {
         let ImageHdu {
             header,
             data_start,
             table,
             ..
-        } = locate_image(reader, true)?;
+        } = locate_image(reader, true, name)?;
         let headers = header.cards;
         let spec = ImageSpec::from_headers(&headers)?;
         let data_bytes = match &table {
@@ -1985,7 +2084,7 @@ mod io_tests {
         let bytes = image_bytes(16, &[3, 1], &[("BZERO", "32768")], &payload, true);
         let expected_position = BLOCK + payload.len();
         let mut reader = std::io::Cursor::new(bytes);
-        let image = FitsImage::read_from(&mut reader, None).unwrap();
+        let image = FitsImage::read_from(&mut reader, None, None).unwrap();
         assert_eq!(reader.position() as usize, expected_position);
         assert!(matches!(image.pixels, Pixels::U16(ref values) if values == &[10, 20, 30]));
 
@@ -2174,6 +2273,7 @@ mod io_tests {
                     called = true;
                     given
                 }),
+                None,
             )
             .unwrap();
             let physical = decoded.into_physical_f32();
@@ -2585,6 +2685,64 @@ mod hdu_tests {
         assert_eq!(header.cards, opened.headers);
         assert_eq!(read_header(&path).unwrap(), opened.headers);
         assert_eq!(header.history, ["extension history", "primary history"]);
+    }
+
+    #[test]
+    fn a_named_image_is_found_past_the_primary_data_and_tables() {
+        // A primary with data of its own, which the search steps over.
+        let mut file = hdu(
+            &primary(8, &[3, 1], &[card("OBJECT", "'from the primary'")]),
+            &[1, 2, 3],
+        );
+        // A table of the same name is not an image, and is stepped over
+        // with its heap.
+        file.extend(hdu(
+            &extension(
+                "BINTABLE",
+                8,
+                &[4, 1],
+                &[
+                    card("TFIELDS", "1"),
+                    card("TFORM1", "'1J'"),
+                    card("EXTNAME", "'WEIGHT'"),
+                ],
+            )
+            .into_iter()
+            .map(|text| {
+                if text.starts_with("PCOUNT") {
+                    card("PCOUNT", "3000")
+                } else {
+                    text
+                }
+            })
+            .collect::<Vec<_>>(),
+            &[7; 4 + 3000],
+        ));
+        file.extend(hdu(
+            &extension("IMAGE", 8, &[2, 1], &[card("EXTNAME", "'OTHER'")]),
+            &[8, 9],
+        ));
+        // Trailing spaces in the stored name do not count.
+        file.extend(hdu(
+            &extension("IMAGE", 8, &[2, 1], &[card("EXTNAME", "'weight  '")]),
+            &[4, 5],
+        ));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("named.fits");
+        std::fs::write(&path, &file).unwrap();
+
+        let image = FitsImage::open_named(&path, "WEIGHT").unwrap();
+        assert!(matches!(image.pixels, Pixels::U8(ref values) if values == &[4, 5]));
+        assert_eq!(image.header_str("OBJECT"), Some("from the primary"));
+        let other = FitsImage::open_named(&path, "Other").unwrap();
+        assert!(matches!(other.pixels, Pixels::U8(ref values) if values == &[8, 9]));
+        // The default image is still the primary's.
+        let default = FitsImage::open(&path).unwrap();
+        assert!(matches!(default.pixels, Pixels::U8(ref values) if values == &[1, 2, 3]));
+        assert!(matches!(
+            FitsImage::open_named(&path, "PRIMARY"),
+            Err(FitsError::ImageNotFound(_))
+        ));
     }
 
     #[test]

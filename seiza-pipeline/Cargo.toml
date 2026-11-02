@@ -1,0 +1,25 @@
+[package]
+name = "seiza-pipeline"
+description = "Distributed stacking for Seiza: partial stacks that describe themselves, combined and resumed by key"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "README.md"
+keywords = ["astronomy", "astrophotography", "stacking", "distributed"]
+categories = ["science", "multimedia::images"]
+
+[dependencies]
+rayon.workspace = true
+seiza-calibration.workspace = true
+seiza-fits.workspace = true
+seiza-image-io.workspace = true
+seiza-stacking.workspace = true
+seiza-xisf.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile = "3"
+thiserror.workspace = true

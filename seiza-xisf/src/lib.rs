@@ -56,7 +56,7 @@ pub use xml::XisfElement;
 
 pub use writer::{
     ChecksumAlgorithm, WriteCompression, WriteOptions, write_f32_image, write_f32_image_to,
-    write_f32_image_to_with_options, write_f32_image_with_options,
+    write_f32_image_to_with_options, write_f32_image_with_options, write_images, write_images_to,
 };
 
 const SIGNATURE: &[u8; 8] = b"XISF0100";
@@ -815,10 +815,32 @@ pub fn read_header(path: &Path) -> Result<Vec<(String, HeaderValue)>, XisfError>
 pub fn read_header_and_metadata(
     path: &Path,
 ) -> Result<(Vec<(String, HeaderValue)>, XisfMetadata), XisfError> {
+    header_and_metadata(path, ImageSelection::Index(0))
+}
+
+/// [`read_header_and_metadata`] for the top-level image with a given
+/// case-sensitive XISF `id` attribute.
+pub fn read_header_and_metadata_by_id(
+    path: &Path,
+    id: &str,
+) -> Result<(Vec<(String, HeaderValue)>, XisfMetadata), XisfError> {
+    header_and_metadata(path, ImageSelection::Id(id))
+}
+
+fn header_and_metadata(
+    path: &Path,
+    selection: ImageSelection<'_>,
+) -> Result<(Vec<(String, HeaderValue)>, XisfMetadata), XisfError> {
     let mut file = std::fs::File::open(path)?;
     let file_bytes = file.metadata()?.len();
     let mut parsed = parse_file(&mut file, file_bytes, header_dir(path).as_deref())?;
-    let image = parsed.take(0)?;
+    let index = match selection {
+        ImageSelection::Index(index) => index,
+        ImageSelection::Id(id) => parsed
+            .index_of_id(id)
+            .ok_or_else(|| XisfError::ImageNotFound(format!("with id {id:?}")))?,
+    };
+    let image = parsed.take(index)?;
     let mut headers = image.info.headers.clone();
     add_structural_headers(&mut headers, &image.info);
     let metadata = image.metadata(&mut file, &parsed);
@@ -3368,6 +3390,16 @@ mod tests {
         assert!(matches!(
             open_image_by_id(&path, "alpha"),
             Err(XisfError::Unsupported(_))
+        ));
+        let (cards, _) = read_header_and_metadata_by_id(&path, "gray").unwrap();
+        assert_eq!(cards, open_image_by_id(&path, "gray").unwrap().headers);
+        assert!(matches!(
+            read_header_and_metadata_by_id(&path, "alpha"),
+            Err(XisfError::Unsupported(_))
+        ));
+        assert!(matches!(
+            read_header_and_metadata_by_id(&path, "missing"),
+            Err(XisfError::ImageNotFound(_))
         ));
     }
 

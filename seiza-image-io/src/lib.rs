@@ -11,13 +11,15 @@
 //!   that choose how to treat 8-bit pixels.
 //! - [`read_astronomy`] gives a FITS or XISF file as Seiza's [`FitsImage`],
 //!   with its headers and stored sample type, and an XISF file's
-//!   description and metadata.
+//!   description and metadata; [`read_astronomy_named`] gives one image of
+//!   several by its name.
 //!
-//! And three ways out: [`save`] writes floating-point samples, PNG and TIFF
+//! And four ways out: [`save`] writes floating-point samples, PNG and TIFF
 //! at 16 bits and FITS and XISF as 32-bit floats; [`save_f32`] writes
 //! borrowed samples with FITS header cards, XISF bounds or a chosen format;
 //! [`save_display`] writes a display image, 8 or 16 bits, as PNG, JPEG or
-//! TIFF, or as floats in FITS or XISF. Exports replace the destination only
+//! TIFF, or as floats in FITS or XISF; [`save_images`] writes several named
+//! images to one FITS or XISF file. Exports replace the destination only
 //! after the complete image has been written, flushed and synced.
 //!
 //! FITS rows are read in their stored order, as the rest of Seiza reads
@@ -30,7 +32,7 @@ use image::{DynamicImage, ImageBuffer, ImageFormat, Luma, Rgb, Rgb32FImage};
 use raster::OrientedRaster;
 use seiza_core::prior::SolvePrior;
 use seiza_fits::{F32ImageData, FitsError, FitsImage, HeaderValue, Pixels, WriteHeaderCard};
-pub use seiza_fits::{FitsHeader, ImageWindow, MAX_WINDOW_EDGE};
+pub use seiza_fits::{FitsHeader, ImagePart, ImageSamples, ImageWindow, MAX_WINDOW_EDGE};
 use seiza_xisf::{XisfError, XisfImageInfo, XisfMetadata};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -429,6 +431,46 @@ pub fn read_header_as(path: &Path, format: Format) -> Result<FitsHeader, Error> 
         }
         _ => Err(Error::open(path, "it is not a FITS or XISF file")),
     }
+}
+
+/// [`read_astronomy`] for the image named `name` among several in one file:
+/// in a FITS file the HDU whose `EXTNAME` it is, ignoring case and trailing
+/// spaces ([`FitsImage::open_named`]), and in an XISF file the image whose
+/// `id` it is, exactly. A file with no image of that name gives a
+/// [`FitsError::ImageNotFound`] or [`XisfError::ImageNotFound`] cause.
+pub fn read_astronomy_named(path: &Path, name: &str) -> Result<AstronomyImage, Error> {
+    if Format::astronomy(path) == Format::Xisf {
+        let read =
+            seiza_xisf::read_image_by_id(path, name).map_err(|error| Error::open(path, error))?;
+        return Ok(AstronomyImage {
+            image: read.image,
+            format: Format::Xisf,
+            xisf_info: Some(read.info),
+            xisf_metadata: Some(read.metadata),
+        });
+    }
+    let image = FitsImage::open_named(path, name).map_err(|error| Error::open(path, error))?;
+    Ok(AstronomyImage {
+        image,
+        format: Format::Fits,
+        xisf_info: None,
+        xisf_metadata: None,
+    })
+}
+
+/// [`read_header`] for the image named `name`, found as
+/// [`read_astronomy_named`] finds it, without decoding its pixels.
+pub fn read_named_header(path: &Path, name: &str) -> Result<FitsHeader, Error> {
+    if Format::astronomy(path) == Format::Xisf {
+        let (mut cards, metadata) = seiza_xisf::read_header_and_metadata_by_id(path, name)
+            .map_err(|error| Error::open(path, error))?;
+        add_xisf_solution_wcs(&mut cards, &metadata);
+        return Ok(FitsHeader {
+            cards,
+            ..FitsHeader::default()
+        });
+    }
+    seiza_fits::read_named_header(path, name).map_err(|error| Error::open(path, error))
 }
 
 /// Add FITS WCS cards for an XISF image's astrometric solution, when its
@@ -836,6 +878,45 @@ pub fn save_f32(
     }
 }
 
+/// Write several images to one FITS or XISF file, as its extension names,
+/// atomically: the first as the image any reader opens, the rest named,
+/// each with its own samples and header cards. Read one back with
+/// [`read_astronomy_named`].
+///
+/// A FITS file holds the first as its primary HDU and the rest as image
+/// extensions named by `EXTNAME` ([`seiza_fits::write_images`]); an XISF
+/// file holds each as an `Image` whose `id` is its name
+/// ([`seiza_xisf::write_images`]), so names must be XISF identifiers there.
+/// As [`save_f32`] does, an XISF file declares the first image's range as 0
+/// to 1 when its floating-point samples lie in it.
+pub fn save_images(path: &Path, images: &[ImagePart<'_>]) -> Result<(), Error> {
+    match Format::from_path(path) {
+        Some(Format::Fits) => {
+            seiza_fits::write_images(path, images).map_err(|error| Error::save(path, error))
+        }
+        Some(Format::Xisf) if !seiza_xisf::is_xisf_header_path(path) => {
+            let bounds = images.first().and_then(|image| match image.samples {
+                ImageSamples::F32(pixels) => pixels
+                    .samples()
+                    .iter()
+                    .all(|sample| (0.0..=1.0).contains(sample))
+                    .then_some((0.0, 1.0)),
+                ImageSamples::U16 { .. } => None,
+            });
+            let options = seiza_xisf::WriteOptions {
+                bounds,
+                ..seiza_xisf::WriteOptions::default()
+            };
+            seiza_xisf::write_images(path, images, &options)
+                .map_err(|error| Error::save(path, error))
+        }
+        _ => Err(Error::save(
+            path,
+            "several images are written to FITS or XISF files; name it .fits or .xisf",
+        )),
+    }
+}
+
 /// Write a display image, such as a preview or an annotated photo, in the
 /// format its extension names: PNG or TIFF at the image's own depth, JPEG
 /// at 8 bits, or FITS or XISF as 32-bit floats from 0 to 1.
@@ -1022,6 +1103,88 @@ mod tests {
             ),
         ]
         .concat()
+    }
+
+    #[test]
+    fn several_images_are_saved_and_read_by_name() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("partial.fits");
+        let mean = [1.0_f32, 2.0, 3.0, 4.0];
+        let cover = [1_u16, 2, 40000, 65535];
+        let cards = [WriteHeaderCard::new("NCOMBINE", HeaderValue::Integer(4))];
+        let images = [
+            ImagePart {
+                name: None,
+                width: 2,
+                height: 2,
+                samples: ImageSamples::F32(F32ImageData::Mono(&mean)),
+                headers: &cards,
+            },
+            ImagePart {
+                name: Some("COVER"),
+                width: 2,
+                height: 2,
+                samples: ImageSamples::U16 {
+                    samples: &cover,
+                    planes: 1,
+                },
+                headers: &[],
+            },
+        ];
+        save_images(&path, &images).unwrap();
+
+        let primary = read_astronomy(&path).unwrap();
+        assert!(matches!(primary.image.pixels, Pixels::F32(ref values) if values == &mean));
+        let named = read_astronomy_named(&path, "COVER").unwrap();
+        assert_eq!(named.format, Format::Fits);
+        assert!(matches!(named.image.pixels, Pixels::U16(ref values) if values == &cover));
+        assert_eq!(named.image.header_f64("NCOMBINE"), Some(4.0));
+        assert_eq!(
+            read_named_header(&path, "COVER").unwrap().cards,
+            named.image.headers
+        );
+        let missing = read_astronomy_named(&path, "REJECT").unwrap_err();
+        assert!(matches!(
+            missing.cause(),
+            Cause::Fits(FitsError::ImageNotFound(_))
+        ));
+
+        // An XISF image is named by its id, exactly.
+        let xisf = directory.path().join("named.xisf");
+        xisf_file(
+            &xisf,
+            [5.0, 6.0, 7.0, 8.0],
+            "id=\"weight\"",
+            &pixinsight_solution(),
+        );
+        let named = read_astronomy_named(&xisf, "weight").unwrap();
+        assert_eq!(named.format, Format::Xisf);
+        assert_eq!(named.image.into_physical_f32(), [5.0, 6.0, 7.0, 8.0]);
+        let header = read_named_header(&xisf, "weight").unwrap();
+        assert!(header.cards.iter().any(|(key, _)| key == "CTYPE1"));
+        assert!(matches!(
+            read_named_header(&xisf, "WEIGHT").unwrap_err().cause(),
+            Cause::Xisf(XisfError::ImageNotFound(_))
+        ));
+
+        // XISF holds them as images with ids.
+        let path = directory.path().join("partial.xisf");
+        save_images(&path, &images).unwrap();
+        let primary = read_astronomy(&path).unwrap();
+        assert!(matches!(primary.image.pixels, Pixels::F32(ref values) if values == &mean));
+        let named = read_astronomy_named(&path, "COVER").unwrap();
+        assert!(matches!(named.image.pixels, Pixels::U16(ref values) if values == &cover));
+        assert_eq!(
+            read_named_header(&path, "COVER").unwrap().cards,
+            named.image.headers
+        );
+
+        // Nothing else holds several images.
+        for name in ["partial.png", "partial.xish"] {
+            let path = directory.path().join(name);
+            assert!(save_images(&path, &images).is_err());
+            assert!(!path.exists());
+        }
     }
 
     #[test]

@@ -359,7 +359,14 @@ objects = [
     "seiza-stacking::LiveStacker",
     "seiza-background::BackgroundFit",
     "seiza-stacking::ColorCalibration",
+    "seiza-pipeline::PartialStack",
+    "seiza-pipeline::SessionStep",
 ]
+
+# distributed stacking
+"seiza-pipeline::carried_cards" = { none = "the reference cards every stack file keeps; hosts read them from the files the pipeline writes" }
+"seiza-pipeline::PartialStack::from_snapshot" = { none = "a partial stack's last step inside SessionStep::run, which the C ABI's session and channel calls run" }
+"seiza-pipeline::SessionStep::lights" = { none = "a C host holds the session it planned; Python reads it back as SessionStep.lights" }
 
 # Public modules' functions that are building blocks, or that the bindings
 # reach through a larger call.
@@ -467,6 +474,9 @@ objects = [
 "seiza-image-io::save" = { none = "the C ABI writes images through seiza-parallax and seiza-stacking, which write through seiza-image-io" }
 "seiza-image-io::save_display" = { none = "the C ABI writes images through seiza-parallax and seiza-stacking, which write through seiza-image-io" }
 "seiza-image-io::save_f32" = { none = "the C ABI writes images through seiza-parallax and seiza-stacking, which write through seiza-image-io" }
+"seiza-image-io::save_images" = { none = "multi-image files hold distributed stacking's partial stacks, which hosts will write through the pipeline's own calls" }
+"seiza-image-io::read_astronomy_named" = { none = "multi-image files hold distributed stacking's partial stacks, which hosts will read through the pipeline's own calls" }
+"seiza-image-io::read_named_header" = { none = "multi-image files hold distributed stacking's partial stacks, which hosts will read through the pipeline's own calls" }
 
 # parallax
 "seiza-parallax::Parallax::dust" = { none = "the C ABI reads dust through source_dust_map, which uses it" }
@@ -559,6 +569,8 @@ seiza_flat_combine_verdicts_json = "flat_combine_verdicts"
 seiza_flat_choose_response_json = "flat_choose_response"
 seiza_flat_group_plan_json = { none = "the C ABI's one-call grouping plan; Python binds the book it builds: FlatGroups and FlatGroups.place_light" }
 seiza_live_stacker_open_fits_expanding_sessions = "LiveStacker.open_fits_expanding_sessions"
+seiza_live_stacker_open_fits_sessions_with_reference_image = "LiveStacker.open_fits_sessions_with_reference_image"
+seiza_live_stacker_add_session_lights = "LiveStacker.add_session_lights"
 
 seiza_master_flat_stability_json = "master_flat_stability"
 seiza_master_flat_stability_images_json = "master_flat_stability_images"
@@ -671,6 +683,13 @@ seiza_live_stacker_free = { none = "frees a C handle; Python's garbage collector
 seiza_stack_choose_reference_json = "choose_reference"
 seiza_stack_detect_defects_json = "detect_defects"
 seiza_stack_integrate_registered_json = "integrate_registered_frames"
+
+# distributed stacking: the C ABI's one-call workflows over the native types
+# Python binds
+seiza_pipeline_run_channel_json = "run_channel"
+seiza_pipeline_run_session_json = "SessionStep.run_into"
+seiza_pipeline_read_identity_json = "PartialStack.read_identity"
+seiza_pipeline_combine_json = "PartialStack.combine_files"
 
 seiza_stack_snapshot_width = "StackSnapshot.width"
 seiza_stack_snapshot_height = "StackSnapshot.height"
@@ -837,6 +856,13 @@ seiza_stretch_output_version = "STRETCH_OUTPUT_VERSION"
 # export above gives as its twin: the C export that does the same job
 # ({ c = "..." }), or why there is none.
 [python_functions]
+# distributed stacking: the steps of the C ABI's one-call workflows
+"PartialStack.combine" = { c = "seiza_pipeline_combine_json" }
+"PartialStack.open" = { c = "seiza_pipeline_combine_json" }
+"PartialStack.write" = { c = "seiza_pipeline_combine_json" }
+"SessionStep.plan" = { c = "seiza_pipeline_run_session_json" }
+"SessionStep.run" = { c = "seiza_pipeline_run_session_json" }
+
 CalibrationFiles = { c = "seiza_calibration_files_json" }
 "CalibrationFiles.prepare" = { c = "seiza_calibration_files_json" }
 "CalibrationFiles.verify" = { c = "seiza_calibration_files_json" }

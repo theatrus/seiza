@@ -1,6 +1,6 @@
 # Distributed stacking
 
-Status: proposal
+Status: phase 1 built; paused before phase 2 (see **Phases**)
 
 ## Goal
 
@@ -233,9 +233,9 @@ as an ordinary stack. Further images carry the rest.
 |---|---|
 | Primary | Weighted mean, in the session's physical units |
 | `WEIGHT` | Inverse variance per sample, W / σ₁² |
-| `COVER` | Frames integrated per sample, `u16` |
-| `REJECT` | Rejected samples per sample, `u16` (optional) |
-| `VARIANCE` | Across-frame variance of the mean (optional) |
+| `COVER` | Frames integrated per sample, `u16`, or `f32` where a deep tile passes 65535 |
+| `REJECT` | Rejected samples per sample, `u16` or `f32` likewise (optional) |
+| `VARIANCE` | Variance of one frame of weight 1 about the mean, from the stack's own frames (optional) |
 | `PSFGRID` | One PSF model per cell |
 | `SKYCELLS` | Star-masked background means and coverage per cell |
 
@@ -246,10 +246,10 @@ coordinates and file paths from the frames are left out unless a contributor
 chooses to include them. Partial stacks are meant to be shared, and capture
 software writes the observer's location into every frame.
 
-`seiza-fits` writes only a primary HDU today, and reads the primary or the
-first image extension. Writing extensions, and reading one by `EXTNAME`, is
-new work. XISF holds several images natively, but `seiza-xisf` writes one
-today. Both are reached through `seiza-image-io`, by extension.
+`seiza-image-io::save_images` writes the images to one file, `f32` or
+unsigned 16-bit: in FITS the mean as the primary HDU and the rest as image
+extensions named by `EXTNAME`, in XISF each as an image with that `id`.
+`read_astronomy_named` reads one back by its name.
 
 ## Header cards
 
@@ -333,7 +333,14 @@ file never carries a key.
   equals `INPUTSHA`, and `CALIBSHA`, `OPTSSHA`, `HOSTSHA` and `SEIZASTK` all
   match, reopen the `CONTEXT` and push only the new frames. This is the
   proof PSF Guard's `ResumeManifest` makes, carried in the file itself. A
-  `CLIPPED` file means stacking that one session again.
+  `CLIPPED` file means reintegrating that one session again, from the
+  reopened context's ledger when one was kept and from scratch otherwise.
+
+  The step over the first `NINPUTS` frames has a key of its own, which a
+  store finds without an index: computing the keys of the new list's
+  prefixes, longest first, finds the step to extend. Phase 1 does this with
+  `SessionOptions::keep_context`, which keeps each session's context in the
+  store beside its partial stack.
 - **A new session arrives.** Only its partial stacks are new. They are
   solved against the baseline, and only the tiles they reach are combined
   again, from the partial stacks already stored. That costs little, because
@@ -641,10 +648,11 @@ arrived first and never overwrites it.
 
 The pipeline lives in a new crate, `seiza-pipeline`. It holds grids, projects,
 partial stack files and their cards, the steps, the plan and the local
-executor. It needs solving and Gaia photometry, which live in `seiza`, and
-`seiza-stacking` deliberately does not depend on `seiza`. So the new crate
-depends on `seiza`, `seiza-stacking`, `seiza-calibration` and
-`seiza-image-io`, and none of them depends on it.
+executor. Those are not per-frame work, and they change output on a schedule
+of their own, so they get a crate and an output version of their own rather
+than a corner of `seiza-stacking`. The new crate depends on `seiza-stacking`,
+`seiza-calibration` and `seiza-image-io`, and later on `seiza` for solving and
+Gaia photometry; none of them depends on it.
 
 What stays where:
 
@@ -680,6 +688,37 @@ AGENTS.md requires.
    reference frame, so normalization and weights agree. It must show that
    the result differs from a single-machine stack only at pixels rejected
    differently.
+
+   Done in Seiza. Hosts reach the same steps through the C ABI, Python and
+   the CLI. PSF Guard has an opt-in method, off by default, that stacks each
+   session of a channel apart on its own machine and combines them. It waits
+   for the Seiza release that ships `seiza-pipeline`. Its worker task for one
+   session is deferred.
+   - `LiveStacker::open_fits_sessions_with_reference_image` stacks one
+     session against the shared reference, its lights calibrated by their own
+     recipe, and `LiveStacker::add_session_lights` lets a reopened session
+     stack take the lights its session gained.
+   - `StackSnapshot::weight_sum` keeps Σw. Until phase 2 measures σ₁,
+     `WEIGHT` holds W itself, which is all that combining on one grid needs,
+     and `VARIANCE` the variance of a frame of weight 1 the stack measured.
+   - `SessionStep` plans a session's key from its files' contents and runs
+     it, and `run_channel` runs a channel against a `Store`, doing only what
+     the store lacks. With `keep_context`, a session that gains frames is
+     extended from its stored context, as **Resuming** describes.
+   - The C ABI, Python and `seiza pipeline run` reach them.
+
+   The partition invariant holds to `f32` rounding, and combining is held to
+   its output by `seiza-pipeline`'s `output_version` test. The resume
+   invariant holds to the bit: a session extended from its context, live or
+   reintegrated, gives the partial stack stacking every frame at once does.
+
+   Left from phase 1, for when work resumes:
+   - A digest cache. Every plan still reads and hashes each light to make
+     its session's key.
+   - Pruning a store: nothing yet removes partial stacks and contexts that
+     no plan names, in Seiza's store or in PSF Guard's cache.
+   - A worker task per session, so that remote workers take sessions rather
+     than whole channels, and a session's stack that can stop part way.
 2. **Measurements.** The weight map, the PSF grid with an `f32` fitter, Gaia
    zero points for mono filters, and sky cells.
 3. **Project grids.**

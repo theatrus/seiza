@@ -259,6 +259,7 @@ mod stack_report_tests {
                     image: image.clone(),
                     variance: image,
                     coverage: vec![2, 1],
+                    weight_sum: None,
                     rejected_samples: vec![0, 1],
                     accepted_frames: 2,
                     rejected_frames: 0,
