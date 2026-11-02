@@ -18,6 +18,7 @@ mod flat_response;
 mod imgproc;
 mod library;
 mod parallax;
+mod pipeline;
 mod rc_astro;
 mod satellites;
 mod screening;
@@ -1380,6 +1381,7 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     field_objects::register(m)?;
     imgproc::register(m)?;
     stacking::register(m)?;
+    pipeline::register(m)?;
     stars::register(m)?;
     rc_astro::register(m)?;
     parallax::register(m)?;

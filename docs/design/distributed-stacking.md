@@ -235,7 +235,7 @@ as an ordinary stack. Further images carry the rest.
 | `WEIGHT` | Inverse variance per sample, W / σ₁² |
 | `COVER` | Frames integrated per sample, `u16` |
 | `REJECT` | Rejected samples per sample, `u16` (optional) |
-| `VARIANCE` | Across-frame variance of the mean (optional) |
+| `VARIANCE` | Variance of one frame of weight 1 about the mean, from the stack's own frames (optional) |
 | `PSFGRID` | One PSF model per cell |
 | `SKYCELLS` | Star-masked background means and coverage per cell |
 
@@ -641,10 +641,11 @@ arrived first and never overwrites it.
 
 The pipeline lives in a new crate, `seiza-pipeline`. It holds grids, projects,
 partial stack files and their cards, the steps, the plan and the local
-executor. It needs solving and Gaia photometry, which live in `seiza`, and
-`seiza-stacking` deliberately does not depend on `seiza`. So the new crate
-depends on `seiza`, `seiza-stacking`, `seiza-calibration` and
-`seiza-image-io`, and none of them depends on it.
+executor. Those are not per-frame work, and they change output on a schedule
+of their own, so they get a crate and an output version of their own rather
+than a corner of `seiza-stacking`. The new crate depends on `seiza-stacking`,
+`seiza-calibration` and `seiza-image-io`, and later on `seiza` for solving and
+Gaia photometry; none of them depends on it.
 
 What stays where:
 
@@ -680,6 +681,23 @@ AGENTS.md requires.
    reference frame, so normalization and weights agree. It must show that
    the result differs from a single-machine stack only at pixels rejected
    differently.
+
+   Done in Seiza, all but PSF Guard's task, which lives in PSF Guard:
+   - `LiveStacker::open_fits_sessions_with_reference_image` stacks one
+     session against the shared reference, its lights calibrated by their own
+     recipe.
+   - `StackSnapshot::weight_sum` keeps Σw. Until phase 2 measures σ₁,
+     `WEIGHT` holds W itself, which is all that combining on one grid needs,
+     and `VARIANCE` the variance of a frame of weight 1 the stack measured.
+   - `SessionStep` plans a session's key from its files' contents and runs
+     it, and `run_channel` runs a channel against a `Store`, doing only what
+     the store lacks.
+   - The C ABI, Python and `seiza pipeline run` reach them.
+
+   The partition invariant holds to `f32` rounding, and combining is held to
+   its output by `seiza-pipeline`'s `output_version` test. Resuming a session
+   with more frames (`ADDITIVE` with `CONTEXT`) waits for PSF Guard's task.
+   For now a session with new frames is a new step.
 2. **Measurements.** The weight map, the PSF grid with an `f32` fitter, Gaia
    zero points for mono filters, and sky cells.
 3. **Project grids.**

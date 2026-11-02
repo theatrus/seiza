@@ -15,6 +15,7 @@ members = [
     "seiza-image-io",
     "seiza-imgproc",
     "seiza-parallax",
+    "seiza-pipeline",
     "seiza-satellites",
     "seiza-stacking",
     "seiza-stars",
@@ -45,6 +46,7 @@ seiza-fits = { path = "seiza-fits", version = "0.7.0" }
 seiza-image-io = { path = "seiza-image-io", version = "0.12.0" }
 seiza-imgproc = { path = "seiza-imgproc", version = "0.3.2" }
 seiza-parallax = { path = "seiza-parallax", version = "0.19.6" }
+seiza-pipeline = { path = "seiza-pipeline", version = "0.1.0" }
 seiza-satellites = { path = "seiza-satellites", version = "0.22.2" }
 seiza-stacking = { path = "seiza-stacking", version = "0.56.0" }
 seiza-stars = { path = "seiza-stars", version = "0.4.0" }

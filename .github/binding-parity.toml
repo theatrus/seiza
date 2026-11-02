@@ -359,7 +359,14 @@ objects = [
     "seiza-stacking::LiveStacker",
     "seiza-background::BackgroundFit",
     "seiza-stacking::ColorCalibration",
+    "seiza-pipeline::PartialStack",
+    "seiza-pipeline::SessionStep",
 ]
+
+# distributed stacking
+"seiza-pipeline::carried_cards" = { none = "the reference cards every stack file keeps; hosts read them from the files the pipeline writes" }
+"seiza-pipeline::PartialStack::from_snapshot" = { none = "a partial stack's last step inside SessionStep::run, which the C ABI's session and channel calls run" }
+"seiza-pipeline::SessionStep::lights" = { none = "a C host holds the session it planned; Python reads it back as SessionStep.lights" }
 
 # Public modules' functions that are building blocks, or that the bindings
 # reach through a larger call.
@@ -675,6 +682,13 @@ seiza_stack_choose_reference_json = "choose_reference"
 seiza_stack_detect_defects_json = "detect_defects"
 seiza_stack_integrate_registered_json = "integrate_registered_frames"
 
+# distributed stacking: the C ABI's one-call workflows over the native types
+# Python binds
+seiza_pipeline_run_channel_json = "run_channel"
+seiza_pipeline_run_session_json = "SessionStep.run_into"
+seiza_pipeline_read_identity_json = "PartialStack.read_identity"
+seiza_pipeline_combine_json = "PartialStack.combine"
+
 seiza_stack_snapshot_width = "StackSnapshot.width"
 seiza_stack_snapshot_height = "StackSnapshot.height"
 seiza_stack_snapshot_channels = "StackSnapshot.channels"
@@ -840,6 +854,12 @@ seiza_stretch_output_version = "STRETCH_OUTPUT_VERSION"
 # export above gives as its twin: the C export that does the same job
 # ({ c = "..." }), or why there is none.
 [python_functions]
+# distributed stacking: the steps of the C ABI's one-call workflows
+"PartialStack.open" = { c = "seiza_pipeline_combine_json" }
+"PartialStack.write" = { c = "seiza_pipeline_combine_json" }
+"SessionStep.plan" = { c = "seiza_pipeline_run_session_json" }
+"SessionStep.run" = { c = "seiza_pipeline_run_session_json" }
+
 CalibrationFiles = { c = "seiza_calibration_files_json" }
 "CalibrationFiles.prepare" = { c = "seiza_calibration_files_json" }
 "CalibrationFiles.verify" = { c = "seiza_calibration_files_json" }

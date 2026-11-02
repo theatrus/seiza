@@ -31,6 +31,7 @@ mod interrupt;
 mod master;
 pub(crate) use seiza_draw::ellipse_points;
 mod parallax_video;
+mod pipeline;
 mod preview;
 mod provenance;
 mod setup;
@@ -698,6 +699,9 @@ enum Command {
     Color(color::ColorArgs),
     /// Build sigma-clipped bias, dark, and flat masters from raw FITS frames
     Master(master::MasterArgs),
+    /// Distributed stacking: stack a channel as partial stacks, one per
+    /// session, into a store, and combine them
+    Pipeline(pipeline::PipelineArgs),
     /// Query a star tile file: list stars around a sky position
     Cone {
         /// Star tile file built by build-data
@@ -1639,6 +1643,7 @@ fn main() -> Result<()> {
         Command::Stack(options) => stack::run(options),
         Command::Color(options) => color::run(options),
         Command::Master(options) => master::run(options),
+        Command::Pipeline(options) => pipeline::run(options),
         Command::Cone {
             data,
             ra,
@@ -4778,6 +4783,30 @@ mod cli_tests {
         ])
         .unwrap();
         assert!(matches!(cli.command, Command::Stack(_)));
+    }
+
+    #[test]
+    fn pipeline_commands_parse() {
+        for arguments in [
+            &["seiza", "pipeline", "run", "plan.json", "--store", "store"][..],
+            &[
+                "seiza",
+                "pipeline",
+                "combine",
+                "a.fits",
+                "b.fits",
+                "--output",
+                "tile.fits",
+            ],
+            &["seiza", "pipeline", "show", "partial.fits"],
+        ] {
+            let cli = Cli::try_parse_from(arguments).unwrap();
+            assert!(matches!(cli.command, Command::Pipeline(_)));
+        }
+        assert!(Cli::try_parse_from(["seiza", "pipeline", "run", "plan.json"]).is_err());
+        assert!(
+            Cli::try_parse_from(["seiza", "pipeline", "combine", "--output", "t.fits"]).is_err()
+        );
     }
 
     #[test]
