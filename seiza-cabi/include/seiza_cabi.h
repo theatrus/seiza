@@ -3357,9 +3357,10 @@ char *seiza_rc_astro_process_file_json(const char *request_json,
 char *seiza_pixinsight_locate(char **error_out);
 
 /*
- The header of an MLDenoise model file (`.xmlm`) as schema-1 JSON: the
- process it is for, its format version, whether it denoises mono and RGB
- images, and its weights' SHA-256, which a host caching results keys on.
+ The header of an MLDenoise model file (`.xmlm`) as JSON: the process it
+ is for, its format version, whether it denoises mono and RGB images, its
+ weights' SHA-256, and the SHA-256 of the whole header, which identifies
+ the model for a host caching results.
  Returns a string released with [`seiza_string_free`], or null with
  `error_out` set.
 
@@ -3372,17 +3373,19 @@ char *seiza_pixinsight_ml_denoise_model_json(const char *model_path, char **erro
 
 /*
  Denoise an image file with PixInsight's MLDenoise and write the result.
- The request names the input and output (FITS or XISF, by extension), the
- model file, and optionally `amount`, `overlapPercent`, `precision`
- ("fast" or "high"), `localSupport` (`clipLow`, `background`,
- `smoothness`) and the PixInsight `executable`. The image may be on any
- linear scale: PixInsight works on it mapped onto 0 to 1, and the output
- holds 32-bit floats on the input's scale with the input's headers.
- PixInsight reports no progress; `cancel` stops the run within a quarter
- of a second and closes PixInsight. Returns schema-1 JSON with the output
- path, the PixInsight version, the model's header and the seconds
- PixInsight took, as a string released with [`seiza_string_free`], or
- null with `error_out` set.
+ The request has the fields `input` and `output` (FITS or XISF paths, by
+ extension) and `model` (the `.xmlm` file), and optionally `amount`,
+ `overlapPercent`, `precision` ("fast" or "high"), `localSupport`
+ (`clipLow`, `background`, `smoothness`), `timeoutSeconds` and the
+ PixInsight `executable`. An image on 0 to 1 keeps its scale; any other
+ is mapped from 16-bit counts or its span, whichever is larger, and back.
+ Samples that are not finite come back unchanged. The output holds
+ 32-bit floats on the input's scale with the input's headers. PixInsight
+ reports no progress; `cancel` stops the run within a quarter of a second
+ and closes PixInsight, as does the time limit. Returns schema-1 JSON with
+ the output path, the PixInsight version and build, the model's header
+ and the seconds PixInsight took, as a string released with
+ [`seiza_string_free`], or null with `error_out` set.
 
  # Safety
 

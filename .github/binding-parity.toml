@@ -292,12 +292,6 @@ core = "seiza-stacking::ExternalToolRun"
 [rust.PixInsightMlDenoiseRequest]
 core = "seiza-stacking::MlDenoiseOptions"
 
-[rust.MlDenoiseLocalSupportJson]
-core = "seiza-stacking::MlDenoiseLocalSupport"
-
-[rust.MlDenoiseModelResponse]
-core = "seiza-stacking::MlDenoiseModel"
-
 [rust.PixInsightMlDenoiseResponse]
 core = "seiza-stacking::MlDenoiseRun"
 

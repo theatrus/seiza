@@ -1141,6 +1141,7 @@ class MlDenoiseModel:
     mono: bool
     rgb: bool
     weights_sha256: str | None
+    header_sha256: str
 
 class MlDenoiseRun:
     """A file PixInsight's MLDenoise processed."""
@@ -1167,6 +1168,7 @@ def pixinsight_ml_denoise_file(
     overlap_percent: int = 25,
     precision: Literal["fast", "high"] = "fast",
     local_support: MlDenoiseLocalSupport | None = None,
+    timeout_seconds: float | None = None,
     executable: str | Path | None = None,
     cancel: Callable[[], bool] | None = None,
 ) -> MlDenoiseRun: ...
@@ -1178,6 +1180,7 @@ def pixinsight_ml_denoise_image(
     overlap_percent: int = 25,
     precision: Literal["fast", "high"] = "fast",
     local_support: MlDenoiseLocalSupport | None = None,
+    timeout_seconds: float | None = None,
     executable: str | Path | None = None,
     cancel: Callable[[], bool] | None = None,
 ) -> MlDenoised: ...

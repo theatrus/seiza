@@ -1371,7 +1371,7 @@ print(seiza.pixinsight_locate())            # None when not installed
 
 model = "/path/to/MLDenoise_v42.xmlm"
 header = seiza.pixinsight_ml_denoise_model(model)
-print(header.mono, header.rgb, header.weights_sha256)
+print(header.mono, header.rgb, header.header_sha256)
 
 denoised = seiza.pixinsight_ml_denoise_image(stack, model, amount=0.9)
 denoised.image                              # same shape and units as stack
@@ -1384,12 +1384,15 @@ seiza.pixinsight_ml_denoise_file(
 )
 ```
 
-`pixinsight_ml_denoise_image` takes an array in any linear units. As for
-the RC-Astro calls, it maps the image onto 0..1, offset by its most
-negative sample and scaled by its span, and maps the result back. A
+PixInsight works on 0 to 1. An array whose samples lie within 0 to 1 keeps
+its scale. Any other array is offset by its most negative sample and
+divided by 65535 or its span, whichever is larger, which is how PixInsight
+opens a 16-bit camera frame; the result is mapped back. NaN and infinite
+samples, such as a stack's uncovered edges, come back unchanged. A
 one-channel image needs a model with a mono route, and an RGB image one
-with an RGB route; the model's header says which it has. The options are
-PixInsight's, with its ranges and defaults:
+with an RGB route: `mono` and `rgb` on `pixinsight_ml_denoise_model(model)`
+show which routes a model has. The options are PixInsight's, with its
+ranges and defaults:
 
 | Option | Range | Default | Effect |
 |---|---|---|---|
@@ -1397,17 +1400,26 @@ PixInsight's, with its ranges and defaults:
 | `overlap_percent` | 12 to 50 | 25 | Overlap of neighboring inference tiles |
 | `precision` | `"fast"`, `"high"` | `"fast"` | GPU inference precision; CPU inference is always full precision |
 | `local_support` | | none | A brightness mask that protects bright structures |
+| `timeout_seconds` | above 0 | 600 + 20 per million samples | How long a run may take before PixInsight is closed |
 
 `MlDenoiseLocalSupport` takes `clip_low` (-20 to 20, in robust sigma from
 the median), `background` (0 to 1, the mask's mean background level) and
 `smoothness` (0 to 7 pixels, the mask's median-filter radius).
 
-A cached result should be keyed on the model's `weights_sha256`, the
-`pixinsight_version` and the options: another model or PixInsight version
-can give another result for the same input. PixInsight reports no
-progress. Ctrl-C cancels a run within a quarter of a second and closes
-PixInsight, as does an optional `cancel=lambda: ...` predicate returning
-true.
+A refused request, such as an option out of range or a model that cannot
+denoise the image, raises `ValueError`; a missing model raises
+`FileNotFoundError`; a run that fails raises `RuntimeError`. PixInsight
+shows license dialogs even in automation mode, and the time limit stops a
+run that waits on one.
+
+Key a cached result on the model's `header_sha256`, the
+`pixinsight_version` (which includes PixInsight's build) and the options.
+Two releases of a model can share `weights_sha256` and still give different
+results. PixInsight reports no progress. Ctrl-C cancels a run within a
+quarter of a second and closes PixInsight, as does an optional
+`cancel=lambda: ...` predicate returning true. Runs in one process start
+PixInsight one at a time, and a run whose PixInsight failed to start
+because another instance took its slot is started again.
 
 ## Parallax fly-through videos
 

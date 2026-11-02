@@ -30,9 +30,10 @@ use seiza_stacking::{
     FrameDisposition, FrameInputMode, FrameSourceRole, ImpulseFilterOptions, LinearImage,
     LiveStacker, LrgbLuminance, MasterBuildOptions, MasterDark, MasterFrame, MasterFrameKind,
     MasterRejectionOptions, MlDenoiseLocalSupport, MlDenoiseModel, MlDenoiseOptions,
-    NarrowbandMatrix, NarrowbandMix, NarrowbandPalette, PixInsight, RcAstroCli, ReferenceRegion,
-    RegisteredFrameMapping, RgbLuminance, StackExportSnapshot as RustStackExportSnapshot,
-    StackOptions, StackSnapshot as RustStackSnapshot, build_master_from_fits,
+    MlDenoisePrecision, NarrowbandMatrix, NarrowbandMix, NarrowbandPalette, PixInsight, RcAstroCli,
+    ReferenceRegion, RegisteredFrameMapping, RgbLuminance,
+    StackExportSnapshot as RustStackExportSnapshot, StackOptions,
+    StackSnapshot as RustStackSnapshot, build_master_from_fits,
     build_master_from_fits_with_scratch, checkpoint_depths as rust_checkpoint_depths, combine_lrgb,
     combine_narrowband, combine_narrowband_matrix, combine_rgb, combine_super_lrgb,
     combine_super_rgb, crop_report, path_identity, paths_refer_to_same_file, write_color_fits_f32,
@@ -18600,27 +18601,6 @@ pub unsafe extern "C" fn seiza_pixinsight_locate(error_out: *mut *mut c_char) ->
     .unwrap_or(ptr::null_mut())
 }
 
-/// MLDenoise's local support, as [`seiza_pixinsight_ml_denoise_file_json`]
-/// takes it.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct MlDenoiseLocalSupportJson {
-    #[serde(default)]
-    clip_low: f64,
-    #[serde(default = "default_ml_denoise_mask_background")]
-    background: f64,
-    #[serde(default = "default_ml_denoise_mask_smoothness")]
-    smoothness: u32,
-}
-
-fn default_ml_denoise_mask_background() -> f64 {
-    MlDenoiseLocalSupport::default().background
-}
-
-fn default_ml_denoise_mask_smoothness() -> u32 {
-    MlDenoiseLocalSupport::default().smoothness
-}
-
 /// One MLDenoise request for [`seiza_pixinsight_ml_denoise_file_json`].
 /// Unknown fields are an error so a typo cannot silently run the defaults.
 #[derive(Deserialize)]
@@ -18638,39 +18618,17 @@ struct PixInsightMlDenoiseRequest {
     overlap_percent: Option<u32>,
     /// "fast" or "high"; absent is "fast".
     #[serde(default)]
-    precision: Option<String>,
+    precision: Option<MlDenoisePrecision>,
     /// A brightness mask that protects bright structures; absent is none.
     #[serde(default)]
-    local_support: Option<MlDenoiseLocalSupportJson>,
+    local_support: Option<MlDenoiseLocalSupport>,
+    /// The longest the run may take, in seconds; absent is ten minutes
+    /// plus 20 seconds per million samples.
+    #[serde(default)]
+    timeout_seconds: Option<f64>,
     /// Executable path; absent searches the standard locations and PATH.
     #[serde(default)]
     executable: Option<PathBuf>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct MlDenoiseModelResponse {
-    process: String,
-    format_version: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    created: Option<String>,
-    mono: bool,
-    rgb: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    weights_sha256: Option<String>,
-}
-
-impl From<MlDenoiseModel> for MlDenoiseModelResponse {
-    fn from(model: MlDenoiseModel) -> Self {
-        Self {
-            process: model.process,
-            format_version: model.format_version,
-            created: model.created,
-            mono: model.mono,
-            rgb: model.rgb,
-            weights_sha256: model.weights_sha256,
-        }
-    }
 }
 
 #[derive(Serialize)]
@@ -18679,13 +18637,14 @@ struct PixInsightMlDenoiseResponse {
     schema_version: u32,
     output: PathBuf,
     pixinsight_version: String,
-    model: MlDenoiseModelResponse,
+    model: MlDenoiseModel,
     seconds: f64,
 }
 
-/// The header of an MLDenoise model file (`.xmlm`) as schema-1 JSON: the
-/// process it is for, its format version, whether it denoises mono and RGB
-/// images, and its weights' SHA-256, which a host caching results keys on.
+/// The header of an MLDenoise model file (`.xmlm`) as JSON: the process it
+/// is for, its format version, whether it denoises mono and RGB images, its
+/// weights' SHA-256, and the SHA-256 of the whole header, which identifies
+/// the model for a host caching results.
 /// Returns a string released with [`seiza_string_free`], or null with
 /// `error_out` set.
 ///
@@ -18702,23 +18661,25 @@ pub unsafe extern "C" fn seiza_pixinsight_ml_denoise_model_json(
     ffi_result(error_out, || {
         let path = required_path(model_path, "model path")?;
         let model = MlDenoiseModel::read(&path).map_err(|error| error.to_string())?;
-        owned_json(&MlDenoiseModelResponse::from(model))
+        owned_json(&model)
     })
     .unwrap_or(ptr::null_mut())
 }
 
 /// Denoise an image file with PixInsight's MLDenoise and write the result.
-/// The request names the input and output (FITS or XISF, by extension), the
-/// model file, and optionally `amount`, `overlapPercent`, `precision`
-/// ("fast" or "high"), `localSupport` (`clipLow`, `background`,
-/// `smoothness`) and the PixInsight `executable`. The image may be on any
-/// linear scale: PixInsight works on it mapped onto 0 to 1, and the output
-/// holds 32-bit floats on the input's scale with the input's headers.
-/// PixInsight reports no progress; `cancel` stops the run within a quarter
-/// of a second and closes PixInsight. Returns schema-1 JSON with the output
-/// path, the PixInsight version, the model's header and the seconds
-/// PixInsight took, as a string released with [`seiza_string_free`], or
-/// null with `error_out` set.
+/// The request has the fields `input` and `output` (FITS or XISF paths, by
+/// extension) and `model` (the `.xmlm` file), and optionally `amount`,
+/// `overlapPercent`, `precision` ("fast" or "high"), `localSupport`
+/// (`clipLow`, `background`, `smoothness`), `timeoutSeconds` and the
+/// PixInsight `executable`. An image on 0 to 1 keeps its scale; any other
+/// is mapped from 16-bit counts or its span, whichever is larger, and back.
+/// Samples that are not finite come back unchanged. The output holds
+/// 32-bit floats on the input's scale with the input's headers. PixInsight
+/// reports no progress; `cancel` stops the run within a quarter of a second
+/// and closes PixInsight, as does the time limit. Returns schema-1 JSON with
+/// the output path, the PixInsight version and build, the model's header
+/// and the seconds PixInsight took, as a string released with
+/// [`seiza_string_free`], or null with `error_out` set.
 ///
 /// # Safety
 ///
@@ -18741,17 +18702,9 @@ pub unsafe extern "C" fn seiza_pixinsight_ml_denoise_file_json(
         let options = MlDenoiseOptions {
             amount: request.amount.unwrap_or(defaults.amount),
             overlap_percent: request.overlap_percent.unwrap_or(defaults.overlap_percent),
-            precision: match &request.precision {
-                Some(precision) => precision
-                    .parse()
-                    .map_err(|error: seiza_stacking::Error| error.to_string())?,
-                None => defaults.precision,
-            },
-            local_support: request.local_support.map(|support| MlDenoiseLocalSupport {
-                clip_low: support.clip_low,
-                background: support.background,
-                smoothness: support.smoothness,
-            }),
+            precision: request.precision.unwrap_or(defaults.precision),
+            local_support: request.local_support,
+            timeout_seconds: request.timeout_seconds,
             ..defaults
         };
         let pixinsight = pixinsight(request.executable)?;
@@ -18769,7 +18722,7 @@ pub unsafe extern "C" fn seiza_pixinsight_ml_denoise_file_json(
             schema_version: 1,
             output: run.output,
             pixinsight_version: run.pixinsight_version,
-            model: run.model.into(),
+            model: run.model,
             seconds: run.seconds,
         })
     })
@@ -18810,12 +18763,12 @@ mod pixinsight_tests {
             r#"{"input": "a.fits", "output": "b.fits", "model": "m.xmlm", "precision": "full", "executable": "/nonexistent/PixInsight"}"#,
         )
         .unwrap_err();
-        assert!(error.contains("precision"), "{error}");
+        assert!(error.contains("unknown variant"), "{error}");
         let error = call(
             r#"{"input": "a.fits", "output": "b.fits", "model": "m.xmlm", "overlapPercent": 5, "executable": "/nonexistent/PixInsight"}"#,
         )
         .unwrap_err();
-        assert!(error.contains("overlap_percent"), "{error}");
+        assert!(error.contains("tile overlap"), "{error}");
     }
 
     #[cfg(unix)]
@@ -18874,6 +18827,7 @@ mod pixinsight_tests {
         let header: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(header["process"], "MLDenoise");
         assert_eq!(header["mono"], true);
+        assert_eq!(header["headerSha256"].as_str().unwrap().len(), 64);
     }
 }
 

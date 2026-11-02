@@ -23,6 +23,7 @@ def fake(expected=None):
     return f"""#!/usr/bin/env python3
 import json, shutil, sys
 run = next(a for a in sys.argv if a.startswith('-r='))[3:].split(',')
+open(run[3], 'w').write('started')
 request = json.load(open(run[1]))
 for key, value in {expected or {}!r}.items():
     assert request[key] == value, (key, request[key])
@@ -74,21 +75,28 @@ def test_the_model_header_gives_its_routes_and_weights(model):
     assert header.created == "2026-10-05T22:31:37Z"
     assert header.mono and not header.rgb
     assert header.weights_sha256 == "bb"
+    assert len(header.header_sha256) == 64
     with pytest.raises(ValueError, match="not a PixInsight model file"):
         seiza.pixinsight_ml_denoise_model(__file__)
+    with pytest.raises(FileNotFoundError):
+        seiza.pixinsight_ml_denoise_model(model.parent / "missing.xmlm")
 
 
 def test_options_outside_pixinsights_ranges_are_refused(model):
     image = np.ones((4, 4), dtype=np.float32)
     with pytest.raises(ValueError, match="amount"):
         seiza.pixinsight_ml_denoise_image(image, model, amount=1.5, executable="/nonexistent")
-    with pytest.raises(ValueError, match="overlap_percent"):
+    with pytest.raises(ValueError, match="tile overlap"):
         seiza.pixinsight_ml_denoise_image(image, model, overlap_percent=60, executable="/nonexistent")
     with pytest.raises(ValueError, match="precision"):
         seiza.pixinsight_ml_denoise_image(image, model, precision="full", executable="/nonexistent")
     support = seiza.MlDenoiseLocalSupport(smoothness=9)
     with pytest.raises(ValueError, match="smoothness"):
         seiza.pixinsight_ml_denoise_image(image, model, local_support=support, executable="/nonexistent")
+    with pytest.raises(ValueError, match="timeout"):
+        seiza.pixinsight_ml_denoise_image(image, model, timeout_seconds=0, executable="/nonexistent")
+    with pytest.raises(FileNotFoundError):
+        seiza.pixinsight_ml_denoise_image(image, model.parent / "missing.xmlm", executable="/nonexistent")
 
 
 @runs_stand_in
@@ -100,7 +108,7 @@ def test_an_image_returns_in_its_own_units(tmp_path, model):
         "localSupport": {"clipLow": -1.0, "background": 0.3, "smoothness": 3},
     }
     stand_in = executable(tmp_path, "PixInsight", fake(expected))
-    image = np.array([[-12.0, 0.0, 250.5], [1000.0, 40000.0, 65000.0]], dtype=np.float32)
+    image = np.array([[-12.0, np.nan, 250.5], [1000.0, 40000.0, 65000.0]], dtype=np.float32)
     support = seiza.MlDenoiseLocalSupport(clip_low=-1.0, background=0.3, smoothness=3)
     denoised = seiza.pixinsight_ml_denoise_image(
         image,
@@ -112,12 +120,13 @@ def test_an_image_returns_in_its_own_units(tmp_path, model):
         executable=stand_in,
     )
     assert denoised.image.shape == image.shape
-    np.testing.assert_allclose(denoised.image, image, rtol=1e-6, atol=1e-2)
+    # NaN marks an uncovered pixel, and comes back as NaN.
+    np.testing.assert_allclose(denoised.image, image, rtol=1e-6, atol=1e-2, equal_nan=True)
     assert denoised.pixinsight_version == "1.9.6"
     assert denoised.seconds == 1.25
     assert denoised.model.weights_sha256 == "bb"
     # An RGB image needs a model with an RGB route; this one has none.
-    with pytest.raises(RuntimeError, match="cannot denoise a 3-channel image"):
+    with pytest.raises(ValueError, match="cannot denoise a 3-channel image"):
         seiza.pixinsight_ml_denoise_image(np.ones((2, 2, 3), dtype=np.float32), model, executable=stand_in)
 
 

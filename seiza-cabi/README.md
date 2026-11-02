@@ -352,16 +352,21 @@ exposes the **superset** of what both apps need.
   its standard install location or on `PATH` (null without an error when
   absent). `seiza_pixinsight_ml_denoise_model_json` reads an MLDenoise model
   file's header: the process it is for, whether it denoises mono and RGB
-  images, and its weights' SHA-256. `seiza_pixinsight_ml_denoise_file_json`
-  denoises a FITS or XISF file through a headless PixInsight. The request
-  takes `input`, `output`, `model` and optionally `amount` (0 to 1),
-  `overlapPercent` (12 to 50), `precision` (`"fast"` or `"high"`),
-  `localSupport` (`clipLow`, `background`, `smoothness`) and `executable`.
-  The input may be on any linear scale, and the output holds 32-bit floats
-  on the same scale with the input's headers. PixInsight reports no
-  progress; the run accepts a `SeizaCancelSignal`, which closes PixInsight.
-  Key a cached result on the model's `weightsSha256`, the returned
-  `pixinsightVersion` and the options.
+  images, its weights' SHA-256, and the SHA-256 of the whole header.
+  `seiza_pixinsight_ml_denoise_file_json` denoises a FITS or XISF file
+  through a headless PixInsight. The request has the fields `input`,
+  `output` and `model`, and optionally `amount` (0 to 1), `overlapPercent`
+  (12 to 50), `precision` (`"fast"` or `"high"`), `localSupport`
+  (`clipLow`, `background`, `smoothness`), `timeoutSeconds` and
+  `executable`. An image on 0 to 1 keeps its scale; any other is mapped
+  from 65535 or its span, whichever is larger, and back. NaN and infinite
+  samples come back unchanged. The output holds 32-bit floats on the
+  input's scale with the input's headers. PixInsight reports no progress;
+  the run accepts a `SeizaCancelSignal`, which closes PixInsight, as does
+  the time limit (by default ten minutes plus 20 seconds per million
+  samples). Key a cached result on the model's `headerSha256`, the
+  returned `pixinsightVersion` (which includes PixInsight's build) and the
+  options.
 - **Plate solving** — `seiza_solve_image_json`, and
   `seiza_solve_image_with_limits_json`. Both start from what the file says
   about itself: a FITS or XISF image's own WCS (FITS cards, or a PixInsight

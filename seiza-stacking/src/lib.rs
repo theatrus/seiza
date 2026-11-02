@@ -335,6 +335,16 @@ pub enum Error {
         /// What went wrong.
         message: String,
     },
+    /// A request for an external tool that Seiza turned down before starting
+    /// it: an option outside the tool's range, or a model that cannot
+    /// process the image. Changing the request can make it run.
+    #[error("{tool}: {message}")]
+    ExternalToolRefused {
+        /// The tool the request was for, e.g. "PixInsight MLDenoise".
+        tool: String,
+        /// What is wrong with the request.
+        message: String,
+    },
 }
 
 /// Result specialized to this crate's [`Error`].

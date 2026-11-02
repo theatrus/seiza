@@ -57,9 +57,10 @@ impl PyMlDenoiseLocalSupport {
     }
 }
 
-/// What an MLDenoise model file declares in its header. `weights_sha256`
-/// identifies the model's weights: a host caching results keys on it with
-/// the PixInsight version and the options.
+/// What an MLDenoise model file declares in its header. `header_sha256`
+/// identifies the model: a host caching results keys on it with the
+/// PixInsight version and the options. Two releases of a model can share
+/// `weights_sha256` and still give different results.
 #[pyclass(skip_from_py_object, name = "MlDenoiseModel", module = "seiza", frozen)]
 #[derive(Clone)]
 pub(crate) struct PyMlDenoiseModel {
@@ -75,6 +76,8 @@ pub(crate) struct PyMlDenoiseModel {
     rgb: bool,
     #[pyo3(get)]
     weights_sha256: Option<String>,
+    #[pyo3(get)]
+    header_sha256: String,
 }
 
 impl From<MlDenoiseModel> for PyMlDenoiseModel {
@@ -86,6 +89,7 @@ impl From<MlDenoiseModel> for PyMlDenoiseModel {
             mono: model.mono,
             rgb: model.rgb,
             weights_sha256: model.weights_sha256,
+            header_sha256: model.header_sha256,
         }
     }
 }
@@ -158,16 +162,38 @@ fn pixinsight(executable: Option<PathBuf>) -> PyResult<PixInsight> {
     }
 }
 
+/// A refused request is a `ValueError`; anything else that stopped a run
+/// is a `RuntimeError`.
+fn python_error(error: seiza_stacking::Error) -> PyErr {
+    match error {
+        seiza_stacking::Error::ExternalToolRefused { .. } => {
+            PyValueError::new_err(error.to_string())
+        }
+        other => PyRuntimeError::new_err(other.to_string()),
+    }
+}
+
+fn existing_model(model: PathBuf) -> PyResult<PathBuf> {
+    if model.exists() {
+        Ok(model)
+    } else {
+        Err(PyFileNotFoundError::new_err(format!(
+            "no MLDenoise model at {}",
+            model.display()
+        )))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn options(
     model: PathBuf,
     amount: f64,
     overlap_percent: u32,
     precision: &str,
     local_support: Option<PyMlDenoiseLocalSupport>,
+    timeout_seconds: Option<f64>,
 ) -> PyResult<MlDenoiseOptions> {
-    let precision: MlDenoisePrecision = precision
-        .parse()
-        .map_err(|error: seiza_stacking::Error| PyValueError::new_err(error.to_string()))?;
+    let precision: MlDenoisePrecision = precision.parse().map_err(python_error)?;
     let options = MlDenoiseOptions {
         amount,
         overlap_percent,
@@ -177,11 +203,10 @@ fn options(
             background: support.background,
             smoothness: support.smoothness,
         }),
+        timeout_seconds,
         ..MlDenoiseOptions::new(model)
     };
-    options
-        .validate()
-        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    options.validate().map_err(python_error)?;
     Ok(options)
 }
 
@@ -196,9 +221,10 @@ pub(crate) fn pixinsight_locate() -> Option<String> {
 /// its weights.
 #[pyfunction]
 pub(crate) fn pixinsight_ml_denoise_model(path: PathBuf) -> PyResult<PyMlDenoiseModel> {
+    let path = existing_model(path)?;
     MlDenoiseModel::read(&path)
         .map(PyMlDenoiseModel::from)
-        .map_err(|error| PyValueError::new_err(error.to_string()))
+        .map_err(python_error)
 }
 
 /// Denoise a FITS or XISF file with PixInsight's MLDenoise and write the
@@ -207,11 +233,14 @@ pub(crate) fn pixinsight_ml_denoise_model(path: PathBuf) -> PyResult<PyMlDenoise
 /// `amount` (0 to 1) blends the denoised image with the original,
 /// `overlap_percent` (12 to 50) sets how much inference tiles overlap,
 /// `precision` is "fast" or "high" GPU inference, and `local_support`
-/// protects bright structures. PixInsight reports no progress; Ctrl-C or
-/// `cancel` returning true stops the run within a quarter of a second and
-/// closes PixInsight.
+/// protects bright structures. `timeout_seconds` closes PixInsight and fails
+/// the run after that long; the default is ten minutes plus 20 seconds per
+/// million samples. PixInsight reports no progress; Ctrl-C or `cancel`
+/// returning true stops the run within a quarter of a second and closes
+/// PixInsight. A refused request raises `ValueError`, a missing model
+/// `FileNotFoundError`, and a failed run `RuntimeError`.
 #[pyfunction]
-#[pyo3(signature = (input, output, model, *, amount=0.9, overlap_percent=25, precision="fast", local_support=None, executable=None, cancel=None))]
+#[pyo3(signature = (input, output, model, *, amount=0.9, overlap_percent=25, precision="fast", local_support=None, timeout_seconds=None, executable=None, cancel=None))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pixinsight_ml_denoise_file(
     py: Python<'_>,
@@ -222,15 +251,17 @@ pub(crate) fn pixinsight_ml_denoise_file(
     overlap_percent: u32,
     precision: &str,
     local_support: Option<PyRef<'_, PyMlDenoiseLocalSupport>>,
+    timeout_seconds: Option<f64>,
     executable: Option<PathBuf>,
     cancel: Option<Py<PyAny>>,
 ) -> PyResult<PyMlDenoiseRun> {
     let options = options(
-        model,
+        existing_model(model)?,
         amount,
         overlap_percent,
         precision,
         local_support.map(|support| support.clone()),
+        timeout_seconds,
     )?;
     let pixinsight = pixinsight(executable)?;
     let raised: Arc<Mutex<Option<PyErr>>> = Arc::new(Mutex::new(None));
@@ -242,7 +273,7 @@ pub(crate) fn pixinsight_ml_denoise_file(
     {
         return Err(error);
     }
-    let run = outcome.map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    let run = outcome.map_err(python_error)?;
     Ok(PyMlDenoiseRun {
         output: run.output,
         pixinsight_version: run.pixinsight_version,
@@ -252,15 +283,17 @@ pub(crate) fn pixinsight_ml_denoise_file(
 }
 
 /// Denoise an image in memory with PixInsight's MLDenoise: a float32 array
-/// of shape (height, width) or (height, width, 3) in any linear units.
-/// PixInsight works on the image mapped onto 0..1, offset by its most
-/// negative sample and scaled by its span, and the result is mapped back,
-/// so it returns in the input's units and shape. A one-channel image needs
+/// of shape (height, width) or (height, width, 3). PixInsight works on
+/// 0..1: an image within 0..1 keeps its scale, and any other is offset by
+/// its most negative sample and divided by 65535 or its span, whichever is
+/// larger, as PixInsight opens a 16-bit camera frame. The result is mapped
+/// back, so it returns in the input's units and shape. NaN and infinite
+/// samples, such as a stack's uncovered edges, come back unchanged. A one-channel image needs
 /// a model with a mono route and an RGB image one with an RGB route. The
 /// options work as for `pixinsight_ml_denoise_file`; no file is left
 /// behind.
 #[pyfunction]
-#[pyo3(signature = (image, model, *, amount=0.9, overlap_percent=25, precision="fast", local_support=None, executable=None, cancel=None))]
+#[pyo3(signature = (image, model, *, amount=0.9, overlap_percent=25, precision="fast", local_support=None, timeout_seconds=None, executable=None, cancel=None))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pixinsight_ml_denoise_image<'py>(
     py: Python<'py>,
@@ -270,16 +303,18 @@ pub(crate) fn pixinsight_ml_denoise_image<'py>(
     overlap_percent: u32,
     precision: &str,
     local_support: Option<PyRef<'_, PyMlDenoiseLocalSupport>>,
+    timeout_seconds: Option<f64>,
     executable: Option<PathBuf>,
     cancel: Option<Py<PyAny>>,
 ) -> PyResult<PyMlDenoised> {
     let linear = crate::arrays::linear_image(image)?;
     let options = options(
-        model,
+        existing_model(model)?,
         amount,
         overlap_percent,
         precision,
         local_support.map(|support| support.clone()),
+        timeout_seconds,
     )?;
     let pixinsight = pixinsight(executable)?;
     let raised: Arc<Mutex<Option<PyErr>>> = Arc::new(Mutex::new(None));
@@ -290,7 +325,7 @@ pub(crate) fn pixinsight_ml_denoise_image<'py>(
     {
         return Err(error);
     }
-    let denoised = outcome.map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    let denoised = outcome.map_err(python_error)?;
     Ok(PyMlDenoised {
         image: crate::arrays::into_image_array(py, denoised.image)?.unbind(),
         pixinsight_version: denoised.pixinsight_version,
