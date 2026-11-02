@@ -454,9 +454,7 @@ fn write_version(path: &Path, state: ContextWriteState<'_>, format_version: u32)
             .flush()
             .map_err(|error| context_write_error(path, error.to_string()))?;
     }
-    temporary
-        .as_file()
-        .sync_all()
+    seiza_fits::sync_file(temporary.as_file())
         .map_err(|error| context_write_error(path, error.to_string()))?;
     temporary
         .persist(path)

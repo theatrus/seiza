@@ -35,7 +35,8 @@ pub use seiza_stretch::{
 };
 pub use window::{ImageWindow, MAX_WINDOW_EDGE, read_window};
 pub use writer::{
-    F32ImageData, WriteHeaderCard, update_header_in_place, write_f32_image, write_f32_image_to,
+    F32ImageData, WriteHeaderCard, sync_file, update_header_in_place, write_f32_image,
+    write_f32_image_to,
 };
 
 use rayon::prelude::*;

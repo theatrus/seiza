@@ -1316,7 +1316,7 @@ fn stack(options: StackArgs) -> Result<()> {
                 .unwrap_or_else(|| std::path::Path::new("."));
             let mut file = tempfile::NamedTempFile::new_in(parent)?;
             file.write_all(html.as_bytes())?;
-            file.as_file().sync_all()?;
+            seiza_fits::sync_file(file.as_file())?;
             file.persist(path)?;
             crate::common::wrote(path, format_args!("completed-stack HTML report"));
         }

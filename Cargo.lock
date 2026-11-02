@@ -3388,6 +3388,7 @@ dependencies = [
  "memmap2",
  "multiversion",
  "rayon",
+ "rustix",
  "seiza-stretch",
  "tempfile",
 ]

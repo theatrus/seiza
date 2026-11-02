@@ -19,3 +19,8 @@ rayon.workspace = true
 seiza-stretch.workspace = true
 tempfile = "3"
 
+# A plain fsync when an Apple file system refuses a full sync; see
+# `sync_file`.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+rustix = { version = "1", features = ["fs"] }
+

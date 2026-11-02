@@ -196,7 +196,7 @@ fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
     let mut file = tempfile::NamedTempFile::new_in(path.parent().ok_or("Missing cache directory")?)
         .map_err(error)?;
     serde_json::to_writer(file.as_file_mut(), value).map_err(error)?;
-    file.as_file().sync_all().map_err(error)?;
+    seiza_fits::sync_file(file.as_file()).map_err(error)?;
     file.persist(path).map_err(error)?;
     Ok(())
 }

@@ -890,7 +890,7 @@ fn write_raster_atomic(
         encode(&mut writer)?;
         writer.flush()?;
         drop(writer);
-        temporary.as_file().sync_all()?;
+        seiza_fits::sync_file(temporary.as_file())?;
         temporary.persist(path).map_err(|error| error.error)?;
         Ok(())
     };
