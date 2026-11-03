@@ -53,18 +53,22 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
     with Manifest(store / "manifest.sqlite") as manifest:
         with manifest.transaction():
             manifest.db.execute("UPDATE sets SET split = 'train'")
-            # One noise pair stands in for a deep stack's halves.
+            # The deepest noise pair, whose edges are covered, stands in for
+            # a deep stack's halves.
+            deepest = manifest.rows("SELECT id FROM products WHERE kind = 'noise-a' "
+                                    "ORDER BY json_array_length(frames) DESC, id LIMIT 1")[0]["id"].removesuffix("/a")
             for half in ("a", "b"):
-                row = dict(manifest.rows(f"SELECT * FROM products WHERE kind = 'noise-{half}' ORDER BY id LIMIT 1")[0])
+                row = dict(manifest.rows("SELECT * FROM products WHERE id = ?", (f"{deepest}/{half}",))[0])
                 row.update(id=f"{row['set_id']}/deep-half/{half}", kind=f"deep-half-{half}",
                            recipe=json.dumps({"recipe": "deep-half", "half": half}))
                 manifest.db.execute(f"INSERT INTO products ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})",
                                     tuple(row.values()))
     capsys.readouterr()
     run("train-noise", "--name", "smoke", "--steps", "6", "--width", "4", "--levels", "3", "--tile", "64", "--batch", "2",
-        "--precision", "bf16", "--prefetch", "2", "--batch-threads", "2")
+        "--precision", "bf16", "--prefetch", "2", "--batch-threads", "2", "--deep-fraction", "0.5")
     record = json.loads((store / "models" / "noise" / "smoke" / "run.json").read_text())
     assert record["config"]["train_pairs"] == 6
+    assert record["config"]["extra"]["label"] == "deep" and record["config"]["extra"]["windows"] > 0
     assert record["config"]["precision"] == "bf16"
     assert record["export"]["max_relative_error"] < 1e-4
     assert record["inference"]["overlap"] >= receptive_field(3) // 2

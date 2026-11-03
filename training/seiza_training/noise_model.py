@@ -204,6 +204,17 @@ def bank(store: Store, chosen: list[dict[str, Any]], *, seed: int = 0, noise_map
     return cut_windows(store, f"noise-{key}", halves(), sources=len(chosen), seed=seed)
 
 
+# The A halves of the deep stacks' pairs: a night's, and many nights'.
+DEEP_KINDS = ("deep-half-a", "multi-night-half-a")
+
+
+def deep_pairs(manifest: Manifest, split: str, sets: set[str] | None = None) -> list[dict[str, Any]]:
+    """The pairs of halves of one split's deep stacks, a night's and many
+    nights': far less noisy than the noise pairs, with signal far further
+    above their noise."""
+    return [pair for kind in DEEP_KINDS for pair in pairs(manifest, split, sets, kind=kind)]
+
+
 def dark_noise_bank(
     store: Store, manifest: Manifest, *, sets: set[str] | None = None, seed: int = 0, noise_map: str = "raw"
 ) -> dict[str, np.ndarray]:
@@ -529,6 +540,8 @@ def train(
     one generator in turn.)"""
     if precision not in PRECISIONS:
         raise ValueError(f"precision is one of {PRECISIONS}, not {precision!r}")
+    if extra is not None and extra_fraction and not len(extra["a"]):
+        raise RuntimeError(f"the {extra_label} bank holds no window wholly inside its pairs' coverage")
     torch.manual_seed(seed)
     chosen = pairs(manifest, "train", sets)
     if not chosen:
@@ -734,8 +747,9 @@ def evaluate(
     """Denoise each of a split's A halves, whole, through overlapping
     tiles, take out `bands` of what the model finds, and measure it against
     its B half. The deep stacks' halves are measured the same way, one
-    against the other, under the size `deep-half`: they show the model on a
-    whole night's depth, far less noisy than the pairs it trains on. The
+    against the other, under the size `deep-half`, or `multi-night` for an
+    object stacked over its nights: they show the model at a night's whole
+    depth and beyond, far less noisy than the noise pairs. The
     network reads the noise map it was trained with; every run is measured
     in the same units, the per-pixel map's median noise, so runs with
     different maps compare. `threads` pairs are measured at once."""
@@ -758,7 +772,7 @@ def evaluate(
         return {"pair": pair["a"]["id"], "set": pair["set"], "size": recipe.get("size") or recipe["recipe"],
                 **measure(estimate, image_a, image_b, background, noise)}
 
-    chosen = pairs(manifest, split, sets) + pairs(manifest, split, sets, kind="deep-half-a")
+    chosen = pairs(manifest, split, sets) + deep_pairs(manifest, split, sets)
     with ThreadPoolExecutor(max_workers=threads, thread_name_prefix="evaluate") as pool:
         per_pair = list(pool.map(one, chosen[:limit]))
     by_size: dict[Any, list[dict[str, Any]]] = {}
