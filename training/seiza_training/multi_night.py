@@ -18,7 +18,11 @@ normalization:
 - `multi-night/{key}/half/a` and `/b` (kinds `multi-night-half-a` and
   `-b`), the nights dealt between them so their frame counts come out
   even: a noise pair at a depth no night reaches, whose noise is
-  independent since the halves share no frame.
+  independent since the halves share no frame;
+- `multi-night/{key}/seeing/best` and `/worst` (kinds
+  `multi-night-seeing-best` and `-worst`), the best and the worst quarter
+  of every night's frames by measured FWHM, at matched counts: PSF pairs
+  deeper, and further apart in seeing, than a night's split.
 
 An object is its sets' name less the night,
 `telescope/target/FILTER-exposure-gain-binning`; `key` is a hash of it.
@@ -41,7 +45,7 @@ from typing import Any
 
 import seiza
 
-from .build import record_product, stack_options, transparency_outliers
+from .build import mean_fwhm, record_product, seeing_split, stack_options, transparency_outliers
 from .manifest import Manifest, loads
 from .measure import accepted_frames
 from .store import Store, save_stack, stack_stats, versions
@@ -148,7 +152,9 @@ def stack_object(
                 return replacement + path[len(prefix):]
         return path
 
-    nights = {row["id"]: [frame["path"] for frame in accepted_frames(manifest, row["id"])] for row in sets}
+    measured = {row["id"]: accepted_frames(manifest, row["id"]) for row in sets}
+    nights = {night: [frame["path"] for frame in frames] for night, frames in measured.items()}
+    fwhm = {frame["path"]: frame["fwhm_px"] for frames in measured.values() for frame in frames}
     masters = {row["id"]: loads(row["calibration"], {}).get("masters", {}) for row in sets}
     deepest = max(nights, key=lambda night: (len(nights[night]), night))
     # The deepest night's own reference when it was built, else Seiza's choice.
@@ -230,6 +236,29 @@ def stack_object(
                            {**recipe, "half": half, "nights": sorted(half_nights)}, paths,
                            directory / f"half-{half}", files, stack_stats(snapshot), run_versions)
             summary[f"half_{half}"] = {"nights": len(half_nights), "frames": len(paths)}
+            del snapshot
+        # The best and worst quarters by seeing over every night, at matched
+        # counts: PSF pairs deeper, and further apart, than one night gives.
+        in_stack = {path: fwhm[path] for path in everything if fwhm.get(path) is not None}
+        best, worst = seeing_split(in_stack)
+        seeing = {**recipe, "recipe": "multi-night-seeing", "frames_each": len(best),
+                  "best_fwhm_px": mean_fwhm(best, in_stack), "worst_fwhm_px": mean_fwhm(worst, in_stack)}
+        for half, frames in (("best", best), ("worst", worst)):
+            snapshot = stacker.reintegrate(frames=[local(path) for path in frames])
+            half_directory = directory / "seeing" / half
+            files = save_stack(half_directory, snapshot, fits=True)
+            stats = stack_stats(snapshot)
+            try:
+                measured_stack = seiza.detect_measured_stars_file(half_directory / files["fits"])
+                stats["stack_fwhm_px"] = measured_stack.average_fwhm
+                stats["stack_stars"] = len(measured_stack.stars)
+            except Exception as error:  # noqa: BLE001 - recorded, not fatal
+                stats["stack_fwhm_error"] = str(error)
+            record_product(manifest, store, deepest, f"multi-night/{key}/seeing/{half}",
+                           f"multi-night-seeing-{half}", {**seeing, "nights": sorted({
+                               night for night, paths in admitted.items() if set(paths) & set(frames)})},
+                           frames, half_directory, files, stats, run_versions)
+            summary[f"seeing_{half}"] = {"frames": len(frames), "fwhm_px": stats.get("stack_fwhm_px")}
             del snapshot
         summary["nights"] = counts
         summary["frames"] = len(everything)

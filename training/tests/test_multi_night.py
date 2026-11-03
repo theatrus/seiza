@@ -49,7 +49,15 @@ def test_every_night_of_an_object_stacks_onto_one_reference(tmp_path, capsys):
         rows = {row["kind"]: dict(row) for row in manifest.rows("SELECT * FROM products WHERE id LIKE 'multi-night/%'")}
         nights = {row["id"]: [frame["path"] for frame in manifest.rows(
             "SELECT path FROM measurements WHERE set_id = ?", (row["id"],))] for row in manifest.rows("SELECT id FROM sets")}
-    assert set(rows) == {"multi-night", "multi-night-half-a", "multi-night-half-b"}
+    assert set(rows) == {"multi-night", "multi-night-half-a", "multi-night-half-b",
+                         "multi-night-seeing-best", "multi-night-seeing-worst"}
+    best, worst = loads(rows["multi-night-seeing-best"]["frames"]), loads(rows["multi-night-seeing-worst"]["frames"])
+    seeing = loads(rows["multi-night-seeing-best"]["recipe"])
+    assert len(best) == len(worst) == seeing["frames_each"] > 0 and not set(best) & set(worst)
+    assert seeing["best_fwhm_px"] < seeing["worst_fwhm_px"]
+    assert set(best) | set(worst) <= set(loads(rows["multi-night"]["frames"]))
+    assert loads(rows["multi-night-seeing-best"]["stats"])["stack_fwhm_px"] < \
+        loads(rows["multi-night-seeing-worst"]["stats"])["stack_fwhm_px"]
     whole = loads(rows["multi-night"]["frames"])
     a, b = loads(rows["multi-night-half-a"]["frames"]), loads(rows["multi-night-half-b"]["frames"])
     assert sorted(a + b) == sorted(whole) and not set(a) & set(b)
