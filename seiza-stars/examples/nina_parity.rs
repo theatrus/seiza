@@ -9,13 +9,16 @@
 //! - `nina31`, `nina` (3.2, the default) or `nina33`: N.I.N.A.'s built-in
 //!   detector with that version's measurement, on the frame autostretched as
 //!   N.I.N.A. stretches it before detecting stars.
-//! - `hocus`: the HocusFocus port with its default parameters.
+//! - `hocus`: the HocusFocus port, with parameters for the frame's optics as
+//!   PSF Guard picks them.
 //!
 //! N.I.N.A.'s profile settings come from the environment:
 //! `NINA_SENSITIVITY` (`normal`, `high`, `highest`), `NINA_NOISE_REDUCTION`
 //! (`none`, `normal`, `high`, `highest`, `median`), `NINA_STRETCH` (the
 //! autostretch factor, 0.2) and `NINA_CLIP` (black clipping, −2.8). High
 //! sensitivity takes its image scale from the XPIXSZ and FOCALLEN headers.
+//! For `hocus`, `HF_NOISE_RADIUS`, `HF_SENSITIVITY`, `HF_MIN_HFR`,
+//! `HF_LAYERS` and `HF_STRUCTURE=atrous` override the preset.
 //! `NINA_PARITY_DEBUG` prints each frame's HFR spread and the detector's
 //! diagnostics on standard error.
 //!
@@ -29,7 +32,9 @@ use std::path::Path;
 
 use rayon::prelude::*;
 use seiza_fits::{FitsImage, StretchParams, statistics_u16, stretch_u16_to_u16};
-use seiza_stars::hocus_focus_star_detection::{HocusFocusParams, detect_stars_hocus_focus};
+use seiza_stars::hocus_focus_star_detection::{
+    HocusFocusParams, StructureRemovalMethod, detect_stars_hocus_focus,
+};
 use seiza_stars::nina_star_detection::{
     MeasurementVersion, NoiseReduction, StarDetectionParams, StarSensitivity,
     detect_stars_with_original,
@@ -65,7 +70,28 @@ fn measure(detector: &str, path: &Path) -> Result<Measured, String> {
     let (width, height) = (fits.width, fits.height);
     let data = fits.to_u16().into_owned();
     if detector == "hocus" {
-        let found = detect_stars_hocus_focus(&data, width, height, &HocusFocusParams::default());
+        // Parameters for the frame's optics, as PSF Guard picks them.
+        let (params, _) = HocusFocusParams::for_frame_headers(
+            fits.header_f64("FOCALLEN"),
+            fits.header_f64("XPIXSZ"),
+        );
+        let mut params = params;
+        if let Ok(v) = std::env::var("HF_NOISE_RADIUS") {
+            params.noise_reduction_radius = v.parse().unwrap();
+        }
+        if let Ok(v) = std::env::var("HF_SENSITIVITY") {
+            params.sensitivity = v.parse().unwrap();
+        }
+        if let Ok(v) = std::env::var("HF_MIN_HFR") {
+            params.min_hfr = v.parse().unwrap();
+        }
+        if let Ok(v) = std::env::var("HF_LAYERS") {
+            params.structure_layers = v.parse().unwrap();
+        }
+        if std::env::var("HF_STRUCTURE").as_deref() == Ok("atrous") {
+            params.structure_removal = StructureRemovalMethod::Atrous;
+        }
+        let found = detect_stars_hocus_focus(&data, width, height, &params);
         let hfrs = found.stars.iter().map(|s| s.hfr).collect::<Vec<_>>();
         let mean = found.average_hfr;
         let sd = (hfrs.iter().map(|h| (h - mean).powi(2)).sum::<f64>()
