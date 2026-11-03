@@ -214,18 +214,23 @@ The manifest decides which sets qualify for which recipe:
 | Starless candidate and star list | catalogue-guided removal on the solved deep stack | star backgrounds, once reviewed |
 | Finished stack | a PSF Guard group stack, copied in, image only | inputs at user depth, reblur loss, catalogue removal, gates |
 | Deep halves | the deep stack's frames dealt alternately into two stacks | noise pairs at a night's whole depth, clean targets |
-| Multi-night deep stack, with variance and coverage, and its halves | every accepted frame of one object, telescope and filter, over all its nights | references and pairs deeper than any night (planned) |
+| Multi-night deep stack, with variance and coverage, and its halves | every accepted frame of one object, telescope and filter, over all its nights; the halves hold whole nights | references and pairs deeper than any night |
 
 Cross-instrument pairs are built per object, across sets, once both sets'
 deep stacks exist.
 
 A copied finished stack carries no variance or coverage, so the noise model
 cannot be run on it with a noise map of its own. The deepest objects, tens
-of hours over dozens of nights, are therefore stacked again from the
-corpus's own calibrated frames, onto one reference across the nights, with
-the variance and coverage every product carries. Halves dealt by night give
-pairs at a depth no single night reaches, and the whole is a near-clean
-reference for each night's stack.
+of hours over many nights, are therefore stacked again from the corpus's own
+frames by the `multi-night` pass. One stacker registers every night onto the
+deepest night's reference, calibrating each night with its own masters, and
+keeps the frames, so the whole stack and its halves are reintegrated from
+the same registration. The halves are dealt whole nights, so they share no
+frame and their frame counts come out near even: pairs at a depth no single
+night reaches. The whole stack is a near-clean reference for the reference
+night's own products, which share its grid. The pass can run on a machine
+that mounts the corpus under another path; the products record the
+manifest's paths.
 
 ### Review
 

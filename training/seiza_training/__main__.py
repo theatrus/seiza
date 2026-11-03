@@ -3,6 +3,7 @@
 The passes run in order — crawl, calibrate, stacks, split, measure,
 build, review — and each can be rerun alone. `process` measures and
 builds one set at a time, which reads each frame over the network once.
+`multi-night` stacks the deepest objects over all their nights.
 `status` prints what the manifest holds; `decide` records a review
 decision.
 """
@@ -62,6 +63,17 @@ def main(argv: list[str] | None = None) -> int:
                       help="the A half whose frames lend their registration, by size (default 8 and 16)")
     dark.add_argument("--again", action="store_true", help="make pairs already made")
     dark.add_argument("--limit", type=int, help="at most this many pairs")
+
+    multi = commands.add_parser("multi-night", help="stack every night of the deepest objects onto one reference")
+    multi.add_argument("--object", action="append", dest="objects",
+                       help="only this object, `telescope/target/FILTER-exposure-gain-binning` (default: all deep)")
+    multi.add_argument("--min-hours", type=float, help="the hours of accepted frames an unnamed object needs")
+    multi.add_argument("--source-map", action="append", default=[], metavar="FROM=TO",
+                       help="read frame and master paths starting FROM from TO instead")
+    multi.add_argument("--list", action="store_true", help="list the objects and their depth, and stack nothing")
+    multi.add_argument("--again", action="store_true", help="stack objects already stacked")
+    multi.add_argument("--limit", type=int, help="at most this many objects")
+    multi.add_argument("--keep-scratch", action="store_true")
 
     train = commands.add_parser("train-noise", help="train a noise model on the train split's noise pairs")
     train.add_argument("--name", required=True, help="the run's name, under STORE/models/noise/")
@@ -199,6 +211,17 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
         return make_dark_noise(
             manifest, store, sets=only, sizes=tuple(arguments.sizes or SIZES), again=arguments.again,
             limit=arguments.limit,
+        )
+    if command == "multi-night":
+        from . import multi_night
+
+        if arguments.list:
+            return {"objects": multi_night.survey(manifest)}
+        source_map = dict(entry.split("=", 1) for entry in arguments.source_map)
+        return multi_night.run(
+            manifest, store, names=set(arguments.objects) if arguments.objects else None,
+            minimum_hours=arguments.min_hours if arguments.min_hours is not None else multi_night.MINIMUM_HOURS,
+            source_map=source_map, again=arguments.again, limit=arguments.limit, keep_scratch=arguments.keep_scratch,
         )
     if command == "train-noise":
         from .noise_model import dark_noise_bank, train
