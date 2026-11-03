@@ -550,7 +550,7 @@ def train(
     synthetic outliers per 256 × 256 pixels to every input tile, the hot
     ones from `outlier_floor` up. `clip_grad` scales each step's gradient
     down to that norm where it is longer, so one wild batch cannot throw
-    the weights far.
+    the weights far, and records the norms it saw in the history.
     `precision` "bf16" runs the network in bfloat16 under autocast.
     `prefetch` batches are built ahead on `batch_threads` threads; 0 builds
     each in turn. Each step's batch draws from `step_generator(seed, step)`,
@@ -593,6 +593,8 @@ def train(
     started = time.monotonic()
     # Summed on the device, so a step never waits for the GPU to finish.
     running = torch.zeros((), device=where)
+    # With clipping, the gradient's norm before it: the sum and the largest.
+    norms = torch.zeros(2, device=where)
     try:
         for step in range(1, steps + 1):
             tensors = source.get() if source else assemble(step)
@@ -603,14 +605,23 @@ def train(
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             if clip_grad:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
+                norm = torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
+                norms[0] += norm
+                norms[1] = torch.maximum(norms[1], norm)
             optimizer.step()
             schedule.step()
             running += loss.detach().float()
             if step % log_every == 0 or step == steps:
                 mean = float(running) / log_every
-                history.append({"step": step, "loss": mean, "seconds": round(time.monotonic() - started, 1)})
-                print(f"train {name}: step {step} loss {mean:.4f} ({time.monotonic() - started:.0f} s)", flush=True)
+                entry = {"step": step, "loss": mean, "seconds": round(time.monotonic() - started, 1)}
+                gradient = ""
+                if clip_grad:
+                    entry["grad_norm_mean"], entry["grad_norm_max"] = float(norms[0]) / log_every, float(norms[1])
+                    gradient = f" gradient {entry['grad_norm_mean']:.3g} (largest {entry['grad_norm_max']:.3g})"
+                    norms.zero_()
+                history.append(entry)
+                print(f"train {name}: step {step} loss {mean:.4f}{gradient} ({time.monotonic() - started:.0f} s)",
+                      flush=True)
                 running.zero_()
     finally:
         if source:

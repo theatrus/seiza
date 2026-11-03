@@ -73,6 +73,7 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
     assert record["config"]["precision"] == "bf16"
     assert record["config"]["outliers"] == 2 and record["config"]["outlier_floor"] == 10
     assert record["config"]["clip_grad"] == 1
+    assert all(entry["grad_norm_max"] > 0 and entry["grad_norm_mean"] > 0 for entry in record["history"])
     assert record["export"]["max_relative_error"] < 1e-4
     assert record["inference"]["overlap"] >= receptive_field(3) // 2
     capsys.readouterr()
