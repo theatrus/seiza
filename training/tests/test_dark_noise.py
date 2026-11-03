@@ -1,5 +1,6 @@
 """The dark-noise pass's calibration follows the stacker's handling of
-masters, and its gate measures what a master dark adds."""
+masters, its gate measures what a master dark adds, and its base and target
+share no frame."""
 
 from __future__ import annotations
 
@@ -10,7 +11,7 @@ import pytest
 
 fits = pytest.importorskip("astropy.io.fits")
 
-from seiza_training.dark_noise import Calibration, master_excess  # noqa: E402
+from seiza_training.dark_noise import Calibration, alternate, master_excess  # noqa: E402
 
 WIDTH, HEIGHT = 64, 48
 
@@ -66,3 +67,11 @@ def test_the_gate_measures_a_scaled_master_against_one_frame(tmp_path):
     assert master_excess({"dark": dark}, 300.0) == pytest.approx(4.0 / np.sqrt(2.0))
     assert master_excess({"dark": dark}, 75.0) == pytest.approx(1.0 / np.sqrt(2.0))
     assert master_excess({}, 300.0) is None
+
+
+def test_the_halves_share_no_frame_and_span_the_night():
+    ordered = [f"frame-{index:02d}" for index in range(9)]
+    base, target = alternate(ordered)
+    assert not set(base) & set(target)
+    assert sorted(base + target) == ordered
+    assert (base[0], base[-1], target[0], target[-1]) == ("frame-00", "frame-08", "frame-01", "frame-07")
