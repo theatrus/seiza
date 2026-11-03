@@ -191,6 +191,25 @@ pub struct HocusFocusParams {
     /// Measure stars on the noise-reduced image too, as HocusFocus does for
     /// its High noise level, rather than on the hot-pixel-filtered one.
     pub measurement_noise_reduction: bool,
+    /// N.I.N.A.'s autofocus inner crop ratio. N.I.N.A. passes its autofocus
+    /// crop to every star detection, not only autofocus, and HocusFocus
+    /// honours it (its "Use AutoFocus Crop", on by default): below 1, stars
+    /// are found only in the centred region this fraction of the frame's
+    /// width and height covers, and the frame's HFR and star count describe
+    /// that region alone.
+    pub autofocus_inner_crop_ratio: f64,
+    /// N.I.N.A.'s autofocus outer crop ratio. With an inner ratio below 1
+    /// and this below 1 too, stars are found in the centred region this
+    /// fraction covers, outside the inner region. [`HocusFocusVersion::V3`]
+    /// crops to the outer region but does not leave the inner one out.
+    pub autofocus_outer_crop_ratio: f64,
+    /// N.I.N.A.'s "use brightest n stars" for autofocus, which N.I.N.A.
+    /// also passes to every star detection: above 0, the frame's HFR and
+    /// FWHM come from the `n` stars HocusFocus ranks first by
+    /// `0.3 × HFR + 0.7 × mean brightness` (brightness on its 0..1 scale, so
+    /// in practice the largest), while every star still counts as
+    /// detected. 0 uses them all.
+    pub autofocus_brightest_stars: usize,
     /// Take candidates as 8-connected regions (HocusFocus 4.0.0.16 on)
     /// rather than with the older box-growing walk.
     pub connected_components: bool,
@@ -408,6 +427,9 @@ impl Default for HocusFocusParams {
             contamination_sensitivity: 5.0,
             connected_components: true,
             measurement_noise_reduction: false,
+            autofocus_inner_crop_ratio: 1.0,
+            autofocus_outer_crop_ratio: 1.0,
+            autofocus_brightest_stars: 0,
             keep_saturated_stars: false,
             psf_type: PSFType::None, // No PSF fitting by default
         }
@@ -456,6 +478,155 @@ pub fn detect_stars_hocus_focus(
     height: usize,
     params: &HocusFocusParams,
 ) -> HocusFocusDetectionResult {
+    let mut result = detect_in_autofocus_region(data, width, height, params);
+    let n = params.autofocus_brightest_stars;
+    if n > 0 && result.stars.len() > n {
+        let mut ranked = result.stars.iter().collect::<Vec<_>>();
+        // HocusFocus's MeanBrightness: total flux over the region's pixels,
+        // on its 0..1 scale.
+        let score = |s: &&HocusFocusStar| {
+            s.hfr * 0.3 + s.flux / 65536.0 / s.pixel_count.max(1) as f64 * 0.7
+        };
+        ranked.sort_by(|a, b| score(b).total_cmp(&score(a)));
+        ranked.truncate(n);
+        let (hfr, fwhm) = match params.version {
+            HocusFocusVersion::V4 => {
+                let top = ranked.into_iter().cloned().collect::<Vec<_>>();
+                crate::hocus_focus_v4::summarize(&top, params)
+            }
+            HocusFocusVersion::V3 => {
+                let unsaturated = ranked
+                    .iter()
+                    .copied()
+                    .filter(|s| !s.saturated)
+                    .collect::<Vec<_>>();
+                let pool = if unsaturated.len() >= 3 {
+                    unsaturated
+                } else {
+                    ranked
+                };
+                summarize(&pool, params.measurement_average)
+            }
+        };
+        result.average_hfr = hfr;
+        result.average_fwhm = fwhm;
+    }
+    result
+}
+
+/// [`detect_stars_hocus_focus`] within N.I.N.A.'s autofocus crop.
+fn detect_in_autofocus_region(
+    data: &[u16],
+    width: usize,
+    height: usize,
+    params: &HocusFocusParams,
+) -> HocusFocusDetectionResult {
+    let Some(region) = AutofocusRegion::new(params) else {
+        return detect_whole_frame(data, width, height, params, None);
+    };
+    // HocusFocus crops at native resolution, before anything else, and
+    // reports positions in the full frame.
+    let (x0, y0, w, h) = region.outer.pixels_floor(width, height);
+    if w < 16 || h < 16 {
+        return detect_whole_frame(data, width, height, params, None);
+    }
+    let cropped = (y0..y0 + h)
+        .flat_map(|y| data[y * width + x0..y * width + x0 + w].iter().copied())
+        .collect::<Vec<_>>();
+    // The inner region stays out of the search: in the cropped frame's
+    // pixels for clearing structures (HocusFocus scales the full-frame
+    // ratios by the cropped size), and as the full frame's rectangle for
+    // dropping stars whose box touches it.
+    let inner = region.inner.map(|inner| crate::hocus_focus_v4::InnerCrop {
+        ratios: inner,
+        excluded: {
+            let (ix, iy, iw, ih) = inner.pixels_round(width, height);
+            (
+                ix as f64 - x0 as f64,
+                iy as f64 - y0 as f64,
+                iw as f64,
+                ih as f64,
+            )
+        },
+    });
+    let mut result = detect_whole_frame(&cropped, w, h, params, inner);
+    for star in &mut result.stars {
+        star.position = (star.position.0 + x0 as f64, star.position.1 + y0 as f64);
+        if let Some(psf) = &mut star.psf_model {
+            psf.x0 += x0 as f64;
+            psf.y0 += y0 as f64;
+        }
+    }
+    result
+}
+
+/// A centred rectangle as fractions of the frame: start and size.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CentredRatio {
+    start: f64,
+    size: f64,
+}
+
+impl CentredRatio {
+    fn new(ratio: f64) -> Self {
+        Self {
+            start: (1.0 - ratio) / 2.0,
+            size: ratio,
+        }
+    }
+
+    /// HocusFocus's ROI rectangle: floored start, truncated size.
+    pub(crate) fn pixels_floor(&self, width: usize, height: usize) -> (usize, usize, usize, usize) {
+        (
+            (width as f64 * self.start).floor() as usize,
+            (height as f64 * self.start).floor() as usize,
+            (width as f64 * self.size) as usize,
+            (height as f64 * self.size) as usize,
+        )
+    }
+
+    /// HocusFocus's `RatioRect.ToRectangle`: every edge rounded.
+    fn pixels_round(&self, width: usize, height: usize) -> (usize, usize, usize, usize) {
+        (
+            (self.start * width as f64).round() as usize,
+            (self.start * height as f64).round() as usize,
+            (self.size * width as f64).round() as usize,
+            (self.size * height as f64).round() as usize,
+        )
+    }
+}
+
+/// HocusFocus's `StarDetectionRegion.FromStarDetectionParams` for the
+/// crop ratios N.I.N.A. passes.
+struct AutofocusRegion {
+    outer: CentredRatio,
+    inner: Option<CentredRatio>,
+}
+
+impl AutofocusRegion {
+    fn new(params: &HocusFocusParams) -> Option<Self> {
+        let (inner, outer) = (
+            params.autofocus_inner_crop_ratio,
+            params.autofocus_outer_crop_ratio,
+        );
+        if !(inner < 1.0 && outer > 0.0) {
+            return None;
+        }
+        Some(Self {
+            outer: CentredRatio::new(if outer >= 1.0 { inner } else { outer }),
+            inner: (outer < 1.0).then(|| CentredRatio::new(inner)),
+        })
+    }
+}
+
+/// [`detect_stars_hocus_focus`] on the frame or crop it is given.
+fn detect_whole_frame(
+    data: &[u16],
+    width: usize,
+    height: usize,
+    params: &HocusFocusParams,
+    inner: Option<crate::hocus_focus_v4::InnerCrop>,
+) -> HocusFocusDetectionResult {
     // Step 1: Apply hot pixel filtering if enabled. Always at native
     // resolution — a binned average would smear hot pixels into their
     // neighbours instead of removing them.
@@ -473,12 +644,13 @@ pub fn detect_stars_hocus_focus(
         let binned_width = width / bin;
         let binned_height = height / bin;
         let binned = bin_average(&working_data, width, binned_width, binned_height, bin);
-        let mut result = detect_on_prepared(&binned, binned_width, binned_height, params);
+        let inner = inner.map(|crop| crop.binned(bin));
+        let mut result = detect_on_prepared(&binned, binned_width, binned_height, params, inner);
         rescale_result_to_native(&mut result, bin);
         return result;
     }
 
-    detect_on_prepared(&working_data, width, height, params)
+    detect_on_prepared(&working_data, width, height, params, inner)
 }
 
 /// The sensitivity floor the adaptive ladder relaxes to: the calibrated
@@ -632,9 +804,10 @@ fn detect_on_prepared(
     width: usize,
     height: usize,
     params: &HocusFocusParams,
+    inner: Option<crate::hocus_focus_v4::InnerCrop>,
 ) -> HocusFocusDetectionResult {
     if params.version == HocusFocusVersion::V4 {
-        let found = crate::hocus_focus_v4::detect(data, width, height, params);
+        let found = crate::hocus_focus_v4::detect(data, width, height, params, inner);
         return HocusFocusDetectionResult {
             stars: found.stars,
             average_hfr: found.average_hfr,

@@ -39,11 +39,35 @@ pub(crate) struct V4Result {
 }
 
 /// Run HocusFocus 4's detector on hot-pixel-filtered `data`.
+/// The inner region an autofocus outer crop leaves out of the search.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct InnerCrop {
+    /// The full frame's inner-crop fractions, which HocusFocus scales by the
+    /// cropped frame's size to clear structures.
+    pub ratios: crate::hocus_focus_star_detection::CentredRatio,
+    /// The full frame's inner rectangle in this frame's pixels
+    /// (x, y, width, height); a star whose box touches it is dropped.
+    pub excluded: (f64, f64, f64, f64),
+}
+
+impl InnerCrop {
+    /// The same crop for a frame binned by `factor`.
+    pub(crate) fn binned(self, factor: usize) -> Self {
+        let f = factor as f64;
+        let (x, y, w, h) = self.excluded;
+        Self {
+            ratios: self.ratios,
+            excluded: (x / f, y / f, w / f, h / f),
+        }
+    }
+}
+
 pub(crate) fn detect(
     data: &[u16],
     width: usize,
     height: usize,
     params: &HocusFocusParams,
+    inner: Option<InnerCrop>,
 ) -> V4Result {
     let mut src: Vec<f32> = data
         .par_iter()
@@ -98,6 +122,15 @@ pub(crate) fn detect(
                 .collect()
         }
     };
+    let mut binary = binary;
+    if let Some(crop) = inner {
+        let (x0, y0, w, h) = crop.ratios.pixels_floor(width, height);
+        for y in y0..(y0 + h).min(height) {
+            for value in &mut binary[y * width + x0.min(width)..y * width + (x0 + w).min(width)] {
+                *value = false;
+            }
+        }
+    }
     let candidates = if params.connected_components {
         connected_regions(&binary, width, height)
     } else {
@@ -114,6 +147,16 @@ pub(crate) fn detect(
     let rejected = std::sync::Mutex::new([0usize; 10]);
     let mut stars: Vec<HocusFocusStar> = candidates
         .par_iter()
+        .filter(|candidate| {
+            // HocusFocus's OutsideROI: a star whose box is inside or
+            // touches the inner region is not counted.
+            inner.is_none_or(|crop| {
+                let (ex, ey, ew, eh) = crop.excluded;
+                let (bx, by, bw, bh) = candidate.bounds;
+                let (bx, by, bw, bh) = (bx as f64, by as f64, bw as f64, bh as f64);
+                bx + bw <= ex || ex + ew <= bx || by + bh <= ey || ey + eh <= by
+            })
+        })
         .filter_map(|candidate| {
             evaluate(&src, data, width, height, candidate, params, sigma)
                 .map_err(|gate| {
@@ -146,7 +189,7 @@ pub(crate) fn detect(
 
 /// HocusFocus's frame HFR and FWHM: over unsaturated stars when at least
 /// three remain, the median or the outlier-trimmed mean.
-fn summarize(stars: &[HocusFocusStar], params: &HocusFocusParams) -> (f64, f64) {
+pub(crate) fn summarize(stars: &[HocusFocusStar], params: &HocusFocusParams) -> (f64, f64) {
     let unsaturated = stars.iter().filter(|s| !s.saturated).collect::<Vec<_>>();
     let pool = if unsaturated.len() >= 3 {
         unsaturated
@@ -1063,6 +1106,117 @@ fn measure_hfr(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 600 × 400 field of 54 σ = 2 stars on a noisy sky, with their
+    /// centres.
+    fn star_field() -> (Vec<u16>, Vec<(f64, f64)>) {
+        let (width, height, sigma) = (600usize, 400usize, 2.0f64);
+        let mut seed = 7u64;
+        let mut next = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut image = (0..width * height)
+            .map(|_| 1000.0 + 30.0 * (next() + next() + next() - 1.5))
+            .collect::<Vec<f64>>();
+        let mut centres = Vec::new();
+        for row in 0..6 {
+            for column in 0..9 {
+                let (cx, cy) = (
+                    40.0 + column as f64 * 65.0 + next(),
+                    40.0 + row as f64 * 64.0 + next(),
+                );
+                let peak = 3000.0 + 20000.0 * next();
+                for y in (cy as usize - 14)..(cy as usize + 14) {
+                    for x in (cx as usize - 14)..(cx as usize + 14) {
+                        let d2 = (x as f64 - cx).powi(2) + (y as f64 - cy).powi(2);
+                        image[y * width + x] += peak * (-d2 / (2.0 * sigma * sigma)).exp();
+                    }
+                }
+                centres.push((cx, cy));
+            }
+        }
+        let data = image.into_iter().map(|v| v.round() as u16).collect();
+        (data, centres)
+    }
+
+    #[test]
+    fn an_autofocus_crop_limits_detection_to_its_region() {
+        let (data, centres) = star_field();
+        let detect = |inner: f64, outer: f64| {
+            crate::hocus_focus_star_detection::detect_stars_hocus_focus(
+                &data,
+                600,
+                400,
+                &HocusFocusParams {
+                    autofocus_inner_crop_ratio: inner,
+                    autofocus_outer_crop_ratio: outer,
+                    ..HocusFocusParams::v4()
+                },
+            )
+        };
+        let whole = detect(1.0, 1.0);
+        // An inner ratio alone: only the centred half of each side, with
+        // positions still in the full frame.
+        let centre = detect(0.5, 1.0);
+        let inside =
+            |&(x, y): &(f64, f64)| (150.0..450.0).contains(&x) && (100.0..300.0).contains(&y);
+        assert!(
+            centre.stars.iter().all(|s| inside(&s.position)),
+            "{:?}",
+            centre.stars.iter().map(|s| s.position).collect::<Vec<_>>()
+        );
+        // Stars whose blob reaches the crop's edge are border stars there.
+        let well_inside =
+            |&(x, y): &(f64, f64)| (162.0..438.0).contains(&x) && (112.0..288.0).contains(&y);
+        let expected = centres.iter().filter(|c| well_inside(c)).count();
+        assert!(
+            centre.stars.len() + 2 >= expected && centre.stars.len() <= expected,
+            "{} of {expected}",
+            centre.stars.len()
+        );
+        assert!(centre.stars.iter().all(|s| {
+            centres
+                .iter()
+                .any(|c| (c.0 - s.position.0).abs() < 0.5 && (c.1 - s.position.1).abs() < 0.5)
+        }));
+        // Outer 0.9 with inner 0.5: the ring between them.
+        let ring = detect(0.5, 0.9);
+        assert!(ring.stars.iter().all(|s| !inside(&s.position)));
+        assert!(ring.stars.len() + centre.stars.len() <= whole.stars.len());
+        assert!(ring.stars.len() > whole.stars.len() / 2);
+    }
+
+    #[test]
+    fn the_brightest_stars_give_the_frame_hfr_but_all_count() {
+        let (data, _) = star_field();
+        let detect = |n: usize| {
+            crate::hocus_focus_star_detection::detect_stars_hocus_focus(
+                &data,
+                600,
+                400,
+                &HocusFocusParams {
+                    autofocus_brightest_stars: n,
+                    ..HocusFocusParams::v4()
+                },
+            )
+        };
+        let all = detect(0);
+        let top = detect(5);
+        assert_eq!(top.stars.len(), all.stars.len());
+        // The frame's HFR is the median of the five ranked first by
+        // 0.3 HFR + 0.7 mean brightness.
+        let score = |s: &HocusFocusStar| s.hfr * 0.3 + s.flux / SCALE / s.pixel_count as f64 * 0.7;
+        let mut ranked = all.stars.iter().collect::<Vec<_>>();
+        ranked.sort_by(|a, b| score(b).total_cmp(&score(a)));
+        let mut hfrs = ranked[..5].iter().map(|s| s.hfr).collect::<Vec<_>>();
+        hfrs.sort_by(f64::total_cmp);
+        assert_eq!(top.average_hfr, hfrs[2]);
+        assert_ne!(top.average_hfr, all.average_hfr);
+        assert_eq!(detect(1000).average_hfr, all.average_hfr);
+    }
 
     #[test]
     fn finds_and_measures_a_star_field() {
