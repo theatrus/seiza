@@ -1,5 +1,6 @@
-"""A small synthetic corpus laid out as the telescope corpus is: one night of
-lights whose seeing worsens as the night goes on, and bias and flat masters
+"""A small synthetic corpus laid out as the telescope corpus is: a night of
+lights whose seeing worsens as the night goes on, or several nights of the
+same object, and bias and flat masters
 that Seiza builds into a calibration library. The tests run every pass on
 it, and it tries the passes without telescope data. Writing it needs
 astropy, from the `test` extra.
@@ -64,23 +65,27 @@ def star_field(rng: np.random.Generator, sigma: float, shift: tuple[float, float
     return image + rng.normal(0.0, 8.0, image.shape)
 
 
-def build_corpus(root: Path) -> Path:
+def build_corpus(root: Path, *, nights: int = 1) -> Path:
     """Write the corpus under `root`: `telescopes/` for `--corpus`,
     `library/` for `--library`, and an empty `catalogs/` for
-    `--catalog-dir`. Returns `root`."""
+    `--catalog-dir`; `nights` nights of the one object, a day apart, each
+    pointed a little differently. Returns `root`."""
     rng = np.random.default_rng(5)
-    lights = root / LIGHTS / "2026-01-09" / "LIGHT"
-    for index in range(FRAMES):
-        when = START + timedelta(minutes=2 * index)
-        header = common_header("LIGHT", when, 60.0)
-        header["FILTER"] = "L"
-        header["OBJECT"] = "Test Nebula"
-        header["RA"] = 83.8
-        header["DEC"] = -5.4
-        # Seeing worsens through the night.
-        sigma = 1.6 + 2.0 * index / (FRAMES - 1)
-        shift = (rng.uniform(-3, 3), rng.uniform(-3, 3))
-        write(lights / f"light_{index:03d}.fits", star_field(rng, sigma, shift) + 30.0, header)
+    for night in range(nights):
+        started = START + timedelta(days=night)
+        lights = root / LIGHTS / (started - timedelta(hours=12)).strftime("%Y-%m-%d") / "LIGHT"
+        pointing = (rng.uniform(-6, 6), rng.uniform(-6, 6)) if night else (0.0, 0.0)
+        for index in range(FRAMES):
+            when = started + timedelta(minutes=2 * index)
+            header = common_header("LIGHT", when, 60.0)
+            header["FILTER"] = "L"
+            header["OBJECT"] = "Test Nebula"
+            header["RA"] = 83.8
+            header["DEC"] = -5.4
+            # Seeing worsens through the night.
+            sigma = 1.6 + 2.0 * index / (FRAMES - 1)
+            shift = (pointing[0] + rng.uniform(-3, 3), pointing[1] + rng.uniform(-3, 3))
+            write(lights / f"light_{index:03d}.fits", star_field(rng, sigma, shift) + 30.0, header)
 
     raw = root / "raw"
     bias_paths, flat_paths = [], []
