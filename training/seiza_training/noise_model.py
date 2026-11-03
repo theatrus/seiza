@@ -731,30 +731,26 @@ OUTLIER_TEST_COUNT = 4.0
 PEAK_APERTURE, PEAK_ANNULUS, PEAK_SEPARATION = 3, 10, 5
 
 
+def box_filter(image: np.ndarray, radius: int, pool: Callable) -> np.ndarray:
+    """`pool` over the (2·radius + 1)² box about each pixel, the edge pixels
+    repeated outward, on the training device: a measure's whole-image
+    filters cost little there, and most of an evaluation on the CPU."""
+    pixels = torch.from_numpy(np.ascontiguousarray(image, dtype=np.float32))[None, None].to(device())
+    padded = torch.nn.functional.pad(pixels, (radius, radius, radius, radius), mode="replicate")
+    return pool(padded, 2 * radius + 1, stride=1)[0, 0].cpu().numpy()
+
+
 def box_blur(image: np.ndarray, radius: int) -> np.ndarray:
     """The mean over the (2·radius + 1)² box about each pixel, the edge
     pixels repeated outward. `image` must be finite."""
     if radius == 0:
         return image
-    side = 2 * radius + 1
-    blurred = np.pad(image.astype(np.float64), radius, mode="edge")
-    for axis in (0, 1):
-        total = np.insert(np.cumsum(blurred, axis=axis), 0, 0.0, axis=axis)
-        blurred = (total[side:] - total[:-side]) / side if axis == 0 else (total[:, side:] - total[:, :-side]) / side
-    return blurred.astype(np.float32)
+    return box_filter(image, radius, torch.nn.functional.avg_pool2d)
 
 
 def box_max(image: np.ndarray, radius: int) -> np.ndarray:
     """The largest value in the (2·radius + 1)² box about each pixel."""
-    height, width = image.shape
-    padded = np.pad(image, radius, mode="edge")
-    rows = padded[:height]
-    for shift in range(1, 2 * radius + 1):
-        rows = np.maximum(rows, padded[shift:shift + height])
-    largest = rows[:, :width]
-    for shift in range(1, 2 * radius + 1):
-        largest = np.maximum(largest, rows[:, shift:shift + width])
-    return largest
+    return box_filter(image, radius, torch.nn.functional.max_pool2d)
 
 
 def photometry(image: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
