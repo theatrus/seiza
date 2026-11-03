@@ -22,7 +22,8 @@
 //! `auto` by the frame's date), `HF_CLASS` (`wide`, `standard`, `long`)
 //! overrides the rig class, `HF_WALKER` takes candidates with the older
 //! walk, `HF_INNER_CROP` and `HF_OUTER_CROP` set N.I.N.A.'s autofocus crop
-//! ratios, `HF_NC` sets the noise clipping multiplier, `HF_BIN` detection
+//! ratios, `HF_AF_STARS` N.I.N.A.'s brightest-stars count, `HF_MIN_BOX`
+//! and `HF_SAMPLE` the smallest star box and HFR sampling, `HF_NC` sets the noise clipping multiplier, `HF_BIN` detection
 //! binning, and `HF_NOISE_RADIUS`, `HF_SENSITIVITY`, `HF_MIN_HFR`,
 //! `HF_LAYERS` and `HF_STRUCTURE=atrous` override the preset.
 //! `NINA_PARITY_DEBUG` prints each frame's HFR spread and the detector's
@@ -113,6 +114,15 @@ fn measure(detector: &str, path: &Path) -> Result<Measured, String> {
         }
         if let Ok(v) = std::env::var("HF_SENSITIVITY_V4") {
             params.sensitivity = v.parse().unwrap();
+        }
+        if let Ok(v) = std::env::var("HF_AF_STARS") {
+            params.autofocus_brightest_stars = v.parse().unwrap();
+        }
+        if let Ok(v) = std::env::var("HF_MIN_BOX") {
+            params.min_star_size = v.parse().unwrap();
+        }
+        if let Ok(v) = std::env::var("HF_SAMPLE") {
+            params.pixel_sample_size = v.parse().unwrap();
         }
         if let Ok(v) = std::env::var("HF_INNER_CROP") {
             params.autofocus_inner_crop_ratio = v.parse().unwrap();

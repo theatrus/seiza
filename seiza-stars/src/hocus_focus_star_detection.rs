@@ -203,6 +203,13 @@ pub struct HocusFocusParams {
     /// fraction covers, outside the inner region. [`HocusFocusVersion::V3`]
     /// crops to the outer region but does not leave the inner one out.
     pub autofocus_outer_crop_ratio: f64,
+    /// N.I.N.A.'s "use brightest n stars" for autofocus, which N.I.N.A.
+    /// also passes to every star detection: above 0, the frame's HFR and
+    /// FWHM come from the `n` stars HocusFocus ranks first by
+    /// `0.3 × HFR + 0.7 × mean brightness` (brightness on its 0..1 scale, so
+    /// in practice the largest), while every star still counts as
+    /// detected. 0 uses them all.
+    pub autofocus_brightest_stars: usize,
     /// Take candidates as 8-connected regions (HocusFocus 4.0.0.16 on)
     /// rather than with the older box-growing walk.
     pub connected_components: bool,
@@ -422,6 +429,7 @@ impl Default for HocusFocusParams {
             measurement_noise_reduction: false,
             autofocus_inner_crop_ratio: 1.0,
             autofocus_outer_crop_ratio: 1.0,
+            autofocus_brightest_stars: 0,
             keep_saturated_stars: false,
             psf_type: PSFType::None, // No PSF fitting by default
         }
@@ -465,6 +473,49 @@ struct KappaSigmaResult {
 
 /// Main star detection function using HocusFocus algorithm
 pub fn detect_stars_hocus_focus(
+    data: &[u16],
+    width: usize,
+    height: usize,
+    params: &HocusFocusParams,
+) -> HocusFocusDetectionResult {
+    let mut result = detect_in_autofocus_region(data, width, height, params);
+    let n = params.autofocus_brightest_stars;
+    if n > 0 && result.stars.len() > n {
+        let mut ranked = result.stars.iter().collect::<Vec<_>>();
+        // HocusFocus's MeanBrightness: total flux over the region's pixels,
+        // on its 0..1 scale.
+        let score = |s: &&HocusFocusStar| {
+            s.hfr * 0.3 + s.flux / 65536.0 / s.pixel_count.max(1) as f64 * 0.7
+        };
+        ranked.sort_by(|a, b| score(b).total_cmp(&score(a)));
+        ranked.truncate(n);
+        let (hfr, fwhm) = match params.version {
+            HocusFocusVersion::V4 => {
+                let top = ranked.into_iter().cloned().collect::<Vec<_>>();
+                crate::hocus_focus_v4::summarize(&top, params)
+            }
+            HocusFocusVersion::V3 => {
+                let unsaturated = ranked
+                    .iter()
+                    .copied()
+                    .filter(|s| !s.saturated)
+                    .collect::<Vec<_>>();
+                let pool = if unsaturated.len() >= 3 {
+                    unsaturated
+                } else {
+                    ranked
+                };
+                summarize(&pool, params.measurement_average)
+            }
+        };
+        result.average_hfr = hfr;
+        result.average_fwhm = fwhm;
+    }
+    result
+}
+
+/// [`detect_stars_hocus_focus`] within N.I.N.A.'s autofocus crop.
+fn detect_in_autofocus_region(
     data: &[u16],
     width: usize,
     height: usize,

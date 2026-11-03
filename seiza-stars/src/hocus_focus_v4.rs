@@ -189,7 +189,7 @@ pub(crate) fn detect(
 
 /// HocusFocus's frame HFR and FWHM: over unsaturated stars when at least
 /// three remain, the median or the outlier-trimmed mean.
-fn summarize(stars: &[HocusFocusStar], params: &HocusFocusParams) -> (f64, f64) {
+pub(crate) fn summarize(stars: &[HocusFocusStar], params: &HocusFocusParams) -> (f64, f64) {
     let unsaturated = stars.iter().filter(|s| !s.saturated).collect::<Vec<_>>();
     let pool = if unsaturated.len() >= 3 {
         unsaturated
@@ -1187,6 +1187,35 @@ mod tests {
         assert!(ring.stars.iter().all(|s| !inside(&s.position)));
         assert!(ring.stars.len() + centre.stars.len() <= whole.stars.len());
         assert!(ring.stars.len() > whole.stars.len() / 2);
+    }
+
+    #[test]
+    fn the_brightest_stars_give_the_frame_hfr_but_all_count() {
+        let (data, _) = star_field();
+        let detect = |n: usize| {
+            crate::hocus_focus_star_detection::detect_stars_hocus_focus(
+                &data,
+                600,
+                400,
+                &HocusFocusParams {
+                    autofocus_brightest_stars: n,
+                    ..HocusFocusParams::v4()
+                },
+            )
+        };
+        let all = detect(0);
+        let top = detect(5);
+        assert_eq!(top.stars.len(), all.stars.len());
+        // The frame's HFR is the median of the five ranked first by
+        // 0.3 HFR + 0.7 mean brightness.
+        let score = |s: &HocusFocusStar| s.hfr * 0.3 + s.flux / SCALE / s.pixel_count as f64 * 0.7;
+        let mut ranked = all.stars.iter().collect::<Vec<_>>();
+        ranked.sort_by(|a, b| score(b).total_cmp(&score(a)));
+        let mut hfrs = ranked[..5].iter().map(|s| s.hfr).collect::<Vec<_>>();
+        hfrs.sort_by(f64::total_cmp);
+        assert_eq!(top.average_hfr, hfrs[2]);
+        assert_ne!(top.average_hfr, all.average_hfr);
+        assert_eq!(detect(1000).average_hfr, all.average_hfr);
     }
 
     #[test]
