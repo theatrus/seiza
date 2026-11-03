@@ -13,7 +13,8 @@
 //!   PSF Guard picks them.
 //!
 //! N.I.N.A.'s profile settings come from the environment:
-//! `NINA_SENSITIVITY` (`normal`, `high`, `highest`), `NINA_NOISE_REDUCTION`
+//! `NINA_SENSITIVITY` (`normal`, `high` (the default, as in N.I.N.A.),
+//! `highest`), `NINA_NOISE_REDUCTION`
 //! (`none`, `normal`, `high`, `highest`, `median`), `NINA_STRETCH` (the
 //! autostretch factor, 0.2) and `NINA_CLIP` (black clipping, −2.8). High
 //! sensitivity takes its image scale from the XPIXSZ and FOCALLEN headers.
@@ -27,7 +28,7 @@
 //! diagnostics on standard error.
 //!
 //! ```sh
-//! NINA_SENSITIVITY=high cargo run --release -p seiza-stars \
+//! cargo run --release -p seiza-stars \
 //!     --example nina_parity -- nina31 < manifest.txt
 //! ```
 
@@ -153,9 +154,9 @@ fn measure(detector: &str, path: &Path) -> Result<Measured, String> {
     let stretched = stretch_u16_to_u16(&data, &stats, &stretch);
     let params = StarDetectionParams {
         sensitivity: match std::env::var("NINA_SENSITIVITY").as_deref() {
-            Ok("high") => StarSensitivity::High,
+            Ok("normal") => StarSensitivity::Normal,
             Ok("highest") => StarSensitivity::Highest,
-            _ => StarSensitivity::Normal,
+            _ => StarSensitivity::High,
         },
         noise_reduction: match std::env::var("NINA_NOISE_REDUCTION").as_deref() {
             Ok("normal") => NoiseReduction::Normal,

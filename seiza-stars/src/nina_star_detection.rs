@@ -35,17 +35,24 @@ pub struct StarDetectionParams {
     pub outer_crop_ratio: f64,
     /// Fraction of the frame's width and height the inner crop covers.
     pub inner_crop_ratio: f64,
-    /// Image scale in arcseconds per pixel. [`StarSensitivity::High`] picks
-    /// its resize from it; without it, N.I.N.A. halves the image.
+    /// Image scale in arcseconds per pixel, `206.265 × XPIXSZ / FOCALLEN`
+    /// with binning included, as N.I.N.A. computes it.
+    /// [`StarSensitivity::High`] shrinks images wider than 1552 pixels to a
+    /// quarter below 0.5″/px, a third from 0.5 to just under 1.5″/px, a half
+    /// at exactly 1.5″/px, and `max(2/3, 1552 / width)` above; without a
+    /// scale, N.I.N.A. halves the image.
     pub image_scale_arcsec: Option<f64>,
     /// Which N.I.N.A. version's star measurement to run.
     pub measurement: MeasurementVersion,
 }
 
+/// N.I.N.A.'s profile defaults since 3.0: High sensitivity, no noise
+/// reduction. Give High the frame's [`StarDetectionParams::image_scale_arcsec`];
+/// without it N.I.N.A., and this port, halve the image.
 impl Default for StarDetectionParams {
     fn default() -> Self {
         Self {
-            sensitivity: StarSensitivity::Normal,
+            sensitivity: StarSensitivity::High,
             noise_reduction: NoiseReduction::None,
             use_roi: false,
             outer_crop_ratio: 1.0,
@@ -973,6 +980,28 @@ mod tests {
     fn test_eccentricity() {
         assert_eq!(box_eccentricity(10.0, 10.0), 0.0);
         assert!(box_eccentricity(10.0, 5.0) > 0.8);
+    }
+
+    #[test]
+    fn high_sensitivity_resizes_by_image_scale() {
+        let factor = |scale: Option<f64>, width: usize| {
+            let params = StarDetectionParams {
+                image_scale_arcsec: scale,
+                ..StarDetectionParams::default()
+            };
+            initial_state(&[], width, 100, &params).resize_factor
+        };
+        assert_eq!(factor(Some(0.4), 6248), 0.25);
+        assert_eq!(factor(Some(1.035), 6248), 1.0 / 3.0);
+        assert_eq!(factor(Some(1.5), 6248), 0.5);
+        assert_eq!(factor(Some(2.0), 6248), 2.0 / 3.0);
+        assert_eq!(factor(Some(2.0), 9576), 2.0 / 3.0);
+        assert_eq!(factor(None, 6248), 0.5);
+        assert_eq!(factor(None, 1500), 1.0);
+        assert_eq!(
+            StarDetectionParams::default().sensitivity,
+            StarSensitivity::High
+        );
     }
 
     #[test]
