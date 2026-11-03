@@ -886,8 +886,12 @@ validation sets, from the held-out telescope and from a training set, mono
 narrowband and broadband, bright structure and the faintest. For each, one
 sheet takes a 4-frame half as the input and the night's deep stack as the
 reference. The other takes the deep stack itself, with nothing deeper, and
-shows in place of a reference the noise taken out, magnified, where any
-structure is detail the run removed. Each row is a 1:1 crop. The panels
+shows in place of a reference the noise taken out divided by each pixel's
+own noise. Where a run takes out only noise that panel is even grain at
+every brightness, so any shape in it is signal the run changed; magnified
+without the division, a bright core's own photon noise looks like damage.
+An object stacked over many nights adds a third sheet, the reference
+night's 4-frame half against the whole stack. Each row is a 1:1 crop. The panels
 show the input, then everything the run finds taken out, then the same
 fixed shares kept, all under the reference's stretch. The shares never
 change, so one run's sheet can be laid beside another's. A night's deep

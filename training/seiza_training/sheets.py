@@ -11,10 +11,10 @@ The images are listed in `STORE/sheets/noise.json`:
 The input is a stack with its variance and coverage: a noise half, a deep
 stack or a deep stack's half. Each crop is a row: the input; the run with
 all the noise it finds taken out; with each of `SETTINGS`' shares kept;
-and the reference, a deeper stack of the same frames' night, or, when
-nothing deeper is given, the noise taken out, magnified, in which any
-structure is detail the run removed. Every panel takes the reference's
-stretch, or the input's when there is none.
+and the reference, a deeper stack on the same grid, or, when nothing
+deeper is given, the noise taken out divided by each pixel's own noise, in
+which any shape is something other than noise the run changed. Every other
+panel takes the reference's stretch, or the input's when there is none.
 
 Sheets go to `STORE/models/noise/<run>/sheets/<name>.png` and are listed in
 the run's record. `train-noise` makes them after every run; `sheet-noise`
@@ -38,8 +38,10 @@ from .unet import ResidualUNet
 SPEC = Path("sheets") / "noise.json"
 # The side of a crop, in pixels, unless a sheet gives its own.
 SIDE = 800
-# How much the noise taken out is magnified when there is no reference.
-MAGNIFY = 4.0
+# Without a reference, the noise taken out is shown in units of each
+# pixel's own noise, from −SPAN to +SPAN: where a run takes out only noise
+# it is even grain at every brightness, and anything else shows as shape.
+SPAN = 3.0
 # The shares of the noise kept, besides none, on every sheet: the same for
 # every run, so sheets compare.
 SETTINGS = (
@@ -113,7 +115,7 @@ def render(
     frames = len(loads(source["frames"]))
     labels = [f"Input: {frames} frames", "All noise removed", *(label for label, _ in SETTINGS)]
     labels.append(f"Reference: {len(loads(reference_product['frames']))} frames" if reference is not None
-                  else f"Noise taken out, ×{MAGNIFY:g}")
+                  else f"Noise taken out ÷ each pixel's noise, ±{SPAN:g}σ")
     rows = []
     for crop in sheet["crops"]:
         x, y = min(crop["x"], width - side), min(crop["y"], height - side)
@@ -127,7 +129,9 @@ def render(
         if reference is not None:
             last = look(reference[y:y + side, x:x + side], reference_background)
         else:
-            last = look(image_background - MAGNIFY * residual[inner], image_background)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                taken = -residual[inner] / sigma[y:y + side, x:x + side]
+            last = np.clip(np.nan_to_num(0.5 + taken / (2 * SPAN), nan=0.5), 0.0, 1.0)
         rows.append((f"{crop['label']}: 1:1 crop at x {x}, y {y}",
                      [look(panel, image_background) for panel in panels] + [last]))
 
