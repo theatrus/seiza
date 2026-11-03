@@ -7,9 +7,11 @@
 //!   N.I.N.A. by George Hilios: à trous wavelet structure removal, kappa-sigma
 //!   noise thresholds, hot-pixel filtering, and multi-criteria validation,
 //!   with optional Gaussian/Moffat PSF fitting per star.
-//! - [`nina_star_detection`] — a port of N.I.N.A.'s standard detector, kept
-//!   because its star counts and HFR values are comparable with what N.I.N.A.
-//!   itself recorded into an imaging catalog.
+//! - [`nina_star_detection`] — a port of N.I.N.A.'s built-in detector and
+//!   the Accord.NET filters it runs ([`accord_imaging`]), kept because its
+//!   star counts and HFR values are comparable with what N.I.N.A. itself
+//!   recorded into an imaging catalog. It measures stars as N.I.N.A. 3.1,
+//!   3.2 or 3.3 does.
 //!
 //! These are *measurement* detectors: they exist to produce trustworthy star
 //! counts, HFR, FWHM, and eccentricity for quality grading. The fast

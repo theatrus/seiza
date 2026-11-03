@@ -272,8 +272,6 @@ fn run(pool: &rayon::ThreadPool) -> Vec<(&'static str, Vec<u64>)> {
             .collect::<Vec<u8>>();
         let mut counter = BlobCounter::new();
         counter.process_image(&binary, WIDTH, HEIGHT);
-        // The counter lists blobs in hash map order, which changes from run
-        // to run whatever the pool, so they are compared sorted.
         let mut rectangles = counter
             .get_objects_information()
             .iter()
