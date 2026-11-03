@@ -36,6 +36,11 @@ synthetic ones to each input tile, resampled as registration resamples a
 frame, while the target keeps none, so the network learns to remove them;
 the empty sky, with outliers planted in it, measures how much of them a
 model leaves.
+
+A background thread builds each batch while the GPU trains on the one
+before, and on CUDA the network runs channels-last. Training can run the
+network in bfloat16 with the loss in float32; evaluation and export stay
+in float32.
 """
 
 from __future__ import annotations
@@ -43,10 +48,13 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import queue
 import random
+import threading
 import time
 import warnings
 import zlib
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -382,6 +390,45 @@ def batch_from(
     )
 
 
+class Prefetch:
+    """Batches from `make`, built up to `depth` ahead on one background
+    thread. One thread calls `make` in turn, so the batches, and the random
+    draws behind them, are those calling `make` in the loop would give."""
+
+    def __init__(self, make: Callable[[], Any], depth: int) -> None:
+        self.ready: queue.Queue = queue.Queue(maxsize=depth)
+        self.stopped = threading.Event()
+        self.thread = threading.Thread(target=self.fill, args=(make,), daemon=True)
+        self.thread.start()
+
+    def fill(self, make: Callable[[], Any]) -> None:
+        while not self.stopped.is_set():
+            try:
+                item = make()
+            except Exception as error:  # noqa: BLE001 - `get` raises it again
+                item = error
+            while not self.stopped.is_set():
+                try:
+                    self.ready.put(item, timeout=0.1)
+                    break
+                except queue.Full:
+                    pass
+            if isinstance(item, Exception):
+                return
+
+    def get(self) -> Any:
+        """The next batch, or the error that building it raised."""
+        item = self.ready.get()
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    def close(self) -> None:
+        self.stopped.set()
+        self.thread.join()
+
+
+PRECISIONS = ("fp32", "bf16")
 LOSS_WEIGHTS = ("core", "variance")
 
 
@@ -450,6 +497,8 @@ def train(
     huber_above: float = 0.0,
     structure_sampling: float = 0.0,
     outlier_count: float = 0.0,
+    precision: str = "fp32",
+    prefetch: int = 4,
 ) -> dict[str, Any]:
     """Train a noise model on the train split's pairs, evaluate it on the
     validation split's, export it to ONNX and record the run.
@@ -457,7 +506,12 @@ def train(
     `extra` is a second bank from `cut_windows`, of other targets for
     their inputs; it makes up `extra_fraction` of every batch, and the run
     records it under `extra_label`. `outlier_count` adds that many
-    synthetic outliers per 256 × 256 pixels to every input tile."""
+    synthetic outliers per 256 × 256 pixels to every input tile.
+    `precision` "bf16" runs the network in bfloat16 under autocast.
+    `prefetch` batches are built ahead on a background thread; 0 builds
+    each in turn, giving the same batches."""
+    if precision not in PRECISIONS:
+        raise ValueError(f"precision is one of {PRECISIONS}, not {precision!r}")
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
     chosen = pairs(manifest, "train", sets)
@@ -467,37 +521,55 @@ def train(
     banked = bank(store, chosen, seed=seed, noise_map=noise_map)
     bank_seconds = time.monotonic() - started
     where = device()
-    model = ResidualUNet(width=width, levels=levels).to(where)
+    cuda = where.type == "cuda"
+    layout = torch.channels_last if cuda else torch.contiguous_format
+    model = ResidualUNet(width=width, levels=levels).to(where, memory_format=layout)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     schedule = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=learning_rate, total_steps=steps, pct_start=0.05)
     history = []
-    started = time.monotonic()
-    running = 0.0
     extra_count = round(batch * extra_fraction) if extra is not None else 0
     odds = structure_odds(banked, structure_sampling)
     extra_odds = structure_odds(extra, structure_sampling) if extra is not None else None
-    for step in range(1, steps + 1):
+
+    def assemble() -> tuple[torch.Tensor, ...]:
         parts = [batch_from(banked, batch - extra_count, tile, rng, map_jitter=map_jitter, odds=odds,
                             outlier_count=outlier_count)]
         if extra_count:
             parts.append(batch_from(extra, extra_count, tile, rng, map_jitter=map_jitter, odds=extra_odds,
                                     outlier_count=outlier_count))
-        inputs, targets, references, sigmas = (torch.cat(values).to(where) for values in zip(*parts))
-        loss = loss_of(model, inputs, targets, references, sigmas, loss_weight, huber, huber_above)
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        optimizer.step()
-        schedule.step()
-        running += float(loss.detach())
-        if step % log_every == 0 or step == steps:
-            history.append({"step": step, "loss": running / log_every, "seconds": round(time.monotonic() - started, 1)})
-            print(f"train {name}: step {step} loss {running / log_every:.4f} ({time.monotonic() - started:.0f} s)", flush=True)
-            running = 0.0
+        tensors = tuple(torch.cat(values) for values in zip(*parts))
+        # Pinned, a batch copies to the GPU while it still trains.
+        return tuple(t.pin_memory() for t in tensors) if cuda else tensors
+
+    source = Prefetch(assemble, prefetch) if prefetch else None
+    started = time.monotonic()
+    # Summed on the device, so a step never waits for the GPU to finish.
+    running = torch.zeros((), device=where)
+    try:
+        for step in range(1, steps + 1):
+            tensors = source.get() if source else assemble()
+            inputs, targets, references, sigmas = (t.to(where, non_blocking=True) for t in tensors)
+            inputs = inputs.contiguous(memory_format=layout)
+            with torch.autocast(where.type, dtype=torch.bfloat16, enabled=precision == "bf16"):
+                loss = loss_of(model, inputs, targets, references, sigmas, loss_weight, huber, huber_above)
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            schedule.step()
+            running += loss.detach().float()
+            if step % log_every == 0 or step == steps:
+                mean = float(running) / log_every
+                history.append({"step": step, "loss": mean, "seconds": round(time.monotonic() - started, 1)})
+                print(f"train {name}: step {step} loss {mean:.4f} ({time.monotonic() - started:.0f} s)", flush=True)
+                running.zero_()
+    finally:
+        if source:
+            source.close()
     train_seconds = time.monotonic() - started
 
     directory = store.root / "models" / "noise" / name
     directory.mkdir(parents=True, exist_ok=True)
-    model = model.cpu().eval()
+    model = model.cpu().to(memory_format=torch.contiguous_format).eval()
     torch.save(model.state_dict(), directory / "weights.pt")
     # A margin of half the receptive field reproduces whole-image inference;
     # the cosine ramps over 32 more pixels.
@@ -517,7 +589,7 @@ def train(
                    "windows": int(len(banked["a"])), "core_sigma": CORE_SIGMA,
                    "loss_weight": loss_weight, "map_jitter": map_jitter, "noise_map": noise_map,
                    "huber": huber, "huber_above": huber_above, "structure_sampling": structure_sampling,
-                   "outliers": outlier_count,
+                   "outliers": outlier_count, "precision": precision, "prefetch": prefetch,
                    "extra": {"label": extra_label, "fraction": extra_fraction, "windows": int(len(extra["a"]))}
                    if extra is not None else None},
         "parameters": sum(p.numel() for p in model.parameters()),
