@@ -206,13 +206,19 @@ def bank(store: Store, chosen: list[dict[str, Any]], *, seed: int = 0, noise_map
 
 # The A halves of the deep stacks' pairs: a night's, and many nights'.
 DEEP_KINDS = ("deep-half-a", "multi-night-half-a")
+# Those a model trains on. A multi-night half holds whole nights, whose
+# seeing differs, so its target's stars are wider or narrower than its
+# input's and would teach a model to change them; it is only measured.
+DEEP_TRAINING_KINDS = ("deep-half-a",)
 
 
-def deep_pairs(manifest: Manifest, split: str, sets: set[str] | None = None) -> list[dict[str, Any]]:
-    """The pairs of halves of one split's deep stacks, a night's and many
-    nights': far less noisy than the noise pairs, with signal far further
-    above their noise."""
-    return [pair for kind in DEEP_KINDS for pair in pairs(manifest, split, sets, kind=kind)]
+def deep_pairs(
+    manifest: Manifest, split: str, sets: set[str] | None = None, *, kinds: tuple[str, ...] = DEEP_KINDS
+) -> list[dict[str, Any]]:
+    """The pairs of halves of one split's deep stacks, of `kinds`: far less
+    noisy than the noise pairs, with signal far further above their
+    noise."""
+    return [pair for kind in kinds for pair in pairs(manifest, split, sets, kind=kind)]
 
 
 def dark_noise_bank(

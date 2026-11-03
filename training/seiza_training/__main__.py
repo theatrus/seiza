@@ -101,7 +101,7 @@ def main(argv: list[str] | None = None) -> int:
     train.add_argument("--dark-noise-fraction", type=float, default=0.0,
                        help="this share of every batch from the dark-noise pairs, whose target is clean")
     train.add_argument("--deep-fraction", type=float, default=0.0,
-                       help="this share of every batch from the deep stacks' halves, a night's and many nights'")
+                       help="this share of every batch from the halves of each night's deep stack")
     train.add_argument("--outliers", type=float, default=0.0, dest="outlier_count",
                        help="add this many synthetic hot pixels, cold pixels and cosmic rays per 256 × 256 "
                             "pixels to every input tile, and none to its target")
@@ -226,13 +226,13 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
             source_map=source_map, again=arguments.again, limit=arguments.limit, keep_scratch=arguments.keep_scratch,
         )
     if command == "train-noise":
-        from .noise_model import bank, dark_noise_bank, deep_pairs, train
+        from .noise_model import DEEP_TRAINING_KINDS, bank, dark_noise_bank, deep_pairs, train
 
         extra = {}
         if arguments.dark_noise_fraction and arguments.deep_fraction:
             raise SystemExit("a run takes one second bank: --dark-noise-fraction or --deep-fraction")
         if arguments.deep_fraction:
-            chosen = deep_pairs(manifest, "train", only)
+            chosen = deep_pairs(manifest, "train", only, kinds=DEEP_TRAINING_KINDS)
             if not chosen:
                 raise SystemExit("no built deep-stack halves in the train split")
             extra = {
