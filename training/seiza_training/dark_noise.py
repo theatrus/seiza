@@ -1,10 +1,10 @@
 """Noise pairs with a known clean image, from dark frames.
 
 A noise pair's two halves both carry noise, so its target is right only
-on average. Here the target is a set's deep stack, and the input is the
-deep stack plus the noise a short stack of the same night would add: the
-noise of real dark frames, taken with the lights' camera settings, and the
-photon noise those frames lack.
+on average. Here the target is a stack of half a set's frames, and the
+input is a stack of the other half plus the noise a short stack of the same
+night would add: the noise of real dark frames, taken with the lights'
+camera settings, and the photon noise those frames lack.
 
 For each of `size` lights, the A half of one of the set's noise pairs:
 
@@ -16,8 +16,8 @@ For each of `size` lights, the A half of one of the set's noise pairs:
 - photon noise is drawn in the frame's own grid, white, scaled for the
   flat's vignetting. Its variance on the sky is the light's own noise less
   the dark's, each measured as the stacker weighs frames
-  (`seiza.frame_noise`); where the deep stack has signal above the sky, the
-  variance grows with it, at the gain the sky implies;
+  (`seiza.frame_noise`); where the input's half has signal above the sky,
+  the variance grows with it, at the gain the sky implies;
 - both are resampled by the light's own registration
   (`FrameDisposition.resample`), so the noise carries the correlation
   between neighbouring pixels that resampling gives a real stack, and
@@ -30,9 +30,16 @@ lights. Put through the same steps, the lights themselves give back their
 stacked half to within its background fit.
 
 So the input holds the hot pixels, read noise, random telegraph noise,
-amplifier glow and cosmic rays of the camera that took the lights. The
-deep stack keeps its own noise, a stack of every frame of the night, so
-the pairs use the smaller sizes, whose noise is many times the deep's.
+amplifier glow and cosmic rays of the camera that took the lights.
+
+The two halves deal the deep stack's frames alternately in capture order,
+so they share the night's seeing and sky but no frame's noise. Each keeps
+its own noise. Were the input made on the stack that is the target, that
+noise would be in both, and a model would be taught to keep a share of the
+noise it sees. The target's noise is instead independent of the input's,
+as a noise pair's B half is, and smaller. Each half holds at least
+`HALF_DEPTH` times the pair's frames, so its noise adds at most half the
+synthetic noise's again; the noise map counts both.
 
 Each product also keeps the noise of the same frames with sky photon noise
 only: added to a flat sky, it is an image with nothing in it, on which a
@@ -42,6 +49,7 @@ model must not make structure.
 from __future__ import annotations
 
 import hashlib
+import shutil
 import statistics
 import sys
 import tempfile
@@ -53,12 +61,16 @@ import numpy as np
 
 import seiza
 
-from .build import BAND_SCALE_PX, binned, record_product, stack_options
+from .build import BAND_SCALE_PX, binned, record_product, register, stack_options
 from .manifest import Manifest, dumps, loads
-from .store import Store, counts16, read_image, robust_sigma, versions
+from .measure import accepted_frames
+from .store import Store, counts16, read_image, robust_sigma, save_stack, stack_stats, versions
 
 # The A halves whose frames lend their registration, by size.
 SIZES = (8, 16)
+# Each half of the deep stack's frames holds at least this many times a
+# pair's frames.
+HALF_DEPTH = 2
 # A dark's exposure within this share of the lights', and its sensor
 # within this many degrees of the lights' median.
 EXPOSURE_TOLERANCE = 0.01
@@ -210,6 +222,49 @@ def check(noise: np.ndarray, a: np.ndarray, b: np.ndarray, deep: np.ndarray, a_f
     }
 
 
+def alternate(ordered: list[str]) -> tuple[list[str], list[str]]:
+    """Frames in capture order, dealt alternately into two halves."""
+    return ordered[0::2], ordered[1::2]
+
+
+def deep_halves(manifest: Manifest, store: Store, set_row: Any, deep_row: dict[str, Any]) -> tuple[dict, dict]:
+    """The deep stack's frames as two stacks, `{set}/deep-half/a` and `/b`,
+    dealt alternately in capture order and registered as the deep stack
+    was. Built once, and then read from the manifest."""
+    set_id = set_row["id"]
+    ids = (f"{set_id}/deep-half/a", f"{set_id}/deep-half/b")
+    found = [manifest.rows("SELECT * FROM products WHERE id = ? AND status = 'built'", (i,)) for i in ids]
+    if all(found):
+        return dict(found[0][0]), dict(found[1][0])
+    masters = loads(set_row["calibration"], {}).get("masters", {})
+    reference = loads(deep_row["versions"])["reference"]
+    in_deep = set(loads(deep_row["frames"]))
+    ordered = [row["path"] for row in accepted_frames(manifest, set_id) if row["path"] in in_deep]
+    samples = set_row["width"] * set_row["height"] * (set_row["channels"] or 1)
+    store.check_space(samples * 4 * len(ordered) * 17 // 16, samples * 2 * 12)
+    scratch = store.scratch / f"{set_id}-halves"
+    try:
+        # A set given a dark has no defect map, so its options are these.
+        stacker, dispositions = register(ordered, reference, stack_options(None), masters, scratch)
+        registered = {reference} if stacker.reference_integrated else set()
+        registered.update(str(d.source) for d in dispositions if d.accepted)
+        run_versions = {**versions(), "masters": masters, "reference": reference}
+        for half, frames, product_id in zip("ab", alternate([p for p in ordered if p in registered]), ids):
+            snapshot = stacker.reintegrate(frames=frames)
+            directory = store.set_directory(set_id) / "deep-half" / half
+            files = save_stack(directory, snapshot, fits=False)
+            record_product(
+                manifest, store, set_id, product_id, f"deep-half-{half}",
+                {"recipe": "deep-half", "half": half, "of": deep_row["id"]},
+                frames, directory, files, stack_stats(snapshot), run_versions,
+            )
+            del snapshot
+        del stacker
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    return tuple(dict(manifest.rows("SELECT * FROM products WHERE id = ?", (i,))[0]) for i in ids)
+
+
 def noise_stacks(
     store: Store,
     set_row: Any,
@@ -217,11 +272,11 @@ def noise_stacks(
     reference: str,
     lights: list[str],
     darks: list[str],
-    deep: np.ndarray,
+    base: np.ndarray,
     rng: np.random.Generator,
 ) -> dict[str, Any]:
     """The noise `lights` would have had from `darks`, one each, registered
-    onto `reference`: integrated with the photon noise of `deep`'s signal
+    onto `reference`: integrated with the photon noise of `base`'s signal
     (`scene`) and with the sky's alone (`sky`), each as `integrate` gives
     it, and what each frame contributed (`frames`)."""
     stacker = seiza.LiveStacker(
@@ -236,7 +291,7 @@ def noise_stacks(
     width, height = set_row["width"], set_row["height"]
     exposure = float(set_row["exposure_seconds"])
     calibration = Calibration(masters, width, height)
-    signal = np.clip(np.nan_to_num(deep - np.nanmedian(deep[::7, ::7]), nan=0.0), 0.0, None)
+    signal = np.clip(np.nan_to_num(base - np.nanmedian(base[::7, ::7]), nan=0.0), 0.0, None)
     with tempfile.TemporaryDirectory(dir=store.scratch, prefix="dark-noise-") as scratch:
         scene_paths, sky_paths, weights = [], [], []
         records = []
@@ -260,7 +315,7 @@ def noise_stacks(
                 dark_image = disposition.resample(dark_image)
                 white = disposition.resample(white)
             # The photon variance per pixel: the sky's, growing with the
-            # deep stack's signal in this frame's units at the gain the sky
+            # base's signal in this frame's units at the gain the sky
             # implies.
             growth = signal / (gain * sky) if sky > 0 else 0.0
             scene_paths.append(Path(scratch) / f"scene-{index:03d}.fits")
@@ -281,8 +336,9 @@ def synthesize(
     manifest: Manifest, store: Store, set_row: Any, size: int, *, again: bool = False
 ) -> dict[str, Any] | None:
     """One set's dark-noise pair for its A half of `size` frames; `None`
-    when the set lacks a half of that size, a sound dark master or enough
-    darks."""
+    when the set lacks a half of that size, a sound dark master, enough
+    darks or `HALF_DEPTH` times `size` frames in each half of its deep
+    stack."""
     set_id = set_row["id"]
     product_id = f"{set_id}/dark-noise/n{size:02d}"
     existing = manifest.rows("SELECT status FROM products WHERE id = ?", (product_id,))
@@ -299,6 +355,8 @@ def synthesize(
     if not halves or not deep_rows:
         return None
     half, deep_row = dict(halves[0]), dict(deep_rows[0])
+    if len(loads(deep_row["frames"])) // 2 < HALF_DEPTH * size:
+        return None
     darks = matching_darks(manifest, set_row)
     if len(darks) < size:
         return None
@@ -309,28 +367,29 @@ def synthesize(
 
     reference = loads(deep_row["versions"])["reference"]
     lights = loads(half["frames"])
-    deep_files = loads(deep_row["files"])
-    deep = np.load(store.root / deep_files["image"]).astype(np.float32)
-    deep_coverage = np.load(store.root / deep_files["coverage"])
-    deep[deep_coverage == 0] = np.nan
-    deep_variance = np.load(store.root / deep_files["variance"]).astype(np.float32)
+    base_row, target_row = deep_halves(manifest, store, set_row, deep_row)
+    base_files = loads(base_row["files"])
+    base = np.load(store.root / base_files["image"]).astype(np.float32)
+    base_coverage = np.load(store.root / base_files["coverage"])
+    base[base_coverage == 0] = np.nan
+    base_variance = np.load(store.root / base_files["variance"]).astype(np.float32)
     with np.errstate(divide="ignore", invalid="ignore"):
-        deep_sigma2 = np.where(deep_coverage > 0, deep_variance / deep_coverage, np.nan).astype(np.float32)
+        base_sigma2 = np.where(base_coverage > 0, base_variance / base_coverage, np.nan).astype(np.float32)
 
-    stacks = noise_stacks(store, set_row, masters, reference, lights, chosen, deep, rng)
+    stacks = noise_stacks(store, set_row, masters, reference, lights, chosen, base, rng)
     noise, variance, coverage, scene_rejected = stacks["scene"]
     gate, gate_variance, gate_coverage, sky_rejected = stacks["sky"]
     records = stacks["frames"]
-    covered = (coverage > 0) & (deep_coverage > 0)
-    image = np.where(covered, deep + noise, np.nan).astype(np.float32)
-    # The input's noise is the synthetic noise and the deep stack's own;
+    covered = (coverage > 0) & (base_coverage > 0)
+    image = np.where(covered, base + noise, np.nan).astype(np.float32)
+    # The input's noise is the synthetic noise and the base's own;
     # `variance / coverage` is the noise map, as for a stacked half.
-    total = np.where(covered, variance + coverage * np.nan_to_num(deep_sigma2), 0.0).astype(np.float32)
+    total = np.where(covered, variance + coverage * np.nan_to_num(base_sigma2), 0.0).astype(np.float32)
 
     a_image = np.load(store.root / loads(half["files"])["image"]).astype(np.float32)
     b_row = manifest.rows("SELECT * FROM products WHERE id = ?", (half["id"].removesuffix("/a") + "/b",))[0]
     b_image = np.load(store.root / loads(b_row["files"])["image"]).astype(np.float32)
-    checked = check(np.where(covered, noise, np.nan), a_image, b_image, deep, len(lights), len(loads(b_row["frames"])))
+    checked = check(np.where(covered, noise, np.nan), a_image, b_image, base, len(lights), len(loads(b_row["frames"])))
     del a_image, b_image
 
     directory = store.set_directory(set_id) / "dark-noise" / f"n{size:02d}"
@@ -347,7 +406,8 @@ def synthesize(
         "recipe": "dark-noise",
         "size": size,
         "seed": seed,
-        "target": deep_row["id"],
+        "base": base_row["id"],
+        "target": target_row["id"],
         "half": half["id"],
         "darks_matched": len(darks),
         "master_excess": round(excess, 4),
