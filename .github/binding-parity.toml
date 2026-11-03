@@ -409,6 +409,7 @@ objects = [
 "seiza-parallax::light::*" = { none = "display conversions inside rendering" }
 "seiza-parallax::tour::*" = { none = "the tour planner's steps; plan_tour reaches them" }
 "seiza-stars::debug::*" = { none = "diagnostic switches for development" }
+"seiza-stars::accord_imaging::*" = { none = "the Accord.NET filters inside the N.I.N.A.-compatible detection variant" }
 "seiza-stars::nina_star_detection::*" = { none = "a NINA-compatible detection variant; hosts measure stars through MeasurementOptions" }
 "seiza-stars::psf_fitting::*" = { none = "PSF fitting steps inside star measurement" }
 "seiza-calibration::flat_response::metric::compare" = { none = "compare_with with the default options; both bindings call compare_with" }
