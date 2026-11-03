@@ -21,7 +21,8 @@
 //! For `hocus`, `HF_VERSION` picks the HocusFocus release (`3`, `4`, or
 //! `auto` by the frame's date), `HF_CLASS` (`wide`, `standard`, `long`)
 //! overrides the rig class, `HF_WALKER` takes candidates with the older
-//! walk, `HF_NC` sets the noise clipping multiplier, `HF_BIN` detection
+//! walk, `HF_INNER_CROP` and `HF_OUTER_CROP` set N.I.N.A.'s autofocus crop
+//! ratios, `HF_NC` sets the noise clipping multiplier, `HF_BIN` detection
 //! binning, and `HF_NOISE_RADIUS`, `HF_SENSITIVITY`, `HF_MIN_HFR`,
 //! `HF_LAYERS` and `HF_STRUCTURE=atrous` override the preset.
 //! `NINA_PARITY_DEBUG` prints each frame's HFR spread and the detector's
@@ -112,6 +113,12 @@ fn measure(detector: &str, path: &Path) -> Result<Measured, String> {
         }
         if let Ok(v) = std::env::var("HF_SENSITIVITY_V4") {
             params.sensitivity = v.parse().unwrap();
+        }
+        if let Ok(v) = std::env::var("HF_INNER_CROP") {
+            params.autofocus_inner_crop_ratio = v.parse().unwrap();
+        }
+        if let Ok(v) = std::env::var("HF_OUTER_CROP") {
+            params.autofocus_outer_crop_ratio = v.parse().unwrap();
         }
         if std::env::var("HF_WALKER").is_ok() {
             params.connected_components = false;
