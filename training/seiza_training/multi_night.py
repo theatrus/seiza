@@ -250,8 +250,9 @@ def stack_object(
             stats = stack_stats(snapshot)
             try:
                 measured_stack = seiza.detect_measured_stars_file(half_directory / files["fits"])
-                stats["stack_fwhm_px"] = measured_stack.average_fwhm
                 stats["stack_stars"] = len(measured_stack.stars)
+                # With no star found, the average width reads 0.
+                stats["stack_fwhm_px"] = measured_stack.average_fwhm if measured_stack.stars else None
             except Exception as error:  # noqa: BLE001 - recorded, not fatal
                 stats["stack_fwhm_error"] = str(error)
             record_product(manifest, store, deepest, f"multi-night/{key}/seeing/{half}",
