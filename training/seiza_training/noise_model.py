@@ -19,10 +19,23 @@ the same overlapping-tile inference that ships, and measures the noise of
 `f(A) − B` against that of `A − B`: at the pixel scale, which is the grain,
 and binned by the band scale, which is the low band.
 
-The dark-noise pairs (`dark_noise`) have a clean target, a deep stack, so
-on them a model's error is measured directly, and their noise alone, on a
-flat sky, shows whether a model makes structure where there is none. They
-can also make up a share of every batch.
+The dark-noise pairs (`dark_noise`) have a target far less noisy than a B
+half, a stack of half the night's frames, whose noise the input does not
+share, so on them a model's error is measured nearly directly. Their noise
+alone, on a flat sky, shows whether a model makes structure where there is
+none. They can also make up a share of every batch.
+
+Against them a model's signal transfer is measured too: how much of the
+signal at each scale it keeps in faint and mid regions. The input and the
+target share their signal but no noise, so `⟨f(x)·t⟩ / ⟨x·t⟩` within a
+band holds no noise bias: 1 keeps the signal at that scale whole, and less
+than 1 smooths it away.
+
+A few frames cannot reject every hot pixel or cosmic ray. Training can add
+synthetic ones to each input tile, resampled as registration resamples a
+frame, while the target keeps none, so the network learns to remove them;
+the empty sky, with outliers planted in it, measures how much of them a
+model leaves.
 """
 
 from __future__ import annotations
@@ -33,6 +46,7 @@ import math
 import random
 import time
 import warnings
+import zlib
 from pathlib import Path
 from typing import Any
 
@@ -281,6 +295,46 @@ def structure_odds(banked: dict[str, np.ndarray], factor: float) -> np.ndarray |
     return odds / odds.sum()
 
 
+# Outliers per this many pixels: `count` in `outliers` is per 256 × 256.
+OUTLIER_AREA = 256 * 256
+
+
+def lanczos3(offset: float) -> np.ndarray:
+    """Lanczos-3 weights of the six pixels from two before to three after
+    a point `offset` (0 to 1) past a pixel, summing to 1."""
+    weights = np.sinc(np.arange(-2, 4) - offset) * np.sinc((np.arange(-2, 4) - offset) / 3)
+    return weights / weights.sum()
+
+
+def outliers(shape: tuple[int, int], rng: np.random.Generator, count: float) -> np.ndarray:
+    """Outliers a few frames fail to reject, in units of σ̄, `count` per
+    256 × 256 pixels on average: hot pixels (5 to 200σ̄), cold ones (−5 to
+    −30σ̄) and cosmic-ray tracks 3 to 15 pixels long (10 to 300σ̄ along
+    them). Each point is spread over the pixels around it as Lanczos-3
+    registration spreads a frame's pixel, at a random sub-pixel offset."""
+    height, width = shape
+    plane = np.zeros((height + 6, width + 6), dtype=np.float32)
+    for _ in range(rng.poisson(count * height * width / OUTLIER_AREA)):
+        y, x = rng.uniform(0, height), rng.uniform(0, width)
+        kind = rng.random()
+        if kind < 0.6:
+            points, amplitude = [(y, x)], math.exp(rng.uniform(math.log(5), math.log(200)))
+        elif kind < 0.75:
+            points, amplitude = [(y, x)], -math.exp(rng.uniform(math.log(5), math.log(30)))
+        else:
+            length, angle = rng.uniform(3, 15), rng.uniform(0, math.pi)
+            steps = np.arange(int(length) + 1)
+            points = list(zip(y + steps * math.sin(angle), x + steps * math.cos(angle)))
+            amplitude = math.exp(rng.uniform(math.log(10), math.log(300)))
+        for py, px in points:
+            if not (0 <= py < height and 0 <= px < width):
+                continue
+            row, column = math.floor(py), math.floor(px)
+            # The padding of 3 puts the tap two pixels before at row + 1.
+            plane[row + 1:row + 7, column + 1:column + 7] += amplitude * np.outer(lanczos3(py - row), lanczos3(px - column))
+    return plane[3:-3, 3:-3]
+
+
 def batch_from(
     banked: dict[str, np.ndarray],
     size: int,
@@ -289,6 +343,7 @@ def batch_from(
     *,
     map_jitter: float = 0.0,
     odds: np.ndarray | None = None,
+    outlier_count: float = 0.0,
 ) -> tuple[torch.Tensor, ...]:
     """`size` tiles at random windows and offsets, each flipped and turned
     one of eight ways: the network's input, the target and A, in units of
@@ -296,7 +351,9 @@ def batch_from(
     `map_jitter`, the noise map the network reads is scaled by a factor
     drawn log-uniformly from `exp(±map_jitter)` per tile, so the network
     learns to judge the noise from the image, the map telling it only
-    where the noise is higher or lower."""
+    where the noise is higher or lower. With `outlier_count`, A gains
+    `outliers` and the target does not; the noise map, which a modelled
+    map would not change, stays as it was."""
     count = len(banked["a"])
     picks = rng.choice(count, size, p=odds) if odds is not None else rng.integers(0, count, size)
     inputs, targets, references, sigmas = [], [], [], []
@@ -312,6 +369,8 @@ def batch_from(
         if flip:
             planes = planes[:, :, ::-1]
         a, sigma, b = planes
+        if outlier_count:
+            a = a + outliers(a.shape, rng, outlier_count) * noise
         stated = sigma * float(np.exp(rng.uniform(-map_jitter, map_jitter))) if map_jitter else sigma
         inputs.append(network_input(a, stated, background, noise))
         targets.append(np.stack([(b - background) / noise]))
@@ -390,13 +449,15 @@ def train(
     huber: float = 0.0,
     huber_above: float = 0.0,
     structure_sampling: float = 0.0,
+    outlier_count: float = 0.0,
 ) -> dict[str, Any]:
     """Train a noise model on the train split's pairs, evaluate it on the
     validation split's, export it to ONNX and record the run.
 
     `extra` is a second bank from `cut_windows`, of other targets for
     their inputs; it makes up `extra_fraction` of every batch, and the run
-    records it under `extra_label`."""
+    records it under `extra_label`. `outlier_count` adds that many
+    synthetic outliers per 256 × 256 pixels to every input tile."""
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
     chosen = pairs(manifest, "train", sets)
@@ -416,9 +477,11 @@ def train(
     odds = structure_odds(banked, structure_sampling)
     extra_odds = structure_odds(extra, structure_sampling) if extra is not None else None
     for step in range(1, steps + 1):
-        parts = [batch_from(banked, batch - extra_count, tile, rng, map_jitter=map_jitter, odds=odds)]
+        parts = [batch_from(banked, batch - extra_count, tile, rng, map_jitter=map_jitter, odds=odds,
+                            outlier_count=outlier_count)]
         if extra_count:
-            parts.append(batch_from(extra, extra_count, tile, rng, map_jitter=map_jitter, odds=extra_odds))
+            parts.append(batch_from(extra, extra_count, tile, rng, map_jitter=map_jitter, odds=extra_odds,
+                                    outlier_count=outlier_count))
         inputs, targets, references, sigmas = (torch.cat(values).to(where) for values in zip(*parts))
         loss = loss_of(model, inputs, targets, references, sigmas, loss_weight, huber, huber_above)
         optimizer.zero_grad(set_to_none=True)
@@ -454,6 +517,7 @@ def train(
                    "windows": int(len(banked["a"])), "core_sigma": CORE_SIGMA,
                    "loss_weight": loss_weight, "map_jitter": map_jitter, "noise_map": noise_map,
                    "huber": huber, "huber_above": huber_above, "structure_sampling": structure_sampling,
+                   "outliers": outlier_count,
                    "extra": {"label": extra_label, "fraction": extra_fraction, "windows": int(len(extra["a"]))}
                    if extra is not None else None},
         "parameters": sum(p.numel() for p in model.parameters()),
@@ -484,7 +548,9 @@ def denoiser(model: ResidualUNet, background: float, noise: float, batch_device:
 
 
 def measure(estimate: np.ndarray, a: np.ndarray, b: np.ndarray, background: float, noise: float) -> dict[str, float]:
-    """How close `estimate` comes to B, against how close A came."""
+    """How close `estimate` comes to B, against how close A came, and
+    `signal_kept`'s measures of the signal it keeps, B's noise being
+    independent of A's."""
     valid = np.isfinite(a) & np.isfinite(b) & np.isfinite(estimate)
     before = np.where(valid, a - b, np.nan)
     after = np.where(valid, estimate - b, np.nan)
@@ -521,6 +587,7 @@ def measure(estimate: np.ndarray, a: np.ndarray, b: np.ndarray, background: floa
     bright = valid & (b - background > 20 * noise)
     signal = float(np.sum((a - background)[bright]))
     result["bright_flux_change"] = float(np.sum((estimate - a)[bright]) / signal) if signal else None
+    result.update(signal_kept(estimate, a, b, valid, background, noise))
     return result
 
 
@@ -568,13 +635,64 @@ def evaluate(
         return float(np.mean(values)) if values else None
 
     keys = ("high_ratio", "low_ratio", "high_removed", "mse_before", "mse_after", "sky_bias", "bright_flux_change",
-            "sky_mse", "sky_mse_trimmed", "sky_outlier_share", "faint_mse", "mid_mse", "core_mse")
+            "sky_mse", "sky_mse_trimmed", "sky_outlier_share", "faint_mse", "mid_mse", "core_mse",
+            *(f"transfer_{region}_{band}" for region in ("faint", "mid") for band in TRANSFER_BANDS),
+            "peak_flux_kept_faint", "peak_flux_kept_mid", "peak_height_kept_faint", "peak_height_kept_mid")
     return {
         "split": split,
         "pairs": len(per_pair),
         "by_size": {str(size): {key: mean(rows, key) for key in keys} for size, rows in sorted(by_size.items())},
         "pairs_detail": per_pair,
     }
+
+
+# Signal-transfer bands: the image box-blurred at the first radius less the
+# image box-blurred at the second, radius 0 being the image itself.
+TRANSFER_BANDS = {"fine": (0, 1), "medium": (1, 4), "coarse": (4, 12)}
+# The side of the blocks whose spread gives the shared signal's error.
+TRANSFER_BLOCK = 64
+# Outliers per 256 × 256 pixels planted on the empty sky.
+OUTLIER_TEST_COUNT = 4.0
+# Peak photometry: a box of this radius, less the mean of the ring from
+# two pixels beyond it out to the second radius; peaks are the highest
+# within the third.
+PEAK_APERTURE, PEAK_ANNULUS, PEAK_SEPARATION = 3, 10, 5
+
+
+def box_blur(image: np.ndarray, radius: int) -> np.ndarray:
+    """The mean over the (2·radius + 1)² box about each pixel, the edge
+    pixels repeated outward. `image` must be finite."""
+    if radius == 0:
+        return image
+    side = 2 * radius + 1
+    blurred = np.pad(image.astype(np.float64), radius, mode="edge")
+    for axis in (0, 1):
+        total = np.insert(np.cumsum(blurred, axis=axis), 0, 0.0, axis=axis)
+        blurred = (total[side:] - total[:-side]) / side if axis == 0 else (total[:, side:] - total[:, :-side]) / side
+    return blurred.astype(np.float32)
+
+
+def box_max(image: np.ndarray, radius: int) -> np.ndarray:
+    """The largest value in the (2·radius + 1)² box about each pixel."""
+    height, width = image.shape
+    padded = np.pad(image, radius, mode="edge")
+    rows = padded[:height]
+    for shift in range(1, 2 * radius + 1):
+        rows = np.maximum(rows, padded[shift:shift + height])
+    largest = rows[:, :width]
+    for shift in range(1, 2 * radius + 1):
+        largest = np.maximum(largest, rows[:, shift:shift + width])
+    return largest
+
+
+def photometry(image: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """At each pixel, the flux in the `PEAK_APERTURE` box above the mean of
+    the ring around it, and that mean. `image` must be finite."""
+    area = (2 * PEAK_APERTURE + 1) ** 2
+    hole = (2 * PEAK_APERTURE + 5) ** 2
+    outer = (2 * PEAK_ANNULUS + 1) ** 2
+    ring = (box_blur(image, PEAK_ANNULUS) * outer - box_blur(image, PEAK_APERTURE + 2) * hole) / (outer - hole)
+    return box_blur(image, PEAK_APERTURE) * area - ring * area, ring
 
 
 def against_truth(estimate: np.ndarray, image: np.ndarray, target: np.ndarray, floor: np.ndarray,
@@ -584,7 +702,9 @@ def against_truth(estimate: np.ndarray, image: np.ndarray, target: np.ndarray, f
     pixels and by the target's level, the error's noise at the pixel and
     band scales, and the bias on the sky. `floor` is the target's own
     noise variance, which no estimate can remove; it is given on the sky,
-    as in star cores it holds the frames' differing seeing too."""
+    as in star cores it holds the frames' differing seeing too.
+
+    With them, `signal_kept`'s measures of the signal the estimate keeps."""
     valid = np.isfinite(image) & np.isfinite(target) & np.isfinite(estimate)
     before = np.where(valid, (image - target) / noise, np.nan)
     after = np.where(valid, (estimate - target) / noise, np.nan)
@@ -606,6 +726,72 @@ def against_truth(estimate: np.ndarray, image: np.ndarray, target: np.ndarray, f
     bright = valid & (level > 20)
     signal = float(np.sum((target - background)[bright]))
     result["bright_flux_change"] = float(np.sum((estimate - target)[bright]) / signal) if signal else None
+    result.update(signal_kept(estimate, image, target, valid, background, noise))
+    return result
+
+
+def signal_kept(estimate: np.ndarray, image: np.ndarray, target: np.ndarray, valid: np.ndarray,
+                background: float, noise: float) -> dict[str, float | int | None]:
+    """How much of the input's signal `estimate` keeps, against a `target`
+    whose noise is independent of the input's: a clean target, or a B half.
+
+    `transfer_<region>_<band>` is the share of the signal in each of
+    `TRANSFER_BANDS` that the estimate keeps where the target, smoothed,
+    is faint or mid: `⟨e·t⟩ / ⟨x·t⟩` over the band-passed estimate, input
+    and target. The target's noise is independent of both, so it cancels.
+    It is None where the band holds too little signal to measure: an
+    oversampled image's pixel scale in faint regions, mostly.
+
+    `peak_flux_kept_<region>` is the share of the input's flux the
+    estimate keeps in small apertures on the target's faint or mid peaks,
+    stars and knots by their height above the ring around them, which a
+    region's transfer, ruled by its extended signal, hardly sees.
+    `peak_height_kept_<region>` is the share of their height, the 3 × 3
+    mean above the ring, that it keeps: a peak softened within its
+    aperture keeps its flux and loses height."""
+    result: dict[str, float | int | None] = {}
+
+    def filled(x: np.ndarray) -> np.ndarray:
+        return np.where(valid, x - background, 0.0).astype(np.float32)
+
+    widest = max(outer for _, outer in TRANSFER_BANDS.values())
+    inside = box_blur(valid.astype(np.float32), widest) > 0.999
+    smooth = box_blur(filled(target), 2) / noise
+    regions = {"faint": inside & (smooth >= 3) & (smooth < 20), "mid": inside & (smooth >= 20) & (smooth < 200)}
+    height, width = valid.shape
+    blocks = (np.arange(height)[:, None] // TRANSFER_BLOCK) * (width // TRANSFER_BLOCK + 1) \
+        + np.arange(width)[None, :] // TRANSFER_BLOCK
+    for band, (inner, outer) in TRANSFER_BANDS.items():
+        e, x, t = (box_blur(filled(v), inner) - box_blur(filled(v), outer) for v in (estimate, image, target))
+        for region, mask in regions.items():
+            ids = blocks[mask]
+            shared = np.bincount(ids, weights=(x[mask] * t[mask]).astype(np.float64))
+            kept = float(np.sum(e[mask] * t[mask], dtype=np.float64))
+            # The shared signal's error from the spread of its blocks' sums,
+            # which overstates it where the signal varies; a band with no
+            # signal measurably above that has no transfer to give.
+            used = shared[np.bincount(ids) > 0]
+            error = math.sqrt(len(used) * float(np.var(used))) if len(used) > 1 else math.inf
+            total = float(shared.sum())
+            result[f"transfer_{region}_{band}"] = kept / total if total > 3 * error else None
+
+    # Peaks, faint stars and knots, are chosen on the target and measured
+    # on the input and the estimate, whose noise the choice does not favour.
+    sharp = box_blur(filled(target), 1)
+    _, around = photometry(filled(target))
+    height_above = (sharp - around) / noise
+    peaks = inside & (sharp == box_max(sharp, PEAK_SEPARATION))
+    flux_e, ring_e = photometry(filled(estimate))
+    flux_x, ring_x = photometry(filled(image))
+    height_e = box_blur(filled(estimate), 1) - ring_e
+    height_x = box_blur(filled(image), 1) - ring_x
+    for region, low, high in (("faint", 3, 20), ("mid", 20, 200)):
+        chosen = peaks & (height_above >= low) & (height_above < high)
+        result[f"peaks_{region}"] = int(chosen.sum())
+        for measured, kept, given in (("flux", flux_e, flux_x), ("height", height_e, height_x)):
+            total = float(np.sum(given[chosen], dtype=np.float64))
+            result[f"peak_{measured}_kept_{region}"] = (float(np.sum(kept[chosen], dtype=np.float64)) / total
+                                                        if total > 0 else None)
     return result
 
 
@@ -643,7 +829,8 @@ def evaluate_dark_noise(
 ) -> dict[str, Any]:
     """Denoise each of a split's dark-noise inputs and measure it against
     its clean target (`truth`), and denoise its noise alone on a flat sky
-    (`empty_sky`). Inference and units are `evaluate`'s."""
+    (`empty_sky`), once as it is and once with `outliers` planted in it.
+    Inference and units are `evaluate`'s."""
     model = model.eval()
     where = device()
     rows = []
@@ -678,6 +865,16 @@ def evaluate_dark_noise(
                              network_input(sky, sky_sigma, sky_background, sky_noise),
                              tile=tile, overlap=overlap, margin=margin)[0]
         empty = on_empty_sky(output, sky, background, noise)
+        # The same outliers for every model, planted on the empty sky: the
+        # share of their energy the output keeps.
+        planted = outliers(sky.shape, np.random.default_rng(zlib.crc32(pair["input"]["id"].encode())),
+                           OUTLIER_TEST_COUNT) * sky_noise
+        planted[~np.isfinite(sky)] = 0.0
+        spoiled = sky + planted
+        left = spoiled - output + infer(denoiser(model, sky_background, sky_noise, where),
+                                        network_input(spoiled, sky_sigma, sky_background, sky_noise),
+                                        tile=tile, overlap=overlap, margin=margin)[0]
+        empty["outliers_left"] = float(np.nansum(left**2) / np.sum(planted**2))
         rows.append({"pair": pair["input"]["id"], "set": pair["set"],
                      "size": loads(pair["input"]["recipe"]).get("size"),
                      **{f"truth_{key}": value for key, value in truth.items()},

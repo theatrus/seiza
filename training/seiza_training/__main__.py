@@ -88,6 +88,9 @@ def main(argv: list[str] | None = None) -> int:
                        help="draw windows 1 + this × their share of bright pixels as often")
     train.add_argument("--dark-noise-fraction", type=float, default=0.0,
                        help="this share of every batch from the dark-noise pairs, whose target is clean")
+    train.add_argument("--outliers", type=float, default=0.0, dest="outlier_count",
+                       help="add this many synthetic hot pixels, cold pixels and cosmic rays per 256 × 256 "
+                            "pixels to every input tile, and none to its target")
 
     evaluate = commands.add_parser("evaluate-noise", help="measure a trained noise model on a split")
     evaluate.add_argument("--name", required=True)
@@ -198,7 +201,7 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
             loss_weight=arguments.loss_weight, map_jitter=arguments.map_jitter,
             validation_sets=set(arguments.validation_sets) if arguments.validation_sets else None,
             noise_map=arguments.noise_map, huber=arguments.huber, huber_above=arguments.huber_above,
-            structure_sampling=arguments.structure_sampling, **extra,
+            structure_sampling=arguments.structure_sampling, outlier_count=arguments.outlier_count, **extra,
         )
     if command == "evaluate-noise":
         from .noise_model import evaluate_saved
