@@ -37,6 +37,11 @@ frame, while the target keeps none, so the network learns to remove them;
 the empty sky, with outliers planted in it, measures how much of them a
 model leaves.
 
+Taking out all the noise a model finds gives the least error against a
+clean target but looks smooth and flat; an image keeps some. `NoiseBands`
+takes out a share of the grain and of the wider mottle apart, as the
+runtime's per-band amounts do, and a run can be measured with them.
+
 Threads build batches ahead while the GPU trains, each batch from a
 generator seeded by its step, and on CUDA the network runs channels-last.
 Training can run the network in bfloat16 with the loss in float32;
@@ -57,6 +62,7 @@ import zlib
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -76,12 +82,16 @@ WINDOWS_PER_HALF = 40
 CORE_SIGMA = 50.0
 
 
-def pairs(manifest: Manifest, split: str, sets: set[str] | None = None) -> list[dict[str, Any]]:
-    """The built noise pairs of one split's sets: each A product with its B."""
+def pairs(
+    manifest: Manifest, split: str, sets: set[str] | None = None, *, kind: str = "noise-a"
+) -> list[dict[str, Any]]:
+    """The built pairs of one split's sets: each A product of `kind` with
+    its B, the noise pairs' or, with `deep-half-a`, the deep stacks'
+    halves."""
     rows = manifest.rows(
         "SELECT p.*, s.split, s.name FROM products p JOIN sets s ON s.id = p.set_id "
-        "WHERE p.kind = 'noise-a' AND p.status = 'built' AND s.split = ? ORDER BY p.id",
-        (split,),
+        "WHERE p.kind = ? AND p.status = 'built' AND s.split = ? ORDER BY p.id",
+        (kind, split),
     )
     found = []
     for row in rows:
@@ -630,6 +640,38 @@ def denoiser(model: ResidualUNet, background: float, noise: float, batch_device:
     return run
 
 
+@dataclass(frozen=True)
+class NoiseBands:
+    """How much of the noise a model finds is taken out, as the runtime's
+    `NoiseBands`. The removed noise `r = x − f(x)` is split by a Gaussian of
+    `scale_px` into the low band, the mottle, and the high band, the grain
+    left over; `high` and `low` of each are taken out. Ones take out all
+    of it. Keeping a share `k` of white noise leaves an image as noisy as a
+    stack `1/k²` as deep."""
+
+    high: float = 1.0
+    low: float = 1.0
+    scale_px: float = 5.0
+
+    def __post_init__(self) -> None:
+        if not (0.0 <= self.high <= 1.0 and 0.0 <= self.low <= 1.0 and self.scale_px > 0):
+            raise ValueError(f"amounts run from 0 to 1 and the scale is positive: {self}")
+
+    @property
+    def whole(self) -> bool:
+        return self.high == 1.0 and self.low == 1.0
+
+    def __str__(self) -> str:
+        return f"high {self.high:g} low {self.low:g} at {self.scale_px:g} px"
+
+    def apply(self, image: np.ndarray, residual: np.ndarray) -> np.ndarray:
+        """`image` with these shares of the model's `residual`, `f(x) − x`,
+        added: `x − a_high·r_high − a_low·r_low`."""
+        if self.high == self.low:
+            return image + self.high * residual
+        return image + self.high * residual + (self.low - self.high) * gaussian_blur(residual, self.scale_px)
+
+
 def measure(estimate: np.ndarray, a: np.ndarray, b: np.ndarray, background: float, noise: float) -> dict[str, float]:
     """How close `estimate` comes to B, against how close A came, and
     `signal_kept`'s measures of the signal it keeps, B's noise being
@@ -686,13 +728,17 @@ def evaluate(
     limit: int | None = None,
     sets: set[str] | None = None,
     noise_map: str = "raw",
+    bands: NoiseBands = NoiseBands(),
     threads: int = EVALUATION_THREADS,
 ) -> dict[str, Any]:
     """Denoise each of a split's A halves, whole, through overlapping
-    tiles, and measure it against its B half. The network reads the noise
-    map it was trained with; every run is measured in the same units, the
-    per-pixel map's median noise, so runs with different maps compare.
-    `threads` pairs are measured at once."""
+    tiles, take out `bands` of what the model finds, and measure it against
+    its B half. The deep stacks' halves are measured the same way, one
+    against the other, under the size `deep-half`: they show the model on a
+    whole night's depth, far less noisy than the pairs it trains on. The
+    network reads the noise map it was trained with; every run is measured
+    in the same units, the per-pixel map's median noise, so runs with
+    different maps compare. `threads` pairs are measured at once."""
     model = model.eval()
     where = device()
 
@@ -707,13 +753,14 @@ def evaluate(
         planes = network_input(image_a, sigma_a, input_background, input_noise)
         residual = infer(denoiser(model, input_background, input_noise, where), planes,
                          tile=tile, overlap=overlap, margin=margin)[0]
-        estimate = image_a + residual
+        estimate = bands.apply(image_a, residual)
         recipe = loads(pair["a"]["recipe"])
-        return {"pair": pair["a"]["id"], "set": pair["set"], "size": recipe.get("size"),
+        return {"pair": pair["a"]["id"], "set": pair["set"], "size": recipe.get("size") or recipe["recipe"],
                 **measure(estimate, image_a, image_b, background, noise)}
 
+    chosen = pairs(manifest, split, sets) + pairs(manifest, split, sets, kind="deep-half-a")
     with ThreadPoolExecutor(max_workers=threads, thread_name_prefix="evaluate") as pool:
-        per_pair = list(pool.map(one, pairs(manifest, split, sets)[:limit]))
+        per_pair = list(pool.map(one, chosen[:limit]))
     by_size: dict[Any, list[dict[str, Any]]] = {}
     for row in per_pair:
         by_size.setdefault(row["size"], []).append(row)
@@ -728,8 +775,11 @@ def evaluate(
             "peak_flux_kept_faint", "peak_flux_kept_mid", "peak_height_kept_faint", "peak_height_kept_mid")
     return {
         "split": split,
+        "bands": asdict(bands),
         "pairs": len(per_pair),
-        "by_size": {str(size): {key: mean(rows, key) for key in keys} for size, rows in sorted(by_size.items())},
+        # Frame counts first, then the deep halves.
+        "by_size": {str(size): {key: mean(rows, key) for key in keys}
+                    for size, rows in sorted(by_size.items(), key=lambda item: (isinstance(item[0], str), item[0]))},
         "pairs_detail": per_pair,
     }
 
@@ -768,6 +818,22 @@ def box_blur(image: np.ndarray, radius: int) -> np.ndarray:
 def box_max(image: np.ndarray, radius: int) -> np.ndarray:
     """The largest value in the (2·radius + 1)² box about each pixel."""
     return box_filter(image, radius, torch.nn.functional.max_pool2d)
+
+
+def gaussian_blur(image: np.ndarray, sigma_px: float) -> np.ndarray:
+    """A Gaussian blur of scale `sigma_px`, cut at three of it, the edge
+    pixels repeated outward, on the training device. `image` must be
+    finite."""
+    radius = max(1, math.ceil(3 * sigma_px))
+    offsets = torch.arange(-radius, radius + 1, dtype=torch.float32)
+    kernel = torch.exp(-0.5 * (offsets / sigma_px) ** 2)
+    kernel /= kernel.sum()
+    with GPU:
+        pixels = torch.from_numpy(np.ascontiguousarray(image, dtype=np.float32))[None, None].to(device())
+        padded = torch.nn.functional.pad(pixels, (radius, radius, radius, radius), mode="replicate")
+        kernel = kernel.to(pixels.device)
+        rows = torch.nn.functional.conv2d(padded, kernel.view(1, 1, 1, -1))
+        return torch.nn.functional.conv2d(rows, kernel.view(1, 1, -1, 1))[0, 0].cpu().numpy()
 
 
 def photometry(image: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -911,12 +977,13 @@ def evaluate_dark_noise(
     margin: int = 52,
     sets: set[str] | None = None,
     noise_map: str = "raw",
+    bands: NoiseBands = NoiseBands(),
     threads: int = EVALUATION_THREADS,
 ) -> dict[str, Any]:
     """Denoise each of a split's dark-noise inputs and measure it against
     its clean target (`truth`), and denoise its noise alone on a flat sky
     (`empty_sky`), once as it is and once with `outliers` planted in it.
-    Inference, units and threads are `evaluate`'s."""
+    Inference, units, `bands` and threads are `evaluate`'s."""
     model = model.eval()
     where = device()
 
@@ -932,8 +999,8 @@ def evaluate_dark_noise(
         stated = modelled_sigma(image, sigma, coverage) if noise_map == "model" else sigma
         input_background, input_noise = scales(image, stated)
         run = denoiser(model, input_background, input_noise, where)
-        estimate = image + infer(run, network_input(image, stated, input_background, input_noise),
-                                 tile=tile, overlap=overlap, margin=margin)[0]
+        estimate = bands.apply(image, infer(run, network_input(image, stated, input_background, input_noise),
+                                            tile=tile, overlap=overlap, margin=margin)[0])
         truth = against_truth(estimate, image, target, floor, background, noise)
         del estimate
 
@@ -947,9 +1014,9 @@ def evaluate_dark_noise(
         if noise_map == "model":
             sky_sigma = modelled_sigma(sky, sky_sigma, alone_coverage)
         sky_background, sky_noise = scales(sky, sky_sigma)
-        output = sky + infer(denoiser(model, sky_background, sky_noise, where),
-                             network_input(sky, sky_sigma, sky_background, sky_noise),
-                             tile=tile, overlap=overlap, margin=margin)[0]
+        sky_run = denoiser(model, sky_background, sky_noise, where)
+        output = bands.apply(sky, infer(sky_run, network_input(sky, sky_sigma, sky_background, sky_noise),
+                                        tile=tile, overlap=overlap, margin=margin)[0])
         empty = on_empty_sky(output, sky, background, noise)
         # The same outliers for every model, planted on the empty sky: the
         # share of their energy the output keeps.
@@ -957,9 +1024,8 @@ def evaluate_dark_noise(
                            OUTLIER_TEST_COUNT) * sky_noise
         planted[~np.isfinite(sky)] = 0.0
         spoiled = sky + planted
-        left = spoiled - output + infer(denoiser(model, sky_background, sky_noise, where),
-                                        network_input(spoiled, sky_sigma, sky_background, sky_noise),
-                                        tile=tile, overlap=overlap, margin=margin)[0]
+        left = bands.apply(spoiled, infer(sky_run, network_input(spoiled, sky_sigma, sky_background, sky_noise),
+                                          tile=tile, overlap=overlap, margin=margin)[0]) - output
         empty["outliers_left"] = float(np.nansum(left**2) / np.sum(planted**2))
         return {"pair": pair["input"]["id"], "set": pair["set"],
                 "size": loads(pair["input"]["recipe"]).get("size"),
@@ -974,7 +1040,8 @@ def evaluate_dark_noise(
         return float(np.mean(values)) if values else None
 
     keys = sorted({key for row in rows for key in row if key.startswith(("truth_", "empty_"))})
-    return {"split": split, "pairs": len(rows), "mean": {key: mean(key) for key in keys}, "pairs_detail": rows}
+    return {"split": split, "bands": asdict(bands), "pairs": len(rows), "mean": {key: mean(key) for key in keys},
+            "pairs_detail": rows}
 
 
 def export(model: ResidualUNet, path: Path, *, tile: int) -> dict[str, Any]:
@@ -994,20 +1061,31 @@ def export(model: ResidualUNet, path: Path, *, tile: int) -> dict[str, Any]:
             "bytes": path.stat().st_size}
 
 
-def evaluate_saved(
-    store: Store, manifest: Manifest, name: str, *, split: str, limit: int | None = None, sets: set[str] | None = None
-) -> dict[str, Any]:
-    """Measure a recorded run's model on `split`, and add it to the record."""
+def load_run(store: Store, name: str) -> tuple[dict[str, Any], ResidualUNet]:
+    """A recorded run's record and its model, on the CPU."""
     directory = store.root / "models" / "noise" / name
     record = json.loads((directory / "run.json").read_text())
-    config = record["config"]
-    model = ResidualUNet(width=config["width"], levels=config["levels"])
+    model = ResidualUNet(width=record["config"]["width"], levels=record["config"]["levels"])
     model.load_state_dict(torch.load(directory / "weights.pt", map_location="cpu"))
+    return record, model.eval()
+
+
+def evaluate_saved(
+    store: Store, manifest: Manifest, name: str, *, split: str, limit: int | None = None, sets: set[str] | None = None,
+    bands: NoiseBands = NoiseBands(),
+) -> dict[str, Any]:
+    """Measure a recorded run's model on `split`, taking out `bands` of
+    what it finds, and add it to the record: under the split's name, or,
+    when `bands` keep some noise, under the split's name and theirs."""
+    directory = store.root / "models" / "noise" / name
+    record, model = load_run(store, name)
+    config = record["config"]
     result = evaluate(store, manifest, model, split=split, limit=limit, sets=sets,
-                      noise_map=config.get("noise_map", "raw"), **record["inference"])
+                      noise_map=config.get("noise_map", "raw"), bands=bands, **record["inference"])
     result["dark_noise"] = evaluate_dark_noise(store, manifest, model, split=split, sets=sets,
-                                               noise_map=config.get("noise_map", "raw"), **record["inference"])
-    record.setdefault("evaluations", {})[split] = result
+                                               noise_map=config.get("noise_map", "raw"), bands=bands,
+                                               **record["inference"])
+    record.setdefault("evaluations", {})[split if bands.whole else f"{split}, {bands}"] = result
     (directory / "run.json").write_text(json.dumps(record, indent=2))
     return {key: value for key, value in result.items() if key != "pairs_detail"} | {
         "dark_noise": {key: value for key, value in result["dark_noise"].items() if key != "pairs_detail"}

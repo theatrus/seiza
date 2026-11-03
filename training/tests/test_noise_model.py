@@ -53,6 +53,13 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
     with Manifest(store / "manifest.sqlite") as manifest:
         with manifest.transaction():
             manifest.db.execute("UPDATE sets SET split = 'train'")
+            # One noise pair stands in for a deep stack's halves.
+            for half in ("a", "b"):
+                row = dict(manifest.rows(f"SELECT * FROM products WHERE kind = 'noise-{half}' ORDER BY id LIMIT 1")[0])
+                row.update(id=f"{row['set_id']}/deep-half/{half}", kind=f"deep-half-{half}",
+                           recipe=json.dumps({"recipe": "deep-half", "half": half}))
+                manifest.db.execute(f"INSERT INTO products ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})",
+                                    tuple(row.values()))
     capsys.readouterr()
     run("train-noise", "--name", "smoke", "--steps", "6", "--width", "4", "--levels", "3", "--tile", "64", "--batch", "2",
         "--precision", "bf16", "--prefetch", "2", "--batch-threads", "2")
@@ -62,11 +69,41 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
     assert record["export"]["max_relative_error"] < 1e-4
     assert record["inference"]["overlap"] >= receptive_field(3) // 2
     capsys.readouterr()
-    run("evaluate-noise", "--name", "smoke", "--split", "train", "--limit", "2")
+    run("evaluate-noise", "--name", "smoke", "--split", "train")
     measured = json.loads(capsys.readouterr().out)
-    assert measured["pairs"] == 2
+    assert measured["pairs"] == 7
     size = next(iter(measured["by_size"].values()))
     assert size["high_ratio"] is not None and abs(size["sky_bias"]) < 1.0
+    assert list(measured["by_size"])[-1] == "deep-half"
+    assert measured["by_size"]["deep-half"]["high_ratio"] is not None
+    run("evaluate-noise", "--name", "smoke", "--split", "train", "--limit", "2", "--high-amount", "0.7",
+        "--low-amount", "0.9")
+    kept = json.loads(capsys.readouterr().out)
+    assert kept["bands"] == {"high": 0.7, "low": 0.9, "scale_px": 5.0}
+    evaluations = json.loads((store / "models" / "noise" / "smoke" / "run.json").read_text())["evaluations"]
+    assert set(evaluations) == {"train", "train, high 0.7 low 0.9 at 5 px"}
+
+    # Contact sheets: one against a deeper reference, one showing the noise
+    # taken out, and one whose input is not built.
+    pytest.importorskip("PIL")
+    with Manifest(store / "manifest.sqlite") as manifest:
+        half = manifest.rows("SELECT * FROM products WHERE kind = 'noise-a' ORDER BY id LIMIT 1")[0]
+        deep = manifest.rows("SELECT id FROM products WHERE kind = 'deep' AND set_id = ?", (half["set_id"],))[0]["id"]
+    crops = [{"x": 8, "y": 8, "label": "corner"}, {"x": 10_000, "y": 20, "label": "past the edge"}]
+    (store / "sheets").mkdir()
+    (store / "sheets" / "noise.json").write_text(json.dumps({"sheets": [
+        {"name": "half", "title": "A half", "input": half["id"], "reference": deep, "side": 48, "crops": crops},
+        {"name": "deep", "title": "The deep stack", "input": deep, "side": 48, "crops": crops},
+        {"name": "gone", "title": "Not built", "input": "nothing/deep", "side": 48, "crops": crops},
+    ]}))
+    run("sheet-noise", "--name", "smoke")
+    sheets = json.loads(capsys.readouterr().out)
+    assert set(sheets["made"]) == {"half", "deep"} and sheets["missing"] == ["gone"]
+    png = (store / sheets["made"]["deep"]).read_bytes()
+    assert png.startswith(b"\x89PNG")
+    width, height = int.from_bytes(png[16:20], "big"), int.from_bytes(png[20:24], "big")
+    assert width == 7 * 48 + 8 * 12 and height > 2 * 48
+    assert json.loads((store / "models" / "noise" / "smoke" / "run.json").read_text())["sheets"] == sheets["made"]
 
 
 def test_the_modelled_noise_map_keeps_the_level_and_drops_the_scatter():
@@ -84,6 +121,36 @@ def test_the_modelled_noise_map_keeps_the_level_and_drops_the_scatter():
     assert np.percentile(raw, 99) / np.percentile(raw, 1) > 5, "the per-pixel map scatters"
     assert np.percentile(modelled, 99) / np.percentile(modelled, 1) < 1.2, "the modelled one does not"
     assert abs(np.median(modelled) / true_sigma - 1.0) < 0.08, "and keeps the level"
+
+
+def test_noise_bands_take_out_the_grain_and_the_mottle_apart():
+    from seiza_training.noise_model import NoiseBands, gaussian_blur
+
+    rng = np.random.default_rng(10)
+    grain = rng.normal(size=(256, 256)).astype(np.float32)
+    mottle = rng.normal(size=(256, 256)).astype(np.float32)
+    for _ in range(3):
+        mottle = gaussian_blur(mottle, 8.0)
+    mottle *= 1.0 / mottle.std()
+    image = (100.0 + grain + mottle).astype(np.float32)
+    residual = 100.0 - image  # a model that finds all of the noise
+
+    assert np.allclose(NoiseBands().apply(image, residual), 100.0, atol=1e-4)
+    kept = NoiseBands(high=0.7, low=0.7).apply(image, residual) - 100.0
+    assert kept.std() == pytest.approx(0.3 * (grain + mottle).std(), rel=1e-4)
+
+    def left(bands):
+        return bands.apply(image, residual) - 100.0
+
+    # The grain alone kept: little of the mottle comes back.
+    only_grain = left(NoiseBands(high=0.0, low=1.0))
+    assert np.corrcoef(only_grain.ravel(), grain.ravel())[0, 1] > 0.95
+    assert abs(np.corrcoef(only_grain.ravel(), mottle.ravel())[0, 1]) < 0.1
+    # The mottle alone kept: little of the grain comes back.
+    only_mottle = left(NoiseBands(high=1.0, low=0.0))
+    assert np.corrcoef(only_mottle.ravel(), mottle.ravel())[0, 1] > 0.95
+    with pytest.raises(ValueError):
+        NoiseBands(high=1.5)
 
 
 def test_prefetched_batches_are_the_ones_built_in_turn_and_errors_come_through():

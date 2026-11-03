@@ -342,9 +342,19 @@ The manifest decides which sets qualify for which recipe:
 | PSF field | the deep stack | conditioning, star rendering |
 | Starless candidate and star list | catalogue-guided removal on the solved deep stack | star backgrounds, once reviewed |
 | Finished stack | a PSF Guard group stack, copied in, image only | inputs at user depth, reblur loss, catalogue removal, gates |
+| Deep halves | the deep stack's frames dealt alternately into two stacks | noise pairs at a night's whole depth, clean targets |
+| Multi-night deep stack, with variance and coverage, and its halves | every accepted frame of one object, telescope and filter, over all its nights | references and pairs deeper than any night (planned) |
 
 Cross-instrument pairs are built per object, across sets, once both sets'
 deep stacks exist.
+
+A copied finished stack carries no variance or coverage, so the noise model
+cannot be run on it with a noise map of its own. The deepest objects, tens
+of hours over dozens of nights, are therefore stacked again from the
+corpus's own calibrated frames, onto one reference across the nights, with
+the variance and coverage every product carries. Halves dealt by night give
+pairs at a depth no single night reaches, and the whole is a near-clean
+reference for each night's stack.
 
 ### Review
 
@@ -434,6 +444,19 @@ gradient removal leave. The removed noise `r = x − f(x)` is split by a
 Gaussian of scale `s`, 5 px by default: `r_low = G_s ∗ r` and
 `r_high = r − r_low`. The result is `x − a_high · r_high − a_low · r_low`.
 Changing either amount, or `s`, is instant and needs no second inference.
+
+The amounts default to less than 1. Taking out everything the model finds
+gives the least error against a clean target, but the result looks smooth
+and flat: in the first large runs the empty sky kept 2% of its noise, as
+flat as a stack about 2,500 times as deep, and fine texture near the noise
+floor went with it. Keeping a share `k` of the noise leaves an image as
+noisy as a stack `1/k²` as deep, so a 4-frame stack keeping 30% looks as
+grainy as 45 frames. The blend adds back only what was in the input, so it
+also returns any detail the model took out, and invents nothing. Grain
+reads as texture where mottle reads as a fault, so the low band is taken
+out more fully than the high. The defaults are chosen on real stacks, by
+eye against a deeper stack of the same night, and the training harness
+measures runs at them as well as at full removal.
 
 So both bands must be learned, not only the grain. Real pairs carry real
 low-frequency noise: resampling correlates neighbouring pixels, and a
@@ -1000,6 +1023,22 @@ Each model also has gates of its own.
 - a flat residual spectrum;
 - star flux and FWHM unchanged within 1%;
 - injected Gaussian blobs at 1–3σ keep at least 80% of their amplitude.
+
+Every noise run also makes contact sheets, so runs are judged by eye
+beside their measures. The store lists a few chosen images: nights from the
+validation sets, from the held-out telescope and from a training set, mono
+narrowband and broadband, bright structure and the faintest. For each, one
+sheet takes a 4-frame half as the input and the night's deep stack as the
+reference. The other takes the deep stack itself, with nothing deeper, and
+shows in place of a reference the noise taken out, magnified, where any
+structure is detail the run removed. Each row is a 1:1 crop. The panels
+show the input, then everything the run finds taken out, then the same
+fixed shares kept, all under the reference's stretch. The shares never
+change, so one run's sheet can be laid beside another's. A night's deep
+stack is far less noisy than anything the noise model trains on, and the
+first large runs, measuring at the floor on its halves, still took out a
+trace of edges and bright-star profiles there. The deep stacks' halves are
+measured the same way as the noise pairs, under their own size.
 
 **PSF model:**
 
