@@ -37,10 +37,11 @@ frame, while the target keeps none, so the network learns to remove them;
 the empty sky, with outliers planted in it, measures how much of them a
 model leaves.
 
-A background thread builds each batch while the GPU trains on the one
-before, and on CUDA the network runs channels-last. Training can run the
-network in bfloat16 with the loss in float32; evaluation and export stay
-in float32.
+Threads build batches ahead while the GPU trains, each batch from a
+generator seeded by its step, and on CUDA the network runs channels-last.
+Training can run the network in bfloat16 with the loss in float32;
+evaluation and export stay in float32. Evaluation measures several pairs
+at once, their GPU calls taking turns.
 """
 
 from __future__ import annotations
@@ -48,13 +49,14 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import queue
 import random
 import threading
 import time
 import warnings
 import zlib
+from collections import deque
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -391,41 +393,43 @@ def batch_from(
 
 
 class Prefetch:
-    """Batches from `make`, built up to `depth` ahead on one background
-    thread. One thread calls `make` in turn, so the batches, and the random
-    draws behind them, are those calling `make` in the loop would give."""
+    """`make(step)` for steps 1, 2, …, built up to `depth` ahead on `threads`
+    threads and handed out in step order. A batch depends only on its step,
+    so the batches are those calling `make` in the loop would give, whatever
+    the threads. NumPy releases the interpreter lock for the copies and the
+    arithmetic, which is most of a batch."""
 
-    def __init__(self, make: Callable[[], Any], depth: int) -> None:
-        self.ready: queue.Queue = queue.Queue(maxsize=depth)
-        self.stopped = threading.Event()
-        self.thread = threading.Thread(target=self.fill, args=(make,), daemon=True)
-        self.thread.start()
+    def __init__(self, make: Callable[[int], Any], depth: int, threads: int = 1) -> None:
+        self.make = make
+        self.pool = ThreadPoolExecutor(max_workers=threads, thread_name_prefix="batch")
+        self.pending: deque[Future] = deque()
+        self.step = 0
+        for _ in range(max(depth, threads)):
+            self.submit()
 
-    def fill(self, make: Callable[[], Any]) -> None:
-        while not self.stopped.is_set():
-            try:
-                item = make()
-            except Exception as error:  # noqa: BLE001 - `get` raises it again
-                item = error
-            while not self.stopped.is_set():
-                try:
-                    self.ready.put(item, timeout=0.1)
-                    break
-                except queue.Full:
-                    pass
-            if isinstance(item, Exception):
-                return
+    def submit(self) -> None:
+        self.step += 1
+        self.pending.append(self.pool.submit(self.make, self.step))
 
     def get(self) -> Any:
-        """The next batch, or the error that building it raised."""
-        item = self.ready.get()
-        if isinstance(item, Exception):
-            raise item
+        """The next step's batch, or the error that building it raised."""
+        item = self.pending.popleft().result()
+        self.submit()
         return item
 
     def close(self) -> None:
-        self.stopped.set()
-        self.thread.join()
+        self.pool.shutdown(wait=True, cancel_futures=True)
+
+
+def step_generator(seed: int, step: int) -> np.random.Generator:
+    """The random generator of one training step's batch."""
+    return np.random.default_rng([seed, step])
+
+
+# Whole-image evaluation runs this many pairs at once; their GPU calls take
+# turns under `GPU`, and their loading and NumPy work overlap.
+EVALUATION_THREADS = 4
+GPU = threading.Lock()
 
 
 PRECISIONS = ("fp32", "bf16")
@@ -498,7 +502,8 @@ def train(
     structure_sampling: float = 0.0,
     outlier_count: float = 0.0,
     precision: str = "fp32",
-    prefetch: int = 4,
+    prefetch: int = 8,
+    batch_threads: int = 4,
 ) -> dict[str, Any]:
     """Train a noise model on the train split's pairs, evaluate it on the
     validation split's, export it to ONNX and record the run.
@@ -508,12 +513,13 @@ def train(
     records it under `extra_label`. `outlier_count` adds that many
     synthetic outliers per 256 × 256 pixels to every input tile.
     `precision` "bf16" runs the network in bfloat16 under autocast.
-    `prefetch` batches are built ahead on a background thread; 0 builds
-    each in turn, giving the same batches."""
+    `prefetch` batches are built ahead on `batch_threads` threads; 0 builds
+    each in turn. Each step's batch draws from `step_generator(seed, step)`,
+    so it is the same either way. (Runs before this drew every batch from
+    one generator in turn.)"""
     if precision not in PRECISIONS:
         raise ValueError(f"precision is one of {PRECISIONS}, not {precision!r}")
     torch.manual_seed(seed)
-    rng = np.random.default_rng(seed)
     chosen = pairs(manifest, "train", sets)
     if not chosen:
         raise RuntimeError("no built noise pairs in the train split")
@@ -531,7 +537,8 @@ def train(
     odds = structure_odds(banked, structure_sampling)
     extra_odds = structure_odds(extra, structure_sampling) if extra is not None else None
 
-    def assemble() -> tuple[torch.Tensor, ...]:
+    def assemble(step: int) -> tuple[torch.Tensor, ...]:
+        rng = step_generator(seed, step)
         parts = [batch_from(banked, batch - extra_count, tile, rng, map_jitter=map_jitter, odds=odds,
                             outlier_count=outlier_count)]
         if extra_count:
@@ -541,13 +548,13 @@ def train(
         # Pinned, a batch copies to the GPU while it still trains.
         return tuple(t.pin_memory() for t in tensors) if cuda else tensors
 
-    source = Prefetch(assemble, prefetch) if prefetch else None
+    source = Prefetch(assemble, prefetch, batch_threads) if prefetch else None
     started = time.monotonic()
     # Summed on the device, so a step never waits for the GPU to finish.
     running = torch.zeros((), device=where)
     try:
         for step in range(1, steps + 1):
-            tensors = source.get() if source else assemble()
+            tensors = source.get() if source else assemble(step)
             inputs, targets, references, sigmas = (t.to(where, non_blocking=True) for t in tensors)
             inputs = inputs.contiguous(memory_format=layout)
             with torch.autocast(where.type, dtype=torch.bfloat16, enabled=precision == "bf16"):
@@ -590,6 +597,7 @@ def train(
                    "loss_weight": loss_weight, "map_jitter": map_jitter, "noise_map": noise_map,
                    "huber": huber, "huber_above": huber_above, "structure_sampling": structure_sampling,
                    "outliers": outlier_count, "precision": precision, "prefetch": prefetch,
+                   "batch_threads": batch_threads, "batch_generator": "per-step",
                    "extra": {"label": extra_label, "fraction": extra_fraction, "windows": int(len(extra["a"]))}
                    if extra is not None else None},
         "parameters": sum(p.numel() for p in model.parameters()),
@@ -609,10 +617,13 @@ def train(
 def denoiser(model: ResidualUNet, background: float, noise: float, batch_device: torch.device | None = None):
     """A function from network-input tiles to the residual in linear units."""
     where = batch_device or torch.device("cpu")
-    model = model.to(where)
+    with GPU:
+        # Under the lock, so a thread moving the model never meets another's
+        # forward pass.
+        model = model.to(where)
 
     def run(tiles: np.ndarray) -> np.ndarray:
-        with torch.no_grad():
+        with GPU, torch.no_grad():
             residual = model(torch.from_numpy(tiles).to(where)).cpu().numpy()
         return residual * noise
 
@@ -675,15 +686,17 @@ def evaluate(
     limit: int | None = None,
     sets: set[str] | None = None,
     noise_map: str = "raw",
+    threads: int = EVALUATION_THREADS,
 ) -> dict[str, Any]:
     """Denoise each of a split's A halves, whole, through overlapping
     tiles, and measure it against its B half. The network reads the noise
     map it was trained with; every run is measured in the same units, the
-    per-pixel map's median noise, so runs with different maps compare."""
+    per-pixel map's median noise, so runs with different maps compare.
+    `threads` pairs are measured at once."""
     model = model.eval()
     where = device()
-    per_pair = []
-    for pair in pairs(manifest, split, sets)[:limit]:
+
+    def one(pair: dict[str, Any]) -> dict[str, Any]:
         image_a, sigma_a = load_half(store, pair["a"])
         image_b, _ = load_half(store, pair["b"], noise_map=False)
         background, noise = scales(image_a, sigma_a)
@@ -696,8 +709,11 @@ def evaluate(
                          tile=tile, overlap=overlap, margin=margin)[0]
         estimate = image_a + residual
         recipe = loads(pair["a"]["recipe"])
-        per_pair.append({"pair": pair["a"]["id"], "set": pair["set"], "size": recipe.get("size"),
-                         **measure(estimate, image_a, image_b, background, noise)})
+        return {"pair": pair["a"]["id"], "set": pair["set"], "size": recipe.get("size"),
+                **measure(estimate, image_a, image_b, background, noise)}
+
+    with ThreadPoolExecutor(max_workers=threads, thread_name_prefix="evaluate") as pool:
+        per_pair = list(pool.map(one, pairs(manifest, split, sets)[:limit]))
     by_size: dict[Any, list[dict[str, Any]]] = {}
     for row in per_pair:
         by_size.setdefault(row["size"], []).append(row)
@@ -735,9 +751,10 @@ def box_filter(image: np.ndarray, radius: int, pool: Callable) -> np.ndarray:
     """`pool` over the (2·radius + 1)² box about each pixel, the edge pixels
     repeated outward, on the training device: a measure's whole-image
     filters cost little there, and most of an evaluation on the CPU."""
-    pixels = torch.from_numpy(np.ascontiguousarray(image, dtype=np.float32))[None, None].to(device())
-    padded = torch.nn.functional.pad(pixels, (radius, radius, radius, radius), mode="replicate")
-    return pool(padded, 2 * radius + 1, stride=1)[0, 0].cpu().numpy()
+    with GPU:
+        pixels = torch.from_numpy(np.ascontiguousarray(image, dtype=np.float32))[None, None].to(device())
+        padded = torch.nn.functional.pad(pixels, (radius, radius, radius, radius), mode="replicate")
+        return pool(padded, 2 * radius + 1, stride=1)[0, 0].cpu().numpy()
 
 
 def box_blur(image: np.ndarray, radius: int) -> np.ndarray:
@@ -894,15 +911,16 @@ def evaluate_dark_noise(
     margin: int = 52,
     sets: set[str] | None = None,
     noise_map: str = "raw",
+    threads: int = EVALUATION_THREADS,
 ) -> dict[str, Any]:
     """Denoise each of a split's dark-noise inputs and measure it against
     its clean target (`truth`), and denoise its noise alone on a flat sky
     (`empty_sky`), once as it is and once with `outliers` planted in it.
-    Inference and units are `evaluate`'s."""
+    Inference, units and threads are `evaluate`'s."""
     model = model.eval()
     where = device()
-    rows = []
-    for pair in dark_noise.pairs(manifest, split, sets):
+
+    def one(pair: dict[str, Any]) -> dict[str, Any]:
         image, sigma = load_half(store, pair["input"])
         target, _ = load_half(store, pair["target"], noise_map=False)
         target_files = loads(pair["target"]["files"])
@@ -943,10 +961,13 @@ def evaluate_dark_noise(
                                         network_input(spoiled, sky_sigma, sky_background, sky_noise),
                                         tile=tile, overlap=overlap, margin=margin)[0]
         empty["outliers_left"] = float(np.nansum(left**2) / np.sum(planted**2))
-        rows.append({"pair": pair["input"]["id"], "set": pair["set"],
-                     "size": loads(pair["input"]["recipe"]).get("size"),
-                     **{f"truth_{key}": value for key, value in truth.items()},
-                     **{f"empty_{key}": value for key, value in empty.items()}})
+        return {"pair": pair["input"]["id"], "set": pair["set"],
+                "size": loads(pair["input"]["recipe"]).get("size"),
+                **{f"truth_{key}": value for key, value in truth.items()},
+                **{f"empty_{key}": value for key, value in empty.items()}}
+
+    with ThreadPoolExecutor(max_workers=threads, thread_name_prefix="evaluate") as pool:
+        rows = list(pool.map(one, dark_noise.pairs(manifest, split, sets)))
 
     def mean(key):
         values = [row[key] for row in rows if row.get(key) is not None]
