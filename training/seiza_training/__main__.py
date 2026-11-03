@@ -105,6 +105,9 @@ def main(argv: list[str] | None = None) -> int:
     train.add_argument("--outliers", type=float, default=0.0, dest="outlier_count",
                        help="add this many synthetic hot pixels, cold pixels and cosmic rays per 256 × 256 "
                             "pixels to every input tile, and none to its target")
+    train.add_argument("--outlier-floor", type=float, default=5.0,
+                       help="the faintest synthetic hot pixel, in units of the typical noise; cosmic rays "
+                            "start at twice it")
     train.add_argument("--precision", choices=("fp32", "bf16"), default="fp32",
                        help="run the network in bfloat16 under autocast, the loss staying in float32")
     train.add_argument("--prefetch", type=int, default=8,
@@ -256,6 +259,7 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
             validation_sets=set(arguments.validation_sets) if arguments.validation_sets else None,
             noise_map=arguments.noise_map, huber=arguments.huber, huber_above=arguments.huber_above,
             structure_sampling=arguments.structure_sampling, outlier_count=arguments.outlier_count,
+            outlier_floor=arguments.outlier_floor,
             precision=arguments.precision, prefetch=arguments.prefetch, batch_threads=arguments.batch_threads,
             **extra,
         )

@@ -334,6 +334,10 @@ def structure_odds(banked: dict[str, np.ndarray], factor: float) -> np.ndarray |
 
 # Outliers per this many pixels: `count` in `outliers` is per 256 × 256.
 OUTLIER_AREA = 256 * 256
+# The faintest hot pixel `outliers` plants, in σ̄. Near it a hot pixel looks
+# like a faint star, so a model trained on many learns to take out some of
+# the faint stars' flux too.
+OUTLIER_FLOOR = 5.0
 
 
 def lanczos3(offset: float) -> np.ndarray:
@@ -343,26 +347,28 @@ def lanczos3(offset: float) -> np.ndarray:
     return weights / weights.sum()
 
 
-def outliers(shape: tuple[int, int], rng: np.random.Generator, count: float) -> np.ndarray:
+def outliers(shape: tuple[int, int], rng: np.random.Generator, count: float, *,
+             floor: float = OUTLIER_FLOOR) -> np.ndarray:
     """Outliers a few frames fail to reject, in units of σ̄, `count` per
-    256 × 256 pixels on average: hot pixels (5 to 200σ̄), cold ones (−5 to
-    −30σ̄) and cosmic-ray tracks 3 to 15 pixels long (10 to 300σ̄ along
-    them). Each point is spread over the pixels around it as Lanczos-3
-    registration spreads a frame's pixel, at a random sub-pixel offset."""
+    256 × 256 pixels on average: hot pixels (`floor` to 200σ̄), cold ones
+    (−5 to −30σ̄) and cosmic-ray tracks 3 to 15 pixels long (twice `floor`
+    to 300σ̄ along them). Each point is spread over the pixels around it as
+    Lanczos-3 registration spreads a frame's pixel, at a random sub-pixel
+    offset."""
     height, width = shape
     plane = np.zeros((height + 6, width + 6), dtype=np.float32)
     for _ in range(rng.poisson(count * height * width / OUTLIER_AREA)):
         y, x = rng.uniform(0, height), rng.uniform(0, width)
         kind = rng.random()
         if kind < 0.6:
-            points, amplitude = [(y, x)], math.exp(rng.uniform(math.log(5), math.log(200)))
+            points, amplitude = [(y, x)], math.exp(rng.uniform(math.log(floor), math.log(200)))
         elif kind < 0.75:
             points, amplitude = [(y, x)], -math.exp(rng.uniform(math.log(5), math.log(30)))
         else:
             length, angle = rng.uniform(3, 15), rng.uniform(0, math.pi)
             steps = np.arange(int(length) + 1)
             points = list(zip(y + steps * math.sin(angle), x + steps * math.cos(angle)))
-            amplitude = math.exp(rng.uniform(math.log(10), math.log(300)))
+            amplitude = math.exp(rng.uniform(math.log(2 * floor), math.log(300)))
         for py, px in points:
             if not (0 <= py < height and 0 <= px < width):
                 continue
@@ -381,6 +387,7 @@ def batch_from(
     map_jitter: float = 0.0,
     odds: np.ndarray | None = None,
     outlier_count: float = 0.0,
+    outlier_floor: float = OUTLIER_FLOOR,
 ) -> tuple[torch.Tensor, ...]:
     """`size` tiles at random windows and offsets, each flipped and turned
     one of eight ways: the network's input, the target and A, in units of
@@ -389,8 +396,8 @@ def batch_from(
     drawn log-uniformly from `exp(±map_jitter)` per tile, so the network
     learns to judge the noise from the image, the map telling it only
     where the noise is higher or lower. With `outlier_count`, A gains
-    `outliers` and the target does not; the noise map, which a modelled
-    map would not change, stays as it was."""
+    `outliers` from `outlier_floor` up and the target does not; the noise
+    map, which a modelled map would not change, stays as it was."""
     count = len(banked["a"])
     picks = rng.choice(count, size, p=odds) if odds is not None else rng.integers(0, count, size)
     inputs, targets, references, sigmas = [], [], [], []
@@ -407,7 +414,7 @@ def batch_from(
             planes = planes[:, :, ::-1]
         a, sigma, b = planes
         if outlier_count:
-            a = a + outliers(a.shape, rng, outlier_count) * noise
+            a = a + outliers(a.shape, rng, outlier_count, floor=outlier_floor) * noise
         stated = sigma * float(np.exp(rng.uniform(-map_jitter, map_jitter))) if map_jitter else sigma
         inputs.append(network_input(a, stated, background, noise))
         targets.append(np.stack([(b - background) / noise]))
@@ -528,6 +535,7 @@ def train(
     huber_above: float = 0.0,
     structure_sampling: float = 0.0,
     outlier_count: float = 0.0,
+    outlier_floor: float = OUTLIER_FLOOR,
     precision: str = "fp32",
     prefetch: int = 8,
     batch_threads: int = 4,
@@ -538,7 +546,8 @@ def train(
     `extra` is a second bank from `cut_windows`, of other targets for
     their inputs; it makes up `extra_fraction` of every batch, and the run
     records it under `extra_label`. `outlier_count` adds that many
-    synthetic outliers per 256 × 256 pixels to every input tile.
+    synthetic outliers per 256 × 256 pixels to every input tile, the hot
+    ones from `outlier_floor` up.
     `precision` "bf16" runs the network in bfloat16 under autocast.
     `prefetch` batches are built ahead on `batch_threads` threads; 0 builds
     each in turn. Each step's batch draws from `step_generator(seed, step)`,
@@ -569,10 +578,10 @@ def train(
     def assemble(step: int) -> tuple[torch.Tensor, ...]:
         rng = step_generator(seed, step)
         parts = [batch_from(banked, batch - extra_count, tile, rng, map_jitter=map_jitter, odds=odds,
-                            outlier_count=outlier_count)]
+                            outlier_count=outlier_count, outlier_floor=outlier_floor)]
         if extra_count:
             parts.append(batch_from(extra, extra_count, tile, rng, map_jitter=map_jitter, odds=extra_odds,
-                                    outlier_count=outlier_count))
+                                    outlier_count=outlier_count, outlier_floor=outlier_floor))
         tensors = tuple(torch.cat(values) for values in zip(*parts))
         # Pinned, a batch copies to the GPU while it still trains.
         return tuple(t.pin_memory() for t in tensors) if cuda else tensors
@@ -625,7 +634,7 @@ def train(
                    "windows": int(len(banked["a"])), "core_sigma": CORE_SIGMA,
                    "loss_weight": loss_weight, "map_jitter": map_jitter, "noise_map": noise_map,
                    "huber": huber, "huber_above": huber_above, "structure_sampling": structure_sampling,
-                   "outliers": outlier_count, "precision": precision, "prefetch": prefetch,
+                   "outliers": outlier_count, "outlier_floor": outlier_floor, "precision": precision, "prefetch": prefetch,
                    "batch_threads": batch_threads, "batch_generator": "per-step",
                    "extra": {"label": extra_label, "fraction": extra_fraction, "windows": int(len(extra["a"]))}
                    if extra is not None else None},
