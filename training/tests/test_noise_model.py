@@ -240,6 +240,30 @@ def test_signal_transfer_keeps_the_input_whole_and_falls_as_an_estimate_smooths(
     assert transfer(image)["transfer_faint_coarse"] == pytest.approx(1.0)
 
 
+def test_star_widths_show_an_estimate_that_softens_stars():
+    from seiza_training.noise_model import against_truth, gaussian_blur
+
+    rng = np.random.default_rng(12)
+    stars = np.zeros((400, 400), dtype=np.float32)
+    yy, xx = np.mgrid[0:400, 0:400]
+    for y, x in rng.uniform(20, 380, (120, 2)):
+        stars += rng.uniform(40, 400) * np.exp(-((yy - y) ** 2 + (xx - x) ** 2) / (2 * 1.5**2))
+    image = 100.0 + stars + rng.normal(0.0, 1.0, stars.shape).astype(np.float32)
+    target = 100.0 + stars + rng.normal(0.0, 0.3, stars.shape).astype(np.float32)
+    floor = np.full(stars.shape, 0.09, dtype=np.float32)
+
+    def measured(estimate):
+        return against_truth(estimate, image, target, floor, 100.0, 1.0)
+
+    kept = measured(image)
+    assert kept["star_fwhm_ratio_faint"] == pytest.approx(1.0)
+    assert kept["star_fwhm_px"] == pytest.approx(2.3548 * 1.5, rel=0.1)
+    # A clean estimate is as sharp as the noisy input, on average.
+    assert measured(100.0 + stars)["star_fwhm_ratio_faint"] == pytest.approx(1.0, abs=0.03)
+    softened = measured(gaussian_blur(image, 1.0))
+    assert softened["star_fwhm_ratio_faint"] > 1.1 and softened["star_fwhm_target_faint"] > 1.1
+
+
 def test_peak_flux_shows_faint_stars_an_estimate_drops():
     from seiza_training.noise_model import against_truth, box_blur
 

@@ -420,7 +420,14 @@ There are four sources:
    on one grid with matched depth, and measure the PSF field of each. The
    ratio map is the measured ratio between the two. The target is not truth,
    but it is a real observation of the same sky through real optics with a
-   smaller PSF.
+   smaller PSF. An object stacked over many nights is split the same way
+   over all of them, the best frames of every night against the worst: both
+   halves far deeper, and the ratio wider than one night's spread of
+   seeing gives. A pair teaches sharpening only where its halves differ in
+   the PSF alone, so each half's PSF is measured, never assumed, and the
+   model reads its shape as well as its width. Whatever moves with seeing,
+   such as airmass, focus drift, wind or haze, is checked per pair:
+   background, flux and PSF shape.
 3. **Star-rendered real pairs (real, exact for stars).** On a solved stack,
    fit the stars at their Gaia positions, remove them, and render them again
    at `T`. Hybrid seeing-split pairs take their background from the best
