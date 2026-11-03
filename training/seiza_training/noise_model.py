@@ -536,6 +536,7 @@ def train(
     structure_sampling: float = 0.0,
     outlier_count: float = 0.0,
     outlier_floor: float = OUTLIER_FLOOR,
+    clip_grad: float = 0.0,
     precision: str = "fp32",
     prefetch: int = 8,
     batch_threads: int = 4,
@@ -547,7 +548,9 @@ def train(
     their inputs; it makes up `extra_fraction` of every batch, and the run
     records it under `extra_label`. `outlier_count` adds that many
     synthetic outliers per 256 × 256 pixels to every input tile, the hot
-    ones from `outlier_floor` up.
+    ones from `outlier_floor` up. `clip_grad` scales each step's gradient
+    down to that norm where it is longer, so one wild batch cannot throw
+    the weights far.
     `precision` "bf16" runs the network in bfloat16 under autocast.
     `prefetch` batches are built ahead on `batch_threads` threads; 0 builds
     each in turn. Each step's batch draws from `step_generator(seed, step)`,
@@ -599,6 +602,8 @@ def train(
                 loss = loss_of(model, inputs, targets, references, sigmas, loss_weight, huber, huber_above)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
+            if clip_grad:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
             optimizer.step()
             schedule.step()
             running += loss.detach().float()
@@ -634,7 +639,7 @@ def train(
                    "windows": int(len(banked["a"])), "core_sigma": CORE_SIGMA,
                    "loss_weight": loss_weight, "map_jitter": map_jitter, "noise_map": noise_map,
                    "huber": huber, "huber_above": huber_above, "structure_sampling": structure_sampling,
-                   "outliers": outlier_count, "outlier_floor": outlier_floor, "precision": precision, "prefetch": prefetch,
+                   "outliers": outlier_count, "outlier_floor": outlier_floor, "clip_grad": clip_grad, "precision": precision, "prefetch": prefetch,
                    "batch_threads": batch_threads, "batch_generator": "per-step",
                    "extra": {"label": extra_label, "fraction": extra_fraction, "windows": int(len(extra["a"]))}
                    if extra is not None else None},

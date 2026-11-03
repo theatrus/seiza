@@ -66,12 +66,13 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
     capsys.readouterr()
     run("train-noise", "--name", "smoke", "--steps", "6", "--width", "4", "--levels", "3", "--tile", "64", "--batch", "2",
         "--precision", "bf16", "--prefetch", "2", "--batch-threads", "2", "--deep-fraction", "0.5",
-        "--outliers", "2", "--outlier-floor", "10")
+        "--outliers", "2", "--outlier-floor", "10", "--clip-grad", "1")
     record = json.loads((store / "models" / "noise" / "smoke" / "run.json").read_text())
     assert record["config"]["train_pairs"] == 6
     assert record["config"]["extra"]["label"] == "deep" and record["config"]["extra"]["windows"] > 0
     assert record["config"]["precision"] == "bf16"
     assert record["config"]["outliers"] == 2 and record["config"]["outlier_floor"] == 10
+    assert record["config"]["clip_grad"] == 1
     assert record["export"]["max_relative_error"] < 1e-4
     assert record["inference"]["overlap"] >= receptive_field(3) // 2
     capsys.readouterr()
