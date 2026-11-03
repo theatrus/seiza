@@ -495,8 +495,7 @@ meet. A gate tests a deliberately wrong PSF.
 
 ### Pairs
 
-There are three sources, in decreasing order of volume and increasing order
-of trust:
+There are four sources:
 
 1. **Synthetic composites with re-rendered stars (known truth).** A reference
    is a deep stack's reviewed starless image, with PSF `P_ref`. Public
@@ -523,7 +522,13 @@ of trust:
    ratio map is the measured ratio between the two. The target is not truth,
    but it is a real observation of the same sky through real optics with a
    smaller PSF.
-3. **Cross-instrument pairs (real, few).** Solve both stacks. Reproject the
+3. **Star-rendered real pairs (real, exact for stars).** On a solved stack,
+   fit the stars at their Gaia positions, remove them, and render them again
+   at `T`. Hybrid seeing-split pairs take their background from the best
+   quartile and their stars from that render. The
+   [Gaia-anchored sharpening plan](gaia-anchored-sharpening.md) describes
+   both, with the Gaia gates and a classical star sharpener.
+4. **Cross-instrument pairs (real, few).** Solve both stacks. Reproject the
    longer focal length's stack onto the shorter one's grid, then convolve it to
    the target PSF. Fit a linear photometric match first, because cameras and
    filters differ. These pairs validate only.
