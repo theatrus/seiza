@@ -65,11 +65,13 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
                                     tuple(row.values()))
     capsys.readouterr()
     run("train-noise", "--name", "smoke", "--steps", "6", "--width", "4", "--levels", "3", "--tile", "64", "--batch", "2",
-        "--precision", "bf16", "--prefetch", "2", "--batch-threads", "2", "--deep-fraction", "0.5")
+        "--precision", "bf16", "--prefetch", "2", "--batch-threads", "2", "--deep-fraction", "0.5",
+        "--outliers", "2", "--outlier-floor", "10")
     record = json.loads((store / "models" / "noise" / "smoke" / "run.json").read_text())
     assert record["config"]["train_pairs"] == 6
     assert record["config"]["extra"]["label"] == "deep" and record["config"]["extra"]["windows"] > 0
     assert record["config"]["precision"] == "bf16"
+    assert record["config"]["outliers"] == 2 and record["config"]["outlier_floor"] == 10
     assert record["export"]["max_relative_error"] < 1e-4
     assert record["inference"]["overlap"] >= receptive_field(3) // 2
     capsys.readouterr()
@@ -193,6 +195,11 @@ def test_an_outlier_is_spread_as_registration_spreads_a_pixel():
     plane = outliers((512, 512), np.random.default_rng(5), 8.0)
     assert plane.max() > 5 and plane.min() < 0
     assert (np.abs(plane) > 0.5).mean() < 0.01, "outliers are sparse"
+    # The same draws from a higher floor: each hot pixel and track brighter,
+    # and each pixel's Lanczos weights sum to 1.
+    higher = outliers((512, 512), np.random.default_rng(5), 8.0, floor=20.0)
+    assert np.array_equal(higher != 0, plane != 0)
+    assert higher.sum() > plane.sum() + 8 * 15
 
 
 def test_outliers_reach_the_input_and_not_the_target():
