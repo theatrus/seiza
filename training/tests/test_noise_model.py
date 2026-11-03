@@ -55,7 +55,7 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
             manifest.db.execute("UPDATE sets SET split = 'train'")
     capsys.readouterr()
     run("train-noise", "--name", "smoke", "--steps", "6", "--width", "4", "--levels", "3", "--tile", "64", "--batch", "2",
-        "--precision", "bf16", "--prefetch", "2")
+        "--precision", "bf16", "--prefetch", "2", "--batch-threads", "2")
     record = json.loads((store / "models" / "noise" / "smoke" / "run.json").read_text())
     assert record["config"]["train_pairs"] == 6
     assert record["config"]["precision"] == "bf16"
@@ -87,22 +87,27 @@ def test_the_modelled_noise_map_keeps_the_level_and_drops_the_scatter():
 
 
 def test_prefetched_batches_are_the_ones_built_in_turn_and_errors_come_through():
-    from seiza_training.noise_model import Prefetch
+    import time
 
-    def counter(rng):
-        return lambda: rng.integers(0, 1000, 3)
+    from seiza_training.noise_model import Prefetch, step_generator
 
-    make = counter(np.random.default_rng(1))
-    direct = [make() for _ in range(20)]
-    source = Prefetch(counter(np.random.default_rng(1)), 3)
-    fetched = [source.get() for _ in range(20)]
-    source.close()
-    assert all(np.array_equal(a, b) for a, b in zip(direct, fetched))
+    def make(step):
+        # Uneven work, so threads finish out of order.
+        time.sleep(0.002 * (step % 3))
+        return step, step_generator(7, step).integers(0, 1000, 3)
 
-    def failing():
+    direct = [make(step) for step in range(1, 21)]
+    for threads in (1, 4):
+        source = Prefetch(make, 3, threads)
+        fetched = [source.get() for _ in range(20)]
+        source.close()
+        assert [step for step, _ in fetched] == list(range(1, 21))
+        assert all(np.array_equal(a, b) for (_, a), (_, b) in zip(direct, fetched))
+
+    def failing(step):
         raise RuntimeError("bank gone")
 
-    source = Prefetch(failing, 2)
+    source = Prefetch(failing, 2, 2)
     with pytest.raises(RuntimeError, match="bank gone"):
         source.get()
     source.close()

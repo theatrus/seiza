@@ -93,8 +93,10 @@ def main(argv: list[str] | None = None) -> int:
                             "pixels to every input tile, and none to its target")
     train.add_argument("--precision", choices=("fp32", "bf16"), default="fp32",
                        help="run the network in bfloat16 under autocast, the loss staying in float32")
-    train.add_argument("--prefetch", type=int, default=4,
-                       help="build this many batches ahead on a background thread (0: none; the batches are the same)")
+    train.add_argument("--prefetch", type=int, default=8,
+                       help="build this many batches ahead (0: none; the batches are the same)")
+    train.add_argument("--batch-threads", type=int, default=4,
+                       help="threads building batches ahead (the batches are the same)")
 
     evaluate = commands.add_parser("evaluate-noise", help="measure a trained noise model on a split")
     evaluate.add_argument("--name", required=True)
@@ -206,7 +208,8 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
             validation_sets=set(arguments.validation_sets) if arguments.validation_sets else None,
             noise_map=arguments.noise_map, huber=arguments.huber, huber_above=arguments.huber_above,
             structure_sampling=arguments.structure_sampling, outlier_count=arguments.outlier_count,
-            precision=arguments.precision, prefetch=arguments.prefetch, **extra,
+            precision=arguments.precision, prefetch=arguments.prefetch, batch_threads=arguments.batch_threads,
+            **extra,
         )
     if command == "evaluate-noise":
         from .noise_model import evaluate_saved
