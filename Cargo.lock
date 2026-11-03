@@ -3526,9 +3526,9 @@ dependencies = [
 name = "seiza-stars"
 version = "0.4.0"
 dependencies = [
- "image",
  "nalgebra",
  "rayon",
+ "seiza-fits",
  "seiza-imgproc",
 ]
 

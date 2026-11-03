@@ -116,7 +116,8 @@ fn run(pool: &rayon::ThreadPool) -> Vec<(&'static str, Vec<u64>)> {
         let mut results = Vec::new();
         let data = star_field();
 
-        // HocusFocus, with a PSF fit, each structure removal and binning.
+        // HocusFocus, with a PSF fit, each structure removal and binning, and
+        // HocusFocus 4.
         let mut fitted = None;
         for (name, params) in [
             ("hocus focus", HocusFocusParams::default()),
@@ -140,6 +141,15 @@ fn run(pool: &rayon::ThreadPool) -> Vec<(&'static str, Vec<u64>)> {
                 HocusFocusParams {
                     detection_binning: 2,
                     ..HocusFocusParams::default()
+                },
+            ),
+            ("hocus focus 4", HocusFocusParams::v4()),
+            (
+                "hocus focus 4 walked, one threshold",
+                HocusFocusParams {
+                    connected_components: false,
+                    adaptive_binarization: false,
+                    ..HocusFocusParams::v4()
                 },
             ),
         ] {
@@ -272,8 +282,6 @@ fn run(pool: &rayon::ThreadPool) -> Vec<(&'static str, Vec<u64>)> {
             .collect::<Vec<u8>>();
         let mut counter = BlobCounter::new();
         counter.process_image(&binary, WIDTH, HEIGHT);
-        // The counter lists blobs in hash map order, which changes from run
-        // to run whatever the pool, so they are compared sorted.
         let mut rectangles = counter
             .get_objects_information()
             .iter()

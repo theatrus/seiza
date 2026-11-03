@@ -24,6 +24,56 @@ pub enum StructureRemovalMethod {
     Atrous,
 }
 
+/// How a frame's HFR and FWHM summarize its stars, after HocusFocus's
+/// `MeasurementAverage` option.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MeasurementAverage {
+    /// The median of the stars' values: HocusFocus's default, and what it
+    /// records into an imaging catalog unless set otherwise.
+    #[default]
+    Median,
+    /// The mean, after dropping stars whose HFR lies more than 3 MADs from
+    /// the median.
+    MeanOutliers,
+}
+
+/// The HocusFocus release whose detector to reproduce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HocusFocusVersion {
+    /// HocusFocus 3 measurement (centroid, clipped box HFR) on PSF Guard's
+    /// own structure detection.
+    #[default]
+    V3,
+    /// HocusFocus 4 (from July 2026) throughout: its à trous structure map
+    /// with adaptive binarization, 8-connected candidates, a local
+    /// background plane, the contamination gate, and HFR over a circular
+    /// aperture. Build its defaults with [`HocusFocusParams::v4`].
+    V4,
+}
+
+impl std::fmt::Display for HocusFocusVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::V3 => "3",
+            Self::V4 => "4",
+        })
+    }
+}
+
+impl std::str::FromStr for HocusFocusVersion {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().trim_start_matches(['v', 'V']) {
+            "3" => Ok(Self::V3),
+            "4" => Ok(Self::V4),
+            other => Err(format!(
+                "unknown HocusFocus version {other:?}: expected 3 or 4"
+            )),
+        }
+    }
+}
+
 /// Coarse rig class for detection presets, after HocusFocus's Simple-mode
 /// pixel-scale axis. Star apparent size in PIXELS is what the detector's
 /// pixel-space knobs care about, and it follows the pixel scale: wide
@@ -121,6 +171,29 @@ pub struct HocusFocusParams {
     pub star_center_tolerance: f64, // Fraction of box size for center tolerance
     pub saturation_threshold: f64, // ADU value for saturation
     pub min_hfr: f64,        // Minimum HFR threshold
+    /// Spacing, in pixels, of the bilinear samples HFR is measured on:
+    /// HocusFocus's `PixelSampleSize`, 1 by default and 0.5 for wide fields.
+    pub pixel_sample_size: f64,
+    /// How the frame's HFR and FWHM summarize its stars.
+    pub measurement_average: MeasurementAverage,
+    /// Which HocusFocus release to reproduce. The fields below apply to
+    /// [`HocusFocusVersion::V4`] only.
+    pub version: HocusFocusVersion,
+    /// Threshold structures against a local surface (block median plus
+    /// `noise_clipping_multiplier` block noise) rather than one global level.
+    pub adaptive_binarization: bool,
+    /// Side, in pixels, of the blocks the adaptive surface is sampled on.
+    pub adaptive_block_size: usize,
+    /// Drop stars whose background ring has an eighth more than this many
+    /// standard errors above the fitted plane, as a neighbour would make it;
+    /// 0 turns the gate off.
+    pub contamination_sensitivity: f64,
+    /// Measure stars on the noise-reduced image too, as HocusFocus does for
+    /// its High noise level, rather than on the hot-pixel-filtered one.
+    pub measurement_noise_reduction: bool,
+    /// Take candidates as 8-connected regions (HocusFocus 4.0.0.16 on)
+    /// rather than with the older box-growing walk.
+    pub connected_components: bool,
 
     /// Keep saturated stars detected (flagged) instead of rejecting them,
     /// and exclude them from the average HFR/FWHM while at least three
@@ -136,12 +209,48 @@ impl HocusFocusParams {
     /// the plain defaults; the other classes shift the pixel-space knobs
     /// the way HocusFocus's Simple-mode presets do, with one corpus-driven
     /// divergence documented on [`TelescopeClass::LongFocalLength`].
+    /// HocusFocus 4's Simple-mode defaults for a typical rig: noise
+    /// reduction radius 4, MinHFR 1.2, saturated stars kept but left out of
+    /// the frame's HFR, adaptive binarization and the contamination gate on.
+    pub fn v4() -> Self {
+        Self {
+            version: HocusFocusVersion::V4,
+            noise_reduction_radius: 4,
+            min_hfr: 1.2,
+            keep_saturated_stars: true,
+            ..Self::default()
+        }
+    }
+
+    /// HocusFocus 4's Simple-mode preset for a rig class: wide fields drop a
+    /// structure layer, shrink the smallest star box and sample HFR every
+    /// half pixel; long focal lengths add a layer, grow the box and raise
+    /// the sensitivity threshold to 12.
+    pub fn v4_for_telescope_class(class: TelescopeClass) -> Self {
+        let mut params = Self::v4();
+        match class {
+            TelescopeClass::WideField => {
+                params.structure_layers = 3;
+                params.min_star_size = 4;
+                params.pixel_sample_size = 0.5;
+            }
+            TelescopeClass::Standard => {}
+            TelescopeClass::LongFocalLength => {
+                params.structure_layers = 5;
+                params.min_star_size = 6;
+                params.sensitivity = 12.0;
+            }
+        }
+        params
+    }
+
     pub fn for_telescope_class(class: TelescopeClass) -> Self {
         let mut params = Self::default();
         match class {
             TelescopeClass::WideField => {
                 params.structure_layers = 3;
                 params.min_star_size = 4;
+                params.pixel_sample_size = 0.5;
             }
             TelescopeClass::Standard => {}
             TelescopeClass::LongFocalLength => {
@@ -291,6 +400,14 @@ impl Default for HocusFocusParams {
             star_center_tolerance: 0.3,           // 30% - actual default
             saturation_threshold: 65535.0 * 0.99, // 99% of max
             min_hfr: 1.5,                         // Actual default
+            pixel_sample_size: 1.0,
+            measurement_average: MeasurementAverage::Median,
+            version: HocusFocusVersion::V3,
+            adaptive_binarization: true,
+            adaptive_block_size: 128,
+            contamination_sensitivity: 5.0,
+            connected_components: true,
+            measurement_noise_reduction: false,
             keep_saturated_stars: false,
             psf_type: PSFType::None, // No PSF fitting by default
         }
@@ -516,6 +633,16 @@ fn detect_on_prepared(
     height: usize,
     params: &HocusFocusParams,
 ) -> HocusFocusDetectionResult {
+    if params.version == HocusFocusVersion::V4 {
+        let found = crate::hocus_focus_v4::detect(data, width, height, params);
+        return HocusFocusDetectionResult {
+            stars: found.stars,
+            average_hfr: found.average_hfr,
+            average_fwhm: found.average_fwhm,
+            noise_sigma: found.noise_sigma,
+            background_mean: found.background_mean,
+        };
+    }
     let mut working_data = data.to_vec();
 
     // Step 2: Apply noise reduction if configured
@@ -620,15 +747,19 @@ fn detect_on_prepared(
         candidates.len()
     );
 
-    // Step 7: Measure and validate stars
-    let stars = measure_stars(
-        &working_data,
-        width,
-        height,
-        candidates,
-        params,
-        &noise_estimate,
-    );
+    // Step 7: Measure and validate stars. HocusFocus measures on the
+    // hot-pixel-filtered image, not the blurred one structures were found
+    // on, and clips with the noise of the blurred image.
+    let measurement_sigma = match params.structure_removal {
+        StructureRemovalMethod::Atrous => noise_estimate.sigma,
+        StructureRemovalMethod::Filtered => {
+            use rayon::prelude::*;
+            let image_f64: Vec<f64> = working_data.par_iter().map(|&v| v as f64).collect();
+            kappa_sigma_noise_estimate(&image_f64, width, height, params.noise_clipping_multiplier)
+                .sigma
+        }
+    };
+    let stars = measure_stars(data, width, height, candidates, params, measurement_sigma);
     crate::debug_detection!("Debug HocusFocus: {} stars passed validation", stars.len());
 
     // Calculate statistics. A saturated star's HFR is inflated by peak
@@ -642,17 +773,7 @@ fn detect_on_prepared(
         stars.iter().collect()
     };
 
-    let average_hfr = if !hfr_pool.is_empty() {
-        hfr_pool.iter().map(|s| s.hfr).sum::<f64>() / hfr_pool.len() as f64
-    } else {
-        0.0
-    };
-
-    let average_fwhm = if !hfr_pool.is_empty() {
-        hfr_pool.iter().map(|s| s.fwhm).sum::<f64>() / hfr_pool.len() as f64
-    } else {
-        0.0
-    };
+    let (average_hfr, average_fwhm) = summarize(&hfr_pool, params.measurement_average);
 
     HocusFocusDetectionResult {
         stars,
@@ -661,6 +782,63 @@ fn detect_on_prepared(
         noise_sigma: noise_estimate.sigma,
         background_mean: noise_estimate.background_mean,
     }
+}
+
+/// The frame's HFR and FWHM from its stars, as HocusFocus summarizes them;
+/// 0 for no stars.
+fn summarize(stars: &[&HocusFocusStar], average: MeasurementAverage) -> (f64, f64) {
+    if stars.is_empty() {
+        return (0.0, 0.0);
+    }
+    let hfrs = stars.iter().map(|s| s.hfr).collect::<Vec<_>>();
+    match average {
+        MeasurementAverage::Median => {
+            let fwhms = stars.iter().map(|s| s.fwhm).collect::<Vec<_>>();
+            (median_mad(&hfrs).0, median_mad(&fwhms).0)
+        }
+        MeasurementAverage::MeanOutliers => {
+            let (median, mad) = median_mad(&hfrs);
+            let kept = stars
+                .iter()
+                .filter(|s| s.hfr <= median + 3.0 * mad && s.hfr >= median - 3.0 * mad)
+                .collect::<Vec<_>>();
+            let kept = if kept.is_empty() {
+                stars.iter().collect()
+            } else {
+                kept
+            };
+            let n = kept.len() as f64;
+            (
+                kept.iter().map(|s| s.hfr).sum::<f64>() / n,
+                kept.iter().map(|s| s.fwhm).sum::<f64>() / n,
+            )
+        }
+    }
+}
+
+/// HocusFocus's `MedianMAD`: the median (mean of the middle two for an even
+/// count) and 1.483 times the median absolute deviation.
+fn median_mad(values: &[f64]) -> (f64, f64) {
+    fn middle(sorted: &[f64]) -> f64 {
+        let n = sorted.len();
+        if n.is_multiple_of(2) {
+            (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+        } else {
+            sorted[n / 2]
+        }
+    }
+    if values.is_empty() {
+        return (f64::NAN, f64::NAN);
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let median = middle(&sorted);
+    let mut deviations = sorted
+        .iter()
+        .map(|v| (v - median).abs())
+        .collect::<Vec<_>>();
+    deviations.sort_by(f64::total_cmp);
+    (median, 1.483 * middle(&deviations))
 }
 
 /// Apply hot pixel filtering using 3x3 median filter
@@ -1211,15 +1389,8 @@ fn find_star_candidates(
                 }
             }
 
-            // Calculate centroid
-            let center_x =
-                star_pixels.iter().map(|&(x, _)| x as f64).sum::<f64>() / star_pixels.len() as f64;
-            let center_y =
-                star_pixels.iter().map(|&(_, y)| y as f64).sum::<f64>() / star_pixels.len() as f64;
-
             candidates.push(StarCandidate {
                 pixels: star_pixels,
-                center: (center_x, center_y),
                 bounding_box: star_bounds,
             });
         }
@@ -1239,54 +1410,86 @@ fn find_star_candidates(
 #[derive(Debug, Clone)]
 struct StarCandidate {
     pixels: Vec<(usize, usize)>,
-    center: (f64, f64),
     bounding_box: (usize, usize, usize, usize), // x, y, width, height
 }
 
-/// Measure and validate star candidates
+/// Measure and validate star candidates as HocusFocus's
+/// `EvaluateStarCandidate` does, in its order of gates. `data` is the image
+/// stars are measured on and `sigma` the noise that clips them.
 fn measure_stars(
     data: &[u16],
     width: usize,
     height: usize,
     candidates: Vec<StarCandidate>,
     params: &HocusFocusParams,
-    noise_estimate: &KappaSigmaResult,
+    sigma: f64,
 ) -> Vec<HocusFocusStar> {
     let mut stars = Vec::new();
     let mut rejected_by_gate = [0usize; GATE_NAMES.len()];
 
     for candidate in candidates {
-        // Measure star properties
-        let (hfr, fwhm, peak, median, background, flux) = measure_star_properties(
-            data,
-            width,
-            height,
-            &candidate,
-            params.background_box_expansion,
-        );
-
-        // Calculate SNR (signal - background) / noise
-        let signal = peak - background;
-        let snr = signal / noise_estimate.sigma.max(0.001);
+        let (bx, by, bw, bh) = candidate.bounding_box;
+        if bw < params.min_star_size || bh < params.min_star_size {
+            rejected_by_gate[RejectReason::TooSmallBox as usize] += 1;
+            continue;
+        }
+        if bx == 0 || by == 0 || bx + bw >= width || by + bh >= height {
+            rejected_by_gate[RejectReason::OnBorder as usize] += 1;
+            continue;
+        }
+        let d = bw.max(bh) as f64;
+        if (candidate.pixels.len() as f64 / d / d) < params.max_distortion {
+            rejected_by_gate[RejectReason::TooDistorted as usize] += 1;
+            continue;
+        }
+        let Some(measured) = star_parameters(data, width, height, &candidate, params, sigma) else {
+            rejected_by_gate[RejectReason::Degenerate as usize] += 1;
+            continue;
+        };
 
         // A clipped peak means the measured HFR is unreliable. With
         // keep_saturated_stars the star survives, flagged, and is excluded
         // from the average HFR below; without it the gate rejects it.
-        let saturated = (background + peak) >= params.saturation_threshold;
+        let saturated = (measured.background + measured.peak) >= params.saturation_threshold;
         if saturated && !params.keep_saturated_stars {
             rejected_by_gate[RejectReason::Saturated as usize] += 1;
             continue;
         }
-
-        // Validate star based on multiple criteria
-        if let Some(reason) =
-            validate_star(&candidate, peak, median, hfr, snr, params, width, height)
-        {
-            rejected_by_gate[reason as usize] += 1;
+        if measured.normalized_brightness / sigma.max(f64::MIN_POSITIVE) <= params.sensitivity {
+            rejected_by_gate[RejectReason::LowSensitivity as usize] += 1;
+            continue;
+        }
+        let tolerance_x = bw as f64 * params.star_center_tolerance;
+        let tolerance_y = bh as f64 * params.star_center_tolerance;
+        let min_x = bx as f64 + (bw as f64 - tolerance_x) / 2.0;
+        let min_y = by as f64 + (bh as f64 - tolerance_y) / 2.0;
+        let (cx, cy) = measured.center;
+        if cx < min_x || cx > min_x + tolerance_x || cy < min_y || cy > min_y + tolerance_y {
+            rejected_by_gate[RejectReason::OffCenter as usize] += 1;
+            continue;
+        }
+        if measured.star_median >= params.peak_response * measured.peak {
+            rejected_by_gate[RejectReason::TooFlat as usize] += 1;
+            continue;
+        }
+        let Some(hfr) = sampled_hfr(
+            data,
+            width,
+            height,
+            measured.center,
+            candidate.bounding_box,
+            measured.background,
+            params.star_clipping_multiplier * sigma,
+            params.pixel_sample_size,
+        ) else {
+            rejected_by_gate[RejectReason::Degenerate as usize] += 1;
+            continue;
+        };
+        if hfr <= params.min_hfr {
+            rejected_by_gate[RejectReason::HfrTooSmall as usize] += 1;
             continue;
         }
 
-        // PSF fitting if requested
         let psf_model = if params.psf_type != PSFType::None {
             use crate::psf_fitting::PSFFitter;
             let fitter = PSFFitter::new(params.psf_type);
@@ -1294,32 +1497,27 @@ fn measure_stars(
                 data,
                 width,
                 height,
-                candidate.center.0,
-                candidate.center.1,
-                candidate.bounding_box.2 as f64,
-                candidate.bounding_box.3 as f64,
-                background,
-                peak,
+                cx,
+                cy,
+                bw as f64,
+                bh as f64,
+                measured.background,
+                measured.background + measured.peak,
             )
         } else {
             None
         };
-
-        // Use PSF-derived FWHM if available
-        let final_fwhm = if let Some(ref psf) = psf_model {
-            psf.fwhm
-        } else {
-            fwhm
-        };
+        // Without a PSF fit, the FWHM of a Gaussian with this HFR.
+        let fwhm = psf_model.as_ref().map_or(hfr * 2.0 * 1.177, |psf| psf.fwhm);
 
         stars.push(HocusFocusStar {
-            position: candidate.center,
+            position: measured.center,
             hfr,
-            fwhm: final_fwhm,
-            brightness: peak,
-            background,
-            snr,
-            flux,
+            fwhm,
+            brightness: measured.background + measured.peak,
+            background: measured.background,
+            snr: measured.peak / sigma.max(0.001),
+            flux: measured.total_flux,
             pixel_count: candidate.pixels.len(),
             saturated,
             psf_model,
@@ -1343,95 +1541,146 @@ fn measure_stars(
     stars
 }
 
-/// Measure star properties including median for flatness check
-fn measure_star_properties(
+/// A candidate's measurements from HocusFocus's `ComputeStarParameters`.
+/// Brightnesses are above the background.
+struct CandidateMeasure {
+    center: (f64, f64),
+    background: f64,
+    total_flux: f64,
+    peak: f64,
+    /// The peak less `1 − peak_response` of the mean brightness, which the
+    /// sensitivity gate compares with the noise.
+    normalized_brightness: f64,
+    star_median: f64,
+}
+
+/// HocusFocus's `ComputeStarParameters`: the background is the median of a
+/// ring `background_box_expansion` pixels wide around the bounding box, and
+/// the centre is the centroid of the candidate's pixels more than
+/// `star_clipping_multiplier` σ above it, weighted by their brightness above
+/// the background. `None` when fewer than two pixels clear the clip or
+/// they are all equal.
+fn star_parameters(
     data: &[u16],
     width: usize,
     height: usize,
     candidate: &StarCandidate,
-    background_expansion: usize,
-) -> (f64, f64, f64, f64, f64, f64) {
-    let (cx, cy) = candidate.center;
+    params: &HocusFocusParams,
+    sigma: f64,
+) -> Option<CandidateMeasure> {
     let (bx, by, bw, bh) = candidate.bounding_box;
-
-    // Calculate background from expanded region
-    let expanded_width = bw + background_expansion * 2;
-    let expanded_height = bh + background_expansion * 2;
-    let expanded_x = bx.saturating_sub(background_expansion);
-    let expanded_y = by.saturating_sub(background_expansion);
-
-    let mut background_pixels = Vec::new();
-    let mut star_pixel_values = Vec::new();
-
-    // Collect background pixels (outside star box but inside expanded box)
-    for y in expanded_y..(expanded_y + expanded_height).min(height) {
-        for x in expanded_x..(expanded_x + expanded_width).min(width) {
-            // Check if outside star bounding box
+    let expansion = params.background_box_expansion;
+    let (x0, y0) = (bx.saturating_sub(expansion), by.saturating_sub(expansion));
+    let (x1, y1) = (
+        (bx + bw + expansion).min(width),
+        (by + bh + expansion).min(height),
+    );
+    let mut ring = Vec::with_capacity((x1 - x0) * (y1 - y0));
+    for y in y0..y1 {
+        for x in x0..x1 {
             if x < bx || x >= bx + bw || y < by || y >= by + bh {
-                background_pixels.push(data[y * width + x] as f64);
+                ring.push(data[y * width + x] as f64);
             }
         }
     }
-
-    // Calculate background median
-    background_pixels.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let background = if !background_pixels.is_empty() {
-        if background_pixels.len().is_multiple_of(2) {
-            (background_pixels[background_pixels.len() / 2 - 1]
-                + background_pixels[background_pixels.len() / 2])
-                / 2.0
-        } else {
-            background_pixels[background_pixels.len() / 2]
-        }
-    } else {
-        0.0
-    };
-
-    // Calculate star properties
-    let mut weighted_distance = 0.0;
-    let mut total_weight = 0.0;
-    let mut peak = 0.0f64;
-    let mut flux = 0.0;
-
-    for &(px, py) in &candidate.pixels {
-        let raw_value = data[py * width + px] as f64;
-        let value = (raw_value - background).max(0.0);
-
-        star_pixel_values.push(raw_value);
-
-        if value > 0.0 {
-            let distance = ((px as f64 - cx).powi(2) + (py as f64 - cy).powi(2)).sqrt();
-            weighted_distance += value * distance;
-            total_weight += value;
-            peak = peak.max(raw_value);
-            flux += value;
-        }
+    if ring.is_empty() {
+        return None;
     }
+    ring.sort_by(f64::total_cmp);
+    // The upper middle for an even count, as HocusFocus indexes it.
+    let background = ring[ring.len() >> 1];
+    let threshold = background + params.star_clipping_multiplier * sigma;
 
-    // Calculate star median for flatness check
-    star_pixel_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let star_median = if !star_pixel_values.is_empty() {
-        if star_pixel_values.len().is_multiple_of(2) {
-            (star_pixel_values[star_pixel_values.len() / 2 - 1]
-                + star_pixel_values[star_pixel_values.len() / 2])
-                / 2.0
-        } else {
-            star_pixel_values[star_pixel_values.len() / 2]
+    let above = candidate
+        .pixels
+        .iter()
+        .filter_map(|&(x, y)| {
+            let value = data[y * width + x] as f64;
+            (value > threshold).then_some((x, y, value - background))
+        })
+        .collect::<Vec<_>>();
+    let (lowest, highest) = above
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(lo, hi), &(_, _, v)| {
+            (lo.min(v), hi.max(v))
+        });
+    if above.len() < 2 || highest <= lowest {
+        return None;
+    }
+    let (mut sx, mut sy, mut total, mut peak) = (0.0, 0.0, 0.0, 0.0f64);
+    for &(x, y, v) in &above {
+        sx += v * x as f64;
+        sy += v * y as f64;
+        total += v;
+        peak = peak.max(v);
+    }
+    let mut values = above.iter().map(|&(_, _, v)| v).collect::<Vec<_>>();
+    values.sort_by(f64::total_cmp);
+    let n = values.len();
+    // HocusFocus writes `values[n >> 1 + 1]`, and `>>` binds after `+`, so
+    // the lower of the two it averages is the value a quarter of the way up.
+    let star_median = if n % 2 == 1 {
+        values[n >> 1]
+    } else {
+        (values[n >> 2] + values[n >> 1]) / 2.0
+    };
+    let mean_flux = total / candidate.pixels.len() as f64;
+    Some(CandidateMeasure {
+        center: (sx / total, sy / total),
+        background,
+        total_flux: total,
+        peak,
+        normalized_brightness: peak - (1.0 - params.peak_response) * mean_flux,
+        star_median,
+    })
+}
+
+/// HocusFocus's `MeasureStar`: the brightness-weighted mean distance from
+/// the centre of bilinear samples, `step` pixels apart and aligned so the
+/// centre is one of them, over the bounding box and one pixel past its right
+/// and bottom edges. Each sample counts only by how far it rises above the
+/// background plus `clip`. `None` when nothing does.
+#[allow(clippy::too_many_arguments)]
+fn sampled_hfr(
+    data: &[u16],
+    width: usize,
+    height: usize,
+    center: (f64, f64),
+    bounding_box: (usize, usize, usize, usize),
+    background: f64,
+    clip: f64,
+    step: f64,
+) -> Option<f64> {
+    let (bx, by, bw, bh) = bounding_box;
+    let (cx, cy) = center;
+    let step = if step > 0.0 { step } else { 1.0 };
+    let start_x = cx - step * ((cx - bx as f64) / step).floor();
+    let start_y = cy - step * ((cy - by as f64) / step).floor();
+    let (end_x, end_y) = ((bx + bw) as f64, (by + bh) as f64);
+    let sample = |x: f64, y: f64| {
+        let (x0, y0) = (x.floor() as usize, y.floor() as usize);
+        let (x1, y1) = ((x0 + 1).min(width - 1), (y0 + 1).min(height - 1));
+        let (fx, fy) = (x - x0 as f64, y - y0 as f64);
+        let at = |x: usize, y: usize| data[y * width + x] as f64;
+        let top = at(x0, y0) + fx * (at(x1, y0) - at(x0, y0));
+        let bottom = at(x0, y1) + fx * (at(x1, y1) - at(x0, y1));
+        top + fy * (bottom - top)
+    };
+    let (mut weighted, mut total) = (0.0, 0.0);
+    let mut y = start_y;
+    while y <= end_y {
+        let mut x = start_x;
+        while x <= end_x {
+            let value = sample(x, y) - background - clip;
+            if value > 0.0 {
+                weighted += value * ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
+                total += value;
+            }
+            x += step;
         }
-    } else {
-        0.0
-    };
-
-    let hfr = if total_weight > 0.0 {
-        weighted_distance / total_weight
-    } else {
-        0.0
-    };
-
-    // Estimate FWHM from HFR (approximate conversion)
-    let fwhm = hfr * 2.0 * 1.177; // 2*sqrt(2*ln(2))
-
-    (hfr, fwhm, peak, star_median - background, background, flux)
+        y += step;
+    }
+    (total > 0.0).then(|| weighted / total)
 }
 
 /// Why a measured candidate was not accepted as a star. Indexes
@@ -1446,9 +1695,12 @@ enum RejectReason {
     TooFlat = 5,
     HfrTooSmall = 6,
     Saturated = 7,
+    /// Fewer than two pixels clear the star clip, or nothing rises above it
+    /// for the HFR.
+    Degenerate = 8,
 }
 
-const GATE_NAMES: [&str; 8] = [
+const GATE_NAMES: [&str; 9] = [
     "small_box",
     "border",
     "distorted",
@@ -1457,75 +1709,94 @@ const GATE_NAMES: [&str; 8] = [
     "too_flat",
     "hfr_too_small",
     "saturated",
+    "degenerate",
 ];
-
-/// Validate star based on HocusFocus criteria. `None` = accepted.
-#[allow(clippy::too_many_arguments)]
-fn validate_star(
-    candidate: &StarCandidate,
-    peak: f64,
-    median: f64,
-    hfr: f64,
-    snr: f64,
-    params: &HocusFocusParams,
-    src_width: usize,
-    src_height: usize,
-) -> Option<RejectReason> {
-    let (bx, by, bw, bh) = candidate.bounding_box;
-
-    // Too small
-    if bw < params.min_star_size || bh < params.min_star_size {
-        return Some(RejectReason::TooSmallBox);
-    }
-
-    // Touching the border
-    if bx == 0 || by == 0 || bx + bw >= src_width || by + bh >= src_height {
-        return Some(RejectReason::OnBorder);
-    }
-
-    // Too distorted (pixel density check)
-    let max_dim = bw.max(bh) as f64;
-    let pixel_density = candidate.pixels.len() as f64 / (max_dim * max_dim);
-    if pixel_density < params.max_distortion {
-        return Some(RejectReason::TooDistorted);
-    }
-
-    // Saturation is judged by the caller (measure_stars), where the
-    // keep-saturated policy decides between rejecting and flagging.
-
-    // Not bright enough relative to noise (sensitivity check)
-    if snr <= params.sensitivity {
-        return Some(RejectReason::LowSensitivity);
-    }
-
-    // Star center too far from bounding box center
-    let box_center_x = bx as f64 + bw as f64 / 2.0;
-    let box_center_y = by as f64 + bh as f64 / 2.0;
-    let center_threshold_x = bw as f64 * params.star_center_tolerance / 2.0;
-    let center_threshold_y = bh as f64 * params.star_center_tolerance / 2.0;
-
-    if (candidate.center.0 - box_center_x).abs() > center_threshold_x
-        || (candidate.center.1 - box_center_y).abs() > center_threshold_y
-    {
-        return Some(RejectReason::OffCenter);
-    }
-
-    // Too flat (median too close to peak)
-    if median >= params.peak_response * peak {
-        return Some(RejectReason::TooFlat);
-    }
-
-    // HFR below minimum threshold
-    if hfr <= params.min_hfr {
-        return Some(RejectReason::HfrTooSmall);
-    }
-
-    None
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Gaussian star of `sigma` at (`cx`, `cy`) on a flat sky of 1000 in
+    /// a `size` × `size` image.
+    fn gaussian_image(size: usize, cx: f64, cy: f64, sigma: f64, peak: f64) -> Vec<u16> {
+        (0..size * size)
+            .map(|i| {
+                let (x, y) = ((i % size) as f64, (i / size) as f64);
+                let d2 = (x - cx).powi(2) + (y - cy).powi(2);
+                (1000.0 + peak * (-d2 / (2.0 * sigma * sigma)).exp()).round() as u16
+            })
+            .collect()
+    }
+
+    #[test]
+    fn hfr_is_sampled_over_the_box_above_the_clip() {
+        // Unclipped, the brightness-weighted mean distance of a Gaussian is
+        // σ·sqrt(π/2) ≈ 1.2533σ; the box reaches 4σ, which trims it a little.
+        let sigma = 2.0;
+        let data = gaussian_image(41, 20.3, 19.6, sigma, 20000.0);
+        let bounds = (12, 12, 17, 17);
+        let hfr = sampled_hfr(&data, 41, 41, (20.3, 19.6), bounds, 1000.0, 0.0, 1.0).unwrap();
+        assert!((hfr - 1.2533 * sigma).abs() < 0.08, "{hfr}");
+        // Clipping 2% of the peak drops the faint wings HocusFocus drops.
+        let clipped = sampled_hfr(&data, 41, 41, (20.3, 19.6), bounds, 1000.0, 400.0, 1.0).unwrap();
+        assert!(clipped < hfr - 0.1, "{clipped} vs {hfr}");
+        // Half-pixel sampling measures the same profile, on the bilinear
+        // surface between pixels.
+        let fine = sampled_hfr(&data, 41, 41, (20.3, 19.6), bounds, 1000.0, 0.0, 0.5).unwrap();
+        assert!((fine - hfr).abs() / hfr < 0.1, "{fine} vs {hfr}");
+        assert!(sampled_hfr(&data, 41, 41, (20.3, 19.6), bounds, 1000.0, 1e9, 1.0).is_none());
+    }
+
+    #[test]
+    fn candidate_centre_is_brightness_weighted_above_the_clip() {
+        let data = gaussian_image(41, 20.3, 19.6, 2.0, 20000.0);
+        // The structure blob is lopsided towards the right; an unweighted
+        // mean of its pixels would sit right of the star.
+        let pixels = (14..=29)
+            .flat_map(|x| (14..=26).map(move |y| (x, y)))
+            .collect::<Vec<_>>();
+        let candidate = StarCandidate {
+            pixels,
+            bounding_box: (14, 14, 16, 13),
+        };
+        let params = HocusFocusParams::default();
+        let measured = star_parameters(&data, 41, 41, &candidate, &params, 5.0).unwrap();
+        assert!(
+            (measured.center.0 - 20.3).abs() < 0.02,
+            "{:?}",
+            measured.center
+        );
+        assert!(
+            (measured.center.1 - 19.6).abs() < 0.02,
+            "{:?}",
+            measured.center
+        );
+        assert_eq!(measured.background, 1000.0);
+        assert!(measured.peak > 19000.0);
+    }
+
+    #[test]
+    fn frame_hfr_is_the_median_unless_asked_for_the_mean() {
+        let star = |hfr: f64| HocusFocusStar {
+            position: (0.0, 0.0),
+            hfr,
+            fwhm: 2.0 * hfr,
+            brightness: 0.0,
+            background: 0.0,
+            snr: 0.0,
+            flux: 0.0,
+            pixel_count: 0,
+            saturated: false,
+            psf_model: None,
+        };
+        let stars = [2.0, 2.1, 2.2, 2.3, 9.0].map(star);
+        let pool = stars.iter().collect::<Vec<_>>();
+        assert_eq!(summarize(&pool, MeasurementAverage::Median), (2.2, 4.4));
+        // The 9 px outlier lies beyond 3 MADs and is dropped from the mean.
+        let (mean, _) = summarize(&pool, MeasurementAverage::MeanOutliers);
+        assert!((mean - 2.15).abs() < 1e-9, "{mean}");
+        assert_eq!(summarize(&[], MeasurementAverage::Median), (0.0, 0.0));
+    }
 
     fn lcg_u16(len: usize, mut state: u64) -> Vec<u16> {
         (0..len)

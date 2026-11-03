@@ -16,4 +16,4 @@ nalgebra = { workspace = true }
 rayon = { workspace = true }
 
 [dev-dependencies]
-image = { workspace = true }
+seiza-fits = { workspace = true }
