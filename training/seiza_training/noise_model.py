@@ -780,13 +780,14 @@ def evaluate(
         by_size.setdefault(row["size"], []).append(row)
 
     def mean(rows, key):
-        values = [row[key] for row in rows if row[key] is not None]
+        values = [row[key] for row in rows if row.get(key) is not None]
         return float(np.mean(values)) if values else None
 
     keys = ("high_ratio", "low_ratio", "high_removed", "mse_before", "mse_after", "sky_bias", "bright_flux_change",
             "sky_mse", "sky_mse_trimmed", "sky_outlier_share", "faint_mse", "mid_mse", "core_mse",
             *(f"transfer_{region}_{band}" for region in ("faint", "mid") for band in TRANSFER_BANDS),
-            "peak_flux_kept_faint", "peak_flux_kept_mid", "peak_height_kept_faint", "peak_height_kept_mid")
+            "peak_flux_kept_faint", "peak_flux_kept_mid", "peak_height_kept_faint", "peak_height_kept_mid",
+            "star_fwhm_px", *(f"star_fwhm_{kind}_{level}" for kind in ("ratio", "target") for level in STAR_LEVELS))
     return {
         "split": split,
         "bands": asdict(bands),
@@ -809,6 +810,11 @@ OUTLIER_TEST_COUNT = 4.0
 # two pixels beyond it out to the second radius; peaks are the highest
 # within the third.
 PEAK_APERTURE, PEAK_ANNULUS, PEAK_SEPARATION = 3, 10, 5
+# Star widths: stars the highest within this radius on the target, by their
+# height above the ring around them, in units of the median noise.
+STAR_SEPARATION = 7
+STAR_LEVELS = {"faint": (20, 200), "bright": (200, 5000)}
+STARS_PER_LEVEL = 1500
 
 
 def box_filter(image: np.ndarray, radius: int, pool: Callable) -> np.ndarray:
@@ -957,6 +963,81 @@ def signal_kept(estimate: np.ndarray, image: np.ndarray, target: np.ndarray, val
             total = float(np.sum(given[chosen], dtype=np.float64))
             result[f"peak_{measured}_kept_{region}"] = (float(np.sum(kept[chosen], dtype=np.float64)) / total
                                                         if total > 0 else None)
+
+    stars = inside & (sharp == box_max(sharp, STAR_SEPARATION))
+    result.update(star_widths(filled(estimate), filled(image), filled(target), stars, height_above))
+    return result
+
+
+def star_widths(estimate: np.ndarray, image: np.ndarray, target: np.ndarray, stars: np.ndarray,
+                height_above: np.ndarray) -> dict[str, float | int | None]:
+    """How an estimate changes star widths: at `stars` chosen on the target,
+    the FWHM from each star's second moment about the target's centroid,
+    within a radius of one and a half of the field's typical FWHM and above
+    the median of the ring outside it, in the estimate, the input and the
+    target alike. All three are background-subtracted and finite.
+
+    `star_fwhm_ratio_<level>` is the median over stars of the estimate's
+    FWHM over the input's: 1 keeps stars as sharp as they came, more
+    softens them. `star_fwhm_target_<level>` is the estimate's over the
+    target's. The input's noise widens neither on average, since it adds
+    nothing to a moment's expected sums."""
+    result: dict[str, float | int | None] = {}
+    picked = []
+    for low, high in STAR_LEVELS.values():
+        found = np.flatnonzero(stars & (height_above >= low) & (height_above < high))
+        # At most STARS_PER_LEVEL, spread over the field.
+        picked.append(found[np.linspace(0, len(found) - 1, min(len(found), STARS_PER_LEVEL)).astype(int)]
+                      if len(found) else found)
+    ys, xs = np.unravel_index(np.concatenate(picked), stars.shape)
+    if len(ys) < 10:
+        return result
+
+    def stamps(image: np.ndarray, radius: int, outer: int) -> np.ndarray:
+        padded = np.pad(image, outer)
+        windows = np.lib.stride_tricks.sliding_window_view(padded, (2 * outer + 1, 2 * outer + 1))
+        return windows[ys, xs].astype(np.float64)
+
+    def widths(stack: np.ndarray, radius: int, outer: int, centre: tuple[np.ndarray, np.ndarray] | None):
+        offsets = np.arange(-outer, outer + 1, dtype=np.float64)
+        dy, dx = np.meshgrid(offsets, offsets, indexing="ij")
+        distance = np.hypot(dy, dx)
+        ring = (distance > radius + 1) & (distance <= outer)
+        light = stack - np.median(stack[:, ring], axis=1)[:, None, None]
+        aperture = distance <= radius
+        weights = np.where(aperture, light, 0.0)
+        total = weights.sum(axis=(1, 2))
+        if centre is None:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                centre = ((weights * dy).sum(axis=(1, 2)) / total, (weights * dx).sum(axis=(1, 2)) / total)
+        cy, cx = (np.clip(np.nan_to_num(c), -1.0, 1.0)[:, None, None] for c in centre)
+        spread = (weights * ((dy - cy) ** 2 + (dx - cx) ** 2)).sum(axis=(1, 2))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            # ⟨r²⟩ = 2σ² for a Gaussian, whose FWHM is 2.3548σ.
+            fwhm = 2.3548 * np.sqrt(np.clip(spread / total, 0.0, None) / 2.0)
+        return np.where(total > 0, fwhm, np.nan), centre
+
+    # The field's typical width sets the radius, found from the target in
+    # two steps, so a coarsely sampled field and a finely sampled one both
+    # take their stars whole.
+    radius = 6
+    for _ in range(2):
+        outer = radius + 2 + max(3, radius // 2)
+        typical = float(np.nanmedian(widths(stamps(target, radius, outer), radius, outer, None)[0]))
+        radius = int(np.clip(round(1.5 * typical), 3, 30)) if np.isfinite(typical) else radius
+    outer = radius + 2 + max(3, radius // 2)
+    fwhm_t, centre = widths(stamps(target, radius, outer), radius, outer, None)
+    fwhm_e, _ = widths(stamps(estimate, radius, outer), radius, outer, centre)
+    fwhm_x, _ = widths(stamps(image, radius, outer), radius, outer, centre)
+    level = height_above[ys, xs]
+    result["star_fwhm_px"] = float(np.nanmedian(fwhm_t))
+    for name, (low, high) in STAR_LEVELS.items():
+        chosen = (level >= low) & (level < high) & np.isfinite(fwhm_t) & np.isfinite(fwhm_e) & np.isfinite(fwhm_x) \
+            & (fwhm_x > 0) & (fwhm_t > 0)
+        result[f"stars_{name}"] = int(chosen.sum())
+        enough = chosen.sum() >= 10
+        result[f"star_fwhm_ratio_{name}"] = float(np.median(fwhm_e[chosen] / fwhm_x[chosen])) if enough else None
+        result[f"star_fwhm_target_{name}"] = float(np.median(fwhm_e[chosen] / fwhm_t[chosen])) if enough else None
     return result
 
 
