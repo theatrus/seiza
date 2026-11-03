@@ -17,7 +17,11 @@
 //! (`none`, `normal`, `high`, `highest`, `median`), `NINA_STRETCH` (the
 //! autostretch factor, 0.2) and `NINA_CLIP` (black clipping, −2.8). High
 //! sensitivity takes its image scale from the XPIXSZ and FOCALLEN headers.
-//! For `hocus`, `HF_NOISE_RADIUS`, `HF_SENSITIVITY`, `HF_MIN_HFR`,
+//! For `hocus`, `HF_VERSION` picks the HocusFocus release (`3`, `4`, or
+//! `auto` by the frame's date), `HF_CLASS` (`wide`, `standard`, `long`)
+//! overrides the rig class, `HF_WALKER` takes candidates with the older
+//! walk, `HF_NC` sets the noise clipping multiplier, `HF_BIN` detection
+//! binning, and `HF_NOISE_RADIUS`, `HF_SENSITIVITY`, `HF_MIN_HFR`,
 //! `HF_LAYERS` and `HF_STRUCTURE=atrous` override the preset.
 //! `NINA_PARITY_DEBUG` prints each frame's HFR spread and the detector's
 //! diagnostics on standard error.
@@ -70,12 +74,47 @@ fn measure(detector: &str, path: &Path) -> Result<Measured, String> {
     let (width, height) = (fits.width, fits.height);
     let data = fits.to_u16().into_owned();
     if detector == "hocus" {
-        // Parameters for the frame's optics, as PSF Guard picks them.
-        let (params, _) = HocusFocusParams::for_frame_headers(
+        // Parameters for the frame's optics, as PSF Guard picks them, for
+        // the HocusFocus release asked for: `HF_VERSION=4`, or `auto` for 4
+        // from HocusFocus 4's release on 2026-07-02.
+        let (params, class) = HocusFocusParams::for_frame_headers(
             fits.header_f64("FOCALLEN"),
             fits.header_f64("XPIXSZ"),
         );
+        let v4 = match std::env::var("HF_VERSION").as_deref() {
+            Ok("4") => true,
+            Ok("auto") => fits
+                .header_str("DATE-OBS")
+                .is_some_and(|date| date >= "2026-07-02"),
+            _ => false,
+        };
+        let class = match std::env::var("HF_CLASS").as_deref() {
+            Ok("wide") => seiza_stars::TelescopeClass::WideField,
+            Ok("standard") => seiza_stars::TelescopeClass::Standard,
+            Ok("long") => seiza_stars::TelescopeClass::LongFocalLength,
+            _ => class,
+        };
+        let params = if v4 {
+            HocusFocusParams::v4_for_telescope_class(class)
+        } else {
+            params
+        };
         let mut params = params;
+        if let Ok(v) = std::env::var("HF_NC") {
+            params.noise_clipping_multiplier = v.parse().unwrap();
+        }
+        if let Ok(v) = std::env::var("HF_BIN") {
+            params.detection_binning = v.parse().unwrap();
+        }
+        if std::env::var("HF_MEASURE_BLURRED").is_ok() {
+            params.measurement_noise_reduction = true;
+        }
+        if let Ok(v) = std::env::var("HF_SENSITIVITY_V4") {
+            params.sensitivity = v.parse().unwrap();
+        }
+        if std::env::var("HF_WALKER").is_ok() {
+            params.connected_components = false;
+        }
         if let Ok(v) = std::env::var("HF_NOISE_RADIUS") {
             params.noise_reduction_radius = v.parse().unwrap();
         }

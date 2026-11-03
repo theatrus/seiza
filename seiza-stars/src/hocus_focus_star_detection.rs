@@ -37,6 +37,43 @@ pub enum MeasurementAverage {
     MeanOutliers,
 }
 
+/// The HocusFocus release whose detector to reproduce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HocusFocusVersion {
+    /// HocusFocus 3 measurement (centroid, clipped box HFR) on PSF Guard's
+    /// own structure detection.
+    #[default]
+    V3,
+    /// HocusFocus 4 (from July 2026) throughout: its à trous structure map
+    /// with adaptive binarization, 8-connected candidates, a local
+    /// background plane, the contamination gate, and HFR over a circular
+    /// aperture. Build its defaults with [`HocusFocusParams::v4`].
+    V4,
+}
+
+impl std::fmt::Display for HocusFocusVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::V3 => "3",
+            Self::V4 => "4",
+        })
+    }
+}
+
+impl std::str::FromStr for HocusFocusVersion {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().trim_start_matches(['v', 'V']) {
+            "3" => Ok(Self::V3),
+            "4" => Ok(Self::V4),
+            other => Err(format!(
+                "unknown HocusFocus version {other:?}: expected 3 or 4"
+            )),
+        }
+    }
+}
+
 /// Coarse rig class for detection presets, after HocusFocus's Simple-mode
 /// pixel-scale axis. Star apparent size in PIXELS is what the detector's
 /// pixel-space knobs care about, and it follows the pixel scale: wide
@@ -139,6 +176,24 @@ pub struct HocusFocusParams {
     pub pixel_sample_size: f64,
     /// How the frame's HFR and FWHM summarize its stars.
     pub measurement_average: MeasurementAverage,
+    /// Which HocusFocus release to reproduce. The fields below apply to
+    /// [`HocusFocusVersion::V4`] only.
+    pub version: HocusFocusVersion,
+    /// Threshold structures against a local surface (block median plus
+    /// `noise_clipping_multiplier` block noise) rather than one global level.
+    pub adaptive_binarization: bool,
+    /// Side, in pixels, of the blocks the adaptive surface is sampled on.
+    pub adaptive_block_size: usize,
+    /// Drop stars whose background ring has an eighth more than this many
+    /// standard errors above the fitted plane, as a neighbour would make it;
+    /// 0 turns the gate off.
+    pub contamination_sensitivity: f64,
+    /// Measure stars on the noise-reduced image too, as HocusFocus does for
+    /// its High noise level, rather than on the hot-pixel-filtered one.
+    pub measurement_noise_reduction: bool,
+    /// Take candidates as 8-connected regions (HocusFocus 4.0.0.16 on)
+    /// rather than with the older box-growing walk.
+    pub connected_components: bool,
 
     /// Keep saturated stars detected (flagged) instead of rejecting them,
     /// and exclude them from the average HFR/FWHM while at least three
@@ -154,6 +209,41 @@ impl HocusFocusParams {
     /// the plain defaults; the other classes shift the pixel-space knobs
     /// the way HocusFocus's Simple-mode presets do, with one corpus-driven
     /// divergence documented on [`TelescopeClass::LongFocalLength`].
+    /// HocusFocus 4's Simple-mode defaults for a typical rig: noise
+    /// reduction radius 4, MinHFR 1.2, saturated stars kept but left out of
+    /// the frame's HFR, adaptive binarization and the contamination gate on.
+    pub fn v4() -> Self {
+        Self {
+            version: HocusFocusVersion::V4,
+            noise_reduction_radius: 4,
+            min_hfr: 1.2,
+            keep_saturated_stars: true,
+            ..Self::default()
+        }
+    }
+
+    /// HocusFocus 4's Simple-mode preset for a rig class: wide fields drop a
+    /// structure layer, shrink the smallest star box and sample HFR every
+    /// half pixel; long focal lengths add a layer, grow the box and raise
+    /// the sensitivity threshold to 12.
+    pub fn v4_for_telescope_class(class: TelescopeClass) -> Self {
+        let mut params = Self::v4();
+        match class {
+            TelescopeClass::WideField => {
+                params.structure_layers = 3;
+                params.min_star_size = 4;
+                params.pixel_sample_size = 0.5;
+            }
+            TelescopeClass::Standard => {}
+            TelescopeClass::LongFocalLength => {
+                params.structure_layers = 5;
+                params.min_star_size = 6;
+                params.sensitivity = 12.0;
+            }
+        }
+        params
+    }
+
     pub fn for_telescope_class(class: TelescopeClass) -> Self {
         let mut params = Self::default();
         match class {
@@ -312,6 +402,12 @@ impl Default for HocusFocusParams {
             min_hfr: 1.5,                         // Actual default
             pixel_sample_size: 1.0,
             measurement_average: MeasurementAverage::Median,
+            version: HocusFocusVersion::V3,
+            adaptive_binarization: true,
+            adaptive_block_size: 128,
+            contamination_sensitivity: 5.0,
+            connected_components: true,
+            measurement_noise_reduction: false,
             keep_saturated_stars: false,
             psf_type: PSFType::None, // No PSF fitting by default
         }
@@ -537,6 +633,16 @@ fn detect_on_prepared(
     height: usize,
     params: &HocusFocusParams,
 ) -> HocusFocusDetectionResult {
+    if params.version == HocusFocusVersion::V4 {
+        let found = crate::hocus_focus_v4::detect(data, width, height, params);
+        return HocusFocusDetectionResult {
+            stars: found.stars,
+            average_hfr: found.average_hfr,
+            average_fwhm: found.average_fwhm,
+            noise_sigma: found.noise_sigma,
+            background_mean: found.background_mean,
+        };
+    }
     let mut working_data = data.to_vec();
 
     // Step 2: Apply noise reduction if configured

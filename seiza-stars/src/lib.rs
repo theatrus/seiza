@@ -44,6 +44,7 @@
 pub mod accord_imaging;
 pub mod debug;
 pub mod hocus_focus_star_detection;
+mod hocus_focus_v4;
 pub mod nina_star_detection;
 pub mod peak_star_detection;
 pub mod psf_fitting;
