@@ -98,11 +98,21 @@ def main(argv: list[str] | None = None) -> int:
     train.add_argument("--batch-threads", type=int, default=4,
                        help="threads building batches ahead (the batches are the same)")
 
+    sheet = commands.add_parser("sheet-noise", help="make a trained noise model's contact sheets")
+    sheet.add_argument("--name", required=True)
+    sheet.add_argument("--sheet", action="append", dest="sheets_named", help="only this sheet (default: all)")
+
     evaluate = commands.add_parser("evaluate-noise", help="measure a trained noise model on a split")
     evaluate.add_argument("--name", required=True)
     evaluate.add_argument("--split", default="validation")
     evaluate.add_argument("--limit", type=int, help="at most this many pairs")
     evaluate.add_argument("--set", action="append", dest="sets", help="only this set id")
+    evaluate.add_argument("--high-amount", type=float, default=1.0,
+                          help="the share of the pixel-scale grain the model finds that is taken out (1: all of it)")
+    evaluate.add_argument("--low-amount", type=float, default=1.0,
+                          help="the share of the wider mottle the model finds that is taken out (1: all of it)")
+    evaluate.add_argument("--band-scale", type=float, default=5.0,
+                          help="the Gaussian scale in pixels dividing the grain from the mottle")
 
     split = commands.add_parser("split", help="assign sky groups and train/validation/test splits")
     split.add_argument("--hold-out", help="a telescope whose groups are all test")
@@ -200,7 +210,9 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
                 "extra_fraction": arguments.dark_noise_fraction,
                 "extra_label": "dark-noise",
             }
-        return train(
+        from .sheets import render_saved
+
+        record = train(
             store, manifest, name=arguments.name, steps=arguments.steps, width=arguments.width,
             levels=arguments.levels, tile=arguments.tile, batch=arguments.batch,
             learning_rate=arguments.learning_rate, sets=only, seed=arguments.seed,
@@ -211,10 +223,18 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
             precision=arguments.precision, prefetch=arguments.prefetch, batch_threads=arguments.batch_threads,
             **extra,
         )
-    if command == "evaluate-noise":
-        from .noise_model import evaluate_saved
+        return {**record, "sheets": render_saved(store, manifest, arguments.name)}
+    if command == "sheet-noise":
+        from .sheets import render_saved
 
-        return evaluate_saved(store, manifest, arguments.name, split=arguments.split, limit=arguments.limit, sets=only)
+        named = set(arguments.sheets_named) if arguments.sheets_named else None
+        return render_saved(store, manifest, arguments.name, only=named)
+    if command == "evaluate-noise":
+        from .noise_model import NoiseBands, evaluate_saved
+
+        bands = NoiseBands(high=arguments.high_amount, low=arguments.low_amount, scale_px=arguments.band_scale)
+        return evaluate_saved(store, manifest, arguments.name, split=arguments.split, limit=arguments.limit, sets=only,
+                              bands=bands)
     if command == "split":
         from .splits import assign_splits
 
