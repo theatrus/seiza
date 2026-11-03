@@ -54,9 +54,11 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
         with manifest.transaction():
             manifest.db.execute("UPDATE sets SET split = 'train'")
     capsys.readouterr()
-    run("train-noise", "--name", "smoke", "--steps", "6", "--width", "4", "--levels", "3", "--tile", "64", "--batch", "2")
+    run("train-noise", "--name", "smoke", "--steps", "6", "--width", "4", "--levels", "3", "--tile", "64", "--batch", "2",
+        "--precision", "bf16", "--prefetch", "2")
     record = json.loads((store / "models" / "noise" / "smoke" / "run.json").read_text())
     assert record["config"]["train_pairs"] == 6
+    assert record["config"]["precision"] == "bf16"
     assert record["export"]["max_relative_error"] < 1e-4
     assert record["inference"]["overlap"] >= receptive_field(3) // 2
     capsys.readouterr()
@@ -82,6 +84,28 @@ def test_the_modelled_noise_map_keeps_the_level_and_drops_the_scatter():
     assert np.percentile(raw, 99) / np.percentile(raw, 1) > 5, "the per-pixel map scatters"
     assert np.percentile(modelled, 99) / np.percentile(modelled, 1) < 1.2, "the modelled one does not"
     assert abs(np.median(modelled) / true_sigma - 1.0) < 0.08, "and keeps the level"
+
+
+def test_prefetched_batches_are_the_ones_built_in_turn_and_errors_come_through():
+    from seiza_training.noise_model import Prefetch
+
+    def counter(rng):
+        return lambda: rng.integers(0, 1000, 3)
+
+    make = counter(np.random.default_rng(1))
+    direct = [make() for _ in range(20)]
+    source = Prefetch(counter(np.random.default_rng(1)), 3)
+    fetched = [source.get() for _ in range(20)]
+    source.close()
+    assert all(np.array_equal(a, b) for a, b in zip(direct, fetched))
+
+    def failing():
+        raise RuntimeError("bank gone")
+
+    source = Prefetch(failing, 2)
+    with pytest.raises(RuntimeError, match="bank gone"):
+        source.get()
+    source.close()
 
 
 def test_an_outlier_is_spread_as_registration_spreads_a_pixel():
