@@ -246,8 +246,8 @@ example, holds 162 five-minute Hα sub-frames of 6248 × 4176 pixels.
 
 The first crawl (2026-10-31) read 41,245 lights in 1,232 sets of 71 targets,
 3,349 masters from earlier processing, and 1,520 masters in the calibration
-library. The library calibrates 744 sets; 198 of those have the 40 frames a
-noise pair needs, 16,369 frames in all. The rest lack a matching flat,
+library. The library calibrates 744 sets; 198 of those have the 40 frames
+noise pairs first needed, 16,369 frames in all. The rest lack a matching flat,
 mostly because the library has no masters for three telescopes, whose
 calibration frames are still raw: Askar107PHQ alone has 11,826 lights
 waiting on them.
@@ -326,7 +326,13 @@ camera, gain, offset, exposure, binning and night on one telescope.
 
 The manifest decides which sets qualify for which recipe:
 
-- **noise pairs** need at least 40 accepted sub-frames;
+- **noise pairs** need at least 20 accepted sub-frames, which give pairs of
+  4 frames against the other 16 or more; pairs of 8 need 40. (The rule was
+  40 until 2026-11-03, when it left 105 built train sets of 20 to 39 frames
+  without pairs. A target of 16 frames is noisier than one of 36, which
+  slows training but does not bias it. `recipes` decides the sets' recipes
+  again from their measurements, and `build --pairs-only` builds the noise
+  pairs of sets already built, leaving their other products as they are.)
 - **seeing splits** need a FWHM difference of at least 25% between the best
   and the worst quartile;
 - **cross-instrument pairs** need the same object from two focal lengths.

@@ -220,8 +220,12 @@ def estimated_bytes(set_row: Any, frames: int, pairs: int, seeing: bool) -> tupl
     return samples * 4 * frames * 17 // 16, samples * stacks * 12
 
 
-def build_set(manifest: Manifest, store: Store, set_row: Any, *, keep_scratch: bool = False) -> dict[str, Any]:
-    """Build one set's products."""
+def build_set(
+    manifest: Manifest, store: Store, set_row: Any, *, keep_scratch: bool = False, pairs_only: bool = False
+) -> dict[str, Any]:
+    """Build one set's products, or with `pairs_only` only its noise pairs,
+    for a set built before it qualified for them: its deep stack and
+    seeing split, which other products are made from, stay as they are."""
     set_id = set_row["id"]
     started = time.monotonic()
     calibration = loads(set_row["calibration"], {})
@@ -290,14 +294,15 @@ def build_set(manifest: Manifest, store: Store, set_row: Any, *, keep_scratch: b
         if len(admitted) < 2:
             raise RuntimeError(f"{len(admitted)} frames registered and clear")
 
-        deep = stacker.reintegrate(frames=admitted)
-        files = save_stack(directory / "deep", deep, fits=True)
-        record_product(
-            manifest, store, set_id, f"{set_id}/deep", "deep", {"recipe": "deep"},
-            admitted, directory / "deep", files,
-            {**stack_stats(deep), "turned_away": turned_away, "dimmed": dimmed}, run_versions,
-        )
-        del deep
+        if not pairs_only:
+            deep = stacker.reintegrate(frames=admitted)
+            files = save_stack(directory / "deep", deep, fits=True)
+            record_product(
+                manifest, store, set_id, f"{set_id}/deep", "deep", {"recipe": "deep"},
+                admitted, directory / "deep", files,
+                {**stack_stats(deep), "turned_away": turned_away, "dimmed": dimmed}, run_versions,
+            )
+            del deep
 
         # Time order, for drawing interleaved subsets.
         captured = {row["path"]: row["captured_at_unix"] or 0 for row in measured}
@@ -332,7 +337,7 @@ def build_set(manifest: Manifest, store: Store, set_row: Any, *, keep_scratch: b
                 del a, b
         summary["pairs"] = {"built": built_pairs, "rejected": rejected_pairs}
 
-        if "seeing-split" in recipes:
+        if "seeing-split" in recipes and not pairs_only:
             in_stack = {path: fwhm[path] for path in admitted if fwhm.get(path) is not None}
             best, worst = seeing_split(in_stack)
             recipe = {
@@ -379,9 +384,11 @@ def build(
     again: bool = False,
     limit: int | None = None,
     keep_scratch: bool = False,
+    pairs_only: bool = False,
 ) -> dict[str, Any]:
     """Build the products of every measured set with a split, or the sets
-    `only` names."""
+    `only` names. With `pairs_only`, instead the noise pairs of each built
+    set that qualifies for them and has none (see `build_set`)."""
     rows = manifest.rows(
         "SELECT * FROM sets WHERE calibration_status = 'ready' AND measurement_status = 'measured' "
         "AND split IS NOT NULL ORDER BY name"
@@ -390,13 +397,19 @@ def build(
     for set_row in rows:
         if only is not None and set_row["id"] not in only:
             continue
-        if set_row["build_status"] == "built" and not again:
+        if pairs_only:
+            if set_row["build_status"] != "built" or "noise-pairs" not in loads(set_row["recipes"], []):
+                continue
+            if manifest.rows("SELECT 1 FROM products WHERE set_id = ? AND kind = 'noise-a' LIMIT 1",
+                             (set_row["id"],)):
+                continue
+        elif set_row["build_status"] == "built" and not again:
             continue
         if limit is not None and built + failed >= limit:
             break
         if "deep" not in loads(set_row["recipes"], []):
             continue
-        if build_recorded(manifest, store, set_row, keep_scratch=keep_scratch) is None:
+        if build_recorded(manifest, store, set_row, keep_scratch=keep_scratch, pairs_only=pairs_only) is None:
             failed += 1
         else:
             built += 1
@@ -404,23 +417,29 @@ def build(
 
 
 def build_recorded(
-    manifest: Manifest, store: Store, set_row: Any, *, keep_scratch: bool = False
+    manifest: Manifest, store: Store, set_row: Any, *, keep_scratch: bool = False, pairs_only: bool = False
 ) -> dict[str, Any] | None:
-    """Build one set, recording a failure rather than raising it."""
+    """Build one set, recording a failure rather than raising it. Building
+    `pairs_only` adds to the set's build record, and a failure leaves the
+    set built, as its other products are."""
     print(f"build: {set_row['name']} ({set_row['split']})", file=sys.stderr)
+    earlier = loads(set_row["build_reason"], {}) if pairs_only else {}
     try:
-        summary = build_set(manifest, store, set_row, keep_scratch=keep_scratch)
+        summary = build_set(manifest, store, set_row, keep_scratch=keep_scratch, pairs_only=pairs_only)
     except Exception as error:  # noqa: BLE001 - one bad set must not stop the pass
         with manifest.transaction():
             manifest.update(
-                "sets", "id", set_row["id"], {"build_status": "failed", "build_reason": str(error)}
+                "sets", "id", set_row["id"],
+                {"build_reason": dumps({**earlier, "pairs_later": {"error": str(error)}})} if pairs_only
+                else {"build_status": "failed", "build_reason": str(error)},
             )
         print(f"build: {set_row['name']}: {error}", file=sys.stderr)
         return None
     with manifest.transaction():
         manifest.update(
             "sets", "id", set_row["id"],
-            {"build_status": "built", "build_reason": dumps(summary)},
+            {"build_status": "built",
+             "build_reason": dumps({**earlier, "pairs_later": summary} if pairs_only else summary)},
         )
     print(
         f"build: {set_row['name']}: {summary['admitted']} frames, pairs {summary['pairs']}, "
