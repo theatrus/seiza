@@ -66,13 +66,13 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
     capsys.readouterr()
     run("train-noise", "--name", "smoke", "--steps", "6", "--width", "4", "--levels", "3", "--tile", "64", "--batch", "2",
         "--precision", "bf16", "--prefetch", "2", "--batch-threads", "2", "--deep-fraction", "0.5",
-        "--outliers", "2", "--outlier-floor", "10", "--clip-grad", "1")
+        "--outliers", "2", "--outlier-floor", "10", "--clip-grad", "1", "--match-flux")
     record = json.loads((store / "models" / "noise" / "smoke" / "run.json").read_text())
     assert record["config"]["train_pairs"] == 6
     assert record["config"]["extra"]["label"] == "deep" and record["config"]["extra"]["windows"] > 0
     assert record["config"]["precision"] == "bf16"
     assert record["config"]["outliers"] == 2 and record["config"]["outlier_floor"] == 10
-    assert record["config"]["clip_grad"] == 1
+    assert record["config"]["clip_grad"] == 1 and record["config"]["match_flux"]
     assert all(entry["grad_norm_max"] > 0 and entry["grad_norm_mean"] > 0 for entry in record["history"])
     assert record["export"]["max_relative_error"] < 1e-4
     assert record["inference"]["overlap"] >= receptive_field(3) // 2
@@ -88,8 +88,12 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
         "--low-amount", "0.9")
     kept = json.loads(capsys.readouterr().out)
     assert kept["bands"] == {"high": 0.7, "low": 0.9, "scale_px": 5.0}
+    run("evaluate-noise", "--name", "smoke", "--split", "train", "--limit", "2", "--match-flux")
+    assert json.loads(capsys.readouterr().out)["match_flux"]
     evaluations = json.loads((store / "models" / "noise" / "smoke" / "run.json").read_text())["evaluations"]
-    assert set(evaluations) == {"train", "train, high 0.7 low 0.9 at 5 px"}
+    assert set(evaluations) == {"train", "train, high 0.7 low 0.9 at 5 px", "train, matched flux"}
+    assert all(row["flux_gain"] is not None for row in evaluations["train, matched flux"]["pairs_detail"])
+    assert all(row["flux_gain"] is None for row in evaluations["train"]["pairs_detail"])
 
     # Contact sheets: one against a deeper reference, one showing the noise
     # taken out, and one whose input is not built.
@@ -129,6 +133,32 @@ def test_the_modelled_noise_map_keeps_the_level_and_drops_the_scatter():
     assert np.percentile(raw, 99) / np.percentile(raw, 1) > 5, "the per-pixel map scatters"
     assert np.percentile(modelled, 99) / np.percentile(modelled, 1) < 1.2, "the modelled one does not"
     assert abs(np.median(modelled) / true_sigma - 1.0) < 0.08, "and keeps the level"
+
+
+def test_matching_puts_b_on_a_s_background_and_flux():
+    from seiza_training.noise_model import matched
+
+    rng = np.random.default_rng(3)
+    y, x = np.mgrid[:256, :256]
+    sky = np.zeros((256, 256))
+    for cy, cx, height in rng.uniform((0, 0, 50), (256, 256, 3000), (60, 3)):
+        sky += height * np.exp(-((y - cy) ** 2 + (x - cx) ** 2) / (2 * 2.0**2))
+    sky += 40 * np.exp(-((y - 128) ** 2 + (x - 90) ** 2) / (2 * 30.0**2))
+    a = (100 + sky + rng.normal(0, 2, sky.shape)).astype(np.float32)
+    # B's normalization 3% low, its background lower and tilted.
+    b = (95 + 0.02 * x + 0.97 * sky + rng.normal(0, 0.5, sky.shape)).astype(np.float32)
+    a[:, :10] = np.nan
+    fixed, gain = matched(a, b, 2.0)
+    assert abs(gain * 0.97 - 1) < 0.003
+    assert abs(np.mean((fixed - 100 - sky)[np.isfinite(a)])) < 0.05
+    bright = sky > 40
+    assert abs(np.nansum(fixed[bright] - 100) / np.sum(sky[bright]) - 1) < 0.005
+    # As noisy as A, as a deep stack's other half is: the gain holds.
+    noisy = (95 + 0.97 * sky + rng.normal(0, 2, sky.shape)).astype(np.float32)
+    assert abs(matched(a, noisy, 2.0)[1] * 0.97 - 1) < 0.003
+    # An empty sky gives no gain to fit, and only the background moves.
+    fixed, gain = matched(np.full((64, 64), 10, np.float32), np.full((64, 64), 7, np.float32), 1.0)
+    assert gain == 1.0 and np.allclose(fixed, 10)
 
 
 def test_noise_bands_take_out_the_grain_and_the_mottle_apart():

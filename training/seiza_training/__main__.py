@@ -108,6 +108,8 @@ def main(argv: list[str] | None = None) -> int:
     train.add_argument("--outlier-floor", type=float, default=5.0,
                        help="the faintest synthetic hot pixel, in units of the typical noise; cosmic rays "
                             "start at twice it")
+    train.add_argument("--match-flux", action="store_true",
+                       help="scale each pair's B half onto its A half's background and bright flux first")
     train.add_argument("--clip-grad", type=float, default=0.0,
                        help="scale each step's gradient down to this norm where it is longer (0: never)")
     train.add_argument("--precision", choices=("fp32", "bf16"), default="fp32",
@@ -132,6 +134,8 @@ def main(argv: list[str] | None = None) -> int:
                           help="the share of the wider mottle the model finds that is taken out (1: all of it)")
     evaluate.add_argument("--band-scale", type=float, default=5.0,
                           help="the Gaussian scale in pixels dividing the grain from the mottle")
+    evaluate.add_argument("--match-flux", action="store_true",
+                          help="measure against each B half scaled onto its A half's background and bright flux")
 
     split = commands.add_parser("split", help="assign sky groups and train/validation/test splits")
     split.add_argument("--hold-out", help="a telescope whose groups are all test")
@@ -261,7 +265,7 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
             validation_sets=set(arguments.validation_sets) if arguments.validation_sets else None,
             noise_map=arguments.noise_map, huber=arguments.huber, huber_above=arguments.huber_above,
             structure_sampling=arguments.structure_sampling, outlier_count=arguments.outlier_count,
-            outlier_floor=arguments.outlier_floor, clip_grad=arguments.clip_grad,
+            outlier_floor=arguments.outlier_floor, clip_grad=arguments.clip_grad, match_flux=arguments.match_flux,
             precision=arguments.precision, prefetch=arguments.prefetch, batch_threads=arguments.batch_threads,
             **extra,
         )
@@ -276,7 +280,7 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
 
         bands = NoiseBands(high=arguments.high_amount, low=arguments.low_amount, scale_px=arguments.band_scale)
         return evaluate_saved(store, manifest, arguments.name, split=arguments.split, limit=arguments.limit, sets=only,
-                              bands=bands)
+                              bands=bands, match_flux=arguments.match_flux)
     if command == "split":
         from .splits import assign_splits
 
