@@ -66,13 +66,14 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
     capsys.readouterr()
     run("train-noise", "--name", "smoke", "--steps", "6", "--width", "4", "--levels", "3", "--tile", "64", "--batch", "2",
         "--precision", "bf16", "--prefetch", "2", "--batch-threads", "2", "--deep-fraction", "0.5",
-        "--outliers", "2", "--outlier-floor", "10", "--clip-grad", "1", "--match-flux")
+        "--outliers", "2", "--outlier-floor", "10", "--clip-grad", "1", "--match-flux", "--agree", "0.9")
     record = json.loads((store / "models" / "noise" / "smoke" / "run.json").read_text())
     assert record["config"]["train_pairs"] == 6
     assert record["config"]["extra"]["label"] == "deep" and record["config"]["extra"]["windows"] > 0
     assert record["config"]["precision"] == "bf16"
     assert record["config"]["outliers"] == 2 and record["config"]["outlier_floor"] == 10
     assert record["config"]["clip_grad"] == 1 and record["config"]["match_flux"]
+    assert record["config"]["agree"] == 0.9 and record["config"]["pairs_dropped"] == []
     assert all(entry["grad_norm_max"] > 0 and entry["grad_norm_mean"] > 0 for entry in record["history"])
     assert record["export"]["max_relative_error"] < 1e-4
     assert record["inference"]["overlap"] >= receptive_field(3) // 2
@@ -94,6 +95,18 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
     assert set(evaluations) == {"train", "train, high 0.7 low 0.9 at 5 px", "train, matched flux"}
     assert all(row["flux_gain"] is not None for row in evaluations["train, matched flux"]["pairs_detail"])
     assert all(row["flux_gain"] is None for row in evaluations["train"]["pairs_detail"])
+
+    # Asked for halves that agree to within nothing, the bank leaves every
+    # pair out, and says which.
+    from seiza_training.noise_model import bank, pairs
+    from seiza_training.store import Store
+
+    with Manifest(store / "manifest.sqlite") as manifest:
+        chosen = pairs(manifest, "train")
+    strict = bank(Store(store, tmp_path / "scratch"), chosen, match_flux=True, agree=1e-9)
+    assert len(strict["a"]) == 0 and sorted(strict["dropped"]) == sorted(p["a"]["id"] for p in chosen)
+    with pytest.raises(ValueError, match="match_flux"):
+        bank(Store(store, tmp_path / "scratch"), chosen, agree=0.1)
 
     # Contact sheets: one against a deeper reference, one showing the noise
     # taken out, and one whose input is not built.
@@ -159,6 +172,27 @@ def test_matching_puts_b_on_a_s_background_and_flux():
     # An empty sky gives no gain to fit, and only the background moves.
     fixed, gain = matched(np.full((64, 64), 10, np.float32), np.full((64, 64), 7, np.float32), 1.0)
     assert gain == 1.0 and np.allclose(fixed, 10)
+
+
+def test_haze_in_one_half_shows_as_disagreement_and_a_gain_does_not():
+    from seiza_training.noise_model import agreement, disagree, matched
+
+    rng = np.random.default_rng(4)
+    y, x = np.mgrid[:256, :256]
+    stars, halos = np.zeros((256, 256)), np.zeros((256, 256))
+    for cy, cx, height in rng.uniform((0, 0, 3000), (256, 256, 20000), (25, 3)):
+        r2 = (y - cy) ** 2 + (x - cx) ** 2
+        stars += height * np.exp(-r2 / (2 * 2.0**2))
+        halos += height * 0.05 * np.exp(-r2 / (2 * 6.0**2))
+    b = (100 + stars + rng.normal(0, 0.5, stars.shape)).astype(np.float32)
+    # Only out of gain: matched, the halves agree.
+    a = (100 + 1.04 * stars + rng.normal(0, 2, stars.shape)).astype(np.float32)
+    found = agreement(a, matched(a, b, 2.0)[0], 2.0)
+    assert not disagree(found, 0.02), found
+    # Haze in A: its cores dimmed and their light spread wide.
+    hazy = (100 + 0.95 * stars + halos + rng.normal(0, 2, stars.shape)).astype(np.float32)
+    found = agreement(hazy, matched(hazy, b, 2.0)[0], 2.0)
+    assert disagree(found, 0.05) and found["wings"] > 1 > found["cores"], found
 
 
 def test_noise_bands_take_out_the_grain_and_the_mottle_apart():

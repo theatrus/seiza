@@ -110,6 +110,9 @@ def main(argv: list[str] | None = None) -> int:
                             "start at twice it")
     train.add_argument("--match-flux", action="store_true",
                        help="scale each pair's B half onto its A half's background and bright flux first")
+    train.add_argument("--agree", type=float,
+                       help="with --match-flux, leave out pairs whose halves' flux still differs by more than "
+                            "this share in the stars' wings or cores (haze, a change of seeing)")
     train.add_argument("--clip-grad", type=float, default=0.0,
                        help="scale each step's gradient down to this norm where it is longer (0: never)")
     train.add_argument("--precision", choices=("fp32", "bf16"), default="fp32",
@@ -266,6 +269,7 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
             noise_map=arguments.noise_map, huber=arguments.huber, huber_above=arguments.huber_above,
             structure_sampling=arguments.structure_sampling, outlier_count=arguments.outlier_count,
             outlier_floor=arguments.outlier_floor, clip_grad=arguments.clip_grad, match_flux=arguments.match_flux,
+            agree=arguments.agree,
             precision=arguments.precision, prefetch=arguments.prefetch, batch_threads=arguments.batch_threads,
             **extra,
         )
