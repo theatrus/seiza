@@ -933,6 +933,18 @@ in these ways:
   targets were 6% worse. The
   41M model at 80k, in less time, was better at every depth but 4 frames
   overall.
+- **Noise map.** The network read the noise map in σ̄ as it is, which
+  reaches 50σ̄ and more on a bright star, beside the image through asinh.
+  The 41M model trained 160k steps added up to 71,000σ̄ in a square some
+  190 pixels wide around one star of one 4-frame half, whose map peaked
+  at 55σ̄. The same star in another half of that night, its map at 50σ̄,
+  it left alone. Its activations ran from 44 to 27,000 at the fourth level
+  down. With the map flattened it did nothing, with the map 10% higher it
+  did more, and clipping the image changed nothing. No other run blew up on
+  any pair, and none did on the tiles whose maps reach highest, even with
+  their maps tripled, so the cue is a shape, not a height. The next runs
+  read the map through asinh, as they read the image, which brings a
+  bright star's under 5.
 - **Deep halves.** Training on a night's deep stack dealt into two halves,
   a quarter of every batch, taught a model to keep mottle: it left 37% of
   the coarse noise on empty sky. The halves share the night's flats,
@@ -1038,6 +1050,16 @@ Each tile carries its own PSF stamp and its own slices of the noise,
 ratio, halo and bloom maps. Peak memory is a few tiles' worth whatever the
 image's size, and the backends compile one tile shape. The model card
 records the tile shape, the overlap and the zero-weight margin.
+
+The noise model's output is bounded by its input. Each pixel is held
+between the lowest and highest input in the 5 × 5 box around it, widened by
+three times the noise map there: smoothing and the removal of an outlier
+both stay inside that range, and a network that runs away does not. Tried
+on four 4-frame validation pairs with two runs, the bound moved 1 to 79
+pixels of 26 million and left the error as it was, except on the one pair
+where a run blew up: there it moved 34,000 and brought the error from
+121,000 to 13. The share of pixels it moves is
+reported, and a tile where it moves many falls back to its input.
 
 The export script writes fixture tiles with PyTorch's f32 output. Each backend
 must match them:
@@ -1155,7 +1177,9 @@ above). Runs are compared by region, sky, faint, mid and cores, not by the
 error over the whole image, which a few defects can rule: in one pair a
 cold blob of 37 pixels, thousands of σ̄ below the background in both
 halves and by different amounts, held two thirds of the error, and a model that was better
-in every region scored worse over the whole.
+in every region scored worse over the whole. Each pair is also checked on
+its own: a run whose output on any pair's sky strays far from the noise
+fails, however good its means without that pair.
 
 Every noise run also makes contact sheets, so runs are judged by eye
 beside their measures. The store lists a few chosen images: nights from the
