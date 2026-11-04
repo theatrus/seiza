@@ -331,9 +331,16 @@ well as in a model trained without them. The second is their scale. In
 units of the image's typical noise σ̄, an outlier on a bright nebula,
 whose noise is many times σ̄, is a bump of ordinary noise, and the wider
 and longer-trained models learned to shave such bumps: they dimmed bright
-structure by up to 0.7%, most of it away from the stars. Scaling each
-outlier to the noise at its own pixel, so that it stands as far above a
-nebula as above the sky, is the fix under test.
+structure by up to 0.7%, most of it away from the stars. So each outlier
+is scaled to the noise at its own pixel, and stands as far above a nebula
+as above the sky. Trained so, on matched halves that agree, a 23M model
+trained 80k steps dimmed bright structure by 0.1%, where the same model
+trained on outliers in σ̄ and halves as they are dimmed it by 0.7%. On the
+validation set where the dimming was worst, it took 0.15% from the
+extended structure between 200 and 2,000σ̄ off the stars, against 3.75%.
+It also had the lowest error of any run on 4-frame halves, on 8-frame
+faint signal and against the clean targets. It left a little more of the
+coarse noise on empty sky, 4.0% against 3.0%.
 
 Once the PSF model exists, a further variant runs the frozen PSF model on both
 A and B. Their noise stays independent, so the noise model also learns the
