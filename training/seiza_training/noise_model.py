@@ -180,6 +180,57 @@ def scales(image: np.ndarray, sigma: np.ndarray) -> tuple[float, float]:
     return float(np.median(image[finite][::17])), float(np.median(sigma[finite][::17]))
 
 
+# `matched` fits a gain on the pixels whose box-blurred B is `MATCH_LEVEL`
+# σ̄ (of A) above its background, grown 3 pixels to take in the stars'
+# wings, when there are at least `MATCH_PIXELS` of them.
+MATCH_LEVEL = 10.0
+MATCH_PIXELS = 1000
+
+
+def matched(image_a: np.ndarray, image_b: np.ndarray, noise: float) -> tuple[np.ndarray, float]:
+    """B scaled and shifted onto A's flux and background, and the gain.
+
+    The halves of a pair are stacks of different frames, so their
+    normalization can leave B's bright flux a few percent above or below
+    A's: among the train pairs, from 0.58 to 1.42 times it, a tenth of
+    them more than 2.5% off. A model cannot tell one pair's error from the
+    next, so it learns their mean and dims what it denoises.
+
+    Each half's background is a plane fitted by least squares over the
+    same faint pixels, those where B blurred widely is below its median:
+    a mean over shared pixels, which neither half's noise moves (a median
+    over a nebula moves with the noise, which the halves do not share).
+    The gain is then the ratio of the halves' flux above those planes,
+    box-blurred, over the bright pixels, where whole stars count whatever
+    the seeing of each half. (A least-squares gain would not do: on sky,
+    B's blurred noise has nothing to do with A, and drags the slope
+    down.) Pixels count only where every neighbour is covered."""
+    both = np.isfinite(image_a) & np.isfinite(image_b)
+    smooth_a = box_blur(np.where(both, image_a, 0.0).astype(np.float32), 2)
+    smooth_b = box_blur(np.where(both, image_b, 0.0).astype(np.float32), 2)
+    wide_b = box_blur(np.where(both, image_b, 0.0).astype(np.float32), 8)
+    inner = box_blur(both.astype(np.float32), 2) > 0.999
+    inner_wide = box_blur(both.astype(np.float32), 8) > 0.999
+    height, width = image_a.shape
+    across, down = np.arange(width) / width, np.arange(height) / height
+    rows, columns = np.nonzero(inner_wide[::4, ::4])
+    rows, columns = rows * 4, columns * 4
+    faint = wide_b[rows, columns] <= np.median(wide_b[rows, columns])
+    rows, columns = rows[faint], columns[faint]
+    design = np.stack([np.ones(len(rows)), across[columns], down[rows]], axis=1)
+
+    def plane(smooth: np.ndarray) -> np.ndarray:
+        offset, along, up = np.linalg.lstsq(design, smooth[rows, columns].astype(np.float64), rcond=None)[0]
+        return (offset + along * across[None, :] + up * down[:, None]).astype(np.float32)
+
+    plane_a, plane_b = plane(smooth_a), plane(smooth_b)
+    signal_a, signal_b = smooth_a - plane_a, smooth_b - plane_b
+    bright = inner & (box_max((inner & (signal_b > MATCH_LEVEL * noise)).astype(np.float32), 3) > 0)
+    gain = float(signal_a[bright].sum(dtype=np.float64) / signal_b[bright].sum(dtype=np.float64)) \
+        if bright.sum() >= MATCH_PIXELS else 1.0
+    return (gain * (image_b - plane_b) + plane_a).astype(np.float32), gain
+
+
 def network_input(image: np.ndarray, sigma: np.ndarray, background: float, noise: float) -> np.ndarray:
     """The two planes the network reads; NaN becomes the background."""
     x = np.arcsinh(np.nan_to_num((image - background) / noise, nan=0.0))
@@ -187,18 +238,25 @@ def network_input(image: np.ndarray, sigma: np.ndarray, background: float, noise
     return np.stack([x, s]).astype(np.float32)
 
 
-def bank(store: Store, chosen: list[dict[str, Any]], *, seed: int = 0, noise_map: str = "raw") -> dict[str, np.ndarray]:
-    """Windows of every pair: A's image and noise map, and B's image.
-    Cached by the pairs, the seed and the kind of noise map."""
+def bank(
+    store: Store, chosen: list[dict[str, Any]], *, seed: int = 0, noise_map: str = "raw", match_flux: bool = False
+) -> dict[str, np.ndarray]:
+    """Windows of every pair: A's image and noise map, and B's image, with
+    `match_flux` first `matched` to A's. Cached by the pairs, the seed, the
+    kind of noise map and the matching."""
     parts = [p["a"]["id"] for p in chosen] + [seed, WINDOW, WINDOWS_PER_HALF]
     if noise_map != "raw":
         parts.append(f"map-{noise_map}")
+    if match_flux:
+        parts.append("match-flux")
     key = hashlib.sha256(json.dumps(parts).encode()).hexdigest()[:16]
 
     def halves():
         for pair in chosen:
             image_a, sigma_a = load_half(store, pair["a"], modelled=noise_map == "model")
             image_b, _ = load_half(store, pair["b"], noise_map=False)
+            if match_flux:
+                image_b, _ = matched(image_a, image_b, scales(image_a, sigma_a)[1])
             yield image_a, sigma_a, image_b
 
     return cut_windows(store, f"noise-{key}", halves(), sources=len(chosen), seed=seed)
@@ -537,6 +595,7 @@ def train(
     outlier_count: float = 0.0,
     outlier_floor: float = OUTLIER_FLOOR,
     clip_grad: float = 0.0,
+    match_flux: bool = False,
     precision: str = "fp32",
     prefetch: int = 8,
     batch_threads: int = 4,
@@ -551,6 +610,8 @@ def train(
     ones from `outlier_floor` up. `clip_grad` scales each step's gradient
     down to that norm where it is longer, so one wild batch cannot throw
     the weights far, and records the norms it saw in the history.
+    `match_flux` trains on B halves `matched` to their A halves' flux; the
+    run's own validation measures against B as it is, as every run's does.
     `precision` "bf16" runs the network in bfloat16 under autocast.
     `prefetch` batches are built ahead on `batch_threads` threads; 0 builds
     each in turn. Each step's batch draws from `step_generator(seed, step)`,
@@ -565,7 +626,7 @@ def train(
     if not chosen:
         raise RuntimeError("no built noise pairs in the train split")
     started = time.monotonic()
-    banked = bank(store, chosen, seed=seed, noise_map=noise_map)
+    banked = bank(store, chosen, seed=seed, noise_map=noise_map, match_flux=match_flux)
     bank_seconds = time.monotonic() - started
     where = device()
     cuda = where.type == "cuda"
@@ -650,7 +711,7 @@ def train(
                    "windows": int(len(banked["a"])), "core_sigma": CORE_SIGMA,
                    "loss_weight": loss_weight, "map_jitter": map_jitter, "noise_map": noise_map,
                    "huber": huber, "huber_above": huber_above, "structure_sampling": structure_sampling,
-                   "outliers": outlier_count, "outlier_floor": outlier_floor, "clip_grad": clip_grad, "precision": precision, "prefetch": prefetch,
+                   "outliers": outlier_count, "outlier_floor": outlier_floor, "clip_grad": clip_grad, "match_flux": match_flux, "precision": precision, "prefetch": prefetch,
                    "batch_threads": batch_threads, "batch_generator": "per-step",
                    "extra": {"label": extra_label, "fraction": extra_fraction, "windows": int(len(extra["a"]))}
                    if extra is not None else None},
@@ -773,6 +834,7 @@ def evaluate(
     sets: set[str] | None = None,
     noise_map: str = "raw",
     bands: NoiseBands = NoiseBands(),
+    match_flux: bool = False,
     threads: int = EVALUATION_THREADS,
 ) -> dict[str, Any]:
     """Denoise each of a split's A halves, whole, through overlapping
@@ -783,7 +845,9 @@ def evaluate(
     depth and beyond, far less noisy than the noise pairs. The
     network reads the noise map it was trained with; every run is measured
     in the same units, the per-pixel map's median noise, so runs with
-    different maps compare. `threads` pairs are measured at once."""
+    different maps compare. With `match_flux`, each B is first `matched`
+    to its A, so a model that keeps A's flux is not marked down for the
+    halves' own difference. `threads` pairs are measured at once."""
     model = model.eval()
     where = device()
 
@@ -791,6 +855,9 @@ def evaluate(
         image_a, sigma_a = load_half(store, pair["a"])
         image_b, _ = load_half(store, pair["b"], noise_map=False)
         background, noise = scales(image_a, sigma_a)
+        gain = None
+        if match_flux:
+            image_b, gain = matched(image_a, image_b, noise)
         if noise_map == "model":
             coverage = np.load(store.root / loads(pair["a"]["files"])["coverage"])
             sigma_a = modelled_sigma(image_a, sigma_a, coverage)
@@ -801,7 +868,7 @@ def evaluate(
         estimate = bands.apply(image_a, residual)
         recipe = loads(pair["a"]["recipe"])
         return {"pair": pair["a"]["id"], "set": pair["set"], "size": recipe.get("size") or recipe["recipe"],
-                **measure(estimate, image_a, image_b, background, noise)}
+                "flux_gain": gain, **measure(estimate, image_a, image_b, background, noise)}
 
     chosen = pairs(manifest, split, sets) + deep_pairs(manifest, split, sets)
     with ThreadPoolExecutor(max_workers=threads, thread_name_prefix="evaluate") as pool:
@@ -822,6 +889,7 @@ def evaluate(
     return {
         "split": split,
         "bands": asdict(bands),
+        "match_flux": match_flux,
         "pairs": len(per_pair),
         # Frame counts first, then the deep halves.
         "by_size": {str(size): {key: mean(rows, key) for key in keys}
@@ -1198,20 +1266,23 @@ def load_run(store: Store, name: str) -> tuple[dict[str, Any], ResidualUNet]:
 
 def evaluate_saved(
     store: Store, manifest: Manifest, name: str, *, split: str, limit: int | None = None, sets: set[str] | None = None,
-    bands: NoiseBands = NoiseBands(),
+    bands: NoiseBands = NoiseBands(), match_flux: bool = False,
 ) -> dict[str, Any]:
     """Measure a recorded run's model on `split`, taking out `bands` of
-    what it finds, and add it to the record: under the split's name, or,
-    when `bands` keep some noise, under the split's name and theirs."""
+    what it finds, and add it to the record: under the split's name, then,
+    when `bands` keep some noise, theirs, and with `match_flux` "matched
+    flux"."""
     directory = store.root / "models" / "noise" / name
     record, model = load_run(store, name)
     config = record["config"]
     result = evaluate(store, manifest, model, split=split, limit=limit, sets=sets,
-                      noise_map=config.get("noise_map", "raw"), bands=bands, **record["inference"])
+                      noise_map=config.get("noise_map", "raw"), bands=bands, match_flux=match_flux,
+                      **record["inference"])
     result["dark_noise"] = evaluate_dark_noise(store, manifest, model, split=split, sets=sets,
                                                noise_map=config.get("noise_map", "raw"), bands=bands,
                                                **record["inference"])
-    record.setdefault("evaluations", {})[split if bands.whole else f"{split}, {bands}"] = result
+    label = ", ".join([split] + ([] if bands.whole else [str(bands)]) + (["matched flux"] if match_flux else []))
+    record.setdefault("evaluations", {})[label] = result
     (directory / "run.json").write_text(json.dumps(record, indent=2))
     return {key: value for key, value in result.items() if key != "pairs_detail"} | {
         "dark_noise": {key: value for key, value in result["dark_noise"].items() if key != "pairs_detail"}
