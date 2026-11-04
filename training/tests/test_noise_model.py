@@ -66,7 +66,8 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
     capsys.readouterr()
     run("train-noise", "--name", "smoke", "--steps", "6", "--width", "4", "--levels", "3", "--tile", "64", "--batch", "2",
         "--precision", "bf16", "--prefetch", "2", "--batch-threads", "2", "--deep-fraction", "0.5",
-        "--outliers", "2", "--outlier-floor", "10", "--clip-grad", "1", "--match-flux", "--agree", "0.9")
+        "--outliers", "2", "--outlier-floor", "10", "--clip-grad", "1", "--match-flux", "--agree", "0.9",
+        "--outlier-scale", "local")
     record = json.loads((store / "models" / "noise" / "smoke" / "run.json").read_text())
     assert record["config"]["train_pairs"] == 6
     assert record["config"]["extra"]["label"] == "deep" and record["config"]["extra"]["windows"] > 0
@@ -74,6 +75,7 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
     assert record["config"]["outliers"] == 2 and record["config"]["outlier_floor"] == 10
     assert record["config"]["clip_grad"] == 1 and record["config"]["match_flux"]
     assert record["config"]["agree"] == 0.9 and record["config"]["pairs_dropped"] == []
+    assert record["config"]["outlier_scale"] == "local"
     assert all(entry["grad_norm_max"] > 0 and entry["grad_norm_mean"] > 0 for entry in record["history"])
     assert record["export"]["max_relative_error"] < 1e-4
     assert record["inference"]["overlap"] >= receptive_field(3) // 2
@@ -281,6 +283,17 @@ def test_outliers_reach_the_input_and_not_the_target():
     assert torch.equal(inputs[:, 0] != 0, references[:, 0] != 0)
     _, _, references, _ = batch_from(banked, 4, 128, np.random.default_rng(6))
     assert not references.any()
+    # Scaled to the noise at each pixel, an outlier where the noise is ten
+    # times higher is ten times brighter; scaled to σ̄, it is not.
+    banked["sigma"] = np.where(np.arange(WINDOW) < WINDOW // 2, 2.0, 20.0)[None, None, :] * np.ones_like(flat)
+    for scale, low, high in (("local", 5.0, np.inf), ("typical", 0.5, 2.0)):
+        _, _, references, sigmas = batch_from(banked, 1, WINDOW, np.random.default_rng(7), outlier_count=400,
+                                              outlier_scale=scale)
+        # The tile is turned and flipped; its noise map shows where the
+        # noisier half went.
+        planted, noisier = references[0, 0].abs(), sigmas[0, 0] > 5
+        ratio = float(planted[noisier].max() / planted[~noisier].max())
+        assert low < ratio < high, (scale, ratio)
 
 
 def test_signal_transfer_keeps_the_input_whole_and_falls_as_an_estimate_smooths():

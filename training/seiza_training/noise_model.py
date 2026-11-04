@@ -436,6 +436,9 @@ def structure_odds(banked: dict[str, np.ndarray], factor: float) -> np.ndarray |
 
 # Outliers per this many pixels: `count` in `outliers` is per 256 × 256.
 OUTLIER_AREA = 256 * 256
+# What an outlier's amplitude is a multiple of: the image's typical noise
+# σ̄, or the noise at the pixel itself.
+OUTLIER_SCALES = ("typical", "local")
 # The faintest hot pixel `outliers` plants, in σ̄. Near it a hot pixel looks
 # like a faint star, so a model trained on many learns to take out some of
 # the faint stars' flux too.
@@ -490,6 +493,7 @@ def batch_from(
     odds: np.ndarray | None = None,
     outlier_count: float = 0.0,
     outlier_floor: float = OUTLIER_FLOOR,
+    outlier_scale: str = "typical",
 ) -> tuple[torch.Tensor, ...]:
     """`size` tiles at random windows and offsets, each flipped and turned
     one of eight ways: the network's input, the target and A, in units of
@@ -499,7 +503,11 @@ def batch_from(
     learns to judge the noise from the image, the map telling it only
     where the noise is higher or lower. With `outlier_count`, A gains
     `outliers` from `outlier_floor` up and the target does not; the noise
-    map, which a modelled map would not change, stays as it was."""
+    map, which a modelled map would not change, stays as it was. Their
+    amplitudes are in σ̄, or with `outlier_scale` "local" in the noise at
+    each pixel: on a bright nebula, whose noise is many times σ̄, an
+    outlier of 10σ̄ is a bump of ordinary noise, and a model taught to take
+    those out shaves the noise's peaks and dims what is bright."""
     count = len(banked["a"])
     picks = rng.choice(count, size, p=odds) if odds is not None else rng.integers(0, count, size)
     inputs, targets, references, sigmas = [], [], [], []
@@ -516,7 +524,8 @@ def batch_from(
             planes = planes[:, :, ::-1]
         a, sigma, b = planes
         if outlier_count:
-            a = a + outliers(a.shape, rng, outlier_count, floor=outlier_floor) * noise
+            scale = np.where(np.isfinite(sigma), sigma, noise) if outlier_scale == "local" else noise
+            a = a + outliers(a.shape, rng, outlier_count, floor=outlier_floor) * scale
         stated = sigma * float(np.exp(rng.uniform(-map_jitter, map_jitter))) if map_jitter else sigma
         inputs.append(network_input(a, stated, background, noise))
         targets.append(np.stack([(b - background) / noise]))
@@ -638,6 +647,7 @@ def train(
     structure_sampling: float = 0.0,
     outlier_count: float = 0.0,
     outlier_floor: float = OUTLIER_FLOOR,
+    outlier_scale: str = "typical",
     clip_grad: float = 0.0,
     match_flux: bool = False,
     agree: float | None = None,
@@ -652,7 +662,8 @@ def train(
     their inputs; it makes up `extra_fraction` of every batch, and the run
     records it under `extra_label`. `outlier_count` adds that many
     synthetic outliers per 256 × 256 pixels to every input tile, the hot
-    ones from `outlier_floor` up. `clip_grad` scales each step's gradient
+    ones from `outlier_floor` up, in units `outlier_scale` names (see
+    `batch_from`). `clip_grad` scales each step's gradient
     down to that norm where it is longer, so one wild batch cannot throw
     the weights far, and records the norms it saw in the history.
     `match_flux` trains on B halves `matched` to their A halves' flux, and
@@ -666,6 +677,8 @@ def train(
     one generator in turn.)"""
     if precision not in PRECISIONS:
         raise ValueError(f"precision is one of {PRECISIONS}, not {precision!r}")
+    if outlier_scale not in OUTLIER_SCALES:
+        raise ValueError(f"outlier_scale is one of {OUTLIER_SCALES}, not {outlier_scale!r}")
     if extra is not None and extra_fraction and not len(extra["a"]):
         raise RuntimeError(f"the {extra_label} bank holds no window wholly inside its pairs' coverage")
     torch.manual_seed(seed)
@@ -689,10 +702,12 @@ def train(
     def assemble(step: int) -> tuple[torch.Tensor, ...]:
         rng = step_generator(seed, step)
         parts = [batch_from(banked, batch - extra_count, tile, rng, map_jitter=map_jitter, odds=odds,
-                            outlier_count=outlier_count, outlier_floor=outlier_floor)]
+                            outlier_count=outlier_count, outlier_floor=outlier_floor,
+                            outlier_scale=outlier_scale)]
         if extra_count:
             parts.append(batch_from(extra, extra_count, tile, rng, map_jitter=map_jitter, odds=extra_odds,
-                                    outlier_count=outlier_count, outlier_floor=outlier_floor))
+                                    outlier_count=outlier_count, outlier_floor=outlier_floor,
+                            outlier_scale=outlier_scale))
         tensors = tuple(torch.cat(values) for values in zip(*parts))
         # Pinned, a batch copies to the GPU while it still trains.
         return tuple(t.pin_memory() for t in tensors) if cuda else tensors
@@ -759,7 +774,8 @@ def train(
                    "windows": int(len(banked["a"])), "core_sigma": CORE_SIGMA,
                    "loss_weight": loss_weight, "map_jitter": map_jitter, "noise_map": noise_map,
                    "huber": huber, "huber_above": huber_above, "structure_sampling": structure_sampling,
-                   "outliers": outlier_count, "outlier_floor": outlier_floor, "clip_grad": clip_grad,
+                   "outliers": outlier_count, "outlier_floor": outlier_floor,
+                   "outlier_scale": outlier_scale, "clip_grad": clip_grad,
                    "match_flux": match_flux, "agree": agree, "precision": precision, "prefetch": prefetch,
                    "batch_threads": batch_threads, "batch_generator": "per-step",
                    "extra": {"label": extra_label, "fraction": extra_fraction, "windows": int(len(extra["a"]))}
