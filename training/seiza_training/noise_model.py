@@ -185,6 +185,10 @@ def scales(image: np.ndarray, sigma: np.ndarray) -> tuple[float, float]:
 # wings, when there are at least `MATCH_PIXELS` of them.
 MATCH_LEVEL = 10.0
 MATCH_PIXELS = 1000
+# Its background planes leave out, in each of a few rounds, the pixels
+# either half puts this many times its spread from its plane.
+MATCH_CLIP = 4.0
+MATCH_ROUNDS = 3
 
 
 def matched(image_a: np.ndarray, image_b: np.ndarray, noise: float) -> tuple[np.ndarray, float]:
@@ -200,6 +204,10 @@ def matched(image_a: np.ndarray, image_b: np.ndarray, noise: float) -> tuple[np.
     same faint pixels, those where B blurred widely is below its median:
     a mean over shared pixels, which neither half's noise moves (a median
     over a nebula moves with the noise, which the halves do not share).
+    A pixel either half puts `MATCH_CLIP` times its spread (from the
+    median absolute deviation) from its plane is left out of both, and the
+    planes fitted again: a short stack keeps hot pixels its rejection
+    missed, which would lift A's plane and with it matched B's sky.
     The gain is then the ratio of the halves' flux above those planes,
     box-blurred, over the bright pixels, where whole stars count whatever
     the seeing of each half. (A least-squares gain would not do: on sky,
@@ -218,12 +226,20 @@ def matched(image_a: np.ndarray, image_b: np.ndarray, noise: float) -> tuple[np.
     faint = wide_b[rows, columns] <= np.median(wide_b[rows, columns])
     rows, columns = rows[faint], columns[faint]
     design = np.stack([np.ones(len(rows)), across[columns], down[rows]], axis=1)
-
-    def plane(smooth: np.ndarray) -> np.ndarray:
-        offset, along, up = np.linalg.lstsq(design, smooth[rows, columns].astype(np.float64), rcond=None)[0]
-        return (offset + along * across[None, :] + up * down[:, None]).astype(np.float32)
-
-    plane_a, plane_b = plane(smooth_a), plane(smooth_b)
+    values = [image[rows, columns].astype(np.float64) for image in (image_a, image_b)]
+    keep = np.ones(len(rows), dtype=bool)
+    for round in range(MATCH_ROUNDS):
+        fits = [np.linalg.lstsq(design[keep], value[keep], rcond=None)[0] for value in values]
+        if round == MATCH_ROUNDS - 1:
+            break
+        keep = np.ones(len(rows), dtype=bool)
+        for value, fit in zip(values, fits):
+            residual = value - design @ fit
+            spread = 1.4826 * float(np.median(np.abs(residual - np.median(residual))))
+            if spread > 0:
+                keep &= np.abs(residual) <= MATCH_CLIP * spread
+    plane_a, plane_b = ((offset + along * across[None, :] + up * down[:, None]).astype(np.float32)
+                        for offset, along, up in fits)
     signal_a, signal_b = smooth_a - plane_a, smooth_b - plane_b
     bright = inner & (box_max((inner & (signal_b > MATCH_LEVEL * noise)).astype(np.float32), 3) > 0)
     gain = float(signal_a[bright].sum(dtype=np.float64) / signal_b[bright].sum(dtype=np.float64)) \
@@ -280,7 +296,8 @@ def bank(
     if noise_map != "raw":
         parts.append(f"map-{noise_map}")
     if match_flux:
-        parts.append("match-flux")
+        # 2: the background planes leave out hot pixels.
+        parts.append("match-flux-2")
     if agree is not None:
         parts.append(f"agree-{agree:g}")
     key = hashlib.sha256(json.dumps(parts).encode()).hexdigest()[:16]
