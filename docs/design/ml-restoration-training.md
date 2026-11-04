@@ -765,7 +765,11 @@ in these ways:
   frames, gained the 23M model 5% on 4-frame halves (3% against matched
   halves that agree) and 8% on their faint signal, and its faint stars
   came out a little narrower at every depth. It lost 4–7% on their
-  mid-brightness signal.
+  mid-brightness signal. On those pairs the 41M model beat it at every
+  depth: by 3% on 4-frame halves, 14% on their faint signal and 5% on
+  their star cores, matched, and by 2% on star cores at a night's whole
+  depth, with the least mottle left on empty sky of any run. More
+  targets made room for the larger model.
 - **Steps.** Trained with the synthetic outliers for 40k steps, the 23M
   model left 9% of the coarse mottle on empty sky; for 80k, 3%. The mottle
   was undertraining, not a lack of capacity. At 80k, 23M matched 41M on
@@ -988,7 +992,11 @@ Each model also has gates of its own.
 
 Against B halves, the error is measured both as they are and against
 halves matched to A, on the pairs whose halves agree (see the pairs
-above).
+above). Runs are compared by region, sky, faint, mid and cores, not by the
+error over the whole image, which a few defects can rule: in one pair a
+cold blob of 37 pixels, thousands of σ̄ below the background in both
+halves and by different amounts, held two thirds of the error, and a model that was better
+in every region scored worse over the whole.
 
 Every noise run also makes contact sheets, so runs are judged by eye
 beside their measures. The store lists a few chosen images: nights from the
