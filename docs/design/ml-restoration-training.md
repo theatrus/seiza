@@ -447,9 +447,13 @@ they are.
 Matched, B takes A's background, and a short half's background is the
 higher: on the validation pairs of 4 frames, A's faint sky stood 0.03σ̄
 above B's, in every pair, most likely because the rejection of 4 frames
-lets more of their outliers through. A model trained on matched halves keeps its
-input's level, and so reads about 0.02σ̄ above B and above the clean
-targets. That is the input's level kept, not a fault in the matching.
+lets more of their outliers through. A model trained on halves as they
+are learns to bring its input's sky down toward B's; one trained on
+matched halves keeps its input's level. On the sky, the matched models
+raise the median of their input by about 0.04σ̄, the others by 0.02σ̄,
+and against the clean targets they sit 0.05σ̄ high, the others 0.03σ̄.
+That is the input's level kept, not a fault in the matching, but 0.05σ̄
+is the limit the gates below allow.
 
 Synthetic noise is the minority. It extends the data to signal-to-noise ratios
 the corpus lacks: Poisson–Gaussian noise per synthetic sub-frame, passed
