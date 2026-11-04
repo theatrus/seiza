@@ -417,9 +417,48 @@ OSC, the chroma noise left by VNG demosaicing. Drizzled and binned variants
 are made in proportion to their use. A pair is rejected when the background
 or FWHM of A and B differ beyond a tolerance after local normalisation.
 
+Stacked on one reference with the same normalization, the halves still do
+not agree in flux. In the first corpus, B's bright flux was 0.58 to 1.42
+times A's, pair by pair, and a tenth of the pairs were more than 2.5% off.
+A model cannot tell one pair's difference from the next, so it learns
+their mean. Before training, then, B is matched to A. Each half's
+background is a plane fitted over the same faint pixels, those where B
+blurred widely is below its median, leaving out the pixels either half
+puts four times its spread from its plane: a short stack keeps hot pixels
+its rejection missed, and left in they lift the plane. The gain is the
+ratio of the halves' flux above those planes over B's bright pixels,
+grown to take in the stars' wings. (A least-squares gain will not do: on
+the sky, B's noise has nothing to do with A's, and drags the slope down.)
+
+Where haze has spread light into halos about the stars in one half, no
+gain fits. In one validation pair A held 1.27 times B's flux in the stars'
+wings and 0.98 in their cores, and matched, its brightest cores were 19%
+apart; a model trained on such a pair learns to add or take away halos. A
+pair whose matched halves differ by more than 3% in the wings (200 to
+1,000σ̄ above the background) or in the cores (above 1,000σ̄) is left out,
+which is one train pair in 20. Measured against matched halves, on the
+pairs that agree, every run's error on 4-frame halves fell by about 40%:
+much of what had been measured was the halves' own difference.
+
 Synthetic noise is the minority. It extends the data to signal-to-noise ratios
 the corpus lacks: Poisson–Gaussian noise per synthetic sub-frame, passed
 through the same resampling kernel, added to a deep stack.
+
+A short stack also keeps what its rejection missed: hot and cold pixels
+and cosmic-ray tracks. Training adds synthetic ones to the input, never to
+the target, each spread over its neighbours as Lanczos registration
+spreads a frame's pixel. Two things decide what they cost. The first is
+their floor. Starting at 5σ̄, the height of a faint star, they taught a
+model to take about a tenth of the faint stars' flux with them. Starting
+at 10σ̄ (cosmic rays at 20σ̄), at one per 256 × 256 pixels, a quarter as
+many, they are taken out as fully, and faint stars keep their flux as
+well as in a model trained without them. The second is their scale. In
+units of the image's typical noise σ̄, an outlier on a bright nebula,
+whose noise is many times σ̄, is a bump of ordinary noise, and the wider
+and longer-trained models learned to shave such bumps: they dimmed bright
+structure by up to 0.7%, most of it away from the stars. Scaling each
+outlier to the noise at its own pixel, so that it stands as far above a
+nebula as above the sky, is the fix under test.
 
 Once the PSF model exists, a further variant runs the frozen PSF model on both
 A and B. Their noise stays independent, so the noise model also learns the
@@ -836,6 +875,37 @@ Each run uses batch 32, AdamW at 2e-4 with cosine decay, bf16, and
 full run takes from a few hours to overnight on that GPU. Width {16, 24, 32}
 and depth are swept only on R1, R3a and R4a, and the winners carry forward.
 
+### What the first noise runs showed
+
+The first noise runs trained at batch 16 with a one-cycle schedule, for
+40k to 80k steps, from 10M to 41M parameters. They changed the plan above
+in these ways:
+
+- **Precision.** Training in bf16 cost star cores 7–24% and mid-brightness
+  detail. Runs train in fp32; TF32 convolutions are fine.
+- **Clipping.** With the synthetic outliers, models of width 48 and 64
+  failed without a limit on the gradient's norm: one diverged at step
+  10,750, the loss reaching 1.8 million, and one stopped learning at step
+  3,000. Clipping the norm at 1 trained both. A run records the norm
+  before the clip.
+- **Targets over size.** Three and a half times the training pairs, from
+  136 sets instead of 45, gained a 10M model 2–3%. A 23M model trained on
+  them kept fine detail at 0.964, against 0.925 for the same model on the
+  45 sets.
+- **Steps.** Trained with the synthetic outliers for 40k steps, the 23M
+  model left 9% of the coarse mottle on empty sky; for 80k, 3%. The mottle
+  was undertraining, not a lack of capacity. At 80k, 23M matched 41M on
+  4-frame halves; 41M was better at a night's whole depth.
+- **Deep halves.** Training on a night's deep stack dealt into two halves,
+  a quarter of every batch, taught a model to keep mottle: it left 37% of
+  the coarse noise on empty sky. The halves share the night's flats,
+  masters and gradients, a pattern that is large next to the noise of 20
+  or more frames. The halves are measured only, as are the halves of an
+  object stacked over many nights, whose seeing differs between them.
+- **Stars.** Against the input, every run kept stars' widths within the 1%
+  gate at every depth. Against the deep reference, faint stars from 4-frame
+  halves came out 0.6–1.3% wider.
+
 ## Inference in Seiza
 
 A new crate, `seiza-restore`, runs the models and holds the three operations.
@@ -1041,6 +1111,10 @@ Each model also has gates of its own.
 - a flat residual spectrum;
 - star flux and FWHM unchanged within 1%;
 - injected Gaussian blobs at 1–3σ keep at least 80% of their amplitude.
+
+Against B halves, the error is measured both as they are and against
+halves matched to A, on the pairs whose halves agree (see the pairs
+above).
 
 Every noise run also makes contact sheets, so runs are judged by eye
 beside their measures. The store lists a few chosen images: nights from the
