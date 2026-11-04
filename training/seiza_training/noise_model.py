@@ -274,10 +274,23 @@ def disagree(found: dict[str, float | None], limit: float) -> bool:
     return any(value is not None and abs(value - 1) > limit for value in found.values())
 
 
-def network_input(image: np.ndarray, sigma: np.ndarray, background: float, noise: float) -> np.ndarray:
-    """The two planes the network reads; NaN becomes the background."""
+# How the network reads the noise map: in σ̄ as it is, or through asinh, as
+# it reads the image. Read as it is, a bright star's map reaches 50σ̄ and
+# more, and one 41M model trained 160k steps took a star whose map rose to
+# 55σ̄ for a cue to add tens of thousands of σ̄ in a square around it,
+# though at 50σ̄ in the other half of the same pair it did nothing.
+NOISE_PLANES = ("linear", "asinh")
+
+
+def network_input(
+    image: np.ndarray, sigma: np.ndarray, background: float, noise: float, noise_plane: str = "linear"
+) -> np.ndarray:
+    """The two planes the network reads, the noise map as `noise_plane`
+    says; NaN becomes the background."""
     x = np.arcsinh(np.nan_to_num((image - background) / noise, nan=0.0))
     s = np.nan_to_num(sigma / noise, nan=1.0)
+    if noise_plane == "asinh":
+        s = np.arcsinh(s)
     return np.stack([x, s]).astype(np.float32)
 
 
@@ -511,10 +524,12 @@ def batch_from(
     outlier_count: float = 0.0,
     outlier_floor: float = OUTLIER_FLOOR,
     outlier_scale: str = "typical",
+    noise_plane: str = "linear",
 ) -> tuple[torch.Tensor, ...]:
     """`size` tiles at random windows and offsets, each flipped and turned
-    one of eight ways: the network's input, the target and A, in units of
-    σ̄ above the background, and A's noise map in units of σ̄. With
+    one of eight ways: the network's input (its noise map as `noise_plane`
+    says), the target and A, in units of σ̄ above the background, and A's
+    noise map in units of σ̄. With
     `map_jitter`, the noise map the network reads is scaled by a factor
     drawn log-uniformly from `exp(±map_jitter)` per tile, so the network
     learns to judge the noise from the image, the map telling it only
@@ -544,7 +559,7 @@ def batch_from(
             scale = np.where(np.isfinite(sigma), sigma, noise) if outlier_scale == "local" else noise
             a = a + outliers(a.shape, rng, outlier_count, floor=outlier_floor) * scale
         stated = sigma * float(np.exp(rng.uniform(-map_jitter, map_jitter))) if map_jitter else sigma
-        inputs.append(network_input(a, stated, background, noise))
+        inputs.append(network_input(a, stated, background, noise, noise_plane))
         targets.append(np.stack([(b - background) / noise]))
         references.append(np.stack([(a - background) / noise]))
         sigmas.append(np.stack([np.nan_to_num(sigma / noise, nan=1.0)]))
@@ -665,6 +680,7 @@ def train(
     outlier_count: float = 0.0,
     outlier_floor: float = OUTLIER_FLOOR,
     outlier_scale: str = "typical",
+    noise_plane: str = "linear",
     clip_grad: float = 0.0,
     match_flux: bool = False,
     agree: float | None = None,
@@ -680,7 +696,8 @@ def train(
     records it under `extra_label`. `outlier_count` adds that many
     synthetic outliers per 256 × 256 pixels to every input tile, the hot
     ones from `outlier_floor` up, in units `outlier_scale` names (see
-    `batch_from`). `clip_grad` scales each step's gradient
+    `batch_from`). The network reads the noise map as `noise_plane` says
+    (see `NOISE_PLANES`). `clip_grad` scales each step's gradient
     down to that norm where it is longer, so one wild batch cannot throw
     the weights far, and records the norms it saw in the history.
     `match_flux` trains on B halves `matched` to their A halves' flux, and
@@ -696,6 +713,8 @@ def train(
         raise ValueError(f"precision is one of {PRECISIONS}, not {precision!r}")
     if outlier_scale not in OUTLIER_SCALES:
         raise ValueError(f"outlier_scale is one of {OUTLIER_SCALES}, not {outlier_scale!r}")
+    if noise_plane not in NOISE_PLANES:
+        raise ValueError(f"noise_plane is one of {NOISE_PLANES}, not {noise_plane!r}")
     if extra is not None and extra_fraction and not len(extra["a"]):
         raise RuntimeError(f"the {extra_label} bank holds no window wholly inside its pairs' coverage")
     torch.manual_seed(seed)
@@ -720,11 +739,11 @@ def train(
         rng = step_generator(seed, step)
         parts = [batch_from(banked, batch - extra_count, tile, rng, map_jitter=map_jitter, odds=odds,
                             outlier_count=outlier_count, outlier_floor=outlier_floor,
-                            outlier_scale=outlier_scale)]
+                            outlier_scale=outlier_scale, noise_plane=noise_plane)]
         if extra_count:
             parts.append(batch_from(extra, extra_count, tile, rng, map_jitter=map_jitter, odds=extra_odds,
                                     outlier_count=outlier_count, outlier_floor=outlier_floor,
-                            outlier_scale=outlier_scale))
+                                    outlier_scale=outlier_scale, noise_plane=noise_plane))
         tensors = tuple(torch.cat(values) for values in zip(*parts))
         # Pinned, a batch copies to the GPU while it still trains.
         return tuple(t.pin_memory() for t in tensors) if cuda else tensors
@@ -777,10 +796,10 @@ def train(
     margin = math.ceil(receptive_field(levels) / 2)
     overlap = 2 * margin + 32
     validation = evaluate(store, manifest, model, split="validation", tile=512, overlap=overlap, margin=margin,
-                          sets=validation_sets, noise_map=noise_map)
+                          sets=validation_sets, noise_map=noise_map, noise_plane=noise_plane)
     validation["dark_noise"] = evaluate_dark_noise(store, manifest, model, split="validation", tile=512,
                                                    overlap=overlap, margin=margin, sets=validation_sets,
-                                                   noise_map=noise_map)
+                                                   noise_map=noise_map, noise_plane=noise_plane)
     exported = export(model, directory / "model.onnx", tile=512)
     record = {
         "name": name,
@@ -792,7 +811,7 @@ def train(
                    "loss_weight": loss_weight, "map_jitter": map_jitter, "noise_map": noise_map,
                    "huber": huber, "huber_above": huber_above, "structure_sampling": structure_sampling,
                    "outliers": outlier_count, "outlier_floor": outlier_floor,
-                   "outlier_scale": outlier_scale, "clip_grad": clip_grad,
+                   "outlier_scale": outlier_scale, "noise_plane": noise_plane, "clip_grad": clip_grad,
                    "match_flux": match_flux, "agree": agree, "precision": precision, "prefetch": prefetch,
                    "batch_threads": batch_threads, "batch_generator": "per-step",
                    "extra": {"label": extra_label, "fraction": extra_fraction, "windows": int(len(extra["a"]))}
@@ -915,6 +934,7 @@ def evaluate(
     limit: int | None = None,
     sets: set[str] | None = None,
     noise_map: str = "raw",
+    noise_plane: str = "linear",
     bands: NoiseBands = NoiseBands(),
     match_flux: bool = False,
     threads: int = EVALUATION_THREADS,
@@ -925,7 +945,8 @@ def evaluate(
     against the other, under the size `deep-half`, or `multi-night` for an
     object stacked over its nights: they show the model at a night's whole
     depth and beyond, far less noisy than the noise pairs. The
-    network reads the noise map it was trained with; every run is measured
+    network reads the noise map it was trained with, as `noise_plane`
+    says; every run is measured
     in the same units, the per-pixel map's median noise, so runs with
     different maps compare. With `match_flux`, each B is first `matched`
     to its A, so a model that keeps A's flux is not marked down for the
@@ -946,7 +967,7 @@ def evaluate(
             coverage = np.load(store.root / loads(pair["a"]["files"])["coverage"])
             sigma_a = modelled_sigma(image_a, sigma_a, coverage)
         input_background, input_noise = scales(image_a, sigma_a)
-        planes = network_input(image_a, sigma_a, input_background, input_noise)
+        planes = network_input(image_a, sigma_a, input_background, input_noise, noise_plane)
         residual = infer(denoiser(model, input_background, input_noise, where), planes,
                          tile=tile, overlap=overlap, margin=margin)[0]
         estimate = bands.apply(image_a, residual)
@@ -1255,13 +1276,14 @@ def evaluate_dark_noise(
     margin: int = 52,
     sets: set[str] | None = None,
     noise_map: str = "raw",
+    noise_plane: str = "linear",
     bands: NoiseBands = NoiseBands(),
     threads: int = EVALUATION_THREADS,
 ) -> dict[str, Any]:
     """Denoise each of a split's dark-noise inputs and measure it against
     its clean target (`truth`), and denoise its noise alone on a flat sky
     (`empty_sky`), once as it is and once with `outliers` planted in it.
-    Inference, units, `bands` and threads are `evaluate`'s."""
+    Inference, noise plane, units, `bands` and threads are `evaluate`'s."""
     model = model.eval()
     where = device()
 
@@ -1277,7 +1299,8 @@ def evaluate_dark_noise(
         stated = modelled_sigma(image, sigma, coverage) if noise_map == "model" else sigma
         input_background, input_noise = scales(image, stated)
         run = denoiser(model, input_background, input_noise, where)
-        estimate = bands.apply(image, infer(run, network_input(image, stated, input_background, input_noise),
+        estimate = bands.apply(image, infer(run, network_input(image, stated, input_background, input_noise,
+                                                               noise_plane),
                                             tile=tile, overlap=overlap, margin=margin)[0])
         truth = against_truth(estimate, image, target, floor, background, noise)
         del estimate
@@ -1293,7 +1316,7 @@ def evaluate_dark_noise(
             sky_sigma = modelled_sigma(sky, sky_sigma, alone_coverage)
         sky_background, sky_noise = scales(sky, sky_sigma)
         sky_run = denoiser(model, sky_background, sky_noise, where)
-        output = bands.apply(sky, infer(sky_run, network_input(sky, sky_sigma, sky_background, sky_noise),
+        output = bands.apply(sky, infer(sky_run, network_input(sky, sky_sigma, sky_background, sky_noise, noise_plane),
                                         tile=tile, overlap=overlap, margin=margin)[0])
         empty = on_empty_sky(output, sky, background, noise)
         # The same outliers for every model, planted on the empty sky: the
@@ -1302,7 +1325,8 @@ def evaluate_dark_noise(
                            OUTLIER_TEST_COUNT) * sky_noise
         planted[~np.isfinite(sky)] = 0.0
         spoiled = sky + planted
-        left = bands.apply(spoiled, infer(sky_run, network_input(spoiled, sky_sigma, sky_background, sky_noise),
+        left = bands.apply(spoiled, infer(sky_run, network_input(spoiled, sky_sigma, sky_background, sky_noise,
+                                                                 noise_plane),
                                           tile=tile, overlap=overlap, margin=margin)[0]) - output
         empty["outliers_left"] = float(np.nansum(left**2) / np.sum(planted**2))
         return {"pair": pair["input"]["id"], "set": pair["set"],
@@ -1359,11 +1383,10 @@ def evaluate_saved(
     directory = store.root / "models" / "noise" / name
     record, model = load_run(store, name)
     config = record["config"]
-    result = evaluate(store, manifest, model, split=split, limit=limit, sets=sets,
-                      noise_map=config.get("noise_map", "raw"), bands=bands, match_flux=match_flux,
-                      **record["inference"])
-    result["dark_noise"] = evaluate_dark_noise(store, manifest, model, split=split, sets=sets,
-                                               noise_map=config.get("noise_map", "raw"), bands=bands,
+    read = {"noise_map": config.get("noise_map", "raw"), "noise_plane": config.get("noise_plane", "linear")}
+    result = evaluate(store, manifest, model, split=split, limit=limit, sets=sets, **read, bands=bands,
+                      match_flux=match_flux, **record["inference"])
+    result["dark_noise"] = evaluate_dark_noise(store, manifest, model, split=split, sets=sets, **read, bands=bands,
                                                **record["inference"])
     label = ", ".join([split] + ([] if bands.whole else [str(bands)]) + (["matched flux"] if match_flux else []))
     record.setdefault("evaluations", {})[label] = result

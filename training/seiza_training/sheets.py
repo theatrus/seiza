@@ -100,7 +100,7 @@ def render(
     if record["config"].get("noise_map", "raw") == "model":
         sigma = modelled_sigma(image, sigma, np.load(store.root / loads(source["files"])["coverage"]))
     background, noise = scales(image, sigma)
-    planes = network_input(image, sigma, background, noise)
+    planes = network_input(image, sigma, background, noise, record["config"].get("noise_plane", "linear"))
     run = denoiser(model, background, noise, device())
     reference = load_half(store, reference_product, noise_map=False)[0] if reference_product else None
     look = stretch(reference if reference is not None else image)

@@ -119,6 +119,9 @@ def main(argv: list[str] | None = None) -> int:
     train.add_argument("--outlier-scale", choices=("typical", "local"), default="typical",
                        help="the synthetic outliers' amplitudes in the image's typical noise, or in the noise "
                             "at each pixel, so they stand as far above a bright nebula's noise as the sky's")
+    train.add_argument("--noise-plane", choices=("linear", "asinh"), default="linear",
+                       help="give the network the noise map in units of the typical noise as it is, or through "
+                            "asinh, as it reads the image, so a bright star's map reaches a few units, not 50")
     train.add_argument("--agree", type=float,
                        help="with --match-flux, leave out pairs whose halves' flux still differs by more than "
                             "this share in the stars' wings or cores (haze, a change of seeing)")
@@ -278,7 +281,7 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
             noise_map=arguments.noise_map, huber=arguments.huber, huber_above=arguments.huber_above,
             structure_sampling=arguments.structure_sampling, outlier_count=arguments.outlier_count,
             outlier_floor=arguments.outlier_floor, clip_grad=arguments.clip_grad, match_flux=arguments.match_flux,
-            agree=arguments.agree, outlier_scale=arguments.outlier_scale,
+            agree=arguments.agree, outlier_scale=arguments.outlier_scale, noise_plane=arguments.noise_plane,
             precision=arguments.precision, prefetch=arguments.prefetch, batch_threads=arguments.batch_threads,
             **extra,
         )

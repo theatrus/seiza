@@ -67,7 +67,7 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
     run("train-noise", "--name", "smoke", "--steps", "6", "--width", "4", "--levels", "3", "--tile", "64", "--batch", "2",
         "--precision", "bf16", "--prefetch", "2", "--batch-threads", "2", "--deep-fraction", "0.5",
         "--outliers", "2", "--outlier-floor", "10", "--clip-grad", "1", "--match-flux", "--agree", "0.9",
-        "--outlier-scale", "local")
+        "--outlier-scale", "local", "--noise-plane", "asinh")
     record = json.loads((store / "models" / "noise" / "smoke" / "run.json").read_text())
     assert record["config"]["train_pairs"] == 6
     assert record["config"]["extra"]["label"] == "deep" and record["config"]["extra"]["windows"] > 0
@@ -76,6 +76,7 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
     assert record["config"]["clip_grad"] == 1 and record["config"]["match_flux"]
     assert record["config"]["agree"] == 0.9 and record["config"]["pairs_dropped"] == []
     assert record["config"]["outlier_scale"] == "local"
+    assert record["config"]["noise_plane"] == "asinh"
     assert all(entry["grad_norm_max"] > 0 and entry["grad_norm_mean"] > 0 for entry in record["history"])
     assert record["export"]["max_relative_error"] < 1e-4
     assert record["inference"]["overlap"] >= receptive_field(3) // 2
@@ -281,6 +282,20 @@ def test_an_outlier_is_spread_as_registration_spreads_a_pixel():
     higher = outliers((512, 512), np.random.default_rng(5), 8.0, floor=20.0)
     assert np.array_equal(higher != 0, plane != 0)
     assert higher.sum() > plane.sum() + 8 * 15
+
+
+def test_the_noise_plane_is_the_map_in_typical_noise_or_its_asinh():
+    from seiza_training.noise_model import network_input
+
+    image = np.full((2, 3), 10.0, dtype=np.float32)
+    sigma = np.array([[2.0, 4.0, 100.0], [np.nan, 0.0, 2.0]], dtype=np.float32)
+    linear = network_input(image, sigma, 10.0, 2.0)
+    assert np.allclose(linear[1], [[1.0, 2.0, 50.0], [1.0, 0.0, 1.0]])
+    curved = network_input(image, sigma, 10.0, 2.0, "asinh")
+    assert np.array_equal(curved[0], linear[0])
+    assert np.allclose(curved[1], np.arcsinh(linear[1]))
+    # A bright star's map of 50σ̄ reaches under 5.
+    assert curved[1].max() < 5
 
 
 def test_outliers_reach_the_input_and_not_the_target():
