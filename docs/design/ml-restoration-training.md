@@ -781,9 +781,14 @@ in these ways:
   of 241 sets, 160k steps instead of 80k gained the 23M model 4% on
   4-frame halves, and it kept faint peaks and stars' widths best of any
   run, but its star cores at a night's whole depth and against the clean
-  targets were 6% worse. The
-  41M model at 80k, in less time, was better at every depth but 4 frames
-  overall.
+  targets were 6% worse. The 41M model at 80k, in less time, was better
+  at every depth but 4 frames overall. The 41M model gained from 160k
+  steps the same way: against matched halves that agree, 10% on 4-frame
+  faint signal and 9% on their mid-brightness signal, the least error on
+  4-frame halves of any run and the least mottle left on empty sky, but
+  its star cores were 3–8% worse at every depth and 6% against the clean
+  targets, and on one pair it blew up (see the noise map, below). At
+  either size, more steps trade star cores for faint signal.
 - **Noise map.** The network read the noise map in σ̄ as it is, which
   reaches 50σ̄ and more on a bright star, beside the image through asinh.
   The 41M model trained 160k steps added up to 71,000σ̄ in a square some
