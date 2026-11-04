@@ -444,6 +444,13 @@ structure half as much, 0.3% against 0.6%, and its error on 4-frame halves
 fell 3% overall and 14% on faint signal, measured against the halves as
 they are.
 
+Matched, B takes A's background, and a short half's background is the
+higher: on the validation pairs of 4 frames, A's faint sky stood 0.03σ̄
+above B's, in every pair, most likely because the rejection of 4 frames
+lets more of their outliers through. A model trained on matched halves keeps its
+input's level, and so reads about 0.02σ̄ above B and above the clean
+targets. That is the input's level kept, not a fault in the matching.
+
 Synthetic noise is the minority. It extends the data to signal-to-noise ratios
 the corpus lacks: Poisson–Gaussian noise per synthetic sub-frame, passed
 through the same resampling kernel, added to a deep stack.
@@ -903,7 +910,9 @@ in these ways:
 - **Targets over size.** Three and a half times the training pairs, from
   136 sets instead of 45, gained a 10M model 2–3%. A 23M model trained on
   them kept fine detail at 0.964, against 0.925 for the same model on the
-  45 sets.
+  45 sets. Pairs from 241 sets instead of 136, the added 105 of 20 to 39
+  frames, gained the 23M model 5% on 4-frame halves and 8% on their faint
+  signal, and its faint stars came out a little narrower at every depth.
 - **Steps.** Trained with the synthetic outliers for 40k steps, the 23M
   model left 9% of the coarse mottle on empty sky; for 80k, 3%. The mottle
   was undertraining, not a lack of capacity. At 80k, 23M matched 41M on
