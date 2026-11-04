@@ -438,7 +438,11 @@ pair whose matched halves differ by more than 3% in the wings (200 to
 1,000σ̄ above the background) or in the cores (above 1,000σ̄) is left out,
 which is one train pair in 20. Measured against matched halves, on the
 pairs that agree, every run's error on 4-frame halves fell by about 40%:
-much of what had been measured was the halves' own difference.
+much of what had been measured was the halves' own difference. Trained on
+matched halves that agree, a 41M model trained 80k steps dimmed bright
+structure half as much, 0.3% against 0.6%, and its error on 4-frame halves
+fell 3% overall and 14% on faint signal, measured against the halves as
+they are.
 
 Synthetic noise is the minority. It extends the data to signal-to-noise ratios
 the corpus lacks: Poisson–Gaussian noise per synthetic sub-frame, passed
