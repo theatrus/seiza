@@ -773,7 +773,13 @@ in these ways:
 - **Steps.** Trained with the synthetic outliers for 40k steps, the 23M
   model left 9% of the coarse mottle on empty sky; for 80k, 3%. The mottle
   was undertraining, not a lack of capacity. At 80k, 23M matched 41M on
-  4-frame halves; 41M was better at a night's whole depth.
+  4-frame halves; 41M was better at a night's whole depth. On the pairs
+  of 241 sets, 160k steps instead of 80k gained the 23M model 4% on
+  4-frame halves, and it kept faint peaks and stars' widths best of any
+  run, but its star cores at a night's whole depth and against the clean
+  targets were 6% worse. The
+  41M model at 80k, in less time, was better at every depth but 4 frames
+  overall.
 - **Deep halves.** Training on a night's deep stack dealt into two halves,
   a quarter of every batch, taught a model to keep mottle: it left 37% of
   the coarse noise on empty sky. The halves share the night's flats,
