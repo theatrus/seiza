@@ -762,8 +762,10 @@ in these ways:
   136 sets instead of 45, gained a 10M model 2–3%. A 23M model trained on
   them kept fine detail at 0.964, against 0.925 for the same model on the
   45 sets. Pairs from 241 sets instead of 136, the added 105 of 20 to 39
-  frames, gained the 23M model 5% on 4-frame halves and 8% on their faint
-  signal, and its faint stars came out a little narrower at every depth.
+  frames, gained the 23M model 5% on 4-frame halves (3% against matched
+  halves that agree) and 8% on their faint signal, and its faint stars
+  came out a little narrower at every depth. It lost 4–7% on their
+  mid-brightness signal.
 - **Steps.** Trained with the synthetic outliers for 40k steps, the 23M
   model left 9% of the coarse mottle on empty sky; for 80k, 3%. The mottle
   was undertraining, not a lack of capacity. At 80k, 23M matched 41M on
