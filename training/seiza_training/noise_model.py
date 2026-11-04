@@ -231,6 +231,33 @@ def matched(image_a: np.ndarray, image_b: np.ndarray, noise: float) -> tuple[np.
     return (gain * (image_b - plane_b) + plane_a).astype(np.float32), gain
 
 
+# The bands of B's brightness, in σ̄ above A's background, where
+# `agreement` compares the halves' flux: the stars' wings and their cores.
+AGREEMENT_BANDS = {"wings": (200.0, 1000.0), "cores": (1000.0, np.inf)}
+
+
+def agreement(image_a: np.ndarray, image_b: np.ndarray, noise: float) -> dict[str, float | None]:
+    """A's flux over B's in each of `AGREEMENT_BANDS`, B already `matched`,
+    or None where fewer than 50 pixels are that bright. Matching leaves an
+    error of normalization at 1 in both; haze in one half (its light spread
+    into halos about the stars, their cores dimmed) or a change of seeing
+    moves flux between the cores and the wings, which no gain puts back."""
+    both = np.isfinite(image_a) & np.isfinite(image_b)
+    background = float(np.median(image_a[both][::17]))
+    level = (image_b - background) / noise
+    found = {}
+    for band, (low, high) in AGREEMENT_BANDS.items():
+        mask = both & (level >= low) & (level < high)
+        found[band] = float(np.sum(image_a[mask] - background, dtype=np.float64)
+                            / np.sum(image_b[mask] - background, dtype=np.float64)) if mask.sum() >= 50 else None
+    return found
+
+
+def disagree(found: dict[str, float | None], limit: float) -> bool:
+    """Whether any band of an `agreement` is more than `limit` from 1."""
+    return any(value is not None and abs(value - 1) > limit for value in found.values())
+
+
 def network_input(image: np.ndarray, sigma: np.ndarray, background: float, noise: float) -> np.ndarray:
     """The two planes the network reads; NaN becomes the background."""
     x = np.arcsinh(np.nan_to_num((image - background) / noise, nan=0.0))
@@ -239,27 +266,44 @@ def network_input(image: np.ndarray, sigma: np.ndarray, background: float, noise
 
 
 def bank(
-    store: Store, chosen: list[dict[str, Any]], *, seed: int = 0, noise_map: str = "raw", match_flux: bool = False
-) -> dict[str, np.ndarray]:
+    store: Store, chosen: list[dict[str, Any]], *, seed: int = 0, noise_map: str = "raw", match_flux: bool = False,
+    agree: float | None = None,
+) -> dict[str, Any]:
     """Windows of every pair: A's image and noise map, and B's image, with
-    `match_flux` first `matched` to A's. Cached by the pairs, the seed, the
-    kind of noise map and the matching."""
+    `match_flux` first `matched` to A's. With `agree` too, a pair whose
+    matched halves `disagree` by more than that is left out; the ids left
+    out are under "dropped". Cached by the pairs, the seed, the kind of
+    noise map, the matching and the agreement asked for."""
+    if agree is not None and not match_flux:
+        raise ValueError("agreement is judged on matched halves: ask for match_flux too")
     parts = [p["a"]["id"] for p in chosen] + [seed, WINDOW, WINDOWS_PER_HALF]
     if noise_map != "raw":
         parts.append(f"map-{noise_map}")
     if match_flux:
         parts.append("match-flux")
+    if agree is not None:
+        parts.append(f"agree-{agree:g}")
     key = hashlib.sha256(json.dumps(parts).encode()).hexdigest()[:16]
+    record = store.scratch / "tiles" / f"noise-{key}" / "dropped.json"
 
     def halves():
+        dropped = []
         for pair in chosen:
             image_a, sigma_a = load_half(store, pair["a"], modelled=noise_map == "model")
             image_b, _ = load_half(store, pair["b"], noise_map=False)
             if match_flux:
-                image_b, _ = matched(image_a, image_b, scales(image_a, sigma_a)[1])
+                noise = scales(image_a, sigma_a)[1]
+                image_b, _ = matched(image_a, image_b, noise)
+                if agree is not None and disagree(agreement(image_a, image_b, noise), agree):
+                    dropped.append(pair["a"]["id"])
+                    continue
             yield image_a, sigma_a, image_b
+        # Before cut_windows marks the bank done.
+        record.write_text(json.dumps(dropped))
 
-    return cut_windows(store, f"noise-{key}", halves(), sources=len(chosen), seed=seed)
+    banked = cut_windows(store, f"noise-{key}", halves(), sources=len(chosen), seed=seed)
+    banked["dropped"] = json.loads(record.read_text()) if record.exists() else []
+    return banked
 
 
 # The A halves of the deep stacks' pairs: a night's, and many nights'.
@@ -596,6 +640,7 @@ def train(
     outlier_floor: float = OUTLIER_FLOOR,
     clip_grad: float = 0.0,
     match_flux: bool = False,
+    agree: float | None = None,
     precision: str = "fp32",
     prefetch: int = 8,
     batch_threads: int = 4,
@@ -610,8 +655,10 @@ def train(
     ones from `outlier_floor` up. `clip_grad` scales each step's gradient
     down to that norm where it is longer, so one wild batch cannot throw
     the weights far, and records the norms it saw in the history.
-    `match_flux` trains on B halves `matched` to their A halves' flux; the
-    run's own validation measures against B as it is, as every run's does.
+    `match_flux` trains on B halves `matched` to their A halves' flux, and
+    `agree` leaves out the pairs whose halves then `disagree` by more than
+    that; the run's own validation measures against B as it is, as every
+    run's does.
     `precision` "bf16" runs the network in bfloat16 under autocast.
     `prefetch` batches are built ahead on `batch_threads` threads; 0 builds
     each in turn. Each step's batch draws from `step_generator(seed, step)`,
@@ -626,7 +673,7 @@ def train(
     if not chosen:
         raise RuntimeError("no built noise pairs in the train split")
     started = time.monotonic()
-    banked = bank(store, chosen, seed=seed, noise_map=noise_map, match_flux=match_flux)
+    banked = bank(store, chosen, seed=seed, noise_map=noise_map, match_flux=match_flux, agree=agree)
     bank_seconds = time.monotonic() - started
     where = device()
     cuda = where.type == "cuda"
@@ -707,11 +754,13 @@ def train(
         "name": name,
         "created": now(),
         "config": {"width": width, "levels": levels, "tile": tile, "batch": batch, "steps": steps,
-                   "learning_rate": learning_rate, "seed": seed, "train_pairs": len(chosen),
+                   "learning_rate": learning_rate, "seed": seed,
+                   "train_pairs": len(chosen) - len(banked["dropped"]), "pairs_dropped": banked["dropped"],
                    "windows": int(len(banked["a"])), "core_sigma": CORE_SIGMA,
                    "loss_weight": loss_weight, "map_jitter": map_jitter, "noise_map": noise_map,
                    "huber": huber, "huber_above": huber_above, "structure_sampling": structure_sampling,
-                   "outliers": outlier_count, "outlier_floor": outlier_floor, "clip_grad": clip_grad, "match_flux": match_flux, "precision": precision, "prefetch": prefetch,
+                   "outliers": outlier_count, "outlier_floor": outlier_floor, "clip_grad": clip_grad,
+                   "match_flux": match_flux, "agree": agree, "precision": precision, "prefetch": prefetch,
                    "batch_threads": batch_threads, "batch_generator": "per-step",
                    "extra": {"label": extra_label, "fraction": extra_fraction, "windows": int(len(extra["a"]))}
                    if extra is not None else None},
@@ -847,7 +896,8 @@ def evaluate(
     in the same units, the per-pixel map's median noise, so runs with
     different maps compare. With `match_flux`, each B is first `matched`
     to its A, so a model that keeps A's flux is not marked down for the
-    halves' own difference. `threads` pairs are measured at once."""
+    halves' own difference, and each pair's gain and `agreement` are
+    recorded with it. `threads` pairs are measured at once."""
     model = model.eval()
     where = device()
 
@@ -855,9 +905,10 @@ def evaluate(
         image_a, sigma_a = load_half(store, pair["a"])
         image_b, _ = load_half(store, pair["b"], noise_map=False)
         background, noise = scales(image_a, sigma_a)
-        gain = None
+        gain, found = None, {}
         if match_flux:
             image_b, gain = matched(image_a, image_b, noise)
+            found = {f"flux_{band}": value for band, value in agreement(image_a, image_b, noise).items()}
         if noise_map == "model":
             coverage = np.load(store.root / loads(pair["a"]["files"])["coverage"])
             sigma_a = modelled_sigma(image_a, sigma_a, coverage)
@@ -868,7 +919,7 @@ def evaluate(
         estimate = bands.apply(image_a, residual)
         recipe = loads(pair["a"]["recipe"])
         return {"pair": pair["a"]["id"], "set": pair["set"], "size": recipe.get("size") or recipe["recipe"],
-                "flux_gain": gain, **measure(estimate, image_a, image_b, background, noise)}
+                "flux_gain": gain, **found, **measure(estimate, image_a, image_b, background, noise)}
 
     chosen = pairs(manifest, split, sets) + deep_pairs(manifest, split, sets)
     with ThreadPoolExecutor(max_workers=threads, thread_name_prefix="evaluate") as pool:
