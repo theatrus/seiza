@@ -28,8 +28,10 @@ CLOUD_FRACTION = 0.25
 ELONGATION_EXCESS = 0.2
 ELONGATION_FLOOR = 0.6
 
-# Recipe requirements (see the design note's "Building it").
-NOISE_PAIR_FRAMES = 40
+# Recipe requirements (see the design note's "Building it"). A pair's A is at
+# most a fifth of the set, so 20 frames give pairs of 4 against the other
+# 16, and 40 those of 8 too.
+NOISE_PAIR_FRAMES = 20
 SEEING_SPLIT_SPREAD = 0.25
 SEEING_SPLIT_FRAMES = 32
 
@@ -89,19 +91,49 @@ def summarize(frames: list[dict[str, Any]]) -> dict[str, Any]:
         summary["best_quartile_fwhm_px"] = best
         summary["worst_quartile_fwhm_px"] = worst
         summary["seeing_spread"] = (worst - best) / best if best > 0 else None
+    summary["recipes"] = recipes_for(summary)
+    return summary
+
+
+def recipes_for(summary: dict[str, Any]) -> list[str]:
+    """The recipes a set's measurement summary qualifies it for."""
     recipes = []
-    if len(accepted) >= NOISE_PAIR_FRAMES:
+    if summary["accepted"] >= NOISE_PAIR_FRAMES:
         recipes.append("noise-pairs")
     if (
-        len(accepted) >= SEEING_SPLIT_FRAMES
+        summary["accepted"] >= SEEING_SPLIT_FRAMES
         and summary.get("seeing_spread") is not None
         and summary["seeing_spread"] >= SEEING_SPLIT_SPREAD
     ):
         recipes.append("seeing-split")
-    if accepted:
+    if summary["accepted"]:
         recipes.append("deep")
-    summary["recipes"] = recipes
-    return summary
+    return recipes
+
+
+def refresh_recipes(manifest: Manifest, *, dry_run: bool = False) -> dict[str, Any]:
+    """Decide every measured set's recipes again from its recorded summary,
+    as `recipes_for` decides them now, without measuring its frames again:
+    after a recipe's requirement changes. Returns how many sets changed
+    and the recipes they gained and lost; with `dry_run`, records
+    nothing."""
+    gained: Counter[str] = Counter()
+    lost: Counter[str] = Counter()
+    changed = 0
+    rows = manifest.rows("SELECT id, measurement, recipes FROM sets WHERE measurement_status = 'measured'")
+    with manifest.transaction():
+        for row in rows:
+            summary = loads(row["measurement"], {})
+            old, new = loads(row["recipes"], []), recipes_for(summary)
+            if set(new) == set(old):
+                continue
+            changed += 1
+            gained.update(set(new) - set(old))
+            lost.update(set(old) - set(new))
+            if not dry_run:
+                summary["recipes"] = new
+                manifest.update("sets", "id", row["id"], {"measurement": dumps(summary), "recipes": dumps(new)})
+    return {"changed": changed, "gained": dict(gained), "lost": dict(lost), "dry_run": dry_run}
 
 
 def solve_one(frames: list[dict[str, Any]], catalog_dir: str | None) -> dict[str, Any]:

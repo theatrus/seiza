@@ -51,6 +51,12 @@ def main(argv: list[str] | None = None) -> int:
             command.add_argument("--catalog-dir", help="catalogs for plate solving")
         if name in ("build", "process"):
             command.add_argument("--keep-scratch", action="store_true")
+        if name == "build":
+            command.add_argument("--pairs-only", action="store_true",
+                                 help="only the noise pairs of built sets that now qualify for them and have none")
+
+    recipes = commands.add_parser("recipes", help="decide each measured set's recipes again from its measurement")
+    recipes.add_argument("--dry-run", action="store_true", help="report the changes without recording them")
 
     stacks = commands.add_parser("stacks", help="copy in the finished stacks PSF Guard made from the corpus")
     stacks.add_argument("--psf-guard", type=Path, help="PSF Guard's stacks directory (remembered)")
@@ -297,8 +303,12 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
 
         return build(
             manifest, store, only=only, again=arguments.again, limit=arguments.limit,
-            keep_scratch=arguments.keep_scratch,
+            keep_scratch=arguments.keep_scratch, pairs_only=arguments.pairs_only,
         )
+    if command == "recipes":
+        from .measure import refresh_recipes
+
+        return refresh_recipes(manifest, dry_run=arguments.dry_run)
     if command == "process":
         from .build import process
 

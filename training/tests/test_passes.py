@@ -114,6 +114,39 @@ def test_process_measures_and_builds_set_by_set(corpus, tmp_path, capsys):
         assert manifest.rows("SELECT COUNT(*) FROM products WHERE kind = 'deep'")[0][0] == 1
 
 
+def test_a_set_built_before_it_qualified_gets_its_noise_pairs_alone(corpus, tmp_path, capsys, monkeypatch):
+    from seiza_training import measure
+
+    store = tmp_path / "store"
+    run(store, "crawl", "--corpus", str(corpus / "telescopes"), "--library", str(corpus / "library"))
+    run(store, "calibrate")
+    run(store, "split")
+    # Measured while pairs asked for more frames than the set has.
+    monkeypatch.setattr(measure, "NOISE_PAIR_FRAMES", FRAMES + 1)
+    run(store, "process", "--catalog-dir", str(corpus / "catalogs"))
+    with Manifest(store / "manifest.sqlite") as manifest:
+        assert not manifest.rows("SELECT 1 FROM products WHERE kind = 'noise-a'")
+        before = {row["id"]: dict(row) for row in manifest.rows("SELECT * FROM products")}
+    monkeypatch.undo()
+    capsys.readouterr()
+    run(store, "recipes", "--dry-run")
+    assert json.loads(capsys.readouterr().out)["gained"] == {"noise-pairs": 1}
+    run(store, "recipes")
+    capsys.readouterr()
+    run(store, "build", "--pairs-only")
+    assert json.loads(capsys.readouterr().out)["built"] == 1
+    run(store, "build", "--pairs-only")
+    assert json.loads(capsys.readouterr().out)["built"] == 0, "a set with pairs is passed by"
+    with Manifest(store / "manifest.sqlite") as manifest:
+        after = {row["id"]: dict(row) for row in manifest.rows("SELECT * FROM products")}
+        row = manifest.rows("SELECT * FROM sets")[0]
+    # Sizes 4 and 8, three draws each; the deep stack and the seeing split
+    # as they were.
+    assert sorted(after[key]["kind"] for key in after.keys() - before.keys()).count("noise-a") == 6
+    assert all(after[key] == value for key, value in before.items())
+    assert row["build_status"] == "built" and "pairs_later" in loads(row["build_reason"])
+
+
 def test_a_turned_camera_registers_on_its_larger_orientation(corpus, tmp_path):
     # Ten sharp frames turned 15 degrees, which the reference choice favours,
     # and 35 softer frames as the camera was for most of the night.
