@@ -171,6 +171,19 @@ def test_matching_puts_b_on_a_s_background_and_flux():
     # As noisy as A, as a deep stack's other half is: the gain holds.
     noisy = (95 + 0.97 * sky + rng.normal(0, 2, sky.shape)).astype(np.float32)
     assert abs(matched(a, noisy, 2.0)[1] * 0.97 - 1) < 0.003
+    # Hot pixels a short stack kept do not lift matched B's sky (left in
+    # the planes, these lift it by about 0.09σ).
+    from seiza_training.noise_model import outliers
+
+    rng = np.random.default_rng(12)
+    y, x = np.mgrid[:512, :512]
+    stars = np.zeros((512, 512))
+    for cy, cx, height in rng.uniform((0, 0, 50), (512, 512, 3000), (100, 3)):
+        stars += height * np.exp(-((y - cy) ** 2 + (x - cx) ** 2) / (2 * 2.0**2))
+    hot = (100 + stars + rng.normal(0, 2, stars.shape) + outliers(stars.shape, rng, 20.0, floor=10.0) * 2)
+    fixed, _ = matched(hot.astype(np.float32), (95 + 0.97 * stars + rng.normal(0, 0.5, stars.shape)).astype(np.float32),
+                       2.0)
+    assert abs(np.mean((fixed - 100 - stars)[stars < 1]) / 2) < 0.02
     # An empty sky gives no gain to fit, and only the background moves.
     fixed, gain = matched(np.full((64, 64), 10, np.float32), np.full((64, 64), 7, np.float32), 1.0)
     assert gain == 1.0 and np.allclose(fixed, 10)
