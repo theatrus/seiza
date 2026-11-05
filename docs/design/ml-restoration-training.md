@@ -1056,7 +1056,21 @@ in these ways:
   its last rewind. The schedule holds the rate higher for longer in a long
   run. Each rewind now takes a fifth off the learning rate for the rest of
   the run, and the guard stops a run only after six rewinds within 20,000
-  steps.
+  steps. At a second seed the recipe left 43%, 62% and 88% of the noise at
+  4, 8 and 16 pixels, against the first seed's 41%, 60% and 85%: the
+  seeds differ by about 2 points, the scale loss took off 11–18. The
+  other gains held as well: no stripes, 5% of the sharp spots left on the
+  Trunk (14 over 1σ̄), 84% of the faintest stars' flux there, and the
+  Iris's dust within 1% of the first seed's sharpness. Its error on the
+  4-frame halves, though, was 2.23 against 2.01, from the sky's worst
+  pixels and faint signal, its trimmed sky the same; so the first seed's
+  lead over the run before the scale loss (2.05) is within the spread, as
+  are differences of 5% against clean targets on faint and mid-brightness
+  signal. Around the Trunk's 27 brightest stars it raised the light 2–4
+  pixels out by 6–9σ̄, where the first seed raised it by 3–5σ̄. The next
+  runs add the 101 train sets built without a flat: 1,700 pairs over 342
+  sets, against 1,301 over 241, at the same width and at half as wide
+  again.
 - **Deep halves.** Training on a night's deep stack dealt into two halves,
   a quarter of every batch, taught a model to keep mottle: it left 37% of
   the coarse noise on empty sky. The halves share the night's flats,
