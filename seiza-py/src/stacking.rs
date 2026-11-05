@@ -3079,6 +3079,11 @@ fn build_bias(
     )
 }
 
+/// Build a dark using temporal median/MAD rejection for three or more inputs.
+/// Steady hot pixels remain; minority high/low states are clipped per pixel.
+/// Validated frames stay in memory when the whole set fits in half the available
+/// physical memory, otherwise source tiles bound memory without scratch. Two inputs are
+/// averaged without rejection. Cancellation is checked between tile reads.
 #[pyfunction]
 #[pyo3(signature = (
     images,

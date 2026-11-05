@@ -1713,7 +1713,9 @@ def build_dark(
     sigma_high: float = 3.0,
     cancel: Callable[[], bool] | None = None,
     dark_level_screening: float | None = None,
-) -> MasterResult: ...
+) -> MasterResult:
+    """Build a dark with temporal median/MAD clipping, caching frames when memory permits."""
+    ...
 def build_flat(
     images: Sequence[str | Path],
     output: str | Path,

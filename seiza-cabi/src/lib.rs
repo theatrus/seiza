@@ -14876,6 +14876,42 @@ mod tests {
     }
 
     #[test]
+    fn master_dark_rejects_minority_states_and_preserves_steady_hot_pixels() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = (0..9)
+            .map(|frame| {
+                let path = directory.path().join(format!("varying-dark-{frame}.fits"));
+                let mut data = vec![100.0; 16];
+                let noise = [-1.0, 0.0, 1.0][frame % 3];
+                data[0] += noise;
+                data[1] = 4000.0;
+                data[2] += noise;
+                if frame >= 6 {
+                    data[0] += 1000.0;
+                    data[2] -= 80.0;
+                }
+                seiza_stacking::write_processed_image_fits_f32(
+                    &path,
+                    &LinearImage::new(4, 4, 1, data).unwrap(),
+                    &[],
+                    &[],
+                )
+                .unwrap();
+                path
+            })
+            .collect::<Vec<_>>();
+        let output = directory.path().join("master-dark.fits");
+        let report =
+            build_master_report(json!({"kind":"dark","inputs":paths,"output":output})).unwrap();
+        assert_eq!(report["inputFrames"], 9);
+        assert_eq!(report["rejectionMethod"], "MEDIAN_MAD");
+        assert_eq!(report["rejectedSamples"], 6);
+        assert_eq!(report["fallbackPixels"], 0);
+        let frame = FitsFrame::open(&output).unwrap();
+        assert_eq!(&frame.image.data[..3], &[100.0, 4000.0, 100.0]);
+    }
+
+    #[test]
     fn master_builder_masks_stars_in_sky_flats_in_a_chosen_scratch_directory() {
         let directory = tempfile::tempdir().unwrap();
         let scratch = tempfile::tempdir().unwrap();
@@ -15035,7 +15071,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(report["inputFrames"], 3);
-        assert_eq!(report["rejectionMethod"], "LEAVE_ONE_OUT");
+        assert_eq!(report["rejectionMethod"], "MEDIAN_MAD");
         let skipped = report["skippedInputs"].as_array().unwrap();
         assert_eq!(
             skipped
@@ -17573,7 +17609,10 @@ pub unsafe extern "C" fn seiza_calibration_plan_json(
 /// pixels in place of the system's temporary directory; bias and dark
 /// builds need none.
 ///
-/// Construction is a two-pass leave-one-out sigma-clipped mean and may take
+/// Darks and flats use temporal median/MAD rejection; bias uses a two-pass
+/// leave-one-out mean. Darks keep validated frames in memory when the whole
+/// set fits in half the available physical memory, otherwise rereading bounded
+/// source tiles without scratch. Construction may take
 /// minutes. Run it off the UI thread. `cancel` may be null; otherwise another
 /// thread may call [`seiza_cancel_signal_cancel`]. Cancellation is checked
 /// between input frames, returns failure through `error_out`, and publishes no

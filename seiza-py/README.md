@@ -1110,7 +1110,7 @@ lift colour. It reads the array's height and width, and carries colour by
 luminance, so it takes `linked` or `luminance-preserving`. Analysis and
 application release the GIL.
 
-Calibration masters use the same bounded-memory two-pass builder:
+Calibration masters share the native bounded-memory builder:
 
 ```python
 bias = seiza.build_bias(bias_paths, "master-bias.fits")
@@ -1121,10 +1121,18 @@ flat = seiza.build_flat(flat_paths, "master-flat.fits",
                         dark_flat="master-dark-flat.fits")
 ```
 
-Each builder reads every input twice, so a master over dozens of frames runs
-for minutes. Pass `cancel=` a predicate to stop one early — it is called once
-per input and raises `StackError` when it returns true. Ctrl-C is honoured at
-the same points, without a predicate.
+Bias uses two-pass leave-one-out rejection. Darks use temporal median/MAD
+rejection for three or more accepted frames and report `MEDIAN_MAD`; this
+rejects minority high/low states while preserving steady hot pixels and glow.
+Two-input darks are averaged without rejection. When the entire set fits in half
+the available physical memory, darks keep their validated frames in memory.
+Otherwise they read bounded source tiles without a full-set scratch file;
+formats without windowed reads decode one
+frame per tile. If all samples are rejected at a dark pixel, the result uses
+its temporal median and increments `fallback_pixels`. Flats use their prepared
+scratch tiles. Builds can run for minutes. Pass `cancel=` a predicate to stop
+early; it is checked between input/tile reads and combine batches and raises
+`StackError` when true. Ctrl-C is honoured at the same points.
 
 ```python
 stop = threading.Event()

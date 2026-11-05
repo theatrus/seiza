@@ -960,7 +960,13 @@ The default integration pipeline is unchanged. The standalone harness in
 experiments. See [the evaluation report](../docs/flat-defect-evaluation.md) for
 the measurements and limits.
 
-Bias and dark construction uses a two-pass, leave-one-out sigma-clipped mean.
+Bias construction uses a two-pass, leave-one-out sigma-clipped mean. Dark
+construction uses temporal median/MAD rejection for three or more accepted
+frames, preserving steady hot pixels and glow while rejecting minority pixel
+states. Prepared frames stay in RAM when the set fits safely; otherwise it
+reads bounded source tiles without a full-set scratch file. A dark
+pixel with no retained samples falls back to its temporal median; the report
+counts these fallback pixels. Two-input dark sets are averaged without rejection.
 Flat construction calibrates and normalizes each input once, then uses a
 scratch-backed temporal median/MAD sigma-clipped mean. This improves rejection
 of moving stars that overlap a sensor pixel in multiple sky flats without aligning the

@@ -135,7 +135,7 @@ impl MasterConfigurationReport {
             fallback_center: if master.flat_star_masking.is_some() {
                 "none; insufficient coverage fails"
             } else {
-                fallback_center(master.kind)
+                fallback_center(master.kind, master.rejection_method)
             },
             rereads_inputs: master.kind != MasterFrameKind::Flat,
         }
@@ -150,8 +150,9 @@ fn integration_name(method: MasterRejectionMethod) -> &'static str {
     }
 }
 
-fn fallback_center(kind: MasterFrameKind) -> &'static str {
+fn fallback_center(kind: MasterFrameKind, method: MasterRejectionMethod) -> &'static str {
     match kind {
+        MasterFrameKind::Dark if method == MasterRejectionMethod::MedianMad => "temporal median",
         MasterFrameKind::Flat => "temporal median",
         MasterFrameKind::Bias | MasterFrameKind::Dark => "unclipped mean",
     }
@@ -343,6 +344,8 @@ fn build(
         common.images.len(),
         if kind == MasterFrameKind::Flat {
             "calibration, normalization, and scratch-backed integration"
+        } else if kind == MasterFrameKind::Dark {
+            "validation and temporal median/MAD integration"
         } else {
             "two-pass integration"
         }
@@ -449,7 +452,7 @@ fn build(
         eprintln!(
             "warning: rejection removed every sample at {} pixel(s); wrote their {}",
             master.fallback_pixels,
-            fallback_center(master.kind)
+            fallback_center(master.kind, master.rejection_method)
         );
     }
     crate::common::wrote(

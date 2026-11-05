@@ -17,7 +17,7 @@ The first release supports:
 
 - mono, planar RGB, and Bayer FITS or XISF inputs in linear sensor units;
 - optional master bias, dark, and flat calibration;
-- bounded-memory, two-pass construction of bias, dark, and flat masters;
+- bounded-memory construction of bias, dark, and flat masters;
 - bounded-drift star registration with translation/rotation/scale refinement,
   and optional affine or quadratic polynomial fits for lens distortion;
 - robust global or tiled local normalization, or a global gain with local
@@ -821,10 +821,23 @@ makes a master dark exposure-scalable, every light must provide an exposure
 duration rather than silently assuming a 1:1 scale.
 
 `build_master_from_fits` retains its compatibility name but accepts FITS and
-XISF inputs. It builds reusable calibration masters without retaining the
-input sequence in memory, validates available acquisition metadata, and returns
-per-input rejection statistics. Bias and dark masters reread each file for a
-leave-one-out sigma-clipped second pass.
+XISF inputs. It builds reusable calibration masters, validates available
+acquisition metadata, and returns
+per-input rejection statistics. Bias masters reread each file for a
+leave-one-out sigma-clipped second pass. Darks with three or more accepted
+inputs instead use temporal median/MAD rejection, so a minority of high or low
+pixel states cannot inflate its own clipping threshold. Steady hot pixels and
+amp glow are retained. Defaults remain 3 sigma low/high. Two-input darks are
+averaged without clipping.
+
+Darks retain prepared frames when the complete set fits in half the available
+physical memory. Otherwise, integration reads bounded source tiles without a
+full-set scratch file. Compressed/embedded XISF without windowed reads falls back to
+decoding one input at a time for each tile; this preserves format support but
+can cost additional I/O. Cancellation is checked between reads and combine
+batches. Rejection method `MEDIAN_MAD`, per-input counts and fallback diagnostics
+are shared across the native API, C ABI and Python. With no retained samples,
+a dark falls back to its temporal median and increments `fallback_pixels`.
 
 Flat inputs are bias/dark calibrated and normalized to a common median before
 integration. Temporal sigma clipping uses the median and a MAD-derived scale,
