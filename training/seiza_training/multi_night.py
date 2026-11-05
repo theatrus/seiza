@@ -23,10 +23,10 @@ normalization:
   `multi-night-seeing-best` and `-worst`), the best and the worst quarter
   of all its nights' frames by measured FWHM, at matched counts: PSF pairs
   deeper, and further apart in seeing, than a night's split. An object
-  whose quarters differ as little as a night's split may not
-  (`SEEING_SPLIT_SPREAD`) gets none. Each half's PSF is measured on its
-  stack, and the pair is judged by `seeing_check`: one that fails is kept
-  but marked rejected, with the reason.
+  whose frames' quarters differ by less than `SEEING_SCREEN_SPREAD` gets
+  none. Each half's PSF is measured on its stack, and the pair is judged
+  by `seeing_check`: one that fails is kept but marked rejected, with the
+  reason.
 
 An object is its sets' name less the night,
 `telescope/target/FILTER-exposure-gain-binning`; `key` is a hash of it.
@@ -57,7 +57,6 @@ import seiza
 
 from .build import (
     PAIR_BACKGROUND_TOLERANCE,
-    PAIR_FWHM_TOLERANCE,
     mean_fwhm,
     record_product,
     seeing_split,
@@ -65,12 +64,21 @@ from .build import (
     transparency_outliers,
 )
 from .manifest import Manifest, dumps, loads
-from .measure import accepted_frames, quartile_means, recipes_for
+from .measure import SEEING_SPLIT_FRAMES, SEEING_SPLIT_SPREAD, accepted_frames, quartile_means
 from .store import Store, plane, robust_sigma, save_stack, stack_stats, versions
 
 # Objects with less than this many hours of accepted frames are left alone
 # unless named, or, with `seeing`, unless their nights give a seeing split.
 MINIMUM_HOURS = 10.0
+
+# An object's frames are worth a seeing pair when there are a night's
+# split's worth of them (`SEEING_SPLIT_FRAMES`) and their worst quarter's
+# mean FWHM exceeds their best's by this much. The frames' widths were
+# measured smoothed (see `STACK_DETECTION`), which halves a narrow star's
+# excess width: four multi-night pairs whose frames' quarters differ by
+# 4.8%, 6.2%, 12% and 32% have stacks that differ by 10%, 14%, 23% and
+# 44%. So the frames only screen; the stacks, measured unsmoothed, decide.
+SEEING_SCREEN_SPREAD = 0.10
 
 # A seeing pair teaches sharpening only where its halves differ in the PSF
 # alone. Whatever moves with seeing (airmass, focus, wind, haze) moves
@@ -78,27 +86,36 @@ MINIMUM_HOURS = 10.0
 # stars found in both, within `SEEING_MATCH_PX` of each other, and marks a
 # pair rejected unless:
 # - `SEEING_STARS` stars are measured in both, unsaturated and fitted;
-# - the worst half's median FWHM exceeds the best's by more than a noise
-#   pair's halves may differ (`PAIR_FWHM_TOLERANCE`), and in none of the
+# - the worst half's median FWHM exceeds the best's by as much as a
+#   seeing split needs (`SEEING_SPLIT_SPREAD`), and in none of the
 #   field's `SEEING_FIELD` × `SEEING_FIELD` tiles with `SEEING_FIELD_STARS`
 #   stars is it the sharper: a focus or tilt that changed between nights;
-# - its stars are no more than `SEEING_SHAPE_TOLERANCE` more eccentric than
-#   the best half's (wind, tracking). Seeing is a round blur, which makes
-#   stars rounder;
-# - the halves' flux agrees within `SEEING_FLUX_TOLERANCE` (haze, cloud):
-#   in apertures of `SEEING_APERTURE` times the worst half's FWHM, about
-#   the `SEEING_FLUX_STARS` brightest stars with no other within two
-#   apertures, and in the `SEEING_BLOCK_PX` blocks whose mean the best half
-#   puts `SEEING_BRIGHT` times its noise above its sky, nebula or stars;
-# - their skies, planes fitted to the medians of the fainter half of the
-#   blocks, differ at the centre and at the corners by no more than a noise
-#   pair's backgrounds may (`PAIR_BACKGROUND_TOLERANCE` of the noise of the
-#   halves' difference).
+# - its stars' axis ratio, minor over major, is no more than
+#   `SEEING_SHAPE_TOLERANCE` below the best half's (wind, tracking). Seeing
+#   is a round blur, which makes stars rounder. (Eccentricity moves most
+#   where stars are nearly round: 0.22 and 0.32 are axis ratios of 0.98
+#   and 0.95.);
+# - the halves' flux differs by one gain, within `SEEING_FLUX_TOLERANCE`:
+#   the stars', in apertures of `SEEING_APERTURE` times the worst half's
+#   FWHM about the `SEEING_FLUX_STARS` brightest with no other within two
+#   apertures, and the extended light's, the medians of the
+#   `SEEING_BLOCK_PX` blocks the best half puts `SEEING_BRIGHT` times its
+#   noise above its sky (a median leaves out the stars). A gain alone is
+#   recorded, not rejected: it is normalization's, which scaled one C925
+#   object's best quarter to 0.58 of its worst, and its noise with it;
+# - their skies differ by one plane: on the fainter half of the blocks,
+#   their medians less a plane fitted to each half's differ, in nine of
+#   ten blocks, by no more than a noise pair's backgrounds may
+#   (`PAIR_BACKGROUND_TOLERANCE` of the noise of the halves' difference):
+#   a glow in one corner, or a gradient no plane follows. The planes'
+#   difference, at the centre and at the furthest corner, is recorded, as
+#   the gain is, for a trainer to match: normalization leaves one of a
+#   blurred frame's sky, whose star wings lift the median it matches.
 SEEING_MATCH_PX = 2.0
 SEEING_STARS = 30
 SEEING_FIELD = 3
 SEEING_FIELD_STARS = 10
-SEEING_SHAPE_TOLERANCE = 0.1
+SEEING_SHAPE_TOLERANCE = 0.05
 SEEING_FLUX_TOLERANCE = 0.05
 SEEING_APERTURE = 3.0
 SEEING_FLUX_STARS = 200
@@ -144,10 +161,15 @@ def seeing_spread(fwhm: list[float]) -> float | None:
     return (quartiles[1] - quartiles[0]) / quartiles[0]
 
 
+def screened(frames: int, spread: float | None) -> bool:
+    """Whether `frames` frames whose quarters' spread of seeing is
+    `spread` are worth a seeing pair (`SEEING_SCREEN_SPREAD`)."""
+    return frames >= SEEING_SPLIT_FRAMES and spread is not None and spread >= SEEING_SCREEN_SPREAD
+
+
 def gives_seeing_split(fwhm: list[float]) -> bool:
-    """Whether frames of these FWHMs qualify for a seeing split, by a
-    night's rule (`measure.recipes_for`)."""
-    return "seeing-split" in recipes_for({"accepted": len(fwhm), "seeing_spread": seeing_spread(fwhm)})
+    """Whether frames of these FWHMs are worth a seeing pair."""
+    return screened(len(fwhm), seeing_spread(fwhm))
 
 
 def survey(manifest: Manifest) -> list[dict[str, Any]]:
@@ -289,13 +311,16 @@ def seeing_check(
     field = [[statistics.median(w for _, w in tiles[(row, column)]) / statistics.median(b for b, _ in tiles[(row, column)])
               if len(tiles[(row, column)]) >= SEEING_FIELD_STARS else None
               for column in range(SEEING_FIELD)] for row in range(SEEING_FIELD)]
+    eccentricity = [statistics.median(star.eccentricity for star in half) for half in zip(*pairs)]
     stats.update({
         "fwhm_best_px": fwhm_best,
         "fwhm_worst_px": fwhm_worst,
         "fwhm_ratio": fwhm_worst / fwhm_best,
         "fwhm_ratio_field": field,
-        "eccentricity_best": statistics.median(star.eccentricity for star, _ in pairs),
-        "eccentricity_worst": statistics.median(star.eccentricity for _, star in pairs),
+        "eccentricity_best": eccentricity[0],
+        "eccentricity_worst": eccentricity[1],
+        "axis_ratio_best": math.sqrt(1 - min(1.0, eccentricity[0]) ** 2),
+        "axis_ratio_worst": math.sqrt(1 - min(1.0, eccentricity[1]) ** 2),
     })
 
     covered = (np.asarray(coverage_best) > 0) & (np.asarray(coverage_worst) > 0)
@@ -323,38 +348,40 @@ def seeing_check(
     with warnings.catch_warnings():
         # A block outside the coverage may hold NaN; it is never used.
         warnings.simplefilter("ignore", RuntimeWarning)
-        cut = [blocks(image, SEEING_BLOCK_PX) for image in (image_best, image_worst)]
-        means = [pixels.mean(axis=2, dtype=np.float64) for pixels in cut]
-        medians = [np.median(pixels, axis=2) for pixels in cut]
-    del cut
+        medians = [np.median(blocks(image, SEEING_BLOCK_PX), axis=2) for image in (image_best, image_worst)]
     stats["difference_sigma"] = sigma
     planes = None
     if full.any():
-        planes = sky_planes(medians, full & (medians[0] <= np.median(medians[0][full])))
+        faint = full & (medians[0] <= np.median(medians[0][full]))
+        planes = sky_planes(medians, faint)
     if planes is not None:
         change = planes[0] - planes[1]
         stats["background_offset"] = float(change[0] + 0.5 * change[1] + 0.5 * change[2])
         # The furthest a corner's difference strays from the centre's.
         stats["background_tilt"] = float(0.5 * (abs(change[1]) + abs(change[2])))
         rows, columns = np.indices(full.shape)
-        signal = [mean - (c[0] + c[1] * (columns + 0.5) / full.shape[1] + c[2] * (rows + 0.5) / full.shape[0])
-                  for mean, c in zip(means, planes)]
+        signal = [median - (c[0] + c[1] * (columns + 0.5) / full.shape[1] + c[2] * (rows + 0.5) / full.shape[0])
+                  for median, c in zip(medians, planes)]
+        stats["background_residual"] = float(np.percentile(np.abs(signal[0][faint] - signal[1][faint]), 90))
         bright = full & (signal[0] >= SEEING_BRIGHT * (noise_best or np.inf)) & (signal[1] > 0)
-        stats["flux_blocks"] = int(bright.sum())
-        stats["block_flux_ratio"] = float(np.median(signal[0][bright] / signal[1][bright])) \
+        stats["extended_blocks"] = int(bright.sum())
+        stats["extended_flux_ratio"] = float(np.median(signal[0][bright] / signal[1][bright])) \
             if bright.sum() >= SEEING_FLUX_LEAST else None
+    # The one gain that takes the worst half's flux onto the best's, which
+    # a trainer applies before comparing them.
+    stats["flux_gain"] = stats["star_flux_ratio"] if stats["star_flux_ratio"] is not None \
+        else stats.get("extended_flux_ratio")
 
-    if fwhm_worst - fwhm_best <= PAIR_FWHM_TOLERANCE * fwhm_best:
+    if fwhm_worst - fwhm_best < SEEING_SPLIT_SPREAD * fwhm_best:
         return "rejected", "seeing-too-close", stats
     if any(ratio is not None and ratio < 1 for row in field for ratio in row):
         return "rejected", "psf-field-mismatch", stats
-    if stats["eccentricity_worst"] - stats["eccentricity_best"] > SEEING_SHAPE_TOLERANCE:
+    if stats["axis_ratio_best"] - stats["axis_ratio_worst"] > SEEING_SHAPE_TOLERANCE:
         return "rejected", "psf-shape-mismatch", stats
-    if any(ratio is not None and abs(ratio - 1) > SEEING_FLUX_TOLERANCE
-           for ratio in (stats["star_flux_ratio"], stats.get("block_flux_ratio"))):
+    if stats["star_flux_ratio"] is not None and stats.get("extended_flux_ratio") is not None and \
+            abs(stats["extended_flux_ratio"] / stats["star_flux_ratio"] - 1) > SEEING_FLUX_TOLERANCE:
         return "rejected", "flux-mismatch", stats
-    if sigma is None or planes is None or \
-            max(abs(stats["background_offset"]), stats["background_tilt"]) > PAIR_BACKGROUND_TOLERANCE * sigma:
+    if sigma is None or planes is None or stats["background_residual"] > PAIR_BACKGROUND_TOLERANCE * sigma:
         return "rejected", "background-mismatch", stats
     return "built", None, stats
 
@@ -549,9 +576,9 @@ def split_seeing(
     """Integrate, measure and judge one object's seeing pair from the
     frames `stacker` keeps: the best and the worst quarter of all its
     nights' frames by FWHM, at matched counts and so at matched depth, an
-    object's frames sharing one exposure. An object whose quarters differ
-    too little for a night's split gets none, and a pair it was given
-    before is marked rejected."""
+    object's frames sharing one exposure. An object whose frames do not
+    pass the screen (`screened`) gets none, and a pair it was given before
+    is marked rejected."""
     ids = {half: f"multi-night/{key}/seeing/{half}" for half in ("best", "worst")}
     spread = seeing_spread(list(fwhm.values()))
     if not gives_seeing_split(list(fwhm.values())):
@@ -606,7 +633,7 @@ def check_seeing(manifest: Manifest, store: Store, *, names: set[str] | None = N
         status, reason, check = seeing_check(measured["best"], measured["worst"])
         # Each half is a quarter of the frames: 8 or more from 32 or more.
         spread = (recipe["worst_fwhm_px"] - recipe["best_fwhm_px"]) / recipe["best_fwhm_px"]
-        if "seeing-split" not in recipes_for({"accepted": 4 * recipe["frames_each"], "seeing_spread": spread}):
+        if not screened(4 * recipe["frames_each"], spread):
             status, reason = "rejected", "seeing-spread"
         with manifest.transaction():
             for half, row in rows.items():
