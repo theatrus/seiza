@@ -172,8 +172,9 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
         bank(Store(store, tmp_path / "scratch"), chosen, agree=0.1)
 
     # Contact sheets: one against a deeper reference, with its whole image at
-    # full size, one showing the noise taken out, and one whose input is not
-    # built.
+    # full size and a baseline (the deep stack stands in for one; a second
+    # is not built), one showing the noise taken out, and one whose input is
+    # not built.
     pytest.importorskip("PIL")
     with Manifest(store / "manifest.sqlite") as manifest:
         half = manifest.rows("SELECT * FROM products WHERE kind = 'noise-a' ORDER BY id LIMIT 1")[0]
@@ -182,7 +183,8 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
     (store / "sheets").mkdir()
     (store / "sheets" / "noise.json").write_text(json.dumps({"sheets": [
         {"name": "half", "title": "A half", "input": half["id"], "reference": deep, "side": 48, "crops": crops,
-         "full": True},
+         "full": True, "baselines": [{"name": "other", "label": "Another way", "product": deep},
+                                     {"name": "gone", "label": "Not built", "product": "nothing/deep"}]},
         {"name": "deep", "title": "The deep stack", "input": deep, "side": 48, "crops": crops},
         {"name": "gone", "title": "Not built", "input": "nothing/deep", "side": 48, "crops": crops},
     ]}))
@@ -193,6 +195,9 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
     assert png.startswith(b"\x89PNG")
     width, height = int.from_bytes(png[16:20], "big"), int.from_bytes(png[20:24], "big")
     assert width == 7 * 48 + 8 * 12 and height > 2 * 48
+    # The baseline built is a column more; the one not built is none.
+    png = (store / sheets["made"]["half"]).read_bytes()
+    assert int.from_bytes(png[16:20], "big") == 8 * 48 + 9 * 12
     saved = json.loads((store / "models" / "noise" / "smoke" / "run.json").read_text())
     assert saved["sheets"] == sheets["made"] and saved["full"] == sheets["full"]
     # The full-size image is the whole input's size, and a second tile grid
@@ -203,7 +208,8 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
 
     with fits.open(store / full["fits"]) as opened:
         shape = opened[0].data.shape
-    for key in ("image", "seams"):
+    assert full["baseline-other"] == "sheets/full/half-other.png" and "baseline-gone" not in full
+    for key in ("image", "seams", "baseline-other"):
         png = (store / full[key]).read_bytes()
         assert (int.from_bytes(png[20:24], "big"), int.from_bytes(png[16:20], "big")) == shape
     assert full["seam_max_sigma"] is not None and full["seam_max_sigma"] < 1e-3
