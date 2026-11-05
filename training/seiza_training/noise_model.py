@@ -74,7 +74,7 @@ from .build import BAND_SCALE_PX, binned
 from .manifest import Manifest, loads, now
 from .store import Store, robust_sigma, versions
 from .tiles import infer
-from .unet import ResidualUNet, receptive_field
+from .unet import ResidualUNet, reach, receptive_field
 
 WINDOW = 320
 WINDOWS_PER_HALF = 40
@@ -791,15 +791,12 @@ def train(
     directory.mkdir(parents=True, exist_ok=True)
     model = model.cpu().to(memory_format=torch.contiguous_format).eval()
     torch.save(model.state_dict(), directory / "weights.pt")
-    # A margin of half the receptive field reproduces whole-image inference;
-    # the cosine ramps over 32 more pixels.
-    margin = math.ceil(receptive_field(levels) / 2)
-    overlap = 2 * margin + 32
-    validation = evaluate(store, manifest, model, split="validation", tile=512, overlap=overlap, margin=margin,
-                          sets=validation_sets, noise_map=noise_map, noise_plane=noise_plane)
-    validation["dark_noise"] = evaluate_dark_noise(store, manifest, model, split="validation", tile=512,
-                                                   overlap=overlap, margin=margin, sets=validation_sets,
-                                                   noise_map=noise_map, noise_plane=noise_plane)
+    inference = tiling(levels)
+    validation = evaluate(store, manifest, model, split="validation", **inference, sets=validation_sets,
+                          noise_map=noise_map, noise_plane=noise_plane)
+    validation["dark_noise"] = evaluate_dark_noise(store, manifest, model, split="validation", **inference,
+                                                   sets=validation_sets, noise_map=noise_map,
+                                                   noise_plane=noise_plane)
     exported = export(model, directory / "model.onnx", tile=512)
     record = {
         "name": name,
@@ -818,7 +815,7 @@ def train(
                    if extra is not None else None},
         "parameters": sum(p.numel() for p in model.parameters()),
         "receptive_field_px": receptive_field(levels),
-        "inference": {"tile": 512, "overlap": overlap, "margin": margin},
+        "inference": inference,
         "device": str(where),
         "seconds": {"bank": round(bank_seconds, 1), "train": round(train_seconds, 1)},
         "history": history,
@@ -931,6 +928,7 @@ def evaluate(
     tile: int = 512,
     overlap: int = 136,
     margin: int = 52,
+    multiple: int | None = None,
     limit: int | None = None,
     sets: set[str] | None = None,
     noise_map: str = "raw",
@@ -940,8 +938,9 @@ def evaluate(
     threads: int = EVALUATION_THREADS,
 ) -> dict[str, Any]:
     """Denoise each of a split's A halves, whole, through overlapping
-    tiles, take out `bands` of what the model finds, and measure it against
-    its B half. The deep stacks' halves are measured the same way, one
+    tiles that start on the model's grid, or on multiples of `multiple`
+    when given, take out `bands` of what the model finds, and measure it
+    against its B half. The deep stacks' halves are measured the same way, one
     against the other, under the size `deep-half`, or `multi-night` for an
     object stacked over its nights: they show the model at a night's whole
     depth and beyond, far less noisy than the noise pairs. The
@@ -969,7 +968,8 @@ def evaluate(
         input_background, input_noise = scales(image_a, sigma_a)
         planes = network_input(image_a, sigma_a, input_background, input_noise, noise_plane)
         residual = infer(denoiser(model, input_background, input_noise, where), planes,
-                         tile=tile, overlap=overlap, margin=margin)[0]
+                         tile=tile, overlap=overlap, margin=margin,
+                         multiple=multiple or model.multiple)[0]
         estimate = bands.apply(image_a, residual)
         recipe = loads(pair["a"]["recipe"])
         return {"pair": pair["a"]["id"], "set": pair["set"], "size": recipe.get("size") or recipe["recipe"],
@@ -1274,6 +1274,7 @@ def evaluate_dark_noise(
     tile: int = 512,
     overlap: int = 136,
     margin: int = 52,
+    multiple: int | None = None,
     sets: set[str] | None = None,
     noise_map: str = "raw",
     noise_plane: str = "linear",
@@ -1301,7 +1302,8 @@ def evaluate_dark_noise(
         run = denoiser(model, input_background, input_noise, where)
         estimate = bands.apply(image, infer(run, network_input(image, stated, input_background, input_noise,
                                                                noise_plane),
-                                            tile=tile, overlap=overlap, margin=margin)[0])
+                                            tile=tile, overlap=overlap, margin=margin,
+                                            multiple=multiple or model.multiple)[0])
         truth = against_truth(estimate, image, target, floor, background, noise)
         del estimate
 
@@ -1317,7 +1319,8 @@ def evaluate_dark_noise(
         sky_background, sky_noise = scales(sky, sky_sigma)
         sky_run = denoiser(model, sky_background, sky_noise, where)
         output = bands.apply(sky, infer(sky_run, network_input(sky, sky_sigma, sky_background, sky_noise, noise_plane),
-                                        tile=tile, overlap=overlap, margin=margin)[0])
+                                        tile=tile, overlap=overlap, margin=margin,
+                                        multiple=multiple or model.multiple)[0])
         empty = on_empty_sky(output, sky, background, noise)
         # The same outliers for every model, planted on the empty sky: the
         # share of their energy the output keeps.
@@ -1327,7 +1330,8 @@ def evaluate_dark_noise(
         spoiled = sky + planted
         left = bands.apply(spoiled, infer(sky_run, network_input(spoiled, sky_sigma, sky_background, sky_noise,
                                                                  noise_plane),
-                                          tile=tile, overlap=overlap, margin=margin)[0]) - output
+                                          tile=tile, overlap=overlap, margin=margin,
+                                          multiple=multiple or model.multiple)[0]) - output
         empty["outliers_left"] = float(np.nansum(left**2) / np.sum(planted**2))
         return {"pair": pair["input"]["id"], "set": pair["set"],
                 "size": loads(pair["input"]["recipe"]).get("size"),
@@ -1369,7 +1373,18 @@ def load_run(store: Store, name: str) -> tuple[dict[str, Any], ResidualUNet]:
     record = json.loads((directory / "run.json").read_text())
     model = ResidualUNet(width=record["config"]["width"], levels=record["config"]["levels"])
     model.load_state_dict(torch.load(directory / "weights.pt", map_location="cpu"))
+    # Tiling follows from the network's depth: a run recorded with older
+    # settings is run with these.
+    record["inference"] = tiling(record["config"]["levels"])
     return record, model.eval()
+
+
+def tiling(levels: int) -> dict[str, int]:
+    """How a model of `levels` runs over an image: tiles of 512, a margin of
+    its reach, which reproduces whole-image inference, a cosine over 32 more
+    pixels, and every tile starting on its grid."""
+    margin = reach(levels)
+    return {"tile": 512, "overlap": 2 * margin + 32, "margin": margin, "multiple": 2 ** (levels - 1)}
 
 
 def evaluate_saved(

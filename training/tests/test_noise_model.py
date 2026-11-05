@@ -14,7 +14,7 @@ from seiza_training import tiles  # noqa: E402
 from seiza_training.__main__ import main  # noqa: E402
 from seiza_training.manifest import Manifest  # noqa: E402
 from seiza_training.synthetic import build_corpus  # noqa: E402
-from seiza_training.unet import ResidualUNet, receptive_field  # noqa: E402
+from seiza_training.unet import ResidualUNet, reach, receptive_field  # noqa: E402
 
 
 def test_tiles_cover_the_image_and_blend_back_to_it():
@@ -25,17 +25,72 @@ def test_tiles_cover_the_image_and_blend_back_to_it():
     assert identity.shape == (1, 300, 410)
 
 
-def test_overlapping_tiles_match_the_whole_image():
+def phase_bound_model() -> ResidualUNet:
+    """A small model whose coarse levels count, as a trained model's do:
+    with PyTorch's own starting weights the full-resolution path drowns
+    them, and where a tile starts hardly matters."""
     torch.manual_seed(2)
     model = ResidualUNet(width=4, levels=3).eval()
-    torch.nn.init.normal_(model.last.weight, std=0.1)
-    planes = np.random.default_rng(3).normal(size=(2, 192, 256)).astype(np.float32)
+    for layer in model.modules():
+        if isinstance(layer, torch.nn.Conv2d):
+            torch.nn.init.kaiming_normal_(layer.weight)
+    return model
+
+
+@pytest.mark.parametrize("levels", [3, 4])
+def test_the_reach_is_how_far_an_output_looks_to_either_side(levels):
+    torch.manual_seed(0)
+    model = ResidualUNet(width=2, levels=levels).double().eval()
+    for layer in model.modules():
+        if isinstance(layer, torch.nn.Conv2d):
+            torch.nn.init.normal_(layer.weight)
+    side, farthest = model.multiple * (8 + 4 * receptive_field(levels) // model.multiple), 0
+    # At every phase of the model's grid, the input pixels one output pixel
+    # draws on.
+    for phase in range(model.multiple):
+        planes = torch.randn(1, 2, model.multiple, side, dtype=torch.float64, requires_grad=True)
+        centre = side // 2 // model.multiple * model.multiple + phase
+        model(planes)[0, 0, 0, centre].backward()
+        drawn = (planes.grad[0].abs().sum(dim=(0, 1)) > 0).nonzero().flatten()
+        farthest = max(farthest, centre - int(drawn.min()), int(drawn.max()) - centre)
+    assert farthest == reach(levels) > (receptive_field(levels) - 1) // 2
+
+
+def test_overlapping_tiles_match_the_whole_image():
+    model = phase_bound_model()
+    # Neither side is a multiple of the model's grid, so tiling pads both.
+    planes = np.random.default_rng(3).normal(size=(2, 190, 253)).astype(np.float32)
+    padded = np.pad(planes, ((0, 0), (0, 2), (0, 3)), mode="reflect")
+    settings = {"tile": 96, "overlap": 2 * reach(3) + 4, "margin": reach(3)}
     with torch.no_grad():
-        whole = model(torch.from_numpy(planes)[None]).numpy()[0]
+        whole = model(torch.from_numpy(padded)[None]).numpy()[0, :, :190, :253]
         run = lambda batch: model(torch.from_numpy(batch)).numpy()  # noqa: E731
-        field = receptive_field(3)
-        tiled = tiles.infer(run, planes, tile=96, overlap=field + 3, margin=(field + 1) // 2)
+        tiled = tiles.infer(run, planes, **settings, multiple=model.multiple)
+        loose = tiles.infer(run, planes, **settings)
     np.testing.assert_allclose(tiled, whole, atol=1e-5 * np.abs(whole).max())
+    # Tiles that start off the grid make other estimates.
+    assert np.abs(loose - whole).max() > 1e-2 * np.abs(whole).max()
+
+
+def test_the_seam_map_finds_no_seam_where_tiles_blend_as_the_whole_image(tmp_path):
+    from seiza_training.noise_model import denoiser, network_input
+    from seiza_training.sheets import full_size
+
+    model = phase_bound_model()
+    image = (100 + np.random.default_rng(3).normal(0, 2, (300, 361))).astype(np.float32)
+    sigma = np.full_like(image, 2.0)
+    inference = {"tile": 96, "overlap": 2 * reach(3) + 4, "margin": reach(3), "multiple": model.multiple}
+    planes = network_input(image, sigma, 100.0, 2.0)
+
+    def seams(settings: dict[str, int], name: str) -> dict:
+        return full_size(denoiser(model, 100.0, 2.0), planes, image, sigma, settings,
+                         lambda x: np.clip((x - 90) / 20, 0, 1), tmp_path / "full" / name)
+
+    written = seams(inference, "image")
+    assert written["seam_max_sigma"] < 1e-5
+    assert written["seams"].read_bytes().startswith(b"\x89PNG") and written["image"].exists()
+    # Tiles that start off the model's grid leave seams the map finds.
+    assert seams({**inference, "multiple": 1}, "loose")["seam_max_sigma"] > 1e-2
 
 
 def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
@@ -79,7 +134,7 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
     assert record["config"]["noise_plane"] == "asinh"
     assert all(entry["grad_norm_max"] > 0 and entry["grad_norm_mean"] > 0 for entry in record["history"])
     assert record["export"]["max_relative_error"] < 1e-4
-    assert record["inference"]["overlap"] >= receptive_field(3) // 2
+    assert record["inference"]["margin"] == reach(3) and record["inference"]["multiple"] == 4
     capsys.readouterr()
     run("evaluate-noise", "--name", "smoke", "--split", "train")
     measured = json.loads(capsys.readouterr().out)
@@ -111,8 +166,9 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
     with pytest.raises(ValueError, match="match_flux"):
         bank(Store(store, tmp_path / "scratch"), chosen, agree=0.1)
 
-    # Contact sheets: one against a deeper reference, one showing the noise
-    # taken out, and one whose input is not built.
+    # Contact sheets: one against a deeper reference, with its whole image at
+    # full size, one showing the noise taken out, and one whose input is not
+    # built.
     pytest.importorskip("PIL")
     with Manifest(store / "manifest.sqlite") as manifest:
         half = manifest.rows("SELECT * FROM products WHERE kind = 'noise-a' ORDER BY id LIMIT 1")[0]
@@ -120,7 +176,8 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
     crops = [{"x": 8, "y": 8, "label": "corner"}, {"x": 10_000, "y": 20, "label": "past the edge"}]
     (store / "sheets").mkdir()
     (store / "sheets" / "noise.json").write_text(json.dumps({"sheets": [
-        {"name": "half", "title": "A half", "input": half["id"], "reference": deep, "side": 48, "crops": crops},
+        {"name": "half", "title": "A half", "input": half["id"], "reference": deep, "side": 48, "crops": crops,
+         "full": True},
         {"name": "deep", "title": "The deep stack", "input": deep, "side": 48, "crops": crops},
         {"name": "gone", "title": "Not built", "input": "nothing/deep", "side": 48, "crops": crops},
     ]}))
@@ -131,7 +188,20 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
     assert png.startswith(b"\x89PNG")
     width, height = int.from_bytes(png[16:20], "big"), int.from_bytes(png[20:24], "big")
     assert width == 7 * 48 + 8 * 12 and height > 2 * 48
-    assert json.loads((store / "models" / "noise" / "smoke" / "run.json").read_text())["sheets"] == sheets["made"]
+    saved = json.loads((store / "models" / "noise" / "smoke" / "run.json").read_text())
+    assert saved["sheets"] == sheets["made"] and saved["full"] == sheets["full"]
+    # The full-size image is the whole input's size, and a second tile grid
+    # half a stride over gives the same output to within float error.
+    full = sheets["full"]["half"]
+    assert set(sheets["full"]) == {"half"}
+    from astropy.io import fits
+
+    with fits.open(store / full["fits"]) as opened:
+        shape = opened[0].data.shape
+    for key in ("image", "seams"):
+        png = (store / full[key]).read_bytes()
+        assert (int.from_bytes(png[20:24], "big"), int.from_bytes(png[16:20], "big")) == shape
+    assert full["seam_max_sigma"] is not None and full["seam_max_sigma"] < 1e-3
 
 
 def test_the_modelled_noise_map_keeps_the_level_and_drops_the_scatter():

@@ -73,3 +73,12 @@ def receptive_field(levels: int) -> int:
         scale //= 2
         field += 4 * scale  # each block on the way up
     return field
+
+
+def reach(levels: int) -> int:
+    """How far the network's output looks to one side, at most: half its
+    receptive field, and on the side it starts from, a pixel more at each
+    finer scale than the coarsest, because nearest upsampling copies a
+    coarse pixel onto the fine pixel after it. At five levels it looks 122
+    pixels left and up, but 107 right and down."""
+    return (receptive_field(levels) - 1) // 2 + 2 ** (levels - 1) - 1

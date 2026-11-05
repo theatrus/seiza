@@ -8,6 +8,15 @@ the image's own, where whole-image inference would pad too. Past the
 margin, a tile's weight rises as a raised cosine across the rest of the
 overlap. Neighbouring tiles therefore overlap by at least twice the margin:
 a margin of half the receptive field reproduces whole-image inference.
+
+A network that halves the image `levels - 1` times samples it on a grid of
+`2 ** (levels - 1)` pixels, so what it makes of a pixel depends on where
+the tile holding it starts, unless every tile starts on that grid. Moved a
+pixel, a trained noise model's tile changed by up to 0.8σ; moved 16, by
+float error. Given the model's `multiple`, tiles start only on its grid:
+the stride is cut to a multiple of it, and the image is padded by
+reflection at its far edges until the last tile, flush with them, starts on
+it too.
 """
 
 from __future__ import annotations
@@ -54,14 +63,27 @@ def infer(
     margin: int,
     batch: int = 8,
     outputs: int = 1,
+    multiple: int = 1,
 ) -> np.ndarray:
     """Run `run` over overlapping tiles of `planes`, (channels, height,
     width), and blend its (outputs, tile, tile) results into one image.
     `run` takes and returns a batch: (n, channels, tile, tile) to (n,
-    outputs, tile, tile). An image smaller than a tile is padded by
-    reflection, and the padding is cut away again."""
+    outputs, tile, tile). Every tile starts on a multiple of `multiple`. An
+    image smaller than a tile, or whose last tile would start off that grid,
+    is padded by reflection, and the padding is cut away again."""
+    if tile % multiple:
+        raise ValueError(f"a tile of {tile} is not a multiple of {multiple}")
+    # A stride cut to the grid widens the overlap, never narrows it.
+    stride = (tile - overlap) // multiple * multiple
+    if stride < 1:
+        raise ValueError(f"an overlap of {overlap} leaves no stride of {multiple} in a tile of {tile}")
+    overlap = tile - stride
     channels, height, width = planes.shape
-    pad_y, pad_x = max(0, tile - height), max(0, tile - width)
+
+    def padding(length: int) -> int:
+        return tile - length if length <= tile else -(length - tile) % multiple
+
+    pad_y, pad_x = padding(height), padding(width)
     if pad_y or pad_x:
         planes = np.pad(planes, ((0, 0), (0, pad_y), (0, pad_x)), mode="reflect")
     _, full_height, full_width = planes.shape

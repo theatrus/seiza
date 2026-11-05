@@ -19,11 +19,24 @@ panel takes the reference's stretch, or the input's when there is none.
 Sheets go to `STORE/models/noise/<run>/sheets/<name>.png` and are listed in
 the run's record. `train-noise` makes them after every run; `sheet-noise`
 makes them for a recorded one. Pillow draws the labels.
+
+A sheet marked `"full": true` also gets its whole image at full size, in
+`STORE/models/noise/<run>/full/`: the run's output with all the noise it
+finds taken out, as 32-bit FITS (when astropy is installed) and in the
+sheet's stretch as `<name>.png`, and a seam map, `<name>-seams.png`. The
+seam map runs the image a second time with the tile grid moved half a
+stride, so each seam of the first grid falls inside a tile of the second,
+and shows the two outputs' difference in units of each pixel's noise, from
+−SEAM_SPAN to +SEAM_SPAN. Blending that reproduces whole-image inference
+leaves only float error there; a seam shows as a line of the grid. The
+difference's root mean square and largest size are recorded with the
+files.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +55,10 @@ SIDE = 800
 # pixel's own noise, from −SPAN to +SPAN: where a run takes out only noise
 # it is even grain at every brightness, and anything else shows as shape.
 SPAN = 3.0
+# The seam map shows two tile grids' outputs' difference, in units of each
+# pixel's noise, from −SEAM_SPAN to +SEAM_SPAN: a seam a twentieth of the
+# noise is black or white.
+SEAM_SPAN = 0.05
 # The shares of the noise kept, besides none, on every sheet: the same for
 # every run, so sheets compare.
 SETTINGS = (
@@ -66,25 +83,39 @@ def render_saved(store: Store, manifest: Manifest, name: str, *, only: set[str] 
         return {"skipped": "Pillow, which draws the labels, is not installed"}
     record, model = load_run(store, name)
     directory = store.root / "models" / "noise" / name
-    made, missing = {}, []
+    made, full, missing = {}, {}, []
     for sheet in json.loads(spec.read_text())["sheets"]:
         if only is not None and sheet["name"] not in only:
             continue
         path = directory / "sheets" / f"{sheet['name']}.png"
-        if render(store, manifest, record, model, sheet, path):
-            made[sheet["name"]] = str(path.relative_to(store.root))
-        else:
+        whole = directory / "full" / sheet["name"] if sheet.get("full") else None
+        drawn = render(store, manifest, record, model, sheet, path, whole)
+        if drawn is None:
             missing.append(sheet["name"])
+            continue
+        made[sheet["name"]] = str(path.relative_to(store.root))
+        if drawn:
+            full[sheet["name"]] = {key: str(value.relative_to(store.root)) if isinstance(value, Path) else value
+                                   for key, value in drawn.items()}
     record = json.loads((directory / "run.json").read_text())
     record["sheets"] = {**record.get("sheets", {}), **made}
+    record["full"] = {**record.get("full", {}), **full}
     (directory / "run.json").write_text(json.dumps(record, indent=2))
-    return {"made": made, "missing": missing}
+    return {"made": made, "full": full, "missing": missing}
 
 
 def render(
-    store: Store, manifest: Manifest, record: dict[str, Any], model: ResidualUNet, sheet: dict[str, Any], path: Path
-) -> bool:
-    """Draw one sheet to `path`; false when its products are not built."""
+    store: Store,
+    manifest: Manifest,
+    record: dict[str, Any],
+    model: ResidualUNet,
+    sheet: dict[str, Any],
+    path: Path,
+    whole: Path | None = None,
+) -> dict[str, Any] | None:
+    """Draw one sheet to `path`, and with `whole`, the stem of its full-size
+    files, write them too. None when its products are not built; otherwise
+    what `full_size` wrote, or nothing."""
     from PIL import Image, ImageDraw, ImageFont
 
     def built(product_id: str | None) -> dict[str, Any] | None:
@@ -95,7 +126,7 @@ def render(
 
     source, reference_product = built(sheet["input"]), built(sheet.get("reference"))
     if source is None or (sheet.get("reference") and reference_product is None):
-        return False
+        return None
     image, sigma = load_half(store, source)
     if record["config"].get("noise_map", "raw") == "model":
         sigma = modelled_sigma(image, sigma, np.load(store.root / loads(source["files"])["coverage"]))
@@ -110,8 +141,10 @@ def render(
     side = sheet.get("side", SIDE)
     height, width = image.shape
     # Crops run through the network with its receptive field around them,
-    # which gives the whole image's result inside them.
+    # from a corner on the model's grid, which gives the whole image's result
+    # inside them.
     pad = record["inference"]["margin"] + 16
+    grid = record["inference"].get("multiple", 1)
     frames = len(loads(source["frames"]))
     labels = [f"Input: {frames} frames", "All noise removed", *(label for label, _ in SETTINGS)]
     labels.append(f"Reference: {len(loads(reference_product['frames']))} frames" if reference is not None
@@ -119,7 +152,7 @@ def render(
     rows = []
     for crop in sheet["crops"]:
         x, y = min(crop["x"], width - side), min(crop["y"], height - side)
-        top, left = max(0, y - pad), max(0, x - pad)
+        top, left = max(0, y - pad) // grid * grid, max(0, x - pad) // grid * grid
         bottom, right = min(height, y + side + pad), min(width, x + side + pad)
         window = image[top:bottom, left:right]
         residual = infer(run, np.ascontiguousarray(planes[:, top:bottom, left:right]), **record["inference"])[0]
@@ -154,7 +187,58 @@ def render(
         top += label_height + side + gap
     path.parent.mkdir(parents=True, exist_ok=True)
     write_png(path, np.asarray(canvas))
-    return True
+    if whole is None:
+        return {}
+    return full_size(run, planes, image, sigma, record["inference"], lambda x: look(x, image_background), whole)
+
+
+def full_size(
+    run: Callable[[np.ndarray], np.ndarray],
+    planes: np.ndarray,
+    image: np.ndarray,
+    sigma: np.ndarray,
+    inference: dict[str, int],
+    look: Callable[[np.ndarray], np.ndarray],
+    stem: Path,
+) -> dict[str, Any]:
+    """Write the whole of `image` with all the noise `run` finds taken out,
+    as FITS and, through `look`, as PNG, and its seam map, at `stem` with
+    their suffixes; answer their paths and the seams' size in units of each
+    pixel's noise (None where the image is too small to move the grid)."""
+    residual = infer(run, planes, **inference)[0]
+    output = NoiseBands().apply(image, residual)
+    stem.parent.mkdir(parents=True, exist_ok=True)
+    written: dict[str, Any] = {"image": stem.with_suffix(".png")}
+    write_png(written["image"], (look(output) * 255 + 0.5).astype(np.uint8))
+    try:
+        from astropy.io import fits
+
+        written["fits"] = stem.with_suffix(".fits")
+        fits.PrimaryHDU(output.astype(np.float32)).writeto(written["fits"], overwrite=True)
+    except ImportError:
+        written.pop("fits")
+    # The second grid starts half a stride in, on the model's grid. Within a
+    # margin of where it starts, its first tiles saw that cut rather than the
+    # image, so the difference there is the cut's, not the blend's, and is
+    # left out.
+    grid = inference.get("multiple", 1)
+    shift = (inference["tile"] - inference["overlap"]) // grid * grid // 2 // grid * grid
+    moved = infer(run, np.ascontiguousarray(planes[:, shift:, shift:]), **inference)[0]
+    difference = np.full(image.shape, np.nan, dtype=np.float32)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        difference[shift:, shift:] = (residual[shift:, shift:] - moved) / sigma[shift:, shift:]
+    edge = shift + inference["margin"]
+    difference[:edge] = np.nan
+    difference[:, :edge] = np.nan
+    # Where the noise map is zero, at the edge of what the frames cover.
+    difference[np.isinf(difference)] = np.nan
+    compared = difference[np.isfinite(difference)]
+    written["seams"] = Path(f"{stem}-seams.png")
+    seams = np.clip(np.nan_to_num(0.5 + difference / (2 * SEAM_SPAN), nan=0.5), 0.0, 1.0)
+    write_png(written["seams"], (seams * 255 + 0.5).astype(np.uint8))
+    written["seam_rms_sigma"] = float(np.sqrt(np.mean(compared ** 2))) if compared.size else None
+    written["seam_max_sigma"] = float(np.max(np.abs(compared))) if compared.size else None
+    return written
 
 
 # Faces with the labels' Greek letters and signs, macOS's then Linux's;
