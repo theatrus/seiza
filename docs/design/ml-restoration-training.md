@@ -696,8 +696,9 @@ The variants are:
   pixel blocks, each times its side, so that a block's noise weighs as a
   pixel's does: the per-pixel loss barely feels noise left at those
   scales, and a model leaves it as the blotchy "worm" texture. A block
-  average of the target is still unbiased. Add flux conservation in
-  background boxes and faint-signal boxes.
+  average of the target is still unbiased. Average the error unclipped and
+  make each block's term robust; leave out blocks holding a star core.
+  Add flux conservation in background boxes and faint-signal boxes.
 - **PSF:** Charbonnier error against the target. Add multi-scale gradient
   error, per-star aperture flux within three times the FWHM, centroid shift,
   reblur consistency on real images, and an identity loss where the ratio map
@@ -853,7 +854,19 @@ in these ways:
   at the finest scale, so the per-pixel loss barely feels noise left over
   8 or 16 pixels. The next runs weigh the error averaged over blocks of
   those sides as well (see the losses), and every run records the noise
-  it leaves at 4, 8 and 16 pixels on the validation pairs.
+  it leaves at 4, 8 and 16 pixels on the validation pairs. The first such
+  run, the error clipped at the robust loss's 3σ̄ before the average, left
+  43%, 61% and 84% instead of 58%, 79% and 96%, but striped star cores and
+  bright nebulae column by column, its change from one column to the next
+  up to 15 times that from one row to the next, and dug rings around
+  stars. Against clean targets its error on mid-brightness signal was 18
+  times as large, on every pair, while its sky was as good. The clip let
+  it meet a block's mean with errors of alternating sign, each past the
+  clip, where the robust per-pixel loss charged little for them, and the
+  sky, where errors stay within the clip, showed nothing. Runs since
+  average the error unclipped, make each block's term robust instead, and
+  leave out blocks holding a target brighter than 200σ̄, where the
+  per-pixel loss is robust too.
 - **Deep halves.** Training on a night's deep stack dealt into two halves,
   a quarter of every batch, taught a model to keep mottle: it left 37% of
   the coarse noise on empty sky. The halves share the night's flats,
