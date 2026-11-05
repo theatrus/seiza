@@ -76,7 +76,12 @@ def main(argv: list[str] | None = None) -> int:
     multi.add_argument("--min-hours", type=float, help="the hours of accepted frames an unnamed object needs")
     multi.add_argument("--source-map", action="append", default=[], metavar="FROM=TO",
                        help="read frame and master paths starting FROM from TO instead")
-    multi.add_argument("--list", action="store_true", help="list the objects and their depth, and stack nothing")
+    multi.add_argument("--list", action="store_true",
+                       help="list the objects, their depth and spread of seeing, and stack nothing")
+    multi.add_argument("--seeing", action="store_true",
+                       help="also stack every object whose nights give a seeing split, however few its hours")
+    multi.add_argument("--check-seeing", action="store_true",
+                       help="judge the seeing pairs already stacked again from their files, and stack nothing")
     multi.add_argument("--again", action="store_true", help="stack objects already stacked")
     multi.add_argument("--limit", type=int, help="at most this many objects")
     multi.add_argument("--keep-scratch", action="store_true")
@@ -269,11 +274,15 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
 
         if arguments.list:
             return {"objects": multi_night.survey(manifest)}
+        names = set(arguments.objects) if arguments.objects else None
+        if arguments.check_seeing:
+            return {"judged": multi_night.check_seeing(manifest, store, names=names)}
         source_map = dict(entry.split("=", 1) for entry in arguments.source_map)
         return multi_night.run(
-            manifest, store, names=set(arguments.objects) if arguments.objects else None,
+            manifest, store, names=names,
             minimum_hours=arguments.min_hours if arguments.min_hours is not None else multi_night.MINIMUM_HOURS,
             source_map=source_map, again=arguments.again, limit=arguments.limit, keep_scratch=arguments.keep_scratch,
+            seeing=arguments.seeing,
         )
     if command == "train-noise":
         from .noise_model import DEEP_TRAINING_KINDS, bank, dark_noise_bank, deep_pairs, train
