@@ -841,9 +841,12 @@ The variants are:
 ## Losses
 
 - **Noise:** L2 against the independent target, with per-pixel weights from
-  the variance map. Add flux conservation in background boxes and faint-signal
-  boxes, and a penalty on a residual whose power spectrum is not flat, which
-  is the blotchy "worm" texture.
+  the variance map. Add the same weighted error averaged over 4, 8 and 16
+  pixel blocks, each times its side, so that a block's noise weighs as a
+  pixel's does: the per-pixel loss barely feels noise left at those
+  scales, and a model leaves it as the blotchy "worm" texture. A block
+  average of the target is still unbiased. Add flux conservation in
+  background boxes and faint-signal boxes.
 - **PSF:** Charbonnier error against the target. Add multi-scale gradient
   error, per-star aperture flux within three times the FWHM, centroid shift,
   reblur consistency on real images, and an identity loss where the ratio map
@@ -970,6 +973,20 @@ in these ways:
   seed tells whether those come with the map's reading. Given the map as
   it is, the same model put out 1,500–4,900σ̄ on sky, so the model card
   names the reading.
+- **Mottle.** The whole images showed mottle from a few to some tens of
+  pixels across. On real pairs, from f(A) − f(B) against A − B on
+  star-free sky, where signal and gradients cancel, the 41M models took
+  out 86–89% of a 4-frame half's noise at the pixel, but left 44–54% of it
+  smoothed at 4 pixels, 59–72% at 8 and 80–88% at 16; the run reading the
+  map through asinh left the most. In grain the output was as clean as a
+  200-frame stack, in mottle as an 8-frame one, and that mismatch reads as
+  blotches. On the flat sky of noise alone they left 3–7%: with nothing
+  in the frame like signal, a model takes out coarse noise it leaves on a
+  real sky, where faint signal looks like it. A pixel's noise lies mostly
+  at the finest scale, so the per-pixel loss barely feels noise left over
+  8 or 16 pixels. The next runs weigh the error averaged over blocks of
+  those sides as well (see the losses), and every run records the noise
+  it leaves at 4, 8 and 16 pixels on the validation pairs.
 - **Deep halves.** Training on a night's deep stack dealt into two halves,
   a quarter of every batch, taught a model to keep mottle: it left 37% of
   the coarse noise on empty sky. The halves share the night's flats,
@@ -1220,6 +1237,10 @@ Each model also has gates of its own.
 - unbiased MSE against deep stacks;
 - mean residual in background and faint-signal boxes within 0.05σ;
 - a flat residual spectrum;
+- on real pairs' star-free sky, the noise left at 4, 8 and 16 px, from
+  f(A) − f(B) against A − B smoothed at each, within a limit set from the
+  first runs that weigh those scales in the loss, not on a flat sky of
+  noise alone, where a model leaves far less;
 - star flux and FWHM unchanged within 1%;
 - injected Gaussian blobs at 1–3σ keep at least 80% of their amplitude.
 
