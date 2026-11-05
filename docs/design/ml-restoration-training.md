@@ -1032,7 +1032,20 @@ in these ways:
   pixels and cosmic rays its rejection let through, it left 76 over 1σ̄ on
   the Trunk where the run before left 18, spots of 6–7σ̄ coming out as
   dots of 2–3σ̄. Both runs turn the strongest such spots into a small ring
-  rather than taking them out.
+  rather than taking them out. Weighed once, the next run left less still,
+  41%, 60% and 85%, and with the per-pixel loss's share back it had the
+  lowest error on the 4-frame validation halves of any run (2.01 against
+  2.05); no stripes (cores within 5%); no ring around the brightest stars,
+  where the run before the scale loss had one of +7σ̄ eight pixels out;
+  fewer of the sharp spots left than any run on all four images (9% of
+  them on the Trunk, though 25 over 1σ̄ to 19); 85% of the faintest stars'
+  flux on the Trunk; and in the Iris's faint dust 4% more contrast between
+  neighbouring pixels. Its costs are small: 5% more error on 8-frame
+  halves, against clean targets 7% more on mid-brightness signal and 5% on
+  cores, and on the flat sky 2.3% of the finest noise left instead of
+  1.4%. The rewind guard brought it back once, at step 10,750. A weight of
+  one is the recipe from here; the next runs train it twice as long, and
+  at a second seed for the spread between seeds.
 - **Deep halves.** Training on a night's deep stack dealt into two halves,
   a quarter of every batch, taught a model to keep mottle: it left 37% of
   the coarse noise on empty sky. The halves share the night's flats,
