@@ -338,7 +338,17 @@ The manifest decides which sets qualify for which recipe:
   again from their measurements, and `build --pairs-only` builds the noise
   pairs of sets already built, leaving their other products as they are.)
 - **seeing splits** need a FWHM difference of at least 25% between the best
-  and the worst quartile;
+  and the worst quartile, and 32 accepted frames. (On 2026-11-05, 30 of the
+  699 built sets with a flat had one, 26 of them on the C925: a night's
+  quartiles differ by 5% on the median set of 32 frames or more, and by
+  17% on the C925's. The frames' widths are measured as a frame needs,
+  smoothed first, and smoothing widens a narrow star most: Gaussian stars
+  3.5 and 5.9 pixels wide measure 5.5 and 7.0, so the 1.2–2.6″/px
+  astrographs, whose stars are near 3 pixels, measure near 5.6 whatever
+  the seeing, and need 50% or more of real difference to pass. None of the
+  325 sets without a flat spreads 15%, so letting them in would add none;
+  they stay out of sharpening in any case. The multi-night pass judges its
+  pairs on their stacks, measured unsmoothed, as below.)
 - **cross-instrument pairs** need the same object from two focal lengths.
   NGC 7000 is already in the corpus from Askar107PHQ and Radian61.
 
@@ -353,7 +363,7 @@ The manifest decides which sets qualify for which recipe:
 | Starless candidate and star list | catalogue-guided removal on the solved deep stack | star backgrounds, once reviewed |
 | Finished stack | a PSF Guard group stack, copied in, image only | inputs at user depth, reblur loss, catalogue removal, gates |
 | Deep halves | the deep stack's frames dealt alternately into two stacks | noise pairs at a night's whole depth, clean targets |
-| Multi-night deep stack, with variance and coverage, and its halves | every accepted frame of one object, telescope and filter, over all its nights; the halves hold whole nights | references and pairs deeper than any night |
+| Multi-night deep stack, with variance and coverage, its halves and its seeing quarters | every accepted frame of one object, telescope and filter, over all its nights; the halves hold whole nights; the quarters are the best and worst of all its frames by FWHM, each with its measured PSF | references, pairs deeper than any night, PSF pairs |
 
 Cross-instrument pairs are built per object, across sets, once both sets'
 deep stacks exist.
@@ -369,7 +379,9 @@ frame and their frame counts come out near even: pairs at a depth no single
 night reaches. The whole stack is a near-clean reference for the reference
 night's own products, which share its grid. The pass can run on a machine
 that mounts the corpus under another path; the products record the
-manifest's paths.
+manifest's paths. Its seeing quarters are the PSF model's seeing-split
+pairs over many nights; `--seeing` also stacks every object whose frames
+give one, however few its hours.
 
 ### Review
 
@@ -629,6 +641,44 @@ There are four sources:
    model reads its shape as well as its width. Whatever moves with seeing,
    such as airmass, focus drift, wind or haze, is checked per pair:
    background, flux and PSF shape.
+
+   The `multi-night` pass makes these pairs. An object's frames screen it:
+   their quarters' mean widths must differ by 10%, since the frames were
+   measured smoothed. Its stacks decide, measured without smoothing, on
+   the stars found in both. A pair is kept but marked rejected, with the
+   reason, unless the worst half is 25% wider and wider in each ninth of
+   the field (focus or tilt that moved between nights), its stars' axis
+   ratio falls by no more than 0.05 (wind, tracking; seeing is a round
+   blur), its stars' flux in wide apertures and its extended light's in
+   64-pixel block medians differ by one gain within 5% (haze takes light
+   from the cores into halos, which an aperture loses and a block keeps),
+   and its skies differ by one plane within a quarter of the noise of the
+   halves' difference. The gain and the plane are recorded, not rejected,
+   for the trainer to match, as the noise trainer's `--match-flux` does:
+   both are normalization's. Local-background normalization measures each
+   frame's photometric gain in a 5-pixel aperture, which loses more of a
+   wider star, so it brightens frames as their seeing worsens: a synthetic
+   night whose seeing grows from Gaussian σ 1.6 to 3.6 px is scaled from
+   1.01 to 1.66, and the Elephant's Trunk's OIII worst quarter (C925, 9.1
+   px) by 1.7, its noise with it. Its tiles' offsets, medians that a
+   blurred frame's star wings lift, leave its sky a little low, and take
+   back part of the gain where a nebula fills a tile: the Trunk's Ha worst
+   quarter has its stars brightened 2.1 times and its nebula 1.5, which no
+   one gain matches.
+
+   Measured unsmoothed, the six multi-night pairs stacked first differ by
+   12% to 28% on the astrographs and by 43% and 69% on the C925, where
+   their frames' quarters differ by 3.5% to 12% and by 32% and 48%: an
+   astrograph's excess width is multiplied by 2.3 to 3.5, the C925's by
+   1.4. One is kept, the Trunk's OIII (1.43, gain 0.59); three differ by
+   too little, California's OIII loses its stars' roundness (axis ratio
+   0.91 to 0.72), and the Trunk's Ha its flux. Over the 127 objects with
+   two nights or more with a flat (21,638 frames, 1,125 hours), 58 pass
+   the screen, 38 of them on the C925, 15 on Ultracat and 5 on the
+   Redcat61; from those factors about 55 reach 25% on their stacks, 42 in
+   the train split, before the other checks, which turned away two of the
+   first three to reach it. One night's split is still judged on its
+   frames alone.
 3. **Star-rendered real pairs (real, exact for stars).** On a solved stack,
    fit the stars at their Gaia positions, remove them, and render them again
    at `T`. Hybrid seeing-split pairs take their background from the best
