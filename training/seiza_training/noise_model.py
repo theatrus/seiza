@@ -691,13 +691,22 @@ class Rewind:
     batches, so it does not meet the same ones again. With no normalisation,
     weights that blow up can kill the network for good: every channel of one
     block shut, the output a constant and the loss back at the input's own,
-    the gradient too small ever to bring it back. More than `most` rewinds
-    and the run stops."""
+    the gradient too small ever to bring it back.
 
-    def __init__(self, model: torch.nn.Module, optimizer: torch.optim.Optimizer, factor: float, most: int = 6):
+    Each rewind also takes `damping` off the learning rate for the rest of
+    the run (`rate`, the share of the schedule's the run now takes): a run
+    put back at the same rate can blow up again within a window, as one at
+    160,000 steps did. More than `most` rewinds within `within` steps and
+    the run stops; a long run may meet more spikes in all than a short one."""
+
+    def __init__(self, model: torch.nn.Module, optimizer: torch.optim.Optimizer, factor: float, most: int = 6,
+                 within: int = 20_000, damping: float = 0.8):
         self.model, self.optimizer, self.factor, self.most = model, optimizer, factor, most
+        self.within, self.damping = within, damping
         self.lowest = math.inf
         self.count = 0
+        self.rate = 1.0
+        self.recent: list[int] = []
         self.saved: list[tuple[int, dict, dict]] = []
 
     def after(self, step: int, mean: float) -> int | None:
@@ -712,8 +721,11 @@ class Rewind:
         if not self.saved:
             raise RuntimeError(f"the loss was {mean:.4g} at step {step}, before any sound window to go back to")
         self.count += 1
-        if self.count > self.most:
-            raise RuntimeError(f"the loss was {mean:.4g} at step {step}, after {self.most} rewinds")
+        self.recent = [*(back for back in self.recent if back > step - self.within), step]
+        if len(self.recent) > self.most:
+            raise RuntimeError(f"the loss was {mean:.4g} at step {step}, after {self.most} rewinds "
+                               f"within {self.within} steps")
+        self.rate *= self.damping
         back, model_state, optimizer_state = self.saved[0]
         self.model.load_state_dict(model_state)
         # A copy: on the host the optimizer would keep the saved tensors as
@@ -778,7 +790,8 @@ def train(
     `scale_loss` adds the error averaged over blocks of each of its sides,
     `scale_weight` times each, to the loss (see `loss_of`). `rewind` goes
     back two log windows when one's loss is more than that many times the
-    lowest (see `Rewind`; 0: never), and the history records where.
+    lowest, each time at a lower learning rate (see `Rewind`; 0: never),
+    and the history records where.
 
     `extra` is a second bank from `cut_windows`, of other targets for
     their inputs; it makes up `extra_fraction` of every batch, and the run
@@ -862,6 +875,11 @@ def train(
                 norms[1] = torch.maximum(norms[1], norm)
             optimizer.step()
             schedule.step()
+            if guard and guard.rate != 1.0:
+                # The schedule sets each step's rate afresh, so this does
+                # not compound.
+                for group in optimizer.param_groups:
+                    group["lr"] *= guard.rate
             running += loss.detach().float()
             if step % log_every == 0 or step == steps:
                 mean = float(running) / log_every
@@ -910,6 +928,7 @@ def train(
                    "batch_threads": batch_threads, "batch_generator": "per-step",
                    "scale_loss": list(scale_loss), "scale_weight": scale_weight if scale_loss else None,
                    "rewind": rewind, "rewinds": guard.count if guard else 0,
+                   "rewind_rate": guard.rate if guard else 1.0,
                    "extra": {"label": extra_label, "fraction": extra_fraction, "windows": int(len(extra["a"]))}
                    if extra is not None else None},
         "parameters": sum(p.numel() for p in model.parameters()),
