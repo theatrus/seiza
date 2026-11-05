@@ -971,7 +971,20 @@ in these ways:
   soft spots. The remedy to try is training on pairs changed the same
   ways, which a noise pair allows, since one linear change or added sky
   applied to both halves keeps their noise independent, together with the
-  smooth sky taken out before the network reads the image.
+  smooth sky taken out before the network reads the image. Training now
+  offers both. The network can read the image less its smooth sky in
+  training, evaluation and the sheets alike, the sky carried on along its
+  slope past the outer blocks and through their median: the probe's held
+  its edge blocks level and left 3σ of a 50σ gradient in the corners.
+  Tiles can be shifted by a random sub-pixel offset or sharpened by a
+  random unsharp mask, both halves alike and the noise map through the
+  filter's squared weights; inputs can gain a sky plane, which the loss,
+  taking the input back out of its estimate, does not see, so its weights
+  stay on the target's own brightness; and a share of every batch can
+  come from the pairs binned 2 × 2. The first run with them shifts a
+  quarter of the tiles and sharpens a quarter, puts a plane of up to
+  20σ̄ under half, and draws a fifth of each batch binned, on the 342
+  train sets; a second takes the sky out alone.
 - **Whole nights.** On the held-out objects' deep stacks, measured against
   their multi-night stacks, every run kept the faint stars' flux as the
   input had it, within 3%, and the faint texture within 0.01 of the
