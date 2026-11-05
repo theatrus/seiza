@@ -74,10 +74,11 @@ MINIMUM_HOURS = 10.0
 # An object's frames are worth a seeing pair when there are a night's
 # split's worth of them (`SEEING_SPLIT_FRAMES`) and their worst quarter's
 # mean FWHM exceeds their best's by this much. The frames' widths were
-# measured smoothed (see `STACK_DETECTION`), which halves a narrow star's
-# excess width: four multi-night pairs whose frames' quarters differ by
-# 4.8%, 6.2%, 12% and 32% have stacks that differ by 10%, 14%, 23% and
-# 44%. So the frames only screen; the stacks, measured unsmoothed, decide.
+# measured smoothed (see `STACK_DETECTION`), which shrinks a narrow star's
+# excess width most: the first six multi-night pairs' frames' quarters
+# differ by 3.5% to 12% on 1.2–1.5″/px astrographs and by 32% and 48% on
+# the C925, and their stacks by 12% to 28%, and 43% and 69%. So the frames
+# only screen; the stacks, measured unsmoothed, decide.
 SEEING_SCREEN_SPREAD = 0.10
 
 # A seeing pair teaches sharpening only where its halves differ in the PSF
@@ -101,16 +102,19 @@ SEEING_SCREEN_SPREAD = 0.10
 #   apertures, and the extended light's, the medians of the
 #   `SEEING_BLOCK_PX` blocks the best half puts `SEEING_BRIGHT` times its
 #   noise above its sky (a median leaves out the stars). A gain alone is
-#   recorded, not rejected: it is normalization's, which scaled one C925
-#   object's best quarter to 0.58 of its worst, and its noise with it;
+#   recorded, not rejected, for a trainer to match: it is normalization's,
+#   whose photometric gain, measured in a 5-pixel aperture that loses more
+#   of a wider star, brightens a frame as its seeing worsens. It brightened
+#   one C925 object's worst quarter 1.7 times, and its noise with it;
 # - their skies differ by one plane: on the fainter half of the blocks,
 #   their medians less a plane fitted to each half's differ, in nine of
 #   ten blocks, by no more than a noise pair's backgrounds may
 #   (`PAIR_BACKGROUND_TOLERANCE` of the noise of the halves' difference):
 #   a glow in one corner, or a gradient no plane follows. The planes'
 #   difference, at the centre and at the furthest corner, is recorded, as
-#   the gain is, for a trainer to match: normalization leaves one of a
-#   blurred frame's sky, whose star wings lift the median it matches.
+#   the gain is, for a trainer to match: normalization leaves a blurred
+#   frame's sky a little low, its star wings lifting the medians it
+#   matches.
 SEEING_MATCH_PX = 2.0
 SEEING_STARS = 30
 SEEING_FIELD = 3

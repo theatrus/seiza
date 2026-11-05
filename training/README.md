@@ -87,6 +87,24 @@ python -m seiza_training --store STORE status
    `python -m seiza_training --store STORE decide SUBJECT KIND accept|reject --reviewer NAME`,
    where `KIND` is `set` or `starless`.
 
+`multi-night` stacks an object again over all its nights with a flat,
+from the corpus's own frames: one stacker registers every night onto the
+deepest night's reference, calibrating each with its own masters, and
+integrates the whole, its two halves of whole nights, and its seeing
+quarters. By default it takes the objects with 10 hours of accepted
+frames; `--seeing` also takes every object whose frames screen it for a
+seeing pair, however few its hours, and `--list` lists the objects, their
+hours and their spread of seeing. `--source-map FROM=TO` reads frames and
+masters under another mount; the products record the manifest's paths.
+`--check-seeing` judges the seeing pairs already made again from their
+files, and stacks nothing.
+
+```sh
+python -m seiza_training --store STORE multi-night --list
+python -m seiza_training --store STORE --scratch LOCAL multi-night --seeing --source-map CORPUS=MOUNT
+python -m seiza_training --store STORE multi-night --check-seeing
+```
+
 ## Products
 
 Per set, under `STORE/products/<set id>/`:
@@ -100,6 +118,15 @@ Per set, under `STORE/products/<set id>/`:
 A finished stack's image is under `STORE/products/psf-guard/<database>/<job>/<group>/stack/`,
 as `image.npy` alone: PSF Guard keeps no variance or coverage beside it.
 
+Per object stacked over its nights, under `STORE/products/multi-night/<key>/`,
+recorded under its deepest night's set:
+
+| Directory | Contents |
+|---|---|
+| `stack/` | every clear admitted frame of every night |
+| `half-a/`, `half-b/` | the nights dealt into two halves of near-even frame counts |
+| `seeing/{best,worst}/` | the best and worst quarter of all its frames by FWHM, at matched counts |
+
 Each stack directory holds `image.npy` and `variance.npy` (float32),
 `coverage.npy` and `rejected.npy` (uint16), as `(height, width)` or
 `(channels, height, width)`, so a loader memory-maps them and reads patches
@@ -109,6 +136,18 @@ at random. The deep stack and the seeing quarters are also written as
 A noise pair whose halves' mean FWHM differs by more than 10%, or whose
 backgrounds differ by more than a quarter of the noise of their difference,
 is kept but marked `rejected`, with the reason and the measurements.
+
+An object gets seeing quarters when it has 32 accepted frames whose worst
+quarter's mean FWHM is 10% wider than their best's. The frames were
+measured smoothed, which halves a narrow star's excess width, so the
+quarters' stacks decide: each is measured without smoothing, on the
+stars found in both, and the pair is kept but marked `rejected` unless
+the worst is 25% wider overall and wider in every ninth of the field, its
+stars' axis ratio falls by at most 0.05, its stars' and its extended
+light's flux differ from the best's by one gain within 5%, and its sky
+differs by one plane within a quarter of the noise of their difference.
+The gain, the plane and each half's frame widths are recorded for the
+trainer, which matches the gain and the plane before comparing the halves.
 
 ## The manifest
 
