@@ -65,12 +65,17 @@ def star_field(rng: np.random.Generator, sigma: float, shift: tuple[float, float
     return image + rng.normal(0.0, 8.0, image.shape)
 
 
-def build_corpus(root: Path, *, nights: int = 1) -> Path:
+def build_corpus(root: Path, *, nights: int = 1, vignetted: bool = False) -> Path:
     """Write the corpus under `root`: `telescopes/` for `--corpus`,
     `library/` for `--library`, and an empty `catalogs/` for
     `--catalog-dir`; `nights` nights of the one object, a day apart, each
-    pointed a little differently. Returns `root`."""
+    pointed a little differently. The flat is dimmer toward the corners;
+    `vignetted` lights are too, as real ones are, so their calibrated sky
+    is flat, where otherwise it rises toward the corners. Returns
+    `root`."""
     rng = np.random.default_rng(5)
+    yy, xx = np.mgrid[0:HEIGHT, 0:WIDTH]
+    vignette = 1.0 - 0.2 * (((xx - WIDTH / 2) / WIDTH) ** 2 + ((yy - HEIGHT / 2) / HEIGHT) ** 2)
     for night in range(nights):
         started = START + timedelta(days=night)
         lights = root / LIGHTS / (started - timedelta(hours=12)).strftime("%Y-%m-%d") / "LIGHT"
@@ -85,7 +90,8 @@ def build_corpus(root: Path, *, nights: int = 1) -> Path:
             # Seeing worsens through the night.
             sigma = 1.6 + 2.0 * index / (FRAMES - 1)
             shift = (pointing[0] + rng.uniform(-3, 3), pointing[1] + rng.uniform(-3, 3))
-            write(lights / f"light_{index:03d}.fits", star_field(rng, sigma, shift) + 30.0, header)
+            field = star_field(rng, sigma, shift)
+            write(lights / f"light_{index:03d}.fits", (field * vignette if vignetted else field) + 30.0, header)
 
     raw = root / "raw"
     bias_paths, flat_paths = [], []
@@ -94,8 +100,6 @@ def build_corpus(root: Path, *, nights: int = 1) -> Path:
         path = raw / f"bias_{index}.fits"
         write(path, 30.0 + rng.normal(0, 3, (HEIGHT, WIDTH)), header)
         bias_paths.append(path)
-    yy, xx = np.mgrid[0:HEIGHT, 0:WIDTH]
-    vignette = 1.0 - 0.2 * (((xx - WIDTH / 2) / WIDTH) ** 2 + ((yy - HEIGHT / 2) / HEIGHT) ** 2)
     for index in range(5):
         header = common_header("FLAT", START - timedelta(hours=1, minutes=index), 1.0)
         header["FILTER"] = "L"
