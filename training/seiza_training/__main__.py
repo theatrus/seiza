@@ -144,6 +144,21 @@ def main(argv: list[str] | None = None) -> int:
                             "lowest so far, or not finite, so weights that blow up do not kill the network "
                             "(0: never; 2 catches a collapse, not the loss's ordinary swings); each rewind "
                             "takes a fifth off the learning rate for the rest of the run")
+    train.add_argument("--sky", choices=("global", "flat"), default="global",
+                       help="read the image less one background for the whole frame, or less its smooth sky "
+                            "first (medians over 256-pixel blocks), so a gradient does not read as signal")
+    train.add_argument("--resample", type=float, default=0.0,
+                       help="shift this share of the tiles by a sub-pixel offset through Lanczos-3, both halves "
+                            "and the noise map alike")
+    train.add_argument("--sharpen", type=float, default=0.0,
+                       help="sharpen this share of the tiles by an unsharp mask, both halves and the noise map "
+                            "alike")
+    train.add_argument("--gradient", type=float, default=0.0,
+                       help="put a sky plane under half the input tiles, offset up to this many σ̄ and tilted "
+                            "up to half of it across the tile")
+    train.add_argument("--bin-fraction", type=float, default=0.0,
+                       help="this share of every batch from the pairs binned 2 × 2, whose stars are half as "
+                            "wide")
 
     sheet = commands.add_parser("sheet-noise", help="make a trained noise model's contact sheets")
     sheet.add_argument("--name", required=True)
@@ -271,13 +286,14 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
             if not chosen:
                 raise SystemExit("no built deep-stack halves in the train split")
             extra = {
-                "extra": bank(store, chosen, seed=arguments.seed, noise_map=arguments.noise_map),
+                "extra": bank(store, chosen, seed=arguments.seed, noise_map=arguments.noise_map, sky=arguments.sky),
                 "extra_fraction": arguments.deep_fraction,
                 "extra_label": "deep",
             }
         if arguments.dark_noise_fraction:
             extra = {
-                "extra": dark_noise_bank(store, manifest, sets=only, seed=arguments.seed, noise_map=arguments.noise_map),
+                "extra": dark_noise_bank(store, manifest, sets=only, seed=arguments.seed, noise_map=arguments.noise_map,
+                                         sky=arguments.sky),
                 "extra_fraction": arguments.dark_noise_fraction,
                 "extra_label": "dark-noise",
             }
@@ -295,7 +311,8 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
             agree=arguments.agree, outlier_scale=arguments.outlier_scale, noise_plane=arguments.noise_plane,
             scale_loss=arguments.scale_loss, scale_weight=arguments.scale_weight, rewind=arguments.rewind,
             precision=arguments.precision, prefetch=arguments.prefetch, batch_threads=arguments.batch_threads,
-            **extra,
+            sky=arguments.sky, resample=arguments.resample, sharpen=arguments.sharpen, gradient=arguments.gradient,
+            bin_fraction=arguments.bin_fraction, **extra,
         )
         return {**record, "sheets": render_saved(store, manifest, arguments.name)}
     if command == "sheet-noise":

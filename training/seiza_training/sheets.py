@@ -54,7 +54,7 @@ from typing import Any
 import numpy as np
 
 from .manifest import Manifest, loads
-from .noise_model import NoiseBands, denoiser, device, load_half, load_run, modelled_sigma, network_input, scales
+from .noise_model import NoiseBands, denoiser, device, load_half, load_run, modelled_sigma, view
 from .store import Store, write_png
 from .tiles import infer
 from .unet import ResidualUNet
@@ -141,8 +141,8 @@ def render(
     image, sigma = load_half(store, source)
     if record["config"].get("noise_map", "raw") == "model":
         sigma = modelled_sigma(image, sigma, np.load(store.root / loads(source["files"])["coverage"]))
-    background, noise = scales(image, sigma)
-    planes = network_input(image, sigma, background, noise, record["config"].get("noise_plane", "linear"))
+    planes, background, noise = view(image, sigma, sky=record["config"].get("sky", "global"),
+                                     noise_plane=record["config"].get("noise_plane", "linear"))
     run = denoiser(model, background, noise, device())
     reference = load_half(store, reference_product, noise_map=False)[0] if reference_product else None
     look = stretch(reference if reference is not None else image)

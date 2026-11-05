@@ -123,7 +123,7 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
         "--precision", "bf16", "--prefetch", "2", "--batch-threads", "2", "--deep-fraction", "0.5",
         "--outliers", "2", "--outlier-floor", "10", "--clip-grad", "1", "--match-flux", "--agree", "0.9",
         "--outlier-scale", "local", "--noise-plane", "asinh", "--scale-loss", "4,8", "--scale-weight", "0.5",
-        "--rewind", "2")
+        "--rewind", "2", "--sky", "flat", "--resample", "0.3", "--sharpen", "0.3", "--gradient", "10")
     record = json.loads((store / "models" / "noise" / "smoke" / "run.json").read_text())
     assert record["config"]["scale_loss"] == [4, 8] and record["config"]["scale_weight"] == 0.5
     assert record["config"]["rewind"] == 2 and record["config"]["rewinds"] == 0
@@ -135,6 +135,9 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
     assert record["config"]["agree"] == 0.9 and record["config"]["pairs_dropped"] == []
     assert record["config"]["outlier_scale"] == "local"
     assert record["config"]["noise_plane"] == "asinh"
+    assert record["config"]["sky"] == "flat" and record["config"]["gradient"] == 10
+    assert record["config"]["resample"] == 0.3 and record["config"]["sharpen"] == 0.3
+    assert record["config"]["bin_fraction"] == 0 and record["config"]["binned_windows"] is None
     assert all(entry["grad_norm_max"] > 0 and entry["grad_norm_mean"] > 0 for entry in record["history"])
     assert record["export"]["max_relative_error"] < 1e-4
     assert record["inference"]["margin"] == reach(3) and record["inference"]["multiple"] == 4
@@ -170,6 +173,11 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
     assert len(strict["a"]) == 0 and sorted(strict["dropped"]) == sorted(p["a"]["id"] for p in chosen)
     with pytest.raises(ValueError, match="match_flux"):
         bank(Store(store, tmp_path / "scratch"), chosen, agree=0.1)
+    # Binned, the synthetic images are smaller than a window.
+    with pytest.raises(RuntimeError, match="binned bank holds no window"):
+        run("train-noise", "--name", "binned", "--steps", "2", "--width", "4", "--levels", "3", "--tile", "64",
+            "--batch", "4", "--bin-fraction", "0.5")
+    assert len(bank(Store(store, tmp_path / "scratch"), chosen, binned_windows=4)["binned"]["a"]) == 0
 
     # Contact sheets: one against a deeper reference, with its whole image at
     # full size and a baseline (the deep stack stands in for one; a second
@@ -516,6 +524,114 @@ def test_outliers_reach_the_input_and_not_the_target():
         planted, noisier = references[0, 0].abs(), sigmas[0, 0] > 5
         ratio = float(planted[noisier].max() / planted[~noisier].max())
         assert low < ratio < high, (scale, ratio)
+
+
+def test_the_smooth_sky_takes_out_a_gradient_and_keeps_the_level():
+    from seiza_training.noise_model import seen, smooth_sky, view
+
+    rng = np.random.default_rng(8)
+    yy, xx = np.mgrid[0:1024, 0:1536].astype(np.float32)
+    # A gradient of 50σ across the frame, and stars, one wide enough to
+    # fill most of a block.
+    gradient = 0.05 * xx + 0.02 * yy
+    image = 100.0 + gradient + rng.normal(0.0, 2.0, xx.shape).astype(np.float32)
+    for y, x, flux, width in ((300, 400, 2e5, 2.0), (700, 1100, 5e4, 1.5), (520, 760, 4e7, 60.0)):
+        image += flux / (2 * np.pi * width**2) * np.exp(-((xx - x) ** 2 + (yy - y) ** 2) / (2 * width**2))
+    flat = seen(image, "flat")
+    # The sky's level is kept (the wide star lifts the image's own median).
+    assert abs(np.median(flat) - (100.0 + np.median(gradient))) < 2.0
+    # What is left of the gradient is under the noise, to the corners.
+    left = flat - (image - gradient)
+    for corner in (left[:64, :64], left[:64, -64:], left[-64:, :64], left[-64:, -64:]):
+        assert abs(np.median(corner) - np.median(left)) < 1.0
+    assert np.ptp(smooth_sky(image)) > 80
+    # The stars stay.
+    assert flat[300, 400] - np.median(flat) > 0.9 * (image[300, 400] - np.median(image))
+    sigma = np.full_like(image, 2.0)
+    planes, background, noise = view(image, sigma, sky="flat", noise_plane="asinh")
+    assert noise == 2.0 and abs(background - np.median(flat)) < 0.5
+    global_planes, global_background, _ = view(image, sigma, noise_plane="asinh")
+    assert global_background == pytest.approx(np.median(image), abs=0.5)
+    assert np.abs(global_planes[0, :, -64:]).mean() > 2 * np.abs(planes[0, :, -64:]).mean()
+    # A frame smaller than a block is one block: nothing to take out.
+    assert not smooth_sky(image[:200, :300]).any()
+
+
+def test_binned_halves_keep_their_noise_and_the_map_follows(tmp_path):
+    from seiza_training.noise_model import WINDOW, Windows, binned_pair, scales
+    from seiza_training.store import Store
+
+    rng = np.random.default_rng(9)
+    shape = (4 * WINDOW, 4 * WINDOW + 200)
+    sigma = np.where(np.arange(shape[1]) < shape[1] // 2, 2.0, 4.0)[None, :] * np.ones(shape, dtype=np.float32)
+    a = (50.0 + sigma * rng.normal(size=shape)).astype(np.float32)
+    b = (50.0 + sigma * rng.normal(size=shape)).astype(np.float32)
+    a[:3, :3] = np.nan
+    small_a, small_sigma, small_b = binned_pair(a, sigma, b)
+    assert small_a.shape == (shape[0] // 2, shape[1] // 2) and np.isnan(small_a[:2, :2]).all()
+    assert np.isfinite(small_a[2:, 2:]).all() and np.isfinite(small_a[:2, 2:]).all()
+    # The binned noise is what the binned map says, and the halves' stays
+    # independent.
+    for half in (slice(None, shape[1] // 4 - 10), slice(shape[1] // 4 + 10, None)):
+        spread = float(np.std(small_a[2:, half] - small_b[2:, half])) / np.sqrt(2)
+        assert spread == pytest.approx(float(np.median(small_sigma[2:, half])), rel=0.03)
+    assert np.allclose(small_sigma[:, :shape[1] // 4], 1.0) and np.allclose(small_sigma[:, shape[1] // 4:], 2.0)
+    store = Store(tmp_path / "store", tmp_path / "scratch")
+    windows = Windows(store, "binned", sources=1, per_source=3)
+    windows.add(small_a, small_sigma, small_b)
+    banked = windows.finish()
+    assert len(banked["a"]) == 3 and banked["noise"][0] == scales(small_a, small_sigma)[1]
+    # Finished, it is read back as it was.
+    again = Windows(store, "binned", sources=1, per_source=3)
+    assert again.done and np.array_equal(again.finish()["a"], banked["a"])
+
+
+def test_shifted_and_sharpened_tiles_change_both_halves_alike_and_the_map_follows():
+    from seiza_training.noise_model import WINDOW, batch_from
+
+    rng = np.random.default_rng(3)
+    noisy = (100.0 + rng.normal(0.0, 2.0, (4, WINDOW, WINDOW))).astype(np.float32)
+    banked = {"a": noisy, "sigma": np.full_like(noisy, 2.0), "b": noisy.copy(),
+              "background": np.full(4, 100.0, dtype=np.float32), "noise": np.full(4, 2.0, dtype=np.float32)}
+
+    def neighbours(planes: torch.Tensor) -> float:
+        return float((planes[..., 1:] * planes[..., :-1]).mean() / planes.var())
+
+    assert abs(neighbours(batch_from(banked, 6, 128, np.random.default_rng(4))[2])) < 0.01
+    for change in ("resample", "sharpen"):
+        inputs, targets, references, sigmas = batch_from(banked, 6, 128, np.random.default_rng(4), **{change: 1.0})
+        assert inputs.dtype == targets.dtype == sigmas.dtype == torch.float32
+        # The halves were the same, and are changed alike.
+        assert torch.allclose(targets, references)
+        # In units of the tile's own σ̄, which follows the change, the noise
+        # is what the map says.
+        spread = references.std(dim=(2, 3)).flatten()
+        assert torch.allclose(spread, sigmas.mean(dim=(2, 3)).flatten(), rtol=0.04), (change, spread)
+        assert torch.allclose(spread, torch.ones_like(spread), rtol=0.04), (change, spread)
+        # Resampled noise is smoother, sharpened noise rougher.
+        if change == "resample":
+            assert neighbours(references) > 0.05
+        else:
+            assert neighbours(references) < -0.02
+
+
+def test_a_sky_plane_reaches_the_input_alone():
+    from seiza_training.noise_model import WINDOW, batch_from
+
+    flat = np.full((2, WINDOW, WINDOW), 100.0, dtype=np.float32)
+    banked = {"a": flat, "sigma": np.full_like(flat, 2.0), "b": flat,
+              "background": np.array([100.0, 100.0], dtype=np.float32),
+              "noise": np.array([2.0, 2.0], dtype=np.float32)}
+    inputs, targets, references, _ = batch_from(banked, 32, 64, np.random.default_rng(5), gradient=20)
+    assert not targets.any() and not references.any()
+    planes = torch.sinh(inputs[:, 0].double())
+    tilted = planes.abs().amax(dim=(1, 2)) > 0
+    assert 6 < int(tilted.sum()) < 26
+    assert float(planes.abs().amax()) < 20 + 10
+    # Each is a plane.
+    for curvature in (planes[:, 2:] - 2 * planes[:, 1:-1] + planes[:, :-2],
+                      planes[:, :, 2:] - 2 * planes[:, :, 1:-1] + planes[:, :, :-2]):
+        assert float(curvature.abs().max()) < 1e-3
 
 
 def test_signal_transfer_keeps_the_input_whole_and_falls_as_an_estimate_smooths():

@@ -10,6 +10,11 @@ is the image's median and `σ̄` its median noise, both of the whole image so
 that no tile has statistics of its own. It returns a residual in units of
 `σ̄`; the loss is taken in linear units, scaled by `σ̄`, with bright star
 cores weighted down, since the halves' seeing differs a little there.
+With `sky` "flat", the network reads the image less its smooth sky
+(`smooth_sky`) instead: one background for the whole image leaves a
+gradient's far side well above it, where a model reads the sky as signal and
+leaves its coarse noise, or adds to it. The residual is added to the image
+as it was, so the sky taken out comes back.
 
 Training reads overlapping tiles from a tile bank: windows cut once from
 each pair on an overlapping grid and cached on local disk, from which each
@@ -36,6 +41,14 @@ synthetic ones to each input tile, resampled as registration resamples a
 frame, while the target keeps none, so the network learns to remove them;
 the empty sky, with outliers planted in it, measures how much of them a
 model leaves.
+
+Training can also change both halves of a pair alike, which keeps their
+noise independent, so the network meets images the pairs do not hold:
+tiles shifted by a sub-pixel offset through Lanczos-3, or sharpened by an
+unsharp mask, the noise map carried through the filter; a sky plane under
+the input; and a share of every batch from the pairs binned 2 × 2, whose
+stars are half as many pixels wide. Models trained without them lost faint
+stars in binned and sharpened images.
 
 Taking out all the noise a model finds gives the least error against a
 clean target but looks smooth and flat; an image keeps some. `NoiseBands`
@@ -78,6 +91,8 @@ from .unet import ResidualUNet, reach, receptive_field
 
 WINDOW = 320
 WINDOWS_PER_HALF = 40
+# Of a pair binned 2 × 2, a quarter of the pixels, a quarter as many.
+BINNED_WINDOWS = WINDOWS_PER_HALF // 4
 # Pixels this many σ̄ above the background are star cores, weighted down.
 CORE_SIGMA = 50.0
 
@@ -128,12 +143,30 @@ def load_half(
     return image, sigma
 
 
-def upsample(grid: np.ndarray, height: int, width: int, block: int) -> np.ndarray:
+def extended(grid: np.ndarray) -> np.ndarray:
+    """A grid with one more value on each side, carried on along the slope
+    from the edge's neighbour, or repeated along a side one value long."""
+    for axis in (0, 1):
+        ends = [(0, 0), (0, 0)]
+        ends[axis] = (1, 1)
+        if grid.shape[axis] > 1:
+            grid = np.pad(grid, ends, mode="reflect", reflect_type="odd")
+        else:
+            grid = np.pad(grid, ends, mode="edge")
+    return grid
+
+
+def upsample(grid: np.ndarray, height: int, width: int, block: int, *, extrapolate: bool = False) -> np.ndarray:
     """A grid of block values, one per `block` × `block` pixels, spread
-    bilinearly over `height` × `width` pixels."""
+    bilinearly over `height` × `width` pixels: past the outer blocks'
+    centres held at theirs, or with `extrapolate` carried on along the
+    slope from the next blocks in."""
+    offset = 0
+    if extrapolate:
+        grid, offset = extended(grid), 1
     rows, columns = grid.shape
-    ys = np.clip((np.arange(height, dtype=np.float32) + 0.5) / block - 0.5, 0, rows - 1)
-    xs = np.clip((np.arange(width, dtype=np.float32) + 0.5) / block - 0.5, 0, columns - 1)
+    ys = np.clip((np.arange(height, dtype=np.float32) + 0.5) / block - 0.5 + offset, 0, rows - 1)
+    xs = np.clip((np.arange(width, dtype=np.float32) + 0.5) / block - 0.5 + offset, 0, columns - 1)
     y0, x0 = np.floor(ys).astype(int), np.floor(xs).astype(int)
     y1, x1 = np.minimum(y0 + 1, rows - 1), np.minimum(x0 + 1, columns - 1)
     wy, wx = (ys - y0)[:, None], (xs - x0)[None, :]
@@ -294,17 +327,91 @@ def network_input(
     return np.stack([x, s]).astype(np.float32)
 
 
+# How the network reads the sky: less the one background of the whole
+# image, or less the image's smooth sky first.
+SKIES = ("global", "flat")
+# The side of the blocks whose medians make the smooth sky.
+FLAT_BLOCK = 256
+
+
+def smooth_sky(image: np.ndarray) -> np.ndarray:
+    """The slow change of an image's sky, less its own median, so that the
+    image less it keeps its level: medians over `FLAT_BLOCK`-pixel blocks
+    (one block where the image is smaller), a 3 × 3 median over those
+    against a star or a knot that fills a block, spread back bilinearly and
+    carried on past the outer blocks' centres, as a gradient is."""
+    height, width = image.shape
+    block = min(FLAT_BLOCK, height, width)
+    rows, columns = height // block, width // block
+    blocks = image[: rows * block, : columns * block].reshape(rows, block, columns, block)
+    with warnings.catch_warnings():
+        # A block wholly outside the coverage is NaN.
+        warnings.simplefilter("ignore", RuntimeWarning)
+        grid = np.nanmedian(blocks, axis=(1, 3))
+    grid = np.where(np.isfinite(grid), grid, np.nanmedian(grid))
+    # Carried on past the edge, so that a gradient's edge blocks keep their
+    # values through the median.
+    padded = extended(grid)
+    grid = np.median(np.stack([padded[1 + dy:1 + dy + rows, 1 + dx:1 + dx + columns]
+                               for dy in (-1, 0, 1) for dx in (-1, 0, 1)]), axis=0)
+    return upsample(grid - float(np.median(grid)), height, width, block, extrapolate=True)
+
+
+def seen(image: np.ndarray, sky: str = "global") -> np.ndarray:
+    """The image the network reads: with `sky` "flat", less its smooth sky."""
+    return image - smooth_sky(image) if sky == "flat" else image
+
+
+def view(
+    image: np.ndarray, sigma: np.ndarray, *, sky: str = "global", noise_plane: str = "linear"
+) -> tuple[np.ndarray, float, float]:
+    """The planes the network reads of a whole image, as `sky` and
+    `noise_plane` say, with the background and median noise they are in
+    units of; the residual it returns is added to the image as it is."""
+    looked = seen(image, sky)
+    background, noise = scales(looked, sigma)
+    return network_input(looked, sigma, background, noise, noise_plane), background, noise
+
+
+def flattened(image_a: np.ndarray, sigma_a: np.ndarray, image_b: np.ndarray,
+              sky: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """A pair's halves as the network reads them: with `sky` "flat", both
+    less A's smooth sky, so the target moves with the input."""
+    if sky != "flat":
+        return image_a, sigma_a, image_b
+    smooth = smooth_sky(image_a)
+    return image_a - smooth, sigma_a, image_b - smooth
+
+
+def binned_pair(image_a: np.ndarray, sigma_a: np.ndarray,
+                image_b: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """A pair's halves binned 2 × 2, each pixel the mean of its block, and
+    A's noise map that mean's noise; NaN where any of a block is."""
+    height, width = image_a.shape[0] // 2 * 2, image_a.shape[1] // 2 * 2
+
+    def mean(plane: np.ndarray) -> np.ndarray:
+        return plane[:height, :width].reshape(height // 2, 2, width // 2, 2).mean(axis=(1, 3), dtype=np.float32)
+
+    return mean(image_a), np.sqrt(mean(sigma_a.astype(np.float32) ** 2)) / 2, mean(image_b)
+
+
 def bank(
     store: Store, chosen: list[dict[str, Any]], *, seed: int = 0, noise_map: str = "raw", match_flux: bool = False,
-    agree: float | None = None,
+    agree: float | None = None, sky: str = "global", binned_windows: int = 0,
 ) -> dict[str, Any]:
     """Windows of every pair: A's image and noise map, and B's image, with
     `match_flux` first `matched` to A's. With `agree` too, a pair whose
     matched halves `disagree` by more than that is left out; the ids left
-    out are under "dropped". Cached by the pairs, the seed, the kind of
-    noise map, the matching and the agreement asked for."""
+    out are under "dropped". With `sky` "flat", both halves are less A's
+    smooth sky (`flattened`). With `binned_windows`, up to that many
+    windows of each pair `binned_pair` 2 × 2, its sky taken out after, are
+    cut in the same pass into a bank of their own, under "binned". Cached
+    by the pairs, the seed, the kind of noise map, the matching, the
+    agreement and the sky asked for."""
     if agree is not None and not match_flux:
         raise ValueError("agreement is judged on matched halves: ask for match_flux too")
+    if sky not in SKIES:
+        raise ValueError(f"sky is one of {SKIES}, not {sky!r}")
     parts = [p["a"]["id"] for p in chosen] + [seed, WINDOW, WINDOWS_PER_HALF]
     if noise_map != "raw":
         parts.append(f"map-{noise_map}")
@@ -313,10 +420,17 @@ def bank(
         parts.append("match-flux-2")
     if agree is not None:
         parts.append(f"agree-{agree:g}")
-    key = hashlib.sha256(json.dumps(parts).encode()).hexdigest()[:16]
-    record = store.scratch / "tiles" / f"noise-{key}" / "dropped.json"
+    if sky != "global":
+        parts.append(f"sky-{sky}")
 
-    def halves():
+    def named(parts: list[Any]) -> str:
+        return "noise-" + hashlib.sha256(json.dumps(parts).encode()).hexdigest()[:16]
+
+    whole = Windows(store, named(parts), sources=len(chosen), seed=seed)
+    binned = Windows(store, named([*parts, "binned-2", binned_windows]), sources=len(chosen), seed=seed,
+                     per_source=binned_windows) if binned_windows else None
+    record = whole.directory / "dropped.json"
+    if not (whole.done and (binned is None or binned.done)):
         dropped = []
         for pair in chosen:
             image_a, sigma_a = load_half(store, pair["a"], modelled=noise_map == "model")
@@ -327,12 +441,16 @@ def bank(
                 if agree is not None and disagree(agreement(image_a, image_b, noise), agree):
                     dropped.append(pair["a"]["id"])
                     continue
-            yield image_a, sigma_a, image_b
-        # Before cut_windows marks the bank done.
+            if not whole.done:
+                whole.add(*flattened(image_a, sigma_a, image_b, sky))
+            if binned is not None and not binned.done:
+                binned.add(*flattened(*binned_pair(image_a, sigma_a, image_b), sky))
+        # Before the banks are marked done.
         record.write_text(json.dumps(dropped))
-
-    banked = cut_windows(store, f"noise-{key}", halves(), sources=len(chosen), seed=seed)
+    banked = whole.finish()
     banked["dropped"] = json.loads(record.read_text()) if record.exists() else []
+    if binned is not None:
+        banked["binned"] = binned.finish()
     return banked
 
 
@@ -354,26 +472,95 @@ def deep_pairs(
 
 
 def dark_noise_bank(
-    store: Store, manifest: Manifest, *, sets: set[str] | None = None, seed: int = 0, noise_map: str = "raw"
+    store: Store, manifest: Manifest, *, sets: set[str] | None = None, seed: int = 0, noise_map: str = "raw",
+    sky: str = "global",
 ) -> dict[str, np.ndarray]:
     """Windows of the train split's dark-noise pairs: the input, its noise
-    map and the deep stack it was made from, as `cut_windows` cuts them."""
+    map and the deep stack it was made from, as `cut_windows` cuts them,
+    with `sky` "flat" both less the input's smooth sky."""
     chosen = dark_noise.pairs(manifest, "train", sets)
     if not chosen:
         raise RuntimeError("no built dark-noise pairs in the train split")
     parts = ["dark-noise"] + [p["input"]["id"] for p in chosen] + [seed, WINDOW, WINDOWS_PER_HALF, noise_map]
+    if sky != "global":
+        parts.append(f"sky-{sky}")
     key = hashlib.sha256(json.dumps(parts).encode()).hexdigest()[:16]
 
     def images():
         for pair in chosen:
             image, sigma = load_half(store, pair["input"], modelled=noise_map == "model")
             target, _ = load_half(store, pair["target"], noise_map=False)
-            yield image, sigma, target
+            yield flattened(image, sigma, target, sky)
 
     return cut_windows(store, f"dark-noise-{key}", images(), sources=len(chosen), seed=seed)
 
 
 BANK_PLANES = ("a", "sigma", "b")
+
+
+class Windows:
+    """A bank being cut, as `cut_windows` cuts it, one source at a time, so
+    that one pass over the pairs can fill more than one: at most
+    `per_source` windows of each, `sources` in all. `done` says the bank
+    was finished before, and then `add` is not called."""
+
+    def __init__(self, store: Store, name: str, *, sources: int, seed: int = 0,
+                 per_source: int = WINDOWS_PER_HALF) -> None:
+        self.directory = store.scratch / "tiles" / name
+        self.done = (self.directory / "done.json").exists()
+        self.sources, self.per_source = sources, per_source
+        self.rng = random.Random(seed)
+        self.background: list[float] = []
+        self.noise: list[float] = []
+        self.count = 0
+        self.capacity = max(1, sources * per_source)
+        if self.done:
+            return
+        self.directory.mkdir(parents=True, exist_ok=True)
+        self.planes = {
+            plane: np.lib.format.open_memmap(self.directory / f"{plane}.npy", mode="w+", dtype=np.float32,
+                                             shape=(self.capacity, WINDOW, WINDOW))
+            for plane in BANK_PLANES
+        }
+
+    def add(self, image_a: np.ndarray, sigma_a: np.ndarray, image_b: np.ndarray) -> None:
+        """Cut the windows of one `(image, noise map, target)`."""
+        b, s = scales(image_a, sigma_a)
+        height, width = image_a.shape
+        step = WINDOW // 2
+        grid = [(y, x) for y in range(0, height - WINDOW, step) for x in range(0, width - WINDOW, step)]
+        self.rng.shuffle(grid)
+        kept = 0
+        for y, x in grid:
+            window_a = image_a[y:y + WINDOW, x:x + WINDOW]
+            window_b = image_b[y:y + WINDOW, x:x + WINDOW]
+            if not (np.isfinite(window_a).all() and np.isfinite(window_b).all()):
+                continue
+            if self.count == self.capacity:
+                break
+            self.planes["a"][self.count] = window_a
+            self.planes["sigma"][self.count] = sigma_a[y:y + WINDOW, x:x + WINDOW]
+            self.planes["b"][self.count] = window_b
+            self.background.append(b)
+            self.noise.append(s)
+            self.count += 1
+            kept += 1
+            if kept == self.per_source:
+                break
+
+    def finish(self) -> dict[str, np.ndarray]:
+        """The bank's planes, as `open_bank` reads them, marked done."""
+        done = self.directory / "done.json"
+        if self.done:
+            return open_bank(self.directory, json.loads(done.read_text())["windows"])
+        for plane in self.planes.values():
+            plane.flush()
+        del self.planes
+        np.save(self.directory / "background.npy", np.array(self.background, dtype=np.float32))
+        np.save(self.directory / "noise.npy", np.array(self.noise, dtype=np.float32))
+        done.write_text(json.dumps({"windows": self.count, "sources": self.sources}))
+        self.done = True
+        return open_bank(self.directory, self.count)
 
 
 def cut_windows(store: Store, name: str, images: Any, *, sources: int, seed: int = 0) -> dict[str, np.ndarray]:
@@ -385,50 +572,11 @@ def cut_windows(store: Store, name: str, images: Any, *, sources: int, seed: int
     the local scratch directory under `name`, and read back the same way, so
     neither building nor training holds it in memory. `done.json` marks a
     finished bank; one without it is built again."""
-    directory = store.scratch / "tiles" / name
-    done = directory / "done.json"
-    if done.exists():
-        return open_bank(directory, json.loads(done.read_text())["windows"])
-    directory.mkdir(parents=True, exist_ok=True)
-    capacity = max(1, sources * WINDOWS_PER_HALF)
-    planes = {
-        plane: np.lib.format.open_memmap(directory / f"{plane}.npy", mode="w+", dtype=np.float32,
-                                         shape=(capacity, WINDOW, WINDOW))
-        for plane in BANK_PLANES
-    }
-    rng = random.Random(seed)
-    background, noise = [], []
-    count = 0
-    for image_a, sigma_a, image_b in images:
-        b, s = scales(image_a, sigma_a)
-        height, width = image_a.shape
-        step = WINDOW // 2
-        grid = [(y, x) for y in range(0, height - WINDOW, step) for x in range(0, width - WINDOW, step)]
-        rng.shuffle(grid)
-        kept = 0
-        for y, x in grid:
-            window_a = image_a[y:y + WINDOW, x:x + WINDOW]
-            window_b = image_b[y:y + WINDOW, x:x + WINDOW]
-            if not (np.isfinite(window_a).all() and np.isfinite(window_b).all()):
-                continue
-            if count == capacity:
-                break
-            planes["a"][count] = window_a
-            planes["sigma"][count] = sigma_a[y:y + WINDOW, x:x + WINDOW]
-            planes["b"][count] = window_b
-            background.append(b)
-            noise.append(s)
-            count += 1
-            kept += 1
-            if kept == WINDOWS_PER_HALF:
-                break
-    for plane in planes.values():
-        plane.flush()
-    del planes
-    np.save(directory / "background.npy", np.array(background, dtype=np.float32))
-    np.save(directory / "noise.npy", np.array(noise, dtype=np.float32))
-    done.write_text(json.dumps({"windows": count, "sources": sources}))
-    return open_bank(directory, count)
+    windows = Windows(store, name, sources=sources, seed=seed)
+    if not windows.done:
+        for image_a, sigma_a, image_b in images:
+            windows.add(image_a, sigma_a, image_b)
+    return windows.finish()
 
 
 def open_bank(directory: Path, count: int) -> dict[str, np.ndarray]:
@@ -513,6 +661,82 @@ def outliers(shape: tuple[int, int], rng: np.random.Generator, count: float, *,
     return plane[3:-3, 3:-3]
 
 
+# A shifted or sharpened tile is filtered from this many pixels more on
+# each side.
+FILTER_MARGIN = 8
+# The unsharp masks `sharpened` draws from: its Gaussian's width in pixels,
+# and the share of the image less its blur it adds, drawn log-uniformly.
+SHARPEN_WIDTHS = (0.7, 2.0)
+SHARPEN_AMOUNTS = (0.2, 1.0)
+# The share of tiles given a sky plane, and its least offset and tilt in σ̄.
+GRADIENT_SHARE = 0.5
+GRADIENT_LEAST = 0.5
+
+
+def taps(plane: np.ndarray, weights: np.ndarray, lead: int, start: int, size: int, axis: int) -> np.ndarray:
+    """`size` pixels of `plane` along `axis` from `start`, each the sum of
+    `weights` over the pixels from `lead` before it."""
+    moved = np.moveaxis(plane, axis, 0)
+    first = start - lead
+    out = sum(weight * moved[first + i:first + i + size] for i, weight in enumerate(weights))
+    return np.moveaxis(out, 0, axis)
+
+
+def separable(plane: np.ndarray, weights: np.ndarray, lead: int, start: int, size: int) -> np.ndarray:
+    """The `size` × `size` pixels of `plane` from (`start`, `start`), each
+    filtered by `weights` down and across."""
+    down = taps(plane, weights[0], lead, start, size, 0)
+    return taps(down, weights[1], lead, start, size, 1)
+
+
+def shifted(planes: tuple[np.ndarray, ...], variance: np.ndarray, rng: np.random.Generator, margin: int,
+            size: int) -> tuple[tuple[np.ndarray, ...], np.ndarray, float]:
+    """`planes` moved by one sub-pixel offset through Lanczos-3, as
+    registration resamples a frame, and their noise's `variance` through
+    the squared weights, with the share of white noise's variance that
+    is left."""
+    rows, columns = (lanczos3(offset) for offset in rng.random(2))
+    weights = (rows, columns)
+    moved = tuple(separable(plane, weights, 2, margin, size) for plane in planes)
+    squared = (rows**2, columns**2)
+    return moved, separable(variance, squared, 2, margin, size), float(squared[0].sum() * squared[1].sum())
+
+
+def sharpened(planes: tuple[np.ndarray, ...], variance: np.ndarray, rng: np.random.Generator, margin: int,
+              size: int) -> tuple[tuple[np.ndarray, ...], np.ndarray, float]:
+    """`planes` through one unsharp mask, `(1 + k) x − k G * x` for a
+    Gaussian `G` and an amount `k` drawn from `SHARPEN_WIDTHS` and
+    `SHARPEN_AMOUNTS`, and their noise's `variance` through the mask's
+    squared weights, with the share of white noise's variance it makes."""
+    width = rng.uniform(*SHARPEN_WIDTHS)
+    amount = math.exp(rng.uniform(*np.log(SHARPEN_AMOUNTS)))
+    reach_px = math.ceil(3 * width)
+    gaussian = np.exp(-0.5 * (np.arange(-reach_px, reach_px + 1) / width) ** 2)
+    gaussian /= gaussian.sum()
+    inner = slice(margin, margin + size)
+    moved = tuple((1 + amount) * plane[inner, inner] - amount * separable(plane, (gaussian, gaussian), reach_px,
+                                                                          margin, size)
+                  for plane in planes)
+    # The mask's square is (1 + k)² − 2k(1 + k)G(0) at the centre and k²G²
+    # throughout.
+    centre = (1 + amount) ** 2 - 2 * amount * (1 + amount) * gaussian[reach_px] ** 2
+    squared = gaussian**2
+    carried = centre * variance[inner, inner] + amount**2 * separable(variance, (squared, squared), reach_px,
+                                                                       margin, size)
+    return moved, carried, float(centre + amount**2 * squared.sum() ** 2)
+
+
+def sky_plane(size: int, rng: np.random.Generator, largest: float) -> np.ndarray:
+    """A sky plane over a tile, in σ̄: an offset of either sign, and a tilt
+    end to end across the tile in a random direction, each drawn
+    log-uniformly from `GRADIENT_LEAST` to `largest` and half of it."""
+    offset = math.copysign(math.exp(rng.uniform(math.log(GRADIENT_LEAST), math.log(largest))), rng.random() - 0.5)
+    tilt = math.exp(rng.uniform(math.log(GRADIENT_LEAST), math.log(max(GRADIENT_LEAST, largest / 2))))
+    angle = rng.uniform(0, 2 * math.pi)
+    across = (np.arange(size, dtype=np.float32) - (size - 1) / 2) / size
+    return (offset + tilt * (math.cos(angle) * across[None, :] + math.sin(angle) * across[:, None])).astype(np.float32)
+
+
 def batch_from(
     banked: dict[str, np.ndarray],
     size: int,
@@ -525,6 +749,9 @@ def batch_from(
     outlier_floor: float = OUTLIER_FLOOR,
     outlier_scale: str = "typical",
     noise_plane: str = "linear",
+    resample: float = 0.0,
+    sharpen: float = 0.0,
+    gradient: float = 0.0,
 ) -> tuple[torch.Tensor, ...]:
     """`size` tiles at random windows and offsets, each flipped and turned
     one of eight ways: the network's input (its noise map as `noise_plane`
@@ -539,15 +766,25 @@ def batch_from(
     amplitudes are in σ̄, or with `outlier_scale` "local" in the noise at
     each pixel: on a bright nebula, whose noise is many times σ̄, an
     outlier of 10σ̄ is a bump of ordinary noise, and a model taught to take
-    those out shaves the noise's peaks and dims what is bright."""
+    those out shaves the noise's peaks and dims what is bright.
+
+    The halves are changed alike, after the outliers, which keeps their
+    noise independent: `resample` of the tiles are `shifted` and `sharpen`
+    of them `sharpened`, the noise map and σ̄ following, and with
+    `gradient`, `GRADIENT_SHARE` of them gain a `sky_plane` up to that many
+    σ̄ under the input. The target would gain it too, but the loss, which
+    takes the input from its estimate, would not see it there, and the
+    loss's weights are kept on the target's own brightness."""
     count = len(banked["a"])
     picks = rng.choice(count, size, p=odds) if odds is not None else rng.integers(0, count, size)
+    margin = FILTER_MARGIN if resample or sharpen else 0
+    span = tile + 2 * margin
     inputs, targets, references, sigmas = [], [], [], []
     for index in picks:
-        y, x = rng.integers(0, WINDOW - tile + 1, 2)
-        a = banked["a"][index, y:y + tile, x:x + tile]
-        sigma = banked["sigma"][index, y:y + tile, x:x + tile]
-        b = banked["b"][index, y:y + tile, x:x + tile]
+        y, x = rng.integers(0, WINDOW - span + 1, 2)
+        a = banked["a"][index, y:y + span, x:x + span]
+        sigma = banked["sigma"][index, y:y + span, x:x + span]
+        b = banked["b"][index, y:y + span, x:x + span]
         background, noise = float(banked["background"][index]), float(banked["noise"][index])
         turns, flip = int(rng.integers(0, 4)), bool(rng.integers(0, 2))
         planes = np.stack([a, sigma, b])
@@ -558,8 +795,23 @@ def batch_from(
         if outlier_count:
             scale = np.where(np.isfinite(sigma), sigma, noise) if outlier_scale == "local" else noise
             a = a + outliers(a.shape, rng, outlier_count, floor=outlier_floor) * scale
+        if margin:
+            choice = rng.random()
+            change = shifted if choice < resample else sharpened if choice < resample + sharpen else None
+            if change is None:
+                inner = slice(margin, margin + tile)
+                a, sigma, b = a[inner, inner], sigma[inner, inner], b[inner, inner]
+            else:
+                variance = np.where(np.isfinite(sigma), sigma, noise) ** 2
+                (a, b), variance, share = change((a, b), variance, rng, margin, tile)
+                a, b = a.astype(np.float32), b.astype(np.float32)
+                sigma = np.sqrt(np.clip(variance, 0.0, None)).astype(np.float32)
+                noise *= math.sqrt(share)
         stated = sigma * float(np.exp(rng.uniform(-map_jitter, map_jitter))) if map_jitter else sigma
-        inputs.append(network_input(a, stated, background, noise, noise_plane))
+        shown = a
+        if gradient and rng.random() < GRADIENT_SHARE:
+            shown = a + noise * sky_plane(tile, rng, gradient)
+        inputs.append(network_input(shown, stated, background, noise, noise_plane))
         targets.append(np.stack([(b - background) / noise]))
         references.append(np.stack([(a - background) / noise]))
         sigmas.append(np.stack([np.nan_to_num(sigma / noise, nan=1.0)]))
@@ -783,6 +1035,11 @@ def train(
     scale_loss: tuple[int, ...] = (),
     scale_weight: float = 1.0,
     rewind: float = 0.0,
+    sky: str = "global",
+    resample: float = 0.0,
+    sharpen: float = 0.0,
+    gradient: float = 0.0,
+    bin_fraction: float = 0.0,
 ) -> dict[str, Any]:
     """Train a noise model on the train split's pairs, evaluate it on the
     validation split's, export it to ONNX and record the run.
@@ -792,6 +1049,12 @@ def train(
     back two log windows when one's loss is more than that many times the
     lowest, each time at a lower learning rate (see `Rewind`; 0: never),
     and the history records where.
+
+    The network reads the sky as `sky` says (see `SKIES`), in training,
+    evaluation and the sheets. `resample`, `sharpen` and `gradient` change
+    both halves of the tiles alike (see `batch_from`), and `bin_fraction`
+    of every batch comes from the pairs binned 2 × 2, `BINNED_WINDOWS` of
+    each cut with the bank.
 
     `extra` is a second bank from `cut_windows`, of other targets for
     their inputs; it makes up `extra_fraction` of every batch, and the run
@@ -817,6 +1080,13 @@ def train(
         raise ValueError(f"outlier_scale is one of {OUTLIER_SCALES}, not {outlier_scale!r}")
     if noise_plane not in NOISE_PLANES:
         raise ValueError(f"noise_plane is one of {NOISE_PLANES}, not {noise_plane!r}")
+    if sky not in SKIES:
+        raise ValueError(f"sky is one of {SKIES}, not {sky!r}")
+    if resample < 0 or sharpen < 0 or resample + sharpen > 1:
+        raise ValueError(f"the shares of tiles shifted ({resample}) and sharpened ({sharpen}) add up to at most 1")
+    if (resample or sharpen) and tile + 2 * FILTER_MARGIN > WINDOW:
+        raise ValueError(f"a shifted or sharpened tile reads {FILTER_MARGIN} pixels more on each side: "
+                         f"the tile, {tile}, is at most {WINDOW - 2 * FILTER_MARGIN}")
     if any(k < 2 or tile % k for k in scale_loss):
         raise ValueError(f"each of the loss's scales {scale_loss} must be at least 2 and divide the tile, {tile}")
     if extra is not None and extra_fraction and not len(extra["a"]):
@@ -826,7 +1096,10 @@ def train(
     if not chosen:
         raise RuntimeError("no built noise pairs in the train split")
     started = time.monotonic()
-    banked = bank(store, chosen, seed=seed, noise_map=noise_map, match_flux=match_flux, agree=agree)
+    banked = bank(store, chosen, seed=seed, noise_map=noise_map, match_flux=match_flux, agree=agree, sky=sky,
+                  binned_windows=BINNED_WINDOWS if bin_fraction else 0)
+    if bin_fraction and not len(banked["binned"]["a"]):
+        raise RuntimeError("the binned bank holds no window wholly inside its pairs' coverage")
     bank_seconds = time.monotonic() - started
     where = device()
     cuda = where.type == "cuda"
@@ -837,18 +1110,21 @@ def train(
     guard = Rewind(model, optimizer, rewind) if rewind else None
     history = []
     extra_count = round(batch * extra_fraction) if extra is not None else 0
+    binned_count = round(batch * bin_fraction)
     odds = structure_odds(banked, structure_sampling)
     extra_odds = structure_odds(extra, structure_sampling) if extra is not None else None
+    binned_odds = structure_odds(banked["binned"], structure_sampling) if binned_count else None
+    changes = {"map_jitter": map_jitter, "outlier_count": outlier_count, "outlier_floor": outlier_floor,
+               "outlier_scale": outlier_scale, "noise_plane": noise_plane, "resample": resample,
+               "sharpen": sharpen, "gradient": gradient}
 
     def assemble(step: int) -> tuple[torch.Tensor, ...]:
         rng = step_generator(seed, step)
-        parts = [batch_from(banked, batch - extra_count, tile, rng, map_jitter=map_jitter, odds=odds,
-                            outlier_count=outlier_count, outlier_floor=outlier_floor,
-                            outlier_scale=outlier_scale, noise_plane=noise_plane)]
+        parts = [batch_from(banked, batch - extra_count - binned_count, tile, rng, odds=odds, **changes)]
         if extra_count:
-            parts.append(batch_from(extra, extra_count, tile, rng, map_jitter=map_jitter, odds=extra_odds,
-                                    outlier_count=outlier_count, outlier_floor=outlier_floor,
-                                    outlier_scale=outlier_scale, noise_plane=noise_plane))
+            parts.append(batch_from(extra, extra_count, tile, rng, odds=extra_odds, **changes))
+        if binned_count:
+            parts.append(batch_from(banked["binned"], binned_count, tile, rng, odds=binned_odds, **changes))
         tensors = tuple(torch.cat(values) for values in zip(*parts))
         # Pinned, a batch copies to the GPU while it still trains.
         return tuple(t.pin_memory() for t in tensors) if cuda else tensors
@@ -884,17 +1160,17 @@ def train(
             if step % log_every == 0 or step == steps:
                 mean = float(running) / log_every
                 entry = {"step": step, "loss": mean, "seconds": round(time.monotonic() - started, 1)}
-                gradient = ""
+                noted = ""
                 if clip_grad:
                     entry["grad_norm_mean"], entry["grad_norm_max"] = float(norms[0]) / log_every, float(norms[1])
-                    gradient = f" gradient {entry['grad_norm_mean']:.3g} (largest {entry['grad_norm_max']:.3g})"
+                    noted = f" gradient {entry['grad_norm_mean']:.3g} (largest {entry['grad_norm_max']:.3g})"
                     norms.zero_()
                 back = guard.after(step, mean) if guard else None
                 if back is not None:
                     entry["rewound_to"] = back
-                    gradient += f", back to step {back}"
+                    noted += f", back to step {back}"
                 history.append(entry)
-                print(f"train {name}: step {step} loss {mean:.4f}{gradient} ({time.monotonic() - started:.0f} s)",
+                print(f"train {name}: step {step} loss {mean:.4f}{noted} ({time.monotonic() - started:.0f} s)",
                       flush=True)
                 running.zero_()
     finally:
@@ -908,10 +1184,10 @@ def train(
     torch.save(model.state_dict(), directory / "weights.pt")
     inference = tiling(levels)
     validation = evaluate(store, manifest, model, split="validation", **inference, sets=validation_sets,
-                          noise_map=noise_map, noise_plane=noise_plane)
+                          noise_map=noise_map, noise_plane=noise_plane, sky=sky)
     validation["dark_noise"] = evaluate_dark_noise(store, manifest, model, split="validation", **inference,
                                                    sets=validation_sets, noise_map=noise_map,
-                                                   noise_plane=noise_plane)
+                                                   noise_plane=noise_plane, sky=sky)
     exported = export(model, directory / "model.onnx", tile=512)
     record = {
         "name": name,
@@ -928,7 +1204,9 @@ def train(
                    "batch_threads": batch_threads, "batch_generator": "per-step",
                    "scale_loss": list(scale_loss), "scale_weight": scale_weight if scale_loss else None,
                    "rewind": rewind, "rewinds": guard.count if guard else 0,
-                   "rewind_rate": guard.rate if guard else 1.0,
+                   "rewind_rate": guard.rate if guard else 1.0, "sky": sky, "resample": resample,
+                   "sharpen": sharpen, "gradient": gradient, "bin_fraction": bin_fraction,
+                   "binned_windows": int(len(banked["binned"]["a"])) if bin_fraction else None,
                    "extra": {"label": extra_label, "fraction": extra_fraction, "windows": int(len(extra["a"]))}
                    if extra is not None else None},
         "parameters": sum(p.numel() for p in model.parameters()),
@@ -1054,6 +1332,7 @@ def evaluate(
     bands: NoiseBands = NoiseBands(),
     match_flux: bool = False,
     threads: int = EVALUATION_THREADS,
+    sky: str = "global",
 ) -> dict[str, Any]:
     """Denoise each of a split's A halves, whole, through overlapping
     tiles that start on the model's grid, or on multiples of `multiple`
@@ -1063,7 +1342,7 @@ def evaluate(
     object stacked over its nights: they show the model at a night's whole
     depth and beyond, far less noisy than the noise pairs. The
     network reads the noise map it was trained with, as `noise_plane`
-    says; every run is measured
+    says, and the sky as `sky` does; every run is measured
     in the same units, the per-pixel map's median noise, so runs with
     different maps compare. With `match_flux`, each B is first `matched`
     to its A, so a model that keeps A's flux is not marked down for the
@@ -1086,8 +1365,7 @@ def evaluate(
         settings = {"tile": tile, "overlap": overlap, "margin": margin, "multiple": multiple or model.multiple}
 
         def denoise(image: np.ndarray, sigma: np.ndarray) -> np.ndarray:
-            image_background, image_noise = scales(image, sigma)
-            planes = network_input(image, sigma, image_background, image_noise, noise_plane)
+            planes, image_background, image_noise = view(image, sigma, sky=sky, noise_plane=noise_plane)
             return bands.apply(image, infer(denoiser(model, image_background, image_noise, where), planes,
                                             **settings)[0])
 
@@ -1453,11 +1731,13 @@ def evaluate_dark_noise(
     noise_plane: str = "linear",
     bands: NoiseBands = NoiseBands(),
     threads: int = EVALUATION_THREADS,
+    sky: str = "global",
 ) -> dict[str, Any]:
     """Denoise each of a split's dark-noise inputs and measure it against
     its clean target (`truth`), and denoise its noise alone on a flat sky
     (`empty_sky`), once as it is and once with `outliers` planted in it.
-    Inference, noise plane, units, `bands` and threads are `evaluate`'s."""
+    Inference, noise plane, sky, units, `bands` and threads are
+    `evaluate`'s."""
     model = model.eval()
     where = device()
 
@@ -1471,11 +1751,9 @@ def evaluate_dark_noise(
         background, noise = scales(image, sigma)
         coverage = np.load(store.root / loads(pair["input"]["files"])["coverage"])
         stated = modelled_sigma(image, sigma, coverage) if noise_map == "model" else sigma
-        input_background, input_noise = scales(image, stated)
+        planes, input_background, input_noise = view(image, stated, sky=sky, noise_plane=noise_plane)
         run = denoiser(model, input_background, input_noise, where)
-        estimate = bands.apply(image, infer(run, network_input(image, stated, input_background, input_noise,
-                                                               noise_plane),
-                                            tile=tile, overlap=overlap, margin=margin,
+        estimate = bands.apply(image, infer(run, planes, tile=tile, overlap=overlap, margin=margin,
                                             multiple=multiple or model.multiple)[0])
         truth = against_truth(estimate, image, target, floor, background, noise)
         del estimate
@@ -1484,25 +1762,24 @@ def evaluate_dark_noise(
         alone = np.load(store.root / files["noise"]).astype(np.float32)
         alone_coverage = np.load(store.root / files["noise_coverage"])
         alone_variance = np.load(store.root / files["noise_variance"]).astype(np.float32)
-        sky = np.where(alone_coverage > 0, background + alone, np.nan).astype(np.float32)
+        blank = np.where(alone_coverage > 0, background + alone, np.nan).astype(np.float32)
         with np.errstate(divide="ignore", invalid="ignore"):
             sky_sigma = np.where(alone_coverage > 0, np.sqrt(alone_variance / alone_coverage), np.nan).astype(np.float32)
         if noise_map == "model":
-            sky_sigma = modelled_sigma(sky, sky_sigma, alone_coverage)
-        sky_background, sky_noise = scales(sky, sky_sigma)
+            sky_sigma = modelled_sigma(blank, sky_sigma, alone_coverage)
+        sky_planes, sky_background, sky_noise = view(blank, sky_sigma, sky=sky, noise_plane=noise_plane)
         sky_run = denoiser(model, sky_background, sky_noise, where)
-        output = bands.apply(sky, infer(sky_run, network_input(sky, sky_sigma, sky_background, sky_noise, noise_plane),
-                                        tile=tile, overlap=overlap, margin=margin,
-                                        multiple=multiple or model.multiple)[0])
-        empty = on_empty_sky(output, sky, background, noise)
+        output = bands.apply(blank, infer(sky_run, sky_planes, tile=tile, overlap=overlap, margin=margin,
+                                          multiple=multiple or model.multiple)[0])
+        empty = on_empty_sky(output, blank, background, noise)
         # The same outliers for every model, planted on the empty sky: the
         # share of their energy the output keeps.
-        planted = outliers(sky.shape, np.random.default_rng(zlib.crc32(pair["input"]["id"].encode())),
+        planted = outliers(blank.shape, np.random.default_rng(zlib.crc32(pair["input"]["id"].encode())),
                            OUTLIER_TEST_COUNT) * sky_noise
-        planted[~np.isfinite(sky)] = 0.0
-        spoiled = sky + planted
-        left = bands.apply(spoiled, infer(sky_run, network_input(spoiled, sky_sigma, sky_background, sky_noise,
-                                                                 noise_plane),
+        planted[~np.isfinite(blank)] = 0.0
+        spoiled = blank + planted
+        left = bands.apply(spoiled, infer(sky_run, network_input(seen(spoiled, sky), sky_sigma, sky_background,
+                                                                 sky_noise, noise_plane),
                                           tile=tile, overlap=overlap, margin=margin,
                                           multiple=multiple or model.multiple)[0]) - output
         empty["outliers_left"] = float(np.nansum(left**2) / np.sum(planted**2))
@@ -1571,7 +1848,8 @@ def evaluate_saved(
     directory = store.root / "models" / "noise" / name
     record, model = load_run(store, name)
     config = record["config"]
-    read = {"noise_map": config.get("noise_map", "raw"), "noise_plane": config.get("noise_plane", "linear")}
+    read = {"noise_map": config.get("noise_map", "raw"), "noise_plane": config.get("noise_plane", "linear"),
+            "sky": config.get("sky", "global")}
     result = evaluate(store, manifest, model, split=split, limit=limit, sets=sets, **read, bands=bands,
                       match_flux=match_flux, **record["inference"])
     result["dark_noise"] = evaluate_dark_noise(store, manifest, model, split=split, sets=sets, **read, bands=bands,
