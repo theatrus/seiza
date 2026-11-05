@@ -1,0 +1,20 @@
+{
+  "base": "c1ab8a12196c85a608b3ce96b27068fb72bb235b",
+  "core_filter_sha256": "6174b39e09008b3a2450d3abfdc3a68a36f1454f2c2591e22946d435460cf265",
+  "configuration": {
+    "sigma": 6.0,
+    "minimum_relative_excess": 0.01,
+    "noise_floor_adu": 1.0
+  },
+  "input_frames": 5,
+  "experimental_flat_samples_replaced": 32071,
+  "defect_pixels_replaced": 18981,
+  "reference_master": "F-sigma6-n5-seed0.fits",
+  "compared_channel_samples": 61171488,
+  "all_samples_equal": true,
+  "verification": "NumPy exact equality of 1024-pixel windows decoded through seiza.read_image_window (seiza-image-io)",
+  "bias_subtracted": false,
+  "dark_subtracted": false,
+  "new_default_sigma": 10.0,
+  "experimental_option_enabled_by_default": false
+}

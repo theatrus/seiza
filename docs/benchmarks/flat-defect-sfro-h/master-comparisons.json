@@ -1,0 +1,170 @@
+[
+  {
+    "changed_samples_from_D": 17666,
+    "largest_difference_coordinate": [
+      6812,
+      2967
+    ],
+    "maximum_absolute_difference_from_D": 1.092395544052124,
+    "name": "A-sigma0-n30-seed0",
+    "rms_difference_from_D": 0.0003206011277032872
+  },
+  {
+    "changed_samples_from_D": 19010,
+    "largest_difference_coordinate": [
+      6812,
+      2967
+    ],
+    "maximum_absolute_difference_from_D": 1.1011507511138916,
+    "name": "A-sigma0-n5-seed0",
+    "rms_difference_from_D": 0.0003947230707906179
+  },
+  {
+    "changed_samples_from_D": 17561,
+    "largest_difference_coordinate": [
+      6812,
+      2967
+    ],
+    "maximum_absolute_difference_from_D": 1.092395544052124,
+    "name": "B-sigma0-n30-seed0",
+    "rms_difference_from_D": 0.00032059983552743156
+  },
+  {
+    "changed_samples_from_D": 19010,
+    "largest_difference_coordinate": [
+      6812,
+      2967
+    ],
+    "maximum_absolute_difference_from_D": 1.1011507511138916,
+    "name": "B-sigma0-n5-seed0",
+    "rms_difference_from_D": 0.0003947230707906179
+  },
+  {
+    "changed_samples_from_D": 105,
+    "largest_difference_coordinate": [
+      911,
+      871
+    ],
+    "mask_ones": 17561,
+    "maximum_absolute_difference_from_D": 0.0022321343421936035,
+    "name": "C-sigma0-n30-seed0",
+    "rms_difference_from_D": 9.102441448862262e-7
+  },
+  {
+    "changed_samples_from_D": 0,
+    "largest_difference_coordinate": [
+      0,
+      0
+    ],
+    "mask_ones": 19010,
+    "maximum_absolute_difference_from_D": 0.0,
+    "name": "C-sigma0-n5-seed0",
+    "rms_difference_from_D": 0.0
+  },
+  {
+    "changed_samples_from_D": 0,
+    "largest_difference_coordinate": [
+      0,
+      0
+    ],
+    "mask_ones": 17561,
+    "maximum_absolute_difference_from_D": 0.0,
+    "name": "D-sigma0-n30-seed0",
+    "rms_difference_from_D": 0.0
+  },
+  {
+    "changed_samples_from_D": 0,
+    "largest_difference_coordinate": [
+      0,
+      0
+    ],
+    "mask_ones": 19010,
+    "maximum_absolute_difference_from_D": 0.0,
+    "name": "D-sigma0-n5-seed0",
+    "rms_difference_from_D": 0.0
+  },
+  {
+    "changed_samples_from_D": 19824,
+    "largest_difference_coordinate": [
+      5614,
+      3599
+    ],
+    "maximum_absolute_difference_from_D": 0.0976111888885498,
+    "name": "E-sigma10-n30-seed0",
+    "rms_difference_from_D": 0.0001693150926858958
+  },
+  {
+    "changed_samples_from_D": 19386,
+    "largest_difference_coordinate": [
+      7486,
+      2267
+    ],
+    "maximum_absolute_difference_from_D": 0.12328112125396729,
+    "name": "E-sigma10-n5-seed0",
+    "rms_difference_from_D": 0.0002867365860910696
+  },
+  {
+    "changed_samples_from_D": 61152685,
+    "largest_difference_coordinate": [
+      8937,
+      3117
+    ],
+    "maximum_absolute_difference_from_D": 0.08557683229446411,
+    "name": "E-sigma6-n30-seed0",
+    "rms_difference_from_D": 0.00017846937021637337
+  },
+  {
+    "changed_samples_from_D": 49948,
+    "largest_difference_coordinate": [
+      5196,
+      3234
+    ],
+    "maximum_absolute_difference_from_D": 0.14259672164916992,
+    "name": "E-sigma6-n5-seed0",
+    "rms_difference_from_D": 0.00032604978486432243
+  },
+  {
+    "changed_samples_from_D": 2189,
+    "largest_difference_coordinate": [
+      8937,
+      3117
+    ],
+    "mask_ones": 17538,
+    "maximum_absolute_difference_from_D": 0.08498972654342651,
+    "name": "F-sigma10-n30-seed0",
+    "rms_difference_from_D": 0.000012507164346277097
+  },
+  {
+    "changed_samples_from_D": 404,
+    "largest_difference_coordinate": [
+      7486,
+      2267
+    ],
+    "mask_ones": 18986,
+    "maximum_absolute_difference_from_D": 0.12328112125396729,
+    "name": "F-sigma10-n5-seed0",
+    "rms_difference_from_D": 0.000028626249380503383
+  },
+  {
+    "changed_samples_from_D": 61152685,
+    "largest_difference_coordinate": [
+      8937,
+      3117
+    ],
+    "mask_ones": 17506,
+    "maximum_absolute_difference_from_D": 0.08557683229446411,
+    "name": "F-sigma6-n30-seed0",
+    "rms_difference_from_D": 0.00007123813358380049
+  },
+  {
+    "changed_samples_from_D": 31104,
+    "largest_difference_coordinate": [
+      5196,
+      3234
+    ],
+    "mask_ones": 18981,
+    "maximum_absolute_difference_from_D": 0.14259672164916992,
+    "name": "F-sigma6-n5-seed0",
+    "rms_difference_from_D": 0.0001606870271926992
+  }
+]

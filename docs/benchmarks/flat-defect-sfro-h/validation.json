@@ -1,0 +1,22 @@
+{
+  "base": "c1ab8a12196c85a608b3ce96b27068fb72bb235b",
+  "cli_source_sha256": "716decaa7a4cb21995048c09cdc1a84d8bcac135f3393cfd42804511bfdf9e2a",
+  "master_sha256": "1f31fed95d83657fff4206f1372f0a2a820143521ed343eee9e394345aeaeb6b",
+  "harness_master_sha256": "1f31fed95d83657fff4206f1372f0a2a820143521ed343eee9e394345aeaeb6b",
+  "mask_sha256": "90a236a153e8300ba649a7cea38e744d7f5f7d00912625beecbc5c341fde6948",
+  "harness_mask_sha256": "90a236a153e8300ba649a7cea38e744d7f5f7d00912625beecbc5c341fde6948",
+  "hardware": {
+    "cpu": "Intel Core i9-14900K",
+    "logical_cpus": 10,
+    "system_memory_gib": 31,
+    "profile": "development, opt-level=1"
+  },
+  "validation": {
+    "master_cli_tests": 8,
+    "prototype_tests": 2,
+    "stacking_output_version_tests": 66,
+    "cli_clippy": "passed",
+    "binding_parity": "passed (Python 3.10 with installed tomli as tomllib)",
+    "full_workspace_suite": "not completed; broad core lib-test compilation was interrupted after exhausting swap; focused suites passed"
+  }
+}

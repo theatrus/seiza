@@ -2643,6 +2643,8 @@ pub(crate) struct PyMasterResult {
     #[pyo3(get)]
     defect_pixels_replaced: u64,
     #[pyo3(get)]
+    experimental_flat_samples_replaced: u64,
+    #[pyo3(get)]
     bias_subtracted: bool,
     #[pyo3(get)]
     dark_subtracted: bool,
@@ -3137,7 +3139,11 @@ fn build_dark(
     scratch_directory=None,
     defect_suppression=false,
     defect_sigma_low=None,
-    defect_sigma_high=None
+    defect_sigma_high=None,
+    experimental_flat_preprocessing=false,
+    spatial_sigma=None,
+    spatial_minimum_relative_excess=None,
+    spatial_noise_floor_adu=None
 ))]
 #[allow(clippy::too_many_arguments)]
 fn build_flat(
@@ -3156,7 +3162,29 @@ fn build_flat(
     defect_suppression: bool,
     defect_sigma_low: Option<f32>,
     defect_sigma_high: Option<f32>,
+    experimental_flat_preprocessing: bool,
+    spatial_sigma: Option<f32>,
+    spatial_minimum_relative_excess: Option<f32>,
+    spatial_noise_floor_adu: Option<f32>,
 ) -> PyResult<PyMasterResult> {
+    if !experimental_flat_preprocessing
+        && (spatial_sigma.is_some()
+            || spatial_minimum_relative_excess.is_some()
+            || spatial_noise_floor_adu.is_some())
+    {
+        return Err(PyValueError::new_err(
+            "spatial thresholds require experimental_flat_preprocessing=True",
+        ));
+    }
+    let experimental_flat_preprocessing = experimental_flat_preprocessing.then(|| {
+        let defaults = seiza_stacking::ExperimentalFlatPreprocessingOptions::default();
+        seiza_stacking::ExperimentalFlatPreprocessingOptions {
+            sigma: spatial_sigma.unwrap_or(defaults.sigma),
+            minimum_relative_excess: spatial_minimum_relative_excess
+                .unwrap_or(defaults.minimum_relative_excess),
+            noise_floor_adu: spatial_noise_floor_adu.unwrap_or(defaults.noise_floor_adu),
+        }
+    });
     validate_exposure_override(dark_flat.as_ref(), dark_flat_exposure_seconds, "dark_flat")?;
     let defect_suppression =
         defect_filter(defect_suppression, defect_sigma_low, defect_sigma_high)?;
@@ -3178,6 +3206,7 @@ fn build_flat(
                 .map(FlatStarMaskingOptions::from),
             scratch_directory,
             defect_suppression,
+            experimental_flat_preprocessing,
             ..MasterExtras::default()
         },
     )
@@ -3220,6 +3249,7 @@ struct MasterExtras {
     dark_level_screening: Option<DarkLevelScreening>,
     scratch_directory: Option<PathBuf>,
     defect_suppression: Option<ImpulseFilterOptions>,
+    experimental_flat_preprocessing: Option<seiza_stacking::ExperimentalFlatPreprocessingOptions>,
 }
 
 /// A cancel signal for work that runs for minutes with the GIL released: it
@@ -3435,6 +3465,7 @@ fn build_master(
             cancel: Some(signal),
             progress: None,
             defect_suppression: extras.defect_suppression,
+            experimental_flat_preprocessing: extras.experimental_flat_preprocessing,
             flat_star_masking: extras.flat_star_masking,
             dark_level_screening: extras.dark_level_screening,
         };
@@ -3460,6 +3491,7 @@ fn build_master(
             rejected_samples: master.rejected_samples,
             fallback_pixels: master.fallback_pixels,
             defect_pixels_replaced: master.defect_pixels_replaced,
+            experimental_flat_samples_replaced: master.experimental_flat_samples_replaced,
             bias_subtracted: master.bias_subtracted,
             dark_subtracted: master.dark_subtracted,
             normalized: master.normalized,

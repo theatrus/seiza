@@ -1,0 +1,22 @@
+[
+  {
+    "false_positive": 4,
+    "genuine_high_response_removed": 4,
+    "negative_impulse_recall": 0.0,
+    "positive_impulse_precision": 0.6,
+    "positive_impulse_recall": 1.0,
+    "scope": "synthetic isolated probes; not a real-data accuracy estimate",
+    "sigma": 6.0,
+    "true_positive": 6
+  },
+  {
+    "false_positive": 4,
+    "genuine_high_response_removed": 4,
+    "negative_impulse_recall": 0.0,
+    "positive_impulse_precision": 0.6,
+    "positive_impulse_recall": 1.0,
+    "scope": "synthetic isolated probes; not a real-data accuracy estimate",
+    "sigma": 10.0,
+    "true_positive": 6
+  }
+]

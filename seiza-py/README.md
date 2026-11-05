@@ -1147,6 +1147,33 @@ lists the inputs used, and `result.input_statistics` their `(accepted,
 rejected)` sample counts, in the same order. The build checks that these
 account for every input before it writes the master.
 
+Experimental per-input replacement is opt-in:
+
+```python
+flat = seiza.build_flat(
+    flat_paths, "master-flat.fits",
+    experimental_flat_preprocessing=True,
+    spatial_sigma=6.0,  # omit for the conservative 10-sigma default
+    spatial_minimum_relative_excess=0.01,
+    spatial_noise_floor_adu=1.0,
+    defect_suppression=True,
+)
+print(flat.experimental_flat_samples_replaced)  # input channel samples
+print(flat.defect_pixels_replaced)              # finished-master samples
+```
+
+The core positive-only 5×5 MAD filter runs after calibration and before star
+masking/normalization, with same-channel/CFA-phase neighborhoods. Threshold
+keywords require `experimental_flat_preprocessing=True`. Default thresholds are
+10 sigma, one percent relative excess, and a one-ADU local noise floor. It may
+remove real photoresponse; improvements measured on the evaluation set were
+very small. Negative impulses remain unchanged. Disabled builds report zero
+experimental replacements and preserve existing pixel behavior.
+The C master's matching JSON request takes
+`"experimentalFlatPreprocessing": {"sigma": 6, "minimumRelativeExcess": 0.01,
+"noiseFloorAdu": 1}`; `null`/omission disables it. Both bindings use the same
+core operation and report the separate replacement count.
+
 `build_flat(..., defect_suppression=True)` replaces hot and cold pixels in the
 flat master with their neighbours' median. A defective pixel repeats in every
 flat, so rejection across frames keeps it. `defect_sigma_low` and

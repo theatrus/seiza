@@ -1,0 +1,23 @@
+	Command being timed: "target/debug/seiza master flat /mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_2.66s_Bin1x1_0029.fits /mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_2.70s_Bin1x1_0028.fits /mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_2.72s_Bin1x1_0025.fits /mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_2.74s_Bin1x1_0027.fits /mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_2.76s_Bin1x1_0024.fits /mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_2.77s_Bin1x1_0000.fits /mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_2.79s_Bin1x1_0023.fits /mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_2.83s_Bin1x1_0022.fits /mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_2.87s_Bin1x1_0021.fits /mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_2.91s_Bin1x1_0020.fits /mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_2.96s_Bin1x1_0019.fits /mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.00s_Bin1x1_0018.fits /mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.04s_Bin1x1_0017.fits /mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.05s_Bin1x1_0012.fits /mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.09s_Bin1x1_0016.fits /mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.10s_Bin1x1_0011.fits /mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.14s_Bin1x1_0010.fits /mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.14s_Bin1x1_0015.fits /mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.18s_Bin1x1_0014.fits /mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.19s_Bin1x1_0009.fits /mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.22s_Bin1x1_0000.fits /mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.24s_Bin1x1_0008.fits /mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.29s_Bin1x1_0007.fits /mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.34s_Bin1x1_0006.fits /mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.40s_Bin1x1_0005.fits /mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.45s_Bin1x1_0004.fits /mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.51s_Bin1x1_0003.fits /mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.57s_Bin1x1_0002.fits /mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.63s_Bin1x1_0001.fits /mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.67s_Bin1x1_0000.fits --star-mask --saturation-level 65535 --defect-suppression --defect-mask /tmp/seiza-flat-evaluation-v2/cli-validation/mask.fits --output /tmp/seiza-flat-evaluation-v2/cli-validation/master.fits --report /tmp/seiza-flat-evaluation-v2/cli-validation/report.json"
+	User time (seconds): 95.19
+	System time (seconds): 13.01
+	Percent of CPU this job got: 293%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:36.82
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 739276
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 299
+	Minor (reclaiming a frame) page faults: 4287895
+	Voluntary context switches: 75542
+	Involuntary context switches: 525691
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 15292952
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
