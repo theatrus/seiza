@@ -33,6 +33,7 @@ import numpy as np
 
 import seiza
 
+from .calibrate import CALIBRATABLE_SQL
 from .manifest import Manifest, dumps, loads, now
 from .measure import accepted_frames
 from .store import Store, robust_sigma, save_stack, stack_stats, versions
@@ -390,7 +391,7 @@ def build(
     `only` names. With `pairs_only`, instead the noise pairs of each built
     set that qualifies for them and has none (see `build_set`)."""
     rows = manifest.rows(
-        "SELECT * FROM sets WHERE calibration_status = 'ready' AND measurement_status = 'measured' "
+        f"SELECT * FROM sets WHERE {CALIBRATABLE_SQL} AND measurement_status = 'measured' "
         "AND split IS NOT NULL ORDER BY name"
     )
     built = failed = 0
@@ -464,7 +465,7 @@ def process(
     from .measure import measure_recorded
 
     rows = manifest.rows(
-        "SELECT * FROM sets WHERE calibration_status = 'ready' AND split IS NOT NULL "
+        f"SELECT * FROM sets WHERE {CALIBRATABLE_SQL} AND split IS NOT NULL "
         "AND (build_status IS NULL OR build_status != 'built') ORDER BY name"
     )
     counts = {"measured": 0, "built": 0, "failed": 0, "skipped": 0}
