@@ -31,6 +31,17 @@ and shows the two outputs' difference in units of each pixel's noise, from
 leaves only float error there; a seam shows as a line of the grid. The
 difference's root mean square and largest size are recorded with the
 files.
+
+A sheet may list baselines, images made from the same input some other
+way, to judge the runs against:
+
+    "baselines": [{"name": "other", "label": "Another denoiser", "product": "<product id>"}]
+
+Each one built is a panel after the run's "All noise removed", labelled as
+listed, in the sheet's stretch moved to its own background; one not built
+is left out. With `full`, each is also written whole, in the stretch of
+the runs' full-size images, to `STORE/sheets/full/<sheet>-<name>.png`,
+the same for every run, and the run's record lists it.
 """
 
 from __future__ import annotations
@@ -137,6 +148,16 @@ def render(
     look = stretch(reference if reference is not None else image)
     reference_background = float(np.nanmedian(reference[::31, ::31])) if reference is not None else 0.0
     image_background = float(np.nanmedian(image[::31, ::31]))
+    baselines = []
+    for entry in sheet.get("baselines", ()):
+        product = built(entry["product"])
+        if product is None:
+            continue
+        other = np.load(store.root / loads(product["files"])["image"]).astype(np.float32)
+        if other.shape != image.shape:
+            raise ValueError(f"baseline {entry['product']} is {other.shape}, its sheet's input {image.shape}")
+        other[np.isnan(image)] = np.nan
+        baselines.append((entry, other, float(np.nanmedian(other[::31, ::31]))))
 
     side = sheet.get("side", SIDE)
     height, width = image.shape
@@ -146,7 +167,8 @@ def render(
     pad = record["inference"]["margin"] + 16
     grid = record["inference"].get("multiple", 1)
     frames = len(loads(source["frames"]))
-    labels = [f"Input: {frames} frames", "All noise removed", *(label for label, _ in SETTINGS)]
+    labels = [f"Input: {frames} frames", "All noise removed", *(entry["label"] for entry, _, _ in baselines),
+              *(label for label, _ in SETTINGS)]
     labels.append(f"Reference: {len(loads(reference_product['frames']))} frames" if reference is not None
                   else f"Noise taken out ÷ each pixel's noise, ±{SPAN:g}σ")
     rows = []
@@ -165,8 +187,9 @@ def render(
             with np.errstate(divide="ignore", invalid="ignore"):
                 taken = -residual[inner] / sigma[y:y + side, x:x + side]
             last = np.clip(np.nan_to_num(0.5 + taken / (2 * SPAN), nan=0.5), 0.0, 1.0)
-        rows.append((f"{crop['label']}: 1:1 crop at x {x}, y {y}",
-                     [look(panel, image_background) for panel in panels] + [last]))
+        tiles = [look(panel, image_background) for panel in panels]
+        tiles[2:2] = [look(other[y:y + side, x:x + side], background_of) for _, other, background_of in baselines]
+        rows.append((f"{crop['label']}: 1:1 crop at x {x}, y {y}", tiles + [last]))
 
     gap, label_height, title_height, row_label = 12, 44, 64, 34
     columns = len(labels)
@@ -189,7 +212,13 @@ def render(
     write_png(path, np.asarray(canvas))
     if whole is None:
         return {}
-    return full_size(run, planes, image, sigma, record["inference"], lambda x: look(x, image_background), whole)
+    written = full_size(run, planes, image, sigma, record["inference"], lambda x: look(x, image_background), whole)
+    for entry, other, background_of in baselines:
+        shared = store.root / "sheets" / "full" / f"{sheet['name']}-{entry['name']}.png"
+        shared.parent.mkdir(parents=True, exist_ok=True)
+        write_png(shared, (look(other, background_of) * 255 + 0.5).astype(np.uint8))
+        written[f"baseline-{entry['name']}"] = shared
+    return written
 
 
 def full_size(

@@ -1297,7 +1297,11 @@ An object stacked over many nights adds a third sheet, the reference
 night's 4-frame half against the whole stack. Each row is a 1:1 crop. The panels
 show the input, then everything the run finds taken out, then the same
 fixed shares kept, all under the reference's stretch. The shares never
-change, so one run's sheet can be laid beside another's. A night's deep
+change, so one run's sheet can be laid beside another's. The list can name
+baselines for an image, the same input denoised some other way, which
+then sit beside the run's output, and, for an image written whole, are
+written whole once in the same stretch, so every run is judged against
+the same thing. A night's deep
 stack is far less noisy than anything the noise model trains on, and the
 first large runs, measuring at the floor on its halves, still took out a
 trace of edges and bright-star profiles there. The deep stacks' halves are
