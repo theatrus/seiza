@@ -1067,7 +1067,14 @@ in these ways:
   lead over the run before the scale loss (2.05) is within the spread, as
   are differences of 5% against clean targets on faint and mid-brightness
   signal. Around the Trunk's 27 brightest stars it raised the light 2–4
-  pixels out by 6–9σ̄, where the first seed raised it by 3–5σ̄. The next
+  pixels out by 6–9σ̄, where the first seed raised it by 3–5σ̄. Against
+  B halves matched to A's flux, on the pairs whose halves agree, the run
+  before the scale loss is better than either seed away from the sky: on
+  4-frame halves its error on faint signal was 11.1 against 15.9 and 21.5,
+  on mid-brightness signal 29.5 against 41.0 and 50.0, on cores 2,937
+  against about 3,280, with the trimmed sky the same. The scale loss takes
+  the coarse noise out at a cost pixel by pixel in signal, and the cost
+  differs by a third between seeds. The next
   runs add the 101 train sets built without a flat: 1,700 pairs over 342
   sets, against 1,301 over 241, at the same width and at half as wide
   again.
