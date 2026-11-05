@@ -55,11 +55,12 @@ same map PixInsight MLDenoise uses (`seiza-stacking`'s `exchange` module):
   image is 0 there. No sky lies so far below an image's median, but a
   stack's resampling rings to thousands below zero beside a saturated
   star. Taken as the most negative sample, a few dozen such samples
-  lifted the whole sky by their depth, up to 0.6 of the range, and on that
-  pedestal NoiseXTerminator 2.6.10 and MLDenoise left 92–94% of a 4-frame
-  stack's fine noise, and MLDenoise moved a dim sky by 1.7 times its noise.
-  Clamped, the same stacks came out with 8–19% of it left, as an image
-  without such samples did. Version 3 of the map.
+  lifted the whole sky by their depth, up to 0.6 of the range. On some
+  stacks so lifted NoiseXTerminator 2.6.10 left 96% of a 4-frame stack's
+  fine noise, changing its sky by a twentieth of the noise, and MLDenoise
+  left 81% and moved a dim sky by 1.75 times its noise; other stacks so
+  lifted came out well. Through version 3 of the map the same stacks came
+  out with 11–12% left and their skies within 0.02 of the noise.
 - The stars image, a difference of two images on 0 to 1, is restored with
   the scale alone, so `starless + stars` still reconstructs the original on
   its own scale.
