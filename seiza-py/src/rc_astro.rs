@@ -377,7 +377,10 @@ pub(crate) struct PyRcAstroProcessed {
 /// its most negative sample and divided by 65535 or its span, whichever is
 /// larger, then mapped back on the way in. A stars image comes back with
 /// the scale alone, so the processed image plus the stars gives back the
-/// original. NaN and infinite samples come back unchanged.
+/// original. NaN and infinite samples come back unchanged, and so do
+/// samples more than 30 robust sigmas below their channel's median (a
+/// stack's resampling ringing beside a saturated star), which take no part
+/// in the offset.
 /// `parameters`, `device`, `progress` and `cancel` work as for
 /// `rc_astro_process_file`; no file is left behind.
 #[pyfunction]

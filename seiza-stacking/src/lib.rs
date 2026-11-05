@@ -200,10 +200,13 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// work on and takes their result back: [`RcAstroCli::process_image`] and
 /// [`PixInsight::ml_denoise_image`]. A change to the map changes their
 /// results for the same input, tool and options, so a host caching those
-/// results keys on it. Version 2 maps from 65535 or the image's span,
+/// results keys on it. Version 3 keeps samples far below the sky, such as a
+/// stack's resampling ringing beside a saturated star, out of the map as it
+/// keeps samples that are not finite, so a few of them no longer lift the
+/// whole image up the range. Version 2 maps from 65535 or the image's span,
 /// whichever is larger, and keeps samples that are not finite; version 1,
 /// before it was named, divided by the span alone.
-pub const EXTERNAL_EXCHANGE_VERSION: u32 = 2;
+pub const EXTERNAL_EXCHANGE_VERSION: u32 = 3;
 
 /// The `seiza-stacking` crate version whose output this build reproduces.
 ///

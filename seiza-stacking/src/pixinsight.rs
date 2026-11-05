@@ -546,7 +546,9 @@ impl PixInsight {
     /// whichever is larger, which is how PixInsight opens a 16-bit camera
     /// frame; the result is mapped back. Samples that are not finite, such
     /// as the uncovered edges of a stack, are given the channel's median for
-    /// PixInsight and returned unchanged.
+    /// PixInsight and returned unchanged, and so are samples more than 30
+    /// robust sigmas below it, such as a stack's resampling ringing beside a
+    /// saturated star, which take no part in the offset.
     ///
     /// A one-channel image needs a model with a mono route, and a
     /// three-channel image one with an RGB route. `cancel` stops the run

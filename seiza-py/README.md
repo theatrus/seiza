@@ -1350,7 +1350,9 @@ A linear stack is far outside the tools' 0..1 range, and they clamp it.
 the input's units. An array within 0..1 keeps its scale; any other is offset
 by its most negative sample and divided by 65535 or its span, whichever is
 larger, as PixInsight opens a 16-bit camera frame. NaN and infinite samples,
-such as a stack's uncovered edges, come back unchanged.
+such as a stack's uncovered edges, come back unchanged, and so do samples
+more than 30 robust sigmas below their channel's median, such as a stack's
+resampling ringing beside a saturated star, which take no part in the offset.
 
 ```python
 processed = seiza.rc_astro_process_image(tool, stack, parameters=values)
@@ -1397,8 +1399,9 @@ PixInsight works on 0 to 1. An array whose samples lie within 0 to 1 keeps
 its scale. Any other array is offset by its most negative sample and
 divided by 65535 or its span, whichever is larger, which is how PixInsight
 opens a 16-bit camera frame; the result is mapped back. NaN and infinite
-samples, such as a stack's uncovered edges, come back unchanged. A
-one-channel image needs a model with a mono route, and an RGB image one
+samples, such as a stack's uncovered edges, come back unchanged, and so do
+samples more than 30 robust sigmas below their channel's median, such as a
+stack's resampling ringing beside a saturated star. A one-channel image needs a model with a mono route, and an RGB image one
 with an RGB route: `mono` and `rgb` on `pixinsight_ml_denoise_model(model)`
 show which routes a model has. The options are PixInsight's, with its
 ranges and defaults:
