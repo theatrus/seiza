@@ -638,8 +638,14 @@ def loss_of(
     grain is gone. Times k, the blocks' noise weighs as the pixels' does,
     so every scale's error counts alike. A block average of the target is
     still unbiased, so the clean image is still what the loss converges
-    on. With `huber`, the error is clipped there first, so a star core or
-    an outlier cannot rule a block.
+    on. With `huber`, each block's term is robust in turn, so a star core
+    or an outlier cannot rule it; the error is not clipped before the
+    average, which would let a model meet a block's mean with errors of
+    alternating sign, each past the clip: one so trained striped star cores
+    and bright nebulae column by column and dug rings around stars. With
+    `huber_above`, a block holding any pixel whose target is that bright is
+    left out of the scale terms, as a star core's seeing differs between
+    the halves; mottle shows on the sky and faint signal.
 
     With `huber`, each pixel's weighted error is squared only within
     `huber` of zero and grows linearly beyond it. Noise stays in the
@@ -665,9 +671,16 @@ def loss_of(
         loss = robust.mean()
     else:
         loss = (error**2).mean()
-    clipped = error.clamp(-huber, huber) if huber > 0 else error
+    bright = (targets.abs() > huber_above).float() if huber > 0 and huber_above > 0 else None
     for k in scales:
-        loss = loss + scale_weight * ((k * torch.nn.functional.avg_pool2d(clipped, k)) ** 2).mean()
+        block = k * torch.nn.functional.avg_pool2d(error, k)
+        if huber > 0:
+            term = torch.nn.functional.huber_loss(block, torch.zeros_like(block), delta=huber, reduction="none") * 2.0
+        else:
+            term = block**2
+        if bright is not None:
+            term = torch.where(torch.nn.functional.max_pool2d(bright, k) > 0, torch.zeros_like(term), term)
+        loss = loss + scale_weight * term.mean()
     return loss
 
 

@@ -422,6 +422,36 @@ def test_the_scale_loss_weighs_coarse_error_as_it_weighs_the_grain():
     assert loss(offset, (4, 8, 16)) == pytest.approx((1 + 16 + 64 + 256) * loss(offset, ()), rel=1e-4)
 
 
+def test_the_scale_loss_does_not_pay_for_stripes():
+    from seiza_training.noise_model import loss_of
+
+    zeros, ones = torch.zeros(2, 1, 64, 64), torch.ones(2, 1, 64, 64)
+    # An error of 4σ, just past the robust loss's 3, where neither half
+    # can say better (a star core whose seeing differs between them), and
+    # the same with columns of alternating sign added: each column past the
+    # clip a clipped average had, so their block means cancel.
+    even = torch.full((2, 1, 64, 64), 4.0)
+    columns = torch.where(torch.arange(64) % 2 == 0, 8.0, -8.0).expand(2, 1, 64, 64)
+    striped = even + columns
+
+    def loss(error, targets, scales):
+        return float(loss_of(lambda inputs: targets + error, zeros, targets, zeros, ones, "variance", huber=3,
+                             huber_above=200, scales=scales))
+
+    for level in (0.0, 300.0):
+        # Over sky and over a star core alike, the stripes cost more.
+        targets = torch.full((2, 1, 64, 64), level)
+        assert loss(striped, targets, (4, 8, 16)) > loss(even, targets, (4, 8, 16))
+    # Over a core, the scale terms leave the blocks out.
+    core = torch.full((2, 1, 64, 64), 300.0)
+    assert loss(even, core, (4, 8, 16)) == pytest.approx(loss(even, core, ()))
+    # A block holding one bright pixel is left out; the rest are not.
+    one = torch.zeros(2, 1, 64, 64)
+    one[:, :, 5, 5] = 300.0
+    assert loss(even, one, (16,)) - loss(even, one, ()) == pytest.approx(
+        2 * 3 * (4 * 16 - 1.5) * 15 / 16, rel=1e-4)
+
+
 def test_the_noise_left_is_the_share_of_the_halves_noise_at_each_scale():
     from seiza_training.noise_model import gaussian_blur, noise_left
 
