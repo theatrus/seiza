@@ -51,6 +51,8 @@ mod color_calibration;
 mod context;
 mod continuum;
 mod cosmetic;
+mod experimental_flat;
+pub use experimental_flat::{ExperimentalFlatPreprocessingOptions, preprocess_flat_spatial};
 mod crop;
 mod defects;
 mod drizzle;

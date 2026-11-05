@@ -195,6 +195,9 @@ pub struct MasterBuildOptions {
     /// smooth at pixel scale — a dark master must keep its hot pixels, they
     /// are what subtracts the light's.
     pub defect_suppression: Option<crate::cosmetic::ImpulseFilterOptions>,
+    /// Experimental positive spatial replacement after flat calibration and
+    /// before masking/normalization. Off by default; invalid for bias/dark.
+    pub experimental_flat_preprocessing: Option<crate::ExperimentalFlatPreprocessingOptions>,
     /// Exclude native star and broad saturation footprints before flat
     /// normalization and combination. Off by default; invalid for bias/dark.
     pub flat_star_masking: Option<FlatStarMaskingOptions>,
@@ -334,6 +337,9 @@ pub struct MasterFrame {
     /// Impulse pixels replaced by [`MasterBuildOptions::defect_suppression`].
     /// Zero when suppression was off.
     pub defect_pixels_replaced: u64,
+    /// Channel samples replaced across inputs by experimental preprocessing.
+    /// Distinct from master corrections and temporal sample rejection.
+    pub experimental_flat_samples_replaced: u64,
     /// Per-input accepted and rejected counts.
     pub input_statistics: Vec<MasterInputStatistics>,
     /// True once the bias pedestal has been removed.
@@ -559,6 +565,7 @@ fn build_master(
     // what it accepted and pass two walks that list rather than `paths`.
     let mut accepted: Vec<&PathBuf> = Vec::with_capacity(paths.len());
     let mut skipped_inputs: Vec<SkippedInput> = Vec::new();
+    let mut experimental_flat_samples_replaced = 0_u64;
     let mut unmasked_saturation_samples = 0_u64;
     let mut unknown_saturation_inputs = 0_usize;
     let mut levels: Vec<DarkLevel> = Vec::new();
@@ -605,6 +612,7 @@ fn build_master(
             if options.dark_level_screening.is_some() {
                 levels.push(DarkLevel::measure(&prepared.image.data));
             }
+            experimental_flat_samples_replaced += prepared.experimental_flat_samples_replaced;
             unmasked_saturation_samples += prepared.unmasked_saturation_samples;
             unknown_saturation_inputs += usize::from(prepared.unknown_saturation);
             if let Some(scratch) = &mut flat_scratch {
@@ -798,6 +806,7 @@ fn build_master(
         accepted_samples,
         fallback_pixels,
         defect_pixels_replaced,
+        experimental_flat_samples_replaced,
         rejected_samples,
         masked_samples,
         flat_star_masking,
@@ -920,6 +929,14 @@ fn validate_options(
             ));
         }
     }
+    if let Some(preprocessing) = &options.experimental_flat_preprocessing {
+        if kind != MasterFrameKind::Flat {
+            return Err(Error::Calibration(
+                "experimental spatial replacement is only supported for flat masters".into(),
+            ));
+        }
+        preprocessing.validate()?;
+    }
     if let Some(masking) = &options.flat_star_masking {
         if kind != MasterFrameKind::Flat {
             return Err(Error::Calibration(
@@ -989,6 +1006,7 @@ struct PreparedInput {
     bayer: Option<BayerLayout>,
     effective_exposure: Option<f64>,
     metadata: FrameMetadata,
+    experimental_flat_samples_replaced: u64,
     unmasked_saturation_samples: u64,
     unknown_saturation: bool,
 }
@@ -1053,6 +1071,16 @@ fn prepare_input(
             path.display()
         )));
     }
+    let experimental_flat_samples_replaced = match &options.experimental_flat_preprocessing {
+        Some(preprocessing) => crate::preprocess_flat_spatial(
+            &mut frame.image,
+            frame.bayer,
+            preprocessing,
+            None,
+            options.cancel.as_ref(),
+        )?,
+        None => 0,
+    };
     let mut unmasked_saturation_samples = 0;
     let mut unknown_saturation = false;
     if let (Some(masking), Some(saturation)) = (&options.flat_star_masking, saturation) {
@@ -1084,6 +1112,7 @@ fn prepare_input(
         bayer: frame.bayer,
         effective_exposure,
         metadata,
+        experimental_flat_samples_replaced,
         unmasked_saturation_samples,
         unknown_saturation,
     })

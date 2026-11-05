@@ -1081,6 +1081,25 @@ impl From<FlatStarMaskingRequest> for FlatStarMaskingOptions {
     }
 }
 
+/// Experimental input replacement; omitted thresholds keep conservative defaults.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+struct ExperimentalFlatPreprocessingRequest {
+    sigma: f32,
+    minimum_relative_excess: f32,
+    noise_floor_adu: f32,
+}
+impl Default for ExperimentalFlatPreprocessingRequest {
+    fn default() -> Self {
+        let p = seiza_stacking::ExperimentalFlatPreprocessingOptions::default();
+        Self {
+            sigma: p.sigma,
+            minimum_relative_excess: p.minimum_relative_excess,
+            noise_floor_adu: p.noise_floor_adu,
+        }
+    }
+}
+
 /// Dark level screening; a field left out keeps the core's default.
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
@@ -1114,6 +1133,8 @@ struct MasterBuildRequest {
     rejection: MasterRejectionRequest,
     #[serde(default)]
     defect_suppression: Option<ImpulseFilterRequest>,
+    #[serde(default)]
+    experimental_flat_preprocessing: Option<ExperimentalFlatPreprocessingRequest>,
     #[serde(default)]
     flat_star_masking: Option<FlatStarMaskingRequest>,
     #[serde(default)]
@@ -1192,6 +1213,7 @@ struct MasterBuildResponse {
     masked_samples: u64,
     fallback_pixels: u64,
     defect_pixels_replaced: u64,
+    experimental_flat_samples_replaced: u64,
     bias_subtracted: bool,
     dark_subtracted: bool,
     normalized: bool,
@@ -9107,6 +9129,13 @@ fn build_master_request(
         cancel: cancellation,
         progress: None,
         defect_suppression,
+        experimental_flat_preprocessing: request.experimental_flat_preprocessing.map(|p| {
+            seiza_stacking::ExperimentalFlatPreprocessingOptions {
+                sigma: p.sigma,
+                minimum_relative_excess: p.minimum_relative_excess,
+                noise_floor_adu: p.noise_floor_adu,
+            }
+        }),
         flat_star_masking: request.flat_star_masking.map(FlatStarMaskingOptions::from),
         dark_level_screening: request
             .dark_level_screening
@@ -9140,6 +9169,7 @@ fn build_master_request(
         masked_samples: master.masked_samples,
         fallback_pixels: master.fallback_pixels,
         defect_pixels_replaced: master.defect_pixels_replaced,
+        experimental_flat_samples_replaced: master.experimental_flat_samples_replaced,
         bias_subtracted: master.bias_subtracted,
         dark_subtracted: master.dark_subtracted,
         normalized: master.normalized,
@@ -14941,6 +14971,36 @@ mod tests {
     }
 
     #[test]
+    fn master_builder_experimental_preprocessing_is_opt_in() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut pixels = vec![1000.0; 256];
+        pixels[8 * 16 + 8] = 50000.0;
+        let paths = (0..2)
+            .map(|i| {
+                let path = directory.path().join(format!("flat-{i}.fits"));
+                seiza_stacking::write_processed_image_fits_f32(
+                    &path,
+                    &LinearImage::new(16, 16, 1, pixels.clone()).unwrap(),
+                    &[],
+                    &[],
+                )
+                .unwrap();
+                path
+            })
+            .collect::<Vec<_>>();
+        let request = |kind: &str, experimental: Value| json!({"kind":kind,"inputs":paths,"output":directory.path().join("master.fits"),"experimentalFlatPreprocessing":experimental});
+        let plain = build_master_report(request("flat", Value::Null)).unwrap();
+        assert_eq!(plain["experimentalFlatSamplesReplaced"], 0);
+        let result = build_master_report(request("flat", json!({}))).unwrap();
+        assert_eq!(result["experimentalFlatSamplesReplaced"], 2);
+        assert_eq!(result["defectPixelsReplaced"], 0);
+        for kind in ["bias", "dark"] {
+            assert!(build_master_report(request(kind, json!({}))).is_err());
+        }
+        assert!(build_master_report(request("flat", json!({"sigma":0}))).is_err());
+    }
+
+    #[test]
     fn master_builder_screens_darks_that_caught_stray_light() {
         let directory = tempfile::tempdir().unwrap();
         let leaks = [0.0_f32, 0.5, 0.0, 40.0, 400.0];
@@ -17486,7 +17546,8 @@ pub unsafe extern "C" fn seiza_calibration_plan_json(
 /// optional fields are `bias`, `dark`, `darkExposureSeconds`,
 /// `exposureSeconds`, `rejection` (`lowSigma`, `highSigma`),
 /// `defectSuppression` (`lowSigma`, `highSigma`), `flatStarMasking`,
-/// `darkLevelScreening` and `scratchDirectory`. `dark` is a dark-flat when
+/// `experimentalFlatPreprocessing`, `darkLevelScreening` and `scratchDirectory`.
+/// `dark` is a dark-flat when
 /// building a flat. Defect suppression is accepted only for flats, because a
 /// dark master must retain the hot pixels it is meant to subtract.
 ///
@@ -17497,6 +17558,14 @@ pub unsafe extern "C" fn seiza_calibration_plan_json(
 /// inputs' raw units; default from `SATURATE`, `SATLEVEL` or the FITS
 /// encoding) and `minimumCleanSamples` (the fewest unmasked inputs every
 /// pixel must keep; default 2); `{}` takes every default.
+/// `experimentalFlatPreprocessing` (flats only, off when null/omitted) applies
+/// positive-only 5x5 spatial replacement after calibration, before masking and
+/// normalization. Its optional fields are `sigma` (default 10),
+/// `minimumRelativeExcess` (default 0.01), and `noiseFloorAdu` (default 1).
+/// This experimental operation may erase real sensor response. The response's
+/// `experimentalFlatSamplesReplaced` counts input-channel replacements separately
+/// from `defectPixelsReplaced` on the integrated master (zero when disabled).
+///
 /// `darkLevelScreening` (darks only) sets aside darks whose level sits more
 /// than `maxExcessSigma` (default 1) times the quietest dark's pixel noise
 /// above it, the mark of stray light; they appear in `skippedInputs`.

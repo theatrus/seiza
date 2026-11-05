@@ -183,6 +183,9 @@ core = "seiza-stacking::MasterBuildOptions"
 cancel = { none = "the C call takes a cancel signal as an argument" }
 progress = { none = "the C call takes a progress callback as an argument" }
 
+[rust.ExperimentalFlatPreprocessingRequest]
+core = "seiza-stacking::ExperimentalFlatPreprocessingOptions"
+
 [rust.FlatStarMaskingRequest]
 core = "seiza-stacking::FlatStarMaskingOptions"
 
@@ -531,6 +534,7 @@ objects = [
 "seiza-stacking::resample_region_warped" = { none = "a registration building block the stacker uses" }
 "seiza-stacking::resample_region_photosites" = { none = "a registration building block the stacker uses" }
 "seiza-stacking::screen_dark_levels" = { none = "master builds call it for dark level screening (MasterBuildRequest.darkLevelScreening)" }
+"seiza-stacking::preprocess_flat_spatial" = { none = "both bindings call this image-level helper through experimental_flat_preprocessing on their master build; no separate standalone image operation" }
 "seiza-stacking::suppress_impulses" = { none = "master builds call it for defect suppression" }
 
 # stars
@@ -1114,6 +1118,9 @@ CatalogSetupProgressResponse = { none = "download progress for the apps' setup s
 "CalibrationPlanRequest.dependencies" = { python = "bias_available" }
 
 # calibration masters
+"ExperimentalFlatPreprocessingRequest.sigma" = { python = "spatial_sigma" }
+"ExperimentalFlatPreprocessingRequest.minimum_relative_excess" = { python = "spatial_minimum_relative_excess" }
+"ExperimentalFlatPreprocessingRequest.noise_floor_adu" = { python = "spatial_noise_floor_adu" }
 "MasterBuildRequest.inputs" = { python = "images" }
 "RegisteredIntegrationRequest.inputs" = { python = "images" }
 "ImpulseFilterRequest.low_sigma" = { python = "defect_sigma_low" }

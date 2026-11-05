@@ -2063,3 +2063,30 @@ def test_a_frame_resamples_another_image_by_its_registration_alone():
     assert not rejected.accepted
     with pytest.raises(ValueError, match="no mapping"):
         rejected.resample(frame)
+
+
+def test_experimental_flat_preprocessing_is_opt_in_and_reports_input_replacements(tmp_path):
+    paths = []
+    for i in range(2):
+        data = np.full((16, 16), 1000.0, dtype=np.float32)
+        data[8, 8] = 50000.0
+        path = tmp_path / f"flat-{i}.fits"
+        fits.writeto(path, data, overwrite=True)
+        paths.append(path)
+    plain = seiza.build_flat(paths, tmp_path / "plain.fits")
+    assert plain.experimental_flat_samples_replaced == 0
+    result = seiza.build_flat(
+        paths, tmp_path / "experimental.fits",
+        experimental_flat_preprocessing=True, spatial_sigma=6.0,
+        spatial_minimum_relative_excess=0.01, spatial_noise_floor_adu=1.0,
+        defect_suppression=True,
+    )
+    assert result.experimental_flat_samples_replaced == 2
+    assert result.defect_pixels_replaced == 0
+    with fits.open(tmp_path / "experimental.fits") as hdus:
+        assert hdus[0].data[8, 8] == 1.0
+    with pytest.raises(ValueError, match="experimental_flat_preprocessing=True"):
+        seiza.build_flat(paths, tmp_path / "unused.fits", spatial_sigma=6.0)
+    with pytest.raises(seiza.StackError, match="positive finite"):
+        seiza.build_flat(paths, tmp_path / "unused.fits",
+                         experimental_flat_preprocessing=True, spatial_sigma=0.0)

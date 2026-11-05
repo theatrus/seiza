@@ -4289,3 +4289,45 @@ fn independently_stretched_rgb_stars_keep_their_output() {
         ],
     );
 }
+
+#[test]
+fn experimental_flat_preprocessing_keeps_its_calibrated_output() {
+    use seiza_stacking::ExperimentalFlatPreprocessingOptions;
+    let directory = tempfile::tempdir().unwrap();
+    let mut pixels = vec![1100.0; 16 * 16];
+    pixels[7 * 16 + 7] = 1110.5; // qualifies only AFTER subtracting the 100 ADU pedestal
+    pixels[10 * 16 + 10] = 11100.0;
+    pixels[5 * 16 + 10] = 1105.0; // legitimate subthreshold response must survive
+    let paths = (0..2)
+        .map(|i| {
+            let path = directory.path().join(format!("flat-{i}.fits"));
+            write_processed_image_fits_f32(
+                &path,
+                &LinearImage::new(16, 16, 1, pixels.clone()).unwrap(),
+                &[],
+                &[],
+            )
+            .unwrap();
+            path
+        })
+        .collect::<Vec<_>>();
+    let base = MasterBuildOptions {
+        bias: Some(LinearImage::new(16, 16, 1, vec![100.0; 256]).unwrap()),
+        ..Default::default()
+    };
+    let plain = build_master_from_fits(&paths, MasterFrameKind::Flat, &base).unwrap();
+    let options = MasterBuildOptions {
+        experimental_flat_preprocessing: Some(ExperimentalFlatPreprocessingOptions::default()),
+        ..base
+    };
+    let master = build_master_from_fits(&paths, MasterFrameKind::Flat, &options).unwrap();
+    assert_eq!(plain.experimental_flat_samples_replaced, 0);
+    assert_eq!(master.experimental_flat_samples_replaced, 4);
+    assert_eq!(master.defect_pixels_replaced, 0);
+    assert_eq!(master.image.data[7 * 16 + 7], 1.0);
+    assert_eq!(master.image.data[10 * 16 + 10], 1.0);
+    assert_eq!(master.image.data[5 * 16 + 10], 1.005);
+    assert_eq!(plain.image.data[7 * 16 + 7], 1.0105);
+    assert!(build_master_from_fits(&paths, MasterFrameKind::Bias, &options).is_err());
+    assert!(build_master_from_fits(&paths, MasterFrameKind::Dark, &options).is_err());
+}

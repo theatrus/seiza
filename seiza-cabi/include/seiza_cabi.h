@@ -2985,7 +2985,8 @@ char *seiza_calibration_plan_json(const char *request_json, char **error_out);
  optional fields are `bias`, `dark`, `darkExposureSeconds`,
  `exposureSeconds`, `rejection` (`lowSigma`, `highSigma`),
  `defectSuppression` (`lowSigma`, `highSigma`), `flatStarMasking`,
- `darkLevelScreening` and `scratchDirectory`. `dark` is a dark-flat when
+ `experimentalFlatPreprocessing`, `darkLevelScreening` and `scratchDirectory`.
+ `dark` is a dark-flat when
  building a flat. Defect suppression is accepted only for flats, because a
  dark master must retain the hot pixels it is meant to subtract.
 
@@ -2996,6 +2997,14 @@ char *seiza_calibration_plan_json(const char *request_json, char **error_out);
  inputs' raw units; default from `SATURATE`, `SATLEVEL` or the FITS
  encoding) and `minimumCleanSamples` (the fewest unmasked inputs every
  pixel must keep; default 2); `{}` takes every default.
+ `experimentalFlatPreprocessing` (flats only, off when null/omitted) applies
+ positive-only 5x5 spatial replacement after calibration, before masking and
+ normalization. Its optional fields are `sigma` (default 10),
+ `minimumRelativeExcess` (default 0.01), and `noiseFloorAdu` (default 1).
+ This experimental operation may erase real sensor response. The response's
+ `experimentalFlatSamplesReplaced` counts input-channel replacements separately
+ from `defectPixelsReplaced` on the integrated master (zero when disabled).
+
  `darkLevelScreening` (darks only) sets aside darks whose level sits more
  than `maxExcessSigma` (default 1) times the quietest dark's pixel noise
  above it, the mark of stray light; they appear in `skippedInputs`.

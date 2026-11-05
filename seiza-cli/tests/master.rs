@@ -81,6 +81,8 @@ fn master_cli_reports_actual_integration_for_every_kind_and_input_count() {
                     "unclipped mean"
                 }
             );
+            assert_eq!(report["defect_pixels_replaced"], 0);
+            assert!(configuration["defect_suppression"].is_null());
             assert_eq!(report["input_frames"], count);
             assert_eq!(report["skipped_inputs"].as_array().unwrap().len(), 0);
             let stdout = String::from_utf8_lossy(&result.stdout);
@@ -235,6 +237,21 @@ fn masked_flat_cli_reports_coverage_and_never_writes_an_unsupported_master() {
             assert!(String::from_utf8_lossy(&result.stderr).contains("insufficient coverage"));
             assert!(!output.exists());
             assert!(!report.exists());
+            let mask = directory.path().join("failed-mask.fits");
+            let failed = Command::new(env!("CARGO_BIN_EXE_seiza"))
+                .args(["master", "flat"])
+                .args(&paths)
+                .arg("--output")
+                .arg(&output)
+                .args(args)
+                .arg("--defect-suppression")
+                .arg("--defect-mask")
+                .arg(&mask)
+                .output()
+                .unwrap();
+            assert!(!failed.status.success());
+            assert!(!mask.exists());
+            assert!(!output.exists());
         } else {
             let result = run_master("flat", &paths, &output, &report, &args);
             let report = read_report(&report);
@@ -270,5 +287,287 @@ fn masked_flat_cli_reports_coverage_and_never_writes_an_unsupported_master() {
                 Some(true)
             );
         }
+    }
+}
+
+#[test]
+fn flat_defect_suppression_and_mask_report_actual_changes() {
+    for extension in ["fits", "xisf"] {
+        for contaminated in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut pixels = (0..32 * 32)
+                .map(|i| {
+                    1000.0 + (i % 32) as f32 + (i / 32) as f32 * 0.5 + ((i * 37) % 97) as f32 / 97.0
+                })
+                .collect::<Vec<_>>();
+            if contaminated {
+                // Edges have five neighbors; corners have only three and
+                // deliberately cannot be corrected by the existing filter.
+                for index in [
+                    8,
+                    8 * 32,
+                    8 * 32 + 31,
+                    31 * 32 + 8,
+                    16 * 32 + 16,
+                    0,
+                    31,
+                    31 * 32,
+                    32 * 32 - 1,
+                ] {
+                    pixels[index] = 50000.0;
+                }
+            }
+            let paths = (0..3)
+                .map(|i| {
+                    let path = directory.path().join(format!("flat-{i}.{extension}"));
+                    seiza_image_io::save_f32(
+                        &path,
+                        32,
+                        32,
+                        F32ImageData::Mono(&pixels),
+                        &seiza_image_io::SaveOptions::default(),
+                    )
+                    .unwrap();
+                    path
+                })
+                .collect::<Vec<_>>();
+            let mut results = Vec::new();
+            for mode in ["disabled", "enabled", "mask", "repeat"] {
+                let output = directory.path().join(format!("{mode}.fits"));
+                let report_path = directory.path().join(format!("{mode}.json"));
+                let mask_path = directory.path().join(format!("{mode}-mask.fits"));
+                let mut args = Vec::new();
+                if mode != "disabled" {
+                    args.push("--defect-suppression");
+                }
+                if mode == "mask" || mode == "repeat" {
+                    args.extend(["--defect-mask", mask_path.to_str().unwrap()]);
+                }
+                // Exercise the combination with explicit sigma settings and
+                // native star masking on these unsaturated isolated impulses.
+                args.extend(["--star-mask", "--sigma-low", "3", "--sigma-high", "3"]);
+                let result = run_master("flat", &paths, &output, &report_path, &args);
+                let report = read_report(&report_path);
+                let expected = if contaminated && mode != "disabled" {
+                    5
+                } else {
+                    0
+                };
+                assert_eq!(report["defect_pixels_replaced"], expected);
+                assert_eq!(
+                    report["configuration"]["defect_suppression"].is_null(),
+                    mode == "disabled"
+                );
+                if mode != "disabled" {
+                    assert_eq!(
+                        report["configuration"]["defect_suppression"]["high_sigma"],
+                        16.0
+                    );
+                    assert_eq!(
+                        report["configuration"]["defect_suppression"]["low_sigma"],
+                        16.0
+                    );
+                }
+                assert!(
+                    String::from_utf8_lossy(&result.stdout)
+                        .contains(&format!("Master defects corrected: {expected}"))
+                );
+                let Pixels::F32(after) = seiza_image_io::read_astronomy(&output)
+                    .unwrap()
+                    .image
+                    .pixels
+                else {
+                    panic!()
+                };
+                if mask_path.exists() {
+                    let mask = seiza_image_io::read_astronomy(&mask_path).unwrap().image;
+                    assert_eq!((mask.width, mask.height), (32, 32));
+                    let Pixels::F32(mask) = mask.pixels else {
+                        panic!()
+                    };
+                    let before: &Vec<f32> = &results[0];
+                    assert_eq!(
+                        mask.iter().filter(|&&v| v == 1.0).count(),
+                        expected as usize
+                    );
+                    for ((&a, &b), &marked) in before.iter().zip(&after).zip(&mask) {
+                        assert_eq!(marked, if a.to_bits() != b.to_bits() { 1.0 } else { 0.0 });
+                    }
+                    assert!(report["defect_mask"]["sha256"].is_string());
+                }
+                if mode == "mask" || mode == "repeat" {
+                    assert_eq!(after, results[1]);
+                }
+                results.push(after);
+            }
+        }
+    }
+}
+
+#[test]
+fn defect_options_reject_invalid_commands_and_output_aliases() {
+    for kind in ["bias", "dark", "flat"] {
+        let result = Command::new(env!("CARGO_BIN_EXE_seiza"))
+            .args(["master", kind, "a.fits", "b.fits", "--output", "out.fits"])
+            .args(if kind == "flat" {
+                vec!["--defect-mask", "mask.fits"]
+            } else {
+                vec!["--defect-suppression"]
+            })
+            .output()
+            .unwrap();
+        assert!(!result.status.success());
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(if kind == "flat" {
+                "--defect-suppression"
+            } else {
+                "unexpected argument"
+            })
+        );
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.fits");
+    write_raw(&input, "flat", 1000.0, "H");
+    let original = std::fs::read(&input).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_seiza"))
+        .args(["master", "flat"])
+        .arg(&input)
+        .arg(directory.path().join("other.fits"))
+        .arg("--output")
+        .arg(directory.path().join("out.fits"))
+        .arg("--defect-suppression")
+        .arg("--defect-mask")
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert_eq!(std::fs::read(input).unwrap(), original);
+    assert!(!directory.path().join("out.fits").exists());
+}
+
+#[test]
+fn rgb_defect_mask_combines_channels_at_the_same_coordinate() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut data = (0..32 * 32)
+        .flat_map(|i| {
+            let value =
+                1000.0 + (i % 32) as f32 + (i / 32) as f32 * 0.5 + ((i * 37) % 97) as f32 / 97.0;
+            [value, value + 100.0, value + 200.0]
+        })
+        .collect::<Vec<_>>();
+    let first = 16 * 32 + 16;
+    let second = 8 * 32 + 8;
+    data[first * 3] = 50000.0;
+    data[first * 3 + 1] = 50000.0;
+    data[second * 3 + 2] = 50000.0;
+    let paths = (0..3)
+        .map(|i| {
+            let path = directory.path().join(format!("rgb-{i}.fits"));
+            seiza_image_io::save_f32(
+                &path,
+                32,
+                32,
+                F32ImageData::RgbInterleaved(&data),
+                &seiza_image_io::SaveOptions::default(),
+            )
+            .unwrap();
+            path
+        })
+        .collect::<Vec<_>>();
+    let output = directory.path().join("master.fits");
+    let report = directory.path().join("report.json");
+    let mask = directory.path().join("mask.fits");
+    run_master(
+        "flat",
+        &paths,
+        &output,
+        &report,
+        &[
+            "--defect-suppression",
+            "--defect-mask",
+            mask.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(read_report(&report)["defect_pixels_replaced"], 3);
+    let image = seiza_image_io::read_astronomy(&mask).unwrap().image;
+    assert_eq!(image.planes, 1);
+    let Pixels::F32(data) = image.pixels else {
+        panic!()
+    };
+    assert_eq!(data.iter().sum::<f32>(), 2.0);
+    assert_eq!(data[first], 1.0);
+    assert_eq!(data[second], 1.0);
+}
+
+#[test]
+fn experimental_spatial_replacement_is_opt_in_flat_only_and_reported_separately() {
+    for extension in ["fits", "xisf"] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut data = vec![1000.0; 16 * 16];
+        data[8 * 16 + 8] = 50000.0;
+        let paths = (0..3)
+            .map(|i| {
+                let path = directory.path().join(format!("flat-{i}.{extension}"));
+                seiza_image_io::save_f32(
+                    &path,
+                    16,
+                    16,
+                    F32ImageData::Mono(&data),
+                    &seiza_image_io::SaveOptions::default(),
+                )
+                .unwrap();
+                path
+            })
+            .collect::<Vec<_>>();
+        for enabled in [false, true] {
+            let output = directory.path().join(format!("{enabled}.fits"));
+            let report = directory.path().join(format!("{enabled}.json"));
+            let args = if enabled {
+                vec![
+                    "--experimental-spatial-replacement",
+                    "--star-mask",
+                    "--defect-suppression",
+                ]
+            } else {
+                vec![]
+            };
+            let result = run_master("flat", &paths, &output, &report, &args);
+            let report = read_report(&report);
+            assert_eq!(
+                report["experimental_flat_samples_replaced"],
+                if enabled { 3 } else { 0 }
+            );
+            assert_eq!(report["defect_pixels_replaced"], 0);
+            assert_eq!(
+                report["configuration"]["experimental_flat_preprocessing"].is_null(),
+                !enabled
+            );
+            if enabled {
+                assert_eq!(
+                    report["configuration"]["experimental_flat_preprocessing"]["sigma"],
+                    10.0
+                );
+                assert!(
+                    String::from_utf8_lossy(&result.stdout)
+                        .contains("Experimental input samples replaced: 3")
+                );
+            }
+        }
+    }
+    for (kind, extra) in [
+        ("bias", vec!["--experimental-spatial-replacement"]),
+        ("dark", vec!["--experimental-spatial-replacement"]),
+        ("flat", vec!["--spatial-sigma", "6"]),
+        (
+            "flat",
+            vec!["--experimental-spatial-replacement", "--spatial-sigma", "0"],
+        ),
+    ] {
+        let result = Command::new(env!("CARGO_BIN_EXE_seiza"))
+            .args(["master", kind, "a.fits", "b.fits", "--output", "out.fits"])
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(!result.status.success());
     }
 }

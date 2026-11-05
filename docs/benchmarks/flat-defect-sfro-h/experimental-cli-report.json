@@ -1,0 +1,113 @@
+{
+  "schema_version": 1,
+  "kind": "flat",
+  "output": {
+    "path": "/tmp/seiza-experimental-cli-real/master.fits",
+    "bytes": 244693440,
+    "sha256": "c99d7310a5c872d66089d49d38ff2af73c8b678117edf99ab549b9ddae1b5d3e"
+  },
+  "calibration": {
+    "bias": null,
+    "dark_flat": null,
+    "dark_flat_exposure_seconds": null
+  },
+  "configuration": {
+    "low_sigma": 3.0,
+    "high_sigma": 3.0,
+    "exposure_seconds_override": null,
+    "integration": "median-mad-sigma-clipped-mean",
+    "rejection_method": "MEDIAN_MAD",
+    "fallback_center": "none; insufficient coverage fails",
+    "rereads_inputs": false,
+    "defect_suppression": {
+      "low_sigma": 16.0,
+      "high_sigma": 16.0
+    },
+    "experimental_flat_preprocessing": {
+      "sigma": 6.0,
+      "minimum_relative_excess": 0.01,
+      "noise_floor_adu": 1.0
+    }
+  },
+  "inputs": [
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_2.76s_Bin1x1_0024.fits",
+        "bytes": 122351040,
+        "sha256": "1d53938366bddb14ebb1549fb0aaa9a21e1902c394861c150131d31c20cbcf29"
+      },
+      "accepted_samples": 56828852,
+      "rejected_samples": 4342636,
+      "masked_samples": 0
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_2.79s_Bin1x1_0023.fits",
+        "bytes": 122351040,
+        "sha256": "bcc40469fe5ec396d24ac598398bd6ea2a7735a057722a97c39cd556dc0d8aff"
+      },
+      "accepted_samples": 56810861,
+      "rejected_samples": 4360627,
+      "masked_samples": 0
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.22s_Bin1x1_0000.fits",
+        "bytes": 122351040,
+        "sha256": "ac30752cf66e9d45124040719c7cccbac08dd154e620a43b77a014f09a67311a"
+      },
+      "accepted_samples": 57165156,
+      "rejected_samples": 4006332,
+      "masked_samples": 0
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.29s_Bin1x1_0007.fits",
+        "bytes": 122351040,
+        "sha256": "7cb8272c9add52adb4067c986aa848e694f187287e68ee20792241d5245ddf18"
+      },
+      "accepted_samples": 56919751,
+      "rejected_samples": 4251737,
+      "masked_samples": 0
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.45s_Bin1x1_0004.fits",
+        "bytes": 122351040,
+        "sha256": "16537e259f6eaedb802cd073549b9c183869afdc11226ddc6326bd77944e8bc6"
+      },
+      "accepted_samples": 57057221,
+      "rejected_samples": 4114267,
+      "masked_samples": 0
+    }
+  ],
+  "skipped_inputs": [],
+  "input_frames": 5,
+  "accepted_samples": 284781841,
+  "rejected_samples": 21075599,
+  "masked_samples": 0,
+  "flat_star_masking": {
+    "options": {
+      "detection_sigma": 4.0,
+      "halo_radius_factor": 3.0,
+      "minimum_radius_pixels": 6.0,
+      "saturation_level": 65535.0,
+      "minimum_clean_samples": 2
+    },
+    "masked_samples": 0,
+    "masked_pixels": 0,
+    "minimum_clean_samples": 3,
+    "maximum_clean_samples": 5,
+    "low_coverage_samples": 0,
+    "unmasked_saturation_samples": 6,
+    "unknown_saturation_inputs": 0
+  },
+  "fallback_pixels": 0,
+  "defect_pixels_replaced": 18981,
+  "experimental_flat_samples_replaced": 32071,
+  "defect_mask": null,
+  "bias_subtracted": false,
+  "dark_subtracted": false,
+  "normalized": true,
+  "output_exposure_seconds": null
+}

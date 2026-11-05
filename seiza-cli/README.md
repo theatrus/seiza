@@ -894,6 +894,72 @@ seiza master flat flats/*.fits --bias master-bias.fits \
   --report master-flat.json
 ```
 
+Standalone flat integration also offers opt-in master defect suppression:
+
+```sh
+seiza master flat flats/*.fits --star-mask --defect-suppression \
+  --defect-mask master-flat-defects.fits --output master-flat.fits \
+  --report master-flat.json
+```
+
+`--defect-suppression` uses the same conservative core defaults as the
+calibration-library flat recipes (16 sigma below/above the same-plane local
+median). It runs after integration, independently of temporal rejection and
+star masking. Without this flag, master pixels retain the existing behavior.
+Both flags are flat-only; `--defect-mask` requires `--defect-suppression` and a
+FITS output filename. FITS and XISF inputs are supported. Omit calibration
+arguments to deliberately evaluate uncalibrated normalized flats.
+
+Console output and JSON `defect_pixels_replaced` report corrected samples,
+including zero when disabled or when nothing qualifies. JSON
+`configuration.defect_suppression` is `null` when disabled, otherwise it records
+`low_sigma` and `high_sigma`. These corrections are separate from
+`rejected_samples`, `masked_samples`, and `fallback_pixels`. A corrected master
+sample is not proof of a defective sensor pixel: spatial filtering can also
+remove genuine response variation or residual artifacts.
+
+The optional single-channel mask uses 0 for unchanged coordinates and 1 where
+any channel changed. For mono/CFA flats its sum equals `defect_pixels_replaced`;
+for RGB, that statistic counts channel samples while the mask counts coordinates.
+It shares the master's dimensions and row order. The mask is derived from actual
+writes by the existing filter, without repeating detection. Only mask requests
+allocate a pre-correction snapshot, reused as the mask buffer; normal builds incur no
+additional image passes or allocations. Each FITS output is published atomically
+after successful integration; master, mask and report publication is not a
+multi-file transaction. JSON `defect_mask` records its path and SHA-256 identity.
+
+Per-frame spatial replacement is available as a separate experimental option:
+
+```sh
+seiza master flat flats/*.fits --experimental-spatial-replacement \
+  --spatial-sigma 6 --star-mask --defect-suppression \
+  --output master-flat.fits --report master-flat.json
+```
+
+This flat-only option is off by default. It applies the evaluated positive-only
+5×5 median/MAD filter **after calibration, before star masking and normalization**.
+The conservative default is 10 sigma; specify `--spatial-sigma 6` for the more
+aggressive evaluated variant. `--spatial-minimum-relative-excess` defaults to
+0.01 (one percent) and `--spatial-noise-floor-adu` defaults to 1 calibrated ADU.
+Threshold overrides require `--experimental-spatial-replacement`. Neighborhoods
+stay within each channel/CFA phase; negative impulses are left unchanged.
+Raw saturation footprints are captured before calibration/replacement so a
+modified saturated core cannot hide a broad footprint from star masking.
+
+Console output and JSON `experimental_flat_samples_replaced` count replacements
+across input channel samples, separately from `defect_pixels_replaced` on the
+finished master and temporal rejection. JSON
+`configuration.experimental_flat_preprocessing` is `null` when disabled and
+otherwise records effective `sigma`, `minimum_relative_excess` and
+`noise_floor_adu`. Existing `--defect-mask` still describes only corrections to
+the finished master. Inputs are processed in memory; originals are never changed.
+
+The measured gains were very small, and genuine sensor response can be removed.
+The default integration pipeline is unchanged. The standalone harness in
+`examples/flat_defect_evaluation.rs` shares the core filter for reproducible
+experiments. See [the evaluation report](../docs/flat-defect-evaluation.md) for
+the measurements and limits.
+
 Bias and dark construction uses a two-pass, leave-one-out sigma-clipped mean.
 Flat construction calibrates and normalizes each input once, then uses a
 scratch-backed temporal median/MAD sigma-clipped mean. This improves rejection

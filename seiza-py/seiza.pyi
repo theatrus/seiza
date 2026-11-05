@@ -956,6 +956,7 @@ class MasterResult:
     rejected_samples: int
     fallback_pixels: int
     defect_pixels_replaced: int
+    experimental_flat_samples_replaced: int
     bias_subtracted: bool
     dark_subtracted: bool
     normalized: bool
@@ -1729,6 +1730,10 @@ def build_flat(
     defect_suppression: bool = False,
     defect_sigma_low: float | None = None,
     defect_sigma_high: float | None = None,
+    experimental_flat_preprocessing: bool = False,
+    spatial_sigma: float | None = None,
+    spatial_minimum_relative_excess: float | None = None,
+    spatial_noise_floor_adu: float | None = None,
 ) -> MasterResult: ...
 def integrate_registered_frames(
     images: Sequence[str | Path],

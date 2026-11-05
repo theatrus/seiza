@@ -1,0 +1,361 @@
+{
+  "schema_version": 1,
+  "kind": "flat",
+  "output": {
+    "path": "/tmp/seiza-flat-evaluation-v2/cli-validation/master.fits",
+    "bytes": 244693440,
+    "sha256": "1f31fed95d83657fff4206f1372f0a2a820143521ed343eee9e394345aeaeb6b"
+  },
+  "calibration": {
+    "bias": null,
+    "dark_flat": null,
+    "dark_flat_exposure_seconds": null
+  },
+  "configuration": {
+    "low_sigma": 3.0,
+    "high_sigma": 3.0,
+    "exposure_seconds_override": null,
+    "integration": "median-mad-sigma-clipped-mean",
+    "rejection_method": "MEDIAN_MAD",
+    "fallback_center": "none; insufficient coverage fails",
+    "rereads_inputs": false,
+    "defect_suppression": {
+      "low_sigma": 16.0,
+      "high_sigma": 16.0
+    }
+  },
+  "inputs": [
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_2.66s_Bin1x1_0029.fits",
+        "bytes": 122351040,
+        "sha256": "ee0bfa07150897303c72fddc4d997e4bd081004fc2cbd26ea92c0d8ee040f40d"
+      },
+      "accepted_samples": 60551277,
+      "rejected_samples": 620211,
+      "masked_samples": 0
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_2.70s_Bin1x1_0028.fits",
+        "bytes": 122351040,
+        "sha256": "cf8ad7e2e0919335ef1e63650c6fe4b8ab21a589ba145e47074e908a6af4d515"
+      },
+      "accepted_samples": 60542174,
+      "rejected_samples": 629314,
+      "masked_samples": 0
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_2.72s_Bin1x1_0025.fits",
+        "bytes": 122351040,
+        "sha256": "21e1b5e1649e6fbe10b1386dd4789d54bdc48edd7de9105f37dcf366ef9e803a"
+      },
+      "accepted_samples": 60511391,
+      "rejected_samples": 660097,
+      "masked_samples": 0
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_2.74s_Bin1x1_0027.fits",
+        "bytes": 122351040,
+        "sha256": "c3770353210544521b6c341f3c7cedbe3fc8e07008892869165416b5a0e79f2f"
+      },
+      "accepted_samples": 60590317,
+      "rejected_samples": 581171,
+      "masked_samples": 0
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_2.76s_Bin1x1_0024.fits",
+        "bytes": 122351040,
+        "sha256": "1d53938366bddb14ebb1549fb0aaa9a21e1902c394861c150131d31c20cbcf29"
+      },
+      "accepted_samples": 60500480,
+      "rejected_samples": 671008,
+      "masked_samples": 0
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_2.77s_Bin1x1_0000.fits",
+        "bytes": 122351040,
+        "sha256": "3b0cdbb7e86e14cc11387ccb406cc676a5fce203d02feebedf756f3c80b43b2c"
+      },
+      "accepted_samples": 60584855,
+      "rejected_samples": 586633,
+      "masked_samples": 0
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_2.79s_Bin1x1_0023.fits",
+        "bytes": 122351040,
+        "sha256": "bcc40469fe5ec396d24ac598398bd6ea2a7735a057722a97c39cd556dc0d8aff"
+      },
+      "accepted_samples": 60490819,
+      "rejected_samples": 680669,
+      "masked_samples": 0
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_2.83s_Bin1x1_0022.fits",
+        "bytes": 122351040,
+        "sha256": "c416a2c8c8e240ae500c076840285b5b9ba323d4f8eac8b52b45bb24d5bd66df"
+      },
+      "accepted_samples": 60541177,
+      "rejected_samples": 630311,
+      "masked_samples": 0
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_2.87s_Bin1x1_0021.fits",
+        "bytes": 122351040,
+        "sha256": "a295f7595a7ca078d6d637177b94b2b4396790f84601c519367a0c4aa18b9f17"
+      },
+      "accepted_samples": 60533288,
+      "rejected_samples": 638200,
+      "masked_samples": 0
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_2.91s_Bin1x1_0020.fits",
+        "bytes": 122351040,
+        "sha256": "a1624b84d4748c30a86ccb637949a43eaa3b752d01d38e9e9cc6f127b6c18464"
+      },
+      "accepted_samples": 60524447,
+      "rejected_samples": 647041,
+      "masked_samples": 0
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_2.96s_Bin1x1_0019.fits",
+        "bytes": 122351040,
+        "sha256": "f81510131d4bb563ba49d0b595c9cff7e2d68c12d0f8a8540a1c828a44c4fa6c"
+      },
+      "accepted_samples": 60571320,
+      "rejected_samples": 600168,
+      "masked_samples": 0
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.00s_Bin1x1_0018.fits",
+        "bytes": 122351040,
+        "sha256": "44172b8c376d2bf570872aaad9f22da17bb03f7f558ae5f36cc051605b06afd9"
+      },
+      "accepted_samples": 60561831,
+      "rejected_samples": 609545,
+      "masked_samples": 112
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.04s_Bin1x1_0017.fits",
+        "bytes": 122351040,
+        "sha256": "4766c2ce231b4e702d82406e16598094574de03fc856c126759edf1b2282c393"
+      },
+      "accepted_samples": 60601250,
+      "rejected_samples": 570238,
+      "masked_samples": 0
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.05s_Bin1x1_0012.fits",
+        "bytes": 122351040,
+        "sha256": "72b14d400602e39586fc494f2f7abaffb1dcbb080dd68329302357df1eaf3f92"
+      },
+      "accepted_samples": 60494751,
+      "rejected_samples": 676737,
+      "masked_samples": 0
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.09s_Bin1x1_0016.fits",
+        "bytes": 122351040,
+        "sha256": "76527706680b1c7716261228fcdea5dc582548e10a7a6c1090d9a0f5b00f460a"
+      },
+      "accepted_samples": 60594070,
+      "rejected_samples": 577418,
+      "masked_samples": 0
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.10s_Bin1x1_0011.fits",
+        "bytes": 122351040,
+        "sha256": "61994d06394b9f1713b890f6544b088529194afa98262fda7eae3525084c3584"
+      },
+      "accepted_samples": 60486069,
+      "rejected_samples": 685419,
+      "masked_samples": 0
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.14s_Bin1x1_0010.fits",
+        "bytes": 122351040,
+        "sha256": "193d5bc7ab585d3a94141b8f62c5c2ff599c8779f67db92b634b4b4de426df18"
+      },
+      "accepted_samples": 60530228,
+      "rejected_samples": 641260,
+      "masked_samples": 0
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.14s_Bin1x1_0015.fits",
+        "bytes": 122351040,
+        "sha256": "8607166e3004997e13fbfb21da61bbb347f1cd42336b9623f6d223623ffe18cc"
+      },
+      "accepted_samples": 60631357,
+      "rejected_samples": 540131,
+      "masked_samples": 0
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.18s_Bin1x1_0014.fits",
+        "bytes": 122351040,
+        "sha256": "b9630d8b746d43df29490995ce0e785853c13c0d70e6494707a1e971b271da6c"
+      },
+      "accepted_samples": 60621812,
+      "rejected_samples": 549676,
+      "masked_samples": 0
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.19s_Bin1x1_0009.fits",
+        "bytes": 122351040,
+        "sha256": "54d3a49f4115631cd063439443039b004064dc297b647c29052cba943977da51"
+      },
+      "accepted_samples": 60520222,
+      "rejected_samples": 651266,
+      "masked_samples": 0
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.22s_Bin1x1_0000.fits",
+        "bytes": 122351040,
+        "sha256": "ac30752cf66e9d45124040719c7cccbac08dd154e620a43b77a014f09a67311a"
+      },
+      "accepted_samples": 60659104,
+      "rejected_samples": 512384,
+      "masked_samples": 0
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.24s_Bin1x1_0008.fits",
+        "bytes": 122351040,
+        "sha256": "86db722e8f14b9d2b6992d513efe20d6ad4f749a3eea4776b83f7a7c8af76860"
+      },
+      "accepted_samples": 60558272,
+      "rejected_samples": 613216,
+      "masked_samples": 0
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.29s_Bin1x1_0007.fits",
+        "bytes": 122351040,
+        "sha256": "7cb8272c9add52adb4067c986aa848e694f187287e68ee20792241d5245ddf18"
+      },
+      "accepted_samples": 60549637,
+      "rejected_samples": 621851,
+      "masked_samples": 0
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.34s_Bin1x1_0006.fits",
+        "bytes": 122351040,
+        "sha256": "e99a6f875c913a1ebc27e77dbb8492ac5c3cbe317565b6a444f52da7f38886a6"
+      },
+      "accepted_samples": 60587711,
+      "rejected_samples": 583777,
+      "masked_samples": 0
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.40s_Bin1x1_0005.fits",
+        "bytes": 122351040,
+        "sha256": "c467ac0ee2c72aad5b431907b83b807331d2094fd15b6d7248876e88e40f6caa"
+      },
+      "accepted_samples": 60577946,
+      "rejected_samples": 593542,
+      "masked_samples": 0
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.45s_Bin1x1_0004.fits",
+        "bytes": 122351040,
+        "sha256": "16537e259f6eaedb802cd073549b9c183869afdc11226ddc6326bd77944e8bc6"
+      },
+      "accepted_samples": 60611480,
+      "rejected_samples": 560008,
+      "masked_samples": 0
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.51s_Bin1x1_0003.fits",
+        "bytes": 122351040,
+        "sha256": "24d97d49c4d9d7bb5877b25ec4112bc3a007480de7a6406274352bc548a8ff85"
+      },
+      "accepted_samples": 60601073,
+      "rejected_samples": 570415,
+      "masked_samples": 0
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.57s_Bin1x1_0002.fits",
+        "bytes": 122351040,
+        "sha256": "60444a852a372a0411ced6b6067c6d22fc8ad4c6f598d5d7d9921ed8a598f5b7"
+      },
+      "accepted_samples": 60634707,
+      "rejected_samples": 536781,
+      "masked_samples": 0
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.63s_Bin1x1_0001.fits",
+        "bytes": 122351040,
+        "sha256": "3814135cb1a309a81e0cc509c8bdd18f8d7da84e61b3a0ecddead1a8025cf4c1"
+      },
+      "accepted_samples": 60662796,
+      "rejected_samples": 508692,
+      "masked_samples": 0
+    },
+    {
+      "source": {
+        "path": "/mnt/astro/sfro/2024-09-12-SFRO/FLAT/_H_3.67s_Bin1x1_0000.fits",
+        "bytes": 122351040,
+        "sha256": "97b847a53cce93b9702db4a34c6577ef27e1cd8ddd2c363284356190274ab872"
+      },
+      "accepted_samples": 60648193,
+      "rejected_samples": 523295,
+      "masked_samples": 0
+    }
+  ],
+  "skipped_inputs": [],
+  "input_frames": 30,
+  "accepted_samples": 1817074054,
+  "rejected_samples": 18070474,
+  "masked_samples": 112,
+  "flat_star_masking": {
+    "options": {
+      "detection_sigma": 4.0,
+      "halo_radius_factor": 3.0,
+      "minimum_radius_pixels": 6.0,
+      "saturation_level": 65535.0,
+      "minimum_clean_samples": 2
+    },
+    "masked_samples": 112,
+    "masked_pixels": 112,
+    "minimum_clean_samples": 17,
+    "maximum_clean_samples": 30,
+    "low_coverage_samples": 0,
+    "unmasked_saturation_samples": 35,
+    "unknown_saturation_inputs": 0
+  },
+  "fallback_pixels": 0,
+  "defect_pixels_replaced": 17561,
+  "defect_mask": {
+    "path": "/tmp/seiza-flat-evaluation-v2/cli-validation/mask.fits",
+    "bytes": 244690560,
+    "sha256": "90a236a153e8300ba649a7cea38e744d7f5f7d00912625beecbc5c341fde6948"
+  },
+  "bias_subtracted": false,
+  "dark_subtracted": false,
+  "normalized": true,
+  "output_exposure_seconds": null
+}
