@@ -290,8 +290,12 @@ camera, gain, offset, exposure, binning and night on one telescope.
 2. **Plan calibration.** `plan_calibration` chooses each set's bias, dark
    and flat from the calibration-master library, under the matching policy
    the desktop apps use, and the plan must suit every light of the set. A
-   set without a flat, or without both a dark and a bias, is left out, and
-   the reason is recorded.
+   set without a dark or a bias is left out, and the reason is recorded. A
+   set without a flat is built all the same and marked `ready:no-flat`: the
+   halves of a noise pair share their calibration, so an uncorrected flat
+   field is signal both halves hold, not noise. A model that learns the flat
+   field's work, such as sharpening, and the multi-night stacks leave these
+   sets out.
 3. **Take in finished stacks.** Copy in each PSF Guard group stack at its
    current revision. Its scheduler database, found by the targets its jobs
    name, gives its telescope, and the file names the scheduler recorded for

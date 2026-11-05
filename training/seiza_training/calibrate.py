@@ -2,8 +2,12 @@
 
 Seiza's `plan_calibration` applies the same matching policy the desktop
 apps and PSF Guard use, to the masters the crawl found in the library. The
-plan must suit every light of the set. A set needs a flat, and a dark or a
-bias; a set without one is left out, with the reason recorded.
+plan must suit every light of the set. A set needs a dark or a bias; a set
+without either is left out, with the reason recorded. A set without a flat
+is built all the same, marked `ready:no-flat`: the halves of a noise pair
+share their calibration, so an uncorrected flat field is signal both halves
+hold, not noise. A model that learns the flat field's work, such as
+sharpening, leaves these sets out.
 
 The plan orders the masters that suit by time, nearest first, as frames to
 combine; it does not judge a master's own noise. A master's noise is the
@@ -25,6 +29,8 @@ import seiza
 from .manifest import Manifest, dumps
 
 KINDS = ("bias", "dark", "flat")
+# The sets the later passes measure and build.
+CALIBRATABLE_SQL = "calibration_status IN ('ready', 'ready:no-flat')"
 # The read noise a bias or dark master may add, as a share of one frame's.
 MASTER_NOISE = 0.2
 _counts: dict[str, tuple[float | None, float | None]] = {}
@@ -128,10 +134,10 @@ def plan_set(lights: list[Any], masters: dict[str, list[Any]]) -> dict[str, Any]
             plans[kind]["noise"] = round(noise, 4) if noise is not None else None
             nearest = master_noise(matched[0], kind, lights[0]["exposure_seconds"])
             plans[kind]["nearest_noise"] = round(nearest, 4) if nearest is not None else None
-    if chosen["flat"] is None:
-        status = "excluded:no-flat"
-    elif chosen["dark"] is None and chosen["bias"] is None:
+    if chosen["dark"] is None and chosen["bias"] is None:
         status = "excluded:no-dark-or-bias"
+    elif chosen["flat"] is None:
+        status = "ready:no-flat"
     else:
         status = "ready"
     return {"status": status, "masters": chosen, "plans": plans}

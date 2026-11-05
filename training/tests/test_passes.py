@@ -1,6 +1,7 @@
 """Every pass, end to end, on the small synthetic corpus."""
 
 import json
+import shutil
 from datetime import timedelta
 
 import numpy as np
@@ -112,6 +113,23 @@ def test_process_measures_and_builds_set_by_set(corpus, tmp_path, capsys):
         assert row["measurement_status"] == "measured"
         assert row["build_status"] == "built", row["build_reason"]
         assert manifest.rows("SELECT COUNT(*) FROM products WHERE kind = 'deep'")[0][0] == 1
+
+
+def test_a_set_without_a_flat_is_built_and_marked(corpus, tmp_path):
+    masters = tmp_path / "library" / "db-test" / "calibration-masters"
+    masters.mkdir(parents=True)
+    shutil.copy(corpus / "library" / "db-test" / "calibration-masters" / "bias-test.fits", masters)
+    store = tmp_path / "store"
+    run(store, "crawl", "--corpus", str(corpus / "telescopes"), "--library", str(tmp_path / "library"))
+    run(store, "calibrate")
+    run(store, "split")
+    run(store, "process", "--catalog-dir", str(corpus / "catalogs"))
+    with Manifest(store / "manifest.sqlite") as manifest:
+        row = manifest.rows("SELECT * FROM sets")[0]
+        assert row["calibration_status"] == "ready:no-flat", row["calibration"]
+        assert loads(row["calibration"])["masters"]["flat"] is None
+        assert row["build_status"] == "built", row["build_reason"]
+        assert manifest.rows("SELECT COUNT(*) FROM products WHERE kind = 'noise-a'")[0][0] == 6
 
 
 def test_a_set_built_before_it_qualified_gets_its_noise_pairs_alone(corpus, tmp_path, capsys, monkeypatch):

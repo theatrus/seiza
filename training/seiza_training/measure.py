@@ -17,6 +17,7 @@ from typing import Any
 
 import seiza
 
+from .calibrate import CALIBRATABLE_SQL
 from .manifest import Manifest, dumps, loads
 
 # A frame with fewer stars than this fraction of the set's median lost them
@@ -237,7 +238,7 @@ def measure(
     """Measure the calibratable sets not measured yet (all of them with
     `again`), or the sets `only` names."""
     rows = manifest.rows(
-        "SELECT * FROM sets WHERE calibration_status = 'ready' ORDER BY name"
+        f"SELECT * FROM sets WHERE {CALIBRATABLE_SQL} ORDER BY name"
     )
     done = 0
     outcomes: Counter[str] = Counter()

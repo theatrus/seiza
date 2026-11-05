@@ -66,8 +66,8 @@ def object_key(name: str) -> str:
 
 
 def objects(manifest: Manifest) -> dict[str, list[dict[str, Any]]]:
-    """Every object with two or more measured, calibratable nights: its
-    sets, in night order."""
+    """Every object with two or more measured nights calibrated with a
+    flat: its sets, in night order."""
     found: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in manifest.rows(
         "SELECT * FROM sets WHERE calibration_status = 'ready' AND measurement_status = 'measured' "
