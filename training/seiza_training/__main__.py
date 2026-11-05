@@ -142,7 +142,8 @@ def main(argv: list[str] | None = None) -> int:
     train.add_argument("--rewind", type=float, default=0.0,
                        help="go back two log windows when one's mean loss is more than this many times the "
                             "lowest so far, or not finite, so weights that blow up do not kill the network "
-                            "(0: never; 2 catches a collapse, not the loss's ordinary swings)")
+                            "(0: never; 2 catches a collapse, not the loss's ordinary swings); each rewind "
+                            "takes a fifth off the learning rate for the rest of the run")
 
     sheet = commands.add_parser("sheet-noise", help="make a trained noise model's contact sheets")
     sheet.add_argument("--name", required=True)

@@ -900,7 +900,14 @@ in these ways:
   cores, and on the flat sky 2.3% of the finest noise left instead of
   1.4%. The rewind guard brought it back once, at step 10,750. A weight of
   one is the recipe from here; the next runs train it twice as long, and
-  at a second seed for the spread between seeds.
+  at a second seed for the spread between seeds. Twice as long, the run
+  blew up seven times in its first 60,500 steps, from a sound window to a
+  mean loss of 300 to 3.5 million in the next. The guard brought it back
+  six times and then stopped it, since it blew up again 250 steps after
+  its last rewind. The schedule holds the rate higher for longer in a long
+  run. Each rewind now takes a fifth off the learning rate for the rest of
+  the run, and the guard stops a run only after six rewinds within 20,000
+  steps.
 - **Deep halves.** Training on a night's deep stack dealt into two halves,
   a quarter of every batch, taught a model to keep mottle: it left 37% of
   the coarse noise on empty sky. The halves share the night's flats,

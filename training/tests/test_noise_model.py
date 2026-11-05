@@ -402,12 +402,27 @@ def test_a_rewind_puts_back_the_weights_of_two_windows_before_a_blow_up():
     _, back = window(1000, 3.0)
     assert back == 500 and torch.equal(model.weight, sound)
     assert optimizer.state_dict()["state"][0]["step"] == 2
+    assert guard.rate == pytest.approx(0.8)
     _, back = window(1250, float("nan"))
     assert back == 500 and torch.equal(model.weight, sound)
     assert optimizer.state_dict()["state"][0]["step"] == 2
+    assert guard.rate == pytest.approx(0.64)
     with pytest.raises(RuntimeError, match="after 2 rewinds"):
         window(1500, float("inf"))
     assert not torch.equal(early, sound)
+
+
+def test_rewinds_far_apart_do_not_stop_a_long_run():
+    from seiza_training.noise_model import Rewind
+
+    model = torch.nn.Linear(3, 1)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.1)
+    guard = Rewind(model, optimizer, 2.0, most=2, within=1000)
+    guard.after(250, 1.0)
+    guard.after(500, 1.0)
+    for step in (750, 2000, 3250, 4500):
+        assert guard.after(step, 5.0) == 250
+    assert guard.count == 4 and guard.rate == pytest.approx(0.8**4)
 
 
 def test_the_scale_loss_weighs_coarse_error_as_it_weighs_the_grain():
