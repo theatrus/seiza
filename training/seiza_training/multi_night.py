@@ -308,9 +308,9 @@ def seeing_check(
         tile = (min(SEEING_FIELD - 1, int(SEEING_FIELD * star.y / height)),
                 min(SEEING_FIELD - 1, int(SEEING_FIELD * star.x / width)))
         tiles[tile].append((star.fwhm, other.fwhm))
-    field = [[statistics.median(w for _, w in tiles[(row, column)]) / statistics.median(b for b, _ in tiles[(row, column)])
-              if len(tiles[(row, column)]) >= SEEING_FIELD_STARS else None
-              for column in range(SEEING_FIELD)] for row in range(SEEING_FIELD)]
+    field = [[statistics.median(w for _, w in tiles[tile]) / statistics.median(b for b, _ in tiles[tile])
+              if len(tiles[tile]) >= SEEING_FIELD_STARS else None
+              for tile in ((row, column) for column in range(SEEING_FIELD))] for row in range(SEEING_FIELD)]
     eccentricity = [statistics.median(star.eccentricity for star in half) for half in zip(*pairs)]
     stats.update({
         "fwhm_best_px": fwhm_best,
@@ -386,12 +386,27 @@ def seeing_check(
     return "built", None, stats
 
 
-def stack_psf(path: Path) -> tuple[list[Any], dict[str, Any]]:
-    """The stars measured on a stack's FITS, unsmoothed (`STACK_DETECTION`),
-    and its PSF's width and shape; no stars, and the error, where measuring
-    failed."""
+def counts(image: np.ndarray) -> np.ndarray:
+    """A stack's first channel as the 16-bit counts the measuring detector
+    reads: linear from its 0.01st percentile to its brightest pixel, NaN
+    as its median. A few pixels far below the sky, which an edge of low
+    coverage can leave, would otherwise take the whole range: one C925
+    stack's 18 pixels below -100, down to -21,809, hid its 448 stars."""
+    values = image if image.ndim == 2 else image[0]
+    sample = np.asarray(values[::7, ::7])
+    sample = sample[np.isfinite(sample)]
+    low, high = float(np.percentile(sample, 0.01)), float(np.nanmax(values))
+    with np.errstate(invalid="ignore"):
+        scaled = (np.where(np.isfinite(values), values, np.median(sample)) - low) * (65535 / max(high - low, 1e-6))
+    return np.clip(scaled, 0, 65535).astype(np.uint16)
+
+
+def stack_psf(image: np.ndarray) -> tuple[list[Any], dict[str, Any]]:
+    """The stars measured on a stack, as `counts`, unsmoothed
+    (`STACK_DETECTION`), and its PSF's width and shape; no stars, and the
+    error, where measuring failed."""
     try:
-        found = seiza.detect_measured_stars_file(path, **STACK_DETECTION)
+        found = seiza.detect_measured_stars(counts(image), **STACK_DETECTION)
     except Exception as error:  # noqa: BLE001 - recorded, not fatal
         return [], {"stack_fwhm_error": str(error)}
     fitted = usable(found.stars)
@@ -594,9 +609,10 @@ def split_seeing(
     for half, frames in halves.items():
         snapshot = stacker.reintegrate(frames=[local(path) for path in frames])
         files[half] = save_stack(directory / half, snapshot, fits=True)
-        stars, psf = stack_psf(directory / half / files[half]["fits"])
+        image = plane(snapshot.image)
+        stars, psf = stack_psf(image)
         stats[half] = {**stack_stats(snapshot), **psf, "frame_fwhm_px": [fwhm[path] for path in frames]}
-        measured[half] = (plane(snapshot.image), plane(snapshot.coverage), stars)
+        measured[half] = (image, plane(snapshot.coverage), stars)
         del snapshot
     status, reason, check = seeing_check(measured["best"], measured["worst"])
     del measured
@@ -627,9 +643,9 @@ def check_seeing(manifest: Manifest, store: Store, *, names: set[str] | None = N
         measured, stats = {}, {}
         for half, row in rows.items():
             files = loads(row["files"])
-            stars, stats[half] = stack_psf(store.root / files["fits"])
-            measured[half] = (np.load(store.root / files["image"], mmap_mode="r"),
-                              np.load(store.root / files["coverage"], mmap_mode="r"), stars)
+            image = np.load(store.root / files["image"], mmap_mode="r")
+            stars, stats[half] = stack_psf(image)
+            measured[half] = (image, np.load(store.root / files["coverage"], mmap_mode="r"), stars)
         status, reason, check = seeing_check(measured["best"], measured["worst"])
         # Each half is a quarter of the frames: 8 or more from 32 or more.
         spread = (recipe["worst_fwhm_px"] - recipe["best_fwhm_px"]) / recipe["best_fwhm_px"]

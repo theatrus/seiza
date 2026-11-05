@@ -8,18 +8,16 @@ import shutil
 import numpy as np
 import pytest
 
-import seiza
-
 pytest.importorskip("astropy")
 
 from seiza_training.__main__ import main  # noqa: E402
 from seiza_training.manifest import Manifest, dumps, loads  # noqa: E402
 from seiza_training.multi_night import (  # noqa: E402
-    STACK_DETECTION,
     deal,
     gives_seeing_split,
     object_name,
     seeing_check,
+    stack_psf,
 )
 from seiza_training.synthetic import build_corpus  # noqa: E402
 
@@ -71,8 +69,7 @@ def half(sigma: float, *, seed: int, gain: float = 1.0, sky: float = 500.0, tilt
                     image = image + halo * flux / (2 * np.pi * 20.0**2) * np.exp(
                         -(distance[0] + distance[1]) / (2 * 20.0**2))
     image = (image + np.random.default_rng(seed).normal(0.0, 2.0, image.shape)).astype(np.float32)
-    found = seiza.detect_measured_stars(np.clip(image, 0, 65535).astype(np.uint16), **STACK_DETECTION)
-    return image, np.ones(image.shape, dtype=np.uint16), found.stars
+    return image, np.ones(image.shape, dtype=np.uint16), stack_psf(image)[0]
 
 
 # How the worst half differs from the best, beyond its seeing (Gaussian
@@ -113,6 +110,15 @@ def test_a_seeing_pair_is_kept_only_where_its_halves_differ_in_the_psf_alone(bes
         assert stats["flux_gain"] == stats["star_flux_ratio"] == pytest.approx(gain, rel=0.01)
         # A median moves a little as blur smooths a nebula.
         assert stats["extended_flux_ratio"] == pytest.approx(gain, rel=0.025)
+
+
+def test_a_stack_is_measured_whatever_a_few_pixels_far_below_its_sky(best_half):
+    image = best_half[0].copy()
+    image[5, 100:118] = -21_809.0
+    image[0] = np.nan
+    stars, psf = stack_psf(image)
+    assert len(stars) == pytest.approx(len(best_half[2]), abs=3) and len(stars) > 80
+    assert psf["stack_fwhm_px"] == pytest.approx(2.3548 * 1.5, rel=0.06)
 
 
 def test_every_night_of_an_object_stacks_onto_one_reference(tmp_path, capsys):
