@@ -938,6 +938,55 @@ in these ways:
 - **Stars.** Against the input, every run kept stars' widths within the 1%
   gate at every depth. Against the deep reference, faint stars from 4-frame
   halves came out 0.6–1.3% wider.
+- **Perturbations.** To tell a model that has learnt to denoise from one
+  that has learnt its data, runs are also measured on the four full-size
+  4-frame images changed in ways the corpus never was, the same change to
+  both halves and the deep stack, with the noise map carried through: a
+  quarter turn; a half-pixel shift by Lanczos-3, which correlates the
+  noise between neighbours as a second registration would; 2 × 2 binning,
+  which halves the stars' width in pixels; and a sky gradient of 40σ̄
+  across the frame and 25σ̄ from the centre to the corners. Turned, every
+  run gives the same measures, and its output turned back lies within
+  0.07–0.27σ̄ of the unturned one's. The image from a train set changes
+  under each no more than the held-out ones do. So the runs have not
+  learnt their images; they have learnt their conditions. With the
+  gradient, the run before the scale loss amplified the coarse noise,
+  leaving 1.3 to 3.4 times what the halves differ by at 16 pixels, and one
+  scale-loss seed did the same on three images (1.3–1.8 times), where the
+  other stayed at 71–85%. The network reads the image less one background
+  for the whole frame, through asinh, so a sky far above or below it reads
+  as smooth signal with its noise compressed. Taking out a smooth sky first
+  (medians over 256-pixel blocks, spread back) and putting it back after
+  brought every run to 80–95% at 16 pixels and gave the faint stars their
+  flux back; on the unchanged images it cost at most 1% of the coarse noise
+  on three and up to 6% on the fourth, a nebula filling the frame. One seed
+  did worse with it on one image, which is open. Binning made stars about
+  two pixels wide, narrower than any in the corpus, and cost the
+  scale-loss runs on the held-out images: on the Iris one moved the
+  image's coarse level by 0.64σ̄ (0.01 unbinned), kept 86% of the faintest
+  stars' flux where the run before the scale loss kept all of it, and
+  rendered faint texture less like the deep stack than the binned input
+  itself did. The extra resampling made two runs leave more 4-pixel noise
+  on the Trunk than its halves differ by: it spreads the hot pixels into
+  soft spots. The remedy to try is training on pairs changed the same
+  ways, which a noise pair allows, since one linear change or added sky
+  applied to both halves keeps their noise independent, together with the
+  smooth sky taken out before the network reads the image.
+- **Whole nights.** On the held-out objects' deep stacks, measured against
+  their multi-night stacks, every run kept the faint stars' flux as the
+  input had it, within 3%, and the faint texture within 0.01 of the
+  input's correlation with the reference. On California's, the scale-loss
+  runs kept 90% of the faintest stars' flux where the input kept 101% and
+  the run before them 96%, though on the 4-frame half they kept more than
+  it. In California's deep and multi-night stacks every run lowers the
+  brightest stars' peaks, by 90 to 280σ̄ (the scale-loss runs by a third
+  to a half as much as the run before them), and changes star cores more
+  down the columns than across them (0.83–0.94), which all three share, so
+  it is the data's. Elsewhere the deep and multi-night stacks show no
+  stripes, and one seed lifts the light 2–8 pixels around the Trunk's
+  brightest stars by 2–9σ̄, as it does on the 4-frame half. The Trunk's multi-night stack lies on
+  another night's grid than its deep sheet, so that deep stack is checked
+  against itself only.
 
 ## Inference in Seiza
 
@@ -1049,11 +1098,17 @@ stars. With both rules, the two grids differ by 2e-6σ, and at most by
 2e-7 of the residual, at a star core. The old tiling moved the measures
 by less than 0.01%, so the comparisons between those runs stand.
 
-Every noise run writes, besides its contact sheets, four 4-frame
-validation images whole, as FITS and PNG, each with a seam map: the
-difference between the outputs of two tile grids half a stride apart, in
-units of the noise, in which a seam shows as a line of the grid. The map's
-root mean square and largest value are recorded with the run.
+Every noise run writes, besides its contact sheets, twelve images whole,
+as FITS and PNG, each with a seam map: the difference between the outputs
+of two tile grids half a stride apart, in units of the noise, in which a
+seam shows as a line of the grid. The map's root mean square and largest
+value are recorded with the run. The images are four objects' 4-frame
+validation halves, the same nights' deep stacks, and the objects' stacks
+over all their nights, so a run is seen on what a user would denoise, a
+whole night or more, as well as on the short stacks it is scored on. A
+deep stack is measured against the object's multi-night stack, which lies
+on its grid; a multi-night stack, which has nothing deeper, only against
+itself, for rings and stripes.
 
 Each tile carries its own PSF stamp and its own slices of the noise,
 ratio, halo and bloom maps. Peak memory is a few tiles' worth whatever the
