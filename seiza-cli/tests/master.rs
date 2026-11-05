@@ -63,7 +63,7 @@ fn master_cli_reports_actual_integration_for_every_kind_and_input_count() {
             let result = run_master(kind, &paths, &output, &report, &[]);
             let (integration, rejection) = if count == 2 {
                 ("mean-without-rejection", "NONE")
-            } else if kind == "flat" {
+            } else if kind == "flat" || kind == "dark" {
                 ("median-mad-sigma-clipped-mean", "MEDIAN_MAD")
             } else {
                 ("two-pass-leave-one-out-sigma-clipped-mean", "LEAVE_ONE_OUT")
@@ -75,7 +75,7 @@ fn master_cli_reports_actual_integration_for_every_kind_and_input_count() {
             assert_eq!(configuration["rereads_inputs"], kind != "flat");
             assert_eq!(
                 configuration["fallback_center"],
-                if kind == "flat" {
+                if kind == "flat" || (kind == "dark" && count >= 3) {
                     "temporal median"
                 } else {
                     "unclipped mean"

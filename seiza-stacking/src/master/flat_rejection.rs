@@ -180,6 +180,58 @@ impl FlatScratch {
     }
 }
 
+/// Counts returned to the dark builder, which supplies the same frame-major
+/// tiles directly from source windows rather than normalized scratch storage.
+pub(super) struct CombinedDarkTile {
+    pub input_statistics: Vec<MasterInputStatistics>,
+    pub rejected_samples: u64,
+    pub fallback_pixels: u64,
+}
+
+pub(super) fn combine_unmasked_frames(
+    frames: &[&[f32]],
+    output: &mut [f32],
+    options: &MasterBuildOptions,
+) -> Result<CombinedDarkTile> {
+    let frame_count = frames.len();
+    let mut totals = CombineTally::new(frame_count);
+    for (batch, output) in output.chunks_mut(COMBINE_BATCH).enumerate() {
+        check_cancelled(options)?;
+        let batch_start = batch * COMBINE_BATCH;
+        let tally = output
+            .par_chunks_mut(COMBINE_CHUNK)
+            .enumerate()
+            .map_init(
+                || vec![0.0; COMBINE_CHUNK * frame_count],
+                |values, (chunk, output)| {
+                    let first = batch_start + chunk * COMBINE_CHUNK;
+                    let values = &mut values[..output.len() * frame_count];
+                    for (frame, samples) in frames.iter().enumerate() {
+                        for (pixel, value) in
+                            samples[first..first + output.len()].iter().enumerate()
+                        {
+                            values[pixel * frame_count + frame] = *value;
+                        }
+                    }
+                    Ok(combine_pixels(
+                        values,
+                        output,
+                        frame_count,
+                        options.rejection,
+                        None,
+                    ))
+                },
+            )
+            .try_reduce(|| CombineTally::new(frame_count), |a, b| Ok(a.merge(b)))?;
+        totals = totals.merge(tally);
+    }
+    Ok(CombinedDarkTile {
+        input_statistics: totals.input_statistics,
+        rejected_samples: totals.rejected_samples,
+        fallback_pixels: totals.fallback_pixels,
+    })
+}
+
 /// Decode pixels `first..first + values.len() / frames` of a frame-major
 /// tile of `length` samples per frame into `values`, each pixel's temporal
 /// samples together. Pure copies: the result does not depend on the split.

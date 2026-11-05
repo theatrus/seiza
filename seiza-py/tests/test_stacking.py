@@ -611,7 +611,7 @@ def test_build_dark_screens_darks_that_caught_stray_light(tmp_path):
 
     result = seiza.build_dark(paths, tmp_path / "master-dark.fits", dark_level_screening=1.0)
     assert result.input_frames == 3
-    assert result.rejection_method == "LEAVE_ONE_OUT"
+    assert result.rejection_method == "MEDIAN_MAD"
     unscreened = seiza.build_dark(paths, tmp_path / "unscreened.fits")
     assert unscreened.input_frames == 5
     with pytest.raises(seiza.StackError, match="level screening"):
@@ -2090,3 +2090,27 @@ def test_experimental_flat_preprocessing_is_opt_in_and_reports_input_replacement
     with pytest.raises(seiza.StackError, match="positive finite"):
         seiza.build_flat(paths, tmp_path / "unused.fits",
                          experimental_flat_preprocessing=True, spatial_sigma=0.0)
+
+
+def test_build_dark_rejects_minority_states_but_preserves_steady_hot_pixels(tmp_path):
+    paths = []
+    for index in range(9):
+        data = np.full((4, 4), 100.0, dtype=np.float32)
+        data[0, 0] += [-1.0, 0.0, 1.0][index % 3]
+        data[0, 1] = 4000.0
+        data[0, 2] += [-1.0, 0.0, 1.0][index % 3]
+        if index >= 6:
+            data[0, 0] += 1000.0
+            data[0, 2] -= 80.0
+        path = tmp_path / f"varying-dark-{index}.fits"
+        fits.writeto(path, data)
+        paths.append(path)
+    output = tmp_path / "master-dark.fits"
+    result = seiza.build_dark(paths, output)
+    assert result.rejection_method == "MEDIAN_MAD"
+    assert result.input_frames == 9
+    assert result.rejected_samples == 6
+    assert result.fallback_pixels == 0
+    assert sum(rejected for _, rejected in result.input_statistics) == 6
+    values = seiza.read_image_window(output, 0, 0, 4, 4).values[0]
+    np.testing.assert_array_equal(values[0, :3], [100.0, 4000.0, 100.0])

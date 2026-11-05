@@ -461,13 +461,7 @@ const SHARED_NEBULA_BACKGROUND: &[f64] = &[
     1.0922065e2, 1.1703941e2, 1.4173183e2, 2.4023395e2, 3.1646753e2, 1.5533604e2,
 ];
 #[rustfmt::skip]
-const DARK_MASTER: &[f64] = &[
-    5.0018033e2, 5.0018273e2, 5.0560712e2, 4.9912210e2, 5.0097733e2, 5.0010815e2,
-    5.0059848e2, 5.0013586e2, 5.0037161e2, 5.0233649e2, 5.0203445e2, 4.9982404e2,
-    4.9820868e2, 5.0218640e2, 4.9793271e2, 5.0225122e2, 4.9774274e2, 5.0003473e2,
-    5.0157529e2, 5.0029086e2, 5.0083975e2, 5.0305823e2, 4.9923734e2, 5.0075592e2,
-    4.9867371e2, 4.9978439e2, 5.0103198e2, 4.9647897e2,
-];
+const DARK_MASTER: &[f64] = &[5.0018532e2, 5.0018816e2, 5.0603180e2, 4.9912207e2, 5.0097729e2, 5.0010815e2, 5.0059845e2, 5.0013586e2, 5.0037161e2, 5.0096335e2, 5.0271860e2, 4.9982404e2, 4.9820868e2, 5.0218640e2, 4.9793271e2, 5.0408582e2, 4.9774274e2, 5.0003473e2, 5.0157532e2, 5.0029083e2, 5.0190503e2, 5.0215579e2, 4.9923734e2, 5.0075589e2, 4.9867374e2, 4.9978439e2, 5.0103198e2, 4.9647900e2];
 #[rustfmt::skip]
 const FLAT_MASTER: &[f64] = &[
     9.9502314e-1, 9.9747827e-1, 1.1070186e0, 8.8392133e-1, 9.7098047e-1, 9.9945378e-1,
@@ -703,13 +697,7 @@ const FLAT_MASTER_BIASED: &[f64] = &[
 ];
 
 #[rustfmt::skip]
-const CALIBRATED_LANCZOS: &[f64] = &[
-    7.6405936e1, 2.9063132e2, 4.5017817e3, 2.9910845e1, 3.0009436e1, 3.1982927e1,
-    5.5067642e1, 2.3747440e1, 2.7948290e1, 3.1852222e1, 2.8892441e1, 2.5063713e1,
-    9.6558657e0, 1.9564846e1, 3.4706512e1, 3.1363016e1, 2.4861242e1, 2.1682476e1,
-    3.2296391e1, 2.3311283e1, 2.4124556e1, 2.7315498e1, 2.5832870e1, 3.1812588e1,
-    1.1398070e2, 2.3346869e1, 2.5175215e1, 4.4047523e1,
-];
+const CALIBRATED_LANCZOS: &[f64] = &[7.6308141e1, 2.9018031e2, 4.4956592e3, 2.9566437e1, 2.9870564e1, 3.1853455e1, 5.5837486e1, 2.3825390e1, 2.8221733e1, 3.1877506e1, 2.8815605e1, 2.4517574e1, 9.8165417e0, 1.9513111e1, 3.4880192e1, 3.1305113e1, 2.4564030e1, 2.2184076e1, 3.2229630e1, 2.2974962e1, 2.3795910e1, 2.7533716e1, 2.5576715e1, 2.8085396e1, 1.1388815e2, 2.3228489e1, 2.4949152e1, 4.4326435e1];
 
 #[rustfmt::skip]
 const BIAS_MASTER: &[f64] = &[
@@ -4330,4 +4318,37 @@ fn experimental_flat_preprocessing_keeps_its_calibrated_output() {
     assert_eq!(plain.image.data[7 * 16 + 7], 1.0105);
     assert!(build_master_from_fits(&paths, MasterFrameKind::Bias, &options).is_err());
     assert!(build_master_from_fits(&paths, MasterFrameKind::Dark, &options).is_err());
+}
+
+/// A minority high state must not inflate its own rejection threshold. The
+/// steady hot pixel is real dark signal and must remain in the master.
+#[test]
+fn varying_dark_pixels_keep_their_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let paths = (0..9)
+        .map(|frame| {
+            let mut data = vec![100.0; WIDTH * HEIGHT];
+            let noise = [-1.0, 0.0, 1.0][frame % 3];
+            data[0] = 100.0 + noise + if frame >= 6 { 1_000.0 } else { 0.0 };
+            data[1] = 4_000.0 + noise;
+            data[2] = 100.0 + noise - if frame >= 6 { 80.0 } else { 0.0 };
+            write_raw(&directory, "varying-dark", frame, data, "DARK")
+        })
+        .collect::<Vec<_>>();
+    let master = build_master_from_fits(
+        &paths,
+        MasterFrameKind::Dark,
+        &MasterBuildOptions::default(),
+    )
+    .unwrap();
+    check(
+        "VARYING_DARK",
+        &[
+            f64::from(master.image.data[0]),
+            f64::from(master.image.data[1]),
+            f64::from(master.image.data[2]),
+            master.rejected_samples as f64,
+        ],
+        &[100.0, 4000.0, 100.0, 6.0],
+    );
 }

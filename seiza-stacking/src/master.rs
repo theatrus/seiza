@@ -9,6 +9,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+mod dark_rejection;
 mod flat_rejection;
 mod star_masking;
 
@@ -58,7 +59,7 @@ impl MasterFrameKind {
 }
 
 /// Sigma thresholds used when integrating a master. Flats use a temporal
-/// median and MAD scale; bias and dark masters use leave-one-out statistics.
+/// median and MAD scale, as do darks; bias masters use leave-one-out statistics.
 #[derive(Clone, Copy, Debug)]
 pub struct MasterRejectionOptions {
     /// Reject a sample this many sigma below the integration center.
@@ -81,9 +82,9 @@ impl Default for MasterRejectionOptions {
 pub enum MasterRejectionMethod {
     /// Two inputs cannot identify an outlier; both are averaged.
     None,
-    /// Temporal median/MAD rejection for normalized flat inputs.
+    /// Temporal median/MAD rejection for darks and normalized flat inputs.
     MedianMad,
-    /// Leave-one-out rejection for bias and dark inputs.
+    /// Leave-one-out rejection for bias inputs.
     LeaveOneOut,
 }
 
@@ -108,11 +109,10 @@ pub enum MasterBuildStage {
     /// aside do not pull the clipping centre. Runs only when the screen sets
     /// a frame aside.
     Reread,
-    /// Read each kept bias or dark again, rejecting outliers and averaging
-    /// the rest. Flats do not run this stage.
+    /// Read each kept bias again, rejecting outliers and averaging the rest.
+    /// Two-input darks also run this stage without clipping.
     Integrate,
-    /// Combine a flat's scratch storage, one tile of pixels at a time. Only
-    /// flats run this stage.
+    /// Combine prepared flats or source darks, one tile at a time.
     Combine,
 }
 
@@ -185,7 +185,7 @@ pub struct MasterBuildOptions {
     /// [`Error::Cancelled`] without writing anything.
     pub cancel: Option<CancelSignal>,
     /// Optional progress reports, one per input frame in each pass and one
-    /// per tile while a flat combines, plus one as each stage ends. See
+    /// per tile while a flat or dark combines, plus one as each stage ends. See
     /// [`MasterProgress`].
     pub progress: Option<MasterProgress>,
     /// Replace impulse pixels in the integrated master with their
@@ -508,8 +508,10 @@ const MINIMUM_MASTER_INPUTS: usize = 2;
 /// rejection. A temporary file stores these prepared pixels so each input is
 /// decoded once and integration uses bounded tiles, not an in-memory image
 /// cube. Scratch storage is about four bytes per input sample and is removed
-/// on success, cancellation, or error. Bias and dark inputs retain two-pass
-/// leave-one-out rejection. Two-frame sets are averaged without clipping.
+/// on success, cancellation, or error. Darks retain validated frames in memory
+/// when the complete set fits in half the available physical memory; otherwise
+/// temporal median/MAD uses bounded source windows without scratch. Bias retains
+/// two-pass leave-one-out rejection. Two-frame sets are averaged without clipping.
 pub fn build_master_from_fits(
     paths: &[PathBuf],
     kind: MasterFrameKind,
@@ -547,6 +549,13 @@ fn build_master(
         }
     };
 
+    // Retain network-file cache leases throughout validation and integration.
+    let _source_leases = if kind == MasterFrameKind::Dark {
+        dark_rejection::keep_sources_open(paths, options)?
+    } else {
+        Vec::new()
+    };
+
     let mut reference_signature = None;
     let mut reference_headers = Vec::new();
     let mut reference_bayer = None;
@@ -569,6 +578,7 @@ fn build_master(
     let mut unmasked_saturation_samples = 0_u64;
     let mut unknown_saturation_inputs = 0_usize;
     let mut levels: Vec<DarkLevel> = Vec::new();
+    let mut memory_frames = None;
 
     with_read_ahead(paths, |frames| -> Result<()> {
         for (index, path) in paths.iter().enumerate() {
@@ -597,6 +607,12 @@ fn build_master(
                 Err(error) => return Err(error),
             };
             if accepted.is_empty() {
+                if kind == MasterFrameKind::Dark && paths.len() >= 3 {
+                    memory_frames = dark_rejection::MemoryFrames::for_inputs(
+                        paths.len(),
+                        prepared.image.sample_count(),
+                    );
+                }
                 reference_headers = prepared.headers.clone();
                 reference_bayer = prepared.bayer;
                 reference_signature = Some(InputSignature::from_frame(&prepared, kind));
@@ -625,6 +641,9 @@ fn build_master(
                 &prepared.image.data,
                 accepted.len() as f32,
             );
+            if let Some(memory) = &mut memory_frames {
+                memory.push(path, prepared.image.data);
+            }
         }
         Ok(())
     })?;
@@ -694,14 +713,18 @@ fn build_master(
         )));
     }
 
-    let mut integrated = vec![0.0_f32; mean.len()];
-    let mut accepted_counts = vec![0_u32; mean.len()];
+    let robust_dark = kind == MasterFrameKind::Dark && accepted.len() >= 3;
+    // A set reduced to two inputs uses the streaming mean, so release its cache.
+    let memory_frames = if robust_dark { memory_frames } else { None };
+    let output_samples = if robust_dark { 0 } else { mean.len() };
+    let mut integrated = vec![0.0_f32; output_samples];
+    let mut accepted_counts = vec![0_u32; output_samples];
     let mut input_statistics = Vec::with_capacity(accepted.len());
     let mut accepted_samples = 0_u64;
     let mut rejected_samples = 0_u64;
     let count = accepted.len();
 
-    if flat_scratch.is_none() {
+    if flat_scratch.is_none() && !robust_dark {
         with_read_ahead(&accepted, |frames| -> Result<()> {
             for (index, path) in accepted.iter().enumerate() {
                 check_cancelled(options)?;
@@ -741,7 +764,24 @@ fn build_master(
     // flickering across all frames). Fall back to the unclipped running mean
     // so the master stays finite instead of seeding NaN into every
     // calibrated light; the count is surfaced for diagnostics.
-    let mut fallback_pixels = fall_back_to_mean(&mut integrated, &accepted_counts, &mean);
+    let mut fallback_pixels = if robust_dark {
+        // Median/MAD supplies its own center; release the first-pass moments
+        // before allocating its bounded temporal tile and final image.
+        drop(mean);
+        drop(m2);
+        let result = if let Some(memory) = memory_frames {
+            memory.integrate(&accepted, options)?
+        } else {
+            dark_rejection::integrate(&accepted, reference_signature.as_ref().unwrap(), options)?
+        };
+        integrated = result.samples;
+        input_statistics = result.input_statistics;
+        accepted_samples = result.accepted_samples;
+        rejected_samples = result.rejected_samples;
+        result.fallback_pixels
+    } else {
+        fall_back_to_mean(&mut integrated, &accepted_counts, &mean)
+    };
     let mut masked_samples = 0;
     let mut flat_star_masking = None;
     if let Some(scratch) = flat_scratch {
@@ -817,7 +857,7 @@ fn build_master(
         rejection: options.rejection,
         rejection_method: if accepted.len() < 3 {
             MasterRejectionMethod::None
-        } else if kind == MasterFrameKind::Flat {
+        } else if matches!(kind, MasterFrameKind::Flat | MasterFrameKind::Dark) {
             MasterRejectionMethod::MedianMad
         } else {
             MasterRejectionMethod::LeaveOneOut
@@ -2062,9 +2102,14 @@ mod tests {
             "{}",
             level(&screened)
         );
-        // Clipping per pixel drops the brightest frame but keeps the milder
-        // leak, so without screening the master still sits high.
-        assert!(level(&unscreened) > 508.0, "{}", level(&unscreened));
+        // Robust temporal clipping also removes both minority leak levels
+        // here; screening still records and excludes the contaminated frames.
+        assert!(
+            (level(&unscreened) - level(&screened)).abs() < 0.5,
+            "unscreened {}, screened {}",
+            level(&unscreened),
+            level(&screened)
+        );
     }
 
     #[test]
@@ -2247,7 +2292,7 @@ mod tests {
         let expected = [
             stage(MasterBuildStage::Read, 5),
             stage(MasterBuildStage::Reread, 3),
-            stage(MasterBuildStage::Integrate, 3),
+            stage(MasterBuildStage::Combine, 1),
         ]
         .concat();
         assert_eq!(*reports.lock().unwrap(), expected);
@@ -2396,7 +2441,7 @@ mod tests {
         build_master_from_fits(&paths, MasterFrameKind::Dark, &options).unwrap();
         let expected = [
             stage(MasterBuildStage::Read, 4),
-            stage(MasterBuildStage::Integrate, 4),
+            stage(MasterBuildStage::Combine, 1),
         ]
         .concat();
         assert_eq!(*reports.lock().unwrap(), expected);

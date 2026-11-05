@@ -3012,7 +3012,10 @@ char *seiza_calibration_plan_json(const char *request_json, char **error_out);
  pixels in place of the system's temporary directory; bias and dark
  builds need none.
 
- Construction is a two-pass leave-one-out sigma-clipped mean and may take
+ Darks and flats use temporal median/MAD rejection; bias uses a two-pass
+ leave-one-out mean. Darks keep validated frames in memory when the whole
+ set fits in half the available physical memory, otherwise rereading bounded
+ source tiles without scratch. Construction may take
  minutes. Run it off the UI thread. `cancel` may be null; otherwise another
  thread may call [`seiza_cancel_signal_cancel`]. Cancellation is checked
  between input frames, returns failure through `error_out`, and publishes no
