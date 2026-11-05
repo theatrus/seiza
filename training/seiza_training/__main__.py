@@ -139,6 +139,10 @@ def main(argv: list[str] | None = None) -> int:
                             "much as the grain and is not left as mottle")
     train.add_argument("--scale-weight", type=float, default=1.0,
                        help="with --scale-loss, the weight of each scale's term against the per-pixel loss")
+    train.add_argument("--rewind", type=float, default=0.0,
+                       help="go back two log windows when one's mean loss is more than this many times the "
+                            "lowest so far, or not finite, so weights that blow up do not kill the network "
+                            "(0: never; 2 catches a collapse, not the loss's ordinary swings)")
 
     sheet = commands.add_parser("sheet-noise", help="make a trained noise model's contact sheets")
     sheet.add_argument("--name", required=True)
@@ -288,7 +292,7 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
             structure_sampling=arguments.structure_sampling, outlier_count=arguments.outlier_count,
             outlier_floor=arguments.outlier_floor, clip_grad=arguments.clip_grad, match_flux=arguments.match_flux,
             agree=arguments.agree, outlier_scale=arguments.outlier_scale, noise_plane=arguments.noise_plane,
-            scale_loss=arguments.scale_loss, scale_weight=arguments.scale_weight,
+            scale_loss=arguments.scale_loss, scale_weight=arguments.scale_weight, rewind=arguments.rewind,
             precision=arguments.precision, prefetch=arguments.prefetch, batch_threads=arguments.batch_threads,
             **extra,
         )

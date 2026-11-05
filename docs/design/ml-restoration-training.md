@@ -915,11 +915,24 @@ in these ways:
 
 - **Precision.** Training in bf16 cost star cores 7–24% and mid-brightness
   detail. Runs train in fp32; TF32 convolutions are fine.
-- **Clipping.** With the synthetic outliers, models of width 48 and 64
-  failed without a limit on the gradient's norm: one diverged at step
-  10,750, the loss reaching 1.8 million, and one stopped learning at step
-  3,000. Clipping the norm at 1 trained both. A run records the norm
-  before the clip.
+- **Clipping and rewinding.** With the synthetic outliers, models of width
+  48 and 64 failed without a limit on the gradient's norm: one diverged at
+  step 10,750, the loss reaching 1.8 million, and one stopped learning at
+  step 3,000. Clipping the norm at 1 trained both. A run records the norm
+  before the clip. A clip bounds each step, not where the weights go over
+  many: the 41M recipe that reads the map through asinh, run again with
+  only its seed changed, blew up at step 2,500, near the top of the
+  schedule's warm-up, and never came back. Its activations grew to 10⁷
+  through the levels, every channel of the full-resolution block before
+  the output stayed below zero, and its output was a constant: for the
+  other 77,500 steps the loss sat at the input's own, the gradient at
+  0.03. At its first seed the same recipe blew up at step 4,000 and
+  recovered. Without normalisation, which would make tiles disagree, a
+  network that blows up can die, so runs keep their weights and the
+  optimizer's state at each log window of 250 steps, and go back two
+  windows when one's mean loss is more than twice the lowest so far, or
+  not finite (`--rewind 2`). Training then goes on with the next steps'
+  batches. The ordinary swings of these runs stay under 1.9 times.
 - **Targets over size.** Three and a half times the training pairs, from
   136 sets instead of 45, gained a 10M model 2–3%. A 23M model trained on
   them kept fine detail at 0.964, against 0.925 for the same model on the
@@ -970,7 +983,8 @@ in these ways:
   its sky error against 23%. It gave up two things: it left 7% of the
   coarse mottle on empty sky instead of 3%, alike on every pair, and kept
   1% less of faint stars' flux, their widths about 0.1% wider. A second
-  seed tells whether those come with the map's reading. Given the map as
+  seed, to tell whether those come with the map's reading, died in
+  training (see clipping and rewinding). Given the map as
   it is, the same model put out 1,500–4,900σ̄ on sky, so the model card
   names the reading.
 - **Mottle.** The whole images showed mottle from a few to some tens of
@@ -978,7 +992,9 @@ in these ways:
   star-free sky, where signal and gradients cancel, the 41M models took
   out 86–89% of a 4-frame half's noise at the pixel, but left 44–54% of it
   smoothed at 4 pixels, 59–72% at 8 and 80–88% at 16; the run reading the
-  map through asinh left the most. In grain the output was as clean as a
+  map through asinh left the most. Over the 4-frame halves of all twelve
+  validation sets the two left 47% and 58% at 4 pixels, 65% and 79% at 8,
+  and 89% and 96% at 16. In grain the output was as clean as a
   200-frame stack, in mottle as an 8-frame one, and that mismatch reads as
   blotches. On the flat sky of noise alone they left 3–7%: with nothing
   in the frame like signal, a model takes out coarse noise it leaves on a

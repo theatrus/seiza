@@ -122,9 +122,11 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
     run("train-noise", "--name", "smoke", "--steps", "6", "--width", "4", "--levels", "3", "--tile", "64", "--batch", "2",
         "--precision", "bf16", "--prefetch", "2", "--batch-threads", "2", "--deep-fraction", "0.5",
         "--outliers", "2", "--outlier-floor", "10", "--clip-grad", "1", "--match-flux", "--agree", "0.9",
-        "--outlier-scale", "local", "--noise-plane", "asinh", "--scale-loss", "4,8", "--scale-weight", "0.5")
+        "--outlier-scale", "local", "--noise-plane", "asinh", "--scale-loss", "4,8", "--scale-weight", "0.5",
+        "--rewind", "2")
     record = json.loads((store / "models" / "noise" / "smoke" / "run.json").read_text())
     assert record["config"]["scale_loss"] == [4, 8] and record["config"]["scale_weight"] == 0.5
+    assert record["config"]["rewind"] == 2 and record["config"]["rewinds"] == 0
     assert record["config"]["train_pairs"] == 6
     assert record["config"]["extra"]["label"] == "deep" and record["config"]["extra"]["windows"] > 0
     assert record["config"]["precision"] == "bf16"
@@ -369,6 +371,37 @@ def test_the_noise_plane_is_the_map_in_typical_noise_or_its_asinh():
     assert np.allclose(curved[1], np.arcsinh(linear[1]))
     # A bright star's map of 50σ̄ reaches under 5.
     assert curved[1].max() < 5
+
+
+def test_a_rewind_puts_back_the_weights_of_two_windows_before_a_blow_up():
+    from seiza_training.noise_model import Rewind
+
+    model = torch.nn.Linear(3, 1)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.1)
+    guard = Rewind(model, optimizer, 2.0, most=2)
+
+    def window(step, mean):
+        optimizer.zero_grad()
+        model(torch.randn(8, 3)).pow(2).mean().backward()
+        optimizer.step()
+        weights = model.weight.detach().clone()
+        return weights, guard.after(step, mean)
+
+    early, _ = window(250, 1.8)
+    sound, back = window(500, 0.9)
+    assert back is None
+    # A swing under twice the lowest is kept.
+    _, back = window(750, 1.7)
+    assert back is None
+    _, back = window(1000, 3.0)
+    assert back == 500 and torch.equal(model.weight, sound)
+    assert optimizer.state_dict()["state"][0]["step"] == 2
+    _, back = window(1250, float("nan"))
+    assert back == 500 and torch.equal(model.weight, sound)
+    assert optimizer.state_dict()["state"][0]["step"] == 2
+    with pytest.raises(RuntimeError, match="after 2 rewinds"):
+        window(1500, float("inf"))
+    assert not torch.equal(early, sound)
 
 
 def test_the_scale_loss_weighs_coarse_error_as_it_weighs_the_grain():
