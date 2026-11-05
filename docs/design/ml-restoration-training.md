@@ -661,6 +661,12 @@ f16's range, which Core ML's GPU and Neural Engine use. The output is a
 residual in linear units of `σ̄`. Losses are computed in linear space, so flux
 is judged where it is physical.
 
+The noise model reads its noise map beside the image, as `asinh(σ / σ̄)`.
+Read in `σ̄` as it is, the map reaches 50σ̄ and more on a bright star, and
+one model took a star's map for a cue to add tens of thousands of σ̄ around
+it. A model given the reading it was not trained on fails as badly, so the
+model card names it.
+
 The operations are limited to those that Core ML, TensorRT and ONNX Runtime's
 CPU provider all run natively:
 
@@ -798,9 +804,23 @@ in these ways:
   down. With the map flattened it did nothing, with the map 10% higher it
   did more, and clipping the image changed nothing. No other run blew up on
   any pair, and none did on the tiles whose maps reach highest, even with
-  their maps tripled, so the cue is a shape, not a height. The next runs
-  read the map through asinh, as they read the image, which brings a
-  bright star's under 5.
+  their maps tripled, so the cue is a shape, not a height. Read through
+  asinh, as the image is, a bright star's map comes under 5. The 41M
+  model trained so for 80k steps stayed at 16–18σ̄ on those tiles' sky
+  with their maps raised up to threefold, where the same recipe reading
+  the map as it is rose from 17 to 34σ̄, and on the pair that blew up its
+  error was 3.6, as the other's. Against matched halves that agree it
+  was 5% better on 4-frame halves, the least error there of any run, 25%
+  on their faint signal and 30% on their mid-brightness signal, 25% on
+  8-frame faint signal, and 1–2% on star cores at 4 and 8 frames. At a
+  night's whole depth it was even, its star cores 2% worse. The worst
+  0.1% of 4-frame sky, what a short stack cannot reject, carried 13% of
+  its sky error against 23%. It gave up two things: it left 7% of the
+  coarse mottle on empty sky instead of 3%, alike on every pair, and kept
+  1% less of faint stars' flux, their widths about 0.1% wider. A second
+  seed tells whether those come with the map's reading. Given the map as
+  it is, the same model put out 1,500–4,900σ̄ on sky, so the model card
+  names the reading.
 - **Deep halves.** Training on a night's deep stack dealt into two halves,
   a quarter of every batch, taught a model to keep mottle: it left 37% of
   the coarse noise on empty sky. The halves share the night's flats,
@@ -880,7 +900,7 @@ A model bundle holds:
 The model card gives:
 
 - the input contract: domain, normalisation, tile shape, conditioning
-  channels and their ranges;
+  channels, how each is read, and their ranges;
 - the trained ranges of FWHM, pixel scale and signal-to-noise ratio;
 - the version, the training run, and a hash of each artefact;
 - the data licences.
