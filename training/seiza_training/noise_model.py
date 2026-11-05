@@ -671,6 +671,56 @@ def loss_of(
     return loss
 
 
+class Rewind:
+    """Puts a run's model and optimizer back where they were two log windows
+    before when a window's mean loss is not finite, or is more than `factor`
+    times the lowest so far; training then goes on with the steps' own
+    batches, so it does not meet the same ones again. With no normalisation,
+    weights that blow up can kill the network for good: every channel of one
+    block shut, the output a constant and the loss back at the input's own,
+    the gradient too small ever to bring it back. More than `most` rewinds
+    and the run stops."""
+
+    def __init__(self, model: torch.nn.Module, optimizer: torch.optim.Optimizer, factor: float, most: int = 6):
+        self.model, self.optimizer, self.factor, self.most = model, optimizer, factor, most
+        self.lowest = math.inf
+        self.count = 0
+        self.saved: list[tuple[int, dict, dict]] = []
+
+    def after(self, step: int, mean: float) -> int | None:
+        """At the end of the window to `step`, with its mean loss: keep the
+        weights if the window was sound, or go back. Returns the step gone
+        back to, if it went back."""
+        if math.isfinite(mean) and mean <= self.factor * self.lowest:
+            self.lowest = min(self.lowest, mean)
+            self.saved = [*self.saved, (step, offloaded(self.model.state_dict()),
+                                        offloaded(self.optimizer.state_dict()))][-2:]
+            return None
+        if not self.saved:
+            raise RuntimeError(f"the loss was {mean:.4g} at step {step}, before any sound window to go back to")
+        self.count += 1
+        if self.count > self.most:
+            raise RuntimeError(f"the loss was {mean:.4g} at step {step}, after {self.most} rewinds")
+        back, model_state, optimizer_state = self.saved[0]
+        self.model.load_state_dict(model_state)
+        # A copy: on the host the optimizer would keep the saved tensors as
+        # its own, and step them on.
+        self.optimizer.load_state_dict(offloaded(optimizer_state))
+        self.saved = self.saved[:1]
+        return back
+
+
+def offloaded(state: Any) -> Any:
+    """A copy of a state dict in host memory."""
+    if isinstance(state, torch.Tensor):
+        return state.detach().to("cpu", copy=True)
+    if isinstance(state, dict):
+        return {key: offloaded(value) for key, value in state.items()}
+    if isinstance(state, (list, tuple)):
+        return type(state)(offloaded(value) for value in state)
+    return state
+
+
 def train(
     store: Store,
     manifest: Manifest,
@@ -707,12 +757,15 @@ def train(
     batch_threads: int = 4,
     scale_loss: tuple[int, ...] = (),
     scale_weight: float = 1.0,
+    rewind: float = 0.0,
 ) -> dict[str, Any]:
     """Train a noise model on the train split's pairs, evaluate it on the
     validation split's, export it to ONNX and record the run.
 
     `scale_loss` adds the error averaged over blocks of each of its sides,
-    `scale_weight` times each, to the loss (see `loss_of`).
+    `scale_weight` times each, to the loss (see `loss_of`). `rewind` goes
+    back two log windows when one's loss is more than that many times the
+    lowest (see `Rewind`; 0: never), and the history records where.
 
     `extra` is a second bank from `cut_windows`, of other targets for
     their inputs; it makes up `extra_fraction` of every batch, and the run
@@ -755,6 +808,7 @@ def train(
     model = ResidualUNet(width=width, levels=levels).to(where, memory_format=layout)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     schedule = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=learning_rate, total_steps=steps, pct_start=0.05)
+    guard = Rewind(model, optimizer, rewind) if rewind else None
     history = []
     extra_count = round(batch * extra_fraction) if extra is not None else 0
     odds = structure_odds(banked, structure_sampling)
@@ -804,6 +858,10 @@ def train(
                     entry["grad_norm_mean"], entry["grad_norm_max"] = float(norms[0]) / log_every, float(norms[1])
                     gradient = f" gradient {entry['grad_norm_mean']:.3g} (largest {entry['grad_norm_max']:.3g})"
                     norms.zero_()
+                back = guard.after(step, mean) if guard else None
+                if back is not None:
+                    entry["rewound_to"] = back
+                    gradient += f", back to step {back}"
                 history.append(entry)
                 print(f"train {name}: step {step} loss {mean:.4f}{gradient} ({time.monotonic() - started:.0f} s)",
                       flush=True)
@@ -838,6 +896,7 @@ def train(
                    "match_flux": match_flux, "agree": agree, "precision": precision, "prefetch": prefetch,
                    "batch_threads": batch_threads, "batch_generator": "per-step",
                    "scale_loss": list(scale_loss), "scale_weight": scale_weight if scale_loss else None,
+                   "rewind": rewind, "rewinds": guard.count if guard else 0,
                    "extra": {"label": extra_label, "fraction": extra_fraction, "windows": int(len(extra["a"]))}
                    if extra is not None else None},
         "parameters": sum(p.numel() for p in model.parameters()),
