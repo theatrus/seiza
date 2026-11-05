@@ -622,11 +622,24 @@ def loss_of(
     weighting: str = "core",
     huber: float = 0.0,
     huber_above: float = 0.0,
+    scales: tuple[int, ...] = (),
+    scale_weight: float = 1.0,
 ) -> torch.Tensor:
     """L2 of `A + residual` against the target, both in units of σ̄ above
     the background. `core` weights star cores down by their brightness;
     `variance` weights every pixel by the inverse of A's noise variance
     there, so a pixel counts by how well A knew it.
+
+    With `scales`, the weighted error is also averaged over k × k blocks
+    for each k there, times k, and its mean square added, `scale_weight`
+    times. A pixel's noise lies mostly at the finest scale, so an error
+    there costs the per-pixel loss far more than noise left over 8 or 16
+    pixels, which a model then leaves, and which shows as mottle once the
+    grain is gone. Times k, the blocks' noise weighs as the pixels' does,
+    so every scale's error counts alike. A block average of the target is
+    still unbiased, so the clean image is still what the loss converges
+    on. With `huber`, the error is clipped there first, so a star core or
+    an outlier cannot rule a block.
 
     With `huber`, each pixel's weighted error is squared only within
     `huber` of zero and grows linearly beyond it. Noise stays in the
@@ -644,13 +657,18 @@ def loss_of(
         weight = 1.0 / sigmas.clamp(min=0.25) ** 2
     else:
         weight = 1.0 / (1.0 + (targets.abs() / CORE_SIGMA) ** 2)
+    error = (estimate - targets) * weight.sqrt()
     if huber > 0:
-        error = (estimate - targets) * weight.sqrt()
         robust = torch.nn.functional.huber_loss(error, torch.zeros_like(error), delta=huber, reduction="none") * 2.0
         if huber_above > 0:
             robust = torch.where(targets.abs() > huber_above, robust, error**2)
-        return robust.mean()
-    return (weight * (estimate - targets) ** 2).mean()
+        loss = robust.mean()
+    else:
+        loss = (error**2).mean()
+    clipped = error.clamp(-huber, huber) if huber > 0 else error
+    for k in scales:
+        loss = loss + scale_weight * ((k * torch.nn.functional.avg_pool2d(clipped, k)) ** 2).mean()
+    return loss
 
 
 def train(
@@ -687,9 +705,14 @@ def train(
     precision: str = "fp32",
     prefetch: int = 8,
     batch_threads: int = 4,
+    scale_loss: tuple[int, ...] = (),
+    scale_weight: float = 1.0,
 ) -> dict[str, Any]:
     """Train a noise model on the train split's pairs, evaluate it on the
     validation split's, export it to ONNX and record the run.
+
+    `scale_loss` adds the error averaged over blocks of each of its sides,
+    `scale_weight` times each, to the loss (see `loss_of`).
 
     `extra` is a second bank from `cut_windows`, of other targets for
     their inputs; it makes up `extra_fraction` of every batch, and the run
@@ -715,6 +738,8 @@ def train(
         raise ValueError(f"outlier_scale is one of {OUTLIER_SCALES}, not {outlier_scale!r}")
     if noise_plane not in NOISE_PLANES:
         raise ValueError(f"noise_plane is one of {NOISE_PLANES}, not {noise_plane!r}")
+    if any(k < 2 or tile % k for k in scale_loss):
+        raise ValueError(f"each of the loss's scales {scale_loss} must be at least 2 and divide the tile, {tile}")
     if extra is not None and extra_fraction and not len(extra["a"]):
         raise RuntimeError(f"the {extra_label} bank holds no window wholly inside its pairs' coverage")
     torch.manual_seed(seed)
@@ -760,7 +785,8 @@ def train(
             inputs, targets, references, sigmas = (t.to(where, non_blocking=True) for t in tensors)
             inputs = inputs.contiguous(memory_format=layout)
             with torch.autocast(where.type, dtype=torch.bfloat16, enabled=precision == "bf16"):
-                loss = loss_of(model, inputs, targets, references, sigmas, loss_weight, huber, huber_above)
+                loss = loss_of(model, inputs, targets, references, sigmas, loss_weight, huber, huber_above,
+                               scale_loss, scale_weight)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             if clip_grad:
@@ -811,6 +837,7 @@ def train(
                    "outlier_scale": outlier_scale, "noise_plane": noise_plane, "clip_grad": clip_grad,
                    "match_flux": match_flux, "agree": agree, "precision": precision, "prefetch": prefetch,
                    "batch_threads": batch_threads, "batch_generator": "per-step",
+                   "scale_loss": list(scale_loss), "scale_weight": scale_weight if scale_loss else None,
                    "extra": {"label": extra_label, "fraction": extra_fraction, "windows": int(len(extra["a"]))}
                    if extra is not None else None},
         "parameters": sum(p.numel() for p in model.parameters()),
@@ -965,15 +992,28 @@ def evaluate(
         if noise_map == "model":
             coverage = np.load(store.root / loads(pair["a"]["files"])["coverage"])
             sigma_a = modelled_sigma(image_a, sigma_a, coverage)
-        input_background, input_noise = scales(image_a, sigma_a)
-        planes = network_input(image_a, sigma_a, input_background, input_noise, noise_plane)
-        residual = infer(denoiser(model, input_background, input_noise, where), planes,
-                         tile=tile, overlap=overlap, margin=margin,
-                         multiple=multiple or model.multiple)[0]
-        estimate = bands.apply(image_a, residual)
+        settings = {"tile": tile, "overlap": overlap, "margin": margin, "multiple": multiple or model.multiple}
+
+        def denoise(image: np.ndarray, sigma: np.ndarray) -> np.ndarray:
+            image_background, image_noise = scales(image, sigma)
+            planes = network_input(image, sigma, image_background, image_noise, noise_plane)
+            return bands.apply(image, infer(denoiser(model, image_background, image_noise, where), planes,
+                                            **settings)[0])
+
+        estimate = denoise(image_a, sigma_a)
         recipe = loads(pair["a"]["recipe"])
-        return {"pair": pair["a"]["id"], "set": pair["set"], "size": recipe.get("size") or recipe["recipe"],
-                "flux_gain": gain, **found, **measure(estimate, image_a, image_b, background, noise)}
+        size = recipe.get("size") or recipe["recipe"]
+        left = {}
+        # A noise pair's halves are independent, so B denoised too shows
+        # the noise left at each scale; a deep stack's halves share the
+        # night's calibration.
+        if isinstance(size, int):
+            alone_b, sigma_b = load_half(store, pair["b"])
+            if noise_map == "model":
+                sigma_b = modelled_sigma(alone_b, sigma_b, np.load(store.root / loads(pair["b"]["files"])["coverage"]))
+            left = noise_left(estimate, denoise(alone_b, sigma_b), image_a, alone_b, noise)
+        return {"pair": pair["a"]["id"], "set": pair["set"], "size": size,
+                "flux_gain": gain, **found, **measure(estimate, image_a, image_b, background, noise), **left}
 
     chosen = pairs(manifest, split, sets) + deep_pairs(manifest, split, sets)
     with ThreadPoolExecutor(max_workers=threads, thread_name_prefix="evaluate") as pool:
@@ -990,7 +1030,8 @@ def evaluate(
             "sky_mse", "sky_mse_trimmed", "sky_outlier_share", "faint_mse", "mid_mse", "core_mse",
             *(f"transfer_{region}_{band}" for region in ("faint", "mid") for band in TRANSFER_BANDS),
             "peak_flux_kept_faint", "peak_flux_kept_mid", "peak_height_kept_faint", "peak_height_kept_mid",
-            "star_fwhm_px", *(f"star_fwhm_{kind}_{level}" for kind in ("ratio", "target") for level in STAR_LEVELS))
+            "star_fwhm_px", *(f"star_fwhm_{kind}_{level}" for kind in ("ratio", "target") for level in STAR_LEVELS),
+            *(f"noise_left_{scale}px" for scale in MOTTLE_SCALES))
     return {
         "split": split,
         "bands": asdict(bands),
@@ -1242,6 +1283,47 @@ def star_widths(estimate: np.ndarray, image: np.ndarray, target: np.ndarray, sta
         enough = chosen.sum() >= 10
         result[f"star_fwhm_ratio_{name}"] = float(np.median(fwhm_e[chosen] / fwhm_x[chosen])) if enough else None
         result[f"star_fwhm_target_{name}"] = float(np.median(fwhm_e[chosen] / fwhm_t[chosen])) if enough else None
+    return result
+
+
+# The scales, in pixels, at which `noise_left` smooths.
+MOTTLE_SCALES = (4, 8, 16)
+
+
+def noise_left(
+    estimate_a: np.ndarray, estimate_b: np.ndarray, image_a: np.ndarray, image_b: np.ndarray, noise: float
+) -> dict[str, float | None]:
+    """The share of a noise pair's noise a model left at each of
+    `MOTTLE_SCALES`, on sky with nothing brighter than the noise within 8
+    pixels. A − B holds only the halves' noise, and f(A) − f(B) only what
+    the model left of it, signal and gradients cancelling in both; each is
+    Gaussian-smoothed over that sky at the scale, and the share is the
+    spread of the one over the other's. A model that takes out the grain
+    but leaves the noise at 8 or 16 pixels leaves mottle. On a flat sky of
+    noise alone, the first models left 3–7% of the coarse noise; on a real
+    one, 60–90% at those scales, since there faint signal looks like it."""
+    valid = np.isfinite(image_a) & np.isfinite(image_b) & np.isfinite(estimate_a) & np.isfinite(estimate_b)
+    both = np.where(valid, (image_a + image_b) / 2, 0.0)
+    background = float(np.median(both[valid][::7])) if valid.any() else 0.0
+    level = gaussian_blur(np.where(valid, both - background, 0.0).astype(np.float32), 2.0) / noise
+    sky = valid & ~(box_max((level > 1.0).astype(np.float32), 8) > 0)
+    noise_alone = np.where(sky, image_a - image_b, 0.0).astype(np.float32)
+    noise_kept = np.where(sky, estimate_a - estimate_b, 0.0).astype(np.float32)
+    result: dict[str, float | None] = {}
+    for scale in MOTTLE_SCALES:
+        weight = gaussian_blur(sky.astype(np.float32), scale)
+        # The blur repeats the image's edge outward, which would spread one
+        # pixel's noise over the kernel, so the edges are left out.
+        reach = 3 * scale
+        middle = (slice(reach, -reach), slice(reach, -reach))
+        inside = np.zeros_like(sky)
+        inside[middle] = sky[middle] & (weight[middle] > 0.5)
+        if not inside.any():
+            result[f"noise_left_{scale}px"] = None
+            continue
+        spread = [float(np.sqrt(np.mean((gaussian_blur(x, scale)[inside] / weight[inside]) ** 2)))
+                  for x in (noise_kept, noise_alone)]
+        result[f"noise_left_{scale}px"] = spread[0] / spread[1] if spread[1] else None
     return result
 
 

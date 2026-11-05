@@ -133,6 +133,12 @@ def main(argv: list[str] | None = None) -> int:
                        help="build this many batches ahead (0: none; the batches are the same)")
     train.add_argument("--batch-threads", type=int, default=4,
                        help="threads building batches ahead (the batches are the same)")
+    train.add_argument("--scale-loss", type=lambda text: tuple(int(k) for k in text.split(",")), default=(),
+                       help="also weigh the error averaged over blocks of these sides, comma-separated (4,8,16), "
+                            "each as much as the pixels' noise, so noise left at those scales costs the loss as "
+                            "much as the grain and is not left as mottle")
+    train.add_argument("--scale-weight", type=float, default=1.0,
+                       help="with --scale-loss, the weight of each scale's term against the per-pixel loss")
 
     sheet = commands.add_parser("sheet-noise", help="make a trained noise model's contact sheets")
     sheet.add_argument("--name", required=True)
@@ -282,6 +288,7 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
             structure_sampling=arguments.structure_sampling, outlier_count=arguments.outlier_count,
             outlier_floor=arguments.outlier_floor, clip_grad=arguments.clip_grad, match_flux=arguments.match_flux,
             agree=arguments.agree, outlier_scale=arguments.outlier_scale, noise_plane=arguments.noise_plane,
+            scale_loss=arguments.scale_loss, scale_weight=arguments.scale_weight,
             precision=arguments.precision, prefetch=arguments.prefetch, batch_threads=arguments.batch_threads,
             **extra,
         )

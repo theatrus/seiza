@@ -122,8 +122,9 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
     run("train-noise", "--name", "smoke", "--steps", "6", "--width", "4", "--levels", "3", "--tile", "64", "--batch", "2",
         "--precision", "bf16", "--prefetch", "2", "--batch-threads", "2", "--deep-fraction", "0.5",
         "--outliers", "2", "--outlier-floor", "10", "--clip-grad", "1", "--match-flux", "--agree", "0.9",
-        "--outlier-scale", "local", "--noise-plane", "asinh")
+        "--outlier-scale", "local", "--noise-plane", "asinh", "--scale-loss", "4,8", "--scale-weight", "0.5")
     record = json.loads((store / "models" / "noise" / "smoke" / "run.json").read_text())
+    assert record["config"]["scale_loss"] == [4, 8] and record["config"]["scale_weight"] == 0.5
     assert record["config"]["train_pairs"] == 6
     assert record["config"]["extra"]["label"] == "deep" and record["config"]["extra"]["windows"] > 0
     assert record["config"]["precision"] == "bf16"
@@ -141,8 +142,10 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
     assert measured["pairs"] == 7
     size = next(iter(measured["by_size"].values()))
     assert size["high_ratio"] is not None and abs(size["sky_bias"]) < 1.0
+    assert all(0 < size[f"noise_left_{scale}px"] < 2 for scale in (4, 8, 16))
     assert list(measured["by_size"])[-1] == "deep-half"
     assert measured["by_size"]["deep-half"]["high_ratio"] is not None
+    assert measured["by_size"]["deep-half"]["noise_left_8px"] is None
     run("evaluate-noise", "--name", "smoke", "--split", "train", "--limit", "2", "--high-amount", "0.7",
         "--low-amount", "0.9")
     kept = json.loads(capsys.readouterr().out)
@@ -366,6 +369,43 @@ def test_the_noise_plane_is_the_map_in_typical_noise_or_its_asinh():
     assert np.allclose(curved[1], np.arcsinh(linear[1]))
     # A bright star's map of 50σ̄ reaches under 5.
     assert curved[1].max() < 5
+
+
+def test_the_scale_loss_weighs_coarse_error_as_it_weighs_the_grain():
+    from seiza_training.noise_model import loss_of
+
+    zeros, ones = torch.zeros(4, 1, 64, 64), torch.ones(4, 1, 64, 64)
+    # The same energy per pixel, as white noise and as one offset.
+    grain = 0.1 * torch.randn(4, 1, 64, 64, generator=torch.Generator().manual_seed(1))
+    offset = torch.full((4, 1, 64, 64), 0.1)
+
+    def loss(error, scales):
+        return float(loss_of(lambda inputs: error, zeros, zeros, zeros, ones, "variance", scales=scales))
+
+    assert loss(grain, ()) == pytest.approx(loss(offset, ()), rel=0.05)
+    # Each scale's term weighs white noise as the pixels' does, and an
+    # offset k² times as much.
+    assert loss(grain, (4, 8, 16)) == pytest.approx(4 * loss(grain, ()), rel=0.2)
+    assert loss(offset, (4, 8, 16)) == pytest.approx((1 + 16 + 64 + 256) * loss(offset, ()), rel=1e-4)
+
+
+def test_the_noise_left_is_the_share_of_the_halves_noise_at_each_scale():
+    from seiza_training.noise_model import gaussian_blur, noise_left
+
+    rng = np.random.default_rng(5)
+    noise_a, noise_b = (rng.normal(0, 1, (320, 320)).astype(np.float32) for _ in range(2))
+    a, b = 100 + noise_a, 100 + noise_b
+
+    def left(estimate_a, estimate_b):
+        return noise_left(estimate_a, estimate_b, a, b, 1.0)
+
+    assert all(value == pytest.approx(1.0) for value in left(a, b).values())
+    assert all(value == 0.0 for value in left(np.full_like(a, 100), np.full_like(b, 100)).values())
+    # Taking out the grain and leaving the coarse noise leaves most of it at
+    # 16 pixels and less at 4.
+    coarse = left(100 + gaussian_blur(noise_a, 2.0), 100 + gaussian_blur(noise_b, 2.0))
+    assert coarse["noise_left_4px"] < coarse["noise_left_8px"] < coarse["noise_left_16px"]
+    assert coarse["noise_left_16px"] > 0.95
 
 
 def test_outliers_reach_the_input_and_not_the_target():
