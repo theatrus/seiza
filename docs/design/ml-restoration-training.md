@@ -1061,20 +1061,45 @@ compiles the package on first load, and Seiza caches the compiled model.
 ### Tiling and parity
 
 Inference cuts the image into tiles of the export's static shape, runs
-each, and blends them. Within half the receptive field of a tile's inner
+each, and blends them. Two rules make that reproduce whole-image inference.
+
+The first is where tiles start. A network that halves the image four times
+samples it on a 16-pixel grid, so what it makes of a pixel depends on where
+the tile holding it starts. Moved a pixel, a tile of a trained noise model
+gave output up to 0.8σ different; moved 16, it differed by float error.
+Tiles therefore start only on multiples of 2^(levels − 1): the stride is cut
+to such a multiple, and the image is padded by reflection at its far edges
+until the last tile, flush with them, starts on one too.
+
+The second is the margin. Within the network's reach of a tile's inner
 edge, its output saw the convolutions' padding rather than the image, so
 that band takes no weight; past it, the tile's weight rises as a raised
-cosine across the rest of the overlap. Neighbouring tiles therefore overlap
-by at least the receptive field. At the image's own edge a tile keeps its
-full weight, because whole-image inference pads there too. With that rule,
-tiled output matches whole-image output to within float error, and a test
-holds it there; a plain cosine over the whole overlap lets the padded band
-leak into the blend.
+cosine across the rest of the overlap. The reach is half the receptive
+field, but on the side nearest upsampling copies from, it is a pixel longer
+at each scale finer than the coarsest: at five levels, 122 pixels left and
+up and 107 right and down. At the image's own edge a tile keeps its full
+weight, because whole-image inference pads there too.
+
+With both rules, tiled output matches whole-image output to within float
+error, and tests hold it there: a plain cosine over the whole overlap,
+tiles off the grid, or a margin of half the receptive field each make them
+fail. The first noise runs were measured with tiles every 264 pixels and a
+margin of 108. On a 4-frame half, a second grid half a stride over gave
+output 0.007σ different in root mean square, and up to 16σ beside bright
+stars. With both rules, the two grids differ by 2e-6σ, and at most by
+2e-7 of the residual, at a star core.
+
+Every noise run writes, besides its contact sheets, four 4-frame
+validation images whole, as FITS and PNG, each with a seam map: the
+difference between the outputs of two tile grids half a stride apart, in
+units of the noise, in which a seam shows as a line of the grid. The map's
+root mean square and largest value are recorded with the run.
 
 Each tile carries its own PSF stamp and its own slices of the noise,
 ratio, halo and bloom maps. Peak memory is a few tiles' worth whatever the
 image's size, and the backends compile one tile shape. The model card
-records the tile shape, the overlap and the zero-weight margin.
+records the tile shape, the overlap, the zero-weight margin and the grid
+tiles start on.
 
 The noise model's output is bounded by its input. Each pixel is held
 between the lowest and highest input in the 5 × 5 box around it, widened by
@@ -1086,8 +1111,9 @@ where a run blew up: there it moved 34,000 and brought the error from
 121,000 to 13. The share of pixels it moves is
 reported, and a tile where it moves many falls back to its input.
 
-The export script writes fixture tiles with PyTorch's f32 output. Each backend
-must match them:
+The export script writes fixture tiles with PyTorch's f32 output, and a
+whole image with its output through tiles. Each backend, and the runtime's
+tiling, must match them:
 
 - the ONNX Runtime CPU provider within 1e-4 relative;
 - Core ML, CUDA and TensorRT within 0.01σ of the input's noise.
