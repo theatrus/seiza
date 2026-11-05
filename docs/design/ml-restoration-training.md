@@ -1087,7 +1087,8 @@ fail. The first noise runs were measured with tiles every 264 pixels and a
 margin of 108. On a 4-frame half, a second grid half a stride over gave
 output 0.007σ different in root mean square, and up to 16σ beside bright
 stars. With both rules, the two grids differ by 2e-6σ, and at most by
-2e-7 of the residual, at a star core.
+2e-7 of the residual, at a star core. The old tiling moved the measures
+by less than 0.01%, so the comparisons between those runs stand.
 
 Every noise run writes, besides its contact sheets, four 4-frame
 validation images whole, as FITS and PNG, each with a seam map: the
