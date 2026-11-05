@@ -1015,7 +1015,24 @@ in these ways:
   sky, where errors stay within the clip, showed nothing. Runs since
   average the error unclipped, make each block's term robust instead, and
   leave out blocks holding a target brighter than 200σ̄, where the
-  per-pixel loss is robust too.
+  per-pixel loss is robust too. The first, weighing the blocks four times,
+  left 43%, 62% and 86%, close to the clipped run, with no stripes: in
+  bright star cores its change from one column to the next is within 12%
+  of that from one row to the next, and zoomed in it looks like noise. No
+  ring shows around the Iris's stars; around the Elephant's Trunk's
+  brighter ones it took 1–2σ̄ off 6–12 pixels out, where the deep stack
+  itself lies 15–19σ̄ below the 4-frame half. It kept more of the faintest
+  stars' flux (83% of it at 1–2σ̄ on the Trunk, where the run before kept
+  64%). But the weight took share from the per-pixel loss. It changed
+  bright star cores by 2σ̄ where the run before changed them by 11σ̄ and
+  the deep differs by 10σ̄, leaving their noise in; against clean targets
+  its error was 20% larger on mid-brightness signal and 6% on cores; on
+  the flat sky of noise alone it left 3.4% of the finest noise instead of
+  1.4%; and of the sharp spots a 4-frame half has and the deep lacks, hot
+  pixels and cosmic rays its rejection let through, it left 76 over 1σ̄ on
+  the Trunk where the run before left 18, spots of 6–7σ̄ coming out as
+  dots of 2–3σ̄. Both runs turn the strongest such spots into a small ring
+  rather than taking them out.
 - **Deep halves.** Training on a night's deep stack dealt into two halves,
   a quarter of every batch, taught a model to keep mottle: it left 37% of
   the coarse noise on empty sky. The halves share the night's flats,
