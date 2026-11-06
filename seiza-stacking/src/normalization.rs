@@ -174,14 +174,10 @@ impl NormalizationMap {
             (layout.width, layout.height, layout.channels),
             layout.tile_size,
             &globals,
-            |cell, channel, (x, y, width, height)| {
-                let samples = layout.block(cell, channel);
-                let pairs = reference[samples.clone()]
-                    .iter()
-                    .zip(&source[samples])
-                    .zip(tile_sample_pixels(layout.width, x, y, width, height))
-                    .filter(|&(_, pixel)| !mask.is_some_and(|mask| mask.covers(pixel)))
-                    .map(|((&reference, &source), _)| (reference, source));
+            |cell, channel, region| {
+                let start = layout.block(cell, channel).start;
+                let pairs = fitted_samples(layout.width, region, mask)?
+                    .map(|(sample, _)| (reference[start + sample], source[start + sample]));
                 sample_offset(pairs, globals[channel].0)
             },
         ))
@@ -216,21 +212,17 @@ impl NormalizationMap {
             (layout.width, layout.height, layout.channels),
             layout.tile_size,
             &globals,
-            |cell, channel, (x, y, width, height)| {
-                let block = layout.block(cell, channel);
-                let pairs = reference[block.clone()]
-                    .iter()
-                    .zip(&source[block])
-                    .zip(tile_sample_pixels(layout.width, x, y, width, height))
-                    .filter(|&(_, pixel)| !mask.is_some_and(|mask| mask.covers(pixel)))
-                    .map(|((&reference, &value), pixel)| {
-                        if !value.is_finite() {
-                            return (reference, value);
-                        }
-                        let (gain, offset) =
-                            sampler.at(pixel % layout.width, pixel / layout.width, channel);
-                        (reference, value.mul_add(gain, offset))
-                    });
+            |cell, channel, region| {
+                let start = layout.block(cell, channel).start;
+                let pairs = fitted_samples(layout.width, region, mask)?.map(|(sample, pixel)| {
+                    let value = source[start + sample];
+                    if !value.is_finite() {
+                        return (reference[start + sample], value);
+                    }
+                    let (gain, offset) =
+                        sampler.at(pixel % layout.width, pixel / layout.width, channel);
+                    (reference[start + sample], value.mul_add(gain, offset))
+                });
                 sample_offset(pairs, 1.0)
             },
         ))
@@ -1415,12 +1407,10 @@ fn tile_offset(
     gain: f32,
     mask: Option<&BackgroundMask>,
 ) -> Option<f32> {
-    let pairs = tile_sample_pixels(source.width, x, y, width, height)
-        .filter(|&pixel| !mask.is_some_and(|mask| mask.covers(pixel)))
-        .map(|pixel| {
-            let index = pixel * source.channels() + channel;
-            (reference.data[index], source.sample(index))
-        });
+    let pairs = fitted_samples(source.width, (x, y, width, height), mask)?.map(|(_, pixel)| {
+        let index = pixel * source.channels() + channel;
+        (reference.data[index], source.sample(index))
+    });
     sample_offset(pairs, gain)
 }
 
@@ -1464,11 +1454,9 @@ impl GatheredTiles {
         let (mut at, mut values) = (Vec::new(), Vec::new());
         for cell in 0..cells {
             starts.push(at.len());
-            let (x, y, tile_width, tile_height) = tile(cell, columns, width, height, tile_size);
-            for pixel in tile_sample_pixels(width, x, y, tile_width, tile_height) {
-                if mask.is_some_and(|mask| mask.covers(pixel)) {
-                    continue;
-                }
+            let region = tile(cell, columns, width, height, tile_size);
+            // A tile the mask leaves too little of reads none, as on the CPU.
+            for (_, pixel) in fitted_samples(width, region, mask).into_iter().flatten() {
                 for channel in 0..channels {
                     let index = pixel * channels + channel;
                     let position = lookup[index];
@@ -1549,14 +1537,11 @@ fn tile_offsets(
     offsets: &mut [Option<f32>],
 ) {
     let channels = source.channels();
-    let pixels = tile_sample_pixels(source.width, x, y, width, height);
-    let mut residuals: Vec<Vec<f32>> = (0..channels)
-        .map(|_| Vec::with_capacity(pixels.len()))
-        .collect();
-    for pixel in pixels {
-        if mask.is_some_and(|mask| mask.covers(pixel)) {
-            continue;
-        }
+    let Some(pixels) = fitted_samples(source.width, (x, y, width, height), mask) else {
+        return;
+    };
+    let mut residuals: Vec<Vec<f32>> = (0..channels).map(|_| Vec::new()).collect();
+    for (_, pixel) in pixels {
         for (channel, (residuals, &gain)) in residuals.iter_mut().zip(gains).enumerate() {
             let index = pixel * channels + channel;
             let (reference_value, source_value) = (reference.data[index], source.sample(index));
@@ -1679,6 +1664,9 @@ const PHOTOMETRY_SHRINK: f64 = 1.5;
 /// How far about each star photometry measures a background fit leaves
 /// its samples out, in the broadest FWHM a frame's photometry scales with.
 const BACKGROUND_MASK: f64 = 1.5;
+/// The most of a tile's samples a mask may leave out for the rest to fit its
+/// offset; a tile it leaves less of takes its neighbours'.
+const BACKGROUND_TILE_SHARE: f64 = 0.75;
 
 /// What photometric normalization reads of a reference, which a stack
 /// measures once for every frame it normalizes against it: the ceilings at
@@ -1828,6 +1816,30 @@ impl BackgroundMask {
             .get(pixel / 64)
             .is_some_and(|bits| bits >> (pixel % 64) & 1 == 1)
     }
+}
+
+/// The samples of the tile at `region` of a grid `width` wide that a local
+/// background fit reads, each as its place among [`tile_sample_pixels`]' and
+/// its pixel: all but those `mask` covers, or `None` when the mask leaves out
+/// more than [`BACKGROUND_TILE_SHARE`] of them, so that the few left, at the
+/// edges of its discs, would decide the tile's offset.
+fn fitted_samples(
+    width: usize,
+    (x, y, tile_width, tile_height): (usize, usize, usize, usize),
+    mask: Option<&BackgroundMask>,
+) -> Option<impl Iterator<Item = (usize, usize)> + '_> {
+    let samples = tile_sample_pixels(width, x, y, tile_width, tile_height);
+    if let Some(mask) = mask {
+        let covered = samples.clone().filter(|&pixel| mask.covers(pixel)).count();
+        if covered as f64 > BACKGROUND_TILE_SHARE * samples.len() as f64 {
+            return None;
+        }
+    }
+    Some(
+        samples
+            .enumerate()
+            .filter(move |&(_, pixel)| !mask.is_some_and(|mask| mask.covers(pixel))),
+    )
 }
 
 /// Per-channel gains that carry `source`'s star fluxes onto `reference`'s:
@@ -3883,5 +3895,28 @@ mod tests {
             mean.abs() < 0.3 && lowest > -1.5,
             "mean {mean}, lowest {lowest}"
         );
+    }
+
+    /// A tile whose bright star the mask leaves out all but its corners of
+    /// fits its offset from them, at the edge of the disc, where a blurred
+    /// frame's wings still stand above the sharp reference's: it is filled
+    /// from its neighbours instead, as a tile beyond a frame's edge is.
+    #[test]
+    fn a_tile_the_mask_leaves_little_of_takes_its_neighbours_offset() {
+        let star = [(160.0, 160.0)];
+        let reference = star_image((320, 320), &star, 2.0, 2.0e6, 0);
+        let source = star_image((320, 320), &star, 12.0, 2.0e6, 1);
+        let mask = BackgroundMask::around((320, 320), &star, 34.0);
+        let map = NormalizationMap::estimate_with_gains(
+            &reference,
+            Placed::whole(&source),
+            NormalizationMode::LocalBackground { tile_size: 64 },
+            Some(&[1.0]),
+            Some(&mask),
+        )
+        .unwrap();
+        // The middle tile of five by five.
+        let offset = map.offsets[2 * 5 + 2];
+        assert!(offset.abs() < 0.5, "{offset}");
     }
 }
