@@ -83,6 +83,7 @@ impl NormalizationMap {
         gains: Option<&[f32]>,
         mask: Option<&BackgroundMask>,
     ) -> Result<Self> {
+        check_mask(mask, source.width, source.height)?;
         match (mode, gains) {
             (NormalizationMode::LocalBackground { tile_size }, Some(gains))
                 if gains.len() == source.channels() && source.matches(reference) =>
@@ -169,6 +170,7 @@ impl NormalizationMap {
                 "background samples do not match the normalization".into(),
             ));
         }
+        check_mask(mask, layout.width, layout.height)?;
         let globals = self.background_globals();
         Ok(local_background_from(
             (layout.width, layout.height, layout.channels),
@@ -206,6 +208,7 @@ impl NormalizationMap {
                 "background samples do not match the normalization".into(),
             ));
         }
+        check_mask(mask, layout.width, layout.height)?;
         let sampler = self.sampler();
         let globals = vec![(1.0, 0.0); self.channels];
         Ok(local_background_from(
@@ -1445,7 +1448,10 @@ impl GatheredTiles {
         mask: Option<&BackgroundMask>,
     ) -> Option<Self> {
         let (width, height, channels) = (reference.width, reference.height, reference.channels);
-        if tile_size == 0 || lookup.len() != reference.data.len() {
+        if tile_size == 0
+            || lookup.len() != reference.data.len()
+            || check_mask(mask, width, height).is_err()
+        {
             return None;
         }
         let columns = width.div_ceil(tile_size);
@@ -1713,11 +1719,19 @@ impl ReferencePhotometry {
     /// samples where the canvas had none, which change its brightest sample
     /// but not the seeing of the stars already there. Widths none of its
     /// stars gave, while the canvas was too empty to measure them, are
-    /// measured again when next asked for, and the mask with them.
+    /// measured again when next asked for, and so is a mask of another grid.
     pub(crate) fn update(&mut self, reference: &LinearImage) {
         self.ceilings = photometric_ceilings(reference);
         if self.widths.get().is_some_and(|widths| !widths.measured) {
             self.widths.take();
+            self.mask.take();
+        }
+        if self
+            .mask
+            .get()
+            .and_then(Option::as_ref)
+            .is_some_and(|mask| !mask.fits(reference.width, reference.height))
+        {
             self.mask.take();
         }
     }
@@ -1803,6 +1817,12 @@ impl ReferencePhotometry {
 /// offset, as a tile beyond a frame's edge does.
 #[derive(Clone, Debug)]
 pub(crate) struct BackgroundMask {
+    width: usize,
+    height: usize,
+    /// The stars, on the grid, and the radius of the discs about them, as
+    /// crowding has left it.
+    stars: Vec<(f64, f64)>,
+    radius: f64,
     /// A bit for each pixel of the grid, row by row: whether it is left out.
     bits: Vec<u64>,
 }
@@ -1845,7 +1865,36 @@ impl BackgroundMask {
                 }
             }
         }
-        Self { bits }
+        Self {
+            width,
+            height,
+            stars: stars.to_vec(),
+            radius,
+            bits,
+        }
+    }
+
+    /// Whether this mask was made for a grid of `width` by `height`.
+    pub(crate) fn fits(&self, width: usize, height: usize) -> bool {
+        (self.width, self.height) == (width, height)
+    }
+
+    /// This mask on a grid `factor` times as fine, as a binned stack's is
+    /// on the sensor's: each star where its bin's pixels centre, and each
+    /// disc `factor` times as wide.
+    pub(crate) fn rescaled(&self, factor: usize) -> Self {
+        let scale = factor as f64;
+        let centre = (scale - 1.0) / 2.0;
+        let stars = self
+            .stars
+            .iter()
+            .map(|&(x, y)| (x * scale + centre, y * scale + centre))
+            .collect::<Vec<_>>();
+        Self::discs(
+            (self.width * factor, self.height * factor),
+            &stars,
+            self.radius * scale,
+        )
     }
 
     /// Whether `pixel`, counted row by row over the grid, is left out.
@@ -1878,6 +1927,17 @@ fn fitted_samples(
             .enumerate()
             .filter(move |&(_, pixel)| !mask.is_some_and(|mask| mask.covers(pixel))),
     )
+}
+
+/// An error unless `mask`, when there is one, was made for a grid of `width`
+/// by `height`: one of another grid would leave out the wrong samples.
+fn check_mask(mask: Option<&BackgroundMask>, width: usize, height: usize) -> Result<()> {
+    if mask.is_some_and(|mask| !mask.fits(width, height)) {
+        return Err(Error::Normalization(
+            "the background mask was made for another grid".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Per-channel gains that carry `source`'s star fluxes onto `reference`'s:
@@ -3978,6 +4038,29 @@ mod tests {
         let mask = BackgroundMask::around((200, 200), &stars, 48.0);
         let covered = (0..200 * 200).filter(|&pixel| mask.covers(pixel)).count();
         assert!(covered <= 200 * 200 / 2, "{covered}");
+    }
+
+    /// A mask made for one grid cannot be read on another, which would put
+    /// its stars in the wrong places: a binned stack's mask on the grid of
+    /// its full-resolution reintegration.
+    #[test]
+    fn a_refit_refuses_a_mask_of_another_grid() {
+        let (reference, source, _, map) = blurred_background();
+        let layout = BackgroundSamples::for_image(&source, 64);
+        let binned = BackgroundMask::around(
+            (reference.width / 2, reference.height / 2),
+            &[(40.0, 40.0)],
+            10.0,
+        );
+        assert!(
+            map.refit_background_samples(
+                &layout,
+                &layout.of(&reference).unwrap(),
+                &layout.of(&source).unwrap(),
+                Some(&binned),
+            )
+            .is_err()
+        );
     }
 
     /// Sixteen stars of 3 px FWHM on a sky of 100, and the same grid with no

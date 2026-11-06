@@ -578,7 +578,7 @@ const NORMALIZATION_REFERENCE_FRAMES: usize = 20;
 
 /// The integrated background reference and each frame's normalization
 /// fitted against it, filled on first use.
-struct Renormalizer {
+struct Renormalizer<'a> {
     /// The samples the background fit reads.
     layout: BackgroundSamples,
     /// The integrated reference at those samples, all the fit reads of it.
@@ -588,12 +588,12 @@ struct Renormalizer {
     preserve_recorded: bool,
     /// The samples about the reference's stars the fit leaves out, as the
     /// live pass left them out.
-    mask: Option<crate::normalization::BackgroundMask>,
+    mask: Option<&'a crate::normalization::BackgroundMask>,
     /// Residual maps when preserving the base, otherwise complete maps.
     maps: std::sync::Mutex<Vec<Option<crate::NormalizationMap>>>,
 }
 
-impl Renormalizer {
+impl Renormalizer<'_> {
     /// Frame `index`'s background offsets refitted against the integrated
     /// reference on `interpolated`, its unnormalized registered image,
     /// keeping its recorded gain; fitted once and then reused, so every pass
@@ -622,7 +622,7 @@ impl Renormalizer {
             return Ok(map);
         }
         let base = admitted.mapping.normalization();
-        let mask = self.mask.as_ref();
+        let mask = self.mask;
         let map = if self.preserve_recorded {
             base.refit_background_residual_samples(&self.layout, &self.reference, samples, mask)?
         } else {
@@ -1545,7 +1545,7 @@ struct Replay<'a> {
     stacker: &'a LiveStacker,
     options: &'a BatchStackOptions,
     masters: &'a MastersCache,
-    renormalizer: Option<&'a Renormalizer>,
+    renormalizer: Option<&'a Renormalizer<'a>>,
     /// Whether frames prepared from their sources are resampled over their
     /// footprints on an expanded canvas.
     footprints: bool,
@@ -3494,7 +3494,7 @@ impl LiveStacker {
         admitted: &AdmittedFrame,
         masters: &CalibrationMasters,
         index: usize,
-        renormalizer: Option<&Renormalizer>,
+        renormalizer: Option<&Renormalizer<'_>>,
         cache: Option<&FrameCache>,
         footprints: bool,
     ) -> Result<LinearImage> {

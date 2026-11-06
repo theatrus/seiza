@@ -744,6 +744,10 @@ pub struct LiveStacker {
     /// frame: on a 26 MP colour reference its ceilings' pass alone was 11%
     /// of preparing a frame.
     reference_photometry: std::sync::OnceLock<crate::normalization::ReferencePhotometry>,
+    /// A binned stack's [`Self::background_mask`] on the sensor's grid,
+    /// which its full-resolution reintegration carries; `None` elsewhere,
+    /// where the mask is the reference's own.
+    carried_background_mask: Option<Option<crate::normalization::BackgroundMask>>,
     /// Where the reference's local background tiles lie among a gathered
     /// frame's samples, once a frame has been gathered.
     #[cfg(feature = "gpu")]
@@ -1344,6 +1348,12 @@ impl LiveStacker {
             reference_noise: self.reference_noise.clone(),
             // Of the full-resolution reference, not this one's.
             reference_photometry: std::sync::OnceLock::new(),
+            // The full-resolution reference holds no samples to measure,
+            // and the registrar and canvas are this stack's.
+            carried_background_mask: Some(
+                self.background_mask()
+                    .map(|mask| mask.rescaled(bin as usize)),
+            ),
             #[cfg(feature = "gpu")]
             fit_tiles: std::sync::OnceLock::new(),
             accumulator: Accumulator::new(0, !self.options.weighting.is_equal()),
@@ -1539,6 +1549,7 @@ impl LiveStacker {
             canvas_registrar,
             reference_noise,
             reference_photometry: std::sync::OnceLock::new(),
+            carried_background_mask: None,
             #[cfg(feature = "gpu")]
             fit_tiles: std::sync::OnceLock::new(),
             accumulator,
@@ -1844,6 +1855,7 @@ impl LiveStacker {
             canvas_registrar,
             reference_noise: restored.reference_noise,
             reference_photometry: std::sync::OnceLock::new(),
+            carried_background_mask: None,
             #[cfg(feature = "gpu")]
             fit_tiles: std::sync::OnceLock::new(),
             accumulator: Accumulator::from_moments(
@@ -2112,17 +2124,10 @@ impl LiveStacker {
             .map(crate::replay::FrameCache::files);
         let prepared = prepare_frame(
             &self.reference,
-            FrameRegistration {
-                registrar: &self.registrar,
-                canvas: self.canvas_registrar.as_ref(),
-                known: crate::expand::registration_for(
-                    &self.planned_registrations,
-                    frame.source.as_ref(),
-                )?,
-                photometry: &self.reference_photometry,
-                #[cfg(feature = "gpu")]
-                fit_tiles: &self.fit_tiles,
-            },
+            self.registration_target(crate::expand::registration_for(
+                &self.planned_registrations,
+                frame.source.as_ref(),
+            )?),
             &self.options,
             &self.reference_noise,
             frame.image,
@@ -2190,14 +2195,7 @@ impl LiveStacker {
         // A frame with no source file cannot be replayed, so none is kept.
         let prepared = prepare_frame(
             &self.reference,
-            FrameRegistration {
-                registrar: &self.registrar,
-                canvas: self.canvas_registrar.as_ref(),
-                known: None,
-                photometry: &self.reference_photometry,
-                #[cfg(feature = "gpu")]
-                fit_tiles: &self.fit_tiles,
-            },
+            self.registration_target(None),
             &self.options,
             &self.reference_noise,
             frame,
@@ -2208,28 +2206,46 @@ impl LiveStacker {
         Ok(self.integrate_prepared(prepared))
     }
 
+    /// How [`prepare_frame`] registers a frame to this stack, through its
+    /// planned registration when `known` holds one.
+    fn registration_target<'a>(
+        &'a self,
+        known: Option<std::result::Result<&'a crate::RegistrationResult, &'a str>>,
+    ) -> FrameRegistration<'a> {
+        FrameRegistration {
+            registrar: &self.registrar,
+            canvas: self.canvas_registrar.as_ref(),
+            known,
+            photometry: &self.reference_photometry,
+            #[cfg(feature = "gpu")]
+            fit_tiles: &self.fit_tiles,
+        }
+    }
+
     /// The samples about the reference's stars that a local background fit
     /// leaves out, as the live pass left them out, for a reintegration to
-    /// refit the frames' backgrounds without them; `None` under another
-    /// normalization.
-    pub(crate) fn background_mask(&self) -> Option<crate::normalization::BackgroundMask> {
+    /// refit the frames' backgrounds without them: a binned stack's, on the
+    /// sensor's grid, for its full-resolution reintegration, whose reference
+    /// is a grid of no samples and whose registrar and canvas are the binned
+    /// stack's. `None` under another normalization, and when the reference's
+    /// stars gave no width.
+    pub(crate) fn background_mask(&self) -> Option<&crate::normalization::BackgroundMask> {
+        let (width, height) = (self.reference.width, self.reference.height);
+        if let Some(carried) = &self.carried_background_mask {
+            return carried.as_ref().filter(|mask| mask.fits(width, height));
+        }
         if !matches!(
             self.options.normalization,
             NormalizationMode::LocalBackground { .. }
         ) {
             return None;
         }
-        let target = FrameRegistration {
-            registrar: &self.registrar,
-            canvas: self.canvas_registrar.as_ref(),
-            known: None,
-            photometry: &self.reference_photometry,
-            #[cfg(feature = "gpu")]
-            fit_tiles: &self.fit_tiles,
-        };
+        let target = self.registration_target(None);
         let stars = target.reference_star_positions();
-        let photometry = target.reference_photometry(&self.reference);
-        photometry.mask(&self.reference, &stars).cloned()
+        target
+            .reference_photometry(&self.reference)
+            .mask(&self.reference, &stars)
+            .filter(|mask| mask.fits(width, height))
     }
 
     /// Borrow the stack as two disjoint halves: the immutable state every
@@ -2944,7 +2960,7 @@ pub(crate) struct FrameRegistration<'a> {
     pub fit_tiles: &'a std::sync::OnceLock<Option<crate::normalization::GatheredTiles>>,
 }
 
-impl FrameRegistration<'_> {
+impl<'a> FrameRegistration<'a> {
     fn register(&self, frame: &LinearImage) -> Result<crate::RegistrationResult> {
         match (self.known, self.canvas) {
             (Some(Ok(known)), _) => Ok(known.clone()),
@@ -2971,7 +2987,7 @@ impl FrameRegistration<'_> {
     fn reference_photometry(
         &self,
         reference: &LinearImage,
-    ) -> &crate::normalization::ReferencePhotometry {
+    ) -> &'a crate::normalization::ReferencePhotometry {
         match self.canvas {
             Some(canvas) if !resamples_whole_canvas() => canvas.photometry(),
             _ => self
