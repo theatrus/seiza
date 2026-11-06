@@ -328,3 +328,83 @@ fn rejects_bad_targets_and_sizes() {
         .is_err()
     );
 }
+
+/// The edge nodes are weighted where their PSFs were measured: on the
+/// image's last column and row, not a spacing beyond them.
+#[test]
+fn the_kernel_at_an_edge_is_the_edge_nodes() {
+    // 119 px wide, so a node every 64 px would put the last one past the
+    // edge.
+    let (width, height) = (120, 600);
+    let image = star_field(width, height, 3.0, 4.0, 37);
+    let field = field_of(&image, width, height);
+    let kernel = RemainingKernel::new(&field, TargetPsf::Fwhm(2.0), 64).unwrap();
+    let (columns, rows) = (kernel.xs.len(), kernel.ys.len());
+    assert_eq!(kernel.xs.positions.last(), Some(&(width - 1)));
+    assert_eq!(kernel.ys.positions.last(), Some(&(height - 1)));
+    for row in [0, rows / 2, rows - 1] {
+        let y = kernel.ys.positions[row] as f64;
+        let node = &kernel.kernels[row * columns + columns - 1];
+        assert_eq!(kernel.kernel_at(0, (width - 1) as f64, y).unwrap(), *node);
+    }
+    // Every axis's weights sum to one, the sky beyond the edges included.
+    for axis in [&kernel.xs, &kernel.ys] {
+        let last = *axis.positions.last().unwrap() as f64;
+        for position in [-10.0, 0.0, 0.5 * last, last - 3.0, last, last + 10.0] {
+            let total: f64 = (0..axis.len()).map(|i| axis.weight(i, position)).sum();
+            assert!((total - 1.0).abs() < 1e-12, "{position}: {total}");
+        }
+    }
+}
+
+/// One PSF everywhere blurs a flat sky to exactly the same flat sky, at the
+/// edges too, where the reflected sky beyond them must carry the full
+/// weight of the nodes it belongs to.
+#[test]
+fn one_kernel_keeps_a_flat_sky_flat_to_the_edges() {
+    // A wide PSF and a narrow target, for a wide remaining kernel, on an
+    // image 5 px short of a whole number of spacings.
+    let (width, height) = (400, 6 * 64 - 4);
+    let image = star_field(width, height, 5.0, 5.0, 41);
+    let field = field_of(&image, width, height);
+    assert!(field.is_global());
+    let kernel = RemainingKernel::new(&field, TargetPsf::Fwhm(1.5), 64).unwrap();
+    let flat = vec![7.0_f32; width * height];
+    let blurred = kernel.blur(&flat).unwrap();
+    let worst = blurred
+        .iter()
+        .map(|v| (v - 7.0).abs() / 7.0)
+        .fold(0.0_f32, f32::max);
+    assert!(worst < 2e-5, "{worst}");
+}
+
+/// A blur whose node spectra are too large to keep transforms each node's
+/// kernel as it goes, and gives the same image.
+#[test]
+fn transforming_kernels_as_it_goes_gives_the_kept_spectra_result() {
+    let (width, height) = (240, 200);
+    let image = star_field(width, height, 3.0, 4.0, 43);
+    let field = field_of(&image, width, height);
+    let kernel = RemainingKernel::new(&field, TargetPsf::Fwhm(2.0), 64).unwrap();
+    let kept = VaryingBlur::new(&kernel, 0);
+    assert!(kept.spectra.is_some());
+    let mut transient = VaryingBlur::new(&kernel, 0);
+    transient.spectra = None;
+    let (mut a, mut b) = (vec![0.0; image.len()], vec![0.0; image.len()]);
+    kept.forward_into(&image, &mut a);
+    transient.forward_into(&image, &mut b);
+    let worst = a
+        .iter()
+        .zip(&b)
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0_f32, f32::max);
+    assert!(worst < 1e-3, "{worst}");
+    kept.adjoint_into(&image, &mut a);
+    transient.adjoint_into(&image, &mut b);
+    let worst = a
+        .iter()
+        .zip(&b)
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0_f32, f32::max);
+    assert!(worst < 1e-3, "{worst}");
+}

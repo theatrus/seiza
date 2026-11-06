@@ -56,6 +56,24 @@ impl Fft2 {
         self.transform(data, scratch, &self.rows, &self.columns);
     }
 
+    /// [`Self::forward`] for a tile whose only non-zero samples lie in
+    /// `rows`: the other rows' transforms are zero, so only these are run.
+    pub(crate) fn forward_sparse_rows(
+        &self,
+        data: &mut [Complex32],
+        scratch: &mut [Complex32],
+        rows: &[usize],
+    ) {
+        debug_assert_eq!(data.len(), self.len());
+        for &row in rows {
+            self.rows
+                .process(&mut data[row * self.width..(row + 1) * self.width]);
+        }
+        transpose(data, scratch, self.width, self.height);
+        self.columns.process(scratch);
+        transpose(scratch, data, self.height, self.width);
+    }
+
     /// Transform `data` back in place, unnormalised.
     pub(crate) fn inverse(&self, data: &mut [Complex32], scratch: &mut [Complex32]) {
         self.transform(data, scratch, &self.rows_inverse, &self.columns_inverse);

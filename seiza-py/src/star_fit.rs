@@ -1,7 +1,7 @@
 //! Catalogue-guided star photometry, removal and rendering —
 //! `seiza-stars`'s `StarFit`.
 
-use crate::arrays::{float_array, float_image_view};
+use crate::arrays::{FloatImageView, float_array, float_image_view};
 use crate::psf_field::PyPsfField;
 use numpy::{PyArrayDyn, PyReadonlyArrayDyn};
 use pyo3::exceptions::PyValueError;
@@ -12,6 +12,23 @@ use seiza_stars::{
 
 fn star_fit_error(error: StarFitError) -> PyErr {
     PyValueError::new_err(error.to_string())
+}
+
+/// Refuse an array whose shape is not the image's: the core sees only the
+/// sample count, which a transposed array shares.
+fn check_shape(
+    name: &str,
+    view: &FloatImageView<'_>,
+    (width, height, channels): (usize, usize, usize),
+) -> PyResult<()> {
+    if (view.width, view.height, view.channels) == (width, height, channels) {
+        Ok(())
+    } else {
+        Err(PyValueError::new_err(format!(
+            "{name} is {}x{}x{}; the PSF field's image is {width}x{height}x{channels}",
+            view.width, view.height, view.channels
+        )))
+    }
 }
 
 /// One catalogue star's fit: where it was fitted, and per channel its
@@ -94,8 +111,18 @@ impl PyStarFit {
         max_shift: f64,
     ) -> PyResult<Self> {
         let image = float_image_view(&image)?;
+        let shape = (
+            field.field.width(),
+            field.field.height(),
+            field.field.channels(),
+        );
+        check_shape("image", &image, shape)?;
         let noise_view = match &noise {
-            Some(array) => Some(float_image_view(array)?),
+            Some(array) => {
+                let view = float_image_view(array)?;
+                check_shape("noise map", &view, shape)?;
+                Some(view)
+            }
             None => None,
         };
         let positions: StarPositions = positions.parse().map_err(star_fit_error)?;
@@ -164,6 +191,7 @@ impl PyStarFit {
         image: PyReadonlyArrayDyn<'_, f32>,
     ) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
         let image = float_image_view(&image)?;
+        check_shape("image", &image, self.shape())?;
         let removed = py
             .detach(|| self.fit.subtract(image.data))
             .map_err(star_fit_error)?;
@@ -199,6 +227,7 @@ impl PyStarFit {
         target_fwhm: f64,
     ) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
         let image = float_image_view(&image)?;
+        check_shape("image", &image, self.shape())?;
         let sharpened = py
             .detach(|| self.fit.sharpen(image.data, target_fwhm))
             .map_err(star_fit_error)?;
@@ -213,6 +242,12 @@ impl PyStarFit {
             self.fit.channels(),
             self.fit.stars().len()
         )
+    }
+}
+
+impl PyStarFit {
+    fn shape(&self) -> (usize, usize, usize) {
+        (self.fit.width(), self.fit.height(), self.fit.channels())
     }
 }
 

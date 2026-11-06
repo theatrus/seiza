@@ -429,3 +429,44 @@ fn rejects_mismatched_images_and_bad_options() {
         );
     }
 }
+
+/// The stamps kept during the fit are placed again when refinement moves a
+/// star: the model the fit keeps is the one its final positions give.
+#[test]
+fn the_kept_model_follows_refined_positions() {
+    let scene = scene(240, 210, 19, &[]);
+    let field = field_of(&scene);
+    let shifted: Vec<(f64, f64, f64)> = scene
+        .stars
+        .iter()
+        .map(|&(x, y, flux)| (x - 0.35, y + 0.25, flux))
+        .collect();
+    let fit = StarFit::fit(
+        &scene.image,
+        &field,
+        &catalogue(&shifted),
+        Some(&scene.noise),
+        &StarFitOptions {
+            positions: StarPositions::Refined,
+            ..StarFitOptions::default()
+        },
+    )
+    .unwrap();
+    let amplitudes: Vec<Vec<f64>> = fit.stars().iter().map(|star| star.flux.clone()).collect();
+    let fresh = fit.model_of(fit.stars(), &amplitudes, &vec![None; fit.stars().len()]);
+    let kept = fit.model();
+    let worst = kept
+        .iter()
+        .zip(&fresh)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0_f32, f32::max);
+    assert!(worst < 1e-3, "kept model differs by {worst}");
+    let removed = fit.subtract(&scene.image).unwrap();
+    assert!(
+        removed
+            .iter()
+            .zip(&scene.image)
+            .zip(&fresh)
+            .all(|((r, i), m)| (r - (i - m)).abs() < 1e-2)
+    );
+}

@@ -19,7 +19,7 @@ fn engine_error(error: DeconvolutionError) -> PyErr {
 
 /// The remaining kernel `R`, with `P = T ∗ R`, between a measured PSF field
 /// `P` and a round Gaussian target `T`, on a grid of nodes
-/// `node_spacing` pixels apart. Give `target_fwhm` for one FWHM in pixels
+/// at most `node_spacing` pixels apart. Give `target_fwhm` for one FWHM in pixels
 /// (at least 1.5), `target_ratio` for a fraction of the local FWHM, or
 /// neither for the field's best round PSF everywhere.
 #[pyclass(name = "RemainingKernel", module = "seiza", frozen)]
@@ -76,7 +76,7 @@ impl PyRemainingKernel {
         self.kernel.kernel_size()
     }
 
-    /// Pixels between the nodes.
+    /// The most pixels between nodes.
     #[getter]
     fn node_spacing(&self) -> usize {
         self.kernel.node_spacing()

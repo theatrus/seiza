@@ -101,10 +101,13 @@ waits for the index):
 ```
 seiza-stats  →  seiza-stretch  →  seiza-imgproc  →  seiza-fits  →  seiza-xisf
 →  seiza-core  →  seiza-image-io  →  seiza-background  →  seiza-calibration
-→  seiza-deconvolution  →  seiza-sources  →  seiza-download  →  seiza
-→  seiza-satellites  →  seiza-stacking  →  seiza-pipeline  →  seiza-stars
+→  seiza-sources  →  seiza-download  →  seiza  →  seiza-satellites
+→  seiza-stacking  →  seiza-pipeline  →  seiza-stars  →  seiza-deconvolution
 →  seiza-draw  →  seiza-parallax  →  seiza-analysis  →  seiza-cabi  →  seiza-cli
 ```
+
+`seiza-deconvolution` sits after `seiza-stars`, whose `PsfField` its
+field-varying deconvolution takes.
 
 `seiza-calibration` sits before `seiza-stacking`, which depends on it, and
 `seiza-image-io`, which needs `seiza-core`, `seiza-fits` and `seiza-xisf`, sits

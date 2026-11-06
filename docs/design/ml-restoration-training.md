@@ -145,8 +145,11 @@ settles what the plan left open:
 - **Fit quality.** Each channel reports the median χ² per pixel against the
   background noise, which bright stars' photon noise raises well above 1,
   and the median relative residual within 1.5 FWHM.
-- **Sparse fields.** A field refuses with `TooFewStars`. With the global
-  policy, three stars or more give one PSF and a warning.
+- **Sparse fields.** A varying field needs ten stars for each component,
+  and so at least ten. With fewer, or fewer than the minimum, a field
+  refuses with `TooFewStars`. With the global policy, three stars or more
+  give one PSF and a warning. Asking for no components gives one PSF too,
+  with no warning.
 
 Measured on corpus deep stacks (mono, one channel each), every field took
 the cubic. Times are for the measurement alone.
@@ -550,8 +553,8 @@ This is used twice:
   something that the data do not support.
 
 `seiza-deconvolution` now computes both. `RemainingKernel` holds `R` on a
-grid of nodes, 256 px apart by default, for each channel. At each node it
-deconvolves the `PsfField` stamp by `T` with Richardson–Lucy, using
+grid of nodes, at most 256 px apart by default, for each channel. At each
+node it deconvolves the `PsfField` stamp by `T` with Richardson–Lucy, using
 `rustfft` convolutions and starting from the Gaussian `R`. A Tikhonov
 division rang badly when `T` was nearly as wide as `P`, where `R` is close
 to a point. `reblur_consistency` blurs an estimate by `R`, each source pixel

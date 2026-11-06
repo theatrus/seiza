@@ -15,6 +15,7 @@ use nalgebra::{DMatrix, DVector};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use super::gaussian::{FWHM_PER_SIGMA, pixel_profile};
 use super::stamps::lanczos_weights;
 use super::{CatalogueStar, PsfField};
 
@@ -26,6 +27,11 @@ const GROUP_LIMIT: usize = 48;
 /// groups' current stars subtracted, so light that a star's wings spread
 /// into its neighbours' windows is accounted for.
 const PASSES: usize = 3;
+
+/// The most memory the fit keeps each star's placed stamp in, in bytes.
+/// Beyond it, as for a very deep catalogue, stamps are placed again when
+/// they are needed.
+const PLACED_CACHE_BYTES: usize = 1 << 30;
 
 /// How the stars' positions enter the fit.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -42,8 +48,7 @@ pub enum StarPositions {
 }
 
 impl StarPositions {
-    /// The mode's name: `fixed` or `refined`.
-    pub fn as_str(self) -> &'static str {
+    fn as_str(self) -> &'static str {
         match self {
             Self::Fixed => "fixed",
             Self::Refined => "refined",
@@ -181,22 +186,28 @@ pub struct StarFit {
     channels: usize,
     stamp_size: usize,
     stars: Vec<FittedStar>,
-    /// Each star's PSF stamp, per channel, at its own position, normalised
-    /// to unit sum before the sub-pixel shift.
+    /// The PSF field the stars were fitted with.
     field: PsfField,
+    /// The fitted stars through the field's PSF: what `subtract` removes.
+    model: Vec<f32>,
 }
 
 /// A PSF stamp shifted to a star's sub-pixel position, per channel: the
 /// pixel the stamp's middle lands on, and its samples.
+#[derive(Clone)]
 struct Placed {
     centre_x: isize,
     centre_y: isize,
-    planes: Vec<Vec<f64>>,
+    planes: Vec<Vec<f32>>,
 }
+
+/// Each star's placed stamp, kept while the fit runs, or `None` where it is
+/// placed again on demand.
+type PlacedCache = Vec<Option<Placed>>;
 
 /// `stamp` (`size × size`, centred) moved by `(dx, dy)` of a pixel, each in
 /// `[−0.5, 0.5]`, with Lanczos-3; zero beyond its edge.
-fn shifted(stamp: &[f32], size: usize, dx: f64, dy: f64) -> Vec<f64> {
+fn shifted(stamp: &[f32], size: usize, dx: f64, dy: f64) -> Vec<f32> {
     // Output sample u is the stamp at u − dx: from x0 = floor(u − dx) with
     // the same fraction for every u.
     let (offset_x, tx) = if dx > 0.0 { (-1, 1.0 - dx) } else { (0, -dx) };
@@ -232,7 +243,7 @@ fn shifted(stamp: &[f32], size: usize, dx: f64, dy: f64) -> Vec<f64> {
                     let y = y0 + k as isize - 2;
                     w * rows[(y + 3) as usize * size + u]
                 })
-                .sum();
+                .sum::<f64>() as f32;
         }
     }
     out
@@ -249,42 +260,24 @@ fn add_gaussian(
     fwhm: f64,
     flux: f64,
 ) {
-    let sigma = fwhm / 2.354_820_045;
+    let sigma = fwhm / FWHM_PER_SIGMA;
     let reach = (4.0 * sigma + 2.0).ceil() as isize;
     let (cx, cy) = (x.round() as isize, y.round() as isize);
-    let scale = 1.0 / (sigma * std::f64::consts::SQRT_2);
-    let profile = |centre: f64, from: isize, to: isize| -> Vec<f64> {
-        (from..=to)
-            .map(|p| {
-                0.5 * (erf((p as f64 + 0.5 - centre) * scale)
-                    - erf((p as f64 - 0.5 - centre) * scale))
-            })
-            .collect()
-    };
     let (x0, x1) = ((cx - reach).max(0), (cx + reach).min(width as isize - 1));
     let (y0, y1) = ((cy - reach).max(0), (cy + reach).min(height as isize - 1));
     if x0 > x1 || y0 > y1 {
         return;
     }
-    let (px, py) = (profile(x, x0, x1), profile(y, y0, y1));
+    let (px, py) = (
+        pixel_profile(x, x0, x1, sigma),
+        pixel_profile(y, y0, y1, sigma),
+    );
     for (row, yv) in (y0..=y1).zip(&py) {
         let row = &mut plane[row as usize * width..(row as usize + 1) * width];
         for (column, xv) in (x0..=x1).zip(&px) {
             row[column as usize] += (flux * yv * xv) as f32;
         }
     }
-}
-
-/// The error function, to 1.5 × 10⁻⁷ (Abramowitz and Stegun 7.1.26).
-fn erf(x: f64) -> f64 {
-    let sign = x.signum();
-    let x = x.abs();
-    let t = 1.0 / (1.0 + 0.327_591_1 * x);
-    let poly = t
-        * (0.254_829_592
-            + t * (-0.284_496_736
-                + t * (1.421_413_741 + t * (-1.453_152_027 + t * 1.061_405_429))));
-    sign * (1.0 - poly * (-x * x).exp())
 }
 
 impl StarFit {
@@ -357,7 +350,25 @@ impl StarFit {
             stamp_size: size,
             stars: Vec::new(),
             field: field.clone(),
+            model: Vec::new(),
         };
+        // Each star's stamp is placed once, and again only when refinement
+        // moves it, unless that would hold too much memory.
+        let keep = inside.len() * size * size * channels * std::mem::size_of::<f32>()
+            <= PLACED_CACHE_BYTES;
+        let place = |fit: &Self, stars: &[FittedStar], cache: &mut PlacedCache| {
+            if keep {
+                let placed: Vec<(usize, Placed)> = inside
+                    .par_iter()
+                    .map(|&i| (i, fit.placed(stars[i].x, stars[i].y)))
+                    .collect();
+                for (i, stamp) in placed {
+                    cache[i] = Some(stamp);
+                }
+            }
+        };
+        let mut cache: PlacedCache = vec![None; stars.len()];
+        place(&fit, &fitted, &mut cache);
         let mut amplitudes = vec![vec![0.0_f64; channels]; stars.len()];
         let passes = match options.positions {
             StarPositions::Fixed => PASSES,
@@ -366,7 +377,7 @@ impl StarFit {
         for pass in 0..passes {
             // The model of every star but a group's own, which each group
             // is fitted against.
-            let model = fit.model_of(&fitted, &amplitudes);
+            let model = fit.model_of(&fitted, &amplitudes, &cache);
             let refine = options.positions == StarPositions::Refined && pass + 1 < passes;
             let solved: Vec<Vec<(usize, Solution)>> = groups
                 .par_iter()
@@ -375,6 +386,7 @@ impl StarFit {
                         group,
                         &fitted,
                         &amplitudes,
+                        &cache,
                         data,
                         noise,
                         &model,
@@ -402,7 +414,11 @@ impl StarFit {
                     star.y = oy + (ny - oy) * scale;
                 }
             }
+            if refine {
+                place(&fit, &fitted, &mut cache);
+            }
         }
+        fit.model = fit.model_of(&fitted, &amplitudes, &cache);
         fit.stars = fitted;
         Ok(fit)
     }
@@ -430,18 +446,16 @@ impl StarFit {
     /// The fitted stars through the measured PSF, on black: the star layer
     /// [`Self::subtract`] removes.
     pub fn model(&self) -> Vec<f32> {
-        let amplitudes: Vec<Vec<f64>> = self.stars.iter().map(|star| star.flux.clone()).collect();
-        self.model_of(&self.stars, &amplitudes)
+        self.model.clone()
     }
 
     /// `data` with the fitted stars removed: the image less [`Self::model`].
     /// The background and everything a star does not explain stay.
     pub fn subtract(&self, data: &[f32]) -> Result<Vec<f32>, StarFitError> {
         self.check(data.len())?;
-        let model = self.model();
         Ok(data
             .iter()
-            .zip(&model)
+            .zip(&self.model)
             .map(|(value, star)| value - star)
             .collect())
     }
@@ -507,8 +521,26 @@ impl StarFit {
         }
     }
 
+    /// A star's placed stamp: kept, or placed again.
+    fn placed_of<'a>(
+        &self,
+        cache: &'a PlacedCache,
+        index: usize,
+        star: &FittedStar,
+    ) -> std::borrow::Cow<'a, Placed> {
+        match &cache[index] {
+            Some(placed) => std::borrow::Cow::Borrowed(placed),
+            None => std::borrow::Cow::Owned(self.placed(star.x, star.y)),
+        }
+    }
+
     /// Σ amplitude · stamp over the stars with finite amplitudes.
-    fn model_of(&self, stars: &[FittedStar], amplitudes: &[Vec<f64>]) -> Vec<f32> {
+    fn model_of(
+        &self,
+        stars: &[FittedStar],
+        amplitudes: &[Vec<f64>],
+        cache: &PlacedCache,
+    ) -> Vec<f32> {
         let (width, height, channels, size) =
             (self.width, self.height, self.channels, self.stamp_size);
         let half = (size / 2) as isize;
@@ -519,7 +551,7 @@ impl StarFit {
             .enumerate()
             .for_each(|(band, chunk)| {
                 let (top, bottom) = (band * BAND, ((band + 1) * BAND).min(height));
-                for (star, amplitude) in stars.iter().zip(amplitudes) {
+                for (index, (star, amplitude)) in stars.iter().zip(amplitudes).enumerate() {
                     if !amplitude.iter().any(|a| a.is_finite() && *a != 0.0) {
                         continue;
                     }
@@ -527,7 +559,7 @@ impl StarFit {
                     if cy + half < top as isize || cy - half >= bottom as isize {
                         continue;
                     }
-                    let placed = self.placed(star.x, star.y);
+                    let placed = self.placed_of(cache, index, star);
                     for v in 0..size as isize {
                         let y = placed.centre_y + v - half;
                         if y < top as isize || y >= bottom as isize {
@@ -542,8 +574,9 @@ impl StarFit {
                             for channel in 0..channels {
                                 let a = amplitude[channel];
                                 if a.is_finite() {
-                                    chunk[base + channel] += (a * placed.planes[channel]
-                                        [(v * size as isize + u) as usize])
+                                    chunk[base + channel] += (a * f64::from(
+                                        placed.planes[channel][(v * size as isize + u) as usize],
+                                    ))
                                         as f32;
                                 }
                             }
@@ -562,6 +595,7 @@ impl StarFit {
         group: &[usize],
         stars: &[FittedStar],
         amplitudes: &[Vec<f64>],
+        cache: &PlacedCache,
         data: &[f32],
         noise: Option<&[f32]>,
         model: &[f32],
@@ -572,9 +606,9 @@ impl StarFit {
         let (width, height, channels, size) =
             (self.width, self.height, self.channels, self.stamp_size);
         let half = (size / 2) as isize;
-        let placed: Vec<Placed> = group
+        let placed: Vec<std::borrow::Cow<'_, Placed>> = group
             .iter()
-            .map(|&i| self.placed(stars[i].x, stars[i].y))
+            .map(|&i| self.placed_of(cache, i, &stars[i]))
             .collect();
         // The pixels of the group's windows.
         let (mut x0, mut y0, mut x1, mut y1) = (isize::MAX, isize::MAX, isize::MIN, isize::MIN);
@@ -621,7 +655,7 @@ impl StarFit {
             if u < 0 || v < 0 || u >= size as isize || v >= size as isize {
                 0.0
             } else {
-                p.planes[channel][(v * size as isize + u) as usize]
+                f64::from(p.planes[channel][(v * size as isize + u) as usize])
             }
         };
         let mut results: Vec<Solution> = (0..count).map(|_| Solution::empty(channels)).collect();

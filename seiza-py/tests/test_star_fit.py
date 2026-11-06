@@ -84,3 +84,13 @@ def test_rejects_mismatched_images() -> None:
         fit.render(0.0)
     with pytest.raises(ValueError):
         fit.subtract(image[:100].copy())
+    # The same samples in another shape are refused, not misread.
+    transposed = np.ascontiguousarray(image.reshape(image.shape[::-1]))
+    with pytest.raises(ValueError):
+        seiza.StarFit.fit(transposed, field, stars)
+    with pytest.raises(ValueError):
+        seiza.StarFit.fit(image, field, stars, noise=np.ones_like(transposed))
+    with pytest.raises(ValueError):
+        fit.subtract(transposed)
+    with pytest.raises(ValueError):
+        fit.sharpen(transposed, 2.0)

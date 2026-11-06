@@ -138,10 +138,10 @@ fn report(kernel: &RemainingKernel) -> RemainingKernelReportResponse {
 #[unsafe(no_mangle)]
 /// Makes the remaining kernel between a measured PSF field and a round
 /// Gaussian target. Pass null or empty `options_json` for the field's best
-/// round PSF as the target and nodes every 256 px, or a JSON object with
+/// round PSF as the target and nodes at most 256 px apart, or a JSON object with
 /// `target` (`{"fwhm": 2.0}` for one FWHM in pixels, at least 1.5;
 /// `{"ratio": 0.7}` for a fraction of the local FWHM; or `"bestRound"`) and
-/// `nodeSpacing` (pixels between the nodes the kernel is sampled at, at
+/// `nodeSpacing` (the most pixels between the nodes the kernel is sampled at, at
 /// least 16). Returns null with an error for a bad target or spacing.
 ///
 /// # Safety

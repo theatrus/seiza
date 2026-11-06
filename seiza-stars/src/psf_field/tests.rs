@@ -479,7 +479,7 @@ fn words_round_trip() {
 
 /// A tilted sensor: best focus runs along a line through the lower left,
 /// and stars soften and stretch towards the upper right, elongated along the
-/// defocus on one side of focus and across it on the other. The quadratic
+/// defocus on one side of focus and across it on the other. The
 /// coefficient field must follow it, not average it away.
 #[test]
 fn follows_a_tilted_focal_plane() {
@@ -594,4 +594,153 @@ fn bloomed_stars_give_wings_not_cores() {
         (measured_ring - true_ring).abs() < 0.08 * true_ring,
         "ring {measured_ring} against {true_ring}"
     );
+}
+
+#[test]
+fn a_varying_field_needs_ten_stars_and_no_components_is_one_psf() {
+    let field = field(240, 200, 60, 0, &[TruePsf::plain()], 3);
+    let global = PsfFieldOptions {
+        sparse: SparseFieldPolicy::Global,
+        ..PsfFieldOptions::default()
+    };
+    let usable = measure(&field, &global).unwrap().star_count();
+    assert!((5..10).contains(&usable), "{usable}");
+    // Fewer than ten stars cannot carry a component: the field refuses, as
+    // it does for too few stars, rather than return one PSF as a varying
+    // field.
+    let few = PsfFieldOptions {
+        minimum_stars: 5,
+        ..PsfFieldOptions::default()
+    };
+    assert_eq!(
+        measure(&field, &few).unwrap_err(),
+        PsfFieldError::TooFewStars {
+            usable,
+            required: 10
+        }
+    );
+    let accepted = measure(
+        &field,
+        &PsfFieldOptions {
+            sparse: SparseFieldPolicy::Global,
+            ..few
+        },
+    )
+    .unwrap();
+    assert!(accepted.is_global());
+    assert_eq!(
+        accepted.warnings(),
+        &[PsfFieldWarning::GlobalPsf {
+            usable,
+            required: 10
+        }]
+    );
+    // No components asked for: one PSF, and no warning.
+    let plenty = field_with(480, 420, 36, 0, 4.0e6, &[TruePsf::plain()], 5);
+    let uniform = measure(
+        &plenty,
+        &PsfFieldOptions {
+            components: 0,
+            ..PsfFieldOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(uniform.is_global());
+    assert!(uniform.warnings().is_empty());
+    assert_eq!(uniform.component_count(), 0);
+    assert_eq!(uniform.channel_fits()[0].degree, 0);
+}
+
+/// The fit a channel reports is measured on the model the field returns,
+/// after the wings are added, not on the core model before them.
+#[test]
+fn the_channel_fit_describes_the_model_with_its_wings() {
+    // One PSF across the field, so a constant core model fits its core.
+    let halo = TruePsf {
+        fwhm_left: 3.2,
+        fwhm_right: 3.2,
+        e1_top: 0.0,
+        e1_bottom: 0.0,
+        halo_fraction: 0.05,
+        halo_sigma: 8.0,
+        ..TruePsf::plain()
+    };
+    let scene = field_with(720, 600, 36, 12, 4.0e6, &[halo], 17);
+    let (width, height, size) = (scene.width, scene.height, 33);
+    let plane = Plane {
+        data: &scene.data,
+        width,
+        height,
+        channels: 1,
+        channel: 0,
+    };
+    let wing_stars: Vec<Candidate> = scene
+        .stars
+        .iter()
+        .filter(|star| star.2 >= 4.0e6)
+        .map(|&(x, y, flux)| Candidate {
+            x,
+            y,
+            flux,
+            snr: 1e4,
+            fwhm: 3.2,
+            saturated: true,
+            brightness: 1e4,
+        })
+        .collect();
+    let aperture = 8.0;
+    let normalised = |values: Vec<f64>| {
+        let flux = aperture_sum(&values, size, aperture);
+        values.into_iter().map(|v| v / flux).collect::<Vec<_>>()
+    };
+    let positions: Vec<(f64, f64)> = (0..5)
+        .flat_map(|j| (0..5).map(move |i| (100.0 + 120.0 * i as f64, 80.0 + 110.0 * j as f64)))
+        .collect();
+    let radius = radii(size);
+    // Stars that hold the halo, and a core model that has lost it beyond
+    // its aperture, as core stars too faint to show it give.
+    let stamp_of = |(x, y): (f64, f64), reach: f64| StarStamp {
+        u: field_coordinate(x, width),
+        v: field_coordinate(y, height),
+        values: normalised(halo.stamp(x, y, width, height, size))
+            .into_iter()
+            .zip(&radius)
+            .map(|(v, &r)| if r <= reach { v } else { 0.0 })
+            .collect(),
+        noise: 1e-5,
+        valid: None,
+    };
+    let core: Vec<StarStamp> = positions.iter().map(|&p| stamp_of(p, 9.0)).collect();
+    let stars: Vec<StarStamp> = positions
+        .iter()
+        .map(|&p| stamp_of(p, f64::INFINITY))
+        .collect();
+    let core_refs: Vec<&StarStamp> = core.iter().collect();
+    let star_refs: Vec<&StarStamp> = stars.iter().collect();
+    let mut model = model::fit(&core_refs, size, 0, Some(0));
+    let core_mask: Vec<bool> = radius.iter().map(|&r| r <= 4.8).collect();
+    let median = |values: &[f64]| median_f64(&mut values.to_vec());
+    let before = model::quality(&model, &star_refs, &core_mask);
+    let (fit, used) = finish_channel(
+        &mut model,
+        &star_refs,
+        &core_mask,
+        &WingSource {
+            plane: &plane,
+            saturation: 48_000.0,
+            stars: &wing_stars,
+            radius: &radius,
+            fwhm0: 3.2,
+        },
+        |x| field_coordinate(x, width),
+        |y| field_coordinate(y, height),
+    );
+    assert!(used.len() >= WING_MINIMUM_STARS, "{fit:?}");
+    let after = model::quality(&model, &star_refs, &core_mask);
+    assert_eq!(fit.reduced_chi_squared, median(&after.chi_squared));
+    assert_eq!(fit.relative_residual, median(&after.relative));
+    // The wings changed the model enough that measuring before them would
+    // report a different fit.
+    let (old, new) = (median(&before.chi_squared), median(&after.chi_squared));
+    assert!((old - new).abs() > 0.1 * old, "{old} against {new}");
 }

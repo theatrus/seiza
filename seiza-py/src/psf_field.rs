@@ -1,7 +1,7 @@
 //! Empirical PSF fields — `seiza-stars`'s `PsfField`.
 //!
 //! A mean PSF stamp plus principal components whose coefficients vary as
-//! quadratic polynomials across the field, measured from an image's
+//! polynomials of degree 1 to 3 across the field, measured from an image's
 //! isolated stars, with the wings from its saturated stars.
 
 use crate::arrays::{float_array, float_image_view};
@@ -90,7 +90,7 @@ pub(crate) struct PyPsfStar {
     #[pyo3(get)]
     fwhm: f64,
     #[pyo3(get)]
-    role: &'static str,
+    role: String,
 }
 
 impl From<&PsfStar> for PyPsfStar {
@@ -101,7 +101,7 @@ impl From<&PsfStar> for PyPsfStar {
             flux: star.flux,
             snr: star.snr,
             fwhm: star.fwhm,
-            role: star.role.as_str(),
+            role: star.role.to_string(),
         }
     }
 }

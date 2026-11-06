@@ -223,7 +223,8 @@ measured in-focus HFR.
 Each star's stamp, 33 px or seven FWHM when that is wider, is centred to a
 fraction of a pixel and normalised to unit flux. Unsaturated stars give the
 core: a mean stamp plus a few principal components whose coefficients vary
-as quadratic polynomials in `x` and `y`. Saturated stars add the wings,
+as polynomials in `x` and `y`, of the degree from 1 to 3 that best predicts
+stars held out of the fit. Saturated stars add the wings,
 scaled to the core over an annulus where both are reliable. Each RGB channel
 has its own field.
 

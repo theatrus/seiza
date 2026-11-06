@@ -15,8 +15,9 @@
 //!    wings, scaled to the core over an overlap annulus where both are
 //!    reliable.
 //! 3. It fits the core stamps as a mean PSF plus a few principal
-//!    components, whose coefficients vary as quadratic polynomials in `x`
-//!    and `y`: the PSF-field method of the survey pipelines. Each channel of
+//!    components, whose coefficients vary as polynomials in `x` and `y`:
+//!    the PSF-field method of the survey pipelines. The degree, 1 to 3, is
+//!    the one that best predicts stars held out of the fit. Each channel of
 //!    an RGB image has its own field.
 //!
 //! [`PsfField::stamp_at`] returns the local PSF anywhere in the image, and
@@ -25,6 +26,7 @@
 //! pixel.
 
 mod candidates;
+mod gaussian;
 mod model;
 mod shape;
 mod stamps;
@@ -82,8 +84,7 @@ pub enum SparseFieldPolicy {
 }
 
 impl SparseFieldPolicy {
-    /// The policy's name: `refuse` or `global`.
-    pub fn as_str(self) -> &'static str {
+    fn as_str(self) -> &'static str {
         match self {
             Self::Refuse => "refuse",
             Self::Global => "global",
@@ -131,10 +132,11 @@ pub struct PsfFieldOptions {
     /// seven FWHM when the PSF is wider than that allows.
     pub stamp_size: Option<usize>,
     /// Principal components beyond the mean PSF. The field uses fewer when
-    /// it has fewer than ten stars for each.
+    /// it has fewer than ten stars for each, and a varying field needs at
+    /// least ten stars. Zero asks for one PSF for the whole image.
     pub components: usize,
-    /// The fewest usable stars a varying field is fitted from. With fewer,
-    /// [`Self::sparse`] decides.
+    /// The fewest usable stars a field is fitted from, and never fewer than
+    /// ten for a varying one. With fewer, [`Self::sparse`] decides.
     pub minimum_stars: usize,
     /// The most stars the core is fitted from, drawn evenly over the field.
     pub maximum_stars: usize,
@@ -232,8 +234,9 @@ pub enum PsfFieldError {
     /// A setting is out of range.
     InvalidOptions(String),
     /// Too few usable stars for a varying field: `usable` were found and
-    /// `required` are needed. With [`SparseFieldPolicy::Global`], `required`
-    /// is [`GLOBAL_MINIMUM_STARS`].
+    /// `required` are needed, [`PsfFieldOptions::minimum_stars`] and at least
+    /// ten. With [`SparseFieldPolicy::Global`], `required` is
+    /// [`GLOBAL_MINIMUM_STARS`].
     TooFewStars {
         /// Stars that passed selection.
         usable: usize,
@@ -292,8 +295,7 @@ pub enum PsfStarRole {
 }
 
 impl PsfStarRole {
-    /// The role's name: `core` or `wing`.
-    pub fn as_str(self) -> &'static str {
+    fn as_str(self) -> &'static str {
         match self {
             Self::Core => "core",
             Self::Wing => "wing",
@@ -373,6 +375,38 @@ pub struct PsfStamp {
 }
 
 impl PsfStamp {
+    /// A pixel-integrated round Gaussian of `fwhm` pixels: one channel,
+    /// `size × size`, centred on the middle pixel and summing to one. It is
+    /// the target PSF stars are rendered at and deconvolution aims at.
+    ///
+    /// # Panics
+    ///
+    /// If `fwhm` is not finite and positive, or `size` is zero.
+    pub fn gaussian(fwhm: f64, size: usize) -> Self {
+        assert!(
+            fwhm.is_finite() && fwhm > 0.0,
+            "FWHM must be finite and positive"
+        );
+        assert!(size > 0, "size must not be zero");
+        let half = (size / 2) as isize;
+        let profile = gaussian::pixel_profile(
+            0.0,
+            -half,
+            size as isize - 1 - half,
+            fwhm / gaussian::FWHM_PER_SIGMA,
+        );
+        let mut data: Vec<f32> = (0..size * size)
+            .map(|index| (profile[index % size] * profile[index / size]) as f32)
+            .collect();
+        let total: f32 = data.iter().sum();
+        data.iter_mut().for_each(|value| *value /= total);
+        Self {
+            size,
+            channels: 1,
+            data,
+        }
+    }
+
     /// One channel's `size × size` samples, row by row.
     ///
     /// # Panics
@@ -511,10 +545,18 @@ impl PsfField {
             options.detection_sigma as f32,
         );
         drop(smoothed);
+        // A varying field needs ten stars for each component, so at least
+        // ten; one PSF everywhere, asked for with no components, needs only
+        // the minimum.
+        let required = if options.components > 0 {
+            options.minimum_stars.max(10)
+        } else {
+            options.minimum_stars
+        };
         let too_few = |usable: usize| PsfFieldError::TooFewStars {
             usable,
             required: match options.sparse {
-                SparseFieldPolicy::Refuse => options.minimum_stars,
+                SparseFieldPolicy::Refuse => required,
                 SparseFieldPolicy::Global => GLOBAL_MINIMUM_STARS,
             },
         };
@@ -759,12 +801,13 @@ impl PsfField {
         wing_candidates.truncate(WING_STAR_LIMIT);
 
         let core = balanced_selection(core_candidates, width, height, options.maximum_stars);
-        let global = core.len() < options.minimum_stars;
-        if global
+        let sparse = core.len() < required;
+        if sparse
             && (options.sparse == SparseFieldPolicy::Refuse || core.len() < GLOBAL_MINIMUM_STARS)
         {
             return Err(too_few(core.len()));
         }
+        let global = sparse || options.components == 0;
 
         // Core stamps, for every channel; a star must give one in each.
         let field_u = |x: f64| field_coordinate(x, width);
@@ -822,9 +865,7 @@ impl PsfField {
                 stamps.map(|stamps| (*star, stamps))
             })
             .collect();
-        if core_stars.len() < GLOBAL_MINIMUM_STARS
-            || (!global && core_stars.len() < options.minimum_stars)
-        {
+        if core_stars.len() < GLOBAL_MINIMUM_STARS || (!sparse && core_stars.len() < required) {
             return Err(too_few(core_stars.len()));
         }
 
@@ -834,10 +875,10 @@ impl PsfField {
             .map(|&r| r <= (1.5 * fwhm0).max(2.0))
             .collect();
         let degree = if global { Some(0) } else { options.degree };
-        let floor = if global {
+        let floor = if sparse {
             GLOBAL_MINIMUM_STARS
         } else {
-            options.minimum_stars
+            required
         };
         let fit_all = |stars: &[(Candidate, Vec<StarStamp>)]| -> Vec<ChannelModel> {
             let components = if global {
@@ -886,28 +927,24 @@ impl PsfField {
                 .iter()
                 .map(|(_, stamps)| &stamps[channel])
                 .collect();
-            let quality = model::quality(model, &stamps, &core_mask);
-            let wings = attach_wings(
+            let (fit, used) = finish_channel(
                 model,
                 &stamps,
-                &planes[channel],
-                saturation[channel],
-                &wing_candidates,
-                &radius,
-                fwhm0,
+                &core_mask,
+                &WingSource {
+                    plane: &planes[channel],
+                    saturation: saturation[channel],
+                    stars: &wing_candidates,
+                    radius: &radius,
+                    fwhm0,
+                },
                 field_u,
                 field_v,
             );
-            for &index in &wings.used {
+            for index in used {
                 wing_used[index] = true;
             }
-            fits.push(PsfChannelFit {
-                reduced_chi_squared: median_f64(&mut quality.chi_squared.clone()),
-                relative_residual: median_f64(&mut quality.relative.clone()),
-                degree: model.degree,
-                wing_stars: wings.used.len(),
-                wing_overlap: wings.overlap,
-            });
+            fits.push(fit);
         }
 
         let mut stars: Vec<PsfStar> = core_stars
@@ -921,10 +958,10 @@ impl PsfField {
                 .filter(|(_, used)| **used)
                 .map(|(star, _)| psf_star(star, PsfStarRole::Wing)),
         );
-        let warnings = if global {
+        let warnings = if sparse {
             vec![PsfFieldWarning::GlobalPsf {
                 usable: core_stars.len(),
-                required: options.minimum_stars,
+                required,
             }]
         } else {
             Vec::new()
@@ -987,8 +1024,10 @@ impl PsfField {
         &self.fits
     }
 
-    /// Whether one PSF serves the whole image: too few stars for a varying
-    /// field, and [`SparseFieldPolicy::Global`] allowed it.
+    /// Whether one PSF serves the whole image: the options asked for no
+    /// components, or there were too few stars for a varying field and
+    /// [`SparseFieldPolicy::Global`] allowed one PSF, which
+    /// [`Self::warnings`] then reports.
     pub fn is_global(&self) -> bool {
         self.global
     }
@@ -1167,6 +1206,48 @@ impl<'a> CatalogueGrid<'a> {
         });
         found
     }
+}
+
+/// Where a channel's wings come from: its plane, its saturation level, the
+/// saturated stars, each stamp pixel's radius and the field's FWHM.
+struct WingSource<'a> {
+    plane: &'a Plane<'a>,
+    saturation: f32,
+    stars: &'a [Candidate],
+    radius: &'a [f64],
+    fwhm0: f64,
+}
+
+/// Add the wings to one channel's model, then measure how well its stars
+/// fit the model the field will return: the fit and the wing stars used.
+fn finish_channel(
+    model: &mut ChannelModel,
+    stamps: &[&StarStamp],
+    core_mask: &[bool],
+    wings: &WingSource<'_>,
+    field_u: impl Fn(f64) -> f64,
+    field_v: impl Fn(f64) -> f64,
+) -> (PsfChannelFit, Vec<usize>) {
+    let attached = attach_wings(
+        model,
+        stamps,
+        wings.plane,
+        wings.saturation,
+        wings.stars,
+        wings.radius,
+        wings.fwhm0,
+        field_u,
+        field_v,
+    );
+    let quality = model::quality(model, stamps, core_mask);
+    let fit = PsfChannelFit {
+        reduced_chi_squared: median_f64(&mut quality.chi_squared.clone()),
+        relative_residual: median_f64(&mut quality.relative.clone()),
+        degree: model.degree,
+        wing_stars: attached.used.len(),
+        wing_overlap: attached.overlap,
+    };
+    (fit, attached.used)
 }
 
 /// The saturated stars a channel's wings came from, and where the core

@@ -16,7 +16,7 @@
 
 use rayon::prelude::*;
 use rustfft::num_complex::Complex32;
-use seiza_stars::PsfField;
+use seiza_stars::{PsfField, PsfStamp};
 use serde::{Deserialize, Serialize};
 
 use crate::fft::{Fft2, smooth_length};
@@ -74,8 +74,9 @@ pub struct RemainingKernel {
     channels: usize,
     size: usize,
     spacing: usize,
-    columns: usize,
-    rows: usize,
+    /// The nodes' columns and rows.
+    xs: Axis,
+    ys: Axis,
     /// Node-major, then channel: `size × size` samples summing to one.
     kernels: Vec<Vec<f32>>,
     /// The local PSF's FWHM and the target's, node-major then channel.
@@ -85,8 +86,9 @@ pub struct RemainingKernel {
 
 impl RemainingKernel {
     /// The remaining kernel between `field`'s PSF and `target`, sampled at
-    /// nodes `node_spacing` pixels apart (at least 16; fewer when the image
-    /// is smaller). Where the target is as wide as the PSF, or wider, `R` is
+    /// nodes evenly spaced at most `node_spacing` pixels apart (at least 16;
+    /// less when the image is smaller), the first and last on the image's
+    /// edges. Where the target is as wide as the PSF, or wider, `R` is
     /// close to a single pixel and nothing is sharpened.
     pub fn new(field: &PsfField, target: TargetPsf, node_spacing: usize) -> Result<Self> {
         target.validate()?;
@@ -98,17 +100,11 @@ impl RemainingKernel {
         let (width, height, channels) = (field.width(), field.height(), field.channels());
         let size = field.stamp_size();
         let spacing = node_spacing.min(width.max(height).saturating_sub(1)).max(1);
-        let columns = (width.saturating_sub(1)).div_ceil(spacing) + 1;
-        let rows = (height.saturating_sub(1)).div_ceil(spacing) + 1;
-        let nodes: Vec<(f64, f64)> = (0..rows)
-            .flat_map(|row| {
-                (0..columns).map(move |column| {
-                    (
-                        ((column * spacing) as f64).min((width - 1) as f64),
-                        ((row * spacing) as f64).min((height - 1) as f64),
-                    )
-                })
-            })
+        let (xs, ys) = (Axis::new(width, spacing), Axis::new(height, spacing));
+        let nodes: Vec<(f64, f64)> = ys
+            .positions
+            .iter()
+            .flat_map(|&y| xs.positions.iter().map(move |&x| (x as f64, y as f64)))
             .collect();
         // Each node's PSF, per channel, and its FWHM.
         let stamps: Vec<(Vec<Vec<f32>>, Vec<f32>)> = nodes
@@ -168,8 +164,8 @@ impl RemainingKernel {
             channels,
             size,
             spacing,
-            columns,
-            rows,
+            xs,
+            ys,
             kernels,
             psf_fwhm,
             target_fwhm,
@@ -197,14 +193,15 @@ impl RemainingKernel {
         self.size
     }
 
-    /// The spacing of the nodes, in pixels.
+    /// The most the nodes are apart, in pixels. They are evenly spaced, with
+    /// the first and last columns and rows on the image's edges.
     pub fn node_spacing(&self) -> usize {
         self.spacing
     }
 
     /// The number of nodes.
     pub fn node_count(&self) -> usize {
-        self.columns * self.rows
+        self.xs.len() * self.ys.len()
     }
 
     /// The narrowest and widest local PSF FWHM over the nodes of one
@@ -243,19 +240,17 @@ impl RemainingKernel {
             return None;
         }
         let mut kernel = vec![0.0; self.size * self.size];
-        let x = x.clamp(0.0, (self.width - 1) as f64);
-        let y = y.clamp(0.0, (self.height - 1) as f64);
-        for row in 0..self.rows {
-            let wy = hat(y, row, self.spacing);
+        for row in 0..self.ys.len() {
+            let wy = self.ys.weight(row, y);
             if wy == 0.0 {
                 continue;
             }
-            for column in 0..self.columns {
-                let w = wy * hat(x, column, self.spacing);
+            for column in 0..self.xs.len() {
+                let w = wy * self.xs.weight(column, x);
                 if w == 0.0 {
                     continue;
                 }
-                let node = &self.kernels[(row * self.columns + column) * self.channels + channel];
+                let node = &self.kernels[(row * self.xs.len() + column) * self.channels + channel];
                 for (sum, value) in kernel.iter_mut().zip(node) {
                     *sum += w as f32 * value;
                 }
@@ -319,9 +314,61 @@ impl RemainingKernel {
     }
 }
 
-/// The hat weight of node `index`, `spacing` apart, at `position`.
-fn hat(position: f64, index: usize, spacing: usize) -> f64 {
-    (1.0 - (position - (index * spacing) as f64).abs() / spacing as f64).max(0.0)
+/// The nodes along one axis, evenly spaced and at most `spacing` apart,
+/// the first on the first pixel and the last on the last: each node is
+/// weighted where its PSF was measured, and no interval is much shorter
+/// than the others, which would make the weights change steeply there.
+#[derive(Clone, Debug)]
+struct Axis {
+    positions: Vec<usize>,
+}
+
+impl Axis {
+    fn new(length: usize, spacing: usize) -> Self {
+        let last = length.saturating_sub(1);
+        let intervals = last.div_ceil(spacing.max(1));
+        let positions = if intervals == 0 {
+            vec![0]
+        } else {
+            (0..=intervals)
+                .map(|index| ((index * last) as f64 / intervals as f64).round() as usize)
+                .collect()
+        };
+        Self { positions }
+    }
+
+    fn len(&self) -> usize {
+        self.positions.len()
+    }
+
+    /// Node `index`'s linear interpolation weight at `position`, taken
+    /// inside the axis: the weights of all nodes sum to one everywhere, and
+    /// the sky beyond an edge belongs to the edge's node.
+    fn weight(&self, index: usize, position: f64) -> f64 {
+        let last = *self.positions.last().unwrap_or(&0) as f64;
+        let position = position.clamp(0.0, last);
+        let at = self.positions[index] as f64;
+        if position == at {
+            return 1.0;
+        }
+        if position > at {
+            match self.positions.get(index + 1) {
+                Some(&next) if position < next as f64 => {
+                    (next as f64 - position) / (next as f64 - at)
+                }
+                _ => 0.0,
+            }
+        } else if index > 0 {
+            let previous = self.positions[index - 1] as f64;
+            if position > previous {
+                (position - previous) / (at - previous)
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        }
+    }
 }
 
 fn extract(data: &[f32], channels: usize, channel: usize) -> Vec<f32> {
@@ -361,36 +408,10 @@ fn moment_fwhm(stamp: &[f32], size: usize) -> f32 {
     (2.354_820_045 * (second / sum / 2.0).sqrt()) as f32
 }
 
-/// The error function, to 1.5 × 10⁻⁷ (Abramowitz and Stegun 7.1.26).
-fn erf(x: f64) -> f64 {
-    let sign = x.signum();
-    let x = x.abs();
-    let t = 1.0 / (1.0 + 0.327_591_1 * x);
-    let poly = t
-        * (0.254_829_592
-            + t * (-0.284_496_736
-                + t * (1.421_413_741 + t * (-1.453_152_027 + t * 1.061_405_429))));
-    sign * (1.0 - poly * (-x * x).exp())
-}
-
 /// A pixel-integrated round Gaussian of `fwhm` pixels, `size × size`,
 /// centred on the middle pixel and summing to one.
 pub(crate) fn gaussian_stamp(fwhm: f32, size: usize) -> Vec<f32> {
-    let sigma = f64::from(fwhm) / 2.354_820_045;
-    let centre = (size / 2) as f64;
-    let scale = 1.0 / (sigma * std::f64::consts::SQRT_2);
-    let profile: Vec<f64> = (0..size)
-        .map(|i| {
-            let d = i as f64 - centre;
-            0.5 * (erf((d + 0.5) * scale) - erf((d - 0.5) * scale))
-        })
-        .collect();
-    let mut stamp: Vec<f32> = (0..size * size)
-        .map(|index| (profile[index % size] * profile[index / size]) as f32)
-        .collect();
-    let total: f32 = stamp.iter().sum();
-    stamp.iter_mut().for_each(|v| *v /= total);
-    stamp
+    PsfStamp::gaussian(f64::from(fwhm), size).data
 }
 
 /// Regularised deconvolution of a PSF stamp by a round Gaussian.
@@ -513,13 +534,21 @@ fn place_centred(tile: &mut [Complex32], kernel: &[f32], size: usize, width: usi
     }
 }
 
+/// The most memory a channel's node spectra are kept in, in bytes. A
+/// larger image transforms each node's kernel again for each blur instead:
+/// a 9576 × 6388 stack at the default spacing has 1014 nodes, whose
+/// spectra would take 2.7 GB.
+const SPECTRA_BYTES: usize = 256 << 20;
+
 /// One channel of a remaining kernel, ready to convolve: each node's kernel
-/// transformed at the size of the tile it is applied over.
+/// transformed at the size of the tile it is applied over, kept when they
+/// fit [`SPECTRA_BYTES`].
 struct VaryingBlur<'a> {
     kernel: &'a RemainingKernel,
+    channel: usize,
     margin: isize,
     fft: Fft2,
-    spectra: Vec<Vec<Complex32>>,
+    spectra: Option<Vec<Vec<Complex32>>>,
 }
 
 impl<'a> VaryingBlur<'a> {
@@ -527,50 +556,70 @@ impl<'a> VaryingBlur<'a> {
         let margin = (kernel.size / 2) as isize;
         let span = 2 * kernel.spacing + 1 + 2 * margin as usize;
         let fft = Fft2::new(smooth_length(span), smooth_length(span));
-        let spectra = (0..kernel.node_count())
-            .into_par_iter()
-            .map(|node| {
-                let mut tile = vec![Complex32::default(); fft.len()];
-                place_centred(
-                    &mut tile,
-                    &kernel.kernels[node * kernel.channels + channel],
-                    kernel.size,
-                    fft.width,
-                    fft.height,
-                );
-                let mut scratch = vec![Complex32::default(); fft.len()];
-                fft.forward(&mut tile, &mut scratch);
-                tile
-            })
-            .collect();
-        Self {
+        let mut blur = Self {
             kernel,
+            channel,
             margin,
             fft,
-            spectra,
+            spectra: None,
+        };
+        let bytes = kernel.node_count() * blur.fft.len() * std::mem::size_of::<Complex32>();
+        if bytes <= SPECTRA_BYTES {
+            let spectra = (0..kernel.node_count())
+                .into_par_iter()
+                .map(|node| {
+                    let mut spectrum = vec![Complex32::default(); blur.fft.len()];
+                    let mut scratch = vec![Complex32::default(); blur.fft.len()];
+                    blur.transform_kernel(node, &mut spectrum, &mut scratch);
+                    spectrum
+                })
+                .collect();
+            blur.spectra = Some(spectra);
         }
+        blur
+    }
+
+    /// Node `node`'s kernel, transformed at the tile size, into `spectrum`.
+    fn transform_kernel(&self, node: usize, spectrum: &mut [Complex32], scratch: &mut [Complex32]) {
+        spectrum.fill(Complex32::default());
+        let kernel = self.kernel;
+        place_centred(
+            spectrum,
+            &kernel.kernels[node * kernel.channels + self.channel],
+            kernel.size,
+            self.fft.width,
+            self.fft.height,
+        );
+        // Only the rows the kernel wraps onto hold samples.
+        let half = kernel.size / 2;
+        let rows: Vec<usize> = (0..=half)
+            .chain(self.fft.height - half..self.fft.height)
+            .collect();
+        self.fft.forward_sparse_rows(spectrum, scratch, &rows);
     }
 
     /// The tile origin of node `(column, row)` in image coordinates.
     fn origin(&self, column: usize, row: usize) -> (isize, isize) {
         let spacing = self.kernel.spacing as isize;
         (
-            column as isize * spacing - spacing - self.margin,
-            row as isize * spacing - spacing - self.margin,
+            self.kernel.xs.positions[column] as isize - spacing - self.margin,
+            self.kernel.ys.positions[row] as isize - spacing - self.margin,
         )
     }
 
     /// Run `node_tile` for every node, nine interleaved passes so that the
     /// tiles of one pass never overlap, and add each pass's tiles into
-    /// `output` with `place`.
+    /// `output` with `place`. `node_tile` is handed the node's kernel
+    /// spectrum. A pass holds only a few tiles per thread at a time.
     fn run(
         &self,
         output: &mut [f32],
-        node_tile: impl Fn(usize, usize, &mut [Complex32], &mut [Complex32]) + Sync,
+        node_tile: impl Fn(usize, usize, &[Complex32], &mut [Complex32], &mut [Complex32]) + Sync,
         place: impl Fn(usize, usize, &[Complex32], &mut [f32]),
     ) {
         output.fill(0.0);
-        let (columns, rows) = (self.kernel.columns, self.kernel.rows);
+        let (columns, rows) = (self.kernel.xs.len(), self.kernel.ys.len());
+        let batch = 2 * rayon::current_num_threads().max(1);
         for pass in 0..9 {
             let nodes: Vec<(usize, usize)> = (0..rows)
                 .filter(|row| row % 3 == pass / 3)
@@ -580,17 +629,37 @@ impl<'a> VaryingBlur<'a> {
                         .map(move |column| (column, row))
                 })
                 .collect();
-            let tiles: Vec<(usize, usize, Vec<Complex32>)> = nodes
-                .par_iter()
-                .map(|&(column, row)| {
-                    let mut tile = vec![Complex32::default(); self.fft.len()];
-                    let mut scratch = vec![Complex32::default(); self.fft.len()];
-                    node_tile(column, row, &mut tile, &mut scratch);
-                    (column, row, tile)
-                })
-                .collect();
-            for (column, row, tile) in tiles {
-                place(column, row, &tile, output);
+            for chunk in nodes.chunks(batch) {
+                // Each thread keeps its scratch and spectrum buffers.
+                let tiles: Vec<(usize, usize, Vec<Complex32>)> = chunk
+                    .par_iter()
+                    .map_init(
+                        || {
+                            (
+                                vec![Complex32::default(); self.fft.len()],
+                                Vec::<Complex32>::new(),
+                            )
+                        },
+                        |(scratch, spectrum), &(column, row)| {
+                            let node = row * columns + column;
+                            let mut tile = vec![Complex32::default(); self.fft.len()];
+                            match &self.spectra {
+                                Some(spectra) => {
+                                    node_tile(column, row, &spectra[node], &mut tile, scratch)
+                                }
+                                None => {
+                                    spectrum.resize(self.fft.len(), Complex32::default());
+                                    self.transform_kernel(node, spectrum, scratch);
+                                    node_tile(column, row, spectrum, &mut tile, scratch);
+                                }
+                            }
+                            (column, row, tile)
+                        },
+                    )
+                    .collect();
+                for (column, row, tile) in tiles {
+                    place(column, row, &tile, output);
+                }
             }
         }
     }
@@ -601,31 +670,32 @@ impl<'a> VaryingBlur<'a> {
     fn forward_into(&self, input: &[f32], output: &mut [f32]) {
         let (width, height) = (self.kernel.width as isize, self.kernel.height as isize);
         let (fw, fh) = (self.fft.width, self.fft.height);
-        let spacing = self.kernel.spacing;
+        let (xs, ys) = (&self.kernel.xs, &self.kernel.ys);
         let scale = 1.0 / (fw * fh) as f32;
         let margin = self.margin;
         self.run(
             output,
-            |column, row, tile, scratch| {
+            |column, row, spectrum, tile, scratch| {
                 let (ox, oy) = self.origin(column, row);
-                let (cx, cy) = ((column * spacing) as isize, (row * spacing) as isize);
-                let support = spacing as isize;
+                // The weights are taken inside the image, so the reflected
+                // sky beyond an edge belongs to the edge's nodes and still
+                // sums to one.
                 for ty in 0..fh as isize {
                     let y = oy + ty;
-                    if (y - cy).abs() > support || y < -margin || y > height - 1 + margin {
+                    if y < -margin || y > height - 1 + margin {
                         continue;
                     }
-                    let wy = hat(y.clamp(0, height - 1) as f64, row, spacing) as f32;
+                    let wy = ys.weight(row, y as f64) as f32;
                     if wy == 0.0 {
                         continue;
                     }
                     let source_row = reflect(y, height as usize) * width as usize;
                     for tx in 0..fw as isize {
                         let x = ox + tx;
-                        if (x - cx).abs() > support || x < -margin || x > width - 1 + margin {
+                        if x < -margin || x > width - 1 + margin {
                             continue;
                         }
-                        let w = wy * hat(x.clamp(0, width - 1) as f64, column, spacing) as f32;
+                        let w = wy * xs.weight(column, x as f64) as f32;
                         if w != 0.0 {
                             let value = input[source_row + reflect(x, width as usize)];
                             tile[ty as usize * fw + tx as usize] = Complex32::new(w * value, 0.0);
@@ -633,7 +703,6 @@ impl<'a> VaryingBlur<'a> {
                     }
                 }
                 self.fft.forward(tile, scratch);
-                let spectrum = &self.spectra[row * self.kernel.columns + column];
                 for (value, k) in tile.iter_mut().zip(spectrum) {
                     *value *= k;
                 }
@@ -664,12 +733,12 @@ impl<'a> VaryingBlur<'a> {
     fn adjoint_into(&self, input: &[f32], output: &mut [f32]) {
         let (width, height) = (self.kernel.width as isize, self.kernel.height as isize);
         let (fw, fh) = (self.fft.width, self.fft.height);
-        let spacing = self.kernel.spacing;
+        let (xs, ys) = (&self.kernel.xs, &self.kernel.ys);
         let scale = 1.0 / (fw * fh) as f32;
         let margin = self.margin;
         self.run(
             output,
-            |column, row, tile, scratch| {
+            |column, row, spectrum, tile, scratch| {
                 let (ox, oy) = self.origin(column, row);
                 for ty in 0..fh as isize {
                     let y = oy + ty;
@@ -687,7 +756,6 @@ impl<'a> VaryingBlur<'a> {
                     }
                 }
                 self.fft.forward(tile, scratch);
-                let spectrum = &self.spectra[row * self.kernel.columns + column];
                 for (value, k) in tile.iter_mut().zip(spectrum) {
                     *value *= k.conj();
                 }
@@ -695,23 +763,21 @@ impl<'a> VaryingBlur<'a> {
             },
             |column, row, tile, output| {
                 let (ox, oy) = self.origin(column, row);
-                let (cx, cy) = ((column * spacing) as isize, (row * spacing) as isize);
-                let support = spacing as isize;
                 for ty in 0..fh as isize {
                     let y = oy + ty;
-                    if y < 0 || y >= height || (y - cy).abs() > support {
+                    if y < 0 || y >= height {
                         continue;
                     }
-                    let wy = hat(y as f64, row, spacing) as f32;
+                    let wy = ys.weight(row, y as f64) as f32;
                     if wy == 0.0 {
                         continue;
                     }
                     for tx in 0..fw as isize {
                         let x = ox + tx;
-                        if x < 0 || x >= width || (x - cx).abs() > support {
+                        if x < 0 || x >= width {
                             continue;
                         }
-                        let w = wy * hat(x as f64, column, spacing) as f32;
+                        let w = wy * xs.weight(column, x as f64) as f32;
                         output[(y * width + x) as usize] +=
                             w * tile[ty as usize * fw + tx as usize].re * scale;
                     }

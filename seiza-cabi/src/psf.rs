@@ -3,8 +3,8 @@
 //!
 //! [`seiza_psf_field_measure`] measures a linear image's PSF from its
 //! isolated stars: a mean stamp plus principal components whose
-//! coefficients vary as quadratic polynomials across the field, with the
-//! wings from saturated stars. The handle then gives the local PSF stamp
+//! coefficients vary as polynomials of degree 1 to 3 across the field, with
+//! the wings from saturated stars. The handle then gives the local PSF stamp
 //! ([`seiza_psf_field_stamp_at`]) and its shape
 //! ([`seiza_psf_field_shape_at`]) anywhere in the image, and a report of the
 //! stars and the fit ([`seiza_psf_field_report_json`]).
