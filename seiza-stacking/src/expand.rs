@@ -1789,7 +1789,7 @@ impl Plan {
         // which a sharper sky on one night than the other would bias.
         let mask = photometry
             .as_ref()
-            .map(|photometry| photometry.mask(existing, &panel_stars));
+            .and_then(|photometry| photometry.mask(existing, &panel_stars));
         let gains = photometry.as_ref().map(|photometry| {
             let scale = options.scale();
             [

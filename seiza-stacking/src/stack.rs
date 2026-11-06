@@ -2229,7 +2229,7 @@ impl LiveStacker {
         };
         let stars = target.reference_star_positions();
         let photometry = target.reference_photometry(&self.reference);
-        Some(photometry.mask(&self.reference, &stars).clone())
+        photometry.mask(&self.reference, &stars).cloned()
     }
 
     /// Borrow the stack as two disjoint halves: the immutable state every
@@ -3212,7 +3212,7 @@ pub(crate) fn prepare_frame(
     let placed = Placed::on(&registered, region, reference);
     // The samples about the reference's stars, which the background fit
     // leaves out.
-    let background_mask = photometry.map(|photometry| photometry.mask(reference, &stars));
+    let background_mask = photometry.and_then(|photometry| photometry.mask(reference, &stars));
     // The fit reads each tile's gathered samples in order, from where the
     // stack worked out they lie for its reference.
     #[cfg(feature = "gpu")]

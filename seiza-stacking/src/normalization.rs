@@ -1664,6 +1664,9 @@ const PHOTOMETRY_SHRINK: f64 = 1.5;
 /// How far about each star photometry measures a background fit leaves
 /// its samples out, in the broadest FWHM a frame's photometry scales with.
 const BACKGROUND_MASK: f64 = 1.5;
+/// The most of a grid a [`BackgroundMask`] leaves out: crowded stars shrink
+/// its discs, about every star alike, until it leaves out no more.
+const BACKGROUND_MASK_SHARE: f64 = 0.5;
 /// The most of a tile's samples a mask may leave out for the rest to fit its
 /// offset; a tile it leaves less of takes its neighbours'.
 const BACKGROUND_TILE_SHARE: f64 = 0.75;
@@ -1676,7 +1679,7 @@ pub(crate) struct ReferencePhotometry {
     /// Each channel's [`photometric_ceilings`].
     ceilings: Vec<f32>,
     widths: std::sync::OnceLock<ReferenceWidths>,
-    mask: std::sync::OnceLock<BackgroundMask>,
+    mask: std::sync::OnceLock<Option<BackgroundMask>>,
 }
 
 /// The FWHM of a reference's stars, and how broad a frame's photometry may
@@ -1690,6 +1693,8 @@ struct ReferenceWidths {
     /// [`PHOTOMETRY_BROADENING`] times the reference's broadest channel's,
     /// or [`PHOTOMETRY_MAXIMUM_FWHM`] when no channel's is known.
     broadest: f64,
+    /// Whether any channel's width is known.
+    measured: bool,
 }
 
 impl ReferencePhotometry {
@@ -1703,12 +1708,18 @@ impl ReferencePhotometry {
         }
     }
 
-    /// The ceilings of `reference` again, a canvas that has grown, keeping
-    /// the widths of its stars when they have been measured: frames add
+    /// The ceilings of `reference` again, a canvas that frames have filled,
+    /// keeping the widths of its stars when they were measured: frames add
     /// samples where the canvas had none, which change its brightest sample
-    /// but not the seeing of the stars already there.
+    /// but not the seeing of the stars already there. Widths none of its
+    /// stars gave, while the canvas was too empty to measure them, are
+    /// measured again when next asked for, and the mask with them.
     pub(crate) fn update(&mut self, reference: &LinearImage) {
         self.ceilings = photometric_ceilings(reference);
+        if self.widths.get().is_some_and(|widths| !widths.measured) {
+            self.widths.take();
+            self.mask.take();
+        }
     }
 
     /// The widths of `reference`'s stars at `stars`, measured the first
@@ -1733,15 +1744,14 @@ impl ReferencePhotometry {
                     )
                 })
                 .collect::<Vec<_>>();
-            let broadest = widths
-                .iter()
-                .flatten()
-                .copied()
-                .reduce(f64::max)
-                .map_or(PHOTOMETRY_MAXIMUM_FWHM, |width| {
+            let broadest = widths.iter().flatten().copied().reduce(f64::max);
+            ReferenceWidths {
+                measured: broadest.is_some(),
+                broadest: broadest.map_or(PHOTOMETRY_MAXIMUM_FWHM, |width| {
                     PHOTOMETRY_BROADENING * width.max(PHOTOMETRY_MINIMUM_FWHM)
-                });
-            ReferenceWidths { widths, broadest }
+                }),
+                widths,
+            }
         })
     }
 
@@ -1754,13 +1764,23 @@ impl ReferencePhotometry {
 
     /// The [`BackgroundMask`] about `stars` on `reference`'s grid, made the
     /// first time it is asked for: `reference` and `stars` are those the
-    /// photometry was measured for. A canvas that grows keeps it, since it
-    /// is its stars' and not its samples'.
-    pub(crate) fn mask(&self, reference: &LinearImage, stars: &[(f64, f64)]) -> &BackgroundMask {
-        self.mask.get_or_init(|| {
-            let radius = BACKGROUND_MASK * self.widths(reference, stars).broadest;
-            BackgroundMask::around((reference.width, reference.height), stars, radius)
-        })
+    /// photometry was measured for. A canvas that frames fill keeps it,
+    /// since it is its stars' and not its samples'. `None` when no star gave
+    /// the reference a width, whose discs would be guessed.
+    pub(crate) fn mask(
+        &self,
+        reference: &LinearImage,
+        stars: &[(f64, f64)],
+    ) -> Option<&BackgroundMask> {
+        self.mask
+            .get_or_init(|| {
+                let widths = self.widths(reference, stars);
+                widths.measured.then(|| {
+                    let radius = BACKGROUND_MASK * widths.broadest;
+                    BackgroundMask::around((reference.width, reference.height), stars, radius)
+                })
+            })
+            .as_ref()
     }
 }
 
@@ -1789,8 +1809,26 @@ pub(crate) struct BackgroundMask {
 
 impl BackgroundMask {
     /// The pixels within `radius` of any of `stars` on a grid of `width` by
-    /// `height`.
+    /// `height`, the radius shrunk about every star alike until the discs
+    /// leave out no more than [`BACKGROUND_MASK_SHARE`] of the grid.
     fn around((width, height): (usize, usize), stars: &[(f64, f64)], radius: f64) -> Self {
+        let mut radius = radius;
+        loop {
+            let mask = Self::discs((width, height), stars, radius);
+            let covered = mask
+                .bits
+                .iter()
+                .map(|bits| bits.count_ones() as usize)
+                .sum::<usize>();
+            if covered as f64 <= BACKGROUND_MASK_SHARE * (width * height) as f64 || radius < 1.0 {
+                return mask;
+            }
+            radius *= 0.9;
+        }
+    }
+
+    /// The pixels within `radius` of any of `stars`.
+    fn discs((width, height): (usize, usize), stars: &[(f64, f64)], radius: f64) -> Self {
         let mut bits = vec![0_u64; (width * height).div_ceil(64)];
         let within = radius * radius;
         let reach = radius.ceil() as isize;
@@ -1941,7 +1979,9 @@ pub(crate) fn photometric_gains_with(
     if !source.matches(reference) || photometry.ceilings.len() != channels {
         return None;
     }
-    let ReferenceWidths { widths, broadest } = photometry.widths(reference, stars);
+    let ReferenceWidths {
+        widths, broadest, ..
+    } = photometry.widths(reference, stars);
     let grid = (reference.width, reference.height);
     (0..channels)
         .map(|channel| {
@@ -2578,7 +2618,9 @@ mod tests {
             }
             // The samples about the stars the background fit leaves out, as
             // a stack leaves them out.
-            let mask = photometry.then(|| reference_photometry.mask(&reference, &stars));
+            let mask = photometry
+                .then(|| reference_photometry.mask(&reference, &stars))
+                .flatten();
             // The tiles' samples read in order, as a stack reads them.
             let tiles = match mode {
                 NormalizationMode::LocalBackground { tile_size } => Some(
@@ -3846,6 +3888,7 @@ mod tests {
             .reference_star_positions();
         let mask = ReferencePhotometry::measure(&reference)
             .mask(&reference, &stars)
+            .expect("a mask")
             .clone();
         let map = NormalizationMap::estimate_with_gains(
             &reference,
@@ -3918,5 +3961,65 @@ mod tests {
         // The middle tile of five by five.
         let offset = map.offsets[2 * 5 + 2];
         assert!(offset.abs() < 0.5, "{offset}");
+    }
+
+    /// However crowded the stars, the mask leaves at least half the grid to
+    /// the fit, shrinking about every star alike.
+    #[test]
+    fn the_mask_leaves_at_least_half_the_grid() {
+        let stars = (0..100)
+            .map(|index| {
+                (
+                    10.0 + (index % 10) as f64 * 20.0,
+                    10.0 + (index / 10) as f64 * 20.0,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mask = BackgroundMask::around((200, 200), &stars, 48.0);
+        let covered = (0..200 * 200).filter(|&pixel| mask.covers(pixel)).count();
+        assert!(covered <= 200 * 200 / 2, "{covered}");
+    }
+
+    /// Sixteen stars of 3 px FWHM on a sky of 100, and the same grid with no
+    /// samples yet, as a canvas no frame has filled.
+    fn canvas_before_and_after() -> (LinearImage, LinearImage, Vec<(f64, f64)>) {
+        let stars = (0..16)
+            .map(|index| {
+                (
+                    40.0 + (index % 4) as f64 * 40.0,
+                    40.0 + (index / 4) as f64 * 40.0,
+                )
+            })
+            .collect::<Vec<_>>();
+        let filled = star_image((200, 200), &stars, 1.27, 20_000.0, 0);
+        let empty = LinearImage::new(200, 200, 1, vec![f32::NAN; 200 * 200]).unwrap();
+        (empty, filled, stars)
+    }
+
+    /// A reference whose stars give no width has no mask: discs of the
+    /// broadest width photometry allows, 48 px, would hide most of the sky.
+    #[test]
+    fn a_reference_without_measurable_stars_masks_nothing() {
+        let (empty, _, stars) = canvas_before_and_after();
+        assert!(
+            ReferencePhotometry::measure(&empty)
+                .mask(&empty, &stars)
+                .is_none()
+        );
+    }
+
+    /// A canvas measured before frames filled it measures its stars again
+    /// once they have: its mask then has discs as wide as its stars give,
+    /// 13.5 px for these, not none, nor the 48 px a guess would give.
+    #[test]
+    fn a_canvas_measures_the_widths_its_first_samples_lacked() {
+        let (empty, filled, stars) = canvas_before_and_after();
+        let mut photometry = ReferencePhotometry::measure(&empty);
+        assert!(photometry.mask(&empty, &stars).is_none());
+        photometry.update(&filled);
+        let mask = photometry.mask(&filled, &stars).expect("a mask");
+        let at = |x: usize, y: usize| y * 200 + x;
+        assert!(mask.covers(at(40, 40)) && mask.covers(at(50, 40)));
+        assert!(!mask.covers(at(60, 40)), "a disc wider than its stars");
     }
 }
