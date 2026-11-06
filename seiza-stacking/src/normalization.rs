@@ -1876,7 +1876,9 @@ pub(crate) fn photometric_gains(
     )
 }
 
-/// [`photometric_gains`] from at least `minimum` cleanly measured stars.
+/// [`photometric_gains`] from at least `minimum` cleanly measured stars,
+/// with the reference's photometry measured for them.
+#[cfg(test)]
 pub(crate) fn photometric_gains_from(
     reference: &LinearImage,
     source: Placed<'_>,
@@ -1916,7 +1918,7 @@ fn photometric_ceilings(reference: &LinearImage) -> Vec<f32> {
 
 /// [`photometric_gains_from`] given the reference's
 /// [`ReferencePhotometry`].
-fn photometric_gains_with(
+pub(crate) fn photometric_gains_with(
     reference: &LinearImage,
     photometry: &ReferencePhotometry,
     source: Placed<'_>,

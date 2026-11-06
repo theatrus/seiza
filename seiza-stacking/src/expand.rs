@@ -1778,11 +1778,19 @@ impl Plan {
         // Panels are shot on different nights, under different skies, so
         // their noise says nothing of their transparency: a gain comes
         // from stars or not at all, leaving only the background matched.
-        let gains = matches!(
+        // The canvas's photometry is measured once for both, its stars'
+        // widths at all the panel's stars.
+        let photometry = matches!(
             options.normalization,
             NormalizationMode::LocalBackground { .. }
         )
-        .then(|| {
+        .then(|| crate::normalization::ReferencePhotometry::measure(existing));
+        // The background fit leaves out the samples about the panel's stars,
+        // which a sharper sky on one night than the other would bias.
+        let mask = photometry
+            .as_ref()
+            .map(|photometry| photometry.mask(existing, &panel_stars));
+        let gains = photometry.as_ref().map(|photometry| {
             let scale = options.scale();
             [
                 scale.floored_length(PHOTOMETRY_PAIRING_PIXELS, 0.75),
@@ -1790,8 +1798,9 @@ impl Plan {
             ]
             .into_iter()
             .find_map(|tolerance| {
-                crate::normalization::photometric_gains_from(
+                crate::normalization::photometric_gains_with(
                     existing,
+                    photometry,
                     crate::image::Placed::whole(incoming),
                     &paired_stars(&panel_stars, landed, tolerance),
                     PANEL_PHOTOMETRY_STARS,
@@ -1799,12 +1808,6 @@ impl Plan {
             })
             .unwrap_or_else(|| vec![1.0; incoming.channels])
         });
-        // The background fit leaves out the samples about the panel's stars,
-        // which a sharper sky on one night than the other would bias.
-        let photometry = crate::normalization::ReferencePhotometry::measure(existing);
-        let mask = gains
-            .is_some()
-            .then(|| photometry.mask(existing, &panel_stars));
         let normalization = NormalizationMap::estimate_with_gains(
             existing,
             crate::image::Placed::whole(incoming),
