@@ -1778,11 +1778,19 @@ impl Plan {
         // Panels are shot on different nights, under different skies, so
         // their noise says nothing of their transparency: a gain comes
         // from stars or not at all, leaving only the background matched.
-        let gains = matches!(
+        // The canvas's photometry is measured once for both, its stars'
+        // widths at all the panel's stars.
+        let photometry = matches!(
             options.normalization,
             NormalizationMode::LocalBackground { .. }
         )
-        .then(|| {
+        .then(|| crate::normalization::ReferencePhotometry::measure(existing));
+        // The background fit leaves out the samples about the panel's stars,
+        // which a sharper sky on one night than the other would bias.
+        let mask = photometry
+            .as_ref()
+            .and_then(|photometry| photometry.mask(existing, &panel_stars));
+        let gains = photometry.as_ref().map(|photometry| {
             let scale = options.scale();
             [
                 scale.floored_length(PHOTOMETRY_PAIRING_PIXELS, 0.75),
@@ -1790,8 +1798,9 @@ impl Plan {
             ]
             .into_iter()
             .find_map(|tolerance| {
-                crate::normalization::photometric_gains_from(
+                crate::normalization::photometric_gains_with(
                     existing,
+                    photometry,
                     crate::image::Placed::whole(incoming),
                     &paired_stars(&panel_stars, landed, tolerance),
                     PANEL_PHOTOMETRY_STARS,
@@ -1804,6 +1813,7 @@ impl Plan {
             crate::image::Placed::whole(incoming),
             options.scale().normalization(options.normalization),
             gains.as_deref(),
+            mask,
         )?;
         let (low, high) = normalization.gain_range();
         if low < criteria.minimum_normalization_gain || high > criteria.maximum_normalization_gain {

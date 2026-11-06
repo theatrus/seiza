@@ -280,10 +280,10 @@ const MONO_DEFAULT: &[f64] = &[
 ];
 #[rustfmt::skip]
 const MONO_CONFIGURED: &[f64] = &[
-    1.4683455e2, 2.8055241e2, 3.9580156e3, 9.7650108e1, 1.0005183e2, 1.0116579e2, 1.1474329e2,
-    1.0543446e2, 9.8273582e1, 1.0055458e2, 1.0238834e2, 1.0342444e2, 1.0466690e2, 9.8383438e1,
-    1.0225329e2, 4.1960275e2, 1.0452811e2, 1.0633288e2, 1.0035703e2, 1.0088261e2, 1.0359650e2,
-    1.0660653e2, 1.0767329e2, 1.0122057e2, 1.7336658e2, 1.0513074e2, 1.0694798e2, 1.1127238e2,
+    1.4679377e2, 2.8053118e2, 3.9579722e3, 9.7689346e1, 1.0004929e2, 1.0113741e2, 1.1472302e2,
+    1.0543855e2, 9.8265144e1, 1.0051174e2, 1.0234735e2, 1.0338989e2, 1.0463287e2, 9.8356514e1,
+    1.0220255e2, 4.1954968e2, 1.0448453e2, 1.0627813e2, 1.0029060e2, 1.0078748e2, 1.0352750e2,
+    1.0656592e2, 1.0761611e2, 1.0117270e2, 1.7328545e2, 1.0506029e2, 1.0691836e2, 1.1124123e2,
 ];
 #[rustfmt::skip]
 const BAYER_DEFAULT: &[f64] = &[
@@ -355,10 +355,10 @@ const MOSAIC_FULL_RESOLUTION: &[f64] = &[
 const LENS_MOSAIC_SIBLINGS: &[f64] = &[1.1248227e2, 1.3248900e2, 4.2809961e3, 9.9621635e1, 1.0401961e2, 1.0109291e2, 1.1935750e2, 9.7427887e1, 9.9319954e1, 1.0011208e2, 1.0266560e2, 1.6070786e2, 1.0302679e2, 1.0011884e2, 1.0015338e2, 1.0428073e2, 1.0138506e2, 1.0049202e2, 9.9340057e1, 9.8439827e1, 1.0166298e2, 1.0112801e2, 1.0463013e2, 1.1425014e2, 1.0245366e2, 1.0088453e2, 1.0183040e2, 9.8820175e1, 6.0000000e0, 6.1900000e2, 1.0160000e3];
 #[rustfmt::skip]
 const MOSAIC_CHANGING_GRADIENTS: &[f64] = &[
-    2.5589154e2, 5.0671553e2, 5.8662793e3, 9.9423141e1, 1.0295413e2, 1.0583661e2, 3.6098846e2,
-    1.1649343e2, 9.9692963e1, 1.5826419e2, 2.3267561e3, 1.4149518e2, 1.1648702e2, 1.0039706e2,
-    1.0452258e2, 3.6311414e2, 3.1867215e2, 1.1504984e2, 9.7276749e1, 1.0155341e2, 1.0763737e2,
-    1.1219053e2, 1.4137045e2, 6.1394897e2, 1.1939092e2, 1.2353701e2, 4.9349551e2, 2.2615749e2,
+    2.5222726e2, 5.0421833e2, 5.8655283e3, 9.8739563e1, 1.0227062e2, 1.0244575e2, 3.5035229e2,
+    1.1024738e2, 9.9009354e1, 1.5757999e2, 2.3238391e3, 1.3419273e2, 1.1027279e2, 9.9713409e1,
+    1.0383897e2, 3.5941183e2, 3.1180780e2, 1.0882188e2, 9.6593086e1, 1.0086980e2, 1.0425690e2,
+    1.0612156e2, 1.3662579e2, 6.1325934e2, 1.1870707e2, 1.2020832e2, 4.7753516e2, 2.2807001e2,
 ];
 const MILD_LENS_MOSAIC: &[f64] = &[
     1.2961286e2,
@@ -427,34 +427,34 @@ const CLIPPED_BAYER_MAP: &[f64] = &[
     3.9800000e2,
 ];
 const MOSAIC_BACKGROUND_REFERENCE: &[f64] = &[
-    2.5354066e2,
-    5.0404477e2,
-    5.8677329e3,
-    9.8762207e1,
-    1.0245848e2,
-    1.0179680e2,
-    3.1344992e2,
-    1.1701159e2,
-    9.9349533e1,
-    1.5773482e2,
-    2.3645271e3,
-    1.2901312e2,
-    1.1770001e2,
-    1.0040960e2,
-    1.0475932e2,
-    3.5657251e2,
-    3.2044836e2,
-    1.1777502e2,
-    9.7674774e1,
-    1.0217004e2,
-    1.0447012e2,
-    1.0876220e2,
-    1.5008739e2,
-    6.1401862e2,
-    1.2025790e2,
-    1.2153581e2,
-    4.7726572e2,
-    2.4803656e2,
+    2.5161698e2,
+    5.0316445e2,
+    5.8677285e3,
+    9.8757339e1,
+    1.0245407e2,
+    1.0136246e2,
+    3.0535855e2,
+    1.1203835e2,
+    9.9344566e1,
+    1.5773035e2,
+    2.3664336e3,
+    1.2405633e2,
+    1.1271484e2,
+    1.0040482e2,
+    1.0475483e2,
+    3.5587247e2,
+    3.1646112e2,
+    1.1281820e2,
+    9.7669701e1,
+    1.0216550e2,
+    1.0403879e2,
+    1.0372500e2,
+    1.4477779e2,
+    6.1401343e2,
+    1.2025341e2,
+    1.2103236e2,
+    4.7784515e2,
+    2.4051619e2,
 ];
 #[rustfmt::skip]
 const SHARED_NEBULA_BACKGROUND: &[f64] = &[
@@ -1616,17 +1616,17 @@ fn a_live_only_locally_normalized_pipelined_stack_large_enough_for_the_gpu_keeps
 // with resident moments. Local background fits exercise a grid of offsets.
 #[rustfmt::skip]
 const LARGE_LOCAL_LIVE: &[f64] = &[
-    1.3750291e2, 4.2611456e2, 1.7902197e4, 9.7615936e1, 1.0073572e2, 1.0332993e2, 1.0637772e2,
-    1.0964362e2, 1.0197401e2, 1.0466738e2, 1.0885051e2, 1.1161619e2, 1.1411933e2, 1.0603545e2,
-    1.0965125e2, 1.1204305e2, 1.1682822e2, 1.1863083e2, 1.1066189e2, 1.1457301e2, 1.1625202e2,
-    1.1974404e2, 1.2309537e2, 1.1479475e2, 1.1817505e2, 1.2164461e2, 1.2403376e2, 1.2758355e2,
+    1.3753774e2, 4.2612581e2, 1.7902223e4, 9.7659058e1, 1.0077487e2, 1.0335715e2, 1.0640355e2,
+    1.0966871e2, 1.0201453e2, 1.0470505e2, 1.0887948e2, 1.1164453e2, 1.1414750e2, 1.0607563e2,
+    1.0968902e2, 1.1207545e2, 1.1686047e2, 1.1866353e2, 1.1070427e2, 1.1461214e2, 1.1628699e2,
+    1.1977885e2, 1.2313189e2, 1.1482997e2, 1.1821022e2, 1.2167997e2, 1.2407232e2, 1.2762524e2,
 ];
 #[rustfmt::skip]
 const LARGE_LOCAL_REINTEGRATED: &[f64] = &[
-    1.3724039e2, 4.2585577e2, 1.7902193e4, 9.7658142e1, 1.0076407e2, 1.0332346e2, 1.0637893e2,
-    1.0964905e2, 1.0200754e2, 1.0468793e2, 1.0884111e2, 1.1135434e2, 1.1413203e2, 1.0605482e2,
-    1.0965839e2, 1.1202685e2, 1.1683203e2, 1.1864561e2, 1.1066983e2, 1.1456944e2, 1.1623064e2,
-    1.1973965e2, 1.2310212e2, 1.1526601e2, 1.1816370e2, 1.2162482e2, 1.2403316e2, 1.2759554e2,
+    1.3727502e2, 4.2586693e2, 1.7902227e4, 9.7692352e1, 1.0079807e2, 1.0335720e2, 1.0641208e2,
+    1.0968211e2, 1.0204162e2, 1.0472184e2, 1.0887508e2, 1.1138783e2, 1.1416555e2, 1.0608913e2,
+    1.0969263e2, 1.1206152e2, 1.1686627e2, 1.1867992e2, 1.1070476e2, 1.1460433e2, 1.1626604e2,
+    1.1977441e2, 1.2313686e2, 1.1530101e2, 1.1819857e2, 1.2166024e2, 1.2406774e2, 1.2763018e2,
 ];
 
 fn large_stack(
@@ -1949,6 +1949,91 @@ fn a_binned_stack_and_its_full_resolution_reintegration_keep_their_output() {
         FULL_RESOLUTION,
     );
 }
+
+/// A binned stack normalized by local background, reintegrated at the
+/// sensor's full resolution, refined and carried unrefined: its frames'
+/// backgrounds are refitted there, leaving out the samples about the
+/// reference's stars, which the binned stack measured; and, on an expanded
+/// canvas, a binned mosaic's.
+#[test]
+fn a_binned_local_background_stack_s_full_resolution_reintegration_keeps_its_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let paths = SHIFTS
+        .iter()
+        .enumerate()
+        .map(|(frame, &(dx, dy))| {
+            let image = mono_field(dx, dy, 0.96 + 0.01 * frame as f32, frame);
+            write_raw(&directory, "light", frame, image.data, "LIGHT")
+        })
+        .collect::<Vec<_>>();
+    let options = StackOptions {
+        bin_factor: 2,
+        normalization: NormalizationMode::LocalBackground { tile_size: 32 },
+        ..StackOptions::default()
+    };
+    let mut stacker = LiveStacker::open_fits(&paths[0], None, None, None, None, options).unwrap();
+    for path in &paths[1..] {
+        admit(stacker.push_fits(path).unwrap());
+    }
+    let mut fingerprint = Vec::new();
+    for refine in [true, false] {
+        let full = stacker
+            .reintegrate_full_resolution(&BatchStackOptions::default(), refine, |_, _, _| {})
+            .unwrap();
+        fingerprint.extend(summary(&full.result.snapshot.image));
+    }
+    check(
+        "BINNED_LOCAL_FULL_RESOLUTION",
+        &fingerprint,
+        BINNED_LOCAL_FULL_RESOLUTION,
+    );
+
+    let paths = mosaic_panels(&directory);
+    let mut options = StackOptions {
+        bin_factor: 2,
+        normalization: NormalizationMode::LocalBackground { tile_size: 32 },
+        ..StackOptions::default()
+    };
+    options.acceptance.minimum_overlap_fraction = 0.1;
+    let mut stacker = LiveStacker::with_expanding_reference(
+        &paths,
+        CalibrationMasters::default(),
+        options,
+        usize::MAX,
+        |_, _, _, _| Continue::Yes,
+    )
+    .unwrap();
+    for path in &paths {
+        admit(stacker.push_fits(path).unwrap());
+    }
+    let full = stacker
+        .reintegrate_full_resolution(&BatchStackOptions::default(), false, |_, _, _| {})
+        .unwrap();
+    check(
+        "BINNED_LOCAL_MOSAIC_FULL_RESOLUTION",
+        &summary(&full.result.snapshot.image),
+        BINNED_LOCAL_MOSAIC_FULL_RESOLUTION,
+    );
+}
+
+#[rustfmt::skip]
+const BINNED_LOCAL_FULL_RESOLUTION: &[f64] = &[
+    1.4414686e2, 2.7306228e2, 3.7519778e3, 9.7452560e1, 9.9788567e1, 1.0116461e2, 1.1805238e2,
+    1.0540538e2, 9.8174828e1, 1.0054142e2, 1.0223524e2, 1.0344564e2, 1.0478371e2, 9.8446503e1,
+    1.0157418e2, 1.0330759e2, 1.0440192e2, 1.0636374e2, 1.0027158e2, 1.0105493e2, 1.0373672e2,
+    1.0633815e2, 1.0752350e2, 1.0110510e2, 1.7197789e2, 1.0487878e2, 1.0689590e2, 1.1109012e2,
+    1.4414612e2, 2.7307504e2, 3.7541108e3, 9.7452324e1, 9.9788544e1, 1.0116600e2, 1.1811668e2,
+    1.0540114e2, 9.8175041e1, 1.0054106e2, 1.0223478e2, 1.0344755e2, 1.0478500e2, 9.8447296e1,
+    1.0157500e2, 1.0330846e2, 1.0440166e2, 1.0636487e2, 1.0027297e2, 1.0105253e2, 1.0373627e2,
+    1.0634189e2, 1.0752493e2, 1.0110642e2, 1.7202321e2, 1.0488212e2, 1.0689706e2, 1.1106624e2,
+];
+#[rustfmt::skip]
+const BINNED_LOCAL_MOSAIC_FULL_RESOLUTION: &[f64] = &[
+    2.5358471e2, 5.0612687e2, 5.7898457e3, 9.9575790e1, 1.0388557e2, 1.0461219e2, 1.5888335e2,
+    2.3473288e2, 1.0136929e2, 2.2564363e2, 1.2263822e3, 1.5182770e2, 1.6662653e2, 1.0178510e2,
+    1.0377553e2, 1.8542705e2, 2.0213840e2, 1.0711947e2, 1.0177240e2, 1.0141240e2, 1.0296011e2,
+    1.0675078e2, 1.0753584e2, 2.6663269e2, 1.9018906e2, 1.0644821e2, 1.1975349e3, 1.0948838e2,
+];
 
 /// Raw RGGB lights made into one pixel per 2x2 cell, their colours resampled
 /// from their photosites' places, and binned no further.
@@ -2504,10 +2589,10 @@ fn a_local_background_stack_through_changing_seeing_keeps_its_output() {
 #[rustfmt::skip]
 const CHANGING_SEEING_LOCAL_BACKGROUND: &[f64] = &[
     9.9850309e-1, 9.9631703e-1, 9.9633980e-1, 9.9669594e-1, 1.2472368e0, 9.9682564e-1, 1.0018693e0,
-    1.9830867e2, 2.5177410e2, 3.0461875e3, 3.6352859e2, 2.9479797e2, 1.5838135e2, 1.6185173e2,
-    1.6461389e2, 1.5031766e2, 1.5511380e2, 1.7785020e2, 8.0744403e2, 1.7077281e2, 3.7716910e2,
-    1.5742467e2, 6.4188593e2, 6.0716418e2, 1.6966904e2, 1.5474257e2, 1.5834204e2, 1.6214569e2,
-    1.6475694e2, 1.6904926e2, 1.5637085e2, 1.6081374e2, 1.6384106e2, 1.6535294e3, 1.7104761e2,
+    1.9887172e2, 2.5223516e2, 3.0469954e3, 3.6430853e2, 2.9552704e2, 1.5920897e2, 1.6241608e2,
+    1.6499660e2, 1.5243112e2, 1.5587741e2, 1.7825623e2, 8.0825055e2, 1.7108409e2, 3.7769785e2,
+    1.5776709e2, 6.4228711e2, 6.0788922e2, 1.6986084e2, 1.5518051e2, 1.5883008e2, 1.6277708e2,
+    1.6544954e2, 1.6924611e2, 1.5685234e2, 1.6114670e2, 1.6398901e2, 1.6537966e3, 1.7118973e2,
 ];
 
 fn mosaic_stack(model: RegistrationModel) -> StackSnapshot {

@@ -767,3 +767,47 @@ fn superpixel_mapping_crops_match_live_reference_after_json_and_context() {
         }
     }
 }
+
+/// A binned stack's full-resolution reintegration refits each frame's
+/// background on the sensor's grid, and leaves out its samples about the
+/// reference's stars where they lie there: at twice their binned places,
+/// and with discs twice as wide, not at the binned places on a grid twice
+/// as large, with discs as wide as a reference with no stars to measure
+/// gives.
+#[test]
+fn a_full_resolution_reintegration_masks_the_stars_where_they_lie() {
+    let directory = tempfile::tempdir().unwrap();
+    let frames = field(directory.path(), 3, None);
+    let options = StackOptions {
+        normalization: NormalizationMode::LocalBackground { tile_size: 64 },
+        ..binned(2)
+    };
+    let (stacker, _) = stack(&frames, options);
+    let binned = stacker.background_mask().expect("a binned mask");
+    let binned_covered = (0..stacker.reference.width * stacker.reference.height)
+        .filter(|&pixel| binned.covers(pixel))
+        .count();
+    for refine in [false, true] {
+        let (full, _) = stacker
+            .full_resolution(&BatchStackOptions::default(), refine, &mut |_, _, _| {})
+            .unwrap();
+        let mask = full.background_mask().expect("a full-resolution mask");
+        let width = full.reference.width;
+        for &(x, y) in &stacker.registrar.reference_star_positions() {
+            let (column, row) = (
+                (2.0 * x + 0.5).round() as usize,
+                (2.0 * y + 0.5).round() as usize,
+            );
+            assert!(
+                mask.covers(row * width + column),
+                "refine {refine}: ({x}, {y})"
+            );
+        }
+        // Four pixels for each binned one, give or take the discs' edges.
+        let covered = (0..width * full.reference.height)
+            .filter(|&pixel| mask.covers(pixel))
+            .count();
+        let ratio = covered as f64 / (4 * binned_covered) as f64;
+        assert!((0.9..1.1).contains(&ratio), "refine {refine}: {ratio}");
+    }
+}

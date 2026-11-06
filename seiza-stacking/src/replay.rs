@@ -578,7 +578,7 @@ const NORMALIZATION_REFERENCE_FRAMES: usize = 20;
 
 /// The integrated background reference and each frame's normalization
 /// fitted against it, filled on first use.
-struct Renormalizer {
+struct Renormalizer<'a> {
     /// The samples the background fit reads.
     layout: BackgroundSamples,
     /// The integrated reference at those samples, all the fit reads of it.
@@ -586,11 +586,14 @@ struct Renormalizer {
     /// Expanded mosaics keep the recorded spatial correction and fit only
     /// an additive residual. Ordinary stacks keep the original refit.
     preserve_recorded: bool,
+    /// The samples about the reference's stars the fit leaves out, as the
+    /// live pass left them out.
+    mask: Option<&'a crate::normalization::BackgroundMask>,
     /// Residual maps when preserving the base, otherwise complete maps.
     maps: std::sync::Mutex<Vec<Option<crate::NormalizationMap>>>,
 }
 
-impl Renormalizer {
+impl Renormalizer<'_> {
     /// Frame `index`'s background offsets refitted against the integrated
     /// reference on `interpolated`, its unnormalized registered image,
     /// keeping its recorded gain; fitted once and then reused, so every pass
@@ -619,10 +622,11 @@ impl Renormalizer {
             return Ok(map);
         }
         let base = admitted.mapping.normalization();
+        let mask = self.mask;
         let map = if self.preserve_recorded {
-            base.refit_background_residual_samples(&self.layout, &self.reference, samples)?
+            base.refit_background_residual_samples(&self.layout, &self.reference, samples, mask)?
         } else {
-            base.refit_background_samples(&self.layout, &self.reference, samples)?
+            base.refit_background_samples(&self.layout, &self.reference, samples, mask)?
         };
         self.maps
             .lock()
@@ -1541,7 +1545,7 @@ struct Replay<'a> {
     stacker: &'a LiveStacker,
     options: &'a BatchStackOptions,
     masters: &'a MastersCache,
-    renormalizer: Option<&'a Renormalizer>,
+    renormalizer: Option<&'a Renormalizer<'a>>,
     /// Whether frames prepared from their sources are resampled over their
     /// footprints on an expanded canvas.
     footprints: bool,
@@ -2936,6 +2940,7 @@ impl LiveStacker {
                     .normalization_reference(&layout, &masters, cache, options, footprints)?,
                 layout,
                 preserve_recorded: self.canvas_registrar.is_some(),
+                mask: self.background_mask(),
                 maps: std::sync::Mutex::new(vec![None; count]),
             }),
             None => None,
@@ -3489,7 +3494,7 @@ impl LiveStacker {
         admitted: &AdmittedFrame,
         masters: &CalibrationMasters,
         index: usize,
-        renormalizer: Option<&Renormalizer>,
+        renormalizer: Option<&Renormalizer<'_>>,
         cache: Option<&FrameCache>,
         footprints: bool,
     ) -> Result<LinearImage> {
@@ -3947,6 +3952,7 @@ mod tests {
                     layout: layout.clone(),
                     reference,
                     preserve_recorded: true,
+                    mask: None,
                     maps: std::sync::Mutex::new(vec![None; 2]),
                 };
                 let residual = renormalizer
@@ -3999,6 +4005,7 @@ mod tests {
             reference: layout.of_placed(expected.view()).unwrap(),
             layout,
             preserve_recorded: true,
+            mask: None,
             maps: std::sync::Mutex::new(vec![None; 2]),
         };
         let residual = renormalizer
