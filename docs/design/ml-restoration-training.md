@@ -1180,8 +1180,26 @@ in these ways:
     - Its error on 4-frame halves was 2.43, outside the seeds' 2.01–2.23.
   - **Rewinds.** One, at step 8,500.
 
-  Another run takes the sky out alone, to tell which of the two costs
-  the noise.
+  Taking the sky out alone, the recipe left 42%, 62% and 88% of the
+  noise, with an error of 2.23 on 4-frame halves. So the sky taken out
+  costs about 3 points of the coarse noise, and the changed pairs cost the
+  fine noise.
+
+  At half as wide again (93 million weights), the recipe without either
+  change was the best yet on the unchanged images:
+  - error 1.97 on 4-frame halves and 1.22 on 8-frame ones;
+  - noise left 42%, 60% and 84%;
+  - under 1% of the Trunk's sharp spots, 10 over 1σ̄.
+
+  It was as easily broken as the narrower one, though:
+  - the Iris binned and sharpened still had 15,800 and 46,000 pixels more
+    than 100σ̄ from the input;
+  - under the gradient it left 125% of California's coarse noise;
+  - it raised the light around the Trunk's three brightest stars by 5–7σ̄
+    out to 8 pixels.
+
+  The next runs put the two changes on the wider model, and the sky plane
+  and binned share alone on the narrower one.
 - **Deep halves.** Training on a night's deep stack dealt into two halves,
   a quarter of every batch, taught a model to keep mottle: it left 37% of
   the coarse noise on empty sky. The halves share the night's flats,
