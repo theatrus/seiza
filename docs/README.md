@@ -62,8 +62,9 @@ internals, tradeoffs, and proposals.
   [background](design/background-extraction.md),
   [stretching](design/stretching.md), [composition](design/color-composition.md),
   [color calibration](design/color-calibration.md), [deconvolution](design/deconvolution.md),
-  [learned restoration](design/ml-restoration-training.md) and its
-  [training corpus](../training/README.md), [editing tools](design/editing-tools.md)
+  [learned restoration](design/ml-restoration-training.md), its
+  [training corpus](../training/README.md) and [runtime](design/ml-runtime.md),
+  [editing tools](design/editing-tools.md)
 - Catalogs: [bundles](design/catalog-bundles.md), [lookup](design/catalog-lookup.md),
   [object format](design/objects-bin-v4.md), [identifiers](design/star-identifiers.md)
 - Rendering: [depth planes](design/parallax-depth-planes.md),

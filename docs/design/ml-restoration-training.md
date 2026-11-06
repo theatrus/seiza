@@ -1274,6 +1274,13 @@ in these ways:
 
 ## Inference in Seiza
 
+The [runtime plan](ml-runtime.md) proposes changes to this section from
+measurements of the current models: one ONNX Runtime binding that drives
+Core ML, no separate Core ML export, and a parity budget of its own for the
+Neural Engine. It also records that the output bound below has not been
+implemented, and that no run has yet been measured with an estimated noise
+map.
+
 A new crate, `seiza-restore`, runs the models and holds the three operations.
 The classical operations stay where they belong: Richardson–Lucy in
 `seiza-deconvolution`, and the PSF field and catalogue-guided star removal in
