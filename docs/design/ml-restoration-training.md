@@ -30,6 +30,20 @@ composite's truth is exact.
 Expert before-and-after pairs teach a model to imitate an operator. They do
 not establish the scene as ground truth.
 
+**Every model works from the image alone.** A shipped model processes a
+linear FITS image from any stacker, given nothing else: no variance,
+coverage, rejection or other record that Seiza's stacker writes. Whatever
+else a model reads, Seiza makes from the image itself by fixed operations:
+- a noise level or noise map;
+- a PSF stamp from the PSF field measured on it;
+- star and halo maps placed by its own plate solution.
+
+Training may use everything Seiza's stacks hold, such as disjoint halves as
+targets and variance for loss weights, since a trained model never sees
+it. Where Seiza's own records do help, a model may have a variant that
+reads them, for stacks Seiza made. That variant is optional and may be a
+separate model. The image-only model is never dropped for it.
+
 The first targets are calibrated, stacked, linear images: mono first, then
 RGB. Raw Bayer data stays out of scope until the mosaic forward model is
 represented directly. Nothing here is advertised as recovering detail the data
@@ -46,7 +60,7 @@ blending stay in Seiza's Rust code, so every backend runs the same tensors.
 
 | Model | Operation | Input | Output | Real pairs | Classical baseline |
 |---|---|---|---|---|---|
-| Noise | `denoise` | linear image, noise map | clean estimate, its removed noise split into high- and low-frequency bands | disjoint sub-frame stacks | wavelet shrinkage driven by the variance map |
+| Noise | `denoise` | linear image; its noise level, or a noise map made from it | clean estimate, its removed noise split into high- and low-frequency bands | disjoint sub-frame stacks | wavelet shrinkage driven by the variance map |
 | PSF | `sharpen` | linear image, local PSF stamp, noise map, target-ratio map, halo and bloom maps | image at the target PSF | seeing-split stacks, cross-instrument pairs | field-varying Richardson–Lucy |
 | Star | `separate-stars` | linear image, noise map | star layer; starless = input − stars | synthetic composites on real backgrounds | catalogue-guided PSF subtraction |
 
@@ -507,9 +521,33 @@ noise of a sharpened image.
 
 The per-pixel noise is `σ = sqrt(variance / effective coverage)`, from the
 stack. Stacks made elsewhere carry no variance, and nor does an image after
-sharpening. For those, Seiza estimates a smooth map from the image's own
-second differences, which is the estimator the `snr` module uses, applied in
-local windows. The noise model trains with both kinds of map, so either works.
+sharpening. So the shipped noise model cannot depend on it.
+
+The network has read a map modelled from the stack's variance: the sky's
+variance as medians over 32-pixel blocks, plus a term growing with the
+image's own signal. It reads only the map's shape, as `σ / σ̄`. Training
+scales that plane by up to 1.65 times either way per tile, so the network
+learns not to trust its level. One number, the image's median noise `σ̄`,
+sets the units the image is read in, and every stacker writes a different
+scale.
+
+Without the stack's variance, there are two candidates:
+- **Blind:** the network reads only the image, in units of its median noise
+  measured from the image's own second differences, the estimator the
+  `snr` module uses. It finds where the noise changes itself.
+- **Image map:** the same map made from the image. The variance of its
+  second differences, as medians over the same 32-pixel blocks, gives the
+  sky term. The signal term is fitted on the blocks a nebula fills.
+
+On 24 train sets' 4-frame halves, against the noise of the halves'
+difference on the sky:
+- the image map read 1.15–1.31 times it;
+- the map modelled from the stack's variance read 1.19–1.61 times it.
+
+So the image alone gives the steadier level. Runs trained blind are being
+measured against runs that read the stack's map. The image map is the
+fallback if the blind runs lose. A model that reads the stack's map stays
+possible as an optional variant for Seiza's own stacks.
 
 Effective coverage is not the frame count. In the first corpus build, the
 noise of a 4-frame half varied by up to 2.5 times between draws of one
@@ -522,9 +560,8 @@ resampling, which sets how strongly the noise is correlated between
 neighbouring pixels. Every pair records the measured and the predicted
 noise of its difference, so the map can be checked against the data.
 
-A user's strength control scales the map before it reaches the model. A
-larger σ tells the model to remove more, as in FFDNet, so no separate model is
-needed per strength.
+A user's strength control is the share of what the model finds that is
+taken out, below, so it needs no map and no separate model per strength.
 
 What the model removes is then split into two bands, each with its own
 amount: high frequency, the pixel-to-pixel grain, and low frequency, the
