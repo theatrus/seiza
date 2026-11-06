@@ -64,18 +64,20 @@ impl Plane<'_> {
     }
 
     /// The clipped median and MAD noise of the square ring at Chebyshev
-    /// distance `inner ..= outer` around `(x, y)`.
+    /// distance `inner ..= outer` around `(x, y)`, over the pixels `keep`
+    /// accepts.
     pub(super) fn ring_background(
         &self,
         x: isize,
         y: isize,
         inner: isize,
         outer: isize,
+        keep: impl Fn(isize, isize) -> bool,
     ) -> Option<(f64, f64)> {
         let mut samples = Vec::with_capacity((8 * outer * (outer - inner + 1)) as usize);
         for py in y - outer..=y + outer {
             for px in x - outer..=x + outer {
-                if (px - x).abs().max((py - y).abs()) < inner {
+                if (px - x).abs().max((py - y).abs()) < inner || !keep(px, py) {
                     continue;
                 }
                 let value = self.at(px, py);

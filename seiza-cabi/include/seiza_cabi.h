@@ -324,6 +324,14 @@ typedef struct SeizaStackExportSnapshot SeizaStackExportSnapshot;
 typedef struct SeizaStackSnapshot SeizaStackSnapshot;
 
 /*
+ An opaque fit of catalogue stars. Release it with
+ [`seiza_star_fit_free`]. It is read-only once made and holds no pointer
+ to its inputs; its stars string is borrowed and remains valid until it is
+ freed.
+ */
+typedef struct SeizaStarFit SeizaStarFit;
+
+/*
  What a frame was shot with, as far as matching cares.
 
  Text fields are null when unknown. Numeric fields are read only when their
@@ -5725,6 +5733,122 @@ bool seiza_live_stacker_add_session_lights(SeizaLiveStacker *stacker,
                                            const char *paths_json,
                                            size_t session,
                                            char **error_out);
+
+/*
+ Fits the flux of each of `star_count` catalogue stars, at their image
+ positions, in interleaved linear `float` samples of the PSF field's size
+ and channels, with the field's local PSF: stars whose fit windows overlap
+ jointly, each group with its own background plane. `noise`, when not
+ null, holds the per-sample noise as a standard deviation in the image's
+ layout (`noise_length` must then equal `data_length`); a sample whose
+ noise is not finite and positive is left out. Pass null or empty
+ `options_json` for the defaults, or a JSON object with any of
+ `fitRadius` (pixels; three FWHM by default), `saturation` (samples at or
+ above it are left out), `positions` (`"fixed"`, the default, or
+ `"refined"`) and `maxShift` (how far a refined star may move, 1 px).
+
+ # Safety
+ `field` must be a live pointer from `seiza_psf_field_measure`. `data`
+ must point to `data_length` readable floats, `stars` to `star_count`
+ readable stars, and a non-null `noise` to `noise_length` readable floats.
+ A non-null `options_json` must be NUL-terminated. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+SeizaStarFit *seiza_star_fit_new(const SeizaPsfField *field,
+                                 const float *data,
+                                 size_t data_length,
+                                 const SeizaPsfCatalogueStar *stars,
+                                 size_t star_count,
+                                 const float *noise,
+                                 size_t noise_length,
+                                 const char *options_json,
+                                 char **error_out);
+
+/*
+ Returns the fit as borrowed JSON: `width`, `height`, `channels` and
+ `stars`, in the order given, each with `x` and `y` (where it was
+ fitted), `magnitude`, and per channel `flux`, `fluxError` and
+ `background` (null where nothing constrained it), then
+ `reducedChiSquared` and `saturated`. The string remains valid until the
+ fit is freed.
+
+ # Safety
+ `fit` must be null or a live pointer from [`seiza_star_fit_new`].
+ */
+const char *seiza_star_fit_stars_json(const SeizaStarFit *fit);
+
+/*
+ Writes the fitted stars through the measured PSF, on black, into
+ `output`: the star layer [`seiza_star_fit_subtract`] removes.
+
+ # Safety
+ `fit` must be a live pointer from [`seiza_star_fit_new`]. `output` must
+ point to `output_length` writable floats. When non-null, `error_out` must
+ point to writable storage for one pointer.
+ */
+bool seiza_star_fit_model(const SeizaStarFit *fit,
+                          float *output,
+                          size_t output_length,
+                          char **error_out);
+
+/*
+ Writes `data` with the fitted stars removed into `output`.
+
+ # Safety
+ `fit` must be a live pointer from [`seiza_star_fit_new`]. `data` must
+ point to `data_length` readable floats and `output` to `output_length`
+ writable floats. When non-null, `error_out` must point to writable
+ storage for one pointer.
+ */
+bool seiza_star_fit_subtract(const SeizaStarFit *fit,
+                             const float *data,
+                             size_t data_length,
+                             float *output,
+                             size_t output_length,
+                             char **error_out);
+
+/*
+ Writes the fitted stars rendered through a pixel-integrated round
+ Gaussian of `target_fwhm` pixels, on black, into `output`.
+
+ # Safety
+ `fit` must be a live pointer from [`seiza_star_fit_new`]. `output` must
+ point to `output_length` writable floats. When non-null, `error_out` must
+ point to writable storage for one pointer.
+ */
+bool seiza_star_fit_render(const SeizaStarFit *fit,
+                           double target_fwhm,
+                           float *output,
+                           size_t output_length,
+                           char **error_out);
+
+/*
+ The classical star sharpener: writes `data` with the fitted stars
+ removed and rendered again through a round Gaussian of `target_fwhm`
+ pixels into `output`.
+
+ # Safety
+ `fit` must be a live pointer from [`seiza_star_fit_new`]. `data` must
+ point to `data_length` readable floats and `output` to `output_length`
+ writable floats. When non-null, `error_out` must point to writable
+ storage for one pointer.
+ */
+bool seiza_star_fit_sharpen(const SeizaStarFit *fit,
+                            const float *data,
+                            size_t data_length,
+                            double target_fwhm,
+                            float *output,
+                            size_t output_length,
+                            char **error_out);
+
+/*
+ Releases a star fit. Null is ignored.
+
+ # Safety
+ `fit` must be null or a pointer from [`seiza_star_fit_new`] that has not
+ been freed.
+ */
+void seiza_star_fit_free(SeizaStarFit *fit);
 
 #ifdef __cplusplus
 }  // extern "C"

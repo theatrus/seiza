@@ -15,6 +15,7 @@ mod psf;
 mod resample;
 mod satellites;
 mod sessions;
+mod star_fit;
 use resample::{downsample_interleaved_f32, downsample_rgba};
 use seiza::SolveLimits;
 use seiza::catalog::StarCatalog;

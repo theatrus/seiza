@@ -119,6 +119,38 @@ pub(super) fn fit(
     for (value, total) in mean.iter_mut().zip(&totals) {
         *value = if *total > 0.0 { *value / total } else { 0.0 };
     }
+    // A pixel most stars mask, as when their neighbours share an offset,
+    // rests on too few stars to trust: it takes the mean of the supported
+    // pixels at its radius, and moves no component.
+    let all: f64 = weights.iter().sum();
+    let supported: Vec<bool> = totals.iter().map(|t| *t >= 0.25 * all).collect();
+    if supported.iter().any(|s| !s) {
+        let centre = (size / 2) as f64;
+        let ring = |pixel: usize| -> usize {
+            ((pixel % size) as f64 - centre)
+                .hypot((pixel / size) as f64 - centre)
+                .round() as usize
+        };
+        let rings = size;
+        let (mut sums, mut counts) = (vec![0.0; rings], vec![0usize; rings]);
+        for pixel in 0..pixels {
+            if supported[pixel] {
+                sums[ring(pixel)] += mean[pixel];
+                counts[ring(pixel)] += 1;
+            }
+        }
+        for pixel in 0..pixels {
+            if !supported[pixel] {
+                let r = ring(pixel);
+                mean[pixel] = if counts[r] > 0 {
+                    sums[r] / counts[r] as f64
+                } else {
+                    0.0
+                };
+            }
+        }
+    }
+    let usable = |stamp: &StarStamp, pixel: usize| supported[pixel] && stamp.is_valid(pixel);
 
     let components = components.min(stamps.len().saturating_sub(1));
     if components == 0 {
@@ -146,7 +178,7 @@ pub(super) fn fit(
                 .zip(&mean)
                 .enumerate()
                 .map(|(pixel, (value, m))| {
-                    if stamp.is_valid(pixel) {
+                    if usable(stamp, pixel) {
                         root * (value - m)
                     } else {
                         0.0
@@ -213,7 +245,7 @@ pub(super) fn fit(
                         .zip(&mean)
                         .zip(component)
                         .enumerate()
-                        .filter(|(pixel, _)| stamp.is_valid(*pixel))
+                        .filter(|(pixel, _)| usable(stamp, *pixel))
                         .map(|(_, ((value, m), c))| (value - m) * c)
                         .sum()
                 })

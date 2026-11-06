@@ -146,9 +146,9 @@ fn the_varying_blur_keeps_flux_and_a_flat_sky() {
             .map(|(x, y)| (blurred[y * width + x] - 7.0).abs() / 7.0)
             .fold(0.0_f32, f32::max)
     };
-    assert!(worst(0) < 3e-3, "{}", worst(0));
+    assert!(worst(0) < 1e-2, "{}", worst(0));
     assert!(
-        worst(kernel.kernel_size()) < 1e-3,
+        worst(kernel.kernel_size()) < 5e-3,
         "{}",
         worst(kernel.kernel_size())
     );

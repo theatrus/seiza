@@ -59,8 +59,9 @@ pub use hocus_focus_star_detection::{
 };
 pub use peak_star_detection::{PeakStar, find_peak_stars, fold_core_fragments};
 pub use psf_field::{
-    CatalogueStar, PsfChannelFit, PsfField, PsfFieldError, PsfFieldOptions, PsfFieldWarning,
-    PsfShape, PsfStamp, PsfStar, PsfStarRole, SparseFieldPolicy,
+    CatalogueStar, FittedStar, PsfChannelFit, PsfField, PsfFieldError, PsfFieldOptions,
+    PsfFieldWarning, PsfShape, PsfStamp, PsfStar, PsfStarRole, SparseFieldPolicy, StarFit,
+    StarFitError, StarFitOptions, StarPositions,
 };
 pub use psf_fitting::{PSFModel, PSFType};
 pub use tilt::{

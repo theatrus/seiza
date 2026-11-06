@@ -26,6 +26,7 @@ mod rc_astro;
 mod satellites;
 mod screening;
 mod stacking;
+mod star_fit;
 mod stars;
 mod stretch;
 
@@ -1388,6 +1389,7 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     stars::register(m)?;
     psf_field::register(m)?;
     field_deconvolution::register(m)?;
+    star_fit::register(m)?;
     rc_astro::register(m)?;
     pixinsight::register(m)?;
     parallax::register(m)?;

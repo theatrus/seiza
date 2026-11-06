@@ -248,7 +248,7 @@ whole image instead, which `is_global` and `warnings` then report. Pass
 `catalogue=[(x, y, magnitude), ...]` with catalogue stars at their image
 positions to keep only stars that match one. Neighbours within
 `isolation_magnitudes` (5) of a star, detected or catalogued, are masked out
-of its stamp, and disqualify it when they lie within two FWHM of its flux
+of its stamp, and disqualify it when they lie within 1.5 FWHM of its flux
 aperture. `saturation`
 sets the level from which a star counts as saturated; by default it is found
 from the brightest stars' common clip level. `degree` fixes the degree, 1
@@ -256,6 +256,28 @@ to 3, of the polynomials the coefficients follow across the field; by
 default each channel takes the degree that best predicts stars held out of
 the fit, which is a cubic for a tilted sensor whose best focus crosses the
 frame. `channel_fits` reports the degree chosen. The call releases the GIL.
+
+### Fit, remove and render catalogue stars
+
+`StarFit.fit` fits each catalogue star's flux, at its image position, with
+the local PSF of a `PsfField`: stars whose fit windows overlap are fitted
+jointly, each group with its own background plane. Pass the stars as
+`(x, y, magnitude)`, for instance from `StarCatalog.cone_search` and
+`Wcs.world_to_pixel`, and the stack's per-pixel σ as `noise`:
+
+```python
+fit = seiza.StarFit.fit(stack, field, stars, noise=sigma, saturation=60000.0)
+starless = fit.subtract(stack)         # the stars removed
+truth = fit.render(2.0)                # the same stars at a 2 px Gaussian
+sharpened = fit.sharpen(stack, 2.0)    # removed and rendered again
+```
+
+Each of `fit.stars` has its fitted `flux`, `flux_error` and `background`
+per channel, `reduced_chi_squared` and whether its window held `saturated`
+samples, which are left out so the wings give its flux. Positions are held
+as given; `positions="refined"` lets each star move up to `max_shift` (1 px)
+when the solution is not accurate to a small fraction of a pixel. Stars the
+catalogue lacks stay in the image.
 
 ## Blind solve
 

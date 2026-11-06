@@ -458,9 +458,11 @@ impl<'a> PeakGrid<'a> {
 }
 
 /// The level at which the brightest stars clip, from the peaks' raw values:
-/// at least three within 5% of the brightest mark a clip level, and stars
-/// from 80% of it up count as saturated. `None` when the brightest stars
-/// spread out as unclipped stars do.
+/// three or more within 2% of one another, at 90% of the brightest or
+/// above, mark a clip level, and stars from 80% of it up count as
+/// saturated. A stack's clipped cores share one level closely, as unclipped
+/// stars do not; a single hot pixel above them does not hide it. `None`
+/// when no such cluster exists.
 pub(super) fn clip_level(mut peak_values: Vec<f32>) -> Option<f32> {
     peak_values.retain(|value| value.is_finite());
     peak_values.sort_by(|a, b| b.total_cmp(a));
@@ -468,15 +470,21 @@ pub(super) fn clip_level(mut peak_values: Vec<f32>) -> Option<f32> {
     if brightest.is_nan() || brightest <= 0.0 {
         return None;
     }
-    let clipped = peak_values
-        .iter()
-        .take_while(|&&value| value >= 0.95 * brightest)
-        .count();
-    if clipped < 3 {
-        return None;
+    for start in 0..peak_values.len() {
+        let top = peak_values[start];
+        if top < 0.9 * brightest {
+            break;
+        }
+        let clustered = peak_values[start..]
+            .iter()
+            .take_while(|&&value| value >= 0.98 * top)
+            .count();
+        if clustered >= 3 {
+            let mut cluster = peak_values[start..start + clustered].to_vec();
+            return Some(0.8 * median(&mut cluster));
+        }
     }
-    let mut top = peak_values[..clipped].to_vec();
-    Some(0.8 * median(&mut top))
+    None
 }
 
 #[cfg(test)]
@@ -502,8 +510,13 @@ mod tests {
     #[test]
     fn clip_level_needs_a_pile_up() {
         assert_eq!(clip_level(vec![100.0, 60.0, 40.0, 30.0]), None);
+        // Bright stars spread over a few percent are not a clip level.
+        assert_eq!(clip_level(vec![100.0, 97.0, 94.0, 91.0, 88.0]), None);
         let level = clip_level(vec![70_000.0, 69_800.0, 69_500.0, 40_000.0]).unwrap();
         assert!((level - 0.8 * 69_800.0).abs() < 1.0);
+        // A hot pixel above the clipped cores does not hide them.
+        let level = clip_level(vec![67_200.0, 62_090.0, 61_600.0, 61_470.0, 50_000.0]).unwrap();
+        assert!((level - 0.8 * 61_600.0).abs() < 1.0, "{level}");
     }
 
     #[test]

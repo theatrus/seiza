@@ -353,6 +353,12 @@ core = "seiza-stars::PsfChannelFit"
 [rust.PsfStarResponse]
 core = "seiza-stars::PsfStar"
 
+[rust.StarFitOptionsRequest]
+core = "seiza-stars::StarFitOptions"
+
+[rust.FittedStarResponse]
+core = "seiza-stars::FittedStar"
+
 
 # satellites
 [rust.SatelliteTracksRequest]
@@ -396,6 +402,7 @@ objects = [
     "seiza-pipeline::SessionStep",
     "seiza-stars::PsfField",
     "seiza-deconvolution::RemainingKernel",
+    "seiza-stars::StarFit",
 ]
 
 # distributed stacking
@@ -843,6 +850,13 @@ seiza_psf_field_channels = "PsfField.channels"
 seiza_psf_field_stamp_at = "PsfField.stamp_at"
 seiza_psf_field_shape_at = "PsfField.shape_at"
 seiza_psf_field_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
+seiza_star_fit_new = "StarFit.fit"
+seiza_star_fit_stars_json = "StarFit.stars"
+seiza_star_fit_model = "StarFit.model"
+seiza_star_fit_subtract = "StarFit.subtract"
+seiza_star_fit_render = "StarFit.render"
+seiza_star_fit_sharpen = "StarFit.sharpen"
+seiza_star_fit_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
 
 # --- color ------------------------------------------------------------------
 seiza_gaia_photometry_cone_json = "gaia_photometry_cone"

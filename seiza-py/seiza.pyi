@@ -1080,6 +1080,47 @@ class PsfField:
         ...
     def shape_at(self, x: float, y: float, channel: int = 0) -> PsfShape | None: ...
 
+class FittedStar:
+    x: float
+    y: float
+    magnitude: float
+    # Per channel; NaN where no sample constrained it.
+    flux: list[float]
+    flux_error: list[float]
+    background: list[float]
+    reduced_chi_squared: float
+    saturated: bool
+
+class StarFit:
+    """Catalogue stars fitted with a PSF field, ready to remove and render."""
+
+    width: int
+    height: int
+    channels: int
+    stars: list[FittedStar]
+    @staticmethod
+    def fit(
+        image: npt.NDArray[np.float32],
+        field: PsfField,
+        stars: Sequence[tuple[float, float, float]],
+        *,
+        noise: npt.NDArray[np.float32] | None = None,
+        fit_radius: float | None = None,
+        saturation: float | None = None,
+        positions: Literal["fixed", "refined"] = "fixed",
+        max_shift: float = 1.0,
+    ) -> StarFit:
+        """Fit each (x, y, magnitude) star's flux with the field's local PSF."""
+        ...
+    def model(self) -> npt.NDArray[np.float32]: ...
+    def subtract(self, image: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]: ...
+    def render(self, target_fwhm: float) -> npt.NDArray[np.float32]: ...
+    def sharpen(
+        self, image: npt.NDArray[np.float32], target_fwhm: float
+    ) -> npt.NDArray[np.float32]:
+        """The classical star sharpener: remove the stars, render them at the target."""
+        ...
+
 def detect(
     image: npt.NDArray[np.float32] | npt.NDArray[np.uint8],
     *,

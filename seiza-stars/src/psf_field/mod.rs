@@ -28,6 +28,7 @@ mod candidates;
 mod model;
 mod shape;
 mod stamps;
+mod star_fit;
 
 use std::borrow::Cow;
 use std::fmt;
@@ -40,6 +41,7 @@ use candidates::{Mesh, PeakGrid, adaptive_moments, clip_level, find_peaks, media
 use model::{ChannelModel, MAX_DEGREE, StarStamp};
 pub use shape::{MAXIMUM_BETA, PsfShape};
 use stamps::{LANCZOS_REACH, Plane, aperture_sum, radii};
+pub use star_fit::{FittedStar, StarFit, StarFitError, StarFitOptions, StarPositions};
 
 /// The stamp side [`PsfField`] uses unless the PSF is wide: 33 px.
 pub const DEFAULT_STAMP_SIZE: usize = 33;
@@ -145,11 +147,13 @@ pub struct PsfFieldOptions {
     /// saturated and gives wings rather than core. `None` finds it from the
     /// brightest stars' common clip level, and counts stars from 80% of it.
     pub saturation: Option<f32>,
-    /// How much fainter than a star, in magnitudes, a neighbour may be and
-    /// still be ignored. A neighbour within `isolation_magnitudes` of it
-    /// disqualifies it when it lies within two FWHM of its flux aperture,
-    /// and is masked out of its stamp further out; one brighter than the
-    /// star anywhere in its stamp disqualifies it.
+    /// How much fainter than a star, in magnitudes, a neighbour near its
+    /// core may be without disqualifying it. A neighbour within
+    /// `isolation_magnitudes` of it disqualifies it when it lies within
+    /// 1.5 FWHM of its flux aperture, and one brighter than the star
+    /// anywhere in its stamp does too. Every other detected neighbour, and
+    /// every catalogue neighbour within `isolation_magnitudes`, is masked
+    /// out of its stamp.
     pub isolation_magnitudes: f64,
     /// What to do with fewer than [`Self::minimum_stars`] usable stars.
     pub sparse: SparseFieldPolicy,
@@ -587,7 +591,7 @@ impl PsfField {
             wide.clamp(DEFAULT_STAMP_SIZE, 255)
         });
         let half = stamp_size / 2;
-        let reach = (half + LANCZOS_REACH + 1) as isize;
+        let reach = (half + LANCZOS_REACH + 1).max(half + 6) as isize;
         let aperture = (2.5 * fwhm0).max(3.0);
         let moment_radius = (4.0 * fwhm0).clamp(4.0, half as f64);
 
@@ -600,8 +604,13 @@ impl PsfField {
                 if !luma_plane.window_is_finite(px, py, reach) {
                     return None;
                 }
-                let (background, sigma) =
-                    luma_plane.ring_background(px, py, half as isize - 1, half as isize)?;
+                let (background, sigma) = luma_plane.ring_background(
+                    px,
+                    py,
+                    half as isize - 1,
+                    half as isize,
+                    |_, _| true,
+                )?;
                 let moments = adaptive_moments(
                     |x, y| luma_plane.at(x, y),
                     peak.x as f64,
@@ -647,13 +656,13 @@ impl PsfField {
         // Isolation.
         let grid = PeakGrid::new(&peaks, width, height, half.max(8));
         let catalogue_grid = CatalogueGrid::new(catalogue, width, height, half.max(8));
-        // A neighbour within `isolation_magnitudes` of a star is masked out
-        // of its stamp, `mask_radius` around it. One whose mask would reach
-        // the flux aperture disqualifies the star, as does one brighter
-        // than the star anywhere in its stamp.
+        // A neighbour within `isolation_magnitudes` of a star disqualifies
+        // it when its mask would reach the flux aperture, as does one
+        // brighter than the star anywhere in its stamp. Other neighbours are
+        // masked out of the stamp, `mask_radius` around them.
         let isolation_radius = half as f64 * std::f64::consts::SQRT_2 + 1.0;
         let ratio = 10_f64.powf(-0.4 * options.isolation_magnitudes) as f32;
-        let mask_radius = (2.0 * fwhm0).max(3.0);
+        let mask_radius = (1.5 * fwhm0).max(3.0);
         let hard_radius = aperture + mask_radius;
         let match_radius = fwhm0.max(2.0);
         let catalogue_isolated = |star: &Candidate, magnitudes: f64| -> bool {
@@ -670,11 +679,13 @@ impl PsfField {
                 index != own && magnitude < own_magnitude
             })
         };
+        // Every detected neighbour is masked, however faint: a star a
+        // hundred times fainter still outshines the PSF's wings where it
+        // sits.
         let neighbours = |star: &Candidate| -> Vec<(f64, f64)> {
             let mut found: Vec<(f64, f64)> = grid
                 .near(star.x, star.y, isolation_radius + mask_radius, 2.0)
                 .into_iter()
-                .filter(|peak| peak.value >= ratio * star.brightness)
                 .map(|peak| (peak.x as f64, peak.y as f64))
                 .collect();
             if let Some((own, own_magnitude)) = catalogue_grid.nearest(star.x, star.y, match_radius)
@@ -758,8 +769,7 @@ impl PsfField {
         // Core stamps, for every channel; a star must give one in each.
         let field_u = |x: f64| field_coordinate(x, width);
         let field_v = |y: f64| field_coordinate(y, height);
-        let mask_of = |star: &Candidate| -> Option<Vec<bool>> {
-            let near = neighbours(star);
+        let mask_of = |star: &Candidate, near: &[(f64, f64)]| -> Option<Vec<bool>> {
             if near.is_empty() {
                 return None;
             }
@@ -775,10 +785,18 @@ impl PsfField {
                     .collect(),
             )
         };
-        let stamp_of = |plane: &Plane<'_>, star: &Candidate, valid: &Option<Vec<bool>>| {
+        let stamp_of = |plane: &Plane<'_>,
+                        star: &Candidate,
+                        valid: &Option<Vec<bool>>,
+                        near: &[(f64, f64)]| {
             let (px, py) = (star.x.round() as isize, star.y.round() as isize);
+            // Neighbours' light is not sky.
+            let clear = |x: isize, y: isize| {
+                near.iter()
+                    .all(|&(nx, ny)| (x as f64 - nx).hypot(y as f64 - ny) > mask_radius)
+            };
             let (background, sigma) =
-                plane.ring_background(px, py, half as isize - 1, half as isize)?;
+                plane.ring_background(px, py, half as isize + 1, half as isize + 6, clear)?;
             let values = plane.shifted_stamp(star.x, star.y, stamp_size, background)?;
             let flux = aperture_sum(&values, stamp_size, aperture);
             if flux.is_nan() || flux <= 0.0 {
@@ -795,10 +813,11 @@ impl PsfField {
         let mut core_stars: Vec<(Candidate, Vec<StarStamp>)> = core
             .par_iter()
             .filter_map(|star| {
-                let valid = mask_of(star);
+                let near = neighbours(star);
+                let valid = mask_of(star, &near);
                 let stamps: Option<Vec<StarStamp>> = planes
                     .iter()
-                    .map(|plane| stamp_of(plane, star, &valid))
+                    .map(|plane| stamp_of(plane, star, &valid, &near))
                     .collect();
                 stamps.map(|stamps| (*star, stamps))
             })
@@ -1211,7 +1230,9 @@ fn attach_wings(
         let (px, py) = (star.x.round() as isize, star.y.round() as isize);
         // The sky from a ring three stamp radii out, where even a bright
         // star's own wings have faded.
-        let Some((background, _)) = plane.ring_background(px, py, 3 * half, 3 * half + 6) else {
+        let Some((background, _)) =
+            plane.ring_background(px, py, 3 * half, 3 * half + 6, |_, _| true)
+        else {
             continue;
         };
         let Some(values) = plane.shifted_stamp(star.x, star.y, size, background) else {

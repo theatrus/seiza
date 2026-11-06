@@ -100,17 +100,25 @@ settles what the plan left open:
   lightly smoothed. Adaptive moments give each star's centre, width and
   shape.
 - **Isolation.** A neighbour within 5 magnitudes of a star disqualifies it
-  inside two FWHM of its 2.5 FWHM flux aperture, as does one brighter than
-  the star anywhere in its stamp. Fainter neighbours further out are masked
-  out of the stamp instead. Rejecting them as well left one star in 270 in
-  a dense Milky Way field. No core star lies within two stamp radii of a
-  bloomed star, one whose saturated disc is 3 px or more in radius.
-  Catalogue neighbours count the same way, with their magnitudes.
+  inside 1.5 FWHM of its 2.5 FWHM flux aperture, as does one brighter than
+  the star anywhere in its stamp. Every other detected neighbour is masked
+  out of the stamp, however faint: a star a hundred times fainter still
+  outshines the PSF's wings where it sits. Rejecting stars for such
+  neighbours left one star in 270 in a dense Milky Way field. Catalogue
+  neighbours within 5 magnitudes count the same way. No core star lies
+  within two stamp radii of a bloomed star, one whose saturated disc is
+  3 px or more in radius.
 - **Saturation.** Unless the caller gives a level, it is the brightest
-  stars' common clip level. Stars from 80% of it give wings, not core.
+  stars' common clip level: three or more peaks within 2% of one another,
+  at 90% of the brightest or above. A single hot pixel above them does not
+  hide it, and bright stars spread over a few percent do not fake it. Stars
+  from 80% of it give wings, not core.
 - **Stamps.** Each is shifted to its centroid by Lanczos-3 and normalised to
-  its aperture flux. The whole model is normalised to unit sum when it is
-  sampled.
+  its aperture flux. Its sky comes from a ring just outside the stamp,
+  leaving out the neighbours' masks, because a sky ring at the stamp's own
+  edge sits in the star's wings. A pixel that most stars mask, as when
+  their neighbours share an offset, takes the mean of its ring. The whole
+  model is normalised to unit sum when it is sampled.
 - **Fit.** Stars are weighted by inverse variance, capped at the upper
   quartile so the brightest do not outvote the field. Stars whose core
   residual is three times the median, and above 10%, are dropped, and the
@@ -146,7 +154,7 @@ the cubic. Times are for the measurement alone.
 | Stack | Scale | Core / wing stars | FWHM, px | Ellipticity | Relative residual |
 |---|---|---|---|---|---|
 | Ultracat, Coma Cluster G, 9576 × 6388 | 1.5″ | 398 / 40 | 1.9 centre to 4.1 bottom right | to 0.16 | 5.0% |
-| C925, Question Mark Galaxy B | 0.33″ | 64 / 0 | 8.8 to 10.1, 71 px stamps | about 0.06 | 5.4%, χ² 1.0 |
+| C925, Question Mark Galaxy B | 0.33″ | 68 / 0 | 8.8 to 10.1, 71 px stamps | about 0.06 | 5.4%, χ² 1.0 |
 | Askar107PHQ, Heart and Soul Hα | 1.04″ | 376 / 9 | 2.4 centre to 4.9 top left | to 0.09 | 2.4% |
 | RedCat61, Sh2 136 B | 2.59″ | 388 / 39 | 2.0 lower left to 3.5 top right | to 0.43 | 5.4% |
 | RedCat61, Sh2 136 L | 2.59″ | 389 / 39 | 1.9 to 3.0 | to 0.40 | 6.8% |
@@ -176,6 +184,51 @@ The result is a deterministic star removal that needs no model. Parallax can
 use it without the external tool. The starless images that pass review are
 the star model's backgrounds, and the starting point for the PSF model's
 references.
+
+The fit, the removal and the rendering have landed as `seiza_stars::StarFit`
+(C `seiza_star_fit_new`, Python `seiza.StarFit`). The halo subtraction and
+the core fills have not.
+
+- **Stars.** It takes the catalogue stars at their image positions, so the
+  solve and the catalogue stay with the caller. In Python those come from
+  `StarCatalog.cone_search` and `Wcs.world_to_pixel`.
+- **Fit.** Each star's window is three FWHM in radius. Stars whose windows
+  overlap are fitted jointly, with a background plane per group, by
+  weighted least squares against the noise map. A chain of more than 48
+  stars is split. Three passes fit each group against the data less every
+  other group's stars, so wings that reach into a neighbour's window are
+  accounted for.
+- **Weights.** A sample's variance adds the PSF model's own error, its
+  relative residual times the model there. Otherwise a bright core's
+  percent-level model error drives the plane under a faint neighbour.
+- **Saturation.** Samples above a given level are left out, so a saturated
+  star's flux comes from its wings, which the field measured from saturated
+  stars.
+- **Positions.** They are held fixed by default: PSF photometry at known
+  positions, as star truth needs. A solve good to 0.15 px still left
+  residual dipoles, so a refined mode adds each star's shift to the linear
+  fit, through the stamp's gradient, and lets it move up to 1 px.
+- **Render.** `render` draws the stars through a pixel-integrated round
+  Gaussian, and `sharpen` subtracts them and renders them again. That is
+  the classical star sharpener of the Gaia plan.
+
+On corpus deep stacks, solved from detections with the set's pointing as
+the prior and SIP order 3, against the installed G 17 catalogue:
+
+| Stack | Solve | Stars | Instrumental mag against G | χ² near stars before, after (refined) |
+|---|---|---|---|---|
+| Askar107PHQ, Heart and Soul Hα | 0.15 px | 11,936 | slope 0.98, scatter 0.17 mag | 466 → 2.4 |
+| RedCat61, Sh2 136 B | 0.21 px | 38,808 | slope 1.00, scatter 0.41 mag | 446 → 31 |
+| Ultracat, Coma Cluster G | 0.13 px | 4,339 | slope 1.06, scatter 0.31 mag | 1,638 → 42 |
+
+The χ² is over 13 px boxes around the 400 brightest unsaturated stars, so
+the PSF model's few-percent error in their cores dominates it. Refinement
+moved stars by a median 0.1 to 0.23 px, and cut what fixed positions left:
+from 4.4 to 2.4 on the Askar field, 107 to 42 on Coma and 38 to 31 on the
+RedCat. The scatter against G is mostly the filters' colour terms, which a
+photometric model in BP−RP would take up. Sharpened to a 2 px target, the
+Askar field's central FWHM went from 2.36 to 2.12 px and its ellipticity
+from 0.04 to 0.001. Fitting the 38,808 RedCat stars took 0.6 s.
 
 ## Real data
 
@@ -997,7 +1050,9 @@ always has a classical fallback with separately named provenance.
    Python twins. These are useful without any model, and both learned models
    need them. `PsfField` has [landed](#what-landed), and so have
    field-varying Richardson–Lucy and the [reblur check](#reblur-consistency)
-   ([deconvolution design](deconvolution.md#field-varying-psf)).
+   ([deconvolution design](deconvolution.md#field-varying-psf)), and the
+   fit, removal and rendering of [catalogue stars](#catalogue-guided-star-removal).
+   Still to do: the bright stars' halo subtraction and the core fills.
 3. **Smoke run.** R0 covers the export, the Core ML and ONNX Runtime backends
    with their parity tests, and the timings.
 4. **Noise model.** R1 and R2 face the gates. Land `denoise` (experimental),
