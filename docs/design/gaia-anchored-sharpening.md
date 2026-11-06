@@ -270,3 +270,34 @@ each case, and the gate above measures what it costs.
    detections, against the Gaia gates and the plan's reblur and ring gates.
 7. **Land `sharpen` (experimental)** with both strengths, the star-size
    floor, halo and bloom, and the classical star sharpener as its fallback.
+
+Progress, November 2026 (built on branches, not yet merged):
+
+- **Step 2, in part.** `PsfField` measures empirical stamps across the
+  field, as a PCA basis whose coefficients follow a polynomial. The
+  polynomial's degree, 1 to 3, is chosen for each channel by five-fold
+  cross-validation, because a tilted sensor needs a cubic. The catalogue is
+  used for isolation only; stamps are not yet centred on Gaia positions.
+  - On a refractor with a known sensor tilt, the FWHM runs from 2.0 to 3.5
+    px in a V across the frame, with ellipticity up to 0.43 at one edge.
+    A plane explains only 56–63% of that FWHM variance.
+  - On a refractor whose bright stars bloom, the wings come from 29
+    saturated stars.
+- **Step 4, in part.** Catalogue stars are fitted at their solved
+  positions, subtracted, and rendered again at `T`. Fitted flux follows G
+  with slopes 0.98–1.06, with a scatter of 0.17–0.41 mag over three
+  stacks. On one stack, sharpening to 2 px took the centre's FWHM from
+  2.36 to 2.12 px. Halo profiles, core fills, bloom and the BP−RP model
+  are not built.
+- **Extended sharpening's classical baseline.** Richardson–Lucy runs with
+  the field-varying PSF, through a remaining kernel `R`, where `P = R ∗ T`
+  at each node, towards a round `T`. It narrows the tilted stack's FWHM
+  range from 2.0–3.6 to 1.9–2.3 px and its ellipticity from 0.24 to 0.16.
+  The reblur χ² is 1.06–1.08 on two stacks, but 8.7 on the tilted one.
+  Without deconvolution, the input itself scores 13.3. On sky alone, the
+  output scores 1.6, so the excess sits on the stars, many of them
+  undersampled near 2 px, where the PSF model's residual is 5–7%.
+- **Open.** A reference for the residual spectrum's flatness: a stack's
+  noise is correlated, so even a perfect estimate falls towards Nyquist.
+  The difference of the half stacks would give one. Doing better on near-2
+  px stars needs a super-resolved PSF basis.
