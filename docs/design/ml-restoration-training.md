@@ -1156,6 +1156,32 @@ in these ways:
   pixels, as it did for the first seed, and 0.001% with the sky taken out
   first. So at this width the sets without a flat neither help nor hurt
   the noise model.
+
+  With the sky taken out before the network and the pairs changed alike
+  (below), the recipe on the same sets became far harder to break.
+  - **The perturbed images.**
+    - On the Iris binned and sharpened it changed no pixel by more than
+      100σ̄, where the recipe without them changed 29,509 and 67,012. Its
+      largest change was 76σ̄ and 65σ̄, against 862σ̄ and 999σ̄. On the SNR
+      binned it changed 4 pixels, against 6,728.
+    - It moved the coarse level by under 0.012σ̄ on every image except the
+      Trunk binned (0.12σ̄). Without the changes the coarse level moved by
+      up to 0.64σ̄.
+    - Faint stars kept their flux under the changes: 1.02 on the Iris
+      binned against 0.86.
+  - **Bright stars.**
+    - The ring around the Trunk's bright stars nearly went: their cores
+      dipped 15σ̄ where the recipe's dipped 63σ̄.
+    - Stripes in star cores halved.
+  - **It removed less noise.**
+    - At 16 pixels it left 93% on the Trunk against 83%, and 3–4 points
+      more on two of the other three images.
+    - It kept about twice the sharp spots.
+    - Its error on 4-frame halves was 2.43, outside the seeds' 2.01–2.23.
+  - **Rewinds.** One, at step 8,500.
+
+  Another run takes the sky out alone, to tell which of the two costs
+  the noise.
 - **Deep halves.** Training on a night's deep stack dealt into two halves,
   a quarter of every batch, taught a model to keep mottle: it left 37% of
   the coarse noise on empty sky. The halves share the night's flats,
