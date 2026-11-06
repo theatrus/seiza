@@ -1142,7 +1142,20 @@ in these ways:
   nothing, and every candidate is run on the perturbed images. The next
   runs add the 101 train sets built without a flat: 1,700 pairs over 342
   sets, against 1,301 over 241, at the same width and at half as wide
-  again.
+  again. At the same width and the first seed, with them the recipe came
+  out between the two seeds on every measure:
+  - noise left 42%, 61% and 85%;
+  - error 2.14 on 4-frame halves and 1.29 on 8-frame ones, against the
+    seeds' 2.01–2.23 and 1.22–1.31;
+  - against B halves matched to A's flux, 2.83 against 2.71 and 2.90;
+  - star cores against clean targets within 0.2%.
+
+  It never rewound. It left more of the Trunk's sharp spots: 13% of them,
+  55 over 1σ̄, against the seeds' 5–9% and 14–25. Nothing blew up on the
+  perturbed images. Under the gradient the guard moved 0.2% of the Trunk's
+  pixels, as it did for the first seed, and 0.001% with the sky taken out
+  first. So at this width the sets without a flat neither help nor hurt
+  the noise model.
 - **Deep halves.** Training on a night's deep stack dealt into two halves,
   a quarter of every batch, taught a model to keep mottle: it left 37% of
   the coarse noise on empty sky. The halves share the night's flats,
