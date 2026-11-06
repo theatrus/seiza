@@ -1463,8 +1463,8 @@ let StarLayers { starless, stars } = StarModel::open(&star_bundle, &backend)?
 The types follow the same rules:
 
 - `Backend` is an enum: Core ML with its compute units, or ONNX Runtime with
-  its execution provider. It has `FromStr` and `Display` for a
-  `--ml-backend coreml|tensorrt|cuda|cpu` flag.
+  its execution provider. It has `FromStr` and `Display` for the
+  `--backend coreml|tensorrt|cuda|cpu` flag of `seiza model`.
 - `SharpenTarget` is `Ratio { stars, extended }` or `Uniform`.
 - `halo_reduction` and `bloom_reduction` are amounts from 0 to 1, applied
   inside the star mask.

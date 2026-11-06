@@ -195,7 +195,7 @@ pub enum Backend {
 }
 ```
 
-`Backend` has `FromStr` and `Display` for `--ml-backend`. `Backend::detect`
+`Backend` has `FromStr` and `Display` for `--backend`. `Backend::detect`
 picks the best one the machine can run and the model's card allows.
 `Backend::available` reports each one with the reason it cannot run, which
 is what a user needs when a GPU goes unused.
@@ -249,8 +249,15 @@ because one CPU tile on a slow machine can take many seconds.
 
 This is the largest open problem, and it is not a runtime problem.
 
-A model reads a noise map, and a map today comes from a stack's variance and
-coverage. Python can get those. `seiza stack` does not write them, PSF
+A noise map is an image the size of the picture that gives, at each pixel,
+how much noise that pixel should hold: its standard deviation σ. It is the
+network's second input, beside the image, and its median σ̄ sets the units
+of both. It tells a model how far to trust a faint bump where the noise
+differs across the frame: at thinly covered edges, under vignetting and in
+bright nebulae. The graph has no way to run without one.
+
+A map today comes from a stack's variance and coverage, as
+`sqrt(variance / coverage)` at each pixel. Python can get those. `seiza stack` does not write them, PSF
 Guard's stacks do not hold them, and no other program's stack does either.
 Any step after stacking also leaves the variance out of date.
 
@@ -271,7 +278,9 @@ Two pieces of work follow.
   is about 25,000 numbers for a 26 MP frame instead of two full planes. It
   fits in a small FITS extension, so `seiza stack --noise-map` costs almost
   nothing and a stack carries its own map from then on. PSF Guard's cached
-  stacks can keep it the same way.
+  stacks can keep it the same way. This serves models trained on the
+  modelled map, as D22 was. The trainer's default is the raw per-pixel map,
+  so the card must say which map a model takes.
 - **Train on estimated maps.** Choose an estimator, calibrate it to the
   stack map's convention, and train and gate a run with estimated maps as a
   share of its batches. `NoiseMap::estimate` ships only after that run passes
@@ -303,11 +312,17 @@ and no inference.
 **CLI.**
 
 ```text
-seiza denoise stack.fits -o clean.fits --high-amount 0.7 --low-amount 0.9
-seiza denoise stack.fits -o clean.fits --ml-backend cpu --tile 512
-seiza models list | install <name> | verify | remove <name>
-seiza restore-info        # which backends run here, and why the others do not
+seiza model denoise stack.fits -o clean.fits --high-amount 0.7 --low-amount 0.9
+seiza model denoise stack.fits -o clean.fits --backend cpu --tile 512
+seiza model list | install <name> | verify | remove <name>
+seiza model backends      # which backends run here, and why the others do not
 ```
+
+Everything learned sits under `seiza model`, running and managing alike, so
+it reads apart from the classical commands: `seiza deconvolve` beside
+`seiza model sharpen`. `seiza process` fits less well, because `stretch`,
+`background` and `deconvolve` already process images at the top level and
+`seiza pipeline` already exists.
 
 `--high-amount` and `--low-amount` are the harness's names, so sheets and the
 CLI speak alike. Output is 32-bit FITS, written through `seiza-image-io`.
@@ -372,7 +387,7 @@ universal2. An Intel Mac gets `BackendUnavailable` unless a library is found.
 
 A bundle holds `model-f32.onnx`, `model-f16.onnx` and `card.json`, verified
 and installed through `seiza-download`, as catalogues are, under a new
-`/models/v1/` path. `seiza models install` fetches only the precision the
+`/models/v1/` path. `seiza model install` fetches only the precision the
 backend needs. A host can ship a bundle instead.
 
 The card is written from a list of allowed fields, never by copying
@@ -417,14 +432,14 @@ requires, so earlier steps keep their items `pub(crate)` until step 4.
 | 0 | **Spike and measure.** A throwaway Rust binary on `ort` rc.13 with `load-dynamic`, run on macOS, Windows and Linux. Measure CUDA, TensorRT, TensorRT-RTX and CPU on NVIDIA, and WebGPU and CPU on Intel Xe, with parity. Repeat the GPU rows on an idle Mac. | The backend table is filled in and NVIDIA's shipped provider is chosen. |
 | 1 | **Bundle export** in `training/`. Dynamic f32 and f16 graphs, `card.json` from the allow-list, fixtures, the output bound in the harness. | `bundle --run NAME` makes a bundle that passes a parity check in Python. |
 | 2 | **`seiza-restore` core**, no ONNX Runtime. Tiling, sky, noise map, scales, bands, the bound, `ModelCard`, `OUTPUT_VERSION`. | Rust matches the harness on fixtures through a closure runner. |
-| 3 | **Backends.** `TileRunner` on `ort`, detection, library search, compile cache, cancel. `seiza restore-info`, with its C and Python twins. | Fixture parity on the CPU provider in CI on all three systems; Core ML on a Mac. |
-| 4 | **`denoise` end to end.** `NoiseModel`, `Denoised`, CLI, C ABI, Python, parity entries, provenance. Marked experimental. | `seiza denoise` matches the harness on a real image within budget, on every backend from step 0. |
+| 3 | **Backends.** `TileRunner` on `ort`, detection, library search, compile cache, cancel. `seiza model backends`, with its C and Python twins. | Fixture parity on the CPU provider in CI on all three systems; Core ML on a Mac. |
+| 4 | **`denoise` end to end.** `NoiseModel`, `Denoised`, CLI, C ABI, Python, parity entries, provenance. Marked experimental. | `seiza model denoise` matches the harness on a real image within budget, on every backend from step 0. |
 | 5 | **Noise maps with stacks.** `seiza stack --noise-map`, the FITS extension, `NoiseMap::from_stack_planes`. | A stack written by the CLI denoises as Python's does. |
 | 6 | **Harness on the runtime.** `evaluate-noise` and the sheets through `seiza.NoiseModel`. | One run's measures and seam maps agree with the PyTorch path. |
 | 7 | **Estimated maps.** Choose and calibrate the estimator, train, gate. Needs GPU time. | A run with estimated maps passes the noise gates. |
-| 8 | **Model delivery.** `seiza models`, `/models/v1/`, `seiza setup`. | A clean machine installs a model and denoises. |
+| 8 | **Model delivery.** `seiza model install`, `/models/v1/`, `seiza setup`. | A clean machine installs a model and denoises. |
 | 9 | **Packaging**, one PR per channel, each with a smoke test on an installed package. | Each row of the table above runs a tile after install. |
-| 10 | **PSF and star models**, as they pass their gates. | `sharpen` and `separate-stars` on the same runner. |
+| 10 | **PSF and star models**, as they pass their gates. | `seiza model sharpen` and `seiza model separate-stars` on the same runner. |
 
 Step 0 gates the rest only where it says so. Steps 1 and 2 can start at once
 and run side by side. Steps 5 and 7 touch no runtime code and can run beside
