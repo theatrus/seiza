@@ -772,15 +772,19 @@ frame's in a few samples, which a median leaves out, and the frame's wings a
 little above the reference's across many more, which move it by their mean. On
 a crowded synthetic field a frame blurred from sigma 1.6 to 3.6 px had offsets
 1.65 low on average, against a sky noise of 4, and 3.1 low in the tile of a
-bright star, so its sky came out low wherever stars are. The fit now leaves out
-the samples within 1.5 times the broadest FWHM photometry measures whole, 4.5
-times the reference's, of the stars photometry measures, in the live pass, on
-the GPU and in a reintegration's refit alike, and a tile left too few samples
-takes its neighbours' offset. That frame's offsets are 0.12 low on average and
-0.64 at most. On the two C925 nights, with tiles of 256 px and bright stars
-fewer for their size, the offsets of the quarter of frames in the worst seeing
-rose by 0.05 and 0.07 on average and by up to 0.3 and 1.0 in a tile, against a
-sky noise of 10 and 14; those of the best quarter moved by less than 0.02.
+bright star, so its sky came out low wherever stars are. The fit now leaves
+out the samples within 1.5 times the broadest FWHM photometry measures whole,
+4.5 times the reference's, of the stars photometry measures, in the live pass,
+on the GPU and in a reintegration's refit alike, and a binned stack's mask
+goes with it to the sensor's grid for its full-resolution reintegration. A
+tile the mask leaves less than a quarter of takes its neighbours' offset,
+crowded stars shrink every disc until the mask leaves at least half the grid,
+and a reference whose stars give no width has no mask at all. That frame's
+offsets are 0.12 low on average and 0.64 at most. On the two C925 nights, with
+tiles of 256 px and bright stars fewer for their size, the offsets of the
+quarter of frames in the worst seeing rose by 0.05 and 0.07 on average and by
+up to 0.3 and 1.0 in a tile, against a sky noise of 10 and 14; those of the
+best quarter moved by less than 0.02.
 
 Matching every frame's background to one reference frame copies that frame's
 gradient, vignetting and banding into the whole stack. So reintegration
