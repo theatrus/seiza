@@ -529,9 +529,9 @@ pub(crate) struct CanvasRegistrar {
     height: usize,
     windows: Vec<Window>,
     stars: Vec<(f64, f64)>,
-    /// The canvas's [`crate::normalization::photometric_ceilings`], which
-    /// photometry would otherwise read the whole canvas for, frame by frame.
-    ceilings: Vec<f32>,
+    /// The canvas's [`crate::normalization::ReferencePhotometry`] at its
+    /// stars, which photometry would otherwise measure frame by frame.
+    photometry: crate::normalization::ReferencePhotometry,
     /// The lens the canvas is undistorted from, when planning measured one.
     lens: Option<LensDistortion>,
     summary: Option<crate::ExpandedLens>,
@@ -543,7 +543,7 @@ pub(crate) struct CanvasRegistrar {
 
 impl CanvasRegistrar {
     pub(crate) fn update_photometry(&mut self, image: &LinearImage) {
-        self.ceilings = crate::normalization::photometric_ceilings(image);
+        self.photometry.update(image);
     }
 
     /// Panels at `regions` of `canvas`, matching the stars planning saved
@@ -668,13 +668,14 @@ impl CanvasRegistrar {
                     .map(|(x, y)| (x + window.region.x as f64, y + window.region.y as f64))
             })
             .filter(|(x, y)| seen.insert((x.round() as i64, y.round() as i64)))
-            .collect();
+            .collect::<Vec<_>>();
+        let photometry = crate::normalization::ReferencePhotometry::measure(canvas);
         Self {
             width: canvas.width,
             height: canvas.height,
             windows,
             stars,
-            ceilings: crate::normalization::photometric_ceilings(canvas),
+            photometry,
             lens,
             summary: None,
             planning_notes: Vec::new(),
@@ -747,9 +748,9 @@ impl CanvasRegistrar {
         self.stars.clone()
     }
 
-    /// The canvas's [`crate::normalization::photometric_ceilings`].
-    pub(crate) fn photometric_ceilings(&self) -> &[f32] {
-        &self.ceilings
+    /// The canvas's [`crate::normalization::ReferencePhotometry`].
+    pub(crate) fn photometry(&self) -> &crate::normalization::ReferencePhotometry {
+        &self.photometry
     }
 
     /// The best-matched registration among the panels, warped against that

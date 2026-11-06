@@ -731,6 +731,40 @@ which inflate a hazy frame's dispersion; its gain then came out low, its
 noise was scaled down, and inverse-noise weighting gave the cloudiest M45
 frames the largest weights. Photometric gains rank them last.
 
+Seeing spreads a star's light without taking any of it away, so the aperture
+must hold nearly all of a star's light in every frame, or the gain follows the
+seeing as well as the sky. A fixed 5 px aperture lost more of a blurred
+frame's stars than of a sharp one's, and scaled the blurred frame up: by 1.67
+for a synthetic frame whose Gaussian seeing had grown from sigma 1.6 to 3.6
+px, and through a C925 at 0.33"/px, on a night of the Elephant's Trunk in Hα
+whose frames measured 8 to 21 px FWHM, by 2.96 for the worst quarter of the
+frames against 1.05 for the best, and three were turned away for gains above
+four. Each channel's aperture is now three times the FWHM of the broader of
+the reference's stars and the frame's, both measured from the pixels above
+half of each star's peak, and its sky the median of the annulus from four to
+five times that FWHM. Both images are measured in the same pixels, so a
+neighbour or nebulosity inside them counts alike in each. The annulus leaves
+out the pixels within two FWHM of the other stars measured: a sharp frame
+holds a neighbour's light in a few pixels far above the noise, which move a
+median little, but a blurred one spreads it thinly under the noise, where it
+lifts the median by its mean, and on a crowded synthetic field that alone
+raised the most blurred frame's gain by 3.6%. Where the other stars would
+leave less than a quarter of an annulus, the whole of it is used. The
+synthetic night's gains now stay within 1% of the transparency, dimmed or not,
+and within 3.5% for stars with the broad wings of a Moffat profile of beta
+2.5, or 5% where the brightest stars crowd each other. On the Trunk night the
+worst quarter's gain is 1.09 against the best's 1.00, and it rises with the
+hour rather than the seeing: frames 13 to 21 px across had gains of 1.03 to
+1.05 just after eleven, and frames 13 to 14.5 px across 1.10 to 1.14 after
+two. Frames whose stars are up to three times as broad as the reference's are
+measured whole, and broader ones at that scale, which is as far as photometry
+reads about each star of a frame gathered from the GPU. Where too few stars
+fit that scale, beside the edges or among saturated stars, photometry tries
+scales a third smaller in turn rather than take the gain from the frames'
+dispersion. A star that either image clips is left out by its flat top, since
+the reference's brightest sample cannot say where a frame exposed longer, or
+under a clearer sky, clips: such stars raised a frame's gain by 9%.
+
 Matching every frame's background to one reference frame copies that frame's
 gradient, vignetting and banding into the whole stack. So reintegration
 refits each frame's background offsets against an integration of the twenty

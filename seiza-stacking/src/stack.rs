@@ -739,11 +739,11 @@ pub struct LiveStacker {
     /// Per-channel noise of the reference frame, the unit of frame weights.
     /// Empty when frames are weighted equally.
     reference_noise: Vec<f32>,
-    /// The reference's [`crate::normalization::photometric_ceilings`],
-    /// measured the first time a frame needs them rather than for every
-    /// frame: on a 26 MP colour reference that pass was 11% of preparing a
-    /// frame.
-    reference_ceilings: std::sync::OnceLock<Vec<f32>>,
+    /// The reference's [`crate::normalization::ReferencePhotometry`],
+    /// measured the first time a frame needs it rather than for every
+    /// frame: on a 26 MP colour reference its ceilings' pass alone was 11%
+    /// of preparing a frame.
+    reference_photometry: std::sync::OnceLock<crate::normalization::ReferencePhotometry>,
     /// Where the reference's local background tiles lie among a gathered
     /// frame's samples, once a frame has been gathered.
     #[cfg(feature = "gpu")]
@@ -919,7 +919,7 @@ impl LiveStacker {
                     registrar: &registrar,
                     canvas: None,
                     known: None,
-                    ceilings: &std::sync::OnceLock::new(),
+                    photometry: &std::sync::OnceLock::new(),
                     #[cfg(feature = "gpu")]
                     fit_tiles: &std::sync::OnceLock::new(),
                 },
@@ -1343,7 +1343,7 @@ impl LiveStacker {
             canvas_registrar: self.canvas_registrar.clone(),
             reference_noise: self.reference_noise.clone(),
             // Of the full-resolution reference, not this one's.
-            reference_ceilings: std::sync::OnceLock::new(),
+            reference_photometry: std::sync::OnceLock::new(),
             #[cfg(feature = "gpu")]
             fit_tiles: std::sync::OnceLock::new(),
             accumulator: Accumulator::new(0, !self.options.weighting.is_equal()),
@@ -1538,7 +1538,7 @@ impl LiveStacker {
             planned_registrations: Default::default(),
             canvas_registrar,
             reference_noise,
-            reference_ceilings: std::sync::OnceLock::new(),
+            reference_photometry: std::sync::OnceLock::new(),
             #[cfg(feature = "gpu")]
             fit_tiles: std::sync::OnceLock::new(),
             accumulator,
@@ -1843,7 +1843,7 @@ impl LiveStacker {
             planned_registrations: Default::default(),
             canvas_registrar,
             reference_noise: restored.reference_noise,
-            reference_ceilings: std::sync::OnceLock::new(),
+            reference_photometry: std::sync::OnceLock::new(),
             #[cfg(feature = "gpu")]
             fit_tiles: std::sync::OnceLock::new(),
             accumulator: Accumulator::from_moments(
@@ -2119,7 +2119,7 @@ impl LiveStacker {
                     &self.planned_registrations,
                     frame.source.as_ref(),
                 )?,
-                ceilings: &self.reference_ceilings,
+                photometry: &self.reference_photometry,
                 #[cfg(feature = "gpu")]
                 fit_tiles: &self.fit_tiles,
             },
@@ -2194,7 +2194,7 @@ impl LiveStacker {
                 registrar: &self.registrar,
                 canvas: self.canvas_registrar.as_ref(),
                 known: None,
-                ceilings: &self.reference_ceilings,
+                photometry: &self.reference_photometry,
                 #[cfg(feature = "gpu")]
                 fit_tiles: &self.fit_tiles,
             },
@@ -2231,7 +2231,7 @@ impl LiveStacker {
                 calibration: &self.calibration,
                 options: &self.options,
                 reference_noise: &self.reference_noise,
-                reference_ceilings: &self.reference_ceilings,
+                reference_photometry: &self.reference_photometry,
                 #[cfg(feature = "gpu")]
                 fit_tiles: &self.fit_tiles,
                 frame_cache: cache_files,
@@ -2912,9 +2912,9 @@ pub(crate) struct FrameRegistration<'a> {
     pub registrar: &'a Registrar,
     pub canvas: Option<&'a crate::expand::CanvasRegistrar>,
     pub known: Option<std::result::Result<&'a crate::RegistrationResult, &'a str>>,
-    /// The reference's photometric ceilings once measured, for every frame
-    /// prepared against the same reference.
-    pub ceilings: &'a std::sync::OnceLock<Vec<f32>>,
+    /// The reference's photometry once measured, for every frame prepared
+    /// against the same reference.
+    pub photometry: &'a std::sync::OnceLock<crate::normalization::ReferencePhotometry>,
     /// The reference's local background tiles among gathered samples.
     #[cfg(feature = "gpu")]
     pub fit_tiles: &'a std::sync::OnceLock<Option<crate::normalization::GatheredTiles>>,
@@ -2940,15 +2940,19 @@ impl FrameRegistration<'_> {
         }
     }
 
-    /// The [`crate::normalization::photometric_ceilings`] of `reference`,
-    /// which an expanded canvas measured once, as do [`Self::ceilings`]
-    /// the first time they are asked for.
-    fn reference_ceilings(&self, reference: &LinearImage) -> &[f32] {
+    /// The [`crate::normalization::ReferencePhotometry`] of `reference`,
+    /// which an expanded canvas keeps, as does [`Self::photometry`] once it
+    /// is first asked for. Its stars' widths are measured at
+    /// [`Self::reference_star_positions`] when a frame first needs them.
+    fn reference_photometry(
+        &self,
+        reference: &LinearImage,
+    ) -> &crate::normalization::ReferencePhotometry {
         match self.canvas {
-            Some(canvas) if !resamples_whole_canvas() => canvas.photometric_ceilings(),
+            Some(canvas) if !resamples_whole_canvas() => canvas.photometry(),
             _ => self
-                .ceilings
-                .get_or_init(|| crate::normalization::photometric_ceilings(reference)),
+                .photometry
+                .get_or_init(|| crate::normalization::ReferencePhotometry::measure(reference)),
         }
     }
 }
@@ -3080,6 +3084,11 @@ pub(crate) fn prepare_frame(
     } else {
         Vec::new()
     };
+    let photometry = matches!(
+        options.normalization,
+        NormalizationMode::LocalBackground { .. }
+    )
+    .then(|| target.reference_photometry(reference));
     #[cfg(feature = "gpu")]
     let mut sampled = None;
     #[cfg(feature = "gpu")]
@@ -3101,6 +3110,7 @@ pub(crate) fn prepare_frame(
             (region.width, region.height, frame.channels),
             scale.normalization(options.normalization),
             &stars,
+            photometry.map_or(0, |photometry| photometry.reach(reference, &stars)),
         )
         .and_then(|plan| {
             let (image, mask, gpu_frame) = crate::registration::resample_region_retained(
@@ -3200,19 +3210,9 @@ pub(crate) fn prepare_frame(
         }),
         ..placed
     };
-    let gains = matches!(
-        options.normalization,
-        NormalizationMode::LocalBackground { .. }
-    )
-    .then(|| {
-        crate::normalization::photometric_gains(
-            reference,
-            target.reference_ceilings(reference),
-            placed,
-            &stars,
-        )
-    })
-    .flatten();
+    let gains = photometry.and_then(|photometry| {
+        crate::normalization::photometric_gains(reference, photometry, placed, &stars)
+    });
     #[cfg(feature = "gpu")]
     trace.mark("coverage and photometry");
     // An expanded canvas keeps the first value each sample received, so its
@@ -3467,7 +3467,8 @@ pub(crate) struct PreparationHalf<'a> {
     pub(crate) calibration: &'a CalibrationMasters,
     pub(crate) options: &'a StackOptions,
     pub(crate) reference_noise: &'a [f32],
-    pub(crate) reference_ceilings: &'a std::sync::OnceLock<Vec<f32>>,
+    pub(crate) reference_photometry:
+        &'a std::sync::OnceLock<crate::normalization::ReferencePhotometry>,
     #[cfg(feature = "gpu")]
     pub(crate) fit_tiles: &'a std::sync::OnceLock<Option<crate::normalization::GatheredTiles>>,
     /// Where a stack kept for reintegration writes each frame's registered

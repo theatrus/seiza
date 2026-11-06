@@ -368,30 +368,32 @@ impl BackgroundSamples {
 /// Every pixel the existing CPU preparation may inspect, including the
 /// fallback gain fit and the replay's background sample grid. No values are
 /// approximated: gathered frames use these same CPU fits and sample order.
+/// Photometry reads up to `reach` from each of `stars` along either axis,
+/// the reference's [`ReferencePhotometry::reach`].
 #[cfg(feature = "gpu")]
 pub(crate) fn preparation_sample_indices(
     (width, height, channels): (usize, usize, usize),
     mode: NormalizationMode,
     stars: &[(f64, f64)],
+    reach: usize,
     background: Option<&BackgroundSamples>,
 ) -> Vec<u32> {
-    fn add(
-        indices: &mut Vec<u32>,
-        image_width: usize,
-        channels: usize,
-        (x, y, width, height): (usize, usize, usize, usize),
-        target: usize,
-    ) {
-        let stride = (width * height / target).max(1);
-        for sample in (0..width * height).step_by(stride) {
-            let pixel = (y + sample / width) * image_width + x + sample % width;
-            indices.extend((0..channels).map(|channel| (pixel * channels + channel) as u32));
+    // Each pixel read, once, in a bit of its own: the stars' circles
+    // overlap the tiles' samples and each other, and marking them costs a
+    // bit a pixel where collecting, sorting and deduplicating every index
+    // cost the indices of every channel of every pixel, many times over.
+    let mut read = vec![0_u64; (width * height).div_ceil(64)];
+    let mut mark = |pixel: usize| read[pixel / 64] |= 1 << (pixel % 64);
+    let mut add = |(x, y, region_width, region_height): (usize, usize, usize, usize),
+                   target: usize| {
+        let stride = (region_width * region_height / target).max(1);
+        for sample in (0..region_width * region_height).step_by(stride) {
+            mark((y + sample / region_width) * width + x + sample % region_width);
         }
-    }
-    let mut indices = Vec::new();
+    };
     let whole = (0, 0, width, height);
     if !matches!(mode, NormalizationMode::None) {
-        add(&mut indices, width, channels, whole, 20_000);
+        add(whole, 20_000);
     }
     if let NormalizationMode::LocalBackground { tile_size }
     | NormalizationMode::Local { tile_size } = mode
@@ -404,54 +406,51 @@ pub(crate) fn preparation_sample_indices(
             20_000
         };
         for cell in 0..columns * rows {
-            add(
-                &mut indices,
-                width,
-                channels,
-                tile(cell, columns, width, height, tile_size),
-                target,
-            );
+            add(tile(cell, columns, width, height, tile_size), target);
         }
     }
     if matches!(mode, NormalizationMode::LocalBackground { .. }) {
-        add(&mut indices, width, channels, whole, 4_000);
-        let outer = PHOTOMETRY_ANNULUS.1.ceil() as isize + 1;
+        add(whole, 4_000);
+        let (reach, within) = (reach as isize, (reach * reach) as f64);
         for &(x, y) in stars {
             let (cx, cy) = (x.round() as isize, y.round() as isize);
-            if cx < outer
-                || cy < outer
-                || cx + outer >= width as isize
-                || cy + outer >= height as isize
-            {
-                continue;
-            }
-            // Photometry rejects non-finite values throughout the square,
-            // even beyond the circular aperture and annulus.
-            for py in cy - outer..=cy + outer {
-                for px in cx - outer..=cx + outer {
-                    let pixel = py as usize * width + px as usize;
-                    indices
-                        .extend((0..channels).map(|channel| (pixel * channels + channel) as u32));
+            // Photometry reads within a circle about each star, smaller for
+            // a sharper frame, which may fit beside an edge that the whole
+            // reach would cross.
+            let rows = (cy - reach).max(0)..=(cy + reach).min(height as isize - 1);
+            let columns = (cx - reach).max(0)..=(cx + reach).min(width as isize - 1);
+            for py in rows {
+                for px in columns.clone() {
+                    if (px as f64 - x).powi(2) + (py as f64 - y).powi(2) <= within {
+                        mark(py as usize * width + px as usize);
+                    }
                 }
             }
         }
     }
     if let Some(layout) = background {
         for cell in 0..layout.columns * layout.height.div_ceil(layout.tile_size) {
-            let (x, y, width, height) = tile(
+            let (x, y, tile_width, tile_height) = tile(
                 cell,
                 layout.columns,
                 layout.width,
                 layout.height,
                 layout.tile_size,
             );
-            for pixel in tile_sample_pixels(layout.width, x, y, width, height) {
-                indices.extend((0..channels).map(|channel| (pixel * channels + channel) as u32));
+            for pixel in tile_sample_pixels(layout.width, x, y, tile_width, tile_height) {
+                mark(pixel);
             }
         }
     }
-    indices.sort_unstable();
-    indices.dedup();
+    let mut indices = Vec::new();
+    for (word, &bits) in read.iter().enumerate() {
+        let mut bits = bits;
+        while bits != 0 {
+            let pixel = word * 64 + bits.trailing_zeros() as usize;
+            indices.extend((0..channels).map(|channel| (pixel * channels + channel) as u32));
+            bits &= bits - 1;
+        }
+    }
     indices
 }
 
@@ -1586,12 +1585,125 @@ fn fill_and_smooth_offsets(
     }
 }
 
-/// Aperture radius, and the annulus that measures each star's local
-/// background, in pixels.
-const PHOTOMETRY_APERTURE: f64 = 5.0;
-const PHOTOMETRY_ANNULUS: (f64, f64) = (8.0, 12.0);
-/// Stars needed for a photometric gain.
+/// Photometry measures each star in a circular aperture whose radius is
+/// `PHOTOMETRY_APERTURE` times a FWHM, and its local background in the
+/// annulus between `PHOTOMETRY_ANNULUS` times it: the FWHM of the broader of
+/// the reference's stars and the frame's, so that both images are measured
+/// in the same pixels, which hold nearly all of either's light.
+const PHOTOMETRY_APERTURE: f64 = 3.0;
+const PHOTOMETRY_ANNULUS: (f64, f64) = (4.0, 5.0);
+/// The annulus a star's width is measured over, in FWHMs: closer than the
+/// photometry's, since the half of the peak it finds the width at moves
+/// little with the sky, and so a smaller stamp, which more stars fit.
+const PHOTOMETRY_WIDTH_ANNULUS: (f64, f64) = (2.5, 3.5);
+/// How far from each of the other stars photometry measures, in FWHMs, a
+/// pixel of a star's annulus must lie to count toward its sky; and the
+/// share of the annulus that must be left for the rest to be left out.
+const PHOTOMETRY_NEIGHBOUR_MASK: f64 = 2.0;
+const PHOTOMETRY_ANNULUS_LEFT: f64 = 0.25;
+/// The narrowest FWHM the geometry scales with, in pixels: an aperture 6 px
+/// in radius, for stars sampled more coarsely than that.
+const PHOTOMETRY_MINIMUM_FWHM: f64 = 2.0;
+/// How many times as broad as the reference's a frame's stars may be and
+/// still be measured whole. Broader ones are measured at that scale, which
+/// is as far as a frame gathered from the GPU reaches.
+const PHOTOMETRY_BROADENING: f64 = 3.0;
+/// The broadest stars a reference's FWHM is measured for, in pixels, and
+/// the broadest a frame's are measured at when the reference's stars give
+/// no width.
+const PHOTOMETRY_MAXIMUM_FWHM: f64 = 32.0;
+/// How far above its sky, in sigmas of the sky's noise, a star's peak must
+/// stand for its width to count.
+const PHOTOMETRY_WIDTH_SNR: f32 = 10.0;
+/// Stars needed for a photometric gain, and for a FWHM.
 const PHOTOMETRY_MINIMUM_STARS: usize = 12;
+const PHOTOMETRY_WIDTH_STARS: usize = 3;
+/// Each smaller scale photometry tries, where too few stars fit the last,
+/// is this much smaller.
+const PHOTOMETRY_SHRINK: f64 = 1.5;
+
+/// What photometric normalization reads of a reference, which a stack
+/// measures once for every frame it normalizes against it: the ceilings at
+/// once, and its stars' widths the first time a frame is measured.
+#[derive(Clone, Debug)]
+pub(crate) struct ReferencePhotometry {
+    /// Each channel's [`photometric_ceilings`].
+    ceilings: Vec<f32>,
+    widths: std::sync::OnceLock<ReferenceWidths>,
+}
+
+/// The FWHM of a reference's stars, and how broad a frame's photometry may
+/// scale.
+#[derive(Clone, Debug)]
+struct ReferenceWidths {
+    /// Each channel's FWHM at the reference's stars, in pixels, or `None`
+    /// where too few measure.
+    widths: Vec<Option<f64>>,
+    /// The broadest FWHM a frame's photometry scales with:
+    /// [`PHOTOMETRY_BROADENING`] times the reference's broadest channel's,
+    /// or [`PHOTOMETRY_MAXIMUM_FWHM`] when no channel's is known.
+    broadest: f64,
+}
+
+impl ReferencePhotometry {
+    /// `reference`'s ceilings; its stars' widths are measured when a frame
+    /// first needs them, through [`Self::widths`].
+    pub(crate) fn measure(reference: &LinearImage) -> Self {
+        Self {
+            ceilings: photometric_ceilings(reference),
+            widths: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// The ceilings of `reference` again, a canvas that has grown, keeping
+    /// the widths of its stars when they have been measured: frames add
+    /// samples where the canvas had none, which change its brightest sample
+    /// but not the seeing of the stars already there.
+    pub(crate) fn update(&mut self, reference: &LinearImage) {
+        self.ceilings = photometric_ceilings(reference);
+    }
+
+    /// The widths of `reference`'s stars at `stars`, measured the first
+    /// time they are asked for: `reference` and `stars` are those the
+    /// photometry was measured for.
+    fn widths(&self, reference: &LinearImage, stars: &[(f64, f64)]) -> &ReferenceWidths {
+        self.widths.get_or_init(|| {
+            let (grid, channels) = ((reference.width, reference.height), reference.channels);
+            let widths = (0..channels)
+                .map(|channel| {
+                    let at =
+                        |x: usize, y: usize| reference.data[(y * grid.0 + x) * channels + channel];
+                    let ceiling = self.ceilings.get(channel).copied().unwrap_or(f32::MIN);
+                    let saturated = |x: usize, y: usize| at(x, y) >= 0.85 * ceiling;
+                    image_width(
+                        &at,
+                        &saturated,
+                        grid,
+                        stars,
+                        PHOTOMETRY_MINIMUM_FWHM,
+                        PHOTOMETRY_MAXIMUM_FWHM,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let broadest = widths
+                .iter()
+                .flatten()
+                .copied()
+                .reduce(f64::max)
+                .map_or(PHOTOMETRY_MAXIMUM_FWHM, |width| {
+                    PHOTOMETRY_BROADENING * width.max(PHOTOMETRY_MINIMUM_FWHM)
+                });
+            ReferenceWidths { widths, broadest }
+        })
+    }
+
+    /// How far from each of `stars`, along either axis, photometry may read
+    /// a frame normalized against `reference`, whose photometry this is.
+    #[cfg(feature = "gpu")]
+    pub(crate) fn reach(&self, reference: &LinearImage, stars: &[(f64, f64)]) -> usize {
+        stamp(self.widths(reference, stars).broadest)
+    }
+}
 
 /// Per-channel gains that carry `source`'s star fluxes onto `reference`'s:
 /// the median ratio of background-subtracted aperture fluxes at `stars`,
@@ -1601,19 +1713,42 @@ const PHOTOMETRY_MINIMUM_STARS: usize = 12;
 /// frames' dispersion also follows their gradients and cloud, which inflate
 /// a hazy frame's dispersion; that gain then comes out low, scaling the
 /// frame's noise down, so inverse-noise weighting gave cloudy frames the
-/// largest weights. Stars near saturation in the reference are skipped.
-/// `None` when fewer than [`PHOTOMETRY_MINIMUM_STARS`] measure cleanly in a
-/// channel.
+/// largest weights. Stars near saturation in the reference are skipped, as
+/// are stars with a flat top in either image. `None` when fewer than
+/// [`PHOTOMETRY_MINIMUM_STARS`] measure cleanly in a channel at any scale.
 ///
-/// `ceilings` are the reference's [`photometric_ceilings`], which a stack
+/// Seeing spreads a star's light without taking any away, so the aperture
+/// must hold nearly all of it in both images, or the gain follows the
+/// seeing too: a fixed 5 px aperture lost more of a blurred frame's stars,
+/// and scaled a frame whose Gaussian seeing had grown from sigma 1.6 to
+/// 3.6 px up by 1.67. Each channel's aperture is [`PHOTOMETRY_APERTURE`]
+/// times the FWHM of the broader of the two images' stars, measured on
+/// both: the same pixels in each, so that neighbours and nebulosity in them
+/// count alike, and nearly all of a star's light in either, 97% or more
+/// even for the broad wings of a Moffat profile of beta 2.5. The gain of
+/// that frame is now within 1% of the transparency, and of Moffat stars
+/// as blurred within 3.5%. Frames up to [`PHOTOMETRY_BROADENING`] times as
+/// blurred as the reference are measured whole. Where too few stars fit
+/// that scale, beside the edges or among saturated neighbours, each scale
+/// [`PHOTOMETRY_SHRINK`] times smaller is tried in turn, down to the
+/// narrowest: a smaller aperture loses some of a blurred frame's light, but
+/// a gain from the frames' dispersion would follow its cloud.
+///
+/// `photometry` is the reference's [`ReferencePhotometry`], which a stack
 /// measures once rather than for every frame.
 pub(crate) fn photometric_gains(
     reference: &LinearImage,
-    ceilings: &[f32],
+    photometry: &ReferencePhotometry,
     source: Placed<'_>,
     stars: &[(f64, f64)],
 ) -> Option<Vec<f32>> {
-    photometric_gains_with(reference, ceilings, source, stars, PHOTOMETRY_MINIMUM_STARS)
+    photometric_gains_with(
+        reference,
+        photometry,
+        source,
+        stars,
+        PHOTOMETRY_MINIMUM_STARS,
+    )
 }
 
 /// [`photometric_gains`] from at least `minimum` cleanly measured stars.
@@ -1628,7 +1763,7 @@ pub(crate) fn photometric_gains_from(
     }
     photometric_gains_with(
         reference,
-        &photometric_ceilings(reference),
+        &ReferencePhotometry::measure(reference),
         source,
         stars,
         minimum,
@@ -1638,7 +1773,7 @@ pub(crate) fn photometric_gains_from(
 /// The brightest finite sample of each channel of `reference`, or
 /// `f32::MIN` for a channel with none: photometry skips a star whose
 /// aperture reaches 85% of it.
-pub(crate) fn photometric_ceilings(reference: &LinearImage) -> Vec<f32> {
+fn photometric_ceilings(reference: &LinearImage) -> Vec<f32> {
     let channels = reference.channels;
     (0..channels)
         .map(|channel| {
@@ -1655,80 +1790,442 @@ pub(crate) fn photometric_ceilings(reference: &LinearImage) -> Vec<f32> {
 }
 
 /// [`photometric_gains_from`] given the reference's
-/// [`photometric_ceilings`].
+/// [`ReferencePhotometry`].
 fn photometric_gains_with(
     reference: &LinearImage,
-    ceilings: &[f32],
+    photometry: &ReferencePhotometry,
     source: Placed<'_>,
     stars: &[(f64, f64)],
     minimum: usize,
 ) -> Option<Vec<f32>> {
-    if !source.matches(reference) || ceilings.len() != reference.channels {
+    let channels = reference.channels;
+    if !source.matches(reference) || photometry.ceilings.len() != channels {
         return None;
     }
-    let channels = reference.channels;
-    let (width, height) = (reference.width, reference.height);
-    let outer = PHOTOMETRY_ANNULUS.1.ceil() as usize + 1;
+    let ReferenceWidths { widths, broadest } = photometry.widths(reference, stars);
+    let grid = (reference.width, reference.height);
     (0..channels)
         .map(|channel| {
-            let ceiling = ceilings[channel];
-            let mut ratios = stars
-                .iter()
-                .filter_map(|&(x, y)| {
-                    let (cx, cy) = (x.round() as isize, y.round() as isize);
-                    if cx < outer as isize
-                        || cy < outer as isize
-                        || cx + outer as isize >= width as isize
-                        || cy + outer as isize >= height as isize
-                    {
-                        return None;
-                    }
-                    let (cx, cy) = (cx as usize, cy as usize);
-                    let mut reference_annulus = Vec::new();
-                    let mut source_annulus = Vec::new();
-                    let mut aperture = Vec::new();
-                    for py in cy - outer..=cy + outer {
-                        for px in cx - outer..=cx + outer {
-                            let distance = (px as f64 - x).hypot(py as f64 - y);
-                            let index = (py * width + px) * channels + channel;
-                            let (r, s) = (reference.data[index], source.at(px, py, channel));
-                            if !r.is_finite() || !s.is_finite() {
-                                return None;
-                            }
-                            if distance <= PHOTOMETRY_APERTURE {
-                                aperture.push((r, s));
-                            } else if (PHOTOMETRY_ANNULUS.0..=PHOTOMETRY_ANNULUS.1)
-                                .contains(&distance)
-                            {
-                                reference_annulus.push(r);
-                                source_annulus.push(s);
-                            }
-                        }
-                    }
-                    if aperture.iter().any(|&(r, _)| r >= 0.85 * ceiling) {
-                        return None;
-                    }
-                    let reference_sky = median_in_place(&mut reference_annulus)?;
-                    let source_sky = median_in_place(&mut source_annulus)?;
-                    let (reference_flux, source_flux) =
-                        aperture
-                            .iter()
-                            .fold((0.0_f64, 0.0_f64), |(rf, sf), &(r, s)| {
-                                (
-                                    rf + f64::from(r - reference_sky),
-                                    sf + f64::from(s - source_sky),
-                                )
-                            });
-                    (reference_flux > 0.0 && source_flux > 0.0)
-                        .then(|| (reference_flux / source_flux) as f32)
-                })
-                .collect::<Vec<_>>();
-            if ratios.len() < minimum {
-                return None;
+            let ceiling = photometry.ceilings[channel];
+            let reference_at =
+                |x: usize, y: usize| reference.data[(y * grid.0 + x) * channels + channel];
+            let source_at = |x: usize, y: usize| source.at(x, y, channel);
+            let saturated = |x: usize, y: usize| reference_at(x, y) >= 0.85 * ceiling;
+            let reference_width = widths[channel];
+            let source_width = image_width(
+                &source_at,
+                &saturated,
+                grid,
+                stars,
+                reference_width.unwrap_or(PHOTOMETRY_MINIMUM_FWHM),
+                *broadest,
+            );
+            let mut scale = reference_width
+                .into_iter()
+                .chain(source_width)
+                .fold(PHOTOMETRY_MINIMUM_FWHM, f64::max)
+                .min(*broadest);
+            loop {
+                let mut ratios = stars
+                    .par_iter()
+                    .zip(neighbours(stars, scale, PHOTOMETRY_ANNULUS.1))
+                    .filter_map(|(&star, neighbours)| {
+                        let star = Star {
+                            at: star,
+                            neighbours: &neighbours,
+                        };
+                        star_ratio(&reference_at, &source_at, &saturated, grid, star, scale)
+                    })
+                    .collect::<Vec<_>>();
+                if ratios.len() >= minimum {
+                    return median_in_place(&mut ratios)
+                        .filter(|gain| gain.is_finite() && *gain > 0.0);
+                }
+                if scale <= PHOTOMETRY_MINIMUM_FWHM {
+                    return None;
+                }
+                scale = (scale / PHOTOMETRY_SHRINK).max(PHOTOMETRY_MINIMUM_FWHM);
             }
-            median_in_place(&mut ratios).filter(|gain| gain.is_finite() && *gain > 0.0)
         })
         .collect()
+}
+
+/// How far from a star, along either axis, photometry at `scale` reads: to
+/// its annulus's outer edge, and a pixel more.
+fn stamp(scale: f64) -> usize {
+    stamp_for(scale, PHOTOMETRY_ANNULUS.1)
+}
+
+/// How far from a star, along either axis, a measurement at `scale` reads
+/// whose annulus ends `outer` times it out.
+fn stamp_for(scale: f64, outer: f64) -> usize {
+    (outer * scale).ceil() as usize + 1
+}
+
+/// A star photometry measures, and the others near it.
+#[derive(Clone, Copy)]
+struct Star<'a> {
+    at: (f64, f64),
+    neighbours: &'a [(f64, f64)],
+}
+
+impl Star<'_> {
+    /// The square of pixels within `half` of the pixel nearest the star, as
+    /// its first and last columns and rows, or `None` when it leaves a grid
+    /// of `width` by `height`.
+    fn square(
+        &self,
+        half: usize,
+        (width, height): (usize, usize),
+    ) -> Option<(usize, usize, usize, usize)> {
+        let (x, y) = self.at;
+        let (cx, cy, half) = (x.round() as isize, y.round() as isize, half as isize);
+        if cx < half || cy < half || cx + half >= width as isize || cy + half >= height as isize {
+            return None;
+        }
+        let (cx, cy, half) = (cx as usize, cy as usize, half as usize);
+        Some((cx - half, cy - half, cx + half, cy + half))
+    }
+
+    /// Where each pixel of the star's square at `scale` lies, by its squared
+    /// distance from the star: within `inside` of it, in its annulus,
+    /// `annulus` times `scale` out, and clear of its neighbours, or in its
+    /// annulus beside one. `visit` is given the pixel and its squared
+    /// distance, in rows from the top and each row from the left, and stops
+    /// the walk with `None`. Only the pixels within the annulus's outer edge
+    /// are visited, and none of the gap between `inside` and its inner edge.
+    fn walk(
+        &self,
+        (x0, y0, x1, y1): (usize, usize, usize, usize),
+        inside: f64,
+        annulus: (f64, f64),
+        scale: f64,
+        mut visit: impl FnMut(usize, usize, f64, Place) -> Option<()>,
+    ) -> Option<()> {
+        let (x, y) = self.at;
+        let inside = inside * inside;
+        let inner = (annulus.0 * scale).powi(2);
+        let outer = (annulus.1 * scale).powi(2);
+        let clear = (PHOTOMETRY_NEIGHBOUR_MASK * scale).powi(2);
+        let reach = inside.max(outer);
+        for py in y0..=y1 {
+            let dy = py as f64 - y;
+            let rise = dy * dy;
+            if rise > reach {
+                continue;
+            }
+            // The row's span within reach, and the gap between the inside
+            // and the annulus to step over, each a pixel wide of its edge.
+            let half = (reach - rise).sqrt();
+            let first = (x - half).floor().max(x0 as f64) as usize;
+            let last = (x + half).ceil().min(x1 as f64) as usize;
+            let gap = (rise < inner).then(|| {
+                let within = (inside - rise).max(0.0).sqrt() + 1.0;
+                (within, (inner - rise).sqrt() - 1.0)
+            });
+            for px in first..=last {
+                let dx = px as f64 - x;
+                if let Some((within, beyond)) = gap
+                    && dx.abs() > within
+                    && dx.abs() < beyond
+                {
+                    continue;
+                }
+                let squared = dx * dx + rise;
+                let place = if squared <= inside {
+                    Place::Inside
+                } else if (inner..=outer).contains(&squared) {
+                    let beside = self.neighbours.iter().any(|&(nx, ny)| {
+                        let (ex, ey) = (px as f64 - nx, py as f64 - ny);
+                        ex * ex + ey * ey <= clear
+                    });
+                    if beside { Place::Beside } else { Place::Sky }
+                } else {
+                    continue;
+                };
+                visit(px, py, squared, place)?;
+            }
+        }
+        Some(())
+    }
+}
+
+/// Where a pixel of a star's square lies: see [`Star::walk`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Place {
+    Inside,
+    Sky,
+    Beside,
+}
+
+/// Each of `stars`' neighbours among them at `scale`: the others close
+/// enough to reach into its annulus, ending `outer` times `scale` out, with
+/// the pixels about them that [`PHOTOMETRY_NEIGHBOUR_MASK`] leaves out.
+///
+/// A median sky stands up to a neighbour's light where that stands far
+/// above the noise in a few pixels, as in a sharp frame. A blurred frame
+/// spreads the same light thinly across many pixels, under the noise, where
+/// it lifts the median by its mean: on a crowded field blurred from sigma
+/// 1.6 to 3.6 px that raised the gain by 3.6%. The stars photometry measures
+/// are the brightest, whose light that mostly is, so each star's annulus
+/// leaves out the pixels about the others, in both images alike.
+fn neighbours(stars: &[(f64, f64)], scale: f64, outer: f64) -> Vec<Vec<(f64, f64)>> {
+    let reach = (outer + PHOTOMETRY_NEIGHBOUR_MASK) * scale;
+    let mut order = (0..stars.len()).collect::<Vec<_>>();
+    order.sort_by(|&left, &right| stars[left].0.total_cmp(&stars[right].0));
+    stars
+        .par_iter()
+        .enumerate()
+        .map(|(index, &(x, y))| {
+            let first = order.partition_point(|&other| stars[other].0 < x - reach);
+            order[first..]
+                .iter()
+                .take_while(|&&other| stars[other].0 <= x + reach)
+                .filter(|&&other| other != index && (stars[other].1 - y).abs() <= reach)
+                .map(|&other| stars[other])
+                .collect()
+        })
+        .collect()
+}
+
+/// The ratio of `star`'s flux in the reference, which `reference_at`
+/// reads, to its flux in the frame `source_at` reads: each the sum over the
+/// aperture of [`PHOTOMETRY_APERTURE`] times `scale` in radius, less for
+/// each pixel the median of the annulus between [`PHOTOMETRY_ANNULUS`]
+/// times it, clear of the star's neighbours. `None` where its square leaves
+/// the grid, where either image misses a sample it reads, where
+/// `saturated` says a pixel of the aperture is, where either image's star
+/// has a flat top, where its neighbours leave too little of the annulus,
+/// or where either flux is not positive.
+fn star_ratio(
+    reference_at: &(impl Fn(usize, usize) -> f32 + Sync),
+    source_at: &(impl Fn(usize, usize) -> f32 + Sync),
+    saturated: &(impl Fn(usize, usize) -> bool + Sync),
+    grid: (usize, usize),
+    star: Star<'_>,
+    scale: f64,
+) -> Option<f32> {
+    let square = star.square(stamp(scale), grid)?;
+    let mut annulus = Vec::new();
+    let mut aperture = Vec::new();
+    star.walk(
+        square,
+        PHOTOMETRY_APERTURE * scale,
+        PHOTOMETRY_ANNULUS,
+        scale,
+        |px, py, _, place| {
+            let (r, s) = (reference_at(px, py), source_at(px, py));
+            if !r.is_finite() || !s.is_finite() {
+                return None;
+            }
+            match place {
+                Place::Inside => aperture.push((px, py, r, s)),
+                Place::Sky => annulus.push(((r, s), true)),
+                Place::Beside => annulus.push(((r, s), false)),
+            }
+            Some(())
+        },
+    )?;
+    if aperture.iter().any(|&(px, py, _, _)| saturated(px, py)) {
+        return None;
+    }
+    let (mut reference_annulus, mut source_annulus): (Vec<_>, Vec<_>) =
+        sky_samples(&annulus).into_iter().unzip();
+    let reference_sky = median_in_place(&mut reference_annulus)?;
+    let source_sky = median_in_place(&mut source_annulus)?;
+    if flat_topped(aperture.iter().map(|&(_, _, r, _)| r - reference_sky))
+        || flat_topped(aperture.iter().map(|&(_, _, _, s)| s - source_sky))
+    {
+        return None;
+    }
+    let (reference_flux, source_flux) =
+        aperture
+            .iter()
+            .fold((0.0_f64, 0.0_f64), |(rf, sf), &(_, _, r, s)| {
+                (
+                    rf + f64::from(r - reference_sky),
+                    sf + f64::from(s - source_sky),
+                )
+            });
+    (reference_flux > 0.0 && source_flux > 0.0).then(|| (reference_flux / source_flux) as f32)
+}
+
+/// Whether a star whose samples stand `excess` above its sky has the flat
+/// top of a clipped one: more of them within 3% of its peak than 13% of
+/// those above half of it, and more than four. A Gaussian star keeps 4.4%
+/// of its samples above half its peak within 3% of it, and a Moffat star of
+/// beta 2.5 3.8%; a star clipped at half its peak keeps half. The
+/// reference's ceiling cannot say where a frame clips: one exposed longer
+/// or under a clearer sky clips stars the reference does not, whose lost
+/// light would raise the gain, and a flat field lifts the stars of a
+/// vignetted corner above those clipped at the centre.
+fn flat_topped(excess: impl Iterator<Item = f32> + Clone) -> bool {
+    let peak = excess.clone().fold(f32::MIN, f32::max);
+    if peak <= 0.0 {
+        return false;
+    }
+    let (top, half) = excess.fold((0_usize, 0_usize), |(top, half), value| {
+        (
+            top + usize::from(value >= 0.97 * peak),
+            half + usize::from(value > 0.5 * peak),
+        )
+    });
+    top > 4 && top as f64 > 0.13 * half as f64
+}
+
+/// The noise of a star's sky, from the second differences of the samples
+/// of `sky`, `(x, y, value)` in rows from the left, that lie three side by
+/// side: a slope beneath them, as of a too-small annulus on the star's own
+/// flank, cancels from each, where the samples' own spread would count it.
+/// `None` with fewer than eight such runs.
+fn sky_noise(sky: &[(usize, usize, f32)]) -> Option<f32> {
+    let mut differences = sky
+        .windows(3)
+        .filter(|run| run[0].1 == run[2].1 && run[0].0 + 2 == run[2].0)
+        .map(|run| run[0].2 - 2.0 * run[1].2 + run[2].2)
+        .collect::<Vec<_>>();
+    if differences.len() < 8 {
+        return None;
+    }
+    let centre = median_in_place(&mut differences)?;
+    // A second difference of independent samples has six times their
+    // variance.
+    robust_sigma_in_place(&mut differences, centre).map(|sigma| sigma / 6.0_f32.sqrt())
+}
+
+/// The samples of a star's annulus its sky comes from, each marked
+/// whether it lies clear of the star's neighbours: those clear of them when
+/// they make up [`PHOTOMETRY_ANNULUS_LEFT`] of the annulus or more, and
+/// otherwise all of it. Where neighbours crowd the annulus, more than they
+/// leave, its sky comes from all of it, as it would without them.
+fn sky_samples<T: Copy>(annulus: &[(T, bool)]) -> Vec<T> {
+    let left = annulus.iter().filter(|&&(_, clear)| clear).count();
+    let clear = left > 0 && left as f64 >= PHOTOMETRY_ANNULUS_LEFT * annulus.len() as f64;
+    annulus
+        .iter()
+        .filter(|&&(_, sky)| sky || !clear)
+        .map(|&(sample, _)| sample)
+        .collect()
+}
+
+/// The median FWHM of an image's stars at `stars`, each as [`star_width`]
+/// measures it in the image `at` reads: first at `start`, then at each
+/// median found until it holds, at most `cap`, which a broader median is
+/// taken for. A star seen at too small a scale is cut short by the window
+/// and its sky is lifted by its wings, so a first median at too small a
+/// scale is too narrow, and the next ones widen. A wider scale needs a
+/// wider stamp, which fewer stars fit: when too few do, the median of
+/// those that did is taken, or with none, the last median, which is then
+/// the narrowest the stars can be. `None` when fewer than
+/// [`PHOTOMETRY_WIDTH_STARS`] measure at `start`.
+///
+/// Colour calibration measures a FWHM too, from luminance second moments
+/// about catalogue stars. Second moments weigh a star's wings, which seeing
+/// and optics give every profile in different measure, and the window that
+/// bounds them; the aperture here is sized in FWHM, which the half maximum
+/// gives from the core alone, in each channel, through the samples of a
+/// frame gathered from the GPU.
+fn image_width(
+    at: &(impl Fn(usize, usize) -> f32 + Sync),
+    saturated: &(impl Fn(usize, usize) -> bool + Sync),
+    grid: (usize, usize),
+    stars: &[(f64, f64)],
+    start: f64,
+    cap: f64,
+) -> Option<f64> {
+    let mut scale = start.clamp(PHOTOMETRY_MINIMUM_FWHM, cap);
+    let mut found = None;
+    for _ in 0..6 {
+        let widths = stars
+            .par_iter()
+            .zip(neighbours(stars, scale, PHOTOMETRY_WIDTH_ANNULUS.1))
+            .filter_map(|(&star, neighbours)| {
+                let star = Star {
+                    at: star,
+                    neighbours: &neighbours,
+                };
+                star_width(at, saturated, grid, star, scale)
+            })
+            .collect::<Vec<_>>();
+        if widths.is_empty() || (found.is_none() && widths.len() < PHOTOMETRY_WIDTH_STARS) {
+            break;
+        }
+        let width = seiza_stats::median_f64(&widths)?.min(cap);
+        found = Some(width);
+        let next = width.max(PHOTOMETRY_MINIMUM_FWHM);
+        if (next - scale).abs() <= 0.02 * scale {
+            break;
+        }
+        scale = next;
+    }
+    found
+}
+
+/// `star`'s FWHM at `scale`, in the image `at` reads: `2 sqrt(n / π)` for
+/// the `n` pixels within 1.5 `scale` of it that stand more than half its
+/// peak above its sky, the median of its annulus between
+/// [`PHOTOMETRY_WIDTH_ANNULUS`] times `scale`, clear of its neighbours as
+/// [`star_ratio`]'s is. Counting the pixels above half the peak reads the
+/// core alone, where seeing shows, and none of the wings. `None` where its
+/// square leaves the grid, where the image misses a sample it reads, where
+/// `saturated` says a pixel near it is, where it has a flat top, where its
+/// neighbours leave too little of the annulus, or where its peak stands
+/// less than [`PHOTOMETRY_WIDTH_SNR`] times its sky's noise above its sky.
+fn star_width(
+    at: &(impl Fn(usize, usize) -> f32 + Sync),
+    saturated: &(impl Fn(usize, usize) -> bool + Sync),
+    grid: (usize, usize),
+    star: Star<'_>,
+    scale: f64,
+) -> Option<f64> {
+    let square = star.square(stamp_for(scale, PHOTOMETRY_WIDTH_ANNULUS.1), grid)?;
+    let mut annulus = Vec::new();
+    let mut core = Vec::new();
+    star.walk(
+        square,
+        1.5 * scale,
+        PHOTOMETRY_WIDTH_ANNULUS,
+        scale,
+        |px, py, squared, place| {
+            let value = at(px, py);
+            if !value.is_finite() {
+                return None;
+            }
+            match place {
+                Place::Inside if saturated(px, py) => return None,
+                Place::Inside => core.push((squared, value)),
+                Place::Sky => annulus.push(((px, py, value), true)),
+                Place::Beside => annulus.push(((px, py, value), false)),
+            }
+            Some(())
+        },
+    )?;
+    let sky = sky_samples(&annulus);
+    let noise = sky_noise(&sky)?;
+    let level = median_in_place(&mut sky.iter().map(|&(_, _, value)| value).collect::<Vec<_>>())?;
+    let peak = core
+        .iter()
+        .filter(|&&(squared, _)| squared <= 1.5 * 1.5)
+        .map(|&(_, value)| value - level)
+        .fold(f32::MIN, f32::max);
+    if !(peak > 0.0 && peak > PHOTOMETRY_WIDTH_SNR * noise) {
+        return None;
+    }
+    let count = core
+        .iter()
+        .filter(|&&(_, value)| value - level > 0.5 * peak)
+        .count();
+    // A star broader than the window fills it above half its peak, and
+    // would look flat-topped; its width here is the least it can be, and a
+    // wider scale looks again.
+    let edge = (1.5 * scale - 1.0).max(0.0).powi(2);
+    let truncated = core
+        .iter()
+        .any(|&(squared, value)| squared > edge && value - level > 0.5 * peak);
+    if !truncated && flat_topped(core.iter().map(|&(_, value)| value - level)) {
+        return None;
+    }
+    Some(2.0 * (count as f64 / std::f64::consts::PI).sqrt())
 }
 
 /// `value * gain + offset` per channel on whole interleaved pixels, leaving
@@ -1814,65 +2311,82 @@ mod tests {
     #[cfg(feature = "gpu")]
     #[test]
     fn gathered_samples_preserve_every_preparation_fit() {
-        let (width, height, channels) = (313, 271, 3);
+        let (width, height, channels) = (960, 720, 3);
+        // A lattice of stars, and one near the left edge: a frame as sharp
+        // as the reference is measured there in a square smaller than the
+        // reach gathered about it, which the edge cuts.
         let stars = (0..20)
             .map(|index| {
                 (
-                    25.25 + (index % 5) as f64 * 55.0,
-                    24.5 + (index / 5) as f64 * 60.0,
+                    90.25 + (index % 5) as f64 * 180.0,
+                    90.5 + (index / 5) as f64 * 170.0,
                 )
             })
+            .chain([(20.25, 360.5)])
             .collect::<Vec<_>>();
-        let data = (0..width * height * channels)
-            .map(|index| {
-                let pixel = index / channels;
-                let (x, y) = ((pixel % width) as f64, (pixel / width) as f64);
-                let stars = stars
-                    .iter()
-                    .map(|&(sx, sy)| 300.0 * (-((x - sx).powi(2) + (y - sy).powi(2)) / 6.0).exp())
-                    .sum::<f64>();
-                (100.0
-                    + 0.03 * x
-                    + 0.01 * y
-                    + stars
-                    + ((index * 97 % 1009) as f64 / 1009.0 - 0.5) * 8.0) as f32
-            })
-            .collect();
-        let mut reference = LinearImage::new(width, height, channels, data).unwrap();
-        reference.data[..channels].fill(50_000.0);
-        let source = LinearImage::new(
-            width,
-            height,
-            channels,
-            reference
-                .data
-                .iter()
-                .enumerate()
-                .map(|(index, &value)| {
-                    if index % 701 == 0 && index / (width * channels) < 3 {
+        let field = |sigma: f64, gain: f64, offset: f64| {
+            (0..width * height * channels)
+                .map(|index| {
+                    let pixel = index / channels;
+                    let (x, y) = ((pixel % width) as f64, (pixel / width) as f64);
+                    let light = stars
+                        .iter()
+                        .filter(|&&(sx, sy)| {
+                            (x - sx).abs() < 10.0 * sigma && (y - sy).abs() < 10.0 * sigma
+                        })
+                        .map(|&(sx, sy)| {
+                            let r2 = (x - sx).powi(2) + (y - sy).powi(2);
+                            3_000.0 / (sigma * sigma) * (-r2 / (2.0 * sigma * sigma)).exp()
+                        })
+                        .sum::<f64>();
+                    let value = gain * (100.0 + 0.03 * x + 0.01 * y + light)
+                        + offset
+                        + ((index * 97 % 1009) as f64 / 1009.0 - 0.5) * 8.0;
+                    if index % 701 == 0 && pixel / width < 3 {
                         f32::NAN
                     } else {
-                        value * 1.1 + 7.0 + (index / channels % width) as f32 * 0.002
+                        value as f32
                     }
                 })
-                .collect(),
-        )
-        .unwrap();
+                .collect::<Vec<_>>()
+        };
+        let mut reference =
+            LinearImage::new(width, height, channels, field(1.2, 1.0, 0.0)).unwrap();
+        reference.data[..channels].fill(50_000.0);
+        let reference_photometry = ReferencePhotometry::measure(&reference);
+        // One frame as sharp as the reference, and one whose seeing is
+        // twice as broad, which photometry measures further out.
+        let sources = [(1.2, 1.1, 7.0), (2.4, 0.9, 5.0)].map(|(sigma, gain, offset)| {
+            let data = field(sigma, gain, offset);
+            (
+                1.0 / gain as f32,
+                LinearImage::new(width, height, channels, data).unwrap(),
+            )
+        });
         let background = BackgroundSamples::new(width, height, channels, 256);
-        let ceilings = photometric_ceilings(&reference);
-        for mode in [
-            NormalizationMode::None,
-            NormalizationMode::Global,
-            NormalizationMode::Local { tile_size: 64 },
-            NormalizationMode::LocalBackground { tile_size: 64 },
-            NormalizationMode::LocalBackground { tile_size: 256 },
-        ] {
+        for (transparency, source, mode) in sources.iter().flat_map(|(transparency, source)| {
+            [
+                NormalizationMode::None,
+                NormalizationMode::Global,
+                NormalizationMode::Local { tile_size: 64 },
+                NormalizationMode::LocalBackground { tile_size: 64 },
+                NormalizationMode::LocalBackground { tile_size: 256 },
+            ]
+            .map(|mode| (*transparency, source, mode))
+        }) {
             let indices = preparation_sample_indices(
                 (width, height, channels),
                 mode,
                 &stars,
+                reference_photometry.reach(&reference, &stars),
                 Some(&background),
             );
+            // With tiles large enough to be sampled sparsely, photometry's
+            // squares leave most of the frame ungathered, so that a read
+            // beyond them would fail.
+            if mode == (NormalizationMode::LocalBackground { tile_size: 256 }) {
+                assert!(indices.len() < source.data.len() / 2, "{mode:?}");
+            }
             let mut lookup = vec![u32::MAX; source.data.len()];
             let values = indices
                 .iter()
@@ -1896,7 +2410,7 @@ mod tests {
                 }),
                 ..Placed::whole(&shape)
             };
-            let dense = Placed::whole(&source);
+            let dense = Placed::whole(source);
             let bits = |values: &[f32]| {
                 values
                     .iter()
@@ -1909,14 +2423,19 @@ mod tests {
             );
             let photometry = matches!(mode, NormalizationMode::LocalBackground { .. });
             let gain = photometry
-                .then(|| photometric_gains(&reference, &ceilings, dense, &stars))
+                .then(|| photometric_gains(&reference, &reference_photometry, dense, &stars))
                 .flatten();
             let gathered_gain = photometry
-                .then(|| photometric_gains(&reference, &ceilings, sparse, &stars))
+                .then(|| photometric_gains(&reference, &reference_photometry, sparse, &stars))
                 .flatten();
             assert_eq!(gain, gathered_gain);
             if photometry {
-                assert!(gain.is_some());
+                let gain = gain.as_ref().expect("enough stars");
+                assert!(
+                    gain.iter()
+                        .all(|gain| (gain / transparency - 1.0).abs() < 0.02),
+                    "{gain:?} for {transparency}"
+                );
             }
             // The tiles' samples read in order, as a stack reads them.
             let tiles = match mode {
@@ -2566,7 +3085,7 @@ mod tests {
             .reference_star_positions();
         let gains = photometric_gains(
             &reference,
-            &photometric_ceilings(&reference),
+            &ReferencePhotometry::measure(&reference),
             Placed::whole(&source),
             &stars,
         )
@@ -2859,5 +3378,293 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// The profile of a star under seeing, of unit flux.
+    #[derive(Clone, Copy, Debug)]
+    enum Seeing {
+        Gaussian { sigma: f64 },
+        Moffat { fwhm: f64, beta: f64 },
+    }
+
+    impl Seeing {
+        /// The star's light at squared distance `r2`, and how far it is
+        /// drawn: past that it holds less than 1e-4 of its flux.
+        fn profile(self) -> (f64, impl Fn(f64) -> f64) {
+            let (reach, scale, norm, beta) = match self {
+                Self::Gaussian { sigma } => (6.0 * sigma, sigma, 0.0, 0.0),
+                Self::Moffat { fwhm, beta } => {
+                    let alpha = fwhm / (2.0 * (2.0_f64.powf(1.0 / beta) - 1.0).sqrt());
+                    let reach = alpha * (1.0e4_f64.powf(1.0 / (beta - 1.0)) - 1.0).sqrt();
+                    let norm = (beta - 1.0) / (std::f64::consts::PI * alpha * alpha);
+                    (reach, alpha, norm, beta)
+                }
+            };
+            let light = move |r2: f64| match self {
+                Self::Gaussian { .. } => {
+                    (-r2 / (2.0 * scale * scale)).exp()
+                        / (2.0 * std::f64::consts::PI * scale * scale)
+                }
+                Self::Moffat { .. } => norm * (1.0 + r2 / (scale * scale)).powf(-beta),
+            };
+            (reach.ceil(), light)
+        }
+    }
+
+    /// One field of `count` stars under `seeing`, its light, sky included,
+    /// scaled by `transparency`, with noise of sigma about 4 that differs
+    /// from frame to frame. Each star keeps its whole flux whatever the
+    /// seeing.
+    fn seeing_field(seeing: Seeing, count: usize, transparency: f32, frame: u32) -> LinearImage {
+        let (width, height) = (640_usize, 512_usize);
+        let mut state = 0x9e37_79b9_u32;
+        let mut random = move || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            f64::from(state) / f64::from(u32::MAX)
+        };
+        let stars = (0..count)
+            .map(|_| {
+                (
+                    48.0 + random() * (width as f64 - 96.0),
+                    48.0 + random() * (height as f64 - 96.0),
+                    3_000.0 + random() * 60_000.0,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut data = vec![200.0_f64; width * height];
+        let (reach, light) = seeing.profile();
+        for &(x, y, flux) in &stars {
+            let (left, top) = ((x - reach).max(0.0) as usize, (y - reach).max(0.0) as usize);
+            for py in top..((y + reach) as usize + 1).min(height) {
+                for px in left..((x + reach) as usize + 1).min(width) {
+                    let (dx, dy) = (px as f64 - x, py as f64 - y);
+                    data[py * width + px] += flux * light(dx * dx + dy * dy);
+                }
+            }
+        }
+        let mut noise = 0x2545_f491_u32 ^ frame.wrapping_mul(0x85eb_ca6b);
+        let data = data
+            .into_iter()
+            .map(|value| {
+                let draw = (0..4)
+                    .map(|_| {
+                        noise ^= noise << 13;
+                        noise ^= noise >> 17;
+                        noise ^= noise << 5;
+                        f64::from(noise) / f64::from(u32::MAX) - 0.5
+                    })
+                    .sum::<f64>();
+                (value * f64::from(transparency) + 7.0 * draw) as f32
+            })
+            .collect();
+        LinearImage::new(width, height, 1, data).unwrap()
+    }
+
+    /// The photometric gain of each frame of [`seeing_field`] of `count`
+    /// stars under `seeings`, dimmed to `transparency`, against the first
+    /// under `reference` and a clear sky.
+    fn seeing_gains<const N: usize>(
+        count: usize,
+        reference: Seeing,
+        seeings: [Seeing; N],
+        transparency: f32,
+    ) -> [(Seeing, f32); N] {
+        let reference = seeing_field(reference, count, 1.0, 0);
+        let stars = crate::Registrar::new(&reference, crate::RegistrationOptions::default())
+            .unwrap()
+            .reference_star_positions();
+        let photometry = ReferencePhotometry::measure(&reference);
+        let mut frame = 0;
+        seeings.map(|seeing| {
+            frame += 1;
+            let source = seeing_field(seeing, count, transparency, frame);
+            let gains = photometric_gains(&reference, &photometry, Placed::whole(&source), &stars);
+            (seeing, gains.expect("enough stars")[0])
+        })
+    }
+
+    /// A night whose Gaussian seeing grows from sigma 1.6 to 3.6 px.
+    fn gaussian_night() -> [Seeing; 5] {
+        [1.6, 2.1, 2.6, 3.1, 3.6].map(|sigma| Seeing::Gaussian { sigma })
+    }
+
+    /// Seeing spreads a star's light without taking any of it away, so a
+    /// night whose seeing grows from sigma 1.6 to 3.6 px under a steady sky
+    /// needs no gain. A 5 px aperture lost more of each frame's stars than
+    /// the last, and scaled them from 1.00 to 1.67. The field's 180 bright
+    /// stars crowd each other's annuli as no real field's brightest do.
+    #[test]
+    fn photometric_gain_does_not_follow_seeing() {
+        let night = gaussian_night();
+        let gains = seeing_gains(180, night[0], night, 1.0);
+        assert!(
+            gains.iter().all(|(_, gain)| (gain - 1.0).abs() < 0.02),
+            "{gains:?}"
+        );
+    }
+
+    /// A frame dimmed 20% by haze needs a gain of 1.25, at any seeing; a
+    /// 5 px aperture measured 1.25 to 2.09.
+    #[test]
+    fn photometric_gain_follows_transparency_at_any_seeing() {
+        let night = gaussian_night();
+        let gains = seeing_gains(180, night[0], night, 0.8);
+        assert!(
+            gains
+                .iter()
+                .all(|(_, gain)| (gain / 1.25 - 1.0).abs() < 0.02),
+            "{gains:?}"
+        );
+    }
+
+    /// Seeing's profiles have broader wings than a Gaussian's, which hold
+    /// more of a star's light outside any aperture and lay more of it over
+    /// the neighbours' annuli: Moffat profiles of beta 2.5, the broadest
+    /// wings seeing gives, whose FWHM grows from 3.8 to 8.5 px as the
+    /// Gaussian night's does. The aperture leaves 2% more of the most
+    /// blurred frame's stars out than of the reference's; on the crowded
+    /// field of 180 stars, their neighbours' wings in their annuli add
+    /// about as much again.
+    #[test]
+    fn photometric_gain_does_not_follow_seeing_with_broad_wings() {
+        let night = [3.77, 4.94, 6.12, 7.3, 8.48].map(|fwhm| Seeing::Moffat { fwhm, beta: 2.5 });
+        for (count, tolerance) in [(80, 0.04), (180, 0.06)] {
+            let gains = seeing_gains(count, night[0], night, 1.0);
+            assert!(
+                gains.iter().all(|(_, gain)| (gain - 1.0).abs() < tolerance),
+                "{count} stars: {gains:?}"
+            );
+        }
+    }
+
+    /// A `width` by `height` image of Gaussian stars of `sigma` at
+    /// `stars`, the first of them of `flux` and each of the others a tenth
+    /// fainter than the last, on a sky of 100 with a little noise that
+    /// differs from `frame` to frame.
+    fn star_image(
+        (width, height): (usize, usize),
+        stars: &[(f64, f64)],
+        sigma: f64,
+        flux: f64,
+        frame: u64,
+    ) -> LinearImage {
+        let reach = 8.0 * sigma;
+        let norm = flux / (2.0 * std::f64::consts::PI * sigma * sigma);
+        let brightness = |index: usize| norm * 0.9_f64.powi(index as i32);
+        let data = (0..width * height)
+            .map(|index| {
+                let (x, y) = ((index % width) as f64, (index / width) as f64);
+                let light = stars
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &(sx, sy))| (x - sx).abs() < reach && (y - sy).abs() < reach)
+                    .map(|(index, &(sx, sy))| {
+                        let r2 = (x - sx).powi(2) + (y - sy).powi(2);
+                        brightness(index) * (-r2 / (2.0 * sigma * sigma)).exp()
+                    })
+                    .sum::<f64>();
+                let mut hash = (index as u64 + 1)
+                    .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                    .wrapping_add(frame.wrapping_mul(0xbf58_476d_1ce4_e5b9));
+                hash ^= hash >> 29;
+                let noise = (hash >> 40) as f64 / (1u64 << 24) as f64 - 0.5;
+                (100.0 + light + noise) as f32
+            })
+            .collect();
+        LinearImage::new(width, height, 1, data).unwrap()
+    }
+
+    /// Stars 30 px from the edges and from each other fit a sharp frame's
+    /// stamps but not those of a frame blurred to 7 px FWHM, which reach 37
+    /// px. Photometry measures them at the largest scale that leaves
+    /// enough, rather than giving up on the frame, whose gain would then
+    /// come from its dispersion.
+    #[test]
+    fn photometry_shrinks_to_fit_rather_than_giving_up() {
+        let stars = (0..16)
+            .map(|index| {
+                (
+                    30.0 + (index % 4) as f64 * 33.0,
+                    30.0 + (index / 4) as f64 * 33.0,
+                )
+            })
+            .collect::<Vec<_>>();
+        let reference = star_image((160, 160), &stars, 1.27, 20_000.0, 0);
+        let source = star_image((160, 160), &stars, 3.0, 20_000.0, 1);
+        let gains = photometric_gains(
+            &reference,
+            &ReferencePhotometry::measure(&reference),
+            Placed::whole(&source),
+            &stars,
+        );
+        let gain = gains.expect("photometry at a smaller scale")[0];
+        assert!((gain - 1.0).abs() < 0.03, "{gain}");
+    }
+
+    /// Stars of 15 px FWHM along a strip 52 px tall: measured first at a
+    /// scale of 2, whose window holds only their cores, and then at the
+    /// width that gives, whose stamps the strip must still hold. A width
+    /// pass that fits no star at the larger scale returned the first,
+    /// narrow median: 6 px.
+    #[test]
+    fn a_width_too_broad_for_most_stamps_is_not_the_narrow_first_guess() {
+        let stars = (0..12)
+            .map(|index| (40.0 + index as f64 * 80.0, 26.0))
+            .collect::<Vec<_>>();
+        let image = star_image((1000, 52), &stars, 15.0 / 2.3548, 200_000.0, 0);
+        let width = ReferencePhotometry::measure(&image)
+            .widths(&image, &stars)
+            .widths[0];
+        assert!(width.is_some_and(|width| width > 12.0), "{width:?}");
+    }
+
+    /// Mosaic panels are matched through the few stars of their overlap.
+    /// When too few of them gave the reference a width, every frame was
+    /// measured at a scale of 6 px at most, an aperture of about one FWHM
+    /// for stars 12 to 18 px across, and the gain followed the seeing.
+    #[test]
+    fn a_few_stars_still_scale_the_aperture() {
+        // The two brightest come within 85% of the reference's brightest
+        // sample, as saturated stars do, and are left out.
+        let stars = [
+            (150.0, 150.0),
+            (450.0, 150.0),
+            (150.0, 450.0),
+            (450.0, 450.0),
+            (300.0, 300.0),
+        ];
+        let reference = star_image((600, 600), &stars, 12.0 / 2.3548, 300_000.0, 0);
+        let source = star_image((600, 600), &stars, 18.0 / 2.3548, 300_000.0, 1);
+        let gain = photometric_gains_from(&reference, Placed::whole(&source), &stars, 3)
+            .expect("enough stars")[0];
+        assert!((gain - 1.0).abs() < 0.02, "{gain}");
+    }
+
+    /// A frame exposed twice as long as the reference clips its brightest
+    /// stars where the reference's stay below its ceiling. Their lost light
+    /// raised the gain, half the reference's light, by as much as they
+    /// lost, until the frame's flat tops were looked for too.
+    #[test]
+    fn photometry_leaves_out_stars_the_frame_clips() {
+        let seeing = Seeing::Gaussian { sigma: 1.6 };
+        let reference = seeing_field(seeing, 180, 1.0, 0);
+        let mut source = seeing_field(seeing, 180, 2.0, 1);
+        let ceiling = 0.35 * source.data.iter().copied().fold(f32::MIN, f32::max);
+        for value in &mut source.data {
+            *value = value.min(ceiling);
+        }
+        let stars = crate::Registrar::new(&reference, crate::RegistrationOptions::default())
+            .unwrap()
+            .reference_star_positions();
+        let gain = photometric_gains(
+            &reference,
+            &ReferencePhotometry::measure(&reference),
+            Placed::whole(&source),
+            &stars,
+        )
+        .expect("enough stars")[0];
+        assert!((gain / 0.5 - 1.0).abs() < 0.01, "{gain}");
     }
 }

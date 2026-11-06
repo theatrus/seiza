@@ -260,7 +260,7 @@ impl LiveStacker {
                                 registrar: &registrar,
                                 canvas: Some(&canvas),
                                 known: Some(Ok(&registration)),
-                                ceilings: &std::sync::OnceLock::new(),
+                                photometry: &std::sync::OnceLock::new(),
                                 #[cfg(feature = "gpu")]
                                 fit_tiles: &std::sync::OnceLock::new(),
                             },

@@ -1048,7 +1048,7 @@ fn prepare_decoded(
                 half.planned_registrations,
                 frame.source.as_ref(),
             )?,
-            ceilings: half.reference_ceilings,
+            photometry: half.reference_photometry,
             #[cfg(feature = "gpu")]
             fit_tiles: half.fit_tiles,
         },

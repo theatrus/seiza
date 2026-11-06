@@ -280,11 +280,10 @@ const MONO_DEFAULT: &[f64] = &[
 ];
 #[rustfmt::skip]
 const MONO_CONFIGURED: &[f64] = &[
-    1.4695953e2, 2.8119425e2, 3.9687632e3, 9.7643250e1, 1.0004932e2, 1.0116178e2,
-    1.1477510e2, 1.0543606e2, 9.8268410e1, 1.0055153e2, 1.0238376e2, 1.0341871e2,
-    1.0466166e2, 9.8374100e1, 1.0225138e2, 4.2145331e2, 1.0452397e2, 1.0633051e2,
-    1.0034851e2, 1.0087305e2, 1.0359173e2, 1.0660538e2, 1.0766888e2, 1.0121416e2,
-    1.7354532e2, 1.0512951e2, 1.0694588e2, 1.1127830e2,
+    1.4683455e2, 2.8055241e2, 3.9580156e3, 9.7650108e1, 1.0005183e2, 1.0116579e2, 1.1474329e2,
+    1.0543446e2, 9.8273582e1, 1.0055458e2, 1.0238834e2, 1.0342444e2, 1.0466690e2, 9.8383438e1,
+    1.0225329e2, 4.1960275e2, 1.0452811e2, 1.0633288e2, 1.0035703e2, 1.0088261e2, 1.0359650e2,
+    1.0660653e2, 1.0767329e2, 1.0122057e2, 1.7336658e2, 1.0513074e2, 1.0694798e2, 1.1127238e2,
 ];
 #[rustfmt::skip]
 const BAYER_DEFAULT: &[f64] = &[
@@ -355,7 +354,12 @@ const MOSAIC_FULL_RESOLUTION: &[f64] = &[
 #[rustfmt::skip]
 const LENS_MOSAIC_SIBLINGS: &[f64] = &[1.1248227e2, 1.3248900e2, 4.2809961e3, 9.9621635e1, 1.0401961e2, 1.0109291e2, 1.1935750e2, 9.7427887e1, 9.9319954e1, 1.0011208e2, 1.0266560e2, 1.6070786e2, 1.0302679e2, 1.0011884e2, 1.0015338e2, 1.0428073e2, 1.0138506e2, 1.0049202e2, 9.9340057e1, 9.8439827e1, 1.0166298e2, 1.0112801e2, 1.0463013e2, 1.1425014e2, 1.0245366e2, 1.0088453e2, 1.0183040e2, 9.8820175e1, 6.0000000e0, 6.1900000e2, 1.0160000e3];
 #[rustfmt::skip]
-const MOSAIC_CHANGING_GRADIENTS: &[f64] = &[2.5618486e2, 5.0731940e2, 5.8631538e3, 9.9515686e1, 1.0304424e2, 1.0594209e2, 3.6188834e2, 1.1663352e2, 9.9784561e1, 1.5832272e2, 2.3292229e3, 1.4172540e2, 1.1663142e2, 1.0048741e2, 1.0461007e2, 3.6352579e2, 3.1940692e2, 1.1519485e2, 9.7367989e1, 1.0164168e2, 1.0775472e2, 1.1233539e2, 1.4158466e2, 6.1375110e2, 1.1946843e2, 1.2367524e2, 4.9480072e2, 2.2657356e2];
+const MOSAIC_CHANGING_GRADIENTS: &[f64] = &[
+    2.5589154e2, 5.0671553e2, 5.8662793e3, 9.9423141e1, 1.0295413e2, 1.0583661e2, 3.6098846e2,
+    1.1649343e2, 9.9692963e1, 1.5826419e2, 2.3267561e3, 1.4149518e2, 1.1648702e2, 1.0039706e2,
+    1.0452258e2, 3.6311414e2, 3.1867215e2, 1.1504984e2, 9.7276749e1, 1.0155341e2, 1.0763737e2,
+    1.1219053e2, 1.4137045e2, 6.1394897e2, 1.1939092e2, 1.2353701e2, 4.9349551e2, 2.2615749e2,
+];
 const MILD_LENS_MOSAIC: &[f64] = &[
     1.2961286e2,
     1.6208965e2,
@@ -423,34 +427,34 @@ const CLIPPED_BAYER_MAP: &[f64] = &[
     3.9800000e2,
 ];
 const MOSAIC_BACKGROUND_REFERENCE: &[f64] = &[
-    2.5444598e2,
-    5.0681991e2,
-    5.8689082e3,
-    9.8751671e1,
-    1.0244911e2,
-    1.0171320e2,
-    3.1581039e2,
-    1.1710111e2,
-    9.9339058e1,
-    1.5773672e2,
-    2.3780955e3,
-    1.2924583e2,
-    1.1780296e2,
-    1.0039929e2,
-    1.0475031e2,
-    3.5805563e2,
-    3.2299777e2,
-    1.1788648e2,
-    9.7663734e1,
-    1.0216030e2,
-    1.0442368e2,
-    1.0878123e2,
-    1.5059869e2,
-    6.1411371e2,
-    1.2025177e2,
-    1.2162159e2,
-    4.8166986e2,
-    2.4971623e2,
+    2.5354066e2,
+    5.0404477e2,
+    5.8677329e3,
+    9.8762207e1,
+    1.0245848e2,
+    1.0179680e2,
+    3.1344992e2,
+    1.1701159e2,
+    9.9349533e1,
+    1.5773482e2,
+    2.3645271e3,
+    1.2901312e2,
+    1.1770001e2,
+    1.0040960e2,
+    1.0475932e2,
+    3.5657251e2,
+    3.2044836e2,
+    1.1777502e2,
+    9.7674774e1,
+    1.0217004e2,
+    1.0447012e2,
+    1.0876220e2,
+    1.5008739e2,
+    6.1401862e2,
+    1.2025790e2,
+    1.2153581e2,
+    4.7726572e2,
+    2.4803656e2,
 ];
 #[rustfmt::skip]
 const SHARED_NEBULA_BACKGROUND: &[f64] = &[
@@ -1612,17 +1616,17 @@ fn a_live_only_locally_normalized_pipelined_stack_large_enough_for_the_gpu_keeps
 // with resident moments. Local background fits exercise a grid of offsets.
 #[rustfmt::skip]
 const LARGE_LOCAL_LIVE: &[f64] = &[
-    1.3754521e2, 4.2678341e2, 1.7932547e4, 9.7603149e1, 1.0072701e2, 1.0332149e2, 1.0637009e2,
-    1.0963932e2, 1.0196701e2, 1.0466370e2, 1.0884956e2, 1.1161555e2, 1.1412208e2, 1.0603079e2,
-    1.0965089e2, 1.1204286e2, 1.1683111e2, 1.1863527e2, 1.1065800e2, 1.1457457e2, 1.1625290e2,
-    1.1974577e2, 1.2310165e2, 1.1479590e2, 1.1817994e2, 1.2165116e2, 1.2404044e2, 1.2759380e2,
+    1.3750291e2, 4.2611456e2, 1.7902197e4, 9.7615936e1, 1.0073572e2, 1.0332993e2, 1.0637772e2,
+    1.0964362e2, 1.0197401e2, 1.0466738e2, 1.0885051e2, 1.1161619e2, 1.1411933e2, 1.0603545e2,
+    1.0965125e2, 1.1204305e2, 1.1682822e2, 1.1863083e2, 1.1066189e2, 1.1457301e2, 1.1625202e2,
+    1.1974404e2, 1.2309537e2, 1.1479475e2, 1.1817505e2, 1.2164461e2, 1.2403376e2, 1.2758355e2,
 ];
 #[rustfmt::skip]
 const LARGE_LOCAL_REINTEGRATED: &[f64] = &[
-    1.3728293e2, 4.2654226e2, 1.7932539e4, 9.7631035e1, 1.0074255e2, 1.0330618e2, 1.0636744e2,
-    1.0964255e2, 1.0198824e2, 1.0467348e2, 1.0883335e2, 1.1135132e2, 1.1413447e2, 1.0604317e2,
-    1.0965260e2, 1.1202531e2, 1.1683836e2, 1.1865505e2, 1.1066511e2, 1.1457175e2, 1.1623668e2,
-    1.1975120e2, 1.2311982e2, 1.1527016e2, 1.1817233e2, 1.2163953e2, 1.2405253e2, 1.2762001e2,
+    1.3724039e2, 4.2585577e2, 1.7902193e4, 9.7658142e1, 1.0076407e2, 1.0332346e2, 1.0637893e2,
+    1.0964905e2, 1.0200754e2, 1.0468793e2, 1.0884111e2, 1.1135434e2, 1.1413203e2, 1.0605482e2,
+    1.0965839e2, 1.1202685e2, 1.1683203e2, 1.1864561e2, 1.1066983e2, 1.1456944e2, 1.1623064e2,
+    1.1973965e2, 1.2310212e2, 1.1526601e2, 1.1816370e2, 1.2162482e2, 1.2403316e2, 1.2759554e2,
 ];
 
 fn large_stack(
@@ -2423,6 +2427,88 @@ fn a_shared_nebula_local_background_keeps_its_output() {
         SHARED_NEBULA_BACKGROUND,
     );
 }
+
+/// Local background normalization through a night whose seeing worsens
+/// frame by frame, from Gaussian sigma 1.5 to 2.9 px, with one frame dimmed
+/// a fifth by haze and a faint nebula over part of the field: each frame's
+/// photometric gain, and the stack. The other local background cases keep
+/// one seeing, where any aperture loses the same share of every frame's
+/// stars.
+#[test]
+fn a_local_background_stack_through_changing_seeing_keeps_its_output() {
+    let (width, height) = (384_usize, 320_usize);
+    let mut state = 0x1b87_3593_u32;
+    let mut next = || {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (state >> 8) as f32 / (1 << 24) as f32
+    };
+    let stars = (0..120)
+        .map(|_| {
+            (
+                8.0 + next() * (width as f32 - 16.0),
+                8.0 + next() * (height as f32 - 16.0),
+                3_000.0 + next() * 60_000.0,
+            )
+        })
+        .collect::<Vec<_>>();
+    let field = |frame: usize| {
+        let (dx, dy) = SHIFTS[frame];
+        let sigma = 1.5 + 0.2 * frame as f32;
+        let transparency = if frame == 5 { 0.8 } else { 1.0 };
+        let norm = 1.0 / (2.0 * std::f32::consts::PI * sigma * sigma);
+        let reach = 6.0 * sigma;
+        let data = (0..width * height)
+            .map(|index| {
+                let (x, y) = ((index % width) as f32, (index / width) as f32);
+                let sky = 150.0 + 0.04 * x + 0.02 * y;
+                let (nx, ny) = (x - dx - 260.0, y - dy - 110.0);
+                let nebula = 60.0 * (-(nx * nx / 5000.0 + ny * ny / 2500.0)).exp();
+                let light = stars
+                    .iter()
+                    .filter(|star| {
+                        (star.0 - x + dx).abs() < reach && (star.1 - y + dy).abs() < reach
+                    })
+                    .map(|&(star_x, star_y, flux)| {
+                        let (sx, sy) = (x - dx - star_x, y - dy - star_y);
+                        flux * norm * (-(sx * sx + sy * sy) / (2.0 * sigma * sigma)).exp()
+                    })
+                    .sum::<f32>();
+                transparency * (sky + nebula + light) + noise(index, frame, 3.0)
+            })
+            .collect();
+        LinearImage::new(width, height, 1, data).unwrap()
+    };
+    let options = StackOptions {
+        normalization: NormalizationMode::LocalBackground { tile_size: 32 },
+        ..StackOptions::default()
+    };
+    let mut stacker = LiveStacker::from_linear(field(0), options).unwrap();
+    let mut fingerprint = Vec::new();
+    for frame in 1..SHIFTS.len() {
+        match stacker.push_linear(field(frame)).unwrap() {
+            FrameDisposition::Accepted(diagnostics) => {
+                fingerprint.push(f64::from(diagnostics.normalization_mean_gain));
+            }
+            rejected => panic!("{rejected:?}"),
+        }
+    }
+    let snapshot = stacker.snapshot().unwrap();
+    fingerprint.extend(summary(&snapshot.image));
+    check(
+        "CHANGING_SEEING_LOCAL_BACKGROUND",
+        &fingerprint,
+        CHANGING_SEEING_LOCAL_BACKGROUND,
+    );
+}
+
+#[rustfmt::skip]
+const CHANGING_SEEING_LOCAL_BACKGROUND: &[f64] = &[
+    9.9850309e-1, 9.9631703e-1, 9.9633980e-1, 9.9669594e-1, 1.2472368e0, 9.9682564e-1, 1.0018693e0,
+    1.9830867e2, 2.5177410e2, 3.0461875e3, 3.6352859e2, 2.9479797e2, 1.5838135e2, 1.6185173e2,
+    1.6461389e2, 1.5031766e2, 1.5511380e2, 1.7785020e2, 8.0744403e2, 1.7077281e2, 3.7716910e2,
+    1.5742467e2, 6.4188593e2, 6.0716418e2, 1.6966904e2, 1.5474257e2, 1.5834204e2, 1.6214569e2,
+    1.6475694e2, 1.6904926e2, 1.5637085e2, 1.6081374e2, 1.6384106e2, 1.6535294e3, 1.7104761e2,
+];
 
 fn mosaic_stack(model: RegistrationModel) -> StackSnapshot {
     let directory = tempfile::tempdir().unwrap();
