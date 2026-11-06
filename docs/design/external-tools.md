@@ -50,6 +50,17 @@ same map PixInsight MLDenoise uses (`seiza-stacking`'s `exchange` module):
   and come back unchanged in the result and in the stars image. Before,
   they reached the tool as NaN: NoiseXTerminator 2.6.10 then returned the
   whole image as NaN, not only the uncovered pixels.
+- Samples more than 30 robust sigmas below their channel's median go out
+  and come back the same way, and take no part in the offset; the stars
+  image is 0 there. No sky lies so far below an image's median, but a
+  stack's resampling rings to thousands below zero beside a saturated
+  star. Taken as the most negative sample, a few dozen such samples
+  lifted the whole sky by their depth, up to 0.6 of the range. On some
+  stacks so lifted NoiseXTerminator 2.6.10 left 96% of a 4-frame stack's
+  fine noise, changing its sky by a twentieth of the noise, and MLDenoise
+  left 81% and moved a dim sky by 1.75 times its noise; other stacks so
+  lifted came out well. Through version 3 of the map the same stacks came
+  out with 11–12% left and their skies within 0.02 of the noise.
 - The stars image, a difference of two images on 0 to 1, is restored with
   the scale alone, so `starless + stars` still reconstructs the original on
   its own scale.
@@ -171,6 +182,7 @@ exchange file is written with bounds 0:1 directly.
   plus noise of the channel's robust sigma, and come back unchanged, so a
   stack keeps its coverage. A noiseless fill is not enough: MLDenoise then
   barely denoises any of the image.
+- **Artifacts far below the sky** go the same way (see Sample scale).
 - **Result.** PixInsight 1.9.6 saves the result as Float32 with
   `bounds="0:1"`; a result declaring other bounds is refused.
 

@@ -288,7 +288,10 @@ pub(crate) fn pixinsight_ml_denoise_file(
 /// its most negative sample and divided by 65535 or its span, whichever is
 /// larger, as PixInsight opens a 16-bit camera frame. The result is mapped
 /// back, so it returns in the input's units and shape. NaN and infinite
-/// samples, such as a stack's uncovered edges, come back unchanged. A one-channel image needs
+/// samples, such as a stack's uncovered edges, come back unchanged, and so
+/// do samples more than 30 robust sigmas below their channel's median (a
+/// stack's resampling ringing beside a saturated star), which take no part
+/// in the offset. A one-channel image needs
 /// a model with a mono route and an RGB image one with an RGB route. The
 /// options work as for `pixinsight_ml_denoise_file`; no file is left
 /// behind.

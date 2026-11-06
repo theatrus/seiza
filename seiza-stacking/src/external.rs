@@ -557,6 +557,9 @@ impl RcAstroCli {
     /// `starless + stars` still reconstructs the original. Samples that are
     /// not finite, such as a stack's uncovered edges, go to the tool as
     /// their channel's background and come back unchanged in both images.
+    /// So do samples more than 30 robust sigmas below their channel's
+    /// median, such as a stack's resampling ringing beside a saturated
+    /// star, which take no part in the offset; the stars image is 0 there.
     /// [`crate::EXTERNAL_EXCHANGE_VERSION`] names this map for a host's
     /// cache key.
     pub fn process_image(

@@ -14,6 +14,13 @@
 //! the way out, and are put back unchanged on the way in. A noiseless fill
 //! is not enough: PixInsight's MLDenoise sees a flat region as part of the
 //! image and then barely denoises any of it.
+//!
+//! So are samples more than [`ARTIFACT_SIGMAS`] robust sigmas below their
+//! channel's median, which no sky reaches: a stack's resampling rings to
+//! thousands below zero beside a saturated star. Taken as the most
+//! negative sample, a few dozen of them lifted the whole sky up the range
+//! by as much as their depth, and on such a pedestal NoiseXTerminator and
+//! MLDenoise barely denoised at all.
 
 use crate::image::LinearImage;
 
@@ -21,14 +28,20 @@ use crate::image::LinearImage;
 /// counts, which PixInsight also uses for an integer FITS file.
 pub(crate) const CAMERA_FULL_SCALE: f32 = 65535.0;
 
+/// How many of its channel's robust sigmas below the channel's median a
+/// sample is taken for an artifact and kept out of the map, as a sample
+/// that is not finite is. A sky, even an image's darkest, lies within a few.
+pub(crate) const ARTIFACT_SIGMAS: f32 = 30.0;
+
 /// How an image is put on 0 to 1 and taken back.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Exchange {
-    /// Subtracted before scaling: the most negative sample, or 0.
+    /// Subtracted before scaling: the most negative sample kept, or 0.
     pub(crate) offset: f32,
     /// Divided by after subtracting the offset.
     pub(crate) scale: f32,
-    /// What a sample that is not finite is given, per channel.
+    /// Each channel's background: what a sample not kept is given, and
+    /// where the artifacts below it start.
     fill: Vec<Background>,
 }
 
@@ -39,13 +52,26 @@ struct Background {
     sigma: f32,
 }
 
+impl Background {
+    /// Whether `sample` takes part in the map: finite, and not an artifact
+    /// far below the background. With no spread, every finite sample does.
+    fn keeps(&self, sample: f32) -> bool {
+        sample.is_finite()
+            && (self.sigma <= 0.0 || sample >= self.median - ARTIFACT_SIGMAS * self.sigma)
+    }
+}
+
 impl Exchange {
     /// The map for `image`, or none when the image has no finite sample.
     pub(crate) fn of(image: &LinearImage) -> Option<Self> {
+        let channels = image.channels.max(1);
+        let fill: Vec<Background> = (0..channels)
+            .map(|channel| channel_background(&image.data, channel, channels))
+            .collect();
         let mut peak = f32::NEG_INFINITY;
         let mut floor = f32::INFINITY;
-        for sample in &image.data {
-            if sample.is_finite() {
+        for (index, sample) in image.data.iter().enumerate() {
+            if fill[index % channels].keeps(*sample) {
                 peak = peak.max(*sample);
                 floor = floor.min(*sample);
             }
@@ -59,10 +85,6 @@ impl Exchange {
             let offset = floor.min(0.0);
             (offset, (peak - offset).max(CAMERA_FULL_SCALE))
         };
-        let channels = image.channels.max(1);
-        let fill = (0..channels)
-            .map(|channel| channel_background(&image.data, channel, channels))
-            .collect();
         Some(Self {
             offset,
             scale,
@@ -70,10 +92,10 @@ impl Exchange {
         })
     }
 
-    /// The image's samples on 0 to 1, with every sample that is not finite
-    /// replaced by its channel's background and noise. The noise depends
-    /// only on the sample's position, so the same image gives the same
-    /// exchange.
+    /// The image's samples on 0 to 1, with every sample the map does not
+    /// keep replaced by its channel's background and noise. The noise
+    /// depends only on the sample's position, so the same image gives the
+    /// same exchange.
     pub(crate) fn normalize(&self, image: &LinearImage) -> Vec<f32> {
         let channels = self.fill.len();
         image
@@ -81,10 +103,10 @@ impl Exchange {
             .iter()
             .enumerate()
             .map(|(index, sample)| {
-                let sample = if sample.is_finite() {
+                let background = self.fill[index % channels];
+                let sample = if background.keeps(*sample) {
                     *sample
                 } else {
-                    let background = self.fill[index % channels];
                     background.median + background.sigma * standard_normal(index as u64)
                 };
                 (sample - self.offset) / self.scale
@@ -93,10 +115,11 @@ impl Exchange {
     }
 
     /// Put an image the tool returned back on the original's scale, and the
-    /// original's samples that were not finite back in place.
+    /// original's samples the map did not keep back in place.
     pub(crate) fn restore(&self, processed: &mut [f32], original: &[f32]) {
-        for (sample, original) in processed.iter_mut().zip(original) {
-            *sample = if original.is_finite() {
+        let channels = self.fill.len();
+        for (index, (sample, original)) in processed.iter_mut().zip(original).enumerate() {
+            *sample = if self.fill[index % channels].keeps(*original) {
                 *sample * self.scale + self.offset
             } else {
                 *original
@@ -107,13 +130,17 @@ impl Exchange {
     /// [`Self::restore`] for a difference of two images on 0 to 1, such as
     /// StarXTerminator's stars image (the original minus the starless
     /// result): the offset cancels out of a difference, so only the scale
-    /// is restored.
+    /// is restored. A sample that is not finite stays a gap; an artifact,
+    /// which the result keeps as it was, differs by nothing.
     pub(crate) fn restore_difference(&self, processed: &mut [f32], original: &[f32]) {
-        for (sample, original) in processed.iter_mut().zip(original) {
-            *sample = if original.is_finite() {
+        let channels = self.fill.len();
+        for (index, (sample, original)) in processed.iter_mut().zip(original).enumerate() {
+            *sample = if !original.is_finite() {
+                *original
+            } else if self.fill[index % channels].keeps(*original) {
                 *sample * self.scale
             } else {
-                *original
+                0.0
             };
         }
     }
@@ -165,18 +192,31 @@ fn standard_normal(position: u64) -> f32 {
 mod tests {
     use super::*;
 
-    /// The map as [`crate::EXTERNAL_EXCHANGE_VERSION`] 2 defines it. A change
+    /// The map as [`crate::EXTERNAL_EXCHANGE_VERSION`] 3 defines it. A change
     /// that fails this test changes external tools' results for the same
     /// input: move the version, then record the new values.
     #[test]
     fn the_map_matches_its_version() {
-        assert_eq!(crate::EXTERNAL_EXCHANGE_VERSION, 2);
+        assert_eq!(crate::EXTERNAL_EXCHANGE_VERSION, 3);
         let image = LinearImage::new(2, 2, 1, vec![f32::NAN, 1_000.0, 1_100.0, -20.0]).unwrap();
         let exchange = Exchange::of(&image).unwrap();
         assert_eq!((exchange.offset, exchange.scale), (-20.0, 65535.0));
         let normalized = exchange.normalize(&image);
         assert_eq!(normalized[1], 1_020.0 / 65535.0);
         assert_eq!(normalized[3], 0.0);
+        // A sample 30 robust sigmas below the median neither offsets the
+        // map nor widens it (version 2 took -90000 as the offset).
+        let ringing =
+            LinearImage::new(5, 1, 1, vec![f32::NAN, 1_000.0, 1_100.0, -20.0, -90_000.0]).unwrap();
+        let exchange = Exchange::of(&ringing).unwrap();
+        assert_eq!((exchange.offset, exchange.scale), (-20.0, 65535.0));
+        assert_eq!(
+            exchange.fill,
+            vec![Background {
+                median: 1_000.0,
+                sigma: 1.4826 * 1_020.0
+            }]
+        );
         // The fill's noise at the first two positions. A tolerance, since
         // platforms' logarithm and cosine can differ in the last bit.
         assert!((standard_normal(0) - -0.455_219).abs() < 1e-6);
@@ -246,5 +286,44 @@ mod tests {
             mean.abs() < 0.03 && (variance - 1.0).abs() < 0.05,
             "{mean} {variance}"
         );
+    }
+
+    #[test]
+    fn ringing_far_below_the_sky_neither_lifts_it_nor_reaches_the_tool() {
+        // A sky of 130 with noise of 10, a saturated star, and the few deep
+        // negatives a stack's resampling leaves beside it.
+        let mut data: Vec<f32> = (0..10_000)
+            .map(|i| 130.0 + 10.0 * standard_normal(i + 7))
+            .collect();
+        data[5_000] = 68_900.0;
+        data[5_001] = -7_300.0;
+        data[5_099] = -4_100.0;
+        let image = LinearImage::new(100, 100, 1, data.clone()).unwrap();
+        let exchange = Exchange::of(&image).unwrap();
+        // The sky stays at the foot of the range, where it would be without
+        // them, not lifted by 7300; the star's peak sets the scale.
+        assert_eq!((exchange.offset, exchange.scale), (0.0, 68_900.0));
+        let normalized = exchange.normalize(&image);
+        assert!((normalized[0] - data[0] / 68_900.0).abs() < 1e-9);
+        // They go out as background with noise, inside the range.
+        for index in [5_001, 5_099] {
+            assert!(normalized[index] > 50.0 / 68_900.0 && normalized[index] < 250.0 / 68_900.0);
+        }
+        // And come back as they were; the stars image shows nothing there.
+        let mut processed = normalized.clone();
+        exchange.restore(&mut processed, &data);
+        assert_eq!((processed[5_001], processed[5_099]), (-7_300.0, -4_100.0));
+        assert!(
+            (processed[0] - data[0]).abs() < 1e-3 && (processed[5_000] - 68_900.0).abs() < 1e-2
+        );
+        let mut stars = vec![0.25; data.len()];
+        exchange.restore_difference(&mut stars, &data);
+        assert_eq!((stars[5_001], stars[5_099]), (0.0, 0.0));
+        assert!((stars[0] - 0.25 * 68_900.0).abs() < 1e-2);
+
+        // An image of nothing but one value keeps every sample.
+        let flat = LinearImage::new(2, 2, 1, vec![-5.0; 4]).unwrap();
+        let exchange = Exchange::of(&flat).unwrap();
+        assert_eq!((exchange.offset, exchange.scale), (-5.0, 65535.0));
     }
 }
