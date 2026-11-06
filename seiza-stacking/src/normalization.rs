@@ -31,8 +31,10 @@ pub enum NormalizationMode {
     /// enough to reject the frame. The gain is the global one, so it follows
     /// transparency and frame weighting still sees each frame's noise. Each
     /// tile's offset is the median difference of corresponding samples,
-    /// after applying the gain, so shared nebular structure cancels;
-    /// tiles with too few are filled from their neighbours, and the grid is
+    /// after applying the gain, so shared nebular structure cancels; a
+    /// stack leaves out the samples about the reference's brightest stars,
+    /// whose light seeing spreads differently in the two frames, and tiles
+    /// with too few are filled from their neighbours, and the grid is
     /// smoothed over three tiles. On an expanded canvas the live pass fits a
     /// single tile: the canvas keeps the first value each sample received,
     /// so its background is a patchwork of single frames' skies that
@@ -70,13 +72,16 @@ impl NormalizationMap {
     }
 
     /// [`Self::estimate`], with per-channel gains measured elsewhere (from
-    /// star photometry) for [`NormalizationMode::LocalBackground`]. Other
-    /// modes, and a missing measurement, fit as [`Self::estimate`] does.
+    /// star photometry) for [`NormalizationMode::LocalBackground`], and its
+    /// background offsets fitted on the samples `mask` leaves, when there is
+    /// one (see [`BackgroundMask`]). Other modes, and a missing measurement,
+    /// fit as [`Self::estimate`] does, with the mask.
     pub(crate) fn estimate_with_gains(
         reference: &LinearImage,
         source: Placed<'_>,
         mode: NormalizationMode,
         gains: Option<&[f32]>,
+        mask: Option<&BackgroundMask>,
     ) -> Result<Self> {
         match (mode, gains) {
             (NormalizationMode::LocalBackground { tile_size }, Some(gains))
@@ -91,24 +96,27 @@ impl NormalizationMap {
                     .iter()
                     .enumerate()
                     .map(|(channel, &gain)| {
-                        let offset = tile_offset(
-                            reference,
-                            source,
-                            channel,
-                            (0, 0, source.width, source.height),
-                            gain,
-                        )
-                        .ok_or_else(|| {
-                            Error::Normalization(
-                                "too few overlapping finite pixels for normalization".into(),
-                            )
-                        })?;
+                        let whole = (0, 0, source.width, source.height);
+                        // The frame's one offset, for channels no tile
+                        // measures, from every sample where the mask
+                        // leaves too few.
+                        let offset = tile_offset(reference, source, channel, whole, gain, mask)
+                            .or_else(|| {
+                                mask.and_then(|_| {
+                                    tile_offset(reference, source, channel, whole, gain, None)
+                                })
+                            })
+                            .ok_or_else(|| {
+                                Error::Normalization(
+                                    "too few overlapping finite pixels for normalization".into(),
+                                )
+                            })?;
                         Ok((gain, offset))
                     })
                     .collect::<Result<Vec<_>>>()?;
-                local_background_with_gains(reference, source, tile_size, &globals)
+                local_background_with_gains(reference, source, tile_size, &globals, mask)
             }
-            _ => Self::estimate_placed(reference, source, mode),
+            _ => Self::estimate_masked(reference, source, mode, mask),
         }
     }
 
@@ -127,6 +135,7 @@ impl NormalizationMap {
         reference: &LinearImage,
         source: &LinearImage,
         tile_size: usize,
+        mask: Option<&BackgroundMask>,
     ) -> Result<Self> {
         if source.channels != self.channels {
             return Err(Error::Normalization(
@@ -138,17 +147,19 @@ impl NormalizationMap {
             Placed::whole(source),
             tile_size,
             &self.background_globals(),
+            mask,
         )
     }
 
     /// [`Self::refit_background`] from the samples `layout` says the fit
     /// reads, of the reference and of the source, rather than from whole
-    /// images; the same fit, to the bit.
+    /// images; the same fit, to the bit, leaving out those `mask` covers.
     pub(crate) fn refit_background_samples(
         &self,
         layout: &BackgroundSamples,
         reference: &[f32],
         source: &[f32],
+        mask: Option<&BackgroundMask>,
     ) -> Result<Self> {
         if layout.channels != self.channels
             || reference.len() != layout.len()
@@ -163,13 +174,15 @@ impl NormalizationMap {
             (layout.width, layout.height, layout.channels),
             layout.tile_size,
             &globals,
-            |cell, channel, _| {
+            |cell, channel, (x, y, width, height)| {
                 let samples = layout.block(cell, channel);
-                sample_offset(
-                    reference[samples.clone()].iter().copied(),
-                    source[samples].iter().copied(),
-                    globals[channel].0,
-                )
+                let pairs = reference[samples.clone()]
+                    .iter()
+                    .zip(&source[samples])
+                    .zip(tile_sample_pixels(layout.width, x, y, width, height))
+                    .filter(|&(_, pixel)| !mask.is_some_and(|mask| mask.covers(pixel)))
+                    .map(|((&reference, &source), _)| (reference, source));
+                sample_offset(pairs, globals[channel].0)
             },
         ))
     }
@@ -185,6 +198,7 @@ impl NormalizationMap {
         layout: &BackgroundSamples,
         reference: &[f32],
         source: &[f32],
+        mask: Option<&BackgroundMask>,
     ) -> Result<Self> {
         self.validate()?;
         if (layout.width, layout.height, layout.channels)
@@ -204,19 +218,20 @@ impl NormalizationMap {
             &globals,
             |cell, channel, (x, y, width, height)| {
                 let block = layout.block(cell, channel);
-                let normalized = source[block.clone()]
+                let pairs = reference[block.clone()]
                     .iter()
-                    .copied()
+                    .zip(&source[block])
                     .zip(tile_sample_pixels(layout.width, x, y, width, height))
-                    .map(|(value, pixel)| {
+                    .filter(|&(_, pixel)| !mask.is_some_and(|mask| mask.covers(pixel)))
+                    .map(|((&reference, &value), pixel)| {
                         if !value.is_finite() {
-                            return value;
+                            return (reference, value);
                         }
                         let (gain, offset) =
                             sampler.at(pixel % layout.width, pixel / layout.width, channel);
-                        value.mul_add(gain, offset)
+                        (reference, value.mul_add(gain, offset))
                     });
-                sample_offset(reference[block].iter().copied(), normalized, 1.0)
+                sample_offset(pairs, 1.0)
             },
         ))
     }
@@ -616,6 +631,17 @@ impl NormalizationMap {
         source: Placed<'_>,
         mode: NormalizationMode,
     ) -> Result<Self> {
+        Self::estimate_masked(reference, source, mode, None)
+    }
+
+    /// [`Self::estimate_placed`], with [`NormalizationMode::LocalBackground`]'s
+    /// offsets fitted on the samples `mask` leaves.
+    fn estimate_masked(
+        reference: &LinearImage,
+        source: Placed<'_>,
+        mode: NormalizationMode,
+        mask: Option<&BackgroundMask>,
+    ) -> Result<Self> {
         if !source.matches(reference) {
             return Err(Error::Normalization(
                 "reference and source dimensions must match".into(),
@@ -650,7 +676,7 @@ impl NormalizationMap {
                         "local normalization tile size must be at least 16 pixels".into(),
                     ));
                 }
-                local_background(reference, source, tile_size)
+                local_background(reference, source, tile_size, mask)
             }
             NormalizationMode::Local { tile_size } => {
                 if tile_size < 16 {
@@ -1244,6 +1270,7 @@ fn local_background(
     reference: &LinearImage,
     source: Placed<'_>,
     tile_size: usize,
+    mask: Option<&BackgroundMask>,
 ) -> Result<NormalizationMap> {
     let channels = source.channels();
     let globals = (0..channels)
@@ -1259,22 +1286,24 @@ fn local_background(
             )
         })
         .collect::<Result<Vec<_>>>()?;
-    local_background_with_gains(reference, source, tile_size, &globals)
+    local_background_with_gains(reference, source, tile_size, &globals, mask)
 }
 
 /// Background offsets per tile for fixed per-channel gains, each paired with
-/// the global offset used where no tile of that channel can be measured.
+/// the global offset used where no tile of that channel can be measured,
+/// from the samples `mask` leaves.
 fn local_background_with_gains(
     reference: &LinearImage,
     source: Placed<'_>,
     tile_size: usize,
     globals: &[(f32, f32)],
+    mask: Option<&BackgroundMask>,
 ) -> Result<NormalizationMap> {
     let gains: Vec<f32> = globals.iter().map(|&(gain, _)| gain).collect();
     #[cfg(feature = "gpu")]
     if let Some(sampled) = source.sampled
         && let Some(tiles) = sampled.tiles
-        && tiles.fits(reference, source, tile_size)
+        && tiles.fits(reference, source, tile_size, mask)
     {
         return Ok(local_background_by_tile(
             (source.width, source.height, source.channels()),
@@ -1291,7 +1320,14 @@ fn local_background_with_gains(
             // A tile the source does not reach shares no samples with the
             // reference.
             if source.reaches(x, y, width, height) {
-                tile_offsets(reference, source, (x, y, width, height), &gains, offsets);
+                tile_offsets(
+                    reference,
+                    source,
+                    (x, y, width, height),
+                    &gains,
+                    mask,
+                    offsets,
+                );
             }
         },
     ))
@@ -1369,23 +1405,23 @@ fn local_background_by_tile(
 }
 
 /// The median residual in one region and channel, over samples both frames
-/// cover after applying `gain`, or `None` when they share too few.
+/// cover after applying `gain` and `mask` leaves, or `None` when they share
+/// too few.
 fn tile_offset(
     reference: &LinearImage,
     source: Placed<'_>,
     channel: usize,
     (x, y, width, height): (usize, usize, usize, usize),
     gain: f32,
+    mask: Option<&BackgroundMask>,
 ) -> Option<f32> {
-    let indices = || {
-        tile_sample_pixels(source.width, x, y, width, height)
-            .map(move |pixel| pixel * source.channels() + channel)
-    };
-    sample_offset(
-        indices().map(|index| reference.data[index]),
-        indices().map(|index| source.sample(index)),
-        gain,
-    )
+    let pairs = tile_sample_pixels(source.width, x, y, width, height)
+        .filter(|&pixel| !mask.is_some_and(|mask| mask.covers(pixel)))
+        .map(|pixel| {
+            let index = pixel * source.channels() + channel;
+            (reference.data[index], source.sample(index))
+        });
+    sample_offset(pairs, gain)
 }
 
 /// Each local background tile's samples in a frame the GPU gathered: where
@@ -1403,14 +1439,21 @@ pub(crate) struct GatheredTiles {
     starts: Vec<usize>,
     at: Vec<u32>,
     reference: Vec<f32>,
+    /// Whether the samples a [`BackgroundMask`] covers are left out.
+    masked: bool,
 }
 
 #[cfg(feature = "gpu")]
 impl GatheredTiles {
     /// The tiles of `tile_size` over `reference`, whose every sample
-    /// `lookup` places among a frame's gathered values; `None` when one is
-    /// not gathered.
-    pub(crate) fn new(reference: &LinearImage, tile_size: usize, lookup: &[u32]) -> Option<Self> {
+    /// `lookup` places among a frame's gathered values, but those `mask`
+    /// covers; `None` when one is not gathered.
+    pub(crate) fn new(
+        reference: &LinearImage,
+        tile_size: usize,
+        lookup: &[u32],
+        mask: Option<&BackgroundMask>,
+    ) -> Option<Self> {
         let (width, height, channels) = (reference.width, reference.height, reference.channels);
         if tile_size == 0 || lookup.len() != reference.data.len() {
             return None;
@@ -1423,6 +1466,9 @@ impl GatheredTiles {
             starts.push(at.len());
             let (x, y, tile_width, tile_height) = tile(cell, columns, width, height, tile_size);
             for pixel in tile_sample_pixels(width, x, y, tile_width, tile_height) {
+                if mask.is_some_and(|mask| mask.covers(pixel)) {
+                    continue;
+                }
                 for channel in 0..channels {
                     let index = pixel * channels + channel;
                     let position = lookup[index];
@@ -1441,16 +1487,25 @@ impl GatheredTiles {
             starts,
             at,
             reference: values,
+            masked: mask.is_some(),
         })
     }
 
     /// Whether these are the tiles `tile_offsets` would read for `source`,
-    /// a whole frame, against `reference`.
-    fn fits(&self, reference: &LinearImage, source: Placed<'_>, tile_size: usize) -> bool {
+    /// a whole frame, against `reference`, with `mask`, the one they were
+    /// built with when there is one.
+    fn fits(
+        &self,
+        reference: &LinearImage,
+        source: Placed<'_>,
+        tile_size: usize,
+        mask: Option<&BackgroundMask>,
+    ) -> bool {
         let shape = (source.width, source.height, source.channels());
         source.is_whole()
             && self.tile_size == tile_size
             && self.shape == shape
+            && self.masked == mask.is_some()
             && (reference.width, reference.height, reference.channels) == shape
     }
 
@@ -1490,6 +1545,7 @@ fn tile_offsets(
     source: Placed<'_>,
     (x, y, width, height): (usize, usize, usize, usize),
     gains: &[f32],
+    mask: Option<&BackgroundMask>,
     offsets: &mut [Option<f32>],
 ) {
     let channels = source.channels();
@@ -1498,6 +1554,9 @@ fn tile_offsets(
         .map(|_| Vec::with_capacity(pixels.len()))
         .collect();
     for pixel in pixels {
+        if mask.is_some_and(|mask| mask.covers(pixel)) {
+            continue;
+        }
         for (channel, (residuals, &gain)) in residuals.iter_mut().zip(gains).enumerate() {
             let index = pixel * channels + channel;
             let (reference_value, source_value) = (reference.data[index], source.sample(index));
@@ -1517,13 +1576,9 @@ fn tile_offsets(
 /// The median of finite paired residuals. Shared structure cancels before
 /// the robust fit, while isolated mismatches cannot dominate the offset.
 /// `None` when fewer than 64 usable pairs remain.
-fn sample_offset(
-    reference: impl Iterator<Item = f32>,
-    source: impl Iterator<Item = f32>,
-    gain: f32,
-) -> Option<f32> {
+fn sample_offset(pairs: impl Iterator<Item = (f32, f32)>, gain: f32) -> Option<f32> {
     let mut residuals = Vec::new();
-    for (reference_value, source_value) in reference.zip(source) {
+    for (reference_value, source_value) in pairs {
         let residual = reference_value - gain * source_value;
         if reference_value.is_finite() && source_value.is_finite() && residual.is_finite() {
             residuals.push(residual);
@@ -1621,6 +1676,9 @@ const PHOTOMETRY_WIDTH_STARS: usize = 3;
 /// Each smaller scale photometry tries, where too few stars fit the last,
 /// is this much smaller.
 const PHOTOMETRY_SHRINK: f64 = 1.5;
+/// How far about each star photometry measures a background fit leaves
+/// its samples out, in the broadest FWHM a frame's photometry scales with.
+const BACKGROUND_MASK: f64 = 1.5;
 
 /// What photometric normalization reads of a reference, which a stack
 /// measures once for every frame it normalizes against it: the ceilings at
@@ -1630,6 +1688,7 @@ pub(crate) struct ReferencePhotometry {
     /// Each channel's [`photometric_ceilings`].
     ceilings: Vec<f32>,
     widths: std::sync::OnceLock<ReferenceWidths>,
+    mask: std::sync::OnceLock<BackgroundMask>,
 }
 
 /// The FWHM of a reference's stars, and how broad a frame's photometry may
@@ -1652,6 +1711,7 @@ impl ReferencePhotometry {
         Self {
             ceilings: photometric_ceilings(reference),
             widths: std::sync::OnceLock::new(),
+            mask: std::sync::OnceLock::new(),
         }
     }
 
@@ -1702,6 +1762,71 @@ impl ReferencePhotometry {
     #[cfg(feature = "gpu")]
     pub(crate) fn reach(&self, reference: &LinearImage, stars: &[(f64, f64)]) -> usize {
         stamp(self.widths(reference, stars).broadest)
+    }
+
+    /// The [`BackgroundMask`] about `stars` on `reference`'s grid, made the
+    /// first time it is asked for: `reference` and `stars` are those the
+    /// photometry was measured for. A canvas that grows keeps it, since it
+    /// is its stars' and not its samples'.
+    pub(crate) fn mask(&self, reference: &LinearImage, stars: &[(f64, f64)]) -> &BackgroundMask {
+        self.mask.get_or_init(|| {
+            let radius = BACKGROUND_MASK * self.widths(reference, stars).broadest;
+            BackgroundMask::around((reference.width, reference.height), stars, radius)
+        })
+    }
+}
+
+/// The pixels of a grid a local background fit leaves out: those within
+/// [`BACKGROUND_MASK`] times the broadest FWHM a frame's photometry scales
+/// with of the stars photometry measures, the brightest.
+///
+/// A tile's offset is the median of its paired residuals, the reference's
+/// samples less the frame's after its gain. Seeing spreads a star's light
+/// without changing the sky, but not alike in the two: where the reference
+/// is the sharper, its cores stand far above the frame's in a few samples,
+/// which a median leaves out, and the frame's wings a little above the
+/// reference's across many more, which move it by their mean. The offsets
+/// of a frame blurred from sigma 1.6 to 3.6 px came out 1.6 low on average
+/// on a crowded field, against a sky noise of 4, and 3.1 low in the tile of
+/// a bright star: the frame's sky lower than the reference's where stars
+/// are, in the stack too. Leaving out the samples about the stars, in both
+/// images alike, leaves the median the sky and what little light reaches
+/// further. A tile the mask leaves too few samples takes its neighbours'
+/// offset, as a tile beyond a frame's edge does.
+#[derive(Clone, Debug)]
+pub(crate) struct BackgroundMask {
+    /// A bit for each pixel of the grid, row by row: whether it is left out.
+    bits: Vec<u64>,
+}
+
+impl BackgroundMask {
+    /// The pixels within `radius` of any of `stars` on a grid of `width` by
+    /// `height`.
+    fn around((width, height): (usize, usize), stars: &[(f64, f64)], radius: f64) -> Self {
+        let mut bits = vec![0_u64; (width * height).div_ceil(64)];
+        let within = radius * radius;
+        let reach = radius.ceil() as isize;
+        for &(x, y) in stars {
+            let (cx, cy) = (x.round() as isize, y.round() as isize);
+            let rows = (cy - reach).max(0)..=(cy + reach).min(height as isize - 1);
+            let columns = (cx - reach).max(0)..=(cx + reach).min(width as isize - 1);
+            for py in rows {
+                for px in columns.clone() {
+                    if (px as f64 - x).powi(2) + (py as f64 - y).powi(2) <= within {
+                        let pixel = py as usize * width + px as usize;
+                        bits[pixel / 64] |= 1 << (pixel % 64);
+                    }
+                }
+            }
+        }
+        Self { bits }
+    }
+
+    /// Whether `pixel`, counted row by row over the grid, is left out.
+    pub(crate) fn covers(&self, pixel: usize) -> bool {
+        self.bits
+            .get(pixel / 64)
+            .is_some_and(|bits| bits >> (pixel % 64) & 1 == 1)
     }
 }
 
@@ -2437,10 +2562,13 @@ mod tests {
                     "{gain:?} for {transparency}"
                 );
             }
+            // The samples about the stars the background fit leaves out, as
+            // a stack leaves them out.
+            let mask = photometry.then(|| reference_photometry.mask(&reference, &stars));
             // The tiles' samples read in order, as a stack reads them.
             let tiles = match mode {
                 NormalizationMode::LocalBackground { tile_size } => Some(
-                    GatheredTiles::new(&reference, tile_size, &lookup)
+                    GatheredTiles::new(&reference, tile_size, &lookup, mask)
                         .expect("every tile sample is gathered"),
                 ),
                 _ => None,
@@ -2454,11 +2582,13 @@ mod tests {
             };
             for gains in [None, gain.as_deref()] {
                 let expected =
-                    NormalizationMap::estimate_with_gains(&reference, dense, mode, gains).unwrap();
+                    NormalizationMap::estimate_with_gains(&reference, dense, mode, gains, mask)
+                        .unwrap();
                 for source in [sparse, tiled] {
-                    let actual =
-                        NormalizationMap::estimate_with_gains(&reference, source, mode, gains)
-                            .unwrap();
+                    let actual = NormalizationMap::estimate_with_gains(
+                        &reference, source, mode, gains, mask,
+                    )
+                    .unwrap();
                     assert_eq!(bits(&expected.gains), bits(&actual.gains), "{mode:?}");
                     assert_eq!(bits(&expected.offsets), bits(&actual.offsets), "{mode:?}");
                 }
@@ -2656,7 +2786,8 @@ mod tests {
                 (Placed::on(&part, region, &reference), 64),
             ] {
                 let walked =
-                    local_background_with_gains(&reference, source, tile_size, &globals).unwrap();
+                    local_background_with_gains(&reference, source, tile_size, &globals, None)
+                        .unwrap();
                 let by_channel = local_background_from(
                     (source.width, source.height, source.channels()),
                     tile_size,
@@ -2671,6 +2802,7 @@ mod tests {
                                     channel,
                                     (x, y, width, height),
                                     globals[channel].0,
+                                    None,
                                 )
                             })
                             .flatten()
@@ -2720,6 +2852,7 @@ mod tests {
                     Placed::whole(&source),
                     NormalizationMode::LocalBackground { tile_size: width },
                     Some(&[gain]),
+                    None,
                 )
                 .unwrap();
                 assert_eq!(map.mean_gain(), gain);
@@ -2742,16 +2875,16 @@ mod tests {
         reference[..12].fill(10_000.0);
         reference[12..20].fill(f32::NAN);
         assert_eq!(
-            sample_offset(reference.iter().copied(), source.iter().copied(), 1.0),
+            sample_offset(reference.iter().copied().zip(source.iter().copied()), 1.0),
             Some(7.0)
         );
         reference[..37].fill(f32::NAN);
         assert_eq!(
-            sample_offset(reference.iter().copied(), source.iter().copied(), 1.0),
+            sample_offset(reference.iter().copied().zip(source.iter().copied()), 1.0),
             None
         );
         assert_eq!(
-            sample_offset([f32::MAX; 64].into_iter(), [-f32::MAX; 64].into_iter(), 2.0),
+            sample_offset([(f32::MAX, -f32::MAX); 64].into_iter(), 2.0),
             None
         );
     }
@@ -2791,35 +2924,44 @@ mod tests {
             let source = image(&mut draw, 700.0);
             let recorded =
                 NormalizationMap::estimate(&reference, &source, NormalizationMode::Global).unwrap();
-            let expected = recorded
-                .refit_background(&reference, &source, tile_size)
-                .unwrap();
-            let layout = BackgroundSamples::for_image(&source, tile_size);
-            let refitted = recorded
-                .refit_background_samples(
-                    &layout,
-                    &layout.of(&reference).unwrap(),
-                    &layout.of(&source).unwrap(),
-                )
-                .unwrap();
-            let bits = |values: &[f32]| {
-                values
-                    .iter()
-                    .map(|value| value.to_bits())
-                    .collect::<Vec<_>>()
-            };
-            assert_eq!(refitted.offsets.len(), expected.offsets.len());
-            assert_eq!(bits(&refitted.offsets), bits(&expected.offsets));
-            assert_eq!(bits(&refitted.gains), bits(&expected.gains));
-            assert_eq!(refitted, expected);
+            // Masked about two places, as about stars, or not.
+            let mask = BackgroundMask::around(
+                (source.width, source.height),
+                &[(40.5, 30.25), (100.0, 70.0)],
+                18.0,
+            );
+            for mask in [None, Some(&mask)] {
+                let expected = recorded
+                    .refit_background(&reference, &source, tile_size, mask)
+                    .unwrap();
+                let layout = BackgroundSamples::for_image(&source, tile_size);
+                let refitted = recorded
+                    .refit_background_samples(
+                        &layout,
+                        &layout.of(&reference).unwrap(),
+                        &layout.of(&source).unwrap(),
+                        mask,
+                    )
+                    .unwrap();
+                let bits = |values: &[f32]| {
+                    values
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(refitted.offsets.len(), expected.offsets.len());
+                assert_eq!(bits(&refitted.offsets), bits(&expected.offsets));
+                assert_eq!(bits(&refitted.gains), bits(&expected.gains));
+                assert_eq!(refitted, expected);
 
-            let mut whole = source.clone();
-            recorded.apply_global(&mut whole).unwrap();
-            let mut samples = layout.of(&source).unwrap();
-            recorded
-                .apply_global_samples(&layout, &mut samples)
-                .unwrap();
-            assert_eq!(bits(&samples), bits(&layout.of(&whole).unwrap()));
+                let mut whole = source.clone();
+                recorded.apply_global(&mut whole).unwrap();
+                let mut samples = layout.of(&source).unwrap();
+                recorded
+                    .apply_global_samples(&layout, &mut samples)
+                    .unwrap();
+                assert_eq!(bits(&samples), bits(&layout.of(&whole).unwrap()));
+            }
         }
     }
 
@@ -2937,7 +3079,7 @@ mod tests {
                 vec![f32::NAN; layout.len()],
             ] {
                 let residual = base
-                    .refit_background_residual_samples(&layout, &reference, &samples)
+                    .refit_background_residual_samples(&layout, &reference, &samples, None)
                     .unwrap();
                 assert!(residual.is_identity());
             }
@@ -2954,6 +3096,7 @@ mod tests {
                     &layout,
                     &layout.of(&expected).unwrap(),
                     &samples,
+                    None,
                 )
                 .unwrap();
             assert_eq!(base, saved);
@@ -2980,6 +3123,7 @@ mod tests {
                     &wrong,
                     &vec![0.0; wrong.len()],
                     &vec![0.0; wrong.len()],
+                    None,
                 )
                 .is_err()
             );
@@ -3666,5 +3810,76 @@ mod tests {
         )
         .expect("enough stars")[0];
         assert!((gain / 0.5 - 1.0).abs() < 0.01, "{gain}");
+    }
+
+    /// The mean and the lowest of `map`'s tile offsets for channel 0.
+    fn offset_spread(map: &NormalizationMap) -> (f32, f32) {
+        let offsets = &map.offsets;
+        let mean = offsets.iter().sum::<f32>() / offsets.len() as f32;
+        (mean, offsets.iter().copied().fold(f32::MAX, f32::min))
+    }
+
+    /// The crowded field, under one sky, taken in seeing of sigma 1.6 px
+    /// for the reference and 3.6 px for the frame, with the frame's gain of
+    /// 1, the [`BackgroundMask`] about the reference's stars, and the
+    /// frame's local background map fitted against the reference in tiles
+    /// of 64 px, as a stack fits it.
+    fn blurred_background() -> (LinearImage, LinearImage, BackgroundMask, NormalizationMap) {
+        let reference = seeing_field(Seeing::Gaussian { sigma: 1.6 }, 180, 1.0, 0);
+        let source = seeing_field(Seeing::Gaussian { sigma: 3.6 }, 180, 1.0, 5);
+        let stars = crate::Registrar::new(&reference, crate::RegistrationOptions::default())
+            .unwrap()
+            .reference_star_positions();
+        let mask = ReferencePhotometry::measure(&reference)
+            .mask(&reference, &stars)
+            .clone();
+        let map = NormalizationMap::estimate_with_gains(
+            &reference,
+            Placed::whole(&source),
+            NormalizationMode::LocalBackground { tile_size: 64 },
+            Some(&[1.0]),
+            Some(&mask),
+        )
+        .unwrap();
+        (reference, source, mask, map)
+    }
+
+    /// Seeing spreads a star's light into its wings without changing the
+    /// sky, so a frame blurred from sigma 1.6 to 3.6 px under the same sky
+    /// needs no offset. The median of the paired residuals in a tile reads
+    /// the wings, a little above the sky across many pixels, and leaves out
+    /// the sharp reference's cores, far above it in a few: on this crowded
+    /// field the offsets came out 1.65 low on average, against a sky noise
+    /// of 4, and 3.1 low in the tile of a bright star, smoothed over its
+    /// neighbours. Without the samples about the stars, 0.12 and 0.64.
+    #[test]
+    fn background_offsets_do_not_follow_seeing() {
+        let (_, _, _, map) = blurred_background();
+        let (mean, lowest) = offset_spread(&map);
+        assert!(
+            mean.abs() < 0.3 && lowest > -1.5,
+            "mean {mean}, lowest {lowest}"
+        );
+    }
+
+    /// A reintegration fits the same offsets again, from the frame's
+    /// background samples alone, against an integrated reference.
+    #[test]
+    fn refitted_background_offsets_do_not_follow_seeing() {
+        let (reference, source, mask, map) = blurred_background();
+        let layout = BackgroundSamples::for_image(&source, 64);
+        let refitted = map
+            .refit_background_samples(
+                &layout,
+                &layout.of(&reference).unwrap(),
+                &layout.of(&source).unwrap(),
+                Some(&mask),
+            )
+            .unwrap();
+        let (mean, lowest) = offset_spread(&refitted);
+        assert!(
+            mean.abs() < 0.3 && lowest > -1.5,
+            "mean {mean}, lowest {lowest}"
+        );
     }
 }

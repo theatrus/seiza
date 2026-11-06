@@ -2208,6 +2208,30 @@ impl LiveStacker {
         Ok(self.integrate_prepared(prepared))
     }
 
+    /// The samples about the reference's stars that a local background fit
+    /// leaves out, as the live pass left them out, for a reintegration to
+    /// refit the frames' backgrounds without them; `None` under another
+    /// normalization.
+    pub(crate) fn background_mask(&self) -> Option<crate::normalization::BackgroundMask> {
+        if !matches!(
+            self.options.normalization,
+            NormalizationMode::LocalBackground { .. }
+        ) {
+            return None;
+        }
+        let target = FrameRegistration {
+            registrar: &self.registrar,
+            canvas: self.canvas_registrar.as_ref(),
+            known: None,
+            photometry: &self.reference_photometry,
+            #[cfg(feature = "gpu")]
+            fit_tiles: &self.fit_tiles,
+        };
+        let stars = target.reference_star_positions();
+        let photometry = target.reference_photometry(&self.reference);
+        Some(photometry.mask(&self.reference, &stars).clone())
+    }
+
     /// Borrow the stack as two disjoint halves: the immutable state every
     /// frame's preparation reads, and the mutable state integration owns.
     ///
@@ -3186,6 +3210,9 @@ pub(crate) fn prepare_frame(
         ));
     }
     let placed = Placed::on(&registered, region, reference);
+    // The samples about the reference's stars, which the background fit
+    // leaves out.
+    let background_mask = photometry.map(|photometry| photometry.mask(reference, &stars));
     // The fit reads each tile's gathered samples in order, from where the
     // stack worked out they lie for its reference.
     #[cfg(feature = "gpu")]
@@ -3196,7 +3223,12 @@ pub(crate) fn prepare_frame(
             target
                 .fit_tiles
                 .get_or_init(|| {
-                    crate::normalization::GatheredTiles::new(reference, tile_size, samples.lookup())
+                    crate::normalization::GatheredTiles::new(
+                        reference,
+                        tile_size,
+                        samples.lookup(),
+                        background_mask,
+                    )
                 })
                 .as_ref()
         }
@@ -3231,19 +3263,24 @@ pub(crate) fn prepare_frame(
         }
         (mode, _) => mode,
     };
-    let normalization =
-        match NormalizationMap::estimate_with_gains(reference, placed, mode, gains.as_deref()) {
-            Ok(normalization) => normalization,
-            Err(error) => {
-                let message = match error {
-                    Error::Normalization(message) => message,
-                    other => other.to_string(),
-                };
-                return Ok(PreparedFrame::Rejected(
-                    FrameRejectionReason::Normalization(message),
-                ));
-            }
-        };
+    let normalization = match NormalizationMap::estimate_with_gains(
+        reference,
+        placed,
+        mode,
+        gains.as_deref(),
+        background_mask,
+    ) {
+        Ok(normalization) => normalization,
+        Err(error) => {
+            let message = match error {
+                Error::Normalization(message) => message,
+                other => other.to_string(),
+            };
+            return Ok(PreparedFrame::Rejected(
+                FrameRejectionReason::Normalization(message),
+            ));
+        }
+    };
     let (minimum_gain, maximum_gain) = normalization.gain_range();
     #[cfg(feature = "gpu")]
     trace.mark("normalization fit");

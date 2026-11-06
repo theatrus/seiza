@@ -586,6 +586,9 @@ struct Renormalizer {
     /// Expanded mosaics keep the recorded spatial correction and fit only
     /// an additive residual. Ordinary stacks keep the original refit.
     preserve_recorded: bool,
+    /// The samples about the reference's stars the fit leaves out, as the
+    /// live pass left them out.
+    mask: Option<crate::normalization::BackgroundMask>,
     /// Residual maps when preserving the base, otherwise complete maps.
     maps: std::sync::Mutex<Vec<Option<crate::NormalizationMap>>>,
 }
@@ -619,10 +622,11 @@ impl Renormalizer {
             return Ok(map);
         }
         let base = admitted.mapping.normalization();
+        let mask = self.mask.as_ref();
         let map = if self.preserve_recorded {
-            base.refit_background_residual_samples(&self.layout, &self.reference, samples)?
+            base.refit_background_residual_samples(&self.layout, &self.reference, samples, mask)?
         } else {
-            base.refit_background_samples(&self.layout, &self.reference, samples)?
+            base.refit_background_samples(&self.layout, &self.reference, samples, mask)?
         };
         self.maps
             .lock()
@@ -2936,6 +2940,7 @@ impl LiveStacker {
                     .normalization_reference(&layout, &masters, cache, options, footprints)?,
                 layout,
                 preserve_recorded: self.canvas_registrar.is_some(),
+                mask: self.background_mask(),
                 maps: std::sync::Mutex::new(vec![None; count]),
             }),
             None => None,
@@ -3947,6 +3952,7 @@ mod tests {
                     layout: layout.clone(),
                     reference,
                     preserve_recorded: true,
+                    mask: None,
                     maps: std::sync::Mutex::new(vec![None; 2]),
                 };
                 let residual = renormalizer
@@ -3999,6 +4005,7 @@ mod tests {
             reference: layout.of_placed(expected.view()).unwrap(),
             layout,
             preserve_recorded: true,
+            mask: None,
             maps: std::sync::Mutex::new(vec![None; 2]),
         };
         let residual = renormalizer

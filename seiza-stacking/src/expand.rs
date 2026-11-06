@@ -1799,11 +1799,18 @@ impl Plan {
             })
             .unwrap_or_else(|| vec![1.0; incoming.channels])
         });
+        // The background fit leaves out the samples about the panel's stars,
+        // which a sharper sky on one night than the other would bias.
+        let photometry = crate::normalization::ReferencePhotometry::measure(existing);
+        let mask = gains
+            .is_some()
+            .then(|| photometry.mask(existing, &panel_stars));
         let normalization = NormalizationMap::estimate_with_gains(
             existing,
             crate::image::Placed::whole(incoming),
             options.scale().normalization(options.normalization),
             gains.as_deref(),
+            mask,
         )?;
         let (low, high) = normalization.gain_range();
         if low < criteria.minimum_normalization_gain || high > criteria.maximum_normalization_gain {
