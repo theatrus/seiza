@@ -1198,8 +1198,50 @@ in these ways:
   - it raised the light around the Trunk's three brightest stars by 5–7σ̄
     out to 8 pixels.
 
-  The next runs put the two changes on the wider model, and the sky plane
-  and binned share alone on the narrower one.
+  Against B halves matched to A's flux, the wider model's error was 2.63:
+  - against 2.83 for the narrower model on the same sets, and 2.71 for the
+    best seed;
+  - in faint regions 9.4, against 12.2.
+
+  So width pays when the pairs are left as they are.
+
+  With the sky taken out, the narrower model was trained again with only
+  the sky gradient and the binned share. That was nearly as hard to break
+  as all four changes:
+  - **The perturbed images.**
+    - On the Iris binned and sharpened it changed 10 and 8 pixels by more
+      than 100σ̄, with a largest change of 300σ̄ and 161σ̄. With the sky
+      taken out alone it changed 15,357 and 27,926.
+    - On the SNR and California sharpened it changed 20 and 18 pixels,
+      against 16,830 and 4,794 without either change.
+  - **What it cost.**
+    - Its error on 4-frame halves was 2.32: 2.23 with the sky alone, 2.43
+      with all four changes.
+    - Against matched halves its error was 2.98 against 2.90 and 3.11. In
+      faint regions it was 16.8 against 14.7 and 20.4.
+    - It left 46% of the finest noise, as all four changes did, against
+      42% with the sky alone. So the gradient and binned share, not the
+      shifts and sharpening, cost the fine noise.
+    - It kept 20% of the Trunk's sharp spots, 118 over 1σ̄, against 12%
+      and 48.
+
+  All four changes on the wider model bought nothing from the width:
+  - its error was 2.41 on 4-frame halves against 2.43, and 3.07 against
+    matched halves against 3.11;
+  - in faint regions its error was 21.8 against 20.4;
+  - it kept 23% of the Trunk's sharp spots.
+
+  It left 49%, 64% and 78% of the noise, the least coarse noise of any run
+  and the most fine. It stayed hard to break: 1 and 0 pixels over 100σ̄ on
+  the Iris binned and sharpened. Under the gradient, though, the guard moved
+  0.17% of the Trunk's pixels, against 0.015% for the narrower model with
+  the gradient and binned share alone.
+
+  The next runs are the first on the corpus restacked with the stacker's
+  fixed gains and tile offsets. Both are at the wider width:
+  - the recipe without the changes, as the new corpus's baseline;
+  - the sky taken out with the gradient and half the binned share, a tenth
+    of each batch.
 - **Deep halves.** Training on a night's deep stack dealt into two halves,
   a quarter of every batch, taught a model to keep mottle: it left 37% of
   the coarse noise on empty sky. The halves share the night's flats,
