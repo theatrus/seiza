@@ -240,6 +240,31 @@ def test_the_modelled_noise_map_keeps_the_level_and_drops_the_scatter():
     assert abs(np.median(modelled) / true_sigma - 1.0) < 0.08, "and keeps the level"
 
 
+def test_the_image_noise_map_finds_the_sky_s_noise_and_a_nebula_s():
+    from seiza_training.noise_model import IMAGE_MAP_SCALE, image_sigma
+
+    rng = np.random.default_rng(5)
+    height, width, sky_sigma, gain = 512, 640, 2.0, 0.05
+    y, x = np.mgrid[:height, :width]
+    # A gradient, stars and, on the right, a nebula whose shot noise adds
+    # `gain` × its signal to the variance; a strip on the left is noisier,
+    # as a thinly covered edge is.
+    nebula = np.where(x > 400, 2000.0, 0.0)
+    signal = 100.0 + 0.05 * x + 0.03 * y + nebula
+    for cy, cx in rng.uniform((0, 0), (height, width), (80, 2)):
+        signal += 3000.0 * np.exp(-((y - cy) ** 2 + (x - cx) ** 2) / (2 * 1.5**2))
+    sigma = np.sqrt(np.where(x < 64, 4.0, 1.0) * sky_sigma**2 + gain * nebula)
+    image = (signal + rng.normal(0.0, 1.0, (height, width)) * sigma).astype(np.float32)
+    image[:20, :20] = np.nan
+    mapped = image_sigma(image) / IMAGE_MAP_SCALE
+    assert np.isnan(mapped[:20, :20]).all() and np.isfinite(mapped[20:, 20:]).all()
+    sky = (x > 96) & (x < 368)
+    assert abs(np.median(mapped[sky]) / sky_sigma - 1.0) < 0.08, "the sky's noise, the stars left out"
+    assert abs(np.median(mapped[24:, 8:48]) / (2 * sky_sigma) - 1.0) < 0.15, "the noisier edge"
+    inside = x > 440
+    assert abs(np.median(mapped[inside]) / np.median(sigma[inside]) - 1.0) < 0.1, "the nebula's"
+
+
 def test_matching_puts_b_on_a_s_background_and_flux():
     from seiza_training.noise_model import matched
 

@@ -101,8 +101,8 @@ def main(argv: list[str] | None = None) -> int:
     train.add_argument("--loss-weight", choices=("core", "variance"), default="core")
     train.add_argument("--map-jitter", type=float, default=0.0,
                        help="scale the noise map the network reads by up to exp(±this)")
-    train.add_argument("--noise-map", choices=("raw", "model"), default="raw",
-                       help="the stack's per-pixel noise map, or the modelled one")
+    train.add_argument("--noise-map", choices=("raw", "model", "image"), default="raw",
+                       help="the stack's per-pixel noise map, the one modelled from it, or one from the image alone")
     train.add_argument("--huber", type=float, default=0.0,
                        help="square each pixel's weighted error only within this of zero")
     train.add_argument("--huber-above", type=float, default=0.0,
@@ -178,6 +178,8 @@ def main(argv: list[str] | None = None) -> int:
                           help="the share of the pixel-scale grain the model finds that is taken out (1: all of it)")
     evaluate.add_argument("--low-amount", type=float, default=1.0,
                           help="the share of the wider mottle the model finds that is taken out (1: all of it)")
+    evaluate.add_argument("--noise-map", choices=("raw", "model", "image"),
+                          help="the kind of noise map the network reads, in place of the one it trained with")
     evaluate.add_argument("--band-scale", type=float, default=5.0,
                           help="the Gaussian scale in pixels dividing the grain from the mottle")
     evaluate.add_argument("--match-flux", action="store_true",
@@ -334,7 +336,7 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
 
         bands = NoiseBands(high=arguments.high_amount, low=arguments.low_amount, scale_px=arguments.band_scale)
         return evaluate_saved(store, manifest, arguments.name, split=arguments.split, limit=arguments.limit, sets=only,
-                              bands=bands, match_flux=arguments.match_flux)
+                              bands=bands, match_flux=arguments.match_flux, noise_map=arguments.noise_map)
     if command == "split":
         from .splits import assign_splits
 

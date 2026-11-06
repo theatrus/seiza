@@ -118,17 +118,94 @@ def pairs(
     return found
 
 
-NOISE_MAPS = ("raw", "model")
+NOISE_MAPS = ("raw", "model", "image")
 # The side of the blocks the modelled map takes the sky's variance over.
 SKY_BLOCK = 32
+# The median of a χ² with one degree of freedom over its mean: a second
+# difference's square, of white noise, has it.
+CHI2_1_MEDIAN = 0.4549
+# The image map fits its signal term on the blocks whose median is this
+# many times its sky noise above the background, when there are at least
+# `IMAGE_GAIN_BLOCKS` of them.
+IMAGE_GAIN_LEVEL = 5.0
+IMAGE_GAIN_BLOCKS = 20
+# The image map's level against the modelled map's: the median, over 24 of
+# the train sets' 4-frame A halves, of the modelled map's median noise over
+# the image map's before this factor (measured 2026-11-06, spread
+# 0.99–1.31). It puts the image map on the level that models trained with
+# the stack's map know. Against the noise of the halves' difference on the
+# sky, the image map read 1.15–1.31 times it, the modelled map 1.19–1.61.
+IMAGE_MAP_SCALE = 1.13
+
+
+def input_sigma(kind: str, image: np.ndarray, sigma: np.ndarray | None, coverage: np.ndarray | None) -> np.ndarray:
+    """The noise map a network reads, of `kind` (`NOISE_MAPS`): the stack's
+    own per-pixel map, the map `modelled_sigma` makes from it, or the map
+    `image_sigma` makes from the image alone, which needs neither the
+    stack's variance nor its coverage."""
+    if kind == "raw":
+        return sigma
+    if kind == "model":
+        return modelled_sigma(image, sigma, coverage)
+    if kind == "image":
+        return image_sigma(image)
+    raise ValueError(f"a noise map is one of {NOISE_MAPS}, not {kind!r}")
+
+
+def image_sigma(image: np.ndarray) -> np.ndarray:
+    """A noise map from the image alone, for stacks that carry no variance:
+    those made by other stackers, or changed after stacking. It has the
+    modelled map's shape. The sky's variance is that of the image's second
+    differences along each axis, as Seiza's `snr` module measures noise: a
+    planar gradient cancels in them, and as medians over `SKY_BLOCK`-pixel
+    blocks the stars drop out. Spread back smoothly, the blocks keep
+    vignetting and thinly covered edges. A term growing with the signal is
+    fitted on the blocks a bright nebula fills, so stars and nebulae stay
+    noisier; it is taken out of those blocks' own variance first, so the
+    sky is not counted twice. NaN where the image is."""
+    height, width = image.shape
+    values = image.astype(np.float64)
+    rows, columns = max(1, height // SKY_BLOCK), max(1, width // SKY_BLOCK)
+
+    def block_medians(plane: np.ndarray) -> np.ndarray:
+        if plane.shape[0] < rows * SKY_BLOCK or plane.shape[1] < columns * SKY_BLOCK:
+            plane = np.pad(plane, ((0, max(0, rows * SKY_BLOCK - plane.shape[0])),
+                                   (0, max(0, columns * SKY_BLOCK - plane.shape[1]))), constant_values=np.nan)
+        blocks = plane[: rows * SKY_BLOCK, : columns * SKY_BLOCK].reshape(rows, SKY_BLOCK, columns, SKY_BLOCK)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            return np.nanmedian(blocks, axis=(1, 3))
+
+    across = np.full_like(values, np.nan)
+    across[:, 1:-1] = (values[:, :-2] - 2.0 * values[:, 1:-1] + values[:, 2:]) ** 2
+    down = np.full_like(values, np.nan)
+    down[1:-1, :] = (values[:-2, :] - 2.0 * values[1:-1, :] + values[2:, :]) ** 2
+    # A second difference of white noise has six times its variance.
+    variance_blocks = 0.5 * (block_medians(across) + block_medians(down)) / (6.0 * CHI2_1_MEDIAN)
+    background = float(np.nanmedian(values[::7, ::7])) if np.isfinite(values).any() else 0.0
+    signal_blocks = block_medians(values) - background
+    finite = np.isfinite(variance_blocks) & np.isfinite(signal_blocks)
+    sky_variance = float(np.median(variance_blocks[finite])) if finite.any() else 1.0
+    gain = 0.0
+    nebula = finite & (signal_blocks > IMAGE_GAIN_LEVEL * np.sqrt(sky_variance))
+    if nebula.sum() >= IMAGE_GAIN_BLOCKS:
+        floor = float(np.median(variance_blocks[finite & ~nebula])) if (finite & ~nebula).any() else sky_variance
+        gain = max(0.0, float(np.median((variance_blocks[nebula] - floor) / signal_blocks[nebula])))
+    sky_blocks = variance_blocks - gain * np.clip(np.nan_to_num(signal_blocks, nan=0.0), 0.0, None)
+    sky_blocks = np.where(np.isfinite(sky_blocks), sky_blocks, sky_variance)
+    sky_blocks = np.maximum(sky_blocks, 0.25 * sky_variance)
+    sky = upsample(sky_blocks, height, width, SKY_BLOCK).astype(np.float64)
+    signal = np.clip(np.nan_to_num(values - background, nan=0.0), 0.0, None)
+    mapped = IMAGE_MAP_SCALE * np.sqrt(sky + gain * signal)
+    return np.where(np.isfinite(image), mapped, np.nan).astype(np.float32)
 
 
 def load_half(
-    store: Store, product: dict[str, Any], *, noise_map: bool = True, modelled: bool = False
+    store: Store, product: dict[str, Any], *, noise_map: bool = True, kind: str = "raw"
 ) -> tuple[np.ndarray, np.ndarray | None]:
     """A stack's image, NaN where nothing covers it, and its noise map
-    when `noise_map`: `sqrt(variance / coverage)` per pixel, or, when
-    `modelled`, the map `modelled_sigma` makes from it."""
+    when `noise_map`: `sqrt(variance / coverage)` per pixel, or the map of
+    `kind` (`input_sigma`) made from it or from the image."""
     files = loads(product["files"])
     image = np.load(store.root / files["image"]).astype(np.float32)
     coverage = np.load(store.root / files["coverage"])
@@ -138,9 +215,7 @@ def load_half(
     variance = np.load(store.root / files["variance"]).astype(np.float32)
     with np.errstate(divide="ignore", invalid="ignore"):
         sigma = np.where(coverage > 0, np.sqrt(variance / coverage), np.nan).astype(np.float32)
-    if modelled:
-        sigma = modelled_sigma(image, sigma, coverage)
-    return image, sigma
+    return image, input_sigma(kind, image, sigma, coverage)
 
 
 def extended(grid: np.ndarray) -> np.ndarray:
@@ -433,7 +508,7 @@ def bank(
     if not (whole.done and (binned is None or binned.done)):
         dropped = []
         for pair in chosen:
-            image_a, sigma_a = load_half(store, pair["a"], modelled=noise_map == "model")
+            image_a, sigma_a = load_half(store, pair["a"], kind=noise_map)
             image_b, _ = load_half(store, pair["b"], noise_map=False)
             if match_flux:
                 noise = scales(image_a, sigma_a)[1]
@@ -444,7 +519,12 @@ def bank(
             if not whole.done:
                 whole.add(*flattened(image_a, sigma_a, image_b, sky))
             if binned is not None and not binned.done:
-                binned.add(*flattened(*binned_pair(image_a, sigma_a, image_b), sky))
+                binned_a, binned_sigma, binned_b = binned_pair(image_a, sigma_a, image_b)
+                if noise_map == "image":
+                    # What the image map makes of a binned image, as it
+                    # would of one binned before it came.
+                    binned_sigma = image_sigma(binned_a)
+                binned.add(*flattened(binned_a, binned_sigma, binned_b, sky))
         # Before the banks are marked done.
         record.write_text(json.dumps(dropped))
     banked = whole.finish()
@@ -488,7 +568,7 @@ def dark_noise_bank(
 
     def images():
         for pair in chosen:
-            image, sigma = load_half(store, pair["input"], modelled=noise_map == "model")
+            image, sigma = load_half(store, pair["input"], kind=noise_map)
             target, _ = load_half(store, pair["target"], noise_map=False)
             yield flattened(image, sigma, target, sky)
 
@@ -1359,9 +1439,8 @@ def evaluate(
         if match_flux:
             image_b, gain = matched(image_a, image_b, noise)
             found = {f"flux_{band}": value for band, value in agreement(image_a, image_b, noise).items()}
-        if noise_map == "model":
-            coverage = np.load(store.root / loads(pair["a"]["files"])["coverage"])
-            sigma_a = modelled_sigma(image_a, sigma_a, coverage)
+        coverage = np.load(store.root / loads(pair["a"]["files"])["coverage"])
+        sigma_a = input_sigma(noise_map, image_a, sigma_a, coverage)
         settings = {"tile": tile, "overlap": overlap, "margin": margin, "multiple": multiple or model.multiple}
 
         def denoise(image: np.ndarray, sigma: np.ndarray) -> np.ndarray:
@@ -1378,8 +1457,8 @@ def evaluate(
         # night's calibration.
         if isinstance(size, int):
             alone_b, sigma_b = load_half(store, pair["b"])
-            if noise_map == "model":
-                sigma_b = modelled_sigma(alone_b, sigma_b, np.load(store.root / loads(pair["b"]["files"])["coverage"]))
+            sigma_b = input_sigma(noise_map, alone_b, sigma_b,
+                                  np.load(store.root / loads(pair["b"]["files"])["coverage"]))
             left = noise_left(estimate, denoise(alone_b, sigma_b), image_a, alone_b, noise)
         return {"pair": pair["a"]["id"], "set": pair["set"], "size": size,
                 "flux_gain": gain, **found, **measure(estimate, image_a, image_b, background, noise), **left}
@@ -1750,7 +1829,7 @@ def evaluate_dark_noise(
             floor = np.load(store.root / target_files["variance"]) / target_coverage
         background, noise = scales(image, sigma)
         coverage = np.load(store.root / loads(pair["input"]["files"])["coverage"])
-        stated = modelled_sigma(image, sigma, coverage) if noise_map == "model" else sigma
+        stated = input_sigma(noise_map, image, sigma, coverage)
         planes, input_background, input_noise = view(image, stated, sky=sky, noise_plane=noise_plane)
         run = denoiser(model, input_background, input_noise, where)
         estimate = bands.apply(image, infer(run, planes, tile=tile, overlap=overlap, margin=margin,
@@ -1765,8 +1844,7 @@ def evaluate_dark_noise(
         blank = np.where(alone_coverage > 0, background + alone, np.nan).astype(np.float32)
         with np.errstate(divide="ignore", invalid="ignore"):
             sky_sigma = np.where(alone_coverage > 0, np.sqrt(alone_variance / alone_coverage), np.nan).astype(np.float32)
-        if noise_map == "model":
-            sky_sigma = modelled_sigma(blank, sky_sigma, alone_coverage)
+        sky_sigma = input_sigma(noise_map, blank, sky_sigma, alone_coverage)
         sky_planes, sky_background, sky_noise = view(blank, sky_sigma, sky=sky, noise_plane=noise_plane)
         sky_run = denoiser(model, sky_background, sky_noise, where)
         output = bands.apply(blank, infer(sky_run, sky_planes, tile=tile, overlap=overlap, margin=margin,
@@ -1839,22 +1917,24 @@ def tiling(levels: int) -> dict[str, int]:
 
 def evaluate_saved(
     store: Store, manifest: Manifest, name: str, *, split: str, limit: int | None = None, sets: set[str] | None = None,
-    bands: NoiseBands = NoiseBands(), match_flux: bool = False,
+    bands: NoiseBands = NoiseBands(), match_flux: bool = False, noise_map: str | None = None,
 ) -> dict[str, Any]:
     """Measure a recorded run's model on `split`, taking out `bands` of
     what it finds, and add it to the record: under the split's name, then,
-    when `bands` keep some noise, theirs, and with `match_flux` "matched
-    flux"."""
+    when `bands` keep some noise, theirs, with `match_flux` "matched
+    flux", and with `noise_map` the kind of map the network reads in place
+    of the one it trained with, "<kind> map"."""
     directory = store.root / "models" / "noise" / name
     record, model = load_run(store, name)
     config = record["config"]
-    read = {"noise_map": config.get("noise_map", "raw"), "noise_plane": config.get("noise_plane", "linear"),
-            "sky": config.get("sky", "global")}
+    read = {"noise_map": noise_map or config.get("noise_map", "raw"),
+            "noise_plane": config.get("noise_plane", "linear"), "sky": config.get("sky", "global")}
     result = evaluate(store, manifest, model, split=split, limit=limit, sets=sets, **read, bands=bands,
                       match_flux=match_flux, **record["inference"])
     result["dark_noise"] = evaluate_dark_noise(store, manifest, model, split=split, sets=sets, **read, bands=bands,
                                                **record["inference"])
-    label = ", ".join([split] + ([] if bands.whole else [str(bands)]) + (["matched flux"] if match_flux else []))
+    label = ", ".join([split] + ([] if bands.whole else [str(bands)]) + (["matched flux"] if match_flux else [])
+                      + ([f"{noise_map} map"] if noise_map else []))
     record.setdefault("evaluations", {})[label] = result
     (directory / "run.json").write_text(json.dumps(record, indent=2))
     return {key: value for key, value in result.items() if key != "pairs_detail"} | {
