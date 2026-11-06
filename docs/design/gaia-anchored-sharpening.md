@@ -293,9 +293,9 @@ Progress, November 2026 (built on branches, not yet merged):
   the field-varying PSF, through a remaining kernel `R`, where `P = R ∗ T`
   at each node, towards a round `T`. It narrows the tilted stack's FWHM
   range from 2.0–3.6 to 1.9–2.3 px and its ellipticity from 0.24 to 0.16.
-  The reblur χ² is 1.06–1.08 on two stacks, but 8.7 on the tilted one.
-  Without deconvolution, the input itself scores 13.3. On sky alone, the
-  output scores 1.6, so the excess sits on the stars, many of them
+  The reblur χ² is 0.97–0.99 on two stacks, but 7.2 on the tilted one.
+  Without deconvolution, the input itself scores 13.2. On sky alone, the
+  output scores 1.5, so the excess sits on the stars, many of them
   undersampled near 2 px, where the PSF model's residual is 5–7%.
 - **Open.** A reference for the residual spectrum's flatness: a stack's
   noise is correlated, so even a perfect estimate falls towards Nyquist.
