@@ -2424,6 +2424,88 @@ fn a_shared_nebula_local_background_keeps_its_output() {
     );
 }
 
+/// Local background normalization through a night whose seeing worsens
+/// frame by frame, from Gaussian sigma 1.5 to 2.9 px, with one frame dimmed
+/// a fifth by haze and a faint nebula over part of the field: each frame's
+/// photometric gain, and the stack. The other local background cases keep
+/// one seeing, where any aperture loses the same share of every frame's
+/// stars.
+#[test]
+fn a_local_background_stack_through_changing_seeing_keeps_its_output() {
+    let (width, height) = (384_usize, 320_usize);
+    let mut state = 0x1b87_3593_u32;
+    let mut next = || {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (state >> 8) as f32 / (1 << 24) as f32
+    };
+    let stars = (0..120)
+        .map(|_| {
+            (
+                8.0 + next() * (width as f32 - 16.0),
+                8.0 + next() * (height as f32 - 16.0),
+                3_000.0 + next() * 60_000.0,
+            )
+        })
+        .collect::<Vec<_>>();
+    let field = |frame: usize| {
+        let (dx, dy) = SHIFTS[frame];
+        let sigma = 1.5 + 0.2 * frame as f32;
+        let transparency = if frame == 5 { 0.8 } else { 1.0 };
+        let norm = 1.0 / (2.0 * std::f32::consts::PI * sigma * sigma);
+        let reach = 6.0 * sigma;
+        let data = (0..width * height)
+            .map(|index| {
+                let (x, y) = ((index % width) as f32, (index / width) as f32);
+                let sky = 150.0 + 0.04 * x + 0.02 * y;
+                let (nx, ny) = (x - dx - 260.0, y - dy - 110.0);
+                let nebula = 60.0 * (-(nx * nx / 5000.0 + ny * ny / 2500.0)).exp();
+                let light = stars
+                    .iter()
+                    .filter(|star| {
+                        (star.0 - x + dx).abs() < reach && (star.1 - y + dy).abs() < reach
+                    })
+                    .map(|&(star_x, star_y, flux)| {
+                        let (sx, sy) = (x - dx - star_x, y - dy - star_y);
+                        flux * norm * (-(sx * sx + sy * sy) / (2.0 * sigma * sigma)).exp()
+                    })
+                    .sum::<f32>();
+                transparency * (sky + nebula + light) + noise(index, frame, 3.0)
+            })
+            .collect();
+        LinearImage::new(width, height, 1, data).unwrap()
+    };
+    let options = StackOptions {
+        normalization: NormalizationMode::LocalBackground { tile_size: 32 },
+        ..StackOptions::default()
+    };
+    let mut stacker = LiveStacker::from_linear(field(0), options).unwrap();
+    let mut fingerprint = Vec::new();
+    for frame in 1..SHIFTS.len() {
+        match stacker.push_linear(field(frame)).unwrap() {
+            FrameDisposition::Accepted(diagnostics) => {
+                fingerprint.push(f64::from(diagnostics.normalization_mean_gain));
+            }
+            rejected => panic!("{rejected:?}"),
+        }
+    }
+    let snapshot = stacker.snapshot().unwrap();
+    fingerprint.extend(summary(&snapshot.image));
+    check(
+        "CHANGING_SEEING_LOCAL_BACKGROUND",
+        &fingerprint,
+        CHANGING_SEEING_LOCAL_BACKGROUND,
+    );
+}
+
+#[rustfmt::skip]
+const CHANGING_SEEING_LOCAL_BACKGROUND: &[f64] = &[
+    1.0144367e0, 1.0325469e0, 1.0670775e0, 1.1080229e0, 1.4584700e0, 1.2323509e0, 1.3092300e0,
+    2.0179522e2, 2.6383898e2, 3.2878005e3, 3.9345065e2, 3.1257745e2, 1.5799240e2, 1.6112708e2,
+    1.6437914e2, 1.4961624e2, 1.5528780e2, 1.7790121e2, 8.6392285e2, 1.7025122e2, 3.9528873e2,
+    1.5741251e2, 6.8794415e2, 6.5978015e2, 1.6933549e2, 1.5461763e2, 1.5829283e2, 1.6199429e2,
+    1.6450677e2, 1.6911099e2, 1.5640068e2, 1.6115594e2, 1.6384425e2, 1.7856921e3, 1.7127193e2,
+];
+
 fn mosaic_stack(model: RegistrationModel) -> StackSnapshot {
     let directory = tempfile::tempdir().unwrap();
     let paths = mosaic_panels(&directory);
