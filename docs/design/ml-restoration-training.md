@@ -1516,8 +1516,7 @@ Following the [Rust-first rules](../../AGENTS.md#the-rust-api-comes-first):
 let backend = Backend::detect(&BackendOptions::default())?;
 
 let model = NoiseModel::open(&noise_bundle, &backend)?;
-let noise = NoiseMap::from_stack(&snapshot)?; // or NoiseMap::estimate(&image)?
-let result = model.denoise(&image, &noise, &DenoiseOptions::default())?;
+let result = model.denoise(&image, &DenoiseOptions::default())?;
 // Per-band amounts of the removed noise: no second inference.
 let image = result.blend(&NoiseBands { high: 0.9, low: 0.5, scale_px: 5.0 });
 
@@ -1525,7 +1524,6 @@ let psf = PsfField::measure(&image, &PsfFieldOptions::default())?;
 let sharpened = PsfModel::open(&psf_bundle, &backend)?.sharpen(
     &image,
     &psf,
-    &noise,
     &SharpenOptions {
         target: SharpenTarget::Ratio { stars: 0.5, extended: 0.75 },
         halo_reduction: 0.3,
@@ -1536,7 +1534,7 @@ let sharpened = PsfModel::open(&psf_bundle, &backend)?.sharpen(
 // sharpened.report holds the reblur χ² and the trained-range checks.
 
 let StarLayers { starless, stars } = StarModel::open(&star_bundle, &backend)?
-    .separate(&sharpened.image, &NoiseMap::estimate(&sharpened.image)?)?;
+    .separate(&sharpened.image)?;
 ```
 
 The types follow the same rules:

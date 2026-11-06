@@ -19,14 +19,17 @@ fallback, as fast as native Core ML and with the same error, so the second
 backend would buy nothing.
 
 A model ships as one dynamic ONNX graph per precision plus a model card.
-Seiza's Rust code does everything around the graph: sky, noise map, tiling,
+Seiza's Rust code does everything around the graph: sky, noise input, tiling,
 blending, the output bound and provenance. The backend only runs tiles.
 
 A 61 MP frame should take about 15 seconds on an M4 Max's Neural Engine with
 the current 41M-parameter model. That is an estimate from a measured 26 MP
-run. The largest thing the measurements changed is not speed: most images a
-user will denoise have no stack variance, and the models have never been
-run or judged without it (see [Noise maps](#noise-maps)).
+run.
+
+[Every shipped model works from the image alone](ml-restoration-training.md#short-answer),
+so a host passes an image and nothing else, and `seiza stack` writes nothing
+new. Which noise input ships is not settled, but the choice costs the runtime
+nothing (see [Noise input](#noise-input)).
 
 ## What the models need
 
@@ -44,8 +47,8 @@ The harness has moved past the restoration plan, which sized this for
 
 Each run's reading of its inputs is in its `run.json`, and a model given the
 wrong reading fails badly, so all of it moves to the model card:
-`noise_map`, `noise_plane`, `sky`, and constants such as `SKY_BLOCK` (32) and
-`FLAT_BLOCK` (256).
+`noise_map`, `noise_plane`, `sky`, and constants such as `SKY_BLOCK` (32),
+`FLAT_BLOCK` (256) and `IMAGE_MAP_SCALE` (1.13).
 
 Three things the restoration plan describes do not yet exist anywhere.
 
@@ -54,9 +57,9 @@ Three things the restoration plan describes do not yet exist anywhere.
   no run has been measured with it. The Rust port is its first real
   implementation, and the harness needs the same bound or its gates do not
   judge what ships.
-- **The estimated noise map.** `NoiseMap::estimate` is planned and the plan
-  says the model trains on estimated maps. Every run so far trains and
-  measures on maps built from the stack's variance.
+- **A model that needs only the image.** The trainer can now make both
+  image-only inputs, but every run on record trained and measured on maps
+  built from the stack's variance.
 - **A Core ML export.** The harness writes ONNX only.
 
 Only mono models exist. RGB runs a mono model on each channel until an RGB
@@ -155,8 +158,8 @@ Neural Engine older than the M4's; a loaded-versus-idle GPU comparison.
 ## The crate
 
 `seiza-restore` depends on neither `seiza-stacking` nor `seiza-stars`
-for the noise model. It takes borrowed planes, so a host can pass a live
-stack's variance and coverage without a copy.
+for the noise model. It takes a borrowed image and makes everything else a
+model reads from it.
 
 ```text
 seiza-restore/src/
@@ -165,7 +168,7 @@ seiza-restore/src/
   session.rs   TileRunner, the ONNX Runtime session, the compile cache
   bundle.rs    ModelBundle, ModelCard, verification
   tiles.rs     tile starts, window weights, streaming blend
-  noise_map.rs NoiseMap: from a stack's planes, estimated, saved, read
+  noise.rs     the noise input: image_sigma, or its median, as the card says
   sky.rs       smooth sky, background and noise scales, the network's input
   bands.rs     NoiseBands
 ```
@@ -245,50 +248,50 @@ Three things change from the harness.
 A cancel is checked between tiles and also reaches `RunOptions::terminate`,
 because one CPU tile on a slow machine can take many seconds.
 
-### Noise maps
+### Noise input
 
-This is the largest open problem, and it is not a runtime problem.
+The graph takes two inputs: the image and a noise plane. A noise map gives,
+at each pixel, how much noise that pixel should hold: its standard deviation
+σ. The graph reads it as `asinh(σ / σ̄)`, and the map's median σ̄ sets the
+units of both planes.
 
-A noise map is an image the size of the picture that gives, at each pixel,
-how much noise that pixel should hold: its standard deviation σ. It is the
-network's second input, beside the image, and its median σ̄ sets the units
-of both. It tells a model how far to trust a faint bump where the noise
-differs across the frame: at thinly covered edges, under vignetting and in
-bright nebulae. The graph has no way to run without one.
+Every run so far reads a map built from a stack's variance and coverage. A
+shipped model cannot, because a linear FITS file from any stacker is all it
+gets. So a host passes an image, `seiza stack` writes nothing new, and a step
+after stacking leaves nothing out of date.
 
-A map today comes from a stack's variance and coverage, as
-`sqrt(variance / coverage)` at each pixel. Python can get those. `seiza stack` does not write them, PSF
-Guard's stacks do not hold them, and no other program's stack does either.
-Any step after stacking also leaves the variance out of date.
+Two inputs are candidates, and the choice is not settled:
 
-A first test shows a simple estimate is not a drop-in. Block medians of a
-Laplacian, at the 32-pixel blocks `modelled_sigma` uses, gave 1.5 times the
-stack's map at the median (1.06 to 1.83 between the 5th and 95th percentiles)
-on the image above. The model then took out 3.5% more noise on the sky, but
-its residual moved by 0.19σ̄ RMS there, with one pixel in a thousand past
-0.9σ̄. That is over ten times the Neural Engine's error. It is one image and
-one uncalibrated estimator, so it says the case is unmeasured, not that it
-cannot work. Part
-of the gap is expected: the stack's variance understates the real noise.
+| Candidate | Card's `noise_map` | What fills the plane |
+|---|---|---|
+| Blind | `constant` | the median of `image_sigma` everywhere: the level, and nothing of where it changes |
+| Image map | `image` | `image_sigma`: second differences in 32-pixel blocks, plus a term growing with the signal |
 
-Two pieces of work follow.
+Both come from `image_sigma`, so the runtime does the same work for either.
+`noise.rs` ports it, and the card says whether the map or its median fills
+the plane. Step 2 need not wait for the choice. A later model that drops the
+plane altogether changes only the card's named inputs.
 
-- **Save the map with the stack.** `modelled_sigma` needs only its block grid
-  and one gain, because the rest comes from the image and its NaN mask. That
-  is about 25,000 numbers for a 26 MP frame instead of two full planes. It
-  fits in a small FITS extension, so `seiza stack --noise-map` costs almost
-  nothing and a stack carries its own map from then on. PSF Guard's cached
-  stacks can keep it the same way. This serves models trained on the
-  modelled map, as D22 was. The trainer's default is the raw per-pixel map,
-  so the card must say which map a model takes.
-- **Train on estimated maps.** Choose an estimator, calibrate it to the
-  stack map's convention, and train and gate a run with estimated maps as a
-  share of its batches. `NoiseMap::estimate` ships only after that run passes
-  its gates. Until then, an image with no map is refused unless the caller
-  asks for the estimate, and the report says it was used.
+Three things are still unmeasured:
 
-`NoiseMap` holds the block grid and the gain, however it was made, so the
-stack path and the estimate are one type.
+- **Either input on a trained model.** No run on record has trained with
+  one, so neither has faced the gates.
+- **Other stackers.** On 24 train sets' 4-frame halves, the image map read
+  1.15–1.31 times the noise of the halves' difference on the sky, steadier
+  than the stack's modelled map at 1.19–1.61. All 24 are Seiza's stacks.
+  Second differences read correlated noise low, and each stacker's
+  resampling correlates it differently, so the level may differ on other
+  stacks. The gates need stacks from other software.
+- **A map swapped under a trained model.** D22 trained on the stack's
+  modelled map. An uncalibrated Laplacian estimate, 1.5 times that map at
+  the median, moved its residual by 0.19σ̄ RMS on one image's sky, over ten
+  times the Neural Engine's error. So a model ships with the input it trained
+  on. `evaluate-noise --noise-map` now measures such a swap on a saved model.
+
+A variant that reads Seiza's own records may sit beside the image-only model,
+for Seiza's stacks. Nothing here builds it. If one earns its place,
+`modelled_sigma` needs only its block grid and one gain, about 25,000 numbers
+for a 26 MP frame, which fits a small FITS extension.
 
 ## What hosts see
 
@@ -301,13 +304,13 @@ stands, with `Backend` as above.
 ```rust
 let backend = Backend::detect(&BackendOptions::default())?;
 let model = NoiseModel::open(&bundle, &backend)?;
-let noise = NoiseMap::from_stack_planes(&planes)?;
-let result = model.denoise(image, &noise, &DenoiseOptions::default())?;
+let result = model.denoise(image, &DenoiseOptions::default())?;
 let kept = result.blend(&NoiseBands { high: 0.7, low: 0.9, scale_px: 5.0 });
 ```
 
-`Denoised` keeps the residual, so a slider for the noise kept costs a blend
-and no inference.
+`denoise` makes the noise input the card names from the image. `Denoised`
+keeps the residual, so a slider for the noise kept costs a blend and no
+inference.
 
 **CLI.**
 
@@ -332,7 +335,7 @@ CLI speak alike. Output is 32-bit FITS, written through `seiza-image-io`.
 ```c
 SeizaNoiseModel *seiza_noise_model_open(const char *bundle, const char *backend, char **error_out);
 SeizaDenoised *seiza_noise_model_denoise(SeizaNoiseModel *, const float *image, size_t width,
-    size_t height, size_t channels, const SeizaNoiseMap *, const char *options_json,
+    size_t height, size_t channels, const char *options_json,
     SeizaRestoreProgressCallback, const SeizaCancelSignal *, void *context, char **error_out);
 bool seiza_denoised_blend(const SeizaDenoised *, float high, float low, float scale_px, float *out, char **error_out);
 char *seiza_noise_model_denoise_file_json(const char *request_json, /* progress, cancel */ ...);
@@ -347,13 +350,12 @@ The JSON file call is only a request and answer over the native API, as
 
 ```python
 model = seiza.NoiseModel("noise-v1", backend="auto")
-noise = seiza.NoiseMap.from_stack(snapshot)
-result = model.denoise(image, noise, progress=report, cancel=flag)
+result = model.denoise(image, progress=report, cancel=flag)
 clean = result.blend(high=0.7, low=0.9, scale_px=5.0)
 seiza.restore_backends()
 ```
 
-The GIL is released for the run. `NoiseModel`, `NoiseMap` and `Denoised` join
+The GIL is released for the run. `NoiseModel` and `Denoised` join
 `[core_functions] objects` in `.github/binding-parity.toml`, and
 `OUTPUT_VERSION` joins the rules in [AGENTS.md](../../AGENTS.md#output-versions-revise-and-test-every-time).
 
@@ -405,7 +407,7 @@ run an unlisted file, and the user asks for it by name.
 - **Fixtures.** The bundle step writes a small model, a few hundred
   kilobytes, with input tiles and a whole image through tiling. It is
   committed, and it drives CI on all three systems.
-- **Pure Rust parity.** Sky, noise map, scales, window weights and bands match
+- **Pure Rust parity.** Sky, `image_sigma`, scales, window weights and bands match
   the harness's outputs on fixture planes.
 - **`output_version`.** A case on the fixture model on ONNX Runtime's CPU
   provider, under the rules in AGENTS.md, with a planted change seen to fail.
@@ -431,19 +433,19 @@ requires, so earlier steps keep their items `pub(crate)` until step 4.
 |---|---|---|
 | 0 | **Spike and measure.** A throwaway Rust binary on `ort` rc.13 with `load-dynamic`, run on macOS, Windows and Linux. Measure CUDA, TensorRT, TensorRT-RTX and CPU on NVIDIA, and WebGPU and CPU on Intel Xe, with parity. Repeat the GPU rows on an idle Mac. | The backend table is filled in and NVIDIA's shipped provider is chosen. |
 | 1 | **Bundle export** in `training/`. Dynamic f32 and f16 graphs, `card.json` from the allow-list, fixtures, the output bound in the harness. | `bundle --run NAME` makes a bundle that passes a parity check in Python. |
-| 2 | **`seiza-restore` core**, no ONNX Runtime. Tiling, sky, noise map, scales, bands, the bound, `ModelCard`, `OUTPUT_VERSION`. | Rust matches the harness on fixtures through a closure runner. |
+| 2 | **`seiza-restore` core**, no ONNX Runtime. Tiling, sky, `image_sigma`, scales, bands, the bound, `ModelCard`, `OUTPUT_VERSION`. | Rust matches the harness on fixtures through a closure runner. |
 | 3 | **Backends.** `TileRunner` on `ort`, detection, library search, compile cache, cancel. `seiza model backends`, with its C and Python twins. | Fixture parity on the CPU provider in CI on all three systems; Core ML on a Mac. |
 | 4 | **`denoise` end to end.** `NoiseModel`, `Denoised`, CLI, C ABI, Python, parity entries, provenance. Marked experimental. | `seiza model denoise` matches the harness on a real image within budget, on every backend from step 0. |
-| 5 | **Noise maps with stacks.** `seiza stack --noise-map`, the FITS extension, `NoiseMap::from_stack_planes`. | A stack written by the CLI denoises as Python's does. |
-| 6 | **Harness on the runtime.** `evaluate-noise` and the sheets through `seiza.NoiseModel`. | One run's measures and seam maps agree with the PyTorch path. |
-| 7 | **Estimated maps.** Choose and calibrate the estimator, train, gate. Needs GPU time. | A run with estimated maps passes the noise gates. |
-| 8 | **Model delivery.** `seiza model install`, `/models/v1/`, `seiza setup`. | A clean machine installs a model and denoises. |
-| 9 | **Packaging**, one PR per channel, each with a smoke test on an installed package. | Each row of the table above runs a tile after install. |
-| 10 | **PSF and star models**, as they pass their gates. | `seiza model sharpen` and `seiza model separate-stars` on the same runner. |
+| 5 | **Harness on the runtime.** `evaluate-noise` and the sheets through `seiza.NoiseModel`. | One run's measures and seam maps agree with the PyTorch path. |
+| 6 | **Model delivery.** `seiza model install`, `/models/v1/`, `seiza setup`. | A clean machine installs a model and denoises. |
+| 7 | **Packaging**, one PR per channel, each with a smoke test on an installed package. | Each row of the table above runs a tile after install. |
+| 8 | **PSF and star models**, as they pass their gates, with what they read made from the image: a PSF stamp from its PSF field, star and halo maps from its plate solution. | `seiza model sharpen` and `seiza model separate-stars` on the same runner. |
 
 Step 0 gates the rest only where it says so. Steps 1 and 2 can start at once
-and run side by side. Steps 5 and 7 touch no runtime code and can run beside
-3 and 4.
+and run side by side. Nothing here waits for the choice of noise input.
+Parity compares code, not models, so it can run D22 with a card that says
+`image`, as `evaluate-noise --noise-map image` does. Only a release needs a
+model that has passed its gates on an image-only input.
 
 ## Risks
 
