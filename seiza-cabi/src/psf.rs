@@ -22,7 +22,7 @@ use std::ptr;
 /// It is read-only once made, so several threads may sample it at once;
 /// its report string is borrowed and remains valid until it is freed.
 pub struct SeizaPsfField {
-    field: PsfField,
+    pub(crate) field: PsfField,
     report_json: CString,
 }
 
@@ -185,7 +185,9 @@ fn report(field: &PsfField) -> PsfFieldReportResponse {
     }
 }
 
-unsafe fn required_psf_field<'a>(field: *const SeizaPsfField) -> Result<&'a SeizaPsfField, String> {
+pub(crate) unsafe fn required_psf_field<'a>(
+    field: *const SeizaPsfField,
+) -> Result<&'a SeizaPsfField, String> {
     unsafe { field.as_ref() }.ok_or_else(|| "PSF field is required".into())
 }
 

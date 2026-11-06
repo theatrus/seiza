@@ -1,6 +1,7 @@
 mod analysis;
 mod continuum;
 mod emission;
+mod field_deconvolution;
 
 use image::DynamicImage;
 mod calibration_files;

@@ -303,6 +303,15 @@ core = "seiza-stacking::MlDenoiseRun"
 [rust.DeconvolutionRenderRequest]
 core = "seiza-deconvolution::DeconvolutionConfig"
 
+[rust.FieldDeconvolutionRequest]
+core = "seiza-deconvolution::FieldDeconvolutionConfig"
+
+[rust.ChannelConsistencyResponse]
+core = "seiza-deconvolution::ChannelConsistency"
+
+[rust.ReblurConsistencyResponse]
+core = "seiza-deconvolution::ReblurConsistency"
+
 [rust.DetectedStarJson]
 core = "seiza-stars::HocusFocusStar"
 position = { c = "x" }
@@ -386,6 +395,7 @@ objects = [
     "seiza-pipeline::PartialStack",
     "seiza-pipeline::SessionStep",
     "seiza-stars::PsfField",
+    "seiza-deconvolution::RemainingKernel",
 ]
 
 # distributed stacking
@@ -785,6 +795,13 @@ seiza_background_model_correct_in_place_with_strength = "BackgroundModel.correct
 seiza_background_model_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
 seiza_background_select_shared_model_json = "select_shared_model"
 seiza_deconvolve_in_place = "deconvolve"
+seiza_remaining_kernel_new = "RemainingKernel"
+seiza_remaining_kernel_report_json = "RemainingKernel.psf_fwhm_range"
+seiza_remaining_kernel_kernel_at = "RemainingKernel.kernel_at"
+seiza_remaining_kernel_blur = "RemainingKernel.blur"
+seiza_remaining_kernel_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
+seiza_deconvolve_field_in_place = "deconvolve_field"
+seiza_reblur_consistency_json = "reblur_consistency"
 
 # --- rendering (display images for the desktop viewers) ---------------------
 seiza_rendered_image_open = { none = "renders a file to an 8-bit display image for the desktop viewers; Python stretches arrays with stretch()" }
@@ -895,6 +912,7 @@ seiza_external_exchange_version = "EXTERNAL_EXCHANGE_VERSION"
 # export above gives as its twin: the C export that does the same job
 # ({ c = "..." }), or why there is none.
 [python_functions]
+"RemainingKernel.target_fwhm_range" = { c = "seiza_remaining_kernel_report_json" }
 # distributed stacking: the steps of the C ABI's one-call workflows
 "PartialStack.combine" = { c = "seiza_pipeline_combine_json" }
 "PartialStack.open" = { c = "seiza_pipeline_combine_json" }
@@ -1094,6 +1112,7 @@ CatalogSetupProgressResponse = { none = "download progress for the apps' setup s
 # Single fields of JSON types whose (snake_case Rust) name has no Python name:
 # "Type.field", or "*.field" for the same field in every type.
 [fields]
+"RemainingKernelReportResponse.channel_ranges" = { none = "Python reads each channel's ranges with psf_fwhm_range(channel) and target_fwhm_range(channel)" }
 
 "*.schema_version" = { none = "versions the JSON for C hosts; Python returns objects" }
 "*.core_version" = { python = "__version__" }

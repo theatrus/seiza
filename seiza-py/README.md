@@ -480,6 +480,38 @@ applied. The operation releases the GIL. Inspect identical stretches for noise,
 rings, saturated-star failures, and field-dependent PSF mismatch before using a
 stronger `iterations` or `amount`.
 
+### Towards a target PSF across the field
+
+`deconvolve_field` runs the same damped update with the PSF a
+`PsfField` measured, which varies across the image, and deconvolves towards
+a round Gaussian target `T` rather than a point. `RemainingKernel` holds the
+blur `R` between them, with `P = T ∗ R`, on a grid of nodes, each node's
+stamp deconvolved by `T`:
+
+```python
+field = seiza.PsfField.measure(stack)
+kernel = seiza.RemainingKernel(field)               # the field's best round PSF
+sharper = seiza.deconvolve_field(stack, kernel, iterations=8, amount=0.6)
+check = seiza.reblur_consistency(sharper, stack, sigma, kernel)
+print(check.channels[0].reduced_chi_squared, check.channels[0].spectral_flatness)
+```
+
+Give `target_fwhm=` for one FWHM in pixels everywhere, never below 1.5, or
+`target_ratio=` for a fraction of the local FWHM; with neither, the target
+is the field's narrowest local FWHM, which corrects tilt and elongation
+without sharpening the field's best part. `node_spacing` (256) sets how
+finely the kernel follows the field. `kernel.blur(image)` blurs an image by
+`R`, each source pixel by its own kernel, and `kernel_at(x, y)` returns the
+kernel there.
+
+`reblur_consistency(output, input, noise, kernel)` needs no truth: blurred
+by `R`, a sound estimate gives its input back to within the input's noise.
+`noise` is the input's per-pixel σ, such as `sqrt(variance)` from a stack;
+non-finite or zero entries, such as saturated cores, are left out. Each
+channel reports the reduced χ² of the residual, near 1 when it is the
+input's noise, its power in eight radial frequency bands, and their
+`spectral_flatness`, 1 for a flat spectrum.
+
 ## Photometric colour calibration
 
 `calibrate_color` fits per-channel gains for a linear RGB image from Gaia DR3

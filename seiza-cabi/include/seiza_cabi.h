@@ -279,6 +279,14 @@ typedef struct SeizaParallax SeizaParallax;
 typedef struct SeizaPsfField SeizaPsfField;
 
 /*
+ An opaque remaining kernel between a PSF field and a round target.
+ Release it with [`seiza_remaining_kernel_free`]. It is read-only once
+ made, and holds no pointer to the field it was made from; its report
+ string is borrowed and remains valid until it is freed.
+ */
+typedef struct SeizaRemainingKernel SeizaRemainingKernel;
+
+/*
  An opaque, owned rendered image. C sees only a pointer; release it with
  [`seiza_rendered_image_free`]. Not `repr(C)`: it is only ever handed to C as
  an opaque pointer, so its layout is private (and cbindgen forward-declares
@@ -4060,6 +4068,130 @@ char *seiza_emission_flux_json(const float *residuals,
                                const char *request_json,
                                float *output,
                                char **error_out);
+
+/*
+ Makes the remaining kernel between a measured PSF field and a round
+ Gaussian target. Pass null or empty `options_json` for the field's best
+ round PSF as the target and nodes every 256 px, or a JSON object with
+ `target` (`{"fwhm": 2.0}` for one FWHM in pixels, at least 1.5;
+ `{"ratio": 0.7}` for a fraction of the local FWHM; or `"bestRound"`) and
+ `nodeSpacing` (pixels between the nodes the kernel is sampled at, at
+ least 16). Returns null with an error for a bad target or spacing.
+
+ # Safety
+ `field` must be a live pointer from `seiza_psf_field_measure`. A
+ non-null `options_json` must be NUL-terminated. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+SeizaRemainingKernel *seiza_remaining_kernel_new(const SeizaPsfField *field,
+                                                 const char *options_json,
+                                                 char **error_out);
+
+/*
+ Returns the kernel's report as borrowed JSON: `width`, `height`,
+ `channels`, `kernelSize`, `nodeSpacing`, `nodeCount` and, per channel in
+ `channelRanges`, the narrowest and widest local PSF FWHM
+ (`psfFwhmRange`) and target FWHM (`targetFwhmRange`) over the nodes. The
+ string remains valid until the kernel is freed.
+
+ # Safety
+ `kernel` must be null or a live pointer from
+ [`seiza_remaining_kernel_new`].
+ */
+const char *seiza_remaining_kernel_report_json(const SeizaRemainingKernel *kernel);
+
+/*
+ Writes the kernel at pixel (`x`, `y`) in one channel, blended from the
+ nodes around it: `kernelSize²` floats summing to one, centred on the
+ middle pixel.
+
+ # Safety
+ `kernel` must be a live pointer from [`seiza_remaining_kernel_new`].
+ `output` must point to `output_length` writable floats. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+bool seiza_remaining_kernel_kernel_at(const SeizaRemainingKernel *kernel,
+                                      size_t channel,
+                                      double x,
+                                      double y,
+                                      float *output,
+                                      size_t output_length,
+                                      char **error_out);
+
+/*
+ Blurs interleaved linear `float` samples by the remaining kernel, each
+ source pixel by its own, into `output`: what the image at the target
+ would look like with the measured PSF. Both buffers hold `width *
+ height * channels` samples of the field's size. Non-finite samples stay
+ non-finite and are left out of their neighbours' blur.
+
+ # Safety
+ `kernel` must be a live pointer from [`seiza_remaining_kernel_new`].
+ `data` must point to `data_length` readable floats and `output` to
+ `output_length` writable floats. When non-null, `error_out` must point
+ to writable storage for one pointer.
+ */
+bool seiza_remaining_kernel_blur(const SeizaRemainingKernel *kernel,
+                                 const float *data,
+                                 size_t data_length,
+                                 float *output,
+                                 size_t output_length,
+                                 char **error_out);
+
+/*
+ Releases a remaining kernel. Null is ignored.
+
+ # Safety
+ `kernel` must be null or a pointer from [`seiza_remaining_kernel_new`]
+ that has not been freed.
+ */
+void seiza_remaining_kernel_free(SeizaRemainingKernel *kernel);
+
+/*
+ Deconvolves interleaved linear `float` samples in place towards the
+ kernel's target, with damped Richardson–Lucy and the remaining kernel
+ as its forward model. Pass null or empty `options_json` for the
+ conservative defaults, or a JSON object with any of `iterations` (4),
+ `amount` (0.35), `noiseFraction` (0.001), `maxCorrection` (2.0) and
+ `masked` (false: non-finite samples are an error; true: they are a mask
+ that stays). The image must be the field's size. The input is left
+ unchanged when the call fails.
+
+ # Safety
+ `kernel` must be a live pointer from [`seiza_remaining_kernel_new`].
+ `data` must point to `data_length` writable floats. A non-null
+ `options_json` must be NUL-terminated. When non-null, `error_out` must
+ point to writable storage for one pointer.
+ */
+bool seiza_deconvolve_field_in_place(const SeizaRemainingKernel *kernel,
+                                     float *data,
+                                     size_t data_length,
+                                     const char *options_json,
+                                     char **error_out);
+
+/*
+ Checks an estimate at the kernel's target against the image it came
+ from: `output`, `input` and `noise` (the input's per-sample noise as a
+ standard deviation; a sample whose noise is not finite and positive is
+ left out) each hold `length` interleaved samples of the field's size.
+ Returns owned JSON, released with `seiza_string_free`: `channels`, each
+ with `reducedChiSquared` of `(R ∗ output − input) / σ`, the `samples` it
+ covers, `bandPower` (the residual's power in eight radial frequency
+ bands, lowest first, relative to their mean) and `spectralFlatness`
+ (their geometric over arithmetic mean, 1 for a flat spectrum, or null).
+
+ # Safety
+ `kernel` must be a live pointer from [`seiza_remaining_kernel_new`].
+ `output`, `input` and `noise` must each point to `length` readable
+ floats. When non-null, `error_out` must point to writable storage for
+ one pointer.
+ */
+char *seiza_reblur_consistency_json(const SeizaRemainingKernel *kernel,
+                                    const float *output,
+                                    const float *input,
+                                    const float *noise,
+                                    size_t length,
+                                    char **error_out);
 
 /*
  Grade/group/match provided FITS/XISF files or a recursive library and prepare

@@ -496,6 +496,26 @@ This is used twice:
   should be flat. Structure in the residual means the model has added or lost
   something that the data do not support.
 
+`seiza-deconvolution` now computes both. `RemainingKernel` holds `R` on a
+grid of nodes, 256 px apart by default, for each channel. At each node it
+deconvolves the `PsfField` stamp by `T` with Richardson–Lucy, using
+`rustfft` convolutions and starting from the Gaussian `R`. A Tikhonov
+division rang badly when `T` was nearly as wide as `P`, where `R` is close
+to a point. `reblur_consistency` blurs an estimate by `R`, each source pixel
+by its own kernel, and reports, per channel:
+
+- the reduced χ² of the residual against the input's noise map;
+- the residual's power in eight radial frequency bands, from 128 px
+  Hann-windowed tiles;
+- the bands' spectral flatness, their geometric over their arithmetic mean.
+
+A stack's noise is correlated by resampling, so even a perfect estimate
+leaves a residual whose power falls towards Nyquist. Its flatness must be
+compared with that of the stack's own noise, from the difference of its
+halves, rather than with 1. The C ABI has `seiza_remaining_kernel_new` and
+`seiza_reblur_consistency_json`, and Python `seiza.RemainingKernel` and
+`seiza.reblur_consistency`.
+
 ## Star model
 
 ### Star policy
@@ -975,7 +995,9 @@ always has a classical fallback with separately named provenance.
 2. **Foundations.** Land `PsfField` with empirical stamps, then field-varying
    Richardson–Lucy, then catalogue-guided star removal, each with its C and
    Python twins. These are useful without any model, and both learned models
-   need them. `PsfField` has [landed](#what-landed).
+   need them. `PsfField` has [landed](#what-landed), and so have
+   field-varying Richardson–Lucy and the [reblur check](#reblur-consistency)
+   ([deconvolution design](deconvolution.md#field-varying-psf)).
 3. **Smoke run.** R0 covers the export, the Core ML and ONNX Runtime backends
    with their parity tests, and the timings.
 4. **Noise model.** R1 and R2 face the gates. Land `denoise` (experimental),

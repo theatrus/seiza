@@ -91,6 +91,8 @@ tokio-util = { version = "0.7.18", features = ["io"] }
 zstd = "0.14.0"
 # 1.7 adds `yield_now`, which seiza-stacking waits with.
 rayon = "1.7"
+# FFT convolution for seiza-deconvolution's field-varying blur.
+rustfft = "6.4"
 nalgebra = { version = "0.35", default-features = false, features = ["std"] }
 rustc-hash = { version = "2" }
 multiversion = "0.9"

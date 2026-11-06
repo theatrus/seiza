@@ -13,6 +13,7 @@ mod continuum;
 mod convert;
 mod deconvolution;
 mod emission;
+mod field_deconvolution;
 mod field_objects;
 mod flat_response;
 mod imgproc;
@@ -1386,6 +1387,7 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     pipeline::register(m)?;
     stars::register(m)?;
     psf_field::register(m)?;
+    field_deconvolution::register(m)?;
     rc_astro::register(m)?;
     pixinsight::register(m)?;
     parallax::register(m)?;

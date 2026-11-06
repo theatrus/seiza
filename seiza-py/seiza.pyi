@@ -1541,6 +1541,60 @@ def deconvolve(
     masked: bool = False,
 ) -> npt.NDArray[np.float32]: ...
 
+class RemainingKernel:
+    """The kernel R, with P = T * R, between a PSF field and a round target T.
+
+    Give ``target_fwhm`` (pixels, at least 1.5) or ``target_ratio`` (a
+    fraction of the local FWHM), or neither for the field's best round PSF."""
+
+    width: int
+    height: int
+    channels: int
+    kernel_size: int
+    node_spacing: int
+    node_count: int
+    def __init__(
+        self,
+        field: PsfField,
+        *,
+        target_fwhm: float | None = None,
+        target_ratio: float | None = None,
+        node_spacing: int = 256,
+    ) -> None: ...
+    def psf_fwhm_range(self, channel: int = 0) -> tuple[float, float]: ...
+    def target_fwhm_range(self, channel: int = 0) -> tuple[float, float]: ...
+    def kernel_at(self, x: float, y: float, channel: int = 0) -> npt.NDArray[np.float32]: ...
+    def blur(self, image: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]:
+        """The image blurred by R, each source pixel by its own kernel."""
+        ...
+
+class ChannelConsistency:
+    reduced_chi_squared: float
+    samples: int
+    # Residual power in eight radial frequency bands, lowest first, relative to their mean.
+    band_power: list[float]
+    spectral_flatness: float | None
+
+class ReblurConsistency:
+    channels: list[ChannelConsistency]
+
+def deconvolve_field(
+    image: npt.NDArray[np.float32],
+    kernel: RemainingKernel,
+    *,
+    iterations: int = 4,
+    amount: float = 0.35,
+    noise_fraction: float = 0.001,
+    max_correction: float = 2.0,
+    masked: bool = False,
+) -> npt.NDArray[np.float32]: ...
+def reblur_consistency(
+    output: npt.NDArray[np.float32],
+    input: npt.NDArray[np.float32],
+    noise: npt.NDArray[np.float32],
+    kernel: RemainingKernel,
+) -> ReblurConsistency: ...
+
 def fit_continuum(
     stars: Sequence[Mapping[str, Any]],
     sources: Mapping[str, Any],
