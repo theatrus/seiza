@@ -1950,6 +1950,91 @@ fn a_binned_stack_and_its_full_resolution_reintegration_keep_their_output() {
     );
 }
 
+/// A binned stack normalized by local background, reintegrated at the
+/// sensor's full resolution, refined and carried unrefined: its frames'
+/// backgrounds are refitted there, leaving out the samples about the
+/// reference's stars, which the binned stack measured; and, on an expanded
+/// canvas, a binned mosaic's.
+#[test]
+fn a_binned_local_background_stack_s_full_resolution_reintegration_keeps_its_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let paths = SHIFTS
+        .iter()
+        .enumerate()
+        .map(|(frame, &(dx, dy))| {
+            let image = mono_field(dx, dy, 0.96 + 0.01 * frame as f32, frame);
+            write_raw(&directory, "light", frame, image.data, "LIGHT")
+        })
+        .collect::<Vec<_>>();
+    let options = StackOptions {
+        bin_factor: 2,
+        normalization: NormalizationMode::LocalBackground { tile_size: 32 },
+        ..StackOptions::default()
+    };
+    let mut stacker = LiveStacker::open_fits(&paths[0], None, None, None, None, options).unwrap();
+    for path in &paths[1..] {
+        admit(stacker.push_fits(path).unwrap());
+    }
+    let mut fingerprint = Vec::new();
+    for refine in [true, false] {
+        let full = stacker
+            .reintegrate_full_resolution(&BatchStackOptions::default(), refine, |_, _, _| {})
+            .unwrap();
+        fingerprint.extend(summary(&full.result.snapshot.image));
+    }
+    check(
+        "BINNED_LOCAL_FULL_RESOLUTION",
+        &fingerprint,
+        BINNED_LOCAL_FULL_RESOLUTION,
+    );
+
+    let paths = mosaic_panels(&directory);
+    let mut options = StackOptions {
+        bin_factor: 2,
+        normalization: NormalizationMode::LocalBackground { tile_size: 32 },
+        ..StackOptions::default()
+    };
+    options.acceptance.minimum_overlap_fraction = 0.1;
+    let mut stacker = LiveStacker::with_expanding_reference(
+        &paths,
+        CalibrationMasters::default(),
+        options,
+        usize::MAX,
+        |_, _, _, _| Continue::Yes,
+    )
+    .unwrap();
+    for path in &paths {
+        admit(stacker.push_fits(path).unwrap());
+    }
+    let full = stacker
+        .reintegrate_full_resolution(&BatchStackOptions::default(), false, |_, _, _| {})
+        .unwrap();
+    check(
+        "BINNED_LOCAL_MOSAIC_FULL_RESOLUTION",
+        &summary(&full.result.snapshot.image),
+        BINNED_LOCAL_MOSAIC_FULL_RESOLUTION,
+    );
+}
+
+#[rustfmt::skip]
+const BINNED_LOCAL_FULL_RESOLUTION: &[f64] = &[
+    1.4412192e2, 2.7304927e2, 3.7519512e3, 9.7433235e1, 9.9773247e1, 1.0114504e2, 1.1802391e2,
+    1.0537344e2, 9.8160263e1, 1.0052707e2, 1.0221610e2, 1.0341846e2, 1.0475098e2, 9.8428535e1,
+    1.0155910e2, 1.0328970e2, 1.0437466e2, 1.0632928e2, 1.0024743e2, 1.0103077e2, 1.0371221e2,
+    1.0630973e2, 1.0748860e2, 1.0107147e2, 1.7194797e2, 1.0485126e2, 1.0686563e2, 1.1105490e2,
+    1.4411722e2, 2.7305820e2, 3.7540830e3, 9.7424423e1, 9.9761787e1, 1.0114450e2, 1.1809391e2,
+    1.0537044e2, 9.8148270e1, 1.0051400e2, 1.0221149e2, 1.0342222e2, 1.0475175e2, 9.8414497e1,
+    1.0154630e2, 1.0328296e2, 1.0437225e2, 1.0632751e2, 1.0024195e2, 1.0102376e2, 1.0370845e2,
+    1.0631135e2, 1.0749074e2, 1.0107206e2, 1.7199387e2, 1.0485381e2, 1.0686643e2, 1.1103400e2,
+];
+#[rustfmt::skip]
+const BINNED_LOCAL_MOSAIC_FULL_RESOLUTION: &[f64] = &[
+    2.5359830e2, 5.0613572e2, 5.7898086e3, 9.9520531e1, 1.0385066e2, 1.0458487e2, 1.5891779e2,
+    2.3483234e2, 1.0132091e2, 2.2560486e2, 1.2263583e3, 1.5187048e2, 1.6671713e2, 1.0174519e2,
+    1.0371989e2, 1.8543130e2, 2.0219305e2, 1.0719276e2, 1.0173113e2, 1.0136076e2, 1.0302948e2,
+    1.0680199e2, 1.0761121e2, 2.6658746e2, 1.9014203e2, 1.0658249e2, 1.1975789e3, 1.0956667e2,
+];
+
 /// Raw RGGB lights made into one pixel per 2x2 cell, their colours resampled
 /// from their photosites' places, and binned no further.
 #[test]
