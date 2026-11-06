@@ -1124,7 +1124,21 @@ in these ways:
   on mid-brightness signal 29.5 against 41.0 and 50.0, on cores 2,937
   against about 3,280, with the trimmed sky the same. The scale loss takes
   the coarse noise out at a cost pixel by pixel in signal, and the cost
-  differs by a third between seeds. The next
+  differs by a third between seeds. Twice as long with the guard that
+  lowers the rate, the recipe rewound ten times, the last at step 82,250,
+  and ended at 11% of the schedule's rate. It came out where the two seeds
+  did: noise left 42%, 60% and 84%, error 2.01 on 4-frame halves, and
+  1.19 on matched agreeing ones against the seeds' 1.18 and 1.27. On the
+  perturbed images (below), though, it blew up where the 80,000-step runs
+  did not: on the Trunk binned and under a gradient it put 54,000 to
+  560,000 pixels more than 100σ̄ from the input, up to 855,000σ̄. Bounding
+  each output pixel by its 5 × 5 neighbourhood of the input, widened by
+  three times its noise, the guard the runtime is to have, brought its
+  worst pixel back to the unchanged image's, about 2,400σ̄ in a bright
+  star's core; it moved 2.6% to 8% of the pixels there, against under a
+  thousandth of a percent on the unchanged image, which makes the
+  share it moves a measure of a model's failing. So the longer run gains
+  nothing, and every candidate is run on the perturbed images. The next
   runs add the 101 train sets built without a flat: 1,700 pairs over 342
   sets, against 1,301 over 241, at the same width and at half as wide
   again.
