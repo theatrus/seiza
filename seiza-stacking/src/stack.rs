@@ -2940,20 +2940,19 @@ impl FrameRegistration<'_> {
         }
     }
 
-    /// The [`crate::normalization::ReferencePhotometry`] of `reference` at
-    /// `stars`, its [`Self::reference_star_positions`], which an expanded
-    /// canvas measured once, as does [`Self::photometry`] the first time it
-    /// is asked for.
+    /// The [`crate::normalization::ReferencePhotometry`] of `reference`,
+    /// which an expanded canvas keeps, as does [`Self::photometry`] once it
+    /// is first asked for. Its stars' widths are measured at
+    /// [`Self::reference_star_positions`] when a frame first needs them.
     fn reference_photometry(
         &self,
         reference: &LinearImage,
-        stars: &[(f64, f64)],
     ) -> &crate::normalization::ReferencePhotometry {
         match self.canvas {
             Some(canvas) if !resamples_whole_canvas() => canvas.photometry(),
-            _ => self.photometry.get_or_init(|| {
-                crate::normalization::ReferencePhotometry::measure(reference, stars)
-            }),
+            _ => self
+                .photometry
+                .get_or_init(|| crate::normalization::ReferencePhotometry::measure(reference)),
         }
     }
 }
@@ -3089,7 +3088,7 @@ pub(crate) fn prepare_frame(
         options.normalization,
         NormalizationMode::LocalBackground { .. }
     )
-    .then(|| target.reference_photometry(reference, &stars));
+    .then(|| target.reference_photometry(reference));
     #[cfg(feature = "gpu")]
     let mut sampled = None;
     #[cfg(feature = "gpu")]
@@ -3111,7 +3110,7 @@ pub(crate) fn prepare_frame(
             (region.width, region.height, frame.channels),
             scale.normalization(options.normalization),
             &stars,
-            photometry.map_or(0, |photometry| photometry.reach()),
+            photometry.map_or(0, |photometry| photometry.reach(reference, &stars)),
         )
         .and_then(|plan| {
             let (image, mask, gpu_frame) = crate::registration::resample_region_retained(

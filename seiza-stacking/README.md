@@ -758,7 +758,12 @@ hour rather than the seeing: frames 13 to 21 px across had gains of 1.03 to
 1.05 just after eleven, and frames 13 to 14.5 px across 1.10 to 1.14 after
 two. Frames whose stars are up to three times as broad as the reference's are
 measured whole, and broader ones at that scale, which is as far as photometry
-reads about each star of a frame gathered from the GPU.
+reads about each star of a frame gathered from the GPU. Where too few stars
+fit that scale, beside the edges or among saturated stars, photometry tries
+scales a third smaller in turn rather than take the gain from the frames'
+dispersion. A star that either image clips is left out by its flat top, since
+the reference's brightest sample cannot say where a frame exposed longer, or
+under a clearer sky, clips: such stars raised a frame's gain by 9%.
 
 Matching every frame's background to one reference frame copies that frame's
 gradient, vignetting and banding into the whole stack. So reintegration

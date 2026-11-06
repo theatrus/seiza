@@ -543,7 +543,7 @@ pub(crate) struct CanvasRegistrar {
 
 impl CanvasRegistrar {
     pub(crate) fn update_photometry(&mut self, image: &LinearImage) {
-        self.photometry = crate::normalization::ReferencePhotometry::measure(image, &self.stars);
+        self.photometry.update(image);
     }
 
     /// Panels at `regions` of `canvas`, matching the stars planning saved
@@ -669,7 +669,7 @@ impl CanvasRegistrar {
             })
             .filter(|(x, y)| seen.insert((x.round() as i64, y.round() as i64)))
             .collect::<Vec<_>>();
-        let photometry = crate::normalization::ReferencePhotometry::measure(canvas, &stars);
+        let photometry = crate::normalization::ReferencePhotometry::measure(canvas);
         Self {
             width: canvas.width,
             height: canvas.height,
