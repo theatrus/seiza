@@ -1841,8 +1841,10 @@ impl Star<'_> {
     /// Where each pixel of the star's square at `scale` lies, by its squared
     /// distance from the star: within `inside` of it, in its annulus and
     /// clear of its neighbours, or in its annulus beside one. `visit` is
-    /// given the pixel and its squared distance, and stops the walk with
-    /// `None`.
+    /// given the pixel and its squared distance, in rows from the top and
+    /// each row from the left, and stops the walk with `None`. Only the
+    /// pixels within the annulus's outer edge are visited, and none of the
+    /// gap between `inside` and its inner edge.
     fn walk(
         &self,
         (x0, y0, x1, y1): (usize, usize, usize, usize),
@@ -1855,11 +1857,31 @@ impl Star<'_> {
         let inner = (PHOTOMETRY_ANNULUS.0 * scale).powi(2);
         let outer = (PHOTOMETRY_ANNULUS.1 * scale).powi(2);
         let clear = (PHOTOMETRY_NEIGHBOUR_MASK * scale).powi(2);
+        let reach = inside.max(outer);
         for py in y0..=y1 {
             let dy = py as f64 - y;
-            for px in x0..=x1 {
+            let rise = dy * dy;
+            if rise > reach {
+                continue;
+            }
+            // The row's span within reach, and the gap between the inside
+            // and the annulus to step over, each a pixel wide of its edge.
+            let half = (reach - rise).sqrt();
+            let first = (x - half).floor().max(x0 as f64) as usize;
+            let last = (x + half).ceil().min(x1 as f64) as usize;
+            let gap = (rise < inner).then(|| {
+                let within = (inside - rise).max(0.0).sqrt() + 1.0;
+                (within, (inner - rise).sqrt() - 1.0)
+            });
+            for px in first..=last {
                 let dx = px as f64 - x;
-                let squared = dx * dx + dy * dy;
+                if let Some((within, beyond)) = gap
+                    && dx.abs() > within
+                    && dx.abs() < beyond
+                {
+                    continue;
+                }
+                let squared = dx * dx + rise;
                 let place = if squared <= inside {
                     Place::Inside
                 } else if (inner..=outer).contains(&squared) {
@@ -1946,8 +1968,8 @@ fn star_ratio(
             }
             match place {
                 Place::Inside => aperture.push((px, py, r, s)),
-                Place::Sky => annulus.push((r, s, true)),
-                Place::Beside => annulus.push((r, s, false)),
+                Place::Sky => annulus.push(((r, s), true)),
+                Place::Beside => annulus.push(((r, s), false)),
             }
             Some(())
         },
@@ -1955,12 +1977,8 @@ fn star_ratio(
     if aperture.iter().any(|&(px, py, _, _)| saturated(px, py)) {
         return None;
     }
-    let clear = sky_samples(&annulus, |&(_, _, clear)| clear);
-    let (mut reference_annulus, mut source_annulus): (Vec<_>, Vec<_>) = annulus
-        .iter()
-        .filter(|&&(_, _, sky)| sky || !clear)
-        .map(|&(r, s, _)| (r, s))
-        .unzip();
+    let (mut reference_annulus, mut source_annulus): (Vec<_>, Vec<_>) =
+        sky_samples(&annulus).into_iter().unzip();
     let reference_sky = median_in_place(&mut reference_annulus)?;
     let source_sky = median_in_place(&mut source_annulus)?;
     let (reference_flux, source_flux) =
@@ -1975,14 +1993,19 @@ fn star_ratio(
     (reference_flux > 0.0 && source_flux > 0.0).then(|| (reference_flux / source_flux) as f32)
 }
 
-/// Whether a star's sky comes from the pixels of its annulus clear of its
-/// neighbours alone, which `clear` picks out of `annulus`: when they make
-/// up [`PHOTOMETRY_ANNULUS_LEFT`] of it or more. Where neighbours crowd the
-/// annulus, more than they leave, its sky comes from all of it, as it would
-/// without them.
-fn sky_samples<T>(annulus: &[T], clear: impl Fn(&T) -> bool) -> bool {
-    let left = annulus.iter().filter(|sample| clear(sample)).count();
-    left > 0 && left as f64 >= PHOTOMETRY_ANNULUS_LEFT * annulus.len() as f64
+/// The samples of a star's annulus its sky comes from, each marked
+/// whether it lies clear of the star's neighbours: those clear of them when
+/// they make up [`PHOTOMETRY_ANNULUS_LEFT`] of the annulus or more, and
+/// otherwise all of it. Where neighbours crowd the annulus, more than they
+/// leave, its sky comes from all of it, as it would without them.
+fn sky_samples<T: Copy>(annulus: &[(T, bool)]) -> Vec<T> {
+    let left = annulus.iter().filter(|&&(_, clear)| clear).count();
+    let clear = left > 0 && left as f64 >= PHOTOMETRY_ANNULUS_LEFT * annulus.len() as f64;
+    annulus
+        .iter()
+        .filter(|&&(_, sky)| sky || !clear)
+        .map(|&(sample, _)| sample)
+        .collect()
 }
 
 /// The median FWHM of an image's stars at `stars`, each as [`star_width`]
@@ -2034,10 +2057,9 @@ fn image_width(
 /// it. Counting the pixels above half the peak reads the core alone, where
 /// seeing shows, and none of the wings. `None` where its square leaves the
 /// grid, where the image misses a sample it reads, where `saturated` says a
-/// pixel near it is,
-/// where its neighbours leave too little of the annulus, or where its peak
-/// stands less than [`PHOTOMETRY_WIDTH_SNR`] times its sky's noise above
-/// its sky.
+/// pixel near it is, where its neighbours leave too little of the annulus,
+/// or where its peak stands less than [`PHOTOMETRY_WIDTH_SNR`] times its
+/// sky's noise above its sky.
 fn star_width(
     at: &(impl Fn(usize, usize) -> f32 + Sync),
     saturated: &(impl Fn(usize, usize) -> bool + Sync),
@@ -2061,12 +2083,7 @@ fn star_width(
         }
         Some(())
     })?;
-    let clear = sky_samples(&annulus, |&(_, clear)| clear);
-    let mut sky = annulus
-        .iter()
-        .filter(|&&(_, sky)| sky || !clear)
-        .map(|&(value, _)| value)
-        .collect::<Vec<_>>();
+    let mut sky = sky_samples(&annulus);
     let level = median_in_place(&mut sky)?;
     let noise = robust_sigma_in_place(&mut sky, level)?;
     let peak = core
