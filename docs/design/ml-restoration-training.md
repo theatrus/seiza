@@ -544,10 +544,29 @@ difference on the sky:
 - the image map read 1.15–1.31 times it;
 - the map modelled from the stack's variance read 1.19–1.61 times it.
 
-So the image alone gives the steadier level. Runs trained blind are being
-measured against runs that read the stack's map. The image map is the
-fallback if the blind runs lose. A model that reads the stack's map stays
-possible as an optional variant for Seiza's own stacks.
+So the image alone gives the steadier level.
+
+The best model trained with the stack's map was measured on the rebuilt
+validation sets, unchanged, reading three maps in turn: the stack's
+modelled map, the image map, and a constant, the image map's median
+everywhere. Against B halves matched to A's flux:
+
+| Map read | 4-frame error | 8-frame error | Faint, 4 / 8 frames | Against clean targets | Empty sky's grain and mottle left |
+|---|---|---|---|---|---|
+| The stack's, as trained | 1.709 | 1.184 | 5.02 / 1.88 | 0.757 | 2.2% / 3.2% |
+| The image map | 1.760 | 1.181 | 5.17 / 1.76 | 0.757 | 2.0% / 3.2% |
+| A constant | 1.761 | 1.192 | 5.18 / 1.86 | 0.762 | 2.0% / 3.2% |
+
+The constant does as well as the image map, so the model barely uses
+where the map changes, only its level. Read from the image instead of the
+stack, that level costs 3% on 4-frame halves and nothing on 8-frame ones.
+Against clean targets and on empty sky, nothing changes.
+
+So a model needs only the image and its noise level, which the image gives.
+Runs trained blind are being measured against runs that read the stack's
+map. The image map is the fallback if the blind runs lose. A model that
+reads the stack's map stays possible as an optional variant for Seiza's own
+stacks.
 
 Effective coverage is not the frame count. In the first corpus build, the
 noise of a 4-frame half varied by up to 2.5 times between draws of one
