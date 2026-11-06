@@ -118,7 +118,7 @@ def pairs(
     return found
 
 
-NOISE_MAPS = ("raw", "model", "image")
+NOISE_MAPS = ("raw", "model", "image", "constant")
 # The side of the blocks the modelled map takes the sky's variance over.
 SKY_BLOCK = 32
 # The median of a χ² with one degree of freedom over its mean: a second
@@ -140,15 +140,20 @@ IMAGE_MAP_SCALE = 1.13
 
 def input_sigma(kind: str, image: np.ndarray, sigma: np.ndarray | None, coverage: np.ndarray | None) -> np.ndarray:
     """The noise map a network reads, of `kind` (`NOISE_MAPS`): the stack's
-    own per-pixel map, the map `modelled_sigma` makes from it, or the map
+    own per-pixel map, the map `modelled_sigma` makes from it, the map
     `image_sigma` makes from the image alone, which needs neither the
-    stack's variance nor its coverage."""
+    stack's variance nor its coverage, or that map's median everywhere,
+    which tells the network the image's noise and nothing of where it
+    changes."""
     if kind == "raw":
         return sigma
     if kind == "model":
         return modelled_sigma(image, sigma, coverage)
     if kind == "image":
         return image_sigma(image)
+    if kind == "constant":
+        mapped = image_sigma(image)
+        return np.where(np.isfinite(mapped), np.nanmedian(mapped), np.nan).astype(np.float32)
     raise ValueError(f"a noise map is one of {NOISE_MAPS}, not {kind!r}")
 
 
@@ -520,10 +525,10 @@ def bank(
                 whole.add(*flattened(image_a, sigma_a, image_b, sky))
             if binned is not None and not binned.done:
                 binned_a, binned_sigma, binned_b = binned_pair(image_a, sigma_a, image_b)
-                if noise_map == "image":
+                if noise_map in ("image", "constant"):
                     # What the image map makes of a binned image, as it
                     # would of one binned before it came.
-                    binned_sigma = image_sigma(binned_a)
+                    binned_sigma = input_sigma(noise_map, binned_a, None, None)
                 binned.add(*flattened(binned_a, binned_sigma, binned_b, sky))
         # Before the banks are marked done.
         record.write_text(json.dumps(dropped))
