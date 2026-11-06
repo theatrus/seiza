@@ -3370,6 +3370,8 @@ version = "0.1.2"
 dependencies = [
  "multiversion",
  "rayon",
+ "rustfft",
+ "seiza-stars",
  "serde",
  "thiserror 2.0.21",
 ]
@@ -3550,6 +3552,7 @@ dependencies = [
  "rayon",
  "seiza-fits",
  "seiza-imgproc",
+ "serde",
 ]
 
 [[package]]

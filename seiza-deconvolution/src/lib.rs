@@ -5,7 +5,13 @@
 //! deliberately narrow: callers must provide a measured stellar FWHM, and
 //! defaults use a small iteration count plus partial blending to reduce noise
 //! amplification and ringing. This is a classical restoration experiment, not
-//! a learned image model and not a substitute for a spatially varying PSF.
+//! a learned image model.
+//!
+//! [`deconvolve_field`] runs the same damped update with a PSF that varies
+//! across the field, measured as a `seiza_stars::PsfField`, towards a round
+//! Gaussian target: [`RemainingKernel`] holds the blur between the two, and
+//! [`reblur_consistency`] checks any estimate at the target against its input
+//! with no truth needed.
 //!
 //! # Threads
 //!
@@ -14,15 +20,25 @@
 //! to a number of cores, call it inside a pool that size with
 //! `pool.install(..)`. The crate starts no threads of its own.
 
+mod fft;
+mod field;
+
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+pub use field::{
+    ChannelConsistency, DEFAULT_NODE_SPACING, FieldDeconvolutionConfig, MINIMUM_TARGET_FWHM,
+    ReblurConsistency, RemainingKernel, SPECTRUM_BANDS, TargetPsf, deconvolve_field,
+    deconvolve_field_masked, reblur_consistency,
+};
 
 const FWHM_TO_SIGMA: f32 = 1.0 / 2.354_82;
 
 /// Bump this when the same inputs and settings may yield different pixels.
 pub const ALGORITHM_VERSION: u32 = 1;
 
+/// Settings for [`deconvolve`] with a fixed, circular Gaussian PSF.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DeconvolutionConfig {
     /// Measured stellar full width at half maximum, in pixels.
@@ -56,6 +72,32 @@ impl DeconvolutionConfig {
                 "PSF FWHM must be finite and in [0.25, 100] pixels".into(),
             ));
         }
+        RestoreSettings::from(&self).validate()
+    }
+}
+
+/// The settings of a damped Richardson–Lucy run, whatever its PSF.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RestoreSettings {
+    pub(crate) iterations: usize,
+    pub(crate) amount: f32,
+    pub(crate) noise_fraction: f32,
+    pub(crate) max_correction: f32,
+}
+
+impl From<&DeconvolutionConfig> for RestoreSettings {
+    fn from(config: &DeconvolutionConfig) -> Self {
+        Self {
+            iterations: config.iterations,
+            amount: config.amount,
+            noise_fraction: config.noise_fraction,
+            max_correction: config.max_correction,
+        }
+    }
+}
+
+impl RestoreSettings {
+    pub(crate) fn validate(self) -> Result<()> {
         if self.iterations == 0 || self.iterations > 50 {
             return Err(DeconvolutionError::Invalid(
                 "iterations must be in 1..=50".into(),
@@ -80,6 +122,17 @@ impl DeconvolutionConfig {
     }
 }
 
+/// The blur a Richardson–Lucy update runs through, and its adjoint.
+pub(crate) trait Blur: Sync {
+    /// `output = H · input`.
+    fn forward(&self, input: &[f32], output: &mut [f32], scratch: &mut [f32]);
+    /// `output = Hᵀ · input`.
+    fn adjoint(&self, input: &[f32], output: &mut [f32], scratch: &mut [f32]);
+    /// Whether `Hᵀ = H`, so one pass serves both.
+    fn symmetric(&self) -> bool;
+}
+
+/// One channel's light and peak before and after restoration.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ChannelDiagnostics {
     pub input_flux: f64,
@@ -88,6 +141,7 @@ pub struct ChannelDiagnostics {
     pub output_peak: f32,
 }
 
+/// A restored image and each channel's diagnostics.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DeconvolutionResult {
     /// Row-major samples with the same interleaved channel layout as the input.
@@ -163,8 +217,9 @@ fn deconvolve_impl(
     }
     let kernel = gaussian_kernel(config.psf_fwhm_pixels);
     let convolver = SeparableConvolver::new(width, height, &kernel);
+    let settings = RestoreSettings::from(config);
     if channel_count == 1 {
-        let restored = restore_channel(data, &convolver, config, allow_masked)?;
+        let restored = restore_channel(data, &convolver, &settings, allow_masked)?;
         return Ok(DeconvolutionResult {
             data: restored.data,
             channels: vec![restored.diagnostics],
@@ -180,7 +235,7 @@ fn deconvolve_impl(
                 .step_by(channel_count)
                 .copied()
                 .collect::<Vec<_>>();
-            restore_channel(&input, &convolver, config, allow_masked)
+            restore_channel(&input, &convolver, &settings, allow_masked)
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -198,15 +253,22 @@ fn deconvolve_impl(
     })
 }
 
-struct RestoredChannel {
-    data: Vec<f32>,
-    diagnostics: ChannelDiagnostics,
+pub(crate) struct RestoredChannel {
+    pub(crate) data: Vec<f32>,
+    pub(crate) diagnostics: ChannelDiagnostics,
 }
 
-fn restore_channel(
+/// A missing-data mask and the blur's support of it, forward and adjoint.
+struct MaskSupport {
+    mask: Vec<f32>,
+    forward: Vec<f32>,
+    adjoint: Vec<f32>,
+}
+
+pub(crate) fn restore_channel(
     input: &[f32],
-    convolver: &SeparableConvolver<'_>,
-    config: &DeconvolutionConfig,
+    blur: &impl Blur,
+    config: &RestoreSettings,
     allow_masked: bool,
 ) -> Result<RestoredChannel> {
     let mut minimum = f32::INFINITY;
@@ -276,15 +338,31 @@ fn restore_channel(
             .iter()
             .map(|sample| if sample.is_finite() { 1.0 } else { 0.0 })
             .collect::<Vec<_>>();
-        let mut support = vec![0.0; input.len()];
-        convolver.convolve_into(&mask, &mut support, &mut convolution_scratch);
-        Some((mask, support))
+        let mut forward = vec![0.0; input.len()];
+        blur.forward(&mask, &mut forward, &mut convolution_scratch);
+        let adjoint = if blur.symmetric() {
+            forward.clone()
+        } else {
+            let mut adjoint = vec![0.0; input.len()];
+            blur.adjoint(&mask, &mut adjoint, &mut convolution_scratch);
+            adjoint
+        };
+        Some(MaskSupport {
+            mask,
+            forward,
+            adjoint,
+        })
     };
 
     for _ in 0..config.iterations {
-        convolver.convolve_into(&estimate, &mut predicted, &mut convolution_scratch);
-        normalize_masked_convolution(&mut predicted, mask_support.as_ref());
-        if let Some((mask, _)) = &mask_support {
+        blur.forward(&estimate, &mut predicted, &mut convolution_scratch);
+        normalize_masked_convolution(
+            &mut predicted,
+            mask_support
+                .as_ref()
+                .map(|support| (&support.mask[..], &support.forward[..])),
+        );
+        if let Some(MaskSupport { mask, .. }) = &mask_support {
             ratio
                 .par_iter_mut()
                 .zip(&observed)
@@ -308,9 +386,14 @@ fn restore_channel(
                         .clamp(minimum_correction, config.max_correction);
                 });
         }
-        convolver.convolve_into(&ratio, &mut correction, &mut convolution_scratch);
-        normalize_masked_convolution(&mut correction, mask_support.as_ref());
-        if let Some((mask, _)) = &mask_support {
+        blur.adjoint(&ratio, &mut correction, &mut convolution_scratch);
+        normalize_masked_convolution(
+            &mut correction,
+            mask_support
+                .as_ref()
+                .map(|support| (&support.mask[..], &support.adjoint[..])),
+        );
+        if let Some(MaskSupport { mask, .. }) = &mask_support {
             estimate
                 .par_iter_mut()
                 .zip(&predicted)
@@ -411,7 +494,7 @@ fn update_estimate(
     *estimate = activity.mul_add(proposed - *estimate, *estimate);
 }
 
-fn normalize_masked_convolution(output: &mut [f32], mask_support: Option<&(Vec<f32>, Vec<f32>)>) {
+fn normalize_masked_convolution(output: &mut [f32], mask_support: Option<(&[f32], &[f32])>) {
     let Some((mask, support)) = mask_support else {
         return;
     };
@@ -437,6 +520,20 @@ fn gaussian_kernel(fwhm_pixels: f32) -> Vec<f32> {
     let sum = kernel.iter().sum::<f32>();
     kernel.iter_mut().for_each(|weight| *weight /= sum);
     kernel
+}
+
+impl Blur for SeparableConvolver<'_> {
+    fn forward(&self, input: &[f32], output: &mut [f32], scratch: &mut [f32]) {
+        self.convolve_into(input, output, scratch);
+    }
+
+    fn adjoint(&self, input: &[f32], output: &mut [f32], scratch: &mut [f32]) {
+        self.convolve_into(input, output, scratch);
+    }
+
+    fn symmetric(&self) -> bool {
+        true
+    }
 }
 
 struct SeparableConvolver<'a> {
@@ -554,7 +651,9 @@ fn convolve_separable(input: &[f32], width: usize, height: usize, kernel: &[f32]
     output
 }
 
-fn reflect(index: isize, length: usize) -> usize {
+/// `index` reflected into `0..length` about the ends, without repeating
+/// the edge sample.
+pub(crate) fn reflect(index: isize, length: usize) -> usize {
     if length == 1 {
         return 0;
     }

@@ -272,6 +272,21 @@ typedef struct SeizaLiveStacker SeizaLiveStacker;
 typedef struct SeizaParallax SeizaParallax;
 
 /*
+ An opaque measured PSF field. Release it with [`seiza_psf_field_free`].
+ It is read-only once made, so several threads may sample it at once;
+ its report string is borrowed and remains valid until it is freed.
+ */
+typedef struct SeizaPsfField SeizaPsfField;
+
+/*
+ An opaque remaining kernel between a PSF field and a round target.
+ Release it with [`seiza_remaining_kernel_free`]. It is read-only once
+ made, and holds no pointer to the field it was made from; its report
+ string is borrowed and remains valid until it is freed.
+ */
+typedef struct SeizaRemainingKernel SeizaRemainingKernel;
+
+/*
  An opaque, owned rendered image. C sees only a pointer; release it with
  [`seiza_rendered_image_free`]. Not `repr(C)`: it is only ever handed to C as
  an opaque pointer, so its layout is private (and cbindgen forward-declares
@@ -307,6 +322,14 @@ typedef struct SeizaStackExportSnapshot SeizaStackExportSnapshot;
  until [`seiza_stack_snapshot_free`] is called.
  */
 typedef struct SeizaStackSnapshot SeizaStackSnapshot;
+
+/*
+ An opaque fit of catalogue stars. Release it with
+ [`seiza_star_fit_free`]. It is read-only once made and holds no pointer
+ to its inputs; its stars string is borrowed and remains valid until it is
+ freed.
+ */
+typedef struct SeizaStarFit SeizaStarFit;
 
 /*
  What a frame was shot with, as far as matching cares.
@@ -553,6 +576,36 @@ typedef int32_t (*SeizaParallaxFrameCallback)(const uint8_t*,
                                               uint32_t,
                                               double,
                                               void*);
+
+/*
+ A catalogue star at its image position, for isolating the stars a PSF
+ field is built from. Pixels count from 0.
+ */
+typedef struct {
+  double x;
+  double y;
+  /*
+   A magnitude in any one band; only differences between stars count.
+   */
+  double magnitude;
+} SeizaPsfCatalogueStar;
+
+/*
+ The shape of a PSF at one point, from an elliptical Moffat profile with
+ free β fitted to its stamp. Widths are in pixels; `angle` is the major
+ axis's direction in radians over `[0, π)`, from `+x` towards `+y`;
+ `e1` and `e2` are `χ·cos 2φ` and `χ·sin 2φ` with
+ `χ = (a² − b²)/(a² + b²)`.
+ */
+typedef struct {
+  double fwhm;
+  double fwhm_major;
+  double fwhm_minor;
+  double e1;
+  double e2;
+  double angle;
+  double beta;
+} SeizaPsfShape;
 
 #ifdef __cplusplus
 extern "C" {
@@ -4028,6 +4081,130 @@ char *seiza_emission_flux_json(const float *residuals,
                                char **error_out);
 
 /*
+ Makes the remaining kernel between a measured PSF field and a round
+ Gaussian target. Pass null or empty `options_json` for the field's best
+ round PSF as the target and nodes at most 256 px apart, or a JSON object with
+ `target` (`{"fwhm": 2.0}` for one FWHM in pixels, at least 1.5;
+ `{"ratio": 0.7}` for a fraction of the local FWHM; or `"bestRound"`) and
+ `nodeSpacing` (the most pixels between the nodes the kernel is sampled at, at
+ least 16). Returns null with an error for a bad target or spacing.
+
+ # Safety
+ `field` must be a live pointer from `seiza_psf_field_measure`. A
+ non-null `options_json` must be NUL-terminated. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+SeizaRemainingKernel *seiza_remaining_kernel_new(const SeizaPsfField *field,
+                                                 const char *options_json,
+                                                 char **error_out);
+
+/*
+ Returns the kernel's report as borrowed JSON: `width`, `height`,
+ `channels`, `kernelSize`, `nodeSpacing`, `nodeCount` and, per channel in
+ `channelRanges`, the narrowest and widest local PSF FWHM
+ (`psfFwhmRange`) and target FWHM (`targetFwhmRange`) over the nodes. The
+ string remains valid until the kernel is freed.
+
+ # Safety
+ `kernel` must be null or a live pointer from
+ [`seiza_remaining_kernel_new`].
+ */
+const char *seiza_remaining_kernel_report_json(const SeizaRemainingKernel *kernel);
+
+/*
+ Writes the kernel at pixel (`x`, `y`) in one channel, blended from the
+ nodes around it: `kernelSize²` floats summing to one, centred on the
+ middle pixel.
+
+ # Safety
+ `kernel` must be a live pointer from [`seiza_remaining_kernel_new`].
+ `output` must point to `output_length` writable floats. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+bool seiza_remaining_kernel_kernel_at(const SeizaRemainingKernel *kernel,
+                                      size_t channel,
+                                      double x,
+                                      double y,
+                                      float *output,
+                                      size_t output_length,
+                                      char **error_out);
+
+/*
+ Blurs interleaved linear `float` samples by the remaining kernel, each
+ source pixel by its own, into `output`: what the image at the target
+ would look like with the measured PSF. Both buffers hold `width *
+ height * channels` samples of the field's size. Non-finite samples stay
+ non-finite and are left out of their neighbours' blur.
+
+ # Safety
+ `kernel` must be a live pointer from [`seiza_remaining_kernel_new`].
+ `data` must point to `data_length` readable floats and `output` to
+ `output_length` writable floats. When non-null, `error_out` must point
+ to writable storage for one pointer.
+ */
+bool seiza_remaining_kernel_blur(const SeizaRemainingKernel *kernel,
+                                 const float *data,
+                                 size_t data_length,
+                                 float *output,
+                                 size_t output_length,
+                                 char **error_out);
+
+/*
+ Releases a remaining kernel. Null is ignored.
+
+ # Safety
+ `kernel` must be null or a pointer from [`seiza_remaining_kernel_new`]
+ that has not been freed.
+ */
+void seiza_remaining_kernel_free(SeizaRemainingKernel *kernel);
+
+/*
+ Deconvolves interleaved linear `float` samples in place towards the
+ kernel's target, with damped Richardson–Lucy and the remaining kernel
+ as its forward model. Pass null or empty `options_json` for the
+ conservative defaults, or a JSON object with any of `iterations` (4),
+ `amount` (0.35), `noiseFraction` (0.001), `maxCorrection` (2.0) and
+ `masked` (false: non-finite samples are an error; true: they are a mask
+ that stays). The image must be the field's size. The input is left
+ unchanged when the call fails.
+
+ # Safety
+ `kernel` must be a live pointer from [`seiza_remaining_kernel_new`].
+ `data` must point to `data_length` writable floats. A non-null
+ `options_json` must be NUL-terminated. When non-null, `error_out` must
+ point to writable storage for one pointer.
+ */
+bool seiza_deconvolve_field_in_place(const SeizaRemainingKernel *kernel,
+                                     float *data,
+                                     size_t data_length,
+                                     const char *options_json,
+                                     char **error_out);
+
+/*
+ Checks an estimate at the kernel's target against the image it came
+ from: `output`, `input` and `noise` (the input's per-sample noise as a
+ standard deviation; a sample whose noise is not finite and positive is
+ left out) each hold `length` interleaved samples of the field's size.
+ Returns owned JSON, released with `seiza_string_free`: `channels`, each
+ with `reducedChiSquared` of `(R ∗ output − input) / σ`, the `samples` it
+ covers, `bandPower` (the residual's power in eight radial frequency
+ bands, lowest first, relative to their mean) and `spectralFlatness`
+ (their geometric over arithmetic mean, 1 for a flat spectrum, or null).
+
+ # Safety
+ `kernel` must be a live pointer from [`seiza_remaining_kernel_new`].
+ `output`, `input` and `noise` must each point to `length` readable
+ floats. When non-null, `error_out` must point to writable storage for
+ one pointer.
+ */
+char *seiza_reblur_consistency_json(const SeizaRemainingKernel *kernel,
+                                    const float *output,
+                                    const float *input,
+                                    const float *noise,
+                                    size_t length,
+                                    char **error_out);
+
+/*
  Grade/group/match provided FITS/XISF files or a recursive library and prepare
  cached masters through the native file coordinator. Run off the UI thread.
  camelCase request: operation (analyze/execute/verify/schema), lights, library
@@ -5214,6 +5391,114 @@ char *seiza_pipeline_combine_json(const char *paths_json,
                                   char **error_out);
 
 /*
+ Measures the PSF field of interleaved linear `float` samples.
+
+ `channels` must be one or three and `data_length` must equal
+ `width * height * channels`; RGB samples are pixel-interleaved, and each
+ channel gets its own field. Non-finite samples never enter a stamp.
+ `catalogue` holds `catalogue_length` catalogue stars at their image
+ positions, or is null with zero length: with stars, a star gives a stamp
+ only when it matches one, and catalogue neighbours within the isolation
+ magnitudes are masked out of its stamp, or disqualify it when they lie
+ close to its core. Pass null or empty `options_json` for
+ the defaults, or a JSON object with any of `stampSize`, `components`,
+ `minimumStars`, `maximumStars`, `minimumSnr`, `detectionSigma`,
+ `saturation`, `isolationMagnitudes`, `sparse` (`"refuse"`, the
+ default, or `"global"` for one PSF when too few stars allow a varying
+ field) and `degree` (1 to 3; absent chooses it by cross-validation). Returns null with an error when the image, the options or the
+ stars do not allow a field. The handle retains no pointer to the inputs.
+
+ # Safety
+ `data` must point to `data_length` readable floats. A non-null
+ `catalogue` must point to `catalogue_length` readable stars. A non-null
+ `options_json` must be NUL-terminated. When non-null, `error_out` must
+ point to writable storage for one pointer.
+ */
+SeizaPsfField *seiza_psf_field_measure(const float *data,
+                                       size_t data_length,
+                                       size_t width,
+                                       size_t height,
+                                       size_t channels,
+                                       const SeizaPsfCatalogueStar *catalogue,
+                                       size_t catalogue_length,
+                                       const char *options_json,
+                                       char **error_out);
+
+/*
+ Returns the field's report as borrowed JSON: `width`, `height`,
+ `channels`, `stampSize`, `componentCount`, `starCount`, `isGlobal`,
+ `warnings` (messages), `channelFits` (each with `reducedChiSquared`,
+ `relativeResidual`, `degree`, `wingStars` and `wingOverlap`, the radii
+ where the core hands over to the wings, or null) and `stars` (each with `x`, `y`,
+ `flux`, `snr`, `fwhm` and `role`, `"core"` or `"wing"`). The string
+ remains valid until the field is freed.
+
+ # Safety
+ `field` must be null or a live pointer from [`seiza_psf_field_measure`].
+ */
+const char *seiza_psf_field_report_json(const SeizaPsfField *field);
+
+/*
+ The side of the field's stamps in pixels, odd; 0 for a null field.
+
+ # Safety
+ `field` must be null or a live pointer from [`seiza_psf_field_measure`].
+ */
+size_t seiza_psf_field_stamp_size(const SeizaPsfField *field);
+
+/*
+ The field's channels, one or three; 0 for a null field.
+
+ # Safety
+ `field` must be null or a live pointer from [`seiza_psf_field_measure`].
+ */
+size_t seiza_psf_field_channels(const SeizaPsfField *field);
+
+/*
+ Writes the local PSF at pixel (`x`, `y`) into `output`: `stamp_size *
+ stamp_size * channels` floats, row by row with channels interleaved,
+ each channel summing to one and centred on the middle pixel. Points
+ outside the image take the PSF at the nearest edge.
+
+ # Safety
+ `field` must be a live pointer from [`seiza_psf_field_measure`].
+ `output` must point to `output_length` writable floats. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+bool seiza_psf_field_stamp_at(const SeizaPsfField *field,
+                              double x,
+                              double y,
+                              float *output,
+                              size_t output_length,
+                              char **error_out);
+
+/*
+ Fits the shape of one channel's local PSF at pixel (`x`, `y`) and writes
+ it to `shape_out`. Returns false with an error when `channel` is out of
+ range or the profile cannot be fitted.
+
+ # Safety
+ `field` must be a live pointer from [`seiza_psf_field_measure`].
+ `shape_out` must point to writable storage for one shape. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+bool seiza_psf_field_shape_at(const SeizaPsfField *field,
+                              size_t channel,
+                              double x,
+                              double y,
+                              SeizaPsfShape *shape_out,
+                              char **error_out);
+
+/*
+ Releases a PSF field. Null is ignored.
+
+ # Safety
+ `field` must be null or a pointer from [`seiza_psf_field_measure`] that
+ has not been freed.
+ */
+void seiza_psf_field_free(SeizaPsfField *field);
+
+/*
  Open a file of satellite orbital elements: CCSDS OMM JSON (an array or
  one object) or two- or three-line TLE text. Use it for images older than
  a few days, with elements from near their time. Returns an owned catalog
@@ -5451,6 +5736,122 @@ bool seiza_live_stacker_add_session_lights(SeizaLiveStacker *stacker,
                                            const char *paths_json,
                                            size_t session,
                                            char **error_out);
+
+/*
+ Fits the flux of each of `star_count` catalogue stars, at their image
+ positions, in interleaved linear `float` samples of the PSF field's size
+ and channels, with the field's local PSF: stars whose fit windows overlap
+ jointly, each group with its own background plane. `noise`, when not
+ null, holds the per-sample noise as a standard deviation in the image's
+ layout (`noise_length` must then equal `data_length`); a sample whose
+ noise is not finite and positive is left out. Pass null or empty
+ `options_json` for the defaults, or a JSON object with any of
+ `fitRadius` (pixels; three FWHM by default), `saturation` (samples at or
+ above it are left out), `positions` (`"fixed"`, the default, or
+ `"refined"`) and `maxShift` (how far a refined star may move, 1 px).
+
+ # Safety
+ `field` must be a live pointer from `seiza_psf_field_measure`. `data`
+ must point to `data_length` readable floats, `stars` to `star_count`
+ readable stars, and a non-null `noise` to `noise_length` readable floats.
+ A non-null `options_json` must be NUL-terminated. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+SeizaStarFit *seiza_star_fit_new(const SeizaPsfField *field,
+                                 const float *data,
+                                 size_t data_length,
+                                 const SeizaPsfCatalogueStar *stars,
+                                 size_t star_count,
+                                 const float *noise,
+                                 size_t noise_length,
+                                 const char *options_json,
+                                 char **error_out);
+
+/*
+ Returns the fit as borrowed JSON: `width`, `height`, `channels` and
+ `stars`, in the order given, each with `x` and `y` (where it was
+ fitted), `magnitude`, and per channel `flux`, `fluxError` and
+ `background` (null where nothing constrained it), then
+ `reducedChiSquared` and `saturated`. The string remains valid until the
+ fit is freed.
+
+ # Safety
+ `fit` must be null or a live pointer from [`seiza_star_fit_new`].
+ */
+const char *seiza_star_fit_stars_json(const SeizaStarFit *fit);
+
+/*
+ Writes the fitted stars through the measured PSF, on black, into
+ `output`: the star layer [`seiza_star_fit_subtract`] removes.
+
+ # Safety
+ `fit` must be a live pointer from [`seiza_star_fit_new`]. `output` must
+ point to `output_length` writable floats. When non-null, `error_out` must
+ point to writable storage for one pointer.
+ */
+bool seiza_star_fit_model(const SeizaStarFit *fit,
+                          float *output,
+                          size_t output_length,
+                          char **error_out);
+
+/*
+ Writes `data` with the fitted stars removed into `output`.
+
+ # Safety
+ `fit` must be a live pointer from [`seiza_star_fit_new`]. `data` must
+ point to `data_length` readable floats and `output` to `output_length`
+ writable floats. When non-null, `error_out` must point to writable
+ storage for one pointer.
+ */
+bool seiza_star_fit_subtract(const SeizaStarFit *fit,
+                             const float *data,
+                             size_t data_length,
+                             float *output,
+                             size_t output_length,
+                             char **error_out);
+
+/*
+ Writes the fitted stars rendered through a pixel-integrated round
+ Gaussian of `target_fwhm` pixels, on black, into `output`.
+
+ # Safety
+ `fit` must be a live pointer from [`seiza_star_fit_new`]. `output` must
+ point to `output_length` writable floats. When non-null, `error_out` must
+ point to writable storage for one pointer.
+ */
+bool seiza_star_fit_render(const SeizaStarFit *fit,
+                           double target_fwhm,
+                           float *output,
+                           size_t output_length,
+                           char **error_out);
+
+/*
+ The classical star sharpener: writes `data` with the fitted stars
+ removed and rendered again through a round Gaussian of `target_fwhm`
+ pixels into `output`.
+
+ # Safety
+ `fit` must be a live pointer from [`seiza_star_fit_new`]. `data` must
+ point to `data_length` readable floats and `output` to `output_length`
+ writable floats. When non-null, `error_out` must point to writable
+ storage for one pointer.
+ */
+bool seiza_star_fit_sharpen(const SeizaStarFit *fit,
+                            const float *data,
+                            size_t data_length,
+                            double target_fwhm,
+                            float *output,
+                            size_t output_length,
+                            char **error_out);
+
+/*
+ Releases a star fit. Null is ignored.
+
+ # Safety
+ `fit` must be null or a pointer from [`seiza_star_fit_new`] that has not
+ been freed.
+ */
+void seiza_star_fit_free(SeizaStarFit *fit);
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -65,19 +65,78 @@ This can test recovery of contrast lost to a modest, approximately symmetric
 blur. It is deterministic, flux-preserving, relatively lightweight, and does
 not synthesize structures from a training prior.
 
-It does not estimate the PSF, vary it across the field, distinguish atmospheric
-seeing from tracking or aberrations, understand saturated stars, or prevent all
-ringing. A wrong FWHM is a wrong forward model. Raw Bayer mosaics are rejected
+The fixed-PSF call does not estimate the PSF or vary it across the field;
+`deconvolve_field` does both, with the field below. Neither distinguishes
+atmospheric seeing from tracking or aberrations, understands saturated stars,
+or prevents all ringing. A wrong FWHM is a wrong forward model. Raw Bayer mosaics are rejected
 because independent mosaic-sample deconvolution creates color and checkerboard
 artifacts.
 
+## Field-varying PSF
+
+`deconvolve_field` runs the same damped update with the PSF a
+`seiza_stars::PsfField` measured from the image's own stars, which varies
+across the field. It deconvolves towards a round Gaussian target `T`, never
+narrower than 1.5 px, instead of towards a point. The target is one of
+three:
+
+- a fixed FWHM;
+- a fraction of the local FWHM;
+- the field's best round PSF, its narrowest local FWHM everywhere, which
+  corrects tilt, coma and elongation without sharpening the field's best
+  part.
+
+The forward model is the remaining kernel `R`, with `P = T ∗ R`, so the
+estimate is the image as it would be at `T`. `RemainingKernel` samples `R`
+on a grid of nodes, evenly spaced and at most 256 px apart by default, with
+the edge nodes on the image's edges, where their PSFs were measured. At each
+node it deconvolves the PSF stamp by `T` with Richardson–Lucy on the stamp
+itself, using FFT convolutions and starting from the Gaussian `R`. The kernel then stays
+positive and carries the PSF's measured wings, which `T` lacks.
+
+Each source pixel is blurred by its own kernel: `H x = Σₖ Rₖ ∗ (wₖ · x)`,
+with bilinear hat weights `wₖ` that sum to one. Light is conserved exactly.
+The adjoint `Σₖ wₖ · (R̃ₖ ∗ y)` carries the correction back. Each node's
+convolution is an FFT over its tile, with reflection at the image edges.
+Where neighbouring kernels differ, a flat sky stays flat to a few tenths of
+a percent in the synthetic tests, least well at the image edges. All four
+guardrails apply, and so does the missing-data mask.
+
+`reblur_consistency` checks any estimate at `T`, from this or a learned
+model, against its input: blurred by `R`, it must give the input back to
+within the input's noise.
+
+On corpus deep stacks, with ten iterations, a full blend, the default noise
+floor and the best round target:
+
+| Stack | Target | FWHM before | FWHM after | Ellipticity, median | Reblur χ² (input as output) |
+|---|---|---|---|---|---|
+| RedCat61, Sh2 136 B (tilted) | 2.03 px | 2.04–3.61 | 1.90–2.25 | 0.24 → 0.16 | 7.2 (13.2) |
+| Askar107PHQ, Heart and Soul Hα | 2.36 px | 2.36–5.18 | 2.14–2.70 | 0.06 → 0.03 | 0.99 (1.50) |
+| Ultracat, Coma Cluster G | 1.89 px | 1.91–4.36 | 1.84–2.85 | 0.12 → 0.07 | 0.97 (2.06) |
+
+The FWHM ranges are of the PSF field measured before and after, on a 6 × 4
+grid. The noise map is `sqrt(variance / coverage)`. Saturated cores and
+pixels with under half the median coverage are left out of χ², because a
+stack's thin edges have almost no variance. In the sky, the RedCat's χ² is
+1.5. Its bright stars, near 2 px FWHM, are undersampled, and the PSF field
+fits them to only 5% to 7%. That leaves χ² of 92 over the 6% of pixels in
+stars and nebula. The input itself, offered as the result, scores 178 there.
+
+A blur keeps each node's kernel spectrum, one transform at the tile size,
+only while a channel's spectra fit in 256 MiB. Larger images transform each
+kernel again as each blur needs it. Keeping all 1014 spectra of a 61 Mpx
+stack took the run's peak memory to 4.9 GiB; transforming them as needed
+holds it at 2.05 GiB, about 1 GiB of it the image and its field, for a
+third more time. Four iterations then took 7 s.
+
 ## Next experiments
 
-- Estimate local PSFs from unsaturated detected stars and report confidence.
 - Compare Gaussian and Moffat kernels on real star wings.
-- Partition the field into smoothly blended PSF regions for spatial variation.
 - Add star masks, edge tapering, and total-variation or wavelet regularization
   for low-SNR backgrounds and ringing control.
+- Run field-varying Richardson–Lucy on the starless layer of catalogue-guided
+  star removal, so that stars never take part in an iteration.
 - Establish objective tests: held-out synthetic forward models, FWHM/encircled
   energy, flux error, background power, and ringing around high-contrast stars.
 - Treat any learned restoration as a separate, provenance-bearing operation

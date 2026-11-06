@@ -47,6 +47,7 @@ pub mod hocus_focus_star_detection;
 mod hocus_focus_v4;
 pub mod nina_star_detection;
 pub mod peak_star_detection;
+pub mod psf_field;
 pub mod psf_fitting;
 pub mod star_contours;
 pub mod tilt;
@@ -57,6 +58,11 @@ pub use hocus_focus_star_detection::{
     pixel_scale_arcsec, recommend_detection_binning,
 };
 pub use peak_star_detection::{PeakStar, find_peak_stars, fold_core_fragments};
+pub use psf_field::{
+    CatalogueStar, FittedStar, PsfChannelFit, PsfField, PsfFieldError, PsfFieldOptions,
+    PsfFieldWarning, PsfShape, PsfStamp, PsfStar, PsfStarRole, SparseFieldPolicy, StarFit,
+    StarFitError, StarFitOptions, StarPositions,
+};
 pub use psf_fitting::{PSFModel, PSFType};
 pub use tilt::{
     CellStats, Corner, CornerHfr, TRIANGLE_INNER_RADIUS_FRACTION,

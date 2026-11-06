@@ -216,6 +216,70 @@ gives a rig's pixel scale, `classify_pixel_scale(scale)` the `preset` for
 it, and `recommend_detection_binning(hfr)` the `detection_binning` for a
 measured in-focus HFR.
 
+## Measure the PSF field
+
+`PsfField.measure` measures an empirical PSF that varies across a linear
+`float32` image, mono `(H, W)` or RGB `(H, W, 3)`, from its isolated stars.
+Each star's stamp, 33 px or seven FWHM when that is wider, is centred to a
+fraction of a pixel and normalised to unit flux. Unsaturated stars give the
+core: a mean stamp plus a few principal components whose coefficients vary
+as polynomials in `x` and `y`, of the degree from 1 to 3 that best predicts
+stars held out of the fit. Saturated stars add the wings,
+scaled to the core over an annulus where both are reliable. Each RGB channel
+has its own field.
+
+```python
+field = seiza.PsfField.measure(stack)
+psf = field.stamp_at(1200.0, 800.0)          # (33, 33), sums to one
+shape = field.shape_at(1200.0, 800.0)        # FWHM, e1, e2, Moffat beta
+print(field.star_count, field.channel_fits[0].relative_residual)
+```
+
+`shape_at(x, y, channel=0)` fits an elliptical Moffat with free β to the
+local stamp: `fwhm` (the mean of `fwhm_major` and `fwhm_minor`), the
+ellipticity components `e1` and `e2`, the major axis `angle` and `beta`.
+`stars` lists the stars used, each with its `role`, `"core"` or `"wing"`,
+and `channel_fits` the median χ² per pixel against the background noise,
+the median relative residual within 1.5 FWHM, and how many saturated stars
+gave wings.
+
+With fewer than `minimum_stars` (30) usable stars, `measure` raises
+`seiza.TooFewStarsError`; pass `sparse="global"` to accept one PSF for the
+whole image instead, which `is_global` and `warnings` then report. Pass
+`catalogue=[(x, y, magnitude), ...]` with catalogue stars at their image
+positions to keep only stars that match one. Neighbours within
+`isolation_magnitudes` (5) of a star, detected or catalogued, are masked out
+of its stamp, and disqualify it when they lie within 1.5 FWHM of its flux
+aperture. `saturation`
+sets the level from which a star counts as saturated; by default it is found
+from the brightest stars' common clip level. `degree` fixes the degree, 1
+to 3, of the polynomials the coefficients follow across the field; by
+default each channel takes the degree that best predicts stars held out of
+the fit, which is a cubic for a tilted sensor whose best focus crosses the
+frame. `channel_fits` reports the degree chosen. The call releases the GIL.
+
+### Fit, remove and render catalogue stars
+
+`StarFit.fit` fits each catalogue star's flux, at its image position, with
+the local PSF of a `PsfField`: stars whose fit windows overlap are fitted
+jointly, each group with its own background plane. Pass the stars as
+`(x, y, magnitude)`, for instance from `StarCatalog.cone_search` and
+`Wcs.world_to_pixel`, and the stack's per-pixel σ as `noise`:
+
+```python
+fit = seiza.StarFit.fit(stack, field, stars, noise=sigma, saturation=60000.0)
+starless = fit.subtract(stack)         # the stars removed
+truth = fit.render(2.0)                # the same stars at a 2 px Gaussian
+sharpened = fit.sharpen(stack, 2.0)    # removed and rendered again
+```
+
+Each of `fit.stars` has its fitted `flux`, `flux_error` and `background`
+per channel, `reduced_chi_squared` and whether its window held `saturated`
+samples, which are left out so the wings give its flux. Positions are held
+as given; `positions="refined"` lets each star move up to `max_shift` (1 px)
+when the solution is not accurate to a small fraction of a pixel. Stars the
+catalogue lacks stay in the image.
+
 ## Blind solve
 
 No position hint, only a plausible scale range. Uses the prebuilt whole-sky
@@ -438,6 +502,38 @@ The returned array remains linear `float32`; no clipping or display stretch is
 applied. The operation releases the GIL. Inspect identical stretches for noise,
 rings, saturated-star failures, and field-dependent PSF mismatch before using a
 stronger `iterations` or `amount`.
+
+### Towards a target PSF across the field
+
+`deconvolve_field` runs the same damped update with the PSF a
+`PsfField` measured, which varies across the image, and deconvolves towards
+a round Gaussian target `T` rather than a point. `RemainingKernel` holds the
+blur `R` between them, with `P = T ∗ R`, on a grid of nodes, each node's
+stamp deconvolved by `T`:
+
+```python
+field = seiza.PsfField.measure(stack)
+kernel = seiza.RemainingKernel(field)               # the field's best round PSF
+sharper = seiza.deconvolve_field(stack, kernel, iterations=8, amount=0.6)
+check = seiza.reblur_consistency(sharper, stack, sigma, kernel)
+print(check.channels[0].reduced_chi_squared, check.channels[0].spectral_flatness)
+```
+
+Give `target_fwhm=` for one FWHM in pixels everywhere, never below 1.5, or
+`target_ratio=` for a fraction of the local FWHM; with neither, the target
+is the field's narrowest local FWHM, which corrects tilt and elongation
+without sharpening the field's best part. `node_spacing` (256) sets how
+finely the kernel follows the field. `kernel.blur(image)` blurs an image by
+`R`, each source pixel by its own kernel, and `kernel_at(x, y)` returns the
+kernel there.
+
+`reblur_consistency(output, input, noise, kernel)` needs no truth: blurred
+by `R`, a sound estimate gives its input back to within the input's noise.
+`noise` is the input's per-pixel σ, such as `sqrt(variance)` from a stack;
+non-finite or zero entries, such as saturated cores, are left out. Each
+channel reports the reduced χ² of the residual, near 1 when it is the
+input's noise, its power in eight radial frequency bands, and their
+`spectral_flatness`, 1 for a flat spectrum.
 
 ## Photometric colour calibration
 
