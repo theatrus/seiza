@@ -378,23 +378,22 @@ pub(crate) fn preparation_sample_indices(
     reach: usize,
     background: Option<&BackgroundSamples>,
 ) -> Vec<u32> {
-    fn add(
-        indices: &mut Vec<u32>,
-        image_width: usize,
-        channels: usize,
-        (x, y, width, height): (usize, usize, usize, usize),
-        target: usize,
-    ) {
-        let stride = (width * height / target).max(1);
-        for sample in (0..width * height).step_by(stride) {
-            let pixel = (y + sample / width) * image_width + x + sample % width;
-            indices.extend((0..channels).map(|channel| (pixel * channels + channel) as u32));
+    // Each pixel read, once, in a bit of its own: the stars' circles
+    // overlap the tiles' samples and each other, and marking them costs a
+    // bit a pixel where collecting, sorting and deduplicating every index
+    // cost the indices of every channel of every pixel, many times over.
+    let mut read = vec![0_u64; (width * height).div_ceil(64)];
+    let mut mark = |pixel: usize| read[pixel / 64] |= 1 << (pixel % 64);
+    let mut add = |(x, y, region_width, region_height): (usize, usize, usize, usize),
+                   target: usize| {
+        let stride = (region_width * region_height / target).max(1);
+        for sample in (0..region_width * region_height).step_by(stride) {
+            mark((y + sample / region_width) * width + x + sample % region_width);
         }
-    }
-    let mut indices = Vec::new();
+    };
     let whole = (0, 0, width, height);
     if !matches!(mode, NormalizationMode::None) {
-        add(&mut indices, width, channels, whole, 20_000);
+        add(whole, 20_000);
     }
     if let NormalizationMode::LocalBackground { tile_size }
     | NormalizationMode::Local { tile_size } = mode
@@ -407,17 +406,11 @@ pub(crate) fn preparation_sample_indices(
             20_000
         };
         for cell in 0..columns * rows {
-            add(
-                &mut indices,
-                width,
-                channels,
-                tile(cell, columns, width, height, tile_size),
-                target,
-            );
+            add(tile(cell, columns, width, height, tile_size), target);
         }
     }
     if matches!(mode, NormalizationMode::LocalBackground { .. }) {
-        add(&mut indices, width, channels, whole, 4_000);
+        add(whole, 4_000);
         let (reach, within) = (reach as isize, (reach * reach) as f64);
         for &(x, y) in stars {
             let (cx, cy) = (x.round() as isize, y.round() as isize);
@@ -428,32 +421,36 @@ pub(crate) fn preparation_sample_indices(
             let columns = (cx - reach).max(0)..=(cx + reach).min(width as isize - 1);
             for py in rows {
                 for px in columns.clone() {
-                    if (px as f64 - x).powi(2) + (py as f64 - y).powi(2) > within {
-                        continue;
+                    if (px as f64 - x).powi(2) + (py as f64 - y).powi(2) <= within {
+                        mark(py as usize * width + px as usize);
                     }
-                    let pixel = py as usize * width + px as usize;
-                    indices
-                        .extend((0..channels).map(|channel| (pixel * channels + channel) as u32));
                 }
             }
         }
     }
     if let Some(layout) = background {
         for cell in 0..layout.columns * layout.height.div_ceil(layout.tile_size) {
-            let (x, y, width, height) = tile(
+            let (x, y, tile_width, tile_height) = tile(
                 cell,
                 layout.columns,
                 layout.width,
                 layout.height,
                 layout.tile_size,
             );
-            for pixel in tile_sample_pixels(layout.width, x, y, width, height) {
-                indices.extend((0..channels).map(|channel| (pixel * channels + channel) as u32));
+            for pixel in tile_sample_pixels(layout.width, x, y, tile_width, tile_height) {
+                mark(pixel);
             }
         }
     }
-    indices.sort_unstable();
-    indices.dedup();
+    let mut indices = Vec::new();
+    for (word, &bits) in read.iter().enumerate() {
+        let mut bits = bits;
+        while bits != 0 {
+            let pixel = word * 64 + bits.trailing_zeros() as usize;
+            indices.extend((0..channels).map(|channel| (pixel * channels + channel) as u32));
+            bits &= bits - 1;
+        }
+    }
     indices
 }
 
