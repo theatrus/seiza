@@ -3530,6 +3530,7 @@ dependencies = [
  "rayon",
  "seiza-fits",
  "seiza-imgproc",
+ "serde",
 ]
 
 [[package]]

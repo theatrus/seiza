@@ -14,6 +14,7 @@ categories = ["science", "computer-vision"]
 seiza-imgproc = { workspace = true, features = ["parallel"] }
 nalgebra = { workspace = true }
 rayon = { workspace = true }
+serde = { workspace = true }
 
 [dev-dependencies]
 seiza-fits = { workspace = true }

@@ -90,6 +90,79 @@ to move back into the core. `PsfField` measures an empirical PSF instead:
 With fewer than about 30 usable stars, `PsfField` refuses. The caller may
 then accept a single global PSF, which is reported as a warning.
 
+#### What landed
+
+`PsfField` is in `seiza-stars`, with its C twin (`seiza_psf_field_measure`
+and the calls on its handle) and its Python twin (`seiza.PsfField`). It
+settles what the plan left open:
+
+- **Candidates.** Detection runs on the image less a 64 px mesh background,
+  lightly smoothed. Adaptive moments give each star's centre, width and
+  shape.
+- **Isolation.** A neighbour within 5 magnitudes of a star disqualifies it
+  inside two FWHM of its 2.5 FWHM flux aperture, as does one brighter than
+  the star anywhere in its stamp. Fainter neighbours further out are masked
+  out of the stamp instead. Rejecting them as well left one star in 270 in
+  a dense Milky Way field. No core star lies within two stamp radii of a
+  bloomed star, one whose saturated disc is 3 px or more in radius.
+  Catalogue neighbours count the same way, with their magnitudes.
+- **Saturation.** Unless the caller gives a level, it is the brightest
+  stars' common clip level. Stars from 80% of it give wings, not core.
+- **Stamps.** Each is shifted to its centroid by Lanczos-3 and normalised to
+  its aperture flux. The whole model is normalised to unit sum when it is
+  sampled.
+- **Fit.** Stars are weighted by inverse variance, capped at the upper
+  quartile so the brightest do not outvote the field. Stars whose core
+  residual is three times the median, and above 10%, are dropped, and the
+  field is fitted again.
+- **Degree.** A quadratic is not always enough. A tilted sensor whose best
+  focus crosses the frame makes the FWHM a V across it. In a synthetic
+  tilt, a quadratic overshoots the far corner's FWHM by 18%; a cubic comes
+  within 5%. Each channel takes the degree, 1 to 3, that best predicts
+  held-out stars over five folds.
+- **Wings.** Each saturated star is scaled to the core model at its own
+  position, over an annulus. The annulus starts 1.5 px outside the star's
+  saturated pixels and ends where the core model's ring average falls to
+  twenty times its own noise. The star's sky comes from a ring three stamp
+  radii out, past its own wings. The median of the stars' excess over the
+  core model is added from that annulus outwards. The core model thus
+  keeps the field's variation, and the wings add the halo. In a synthetic
+  field with a wide halo, core stars alone lose a quarter of the light 9 to
+  15 px out, because their sky ring sits in the halo. The wings bring it
+  back to within 8%.
+- **Shape.** `shape_at` fits an elliptical Moffat with free β to the local
+  stamp. FWHM is the mean of the two axes' widths. `e1` and `e2` are
+  `χ cos 2φ` and `χ sin 2φ`, with `χ = (a² − b²)/(a² + b²)`. β stops at 25,
+  which undersampled stars near 2 px FWHM often reach.
+- **Fit quality.** Each channel reports the median χ² per pixel against the
+  background noise, which bright stars' photon noise raises well above 1,
+  and the median relative residual within 1.5 FWHM.
+- **Sparse fields.** A field refuses with `TooFewStars`. With the global
+  policy, three stars or more give one PSF and a warning.
+
+Measured on corpus deep stacks (mono, one channel each), every field took
+the cubic. Times are for the measurement alone.
+
+| Stack | Scale | Core / wing stars | FWHM, px | Ellipticity | Relative residual |
+|---|---|---|---|---|---|
+| Ultracat, Coma Cluster G, 9576 × 6388 | 1.5″ | 398 / 40 | 1.9 centre to 4.1 bottom right | to 0.16 | 5.0% |
+| C925, Question Mark Galaxy B | 0.33″ | 64 / 0 | 8.8 to 10.1, 71 px stamps | about 0.06 | 5.4%, χ² 1.0 |
+| Askar107PHQ, Heart and Soul Hα | 1.04″ | 376 / 9 | 2.4 centre to 4.9 top left | to 0.09 | 2.4% |
+| RedCat61, Sh2 136 B | 2.59″ | 388 / 39 | 2.0 lower left to 3.5 top right | to 0.43 | 5.4% |
+| RedCat61, Sh2 136 L | 2.59″ | 389 / 39 | 1.9 to 3.0 | to 0.40 | 6.8% |
+| RedCat61, Teddy Bear OIII | 2.59″ | 394 / 40 | 2.2 to 3.3 | to 0.37 | 5.4% |
+| Radian61, Sh2 119 G | 2.83″ | 397 / 29 | 1.9 to 2.7 | to 0.43 | 6.9% |
+
+The RedCat61's tilt shows clearly. On both Sh2 136 stacks, best focus lies
+low and left of centre, where the ellipticity is about 0.05. Towards the
+right edge the FWHM rises steeply and the ellipticity reaches 0.4, its
+direction turning across the frame. A plane through the FWHM map explains
+only 56% to 63% of its variance, because the FWHM is a V, not a slope. The
+Teddy Bear stack, from a different session, adds field curvature, and there
+a plane explains 8%. Stars near 2 px FWHM are undersampled, and Lanczos shifting of
+their stamps leaves the 5% to 7% relative residuals. The oversampled C925
+field fits to its noise.
+
 ### Catalogue-guided star removal
 
 Solve the image and list its Gaia stars above the [star policy](#star-policy)
@@ -902,7 +975,7 @@ always has a classical fallback with separately named provenance.
 2. **Foundations.** Land `PsfField` with empirical stamps, then field-varying
    Richardson–Lucy, then catalogue-guided star removal, each with its C and
    Python twins. These are useful without any model, and both learned models
-   need them.
+   need them. `PsfField` has [landed](#what-landed).
 3. **Smoke run.** R0 covers the export, the Core ML and ONNX Runtime backends
    with their parity tests, and the timings.
 4. **Noise model.** R1 and R2 face the gates. Land `denoise` (experimental),

@@ -329,6 +329,21 @@ core = "seiza-stars::TriangleSectorStats"
 [rust.TriangleTiltJson]
 core = "seiza-stars::TriangleTiltSummary"
 
+[rust.PsfFieldOptionsRequest]
+core = "seiza-stars::PsfFieldOptions"
+
+[rust.SeizaPsfCatalogueStar]
+core = "seiza-stars::CatalogueStar"
+
+[rust.SeizaPsfShape]
+core = "seiza-stars::PsfShape"
+
+[rust.PsfChannelFitResponse]
+core = "seiza-stars::PsfChannelFit"
+
+[rust.PsfStarResponse]
+core = "seiza-stars::PsfStar"
+
 
 # satellites
 [rust.SatelliteTracksRequest]
@@ -370,6 +385,7 @@ objects = [
     "seiza-stacking::ColorCalibration",
     "seiza-pipeline::PartialStack",
     "seiza-pipeline::SessionStep",
+    "seiza-stars::PsfField",
 ]
 
 # distributed stacking
@@ -803,6 +819,13 @@ seiza_stars_detect_path_json = "detect_measured_stars_file"
 seiza_stars_pixel_scale_arcsec = "pixel_scale_arcsec"
 seiza_stars_classify_pixel_scale = "classify_pixel_scale"
 seiza_stars_recommend_detection_binning = "recommend_detection_binning"
+seiza_psf_field_measure = "PsfField.measure"
+seiza_psf_field_report_json = "PsfField.stars"
+seiza_psf_field_stamp_size = "PsfField.stamp_size"
+seiza_psf_field_channels = "PsfField.channels"
+seiza_psf_field_stamp_at = "PsfField.stamp_at"
+seiza_psf_field_shape_at = "PsfField.shape_at"
+seiza_psf_field_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
 
 # --- color ------------------------------------------------------------------
 seiza_gaia_photometry_cone_json = "gaia_photometry_cone"

@@ -58,6 +58,9 @@ def analysis_html(report: Mapping[str, Any]) -> str:
 class EngineError(RuntimeError):
     """Stretching, color composition, background fitting, or deconvolution failed."""
 
+class TooFewStarsError(EngineError):
+    """Too few isolated, unsaturated stars for a varying PSF field."""
+
 class SolveError(RuntimeError):
     """The field could not be solved."""
 
@@ -1003,6 +1006,79 @@ class BackgroundModel:
         mode: str = "subtract",
         strength: float = 1.0,
     ) -> npt.NDArray[np.float32]: ...
+
+class PsfShape:
+    """A PSF's shape at one point, from an elliptical Moffat with free beta.
+
+    Widths are pixels; ``angle`` is the major axis in radians over [0, pi)
+    from +x towards +y; ``e1``/``e2`` are chi*cos(2 angle) and
+    chi*sin(2 angle), chi = (a^2 - b^2)/(a^2 + b^2)."""
+
+    fwhm: float
+    fwhm_major: float
+    fwhm_minor: float
+    e1: float
+    e2: float
+    angle: float
+    beta: float
+    @property
+    def ellipticity(self) -> float: ...
+
+class PsfStar:
+    x: float
+    y: float
+    flux: float
+    snr: float
+    fwhm: float
+    # "core" for an unsaturated star, "wing" for a saturated one.
+    role: str
+
+class PsfChannelFit:
+    reduced_chi_squared: float
+    relative_residual: float
+    # Degree of the coefficients' polynomials: 0 for a global PSF, else 1-3.
+    degree: int
+    wing_stars: int
+    wing_overlap: tuple[float, float] | None
+
+class PsfField:
+    """An empirical PSF that varies across an image, measured from its stars."""
+
+    width: int
+    height: int
+    channels: int
+    stamp_size: int
+    component_count: int
+    star_count: int
+    is_global: bool
+    warnings: list[str]
+    stars: list[PsfStar]
+    channel_fits: list[PsfChannelFit]
+    @staticmethod
+    def measure(
+        image: npt.NDArray[np.float32],
+        *,
+        catalogue: Sequence[tuple[float, float, float]] | None = None,
+        stamp_size: int | None = None,
+        components: int = 3,
+        minimum_stars: int = 30,
+        maximum_stars: int = 400,
+        minimum_snr: float = 30.0,
+        detection_sigma: float = 5.0,
+        saturation: float | None = None,
+        isolation_magnitudes: float = 5.0,
+        sparse: Literal["refuse", "global"] = "refuse",
+        degree: int | None = None,
+    ) -> PsfField:
+        """Measure a linear (H, W) or (H, W, 3) float32 image's PSF field.
+
+        Raises TooFewStarsError when fewer than ``minimum_stars`` stars are
+        usable, unless ``sparse="global"`` accepts one PSF for the image."""
+        ...
+    def stamp_at(self, x: float, y: float) -> npt.NDArray[np.float32]:
+        """The local PSF, (size, size) or (size, size, 3), each channel summing to one."""
+        ...
+    def shape_at(self, x: float, y: float, channel: int = 0) -> PsfShape | None: ...
 
 def detect(
     image: npt.NDArray[np.float32] | npt.NDArray[np.uint8],

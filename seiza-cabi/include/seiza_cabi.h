@@ -272,6 +272,13 @@ typedef struct SeizaLiveStacker SeizaLiveStacker;
 typedef struct SeizaParallax SeizaParallax;
 
 /*
+ An opaque measured PSF field. Release it with [`seiza_psf_field_free`].
+ It is read-only once made, so several threads may sample it at once;
+ its report string is borrowed and remains valid until it is freed.
+ */
+typedef struct SeizaPsfField SeizaPsfField;
+
+/*
  An opaque, owned rendered image. C sees only a pointer; release it with
  [`seiza_rendered_image_free`]. Not `repr(C)`: it is only ever handed to C as
  an opaque pointer, so its layout is private (and cbindgen forward-declares
@@ -553,6 +560,36 @@ typedef int32_t (*SeizaParallaxFrameCallback)(const uint8_t*,
                                               uint32_t,
                                               double,
                                               void*);
+
+/*
+ A catalogue star at its image position, for isolating the stars a PSF
+ field is built from. Pixels count from 0.
+ */
+typedef struct {
+  double x;
+  double y;
+  /*
+   A magnitude in any one band; only differences between stars count.
+   */
+  double magnitude;
+} SeizaPsfCatalogueStar;
+
+/*
+ The shape of a PSF at one point, from an elliptical Moffat profile with
+ free β fitted to its stamp. Widths are in pixels; `angle` is the major
+ axis's direction in radians over `[0, π)`, from `+x` towards `+y`;
+ `e1` and `e2` are `χ·cos 2φ` and `χ·sin 2φ` with
+ `χ = (a² − b²)/(a² + b²)`.
+ */
+typedef struct {
+  double fwhm;
+  double fwhm_major;
+  double fwhm_minor;
+  double e1;
+  double e2;
+  double angle;
+  double beta;
+} SeizaPsfShape;
 
 #ifdef __cplusplus
 extern "C" {
@@ -5209,6 +5246,114 @@ char *seiza_pipeline_read_identity_json(const char *path, char **error_out);
 char *seiza_pipeline_combine_json(const char *paths_json,
                                   const char *output_path,
                                   char **error_out);
+
+/*
+ Measures the PSF field of interleaved linear `float` samples.
+
+ `channels` must be one or three and `data_length` must equal
+ `width * height * channels`; RGB samples are pixel-interleaved, and each
+ channel gets its own field. Non-finite samples never enter a stamp.
+ `catalogue` holds `catalogue_length` catalogue stars at their image
+ positions, or is null with zero length: with stars, a star gives a stamp
+ only when it matches one, and catalogue neighbours within the isolation
+ magnitudes are masked out of its stamp, or disqualify it when they lie
+ close to its core. Pass null or empty `options_json` for
+ the defaults, or a JSON object with any of `stampSize`, `components`,
+ `minimumStars`, `maximumStars`, `minimumSnr`, `detectionSigma`,
+ `saturation`, `isolationMagnitudes`, `sparse` (`"refuse"`, the
+ default, or `"global"` for one PSF when too few stars allow a varying
+ field) and `degree` (1 to 3; absent chooses it by cross-validation). Returns null with an error when the image, the options or the
+ stars do not allow a field. The handle retains no pointer to the inputs.
+
+ # Safety
+ `data` must point to `data_length` readable floats. A non-null
+ `catalogue` must point to `catalogue_length` readable stars. A non-null
+ `options_json` must be NUL-terminated. When non-null, `error_out` must
+ point to writable storage for one pointer.
+ */
+SeizaPsfField *seiza_psf_field_measure(const float *data,
+                                       size_t data_length,
+                                       size_t width,
+                                       size_t height,
+                                       size_t channels,
+                                       const SeizaPsfCatalogueStar *catalogue,
+                                       size_t catalogue_length,
+                                       const char *options_json,
+                                       char **error_out);
+
+/*
+ Returns the field's report as borrowed JSON: `width`, `height`,
+ `channels`, `stampSize`, `componentCount`, `starCount`, `isGlobal`,
+ `warnings` (messages), `channelFits` (each with `reducedChiSquared`,
+ `relativeResidual`, `degree`, `wingStars` and `wingOverlap`, the radii
+ where the core hands over to the wings, or null) and `stars` (each with `x`, `y`,
+ `flux`, `snr`, `fwhm` and `role`, `"core"` or `"wing"`). The string
+ remains valid until the field is freed.
+
+ # Safety
+ `field` must be null or a live pointer from [`seiza_psf_field_measure`].
+ */
+const char *seiza_psf_field_report_json(const SeizaPsfField *field);
+
+/*
+ The side of the field's stamps in pixels, odd; 0 for a null field.
+
+ # Safety
+ `field` must be null or a live pointer from [`seiza_psf_field_measure`].
+ */
+size_t seiza_psf_field_stamp_size(const SeizaPsfField *field);
+
+/*
+ The field's channels, one or three; 0 for a null field.
+
+ # Safety
+ `field` must be null or a live pointer from [`seiza_psf_field_measure`].
+ */
+size_t seiza_psf_field_channels(const SeizaPsfField *field);
+
+/*
+ Writes the local PSF at pixel (`x`, `y`) into `output`: `stamp_size *
+ stamp_size * channels` floats, row by row with channels interleaved,
+ each channel summing to one and centred on the middle pixel. Points
+ outside the image take the PSF at the nearest edge.
+
+ # Safety
+ `field` must be a live pointer from [`seiza_psf_field_measure`].
+ `output` must point to `output_length` writable floats. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+bool seiza_psf_field_stamp_at(const SeizaPsfField *field,
+                              double x,
+                              double y,
+                              float *output,
+                              size_t output_length,
+                              char **error_out);
+
+/*
+ Fits the shape of one channel's local PSF at pixel (`x`, `y`) and writes
+ it to `shape_out`. Returns false with an error when `channel` is out of
+ range or the profile cannot be fitted.
+
+ # Safety
+ `field` must be a live pointer from [`seiza_psf_field_measure`].
+ `shape_out` must point to writable storage for one shape. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+bool seiza_psf_field_shape_at(const SeizaPsfField *field,
+                              size_t channel,
+                              double x,
+                              double y,
+                              SeizaPsfShape *shape_out,
+                              char **error_out);
+
+/*
+ Releases a PSF field. Null is ignored.
+
+ # Safety
+ `field` must be null or a pointer from [`seiza_psf_field_measure`] that
+ has not been freed.
+ */
+void seiza_psf_field_free(SeizaPsfField *field);
 
 /*
  Open a file of satellite orbital elements: CCSDS OMM JSON (an array or

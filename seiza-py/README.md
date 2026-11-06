@@ -216,6 +216,47 @@ gives a rig's pixel scale, `classify_pixel_scale(scale)` the `preset` for
 it, and `recommend_detection_binning(hfr)` the `detection_binning` for a
 measured in-focus HFR.
 
+## Measure the PSF field
+
+`PsfField.measure` measures an empirical PSF that varies across a linear
+`float32` image, mono `(H, W)` or RGB `(H, W, 3)`, from its isolated stars.
+Each star's stamp, 33 px or seven FWHM when that is wider, is centred to a
+fraction of a pixel and normalised to unit flux. Unsaturated stars give the
+core: a mean stamp plus a few principal components whose coefficients vary
+as quadratic polynomials in `x` and `y`. Saturated stars add the wings,
+scaled to the core over an annulus where both are reliable. Each RGB channel
+has its own field.
+
+```python
+field = seiza.PsfField.measure(stack)
+psf = field.stamp_at(1200.0, 800.0)          # (33, 33), sums to one
+shape = field.shape_at(1200.0, 800.0)        # FWHM, e1, e2, Moffat beta
+print(field.star_count, field.channel_fits[0].relative_residual)
+```
+
+`shape_at(x, y, channel=0)` fits an elliptical Moffat with free β to the
+local stamp: `fwhm` (the mean of `fwhm_major` and `fwhm_minor`), the
+ellipticity components `e1` and `e2`, the major axis `angle` and `beta`.
+`stars` lists the stars used, each with its `role`, `"core"` or `"wing"`,
+and `channel_fits` the median χ² per pixel against the background noise,
+the median relative residual within 1.5 FWHM, and how many saturated stars
+gave wings.
+
+With fewer than `minimum_stars` (30) usable stars, `measure` raises
+`seiza.TooFewStarsError`; pass `sparse="global"` to accept one PSF for the
+whole image instead, which `is_global` and `warnings` then report. Pass
+`catalogue=[(x, y, magnitude), ...]` with catalogue stars at their image
+positions to keep only stars that match one. Neighbours within
+`isolation_magnitudes` (5) of a star, detected or catalogued, are masked out
+of its stamp, and disqualify it when they lie within two FWHM of its flux
+aperture. `saturation`
+sets the level from which a star counts as saturated; by default it is found
+from the brightest stars' common clip level. `degree` fixes the degree, 1
+to 3, of the polynomials the coefficients follow across the field; by
+default each channel takes the degree that best predicts stars held out of
+the fit, which is a cubic for a tilted sensor whose best focus crosses the
+frame. `channel_fits` reports the degree chosen. The call releases the GIL.
+
 ## Blind solve
 
 No position hint, only a plausible scale range. Uses the prebuilt whole-sky

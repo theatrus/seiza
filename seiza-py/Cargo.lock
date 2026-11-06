@@ -2572,6 +2572,7 @@ dependencies = [
  "nalgebra",
  "rayon",
  "seiza-imgproc",
+ "serde",
 ]
 
 [[package]]

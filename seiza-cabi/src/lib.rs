@@ -10,6 +10,7 @@ mod flat_response;
 mod library;
 mod parallax;
 mod pipeline;
+mod psf;
 mod resample;
 mod satellites;
 mod sessions;

@@ -20,6 +20,7 @@ mod library;
 mod parallax;
 mod pipeline;
 mod pixinsight;
+mod psf_field;
 mod rc_astro;
 mod satellites;
 mod screening;
@@ -1384,6 +1385,7 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     stacking::register(m)?;
     pipeline::register(m)?;
     stars::register(m)?;
+    psf_field::register(m)?;
     rc_astro::register(m)?;
     pixinsight::register(m)?;
     parallax::register(m)?;
