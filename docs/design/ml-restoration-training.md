@@ -1131,7 +1131,8 @@ in these ways:
   1.19 on matched agreeing ones against the seeds' 1.18 and 1.27. On the
   perturbed images (below), though, it blew up where the 80,000-step runs
   did not: on the Trunk binned and under a gradient it put 54,000 to
-  560,000 pixels more than 100σ̄ from the input, up to 855,000σ̄. Bounding
+  560,000 pixels more than 100σ̄ from the input, up to 855,000σ̄, and on
+  the Iris binned up to 11,000σ̄, nine times its worst unbinned. Bounding
   each output pixel by its 5 × 5 neighbourhood of the input, widened by
   three times its noise, the guard the runtime is to have, brought its
   worst pixel back to the unchanged image's, about 2,400σ̄ in a bright
