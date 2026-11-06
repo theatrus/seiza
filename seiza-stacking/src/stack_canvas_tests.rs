@@ -381,7 +381,7 @@ fn a_frame_is_resampled_over_its_footprint_alone() {
                 registrar: &stacker.registrar,
                 canvas: stacker.canvas_registrar.as_ref(),
                 known,
-                ceilings: &stacker.reference_ceilings,
+                photometry: &stacker.reference_photometry,
                 #[cfg(feature = "gpu")]
                 fit_tiles: &stacker.fit_tiles,
             },

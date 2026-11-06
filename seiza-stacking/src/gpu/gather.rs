@@ -74,6 +74,7 @@ struct Key {
     shape: (usize, usize, usize),
     mode: NormalizationMode,
     stars: Vec<(f64, f64)>,
+    reach: usize,
 }
 
 pub(crate) struct SamplePlan {
@@ -90,10 +91,13 @@ struct CachedPlan {
 }
 static PLAN: OnceLock<Mutex<Option<CachedPlan>>> = OnceLock::new();
 
+/// The samples preparing a frame of `shape` reads, normalized by `mode`
+/// with photometry reading up to `reach` from each of `stars`.
 pub(crate) fn plan(
     shape: (usize, usize, usize),
     mode: NormalizationMode,
     stars: &[(f64, f64)],
+    reach: usize,
 ) -> Option<Arc<SamplePlan>> {
     let gpu = opened()?;
     // A shared-memory adapter already lets the CPU read its output mapping
@@ -109,6 +113,7 @@ pub(crate) fn plan(
         shape,
         mode,
         stars: stars.to_vec(),
+        reach,
     };
     let mut cache = PLAN
         .get_or_init(|| Mutex::new(None))
@@ -117,7 +122,8 @@ pub(crate) fn plan(
     if let Some(cached) = cache.as_ref().filter(|cached| cached.key == key) {
         return cached.plan.clone();
     }
-    let mut indices = crate::normalization::preparation_sample_indices(shape, mode, stars, None);
+    let mut indices =
+        crate::normalization::preparation_sample_indices(shape, mode, stars, reach, None);
     // A small tile may need almost every pixel; keep the existing dense path
     // when gathering would transfer more indices and values than it saves.
     if indices.len() >= samples / 2 {
@@ -264,11 +270,12 @@ mod tests {
             channels: 1,
             normalization_timer: None,
         };
-        let plan = plan((width, height, 1), NormalizationMode::Global, &[]).unwrap();
+        let plan = plan((width, height, 1), NormalizationMode::Global, &[], 0).unwrap();
         let expected = crate::normalization::preparation_sample_indices(
             (width, height, 1),
             NormalizationMode::Global,
             &[],
+            0,
             None,
         )
         .iter()
