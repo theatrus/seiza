@@ -1397,6 +1397,28 @@ in these ways:
   So the fixed stacks change little in what a model learns. What they
   change is the measure: the same model's error on matched 4-frame halves
   fell from 2.63 to 1.71 with the restack, as the halves now agree.
+
+  The run with the sky taken out, the gradient and a tenth binned lost to
+  the baseline on the halves and kept more of the image:
+  - against matched halves, 1.944 against 1.650 on 4-frame halves and
+    1.253 against 1.173 on 8-frame ones; against clean targets, 0.762
+    against 0.756;
+  - it left 46%, 65% and 89% of the noise at 4, 8 and 16 pixels on 4-frame
+    halves, against 40%, 60% and 87%, and 64% at 4 pixels on 8-frame ones
+    against 41%; on the Trunk, 63% at 4 pixels against 37%, and 35% of
+    the sharp spots against none;
+  - it threw fewer pixels: its worst before the guard was 1,300σ̄ on the
+    Trunk, against 4,400σ̄, and on the Iris binned and sharpened 15 and 25
+    pixels went over 100σ̄, against 17,900 and 40,200;
+  - it dimmed star cores less and barely lifted the light around the
+    brightest: +0.5–0.9σ̄ 2–4 pixels out on the Trunk, against +10–13σ̄
+    for the baseline and +3–4σ̄ for its recipe on the old stacks.
+
+  Like the narrower model with the gradient and binned share, it buys its
+  robustness with fine noise and speckle left behind. It is also the run
+  that blows up on spread noise (see the drizzled masters above): on the
+  California nebula shifted half a pixel, 26,700 pixels went over 100σ̄
+  before the guard, against 45 for the baseline.
 - **Deep halves.** Training on a night's deep stack dealt into two halves,
   a quarter of every batch, taught a model to keep mottle: it left 37% of
   the coarse noise on empty sky. The halves share the night's flats,
