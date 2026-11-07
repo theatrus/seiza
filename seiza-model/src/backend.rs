@@ -293,10 +293,12 @@ fn usable(path: &Path, source: &str) -> Result<PathBuf, String> {
 }
 
 impl Backend {
-    /// Every backend, best first.
+    /// Every backend, best first. Apple's GPU comes before its Neural Engine:
+    /// on an otherwise idle M4 Max it was faster, with about a 35th of the
+    /// error on the sky.
     pub const ALL: [Backend; 8] = [
-        Self::CoreMl(CoreMlUnits::NeuralEngine),
         Self::CoreMl(CoreMlUnits::Gpu),
+        Self::CoreMl(CoreMlUnits::NeuralEngine),
         Self::CoreMl(CoreMlUnits::Cpu),
         Self::TensorRtRtx,
         Self::TensorRt,
@@ -419,6 +421,16 @@ mod tests {
         assert_eq!(engine.default_tile(), Some(1024));
         assert_eq!(Backend::Cpu.default_precision(), Precision::F32);
         assert_eq!(Backend::Cpu.default_tile(), None);
+    }
+
+    #[test]
+    fn apple_s_gpu_comes_before_its_neural_engine() {
+        let place = |units| {
+            Backend::ALL
+                .iter()
+                .position(|&backend| backend == Backend::CoreMl(units))
+        };
+        assert!(place(CoreMlUnits::Gpu) < place(CoreMlUnits::NeuralEngine));
     }
 
     #[test]

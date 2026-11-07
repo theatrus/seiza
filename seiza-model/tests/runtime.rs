@@ -2,8 +2,8 @@
 //! run only where `SEIZA_ONNXRUNTIME` names one, as CI's runtime job does.
 
 use seiza_model::{
-    Backend, BackendOptions, DenoiseOptions, ImageView, ModelBundle, ModelError, NoiseBands,
-    NoiseModel, Precision, Tiling, runtime_info,
+    Backend, BackendOptions, CoreMlUnits, DenoiseOptions, ImageView, ModelBundle, ModelError,
+    NoiseBands, NoiseModel, Precision, Tiling, runtime_info,
 };
 use serde::Deserialize;
 use std::path::Path;
@@ -144,6 +144,40 @@ fn a_tiny_model_stops_when_asked() {
     ));
 }
 
+/// The tiny model at `place`, with a card listing `parity` instead of its own.
+fn listing(parity: &[&str], place: &Path) -> ModelBundle {
+    let tiny = fixtures().join("tiny");
+    for file in ["model-f32.onnx", "model-f16.onnx"] {
+        std::fs::copy(tiny.join(file), place.join(file)).unwrap();
+    }
+    let text = std::fs::read_to_string(tiny.join("card.json")).unwrap();
+    let mut card: serde_json::Value = serde_json::from_str(&text).unwrap();
+    card["parity"] = serde_json::json!(parity);
+    std::fs::write(place.join("card.json"), card.to_string()).unwrap();
+    ModelBundle::open(place).unwrap()
+}
+
+#[test]
+fn a_mac_picks_the_gpu_unless_the_card_leaves_it_out() {
+    if !runtime_present() || !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        return;
+    }
+    let options = BackendOptions::default();
+    let detect = |parity: &[&str]| {
+        let place = tempfile::tempdir().unwrap();
+        Backend::detect(&listing(parity, place.path()), &options).unwrap()
+    };
+    let gpu = Backend::CoreMl(CoreMlUnits::Gpu);
+    assert_eq!(detect(&[]), gpu);
+    assert_eq!(detect(&["neural-engine", "coreml-gpu", "cpu"]), gpu);
+    assert_eq!(
+        detect(&["neural-engine", "cpu"]),
+        Backend::CoreMl(CoreMlUnits::NeuralEngine)
+    );
+    assert_eq!(detect(&["cpu"]), Backend::Cpu);
+    assert_eq!(gpu.default_precision(), Precision::F16);
+}
+
 #[test]
 fn an_f32_graph_is_refused_on_the_neural_engine() {
     if !runtime_present() || !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
@@ -153,7 +187,7 @@ fn an_f32_graph_is_refused_on_the_neural_engine() {
         precision: Some(Precision::F32),
         ..Default::default()
     };
-    let engine = Backend::CoreMl(seiza_model::CoreMlUnits::NeuralEngine);
+    let engine = Backend::CoreMl(CoreMlUnits::NeuralEngine);
     assert!(matches!(
         open(engine, &options),
         Err(ModelError::ModelContract(_))

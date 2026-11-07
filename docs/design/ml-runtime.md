@@ -22,9 +22,9 @@ A model ships as one dynamic ONNX graph per precision plus a model card.
 Seiza's Rust code does everything around the graph: sky, noise input, tiling,
 blending, the output bound and provenance. The backend only runs tiles.
 
-A 61 MP frame should take about 15 seconds on an M4 Max's Neural Engine with
-the current 41M-parameter model. That is an estimate from a measured 26 MP
-run.
+A 61 MP frame should take about 14 seconds on an M4 Max's GPU, the default,
+with the current 41M-parameter model, or about 16 on its Neural Engine. Those
+are estimates from measured 26 MP runs.
 
 [Every shipped model works from the image alone](ml-restoration-training.md#short-answer),
 so a host passes an image and nothing else, and `seiza stack` writes nothing
@@ -136,19 +136,27 @@ whole run, the noise input and sky included.
 | Backend | Precision | Tile | 26 MP whole | Sky RMS | Sky mean | Largest |
 |---|---|---|---|---|---|---|
 | CPU | f32 | 512 | 165 s | 1e-8 | 0 | 1.2e-5 |
-| GPU | f32 | 1024 | 10.1 s | 4.9e-7 | 0 | 0.0011 |
-| GPU | f16 | 1024 | 9.4 s | 0.0004 | −5e-6 | 0.81 |
-| Neural Engine | f16 | 1024 | 6.9 s | 0.0147 | −0.0013 | 1.06 |
+| GPU | f32 | 1024 | 6.4 s | 4.9e-7 | 0 | 0.0011 |
+| GPU | f16 | 1024 | 5.9 s | 0.0004 | −5e-6 | 0.81 |
+| Neural Engine | f16 | 1024 | 6.7 s | 0.0147 | −0.0013 | 1.06 |
 | Neural Engine | f16 | 512 | 15.6 s | 0.0147 | −0.0013 | 1.06 |
 
 The Rust path reproduces the harness, and the Neural Engine's time matches
-Python's. With the GPU free of other work, it ran the image in 9–10 s, not the
-25–31 s above. So the Neural Engine is 1.4 times faster than the GPU at f16,
-not 3.7 times, for 34 times the sky error. Its mean error here is closer to
-its budget than the −0.0005σ̄ above.
+Python's. The 1024-tile times alternate the three paths over four rounds with
+nothing else on the GPU; one GPU f32 round took 7.9 s. Run one after the other
+an hour or two earlier, the GPU took 9–10 s, for a reason not recorded, and
+shared it took the 25–31 s above, while the Neural Engine's time did not move.
+So an idle GPU on this chip beats the Neural Engine at either precision, with
+about a 35th of its sky error at f16. The Neural Engine's one advantage is
+that other work on the GPU does not slow it. Its mean error here is closer to
+its budget than the −0.0005σ̄ above. D24 on another stacker's master gave the
+same picture: 5.9 s and 0.0004σ̄ on the GPU, 6.7 s and 0.0153σ̄ on the Neural
+Engine. Decision 6 follows from this.
 
-**Not yet measured:** anything on NVIDIA or Intel; anything from Rust; any
-Neural Engine older than the M4's; a loaded-versus-idle GPU comparison.
+**Not yet measured:** anything on NVIDIA or Intel; any Neural Engine older
+than the M4's; a loaded-versus-idle GPU comparison; any smaller GPU. This one
+has 40 cores, and a base M4 has a quarter of that beside a Neural Engine of
+the same size, so the Neural Engine may well be the faster one there.
 
 ## Decisions proposed
 
@@ -175,6 +183,12 @@ Neural Engine older than the M4's; a loaded-versus-idle GPU comparison.
    There is no stable 2.0 yet, so the pin is exact, and Dependabot needs an
    ignore rule. With no `api-N` feature, `ort` asks only for ONNX Runtime 1.17
    or later.
+6. **The GPU is the default on Apple hardware.** Decided. With nothing else
+   on it, it took 5.9 s at f16 against the Neural Engine's 6.7 s, with
+   0.0004σ̄ of error on the sky against 0.0147σ̄, inside the 0.01σ every other
+   backend is held to. `--backend neural-engine` still runs there, which
+   leaves the GPU free and keeps its time when the GPU is busy, and `detect`
+   picks it only for a card that leaves the GPU out.
 
 ## The crate
 
@@ -230,7 +244,7 @@ is what a user needs when a GPU goes unused.
 
 | Hardware | Order tried | Graph |
 |---|---|---|
-| Apple Silicon | Neural Engine, GPU, CPU | f16, then f32 for CPU |
+| Apple Silicon | GPU, Neural Engine, CPU | f16, then f32 for CPU |
 | NVIDIA | decided by the measurements; see [Work order](#work-order) | f16 or f32 |
 | Intel and AMD GPUs | WebGPU if measured worthwhile, else CPU | f32, or f16 if parity holds |
 | Anything else | CPU | f32 |
@@ -537,9 +551,9 @@ run the CPU provider, and step 7's NVIDIA download waits for it.
 - **`ort` is a release candidate.** Its API has changed between candidates.
   The pin holds it still, and only `session.rs` and `backend.rs` touch it.
 - **The Neural Engine's error may differ by generation.** Only the M4's is
-  measured. Parity runs on what we own, and a card can leave the Neural
-  Engine out, so an unmeasured chip costs speed, not correctness, if `detect`
-  falls back to the GPU on chips the card does not list.
+  measured. The GPU is the default, so this reaches only a run that asks for
+  the Neural Engine, or a card that leaves the GPU out. The GPU's own error
+  is measured on the same chip, at a 25th of its budget.
 - **Core ML can fall back silently.** The run still succeeds, only slower,
   and the provenance names the unit requested.
 - **ONNX Runtime versions.** `ort` rc.15 asks for at least 1.17. It has run
