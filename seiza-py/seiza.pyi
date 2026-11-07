@@ -1582,6 +1582,90 @@ def deconvolve(
     masked: bool = False,
 ) -> npt.NDArray[np.float32]: ...
 
+class ChannelScales:
+    """The scales one channel was read in: its noise is σ̄ in a model's output."""
+
+    background: float
+    noise: float
+
+class DenoiseReport:
+    """What ran. A cache keys on sha256, backend, precision and MODEL_OUTPUT_VERSION."""
+
+    model: str
+    sha256: str
+    backend: str
+    precision: str
+    tile: int
+    noise_map: str
+    channels: list[ChannelScales]
+
+class Denoised:
+    """A run's result, which keeps what the model found, so blend costs no inference."""
+
+    report: DenoiseReport
+    def blend(
+        self, high: float = 1.0, low: float = 1.0, scale_px: float = 5.0
+    ) -> npt.NDArray[np.float32]: ...
+    def residual(self, channel: int = 0) -> npt.NDArray[np.float32]: ...
+
+class NoiseModel:
+    """A noise model, open on a backend. It needs only the image."""
+
+    backend: str
+    tile: int
+    def __init__(
+        self,
+        model: str | None = None,
+        backend: str | None = None,
+        *,
+        store: str | Path | None = None,
+        library: str | Path | None = None,
+        cache_dir: str | Path | None = None,
+        tile: int | None = None,
+        precision: str | None = None,
+    ) -> None: ...
+    def denoise(
+        self,
+        image: npt.NDArray[np.float32],
+        progress: Callable[[int, int, int, int], object] | None = None,
+        cancel: Callable[[], bool] | None = None,
+    ) -> Denoised: ...
+
+class ModelRuntime:
+    """Which ONNX Runtime this process loaded."""
+
+    path: Path
+    version: str
+
+class ModelBackend:
+    """Whether a backend runs here, and whether a model picks it unasked."""
+
+    backend: str
+    unavailable: str | None
+    automatic: bool
+
+class InstalledModel:
+    """An installed model."""
+
+    name: str
+    path: Path
+    task: str
+    noise_map: str
+    precisions: list[str]
+
+MODEL_OUTPUT_VERSION: str
+
+def model_backends(library: str | Path | None = None) -> list[ModelBackend]: ...
+def model_runtime(library: str | Path | None = None) -> ModelRuntime | None: ...
+def installed_models(store: str | Path | None = None) -> list[InstalledModel]: ...
+def install_model(
+    source: str | Path, store: str | Path | None = None
+) -> InstalledModel: ...
+def verify_model(
+    model: str | None = None, store: str | Path | None = None
+) -> None: ...
+def remove_model(name: str, store: str | Path | None = None) -> None: ...
+
 class RemainingKernel:
     """The kernel R, with P = T * R, between a PSF field and a round target T.
 

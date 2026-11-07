@@ -18,6 +18,7 @@ mod field_objects;
 mod flat_response;
 mod imgproc;
 mod library;
+mod model;
 mod parallax;
 mod pipeline;
 mod pixinsight;
@@ -1400,6 +1401,7 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     calibration_files::register(m)?;
     screening::register(m)?;
     stretch::register(m)?;
+    model::register(m)?;
     m.add("SolveError", m.py().get_type::<SolveError>())?;
     m.add("EngineError", m.py().get_type::<EngineError>())?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

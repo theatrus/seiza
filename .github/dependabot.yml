@@ -4,6 +4,10 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # A release candidate, pinned exactly: its API changes between candidates,
+      # and a new one can raise the Rust floor.
+      - dependency-name: "ort"
     groups:
       cargo-dependencies:
         patterns:
@@ -14,6 +18,8 @@ updates:
     directory: /seiza-py
     schedule:
       interval: weekly
+    ignore:
+      - dependency-name: "ort"
     groups:
       seiza-py-dependencies:
         patterns:

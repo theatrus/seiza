@@ -21,7 +21,7 @@ PyPI**. They are cut from a single "Release `<version>`" PR followed by two tags
 
   At the time of writing that is `seiza-analysis`, `seiza-background`, `seiza-calibration`,
   `seiza-core`, `seiza-deconvolution`, `seiza-download`, `seiza-draw`, `seiza-fits`,
-  `seiza-image-io`, `seiza-imgproc`, `seiza-parallax`, `seiza-pipeline`,
+  `seiza-image-io`, `seiza-imgproc`, `seiza-model`, `seiza-parallax`, `seiza-pipeline`,
   `seiza-satellites`, `seiza-sources`, `seiza-stacking`, `seiza-stars`,
   `seiza-stats`, `seiza-stretch`, and `seiza-xisf`. A list written down goes
   stale the first time a crate is added, which is how `seiza-calibration`,
@@ -103,7 +103,8 @@ seiza-stats  →  seiza-stretch  →  seiza-imgproc  →  seiza-fits  →  seiza
 →  seiza-core  →  seiza-image-io  →  seiza-background  →  seiza-calibration
 →  seiza-sources  →  seiza-download  →  seiza  →  seiza-satellites
 →  seiza-stacking  →  seiza-pipeline  →  seiza-stars  →  seiza-deconvolution
-→  seiza-draw  →  seiza-parallax  →  seiza-analysis  →  seiza-cabi  →  seiza-cli
+→  seiza-draw  →  seiza-parallax  →  seiza-analysis  →  seiza-cabi  →  seiza-model
+→  seiza-cli
 ```
 
 `seiza-deconvolution` sits after `seiza-stars`, whose `PsfField` its
@@ -210,4 +211,14 @@ published.
 
 The Homebrew tap [`theatrus/homebrew-seiza`](https://github.com/theatrus/homebrew-seiza)
 pins the released tarball by sha256. After tagging, bump `Formula/seiza.rb`
-(new `url` version and `sha256` of the `v<version>.tar.gz`) in that repo.
+(new `url` version and `sha256` of the `v<version>.tar.gz`) in that repo. The
+formula has `depends_on "onnxruntime"` for `seiza model`, which the first release
+carrying `seiza-model` adds.
+
+## ONNX Runtime and the Visual C++ runtime
+
+The deb, the rpm, the Windows zip and the MSI carry ONNX Runtime, pinned in
+`packaging/onnxruntime.env`, and the Windows two carry the Visual C++ runtime it
+links. CI and every package read that one file. To move the version, change it,
+read the new archive's `Privacy.md`, and let the `Packaged runtime` workflow run:
+it installs each package on a machine with nothing else on it.

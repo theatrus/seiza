@@ -109,6 +109,23 @@ try {
         throw "Catalog setup shortcut not found at $catalogSetupShortcut"
     }
 
+    # The installed binary finds the library beside it, with nothing to say where.
+    foreach ($runtimeFile in @(
+            "onnxruntime.dll", "onnxruntime_providers_shared.dll", "msvcp140.dll", "msvcp140_1.dll",
+            "vcruntime140.dll", "vcruntime140_1.dll", "LICENSE-onnxruntime.txt",
+            "ThirdPartyNotices-onnxruntime.txt")) {
+        if (-not (Test-Path -LiteralPath (Join-Path $installDirectory $runtimeFile) -PathType Leaf)) {
+            throw "$runtimeFile not found in $installDirectory"
+        }
+    }
+    $backends = & $installedBinary model backends 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+        throw "seiza model backends failed: $backends"
+    }
+    if ($backends -notlike "*$(Join-Path $installDirectory 'onnxruntime.dll')*") {
+        throw "seiza did not load the installed ONNX Runtime: $backends"
+    }
+
     $shortcutArguments = (New-Object -ComObject WScript.Shell).CreateShortcut($catalogSetupShortcut).Arguments
     if ($shortcutArguments -notmatch "(?:^|\s)--from-installer(?:\s|$)") {
         throw "Catalog setup shortcut does not enable durable installer-mode errors"

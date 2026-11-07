@@ -29,6 +29,7 @@ mod deconvolution;
 mod emission;
 mod interrupt;
 mod master;
+mod model;
 pub(crate) use seiza_draw::ellipse_points;
 mod parallax_video;
 mod pipeline;
@@ -693,6 +694,8 @@ enum Command {
     ParallaxVideo(Box<parallax_video::ParallaxVideoArgs>),
     /// Experimentally restore mild blur in a linear FITS using a measured PSF
     Deconvolve(deconvolution::DeconvolutionArgs),
+    /// Run and manage learned models: denoise, list, install, verify, remove
+    Model(model::ModelArgs),
     /// Register and incrementally stack linear FITS light frames
     Stack(stack::StackArgs),
     /// Register and compose mono stacks into RGB, LRGB, or narrowband color
@@ -1640,6 +1643,7 @@ fn main() -> Result<()> {
         Command::ColorCalibrate(options) => color_calibrate::run(options),
         Command::ParallaxVideo(options) => parallax_video::run(*options),
         Command::Deconvolve(options) => deconvolution::run(options),
+        Command::Model(options) => model::run(options),
         Command::Stack(options) => stack::run(options),
         Command::Color(options) => color::run(options),
         Command::Master(options) => master::run(options),

@@ -505,6 +505,27 @@ stronger `iterations` or `amount`.
 
 ### Towards a target PSF across the field
 
+Learned models take an image and nothing else, from any stacker. A
+`NoiseModel` opens on the best backend this machine has, and the `Denoised` it
+returns keeps what it found, so choosing how much noise to keep costs no second
+run:
+
+```python
+model = seiza.NoiseModel("noise-v1")          # an installed model, or a bundle's directory
+result = model.denoise(stack, progress=report, cancel=stop)
+clean = result.blend(high=0.7, low=0.9, scale_px=5.0)
+print(result.report.backend, result.report.channels[0].noise)
+```
+
+`seiza.model_backends()` says which backends run here and why the others do not,
+and `install_model`, `installed_models`, `verify_model` and `remove_model` manage
+the store. Models run through ONNX Runtime, which the wheel does not carry.
+`pip install seiza[ml]` brings the `onnxruntime` package, whose library Seiza finds
+for itself; `library=` or `SEIZA_ONNXRUNTIME` names another. Microsoft's builds
+report to Microsoft unless told not to, and Seiza tells them not to before it loads
+the library, so a program that imports `onnxruntime` itself should first set
+`ORT_DISABLE_TELEMETRY=1`.
+
 `deconvolve_field` runs the same damped update with the PSF a
 `PsfField` measured, which varies across the image, and deconvolves towards
 a round Gaussian target `T` rather than a point. `RemainingKernel` holds the

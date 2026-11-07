@@ -27,6 +27,7 @@ seiza-deconvolution.workspace = true
 seiza-download.workspace = true
 seiza-fits.workspace = true
 seiza-image-io.workspace = true
+seiza-model.workspace = true
 seiza-xisf.workspace = true
 seiza-satellites.workspace = true
 rayon.workspace = true
@@ -76,16 +77,32 @@ assets = [
     { source = "README.md", dest = "/usr/share/doc/seiza-cli/README.md", mode = "644", doc = true },
     { source = "LICENSE", dest = "/usr/share/licenses/seiza-cli/LICENSE", mode = "644" },
     { source = "fonts/LICENSE-Inter.txt", dest = "/usr/share/licenses/seiza-cli/LICENSE-Inter.txt", mode = "644" },
+    # ONNX Runtime, for `seiza model`, from packaging/fetch-onnxruntime.sh. Kept
+    # private to Seiza, so it does not meet what a distribution carries.
+    { source = "onnxruntime/libonnxruntime.so", dest = "/usr/lib/seiza/libonnxruntime.so", mode = "755" },
+    { source = "onnxruntime/libonnxruntime_providers_shared.so", dest = "/usr/lib/seiza/libonnxruntime_providers_shared.so", mode = "755" },
+    { source = "onnxruntime/LICENSE-onnxruntime.txt", dest = "/usr/share/licenses/seiza-cli/LICENSE-onnxruntime.txt", mode = "644" },
+    { source = "onnxruntime/ThirdPartyNotices-onnxruntime.txt", dest = "/usr/share/licenses/seiza-cli/ThirdPartyNotices-onnxruntime.txt", mode = "644" },
 ]
+
+[package.metadata.generate-rpm.requires]
+"libstdc++" = "*"
 
 [package.metadata.deb]
 maintainer = "Yann Ramin <github@theatr.us>"
 extended-description = "Star detection, hinted and blind plate solving, and star/object dataset management for astrophotography."
 section = "science"
+# ONNX Runtime's library needs libstdc++, and `$auto` reads only the binary.
+depends = "$auto, libstdc++6"
 assets = [
     ["target/release/seiza", "usr/bin/", "755"],
     ["README.md", "usr/share/doc/seiza-cli/", "644"],
     ["fonts/LICENSE-Inter.txt", "usr/share/doc/seiza-cli/", "644"],
+    # ONNX Runtime, for `seiza model`, from packaging/fetch-onnxruntime.sh.
+    ["onnxruntime/libonnxruntime.so", "usr/lib/seiza/", "755"],
+    ["onnxruntime/libonnxruntime_providers_shared.so", "usr/lib/seiza/", "755"],
+    ["onnxruntime/LICENSE-onnxruntime.txt", "usr/share/doc/seiza-cli/", "644"],
+    ["onnxruntime/ThirdPartyNotices-onnxruntime.txt", "usr/share/doc/seiza-cli/", "644"],
 ]
 
 [target.'cfg(windows)'.build-dependencies]

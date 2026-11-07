@@ -4,5 +4,6 @@ target/
 /target*/
 dist/
 packaging/windows/obj/
+seiza-cli/onnxruntime/
 .venv/
 __pycache__/

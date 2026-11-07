@@ -403,7 +403,14 @@ objects = [
     "seiza-stars::PsfField",
     "seiza-deconvolution::RemainingKernel",
     "seiza-stars::StarFit",
+    "seiza-model::NoiseModel",
+    "seiza-model::Denoised",
+    "seiza-model::ModelBundle",
+    "seiza-model::ModelStore",
 ]
+
+# learned models
+"seiza-model::ModelBundle::graph" = { none = "NoiseModel::open chooses the graph a backend runs; a host reads the precisions a model has from seiza_model_list_json" }
 
 # distributed stacking
 "seiza-pipeline::carried_cards" = { none = "the reference cards every stack file keeps; hosts read them from the files the pipeline writes" }
@@ -810,6 +817,23 @@ seiza_remaining_kernel_free = { none = "frees a C handle; Python's garbage colle
 seiza_deconvolve_field_in_place = "deconvolve_field"
 seiza_reblur_consistency_json = "reblur_consistency"
 
+# --- learned models ---------------------------------------------------------
+seiza_noise_model_open = "NoiseModel"
+seiza_noise_model_backend = "NoiseModel.backend"
+seiza_noise_model_tile = "NoiseModel.tile"
+seiza_noise_model_denoise = "NoiseModel.denoise"
+seiza_noise_model_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
+seiza_denoised_blend = "Denoised.blend"
+seiza_denoised_residual = "Denoised.residual"
+seiza_denoised_report_json = "Denoised.report"
+seiza_denoised_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
+seiza_model_backends_json = "model_backends"
+seiza_model_list_json = "installed_models"
+seiza_model_install_json = "install_model"
+seiza_model_verify = "verify_model"
+seiza_model_remove = "remove_model"
+seiza_model_output_version = "MODEL_OUTPUT_VERSION"
+
 # --- rendering (display images for the desktop viewers) ---------------------
 seiza_rendered_image_open = { none = "renders a file to an 8-bit display image for the desktop viewers; Python stretches arrays with stretch()" }
 seiza_rendered_image_open_with_rgb_stretch = { none = "renders a file to an 8-bit display image for the desktop viewers; Python stretches arrays with stretch()" }
@@ -926,6 +950,7 @@ seiza_external_exchange_version = "EXTERNAL_EXCHANGE_VERSION"
 # export above gives as its twin: the C export that does the same job
 # ({ c = "..." }), or why there is none.
 [python_functions]
+"model_runtime" = { c = "seiza_model_backends_json" }
 "RemainingKernel.target_fwhm_range" = { c = "seiza_remaining_kernel_report_json" }
 # distributed stacking: the steps of the C ABI's one-call workflows
 "PartialStack.combine" = { c = "seiza_pipeline_combine_json" }
@@ -1126,6 +1151,8 @@ CatalogSetupProgressResponse = { none = "download progress for the apps' setup s
 # Single fields of JSON types whose (snake_case Rust) name has no Python name:
 # "Type.field", or "*.field" for the same field in every type.
 [fields]
+"ModelBackendsResponse.runtime" = { python = "model_runtime" }
+"ModelBackendsResponse.backends" = { python = "model_backends" }
 "RemainingKernelReportResponse.channel_ranges" = { none = "Python reads each channel's ranges with psf_fwhm_range(channel) and target_fwhm_range(channel)" }
 
 "*.schema_version" = { none = "versions the JSON for C hosts; Python returns objects" }
