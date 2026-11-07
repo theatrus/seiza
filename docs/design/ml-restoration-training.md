@@ -1531,7 +1531,9 @@ whole image with its output through tiles. Each backend, and the runtime's
 tiling, must match them:
 
 - the ONNX Runtime CPU provider within 1e-4 relative;
-- Core ML, CUDA and TensorRT within 0.01σ of the input's noise.
+- Core ML's GPU, CUDA and TensorRT within 0.01σ of the input's noise;
+- the Neural Engine, at f16, within 0.02σ̄ RMS on the sky and 0.002σ̄ in the
+  mean.
 
 The Neural Engine is enabled only for a model that passes its own parity run.
 Core ML parity runs on macOS CI. CUDA and TensorRT parity runs on the NVIDIA

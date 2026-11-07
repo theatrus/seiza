@@ -1,8 +1,9 @@
 # Learned model runtime
 
 Status: proposed. Nothing here is built yet. The measurements are from
-Python through ONNX Runtime and Core ML, on one Mac; a Rust spike and the
-NVIDIA and Intel measurements come first (see [Work order](#work-order)).
+Python through ONNX Runtime and Core ML, on one Mac. A Rust spike comes
+first, and the NVIDIA and Intel measurements come when those machines are
+arranged (see [Work order](#work-order)).
 
 ## Short answer
 
@@ -133,8 +134,9 @@ Neural Engine older than the M4's; a loaded-versus-idle GPU comparison.
 
 ## Decisions proposed
 
-1. **One binding: `ort`, with `load-dynamic`.** Drop `objc2-core-ml`, the
-   `.mlpackage` export and the `coreml` feature. Native Core ML stays
+1. **One binding: `ort`, with `load-dynamic`.** Take `objc2-core-ml`, the
+   `.mlpackage` export and the `coreml` feature out of the restoration plan.
+   None of them was built, so no code changes. Native Core ML stays
    available later, as a second `TileRunner`, if a host cannot carry a
    33 MB library. This keeps the decision that Core ML runs models on Apple
    hardware and changes only how Seiza reaches it.
@@ -144,13 +146,13 @@ Neural Engine older than the M4's; a loaded-versus-idle GPU comparison.
 3. **Tile size belongs to the backend, not the export.** Default to 1024 on
    a GPU or the Neural Engine, and 512 where memory is short. Whole-image
    parity already holds across sizes.
-4. **Change the Neural Engine's parity budget.** The restoration plan
-   allows 0.01σ for every accelerated backend. The GPU passes at f16 and the
-   Neural Engine does not, at 0.0143σ̄ on the sky. Proposed for the Neural
-   Engine: sky RMS under 0.02σ̄, mean under 0.002σ̄, seams as for any
-   backend. With 15% of the noise kept, an error that size adds about 0.5%
-   to the noise left, in quadrature. A model still earns the Neural Engine by
-   passing its own parity run.
+4. **The Neural Engine has its own parity budget.** Decided. The restoration
+   plan allows 0.01σ for every accelerated backend. The GPU passes at f16 and
+   the Neural Engine does not, at 0.0143σ̄ on the sky. The Neural Engine's
+   budget is sky RMS under 0.02σ̄ and mean under 0.002σ̄, with seams as for
+   any backend. With 15% of the noise kept, an error that size adds about
+   0.5% to the noise left, in quadrature. A model still earns the Neural
+   Engine by passing its own parity run.
 5. **Pin `ort` to `=2.0.0-rc.13`.** It is the newest release that fits our
    Rust 1.89 floor; rc.15 needs 1.92. There is no stable 2.0 yet. Dependabot
    needs an ignore rule, or the floor moves.
@@ -445,21 +447,25 @@ requires, so earlier steps keep their items `pub(crate)` until step 4.
 
 | # | Step | Done when |
 |---|---|---|
-| 0 | **Spike and measure.** A throwaway Rust binary on `ort` rc.13 with `load-dynamic`, run on macOS, Windows and Linux. Measure CUDA, TensorRT, TensorRT-RTX and CPU on NVIDIA, and WebGPU and CPU on Intel Xe, with parity. Repeat the GPU rows on an idle Mac. | The backend table is filled in and NVIDIA's shipped provider is chosen. |
+| 0 | **Spike.** A throwaway Rust binary on `ort` rc.13 with `load-dynamic`: the CPU provider on macOS, Windows and Linux, and Core ML on a Mac, with parity. Repeat the GPU rows on an idle Mac. | A tile runs from Rust on all three systems, and the Mac's numbers hold from Rust. |
 | 1 | **Bundle export** in `training/`. Dynamic f32 and f16 graphs, `card.json` from the allow-list, fixtures, the output bound in the harness. | `bundle --run NAME` makes a bundle that passes a parity check in Python. |
 | 2 | **`seiza-restore` core**, no ONNX Runtime. Tiling, sky, `image_sigma`, scales, bands, the bound, `ModelCard`, `OUTPUT_VERSION`. | Rust matches the harness on fixtures through a closure runner. |
 | 3 | **Backends.** `TileRunner` on `ort`, detection, library search, compile cache, cancel. `seiza model backends`, with its C and Python twins. | Fixture parity on the CPU provider in CI on all three systems; Core ML on a Mac. |
-| 4 | **`denoise` end to end.** `NoiseModel`, `Denoised`, CLI, C ABI, Python, parity entries, provenance. Marked experimental. | `seiza model denoise` matches the harness on a real image within budget, on every backend from step 0. |
+| 4 | **`denoise` end to end.** `NoiseModel`, `Denoised`, CLI, C ABI, Python, parity entries, provenance. Marked experimental. | `seiza model denoise` matches the harness on a real image within budget, on every backend measured so far. |
 | 5 | **Harness on the runtime.** `evaluate-noise` and the sheets through `seiza.NoiseModel`. | One run's measures and seam maps agree with the PyTorch path. |
 | 6 | **Model delivery.** `seiza model install`, `/models/v1/`, `seiza setup`. | A clean machine installs a model and denoises. |
 | 7 | **Packaging**, one PR per channel, each with a smoke test on an installed package. | Each row of the table above runs a tile after install. |
 | 8 | **PSF and star models**, as they pass their gates, with what they read made from the image: a PSF stamp from its PSF field, star and halo maps from its plate solution. | `seiza model sharpen` and `seiza model separate-stars` on the same runner. |
+| 9 | **NVIDIA and Intel**, when the machines are arranged. Measure CUDA, TensorRT, TensorRT-RTX and CPU on NVIDIA, and WebGPU and CPU on Intel Xe, with parity. | The backend table is filled in and NVIDIA's shipped provider is chosen. |
 
 Step 0 gates the rest only where it says so. Steps 1 and 2 can start at once
 and run side by side. Nothing here waits for the choice of noise input.
 Parity compares code, not models, so it can run D22 with a card that says
 `constant`, as `evaluate-noise --noise-map constant` does. Only a release
 needs a model that has passed its gates on an image-only input.
+
+Step 9 can come any time after step 3. Until then NVIDIA and Intel machines
+run the CPU provider, and step 7's NVIDIA download waits for it.
 
 ## Risks
 
@@ -475,7 +481,7 @@ needs a model that has passed its gates on an image-only input.
   what `ort` rc.13 wraps. The C API is meant to stay compatible; the spike
   checks it.
 - **GPU memory.** One 96-channel f32 plane at tile 1024 is 0.4 GB, so a
-  tile's activations should come to a few gigabytes; step 0 measures it.
+  tile's activations should come to a few gigabytes; steps 0 and 9 measure it.
   `BackendOptions` takes a tile size, and an allocation failure
   retries at 512 before it refuses.
 - **Stacking and inference share the GPU.** A host running both should run
