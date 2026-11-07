@@ -547,7 +547,7 @@ impl<'a> Table<'a> {
             Algorithm::Gzip1 => values(&inflate(compressed, pixels)?, pixels, lossless_floats)?,
             Algorithm::Gzip2 => {
                 let shuffled = inflate(compressed, pixels)?;
-                let width = shuffled.len() / pixels.max(1);
+                let width = sample_width(shuffled.len(), pixels)?;
                 values(&unshuffle(&shuffled, width), pixels, lossless_floats)?
             }
             Algorithm::Plio => {
@@ -663,16 +663,21 @@ fn unshuffle(shuffled: &[u8], width: usize) -> Vec<u8> {
     out
 }
 
+/// The sample width only exists when every pixel has a complete sample.
+/// Check before unshuffling, which otherwise drops an incomplete byte plane.
+fn sample_width(bytes: usize, pixels: usize) -> Result<usize, FitsError> {
+    bytes
+        .checked_div(pixels)
+        .filter(|width| width * pixels == bytes)
+        .ok_or_else(|| malformed("tile size does not match its pixel count"))
+}
+
 /// Big-endian samples whose width the byte count gives away, as cfitsio
 /// and astropy read GZIP tiles: 1 byte is unsigned, 2 bytes signed, and 4
 /// or 8 bytes are floats for losslessly kept floating-point data, signed
 /// integers otherwise.
 fn values(bytes: &[u8], pixels: usize, floats: bool) -> Result<Tile, FitsError> {
-    let width = bytes
-        .len()
-        .checked_div(pixels)
-        .filter(|width| width * pixels == bytes.len())
-        .ok_or_else(|| malformed("tile size does not match its pixel count"))?;
+    let width = sample_width(bytes.len(), pixels)?;
     Ok(match (width, floats) {
         (1, _) => Tile::Int(bytes.iter().map(|&byte| i64::from(byte)).collect()),
         (2, _) => Tile::Int(
@@ -1770,6 +1775,26 @@ mod tests {
             crate::read_named_header(&path, "COVER").unwrap().cards,
             crate::FitsImage::open(&path).unwrap().headers
         );
+    }
+
+    #[test]
+    fn gzip_2_rejects_partial_shuffled_samples() {
+        for width in [2, 4, 8] {
+            let mut shuffled = vec![0; 2 * width];
+            shuffled.push(255);
+            let file = compressed_file(
+                &image_cards(16, &[2, 1], &[2, 1], "GZIP_2"),
+                &[compressed_column(vec![gzip(&shuffled)])],
+                &[],
+            );
+            assert!(
+                matches!(
+                    crate::FitsImage::from_bytes(&file),
+                    Err(FitsError::Malformed(_))
+                ),
+                "accepted a {width}-byte sample tile with an extra byte"
+            );
+        }
     }
 
     #[test]
