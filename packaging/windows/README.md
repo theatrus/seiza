@@ -13,6 +13,16 @@ copy at install time (`CopyFile`), so the MSI carries one binary, the copy
 keeps the signature and version resource of the original, and uninstall
 removes both.
 
+The zip and the MSI also carry ONNX Runtime, for `seiza model`, and the four
+Visual C++ runtime DLLs it links, beside the binary. `seiza.exe` itself keeps its
+static CRT, which CI checks, and loads the library only when a model runs.
+`packaging/fetch-onnxruntime.sh` and `stage-vc-runtime.ps1` lay these out in
+`seiza-cli/onnxruntime` before a package is built, and the second stops the build
+if ONNX Runtime has come to need a DLL this package does not list. None of them
+spends a signature, since Microsoft signs its own. The `Packaged runtime` workflow
+runs a model in a Windows container, which has no Visual C++ runtime of its own,
+and first checks that it fails there without these DLLs.
+
 The package presents the Apache 2.0 license and lets the user choose between
 an all-users install (the default) and a current-user install. The all-users
 choice installs under 64-bit Program Files and causes Windows Installer to

@@ -1,0 +1,48 @@
+{
+  "format": 1,
+  "name": "two-tensors",
+  "task": "denoise",
+  "graphs": [
+    {
+      "precision": "f32",
+      "file": "model-f32.onnx",
+      "sha256": "0f8bb0c14b09ce0352ab4eb8f8975b0a87e92f0a89f824b9a1de1d2703a41844"
+    }
+  ],
+  "inputs": [
+    {
+      "tensor": "picture",
+      "planes": [
+        "image"
+      ]
+    },
+    {
+      "tensor": "level",
+      "planes": [
+        "noise"
+      ]
+    }
+  ],
+  "output": "residual",
+  "dimensions": [
+    "height",
+    "width"
+  ],
+  "reading": {
+    "noise_map": "constant",
+    "noise_plane": "asinh",
+    "sky": "global",
+    "sky_block": 32,
+    "flat_block": 64,
+    "image_map_scale": 1.13
+  },
+  "tiling": {
+    "tile": 64,
+    "margin": 10,
+    "ramp": 8,
+    "multiple": 2
+  },
+  "parity": [
+    "cpu"
+  ]
+}

@@ -1,0 +1,43 @@
+{
+  "format": 1,
+  "name": "half-tensors",
+  "task": "denoise",
+  "graphs": [
+    {
+      "precision": "f16",
+      "file": "model-f16.onnx",
+      "sha256": "1d9eec390f35f9e936a46d7791a2fe6445af05da07578aaf2dc5b75ffc6ff7c8"
+    }
+  ],
+  "inputs": [
+    {
+      "tensor": "planes",
+      "planes": [
+        "image",
+        "noise"
+      ]
+    }
+  ],
+  "output": "residual",
+  "dimensions": [
+    "height",
+    "width"
+  ],
+  "reading": {
+    "noise_map": "constant",
+    "noise_plane": "asinh",
+    "sky": "global",
+    "sky_block": 32,
+    "flat_block": 64,
+    "image_map_scale": 1.13
+  },
+  "tiling": {
+    "tile": 64,
+    "margin": 10,
+    "ramp": 8,
+    "multiple": 2
+  },
+  "parity": [
+    "cpu"
+  ]
+}

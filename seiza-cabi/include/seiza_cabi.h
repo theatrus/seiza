@@ -243,6 +243,12 @@ typedef struct SeizaBackgroundModel SeizaBackgroundModel;
 typedef struct SeizaCancelSignal SeizaCancelSignal;
 
 /*
+ A run's result. Release it with [`seiza_denoised_free`]. It is read-only,
+ and what it lends stays valid until it is freed.
+ */
+typedef struct SeizaDenoised SeizaDenoised;
+
+/*
  A drizzled stack from [`seiza_live_stacker_reintegrate_drizzled`]. Its
  image and weight pointers are borrowed until
  [`seiza_drizzle_result_free`] is called.
@@ -260,6 +266,12 @@ typedef struct SeizaFlatGroups SeizaFlatGroups;
  [`seiza_live_stacker_finish`].
  */
 typedef struct SeizaLiveStacker SeizaLiveStacker;
+
+/*
+ An opaque noise model, open on a backend. Release it with
+ [`seiza_noise_model_free`]. One thread may run it at a time.
+ */
+typedef struct SeizaNoiseModel SeizaNoiseModel;
 
 /*
  An opaque prepared parallax video. Release it with
@@ -548,6 +560,12 @@ typedef struct {
   size_t height;
   size_t channels;
 } SeizaFlatStabilityImage;
+
+/*
+ Told after each tile, on the thread running the model: the channel from 0,
+ the channels, the tiles done in this channel, and its tiles.
+ */
+typedef void (*SeizaModelProgressCallback)(size_t, size_t, size_t, size_t, void*);
 
 /*
  Progress for the parallax functions: one event as JSON, valid only for
@@ -4847,6 +4865,187 @@ char *seiza_calibration_flat_retry_json(const char *request_json, char **error_o
  request_json is NUL-terminated UTF-8; error_out is null or writable.
  */
 char *seiza_master_flat_stability_json(const char *request_json, char **error_out);
+
+/*
+ Open a noise model.
+
+ `model` names an installed model or a bundle's directory; null means the one
+ installed noise model. `options_json` may be null, or hold `backend`,
+ `store`, `library`, `cacheDir`, `tile` and `precision`. With no `backend`,
+ the best one this machine can run and the model's card allows is chosen.
+ The first open on Core ML compiles the model, which can take some time.
+ Release the result with [`seiza_noise_model_free`].
+
+ # Safety
+ `model` and `options_json` must be null or NUL-terminated strings. When
+ non-null, `error_out` must point to writable storage for one pointer.
+ */
+SeizaNoiseModel *seiza_noise_model_open(const char *model,
+                                        const char *options_json,
+                                        char **error_out);
+
+/*
+ The backend an open model runs on, as a string the caller frees with
+ `seiza_string_free`.
+
+ # Safety
+ `model` must be a live [`SeizaNoiseModel`]. When non-null, `error_out` must
+ point to writable storage for one pointer.
+ */
+char *seiza_noise_model_backend(const SeizaNoiseModel *model, char **error_out);
+
+/*
+ The side of the tiles an open model runs.
+
+ # Safety
+ `model` must be null or a live [`SeizaNoiseModel`].
+ */
+size_t seiza_noise_model_tile(const SeizaNoiseModel *model);
+
+/*
+ Run a model over an image, which is all it needs: a linear stack from any
+ stacker, NaN where nothing covers a pixel. Samples are row-major with
+ channels interleaved, and each channel runs alone. Release the result with
+ [`seiza_denoised_free`].
+
+ # Safety
+ `model` must be a live [`SeizaNoiseModel`] no other thread is using, and
+ `data` must point to `data_length` floats. `progress` may be null, and is
+ passed `context`. `cancel` must be null or a live [`SeizaCancelSignal`]
+ retained until this call returns. When non-null, `error_out` must point to
+ writable storage for one pointer.
+ */
+SeizaDenoised *seiza_noise_model_denoise(SeizaNoiseModel *model,
+                                         const float *data,
+                                         size_t data_length,
+                                         size_t width,
+                                         size_t height,
+                                         size_t channels,
+                                         SeizaModelProgressCallback progress,
+                                         const SeizaCancelSignal *cancel,
+                                         void *context,
+                                         char **error_out);
+
+/*
+ Write the image with `high` of the grain and `low` of the mottle the model
+ found taken out, split at a Gaussian of `scale_px`. It costs no inference.
+
+ # Safety
+ `denoised` must be a live [`SeizaDenoised`], and `out` must point to
+ `out_length` writable floats, as many as the image given. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+bool seiza_denoised_blend(const SeizaDenoised *denoised,
+                          float high,
+                          float low,
+                          float scale_px,
+                          float *out,
+                          size_t out_length,
+                          char **error_out);
+
+/*
+ What the model found in one channel, `f(x) − x` in the image's units, lent
+ until the result is freed. Null when there is no such channel; `length_out`
+ then holds 0.
+
+ # Safety
+ `denoised` must be null or a live [`SeizaDenoised`]. When non-null,
+ `length_out` must point to writable storage for one `size_t`.
+ */
+const float *seiza_denoised_residual(const SeizaDenoised *denoised,
+                                     size_t channel,
+                                     size_t *length_out);
+
+/*
+ What ran, as JSON lent until the result is freed: `model`, `sha256`,
+ `backend`, `precision`, `tile`, `noiseMap`, and `channels`, each with its
+ `background` and `noise`. A host keys cached results on `sha256`, `backend`,
+ `precision` and [`seiza_model_output_version`].
+
+ # Safety
+ `denoised` must be null or a live [`SeizaDenoised`].
+ */
+const char *seiza_denoised_report_json(const SeizaDenoised *denoised);
+
+/*
+ Release a run's result.
+
+ # Safety
+ `denoised` must be null or a pointer from [`seiza_noise_model_denoise`] that
+ has not already been freed.
+ */
+void seiza_denoised_free(SeizaDenoised *denoised);
+
+/*
+ Release an open model.
+
+ # Safety
+ `model` must be null or a pointer from [`seiza_noise_model_open`] that has
+ not already been freed.
+ */
+void seiza_noise_model_free(SeizaNoiseModel *model);
+
+/*
+ Which ONNX Runtime this process loaded and which backends run here, as JSON
+ the caller frees with `seiza_string_free`: `runtime`, with its `path` and
+ `version`, or null when no library was found; and `backends`, each with
+ `backend`, `unavailable`, the reason it cannot run or null, and `automatic`,
+ whether a model picks it unasked. `options_json` may be null, or hold
+ `library`.
+
+ # Safety
+ `options_json` must be null or a NUL-terminated string. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_model_backends_json(const char *options_json, char **error_out);
+
+/*
+ The installed models, as a JSON array the caller frees with
+ `seiza_string_free`, each with `name`, `path`, `task`, `noiseMap` and
+ `precisions`. `store` may be null for the default store.
+
+ # Safety
+ `store` must be null or a NUL-terminated string. When non-null, `error_out`
+ must point to writable storage for one pointer.
+ */
+char *seiza_model_list_json(const char *store, char **error_out);
+
+/*
+ Install the bundle at `source`, once its graphs match its card, replacing
+ any model of its name. Returns the model as [`seiza_model_list_json`]
+ describes it, as JSON the caller frees with `seiza_string_free`.
+
+ # Safety
+ `source` must be a NUL-terminated string and `store` null or one. When
+ non-null, `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_model_install_json(const char *source, const char *store, char **error_out);
+
+/*
+ Check a model's graphs against its card. `model` is as for
+ [`seiza_noise_model_open`]; `store` may be null for the default store.
+
+ # Safety
+ `model` and `store` must be null or NUL-terminated strings. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+bool seiza_model_verify(const char *model, const char *store, char **error_out);
+
+/*
+ Delete the installed model named `name`. `store` may be null for the default
+ store.
+
+ # Safety
+ `name` must be a NUL-terminated string and `store` null or one. When
+ non-null, `error_out` must point to writable storage for one pointer.
+ */
+bool seiza_model_remove(const char *name, const char *store, char **error_out);
+
+/*
+ The version of `seiza-model` whose output this build reproduces, a static
+ string a host keys cached results on.
+ */
+const char *seiza_model_output_version(void);
 
 /*
  Prepare a parallax video from a JSON request (see the fields below) and

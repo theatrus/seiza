@@ -22,6 +22,10 @@ classifiers = [
 dependencies = ["numpy>=1.23.2"]
 dynamic = ["version"]
 
+[project.optional-dependencies]
+# `seiza.NoiseModel` runs through this package's library.
+ml = ["onnxruntime>=1.17"]
+
 [project.urls]
 Repository = "https://github.com/theatrus/seiza"
 Homepage = "https://seiza.fyi"
