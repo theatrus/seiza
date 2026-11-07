@@ -34,6 +34,20 @@
           <!-- The sky map embeds the Inter font, whose SIL Open Font
                License must ship with the program. -->
           <File Id="SeizaFontLicense" Source="$(var.RepoRoot)seiza-cli\fonts\LICENSE-Inter.txt" />
+          <!-- ONNX Runtime, which `seiza model` loads from beside the
+               executable, and the Visual C++ runtime it links. seiza.exe
+               itself has a static CRT. Staged by
+               packaging/fetch-onnxruntime.sh and stage-vc-runtime.ps1, which
+               stops the build if this list no longer covers what the library
+               imports. -->
+          <File Id="OnnxRuntimeDll" Source="$(var.RepoRoot)seiza-cli\onnxruntime\onnxruntime.dll" />
+          <File Id="OnnxRuntimeProvidersDll" Source="$(var.RepoRoot)seiza-cli\onnxruntime\onnxruntime_providers_shared.dll" />
+          <File Id="OnnxRuntimeLicense" Source="$(var.RepoRoot)seiza-cli\onnxruntime\LICENSE-onnxruntime.txt" />
+          <File Id="OnnxRuntimeNotices" Source="$(var.RepoRoot)seiza-cli\onnxruntime\ThirdPartyNotices-onnxruntime.txt" />
+          <File Id="VcRuntimeMsvcp140" Source="$(var.RepoRoot)seiza-cli\onnxruntime\msvcp140.dll" />
+          <File Id="VcRuntimeMsvcp140One" Source="$(var.RepoRoot)seiza-cli\onnxruntime\msvcp140_1.dll" />
+          <File Id="VcRuntimeVcruntime140" Source="$(var.RepoRoot)seiza-cli\onnxruntime\vcruntime140.dll" />
+          <File Id="VcRuntimeVcruntime140One" Source="$(var.RepoRoot)seiza-cli\onnxruntime\vcruntime140_1.dll" />
           <RemoveFolder Id="RemoveInstallFolder" On="uninstall" />
           <RegistryValue
               Root="HKMU"

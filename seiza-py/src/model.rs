@@ -16,6 +16,27 @@ use seiza_model::{
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+/// The `onnxruntime` package's library, which `pip install seiza[ml]` brings,
+/// for a caller that names none. `SEIZA_ONNXRUNTIME` still comes first. The
+/// package is found, not imported, since that would load its own copy.
+fn package_library(py: Python<'_>) -> Option<PathBuf> {
+    if std::env::var_os("SEIZA_ONNXRUNTIME").is_some() {
+        return None;
+    }
+    let spec = py
+        .import("importlib.util")
+        .ok()?
+        .call_method1("find_spec", ("onnxruntime",))
+        .ok()?;
+    let package: PathBuf = spec.getattr("origin").ok()?.extract().ok()?;
+    let entries = std::fs::read_dir(package.parent()?.join("capi")).ok()?;
+    entries.flatten().map(|entry| entry.path()).find(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == "onnxruntime.dll" || name.starts_with("libonnxruntime."))
+    })
+}
+
 fn model_error(error: ModelError) -> PyErr {
     crate::EngineError::new_err(error.to_string())
 }
@@ -213,7 +234,7 @@ impl PyNoiseModel {
             .transpose()
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
         let options = BackendOptions {
-            library,
+            library: library.or_else(|| package_library(py)),
             cache_dir,
             tile,
             precision,
@@ -377,9 +398,9 @@ impl PyInstalledModel {
 /// Which backends run here, and why the others do not.
 #[pyfunction]
 #[pyo3(signature = (library=None))]
-fn model_backends(library: Option<PathBuf>) -> Vec<PyModelBackend> {
+fn model_backends(py: Python<'_>, library: Option<PathBuf>) -> Vec<PyModelBackend> {
     let options = BackendOptions {
-        library,
+        library: library.or_else(|| package_library(py)),
         ..Default::default()
     };
     Backend::available(&options)
@@ -395,9 +416,9 @@ fn model_backends(library: Option<PathBuf>) -> Vec<PyModelBackend> {
 /// The ONNX Runtime this process loaded, or `None` when no library was found.
 #[pyfunction]
 #[pyo3(signature = (library=None))]
-fn model_runtime(library: Option<PathBuf>) -> Option<PyModelRuntime> {
+fn model_runtime(py: Python<'_>, library: Option<PathBuf>) -> Option<PyModelRuntime> {
     let options = BackendOptions {
-        library,
+        library: library.or_else(|| package_library(py)),
         ..Default::default()
     };
     runtime_info(&options).ok().map(|info| PyModelRuntime {

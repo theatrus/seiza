@@ -211,4 +211,14 @@ published.
 
 The Homebrew tap [`theatrus/homebrew-seiza`](https://github.com/theatrus/homebrew-seiza)
 pins the released tarball by sha256. After tagging, bump `Formula/seiza.rb`
-(new `url` version and `sha256` of the `v<version>.tar.gz`) in that repo.
+(new `url` version and `sha256` of the `v<version>.tar.gz`) in that repo. The
+formula has `depends_on "onnxruntime"` for `seiza model`, which the first release
+carrying `seiza-model` adds.
+
+## ONNX Runtime and the Visual C++ runtime
+
+The deb, the rpm, the Windows zip and the MSI carry ONNX Runtime, pinned in
+`packaging/onnxruntime.env`, and the Windows two carry the Visual C++ runtime it
+links. CI and every package read that one file. To move the version, change it,
+read the new archive's `Privacy.md`, and let the `Packaged runtime` workflow run:
+it installs each package on a machine with nothing else on it.

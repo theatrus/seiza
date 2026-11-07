@@ -412,9 +412,12 @@ seiza model install DIR     # a bundle's directory, once its hashes match
 seiza model remove NAME
 ```
 
-Models run through ONNX Runtime, which a build does not link. Seiza looks for
-its library beside the binary, in `../lib/seiza`, in the shared data directory
-and in the system's, or where `SEIZA_ONNXRUNTIME` or `--onnxruntime` says.
+Models run through ONNX Runtime, which a build does not link. The deb, rpm,
+Windows zip and MSI carry it, with the Visual C++ runtime on Windows; a build of
+your own needs it installed. Seiza looks for its library beside the binary, in
+`../lib/seiza`, in the shared data directory and in the system's, or where
+`SEIZA_ONNXRUNTIME` or `--onnxruntime` says. Microsoft's builds report to Microsoft
+unless told not to, and Seiza always tells them not to.
 
 ## Light deconvolution (experimental)
 

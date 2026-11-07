@@ -54,6 +54,14 @@ jobs:
       # spend the Basic tier's 5,000 signatures a month on installers that are
       # never published. This MSI exists to be installed and uninstalled by the
       # step below, not to be handed to anyone.
+      - name: Fetch the runtime the MSI carries
+        if: runner.os == 'Windows'
+        shell: bash
+        run: bash packaging/fetch-onnxruntime.sh
+      - name: Stage the Visual C++ runtime the MSI carries
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./packaging/windows/stage-vc-runtime.ps1
       - name: Build Windows MSI
         if: runner.os == 'Windows'
         shell: pwsh
@@ -121,19 +129,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            archive: onnxruntime-linux-x64-1.31.1.tgz
-            sha256: c849e36a1ef3e22d4ff217b9d1ce4a3cf5b9467b975610913ae959ad5b16bdc9
-            library: onnxruntime-linux-x64-1.31.1/lib/libonnxruntime.so
-          - os: windows-latest
-            archive: onnxruntime-win-x64-1.31.1.zip
-            sha256: 5869e26bb25314375f2d5ef1877e3ea06b1543d6c710e6e4a1ec2f7177ab4b2c
-            library: onnxruntime-win-x64-1.31.1/lib/onnxruntime.dll
-          - os: macos-latest
-            archive: onnxruntime-osx-arm64-1.31.1.tgz
-            sha256: 2e1344a1926ee50eb25b38153cb6992c3567515aef0e677a1a520a1798896d6f
-            library: onnxruntime-osx-arm64-1.31.1/lib/libonnxruntime.dylib
+        os: [ubuntu-latest, windows-latest, macos-latest]
     name: model runtime (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     steps:
@@ -143,16 +139,8 @@ jobs:
       - name: Fetch ONNX Runtime
         shell: bash
         run: |
-          cd "$RUNNER_TEMP"
-          curl -fsSL -o "${{ matrix.archive }}" \
-            "https://github.com/microsoft/onnxruntime/releases/download/v1.31.1/${{ matrix.archive }}"
-          sum=$(sha256sum "${{ matrix.archive }}" 2>/dev/null || shasum -a 256 "${{ matrix.archive }}")
-          test "${sum%% *}" = "${{ matrix.sha256 }}"
-          case "${{ matrix.archive }}" in
-            *.zip) unzip -q "${{ matrix.archive }}" ;;
-            *) tar xzf "${{ matrix.archive }}" ;;
-          esac
-          echo "SEIZA_ONNXRUNTIME=$RUNNER_TEMP/${{ matrix.library }}" >> "$GITHUB_ENV"
+          library=$(bash packaging/fetch-onnxruntime.sh)
+          echo "SEIZA_ONNXRUNTIME=$library" >> "$GITHUB_ENV"
       - run: cargo test -p seiza-model --test runtime -- --nocapture
       - run: cargo test -p seiza-cabi --lib model::tests
 

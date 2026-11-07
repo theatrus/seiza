@@ -519,9 +519,12 @@ print(result.report.backend, result.report.channels[0].noise)
 
 `seiza.model_backends()` says which backends run here and why the others do not,
 and `install_model`, `installed_models`, `verify_model` and `remove_model` manage
-the store. Models run through ONNX Runtime, which the wheel does not carry: point
-`library=`, or `SEIZA_ONNXRUNTIME`, at its library. The `onnxruntime` package's
-wheel holds one, under `onnxruntime/capi/`.
+the store. Models run through ONNX Runtime, which the wheel does not carry.
+`pip install seiza[ml]` brings the `onnxruntime` package, whose library Seiza finds
+for itself; `library=` or `SEIZA_ONNXRUNTIME` names another. Microsoft's builds
+report to Microsoft unless told not to, and Seiza tells them not to before it loads
+the library, so a program that imports `onnxruntime` itself should first set
+`ORT_DISABLE_TELEMETRY=1`.
 
 `deconvolve_field` runs the same damped update with the PSF a
 `PsfField` measured, which varies across the image, and deconvolves towards

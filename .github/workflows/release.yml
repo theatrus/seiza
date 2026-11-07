@@ -17,6 +17,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@1.99.1
       - run: cargo install cargo-deb --locked
+      - run: bash packaging/fetch-onnxruntime.sh
       - run: cargo deb -p seiza-cli
       - name: Rename with distro suffix
         run: |
@@ -41,10 +42,11 @@ jobs:
     container: fedora:${{ matrix.fedora }}
     steps:
       - name: Install build dependencies
-        run: dnf install -y curl gcc rpm-build git
+        run: dnf install -y curl gcc rpm-build git tar gzip
       - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@1.99.1
       - run: cargo install cargo-generate-rpm --locked
+      - run: bash packaging/fetch-onnxruntime.sh
       - run: cargo build --release -p seiza-cli
       - run: ~/.cargo/bin/cargo-generate-rpm -p seiza-cli --payload-compress zstd
       - name: Rename with dist tag
@@ -85,6 +87,13 @@ jobs:
       - name: Verify Windows CRT is statically linked
         shell: pwsh
         run: ./.github/scripts/assert-static-crt.ps1 -Binary target/release/seiza.exe
+      # Microsoft's own signed DLLs, so these spend none of the signing quota.
+      - name: Fetch the runtime the zip and MSI carry
+        shell: bash
+        run: bash packaging/fetch-onnxruntime.sh
+      - name: Stage the Visual C++ runtime the zip and MSI carry
+        shell: pwsh
+        run: ./packaging/windows/stage-vc-runtime.ps1
 
       # Authenticode signing through Azure Artifact Signing (the renamed
       # Trusted Signing). The key stays in Microsoft's HSM and we only ever
@@ -146,7 +155,7 @@ jobs:
           # portable zip carries its own copy so unpacking is enough. Copied
           # after signing, so the copy carries the same signature.
           Copy-Item target/release/seiza.exe target/release/astap.exe -Force
-          Compress-Archive -Path target/release/seiza.exe, target/release/astap.exe, README.md, LICENSE, seiza-cli/fonts/LICENSE-Inter.txt -DestinationPath "dist/seiza-cli-$version-windows-x86_64.zip"
+          Compress-Archive -Path target/release/seiza.exe, target/release/astap.exe, README.md, LICENSE, seiza-cli/fonts/LICENSE-Inter.txt, seiza-cli/onnxruntime/* -DestinationPath "dist/seiza-cli-$version-windows-x86_64.zip"
           dotnet build packaging/windows/seiza.wixproj -c Release -p:SeizaVersion=$version
           # Hand the absolute paths to the later steps. The signing action is
           # not a shell and cannot work the version out for itself, and this

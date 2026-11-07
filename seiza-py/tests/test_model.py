@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import importlib.util
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -11,7 +14,8 @@ import seiza
 FIXTURES = Path(__file__).parents[2] / "seiza-model/tests/fixtures"
 TINY = FIXTURES / "tiny"
 needs_runtime = pytest.mark.skipif(
-    "SEIZA_ONNXRUNTIME" not in os.environ, reason="SEIZA_ONNXRUNTIME names no ONNX Runtime library"
+    "SEIZA_ONNXRUNTIME" not in os.environ and importlib.util.find_spec("onnxruntime") is None,
+    reason="neither SEIZA_ONNXRUNTIME nor the onnxruntime package gives a library",
 )
 
 
@@ -49,6 +53,27 @@ def test_backends_answer_with_or_without_a_library() -> None:
     statuses = seiza.model_backends()
     assert any(status.backend == "cpu" for status in statuses)
     assert all(isinstance(status.automatic, bool) for status in statuses)
+
+
+def test_the_onnxruntime_package_s_library_is_found(tmp_path: Path) -> None:
+    capi = tmp_path / "onnxruntime" / "capi"
+    capi.mkdir(parents=True)
+    (tmp_path / "onnxruntime" / "__init__.py").write_text("")
+    name = "onnxruntime.dll" if sys.platform == "win32" else "libonnxruntime.so.1.31.1"
+    (capi / name).write_bytes(b"not a library")
+    (capi / "libonnxruntime_providers_shared.so").write_bytes(b"not this one")
+    environment = {key: value for key, value in os.environ.items() if key != "SEIZA_ONNXRUNTIME"}
+    environment["PYTHONPATH"] = str(tmp_path)
+
+    # In a process of its own, since a process loads ONNX Runtime once.
+    script = "import seiza; print(seiza.model_backends()[0].unavailable)"
+    found = subprocess.run([sys.executable, "-c", script], env=environment, capture_output=True, text=True, check=True)
+    assert name in found.stdout
+
+    environment["SEIZA_ONNXRUNTIME"] = str(tmp_path / "chosen")
+    (tmp_path / "chosen").write_bytes(b"not a library")
+    found = subprocess.run([sys.executable, "-c", script], env=environment, capture_output=True, text=True, check=True)
+    assert "chosen" in found.stdout and name not in found.stdout
 
 
 def test_a_bad_backend_or_precision_is_refused() -> None:

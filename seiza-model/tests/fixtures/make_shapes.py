@@ -69,7 +69,19 @@ def planes(*names: str, tensor_name: str = "planes") -> dict:
     return {"tensor": tensor_name, "planes": list(names)}
 
 
+def write_fits() -> None:
+    """A corner of the fixture image as FITS, for the packages' clean-machine tests."""
+    width, height = 300, 230
+    pixels = np.fromfile(HERE.parent / "image.f32", dtype="<f4").reshape(height, width)[:96, :128]
+    cards = ["SIMPLE  =                    T", "BITPIX  =                  -32", "NAXIS   =                    2",
+             f"NAXIS1  = {pixels.shape[1]:20d}", f"NAXIS2  = {pixels.shape[0]:20d}", "END"]
+    header = "".join(card.ljust(80) for card in cards).ljust(2880).encode("ascii")
+    data = pixels.astype(">f4").tobytes()
+    (HERE.parent / "tiny-input.fits").write_bytes(header + data + bytes(-len(data) % 2880))
+
+
 def main() -> None:
+    write_fits()
     shutil.rmtree(HERE, ignore_errors=True)
     two = [planes("image", "noise")]
     residual = tensor("residual", 1, FREE)

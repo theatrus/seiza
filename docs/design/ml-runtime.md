@@ -450,7 +450,8 @@ size stays out of the key, since it does not change the output.
 Rust 1.92 check need nothing native, and `seiza.exe` keeps its static CRT. Each
 channel supplies the library its own way.
 
-A release can bundle Microsoft's own build. Its archives are mostly debug
+The packages carry Microsoft's own build, pinned once in
+`packaging/onnxruntime.env`, which CI reads too. Its archives are mostly debug
 symbols, and the libraries themselves are small:
 
 | Archive | Library | Compressed | Notes |
@@ -459,11 +460,16 @@ symbols, and the libraries themselves are small:
 | Linux x86-64 | 29.3 MB | 11.2 MB | Asks for glibc 2.28 and GLIBCXX 3.4.22, older than our Ubuntu 22.04 build. |
 | Windows x86-64 | 17.3 MB | 6.3 MB | Carries an Authenticode signature. Imports `MSVCP140` and `VCRUNTIME140`. |
 
-The Windows library needs the Visual C++ runtime that `seiza.exe` avoids, so
-without it the library will not load on a clean machine. The installer must
-carry it, as app-local DLLs or the redistributable. CI's `model-runtime` job
-runs a tiny model on all three. A release pins each archive by version and
-SHA-256, and ships its `LICENSE` and `ThirdPartyNotices.txt`.
+The Windows library imports `MSVCP140`, `MSVCP140_1`, `VCRUNTIME140` and
+`VCRUNTIME140_1`, the Visual C++ runtime that `seiza.exe` avoids, so without
+them it will not load on a clean machine. The zip and the MSI carry those four
+beside the binary, taken from the build machine's redistributable, since a zip
+has no installer to run one, and Windows looks beside the executable first.
+`packaging/windows/stage-vc-runtime.ps1` reads the imports and stops the build
+if they outgrow that list. CI's `model-runtime` job runs a tiny model on all
+three systems, and the `Packaged runtime` workflow installs each package on a
+machine with nothing else on it, a Windows container among them. A package
+ships ONNX Runtime's `LICENSE` and `ThirdPartyNotices.txt`.
 
 **Telemetry.** Microsoft's own builds report to Microsoft on every system,
 unless told not to. Each event held the process's name, the model's file name,
@@ -480,10 +486,10 @@ it added 24 KB.
 
 | Channel | Library | Notes |
 |---|---|---|
-| Homebrew | `depends_on "onnxruntime"` | Built with Core ML on macOS; 1.31.1 today. |
-| Python wheel | an `ml` extra needing `onnxruntime` | The macOS wheel carries `libonnxruntime.1.31.1.dylib`, 33 MB, with Core ML. NVIDIA users take `onnxruntime-gpu`. Our wheels stay abi3 and unlinked. |
+| Homebrew | `depends_on "onnxruntime"` | Built with Core ML on macOS; 1.31.1 today. The formula lives in the tap, and gains this with the first release carrying `seiza-model`. |
+| Python wheel | `pip install seiza[ml]` brings `onnxruntime` | Seiza finds the package's library, under `onnxruntime/capi`, without importing it. Wheels exist for Python 3.11 to 3.14. NVIDIA users take `onnxruntime-gpu`. Our wheels stay abi3 and unlinked. |
 | Mac app | signed dylib in the bundle | Or `ort`'s static macOS build, if the app prefers one binary. |
-| Windows MSI and app | `onnxruntime.dll` beside the binary, with the Visual C++ runtime | CPU, plus WebGPU if measured worthwhile. |
+| Windows zip, MSI and app | `onnxruntime.dll` beside the binary, with the Visual C++ runtime | CPU, plus WebGPU if measured worthwhile. |
 | NVIDIA | a separate download | CUDA and TensorRT are too large for the installers, and their licences need reading before Seiza redistributes them. |
 | deb and rpm | private copy in `/usr/lib/seiza` | So Seiza does not depend on what each distribution carries. The search looks in `../lib/seiza` from the binary. |
 | `cargo install` | `seiza setup` fetches it | Into the shared data directory, verified through `seiza-download`, which the search covers. Not built yet. |
