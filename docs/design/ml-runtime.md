@@ -159,9 +159,11 @@ compiles in the temp folder: two entries a session, `onnxruntime-<UUID>-<pid>-<n
 and the same with `.mlmodelc`, about the size of the model. It removes them when
 the session drops or the process exits normally, and a process killed with a
 session open leaves them for good. One Mac was found holding 90,000 of them,
-1.23 TB, from a program not yet identified. With a cache folder nothing reaches
-the temp folder at all, even when killed part way through a compile, and the next
-run works. So `seiza-model` always gives Core ML a folder, and a test holds to it.
+1.23 TB, from PixInsight's MLDenoise, which carries its own ONNX Runtime and which
+`seiza-stacking` starts with `--force-exit`, ending it before that cleanup. With a
+cache folder nothing reaches the temp folder at all, even when killed part way
+through a compile, and the next run works. So `seiza-model` always gives Core ML
+a folder, and a test holds to it.
 
 **Not yet measured:** anything on NVIDIA or Intel; any Neural Engine older
 than the M4's; a loaded-versus-idle GPU comparison; any smaller GPU. This one
