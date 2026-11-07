@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2.9.3
-      - uses: taiki-e/install-action@v2.87.31
+      - uses: taiki-e/install-action@v2.88.1
         with:
           tool: cargo-nextest
       # nextest runs the tests of every binary in parallel, where cargo test runs
