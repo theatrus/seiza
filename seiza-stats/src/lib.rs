@@ -1,8 +1,9 @@
 //! Robust statistics shared across the seiza workspace.
 //!
 //! One median convention throughout: an even-length sample averages its two
-//! middle elements. Ordering uses `total_cmp`, so NaN sorts high; callers
-//! that must exclude non-finite values filter before calling.
+//! middle elements. Ordering uses `total_cmp`, including its ordering of
+//! signed zeros and NaNs; callers that must exclude non-finite values filter
+//! before calling.
 
 /// Scale from the median absolute deviation to the standard deviation of
 /// normally distributed data.
@@ -72,20 +73,51 @@ pub fn median_of_sorted(values: &[f32]) -> Option<f32> {
     })
 }
 
-/// Median of an f64 sample, sorting a copy. Returns `None` for an empty
-/// sample.
+/// Median of an f64 sample in linear time, leaving the input unchanged.
+/// Monotonic samples need no allocation; other samples are partially
+/// selected on a copy. Returns `None` for an empty sample.
 pub fn median_f64(values: &[f64]) -> Option<f64> {
     if values.is_empty() {
         return None;
     }
-    let mut sorted = values.to_vec();
-    sorted.sort_unstable_by(f64::total_cmp);
-    let middle = sorted.len() / 2;
-    Some(if sorted.len().is_multiple_of(2) {
-        (sorted[middle - 1] + sorted[middle]) * 0.5
+    Some(ordered_median_f64(values).unwrap_or_else(|| select_median_f64(&mut values.to_vec())))
+}
+
+/// The median when a non-empty sample is monotonic, without copying it.
+fn ordered_median_f64(values: &[f64]) -> Option<f64> {
+    let middle = values.len() / 2;
+    let even = values.len().is_multiple_of(2);
+    // Sorting already detects monotonic runs in linear time. Keep that fast
+    // path: selection otherwise does extra partitioning on ordered samples.
+    if values.is_sorted_by(|a, b| a.total_cmp(b).is_le()) {
+        return Some(if even {
+            (values[middle - 1] + values[middle]) * 0.5
+        } else {
+            values[middle]
+        });
+    }
+    if values.is_sorted_by(|a, b| a.total_cmp(b).is_ge()) {
+        return Some(if even {
+            (values[middle] + values[middle - 1]) * 0.5
+        } else {
+            values[middle]
+        });
+    }
+    None
+}
+
+/// Select both middle values of a non-empty sample with the same total
+/// ordering and arithmetic as the sorted median.
+fn select_median_f64(values: &mut [f64]) -> f64 {
+    let middle = values.len() / 2;
+    let even = values.len().is_multiple_of(2);
+    let (lower, &mut upper, _) = values.select_nth_unstable_by(middle, f64::total_cmp);
+    if even {
+        let lower = lower.iter().copied().max_by(f64::total_cmp).unwrap();
+        (lower + upper) * 0.5
     } else {
-        sorted[middle]
-    })
+        upper
+    }
 }
 
 /// Robust sigma (MAD × [`NORMAL_MAD_SCALE`]) around `center`, overwriting
@@ -103,8 +135,9 @@ pub fn robust_sigma_f64(values: &[f64], center: f64) -> Option<f64> {
     if values.is_empty() {
         return None;
     }
-    let deviations: Vec<f64> = values.iter().map(|value| (*value - center).abs()).collect();
-    median_f64(&deviations).map(|mad| mad * NORMAL_MAD_SCALE)
+    let mut deviations: Vec<f64> = values.iter().map(|value| (*value - center).abs()).collect();
+    let mad = ordered_median_f64(&deviations).unwrap_or_else(|| select_median_f64(&mut deviations));
+    Some(mad * NORMAL_MAD_SCALE)
 }
 
 #[cfg(test)]
@@ -137,6 +170,106 @@ mod tests {
         let sigma = robust_sigma_f64(&[1.0, 2.0, 3.0, 4.0, 5.0], 3.0).unwrap();
         assert!((sigma - 1.4826).abs() < 1.0e-12);
         assert_eq!(robust_sigma_f64(&[], 0.0), None);
+    }
+
+    /// Keep the old sorted implementation as an independent oracle, including
+    /// signed zero, infinities and overflowing even medians. NaN payloads from
+    /// arithmetic are unspecified; an odd median must preserve the selected bits.
+    #[test]
+    fn f64_statistics_preserve_sorted_results_and_input() {
+        fn reference(values: &[f64]) -> Option<f64> {
+            if values.is_empty() {
+                return None;
+            }
+            let mut sorted = values.to_vec();
+            sorted.sort_unstable_by(f64::total_cmp);
+            let middle = sorted.len() / 2;
+            Some(if sorted.len().is_multiple_of(2) {
+                (sorted[middle - 1] + sorted[middle]) * 0.5
+            } else {
+                sorted[middle]
+            })
+        }
+
+        fn check(values: &[f64]) {
+            let original: Vec<_> = values.iter().map(|value| value.to_bits()).collect();
+            let got = median_f64(values);
+            let expected = reference(values);
+            if values.len().is_multiple_of(2) && got.is_some_and(f64::is_nan) {
+                assert!(expected.is_some_and(f64::is_nan));
+            } else {
+                assert_eq!(
+                    got.map(f64::to_bits),
+                    expected.map(f64::to_bits),
+                    "median of {values:?}"
+                );
+            }
+            for center in [0.0, -0.0, 1000.0, f64::INFINITY, f64::NAN] {
+                let deviations: Vec<_> = values.iter().map(|v| (v - center).abs()).collect();
+                let expected = reference(&deviations).map(|mad| mad * NORMAL_MAD_SCALE);
+                let got = robust_sigma_f64(values, center);
+                if got.is_some_and(f64::is_nan) {
+                    assert!(expected.is_some_and(f64::is_nan));
+                } else {
+                    assert_eq!(
+                        got.map(f64::to_bits),
+                        expected.map(f64::to_bits),
+                        "sigma around {center} of {values:?}"
+                    );
+                }
+            }
+            assert_eq!(
+                values
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                original,
+                "the borrowed input must stay unchanged"
+            );
+        }
+
+        let special = [
+            0.0,
+            -0.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MAX,
+            f64::MIN,
+            f64::MIN_POSITIVE / 4.0,
+            -f64::MIN_POSITIVE / 4.0,
+            f64::from_bits(0x7ff8_0000_0000_0001),
+            f64::from_bits(0xfff8_0000_0000_0002),
+            f64::from_bits(0x7ff0_0000_0000_0001),
+        ];
+        check(&[]);
+        for &a in &special {
+            check(&[a]);
+            for &b in &special {
+                check(&[a, b]);
+                for &c in &special {
+                    check(&[a, b, c]);
+                }
+            }
+        }
+
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for length in (1..40).chain([255, 256, 4096, 4097, 65536]) {
+            let values: Vec<_> = (0..length).map(|_| f64::from_bits(next())).collect();
+            check(&values);
+            let mut sorted = values;
+            sorted.sort_unstable_by(f64::total_cmp);
+            check(&sorted);
+            sorted.reverse();
+            check(&sorted);
+            let repeated: Vec<_> = (0..length).map(|_| (next() % 5) as f64).collect();
+            check(&repeated);
+        }
     }
 
     /// Every sample's median, and the partition it leaves, are those of
