@@ -136,6 +136,42 @@ IMAGE_GAIN_BLOCKS = 20
 # the stack's map know. Against the noise of the halves' difference on the
 # sky, the image map read 1.15–1.31 times it, the modelled map 1.19–1.61.
 IMAGE_MAP_SCALE = 1.13
+# How much neighbouring pixels share their noise: the second-difference
+# noise of the image binned 2 × 2, times 2, over the image's own, on the
+# sky; white noise gives 1. Seiza's train halves read 1.12–1.45, at 4 frames,
+# 8 and a night's depth alike, with this median (2026-11-06, 16 of each).
+# Another stacker's stacks read the same, 1.22–1.38, but its drizzled ones
+# 2.45–2.58: their noise is spread over neighbours, so second differences
+# see far less of it than there is, and a model told that much leaves a
+# fifth of the finest noise as specks. The image map is raised by as much
+# as an image's correlation exceeds this.
+NOISE_CORRELATION = 1.24
+
+
+def noise_correlation(image: np.ndarray) -> float:
+    """`NOISE_CORRELATION`'s measure of one image, on the pixels within 3
+    of its robust spreads of its median; 1 where too few are left."""
+    values = image.astype(np.float64)
+    level = float(np.nanmedian(values[::3, ::3]))
+    spread = 1.4826 * float(np.nanmedian(np.abs(values[::3, ::3] - level)))
+    sky = np.isfinite(values) & (np.abs(values - level) < 3 * spread)
+
+    def noise(plane: np.ndarray, mask: np.ndarray) -> float:
+        across = (plane[:, :-2] - 2.0 * plane[:, 1:-1] + plane[:, 2:])[mask[:, 1:-1]]
+        down = (plane[:-2, :] - 2.0 * plane[1:-1, :] + plane[2:, :])[mask[1:-1, :]]
+        found = np.concatenate([across[np.isfinite(across)], down[np.isfinite(down)]])
+        if found.size < 1000:
+            return float("nan")
+        return 1.4826 * float(np.median(np.abs(found - np.median(found)))) / math.sqrt(6.0)
+
+    height, width = values.shape[0] // 2 * 2, values.shape[1] // 2 * 2
+
+    def half(plane: np.ndarray) -> np.ndarray:
+        return plane[:height, :width].reshape(height // 2, 2, width // 2, 2).mean(axis=(1, 3))
+
+    whole, binned = noise(values, sky), noise(half(values), half(sky.astype(np.float64)) == 1)
+    ratio = 2 * binned / whole
+    return ratio if np.isfinite(ratio) and whole > 0 else 1.0
 
 
 def input_sigma(kind: str, image: np.ndarray, sigma: np.ndarray | None, coverage: np.ndarray | None) -> np.ndarray:
@@ -167,7 +203,9 @@ def image_sigma(image: np.ndarray) -> np.ndarray:
     vignetting and thinly covered edges. A term growing with the signal is
     fitted on the blocks a bright nebula fills, so stars and nebulae stay
     noisier; it is taken out of those blocks' own variance first, so the
-    sky is not counted twice. NaN where the image is."""
+    sky is not counted twice. Where the noise is shared between neighbours
+    more than in Seiza's stacks, as in a drizzled stack, the map is raised
+    by as much (`noise_correlation`). NaN where the image is."""
     height, width = image.shape
     values = image.astype(np.float64)
     rows, columns = max(1, height // SKY_BLOCK), max(1, width // SKY_BLOCK)
@@ -201,7 +239,8 @@ def image_sigma(image: np.ndarray) -> np.ndarray:
     sky_blocks = np.maximum(sky_blocks, 0.25 * sky_variance)
     sky = upsample(sky_blocks, height, width, SKY_BLOCK).astype(np.float64)
     signal = np.clip(np.nan_to_num(values - background, nan=0.0), 0.0, None)
-    mapped = IMAGE_MAP_SCALE * np.sqrt(sky + gain * signal)
+    raised = max(1.0, noise_correlation(image) / NOISE_CORRELATION)
+    mapped = IMAGE_MAP_SCALE * raised * np.sqrt(sky + gain * signal)
     return np.where(np.isfinite(image), mapped, np.nan).astype(np.float32)
 
 

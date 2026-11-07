@@ -265,6 +265,22 @@ def test_the_image_noise_map_finds_the_sky_s_noise_and_a_nebula_s():
     assert abs(np.median(mapped[inside]) / np.median(sigma[inside]) - 1.0) < 0.1, "the nebula's"
 
 
+def test_the_image_noise_map_sees_noise_spread_over_neighbours():
+    from seiza_training.noise_model import IMAGE_MAP_SCALE, image_sigma, noise_correlation
+
+    rng = np.random.default_rng(6)
+    white = rng.normal(100.0, 2.0, (400, 480)).astype(np.float32)
+    # Upsampled 2 x 2 as a drizzle spreads each sample: every pixel keeps the
+    # noise of 2, but shares it with its neighbours.
+    spread = np.kron(rng.normal(100.0, 2.0, (200, 240)), np.ones((2, 2))).astype(np.float32)
+    assert noise_correlation(white) < 1.1 and noise_correlation(spread) > 1.8
+    assert abs(np.median(image_sigma(white)) / IMAGE_MAP_SCALE / 2.0 - 1.0) < 0.08
+    # Second differences alone read the spread noise as far less than 2; the
+    # map is raised to between each pixel's noise and what its 2 x 2 blocks
+    # carry, 4 as white noise.
+    assert 1.8 < np.median(image_sigma(spread)) / IMAGE_MAP_SCALE < 4.0
+
+
 def test_matching_puts_b_on_a_s_background_and_flux():
     from seiza_training.noise_model import matched
 
