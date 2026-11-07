@@ -628,6 +628,13 @@ struct PreparedBlock {
 }
 
 fn validate_options(options: &WriteOptions<'_>) -> Result<(), XisfError> {
+    if let Some(metadata) = options.metadata {
+        // These trees are cloned and walked recursively after validation.
+        // Account for the wrappers render_xml puts around each location.
+        crate::xml::validate_depth(&metadata.root_elements, 1)?;
+        crate::xml::validate_depth(&metadata.image_elements, 2)?;
+        crate::xml::validate_depth(&metadata.unit_properties, 2)?;
+    }
     if let Some((low, high)) = options.bounds
         && !(low.is_finite() && high.is_finite() && low < high)
     {
