@@ -365,6 +365,10 @@ fn denoise_plane(
 /// Where a compiled model is kept. The tile is in the key because Core ML's
 /// cache ignores the dimension override: a session at a new size would load the
 /// cached graph of the old one, and fail.
+///
+/// Core ML always gets a folder. Without one, ONNX Runtime compiles in the
+/// temp folder, and a process killed with a session open leaves two entries
+/// there, the size of the model, every time.
 fn compile_cache(
     options: &BackendOptions,
     sha256: &str,
@@ -376,14 +380,18 @@ fn compile_cache(
     if !matches!(backend, Backend::CoreMl(_)) {
         return None;
     }
-    let root = options.cache_dir.clone().or_else(|| {
-        std::env::var_os("SEIZA_CACHE_DIR")
-            .map(PathBuf::from)
-            .or_else(|| {
-                ProjectDirs::from("fyi", "Seiza", "seiza")
-                    .map(|dirs| dirs.cache_dir().to_path_buf())
-            })
-    })?;
+    let root = options
+        .cache_dir
+        .clone()
+        .or_else(|| {
+            std::env::var_os("SEIZA_CACHE_DIR")
+                .map(PathBuf::from)
+                .or_else(|| {
+                    ProjectDirs::from("fyi", "Seiza", "seiza")
+                        .map(|dirs| dirs.cache_dir().to_path_buf())
+                })
+        })
+        .unwrap_or_else(|| std::env::temp_dir().join("seiza"));
     let hash = sha256.get(..16).unwrap_or(sha256);
     Some(
         root.join("models")

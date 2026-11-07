@@ -288,6 +288,35 @@ fn a_graph_that_differs_from_its_card_is_refused_when_it_opens() {
     }
 }
 
+/// ONNX Runtime's entries in the temp folder made by this process, which a
+/// killed process would leave behind.
+fn left_in_temp() -> Vec<String> {
+    let mine = format!("-{}-", std::process::id());
+    std::fs::read_dir(std::env::temp_dir())
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("onnxruntime-") && name.contains(&mine))
+        .collect()
+}
+
+#[test]
+fn a_core_ml_session_keeps_out_of_the_temp_folder() {
+    if !runtime_present() || !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        return;
+    }
+    let cache = tempfile::tempdir().unwrap();
+    let options = BackendOptions {
+        cache_dir: Some(cache.path().to_path_buf()),
+        ..Default::default()
+    };
+    let open_model = open(Backend::CoreMl(CoreMlUnits::Cpu), &options).unwrap();
+    assert_eq!(left_in_temp(), Vec::<String>::new());
+    let held = std::fs::read_dir(cache.path().join("models")).unwrap();
+    assert_eq!(held.count(), 1, "the compiled model is in the cache");
+    drop(open_model);
+}
+
 #[test]
 fn an_f32_graph_is_refused_on_the_neural_engine() {
     if !runtime_present() || !cfg!(all(target_os = "macos", target_arch = "aarch64")) {

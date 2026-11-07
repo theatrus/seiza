@@ -154,6 +154,15 @@ its budget than the −0.0005σ̄ above. D24 on another stacker's master gave th
 same picture: 5.9 s and 0.0004σ̄ on the GPU, 6.7 s and 0.0153σ̄ on the Neural
 Engine. Decision 6 follows from this.
 
+**The temp folder.** Given no cache folder, ONNX Runtime's Core ML provider
+compiles in the temp folder: two entries a session, `onnxruntime-<UUID>-<pid>-<n>`
+and the same with `.mlmodelc`, about the size of the model. It removes them when
+the session drops or the process exits normally, and a process killed with a
+session open leaves them for good. One Mac was found holding 90,000 of them,
+1.23 TB, from a program not yet identified. With a cache folder nothing reaches
+the temp folder at all, even when killed part way through a compile, and the next
+run works. So `seiza-model` always gives Core ML a folder, and a test holds to it.
+
 **Not yet measured:** anything on NVIDIA or Intel; any Neural Engine older
 than the M4's; a loaded-versus-idle GPU comparison; any smaller GPU. This one
 has 40 cores, and a base M4 has a quarter of that beside a Neural Engine of
