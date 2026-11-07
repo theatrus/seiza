@@ -4,7 +4,7 @@
 //! what a shipped model reads.
 
 use crate::bands::NoiseBands;
-use crate::bundle::{NoiseInput, NoisePlane, Reading, SkyInput};
+use crate::bundle::{InputPlane, NoiseInput, NoisePlane, Reading, SkyInput};
 use crate::error::ModelError;
 use crate::noise::input_sigma;
 use crate::sky::{network_input, scales, seen, smooth_sky};
@@ -145,7 +145,14 @@ fn planes(fixture: &Fixture) -> (Vec<f32>, f32, f32) {
     let sigma = input_sigma(&fixture.image, width, height, &reading);
     let looked = seen(&fixture.image, width, height, &reading);
     let (background, noise) = scales(&looked, &sigma).unwrap();
-    let planes = network_input(&looked, &sigma, background, noise, NoisePlane::Asinh);
+    let planes = network_input(
+        &looked,
+        &sigma,
+        background,
+        noise,
+        NoisePlane::Asinh,
+        &[InputPlane::Image, InputPlane::Noise],
+    );
     (planes, background, noise)
 }
 

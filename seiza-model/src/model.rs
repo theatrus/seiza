@@ -1,6 +1,6 @@
 use crate::backend::{Backend, BackendOptions, CoreMlUnits, Precision, runtime};
 use crate::bands::NoiseBands;
-use crate::bundle::{ModelBundle, ModelCard, NoiseInput, Reading, Task};
+use crate::bundle::{InputPlane, ModelBundle, ModelCard, NoiseInput, Reading, Task};
 use crate::error::ModelError;
 use crate::noise::input_sigma;
 use crate::session::OrtRunner;
@@ -208,7 +208,18 @@ impl NoiseModel {
         })?;
         bundle.verify_graph(graph)?;
 
-        let tile = options.tile.or(backend.default_tile());
+        // A graph of a fixed size takes the one tile its card gives.
+        let tile = if card.dimensions.is_empty() {
+            if let Some(tile) = options.tile.filter(|&tile| tile != card.tiling.tile) {
+                return Err(ModelError::ModelContract(format!(
+                    "{}'s graph runs only tiles of {}, not {tile}",
+                    card.name, card.tiling.tile
+                )));
+            }
+            None
+        } else {
+            options.tile.or(backend.default_tile())
+        };
         let tiling = card.tiling.tiling(tile);
         tiling.tiles(tiling.tile, tiling.tile)?;
         let cache = compile_cache(
@@ -227,7 +238,6 @@ impl NoiseModel {
             &bundle.path_of(graph),
             &card,
             backend,
-            precision,
             tiling.tile,
             cache.as_deref(),
         )?;
@@ -279,6 +289,7 @@ impl NoiseModel {
                 image.width,
                 image.height,
                 &self.card.reading,
+                &self.card.planes(),
                 &self.tiling,
                 &|| options.cancel.is_some_and(|cancel| cancel()),
                 &report,
@@ -312,6 +323,7 @@ fn denoise_plane(
     width: usize,
     height: usize,
     reading: &Reading,
+    inputs: &[InputPlane],
     tiling: &Tiling,
     stop: &dyn Fn() -> bool,
     report: &dyn Fn(usize, usize),
@@ -325,12 +337,19 @@ fn denoise_plane(
             "the image's noise measures {noise}, so it has no scale to be read in"
         )));
     }
-    let planes = network_input(&looked, &sigma, background, noise, reading.noise_plane);
+    let planes = network_input(
+        &looked,
+        &sigma,
+        background,
+        noise,
+        reading.noise_plane,
+        inputs,
+    );
     drop((looked, sigma));
     let found = infer(
         runner,
         &planes,
-        2,
+        inputs.len(),
         width,
         height,
         tiling,
@@ -377,6 +396,7 @@ mod tests {
     use super::*;
     use crate::bundle::{NoisePlane, SkyInput};
 
+    const BOTH: [InputPlane; 2] = [InputPlane::Image, InputPlane::Noise];
     const TILING: Tiling = Tiling {
         tile: 64,
         overlap: 36,
@@ -434,6 +454,7 @@ mod tests {
             width,
             height,
             &reading(NoiseInput::Constant),
+            &BOTH,
             &TILING,
             &|| false,
             &|_, _| {},
@@ -464,6 +485,7 @@ mod tests {
             width,
             height,
             &reading(NoiseInput::Constant),
+            &BOTH,
             &TILING,
             &|| false,
             &|_, _| {},
@@ -475,6 +497,41 @@ mod tests {
                 .iter()
                 .all(|value| (value - expected).abs() < 1e-6)
         );
+    }
+
+    #[test]
+    fn a_runner_gets_as_many_planes_as_the_card_lists() {
+        let (width, height) = (96, 80);
+        let image = noisy(width, height);
+        for inputs in [
+            &[InputPlane::Image][..],
+            &[InputPlane::Image, InputPlane::Noise][..],
+            &[InputPlane::Noise, InputPlane::Image][..],
+        ] {
+            let mut count = |planes: &[f32], side: usize, residual: &mut [f32]| {
+                assert_eq!(planes.len(), inputs.len() * side * side);
+                let noise = inputs.iter().position(|&p| p == InputPlane::Noise);
+                if let Some(plane) = noise {
+                    let held = &planes[plane * side * side..][..side * side];
+                    let level = 1.0_f32.asinh();
+                    assert!(held.iter().all(|value| (value - level).abs() < 1e-6));
+                }
+                residual.fill(0.0);
+                Ok(())
+            };
+            denoise_plane(
+                &mut count,
+                &image,
+                width,
+                height,
+                &reading(NoiseInput::Constant),
+                inputs,
+                &TILING,
+                &|| false,
+                &|_, _| {},
+            )
+            .unwrap();
+        }
     }
 
     #[test]
@@ -490,6 +547,7 @@ mod tests {
                 64,
                 64,
                 &reading(NoiseInput::Image),
+                &BOTH,
                 &TILING,
                 &|| false,
                 &|_, _| {},

@@ -48,6 +48,34 @@ impl fmt::Display for NoiseInput {
     }
 }
 
+/// What one plane of a network's input holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InputPlane {
+    /// The image, as `asinh((x − b) / σ̄)`.
+    Image,
+    /// The noise input, read as [`NoisePlane`] says.
+    Noise,
+}
+
+impl fmt::Display for InputPlane {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Image => "image",
+            Self::Noise => "noise",
+        })
+    }
+}
+
+/// One of a graph's input tensors.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphInput {
+    /// The tensor's name in the graph.
+    pub tensor: String,
+    /// The planes it holds, in order.
+    pub planes: Vec<InputPlane>,
+}
+
 /// How a network reads its noise plane. A model given the reading it was not
 /// trained on fails badly, so the card names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,13 +162,13 @@ pub struct ModelCard {
     pub task: Task,
     /// The graphs, one per precision.
     pub graphs: Vec<GraphFile>,
-    /// The graph's input tensor.
-    pub input: String,
-    /// The planes that tensor holds.
-    pub input_channels: usize,
-    /// The graph's output tensor.
+    /// The graph's input tensors. A model with no noise plane lists only the
+    /// image, and the order of the planes is the graph's.
+    pub inputs: Vec<GraphInput>,
+    /// The graph's output tensor: one plane, the same size as a tile.
     pub output: String,
-    /// The graph's free dimensions, each set to the tile's side.
+    /// The graph's free dimensions, each set to the tile's side. None means
+    /// a graph fixed at `tiling.tile`, which is then the only tile it runs.
     pub dimensions: Vec<String>,
     /// How the model reads an image.
     pub reading: Reading,
@@ -152,6 +180,14 @@ pub struct ModelCard {
 }
 
 impl ModelCard {
+    /// Every plane the graph reads, in the order of its inputs.
+    pub fn planes(&self) -> Vec<InputPlane> {
+        self.inputs
+            .iter()
+            .flat_map(|input| input.planes.iter().copied())
+            .collect()
+    }
+
     /// Whether the card lets `backend` run this model unasked.
     pub fn allows(&self, backend: Backend) -> bool {
         self.parity.is_empty() || self.parity.iter().any(|word| *word == backend.to_string())
@@ -165,11 +201,24 @@ impl ModelCard {
                 self.format
             ));
         }
-        if self.input_channels != 2 {
-            return refuse(format!(
-                "a denoise graph reads 2 planes, not {}",
-                self.input_channels
-            ));
+        if self.inputs.iter().any(|input| input.planes.is_empty()) {
+            return refuse(format!("{} names an input with no planes", self.name));
+        }
+        for (index, input) in self.inputs.iter().enumerate() {
+            if self.inputs[..index]
+                .iter()
+                .any(|i| i.tensor == input.tensor)
+            {
+                return refuse(format!("{} names {} twice", self.name, input.tensor));
+            }
+        }
+        let planes = self.planes();
+        let count = |plane| planes.iter().filter(|&&each| each == plane).count();
+        if count(InputPlane::Image) != 1 {
+            return refuse(format!("{} must read the image once", self.name));
+        }
+        if count(InputPlane::Noise) > 1 {
+            return refuse(format!("{} reads the noise input twice", self.name));
         }
         if self.graphs.is_empty() {
             return refuse(format!("{} names no graph", self.name));
@@ -285,7 +334,8 @@ pub(crate) mod tests {
             r#"{{
               "format": 1, "name": "{name}", "task": "denoise",
               "graphs": [{{"precision": "f32", "file": "model-f32.onnx", "sha256": "{sha256}"}}],
-              "input": "planes", "input_channels": 2, "output": "residual",
+              "inputs": [{{"tensor": "planes", "planes": ["image", "noise"]}}],
+              "output": "residual",
               "dimensions": ["height", "width"],
               "reading": {{"noise_map": "{noise_map}", "noise_plane": "asinh", "sky": "flat",
                            "sky_block": 32, "flat_block": 256, "image_map_scale": 1.13}},
@@ -306,6 +356,68 @@ pub(crate) mod tests {
         assert_eq!(bundle.card().tiling.tiling(None).overlap, 276);
         assert_eq!(bundle.card().tiling.tiling(Some(1024)).tile, 1024);
         bundle.verify().unwrap();
+    }
+
+    #[test]
+    fn a_card_lists_its_planes_in_the_graph_s_order() {
+        let temp = tempfile::tempdir().unwrap();
+        write_bundle(temp.path(), "noise-test", "constant");
+        let mut card = ModelBundle::open(temp.path()).unwrap().card.clone();
+        assert_eq!(card.planes(), [InputPlane::Image, InputPlane::Noise]);
+        card.inputs = vec![
+            GraphInput {
+                tensor: "level".to_string(),
+                planes: vec![InputPlane::Noise],
+            },
+            GraphInput {
+                tensor: "picture".to_string(),
+                planes: vec![InputPlane::Image],
+            },
+        ];
+        assert_eq!(card.planes(), [InputPlane::Noise, InputPlane::Image]);
+        assert!(card.check().is_ok());
+        card.inputs.remove(0);
+        assert!(card.check().is_ok(), "a model may read the image alone");
+    }
+
+    #[test]
+    fn a_card_must_read_the_image_once_and_name_each_tensor_once() {
+        let temp = tempfile::tempdir().unwrap();
+        write_bundle(temp.path(), "noise-test", "constant");
+        let good = ModelBundle::open(temp.path()).unwrap().card.clone();
+        let input = |tensor: &str, planes: &[InputPlane]| GraphInput {
+            tensor: tensor.to_string(),
+            planes: planes.to_vec(),
+        };
+        let (image, noise) = (InputPlane::Image, InputPlane::Noise);
+        for inputs in [
+            vec![],
+            vec![input("a", &[])],
+            vec![input("a", &[noise])],
+            vec![input("a", &[image, image])],
+            vec![input("a", &[image, noise, noise])],
+            vec![input("a", &[image]), input("a", &[noise])],
+        ] {
+            let card = ModelCard {
+                inputs: inputs.clone(),
+                ..good.clone()
+            };
+            assert!(
+                matches!(card.check(), Err(ModelError::ModelContract(_))),
+                "{inputs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plane_this_build_does_not_know_is_refused_by_name() {
+        let temp = tempfile::tempdir().unwrap();
+        write_bundle(temp.path(), "noise-test", "constant");
+        let path = temp.path().join(CARD_FILE);
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, text.replace(r#""noise"]"#, r#""psf"]"#)).unwrap();
+        let error = ModelBundle::open(temp.path()).unwrap_err();
+        assert!(error.to_string().contains("psf"), "{error}");
     }
 
     #[test]

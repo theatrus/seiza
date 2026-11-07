@@ -1,0 +1,43 @@
+{
+  "format": 1,
+  "name": "three-planes",
+  "task": "denoise",
+  "graphs": [
+    {
+      "precision": "f32",
+      "file": "model-f32.onnx",
+      "sha256": "d3770116d94ee36f9aac6a6535a2f38b3ef58c739121ceeb0844ce7d566b4923"
+    }
+  ],
+  "inputs": [
+    {
+      "tensor": "planes",
+      "planes": [
+        "image",
+        "noise"
+      ]
+    }
+  ],
+  "output": "residual",
+  "dimensions": [
+    "height",
+    "width"
+  ],
+  "reading": {
+    "noise_map": "constant",
+    "noise_plane": "asinh",
+    "sky": "global",
+    "sky_block": 32,
+    "flat_block": 64,
+    "image_map_scale": 1.13
+  },
+  "tiling": {
+    "tile": 64,
+    "margin": 10,
+    "ramp": 8,
+    "multiple": 2
+  },
+  "parity": [
+    "cpu"
+  ]
+}

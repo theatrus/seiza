@@ -14,8 +14,15 @@
       "sha256": "b73086e09c40d92542d879d1a00d00bc3481ede75343b0518b9bb902282f283c"
     }
   ],
-  "input": "planes",
-  "input_channels": 2,
+  "inputs": [
+    {
+      "tensor": "planes",
+      "planes": [
+        "image",
+        "noise"
+      ]
+    }
+  ],
   "output": "residual",
   "dimensions": [
     "height",

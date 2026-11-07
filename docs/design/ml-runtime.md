@@ -62,9 +62,10 @@ Three things the restoration plan describes do not yet exist anywhere.
   built from the stack's variance.
 - **A Core ML export.** The harness writes ONNX only.
 
-Only mono models exist. RGB runs a mono model on each channel until an RGB
-model is trained. PSF and star models need several inputs, so the runtime
-takes named tensors from the start, not one image in and one image out.
+Only mono models exist, so RGB runs a mono model on each channel. The noise
+model will change again, and PSF and star models need other inputs, so a
+model's shape is its card's business, not the code's. See
+[Model shapes](#model-shapes).
 
 ## Measurements
 
@@ -494,6 +495,42 @@ refuses with `ModelContract`.
 
 A bundle runs only after its hashes match. `--model PATH` is the one way to
 run an unlisted file, and the user asks for it by name.
+
+### Model shapes
+
+Nothing in the runtime knows a model's shape. The card says it, and the graph
+is held to the card when it opens.
+
+| What can change | Where it comes from |
+|---|---|
+| Depth and width | The graph. Reach, ramp and tile multiple are the card's `tiling`. |
+| Which planes go in, in what order | `inputs`: each tensor by name, with its planes. `["image"]` is a model with no noise plane. |
+| How many tensors | `inputs` again, so `image` and `noise` may be two tensors or one. |
+| Tile size | `dimensions` names the free axes. None means a graph fixed at `tiling.tile`, and any other tile is refused. |
+| Tensor types | The graph itself, for each tensor, whatever the file's precision. An f16 file may read and write f32 at either end. |
+
+A graph that differs from its card is refused at open, with what differs:
+planes, tile, an unknown or unnamed tensor, a type that is neither f32 nor
+f16. Run on, such a graph would at best stop at its first tile, and at worst
+keep part of what the network wrote. The small graphs in
+`seiza-model/tests/fixtures/shapes` hold each of these, in CI, against answers
+worked out by hand.
+
+A new kind of input is one `InputPlane` variant and one arm of `network_input`.
+A build that does not know a plane refuses the card and names the plane. The
+noise reading, as opposed to the shape, is `reading`: a change to how the noise
+level is read needs a field there, so that a card can say which rule its model
+expects.
+
+Three things stay fixed until a model needs them, because each depends on what
+that model's planes mean, which cannot be known first:
+
+- **A graph writes one plane.** A colour model, or one that writes stars and
+  the rest apart, is refused.
+- **A model reads the image once.** So a colour image still runs channel by
+  channel, each with scales of its own.
+- **`task` is `denoise`.** Star and PSF models are new tasks, with a run of
+  their own, on the same session and tiling.
 
 ## Testing
 

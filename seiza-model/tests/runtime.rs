@@ -178,6 +178,111 @@ fn a_mac_picks_the_gpu_unless_the_card_leaves_it_out() {
     assert_eq!(gpu.default_precision(), Precision::F32);
 }
 
+/// A model from `fixtures/shapes`, on the CPU provider.
+fn shape(name: &str, options: &BackendOptions) -> Result<NoiseModel, ModelError> {
+    let bundle = ModelBundle::open(fixtures().join("shapes").join(name))?;
+    NoiseModel::open(&bundle, Backend::Cpu, options)
+}
+
+/// Run `model` and hold it to its 1 × 1 convolution, `image_weight` on the
+/// image and `noise_weight` on the noise plane, worked out at every pixel. A
+/// constant map reads as `asinh(1)`.
+fn matches_by_hand(mut model: NoiseModel, image_weight: f32, noise_weight: f32, tolerance: f32) {
+    let Expected { width, height, .. } = expected();
+    let pixels = image();
+    let view = ImageView::new(&pixels, width, height, 1).unwrap();
+    let result = model.denoise(view, &DenoiseOptions::default()).unwrap();
+    let scales = result.report.channels[0];
+    let (level, noise) = (scales.background, scales.noise);
+    let found = result.residual(0).unwrap();
+    let mut checked = 0;
+    for (&pixel, &residual) in pixels.iter().zip(found) {
+        if pixel.is_nan() {
+            continue;
+        }
+        let picture = ((pixel - level) / noise).asinh();
+        let wanted = (image_weight * picture + noise_weight * 1.0_f32.asinh()) * noise;
+        assert!(
+            (residual - wanted).abs() <= tolerance * noise,
+            "{pixel}: {residual}, not {wanted}"
+        );
+        checked += 1;
+    }
+    assert!(checked > width * height / 2);
+}
+
+#[test]
+fn the_card_says_what_a_graph_reads() {
+    if !runtime_present() {
+        return;
+    }
+    let options = BackendOptions::default();
+    let (image, noise) = (0.25, 0.5);
+    matches_by_hand(shape("two-planes", &options).unwrap(), image, noise, 1e-3);
+    matches_by_hand(shape("one-plane", &options).unwrap(), image, 0.0, 1e-3);
+    matches_by_hand(shape("reversed", &options).unwrap(), image, noise, 1e-3);
+    matches_by_hand(shape("two-tensors", &options).unwrap(), image, noise, 1e-3);
+}
+
+#[test]
+fn a_graph_of_a_fixed_size_takes_its_own_tile_and_no_other() {
+    if !runtime_present() {
+        return;
+    }
+    let model = shape("fixed", &BackendOptions::default()).unwrap();
+    assert_eq!(model.tiling().tile, 64);
+    matches_by_hand(model, 0.25, 0.5, 1e-3);
+
+    let asked = |tile| BackendOptions {
+        tile: Some(tile),
+        ..Default::default()
+    };
+    assert!(shape("fixed", &asked(64)).is_ok());
+    let Err(ModelError::ModelContract(reason)) = shape("fixed", &asked(128)) else {
+        panic!("a tile the graph cannot take ran");
+    };
+    assert!(reason.contains("128"), "{reason}");
+}
+
+#[test]
+fn a_graph_says_what_its_tensors_hold_whatever_its_precision() {
+    if !runtime_present() {
+        return;
+    }
+    let options = BackendOptions {
+        precision: Some(Precision::F16),
+        ..Default::default()
+    };
+    for name in ["half-inside", "half-tensors", "half-in"] {
+        matches_by_hand(shape(name, &options).unwrap(), 0.25, 0.5, 0.02);
+    }
+}
+
+#[test]
+fn a_graph_that_differs_from_its_card_is_refused_when_it_opens() {
+    if !runtime_present() {
+        return;
+    }
+    let options = BackendOptions::default();
+    for (name, says) in [
+        ("three-planes", "holds 3 planes, not 2"),
+        ("three-out", "holds 3 planes, not 1"),
+        ("other-input", "reads planes"),
+        ("missing-input", "names the input level"),
+        ("other-output", "names the output clean"),
+        ("extra-input", "reads extra"),
+        ("fixed-small", "is 32 × 32"),
+    ] {
+        match shape(name, &options) {
+            Err(ModelError::ModelContract(reason)) => {
+                assert!(reason.contains(says), "{name}: {reason}");
+            }
+            Err(other) => panic!("{name}: {other}"),
+            Ok(_) => panic!("{name} opened"),
+        }
+    }
+}
+
 #[test]
 fn an_f32_graph_is_refused_on_the_neural_engine() {
     if !runtime_present() || !cfg!(all(target_os = "macos", target_arch = "aarch64")) {

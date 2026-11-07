@@ -2,7 +2,7 @@
 //! the harness's functions of the same names, in the same precision at each
 //! step, because a model is trained on exactly what they make.
 
-use crate::bundle::{NoisePlane, Reading, SkyInput};
+use crate::bundle::{InputPlane, NoisePlane, Reading, SkyInput};
 use crate::stats::median_f32;
 use rayon::prelude::*;
 
@@ -169,29 +169,35 @@ pub(crate) fn network_input(
     sigma: &[f32],
     background: f32,
     noise: f32,
-    plane: NoisePlane,
+    reading: NoisePlane,
+    planes: &[InputPlane],
 ) -> Vec<f32> {
-    let mut planes = vec![0.0_f32; image.len() * 2];
-    let (first, second) = planes.split_at_mut(image.len());
-    first
-        .par_iter_mut()
-        .zip(image.par_iter())
-        .for_each(|(out, &value)| {
-            let scaled = (value - background) / noise;
-            *out = if scaled.is_nan() { 0.0 } else { scaled.asinh() };
-        });
-    second
-        .par_iter_mut()
-        .zip(sigma.par_iter())
-        .for_each(|(out, &value)| {
-            let scaled = value / noise;
-            let scaled = if scaled.is_nan() { 1.0 } else { scaled };
-            *out = match plane {
-                NoisePlane::Asinh => scaled.asinh(),
-                NoisePlane::Linear => scaled,
-            };
-        });
-    planes
+    let mut input = vec![0.0_f32; image.len() * planes.len()];
+    for (out, plane) in input.chunks_mut(image.len()).zip(planes) {
+        match plane {
+            InputPlane::Image => {
+                out.par_iter_mut()
+                    .zip(image.par_iter())
+                    .for_each(|(out, &value)| {
+                        let scaled = (value - background) / noise;
+                        *out = if scaled.is_nan() { 0.0 } else { scaled.asinh() };
+                    });
+            }
+            InputPlane::Noise => {
+                out.par_iter_mut()
+                    .zip(sigma.par_iter())
+                    .for_each(|(out, &value)| {
+                        let scaled = value / noise;
+                        let scaled = if scaled.is_nan() { 1.0 } else { scaled };
+                        *out = match reading {
+                            NoisePlane::Asinh => scaled.asinh(),
+                            NoisePlane::Linear => scaled,
+                        };
+                    });
+            }
+        }
+    }
+    input
 }
 
 #[cfg(test)]
@@ -248,11 +254,27 @@ mod tests {
             100.0,
             2.0,
             NoisePlane::Asinh,
+            &[InputPlane::Image, InputPlane::Noise],
         );
         assert_eq!(planes[0], 0.0);
         assert!((planes[1] - 5.0_f32.asinh()).abs() < 1e-6);
         assert!((planes[2] - 1.0_f32.asinh()).abs() < 1e-6);
         assert!((planes[3] - 1.0_f32.asinh()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_planes_come_out_as_the_card_lists_them() {
+        let (image, sigma) = ([110.0_f32], [2.0_f32]);
+        let read = |planes: &[InputPlane]| {
+            network_input(&image, &sigma, 100.0, 2.0, NoisePlane::Linear, planes)
+        };
+        let picture = 5.0_f32.asinh();
+        assert_eq!(read(&[InputPlane::Image]), [picture]);
+        assert_eq!(read(&[InputPlane::Noise]), [1.0]);
+        assert_eq!(
+            read(&[InputPlane::Noise, InputPlane::Image]),
+            [1.0, picture]
+        );
     }
 
     #[test]

@@ -47,7 +47,8 @@ pub use backend::{
 };
 pub use bands::NoiseBands;
 pub use bundle::{
-    GraphFile, ModelBundle, ModelCard, NoiseInput, NoisePlane, Reading, SkyInput, Task, TilingCard,
+    GraphFile, GraphInput, InputPlane, ModelBundle, ModelCard, NoiseInput, NoisePlane, Reading,
+    SkyInput, Task, TilingCard,
 };
 pub use error::ModelError;
 pub use model::{
