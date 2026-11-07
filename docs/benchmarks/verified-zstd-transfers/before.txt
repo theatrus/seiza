@@ -1,0 +1,85 @@
+   Compiling syn v3.0.9
+   Compiling smallvec v1.16.3
+   Compiling mio v1.2.4
+   Compiling socket2 v0.6.5
+   Compiling rustls v0.23.46
+   Compiling compression-codecs v0.4.46
+   Compiling serde_json v1.0.154
+   Compiling synstructure v0.14.0
+   Compiling zerofrom-derive v0.1.8
+   Compiling yoke-derive v0.8.4
+   Compiling zerovec-derive v0.11.6
+   Compiling displaydoc v0.2.7
+   Compiling tokio-macros v2.7.2
+   Compiling futures-macro v0.3.34
+   Compiling serde_derive v1.0.229
+   Compiling thiserror-impl v2.0.21
+   Compiling rustls-platform-verifier v0.7.1
+   Compiling futures-util v0.3.34
+   Compiling tokio v1.54.1
+   Compiling zerofrom v0.1.8
+   Compiling yoke v0.8.3
+   Compiling thiserror v2.0.21
+   Compiling zerovec v0.11.8
+   Compiling zerotrie v0.2.5
+   Compiling tinystr v0.8.4
+   Compiling potential_utf v0.1.6
+   Compiling icu_locale_core v2.3.0
+   Compiling icu_collections v2.3.0
+   Compiling serde v1.0.229
+   Compiling serde_urlencoded v0.7.1
+   Compiling icu_provider v2.3.1
+   Compiling icu_normalizer v2.3.0
+   Compiling icu_properties v2.3.0
+   Compiling hyper v1.12.0
+   Compiling tower v0.5.3
+   Compiling async-compression v0.4.51
+   Compiling tokio-util v0.7.20
+   Compiling tokio-rustls v0.26.6
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling url v2.5.8
+   Compiling hyper-util v0.1.21
+   Compiling tower-http v0.6.11
+   Compiling hyper-rustls v0.27.10
+   Compiling reqwest v0.13.5
+   Compiling seiza-download v0.9.0 (/home/ppicazo/Development/seiza/seiza-download)
+    Finished `test` profile [optimized + debuginfo] target(s) in 16.19s
+     Running unittests src/lib.rs (target/debug/deps/seiza_download-5ee6e5de6ac48287)
+
+running 5 tests
+test bundle::tests::hardlink_or_copy_falls_back_to_copy_when_link_fails ... ok
+test bundle::tests::hardlink_or_copy_links_a_clean_target ... ok
+test bundle::tests::concatenated_zstd_frames_are_verified_and_decoded_completely ... FAILED
+test bundle::tests::encoded_overrun_is_rejected_before_writing_decoded_bytes ... FAILED
+test bundle::tests::a_delayed_tail_cannot_hide_after_the_first_zstd_frame ... FAILED
+
+failures:
+
+---- bundle::tests::concatenated_zstd_frames_are_verified_and_decoded_completely stdout ----
+
+thread 'bundle::tests::concatenated_zstd_frames_are_verified_and_decoded_completely' (900815) panicked at seiza-download/src/bundle.rs:623:16:
+called `Result::unwrap()` on an `Err` value: Size { name: "test artifact", expected: 23, actual: 11 }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- bundle::tests::encoded_overrun_is_rejected_before_writing_decoded_bytes stdout ----
+
+thread 'bundle::tests::encoded_overrun_is_rejected_before_writing_decoded_bytes' (900816) panicked at seiza-download/src/bundle.rs:592:9:
+assertion `left == right` failed
+  left: 131072
+ right: 0
+
+---- bundle::tests::a_delayed_tail_cannot_hide_after_the_first_zstd_frame stdout ----
+
+thread 'bundle::tests::a_delayed_tail_cannot_hide_after_the_first_zstd_frame' (900814) panicked at seiza-download/src/bundle.rs:609:9:
+Ok(())
+
+
+failures:
+    bundle::tests::a_delayed_tail_cannot_hide_after_the_first_zstd_frame
+    bundle::tests::concatenated_zstd_frames_are_verified_and_decoded_completely
+    bundle::tests::encoded_overrun_is_rejected_before_writing_decoded_bytes
+
+test result: FAILED. 2 passed; 3 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.04s
+
+error: test failed, to rerun pass `-p seiza-download --lib`
