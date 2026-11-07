@@ -123,8 +123,8 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
         "--precision", "bf16", "--prefetch", "2", "--batch-threads", "2", "--deep-fraction", "0.5",
         "--outliers", "2", "--outlier-floor", "10", "--clip-grad", "1", "--match-flux", "--agree", "0.9",
         "--outlier-scale", "local", "--noise-plane", "asinh", "--scale-loss", "4,8", "--scale-weight", "0.5",
-        "--rewind", "2", "--sky", "flat", "--resample", "0.3", "--sharpen", "0.3", "--gradient", "10",
-        "--dark-spots", "2")
+        "--rewind", "2", "--sky", "flat", "--resample", "0.3", "--sharpen", "0.3", "--spread", "0.2",
+        "--gradient", "10", "--dark-spots", "2")
     record = json.loads((store / "models" / "noise" / "smoke" / "run.json").read_text())
     assert record["config"]["scale_loss"] == [4, 8] and record["config"]["scale_weight"] == 0.5
     assert record["config"]["rewind"] == 2 and record["config"]["rewinds"] == 0
@@ -139,11 +139,14 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
     assert record["config"]["sky"] == "flat" and record["config"]["gradient"] == 10
     assert record["config"]["resample"] == 0.3 and record["config"]["sharpen"] == 0.3
     assert record["config"]["bin_fraction"] == 0 and record["config"]["binned_windows"] is None
-    assert record["config"]["dark_spots"] == 2
+    assert record["config"]["dark_spots"] == 2 and record["config"]["spread"] == 0.2
+    assert len(record["stability"]["steps"]) == 20 and record["stability"]["largest"] > 0
     assert all(entry["grad_norm_max"] > 0 and entry["grad_norm_mean"] > 0 for entry in record["history"])
     assert record["export"]["max_relative_error"] < 1e-4
     assert record["inference"]["margin"] == reach(3) and record["inference"]["multiple"] == 4
     capsys.readouterr()
+    run("stability-noise", "--name", "smoke")
+    assert json.loads(capsys.readouterr().out) == record["stability"]
     run("evaluate-noise", "--name", "smoke", "--split", "train")
     measured = json.loads(capsys.readouterr().out)
     assert measured["pairs"] == 7
@@ -664,7 +667,7 @@ def test_shifted_and_sharpened_tiles_change_both_halves_alike_and_the_map_follow
         return float((planes[..., 1:] * planes[..., :-1]).mean() / planes.var())
 
     assert abs(neighbours(batch_from(banked, 6, 128, np.random.default_rng(4))[2])) < 0.01
-    for change in ("resample", "sharpen"):
+    for change in ("resample", "sharpen", "spread"):
         inputs, targets, references, sigmas = batch_from(banked, 6, 128, np.random.default_rng(4), **{change: 1.0})
         assert inputs.dtype == targets.dtype == sigmas.dtype == torch.float32
         # The halves were the same, and are changed alike.
@@ -674,11 +677,44 @@ def test_shifted_and_sharpened_tiles_change_both_halves_alike_and_the_map_follow
         spread = references.std(dim=(2, 3)).flatten()
         assert torch.allclose(spread, sigmas.mean(dim=(2, 3)).flatten(), rtol=0.04), (change, spread)
         assert torch.allclose(spread, torch.ones_like(spread), rtol=0.04), (change, spread)
-        # Resampled noise is smoother, sharpened noise rougher.
+        # Resampled noise is smoother, spread noise far smoother, sharpened
+        # noise rougher.
         if change == "resample":
-            assert neighbours(references) > 0.05
+            assert 0.05 < neighbours(references) < 0.3
+        elif change == "spread":
+            assert neighbours(references) > 0.4
         else:
             assert neighbours(references) < -0.02
+
+
+def test_a_box_shares_a_pixel_among_the_pixels_it_covers():
+    from seiza_training.noise_model import SPREAD_WIDTHS, box_weights
+
+    assert box_weights(2.0, 0.5) == pytest.approx([0.0, 0.0, 0.5, 0.5, 0.0])
+    assert box_weights(3.0, 0.0) == pytest.approx([0.0, 1 / 3, 1 / 3, 1 / 3, 0.0])
+    # The widest box at the farthest offset still falls within the five.
+    widest = box_weights(SPREAD_WIDTHS[1], 0.999)
+    assert widest[-1] == pytest.approx(0.999 / SPREAD_WIDTHS[1]) and widest[0] == 0.0
+    assert widest.sum() == pytest.approx(1.0)
+
+
+def test_the_stability_probe_finds_a_model_that_throws_pixels():
+    from seiza_training.noise_model import STABILITY_AMOUNTS, STABILITY_SPREADS, stability
+
+    class Still(torch.nn.Module):
+        def forward(self, x):
+            return torch.zeros_like(x[:, :1])
+
+    class Loud(torch.nn.Module):
+        def forward(self, x):
+            return 1000.0 * x[:, :1]
+
+    inference = {"tile": 64, "overlap": 32, "margin": 8, "multiple": 1}
+    still = stability(Still(), inference, size=128)
+    assert len(still["steps"]) == len(STABILITY_SPREADS) * len(STABILITY_AMOUNTS)
+    assert still["largest"] == 0.0 and still["stable"]
+    loud = stability(Loud(), inference, sky="flat", size=128)
+    assert loud["largest"] > 1000 and not loud["stable"]
 
 
 def test_a_sky_plane_reaches_the_input_alone():

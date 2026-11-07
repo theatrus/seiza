@@ -159,6 +159,9 @@ def main(argv: list[str] | None = None) -> int:
     train.add_argument("--sharpen", type=float, default=0.0,
                        help="sharpen this share of the tiles by an unsharp mask, both halves and the noise map "
                             "alike")
+    train.add_argument("--spread", type=float, default=0.0,
+                       help="spread this share of the tiles over a box 1.5 to 3 pixels wide, as drizzle spreads "
+                            "each frame's pixels, both halves and the noise map alike")
     train.add_argument("--gradient", type=float, default=0.0,
                        help="put a sky plane under half the input tiles, offset up to this many σ̄ and tilted "
                             "up to half of it across the tile")
@@ -189,6 +192,10 @@ def main(argv: list[str] | None = None) -> int:
                           help="the Gaussian scale in pixels dividing the grain from the mottle")
     evaluate.add_argument("--match-flux", action="store_true",
                           help="measure against each B half scaled onto its A half's background and bright flux")
+
+    stability = commands.add_parser("stability-noise",
+                                    help="measure how far a trained noise model throws pixels on spread noise")
+    stability.add_argument("--name", required=True)
 
     bundle = commands.add_parser("bundle-noise", help="write a trained noise model as a bundle Seiza's runtime opens")
     bundle.add_argument("--name", required=True, help="the run")
@@ -337,7 +344,8 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
             scale_loss=arguments.scale_loss, scale_weight=arguments.scale_weight, rewind=arguments.rewind,
             precision=arguments.precision, prefetch=arguments.prefetch, batch_threads=arguments.batch_threads,
             sky=arguments.sky, resample=arguments.resample, sharpen=arguments.sharpen, gradient=arguments.gradient,
-            bin_fraction=arguments.bin_fraction, dark_spot_count=arguments.dark_spot_count, **extra,
+            bin_fraction=arguments.bin_fraction, dark_spot_count=arguments.dark_spot_count, spread=arguments.spread,
+            **extra,
         )
         return {**record, "sheets": render_saved(store, manifest, arguments.name)}
     if command == "sheet-noise":
@@ -351,6 +359,10 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
         bands = NoiseBands(high=arguments.high_amount, low=arguments.low_amount, scale_px=arguments.band_scale)
         return evaluate_saved(store, manifest, arguments.name, split=arguments.split, limit=arguments.limit, sets=only,
                               bands=bands, match_flux=arguments.match_flux, noise_map=arguments.noise_map)
+    if command == "stability-noise":
+        from .noise_model import stability_saved
+
+        return stability_saved(store, arguments.name)
     if command == "bundle-noise":
         from .bundle import write_bundle
 

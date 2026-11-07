@@ -836,6 +836,10 @@ FILTER_MARGIN = 8
 # and the share of the image less its blur it adds, drawn log-uniformly.
 SHARPEN_WIDTHS = (0.7, 2.0)
 SHARPEN_AMOUNTS = (0.2, 1.0)
+# The boxes `spread_out` draws from, their width in pixels: a 2x drizzle
+# drops each frame's pixel on a box about 2 output pixels wide, less with a
+# smaller drop, a 3x one on about 3.
+SPREAD_WIDTHS = (1.5, 3.0)
 # The share of tiles given a sky plane, and its least offset and tilt in σ̄.
 GRADIENT_SHARE = 0.5
 GRADIENT_LEAST = 0.5
@@ -857,17 +861,44 @@ def separable(plane: np.ndarray, weights: np.ndarray, lead: int, start: int, siz
     return taps(down, weights[1], lead, start, size, 1)
 
 
-def shifted(planes: tuple[np.ndarray, ...], variance: np.ndarray, rng: np.random.Generator, margin: int,
-            size: int) -> tuple[tuple[np.ndarray, ...], np.ndarray, float]:
-    """`planes` moved by one sub-pixel offset through Lanczos-3, as
-    registration resamples a frame, and their noise's `variance` through
-    the squared weights, with the share of white noise's variance that
-    is left."""
-    rows, columns = (lanczos3(offset) for offset in rng.random(2))
-    weights = (rows, columns)
+def through(planes: tuple[np.ndarray, ...], variance: np.ndarray, weights: tuple[np.ndarray, np.ndarray],
+            margin: int, size: int) -> tuple[tuple[np.ndarray, ...], np.ndarray, float]:
+    """`planes` through the separable `weights`, down and across from two
+    pixels before, and their noise's `variance` through the squared
+    weights, with the share of white noise's variance that is left."""
+    rows, columns = weights
     moved = tuple(separable(plane, weights, 2, margin, size) for plane in planes)
     squared = (rows**2, columns**2)
     return moved, separable(variance, squared, 2, margin, size), float(squared[0].sum() * squared[1].sum())
+
+
+def shifted(planes: tuple[np.ndarray, ...], variance: np.ndarray, rng: np.random.Generator, margin: int,
+            size: int) -> tuple[tuple[np.ndarray, ...], np.ndarray, float]:
+    """`planes` moved by one sub-pixel offset through Lanczos-3, as
+    registration resamples a frame, `through` its weights."""
+    rows, columns = (lanczos3(offset) for offset in rng.random(2))
+    return through(planes, variance, (rows, columns), margin, size)
+
+
+def box_weights(width: float, offset: float) -> np.ndarray:
+    """The share of a box `width` pixels wide (at most 3), centred `offset`
+    (0 to 1) past a pixel, that falls on each of the five pixels from two
+    before it to two after."""
+    centres = np.arange(-2, 3, dtype=np.float64)
+    low, high = offset - width / 2, offset + width / 2
+    overlap = np.clip(np.minimum(centres + 0.5, high) - np.maximum(centres - 0.5, low), 0.0, None)
+    return overlap / overlap.sum()
+
+
+def spread_out(planes: tuple[np.ndarray, ...], variance: np.ndarray, rng: np.random.Generator, margin: int,
+               size: int) -> tuple[tuple[np.ndarray, ...], np.ndarray, float]:
+    """`planes` spread over a box `SPREAD_WIDTHS` wide at a random
+    sub-pixel offset, as drizzle spreads a frame's pixel over the output
+    pixels its drop covers, `through` the box's weights. Drizzle spreads
+    the noise far more than registration does, and models that never saw
+    it have thrown pixels thousands of σ̄ on a drizzle's edges."""
+    rows, columns = (box_weights(rng.uniform(*SPREAD_WIDTHS), offset) for offset in rng.random(2))
+    return through(planes, variance, (rows, columns), margin, size)
 
 
 def sharpened(planes: tuple[np.ndarray, ...], variance: np.ndarray, rng: np.random.Generator, margin: int,
@@ -921,6 +952,7 @@ def batch_from(
     sharpen: float = 0.0,
     gradient: float = 0.0,
     dark_spot_count: float = 0.0,
+    spread: float = 0.0,
 ) -> tuple[torch.Tensor, ...]:
     """`size` tiles at random windows and offsets, each flipped and turned
     one of eight ways: the network's input (its noise map as `noise_plane`
@@ -940,15 +972,16 @@ def batch_from(
     The halves are changed alike, after the outliers, which keeps their
     noise independent: with `dark_spot_count`, both gain the same
     `dark_spots` that many per 256 × 256 pixels, so the target keeps them;
-    `resample` of the tiles are `shifted` and `sharpen` of them
-    `sharpened`, the noise map and σ̄ following, and with
+    `resample` of the tiles are `shifted`, `sharpen` of them `sharpened`
+    and `spread` of them `spread_out`, the noise map and σ̄ following, and
+    with
     `gradient`, `GRADIENT_SHARE` of them gain a `sky_plane` up to that many
     σ̄ under the input. The target would gain it too, but the loss, which
     takes the input from its estimate, would not see it there, and the
     loss's weights are kept on the target's own brightness."""
     count = len(banked["a"])
     picks = rng.choice(count, size, p=odds) if odds is not None else rng.integers(0, count, size)
-    margin = FILTER_MARGIN if resample or sharpen else 0
+    margin = FILTER_MARGIN if resample or sharpen or spread else 0
     span = tile + 2 * margin
     inputs, targets, references, sigmas = [], [], [], []
     for index in picks:
@@ -971,7 +1004,8 @@ def batch_from(
             a, b = a + spots, b + spots
         if margin:
             choice = rng.random()
-            change = shifted if choice < resample else sharpened if choice < resample + sharpen else None
+            change = (shifted if choice < resample else sharpened if choice < resample + sharpen
+                      else spread_out if choice < resample + sharpen + spread else None)
             if change is None:
                 inner = slice(margin, margin + tile)
                 a, sigma, b = a[inner, inner], sigma[inner, inner], b[inner, inner]
@@ -1215,6 +1249,7 @@ def train(
     gradient: float = 0.0,
     bin_fraction: float = 0.0,
     dark_spot_count: float = 0.0,
+    spread: float = 0.0,
 ) -> dict[str, Any]:
     """Train a noise model on the train split's pairs, evaluate it on the
     validation split's, export it to ONNX and record the run.
@@ -1226,10 +1261,11 @@ def train(
     and the history records where.
 
     The network reads the sky as `sky` says (see `SKIES`), in training,
-    evaluation and the sheets. `resample`, `sharpen`, `gradient` and
-    `dark_spot_count` change both halves of the tiles alike (see
+    evaluation and the sheets. `resample`, `sharpen`, `spread`, `gradient`
+    and `dark_spot_count` change both halves of the tiles alike (see
     `batch_from`), and `bin_fraction` of every batch comes from the pairs
-    binned 2 × 2, `BINNED_WINDOWS` of each cut with the bank.
+    binned 2 × 2, `BINNED_WINDOWS` of each cut with the bank. The record
+    holds the trained model's `stability` on spread noise.
 
     `extra` is a second bank from `cut_windows`, of other targets for
     their inputs; it makes up `extra_fraction` of every batch, and the run
@@ -1257,10 +1293,11 @@ def train(
         raise ValueError(f"noise_plane is one of {NOISE_PLANES}, not {noise_plane!r}")
     if sky not in SKIES:
         raise ValueError(f"sky is one of {SKIES}, not {sky!r}")
-    if resample < 0 or sharpen < 0 or resample + sharpen > 1:
-        raise ValueError(f"the shares of tiles shifted ({resample}) and sharpened ({sharpen}) add up to at most 1")
-    if (resample or sharpen) and tile + 2 * FILTER_MARGIN > WINDOW:
-        raise ValueError(f"a shifted or sharpened tile reads {FILTER_MARGIN} pixels more on each side: "
+    if resample < 0 or sharpen < 0 or spread < 0 or resample + sharpen + spread > 1:
+        raise ValueError(f"the shares of tiles shifted ({resample}), sharpened ({sharpen}) and spread ({spread}) "
+                         "add up to at most 1")
+    if (resample or sharpen or spread) and tile + 2 * FILTER_MARGIN > WINDOW:
+        raise ValueError(f"a shifted, sharpened or spread tile reads {FILTER_MARGIN} pixels more on each side: "
                          f"the tile, {tile}, is at most {WINDOW - 2 * FILTER_MARGIN}")
     if any(k < 2 or tile % k for k in scale_loss):
         raise ValueError(f"each of the loss's scales {scale_loss} must be at least 2 and divide the tile, {tile}")
@@ -1291,7 +1328,7 @@ def train(
     binned_odds = structure_odds(banked["binned"], structure_sampling) if binned_count else None
     changes = {"map_jitter": map_jitter, "outlier_count": outlier_count, "outlier_floor": outlier_floor,
                "outlier_scale": outlier_scale, "noise_plane": noise_plane, "resample": resample,
-               "sharpen": sharpen, "gradient": gradient, "dark_spot_count": dark_spot_count}
+               "sharpen": sharpen, "gradient": gradient, "dark_spot_count": dark_spot_count, "spread": spread}
 
     def assemble(step: int) -> tuple[torch.Tensor, ...]:
         rng = step_generator(seed, step)
@@ -1363,6 +1400,9 @@ def train(
     validation["dark_noise"] = evaluate_dark_noise(store, manifest, model, split="validation", **inference,
                                                    sets=validation_sets, noise_map=noise_map,
                                                    noise_plane=noise_plane, sky=sky)
+    steady = stability(model, inference, sky=sky, noise_plane=noise_plane)
+    print(f"train {name}: largest step on spread noise {steady['largest']:.0f}σ̄"
+          f"{'' if steady['stable'] else ', a blow-up'}", flush=True)
     exported = export(model, directory / "model.onnx", tile=512)
     record = {
         "name": name,
@@ -1381,7 +1421,7 @@ def train(
                    "rewind": rewind, "rewinds": guard.count if guard else 0,
                    "rewind_rate": guard.rate if guard else 1.0, "sky": sky, "resample": resample,
                    "sharpen": sharpen, "gradient": gradient, "bin_fraction": bin_fraction,
-                   "dark_spots": dark_spot_count,
+                   "dark_spots": dark_spot_count, "spread": spread,
                    "binned_windows": int(len(banked["binned"]["a"])) if bin_fraction else None,
                    "extra": {"label": extra_label, "fraction": extra_fraction, "windows": int(len(extra["a"]))}
                    if extra is not None else None},
@@ -1392,6 +1432,7 @@ def train(
         "seconds": {"bank": round(bank_seconds, 1), "train": round(train_seconds, 1)},
         "history": history,
         "validation": validation,
+        "stability": steady,
         "export": exported,
         "versions": versions(),
     }
@@ -2036,3 +2077,49 @@ def evaluate_saved(
     return {key: value for key, value in result.items() if key != "pairs_detail"} | {
         "dark_noise": {key: value for key, value in result["dark_noise"].items() if key != "pairs_detail"}
     }
+
+
+# The stability probe's noise: spread over boxes of these sides in pixels,
+# at these multiples of the noise the network is told.
+STABILITY_SPREADS = (1, 2, 3, 4)
+STABILITY_AMOUNTS = (1.0, 1.5, 2.0, 3.0, 5.0)
+# A step past this many σ̄ is a blow-up: the noise itself reaches about
+# 5σ̄ at its own level and 25σ̄ at five times it, and stable models' steps
+# stay near that.
+STABILITY_LIMIT = 100.0
+
+
+def stability(model: ResidualUNet, inference: dict[str, int], *, sky: str = "global", noise_plane: str = "linear",
+              size: int = 1024, seed: int = 7) -> dict[str, Any]:
+    """How far a model throws a pixel on synthetic sky: flat, with Gaussian
+    noise spread over k × k boxes (`STABILITY_SPREADS`; a 2x drizzle
+    spreads it over about 2) at multiples of the noise the network is told
+    (`STABILITY_AMOUNTS`), the largest step in σ̄ for each, and whether all
+    stay within `STABILITY_LIMIT`. The halves' measures never show it: some
+    models that measure as well as any throw pixels thousands of σ̄ on
+    spread noise, as on a drizzle's edges."""
+    white = np.random.default_rng(seed).standard_normal((size + 3, size + 3)).astype(np.float32)
+    where = device()
+    level, told = 100.0, 1.0
+    steps = {}
+    for side in STABILITY_SPREADS:
+        field = sum(white[dy:dy + size, dx:dx + size] for dy in range(side) for dx in range(side))
+        field = field / field.std()
+        for amount in STABILITY_AMOUNTS:
+            image = (level + amount * told * field).astype(np.float32)
+            planes, background, noise = view(image, np.full_like(image, told), sky=sky, noise_plane=noise_plane)
+            residual = infer(denoiser(model, background, noise, where), planes, **inference)[0]
+            steps[f"{side}px x{amount:g}"] = float(np.abs(residual).max() / noise)
+    largest = max(steps.values())
+    return {"steps": steps, "largest": largest, "stable": largest <= STABILITY_LIMIT}
+
+
+def stability_saved(store: Store, name: str) -> dict[str, Any]:
+    """A recorded run's `stability`, added to its record."""
+    directory = store.root / "models" / "noise" / name
+    record, model = load_run(store, name)
+    config = record["config"]
+    record["stability"] = stability(model, record["inference"], sky=config.get("sky", "global"),
+                                    noise_plane=config.get("noise_plane", "linear"))
+    (directory / "run.json").write_text(json.dumps(record, indent=2))
+    return record["stability"]

@@ -620,6 +620,27 @@ and half sharp as drizzle leaves them, for the model to keep as they are.
 The cold pixels the outlier plant puts in the input alone stop at −30σ̄, so
 a shallow one is still taken out.
 
+The run that took the sky out, with the gradient and a tenth binned, on the
+restacked corpus, broke on the drizzled masters' edges. Where a drizzle's
+coverage thins, over its last 100–200 rows or columns, the noise rises to
+1.3–1.8 times the image's and is spread wider still. There the model moved
+pixels by up to 4,100σ̄, 1.6 million of them on one 2× drizzle, where the
+input stayed within 20σ̄. The input was otherwise ordinary, and with rows
+cut off the image the band stayed on the same rows, not on the same tiles.
+Synthetic sky reproduces it: Gaussian noise spread over boxes 2–4 pixels
+wide, at 1.5 to 3 times the level the model is told, made the same model
+step up to 6,200σ̄. Of 16 models probed so, one more blows up: an earlier,
+narrower one reading the plain sky, by up to 13,300σ̄ at 1 to 1.5 times.
+The other 14 stay within 61σ̄, most within 30σ̄. The sky, the width and
+the rewinds do not explain it: the first rewound five times, its loss
+once reaching 10¹³, but the second never rewound. Some trainings end with
+weights that throw a texture they never saw, and the halves' measures do
+not show it. So every run now records its largest step on spread noise,
+20 cases of spread and level (`stability-noise` probes a run trained
+before), and training can spread a share of its tiles over a box 1.5 to 3
+pixels wide at a random offset, both halves and the map alike, as drizzle
+spreads a frame's pixel (`--spread`).
+
 So a model needs only the image and its noise level, which the image gives.
 Runs trained blind are being measured against runs that read the stack's
 map. The image map is the fallback if the blind runs lose. A model that
