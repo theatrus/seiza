@@ -294,8 +294,7 @@ fn usable(path: &Path, source: &str) -> Result<PathBuf, String> {
 
 impl Backend {
     /// Every backend, best first. Apple's GPU comes before its Neural Engine:
-    /// on an otherwise idle M4 Max it was faster, with about a 35th of the
-    /// error on the sky.
+    /// on an otherwise idle M4 Max it was faster, at f32 as well as f16.
     pub const ALL: [Backend; 8] = [
         Self::CoreMl(CoreMlUnits::Gpu),
         Self::CoreMl(CoreMlUnits::NeuralEngine),
@@ -307,10 +306,12 @@ impl Backend {
         Self::Cpu,
     ];
 
-    /// The precision this backend runs unless asked otherwise.
+    /// The precision this backend runs unless asked otherwise. Only the Neural
+    /// Engine needs f16: on Apple's GPU it saved 8% of the time, for about 800
+    /// times the error on the sky.
     pub fn default_precision(self) -> Precision {
         match self {
-            Self::CoreMl(CoreMlUnits::NeuralEngine | CoreMlUnits::Gpu) => Precision::F16,
+            Self::CoreMl(CoreMlUnits::NeuralEngine) => Precision::F16,
             _ => Precision::F32,
         }
     }
@@ -415,10 +416,13 @@ mod tests {
     }
 
     #[test]
-    fn the_accelerated_core_ml_units_default_to_f16_and_a_large_tile() {
+    fn only_the_neural_engine_defaults_to_f16_and_both_take_a_large_tile() {
         let engine = Backend::CoreMl(CoreMlUnits::NeuralEngine);
+        let gpu = Backend::CoreMl(CoreMlUnits::Gpu);
         assert_eq!(engine.default_precision(), Precision::F16);
+        assert_eq!(gpu.default_precision(), Precision::F32);
         assert_eq!(engine.default_tile(), Some(1024));
+        assert_eq!(gpu.default_tile(), Some(1024));
         assert_eq!(Backend::Cpu.default_precision(), Precision::F32);
         assert_eq!(Backend::Cpu.default_tile(), None);
     }

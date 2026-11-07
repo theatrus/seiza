@@ -22,7 +22,7 @@ A model ships as one dynamic ONNX graph per precision plus a model card.
 Seiza's Rust code does everything around the graph: sky, noise input, tiling,
 blending, the output bound and provenance. The backend only runs tiles.
 
-A 61 MP frame should take about 14 seconds on an M4 Max's GPU, the default,
+A 61 MP frame should take about 15 seconds on an M4 Max's GPU, the default,
 with the current 41M-parameter model, or about 16 on its Neural Engine. Those
 are estimates from measured 26 MP runs.
 
@@ -183,12 +183,16 @@ the same size, so the Neural Engine may well be the faster one there.
    There is no stable 2.0 yet, so the pin is exact, and Dependabot needs an
    ignore rule. With no `api-N` feature, `ort` asks only for ONNX Runtime 1.17
    or later.
-6. **The GPU is the default on Apple hardware.** Decided. With nothing else
-   on it, it took 5.9 s at f16 against the Neural Engine's 6.7 s, with
-   0.0004σ̄ of error on the sky against 0.0147σ̄, inside the 0.01σ every other
-   backend is held to. `--backend neural-engine` still runs there, which
-   leaves the GPU free and keeps its time when the GPU is busy, and `detect`
-   picks it only for a card that leaves the GPU out.
+6. **The GPU at f32 is the default on Apple hardware.** Decided. With nothing
+   else on it, it took 6.4 s against the Neural Engine's 6.7 s, and its result
+   is the CPU's to 4.9e-7σ̄ on the sky and 0.0011σ̄ on the brightest star. f16
+   would save 0.5 s for about 800 times that error on the sky, so it is for
+   the Neural Engine, which needs it, or for `--precision f16`.
+   `--backend neural-engine` leaves the GPU free and keeps its time when the
+   GPU is busy, and `detect` picks it only for a card that leaves the GPU out.
+   The price is memory: a 26 MP run's peak footprint at a 1024 tile was 3.9 GB
+   at f32, 2.5 GB at f16 and 1.1 GB on the Neural Engine. On an 8 GB Mac that
+   may call for `--tile 512`, which has not been tried there.
 
 ## The crate
 
@@ -244,7 +248,7 @@ is what a user needs when a GPU goes unused.
 
 | Hardware | Order tried | Graph |
 |---|---|---|
-| Apple Silicon | GPU, Neural Engine, CPU | f16, then f32 for CPU |
+| Apple Silicon | GPU, Neural Engine, CPU | f32, or f16 on the Neural Engine |
 | NVIDIA | decided by the measurements; see [Work order](#work-order) | f16 or f32 |
 | Intel and AMD GPUs | WebGPU if measured worthwhile, else CPU | f32, or f16 if parity holds |
 | Anything else | CPU | f32 |

@@ -175,7 +175,7 @@ fn a_mac_picks_the_gpu_unless_the_card_leaves_it_out() {
         Backend::CoreMl(CoreMlUnits::NeuralEngine)
     );
     assert_eq!(detect(&["cpu"]), Backend::Cpu);
-    assert_eq!(gpu.default_precision(), Precision::F16);
+    assert_eq!(gpu.default_precision(), Precision::F32);
 }
 
 #[test]
