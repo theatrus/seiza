@@ -1,6 +1,6 @@
 # seiza (星座)
 
-[![MSRV](https://img.shields.io/badge/MSRV-1.89-blue.svg)](Cargo.toml)
+[![MSRV](https://img.shields.io/badge/MSRV-1.92-blue.svg)](Cargo.toml)
 
 Astrophotography tools in Rust, available as a CLI, Python package, Rust crates,
 and C ABI.
@@ -36,7 +36,7 @@ and C ABI.
 | Windows app | [Seiza for Windows](https://github.com/theatrus/seiza-win) |
 | CLI, macOS/Linux | `brew install theatrus/seiza/seiza` |
 | CLI, Windows/Fedora/Ubuntu | MSI, portable ZIP, RPM, or deb from [releases](https://github.com/theatrus/seiza/releases) |
-| CLI, from Rust | `cargo install seiza-cli` (Rust 1.89+) |
+| CLI, from Rust | `cargo install seiza-cli` (Rust 1.92+) |
 | Python | `pip install seiza` ([API and NumPy examples](seiza-py/README.md)) |
 | Rust / C ABI | [Crate guide](docs/README.md#rust-crates) / [native API](seiza-cabi/README.md) |
 

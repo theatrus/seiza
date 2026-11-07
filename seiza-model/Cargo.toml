@@ -1,0 +1,30 @@
+[package]
+name = "seiza-model"
+description = "Learned image restoration for astrophotography: tiling, noise input and an ONNX Runtime backend"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "README.md"
+keywords = ["astronomy", "astrophotography", "denoising", "onnx", "image-processing"]
+categories = ["science", "multimedia::images"]
+
+[dependencies]
+directories.workspace = true
+half = "2"
+libloading = "0.9"
+# `load-dynamic` links nothing: ONNX Runtime is found and opened at run time,
+# so a build needs no native library and a machine without one still runs
+# everything else in Seiza. Pinned exactly because `ort` is a release candidate
+# whose API changes between candidates.
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "half", "coreml", "cuda", "tensorrt", "nvrtx", "webgpu"] }
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
