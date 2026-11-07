@@ -272,21 +272,35 @@ Both come from `image_sigma`, so the runtime does the same work for either.
 the plane. Step 2 need not wait for the choice. A later model that drops the
 plane altogether changes only the card's named inputs.
 
-Three things are still unmeasured:
+D20, trained on the stack's map, was measured unchanged on the rebuilt
+validation sets, reading each input in turn. Its error against matched halves:
 
-- **Either input on a trained model.** No run on record has trained with
-  one, so neither has faced the gates.
-- **Other stackers.** On 24 train sets' 4-frame halves, the image map read
-  1.15–1.31 times the noise of the halves' difference on the sky, steadier
-  than the stack's modelled map at 1.19–1.61. All 24 are Seiza's stacks.
-  Second differences read correlated noise low, and each stacker's
-  resampling correlates it differently, so the level may differ on other
-  stacks. The gates need stacks from other software.
-- **A map swapped under a trained model.** D22 trained on the stack's
-  modelled map. An uncalibrated Laplacian estimate, 1.5 times that map at
-  the median, moved its residual by 0.19σ̄ RMS on one image's sky, over ten
-  times the Neural Engine's error. So a model ships with the input it trained
-  on. `evaluate-noise --noise-map` now measures such a swap on a saved model.
+| Map read | 4-frame halves | 8-frame halves |
+|---|---|---|
+| The stack's, as trained | 1.709 | 1.184 |
+| Image map | 1.760 | 1.181 |
+| Constant | 1.761 | 1.192 |
+
+The constant does as well as the image map, so the model barely uses where
+the map changes, and a host's image is enough even for a model trained with
+the stack's map.
+
+Still open:
+
+- **Models trained blind.** D27 and D28 are queued. No model trained on
+  either input has faced the gates.
+- **The worst pairs.** With the constant, a 4-frame pair's error rose 1.4% at
+  the median, but 22% on the worst. Noise level does not explain it: on nine
+  pairs from both ends and the middle, the stack's level was 0.85–1.31 times
+  the image's, and the gap did not follow the change in error. The cause is
+  unknown.
+- **Other targets and stackers.** Ten of the twelve validation sets are
+  nights of one target, and all twelve are Seiza's stacks. On 24 train sets'
+  4-frame halves, the image map read 1.15–1.31 times the noise of the halves'
+  difference on the sky, steadier than the stack's modelled map at 1.19–1.61.
+  Second differences read correlated noise low, and each stacker's resampling
+  correlates it differently, so the level may differ on other stacks. The
+  gates need other targets and stacks from other software.
 
 A variant that reads Seiza's own records may sit beside the image-only model,
 for Seiza's stacks. Nothing here builds it. If one earns its place,
@@ -444,8 +458,8 @@ requires, so earlier steps keep their items `pub(crate)` until step 4.
 Step 0 gates the rest only where it says so. Steps 1 and 2 can start at once
 and run side by side. Nothing here waits for the choice of noise input.
 Parity compares code, not models, so it can run D22 with a card that says
-`image`, as `evaluate-noise --noise-map image` does. Only a release needs a
-model that has passed its gates on an image-only input.
+`constant`, as `evaluate-noise --noise-map constant` does. Only a release
+needs a model that has passed its gates on an image-only input.
 
 ## Risks
 

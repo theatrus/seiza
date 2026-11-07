@@ -562,6 +562,17 @@ where the map changes, only its level. Read from the image instead of the
 stack, that level costs 3% on 4-frame halves and nothing on 8-frame ones.
 Against clean targets and on empty sky, nothing changes.
 
+The 3% is a mean, and most pairs lose less:
+- with the constant, a 4-frame pair's error changed by +1.4% at the median,
+  from −3% to +22%;
+- an 8-frame pair's changed by +0.3% at the median, and at most +6%.
+
+Level does not explain the worst pairs. On nine pairs from both ends and the
+middle, the stack's level was 0.85–1.31 times the image's, and the gap did
+not follow the change in error: a gap of 30% cost 1.3%, and the worst pair's
+gap was 5%. Why those pairs lose is not known. Ten of the twelve validation
+sets are nights of the Elephant's Trunk, so other targets are barely tested.
+
 So a model needs only the image and its noise level, which the image gives.
 Runs trained blind are being measured against runs that read the stack's
 map. The image map is the fallback if the blind runs lose. A model that
