@@ -419,15 +419,15 @@ fn integrate_registered_frames_plain(
     match (&options.frame_weights, first_image.channels) {
         (None, _) => {
             let weights = vec![ChannelWeights::<1>::unit(); frame_count];
-            integrate_frames::<1, false>(options, &weights, first_image, load, observe)
+            integrate_frames::<1, false>(options, &weights, first_image, &mut load, observe)
         }
         (Some(frame_weights), 1) => {
             let weights = ChannelWeights::<1>::for_frames(frame_weights)?;
-            integrate_frames::<1, true>(options, &weights, first_image, load, observe)
+            integrate_frames::<1, true>(options, &weights, first_image, &mut load, observe)
         }
         (Some(frame_weights), _) => {
             let weights = ChannelWeights::<3>::for_frames(frame_weights)?;
-            integrate_frames::<3, true>(options, &weights, first_image, load, observe)
+            integrate_frames::<3, true>(options, &weights, first_image, &mut load, observe)
         }
     }
 }
@@ -485,11 +485,13 @@ pub(crate) fn validate_options(frame_count: usize, options: &BatchStackOptions) 
 /// The three passes, one whole frame at a time, over frames of `C` channels
 /// (or any channel count when every weight is 1 and `C` is 1). `WEIGHTED`
 /// chooses West's weighted integration over Welford's.
+/// Erase only the frame loader so the Rayon passes are compiled per channel
+/// and weighting mode, rather than again for every caller's loading closure.
 fn integrate_frames<const C: usize, const WEIGHTED: bool>(
     options: &BatchStackOptions,
     weights: &[ChannelWeights<C>],
     first_image: LinearImage,
-    mut load: impl FnMut(BatchStackPass, usize) -> Result<LinearImage>,
+    load: &mut dyn FnMut(BatchStackPass, usize) -> Result<LinearImage>,
     mut observe: Option<RejectionObserver<'_>>,
 ) -> Result<BatchStackResult> {
     let frame_count = weights.len();
@@ -506,7 +508,7 @@ fn integrate_frames<const C: usize, const WEIGHTED: bool>(
     for (index, weights) in weights.iter().enumerate() {
         let image = match first_image.take() {
             Some(image) => image,
-            None => load_unchanged(options, &mut load, BatchStackPass::Estimate, index, shape)?,
+            None => load_unchanged(options, load, BatchStackPass::Estimate, index, shape)?,
         };
         checksums.push(sample_checksum(&image.data));
         first
@@ -525,7 +527,7 @@ fn integrate_frames<const C: usize, const WEIGHTED: bool>(
     for (index, (weights, &checksum)) in weights.iter().zip(&checksums).enumerate() {
         let image = load_matching(
             options,
-            &mut load,
+            load,
             BatchStackPass::Refine,
             index,
             shape,
@@ -549,7 +551,7 @@ fn integrate_frames<const C: usize, const WEIGHTED: bool>(
     for (index, (weights, &checksum)) in weights.iter().zip(&checksums).enumerate() {
         let image = load_matching(
             options,
-            &mut load,
+            load,
             BatchStackPass::Integrate,
             index,
             shape,
@@ -982,7 +984,7 @@ fn rejection_thresholds(frame_count: usize, options: &BatchStackOptions) -> Vec<
 /// the shape against the first pass.
 fn load_unchanged(
     options: &BatchStackOptions,
-    load: &mut impl FnMut(BatchStackPass, usize) -> Result<LinearImage>,
+    load: &mut (impl FnMut(BatchStackPass, usize) -> Result<LinearImage> + ?Sized),
     pass: BatchStackPass,
     index: usize,
     shape: Option<(usize, usize, usize)>,
@@ -998,7 +1000,7 @@ fn load_unchanged(
 /// pass saw.
 fn load_matching(
     options: &BatchStackOptions,
-    load: &mut impl FnMut(BatchStackPass, usize) -> Result<LinearImage>,
+    load: &mut (impl FnMut(BatchStackPass, usize) -> Result<LinearImage> + ?Sized),
     pass: BatchStackPass,
     index: usize,
     shape: Option<(usize, usize, usize)>,
