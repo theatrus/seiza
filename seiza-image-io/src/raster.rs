@@ -71,11 +71,13 @@ pub fn open_oriented(path: &Path) -> Result<OrientedRaster, Error> {
 }
 
 /// Decode raster bytes, such as an upload, and apply their EXIF orientation.
+/// Refuse decoded pixels larger than the image crate's default allocation
+/// budget before constructing their buffer.
 pub fn decode_oriented(bytes: &[u8]) -> Result<OrientedRaster, Error> {
     let reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(image::ImageError::IoError)?;
-    oriented(reader, None)
+    oriented(reader, image::Limits::default().max_alloc)
 }
 
 /// The decoded raster, refused when its pixels would take more than
@@ -548,6 +550,27 @@ pub mod test_support {
 mod tests {
     use super::test_support::{ascii, exif_block, field, jpeg_with_exif, rationals};
     use super::*;
+
+    #[test]
+    fn the_pixel_budget_counts_decoded_samples_and_accepts_the_exact_limit() {
+        let pixels = image::ImageBuffer::from_pixel(1, 1, image::Rgba([1_u16, 2, 3, u16::MAX]));
+        let mut bytes = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba16(pixels.clone())
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        assert!(bytes.get_ref().len() > 8);
+        let reader = || {
+            ImageReader::new(Cursor::new(bytes.get_ref()))
+                .with_guessed_format()
+                .unwrap()
+        };
+        assert!(matches!(
+            oriented(reader(), Some(7)),
+            Err(RasterError::Image(image::ImageError::Limits(_)))
+        ));
+        let decoded = oriented(reader(), Some(8)).unwrap();
+        assert_eq!(decoded.pixels.into_rgba16(), pixels);
+    }
 
     #[test]
     fn a_header_claiming_gigapixels_is_refused_not_allocated() {
