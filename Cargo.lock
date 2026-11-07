@@ -3512,6 +3512,7 @@ name = "seiza-stacking"
 version = "0.57.0"
 dependencies = [
  "bytemuck",
+ "flate2",
  "fs2",
  "libc",
  "multiversion",

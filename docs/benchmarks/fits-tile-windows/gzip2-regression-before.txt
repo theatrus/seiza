@@ -1,0 +1,23 @@
+    Blocking waiting for file lock on build directory
+   Compiling seiza-fits v0.8.0 (/home/ppicazo/Development/seiza/seiza-fits)
+    Finished `test` profile [optimized + debuginfo] target(s) in 40.45s
+     Running unittests src/lib.rs (target/debug/deps/seiza_fits-8f1ecd26d2e6e7f5)
+
+running 1 test
+test compressed::tests::gzip_2_rejects_partial_shuffled_samples ... FAILED
+
+failures:
+
+---- compressed::tests::gzip_2_rejects_partial_shuffled_samples stdout ----
+
+thread 'compressed::tests::gzip_2_rejects_partial_shuffled_samples' (342) panicked at seiza-fits/src/compressed.rs:1785:13:
+accepted a 2-byte sample tile with an extra byte
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    compressed::tests::gzip_2_rejects_partial_shuffled_samples
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 78 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p seiza-fits --lib`
