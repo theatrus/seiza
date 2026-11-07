@@ -186,6 +186,15 @@ def main(argv: list[str] | None = None) -> int:
     evaluate.add_argument("--match-flux", action="store_true",
                           help="measure against each B half scaled onto its A half's background and bright flux")
 
+    bundle = commands.add_parser("bundle-noise", help="write a trained noise model as a bundle Seiza's runtime opens")
+    bundle.add_argument("--name", required=True, help="the run")
+    bundle.add_argument("--out", required=True, type=Path, help="the bundle's directory")
+    bundle.add_argument("--bundle-name", required=True, help="the model's name on its card")
+    bundle.add_argument("--noise-map", choices=("image", "constant"),
+                        help="what the network reads, in place of the map it trained with")
+    bundle.add_argument("--parity", action="append", default=[],
+                        help="a backend the model has passed parity on (default: any may run it)")
+
     split = commands.add_parser("split", help="assign sky groups and train/validation/test splits")
     split.add_argument("--hold-out", help="a telescope whose groups are all test")
 
@@ -338,6 +347,11 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
         bands = NoiseBands(high=arguments.high_amount, low=arguments.low_amount, scale_px=arguments.band_scale)
         return evaluate_saved(store, manifest, arguments.name, split=arguments.split, limit=arguments.limit, sets=only,
                               bands=bands, match_flux=arguments.match_flux, noise_map=arguments.noise_map)
+    if command == "bundle-noise":
+        from .bundle import write_bundle
+
+        return write_bundle(store, arguments.name, arguments.out, name=arguments.bundle_name,
+                            noise_map=arguments.noise_map, parity=tuple(arguments.parity))
     if command == "split":
         from .splits import assign_splits
 

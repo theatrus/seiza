@@ -1390,10 +1390,10 @@ Neural Engine. It also records that the output bound below has not been
 implemented, and that no run has yet been measured with an estimated noise
 map.
 
-A new crate, `seiza-restore`, runs the models and holds the three operations.
+A new crate, `seiza-model`, runs the models and holds the three operations.
 The classical operations stay where they belong: Richardson–Lucy in
 `seiza-deconvolution`, and the PSF field and catalogue-guided star removal in
-`seiza-stars` and `seiza-stacking`. `seiza-restore` has its own
+`seiza-stars` and `seiza-stacking`. `seiza-model` has its own
 `OUTPUT_VERSION` and `output_version` test, under the rules in
 [AGENTS.md](../../AGENTS.md). That test runs a small committed fixture model
 on ONNX Runtime's CPU provider, which is deterministic.
@@ -1437,7 +1437,7 @@ at first. ONNX Runtime's OpenVINO and DirectML providers drop in through the
 same binding if R0's CPU timings show the need.
 
 Without a usable backend, a learned operation returns
-`RestoreError::BackendUnavailable` with the reason, and the classical
+`ModelError::BackendUnavailable` with the reason, and the classical
 operation remains.
 
 Initial targets for a 61 MP mono frame, to be replaced by R0's measurements:
@@ -1545,15 +1545,16 @@ so hosts include the backend and precision in their cache keys.
 Following the [Rust-first rules](../../AGENTS.md#the-rust-api-comes-first):
 
 ```rust
-let backend = Backend::detect(&BackendOptions::default())?;
+let options = BackendOptions::default();
+let backend = Backend::detect(&noise_bundle, &options)?;
 
-let model = NoiseModel::open(&noise_bundle, &backend)?;
+let mut model = NoiseModel::open(&noise_bundle, backend, &options)?;
 let result = model.denoise(&image, &DenoiseOptions::default())?;
 // Per-band amounts of the removed noise: no second inference.
 let image = result.blend(&NoiseBands { high: 0.9, low: 0.5, scale_px: 5.0 });
 
 let psf = PsfField::measure(&image, &PsfFieldOptions::default())?;
-let sharpened = PsfModel::open(&psf_bundle, &backend)?.sharpen(
+let sharpened = PsfModel::open(&psf_bundle, backend, &options)?.sharpen(
     &image,
     &psf,
     &SharpenOptions {
@@ -1565,7 +1566,7 @@ let sharpened = PsfModel::open(&psf_bundle, &backend)?.sharpen(
 )?;
 // sharpened.report holds the reblur χ² and the trained-range checks.
 
-let StarLayers { starless, stars } = StarModel::open(&star_bundle, &backend)?
+let StarLayers { starless, stars } = StarModel::open(&star_bundle, backend, &options)?
     .separate(&sharpened.image)?;
 ```
 
@@ -1580,7 +1581,7 @@ The types follow the same rules:
 - `NoiseBands` holds the high- and low-frequency amounts and the scale that
   divides them.
 
-Refusals are variants of a `RestoreError`, made where they happen:
+Refusals are variants of a `ModelError`, made where they happen:
 
 - `WrongDomain`;
 - `BayerInput`;
@@ -1709,7 +1710,7 @@ Every restored FITS records:
 - the backend and precision;
 - the options and the conditioning values;
 - the tile size and overlap;
-- the software version and `seiza-restore`'s `OUTPUT_VERSION`;
+- the software version and `seiza-model`'s `OUTPUT_VERSION`;
 - a summary of the trained-range checks and, for sharpening, the reblur χ².
 
 The input is never changed. Hosts key cached results on the crate's

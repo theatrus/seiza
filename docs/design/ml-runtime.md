@@ -1,14 +1,13 @@
 # Learned model runtime
 
-Status: proposed. Nothing here is built yet. The measurements are from
-Python through ONNX Runtime and Core ML, on one Mac. A Rust spike comes
-first, and the NVIDIA and Intel measurements come when those machines are
-arranged (see [Work order](#work-order)).
+Status: a first build works through the CLI, the C ABI and Python (see
+[Work order](#work-order)). Every figure from it was measured on one Mac. The
+NVIDIA and Intel measurements come when those machines are arranged.
 
 ## Short answer
 
 The training harness runs our models in Python. This plan moves that into a
-new crate, `seiza-restore`, reached from the CLI, the C ABI and Python.
+new crate, `seiza-model`, reached from the CLI, the C ABI and Python.
 
 One binding runs every model on every platform: ONNX Runtime, through the
 `ort` crate. On Apple hardware it drives Core ML, so models still run on the
@@ -129,6 +128,25 @@ Engine at 0.32 s per 1024 tile and on the GPU at f16 at 0.86 s, which puts a
 graph in no time, then failed at its first run with "Error executing model".
 The cache directory has to carry the tile size itself.
 
+**From Rust.** `seiza model denoise` ran D22 on the same image, reading the
+constant map, with Microsoft's 1.31.1 macOS library. The reference is the
+harness on the same graph through ONNX Runtime's CPU provider. Times cover the
+whole run, the noise input and sky included.
+
+| Backend | Precision | Tile | 26 MP whole | Sky RMS | Sky mean | Largest |
+|---|---|---|---|---|---|---|
+| CPU | f32 | 512 | 165 s | 1e-8 | 0 | 1.2e-5 |
+| GPU | f32 | 1024 | 10.1 s | 4.9e-7 | 0 | 0.0011 |
+| GPU | f16 | 1024 | 9.4 s | 0.0004 | −5e-6 | 0.81 |
+| Neural Engine | f16 | 1024 | 6.9 s | 0.0147 | −0.0013 | 1.06 |
+| Neural Engine | f16 | 512 | 15.6 s | 0.0147 | −0.0013 | 1.06 |
+
+The Rust path reproduces the harness, and the Neural Engine's time matches
+Python's. With the GPU free of other work, it ran the image in 9–10 s, not the
+25–31 s above. So the Neural Engine is 1.4 times faster than the GPU at f16,
+not 3.7 times, for 34 times the sky error. Its mean error here is closer to
+its budget than the −0.0005σ̄ above.
+
 **Not yet measured:** anything on NVIDIA or Intel; anything from Rust; any
 Neural Engine older than the M4's; a loaded-versus-idle GPU comparison.
 
@@ -153,34 +171,39 @@ Neural Engine older than the M4's; a loaded-versus-idle GPU comparison.
    any backend. With 15% of the noise kept, an error that size adds about
    0.5% to the noise left, in quadrature. A model still earns the Neural
    Engine by passing its own parity run.
-5. **Pin `ort` to `=2.0.0-rc.13`.** It is the newest release that fits our
-   Rust 1.89 floor; rc.15 needs 1.92. There is no stable 2.0 yet. Dependabot
-   needs an ignore rule, or the floor moves.
+5. **Pin `ort` to `=2.0.0-rc.15` and raise the Rust floor to 1.92.** Decided.
+   There is no stable 2.0 yet, so the pin is exact, and Dependabot needs an
+   ignore rule. With no `api-N` feature, `ort` asks only for ONNX Runtime 1.17
+   or later.
 
 ## The crate
 
-`seiza-restore` depends on neither `seiza-stacking` nor `seiza-stars`
+`seiza-model` depends on neither `seiza-stacking` nor `seiza-stars`
 for the noise model. It takes a borrowed image and makes everything else a
 model reads from it.
 
 ```text
-seiza-restore/src/
-  lib.rs       NoiseModel, Denoised, RestoreError, OUTPUT_VERSION
+seiza-model/src/
+  lib.rs       the public names and OUTPUT_VERSION
+  model.rs     NoiseModel, Denoised, ImageView
   backend.rs   Backend, BackendOptions, detection, library search
-  session.rs   TileRunner, the ONNX Runtime session, the compile cache
+  session.rs   the ONNX Runtime session
   bundle.rs    ModelBundle, ModelCard, verification
-  tiles.rs     tile starts, window weights, streaming blend
+  store.rs     ModelStore: installed models
+  tiles.rs     tile starts, window weights, blending
   noise.rs     the noise input: image_sigma, or its median, as the card says
   sky.rs       smooth sky, background and noise scales, the network's input
   bands.rs     NoiseBands
+  parity.rs    tests against the harness's recorded answers
 ```
 
-`TileRunner` is the seam between Seiza and any runtime:
+`TileRunner` is the seam between Seiza and any runtime. It stays private to the
+crate, so it can grow named tensors when a PSF or star model needs several
+inputs:
 
 ```rust
-pub trait TileRunner {
-    /// Run one tile of named input tensors, filling the named outputs.
-    fn run(&mut self, inputs: &[Tensor<'_>], outputs: &mut [TensorMut<'_>]) -> Result<(), RestoreError>;
+pub(crate) trait TileRunner {
+    fn run(&mut self, planes: &[f32], side: usize, residual: &mut [f32]) -> Result<(), ModelError>;
 }
 ```
 
@@ -300,9 +323,27 @@ Still open:
   nights of one target, and all twelve are Seiza's stacks. On 24 train sets'
   4-frame halves, the image map read 1.15–1.31 times the noise of the halves'
   difference on the sky, steadier than the stack's modelled map at 1.19–1.61.
-  Second differences read correlated noise low, and each stacker's resampling
-  correlates it differently, so the level may differ on other stacks. The
-  gates need other targets and stacks from other software.
+  The table below is one target from another stacker, which is not enough.
+  The gates need other targets and stacks from other software.
+- **Drizzled stacks.** Second differences read correlated noise low, and
+  drizzle correlates it. The table's 2× drizzle read 1.63 times under its real
+  noise, and the model took out far less. The level needs a correction for
+  correlated noise, or the model a way to find it.
+
+D24 read the constant map on three stacks, with every amount at 1. Noise is
+measured inside empty 64-pixel blocks, each block's own plane taken out, so a
+gradient cannot count as noise. A star's change is at its peak, for stars over
+200 times the noise.
+
+| Stack | Real noise over the level read | Noise left at 1 / 2 / 4 / 8 px | Star peaks, median |
+|---|---|---|---|
+| Seiza, 4 frames, Elephant's Trunk Hα | 0.93 | 3.9 / 5.5 / 9.6 / 17% | −3.1%, 5% of them past −18.5% |
+| Another stacker's master, NGC 7331 L | 0.94 | 2.9 / 3.2 / 4.5 / 7.2% | +0.46% |
+| The same stacker's 2× drizzle | 1.63 | 44 / 52 / 75 / 81% | −0.27% |
+
+So a stack from another stacker needs nothing Seiza's does not, and its noise
+level reads as truly as Seiza's own. At 0.7 and 0.9, about 30% of the noise
+stays at every scale on the first two.
 
 A variant that reads Seiza's own records may sit beside the image-only model,
 for Seiza's stacks. Nothing here builds it. If one earns its place,
@@ -318,8 +359,10 @@ stands, with `Backend` as above.
 **Rust.** PSF Guard calls these directly.
 
 ```rust
-let backend = Backend::detect(&BackendOptions::default())?;
-let model = NoiseModel::open(&bundle, &backend)?;
+let options = BackendOptions::default();
+let backend = Backend::detect(&bundle, &options)?;
+let mut model = NoiseModel::open(&bundle, backend, &options)?;
+let image = ImageView::new(&pixels, width, height, channels)?;
 let result = model.denoise(image, &DenoiseOptions::default())?;
 let kept = result.blend(&NoiseBands { high: 0.7, low: 0.9, scale_px: 5.0 });
 ```
@@ -355,8 +398,8 @@ SeizaDenoised *seiza_noise_model_denoise(SeizaNoiseModel *, const float *image, 
     SeizaRestoreProgressCallback, const SeizaCancelSignal *, void *context, char **error_out);
 bool seiza_denoised_blend(const SeizaDenoised *, float high, float low, float scale_px, float *out, char **error_out);
 char *seiza_noise_model_denoise_file_json(const char *request_json, /* progress, cancel */ ...);
-char *seiza_restore_backends_json(char **error_out);
-const char *seiza_restore_output_version(void);
+char *seiza_model_backends_json(char **error_out);
+const char *seiza_model_output_version(void);
 ```
 
 The JSON file call is only a request and answer over the native API, as
@@ -368,7 +411,7 @@ The JSON file call is only a request and answer over the native API, as
 model = seiza.NoiseModel("noise-v1", backend="auto")
 result = model.denoise(image, progress=report, cancel=flag)
 clean = result.blend(high=0.7, low=0.9, scale_px=5.0)
-seiza.restore_backends()
+seiza.model_backends()
 ```
 
 The GIL is released for the run. `NoiseModel` and `Denoised` join
@@ -385,18 +428,34 @@ size stays out of the key, since it does not change the output.
 ## Getting the runtime onto machines
 
 `load-dynamic` means no build links ONNX Runtime, so crates.io builds and the
-Rust 1.89 check need nothing native, and the Windows build keeps its static
-CRT. Each channel supplies the library its own way.
+Rust 1.92 check need nothing native, and `seiza.exe` keeps its static CRT. Each
+channel supplies the library its own way.
+
+A release can bundle Microsoft's own build. Its archives are mostly debug
+symbols, and the libraries themselves are small:
+
+| Archive | Library | Compressed | Notes |
+|---|---|---|---|
+| macOS arm64 | 44.8 MB | 12.6 MB | Reports CPU, Core ML and WebGPU, and ran every Rust figure above. Ad-hoc signed, so a signed app re-signs it. |
+| Linux x86-64 | 29.3 MB | 11.2 MB | Asks for glibc 2.28 and GLIBCXX 3.4.22, older than our Ubuntu 22.04 build. |
+| Windows x86-64 | 17.3 MB | 6.3 MB | Carries an Authenticode signature. Imports `MSVCP140` and `VCRUNTIME140`. |
+
+The Windows library needs the Visual C++ runtime that `seiza.exe` avoids, so
+without it the library will not load on a clean machine. The installer must
+carry it, as app-local DLLs or the redistributable. CI's `model-runtime` job
+runs a tiny model on all three. A release pins each archive by version and
+SHA-256, and ships its `LICENSE` and `ThirdPartyNotices.txt`.
 
 | Channel | Library | Notes |
 |---|---|---|
-| Homebrew | `depends_on "onnxruntime"` | Built with Core ML on macOS; 1.31.1 today, against the 1.28 `ort` wraps, so the spike must check this. |
+| Homebrew | `depends_on "onnxruntime"` | Built with Core ML on macOS; 1.31.1 today. |
 | Python wheel | an `ml` extra needing `onnxruntime` | The macOS wheel carries `libonnxruntime.1.31.1.dylib`, 33 MB, with Core ML. NVIDIA users take `onnxruntime-gpu`. Our wheels stay abi3 and unlinked. |
 | Mac app | signed dylib in the bundle | Or `ort`'s static macOS build, if the app prefers one binary. |
-| Windows MSI and app | `onnxruntime.dll` beside the binary | CPU, plus WebGPU if measured worthwhile. |
+| Windows MSI and app | `onnxruntime.dll` beside the binary, with the Visual C++ runtime | CPU, plus WebGPU if measured worthwhile. |
 | NVIDIA | a separate download | CUDA and TensorRT are too large for the installers, and their licences need reading before Seiza redistributes them. |
-| deb and rpm | private copy under Seiza's lib directory | So Seiza does not depend on what each distribution carries. |
-| PSF Guard | its own choice, through `BackendOptions` | It links `seiza-restore` like any crate. |
+| deb and rpm | private copy in `/usr/lib/seiza` | So Seiza does not depend on what each distribution carries. The search looks in `../lib/seiza` from the binary. |
+| `cargo install` | `seiza setup` fetches it | Into the shared data directory, verified through `seiza-download`, which the search covers. Not built yet. |
+| PSF Guard | its own choice, through `BackendOptions` | It links `seiza-model` like any crate. |
 
 `ort`'s prebuilt list has no Intel Mac build, and our macOS wheel is
 universal2. An Intel Mac gets `BackendUnavailable` unless a library is found.
@@ -445,11 +504,17 @@ function, its C export and Python twin land in the same PR, as
 [AGENTS.md](../../AGENTS.md#the-core-the-c-abi-and-python-move-together)
 requires, so earlier steps keep their items `pub(crate)` until step 4.
 
+Steps 0 to 4 are built, with model delivery's local commands: `seiza-model`,
+`seiza model`, its C ABI and Python, and `bundle-noise` in `training/`. It
+matches the harness on a real image on a Mac, and a tiny model runs through ONNX
+Runtime in CI. The output bound is still not built, and no shipped channel
+carries the library yet.
+
 | # | Step | Done when |
 |---|---|---|
-| 0 | **Spike.** A throwaway Rust binary on `ort` rc.13 with `load-dynamic`: the CPU provider on macOS, Windows and Linux, and Core ML on a Mac, with parity. Repeat the GPU rows on an idle Mac. | A tile runs from Rust on all three systems, and the Mac's numbers hold from Rust. |
+| 0 | **Spike.** A throwaway Rust binary on `ort` rc.15 with `load-dynamic`: the CPU provider on macOS, Windows and Linux, and Core ML on a Mac, with parity. Repeat the GPU rows on an idle Mac. | A tile runs from Rust on all three systems, and the Mac's numbers hold from Rust. |
 | 1 | **Bundle export** in `training/`. Dynamic f32 and f16 graphs, `card.json` from the allow-list, fixtures, the output bound in the harness. | `bundle --run NAME` makes a bundle that passes a parity check in Python. |
-| 2 | **`seiza-restore` core**, no ONNX Runtime. Tiling, sky, `image_sigma`, scales, bands, the bound, `ModelCard`, `OUTPUT_VERSION`. | Rust matches the harness on fixtures through a closure runner. |
+| 2 | **`seiza-model` core**, no ONNX Runtime. Tiling, sky, `image_sigma`, scales, bands, the bound, `ModelCard`, `OUTPUT_VERSION`. | Rust matches the harness on fixtures through a closure runner. |
 | 3 | **Backends.** `TileRunner` on `ort`, detection, library search, compile cache, cancel. `seiza model backends`, with its C and Python twins. | Fixture parity on the CPU provider in CI on all three systems; Core ML on a Mac. |
 | 4 | **`denoise` end to end.** `NoiseModel`, `Denoised`, CLI, C ABI, Python, parity entries, provenance. Marked experimental. | `seiza model denoise` matches the harness on a real image within budget, on every backend measured so far. |
 | 5 | **Harness on the runtime.** `evaluate-noise` and the sheets through `seiza.NoiseModel`. | One run's measures and seam maps agree with the PyTorch path. |
@@ -477,9 +542,9 @@ run the CPU provider, and step 7's NVIDIA download waits for it.
   falls back to the GPU on chips the card does not list.
 - **Core ML can fall back silently.** The run still succeeds, only slower,
   and the provenance names the unit requested.
-- **ONNX Runtime versions.** Homebrew and pip are three releases ahead of
-  what `ort` rc.13 wraps. The C API is meant to stay compatible; the spike
-  checks it.
+- **ONNX Runtime versions.** `ort` rc.15 asks for at least 1.17. It has run
+  against 1.31.1 from pip and from Microsoft's archive, and not yet against
+  Homebrew's.
 - **GPU memory.** One 96-channel f32 plane at tile 1024 is 0.4 GB, so a
   tile's activations should come to a few gigabytes; steps 0 and 9 measure it.
   `BackendOptions` takes a tile size, and an allocation failure
