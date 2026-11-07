@@ -66,4 +66,5 @@ windows = { version = "0.62", optional = true, default-features = false, feature
 
 [dev-dependencies]
 flate2.workspace = true
+image.workspace = true
 naga.workspace = true
