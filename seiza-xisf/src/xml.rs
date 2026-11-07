@@ -8,11 +8,52 @@ use quick_xml::{Reader, XmlVersion};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
+/// Bounds the trees that metadata cloning, traversal and serialization
+/// recurse over. Includes the root element and empty leaf elements.
+pub(crate) const MAX_ELEMENT_DEPTH: usize = 128;
+
+fn check_depth(depth: usize) -> Result<(), XisfError> {
+    if depth > MAX_ELEMENT_DEPTH {
+        return Err(XisfError::Malformed(format!(
+            "XML element nesting exceeds {MAX_ELEMENT_DEPTH} levels"
+        )));
+    }
+    Ok(())
+}
+
+/// Check caller-built metadata before any recursive clone or traversal.
+/// `parent_depth` includes the root and any Image or Metadata wrapper.
+pub(crate) fn validate_depth(
+    elements: &[XisfElement],
+    parent_depth: usize,
+) -> Result<(), XisfError> {
+    if elements.is_empty() {
+        return Ok(());
+    }
+    let mut stack = vec![(elements.iter(), parent_depth)];
+    while let Some((siblings, parent_depth)) = stack.last_mut() {
+        if let Some(element) = siblings.next() {
+            let depth = *parent_depth + 1;
+            check_depth(depth)?;
+            if !element.children.is_empty() {
+                stack.push((element.children.iter(), depth));
+            }
+        } else {
+            stack.pop();
+        }
+    }
+    Ok(())
+}
+
 /// An XML element of an XISF header, with everything inside it.
 ///
 /// Character data is kept as one string per element. XISF elements hold
 /// either character data or child elements, and white space between child
 /// elements is not significant, so nothing that matters is lost.
+///
+/// Readers and writers accept at most 128 nested elements, including the
+/// `xisf` root and any enclosing `Image` or `Metadata` element. A writer
+/// refuses deeper caller-built metadata before cloning or serializing it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct XisfElement {
     /// The element name as written, with any namespace prefix.
@@ -128,8 +169,12 @@ pub(crate) fn parse_tree(xml: &[u8]) -> Result<XisfElement, XisfError> {
             .read_event_into(&mut buffer)
             .map_err(|error| XisfError::Malformed(format!("invalid XML header: {error}")))?
         {
-            Event::Start(start) => stack.push(element(&start)?),
+            Event::Start(start) => {
+                check_depth(stack.len() + 1)?;
+                stack.push(element(&start)?);
+            }
             Event::Empty(start) => {
+                check_depth(stack.len() + 1)?;
                 let element = element(&start)?;
                 finish(element, &mut stack);
             }
@@ -174,7 +219,14 @@ pub(crate) fn parse_tree(xml: &[u8]) -> Result<XisfElement, XisfError> {
                     element.text.push_str(&text);
                 }
             }
-            Event::Eof => break,
+            Event::Eof => {
+                if !stack.is_empty() {
+                    return Err(XisfError::Malformed(
+                        "unclosed XML element at end of header".into(),
+                    ));
+                }
+                break;
+            }
             Event::DocType(_) => {
                 return Err(XisfError::Unsupported("XML document types".into()));
             }
@@ -210,4 +262,77 @@ fn element(start: &BytesStart<'_>) -> Result<XisfElement, XisfError> {
         attributes,
         ..XisfElement::default()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn nested(depth: usize, empty_leaf: bool) -> String {
+        let parents = depth - if empty_leaf { 2 } else { 1 };
+        format!(
+            "<xisf version=\"1.0\">{}{}{}</xisf>",
+            "<Extension>".repeat(parents),
+            if empty_leaf { "<Extension/>" } else { "" },
+            "</Extension>".repeat(parents),
+        )
+    }
+
+    #[test]
+    fn nesting_boundary_includes_empty_leaf_elements() {
+        for empty_leaf in [false, true] {
+            let root = parse_tree(nested(MAX_ELEMENT_DEPTH, empty_leaf).as_bytes()).unwrap();
+            validate_depth(&root.children, 1).unwrap();
+            let mut depth = 1;
+            let mut element = &root;
+            while let Some(child) = element.children.first() {
+                depth += 1;
+                element = child;
+            }
+            assert_eq!(depth, MAX_ELEMENT_DEPTH);
+            assert!(matches!(
+                parse_tree(nested(MAX_ELEMENT_DEPTH + 1, empty_leaf).as_bytes()),
+                Err(XisfError::Malformed(_))
+            ));
+            assert!(matches!(
+                validate_depth(&root.children, 2),
+                Err(XisfError::Malformed(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn many_siblings_are_not_deep_nesting() {
+        let xml = format!(
+            "<xisf version=\"1.0\">{}</xisf>",
+            "<Extension/>".repeat(10000)
+        );
+        let root = parse_tree(xml.as_bytes()).unwrap();
+        assert_eq!(root.children.len(), 10000);
+        validate_depth(&root.children, 1).unwrap();
+    }
+
+    #[test]
+    fn unfinished_elements_are_refused_even_after_a_complete_root() {
+        for xml in [
+            "<xisf version=\"1.0\"><Extension>",
+            "<xisf version=\"1.0\"/><Signature><SignedInfo>",
+            "<Extension><xisf version=\"1.0\"/>",
+        ] {
+            assert!(matches!(
+                parse_tree(xml.as_bytes()),
+                Err(XisfError::Malformed(_))
+            ));
+        }
+        parse_tree(b"<xisf version=\"1.0\"/><Signature><SignedInfo/></Signature>").unwrap();
+    }
+
+    #[test]
+    fn supported_nested_tree_survives_clone_and_serialization() {
+        let root = parse_tree(nested(MAX_ELEMENT_DEPTH, true).as_bytes()).unwrap();
+        let copy = root.clone();
+        let mut xml = String::new();
+        copy.write(&mut xml, &mut std::iter::empty());
+        assert_eq!(parse_tree(xml.as_bytes()).unwrap(), root);
+    }
 }

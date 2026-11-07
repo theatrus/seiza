@@ -43,6 +43,15 @@ dimensions other than two. As the specification requires, such an image is
 unavailable on its own: opening it fails with `Unsupported`, `inspect` lists it
 under `unavailable`, and the other images in the file stay readable.
 
+XML headers are limited to 16 MiB and 128 nested elements, counting the root
+and empty elements. Resolved references must fit within the same limit at
+their destination. Excessive nesting and unclosed elements, including those
+in a trailing detached signature, return `XisfError::Malformed`. Metadata
+supplied to the writer has the same nesting limit, counting the `xisf` root
+and its `Image` or `Metadata` wrapper when present. Invalid metadata is
+refused before writing any bytes. Supported nested extension elements are
+preserved.
+
 `read_window` reads a rectangle of the first image's samples without decoding
 the rest: one short read a row, from an attached, external, inline or
 embedded block, in planar or normal storage. It returns an `XisfWindow`, the
