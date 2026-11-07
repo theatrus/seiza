@@ -1,0 +1,44 @@
+   Compiling seiza-download v0.9.0 (/home/ppicazo/Development/seiza/seiza-download)
+    Finished `test` profile [optimized + debuginfo] target(s) in 3.47s
+     Running unittests src/lib.rs (target/debug/deps/seiza_download-5ee6e5de6ac48287)
+
+running 31 tests
+test catalog::tests::manifest_caches_are_scoped_without_discarding_the_legacy_v2_path ... ok
+test bundle::tests::hardlink_or_copy_links_a_clean_target ... ok
+test bundle::tests::hardlink_or_copy_falls_back_to_copy_when_link_fails ... ok
+test bundle::tests::later_frames_cannot_reset_the_decoded_size_bound ... ok
+test bundle::tests::encoded_overrun_is_rejected_before_writing_decoded_bytes ... ok
+test catalog::tests::materialize_removes_temporary_file_when_install_fails ... ok
+test catalog::tests::materialize_hardlinks_and_reruns_without_rehashing ... ok
+test bundle::tests::trailing_garbage_is_refused_even_when_its_transport_hash_matches ... ok
+test catalog::tests::materialize_repairs_a_corrupt_same_size_output ... ok
+test manifest::tests::complete_manifest_and_explicit_selection_are_accepted ... ok
+test manifest::tests::default_set_is_small ... ok
+test manifest::tests::incomplete_bundle_is_rejected_for_a_single_file_request ... ok
+test manifest::tests::legacy_v2_manifest_without_keys_remains_accepted ... ok
+test manifest::tests::legacy_v2_rejects_alternate_transports ... ok
+test manifest::tests::named_solver_sets_include_annotation_data ... ok
+test manifest::tests::optional_deep_gaia20_is_hostable_but_not_required ... ok
+test bundle::tests::a_delayed_tail_cannot_hide_after_the_first_zstd_frame ... ok
+test manifest::tests::optional_gaia_photometry_is_hostable_but_not_required ... ok
+test manifest::tests::optional_object_distances_are_hostable_but_not_required ... ok
+test manifest::tests::historical_v3_bundle_version_is_not_repurposed ... ok
+test manifest::tests::traversal_and_unknown_names_are_rejected ... ok
+test manifest::tests::unknown_json_fields_are_ignored ... ok
+test manifest::tests::v4_accepts_content_addressed_zstd_and_unknown_transports ... ok
+test manifest::tests::v4_requires_content_addressed_artifact_keys ... ok
+test catalog::tests::offline_cache_hit_does_not_hash_the_artifact ... ok
+test bundle::tests::concatenated_zstd_frames_are_verified_and_decoded_completely ... ok
+test catalog::tests::oversized_zstd_frame_aborts_before_decompressing_completely ... ok
+test catalog::tests::remote_manifest_and_artifact_are_streamed_into_the_cache ... ok
+test catalog::tests::explicitly_configured_v2_manifest_uses_the_legacy_flat_url ... ok
+test catalog::tests::invalid_zstd_transport_is_not_installed ... ok
+test catalog::tests::zstd_transport_is_streamed_into_the_uncompressed_cache ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
+
+   Doc-tests seiza_download
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

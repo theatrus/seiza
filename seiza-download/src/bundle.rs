@@ -113,7 +113,9 @@ pub enum TransferEvent {
 }
 
 /// Stream `spec` into `temp`, verifying the encoded body then the decoded
-/// artifact by size and SHA-256, bounding decoded output to `decoded_bytes`. On
+/// artifact by size and SHA-256, bounding decoded output to `decoded_bytes`.
+/// Encoded overruns are refused before hashing or decoding the offending chunk;
+/// all compressed frames are consumed through the end of the HTTP body. On
 /// success the verified canonical bytes are left at `temp`; the caller installs
 /// them into its cache. On failure `temp` is left for the caller to clean up.
 pub async fn stream_to_temp(
@@ -238,13 +240,25 @@ async fn stream_encoded(
     let stream_downloaded = Arc::clone(&downloaded);
     let encoded_hasher = Arc::new(Mutex::new(Sha256::new()));
     let stream_hasher = Arc::clone(&encoded_hasher);
+    let encoded_limit = encoded.bytes;
+    let stream_label = encoded_label();
     let stream = response.bytes_stream().map(move |chunk| match chunk {
         Ok(chunk) => {
+            let next = stream_downloaded
+                .load(Ordering::Relaxed)
+                .checked_add(chunk.len() as u64);
+            if next.is_none_or(|bytes| bytes > encoded_limit) {
+                return Err(std::io::Error::other(Error::Size {
+                    name: stream_label.clone(),
+                    expected: encoded_limit,
+                    actual: next.unwrap_or(u64::MAX),
+                }));
+            }
             stream_hasher
                 .lock()
                 .expect("encoded hash mutex poisoned")
                 .update(&chunk);
-            stream_downloaded.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+            stream_downloaded.store(next.expect("checked encoded byte count"), Ordering::Relaxed);
             Ok(chunk)
         }
         Err(source) => Err(std::io::Error::other(source)),
@@ -253,6 +267,9 @@ async fn stream_encoded(
     let mut decoder = match encoded.encoding {
         Encoding::Zstd => ZstdDecoder::new(tokio::io::BufReader::new(reader)),
     };
+    // A frame boundary is not HTTP EOF. Verify every byte of the response,
+    // including subsequent frames and any invalid or oversized trailing data.
+    decoder.multiple_members(true);
     let mut output = tokio::fs::File::create(temp)
         .await
         .map_err(|source| io("create", temp, source))?;
@@ -261,10 +278,27 @@ async fn stream_encoded(
     let mut reported = 0u64;
     let mut buffer = vec![0u8; IO_BUFFER_BYTES];
     loop {
-        let read = decoder
-            .read(&mut buffer)
-            .await
-            .map_err(|source| io("decompress into", temp, source))?;
+        let read = decoder.read(&mut buffer).await.map_err(|source| {
+            // StreamReader carries the native size refusal through an IO
+            // error. Preserve its variant for callers rather than turning
+            // an encoded overrun into a decompression failure.
+            if let Some(Error::Size {
+                name,
+                expected,
+                actual,
+            }) = source
+                .get_ref()
+                .and_then(|inner| inner.downcast_ref::<Error>())
+            {
+                Error::Size {
+                    name: name.clone(),
+                    expected: *expected,
+                    actual: *actual,
+                }
+            } else {
+                io("decompress into", temp, source)
+            }
+        })?;
         if read == 0 {
             break;
         }
@@ -520,6 +554,163 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Chunked HTTP with a gate before the second chunk: the tail cannot be
+    /// prefetched until the client reports decoding the canonical payload.
+    fn chunked_server(
+        chunks: Vec<Vec<u8>>,
+        gate: Option<std::sync::mpsc::Receiver<()>>,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{BufRead, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            {
+                let mut request = std::io::BufReader::new(&mut stream);
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    assert_ne!(request.read_line(&mut line).unwrap(), 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+            }
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            for (index, chunk) in chunks.iter().enumerate() {
+                if index == 1
+                    && let Some(gate) = &gate
+                {
+                    gate.recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap();
+                }
+                if write!(stream, "{:x}\r\n", chunk.len())
+                    .and_then(|_| stream.write_all(chunk))
+                    .and_then(|_| stream.write_all(b"\r\n"))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            let _ = stream.write_all(b"0\r\n\r\n");
+        });
+        (format!("http://{address}/artifact"), server)
+    }
+
+    async fn encoded_transfer(
+        url: &str,
+        decoded: &[u8],
+        encoded: &[u8],
+        declared_bytes: u64,
+        temp: &Path,
+        report: impl Fn(TransferEvent),
+    ) -> Result<()> {
+        let decoded_hash = sha256_hex(decoded);
+        let encoded_hash = sha256_hex(encoded);
+        let spec = ArtifactSpec {
+            label: "test artifact",
+            url,
+            decoded_bytes: decoded.len() as u64,
+            decoded_sha256: &decoded_hash,
+            encoded: Some(EncodedSpec {
+                encoding: Encoding::Zstd,
+                bytes: declared_bytes,
+                sha256: &encoded_hash,
+            }),
+        };
+        let client = http_client("seiza-transfer-test", std::time::Duration::from_secs(5)).unwrap();
+        stream_to_temp(&client, &spec, temp, report).await
+    }
+
+    #[tokio::test]
+    async fn encoded_overrun_is_rejected_before_writing_decoded_bytes() {
+        let decoded = vec![42; 128 * 1024];
+        let encoded = zstd::stream::encode_all(decoded.as_slice(), 1).unwrap();
+        let (url, server) = chunked_server(vec![encoded.clone()], None);
+        let directory = tempfile::tempdir().unwrap();
+        let temp = directory.path().join("artifact.part");
+        let expected = encoded.len() as u64 - 1;
+        let result = encoded_transfer(&url, &decoded, &encoded, expected, &temp, |_| {}).await;
+        assert!(matches!(result, Err(Error::Size { expected: size, .. }) if size == expected));
+        server.join().unwrap();
+        assert_eq!(std::fs::metadata(temp).unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_delayed_tail_cannot_hide_after_the_first_zstd_frame() {
+        let decoded = vec![42; 4 * 1024 * 1024];
+        let encoded = zstd::stream::encode_all(decoded.as_slice(), 1).unwrap();
+        let (release, gate) = std::sync::mpsc::channel();
+        let (url, server) = chunked_server(vec![encoded.clone(), vec![0]], Some(gate));
+        let directory = tempfile::tempdir().unwrap();
+        let temp = directory.path().join("artifact.part");
+        let result = encoded_transfer(&url, &decoded, &encoded, encoded.len() as u64, &temp, |event| {
+            if matches!(event, TransferEvent::Progress(progress) if progress.written >= decoded.len() as u64) {
+                let _ = release.send(());
+            }
+        }).await;
+        assert!(
+            matches!(result, Err(Error::Size { expected, actual, .. })
+            if expected == encoded.len() as u64 && actual == expected + 1),
+            "{result:?}"
+        );
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn concatenated_zstd_frames_are_verified_and_decoded_completely() {
+        let decoded = b"first framesecond frame";
+        let mut encoded = zstd::stream::encode_all(&b"first frame"[..], 1).unwrap();
+        encoded.extend(zstd::stream::encode_all(&b"second frame"[..], 1).unwrap());
+        let (url, server) = chunked_server(vec![encoded.clone()], None);
+        let directory = tempfile::tempdir().unwrap();
+        let temp = directory.path().join("artifact.part");
+        let result =
+            encoded_transfer(&url, decoded, &encoded, encoded.len() as u64, &temp, |_| {}).await;
+        result.unwrap();
+        server.join().unwrap();
+        assert_eq!(std::fs::read(temp).unwrap(), decoded);
+    }
+
+    #[tokio::test]
+    async fn trailing_garbage_is_refused_even_when_its_transport_hash_matches() {
+        let decoded = b"canonical payload";
+        let mut encoded = zstd::stream::encode_all(&decoded[..], 1).unwrap();
+        encoded.push(0);
+        let (url, server) = chunked_server(vec![encoded.clone()], None);
+        let directory = tempfile::tempdir().unwrap();
+        let temp = directory.path().join("artifact.part");
+        let result =
+            encoded_transfer(&url, decoded, &encoded, encoded.len() as u64, &temp, |_| {}).await;
+        assert!(matches!(result, Err(Error::Io { .. })), "{result:?}");
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn later_frames_cannot_reset_the_decoded_size_bound() {
+        let decoded = b"first";
+        let mut encoded = zstd::stream::encode_all(&decoded[..], 1).unwrap();
+        encoded.extend(zstd::stream::encode_all(&b"second"[..], 1).unwrap());
+        let (url, server) = chunked_server(vec![encoded.clone()], None);
+        let directory = tempfile::tempdir().unwrap();
+        let temp = directory.path().join("artifact.part");
+        let result =
+            encoded_transfer(&url, decoded, &encoded, encoded.len() as u64, &temp, |_| {}).await;
+        assert!(
+            matches!(result, Err(Error::Size { name, expected: 5, actual, .. })
+            if name == "test artifact" && actual > 5)
+        );
+        server.join().unwrap();
+        assert!(std::fs::metadata(temp).unwrap().len() <= decoded.len() as u64);
+    }
 
     #[tokio::test]
     async fn hardlink_or_copy_links_a_clean_target() {
