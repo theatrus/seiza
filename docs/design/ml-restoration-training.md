@@ -573,6 +573,34 @@ not follow the change in error: a gap of 30% cost 1.3%, and the worst pair's
 gap was 5%. Why those pairs lose is not known. Ten of the twelve validation
 sets are nights of the Elephant's Trunk, so other targets are barely tested.
 
+Stacks made by another stacker test the level on images Seiza never
+touched. Two models trained with the stack's map were run on 16 such light
+masters from seven telescopes, three of them drizzled 2×, reading a
+constant at the image's level. With no truth, the measures are taken on
+empty sky: how much of the noise is left at the pixel scale and binned
+4 × 4, from second differences; pixels put more than 100σ̄ outside their
+input's neighbourhood; and how far the result moves over 64-pixel blocks.
+- On the 13 plain masters, 2–5% of the pixel-scale noise was left, and
+  2–40% at 4 pixels, the most where faint nebulosity passes for sky. At
+  most 3 pixels went outside. The model trained with the gradient and the
+  binned share moved the 64-pixel level by at most 0.045σ̄; the narrower
+  recipe moved it by up to 0.16σ̄.
+- On the drizzled masters, 18–20% was left at the pixel scale and about
+  70% at 4 pixels, as fine specks. Drizzle spreads each pixel's noise over
+  its neighbours, so second differences read it at about half its level,
+  and the model is told the image is cleaner than it is.
+
+So the level now accounts for how the noise is spread. An image's
+correlation is twice the second-difference noise of the image binned 2 × 2,
+over that of the image itself, on the sky; white noise gives 1. Seiza's
+4-frame train halves read 1.12–1.45, median 1.24; the other stacker's plain
+masters 1.22–1.38, and its drizzled ones 2.45–2.58. Where an image reads
+above 1.24, its level is raised in proportion. On the drizzled masters that
+left 4–6% of the pixel-scale noise and 12–25% at 4 pixels, and the specks
+went. The plain masters were raised by 11% at most and barely changed. The
+blind runs train with this level. Should it fall short, pairs upsampled or
+drizzled 2× can join training, the other way from the binned share.
+
 So a model needs only the image and its noise level, which the image gives.
 Runs trained blind are being measured against runs that read the stack's
 map. The image map is the fallback if the blind runs lose. A model that
