@@ -19,6 +19,7 @@ def test_a_card_holds_only_what_the_runtime_reads():
     assert written["reading"]["noise_map"] == "constant"
     assert written["reading"]["sky"] == "flat"
     assert written["parity"] == ["cpu"]
+    assert written["inputs"] == [{"tensor": "planes", "planes": ["image", "noise"]}]
 
 
 def test_a_model_trained_on_the_stack_s_map_must_say_what_it_reads(monkeypatch, tmp_path):

@@ -22,7 +22,7 @@ A model ships as one dynamic ONNX graph per precision plus a model card.
 Seiza's Rust code does everything around the graph: sky, noise input, tiling,
 blending, the output bound and provenance. The backend only runs tiles.
 
-A 61 MP frame should take about 14 seconds on an M4 Max's GPU, the default,
+A 61 MP frame should take about 15 seconds on an M4 Max's GPU, the default,
 with the current 41M-parameter model, or about 16 on its Neural Engine. Those
 are estimates from measured 26 MP runs.
 
@@ -62,9 +62,10 @@ Three things the restoration plan describes do not yet exist anywhere.
   built from the stack's variance.
 - **A Core ML export.** The harness writes ONNX only.
 
-Only mono models exist. RGB runs a mono model on each channel until an RGB
-model is trained. PSF and star models need several inputs, so the runtime
-takes named tensors from the start, not one image in and one image out.
+Only mono models exist, so RGB runs a mono model on each channel. The noise
+model will change again, and PSF and star models need other inputs, so a
+model's shape is its card's business, not the code's. See
+[Model shapes](#model-shapes).
 
 ## Measurements
 
@@ -183,12 +184,16 @@ the same size, so the Neural Engine may well be the faster one there.
    There is no stable 2.0 yet, so the pin is exact, and Dependabot needs an
    ignore rule. With no `api-N` feature, `ort` asks only for ONNX Runtime 1.17
    or later.
-6. **The GPU is the default on Apple hardware.** Decided. With nothing else
-   on it, it took 5.9 s at f16 against the Neural Engine's 6.7 s, with
-   0.0004σ̄ of error on the sky against 0.0147σ̄, inside the 0.01σ every other
-   backend is held to. `--backend neural-engine` still runs there, which
-   leaves the GPU free and keeps its time when the GPU is busy, and `detect`
-   picks it only for a card that leaves the GPU out.
+6. **The GPU at f32 is the default on Apple hardware.** Decided. With nothing
+   else on it, it took 6.4 s against the Neural Engine's 6.7 s, and its result
+   is the CPU's to 4.9e-7σ̄ on the sky and 0.0011σ̄ on the brightest star. f16
+   would save 0.5 s for about 800 times that error on the sky, so it is for
+   the Neural Engine, which needs it, or for `--precision f16`.
+   `--backend neural-engine` leaves the GPU free and keeps its time when the
+   GPU is busy, and `detect` picks it only for a card that leaves the GPU out.
+   The price is memory: a 26 MP run's peak footprint at a 1024 tile was 3.9 GB
+   at f32, 2.5 GB at f16 and 1.1 GB on the Neural Engine. On an 8 GB Mac that
+   may call for `--tile 512`, which has not been tried there.
 
 ## The crate
 
@@ -244,7 +249,7 @@ is what a user needs when a GPU goes unused.
 
 | Hardware | Order tried | Graph |
 |---|---|---|
-| Apple Silicon | GPU, Neural Engine, CPU | f16, then f32 for CPU |
+| Apple Silicon | GPU, Neural Engine, CPU | f32, or f16 on the Neural Engine |
 | NVIDIA | decided by the measurements; see [Work order](#work-order) | f16 or f32 |
 | Intel and AMD GPUs | WebGPU if measured worthwhile, else CPU | f32, or f16 if parity holds |
 | Anything else | CPU | f32 |
@@ -445,7 +450,8 @@ size stays out of the key, since it does not change the output.
 Rust 1.92 check need nothing native, and `seiza.exe` keeps its static CRT. Each
 channel supplies the library its own way.
 
-A release can bundle Microsoft's own build. Its archives are mostly debug
+The packages carry Microsoft's own build, pinned once in
+`packaging/onnxruntime.env`, which CI reads too. Its archives are mostly debug
 symbols, and the libraries themselves are small:
 
 | Archive | Library | Compressed | Notes |
@@ -454,18 +460,36 @@ symbols, and the libraries themselves are small:
 | Linux x86-64 | 29.3 MB | 11.2 MB | Asks for glibc 2.28 and GLIBCXX 3.4.22, older than our Ubuntu 22.04 build. |
 | Windows x86-64 | 17.3 MB | 6.3 MB | Carries an Authenticode signature. Imports `MSVCP140` and `VCRUNTIME140`. |
 
-The Windows library needs the Visual C++ runtime that `seiza.exe` avoids, so
-without it the library will not load on a clean machine. The installer must
-carry it, as app-local DLLs or the redistributable. CI's `model-runtime` job
-runs a tiny model on all three. A release pins each archive by version and
-SHA-256, and ships its `LICENSE` and `ThirdPartyNotices.txt`.
+The Windows library imports `MSVCP140`, `MSVCP140_1`, `VCRUNTIME140` and
+`VCRUNTIME140_1`, the Visual C++ runtime that `seiza.exe` avoids, so without
+them it will not load on a clean machine. The zip and the MSI carry those four
+beside the binary, taken from the build machine's redistributable, since a zip
+has no installer to run one, and Windows looks beside the executable first.
+`packaging/windows/stage-vc-runtime.ps1` reads the imports and stops the build
+if they outgrow that list. CI's `model-runtime` job runs a tiny model on all
+three systems, and the `Packaged runtime` workflow installs each package on a
+machine with nothing else on it, a Windows container among them. A package
+ships ONNX Runtime's `LICENSE` and `ThirdPartyNotices.txt`.
+
+**Telemetry.** Microsoft's own builds report to Microsoft on every system,
+unless told not to. Each event held the process's name, the model's file name,
+the machine, the system and a device identifier, in a store under
+`Microsoft/DeveloperTools/.onnxruntime` that an uploader sends on. `seiza-model`
+turns this off, since nobody who runs Seiza on their own images has agreed to
+it. ONNX Runtime's API is not enough: it stops only non-essential events, and
+an event may go out before it can be called. `ORT_DISABLE_TELEMETRY=1`, read as
+the library starts, stops the uploader and the identifier being made at all,
+so `seiza-model` sets it before loading the library unless the variable is
+already set, and calls the API as well for a process that loaded ONNX Runtime
+first. A run on a Mac with the variable left the store untouched, and without
+it added 24 KB.
 
 | Channel | Library | Notes |
 |---|---|---|
-| Homebrew | `depends_on "onnxruntime"` | Built with Core ML on macOS; 1.31.1 today. |
-| Python wheel | an `ml` extra needing `onnxruntime` | The macOS wheel carries `libonnxruntime.1.31.1.dylib`, 33 MB, with Core ML. NVIDIA users take `onnxruntime-gpu`. Our wheels stay abi3 and unlinked. |
+| Homebrew | `depends_on "onnxruntime"` | Built with Core ML on macOS; 1.31.1 today. The formula lives in the tap, and gains this with the first release carrying `seiza-model`. |
+| Python wheel | `pip install seiza[ml]` brings `onnxruntime` | Seiza finds the package's library, under `onnxruntime/capi`, without importing it. Wheels exist for Python 3.11 to 3.14. NVIDIA users take `onnxruntime-gpu`. Our wheels stay abi3 and unlinked. |
 | Mac app | signed dylib in the bundle | Or `ort`'s static macOS build, if the app prefers one binary. |
-| Windows MSI and app | `onnxruntime.dll` beside the binary, with the Visual C++ runtime | CPU, plus WebGPU if measured worthwhile. |
+| Windows zip, MSI and app | `onnxruntime.dll` beside the binary, with the Visual C++ runtime | CPU, plus WebGPU if measured worthwhile. |
 | NVIDIA | a separate download | CUDA and TensorRT are too large for the installers, and their licences need reading before Seiza redistributes them. |
 | deb and rpm | private copy in `/usr/lib/seiza` | So Seiza does not depend on what each distribution carries. The search looks in `../lib/seiza` from the binary. |
 | `cargo install` | `seiza setup` fetches it | Into the shared data directory, verified through `seiza-download`, which the search covers. Not built yet. |
@@ -490,6 +514,42 @@ refuses with `ModelContract`.
 
 A bundle runs only after its hashes match. `--model PATH` is the one way to
 run an unlisted file, and the user asks for it by name.
+
+### Model shapes
+
+Nothing in the runtime knows a model's shape. The card says it, and the graph
+is held to the card when it opens.
+
+| What can change | Where it comes from |
+|---|---|
+| Depth and width | The graph. Reach, ramp and tile multiple are the card's `tiling`. |
+| Which planes go in, in what order | `inputs`: each tensor by name, with its planes. `["image"]` is a model with no noise plane. |
+| How many tensors | `inputs` again, so `image` and `noise` may be two tensors or one. |
+| Tile size | `dimensions` names the free axes. None means a graph fixed at `tiling.tile`, and any other tile is refused. |
+| Tensor types | The graph itself, for each tensor, whatever the file's precision. An f16 file may read and write f32 at either end. |
+
+A graph that differs from its card is refused at open, with what differs:
+planes, tile, an unknown or unnamed tensor, a type that is neither f32 nor
+f16. Run on, such a graph would at best stop at its first tile, and at worst
+keep part of what the network wrote. The small graphs in
+`seiza-model/tests/fixtures/shapes` hold each of these, in CI, against answers
+worked out by hand.
+
+A new kind of input is one `InputPlane` variant and one arm of `network_input`.
+A build that does not know a plane refuses the card and names the plane. The
+noise reading, as opposed to the shape, is `reading`: a change to how the noise
+level is read needs a field there, so that a card can say which rule its model
+expects.
+
+Three things stay fixed until a model needs them, because each depends on what
+that model's planes mean, which cannot be known first:
+
+- **A graph writes one plane.** A colour model, or one that writes stars and
+  the rest apart, is refused.
+- **A model reads the image once.** So a colour image still runs channel by
+  channel, each with scales of its own.
+- **`task` is `denoise`.** Star and PSF models are new tasks, with a run of
+  their own, on the same session and tiling.
 
 ## Testing
 

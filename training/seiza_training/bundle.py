@@ -57,8 +57,7 @@ def card(name: str, record: dict[str, Any], noise_map: str, graphs: list[dict[st
         "name": name,
         "task": "denoise",
         "graphs": graphs,
-        "input": "planes",
-        "input_channels": 2,
+        "inputs": [{"tensor": "planes", "planes": ["image", "noise"]}],
         "output": "residual",
         "dimensions": ["height", "width"],
         "reading": {
