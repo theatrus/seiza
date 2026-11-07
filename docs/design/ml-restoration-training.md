@@ -1356,6 +1356,23 @@ in these ways:
   - the recipe without the changes, as the new corpus's baseline;
   - the sky taken out with the gradient and half the binned share, a tenth
     of each batch.
+
+  The baseline came out level with the same recipe trained on the old
+  stacks, both measured on the rebuilt validation sets:
+  - against matched halves, 1.650 against 1.709 on 4-frame halves and
+    1.173 against 1.184 on 8-frame ones, inside the spread between seeds;
+    against clean targets, 0.756 against 0.757;
+  - on the rebuilt sheets, it left 37% of the Trunk's noise at 4 pixels
+    against 45%, and about the same on the other three sheets and at 16
+    pixels; faint stars kept the same flux;
+  - it kept a little more of the sharp spots, 28% of the Iris's against
+    16%; it was less alike turned (0.26σ̄ RMS on the Trunk against 0.19σ̄);
+    and its worst pixel before the guard was a star core 4,400σ̄ out on the
+    Trunk, against 2,800σ̄.
+
+  So the fixed stacks change little in what a model learns. What they
+  change is the measure: the same model's error on matched 4-frame halves
+  fell from 2.63 to 1.71 with the restack, as the halves now agree.
 - **Deep halves.** Training on a night's deep stack dealt into two halves,
   a quarter of every batch, taught a model to keep mottle: it left 37% of
   the coarse noise on empty sky. The halves share the night's flats,
