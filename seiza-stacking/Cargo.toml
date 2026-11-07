@@ -22,7 +22,7 @@ gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck", "dep:objc2-metal", "dep:windo
 schema = ["dep:schemars", "seiza-calibration/json"]
 
 [dependencies]
-sysinfo = { version = "0.37.2", default-features = false, features = ["system"] }
+sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 nalgebra.workspace = true
 multiversion = "0.9"
 wgpu = { workspace = true, optional = true }
