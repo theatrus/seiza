@@ -1101,6 +1101,34 @@ fn a_stack_with_the_cosmetic_filter_keeps_its_output() {
 }
 
 #[test]
+fn a_stack_with_multiblock_fits_headers_keeps_its_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let paths = defective_lights(&directory);
+    for path in &paths {
+        let bytes = std::fs::read(path).unwrap();
+        let mut header = bytes[..2880].to_vec();
+        let end = header
+            .as_chunks::<80>()
+            .0
+            .iter()
+            .position(|card| &card[..8] == b"END     ")
+            .unwrap()
+            * 80;
+        header[end..end + 80].fill(b' ');
+        header.resize(5760, b' ');
+        header[2880..2883].copy_from_slice(b"END");
+        header.extend_from_slice(&bytes[2880..]);
+        std::fs::write(path, header).unwrap();
+    }
+    let options = StackOptions {
+        cosmetic: Some(ImpulseFilterOptions::default()),
+        ..StackOptions::default()
+    };
+    let snapshot = fits_stack(&paths, options);
+    check("COSMETIC", &summary(&snapshot.image), COSMETIC);
+}
+
+#[test]
 fn a_stack_repairing_learned_defects_keeps_its_output() {
     let directory = tempfile::tempdir().unwrap();
     let paths = defective_lights(&directory);
