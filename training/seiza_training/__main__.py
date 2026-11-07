@@ -165,6 +165,10 @@ def main(argv: list[str] | None = None) -> int:
     train.add_argument("--bin-fraction", type=float, default=0.0,
                        help="this share of every batch from the pairs binned 2 × 2, whose stars are half as "
                             "wide")
+    train.add_argument("--dark-spots", type=float, default=0.0, dest="dark_spot_count",
+                       help="add this many dark spots (clusters 30 to 5,000 times the typical noise deep) per "
+                            "256 × 256 pixels to both halves of every tile alike, so the model keeps them, as a "
+                            "stack's over-subtracted hot or dead pixels, and does not fill or ring them")
 
     sheet = commands.add_parser("sheet-noise", help="make a trained noise model's contact sheets")
     sheet.add_argument("--name", required=True)
@@ -333,7 +337,7 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
             scale_loss=arguments.scale_loss, scale_weight=arguments.scale_weight, rewind=arguments.rewind,
             precision=arguments.precision, prefetch=arguments.prefetch, batch_threads=arguments.batch_threads,
             sky=arguments.sky, resample=arguments.resample, sharpen=arguments.sharpen, gradient=arguments.gradient,
-            bin_fraction=arguments.bin_fraction, **extra,
+            bin_fraction=arguments.bin_fraction, dark_spot_count=arguments.dark_spot_count, **extra,
         )
         return {**record, "sheets": render_saved(store, manifest, arguments.name)}
     if command == "sheet-noise":

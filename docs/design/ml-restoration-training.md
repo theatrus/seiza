@@ -601,6 +601,25 @@ went. The plain masters were raised by 11% at most and barely changed. The
 blind runs train with this level. Should it fall short, pairs upsampled or
 drizzled 2× can join training, the other way from the binned share.
 
+Seiza's own 2× drizzle reads the same: four sets stacked plain and drizzled
+from the same registration read 1.25–1.29 plain and 2.51–2.90 drizzled, and
+with the raised level the models left 5–7% of the pixel-scale noise on the
+drizzles, as on the other stacker's. One of the four, a 12-frame Hα night of
+the Elephant's Trunk with a dark but no flat, holds about 190 dark spots of
+10–16 pixels, down to −2,700σ̄ plain and −3,500σ̄ drizzled, far below zero.
+They are most likely hot pixels the dark took too much of (not yet
+checked in the frames). With a dark, Seiza maps no defects, and rejection
+keeps what every frame has.
+Every model filled them and overshot, turning a hole into a spike up to
++3,300σ̄ above the sky, ringed by speckle; two leftover hot clusters were
+ringed by a dark moat of about −220σ̄. Whatever made a spot, the model is
+not the place to decide it is a fault, and ringing it is never right. So
+training now plants dark spots (`--dark-spots`) in both halves alike, 30 to
+5,000σ̄ deep and 1 to 16 pixels, half spread as registration spreads a pixel
+and half sharp as drizzle leaves them, for the model to keep as they are.
+The cold pixels the outlier plant puts in the input alone stop at −30σ̄, so
+a shallow one is still taken out.
+
 So a model needs only the image and its noise level, which the image gives.
 Runs trained blind are being measured against runs that read the stack's
 map. The image map is the fallback if the blind runs lose. A model that

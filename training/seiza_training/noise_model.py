@@ -785,6 +785,50 @@ def outliers(shape: tuple[int, int], rng: np.random.Generator, count: float, *,
     return plane[3:-3, 3:-3]
 
 
+# How deep the spots `dark_spots` plants are, in σ̄, drawn log-uniformly:
+# from the deepest cold pixel `outliers` plants, which a model learns to
+# take out, to as deep as a stack's worst seen (−3,500σ̄, drizzled).
+DARK_SPOT_DEPTHS = (30.0, 5000.0)
+# The most pixels in one dark spot.
+DARK_SPOT_PIXELS = 16
+
+
+def dark_spots(shape: tuple[int, int], rng: np.random.Generator, count: float) -> np.ndarray:
+    """Dark spots a stack holds in every frame, which no rejection takes
+    out: hot pixels a dark subtracts too much of, dead ones a missing or
+    poor flat leaves. In units of σ̄, `count` per 256 × 256 pixels on
+    average. Each is a cluster of 1 to `DARK_SPOT_PIXELS` pixels grown from
+    one, each 30 to 100% of the spot's depth (`DARK_SPOT_DEPTHS`); half are
+    spread as Lanczos-3 registration spreads a frame's pixel, half left
+    sharp, as drizzle leaves them. They are the image's, so a model should
+    keep them as they are: one that fills them overshoots, and turns a
+    hole into a bright spike ringed by speckle."""
+    height, width = shape
+    plane = np.zeros((height + 6, width + 6), dtype=np.float32)
+    steps = ((0, 1), (0, -1), (1, 0), (-1, 0))
+    for _ in range(rng.poisson(count * height * width / OUTLIER_AREA)):
+        depth = math.exp(rng.uniform(math.log(DARK_SPOT_DEPTHS[0]), math.log(DARK_SPOT_DEPTHS[1])))
+        size = int(math.exp(rng.uniform(0.0, math.log(DARK_SPOT_PIXELS + 1))))
+        cells = [(int(rng.integers(0, height)), int(rng.integers(0, width)))]
+        while len(cells) < size:
+            y, x = cells[int(rng.integers(0, len(cells)))]
+            dy, dx = steps[int(rng.integers(0, 4))]
+            if (y + dy, x + dx) not in cells:
+                cells.append((y + dy, x + dx))
+        spread = rng.random() < 0.5
+        offset_y, offset_x = rng.uniform(0, 1, 2)
+        weights = np.outer(lanczos3(offset_y), lanczos3(offset_x)) if spread else None
+        for y, x in cells:
+            if not (0 <= y < height and 0 <= x < width):
+                continue
+            amplitude = -depth * rng.uniform(0.3, 1.0)
+            if spread:
+                plane[y + 1:y + 7, x + 1:x + 7] += amplitude * weights
+            else:
+                plane[y + 3, x + 3] += amplitude
+    return plane[3:-3, 3:-3]
+
+
 # A shifted or sharpened tile is filtered from this many pixels more on
 # each side.
 FILTER_MARGIN = 8
@@ -876,6 +920,7 @@ def batch_from(
     resample: float = 0.0,
     sharpen: float = 0.0,
     gradient: float = 0.0,
+    dark_spot_count: float = 0.0,
 ) -> tuple[torch.Tensor, ...]:
     """`size` tiles at random windows and offsets, each flipped and turned
     one of eight ways: the network's input (its noise map as `noise_plane`
@@ -893,8 +938,10 @@ def batch_from(
     those out shaves the noise's peaks and dims what is bright.
 
     The halves are changed alike, after the outliers, which keeps their
-    noise independent: `resample` of the tiles are `shifted` and `sharpen`
-    of them `sharpened`, the noise map and σ̄ following, and with
+    noise independent: with `dark_spot_count`, both gain the same
+    `dark_spots` that many per 256 × 256 pixels, so the target keeps them;
+    `resample` of the tiles are `shifted` and `sharpen` of them
+    `sharpened`, the noise map and σ̄ following, and with
     `gradient`, `GRADIENT_SHARE` of them gain a `sky_plane` up to that many
     σ̄ under the input. The target would gain it too, but the loss, which
     takes the input from its estimate, would not see it there, and the
@@ -919,6 +966,9 @@ def batch_from(
         if outlier_count:
             scale = np.where(np.isfinite(sigma), sigma, noise) if outlier_scale == "local" else noise
             a = a + outliers(a.shape, rng, outlier_count, floor=outlier_floor) * scale
+        if dark_spot_count:
+            spots = dark_spots(a.shape, rng, dark_spot_count) * noise
+            a, b = a + spots, b + spots
         if margin:
             choice = rng.random()
             change = shifted if choice < resample else sharpened if choice < resample + sharpen else None
@@ -1164,6 +1214,7 @@ def train(
     sharpen: float = 0.0,
     gradient: float = 0.0,
     bin_fraction: float = 0.0,
+    dark_spot_count: float = 0.0,
 ) -> dict[str, Any]:
     """Train a noise model on the train split's pairs, evaluate it on the
     validation split's, export it to ONNX and record the run.
@@ -1175,10 +1226,10 @@ def train(
     and the history records where.
 
     The network reads the sky as `sky` says (see `SKIES`), in training,
-    evaluation and the sheets. `resample`, `sharpen` and `gradient` change
-    both halves of the tiles alike (see `batch_from`), and `bin_fraction`
-    of every batch comes from the pairs binned 2 × 2, `BINNED_WINDOWS` of
-    each cut with the bank.
+    evaluation and the sheets. `resample`, `sharpen`, `gradient` and
+    `dark_spot_count` change both halves of the tiles alike (see
+    `batch_from`), and `bin_fraction` of every batch comes from the pairs
+    binned 2 × 2, `BINNED_WINDOWS` of each cut with the bank.
 
     `extra` is a second bank from `cut_windows`, of other targets for
     their inputs; it makes up `extra_fraction` of every batch, and the run
@@ -1240,7 +1291,7 @@ def train(
     binned_odds = structure_odds(banked["binned"], structure_sampling) if binned_count else None
     changes = {"map_jitter": map_jitter, "outlier_count": outlier_count, "outlier_floor": outlier_floor,
                "outlier_scale": outlier_scale, "noise_plane": noise_plane, "resample": resample,
-               "sharpen": sharpen, "gradient": gradient}
+               "sharpen": sharpen, "gradient": gradient, "dark_spot_count": dark_spot_count}
 
     def assemble(step: int) -> tuple[torch.Tensor, ...]:
         rng = step_generator(seed, step)
@@ -1330,6 +1381,7 @@ def train(
                    "rewind": rewind, "rewinds": guard.count if guard else 0,
                    "rewind_rate": guard.rate if guard else 1.0, "sky": sky, "resample": resample,
                    "sharpen": sharpen, "gradient": gradient, "bin_fraction": bin_fraction,
+                   "dark_spots": dark_spot_count,
                    "binned_windows": int(len(banked["binned"]["a"])) if bin_fraction else None,
                    "extra": {"label": extra_label, "fraction": extra_fraction, "windows": int(len(extra["a"]))}
                    if extra is not None else None},

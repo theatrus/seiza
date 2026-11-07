@@ -123,7 +123,8 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
         "--precision", "bf16", "--prefetch", "2", "--batch-threads", "2", "--deep-fraction", "0.5",
         "--outliers", "2", "--outlier-floor", "10", "--clip-grad", "1", "--match-flux", "--agree", "0.9",
         "--outlier-scale", "local", "--noise-plane", "asinh", "--scale-loss", "4,8", "--scale-weight", "0.5",
-        "--rewind", "2", "--sky", "flat", "--resample", "0.3", "--sharpen", "0.3", "--gradient", "10")
+        "--rewind", "2", "--sky", "flat", "--resample", "0.3", "--sharpen", "0.3", "--gradient", "10",
+        "--dark-spots", "2")
     record = json.loads((store / "models" / "noise" / "smoke" / "run.json").read_text())
     assert record["config"]["scale_loss"] == [4, 8] and record["config"]["scale_weight"] == 0.5
     assert record["config"]["rewind"] == 2 and record["config"]["rewinds"] == 0
@@ -138,6 +139,7 @@ def test_a_noise_model_trains_evaluates_and_exports(tmp_path, capsys):
     assert record["config"]["sky"] == "flat" and record["config"]["gradient"] == 10
     assert record["config"]["resample"] == 0.3 and record["config"]["sharpen"] == 0.3
     assert record["config"]["bin_fraction"] == 0 and record["config"]["binned_windows"] is None
+    assert record["config"]["dark_spots"] == 2
     assert all(entry["grad_norm_max"] > 0 and entry["grad_norm_mean"] > 0 for entry in record["history"])
     assert record["export"]["max_relative_error"] < 1e-4
     assert record["inference"]["margin"] == reach(3) and record["inference"]["multiple"] == 4
@@ -565,6 +567,29 @@ def test_outliers_reach_the_input_and_not_the_target():
         planted, noisier = references[0, 0].abs(), sigmas[0, 0] > 5
         ratio = float(planted[noisier].max() / planted[~noisier].max())
         assert low < ratio < high, (scale, ratio)
+
+
+def test_dark_spots_reach_both_halves_alike():
+    from seiza_training.noise_model import DARK_SPOT_DEPTHS, DARK_SPOT_PIXELS, WINDOW, batch_from, dark_spots
+
+    assert not dark_spots((512, 512), np.random.default_rng(5), 0.0).any()
+    plane = dark_spots((512, 512), np.random.default_rng(5), 8.0)
+    # Spots only: the Lanczos lobes of a spread one lift a few pixels a little.
+    assert plane.min() < -DARK_SPOT_DEPTHS[0] * 0.3 and plane.max() < 0.2 * -plane.min()
+    deep = plane < -DARK_SPOT_DEPTHS[0] * 0.3 * 0.2
+    assert 0 < deep.sum() < 32 * 8 * (DARK_SPOT_PIXELS + 2) ** 2 / 64
+    assert plane.min() > -DARK_SPOT_DEPTHS[1] * 1.1
+    flat = np.full((2, WINDOW, WINDOW), 100.0, dtype=np.float32)
+    banked = {"a": flat, "sigma": np.full_like(flat, 2.0), "b": flat,
+              "background": np.array([100.0, 100.0], dtype=np.float32),
+              "noise": np.array([2.0, 2.0], dtype=np.float32)}
+    inputs, targets, references, _ = batch_from(banked, 4, 128, np.random.default_rng(6), dark_spot_count=40)
+    assert targets.min() < -DARK_SPOT_DEPTHS[0] * 0.3
+    assert torch.equal(targets, references)
+    # With none asked for, the draws are those of a run before them.
+    plain = batch_from(banked, 4, 128, np.random.default_rng(6), gradient=5)
+    again = batch_from(banked, 4, 128, np.random.default_rng(6), gradient=5, dark_spot_count=0)
+    assert all(torch.equal(x, y) for x, y in zip(plain, again))
 
 
 def test_the_smooth_sky_takes_out_a_gradient_and_keeps_the_level():
