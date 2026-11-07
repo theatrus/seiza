@@ -210,77 +210,61 @@ pub struct FitsHeader {
     pub comments: Vec<String>,
 }
 
-/// Parse a primary header block by block until END. Returns the header and
-/// the byte offset where the data section begins.
-fn parse_headers(data: &[u8]) -> Result<(FitsHeader, usize), FitsError> {
-    if data.len() < BLOCK || &data[0..6] != b"SIMPLE" {
-        return Err(FitsError::NotFits);
-    }
-    parse_header_cards(data)
-}
-
-/// Parse header cards block by block until END. Returns the header and the
-/// byte offset, from the start of `data`, where the data section begins.
-fn parse_header_cards(data: &[u8]) -> Result<(FitsHeader, usize), FitsError> {
-    let mut header = FitsHeader::default();
-    let mut data_start = None;
-    'blocks: for block in 0.. {
-        let start = block * BLOCK;
-        let Some(block_data) = data.get(start..start + BLOCK) else {
-            return Err(FitsError::Malformed("header runs past EOF".into()));
-        };
-        for card in block_data.as_chunks::<CARD>().0.iter() {
-            let keyword = std::str::from_utf8(&card[0..8])
-                .map_err(|_| FitsError::Malformed("non-ASCII keyword".into()))?
-                .trim_end()
-                .to_string();
-            if keyword == "END" {
-                data_start = Some((block + 1) * BLOCK);
-                break 'blocks;
+/// Parse one complete header block, preserving long strings across blocks.
+/// Returns whether the block ends the header.
+fn parse_header_block(
+    header: &mut FitsHeader,
+    block_data: &[u8; BLOCK],
+) -> Result<bool, FitsError> {
+    for card in block_data.as_chunks::<CARD>().0.iter() {
+        let keyword = std::str::from_utf8(&card[0..8])
+            .map_err(|_| FitsError::Malformed("non-ASCII keyword".into()))?
+            .trim_end()
+            .to_string();
+        if keyword == "END" {
+            return Ok(true);
+        }
+        let commentary = || String::from_utf8_lossy(&card[8..]).trim().to_string();
+        match keyword.as_str() {
+            "" => continue,
+            "HISTORY" => header.history.push(commentary()),
+            "COMMENT" => header.comments.push(commentary()),
+            // The value starts after the `=` in column 9. The standard
+            // puts a space in column 10, but some writers omit it
+            // (`EXPTIME =30.5`), and cfitsio reads those too.
+            _ if card[8] == b'=' => {
+                let raw = String::from_utf8_lossy(&card[9..]);
+                header.cards.push((keyword, parse_header_value(&raw)));
             }
-            let commentary = || String::from_utf8_lossy(&card[8..]).trim().to_string();
-            match keyword.as_str() {
-                "" => continue,
-                "HISTORY" => header.history.push(commentary()),
-                "COMMENT" => header.comments.push(commentary()),
-                // The value starts after the `=` in column 9. The standard
-                // puts a space in column 10, but some writers omit it
-                // (`EXPTIME =30.5`), and cfitsio reads those too.
-                _ if card[8] == b'=' => {
-                    let raw = String::from_utf8_lossy(&card[9..]);
-                    header.cards.push((keyword, parse_header_value(&raw)));
+            // The long-string convention: a string value ending in `&`
+            // continues in the next `CONTINUE` card's string.
+            "CONTINUE" => {
+                if let Some((_, HeaderValue::String(value))) = header.cards.last_mut()
+                    && value.ends_with('&')
+                    && let HeaderValue::String(more) =
+                        parse_header_value(&String::from_utf8_lossy(&card[8..]))
+                {
+                    value.pop();
+                    value.push_str(&more);
                 }
-                // The long-string convention: a string value ending in `&`
-                // continues in the next `CONTINUE` card's string.
-                "CONTINUE" => {
-                    if let Some((_, HeaderValue::String(value))) = header.cards.last_mut()
-                        && value.ends_with('&')
-                        && let HeaderValue::String(more) =
-                            parse_header_value(&String::from_utf8_lossy(&card[8..]))
-                    {
-                        value.pop();
-                        value.push_str(&more);
-                    }
-                }
-                // The ESO convention for keywords longer than eight
-                // characters or holding spaces:
-                // `HIERARCH ESO DET DIT = 1.5 / comment` names `ESO DET DIT`.
-                "HIERARCH" => {
-                    let text = String::from_utf8_lossy(&card[8..]);
-                    if let Some((keyword, value)) = text.split_once('=')
-                        && is_hierarch_keyword(keyword.trim())
-                    {
-                        header
-                            .cards
-                            .push((keyword.trim().to_string(), parse_header_value(value)));
-                    }
-                }
-                _ => {}
             }
+            // The ESO convention for keywords longer than eight
+            // characters or holding spaces:
+            // `HIERARCH ESO DET DIT = 1.5 / comment` names `ESO DET DIT`.
+            "HIERARCH" => {
+                let text = String::from_utf8_lossy(&card[8..]);
+                if let Some((keyword, value)) = text.split_once('=')
+                    && is_hierarch_keyword(keyword.trim())
+                {
+                    header
+                        .cards
+                        .push((keyword.trim().to_string(), parse_header_value(value)));
+                }
+            }
+            _ => {}
         }
     }
-    let data_start = data_start.ok_or_else(|| FitsError::Malformed("missing END card".into()))?;
-    Ok((header, data_start))
+    Ok(false)
 }
 
 /// Whether `keyword` can be written as a `HIERARCH` card and read back
@@ -295,29 +279,20 @@ pub(crate) fn is_hierarch_keyword(keyword: &str) -> bool {
             .all(|byte| (b' '..=b'~').contains(&byte) && !b"='/".contains(&byte))
 }
 
-/// Whether a header block holds the END card.
-fn holds_end_card(block: &[u8]) -> bool {
-    block
-        .as_chunks::<CARD>()
-        .0
-        .iter()
-        .any(|card| card.starts_with(b"END") && card[3] == b' ')
-}
-
 /// Read complete FITS header blocks and leave the reader at the first byte of
-/// the primary data unit. Only the normally small header is retained.
+/// the primary data unit. Only decoded cards and one raw block are retained.
 fn read_headers_from(
     reader: &mut impl Read,
     short_first_block_is_not_fits: bool,
 ) -> Result<(FitsHeader, usize), FitsError> {
-    let mut data = Vec::new();
+    let mut header = FitsHeader::default();
+    let mut block = [0; BLOCK];
+    let mut length: usize = 0;
     loop {
-        let start = data.len();
-        data.resize(start + BLOCK, 0);
-        if let Err(error) = reader.read_exact(&mut data[start..]) {
+        if let Err(error) = reader.read_exact(&mut block) {
             return Err(match error.kind() {
                 std::io::ErrorKind::UnexpectedEof
-                    if start == 0 && short_first_block_is_not_fits =>
+                    if length == 0 && short_first_block_is_not_fits =>
                 {
                     FitsError::NotFits
                 }
@@ -327,41 +302,43 @@ fn read_headers_from(
                 _ => FitsError::Io(error),
             });
         }
-        // Stop at a first block that is not FITS rather than read the
-        // whole file looking for an END card.
-        if start == 0 && !data.starts_with(b"SIMPLE") {
+        if length == 0 && !block.starts_with(b"SIMPLE") {
             return Err(FitsError::NotFits);
         }
-        if holds_end_card(&data[start..]) {
-            break;
+        length = length
+            .checked_add(BLOCK)
+            .ok_or_else(|| FitsError::Malformed("header length overflows".into()))?;
+        if parse_header_block(&mut header, &block)? {
+            return Ok((header, length));
         }
     }
-    parse_headers(&data)
 }
 
 /// Read an extension's header blocks and leave the reader at the first byte
 /// of its data unit. Returns the header and its length in bytes, or `None`
 /// when no complete, well-formed extension header starts here.
 fn read_extension_header(reader: &mut impl Read) -> Result<Option<(FitsHeader, u64)>, FitsError> {
-    let mut data = Vec::new();
+    let mut header = FitsHeader::default();
+    let mut block = [0; BLOCK];
+    let mut length = 0_u64;
     loop {
-        let start = data.len();
-        data.resize(start + BLOCK, 0);
-        match reader.read_exact(&mut data[start..]) {
+        match reader.read_exact(&mut block) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
             Err(error) => return Err(FitsError::Io(error)),
         }
-        if start == 0 && !data.starts_with(b"XTENSION") {
+        if length == 0 && !block.starts_with(b"XTENSION") {
             return Ok(None);
         }
-        if holds_end_card(&data[start..]) {
-            break;
+        length = length
+            .checked_add(BLOCK as u64)
+            .ok_or_else(|| FitsError::Malformed("header length overflows".into()))?;
+        match parse_header_block(&mut header, &block) {
+            Ok(true) => return Ok(Some((header, length))),
+            Ok(false) => {}
+            Err(_) => return Ok(None),
         }
     }
-    Ok(parse_header_cards(&data)
-        .ok()
-        .map(|(header, length)| (header, length as u64)))
 }
 
 fn card_i64(cards: &[(String, HeaderValue)], key: &str) -> Option<i64> {
@@ -2421,6 +2398,79 @@ mod hdu_tests {
 
     fn keywords(image: &FitsImage) -> Vec<&str> {
         image.headers.iter().map(|(key, _)| key.as_str()).collect()
+    }
+
+    #[test]
+    fn primary_and_extension_headers_keep_cards_across_block_boundaries() {
+        for in_extension in [false, true] {
+            let mut cards = if in_extension {
+                extension("IMAGE", -32, &[1, 1], &[])
+            } else {
+                primary(-32, &[1, 1], &[])
+            };
+            cards.resize(BLOCK / CARD - 1, String::new());
+            cards.extend([
+                card("OBJECT", "'North America &'"),
+                "CONTINUE  'and Pelican'".into(),
+                "HISTORY calibration retained across blocks".into(),
+                "COMMENT second block commentary".into(),
+                card("EXPTIME", "60.0"),
+            ]);
+            let mut bytes = if in_extension {
+                hdu(&primary(8, &[], &[]), &[])
+            } else {
+                Vec::new()
+            };
+            bytes.extend(hdu(&cards, &42.0_f32.to_be_bytes()));
+            let image = FitsImage::from_bytes(&bytes).unwrap();
+            assert_samples(&image.into_physical_f32(), &[42.0]);
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(file.path(), &bytes).unwrap();
+            let header = read_header_with_commentary(file.path()).unwrap();
+            assert!(header.cards.contains(&(
+                "OBJECT".into(),
+                HeaderValue::String("North America and Pelican".into())
+            )));
+            assert!(
+                header
+                    .cards
+                    .contains(&("EXPTIME".into(), HeaderValue::Float(60.0)))
+            );
+            assert_eq!(header.history, ["calibration retained across blocks"]);
+            assert_eq!(header.comments, ["second block commentary"]);
+        }
+    }
+
+    #[test]
+    fn long_primary_and_extension_headers_stop_at_the_data_without_a_size_limit() {
+        for in_extension in [false, true] {
+            let cards = if in_extension {
+                extension("IMAGE", -32, &[1, 1], &[])
+            } else {
+                primary(-32, &[1, 1], &[])
+            };
+            let mut first = hdu(&cards, &[]);
+            let end = cards.len() * CARD;
+            first[end..end + CARD].fill(b' ');
+            let mut last = [b' '; BLOCK];
+            last[..3].copy_from_slice(b"END");
+            let padding = std::io::repeat(b' ').take(4096 * BLOCK as u64);
+            let mut reader = std::io::Cursor::new(first)
+                .chain(padding)
+                .chain(std::io::Cursor::new(last))
+                .chain(std::io::Cursor::new([123]));
+            let (header, length) = if in_extension {
+                let (header, length) = read_extension_header(&mut reader).unwrap().unwrap();
+                (header, length as usize)
+            } else {
+                read_headers_from(&mut reader, false).unwrap()
+            };
+            assert_eq!(header.cards.len(), cards.len());
+            assert_eq!(length, 4098 * BLOCK);
+            let mut sample = [0];
+            reader.read_exact(&mut sample).unwrap();
+            assert_eq!(sample, [123]);
+        }
     }
 
     #[test]
