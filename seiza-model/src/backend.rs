@@ -15,6 +15,11 @@ use std::{env, fmt};
 /// fall-through.
 const LIBRARY_VARIABLE: &str = "SEIZA_ONNXRUNTIME";
 
+/// Stops Microsoft's own ONNX Runtime builds reporting to Microsoft, which
+/// they do unless told not to. Only this, read as the library starts, stops
+/// the uploader and its device identifier being made at all.
+const TELEMETRY_VARIABLE: &str = "ORT_DISABLE_TELEMETRY";
+
 #[cfg(target_os = "macos")]
 const LIBRARY_FILE: &str = "libonnxruntime.dylib";
 #[cfg(target_os = "windows")]
@@ -187,6 +192,13 @@ fn load(options: &BackendOptions) -> Result<Runtime, String> {
     let pinned = env::var_os(LIBRARY_VARIABLE).map(PathBuf::from);
     let places = library_places();
     let path = find_library(options.library.as_deref(), pinned.as_deref(), &places)?;
+    if env::var_os(TELEMETRY_VARIABLE).is_none() {
+        // SAFETY: this runs once, under `RUNTIME`'s lock. Another thread
+        // reading the environment through C at this moment is the one risk,
+        // and it has to be taken here, since the library reads the variable
+        // only as it starts.
+        unsafe { env::set_var(TELEMETRY_VARIABLE, "1") };
+    }
     let builder = ort::init_from(&path).map_err(|error| {
         if path.is_absolute() {
             return error.to_string();
@@ -201,8 +213,10 @@ fn load(options: &BackendOptions) -> Result<Runtime, String> {
             searched.join(", ")
         )
     })?;
+    // For a process that had ONNX Runtime loaded before Seiza came to it.
     let environment = builder
         .with_name("seiza")
+        .with_telemetry(false)
         .build()
         .map_err(|error| format!("{}: {error}", path.display()))?;
     let version = library_version(&path).unwrap_or_else(|| "unknown".to_string());

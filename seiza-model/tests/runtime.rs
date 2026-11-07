@@ -59,6 +59,11 @@ fn the_runtime_reports_its_version_and_cpu_backend() {
     let options = BackendOptions::default();
     let info = runtime_info(&options).unwrap();
     assert!(info.version.starts_with("1."), "{}", info.version);
+    assert_eq!(
+        std::env::var("ORT_DISABLE_TELEMETRY").as_deref(),
+        Ok("1"),
+        "Microsoft's builds report to Microsoft unless this is set first"
+    );
     let statuses = Backend::available(&options);
     let cpu = statuses
         .iter()

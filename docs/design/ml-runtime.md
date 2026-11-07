@@ -465,6 +465,19 @@ carry it, as app-local DLLs or the redistributable. CI's `model-runtime` job
 runs a tiny model on all three. A release pins each archive by version and
 SHA-256, and ships its `LICENSE` and `ThirdPartyNotices.txt`.
 
+**Telemetry.** Microsoft's own builds report to Microsoft on every system,
+unless told not to. Each event held the process's name, the model's file name,
+the machine, the system and a device identifier, in a store under
+`Microsoft/DeveloperTools/.onnxruntime` that an uploader sends on. `seiza-model`
+turns this off, since nobody who runs Seiza on their own images has agreed to
+it. ONNX Runtime's API is not enough: it stops only non-essential events, and
+an event may go out before it can be called. `ORT_DISABLE_TELEMETRY=1`, read as
+the library starts, stops the uploader and the identifier being made at all,
+so `seiza-model` sets it before loading the library unless the variable is
+already set, and calls the API as well for a process that loaded ONNX Runtime
+first. A run on a Mac with the variable left the store untouched, and without
+it added 24 KB.
+
 | Channel | Library | Notes |
 |---|---|---|
 | Homebrew | `depends_on "onnxruntime"` | Built with Core ML on macOS; 1.31.1 today. |
