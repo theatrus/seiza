@@ -193,7 +193,7 @@ until both are done.
 cargo fmt --all --check && (cd seiza-py && cargo fmt --check)
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 (cd seiza-py && cargo clippy --all-targets -- -D warnings)
-cargo +1.89.0 check --workspace --all-targets --all-features --locked
+cargo +1.92.0 check --workspace --all-targets --all-features --locked
 cargo test --workspace --all-features
 python3 .github/scripts/check_binding_parity.py --base origin/main
 (cd seiza-py && maturin develop && python -m pytest tests)

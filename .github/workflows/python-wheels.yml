@@ -13,6 +13,7 @@ on:
       - "seiza-download/**"
       - "seiza-fits/**"
       - "seiza-imgproc/**"
+      - "seiza-model/**"
       - "seiza-satellites/**"
       - "seiza-stacking/**"
       - "seiza-stars/**"

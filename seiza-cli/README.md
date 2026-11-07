@@ -390,6 +390,32 @@ The two steps are also available on their own: `seiza download-data
 gaia-photometry --output chunks [--archive esa|gavo]` and `seiza build-data
 gaia-photometry --input chunks --output stars-gaia-photometry.bin`.
 
+## Learned models (experimental)
+
+`seiza model denoise` takes the noise out of a calibrated, stacked linear
+mono/RGB FITS/XISF image, from any stacker, with a trained model. It needs
+nothing but the image:
+
+```text
+seiza model denoise stack.fits -o clean.fits --high-amount 0.7 --low-amount 0.9
+```
+
+`--high-amount` and `--low-amount` set how much of the pixel-scale grain and of
+the wider mottle is taken out; below 1, some of each is kept. A model runs on the
+best backend the machine has, or the one `--backend` names, and `--tile` changes
+only the speed and memory of a run.
+
+```text
+seiza model backends        # which backends run here, and why the others do not
+seiza model list | verify
+seiza model install DIR     # a bundle's directory, once its hashes match
+seiza model remove NAME
+```
+
+Models run through ONNX Runtime, which a build does not link. Seiza looks for
+its library beside the binary, in `../lib/seiza`, in the shared data directory
+and in the system's, or where `SEIZA_ONNXRUNTIME` or `--onnxruntime` says.
+
 ## Light deconvolution (experimental)
 
 `seiza deconvolve` applies a conservative damped Richardson-Lucy pass to a
