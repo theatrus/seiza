@@ -1368,7 +1368,10 @@ in these ways:
   - it kept a little more of the sharp spots, 28% of the Iris's against
     16%; it was less alike turned (0.26σ̄ RMS on the Trunk against 0.19σ̄);
     and its worst pixel before the guard was a star core 4,400σ̄ out on the
-    Trunk, against 2,800σ̄.
+    Trunk, against 2,800σ̄;
+  - 2–4 pixels around the Trunk's stars it lifted the light by about
+    1.5σ̄ for faint ones and 4–13σ̄ for the brightest, against 0.6σ̄ and
+    1–4σ̄; on the Iris the two were alike.
 
   So the fixed stacks change little in what a model learns. What they
   change is the measure: the same model's error on matched 4-frame halves
