@@ -19,6 +19,11 @@
 //! A run that is cancelled, or that passes its time limit, closes
 //! PixInsight. A host that exits during a run does not: PixInsight finishes
 //! on its own and leaves its temporary folder behind.
+//!
+//! On macOS, the ONNX Runtime MLDenoise runs in keeps Core ML models in the
+//! per-user temporary folder, and a PixInsight closed by `--force-exit` or
+//! by a kill leaves them there. They are removed once each instance has
+//! exited.
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -773,7 +778,7 @@ impl PixInsight {
         })?;
         // Closes PixInsight on cancellation, at the time limit, and on every
         // early return, so no instance keeps computing in the background.
-        let mut instance = Instance(Some(child));
+        let mut instance = Instance::new(child);
         loop {
             // The next instance may start once this one runs the script, or
             // after a minute in which it has not.
@@ -798,12 +803,12 @@ impl PixInsight {
                 )));
             }
             let child = instance
-                .0
+                .child
                 .as_mut()
                 .expect("the instance runs until it exits");
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    instance.0 = None;
+                    instance.child = None;
                     return Ok(describe_exit(status));
                 }
                 Ok(None) => std::thread::sleep(POLL),
@@ -918,12 +923,27 @@ fn describe_exit(status: ExitStatus) -> String {
 
 /// A running PixInsight, closed when dropped: on Unix its whole process
 /// group, since the program started may be a launcher whose children a kill
-/// of the launcher alone leaves running.
-struct Instance(Option<std::process::Child>);
+/// of the launcher alone leaves running. Dropping it also removes the Core
+/// ML models it left, however it ended; see [`remove_core_ml_leftovers`].
+struct Instance {
+    /// The program started, until it has exited and been waited for.
+    child: Option<std::process::Child>,
+    /// The program's process id, which names its Core ML models.
+    pid: u32,
+}
+
+impl Instance {
+    fn new(child: std::process::Child) -> Self {
+        Self {
+            pid: child.id(),
+            child: Some(child),
+        }
+    }
+}
 
 impl Drop for Instance {
     fn drop(&mut self) {
-        if let Some(mut child) = self.0.take() {
+        if let Some(mut child) = self.child.take() {
             #[cfg(unix)]
             if let Ok(group) = libc::pid_t::try_from(child.id()) {
                 // SAFETY: kill only sends a signal; the group is the one
@@ -935,7 +955,96 @@ impl Drop for Instance {
             let _ = child.kill();
             let _ = child.wait();
         }
+        remove_core_ml_leftovers(self.pid);
     }
+}
+
+/// Remove the Core ML models that the PixInsight which ran as `pid`, and
+/// has exited, left in the per-user temporary folder.
+///
+/// MLDenoise runs its network in ONNX Runtime, which on macOS converts the
+/// model of each session to a Core ML package and compiles it, both in that
+/// folder, and removes them when the session closes. `--force-exit` and a
+/// kill end PixInsight with its sessions open, so each run left them: 1.6
+/// GB, in 60 sessions, for one 512 by 512 image. The folder is the one
+/// `confstr` gives: ONNX Runtime writes there whatever TMPDIR says, and
+/// [`std::env::temp_dir`] follows TMPDIR. A removal that fails costs disk
+/// space, not the run, and is passed over.
+///
+/// Only macOS has Core ML; on Linux, the program started may also be
+/// `xvfb-run`, whose pid is not PixInsight's.
+#[cfg(target_os = "macos")]
+fn remove_core_ml_leftovers(pid: u32) {
+    if let Some(folder) = darwin_user_temp_dir() {
+        remove_core_ml_leftovers_in(&folder, pid);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn remove_core_ml_leftovers(_pid: u32) {}
+
+/// The per-user temporary folder, `confstr(_CS_DARWIN_USER_TEMP_DIR)`.
+#[cfg(target_os = "macos")]
+fn darwin_user_temp_dir() -> Option<PathBuf> {
+    use std::ffi::{CStr, OsStr};
+    use std::os::unix::ffi::OsStrExt as _;
+    let mut buffer = vec![0u8; libc::PATH_MAX as usize];
+    // SAFETY: confstr writes at most `buffer.len()` bytes, ending with a
+    // NUL, and returns the length the whole value needs, or 0.
+    let needed = unsafe {
+        libc::confstr(
+            libc::_CS_DARWIN_USER_TEMP_DIR,
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+        )
+    };
+    if needed == 0 || needed > buffer.len() {
+        return None;
+    }
+    let folder = CStr::from_bytes_until_nul(&buffer).ok()?;
+    Some(PathBuf::from(OsStr::from_bytes(folder.to_bytes())))
+}
+
+/// Remove the entries in `folder` that [`core_ml_leftover_pid`] gives `pid`
+/// for: folders with what they hold, and anything else, a link included,
+/// by itself.
+#[cfg(any(target_os = "macos", test))]
+fn remove_core_ml_leftovers_in(folder: &Path, pid: u32) {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_str().and_then(core_ml_leftover_pid) != Some(pid) {
+            continue;
+        }
+        let path = entry.path();
+        let _ = match entry.file_type() {
+            Ok(kind) if kind.is_dir() => std::fs::remove_dir_all(&path),
+            _ => std::fs::remove_file(&path),
+        };
+    }
+}
+
+/// The process id in the name of an entry ONNX Runtime's Core ML provider
+/// made: `onnxruntime-` and the process's `globallyUniqueString`,
+/// `<UUID>-<pid>-<16 hex digits>`, with `.mlmodelc` added for a compiled
+/// model. `None` for any other name.
+#[cfg(any(target_os = "macos", test))]
+fn core_ml_leftover_pid(name: &str) -> Option<u32> {
+    let unique = name.strip_prefix("onnxruntime-")?;
+    let unique = unique.strip_suffix(".mlmodelc").unwrap_or(unique);
+    let mut fields = unique.rsplitn(3, '-');
+    let (serial, pid, uuid) = (fields.next()?, fields.next()?, fields.next()?);
+    let hex = |field: &str| field.bytes().all(|byte| byte.is_ascii_hexdigit());
+    let uuid_shaped =
+        uuid.split('-').map(str::len).eq([8, 4, 4, 4, 12]) && uuid.split('-').all(hex);
+    let serial_shaped = serial.len() == 16 && hex(serial);
+    // Digits only: `parse` would also take a sign.
+    let decimal = !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit());
+    if !(uuid_shaped && serial_shaped && decimal) {
+        return None;
+    }
+    pid.parse().ok()
 }
 
 #[derive(serde::Serialize)]
@@ -1427,6 +1536,118 @@ PixInsight Machine Learning Model Format - xmlm version 1.0
             !marker.exists(),
             "PixInsight kept running after the run ended"
         );
+    }
+
+    #[test]
+    fn only_the_core_ml_models_of_the_exited_instance_are_removed() {
+        let uuid = "43E2160F-B36C-4871-89AE-DF590E19297F";
+        let leftover = |pid: &str| format!("onnxruntime-{uuid}-{pid}-00001ED4787A11A3");
+        assert_eq!(core_ml_leftover_pid(&leftover("92078")), Some(92078));
+        let compiled = format!("{}.mlmodelc", leftover("92078"));
+        assert_eq!(core_ml_leftover_pid(&compiled), Some(92078));
+
+        let folder = tempfile::tempdir().unwrap();
+        // A package and its compiled model, both folders, and a file from
+        // another session of the same instance.
+        for name in [leftover("9203"), format!("{}.mlmodelc", leftover("9203"))] {
+            let package = folder.path().join(name);
+            std::fs::create_dir_all(package.join("Data")).unwrap();
+            std::fs::write(package.join("Manifest.json"), "{}").unwrap();
+        }
+        let file = "onnxruntime-0B7357C7-74CC-49E6-91CD-6D213F707C64-9203-00001ED9BD0FAF90";
+        std::fs::write(folder.path().join(file), "").unwrap();
+        let mut kept = vec![
+            // Other instances, whose pids hold the same digits.
+            leftover("92031"),
+            format!("{}.mlmodelc", leftover("92031")),
+            leftover("19203"),
+            leftover("920"),
+            leftover("+9203"),
+            // Names that are not ONNX Runtime's.
+            format!("onnxruntime-{uuid}-9203"),
+            format!("onnxruntime-{uuid}-9203-00001ED4787A11A3.mlpackage"),
+            "onnxruntime-not-a-uuid-at-all-9203-00001ED4787A11A3".to_string(),
+            format!("seiza-{uuid}-9203-00001ED4787A11A3"),
+            "com.apple.metal".to_string(),
+        ];
+        for name in &kept {
+            std::fs::create_dir(folder.path().join(name)).unwrap();
+        }
+        remove_core_ml_leftovers_in(folder.path(), 9203);
+        let mut left: Vec<String> = std::fs::read_dir(folder.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        kept.sort();
+        assert_eq!(left, kept);
+        // A folder that cannot be read removes nothing, and the run goes on.
+        remove_core_ml_leftovers_in(&folder.path().join("missing"), 9203);
+    }
+
+    /// A stand-in PixInsight that leaves Core ML models, as the real one
+    /// does when it is closed, has them removed however its run ends.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_core_ml_models_an_instance_leaves_are_removed_however_it_ends() {
+        let directory = tempfile::tempdir().unwrap();
+        let model = model_file(directory.path(), HEADER);
+        let temp = darwin_user_temp_dir().expect("the per-user temporary folder");
+        let pids = directory.path().join("pids");
+        // A package and its compiled model, named as ONNX Runtime names
+        // them, and the pid, so the test can look for them.
+        let leave = format!(
+            "import random, uuid\n\
+             name = 'onnxruntime-%s-%d-%016X' % (str(uuid.uuid4()).upper(), os.getpid(), random.getrandbits(64))\n\
+             for entry in (name, name + '.mlmodelc'):\n    os.makedirs(os.path.join({temp:?}, entry, 'Data'))\n\
+             open({pids:?}, 'a').write('%d\\n' % os.getpid())",
+            temp = temp.display().to_string(),
+            pids = pids.display().to_string(),
+        );
+        let fake = |name: &str, then: &str| {
+            fake_pixinsight(directory.path(), name, &format!("{leave}\n{then}"))
+        };
+        let options = MlDenoiseOptions::new(&model);
+        fake(
+            "finishing",
+            "shutil.copy(request['input'], request['output'])\n\
+             finish({'ok': True, 'pixinsightVersion': '1.9.6', 'seconds': 1})",
+        )
+        .ml_denoise_image(&adu_image(), &options, None)
+        .unwrap();
+        fake(
+            "failing",
+            "finish({'ok': False, 'error': 'MLDenoise did not run'})",
+        )
+        .ml_denoise_image(&adu_image(), &options, None)
+        .unwrap_err();
+        // Cancelled once its models are there: closed by a kill.
+        let written = pids.clone();
+        let cancel = CancelSignal::new(move || {
+            std::fs::read_to_string(&written).is_ok_and(|pids| pids.lines().count() == 3)
+        });
+        let bounded = MlDenoiseOptions {
+            timeout_seconds: Some(30.0),
+            ..options.clone()
+        };
+        let error = fake("hanging", "time.sleep(60)")
+            .ml_denoise_image(&adu_image(), &bounded, Some(&cancel))
+            .unwrap_err();
+        assert!(matches!(error, Error::Cancelled), "{error}");
+
+        let pids: Vec<u32> = std::fs::read_to_string(&pids)
+            .unwrap()
+            .lines()
+            .map(|pid| pid.parse().unwrap())
+            .collect();
+        assert_eq!(pids.len(), 3);
+        let left: Vec<String> = std::fs::read_dir(&temp)
+            .unwrap()
+            .flatten()
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|name| core_ml_leftover_pid(name).is_some_and(|pid| pids.contains(&pid)))
+            .collect();
+        assert!(left.is_empty(), "left behind: {left:?}");
     }
 
     #[cfg(unix)]

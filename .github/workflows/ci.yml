@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2.9.3
-      - uses: taiki-e/install-action@v2.87.31
+      - uses: taiki-e/install-action@v2.88.1
         with:
           tool: cargo-nextest
       # nextest runs the tests of every binary in parallel, where cargo test runs
@@ -54,6 +54,14 @@ jobs:
       # spend the Basic tier's 5,000 signatures a month on installers that are
       # never published. This MSI exists to be installed and uninstalled by the
       # step below, not to be handed to anyone.
+      - name: Fetch the runtime the MSI carries
+        if: runner.os == 'Windows'
+        shell: bash
+        run: bash packaging/fetch-onnxruntime.sh
+      - name: Stage the Visual C++ runtime the MSI carries
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./packaging/windows/stage-vc-runtime.ps1
       - name: Build Windows MSI
         if: runner.os == 'Windows'
         shell: pwsh
@@ -115,6 +123,27 @@ jobs:
           git diff --exit-code -- seiza-cabi/include/seiza_cabi.h \
             || { echo "::error::seiza_cabi.h is stale; run 'cargo build -p seiza-cabi' and commit include/seiza_cabi.h"; exit 1; }
 
+  # A tiny model through ONNX Runtime itself, on the archives a release would
+  # bundle. The other jobs have no library, so they skip these tests.
+  model-runtime:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    name: model runtime (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: Swatinem/rust-cache@v2.9.3
+      - name: Fetch ONNX Runtime
+        shell: bash
+        run: |
+          library=$(bash packaging/fetch-onnxruntime.sh)
+          echo "SEIZA_ONNXRUNTIME=$library" >> "$GITHUB_ENV"
+      - run: cargo test -p seiza-model --test runtime -- --nocapture
+      - run: cargo test -p seiza-cabi --lib model::tests
+
   # Verify the workspace still compiles on its declared MSRV
   # (`rust-version` in [workspace.package]). Keep this toolchain in sync
   # with that field.
@@ -122,13 +151,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: dtolnay/rust-toolchain@1.92.0
       - uses: Swatinem/rust-cache@v2.9.3
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - run: cargo +1.89.0 check --workspace --all-targets --all-features --locked
-      - run: cargo +1.89.0 check --manifest-path seiza-py/Cargo.toml --all-targets --locked
+      - run: cargo +1.92.0 check --workspace --all-targets --all-features --locked
+      - run: cargo +1.92.0 check --manifest-path seiza-py/Cargo.toml --all-targets --locked
 
   integration:
     if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'

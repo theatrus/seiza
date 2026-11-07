@@ -62,8 +62,9 @@ internals, tradeoffs, and proposals.
   [background](design/background-extraction.md),
   [stretching](design/stretching.md), [composition](design/color-composition.md),
   [color calibration](design/color-calibration.md), [deconvolution](design/deconvolution.md),
-  [learned restoration](design/ml-restoration-training.md) and its
-  [training corpus](../training/README.md), [editing tools](design/editing-tools.md)
+  [learned restoration](design/ml-restoration-training.md), its
+  [training corpus](../training/README.md) and [runtime](design/ml-runtime.md),
+  [editing tools](design/editing-tools.md)
 - Catalogs: [bundles](design/catalog-bundles.md), [lookup](design/catalog-lookup.md),
   [object format](design/objects-bin-v4.md), [identifiers](design/star-identifiers.md)
 - Rendering: [depth planes](design/parallax-depth-planes.md),
@@ -74,7 +75,7 @@ internals, tradeoffs, and proposals.
 ## Development
 
 Build from the repository with `cargo build --release -p seiza-cli`. The minimum
-supported Rust version is **1.89**, declared in `Cargo.toml` and checked in CI;
+supported Rust version is **1.92**, declared in `Cargo.toml` and checked in CI;
 `rust-toolchain.toml` pins the compiler, formatter, and linter used for local
 repository builds. `seiza-py` is outside the workspace and is built separately.
 

@@ -866,6 +866,71 @@ fn a_mono_stack_with_default_options_keeps_its_output() {
     );
 }
 
+#[path = "support/compressed_fits.rs"]
+mod compressed_fits;
+
+#[test]
+fn gzip_2_lights_read_whole_keep_their_output() {
+    gzip_2_light_stack(false);
+}
+
+#[test]
+fn gzip_2_lights_read_in_windows_keep_their_output() {
+    gzip_2_light_stack(true);
+}
+
+fn gzip_2_light_stack(windowed: bool) {
+    let directory = tempfile::tempdir().unwrap();
+    let paths = SHIFTS
+        .iter()
+        .enumerate()
+        .map(|(frame, &(dx, dy))| {
+            let mut image = mono_field(dx, dy, 0.96 + 0.01 * frame as f32, frame);
+            if frame == 4 {
+                for x in 0..WIDTH {
+                    image.data[(20 + x * 3 / 5) * WIDTH + x] += 3_000.0;
+                }
+            }
+            let path = directory.path().join(format!("compressed-{frame}.fits"));
+            std::fs::write(&path, compressed_fits::encode(&image)).unwrap();
+            path
+        })
+        .collect::<Vec<_>>();
+    if !windowed {
+        check(
+            "MONO_DEFAULT",
+            &summary(&fits_stack(&paths, StackOptions::default()).image),
+            MONO_DEFAULT,
+        );
+        return;
+    }
+    let mut images = paths.iter().map(|path| {
+        let mut image = LinearImage::new(WIDTH, HEIGHT, 1, vec![0.0; WIDTH * HEIGHT]).unwrap();
+        for y in (0..HEIGHT).step_by(43) {
+            for x in (0..WIDTH).step_by(47) {
+                let window = seiza_image_io::read_window(path, x, y, 47, 43, None).unwrap();
+                for row in 0..window.height {
+                    image.data[(y + row) * WIDTH + x..(y + row) * WIDTH + x + window.width]
+                        .copy_from_slice(
+                            &window.values[row * window.width..(row + 1) * window.width],
+                        );
+                }
+            }
+        }
+        image
+    });
+    let mut stacker =
+        LiveStacker::from_linear(images.next().unwrap(), StackOptions::default()).unwrap();
+    for image in images {
+        admit(stacker.push_linear(image).unwrap());
+    }
+    check(
+        "MONO_DEFAULT",
+        &summary(&stacker.snapshot().unwrap().image),
+        MONO_DEFAULT,
+    );
+}
+
 #[test]
 fn uploaded_float_tiff_lights_keep_their_output() {
     let read = |image: LinearImage| {

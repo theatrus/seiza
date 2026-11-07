@@ -1,0 +1,43 @@
+{
+  "format": 1,
+  "name": "extra-input",
+  "task": "denoise",
+  "graphs": [
+    {
+      "precision": "f32",
+      "file": "model-f32.onnx",
+      "sha256": "39bc7f91b4f38fc6a9ce5d9e831cda01130671f756c0203d11bd324242713750"
+    }
+  ],
+  "inputs": [
+    {
+      "tensor": "planes",
+      "planes": [
+        "image",
+        "noise"
+      ]
+    }
+  ],
+  "output": "total",
+  "dimensions": [
+    "height",
+    "width"
+  ],
+  "reading": {
+    "noise_map": "constant",
+    "noise_plane": "asinh",
+    "sky": "global",
+    "sky_block": 32,
+    "flat_block": 64,
+    "image_map_scale": 1.13
+  },
+  "tiling": {
+    "tile": 64,
+    "margin": 10,
+    "ramp": 8,
+    "multiple": 2
+  },
+  "parity": [
+    "cpu"
+  ]
+}

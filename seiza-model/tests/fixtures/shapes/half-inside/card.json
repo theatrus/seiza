@@ -1,0 +1,43 @@
+{
+  "format": 1,
+  "name": "half-inside",
+  "task": "denoise",
+  "graphs": [
+    {
+      "precision": "f16",
+      "file": "model-f16.onnx",
+      "sha256": "fc90fc6f01d8e4288809f2b7327a7452b7209052b64b13de50f8ee0f2aa38bc5"
+    }
+  ],
+  "inputs": [
+    {
+      "tensor": "planes",
+      "planes": [
+        "image",
+        "noise"
+      ]
+    }
+  ],
+  "output": "residual",
+  "dimensions": [
+    "height",
+    "width"
+  ],
+  "reading": {
+    "noise_map": "constant",
+    "noise_plane": "asinh",
+    "sky": "global",
+    "sky_block": 32,
+    "flat_block": 64,
+    "image_map_scale": 1.13
+  },
+  "tiling": {
+    "tile": 64,
+    "margin": 10,
+    "ramp": 8,
+    "multiple": 2
+  },
+  "parity": [
+    "cpu"
+  ]
+}

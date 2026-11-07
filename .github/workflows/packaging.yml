@@ -1,0 +1,99 @@
+name: Packaged runtime
+
+# Each package's own ONNX Runtime, run on a machine with nothing else on it. The
+# hosted runners cannot show this: they have the Visual C++ runtime, and every
+# library a package might forget. Not on every push, since it builds each
+# package from nothing, but on any change to what the packages carry.
+on:
+  pull_request:
+    paths:
+      - "packaging/**"
+      - "seiza-model/**"
+      - "seiza-cli/Cargo.toml"
+      - ".github/workflows/packaging.yml"
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  deb:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: Swatinem/rust-cache@v2.9.3
+      - run: cargo install cargo-deb --locked
+      - run: bash packaging/fetch-onnxruntime.sh
+      - run: cargo deb -p seiza-cli
+      - uses: actions/upload-artifact@v7
+        with:
+          name: packaged-deb
+          path: target/debian/*.deb
+
+  deb-clean:
+    needs: deb
+    runs-on: ubuntu-latest
+    container: ubuntu:22.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/download-artifact@v8
+        with:
+          name: packaged-deb
+      - name: Install the package and run a model
+        run: |
+          apt-get update
+          apt-get install -y ./*.deb
+          bash packaging/test-bundled-runtime.sh /usr/bin/seiza /usr/lib/seiza/libonnxruntime.so
+
+  rpm:
+    runs-on: ubuntu-latest
+    container: fedora:44
+    steps:
+      - name: Install build dependencies
+        run: dnf install -y curl gcc rpm-build git tar gzip
+      - uses: actions/checkout@v7.0.1
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - run: cargo install cargo-generate-rpm --locked
+      - run: bash packaging/fetch-onnxruntime.sh
+      - run: cargo build --release -p seiza-cli
+      - run: ~/.cargo/bin/cargo-generate-rpm -p seiza-cli --payload-compress zstd
+      - uses: actions/upload-artifact@v7
+        with:
+          name: packaged-rpm
+          path: target/generate-rpm/*.rpm
+
+  rpm-clean:
+    needs: rpm
+    runs-on: ubuntu-latest
+    container: fedora:44
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/download-artifact@v8
+        with:
+          name: packaged-rpm
+      - name: Install the package and run a model
+        run: |
+          dnf install -y ./*.rpm
+          bash packaging/test-bundled-runtime.sh /usr/bin/seiza /usr/lib/seiza/libonnxruntime.so
+
+  windows-clean:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: Swatinem/rust-cache@v2.9.3
+      - run: cargo build --release -p seiza-cli
+      - name: Fetch ONNX Runtime
+        shell: bash
+        run: bash packaging/fetch-onnxruntime.sh
+      - name: Stage the runtime
+        shell: pwsh
+        run: |
+          ./packaging/windows/stage-vc-runtime.ps1
+          New-Item -ItemType Directory staged | Out-Null
+          Copy-Item target/release/seiza.exe, seiza-cli/onnxruntime/*.dll staged
+      - name: Run a model in a clean container
+        shell: pwsh
+        run: ./packaging/windows/test-clean-runtime.ps1 -Stage staged

@@ -9,6 +9,7 @@ mod constellations;
 mod flat_groups;
 mod flat_response;
 mod library;
+mod model;
 mod parallax;
 mod pipeline;
 mod psf;

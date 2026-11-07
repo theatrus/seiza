@@ -547,7 +547,7 @@ impl<'a> Table<'a> {
             Algorithm::Gzip1 => values(&inflate(compressed, pixels)?, pixels, lossless_floats)?,
             Algorithm::Gzip2 => {
                 let shuffled = inflate(compressed, pixels)?;
-                let width = shuffled.len() / pixels.max(1);
+                let width = sample_width(shuffled.len(), pixels)?;
                 values(&unshuffle(&shuffled, width), pixels, lossless_floats)?
             }
             Algorithm::Plio => {
@@ -663,16 +663,21 @@ fn unshuffle(shuffled: &[u8], width: usize) -> Vec<u8> {
     out
 }
 
+/// The sample width only exists when every pixel has a complete sample.
+/// Check before unshuffling, which otherwise drops an incomplete byte plane.
+fn sample_width(bytes: usize, pixels: usize) -> Result<usize, FitsError> {
+    bytes
+        .checked_div(pixels)
+        .filter(|width| width * pixels == bytes)
+        .ok_or_else(|| malformed("tile size does not match its pixel count"))
+}
+
 /// Big-endian samples whose width the byte count gives away, as cfitsio
 /// and astropy read GZIP tiles: 1 byte is unsigned, 2 bytes signed, and 4
 /// or 8 bytes are floats for losslessly kept floating-point data, signed
 /// integers otherwise.
 fn values(bytes: &[u8], pixels: usize, floats: bool) -> Result<Tile, FitsError> {
-    let width = bytes
-        .len()
-        .checked_div(pixels)
-        .filter(|width| width * pixels == bytes.len())
-        .ok_or_else(|| malformed("tile size does not match its pixel count"))?;
+    let width = sample_width(bytes.len(), pixels)?;
     Ok(match (width, floats) {
         (1, _) => Tile::Int(bytes.iter().map(|&byte| i64::from(byte)).collect()),
         (2, _) => Tile::Int(
@@ -1060,7 +1065,25 @@ fn decompress_region(
         region.y..region.y + region.height,
     );
 
-    for row in 0..total as usize {
+    // FITS table rows are the tile grid flattened with the first axis
+    // varying fastest. Visit just the grid rectangle crossing this region,
+    // and the tiles containing the retained planes; higher axes start at 0.
+    let x_tiles = columns.start as u64 / tiles[0]..(columns.end as u64).div_ceil(tiles[0]);
+    let y_tiles = rows.start as u64 / tiles[1]..(rows.end as u64).div_ceil(tiles[1]);
+    let plane_tiles = tiles
+        .get(2)
+        .map_or(1, |&tile| (shape.planes as u64).div_ceil(tile));
+    let columns_per_row = counts[0];
+    let rows_per_plane = counts[0] * counts[1];
+    let selected_rows = (0..plane_tiles).flat_map(|plane| {
+        let x_tiles = x_tiles.clone();
+        y_tiles.clone().flat_map(move |y| {
+            x_tiles
+                .clone()
+                .map(move |x| (plane * rows_per_plane + y * columns_per_row + x) as usize)
+        })
+    });
+    for row in selected_rows {
         // The tile's index along each axis, the first axis varying fastest.
         let mut rest = row as u64;
         let mut start = Vec::with_capacity(axes.len());
@@ -1495,6 +1518,66 @@ mod tests {
     }
 
     #[test]
+    fn windows_cross_spatial_and_plane_tiles_but_keep_only_the_first_higher_slice() {
+        let sample =
+            |x: usize, y: usize, z: usize, w: usize| (1000 * w + 100 * z + 10 * y + x) as i16;
+        for [tx, ty, tz, tw] in [[1, 1, 1, 1], [2, 3, 2, 1], [3, 2, 3, 2], [8, 8, 8, 8]] {
+            let mut tiles = Vec::new();
+            for w in (0..2).step_by(tw) {
+                for z in (0..5).step_by(tz) {
+                    for y in (0..4).step_by(ty) {
+                        for x in (0..5).step_by(tx) {
+                            let mut values = Vec::new();
+                            for iw in w..(w + tw).min(2) {
+                                for iz in z..(z + tz).min(5) {
+                                    for iy in y..(y + ty).min(4) {
+                                        for ix in x..(x + tx).min(5) {
+                                            values.extend(sample(ix, iy, iz, iw).to_be_bytes());
+                                        }
+                                    }
+                                }
+                            }
+                            tiles.push(values);
+                        }
+                    }
+                }
+            }
+            let bytes = compressed_file(
+                &image_cards(16, &[5, 4, 5, 2], &[tx, ty, tz, tw], "NOCOMPRESS"),
+                &[compressed_column(tiles)],
+                &[],
+            );
+            let file = written(&bytes);
+            for (x, y, width, height) in [
+                (0, 0, 5, 4),
+                (1, 1, 3, 2),
+                (4, 3, 9, 9),
+                (0, 2, 5, 1),
+                (2, 0, 1, 4),
+                (5, 0, 1, 1),
+            ] {
+                let window = crate::read_window(file.path(), x, y, width, height).unwrap();
+                let mut expected = Vec::new();
+                for z in 0..3 {
+                    for iy in window.y..window.y + window.height {
+                        for ix in window.x..window.x + window.width {
+                            expected.push(f32::from(sample(ix, iy, z, 0)));
+                        }
+                    }
+                }
+                assert_eq!(
+                    window.values, expected,
+                    "tiles {tx} {ty} {tz} {tw}, window {x} {y}"
+                );
+                let mut reader = std::io::Cursor::new(&bytes);
+                let unmapped =
+                    crate::window::window_from(&mut reader, None, x, y, width, height).unwrap();
+                assert_eq!(unmapped, window);
+            }
+        }
+    }
+
+    #[test]
     fn a_window_decodes_only_the_tiles_it_crosses() {
         // Tile 2 holds columns 4 and rows 0-1; the whole image cannot be
         // decoded, but a window clear of that tile can.
@@ -1770,6 +1853,26 @@ mod tests {
             crate::read_named_header(&path, "COVER").unwrap().cards,
             crate::FitsImage::open(&path).unwrap().headers
         );
+    }
+
+    #[test]
+    fn gzip_2_rejects_partial_shuffled_samples() {
+        for width in [2, 4, 8] {
+            let mut shuffled = vec![0; 2 * width];
+            shuffled.push(255);
+            let file = compressed_file(
+                &image_cards(16, &[2, 1], &[2, 1], "GZIP_2"),
+                &[compressed_column(vec![gzip(&shuffled)])],
+                &[],
+            );
+            assert!(
+                matches!(
+                    crate::FitsImage::from_bytes(&file),
+                    Err(FitsError::Malformed(_))
+                ),
+                "accepted a {width}-byte sample tile with an extra byte"
+            );
+        }
     }
 
     #[test]

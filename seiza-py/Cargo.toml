@@ -5,7 +5,7 @@ name = "seiza-py"
 # version; every engine release ships a matching py-vX.Y.Z tag.
 version = "0.49.0"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.92"
 license = "Apache-2.0"
 repository = "https://github.com/theatrus/seiza"
 authors = ["Yann Ramin <github@theatr.us>"]
@@ -37,6 +37,7 @@ seiza-deconvolution = { path = "../seiza-deconvolution" }
 seiza-fits = { path = "../seiza-fits" }
 seiza-image-io = { path = "../seiza-image-io" }
 seiza-imgproc = { path = "../seiza-imgproc" }
+seiza-model = { path = "../seiza-model" }
 seiza-satellites = { path = "../seiza-satellites" }
 seiza-sources = { path = "../seiza-sources" }
 seiza-parallax = { path = "../seiza-parallax" }

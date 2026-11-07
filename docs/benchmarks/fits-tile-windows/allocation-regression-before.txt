@@ -1,0 +1,22 @@
+   Compiling seiza-fits v0.8.0 (/home/ppicazo/Development/seiza/seiza-fits)
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.25s
+     Running tests/compressed_window_work.rs (target/debug/deps/compressed_window_work-04f8203b164a3d00)
+
+running 1 test
+test one_pixel_does_not_allocate_for_unrelated_tiles ... FAILED
+
+failures:
+
+---- one_pixel_does_not_allocate_for_unrelated_tiles stdout ----
+
+thread 'one_pixel_does_not_allocate_for_unrelated_tiles' (66) panicked at seiza-fits/tests/compressed_window_work.rs:83:5:
+one pixel made 200098 allocations
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    one_pixel_does_not_allocate_for_unrelated_tiles
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p seiza-fits --test compressed_window_work`

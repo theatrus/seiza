@@ -1,0 +1,48 @@
+{
+  "format": 1,
+  "name": "noise-tiny",
+  "task": "denoise",
+  "graphs": [
+    {
+      "precision": "f32",
+      "file": "model-f32.onnx",
+      "sha256": "a839752e91740d00979922f5e8c81192afba013185fcb19f89d6f4560fdffa17"
+    },
+    {
+      "precision": "f16",
+      "file": "model-f16.onnx",
+      "sha256": "b73086e09c40d92542d879d1a00d00bc3481ede75343b0518b9bb902282f283c"
+    }
+  ],
+  "inputs": [
+    {
+      "tensor": "planes",
+      "planes": [
+        "image",
+        "noise"
+      ]
+    }
+  ],
+  "output": "residual",
+  "dimensions": [
+    "height",
+    "width"
+  ],
+  "reading": {
+    "noise_map": "constant",
+    "noise_plane": "asinh",
+    "sky": "flat",
+    "sky_block": 32,
+    "flat_block": 64,
+    "image_map_scale": 1.13
+  },
+  "tiling": {
+    "tile": 64,
+    "margin": 10,
+    "ramp": 8,
+    "multiple": 2
+  },
+  "parity": [
+    "cpu"
+  ]
+}

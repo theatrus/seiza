@@ -1314,6 +1314,9 @@ fn parse_image(
         })
         .collect::<Result<Vec<_>, _>>()?;
     for &child in &children {
+        // Resolving a shared root element inside an Image can add a level.
+        // Check its descendants before cloning the resolved metadata.
+        xml::validate_depth(&child.children, 3)?;
         let child_attributes = &child.attributes;
         match child.local_name() {
             "FITSKeyword" => {

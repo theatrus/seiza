@@ -65,5 +65,6 @@ objc2-metal = { version = "0.3.2", optional = true, default-features = false, fe
 windows = { version = "0.62", optional = true, default-features = false, features = ["Win32_Graphics_Dxgi"] }
 
 [dev-dependencies]
+flate2.workspace = true
 image.workspace = true
 naga.workspace = true
