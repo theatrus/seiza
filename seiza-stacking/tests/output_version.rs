@@ -867,6 +867,35 @@ fn a_mono_stack_with_default_options_keeps_its_output() {
 }
 
 #[test]
+fn uploaded_float_tiff_lights_keep_their_output() {
+    let read = |image: LinearImage| {
+        let packed = image.data.iter().flat_map(|&value| [value; 3]).collect();
+        let pixels = image::Rgb32FImage::from_raw(WIDTH as u32, HEIGHT as u32, packed).unwrap();
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb32F(pixels)
+            .write_to(&mut bytes, image::ImageFormat::Tiff)
+            .unwrap();
+        let decoded = seiza_image_io::raster::decode_oriented(bytes.get_ref()).unwrap();
+        assert_eq!(
+            decoded.coordinates.oriented_dimensions,
+            (WIDTH as u32, HEIGHT as u32)
+        );
+        let data = decoded
+            .pixels
+            .into_rgb32f()
+            .pixels()
+            .map(|pixel| pixel.0[0])
+            .collect();
+        LinearImage::new(WIDTH, HEIGHT, 1, data).unwrap()
+    };
+    check(
+        "MONO_DEFAULT",
+        &mono_stack_read(StackOptions::default(), read),
+        MONO_DEFAULT,
+    );
+}
+
+#[test]
 fn a_mono_stack_with_every_stage_configured_keeps_its_output() {
     let mut options = StackOptions {
         normalization: NormalizationMode::LocalBackground { tile_size: 32 },
@@ -3043,8 +3072,16 @@ const FILE_PEDESTAL_AND_FLAT: &[f64] = &[
 ];
 
 fn mono_stack(options: StackOptions) -> Vec<f64> {
+    mono_stack_read(options, |image| image)
+}
+
+fn mono_stack_read(
+    options: StackOptions,
+    mut read: impl FnMut(LinearImage) -> LinearImage,
+) -> Vec<f64> {
     let gain = |frame: usize| 0.96 + 0.01 * frame as f32;
-    let mut stacker = LiveStacker::from_linear(mono_field(0.0, 0.0, gain(0), 0), options).unwrap();
+    let mut stacker =
+        LiveStacker::from_linear(read(mono_field(0.0, 0.0, gain(0), 0)), options).unwrap();
     for (frame, &(dx, dy)) in SHIFTS.iter().enumerate().skip(1) {
         let mut image = mono_field(dx, dy, gain(frame), frame);
         // A satellite trail in one frame, which rejection removes.
@@ -3054,7 +3091,7 @@ fn mono_stack(options: StackOptions) -> Vec<f64> {
                 image.data[y * WIDTH + x] += 3_000.0;
             }
         }
-        admit(stacker.push_linear(image).unwrap());
+        admit(stacker.push_linear(read(image)).unwrap());
     }
     let snapshot = stacker.snapshot().unwrap();
     let report =

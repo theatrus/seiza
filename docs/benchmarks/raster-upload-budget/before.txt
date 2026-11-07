@@ -1,0 +1,24 @@
+   Compiling seiza-fits v0.8.0 (/home/ppicazo/Development/seiza/seiza-fits)
+   Compiling seiza-xisf v0.9.0 (/home/ppicazo/Development/seiza/seiza-xisf)
+   Compiling seiza-image-io v0.13.0 (/home/ppicazo/Development/seiza/seiza-image-io)
+    Finished `test` profile [optimized + debuginfo] target(s) in 1.23s
+     Running tests/raster_decode_budget.rs (target/debug/deps/raster_decode_budget-10039ba7d66d8a5b)
+
+running 1 test
+
+thread 'uploaded_image_budget_is_checked_before_allocating_pixels' (345) panicked at seiza-image-io/tests/raster_decode_budget.rs:63:9:
+bounded upload child failed: signal: 6 (SIGABRT) (core dumped)
+memory allocation of 320000000000 bytes failed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test uploaded_image_budget_is_checked_before_allocating_pixels ... FAILED
+
+failures:
+
+failures:
+    uploaded_image_budget_is_checked_before_allocating_pixels
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+error: test failed, to rerun pass `-p seiza-image-io --test raster_decode_budget`
