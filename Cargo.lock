@@ -3586,6 +3586,7 @@ dependencies = [
  "bytemuck",
  "flate2",
  "fs2",
+ "image",
  "libc",
  "multiversion",
  "naga",

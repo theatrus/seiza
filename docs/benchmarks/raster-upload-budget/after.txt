@@ -1,0 +1,9 @@
+    Blocking waiting for file lock on build directory
+    Finished `test` profile [optimized + debuginfo] target(s) in 1m 29s
+     Running tests/raster_decode_budget.rs (target/debug/deps/raster_decode_budget-10039ba7d66d8a5b)
+
+running 1 test
+largest allocation request before refusal: 131072 bytes
+test uploaded_image_budget_is_checked_before_allocating_pixels ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
