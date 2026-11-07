@@ -62,13 +62,15 @@ def effective_version(package: dict, workspace_version: Version) -> Version:
     raise ValueError(f"package {package.get('name', '<unknown>')} has no usable version")
 
 
-def dependency_names(manifest: dict) -> frozenset[str]:
+def dependency_names(manifest: dict, workspace_dependencies: dict) -> frozenset[str]:
     names: set[str] = set()
 
     def add_table(table: object) -> None:
         if not isinstance(table, dict):
             return
         for key, value in table.items():
+            if isinstance(value, dict) and value.get("workspace") is True:
+                value = workspace_dependencies[key]
             if isinstance(value, dict) and isinstance(value.get("package"), str):
                 names.add(value["package"])
             else:
@@ -94,7 +96,9 @@ def snapshot(load_manifest: Callable[[str], dict]) -> dict[str, Package]:
         item = Package(
             name=package["name"],
             version=effective_version(package, workspace_version),
-            dependencies=dependency_names(manifest),
+            dependencies=dependency_names(
+                manifest, root["workspace"].get("dependencies", {})
+            ),
             publishable=publish is not False and publish != [],
         )
         packages[item.name] = item
@@ -119,7 +123,9 @@ def find_violations(
             continue
         if old_dependent.version != dependent.version:
             continue
-        for dependency_name in dependent.dependencies:
+        # An unchanged published version still carries its old dependencies,
+        # even if this checkout removed or renamed them.
+        for dependency_name in dependent.dependencies | old_dependent.dependencies:
             changed = incompatible.get(dependency_name)
             if changed is not None:
                 old_dependency, dependency = changed

@@ -21,6 +21,75 @@ def package(name, version, dependencies=(), publishable=True):
 
 
 class ReleaseVersionChainTests(unittest.TestCase):
+    def test_removed_dependency_still_requires_published_dependent_bump(self):
+        base = {
+            "core": package("core", (0, 1, 0)),
+            "host": package("host", (1, 0, 0), ("core",)),
+        }
+        current = {
+            "core": package("core", (0, 2, 0)),
+            "host": package("host", (1, 0, 0)),
+        }
+
+        violations = MODULE.find_violations(base, current)
+        self.assertEqual(
+            [(item.dependency.name, item.dependent.name) for item in violations],
+            [("core", "host")],
+        )
+        current["host"] = package("host", (1, 0, 1))
+        self.assertEqual(MODULE.find_violations(base, current), [])
+
+    def test_workspace_aliases_resolve_in_all_dependency_tables(self):
+        for table in ("dependencies", "build-dependencies"):
+            for target in (False, True):
+                with self.subTest(table=table, target=target):
+                    dependency_table = {table: {"engine": {"workspace": True}}}
+                    manifest = {"package": {"name": "host", "version": "1.0.0"}}
+                    if target:
+                        manifest["target"] = {"cfg(unix)": dependency_table}
+                    else:
+                        manifest.update(dependency_table)
+                    manifests = {
+                        "Cargo.toml": {"workspace": {
+                            "package": {"version": "1.0.0"},
+                            "members": ["host"],
+                            "dependencies": {"engine": {
+                                "package": "core", "version": "0.1.0",
+                            }},
+                        }},
+                        "host/Cargo.toml": manifest,
+                    }
+                    packages = MODULE.snapshot(manifests.__getitem__)
+                    self.assertEqual(packages["host"].dependencies, frozenset({"core"}))
+
+    def test_dependency_resolution_preserves_local_names_and_ignores_dev_dependencies(self):
+        manifest = {
+            "dependencies": {
+                "plain": "1.0.0",
+                "local": {"package": "local-core", "version": "1.0.0"},
+                "inherited": {"workspace": True},
+            },
+            "dev-dependencies": {"test-only": "1.0.0"},
+            "target": {"cfg(unix)": {
+                "dev-dependencies": {"target-test-only": "1.0.0"},
+            }},
+        }
+        workspace_dependencies = {
+            # A local dependency with the same key does not inherit this rename.
+            "local": {"package": "other-core", "version": "1.0.0"},
+            "inherited": "1.0.0",
+        }
+        self.assertEqual(
+            MODULE.dependency_names(manifest, workspace_dependencies),
+            frozenset({"plain", "local-core", "inherited"}),
+        )
+
+    def test_missing_inherited_dependency_is_rejected(self):
+        with self.assertRaises(KeyError):
+            MODULE.dependency_names(
+                {"dependencies": {"missing": {"workspace": True}}}, {}
+            )
+
     def test_pre_one_minor_requires_dependent_bump(self):
         base = {
             "seiza": package("seiza", (0, 12, 2)),
