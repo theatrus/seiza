@@ -27,7 +27,7 @@ pub(crate) fn input_sigma(
     height: usize,
     reading: &Reading,
 ) -> Vec<f32> {
-    let mapped = image_sigma(
+    let mut mapped = image_sigma(
         plane,
         width,
         height,
@@ -39,10 +39,10 @@ pub(crate) fn input_sigma(
         NoiseInput::Constant => {
             let mut finite: Vec<f32> = mapped.iter().copied().filter(|v| v.is_finite()).collect();
             let level = median_f32(&mut finite).unwrap_or(f32::NAN);
+            for value in &mut mapped {
+                *value = if value.is_finite() { level } else { f32::NAN };
+            }
             mapped
-                .iter()
-                .map(|v| if v.is_finite() { level } else { f32::NAN })
-                .collect()
         }
     }
 }
@@ -67,43 +67,51 @@ pub(crate) fn image_sigma(
 
     let cells: Vec<(f64, f64)> = (0..rows * columns)
         .into_par_iter()
-        .map(|cell| {
-            let (row, column) = (cell / columns, cell % columns);
-            let (top, left) = (row * block, column * block);
-            let (bottom, right) = (
-                ((row + 1) * block).min(height),
-                ((column + 1) * block).min(width),
-            );
-            let capacity = (bottom - top) * (right - left);
-            let mut across = Vec::with_capacity(capacity);
-            let mut down = Vec::with_capacity(capacity);
-            let mut values = Vec::with_capacity(capacity);
-            for y in top..bottom {
-                for x in left..right {
-                    let centre = at(x, y);
-                    if centre.is_finite() {
-                        values.push(centre);
-                    }
-                    if x >= 1 && x + 1 < width {
-                        let difference = at(x - 1, y) - 2.0 * centre + at(x + 1, y);
-                        if difference.is_finite() {
-                            across.push(difference * difference);
+        // Each Rayon job keeps its median scratch across blocks. Missing
+        // pixels change the lengths, so clear every buffer before refilling.
+        .map_init(
+            || (Vec::new(), Vec::new(), Vec::new()),
+            |(across, down, values), cell| {
+                let (row, column) = (cell / columns, cell % columns);
+                let (top, left) = (row * block, column * block);
+                let (bottom, right) = (
+                    ((row + 1) * block).min(height),
+                    ((column + 1) * block).min(width),
+                );
+                let capacity = (bottom - top) * (right - left);
+                across.clear();
+                down.clear();
+                values.clear();
+                across.reserve(capacity);
+                down.reserve(capacity);
+                values.reserve(capacity);
+                for y in top..bottom {
+                    for x in left..right {
+                        let centre = at(x, y);
+                        if centre.is_finite() {
+                            values.push(centre);
                         }
-                    }
-                    if y >= 1 && y + 1 < height {
-                        let difference = at(x, y - 1) - 2.0 * centre + at(x, y + 1);
-                        if difference.is_finite() {
-                            down.push(difference * difference);
+                        if x >= 1 && x + 1 < width {
+                            let difference = at(x - 1, y) - 2.0 * centre + at(x + 1, y);
+                            if difference.is_finite() {
+                                across.push(difference * difference);
+                            }
+                        }
+                        if y >= 1 && y + 1 < height {
+                            let difference = at(x, y - 1) - 2.0 * centre + at(x, y + 1);
+                            if difference.is_finite() {
+                                down.push(difference * difference);
+                            }
                         }
                     }
                 }
-            }
-            let across = median_f64(&mut across).unwrap_or(f64::NAN);
-            let down = median_f64(&mut down).unwrap_or(f64::NAN);
-            let value = median_f64(&mut values).unwrap_or(f64::NAN);
-            // A second difference of white noise has six times its variance.
-            (0.5 * (across + down) / (6.0 * CHI2_1_MEDIAN), value)
-        })
+                let across = median_f64(across).unwrap_or(f64::NAN);
+                let down = median_f64(down).unwrap_or(f64::NAN);
+                let value = median_f64(values).unwrap_or(f64::NAN);
+                // A second difference of white noise has six times its variance.
+                (0.5 * (across + down) / (6.0 * CHI2_1_MEDIAN), value)
+            },
+        )
         .collect();
 
     let mut sampled = Vec::new();
@@ -273,6 +281,56 @@ mod tests {
             (inside / sigma_at(500) - 1.0).abs() < 0.1,
             "the nebula's: {inside}"
         );
+    }
+
+    #[test]
+    fn changing_block_coverage_does_not_make_the_map_depend_on_the_thread_count() {
+        let (width, height) = (257, 193);
+        let mut state = 17_u64;
+        let image: Vec<f32> = (0..width * height)
+            .map(|index| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let (x, y) = (index % width, index / width);
+                if (x / 16 + 3 * (y / 16)) % 7 == 0 {
+                    return f32::NAN;
+                }
+                if index % 113 == 0 {
+                    return f32::INFINITY;
+                }
+                100.0
+                    + 20.0 * (x / 16) as f32
+                    + ((state >> 40) as f32 / (1_u32 << 24) as f32 - 0.5) * (1 + y / 16) as f32
+            })
+            .collect();
+        for mode in [NoiseInput::Image, NoiseInput::Constant] {
+            let reading = Reading {
+                sky_block: 16,
+                ..reading(mode)
+            };
+            let run = |threads| {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap()
+                    .install(|| input_sigma(&image, width, height, &reading))
+                    .into_iter()
+                    .map(f32::to_bits)
+                    .collect::<Vec<_>>()
+            };
+            let expected = run(1);
+            for threads in [2, 8] {
+                let actual = run(threads);
+                assert_eq!(actual.len(), expected.len());
+                for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+                    assert_eq!(
+                        actual, expected,
+                        "{mode:?}, {threads} threads, pixel {index}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
