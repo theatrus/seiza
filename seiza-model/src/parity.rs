@@ -6,7 +6,7 @@
 use crate::bands::NoiseBands;
 use crate::bundle::{HoleGuard, InputPlane, NoiseInput, NoisePlane, Reading, SkyInput};
 use crate::error::ModelError;
-use crate::holes::{guarded, guarded_residual, sky_floor};
+use crate::holes::{Guard, guarded, guarded_residual, sky_floor};
 use crate::noise::{input_sigma, noise_correlation};
 use crate::sky::{network_input, scales, seen, smooth_sky};
 use crate::tiles::{Tiling, infer, origins, window};
@@ -351,7 +351,9 @@ fn the_hole_guard_matches_the_harness() {
         noise_correlation: want.noise_correlation,
         holes: Some(want.guard),
     };
-    let guarded = guarded(&image, width, height, &want.guard, &reading).unwrap();
+    let Guard::Holes(guarded) = guarded(&image, width, height, &want.guard, &reading) else {
+        panic!("the fixture's holes are found");
+    };
     let masked: Vec<usize> = (0..image.len()).filter(|&i| guarded.mask[i]).collect();
     assert_eq!(
         masked, want.mask,

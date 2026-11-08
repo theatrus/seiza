@@ -9,6 +9,10 @@ use std::path::{Path, PathBuf};
 
 /// The card format this build reads.
 const CARD_FORMAT: u32 = 1;
+/// The widest margin a card's hole guard may ask for, in pixels.
+const MAX_HOLE_MARGIN: usize = 32;
+/// The widest box a card's hole guard may fill from, in pixels each way.
+const MAX_FILL_RADIUS: usize = 64;
 /// A card's file name in its bundle.
 pub(crate) const CARD_FILE: &str = "card.json";
 
@@ -97,8 +101,11 @@ pub enum SkyInput {
     Flat,
 }
 
-/// How a model reads an image: everything that must match its training.
+/// How a model reads an image: everything that must match its training. A
+/// setting this build does not know is refused, never ignored, so a card that
+/// asks for more than a build does cannot run without it.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Reading {
     /// What fills the noise plane.
     pub noise_map: NoiseInput,
@@ -131,6 +138,7 @@ pub struct Reading {
 /// speckle, so they are filled from their surroundings before it runs, and put
 /// back after.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HoleGuard {
     /// How far below the sky's floor a pixel is a hole, in the image map's
     /// noise.
@@ -276,6 +284,13 @@ impl ModelCard {
                 return refuse(format!(
                     "{}'s holes need a positive depth and restore, not {} and {}",
                     self.name, guard.depth, guard.restore
+                ));
+            }
+            if guard.margin > MAX_HOLE_MARGIN || guard.fill_radius > MAX_FILL_RADIUS {
+                return refuse(format!(
+                    "{}'s holes reach at most {MAX_HOLE_MARGIN} pixels past a hole and fill from \
+                     at most {MAX_FILL_RADIUS}, not {} and {}",
+                    self.name, guard.margin, guard.fill_radius
                 ));
             }
         }
@@ -562,12 +577,36 @@ pub(crate) mod tests {
                 restore: 5.0
             })
         );
-        card["reading"]["holes"]["restore"] = serde_json::json!(0.0);
+        for (field, value) in [
+            ("restore", serde_json::json!(0.0)),
+            ("margin", serde_json::json!(usize::MAX)),
+            ("fill_radius", serde_json::json!(100_000)),
+            ("kind", serde_json::json!("median")),
+        ] {
+            let mut bad = card.clone();
+            bad["reading"]["holes"][field] = value;
+            std::fs::write(&path, serde_json::to_vec(&bad).unwrap()).unwrap();
+            assert!(
+                matches!(
+                    ModelBundle::open(temp.path()),
+                    Err(ModelError::ModelContract(_))
+                ),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reading_this_build_does_not_know_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        write_bundle(temp.path(), "noise-test", "constant");
+        let path = temp.path().join(CARD_FILE);
+        let mut card: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        card["reading"]["stars"] = serde_json::json!({"keep": true});
         std::fs::write(&path, serde_json::to_vec(&card).unwrap()).unwrap();
-        assert!(matches!(
-            ModelBundle::open(temp.path()),
-            Err(ModelError::ModelContract(_))
-        ));
+        let error = ModelBundle::open(temp.path()).unwrap_err();
+        assert!(error.to_string().contains("stars"), "{error}");
     }
 
     #[test]

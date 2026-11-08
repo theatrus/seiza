@@ -84,7 +84,14 @@ impl PyChannelScales {
 /// `margin` pixels, are filled from the mean of the others within
 /// `fill_radius`, and put back after where they differ from the output by more
 /// than `restore` of the map's noise.
-#[pyclass(skip_from_py_object, name = "HoleGuard", module = "seiza", frozen)]
+#[pyclass(
+    skip_from_py_object,
+    name = "HoleGuard",
+    module = "seiza",
+    frozen,
+    eq,
+    hash
+)]
 #[derive(Clone)]
 pub(crate) struct PyHoleGuard {
     #[pyo3(get)]
@@ -105,6 +112,31 @@ impl From<&HoleGuard> for PyHoleGuard {
             fill_radius: guard.fill_radius,
             restore: guard.restore,
         }
+    }
+}
+
+/// Two guards are equal when their settings are, bit for bit, so a cache keyed
+/// on a guard finds it again.
+impl PartialEq for PyHoleGuard {
+    fn eq(&self, other: &Self) -> bool {
+        self.key() == other.key()
+    }
+}
+
+impl std::hash::Hash for PyHoleGuard {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.key().hash(state);
+    }
+}
+
+impl PyHoleGuard {
+    fn key(&self) -> (u64, usize, usize, u64) {
+        (
+            self.depth.to_bits(),
+            self.margin,
+            self.fill_radius,
+            self.restore.to_bits(),
+        )
     }
 }
 

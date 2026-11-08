@@ -20,26 +20,41 @@ const IMAGE_GAIN_BLOCKS: usize = 20;
 /// No block's sky variance falls below this share of the image's.
 const SKY_VARIANCE_FLOOR: f64 = 0.25;
 
+/// The background is the median of every this many pixels along each axis.
+const BACKGROUND_STRIDE: usize = 7;
 /// The fewest second differences `noise_correlation` measures on.
 const CORRELATION_SAMPLES: usize = 1000;
 /// `noise_correlation` reads the sky's level from every this many pixels along
 /// each axis.
 const CORRELATION_STRIDE: usize = 3;
 
-/// The noise map `reading` asks for, NaN where the image is not finite.
+/// The noise map `reading` asks for, NaN where the image is not finite, as the
+/// harness's function of the same name. A run makes it in two steps
+/// ([`image_map`], [`noise_input`]), so the guard's map serves it too.
+#[cfg(test)]
 pub(crate) fn input_sigma(
     plane: &[f32],
     width: usize,
     height: usize,
     reading: &Reading,
 ) -> Vec<f32> {
-    let mut mapped = image_sigma(
+    noise_input(image_map(plane, width, height, reading), reading)
+}
+
+/// The image map at the level `reading` sets ([`map_scale`]).
+pub(crate) fn image_map(plane: &[f32], width: usize, height: usize, reading: &Reading) -> Vec<f32> {
+    image_sigma(
         plane,
         width,
         height,
         reading.sky_block,
         map_scale(plane, width, height, reading),
-    );
+    )
+}
+
+/// What fills the noise plane, from the image map `mapped`, as `reading`
+/// asks.
+pub(crate) fn noise_input(mut mapped: Vec<f32>, reading: &Reading) -> Vec<f32> {
     match reading.noise_map {
         NoiseInput::Image => mapped,
         NoiseInput::Constant => {
@@ -158,6 +173,23 @@ fn second_difference_noise(values: &[f64], mask: &[bool], width: usize, height: 
     1.4826 * median_f64(&mut deviations).unwrap_or(f64::NAN) / 6.0_f64.sqrt()
 }
 
+/// The image's background: the median of every `BACKGROUND_STRIDE`th pixel
+/// along each axis that holds a value, or 0 where none does.
+pub(crate) fn background(plane: &[f32], width: usize, height: usize) -> f64 {
+    let mut sampled = Vec::new();
+    for y in (0..height).step_by(BACKGROUND_STRIDE) {
+        for &value in plane[y * width..][..width]
+            .iter()
+            .step_by(BACKGROUND_STRIDE)
+        {
+            if value.is_finite() {
+                sampled.push(f64::from(value));
+            }
+        }
+    }
+    median_f64(&mut sampled).unwrap_or(0.0)
+}
+
 /// A noise map from the image alone. The sky's variance is that of the
 /// image's second differences along each axis, as medians over `block`-pixel
 /// blocks: a planar gradient cancels in them, and the stars drop out. Spread
@@ -225,16 +257,7 @@ pub(crate) fn image_sigma(
         )
         .collect();
 
-    let mut sampled = Vec::new();
-    for y in (0..height).step_by(7) {
-        for x in (0..width).step_by(7) {
-            let value = at(x, y);
-            if value.is_finite() {
-                sampled.push(value);
-            }
-        }
-    }
-    let background = median_f64(&mut sampled).unwrap_or(0.0);
+    let background = background(plane, width, height);
 
     let variance_blocks: Vec<f64> = cells.iter().map(|cell| cell.0).collect();
     let signal_blocks: Vec<f64> = cells.iter().map(|cell| cell.1 - background).collect();

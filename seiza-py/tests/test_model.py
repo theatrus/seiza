@@ -81,6 +81,8 @@ def test_a_card_s_hole_guard_is_listed_with_its_settings(tmp_path: Path) -> None
     holes = seiza.install_model(source, tmp_path / "store").holes
     assert isinstance(holes, seiza.HoleGuard)
     assert (holes.depth, holes.margin, holes.fill_radius, holes.restore) == (30.0, 3, 12, 5.0)
+    listed = seiza.installed_models(tmp_path / "store")[0].holes
+    assert listed == holes and hash(listed) == hash(holes), "a cache keyed on the guard finds it again"
 
 
 def test_a_changed_graph_is_refused(tmp_path: Path) -> None:

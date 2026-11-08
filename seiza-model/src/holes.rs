@@ -13,7 +13,7 @@
 //! This is the harness's `holes` module, held to it by the parity fixtures.
 
 use crate::bundle::{HoleGuard, Reading};
-use crate::noise::{image_sigma, map_scale};
+use crate::noise::{background, image_map};
 use crate::sky::upsample;
 use crate::stats::median_f64;
 use rayon::prelude::*;
@@ -21,9 +21,14 @@ use rayon::prelude::*;
 /// Each block's floor is this percentile of its pixels, read between order
 /// statistics as numpy reads it by default.
 const FLOOR_PERCENTILE: f64 = 20.0;
-/// The image's background is the median of every this many pixels along each
-/// axis, as the noise map takes it.
-const BACKGROUND_STRIDE: usize = 7;
+
+/// What the guard found in an image.
+pub(crate) enum Guard {
+    /// No hole: the network reads the image as it is, with this image map.
+    Clear(Vec<f32>),
+    /// Holes, which the network reads filled.
+    Holes(Guarded),
+}
 
 /// What a guarded network reads, and what the guard needs to put the holes
 /// back.
@@ -36,33 +41,29 @@ pub(crate) struct Guarded {
     noise_map: Vec<f32>,
 }
 
-/// The image `guard` has the network read in place of `plane`, or `None` when
-/// it holds no hole and the network reads the image as it is.
+/// The image `guard` has the network read in place of `plane`. Where the image
+/// map holds no noise, nothing is a hole.
 pub(crate) fn guarded(
     plane: &[f32],
     width: usize,
     height: usize,
     guard: &HoleGuard,
     reading: &Reading,
-) -> Option<Guarded> {
-    let noise_map = image_sigma(
-        plane,
-        width,
-        height,
-        reading.sky_block,
-        map_scale(plane, width, height, reading),
-    );
+) -> Guard {
+    let noise_map = image_map(plane, width, height, reading);
     let floor = sky_floor(plane, width, height, reading.sky_block);
     let deep: Vec<bool> = plane
         .par_iter()
         .zip(floor.par_iter().zip(noise_map.par_iter()))
         .map(|(&value, (&floor, &noise))| {
+            let noise = f64::from(noise);
             value.is_finite()
-                && f64::from(floor) - f64::from(value) > guard.depth * f64::from(noise)
+                && noise > 0.0
+                && f64::from(floor) - f64::from(value) > guard.depth * noise
         })
         .collect();
     if !deep.contains(&true) {
-        return None;
+        return Guard::Clear(noise_map);
     }
     let mask: Vec<bool> = grown(&deep, width, height, guard.margin)
         .into_iter()
@@ -70,7 +71,7 @@ pub(crate) fn guarded(
         .map(|(inside, value)| inside && value.is_finite())
         .collect();
     let read = filled(plane, &mask, width, height, guard.fill_radius, &floor);
-    Some(Guarded {
+    Guard::Holes(Guarded {
         read,
         mask,
         noise_map,
@@ -129,16 +130,7 @@ pub(crate) fn sky_floor(plane: &[f32], width: usize, height: usize, block: usize
             percentile(&mut values, FLOOR_PERCENTILE).unwrap_or(f64::INFINITY)
         })
         .collect();
-    let mut sampled = Vec::new();
-    for y in (0..height).step_by(BACKGROUND_STRIDE) {
-        for x in (0..width).step_by(BACKGROUND_STRIDE) {
-            let value = plane[y * width + x];
-            if value.is_finite() {
-                sampled.push(f64::from(value));
-            }
-        }
-    }
-    let background = median_f64(&mut sampled).unwrap_or(0.0);
+    let background = background(plane, width, height);
     let floor: Vec<f64> = (0..rows * columns)
         .map(|cell| {
             let (row, column) = (cell / columns, cell % columns);
@@ -187,13 +179,14 @@ fn grown(mask: &[bool], width: usize, height: usize, radius: usize) -> Vec<bool>
         .for_each(|(out, line)| {
             for (x, inside) in line.iter().enumerate() {
                 if *inside {
-                    out[x.saturating_sub(radius)..=(x + radius).min(width - 1)].fill(true);
+                    out[x.saturating_sub(radius)..=x.saturating_add(radius).min(width - 1)]
+                        .fill(true);
                 }
             }
         });
     let mut out = vec![false; mask.len()];
     out.par_chunks_mut(width).enumerate().for_each(|(y, line)| {
-        for near in y.saturating_sub(radius)..=(y + radius).min(height - 1) {
+        for near in y.saturating_sub(radius)..=y.saturating_add(radius).min(height - 1) {
             for (pixel, &inside) in line.iter_mut().zip(&rows[near * width..][..width]) {
                 *pixel |= inside;
             }
@@ -202,33 +195,9 @@ fn grown(mask: &[bool], width: usize, height: usize, radius: usize) -> Vec<bool>
     out
 }
 
-/// The sum over the box `radius` round each pixel, cut at the image's edges.
-fn box_sums(plane: &[f64], width: usize, height: usize, radius: usize) -> Vec<f64> {
-    let wide = width + 1;
-    let mut total = vec![0.0_f64; (height + 1) * wide];
-    for y in 0..height {
-        let mut line = 0.0;
-        for x in 0..width {
-            line += plane[y * width + x];
-            total[(y + 1) * wide + x + 1] = total[y * wide + x + 1] + line;
-        }
-    }
-    let mut out = vec![0.0_f64; width * height];
-    out.par_chunks_mut(width).enumerate().for_each(|(y, line)| {
-        let (top, bottom) = (y.saturating_sub(radius), (y + radius + 1).min(height));
-        for (x, sum) in line.iter_mut().enumerate() {
-            let (left, right) = (x.saturating_sub(radius), (x + radius + 1).min(width));
-            *sum = total[bottom * wide + right]
-                - total[top * wide + right]
-                - total[bottom * wide + left]
-                + total[top * wide + left];
-        }
-    });
-    out
-}
-
-/// `plane` with each masked pixel the mean of the unmasked ones within
-/// `radius`, or the floor where there are none.
+/// `plane` with each masked pixel the median of the unmasked ones within
+/// `radius`, cut at the image's edges, or the floor where there are none. A
+/// star or a knot in the box barely moves it.
 fn filled(
     plane: &[f32],
     mask: &[bool],
@@ -237,35 +206,28 @@ fn filled(
     radius: usize,
     floor: &[f32],
 ) -> Vec<f32> {
-    let kept: Vec<bool> = plane
-        .iter()
-        .zip(mask)
-        .map(|(value, &inside)| value.is_finite() && !inside)
-        .collect();
-    let values: Vec<f64> = plane
-        .iter()
-        .zip(&kept)
-        .map(|(&value, &keep)| if keep { f64::from(value) } else { 0.0 })
-        .collect();
-    let ones: Vec<f64> = kept
-        .iter()
-        .map(|&keep| if keep { 1.0 } else { 0.0 })
-        .collect();
-    let totals = box_sums(&values, width, height, radius);
-    let counts = box_sums(&ones, width, height, radius);
-    plane
+    let masked: Vec<usize> = (0..plane.len()).filter(|&index| mask[index]).collect();
+    let fills: Vec<f32> = masked
         .par_iter()
-        .enumerate()
-        .map(|(index, &value)| {
-            if !mask[index] {
-                value
-            } else if counts[index] > 0.5 {
-                (totals[index] / counts[index]) as f32
-            } else {
-                floor[index]
+        .map(|&index| {
+            let (y, x) = (index / width, index % width);
+            let mut around = Vec::new();
+            for row in y.saturating_sub(radius)..y.saturating_add(radius + 1).min(height) {
+                for column in x.saturating_sub(radius)..x.saturating_add(radius + 1).min(width) {
+                    let at = row * width + column;
+                    if !mask[at] && plane[at].is_finite() {
+                        around.push(f64::from(plane[at]));
+                    }
+                }
             }
+            median_f64(&mut around).map_or(floor[index], |median| median as f32)
         })
-        .collect()
+        .collect();
+    let mut read = plane.to_vec();
+    for (index, fill) in masked.into_iter().zip(fills) {
+        read[index] = fill;
+    }
+    read
 }
 
 #[cfg(test)]
@@ -315,9 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn boxes_and_growth_cut_at_the_edges() {
-        let sums = box_sums(&[1.0; 35], 7, 5, 1);
-        assert_eq!((sums[0], sums[2 * 7 + 3], sums[34]), (4.0, 9.0, 4.0));
+    fn growth_cuts_at_the_edges() {
         let mut point = vec![false; 81];
         point[4] = true;
         let count = grown(&point, 9, 9, 2).iter().filter(|&&on| on).count();
@@ -335,7 +295,38 @@ mod tests {
             }
         }
         image[90 * width + 30] -= 30.0;
-        assert!(guarded(&image, width, height, &GUARD, &reading()).is_none());
+        let found = guarded(&image, width, height, &GUARD, &reading());
+        assert!(matches!(found, Guard::Clear(_)));
+    }
+
+    #[test]
+    fn a_map_without_noise_holds_no_hole() {
+        let mut image = vec![100.0_f32; 96 * 96];
+        image[40 * 96 + 40] = 0.0;
+        let found = guarded(&image, 96, 96, &GUARD, &reading());
+        assert!(matches!(found, Guard::Clear(_)));
+    }
+
+    #[test]
+    fn a_star_beside_a_hole_does_not_lift_its_fill() {
+        let (width, height) = (160, 128);
+        let mut image = sky(width, height);
+        for y in 0..height {
+            for x in 0..width {
+                let distance = (y as f32 - 60.0).powi(2) + (x as f32 - 88.0).powi(2);
+                image[y * width + x] += 4000.0 * (-distance / (2.0 * 1.6 * 1.6)).exp();
+            }
+        }
+        let hole = 60 * width + 80;
+        image[hole] -= 3000.0;
+        let Guard::Holes(guarded) = guarded(&image, width, height, &GUARD, &reading()) else {
+            panic!("the hole is found");
+        };
+        assert!(
+            (guarded.read[hole] - 101.6).abs() < 3.0,
+            "the sky's level, not a plateau lit by the star: {}",
+            guarded.read[hole]
+        );
     }
 
     #[test]
@@ -345,7 +336,9 @@ mod tests {
         let hole = 60 * width + 80;
         image[hole] -= 3000.0;
         image[hole + 1] -= 2000.0;
-        let guarded = guarded(&image, width, height, &GUARD, &reading()).unwrap();
+        let Guard::Holes(guarded) = guarded(&image, width, height, &GUARD, &reading()) else {
+            panic!("the hole is found");
+        };
         assert!(guarded.mask[hole] && guarded.mask[hole - 3 * width - 3]);
         assert!(!guarded.mask[hole - 4 * width], "the margin is 3 pixels");
         assert!(

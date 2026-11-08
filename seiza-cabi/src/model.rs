@@ -674,6 +674,32 @@ mod tests {
     }
 
     #[test]
+    fn a_card_s_hole_guard_is_listed_with_its_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        for entry in std::fs::read_dir(fixtures().join("tiny")).unwrap() {
+            let entry = entry.unwrap();
+            std::fs::copy(entry.path(), source.join(entry.file_name())).unwrap();
+        }
+        let path = source.join("card.json");
+        let mut card: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        card["reading"]["holes"] =
+            serde_json::json!({"depth": 30.0, "margin": 3, "fill_radius": 12, "restore": 5.0});
+        std::fs::write(&path, serde_json::to_vec(&card).unwrap()).unwrap();
+        let (source, store) = (text(&source), text(&temp.path().join("store")));
+        let mut error = ptr::null_mut();
+        let installed =
+            unsafe { seiza_model_install_json(source.as_ptr(), store.as_ptr(), &mut error) };
+        assert!(error.is_null());
+        let installed: Value = serde_json::from_str(&taken(installed)).unwrap();
+        assert_eq!(
+            installed["holes"],
+            serde_json::json!({"depth": 30.0, "margin": 3, "fillRadius": 12, "restore": 5.0})
+        );
+    }
+
+    #[test]
     fn invalid_tiling_cannot_replace_an_installed_model() {
         let temp = tempfile::tempdir().unwrap();
         let store = text(&temp.path().join("store"));

@@ -2,8 +2,8 @@ use crate::backend::{Backend, BackendOptions, CoreMlUnits, Precision, runtime};
 use crate::bands::NoiseBands;
 use crate::bundle::{HoleGuard, InputPlane, ModelBundle, ModelCard, NoiseInput, Reading, Task};
 use crate::error::ModelError;
-use crate::holes::{guarded, guarded_residual};
-use crate::noise::input_sigma;
+use crate::holes::{Guard, guarded, guarded_residual};
+use crate::noise::{image_map, noise_input};
 use crate::session::OrtRunner;
 use crate::sky::{network_input, scales, seen};
 use crate::tiles::{TileRunner, Tiling, infer};
@@ -334,11 +334,18 @@ fn denoise_plane(
     stop: &dyn Fn() -> bool,
     report: &dyn Fn(usize, usize),
 ) -> Result<(Vec<f32>, ChannelScales), ModelError> {
-    let guard = reading
-        .holes
-        .and_then(|guard| Some((guard, guarded(plane, width, height, &guard, reading)?)));
+    let (guard, mapped) = match reading.holes {
+        None => (None, image_map(plane, width, height, reading)),
+        Some(guard) => match guarded(plane, width, height, &guard, reading) {
+            Guard::Clear(mapped) => (None, mapped),
+            Guard::Holes(guarded) => {
+                let mapped = image_map(&guarded.read, width, height, reading);
+                (Some((guard, guarded)), mapped)
+            }
+        },
+    };
     let read = guard.as_ref().map_or(plane, |(_, guarded)| &guarded.read);
-    let sigma = input_sigma(read, width, height, reading);
+    let sigma = noise_input(mapped, reading);
     let looked = seen(read, width, height, reading);
     let (background, noise) = scales(&looked, &sigma)
         .ok_or_else(|| ModelError::InvalidImage("the image holds no finite pixel".to_string()))?;
