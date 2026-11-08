@@ -1,0 +1,12 @@
+{
+  "RUST_TEST_THREADS": "1",
+  "PYO3_PYTHON": "/tmp/seiza-python-validation/bin/python",
+  "VIRTUAL_ENV": "/tmp/seiza-python-validation",
+  "python": "Python 3.12.16",
+  "localhost_access_for_rust_tests": true,
+  "full_rust_passed": 2366,
+  "full_rust_ignored": 19,
+  "full_python_passed": 1815,
+  "full_python_skipped": 4,
+  "output_version_cases": 80
+}

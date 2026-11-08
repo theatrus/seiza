@@ -1224,6 +1224,14 @@ fn a_reintegration_and_its_drizzle_keep_their_output() {
         .reintegrate_drizzled(&options, &drizzle, |_, _, _| {})
         .unwrap();
     check("DRIZZLED", &summary(&drizzled.image), DRIZZLED);
+    let finished = stacker
+        .finish_reintegration(&options, |_, _, _| {})
+        .unwrap();
+    check(
+        "REINTEGRATED",
+        &summary(&finished.snapshot.image),
+        REINTEGRATED,
+    );
 }
 
 /// Frames a host registered and normalized itself, integrated with frame
@@ -4653,3 +4661,75 @@ fn varying_dark_pixels_keep_their_output() {
         &[100.0, 4000.0, 100.0, 6.0],
     );
 }
+
+/// Final CPU replay with the local background and noise weighting used by SHO.
+#[test]
+fn a_weighted_local_background_reintegration_keeps_its_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let paths = SHIFTS
+        .iter()
+        .enumerate()
+        .map(|(frame, &(dx, dy))| {
+            let image = mono_field(dx, dy, 0.96 + 0.01 * frame as f32, frame);
+            write_raw(&directory, "light", frame, image.data, "LIGHT")
+        })
+        .collect::<Vec<_>>();
+    let mut stacker = LiveStacker::open_fits(
+        &paths[0],
+        None,
+        None,
+        None,
+        None,
+        StackOptions {
+            normalization: NormalizationMode::LocalBackground { tile_size: 32 },
+            weighting: FrameWeighting::inverse_noise_variance(),
+            interpolation: Interpolation::Lanczos3,
+            gpu: GpuOptions::cpu(),
+            ..StackOptions::default()
+        },
+    )
+    .unwrap();
+    stacker.retain_frames_for_reintegration(None).unwrap();
+    for path in &paths[1..] {
+        admit(stacker.push_fits(path).unwrap());
+    }
+    let result = stacker
+        .finish_reintegration(&BatchStackOptions::default(), |_, _, _| {})
+        .unwrap();
+    check(
+        "REINTEGRATED_WEIGHTED_LOCAL",
+        &summary(&result.snapshot.image),
+        REINTEGRATED_WEIGHTED_LOCAL,
+    );
+}
+
+const REINTEGRATED_WEIGHTED_LOCAL: &[f64] = &[
+    1.4430051e2,
+    2.7762134e2,
+    3.9582263e3,
+    9.7750938e1,
+    1.0012254e2,
+    1.0118108e2,
+    1.1473328e2,
+    1.0543856e2,
+    9.8347527e1,
+    1.0060048e2,
+    1.0239714e2,
+    1.0340273e2,
+    1.0463651e2,
+    9.8407661e1,
+    1.0175587e2,
+    1.0338160e2,
+    1.0449772e2,
+    1.0624787e2,
+    1.0031862e2,
+    1.0082601e2,
+    1.0355362e2,
+    1.0656131e2,
+    1.0760386e2,
+    1.0117020e2,
+    1.7327388e2,
+    1.0507133e2,
+    1.0690379e2,
+    1.1121221e2,
+];
