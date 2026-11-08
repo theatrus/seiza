@@ -1,0 +1,9 @@
+{
+  "original_base": "7cfe303921cca1f361870b8637a8e2bd8f7be512",
+  "weighted_baseline_native_stack_sha256": "703462286f81be2ab9f129f8f44b161b2b0567b03c2102d2d5dda5452cc82861",
+  "weighted_baseline_operation": "LiveStacker::reintegrate on the original main native implementation",
+  "mutation": "Add 1.0 to every result.snapshot.image.data sample in LiveStacker::replay_selected before returning",
+  "mutations_undone": true,
+  "existing_output_summaries_changed": false,
+  "output_versions_changed": false
+}

@@ -941,6 +941,10 @@ class LiveStacker:
         sigma_high: float = 3.0,
         scratch_directory: str | Path | None = None,
     ) -> tuple[StackSnapshot, int, float | None]: ...
+    def finish_reintegration(
+        self, *, sigma_low: float = 3.0, sigma_high: float = 3.0,
+        scratch_directory: str | Path | None = None,
+    ) -> StackSnapshot: ...
     def finish(self, output: str | Path | None = None) -> StackSnapshot: ...
 
 class PipelineReport:

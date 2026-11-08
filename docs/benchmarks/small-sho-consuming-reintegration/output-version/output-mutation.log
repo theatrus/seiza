@@ -1,0 +1,24 @@
+   Compiling seiza-stacking v0.57.0 (/home/ppicazo/Development/seiza/seiza-stacking)
+    Finished `test` profile [optimized + debuginfo] target(s) in 10.50s
+     Running tests/output_version.rs (target/debug/deps/output_version-2e5b89ac5b35b2c3)
+
+running 1 test
+test a_reintegration_and_its_drizzle_keep_their_output ... FAILED
+
+failures:
+
+---- a_reintegration_and_its_drizzle_keep_their_output stdout ----
+seiza-stacking: resampling on the CPU: llvmpipe (LLVM 15.0.7, 256 bits) is a software adapter
+
+thread 'a_reintegration_and_its_drizzle_keep_their_output' (446) panicked at seiza-stacking/tests/output_version.rs:4133:5:
+REINTEGRATED: the output changed. If that is intended, set OUTPUT_VERSION in seiza-stacking/src/lib.rs to the release that will ship this change, and record the new output:
+const REINTEGRATED: &[f64] = &[1.4713894e2, 2.8434888e2, 3.9298564e3, 9.8148277e1, 1.0058486e2, 1.0201023e2, 1.1975857e2, 1.0646034e2, 9.8901772e1, 1.0135715e2, 1.0314648e2, 1.0442279e2, 1.0583615e2, 9.9175110e1, 1.0244085e2, 1.0427808e2, 1.0544199e2, 1.0747711e2, 1.0108474e2, 1.0190938e2, 1.0470780e2, 1.0743605e2, 1.0870409e2, 1.0196039e2, 1.7638022e2, 1.0592811e2, 1.0805235e2, 1.1245596e2];
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    a_reintegration_and_its_drizzle_keep_their_output
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 73 filtered out; finished in 0.10s
+
+error: test failed, to rerun pass `-p seiza-stacking --test output_version`

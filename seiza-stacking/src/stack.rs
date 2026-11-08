@@ -2400,6 +2400,29 @@ impl LiveStacker {
         mapping
     }
 
+    /// Consume this stack and reintegrate its admitted frames, releasing the
+    /// live accumulator before allocating the final integration buffers.
+    ///
+    /// This produces the same result and progress events as
+    /// [`Self::reintegrate`], including its per-frame diagnostics, but the
+    /// live stack cannot be continued. Its accumulator is not used by replay:
+    /// on the CPU, dropping it first releases 16 bytes per live sample
+    /// (20 when weighted), plus any retained clipping fractions. Reference
+    /// images, calibration and cached frames remain available until replay
+    /// finishes. The stack and its scratch files are dropped on success, error
+    /// or cancellation.
+    pub fn finish_reintegration(
+        mut self,
+        options: &crate::BatchStackOptions,
+        progress: impl FnMut(crate::BatchStackPass, usize, usize),
+    ) -> Result<crate::BatchStackResult> {
+        drop(std::mem::replace(
+            &mut self.accumulator,
+            Accumulator::new(0, false),
+        ));
+        self.reintegrate(options, progress)
+    }
+
     /// Consume the live state and move its full-frame buffers into a final
     /// snapshot. Batch callers should prefer this to avoid snapshot copies.
     pub fn into_snapshot(self) -> Result<StackSnapshot> {

@@ -1,0 +1,23 @@
+   Compiling seiza-stacking v0.57.0 (/home/ppicazo/Development/seiza/seiza-stacking)
+    Finished `test` profile [optimized + debuginfo] target(s) in 12.31s
+     Running tests/output_version.rs (target/debug/deps/output_version-2e5b89ac5b35b2c3)
+
+running 1 test
+test a_weighted_local_background_reintegration_keeps_its_output ... FAILED
+
+failures:
+
+---- a_weighted_local_background_reintegration_keeps_its_output stdout ----
+
+thread 'a_weighted_local_background_reintegration_keeps_its_output' (901) panicked at seiza-stacking/tests/output_version.rs:4141:5:
+REINTEGRATED_WEIGHTED_LOCAL: the output changed. If that is intended, set OUTPUT_VERSION in seiza-stacking/src/lib.rs to the release that will ship this change, and record the new output:
+const REINTEGRATED_WEIGHTED_LOCAL: &[f64] = &[1.4530051e2, 2.7814242e2, 3.9592263e3, 9.8750938e1, 1.0112254e2, 1.0218108e2, 1.1573328e2, 1.0643856e2, 9.9347527e1, 1.0160048e2, 1.0339714e2, 1.0440273e2, 1.0563651e2, 9.9407661e1, 1.0275587e2, 1.0438160e2, 1.0549772e2, 1.0724787e2, 1.0131862e2, 1.0182601e2, 1.0455362e2, 1.0756131e2, 1.0860386e2, 1.0217020e2, 1.7427388e2, 1.0607133e2, 1.0790379e2, 1.1221221e2];
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    a_weighted_local_background_reintegration_keeps_its_output
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 74 filtered out; finished in 0.10s
+
+error: test failed, to rerun pass `-p seiza-stacking --test output_version`

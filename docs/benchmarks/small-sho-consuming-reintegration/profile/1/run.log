@@ -1,0 +1,19 @@
+chose      /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0010.fit as reference: 2000 stars, median area 8.0px, sky variation 48.9
+defects    3718 sensor pixel(s) from 10 light(s)
+normalize  /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0010.fit (channel reference)
+reference  /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0001.fit (937.2px registration drift limit)
+accepted   /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0010.fit: 1942 stars, 0.071px RMS, 15.0px drift, -0.009deg, 99.6% samples
+accepted   /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0001.fit: 1998 stars, 0.002px RMS, 0.0px drift, -0.000deg, 100.0% samples
+accepted   /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0002.fit: 1941 stars, 0.067px RMS, 0.2px drift, -0.002deg, 100.0% samples
+accepted   /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0003.fit: 1930 stars, 0.069px RMS, 0.5px drift, -0.003deg, 100.0% samples
+accepted   /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0004.fit: 1938 stars, 0.070px RMS, 5.0px drift, -0.003deg, 99.9% samples
+accepted   /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0005.fit: 1935 stars, 0.070px RMS, 4.9px drift, -0.005deg, 95.1% samples
+accepted   /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0006.fit: 1937 stars, 0.070px RMS, 4.6px drift, -0.006deg, 95.5% samples
+accepted   /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0007.fit: 1930 stars, 0.067px RMS, 9.0px drift, -0.007deg, 95.0% samples
+accepted   /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0008.fit: 1929 stars, 0.068px RMS, 9.0px drift, -0.008deg, 95.4% samples
+accepted   /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0009.fit: 1937 stars, 0.068px RMS, 8.9px drift, -0.010deg, 95.5% samples
+reintegrate estimating 10 admitted frame(s)
+reintegrate integrating 10 admitted frame(s)
+reintegrate rejected 971469 sample(s)
+wrote /tmp/seiza-sho-consuming-replay/profile/1/H.fits: 10 accepted frame(s), 0 rejected frame(s), linear f32
+wrote /tmp/seiza-sho-consuming-replay/profile/1/H.json: admission, provenance and completed-stack report

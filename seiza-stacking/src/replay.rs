@@ -4473,6 +4473,134 @@ mod tests {
     }
 
     #[test]
+    fn consuming_reintegration_matches_every_retained_and_weighted_result() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = (0..3)
+            .map(|index| {
+                let mut image = crate::registration::test_star_field(false);
+                for (sample, value) in image.data.iter_mut().enumerate() {
+                    *value += ((sample * 29 + index * 17) % 97) as f32 * 0.13 - 6.0;
+                }
+                let path = directory.path().join(format!("light-{index}.fits"));
+                crate::write_linear_image_fits_f32(&path, &image, &[], &[]).unwrap();
+                path
+            })
+            .collect::<Vec<_>>();
+        for normalization in [
+            crate::NormalizationMode::None,
+            crate::NormalizationMode::LocalBackground { tile_size: 32 },
+        ] {
+            for weighting in [
+                crate::FrameWeighting::Equal,
+                crate::FrameWeighting::inverse_noise_variance(),
+            ] {
+                for retain in [false, true] {
+                    let mut stacker = LiveStacker::open_fits(
+                        &paths[0],
+                        None,
+                        None,
+                        None,
+                        None,
+                        crate::StackOptions {
+                            normalization,
+                            weighting,
+                            gpu: crate::GpuOptions::cpu(),
+                            ..crate::StackOptions::default()
+                        },
+                    )
+                    .unwrap();
+                    if retain {
+                        stacker
+                            .retain_frames_for_reintegration(Some(directory.path()))
+                            .unwrap();
+                    }
+                    for path in &paths[1..] {
+                        assert!(matches!(
+                            stacker.push_fits(path).unwrap(),
+                            crate::FrameDisposition::Accepted(_)
+                        ));
+                    }
+                    let cache_path = stacker
+                        .frame_cache
+                        .as_ref()
+                        .map(|cache| cache.files.directory.path().to_path_buf());
+                    let options = BatchStackOptions {
+                        scratch_directory: Some(directory.path().to_path_buf()),
+                        ..BatchStackOptions::default()
+                    };
+                    let mut expected_progress = Vec::new();
+                    let expected = stacker
+                        .reintegrate(&options, |pass, i, count| {
+                            expected_progress.push((pass, i, count))
+                        })
+                        .unwrap();
+                    let mut actual_progress = Vec::new();
+                    let actual = stacker
+                        .finish_reintegration(&options, |pass, i, count| {
+                            actual_progress.push((pass, i, count))
+                        })
+                        .unwrap();
+                    assert_eq!(actual_progress, expected_progress);
+                    assert_eq!(
+                        snapshot_bits(&actual.snapshot),
+                        snapshot_bits(&expected.snapshot)
+                    );
+                    let weights = |snapshot: &crate::StackSnapshot| {
+                        snapshot
+                            .weight_sum
+                            .as_ref()
+                            .map(|values| values.iter().map(|v| v.to_bits()).collect::<Vec<_>>())
+                    };
+                    assert_eq!(weights(&actual.snapshot), weights(&expected.snapshot));
+                    let frames = |result: &BatchStackResult| {
+                        result
+                            .frames
+                            .iter()
+                            .map(|f| (f.finite_samples, f.integrated_samples))
+                            .collect::<Vec<_>>()
+                    };
+                    assert_eq!(frames(&actual), frames(&expected));
+                    if let Some(cache_path) = cache_path {
+                        assert!(!cache_path.exists());
+                    }
+                    assert_eq!(
+                        std::fs::read_dir(directory.path()).unwrap().count(),
+                        paths.len()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn consuming_reintegration_drops_retained_frames_when_cancelled() {
+        let (directory, mut stacker) = canvas_refinement_frames(&[false, false]);
+        stacker
+            .retain_frames_for_reintegration(Some(directory.path()))
+            .unwrap();
+        let cache = stacker
+            .frame_cache
+            .as_ref()
+            .unwrap()
+            .files
+            .directory
+            .path()
+            .to_path_buf();
+        assert!(cache.exists());
+        let error = stacker
+            .finish_reintegration(
+                &BatchStackOptions {
+                    cancel: Some(crate::CancelSignal::new(|| true)),
+                    ..BatchStackOptions::default()
+                },
+                |_, _, _| {},
+            )
+            .unwrap_err();
+        assert!(matches!(error, Error::Cancelled));
+        assert!(!cache.exists());
+    }
+
+    #[test]
     fn retained_cache_ignores_an_unused_replay_directory() {
         let (directory, mut stacker) = canvas_refinement_frames(&[false, false]);
         stacker

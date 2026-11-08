@@ -2455,6 +2455,31 @@ bool seiza_drizzle_result_write_fits(const SeizaDrizzleResult *drizzle,
 void seiza_drizzle_result_free(SeizaDrizzleResult *drizzle);
 
 /*
+ Consume a live stacker and reintegrate its admitted frames, dropping the
+ live accumulator before allocating the final integration buffers.
+ The result and arguments are those of [`seiza_live_stacker_reintegrate`].
+ `scratch_directory` is null for system temporary storage, or an existing
+ parent directory for replay scratch files. A retained cache takes precedence.
+ An explicit replay directory refuses a higher-memory whole-frame fallback.
+ A non-null accepted handle is set to null and consumed on success,
+ replay failure or cancellation; do not free or reuse its former value.
+
+ # Safety
+ `stacker` must point to writable storage containing null or a live
+ `SeizaLiveStacker` pointer, exclusively owned for this call. Other
+ arguments have the requirements of [`seiza_live_stacker_reintegrate`].
+ `scratch_directory` must be null or a valid NUL-terminated UTF-8 path.
+ */
+SeizaStackSnapshot *seiza_live_stacker_finish_reintegration(SeizaLiveStacker **stacker,
+                                                            float low_sigma,
+                                                            float high_sigma,
+                                                            const char *scratch_directory,
+                                                            const SeizaCancelSignal *cancel,
+                                                            SeizaStackReintegrateProgressCallback progress,
+                                                            void *context,
+                                                            char **error_out);
+
+/*
  Consumes a live stacker and moves its full-frame state into an immutable
  snapshot without cloning it. Once a non-null live handle is accepted,
  `*stacker` is set to null and consumed even if finalization reports an
