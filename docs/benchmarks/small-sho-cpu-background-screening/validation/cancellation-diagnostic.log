@@ -1,0 +1,100 @@
+RUN 0
+   Compiling seiza-calibration v0.12.1 (/home/ppicazo/Development/seiza/seiza-calibration)
+   Compiling seiza v0.49.0 (/home/ppicazo/Development/seiza/seiza)
+   Compiling seiza-stacking v0.57.0 (/home/ppicazo/Development/seiza/seiza-stacking)
+    Finished `test` profile [optimized + debuginfo] target(s) in 1m 14s
+     Running unittests src/lib.rs (target/debug/deps/seiza_stacking-0bf60cd1afecede0)
+
+running 21 tests
+test external::tests::a_false_switch_emits_the_negation_and_old_contracts_drop_host ... ok
+test external::tests::a_v3_document_without_a_license_object_reads_as_licensed ... ok
+test external::tests::a_whole_number_is_accepted_for_a_float_parameter ... ok
+test external::tests::an_unlicensed_schema_is_refused_before_spawning ... ok
+test external::tests::a_v3_contract_uses_engine_instead_of_device ... ok
+test external::tests::arguments_resolve_flags_from_the_schema ... ok
+test external::tests::int_parameters_accept_whole_floats_and_refuse_fractions ... ok
+test external::tests::out_of_range_unknown_and_gui_only_parameters_are_refused ... ok
+test external::tests::a_cancelled_run_reports_cancelled ... ok
+test external::tests::the_event_stream_yields_outputs_device_and_progress ... ok
+test external::tests::the_live_schema_parses_with_types_ranges_and_license ... ok
+test external::tests::a_requested_stars_image_that_never_appears_is_an_error ... ok
+test external::tests::a_failing_tool_with_a_chatty_stderr_neither_deadlocks_nor_loses_the_reason ... ok
+test external::tests::negative_samples_survive_the_round_trip ... ok
+test external::tests::a_physical_adu_scale_survives_the_round_trip ... ok
+test external::tests::a_linear_image_round_trips_with_a_stars_sidecar ... ok
+test external::tests::a_stacks_uncovered_samples_come_back_uncovered_in_both_images ... ok
+test external::tests::without_the_stars_switch_no_sidecar_comes_back ... ok
+test external::tests::splitting_stars_returns_the_starless_and_stars_images ... ok
+test external::tests::a_stretched_image_splits_on_its_own_scale_even_with_a_sample_outside_it ... ok
+test external::tests::a_completely_silent_child_is_still_cancellable ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 593 filtered out; finished in 0.50s
+
+RUN 1
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.09s
+     Running unittests src/lib.rs (target/debug/deps/seiza_stacking-0bf60cd1afecede0)
+
+running 21 tests
+test external::tests::a_false_switch_emits_the_negation_and_old_contracts_drop_host ... ok
+test external::tests::a_v3_contract_uses_engine_instead_of_device ... ok
+test external::tests::a_v3_document_without_a_license_object_reads_as_licensed ... ok
+test external::tests::a_whole_number_is_accepted_for_a_float_parameter ... ok
+test external::tests::an_unlicensed_schema_is_refused_before_spawning ... ok
+test external::tests::arguments_resolve_flags_from_the_schema ... ok
+test external::tests::int_parameters_accept_whole_floats_and_refuse_fractions ... ok
+test external::tests::out_of_range_unknown_and_gui_only_parameters_are_refused ... ok
+test external::tests::a_cancelled_run_reports_cancelled ... ok
+test external::tests::the_event_stream_yields_outputs_device_and_progress ... ok
+test external::tests::the_live_schema_parses_with_types_ranges_and_license ... ok
+test external::tests::a_requested_stars_image_that_never_appears_is_an_error ... ok
+test external::tests::without_the_stars_switch_no_sidecar_comes_back ... ok
+test external::tests::a_linear_image_round_trips_with_a_stars_sidecar ... ok
+test external::tests::a_stacks_uncovered_samples_come_back_uncovered_in_both_images ... ok
+test external::tests::splitting_stars_returns_the_starless_and_stars_images ... ok
+test external::tests::negative_samples_survive_the_round_trip ... ok
+test external::tests::a_stretched_image_splits_on_its_own_scale_even_with_a_sample_outside_it ... ok
+test external::tests::a_physical_adu_scale_survives_the_round_trip ... ok
+test external::tests::a_failing_tool_with_a_chatty_stderr_neither_deadlocks_nor_loses_the_reason ... ok
+test external::tests::a_completely_silent_child_is_still_cancellable ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 593 filtered out; finished in 0.50s
+
+RUN 2
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.08s
+     Running unittests src/lib.rs (target/debug/deps/seiza_stacking-0bf60cd1afecede0)
+
+running 21 tests
+test external::tests::a_false_switch_emits_the_negation_and_old_contracts_drop_host ... ok
+test external::tests::a_v3_contract_uses_engine_instead_of_device ... ok
+test external::tests::a_v3_document_without_a_license_object_reads_as_licensed ... ok
+
+thread 'external::tests::a_failing_tool_with_a_chatty_stderr_neither_deadlocks_nor_loses_the_reason' (2956442) panicked at seiza-stacking/src/external.rs:1544:9:
+external tool sxt: could not spawn: Text file busy (os error 26)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test external::tests::an_unlicensed_schema_is_refused_before_spawning ... ok
+test external::tests::a_failing_tool_with_a_chatty_stderr_neither_deadlocks_nor_loses_the_reason ... FAILED
+test external::tests::a_whole_number_is_accepted_for_a_float_parameter ... ok
+test external::tests::arguments_resolve_flags_from_the_schema ... ok
+test external::tests::int_parameters_accept_whole_floats_and_refuse_fractions ... ok
+test external::tests::out_of_range_unknown_and_gui_only_parameters_are_refused ... ok
+test external::tests::the_event_stream_yields_outputs_device_and_progress ... ok
+test external::tests::the_live_schema_parses_with_types_ranges_and_license ... ok
+test external::tests::a_cancelled_run_reports_cancelled ... ok
+test external::tests::a_requested_stars_image_that_never_appears_is_an_error ... ok
+test external::tests::without_the_stars_switch_no_sidecar_comes_back ... ok
+test external::tests::splitting_stars_returns_the_starless_and_stars_images ... ok
+test external::tests::negative_samples_survive_the_round_trip ... ok
+test external::tests::a_stacks_uncovered_samples_come_back_uncovered_in_both_images ... ok
+test external::tests::a_linear_image_round_trips_with_a_stars_sidecar ... ok
+test external::tests::a_stretched_image_splits_on_its_own_scale_even_with_a_sample_outside_it ... ok
+test external::tests::a_physical_adu_scale_survives_the_round_trip ... ok
+test external::tests::a_completely_silent_child_is_still_cancellable ... ok
+
+failures:
+
+failures:
+    external::tests::a_failing_tool_with_a_chatty_stderr_neither_deadlocks_nor_loses_the_reason
+
+test result: FAILED. 20 passed; 1 failed; 0 ignored; 0 measured; 593 filtered out; finished in 0.50s
+
+error: test failed, to rerun pass `-p seiza-stacking --lib`

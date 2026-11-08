@@ -1,0 +1,23 @@
+   Compiling seiza v0.49.0 (/home/ppicazo/Development/seiza/seiza)
+   Compiling seiza-stacking v0.57.0 (/home/ppicazo/Development/seiza/seiza-stacking)
+    Finished `test` profile [optimized + debuginfo] target(s) in 3.14s
+     Running tests/output_version.rs (target/debug/deps/output_version-2e5b89ac5b35b2c3)
+
+running 1 test
+test a_mono_stack_with_default_options_keeps_its_output ... FAILED
+
+failures:
+
+---- a_mono_stack_with_default_options_keeps_its_output stdout ----
+
+thread 'a_mono_stack_with_default_options_keeps_its_output' (582) panicked at seiza-stacking/tests/output_version.rs:3177:83:
+called `Result::unwrap()` on an `Err` value: Registration("reference frame has only 0 usable stars; need at least 6")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    a_mono_stack_with_default_options_keeps_its_output
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 73 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p seiza-stacking --test output_version`
