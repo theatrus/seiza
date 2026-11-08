@@ -2576,6 +2576,7 @@ const uint32_t *seiza_stack_snapshot_rejected_samples(const SeizaStackSnapshot *
 /*
  Writes the immutable stack as an unstretched 32-bit floating-point FITS,
  preserving compatible reference headers.
+ Refuses inputs and calibration masters, including hard-link aliases.
 
  # Safety
  `snapshot` must be a live `SeizaStackSnapshot` pointer. `path` must be a

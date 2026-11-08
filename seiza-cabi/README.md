@@ -172,6 +172,9 @@ exposes the **superset** of what both apps need.
   cancellation too; a null scratch-directory argument uses system temporary
   storage, and an existing directory can be supplied explicitly. The snapshot
   retains reference headers and input-path protections.
+  Stack snapshot writes and saved contexts also reject hard-link aliases
+  of their protected inputs; pushing a used frame through a hard link is
+  refused as a duplicate.
   `seiza_live_stacker_reintegrate` rereads every admitted frame and returns a
   new snapshot integrated with leave-one-out rejection, which removes trails
   from the reference and warm-up frames that online rejection kept. It
