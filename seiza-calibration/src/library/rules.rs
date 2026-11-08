@@ -59,7 +59,8 @@ words!(DarkChoice {
 #[serde(rename_all = "snake_case")]
 /// How masters another program integrated stand in for raw frames.
 pub enum ExternalMasterPolicy {
-    /// The nearest external master, before the raw frames.
+    /// The nearest external master, before the raw frames. A flat master
+    /// past the flat age limit only when the raw flats cannot build one.
     #[default]
     Prefer,
     /// Only when the raw frames cannot make a master.
@@ -728,7 +729,7 @@ static FIELDS: LazyLock<Vec<FieldSpec>> = LazyLock::new(|| {
             key: SettingKey::ExternalMasters,
             group: Group::Matching,
             label: "External masters",
-            help: "Masters from PixInsight, Siril and other tools, matched by their headers.",
+            help: "Masters from PixInsight, Siril and other tools, matched by their headers. A flat master past the flat age limit is used only when the raw flats can't build one.",
             effect: Effect::Matching,
             kind: FieldKind::Choice {
                 options: vec![
@@ -892,9 +893,9 @@ static FIELDS: LazyLock<Vec<FieldSpec>> = LazyLock::new(|| {
         number(
             SettingKey::FlatMaxAgeDays,
             Group::Checks,
-            Effect::Flags,
+            Effect::Matching,
             "Flat age limit",
-            "Flag lights as uncalibratable when the elapsed time to the nearest flat contributing to their master exceeds this limit. One day includes exactly 24 hours before or after the light.",
+            "Prefer raw flats that can build a master over an external flat master past this limit. Flag lights as uncalibratable when the elapsed time to the nearest flat contributing to their master exceeds this limit. One day includes exactly 24 hours before or after the light.",
             (0.0, 3650.0, 1.0),
             "days",
             Some("no limit"),
@@ -2130,6 +2131,12 @@ mod tests {
             BTreeMap::new(),
         );
         assert!(wider.global().matching_digest().is_some());
+        let flat_age = RuleBook::new(
+            values(&[("flat_max_age_days", json!(1.0))]),
+            BTreeMap::new(),
+        );
+        assert!(flat_age.global().matching_digest().is_some());
+
         assert_eq!(wider.global().coherence_tolerances().rotation_deg, 2.0);
         assert_eq!(wider.global().tolerances().rotation_deg, 5.0);
     }

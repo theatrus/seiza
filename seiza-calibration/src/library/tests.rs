@@ -286,3 +286,153 @@ fn dark_flats_pair_with_the_raw_flats_not_a_nearer_master() {
     dark_flats.sort_unstable();
     assert_eq!(dark_flats, vec![20, 21, 22]);
 }
+
+// A light whose nearest flat master is past the flat age limit, with raw
+// flats from its own night: Prefer takes a master only within the limit, so
+// the raw flats build one. With too few raw flats, the old master stays.
+#[test]
+fn prefer_takes_a_flat_master_within_the_age_limit_else_the_raw_flats() {
+    const DAY: i64 = 86_400;
+    let night = 1_000_000_000;
+    let frame = |id: i64, is_master: bool, captured_at: i64| CalibrationFrame {
+        id,
+        frame_uuid: format!("f{id}"),
+        rig_uuid: "r".into(),
+        kind: CalibrationKind::Flat,
+        source_path: format!("/frame-{id}.fits").into(),
+        source_fingerprint: "x".into(),
+        captured_at: Some(captured_at),
+        camera: Some("Camera".into()),
+        width: Some(3000),
+        height: Some(2000),
+        channels: Some(1),
+        binning_x: Some(1),
+        binning_y: Some(1),
+        gain: Some(100),
+        offset: Some(80),
+        exposure_s: Some(2.0),
+        filter: Some("Ha".into()),
+        is_master,
+        dark_subtracted: is_master,
+        ..Default::default()
+    };
+    let light = Light {
+        rig_uuid: "r".into(),
+        camera: Some("Camera".into()),
+        filter: Some("Ha".into()),
+        width: Some(3000),
+        height: Some(2000),
+        channels: Some(1),
+        binning_x: Some(1),
+        binning_y: Some(1),
+        gain: Some(100),
+        offset: Some(80),
+        exposure_s: Some(300.0),
+        timestamp: Some(night + 3_600),
+        ..Default::default()
+    };
+    let rules = |policy: &str, days: f64| {
+        RuleBook::new(
+            rules::RuleValues::from([
+                ("external_masters".to_string(), serde_json::json!(policy)),
+                ("flat_max_age_days".to_string(), serde_json::json!(days)),
+            ]),
+            Default::default(),
+        )
+        .for_rig("r")
+    };
+    let adopted = |frames: Vec<CalibrationFrame>, rules: Arc<Rules>| {
+        let selected = Library::new(frames, Default::default(), []).select(&light, rules);
+        adopted_master(
+            CalibrationKind::Flat,
+            &selected.flat,
+            &selected.flat_held_back,
+            &selected.rules,
+        )
+        .map(|master| master.id)
+    };
+    let old_master = frame(1, true, night - 21 * DAY);
+    let same_night_master = frame(2, true, night - 600);
+    let same_night_flats: Vec<CalibrationFrame> = (10..13)
+        .map(|id| frame(id, false, night - 1_200 + id))
+        .collect();
+
+    // The old master is past the 1-day limit: the night's flats build a master.
+    let mut frames = vec![old_master.clone()];
+    frames.extend(same_night_flats.clone());
+    assert_eq!(adopted(frames.clone(), rules("prefer", 1.0)), None);
+    // Within the limit it is preferred, as before.
+    assert_eq!(adopted(frames.clone(), rules("prefer", 60.0)), Some(1));
+    // Zero disables the age limit. Exactly 24 hours in either direction
+    // is within a one-day limit; one second beyond it is not.
+    assert_eq!(adopted(frames.clone(), rules("prefer", 0.0)), Some(1));
+    for direction in [-1, 1] {
+        let at_limit = frame(3, true, light.timestamp.unwrap() + direction * DAY);
+        let mut boundary = same_night_flats.clone();
+        boundary.push(at_limit);
+        assert_eq!(adopted(boundary, rules("prefer", 1.0)), Some(3));
+        let past_limit = frame(3, true, light.timestamp.unwrap() + direction * (DAY + 1));
+        let mut boundary = same_night_flats.clone();
+        boundary.push(past_limit);
+        assert_eq!(adopted(boundary, rules("prefer", 1.0)), None);
+    }
+    // A master from the light's own night is preferred over its raw flats.
+    let mut with_night_master = frames.clone();
+    with_night_master.push(same_night_master);
+    assert_eq!(adopted(with_night_master, rules("prefer", 1.0)), Some(2));
+    // One raw flat cannot build a master: the old master stays, and the age
+    // check reports it.
+    let lone = vec![old_master.clone(), same_night_flats[0].clone()];
+    assert_eq!(adopted(lone, rules("prefer", 1.0)), Some(1));
+    // A coherent pair outside the verified candidate cap cannot replace
+    // the master: the executable recipe must still have usable inputs.
+    let mut capped = vec![old_master.clone()];
+    capped.extend((0..MAX_MASTER_FRAMES).map(|index| {
+        let mut raw = frame(100 + index as i64, false, night - 22 * DAY - index as i64);
+        raw.readout_mode_name = Some(format!("mode-{index}"));
+        raw
+    }));
+    capped.extend((0..2).map(|index| {
+        let mut raw = frame(200 + index, false, night - 22 * DAY - 1000 - index);
+        raw.readout_mode_name = Some("complete".into());
+        raw
+    }));
+    assert_eq!(adopted(capped.clone(), rules("prefer", 1.0)), None);
+    for frame in &mut capped {
+        frame.source_verified = true;
+    }
+    let selected =
+        Library::new(capped.clone(), Default::default(), []).select(&light, rules("prefer", 1.0));
+    let session = resolve_session(
+        &selected,
+        &QualityIndex::default(),
+        &SessionOptions::default(),
+    );
+    let flat = session
+        .recipes
+        .iter()
+        .find(|recipe| recipe.kind == CalibrationKind::Flat)
+        .unwrap();
+    assert_eq!(flat.action, RecipeAction::External);
+    assert_eq!(flat.inputs, vec![old_master.frame_uuid]);
+    // Once a coherent pair is inside the cap, the raws really can replace it.
+    capped[1].readout_mode_name = Some("complete".into());
+    capped[2].readout_mode_name = Some("complete".into());
+    let selected =
+        Library::new(capped, Default::default(), []).select(&light, rules("prefer", 1.0));
+    let session = resolve_session(
+        &selected,
+        &QualityIndex::default(),
+        &SessionOptions::default(),
+    );
+    let flat = session
+        .recipes
+        .iter()
+        .find(|recipe| recipe.kind == CalibrationKind::Flat)
+        .unwrap();
+    assert_eq!(flat.action, RecipeAction::Integrate);
+    assert_eq!(flat.inputs.len(), 2);
+
+    // Fallback still builds from raw flats when it can, whatever the limit.
+    assert_eq!(adopted(frames, rules("fallback", 1.0)), None);
+}
