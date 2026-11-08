@@ -707,6 +707,27 @@ fn frame_deviations(
     }
     #[cfg(not(feature = "gpu"))]
     let _ = gpu;
+    if channels == 1 && step == 1 && (sigma * noise[0]).is_finite() {
+        let threshold = sigma * noise[0];
+        return Some(
+            (0..height)
+                .into_par_iter()
+                .map_init(
+                    || vec![1_u8; width],
+                    |flags, y| {
+                        mono_row_candidates(data, width, y, threshold, flags);
+                        flags
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, flag)| **flag != 0)
+                            .filter_map(|(x, _)| examine(x, y, 0))
+                            .collect::<Vec<_>>()
+                    },
+                )
+                .flatten()
+                .collect(),
+        );
+    }
     let found = (0..height)
         .into_par_iter()
         .flat_map_iter(|y| {
@@ -716,6 +737,40 @@ fn frame_deviations(
         })
         .collect();
     Some(found)
+}
+
+/// Conservatively screen an interior mono row against its neighbours'
+/// extremes. Ordinary finite backgrounds need no detailed examination;
+/// borders and non-finite neighbourhoods retain the full path.
+fn mono_row_candidates(data: &[f32], width: usize, y: usize, threshold: f32, flags: &mut [u8]) {
+    flags.fill(1);
+    if y == 0 || (y + 1) * width == data.len() {
+        return;
+    }
+    let above = &data[(y - 1) * width..y * width];
+    let row = &data[y * width..(y + 1) * width];
+    let below = &data[(y + 1) * width..(y + 2) * width];
+    for x in 1..width - 1 {
+        let taps = [
+            above[x - 1],
+            above[x],
+            above[x + 1],
+            row[x - 1],
+            row[x + 1],
+            below[x - 1],
+            below[x],
+            below[x + 1],
+        ];
+        let mut low = f32::INFINITY;
+        let mut high = f32::NEG_INFINITY;
+        let mut finite = row[x].is_finite();
+        for tap in taps {
+            low = low.min(tap);
+            high = high.max(tap);
+            finite &= tap.is_finite();
+        }
+        flags[x] = u8::from(!(finite & (row[x] - low <= threshold) & (high - row[x] <= threshold)));
+    }
 }
 
 /// The GPU's screen for [`frame_deviations`]: a bit for each sample, set
@@ -1232,6 +1287,74 @@ mod tests {
             .collect::<Vec<_>>();
         pixels.sort_unstable();
         pixels
+    }
+
+    #[test]
+    fn mono_screen_never_discards_a_neighbourhood_the_full_check_keeps() {
+        for width in [5, 6, 7, 16, 31, 32, 33, 65, 129] {
+            let height = 11;
+            let mut state = 0x9e37_79b9_u32;
+            let mut data = (0..width * height)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 17;
+                    state ^= state << 5;
+                    (state % 1000) as f32 / 100.0
+                })
+                .collect::<Vec<_>>();
+            for special in [
+                None,
+                Some(f32::NAN),
+                Some(f32::INFINITY),
+                Some(f32::NEG_INFINITY),
+                Some(f32::MAX),
+                Some(-f32::MAX),
+                Some(-0.0),
+            ] {
+                if let Some(value) = special {
+                    for at in (0..data.len()).step_by(19) {
+                        data[at] = value;
+                    }
+                }
+                for threshold in [0.0, 0.5, 5.0, f32::MAX] {
+                    let mut flags = vec![0; width];
+                    for y in 0..height {
+                        mono_row_candidates(&data, width, y, threshold, &mut flags);
+                        for (x, &flag) in flags.iter().enumerate() {
+                            let mut ring = [0.0; 8];
+                            let count = gather(&data, x, y, 0, 1, 1, width, height, 1, &mut ring);
+                            let (low, high) = ring[..count]
+                                .iter()
+                                .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), &value| {
+                                    (low.min(value), high.max(value))
+                                });
+                            let value = data[y * width + x];
+                            let full_check = count >= 5
+                                && value.is_finite()
+                                && !(value - low <= threshold && high - value <= threshold);
+                            assert!(
+                                !full_check || flag != 0,
+                                "{width}x{height} ({x},{y}) {threshold}"
+                            );
+                            if x > 0
+                                && x + 1 < width
+                                && y > 0
+                                && y + 1 < height
+                                && count == 8
+                                && value.is_finite()
+                            {
+                                assert_eq!(flag != 0, full_check);
+                            } else {
+                                assert_eq!(
+                                    flag, 1,
+                                    "borders and non-finite samples use the full path"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
