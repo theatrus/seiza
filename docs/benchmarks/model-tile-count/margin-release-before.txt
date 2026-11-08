@@ -1,0 +1,22 @@
+   Compiling seiza-model v0.1.0 (/home/ppicazo/Development/seiza/seiza-model)
+    Finished `release` profile [optimized] target(s) in 2.74s
+     Running unittests src/lib.rs (target/release/deps/seiza_model-5b049e8e34a1e52b)
+
+running 1 test
+test tiles::tests::an_unrepresentable_margin_is_refused ... FAILED
+
+failures:
+
+---- tiles::tests::an_unrepresentable_margin_is_refused stdout ----
+
+thread 'tiles::tests::an_unrepresentable_margin_is_refused' (162) panicked at seiza-model/src/tiles.rs:309:13:
+assertion failed: matches!(bad.tiles(200, 130), Err(ModelError::InvalidOption(_)))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tiles::tests::an_unrepresentable_margin_is_refused
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p seiza-model --lib`

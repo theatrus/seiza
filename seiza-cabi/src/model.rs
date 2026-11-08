@@ -643,6 +643,48 @@ mod tests {
     }
 
     #[test]
+    fn invalid_tiling_cannot_replace_an_installed_model() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = text(&temp.path().join("store"));
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        for entry in std::fs::read_dir(fixtures().join("tiny")).unwrap() {
+            let entry = entry.unwrap();
+            std::fs::copy(entry.path(), source.join(entry.file_name())).unwrap();
+        }
+        let source_text = text(&source);
+        let path = source.join("card.json");
+        let good: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let mut error = ptr::null_mut();
+        let installed =
+            unsafe { seiza_model_install_json(source_text.as_ptr(), store.as_ptr(), &mut error) };
+        assert!(error.is_null());
+        taken(installed);
+        for (field, value) in [
+            ("margin", usize::MAX / 2 + 1),
+            ("ramp", usize::MAX),
+            ("tile", 0),
+            ("tile", 63),
+            ("tile", 16),
+            ("multiple", 0),
+        ] {
+            let mut bad = good.clone();
+            bad["tiling"][field] = serde_json::json!(value);
+            std::fs::write(&path, serde_json::to_vec(&bad).unwrap()).unwrap();
+            let installed = unsafe {
+                seiza_model_install_json(source_text.as_ptr(), store.as_ptr(), &mut error)
+            };
+            assert!(installed.is_null(), "{field}={value}");
+            assert!(!error.is_null());
+            assert!(taken(error).contains("tiling"));
+            error = ptr::null_mut();
+            let name = CString::new("noise-tiny").unwrap();
+            assert!(unsafe { seiza_model_verify(name.as_ptr(), store.as_ptr(), &mut error) });
+            assert!(error.is_null());
+        }
+    }
+
+    #[test]
     fn bad_options_are_refused_before_anything_loads() {
         let unknown = CString::new(r#"{"backend": "cpu", "speed": 9}"#).unwrap();
         let mut error = ptr::null_mut();
