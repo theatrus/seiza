@@ -305,7 +305,8 @@ pub(crate) struct PyWcs {
 #[pymethods]
 impl PyWcs {
     /// Construct from a field center, 0-indexed reference pixel, pixel scale
-    /// in arcsec/px, rotation in degrees east of north, and parity.
+    /// in arcsec/px, linear CD rotation in degrees, and parity. The angle
+    /// uses the same convention as ``rotation_deg``.
     #[staticmethod]
     #[pyo3(signature = (center, crpix, scale_arcsec_px, rotation_deg=0.0, flipped=false))]
     fn from_center_scale_rotation(
@@ -371,11 +372,12 @@ impl PyWcs {
         self.wcs.scale_arcsec_per_px()
     }
 
-    /// Position angle of north in the image, degrees east of north.
+    /// Linear CD rotation, in [-180, 180] degrees, matching the constructor.
+    /// Measured from south toward east for the positive image-y axis;
+    /// rotation and scale alone do not encode shear or SIP distortion.
     #[getter]
     fn rotation_deg(&self) -> f64 {
-        let cd = self.wcs.cd;
-        cd[0][1].atan2(-cd[1][1]).to_degrees()
+        self.wcs.rotation_degrees()
     }
 
     /// True when the image parity is mirrored.

@@ -2961,6 +2961,22 @@ bool seiza_read_image_window(const char *path,
                              char **error_out);
 
 /*
+ Linear CD rotation, in degrees from -180 to 180, using the convention of
+ [`seiza::Wcs::from_center_scale_rotation`]. This is the orientation of
+ positive image-y on the tangent plane, measured from south toward east.
+ `wcs_json` uses the same WCS representation as [`seiza_wcs_fits_header_json`].
+ Shear, unequal scales and SIP distortion require the complete WCS, rather
+ than reconstruction from a rotation and scalar scale.
+ Returns NaN on an invalid request; free an `error_out` string with
+ [`seiza_string_free`].
+
+ # Safety
+ `wcs_json` must be a valid NUL-terminated UTF-8 string. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+double seiza_wcs_rotation_degrees(const char *wcs_json, char **error_out);
+
+/*
  A WCS as FITS header cards. `wcs_json` is a WCS as
  [`seiza_solve_image_json`] returns it: `crval`, `crpix`, `cd`, an
  optional `sip` and an optional `pixelOrigin` (0, the default, when

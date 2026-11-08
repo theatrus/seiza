@@ -3342,11 +3342,7 @@ fn solve_command(
     let middle = seiza::image_center(dims.0, dims.1);
     let (ra, dec) = wcs.pixel_to_world(middle.0, middle.1);
     let det = wcs.cd[0][0] * wcs.cd[1][1] - wcs.cd[0][1] * wcs.cd[1][0];
-    // Position angle of north, measured in the image
-    let north = wcs.world_to_pixel(wcs.crval.0, wcs.crval.1 + 0.01);
-    let rotation = north
-        .map(|(x, y)| (x - wcs.crpix.0).atan2(-(y - wcs.crpix.1)).to_degrees())
-        .unwrap_or(f64::NAN);
+    let rotation = wcs.rotation_degrees();
 
     println!("Solved in {:.2}s:", elapsed.as_secs_f64());
     println!(
@@ -3355,7 +3351,7 @@ fn solve_command(
         dms(dec)
     );
     println!("  pixel scale: {:.4}\"/px", wcs.scale_arcsec_per_px());
-    println!("  rotation   : {rotation:.2}° (north angle in image)");
+    println!("  rotation   : {rotation:.2}° (CD matrix)");
     println!(
         "  parity     : {}",
         if det > 0.0 { "normal" } else { "mirrored" }

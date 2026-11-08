@@ -674,6 +674,7 @@ seiza_read_photo_metadata_json = "read_photo_metadata"
 seiza_read_image_window = "read_image_window"
 seiza_read_image_header_json = "read_image_header"
 seiza_wcs_fits_header_json = "Wcs.fits_header_cards"
+seiza_wcs_rotation_degrees = "Wcs.rotation_deg"
 
 # --- stacking ---------------------------------------------------------------
 seiza_live_stacker_create = "LiveStacker.from_array"

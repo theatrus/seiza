@@ -121,6 +121,8 @@ fn worker_adapts_json_rpc_to_the_seiza_server_native_api() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let base_url = format!("http://127.0.0.1:{port}");
+    let cd =
+        seiza::Wcs::from_center_scale_rotation((10.0, 20.0), (31.5, 23.5), 1.5, 33.5, false).cd;
     let server = std::thread::spawn(move || {
         for step in 0..3 {
             let (mut stream, _) = listener.accept().unwrap();
@@ -178,7 +180,7 @@ fn worker_adapts_json_rpc_to_the_seiza_server_native_api() {
                             "wcs": {
                                 "crval": [10.0, 20.0],
                                 "crpix": [31.5, 23.5],
-                                "cd": [[-0.0004166667, 0.0], [0.0, 0.0004166667]]
+                                "cd": cd
                             }
                         },
                         "error": null
@@ -253,6 +255,8 @@ fn worker_adapts_json_rpc_to_the_seiza_server_native_api() {
     assert_eq!(responses[1]["result"]["center"]["raDeg"], 10.0);
     assert_eq!(responses[1]["result"]["wcs"]["pixelOrigin"], 1);
     assert_eq!(responses[1]["result"]["wcs"]["crpix"][0], 32.5);
+    assert!((responses[1]["result"]["rotationDeg"].as_f64().unwrap() - 33.5).abs() < 1e-10);
+    assert_eq!(responses[1]["result"]["parity"], "normal");
     assert_eq!(responses[1]["result"]["transfer"]["encoding"], "png-gray8");
     assert_eq!(responses[2]["result"]["shutdown"], true);
 
