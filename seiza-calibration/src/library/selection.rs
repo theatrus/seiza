@@ -270,6 +270,7 @@ impl Library {
         } else {
             self.keep_unknown_angles_last(light, &rules, &mut selected.flat, &choices);
             self.choose_flats_around_changes(light, &rules, &mut selected, &choices);
+            leave_out_stale_flat_masters(light, &rules, &mut selected);
         }
         selected.flat_choices = choice_notes(&choices);
         selected.flat_family = family.map(|choice| {
@@ -842,6 +843,48 @@ impl Library {
         Some((rotation, frames))
     }
 }
+/// Under [`ExternalMasterPolicy::Prefer`] a stack adopts the nearest
+/// external flat master as it is. One past the flat age limit would leave
+/// the light uncalibratable, though raw flats in its selection could build a
+/// master of their own. So when the raw flats can build one, masters past
+/// the limit leave the selection and a master within it still wins. With
+/// too few raw flats every master stays, and the nearest is adopted as
+/// [`ExternalMasterPolicy::Fallback`] would. A group a person chose is kept
+/// as chosen.
+fn leave_out_stale_flat_masters(light: &Light, rules: &Rules, selected: &mut CalibrationSelection) {
+    if rules.external_masters != ExternalMasterPolicy::Prefer
+        || !rules.flat_max_age_days.is_finite()
+    {
+        return;
+    }
+    let Some(light_at) = light.timestamp else {
+        return;
+    };
+    let stale = |frame: &CalibrationFrame| {
+        frame.is_master
+            && frame
+                .captured_at
+                .is_some_and(|at| at.abs_diff(light_at) as f64 / 86_400.0 > rules.flat_max_age_days)
+    };
+    if !selected.flat.iter().any(stale) {
+        return;
+    }
+    let raw: Vec<CalibrationFrame> = selected
+        .flat
+        .iter()
+        .filter(|frame| !frame.is_master)
+        .cloned()
+        .collect();
+    if coherent_cohort(CalibrationKind::Flat, &raw, rules)
+        .kept
+        .len()
+        < MIN_MASTER_FRAMES
+    {
+        return;
+    }
+    selected.flat.retain(|frame| !stale(frame));
+}
+
 pub(super) fn choice_notes(
     choices: &flat_groups::overrides::ResolvedChoices,
 ) -> Vec<flat_groups::ChoiceNote> {

@@ -59,7 +59,8 @@ words!(DarkChoice {
 #[serde(rename_all = "snake_case")]
 /// How masters another program integrated stand in for raw frames.
 pub enum ExternalMasterPolicy {
-    /// The nearest external master, before the raw frames.
+    /// The nearest external master, before the raw frames. A flat master
+    /// past the flat age limit only when the raw flats cannot build one.
     #[default]
     Prefer,
     /// Only when the raw frames cannot make a master.
@@ -728,7 +729,7 @@ static FIELDS: LazyLock<Vec<FieldSpec>> = LazyLock::new(|| {
             key: SettingKey::ExternalMasters,
             group: Group::Matching,
             label: "External masters",
-            help: "Masters from PixInsight, Siril and other tools, matched by their headers.",
+            help: "Masters from PixInsight, Siril and other tools, matched by their headers. A flat master past the flat age limit is used only when the raw flats can't build one.",
             effect: Effect::Matching,
             kind: FieldKind::Choice {
                 options: vec![
