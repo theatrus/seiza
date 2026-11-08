@@ -6238,6 +6238,7 @@ pub unsafe extern "C" fn seiza_stack_snapshot_rejected_samples(
 #[unsafe(no_mangle)]
 /// Writes the immutable stack as an unstretched 32-bit floating-point FITS,
 /// preserving compatible reference headers.
+/// Refuses inputs and calibration masters, including hard-link aliases.
 ///
 /// # Safety
 /// `snapshot` must be a live `SeizaStackSnapshot` pointer. `path` must be a
@@ -12050,11 +12051,15 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let first = directory.path().join("light-001.fits");
         let second = directory.path().join("light-002.fits");
+        let linked = directory.path().join("linked-light.fits");
         let context = directory.path().join("live.seiza-stack");
         seiza_stacking::write_processed_image_fits_f32(&first, &image, &[], &[]).unwrap();
         seiza_stacking::write_processed_image_fits_f32(&second, &image, &[], &[]).unwrap();
+        std::fs::hard_link(&second, &linked).unwrap();
+        let original = std::fs::read(&second).unwrap();
         let first_c = CString::new(first.to_str().unwrap()).unwrap();
         let second_c = CString::new(second.to_str().unwrap()).unwrap();
+        let linked_c = CString::new(linked.to_str().unwrap()).unwrap();
         let context_c = CString::new(context.to_str().unwrap()).unwrap();
         let config = no_adjustment_stack_options();
         let mut error = ptr::null_mut();
@@ -12081,31 +12086,35 @@ mod tests {
         stacker = unsafe { seiza_live_stacker_open_context(context_c.as_ptr(), &mut error) };
         assert!(!stacker.is_null());
 
-        let duplicate =
-            unsafe { seiza_live_stacker_push_fits_json(stacker, second_c.as_ptr(), &mut error) };
-        assert!(duplicate.is_null());
-        assert!(!error.is_null());
-        assert!(
-            unsafe { CStr::from_ptr(error) }
-                .to_str()
-                .unwrap()
-                .contains("already been used")
-        );
-        unsafe { seiza_string_free(error) };
-        error = ptr::null_mut();
+        for path in [second_c.as_ptr(), linked_c.as_ptr()] {
+            let duplicate = unsafe { seiza_live_stacker_push_fits_json(stacker, path, &mut error) };
+            assert!(duplicate.is_null());
+            assert!(!error.is_null());
+            assert!(
+                unsafe { CStr::from_ptr(error) }
+                    .to_str()
+                    .unwrap()
+                    .contains("already been used")
+            );
+            unsafe { seiza_string_free(error) };
+            error = ptr::null_mut();
+        }
         let snapshot = unsafe { seiza_live_stacker_snapshot(stacker, &mut error) };
         assert!(!snapshot.is_null());
-        assert!(!unsafe {
-            seiza_stack_snapshot_write_fits(snapshot, first_c.as_ptr(), &mut error)
-        });
-        assert!(
-            unsafe { CStr::from_ptr(error) }
-                .to_str()
-                .unwrap()
-                .contains("must not refer")
-        );
+        for path in [first_c.as_ptr(), linked_c.as_ptr()] {
+            assert!(!unsafe { seiza_stack_snapshot_write_fits(snapshot, path, &mut error) });
+            assert!(
+                unsafe { CStr::from_ptr(error) }
+                    .to_str()
+                    .unwrap()
+                    .contains("must not refer")
+            );
+            unsafe { seiza_string_free(error) };
+            error = ptr::null_mut();
+        }
+        assert_eq!(std::fs::read(&second).unwrap(), original);
+        assert_eq!(std::fs::read(&linked).unwrap(), original);
         unsafe {
-            seiza_string_free(error);
             seiza_stack_snapshot_free(snapshot);
             seiza_live_stacker_free(stacker);
         }

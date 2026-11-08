@@ -1178,7 +1178,7 @@ impl PyStackSnapshot {
 
     /// Write the stack as linear 32-bit FITS (or XISF for a ``.xisf``
     /// path), with the reference frame's headers. The path may not be one
-    /// of the stack's inputs or masters.
+    /// of the stack's inputs or masters, including hard-link aliases.
     fn write_fits(&self, py: Python<'_>, path: PathBuf) -> PyResult<()> {
         check_output_path(&self.input_paths, &path)?;
         py.detach(|| write_fits_f32(path, &self.inner, &self.reference_headers))

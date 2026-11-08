@@ -993,6 +993,10 @@ After replay starts the stack is finished even if replay fails; capture its
 headers and protects all input paths when writing. `reintegrate()` keeps the
 stack available for further pushes.
 
+Stack snapshot writes, final output paths and saved contexts reject paths
+that refer to an input frame or calibration master, including hard-link
+aliases. Reusing a frame through a hard link is also rejected as a duplicate.
+
 A stacker built from FITS or XISF paths can integrate its admitted frames again
 from their files, with leave-one-out rejection that removes trails the online
 pass kept, and can drizzle that integration onto a finer grid as WBPP's
