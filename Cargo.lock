@@ -3274,7 +3274,7 @@ dependencies = [
 
 [[package]]
 name = "seiza"
-version = "0.49.0"
+version = "0.50.0"
 dependencies = [
  "directories",
  "image",
@@ -3298,7 +3298,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-analysis"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "seiza-fits",
  "seiza-image-io",
@@ -3313,7 +3313,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-background"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "multiversion",
  "rayon",
@@ -3325,7 +3325,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-cabi"
-version = "0.49.0"
+version = "0.50.0"
 dependencies = [
  "boon",
  "cbindgen",
@@ -3355,7 +3355,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-calibration"
-version = "0.12.1"
+version = "0.12.2"
 dependencies = [
  "chrono",
  "nalgebra",
@@ -3371,7 +3371,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-cli"
-version = "0.49.0"
+version = "0.50.0"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -3418,11 +3418,11 @@ dependencies = [
 
 [[package]]
 name = "seiza-core"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "seiza-deconvolution"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "multiversion",
  "rayon",
@@ -3434,7 +3434,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-download"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "async-compression",
  "directories",
@@ -3461,7 +3461,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-fits"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "flate2",
  "memmap2",
@@ -3474,7 +3474,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-image-io"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "chrono",
  "image",
@@ -3512,7 +3512,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-parallax"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "ab_glyph",
  "image",
@@ -3532,7 +3532,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-pipeline"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "rayon",
  "seiza-calibration",
@@ -3549,7 +3549,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-satellites"
-version = "0.22.2"
+version = "0.22.3"
 dependencies = [
  "directories",
  "fs2",
@@ -3581,7 +3581,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-stacking"
-version = "0.57.0"
+version = "0.58.0"
 dependencies = [
  "bytemuck",
  "flate2",
@@ -3620,7 +3620,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-stars"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "nalgebra",
  "rayon",
@@ -3631,14 +3631,14 @@ dependencies = [
 
 [[package]]
 name = "seiza-stats"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytemuck",
 ]
 
 [[package]]
 name = "seiza-stretch"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "rayon",
  "seiza-stats",
@@ -3649,7 +3649,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-xisf"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "flate2",
  "lz4_flex",
