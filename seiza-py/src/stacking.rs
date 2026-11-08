@@ -2560,6 +2560,32 @@ impl PyLiveStacker {
         ))
     }
 
+    /// Consume the live stack and reintegrate its admitted frames, releasing
+    /// its accumulator first. Returns the same result as ``reintegrate()``.
+    /// After replay starts the stack is finished, including on failure.
+    #[pyo3(signature = (*, sigma_low=3.0, sigma_high=3.0, scratch_directory=None))]
+    fn finish_reintegration(
+        &mut self,
+        py: Python<'_>,
+        sigma_low: f32,
+        sigma_high: f32,
+        scratch_directory: Option<PathBuf>,
+    ) -> PyResult<PyStackSnapshot> {
+        let options = batch_options(sigma_low, sigma_high, scratch_directory)?;
+        let stacker = self.inner.take().ok_or_else(finished_error)?;
+        let reference_headers = stacker.reference_headers().to_vec();
+        let input_paths = stacker.protected_paths();
+        let result = py
+            .detach(|| stacker.finish_reintegration(&options, |_, _, _| {}))
+            .map_err(stack_error)?;
+        Ok(PyStackSnapshot {
+            final_samples: Some(result.frames),
+            inner: result.snapshot,
+            reference_headers,
+            input_paths,
+        })
+    }
+
     /// Consume the accumulator, optionally write a linear FITS file, and return its arrays.
     #[pyo3(signature = (output=None))]
     fn finish(&mut self, py: Python<'_>, output: Option<PathBuf>) -> PyResult<PyStackSnapshot> {

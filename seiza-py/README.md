@@ -965,6 +965,16 @@ stacker.set_match_tolerances(seiza.MatchTolerances(light_rotation=3.5))
 stacker.match_tolerances().light_rotation        # 3.5
 ```
 
+For a completed batch, `stacker.finish_reintegration(sigma_low=3.0,
+sigma_high=3.0, scratch_directory=None)` consumes the stack and returns the
+same `StackSnapshot` and per-frame diagnostics as `reintegrate()`. It releases
+the live accumulator before replay allocates its output buffers (16 bytes per
+CPU sample, or 20 with inverse-noise weighting, plus clipping fractions).
+After replay starts the stack is finished even if replay fails; capture its
+`report_context()` first if needed. The returned snapshot retains reference
+headers and protects all input paths when writing. `reintegrate()` keeps the
+stack available for further pushes.
+
 A stacker built from FITS or XISF paths can integrate its admitted frames again
 from their files, with leave-one-out rejection that removes trails the online
 pass kept, and can drizzle that integration onto a finer grid as WBPP's

@@ -1,0 +1,17 @@
+   Compiling seiza v0.49.0 (/home/ppicazo/Development/seiza/seiza)
+   Compiling seiza-cabi v0.49.0 (/home/ppicazo/Development/seiza/seiza-cabi)
+   Compiling seiza-stacking v0.57.0 (/home/ppicazo/Development/seiza/seiza-stacking)
+   Compiling seiza-parallax v0.20.0 (/home/ppicazo/Development/seiza/seiza-parallax)
+   Compiling seiza-analysis v0.5.0 (/home/ppicazo/Development/seiza/seiza-analysis)
+   Compiling seiza-pipeline v0.2.0 (/home/ppicazo/Development/seiza/seiza-pipeline)
+    Finished `test` profile [optimized + debuginfo] target(s) in 38.69s
+     Running unittests src/lib.rs (target/debug/deps/seiza_cabi-5725a277a34bd27f)
+
+running 5 tests
+test tests::consuming_reintegration_cabi_nulls_handles_on_failure ... ok
+test tests::binned_stacks_reintegrate_at_full_resolution_through_the_cabi ... ok
+test tests::chosen_frames_reintegrate_through_the_cabi ... ok
+test tests::reintegration_cabi_rejects_a_reference_trail_the_live_stack_kept ... ok
+test tests::retained_frames_reintegrate_identically_through_the_cabi ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 188 filtered out; finished in 0.09s

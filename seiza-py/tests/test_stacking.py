@@ -2114,3 +2114,60 @@ def test_build_dark_rejects_minority_states_but_preserves_steady_hot_pixels(tmp_
     assert sum(rejected for _, rejected in result.input_statistics) == 6
     values = seiza.read_image_window(output, 0, 0, 4, 4).values[0]
     np.testing.assert_array_equal(values[0, :3], [100.0, 4000.0, 100.0])
+
+
+@pytest.mark.parametrize("retain", [False, True])
+@pytest.mark.parametrize("normalization", ["none", "local-background"])
+@pytest.mark.parametrize("weighting", ["equal", "inverse-noise-variance"])
+def test_finish_reintegration_preserves_arrays_reports_and_headers(
+    tmp_path, retain, normalization, weighting
+):
+    image, paths = lights_with_a_header(tmp_path)
+    for index, path in enumerate(paths):
+        yy, xx = np.indices(image.shape)
+        noise = (((xx * 29 + yy * 17 + index * 13) % 97) - 48) * 0.13
+        fits.writeto(path, (image + noise).astype(np.float32), fits.getheader(path), overwrite=True)
+    options = seiza.StackOptions(
+        normalization=normalization, local_tile_size=32, weighting=weighting,
+        gpu=seiza.GpuOptions(enabled=False),
+    )
+    stack = seiza.LiveStacker(paths[0], options=options)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    if retain:
+        stack.retain_frames_for_reintegration(scratch_directory=scratch)
+    for path in paths[1:]:
+        assert stack.push_fits(path).accepted
+    context = stack.report_context()
+    expected = stack.reintegrate(scratch_directory=scratch)
+    actual = stack.finish_reintegration(scratch_directory=scratch)
+    for name in ("image", "variance", "coverage", "rejected_samples"):
+        np.testing.assert_array_equal(getattr(actual, name), getattr(expected, name))
+    assert actual.report(context=context) == expected.report(context=context)
+    assert actual.accepted_frames == len(paths)
+    assert list(scratch.iterdir()) == []
+    with pytest.raises(RuntimeError, match="finished"):
+        stack.snapshot()
+    with pytest.raises(RuntimeError, match="finished"):
+        stack.finish_reintegration()
+    with pytest.raises(ValueError, match="must not refer"):
+        actual.write_fits(paths[0])
+    output = tmp_path / "finished-reintegration.fits"
+    actual.write_fits(output)
+    assert fits.getheader(output)["CRVAL1"] == 83.8
+
+
+def test_finish_reintegration_consumes_on_replay_failure():
+    stack = seiza.LiveStacker.from_array(synthetic_star_field(), options=no_adjustment_options())
+    with pytest.raises(seiza.StackError):
+        stack.finish_reintegration()
+    with pytest.raises(RuntimeError, match="finished"):
+        stack.snapshot()
+
+
+def test_finish_reintegration_checks_arguments_before_consuming(tmp_path):
+    _, paths = lights_with_a_header(tmp_path)
+    stack = seiza.LiveStacker(paths[0], options=no_adjustment_options())
+    with pytest.raises(ValueError, match="positive"):
+        stack.finish_reintegration(sigma_low=0)
+    assert stack.accepted_frames == 1
