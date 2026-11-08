@@ -1,0 +1,5 @@
+{
+  "final_rust_test_threads": 1,
+  "localhost_access": true,
+  "reason": "Parallel external-tool fixture launches intermittently hit Text file busy; retained failure and diagnostic logs."
+}

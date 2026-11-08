@@ -1,0 +1,2377 @@
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.54s
+     Running unittests src/lib.rs (target/debug/deps/seiza-c20d6b48d376516b)
+
+running 129 tests
+test blind::tests::a_region_stands_out_only_far_ahead_of_the_next ... ok
+test blind::tests::a_verified_hypothesis_stops_the_rest_of_its_batch ... ok
+test blind::tests::a_callers_stop_reaches_every_hypothesis_of_a_batch ... ok
+test blind::tests::open_defers_exhaustive_blind_index_validation ... ok
+test blind::tests::smoothing_breaks_equal_vote_ties_by_bucket_key ... ok
+test blind::tests::smoothing_uses_the_strongest_bucket_representative ... ok
+test catalog::distances::tests::builder_rejects_duplicates_bad_distances_and_unknown_sources ... ok
+test catalog::distances::tests::distances_round_trip_through_a_file ... ok
+test catalog::distances::tests::edge_offsets_follow_the_ellipse_orientation ... ok
+test blind::tests::the_suppression_grid_keeps_what_marking_every_neighbour_kept ... ok
+test catalog::distances::tests::lookup_by_object_tries_alternate_ids_then_the_kind_default ... ok
+test catalog::distances::tests::reader_rejects_damaged_files ... ok
+test catalog::distances::tests::opening_with_another_object_catalog_fails_plainly ... ok
+test catalog::distances::tests::typical_distances_are_ordered_and_skip_stars ... ok
+test catalog::distances::tests::the_object_at_a_pixel_is_the_smallest_one_holding_it ... ok
+test catalog::motion::tests::a_sidecar_leaves_the_star_file_as_it_was ... ok
+test catalog::motion::tests::a_sidecar_pairs_only_with_its_own_star_file ... ok
+test catalog::photometry::tests::proper_motion_stays_on_the_sphere_at_the_pole ... ok
+test catalog::photometry::tests::stars_round_trip_through_a_file_and_cone_search ... ok
+test catalog::star_distances::tests::distances_keep_a_ten_thousandth_from_a_parsec_to_a_hundred_kiloparsecs ... ok
+test catalog::star_distances::tests::stars_round_trip_through_a_file_and_cone_search ... ok
+test catalog::tests::cone_search_filters_and_sorts ... ok
+test catalog::tests::separation_basics ... ok
+test catalog::tiles::tests::grid_assigns_every_position_to_a_valid_tile ... ok
+test catalog::tiles::tests::open_defers_exhaustive_tile_validation ... ok
+test catalog::tiles::tests::open_rejects_garbage ... ok
+test catalog::tiles::tests::quantization_error_is_below_a_milliarcsecond ... ok
+test catalog::motion::tests::an_epoch_catalog_moves_each_star_by_its_own_motion ... ok
+test catalog::tiles::tests::reads_legacy_v1_files ... ok
+test catalog::tiles::tests::v2_tile_iteration_honors_early_stop ... ok
+test constellations::tests::a_narrow_field_crossed_by_a_line_still_gets_a_name ... ok
+test constellations::tests::clip_segment_cases ... ok
+test constellations::tests::embedded_data_covers_all_88_constellations ... ok
+test constellations::tests::every_line_star_resolves_and_segments_are_short ... ok
+test catalog::tiles::tests::v2_catalog_matches_brute_force_cone_search ... ok
+test constellations::tests::hand_built_figures_with_unknown_stars_do_not_panic ... ok
+test constellations::tests::known_star_positions_match ... ok
+test constellations::tests::label_anchor_sits_among_the_figure ... ok
+test constellations::tests::parser_rejects_bad_counts_and_handles_continuations ... ok
+test constellations::tests::projection_draws_cassiopeia_inside_and_clips_partial_lines ... ok
+test constellations::tests::segments_are_deduplicated_and_retraced_lines_collapse ... ok
+test constellations::tests::segments_behind_the_tangent_plane_are_skipped ... ok
+test constellations::tests::simplification_keeps_bends_and_drops_collinear_points ... ok
+test constellations::tests::sip_is_not_trusted_far_outside_the_frame ... ok
+test constellations::tests::every_name_position_is_nearest_its_own_figure ... ok
+test data_paths::tests::catalog_search_starts_with_setup_directory ... ok
+test data_paths::tests::configured_catalog_directory_ignores_empty_values ... ok
+test data_paths::tests::directory_argument_picks_the_best_catalog ... ok
+test data_paths::tests::directory_argument_resolves_index_objects_and_identifiers ... ok
+test data_paths::tests::directory_argument_resolves_sky_annotation_catalogs ... ok
+test data_paths::tests::missing_paths_error_and_empty_directories_explain_expectations ... ok
+test data_paths::tests::object_distances_are_found_beside_the_object_catalog ... ok
+test data_paths::tests::set_env_var_that_resolves_nothing_is_an_error_not_a_fallback ... ok
+test detect::tests::a_star_that_cannot_be_measured_keeps_its_position ... ok
+test detect::tests::auto_uses_f32_backend_for_high_precision_input ... ok
+test blind::debug_tests::hinted_verify_works_at_this_scale ... ok
+test detect::tests::empty_and_flat_images_yield_nothing ... ok
+test detect::tests::auto_uses_u8_backend_for_rgb8 ... ok
+test detect::tests::f32_positive_search_matches_scalar_at_every_block_boundary ... ok
+test detect::tests::forced_backends_execute_distinct_numeric_paths ... ok
+test detect::tests::finds_synthetic_stars_with_subpixel_accuracy ... ok
+test data_paths::tests::a_catalog_finds_the_blind_index_beside_it ... ok
+test detect::tests::refined_centroids_find_a_star_on_a_sky_gradient ... ok
+test detect::tests::refined_centroids_on_binned_samples_return_full_resolution_positions ... ok
+test detect::tests::native_luma8_path_matches_f32_reference ... ok
+test detect::tests::max_stars_caps_output_brightest_first ... ok
+test detect::tests::rejects_elongated_shapes_like_text_strokes ... ok
+test detect::tests::the_u8_threshold_floor_passes_exactly_the_excesses_f32_would ... ok
+test detect::tests::threshold_rows_match_a_scalar_reference_on_every_dispatch ... ok
+test detect::tests::retains_broad_saturated_stars_in_processed_images ... ok
+test field_objects::tests::capture_times_read_as_julian_dates ... ok
+test field_objects::tests::missing_catalogs_say_why ... ok
+test detect::tests::u8_background_maps_match_a_single_histogram ... ok
+test field_objects::tests::outlines_are_projected_into_image_pixels ... ok
+test field_objects::tests::named_stars_stay_and_transients_are_dated ... ok
+test minor_bodies::tests::earth_distance_is_about_one_au ... ok
+test minor_bodies::tests::julian_dates ... ok
+test minor_bodies::tests::kepler_solvers_converge ... ok
+test minor_bodies::tests::open_defers_minor_body_semantic_validation ... ok
+test minor_bodies::tests::orbit_radius_matches_conic_geometry ... ok
+test minor_bodies::tests::placed_asteroid_reports_apparent_motion ... ok
+test object_catalog_v4::tests::newer_minor_versions_may_use_reserved_envelope_bytes ... ok
+test object_catalog_v4::tests::unknown_optional_sections_are_skipped_but_required_are_rejected ... ok
+test blind::tests::a_blind_sip_fit_refines_the_accepted_field_without_solving_it_again ... ok
+test object_catalog_v4::tests::v4_round_trip_is_mmap_backed_and_validates ... ok
+test blind::tests::limits_stop_a_blind_solve ... ok
+test objects::tests::cone_query_distinguishes_centers_from_extent_only_hits ... ok
+test objects::tests::footprint_projection_places_and_sizes_objects ... ok
+test objects::tests::footprint_projection_withholds_unknown_orientation ... ok
+test objects::tests::mmap_catalog_queries_sky_tiles_and_name_index ... ok
+test objects::tests::open_defers_object_semantic_validation ... ok
+test objects::tests::mmap_cone_query_is_conservative_near_the_pole ... ok
+test objects::tests::open_rejects_garbage ... ok
+test objects::tests::opens_v1_catalogs_with_empty_metadata ... ok
+test objects::tests::polygon_query_handles_polar_fields_and_extent_overlap ... ok
+test objects::tests::polygon_query_handles_ra_wrap ... ok
+test objects::tests::query_filters_and_prominence_sort_are_explicit ... ok
+test objects::tests::query_rejects_invalid_regions ... ok
+test objects::tests::writer_rejects_oversized_metadata_without_truncation ... ok
+test objects::tests::round_trips_through_the_file_format ... ok
+test objects::tests::fingerprints_follow_the_canonical_objects ... ok
+test solve::sip_fit::fit_sip_recovers_an_exact_cubic_distortion ... ok
+test solve::tests::a_crowded_frame_makes_a_dozen_matches_prove_little ... ok
+test solve::tests::a_quads_rough_solution_verifies_without_a_triangle_search ... ok
+test detect::tests::stars_from_positive_excess_match_the_whole_image ... ok
+test solve::tests::fails_cleanly_on_the_wrong_sky_region ... ok
+test solve::tests::fails_cleanly_with_too_few_stars ... ok
+test solve::tests::deepen_keeps_a_solution_it_cannot_better ... ok
+test solve::tests::one_window_failure_is_not_retried ... ok
+test blind::tests::blind_solves_a_deep_small_field ... ok
+test blind::tests::blind_solves_an_unknown_field ... ok
+test solve::tests::rank_robust_fallback_solves_a_flux_shuffled_field ... ok
+test solve::tests::limits_stop_a_hinted_solve ... ok
+test solve::tests::solves_near_the_pole ... ok
+test solve::tests::a_distorted_crowded_field_is_fitted_on_all_of_its_stars ... ok
+test solve::tests::the_chance_of_matching_follows_the_binomial_tail ... ok
+test solve::tests::the_nearest_detection_is_the_one_a_full_scan_finds ... ok
+test star_ids::tests::open_defers_record_and_string_validation_until_touched ... ok
+test star_ids::tests::parses_and_formats_supported_designations ... ok
+test star_ids::tests::round_trips_and_preserves_duplicate_component_matches ... ok
+test solve::tests::sip_fit_reduces_distorted_field_residuals ... ok
+test blind::tests::an_index_in_any_order_is_written_in_key_order ... ok
+test solve::tests::stale_center_falls_back_to_the_requested_radius ... ok
+test solve::tests::strong_center_solution_skips_the_radius_grid ... ok
+test prior::tests::the_strongest_evidence_wins_and_a_header_wcs_is_the_last_resort ... ok
+test image_solve::tests::an_image_file_solves_against_the_catalogs_in_a_directory ... ok
+test solve::tests::solves_rotated_and_flipped_fields ... ok
+test blind::tests::noise_is_refused_even_under_a_weak_match_count ... ok
+test blind::tests::blind_fails_cleanly_on_noise ... ok
+
+test result: ok. 129 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.88s
+
+     Running tests/caller_pool.rs (target/debug/deps/caller_pool-7cdcd2baf7601143)
+
+running 1 test
+test detection_and_solving_stay_in_the_callers_pool ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
+     Running unittests src/lib.rs (target/debug/deps/seiza_analysis-3362000f6d88b452)
+
+running 13 tests
+test color::tests::unknown_pattern_and_invalid_offsets_are_not_silently_mono ... ok
+test report::collection_tests::invalid_collections_and_nested_reports_are_rejected ... ok
+test health_tests::baselines_use_selected_measurement_population_and_keep_native_units ... ok
+test report::collection_tests::report_levels_skip_source_io_and_preserve_final_statistics ... ok
+test report::tests::legacy_report_remains_renderable_without_inventing_new_outcomes ... ok
+test report::collection_tests::collection_embeds_exact_data_and_reuses_single_renderer ... ok
+test sampling::tests::inverse_mapping_and_nonfinite_mask ... ok
+test sampling::tests::patches_are_bounded_distinct_and_data_independent ... ok
+test report::tests::metadata_cannot_escape_script ... ok
+test color::tests::rgb_is_planar_and_never_averaged_or_debayered ... ok
+test trend::tests::independent_noise_has_minus_half_exponent ... ok
+test trend::tests::insufficient_or_flat_or_rising_data_cannot_promise_improvement ... ok
+test color::tests::cfa_lattices_preserve_every_native_sample_and_metadata ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/project.rs (target/debug/deps/project-2dc80e9e96a9d1c9)
+
+running 8 tests
+test invalid_requests_and_unreadable_inputs_are_distinct ... ok
+test measurements_survive_when_no_depth_reference_can_be_built ... ok
+test discovery_filters_xisf_deduplication_and_failed_frames ... ok
+test small_color_bayer_and_mismatched_inputs_are_reported ... ok
+test metrics_are_independent_of_registration_and_depth_admission ... ok
+test common_footprint_excludes_every_frames_invalid_patches ... ok
+test independent_noise_falls_with_depth_and_flux_units_survive_scaling ... ok
+test osc_components_keep_native_noise_and_do_not_mix_layouts ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.91s
+
+     Running unittests src/lib.rs (target/debug/deps/seiza_background-5bc0d63b4f753fdb)
+
+running 23 tests
+test tests::configuration_can_be_validated_before_fitting ... ok
+test tests::configuration_rejects_polygons_without_an_enclosed_area ... ok
+test tests::configuration_rejects_polygon_coordinates_that_can_overflow_geometry ... ok
+test tests::invalid_division_reference_does_not_mutate_an_in_place_image ... ok
+test tests::malformed_deserialized_fit_fails_instead_of_panicking ... ok
+test tests::pixel_polygon_normalization_removes_repeated_vertices ... ok
+test tests::protected_region_padding_covers_a_sample_window_corner ... ok
+test tests::normalized_catalog_outline_protects_a_solved_target ... ok
+test tests::exclusion_mask_can_remove_a_large_structure_from_sampling ... ok
+test tests::invalid_divisor_does_not_partially_mutate_an_in_place_image ... ok
+test tests::divide_removes_a_multiplicative_plane_and_preserves_nonfinite_pixels ... ok
+test tests::shared_selection_gives_every_channel_one_surface ... ok
+test tests::correction_strength_blends_from_unchanged_to_full_correction ... ok
+test tests::rendering_rejects_a_mismatched_buffer ... ok
+test tests::rotated_ellipse_and_polygon_edges_are_inclusive ... ok
+test tests::shared_selection_needs_automatic_scores_from_every_fit ... ok
+test tests::configuration_and_fit_round_trip_through_json ... ok
+test tests::zero_length_polygon_edges_do_not_contain_outside_points ... ok
+test tests::correction_rejects_a_mismatched_buffer ... ok
+test tests::recovers_and_subtracts_a_color_plane_with_bright_sources ... ok
+test tests::radial_basis_recovers_a_smooth_irregular_gradient ... ok
+test tests::row_evaluation_matches_the_per_pixel_model_bit_for_bit ... ok
+test tests::automatic_selection_uses_held_out_samples_for_model_choice ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/caller_pool.rs (target/debug/deps/caller_pool-4e3a1acb42120c5f)
+
+running 1 test
+test background_models_stay_in_the_callers_pool ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running unittests src/lib.rs (target/debug/deps/seiza_cabi-3dcb4ee2e8358ac4)
+
+running 192 tests
+test analysis::tests::key_translation_roundtrips_without_touching_values ... ok
+test continuum::tests::signed_subtraction_is_alias_safe_and_refuses_changed_revisions_transactionally ... ok
+test emission::flux_and_green_tests::calibrated_flux_reports_units_and_is_alias_safe ... ok
+test analysis::tests::entry_point_reports_invalid_options_and_missing_frame ... ok
+test analysis::stack_report_tests::completed_report_camel_case_roundtrip_and_null_errors ... ok
+test emission::star_reduction_tests::reduced_stars_match_the_linked_reference_and_validate_before_writing ... ok
+test emission::tests::blends_are_alias_safe_and_errors_leave_output_unchanged ... ok
+test flat_response::tests::planes_bin_round_trip_through_the_cache_and_verdicts_combine ... ok
+test flat_groups::tests::psf_guard_snapshot_and_uncertainty_survive_the_c_boundary ... ok
+test constellations::tests::the_figures_and_a_solved_images_projection_come_with_their_attribution ... ok
+test library::master_policy_tests::cached_pixels_cross_the_c_abi_and_bad_lengths_are_rejected ... ok
+test library::master_policy_tests::full_path_light_choices_do_not_cross_same_name_files ... ok
+test library::master_policy_tests::cached_record_workflow_and_feedback_cross_the_c_abi ... ok
+test library::master_policy_tests::session_policy_and_strict_settings_cross_the_c_abi ... ok
+test library::master_policy_tests::settings_schema_and_checks_follow_the_shared_table ... ok
+test library::master_policy_tests::shared_master_resolution_and_feedback_cross_the_c_abi ... ok
+test library::master_policy_tests::response_preparation_and_supplied_sets_cross_the_c_abi ... ok
+test library::schema_tests::settings_calls_follow_the_schema ... ok
+test library::schema_tests::the_checked_in_schema_is_the_one_the_calls_take ... ok
+test library::tests::captured_grading_and_fitted_recipe_fields_cross_the_c_abi ... ok
+test continuum::tests::json_fit_matches_core_and_image_measurement_returns_a_structured_skip ... ok
+test library::master_policy_tests::native_flat_measurement_crosses_the_c_abi ... ok
+test analysis::tests::osc_entry_point_preserves_component_geometry_and_camel_case ... ok
+test library::tests::schema_is_strict_but_setting_values_are_opaque ... ok
+test library::tests::resolved_recipe_regressions_cross_the_c_abi ... ok
+test model::tests::a_model_installs_verifies_lists_and_goes ... ok
+test model::tests::a_tiny_model_runs_and_blends_from_c ... ok
+test model::tests::bad_options_are_refused_before_anything_loads ... ok
+test model::tests::the_backends_call_answers_with_or_without_a_library ... ok
+test model::tests::the_output_version_is_the_crate_s_own ... ok
+test library::tests::prepared_grouping_handle_matches_value_planning ... ok
+test library::tests::psf_guard_reference_crosses_the_c_abi ... ok
+test library::schema_tests::fixture_requests_and_answers_follow_the_schema ... ok
+test parallax::tests::a_cropped_video_sizes_to_the_crop_and_gives_back_the_given_solution ... ok
+test parallax::tests::a_request_with_an_unknown_field_or_bad_choice_is_refused ... ok
+test parallax::tests::a_planned_tour_names_its_stops_and_goes_back_into_a_request ... ok
+test parallax::tests::a_watermark_and_cards_read_from_their_fields ... ok
+test parallax::tests::a_wcs_reads_its_pixel_origin ... ok
+test parallax::tests::cropped_dust_ffi_reads_paints_exports_and_reloads_in_source_coordinates ... ok
+test parallax::tests::a_painted_dust_map_goes_in_comes_back_out_and_can_be_swapped ... ok
+test parallax::tests::framing_crop_and_an_image_shaped_size_read_from_their_fields ... ok
+test calibration_files::tests::file_workflow_uses_native_review_sessions_cache_progress_and_schema ... ok
+test parallax::tests::depth_planes_go_in_as_masks_and_come_back_in_the_summary ... ok
+test parallax::tests::null_fields_take_their_defaults_and_a_huge_stride_is_refused ... ok
+test parallax::tests::a_reconfigured_video_shares_the_scene_and_both_draw_at_once ... ok
+test pixinsight_tests::a_request_is_checked_before_pixinsight_starts ... ok
+test parallax::tests::a_prepared_video_draws_frames_for_the_caller_and_its_encoder ... ok
+test parallax::tests::transition_fit_is_reported_without_changing_endpoint_zooms ... ok
+test rc_astro_tests::a_malformed_request_reports_a_clear_error ... ok
+test psf::tests::measures_samples_and_reports_a_field ... ok
+test pixinsight_tests::a_file_is_denoised_through_the_pixinsight_protocol ... ok
+test rc_astro_tests::color_neutralize_clipped_cabi_renders_clipped_pixels_neutral ... ok
+test rc_astro_tests::the_schema_and_a_run_round_trip_through_the_abi ... ok
+test resample::tests::averages_each_rgb_channel_without_losing_u16_precision ... ok
+test resample::tests::checkerboard_averages_instead_of_aliasing ... ok
+test resample::tests::constant_fields_survive_non_integer_reduction ... ok
+test resample::tests::four_by_four_reduction_lowers_uncorrelated_noise ... ok
+test resample::tests::fractional_footprints_include_edges_and_preserve_mean ... ok
+test resample::tests::full_size_and_upscale_requests_leave_samples_untouched ... ok
+test resample::tests::linear_preview_handles_missing_samples_per_channel ... ok
+test flat_response::shared_workflow_tests::cached_response_pedestal_and_evidence_map_use_native_pixels ... ok
+test resample::tests::linear_preview_uses_whole_footprint_not_only_center_samples ... ok
+test resample::tests::transparent_pixels_do_not_add_dark_or_colored_fringes ... ok
+test satellites::tests::a_tracks_request_needs_one_observer_and_one_exposure_length ... ok
+test satellites::tests::a_raised_cancel_signal_stops_a_fetch ... ok
+test satellites::tests::predicts_a_crossing_through_a_matching_wcs ... ok
+test satellites::tests::text_and_files_make_catalogs_with_no_load_details ... ok
+test satellites::tests::fetch_and_resolve_reuse_a_fresh_cache_without_the_network ... ok
+test psf::tests::refuses_a_sparse_field_unless_asked_for_a_global_psf ... ok
+test sessions::tests::a_session_stack_on_a_shared_reference_opens_through_the_c_api ... ok
+test tests::a_frame_mapping_resamples_another_image_through_the_cabi ... ok
+test tests::a_photo_gives_its_exif_and_scale_ranges ... ok
+test tests::a_refusal_over_the_c_surface_names_the_field_and_both_readings ... ok
+test star_fit::tests::fits_removes_and_renders_catalogue_stars ... ok
+test tests::a_stacker_answers_what_a_prospective_light_could_accept ... ok
+test tests::a_stack_and_the_planner_read_a_light_at_the_angle_the_host_measured ... ok
+test tests::a_wcs_becomes_fits_header_cards ... ok
+test tests::astronomy_render_metadata_identifies_xisf_sources_at_both_depths ... ok
+test tests::background_cabi_fits_renders_and_corrects_a_model ... ok
+test tests::background_cabi_rejects_invalid_mask_bytes ... ok
+test tests::background_correction_mode_rejects_unknown_abi_values ... ok
+test tests::bgra_view_swaps_red_and_blue_and_caches ... ok
+test tests::a_stacker_validates_a_light_under_the_callers_tolerances ... ok
+test rc_astro_tests::color_calibration_cabi_fits_and_applies_channel_gains ... ok
+test tests::calibration_plan_checks_flat_optics_against_every_reference ... ok
+test tests::calibration_plan_matches_dark_flats_to_the_selected_flat ... ok
+test tests::calibration_plan_never_combines_conflicting_flats_when_target_optics_are_unknown ... ok
+test tests::calibration_plan_never_combines_conflicting_sensor_settings_hidden_by_target_metadata ... ok
+test tests::calibration_plan_requires_one_safe_set_for_every_target ... ok
+test tests::calibration_plan_sorts_by_proximity_and_reports_exclusions ... ok
+test tests::catalog_setup_presets_include_solver_and_overlay_data ... ok
+test tests::catalog_status_requires_a_star_catalog_and_blind_index ... ok
+test tests::channels_fitted_apart_share_one_background_surface ... ok
+test pipeline::tests::a_channel_stacks_resumes_and_combines_through_the_c_api ... ok
+libEGL warning: egl: failed to create dri2 screen
+test field_deconvolution::tests::makes_applies_and_deconvolves_with_a_remaining_kernel ... ok
+test parallax::tests::a_tour_planned_on_a_prepared_scene_frames_targets_at_their_planes ... ok
+test tests::color_cabi_refuses_shared_paths_unknown_fields_and_a_cancelled_signal ... ok
+test tests::crop_report_cabi_reports_the_region_and_names_a_stray_channel ... ok
+test tests::deconvolution_cabi_restores_in_place_and_reports_errors ... ok
+test tests::binned_stacks_reintegrate_at_full_resolution_through_the_cabi ... ok
+test tests::downsampling_preserves_aspect_ratio ... ok
+test rc_astro_tests::color_calibrate_and_stretch_cabi_follows_a_derived_solution ... ok
+test tests::color_cabi_composes_writes_and_reports_a_crop ... ok
+test tests::color_cabi_composes_lrgb_and_narrowband_palettes_and_matrices ... ok
+test tests::chosen_frames_reintegrate_through_the_cabi ... ok
+test tests::calibration_frames_are_measured_from_files_and_screened_as_sets ... ok
+test tests::explicit_physical_sample_domain_maps_display_buffers_without_mutating_source ... ok
+test tests::file_render_physical_domain_decodes_physical_samples_before_mapping ... ok
+test tests::defect_detection_cabi_returns_the_map_stack_options_take ... ok
+test tests::fits_render_pipeline_reports_and_applies_background_correction ... ok
+test tests::flat_features_are_camel_case_both_ways ... ok
+test tests::flat_readout_policy_survives_c_and_json_translation ... ok
+test tests::frame_probe_is_header_only_and_normalizes_role_and_signature ... ok
+test tests::independent_rgb_star_tone_and_screen_validate_without_mutating_on_error ... ok
+test flat_response::tests::a_session_finds_its_dust_and_each_flat_is_checked_against_it ... ok
+test tests::fits_render_pipeline_reports_and_applies_deconvolution_before_stretching ... ok
+test tests::interactive_preview_reuses_prepared_pixels_across_stretch_edits ... ok
+test tests::interactive_preview_bounds_linear_samples_before_processing ... ok
+test tests::live_preview_area_sampling_keeps_off_center_signal_and_ignores_gaps ... ok
+test tests::lightweight_export_snapshot_writes_off_thread_while_ingestion_continues ... ok
+test tests::live_preview_sampling_excludes_uncovered_pixels_instead_of_making_black_data ... ok
+test tests::fits_path_detection_is_byte_for_byte_the_buffer_contract ... ok
+test tests::live_state_calibration_swap_and_bounded_preview_share_native_state ... ok
+test tests::master_builder_experimental_preprocessing_is_opt_in ... ok
+test tests::live_preview_defaults_follow_the_stacker_input_mode ... ok
+test tests::expanding_stack_cabi_refuses_bad_inputs_and_honours_cancel ... ok
+test tests::master_builder_preserves_output_when_fewer_than_two_inputs_survive ... ok
+test tests::expanding_stack_cabi_notes_lights_that_did_not_join ... ok
+test tests::master_builder_reports_a_skipped_middle_input_without_mislabeling_tallies ... ok
+test tests::master_builder_publishes_atomically_reports_stats_and_can_cancel ... ok
+test tests::new_downloader_events_map_to_setup_progress ... ok
+test tests::normalized_statistics_agree_across_render_depths ... ok
+test tests::object_outlines_carry_how_they_were_made ... ok
+test tests::object_points_keep_their_names_and_dates ... ok
+test tests::narrowband_display_cabi_balances_and_recombines_stars ... ok
+test tests::output_versions_are_the_crates_own ... ok
+test tests::path_detection_headers_only_fill_options_the_caller_omitted ... ok
+test tests::phone_jpegs_render_upright_in_8_and_16_bits ... ok
+test tests::pixel_scale_advice_follows_the_core ... ok
+test tests::parameterized_rgba16_render_retains_sub_u8_distinctions ... ok
+test tests::reads_an_image_header_with_its_commentary ... ok
+test tests::reads_the_capture_time_a_solve_dates_objects_by ... ok
+test tests::master_builder_screens_darks_that_caught_stray_light ... ok
+test tests::reads_a_window_of_an_image_into_the_callers_buffer ... ok
+test tests::master_builder_masks_stars_in_sky_flats_in_a_chosen_scratch_directory ... ok
+test tests::registered_mosaic_json_matches_backgrounds_and_preserves_coverage ... ok
+test tests::rejects_an_empty_stretch_stack ... ok
+test tests::render_config_accepts_a_presentation_only_physical_sample_domain ... ok
+test tests::registered_mosaic_json_matches_partial_cells_with_independent_rgb_support ... ok
+test tests::render_config_composes_background_correction_before_the_stretch_stack ... ok
+test tests::renders_a_fits_with_a_parameterized_stretch_config ... ok
+test tests::renders_a_png_and_reports_raster_metadata ... ok
+test tests::renders_a_synthetic_fits_and_reports_metadata ... ok
+test tests::master_dark_rejects_minority_states_and_preserves_steady_hot_pixels ... ok
+test tests::renders_an_ordered_f32_stretch_stack_and_accepts_single_config_json ... ok
+test tests::residual_flat_responses_are_built_checked_and_applied_as_the_core_does ... ok
+test tests::registered_frames_are_integrated_with_leave_one_out_rejection ... ok
+test tests::rgb_linear_and_linked_auto_use_shared_channel_mappings ... ok
+test tests::rgb_stretch_mode_rejects_unknown_abi_values ... ok
+test tests::rgba16_cabi_exposes_element_count_and_borrowed_pixels ... ok
+test tests::rgba16_raster_render_preserves_sixteen_bit_png_samples ... ok
+test tests::rgba16_render_buffer_round_trips_through_png_and_tiff_encoders ... ok
+test tests::expanding_stack_cabi_holds_every_panel ... ok
+test tests::stack_options_json_chooses_the_demosaic ... ok
+test tests::stack_reference_cabi_preserves_order_scores_and_selected_path ... ok
+test tests::renders_the_layered_stretch_with_the_image_shape ... ok
+test tests::stack_reference_cabi_rejects_invalid_or_unscoreable_inputs ... ok
+test tests::joint_canvas_cabi_selects_one_filter_on_the_union ... ok
+test tests::reintegration_cabi_rejects_a_reference_trail_the_live_stack_kept ... ok
+test tests::expanding_stack_cabi_defaults_to_the_expanded_minimum_overlap ... ok
+test tests::stacking_cabi_pushes_views_snapshots_and_finishes_without_copying ... ok
+test tests::stacking_cabi_checkpoints_reopens_and_continues ... ok
+test tests::stacking_cabi_opens_a_prepared_frame_and_reports_noise_weights_and_mappings ... ok
+test tests::stacking_cabi_opens_fits_and_rejects_duplicate_paths ... ok
+test tests::stacking_cabi_rejects_unknown_configuration_fields ... ok
+test tests::stacking_cabi_returns_frame_rejection_as_disposition_json ... ok
+test sessions::tests::assigned_calibration_and_gate_survive_the_c_api_and_context ... ok
+test tests::stacking_cabi_aligns_a_channel_to_a_shared_reference_image ... ok
+test tests::star_detection_rejects_invalid_slice_dimensions_before_borrowing ... ok
+test tests::retained_frames_reintegrate_identically_through_the_cabi ... ok
+test tests::the_local_gaia_catalog_answers_a_cone ... ok
+test tests::tolerance_overrides_fall_back_when_they_cannot_decide ... ok
+test tests::xisf_path_detection_uses_the_astronomy_loader_and_refuses_rasters ... ok
+test tests::star_detection_over_the_c_surface_measures_and_judges_tilt ... ok
+test tests::stacking_cabi_reopens_a_context_under_other_gpu_options ... ok
+test tests::stacking_cabi_superpixel_mapping_keeps_channel_sites ... ok
+test tests::stacking_cabi_refuses_double_calibration_and_incompatible_lights ... ok
+test tests::stacking_cabi_tries_channel_references_until_one_aligns ... ok
+test tests::star_detection_target_star_count_retries_toward_the_target ... ok
+test tests::render_config_carries_gpu_options_to_the_debayering ... ok
+test tests::shared_canvas_cabi_starts_an_independent_stack ... ok
+test flat_response::tests::two_sessions_compare_and_a_change_map_carries_a_flat_across ... ok
+
+test result: ok. 192 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.29s
+
+     Running unittests src/lib.rs (target/debug/deps/seiza_calibration-07318511748c2429)
+
+running 208 tests
+test dust::tests::a_patch_pairs_with_the_disk_another_session_saw ... ok
+test dust::tests::a_donut_is_one_feature_with_its_hole ... ok
+test dust::tests::bench_session_dust_from_lists ... ignored, a benchmark
+test dust::tests::a_shadow_in_one_corner_is_vignetting_not_dust ... ok
+test dust::tests::a_compact_dip_is_found_and_a_cold_pixel_is_not ... ok
+test dust::tests::a_faint_wide_disk_is_found_at_its_size ... ok
+test dust::tests::depth_sector_matches_atan2_everywhere ... ok
+test dust::tests::a_faint_disk_survives_the_candidate_cap ... ok
+test dust::tests::a_frame_smaller_than_its_session_does_not_panic ... ok
+test dust::tests::features_pair_within_a_tolerance_that_grows_with_size ... ok
+test dust::tests::a_feature_too_few_flats_show_is_dropped_and_a_steady_one_is_no_transient ... ok
+test dust::tests::a_session_counts_each_feature_in_its_flats ... ok
+test dust::tests::a_star_one_sky_flat_kept_is_not_dust ... ok
+test dust::tests::lone_dips_need_more_than_five_sigma_on_a_large_frame ... ok
+test dust::tests::matching_takes_the_most_pairs_not_the_closest_first ... ok
+test dust::tests::dust_moved_by_focus_is_within_tolerance_and_new_dust_is_new ... ok
+test dust::tests::flats_that_found_nothing_count_as_flats_without_the_dust ... ok
+test dust::tests::changes_do_not_depend_on_the_thread_count ... ok
+test dust::tests::faint_new_window_dust_inside_a_held_disk_is_new ... ok
+test dust::tests::alike_disks_gone_and_new_nearby_are_not_called_moved ... ok
+test dust::tests::optics_from_parts_refuse_what_they_would_ignore ... ok
+test dust::tests::new_window_dust_in_front_of_a_held_disk_is_new ... ok
+test dust::tests::new_window_dust_beside_held_window_dust_is_new ... ok
+test dust::tests::overlapping_disks_stay_disks_and_no_circle_wraps_them ... ok
+test dust::tests::new_window_dust_on_a_held_disks_rim_is_new ... ok
+test dust::tests::the_box_index_finds_what_a_full_scan_finds ... ok
+test dust::tests::noise_and_a_gradient_alone_hold_no_dust ... ok
+test dust::tests::find_session_dust_drops_what_too_few_flats_show ... ok
+test dust::tests::session_dust_from_lists_needs_two_flats ... ok
+test flat_response::choice::tests::a_smooth_sky_follows_the_flats_it_was_shot_through ... ok
+test flat_response::choice::tests::candidates_alike_win_together ... ok
+test flat_response::choice::tests::a_lone_candidate_wins_unopposed_and_another_size_never_does ... ok
+test dust::tests::faint_disks_without_optics_are_not_donuts ... ok
+test flat_response::evidence::tests::a_session_takes_a_side_no_fit_contradicts ... ok
+test flat_response::evidence::tests::a_shadow_with_no_room_is_weighed_on_a_ring ... ok
+test flat_response::evidence::tests::a_smooth_field_decides_its_side ... ok
+test flat_response::choice::tests::candidates_measured_alike_are_not_fitted_and_none_wins_alone ... ok
+test dust::tests::clear_disks_of_one_size_do_not_hide_a_faint_one ... ok
+test dust::tests::session_dust_from_lists_keeps_what_the_flats_show ... ok
+test flat_response::evidence::tests::shadows_that_disagree_widen_the_spread ... ok
+test flat_response::evidence::workflow_map_tests::psf_guard_corner_mask_preserves_dust_and_other_corners ... ok
+test flat_response::groups::lights::tests::a_family_is_weighed_by_its_session_near_the_lights_angle ... ok
+test flat_response::groups::lights::tests::a_lone_family_near_the_light_is_chosen_by_its_angle ... ok
+test flat_response::groups::lights::tests::a_meridian_flip_is_the_same_epoch ... ok
+test flat_response::groups::lights::tests::a_re_homed_rotator_widens_the_candidates_but_moves_nothing_alone ... ok
+test flat_response::groups::lights::tests::another_filter_moved_to_the_same_angles_corroborates_a_move ... ok
+test flat_response::groups::lights::tests::offsets_split_into_epochs_at_re_homes_not_at_syncs ... ok
+test flat_response::groups::lights::tests::offsets_wrap_around_the_circle ... ok
+test flat_response::groups::lights::tests::review_repro_a_range_alone_does_not_confirm_a_pixel_move ... ok
+test flat_response::groups::lights::tests::the_lights_own_pixels_confirm_the_recorded_family_freely ... ok
+test flat_response::groups::lights::tests::the_lights_own_pixels_move_a_light_only_when_something_else_agrees ... ok
+test flat_response::groups::model::tests::a_change_in_two_response_families_of_one_filter_is_camera_side ... ok
+test flat_response::groups::model::tests::a_change_of_vignetting_parts_sessions_past_the_light_pattern_limit ... ok
+test flat_response::groups::model::tests::a_familys_alike_pairs_grant_the_angles_they_compare ... ok
+test flat_response::groups::model::tests::a_map_is_borrowed_only_from_a_member_that_spans_its_change_alone ... ok
+test flat_response::groups::model::tests::a_map_is_never_borrowed_for_flats_in_another_state ... ok
+test flat_response::groups::model::tests::a_night_alike_with_two_angles_keeps_no_angle ... ok
+test flat_response::groups::model::tests::a_night_with_no_angle_takes_the_angle_it_measured_alike_with ... ok
+test flat_response::groups::model::tests::a_pair_apart_that_a_range_would_serve_rules_it_out ... ok
+test flat_response::groups::model::tests::a_pair_apart_within_one_window_keeps_two_angles_apart ... ok
+test flat_response::groups::model::tests::a_range_carries_across_camera_side_dust_only ... ok
+test flat_response::groups::model::tests::a_range_wraps_round_zero ... ok
+test flat_response::groups::model::tests::a_session_that_begins_before_the_window_is_before ... ok
+test flat_response::groups::model::tests::a_split_across_both_changes_makes_no_change_of_its_own ... ok
+test flat_response::groups::model::tests::a_split_across_two_changes_never_joins_the_second ... ok
+test flat_response::groups::model::tests::a_wide_match_tolerance_keeps_two_angles_apart ... ok
+test flat_response::groups::model::tests::a_wide_range_serves_only_along_its_own_arc ... ok
+test flat_response::groups::model::tests::a_window_shorter_than_one_flat_run_is_flagged ... ok
+test flat_response::groups::model::tests::alike_nights_form_one_group_and_a_step_splits ... ok
+test flat_response::groups::model::tests::another_rigs_session_places_no_light ... ok
+test flat_response::groups::model::tests::clusters_far_apart_that_measure_alike_are_one_family ... ok
+test flat_response::groups::model::tests::drift_cannot_chain_nights_that_differ ... ok
+test flat_response::groups::model::tests::faint_or_unlike_spots_do_not_say_which_change_a_split_shows ... ok
+test flat_response::groups::model::tests::filter_dust_stays_with_its_filter ... ok
+test flat_response::groups::model::tests::flats_without_an_angle_join_the_cluster_they_measure_alike_with ... ok
+test flat_response::groups::model::tests::one_night_unlike_its_alike_neighbours_makes_no_change ... ok
+test flat_response::groups::model::tests::one_shadow_at_two_angles_is_one_camera_side_event ... ok
+test flat_response::groups::model::tests::overlapping_ranges_stand_side_by_side_and_never_bridge ... ok
+test flat_response::groups::model::tests::pixel_evidence_places_a_session_inside_the_window ... ok
+test flat_response::groups::model::tests::review_repro_a_chain_does_not_grant_ends_never_compared ... ok
+test flat_response::groups::model::tests::review_repro_a_range_is_not_stitched_across_a_change ... ok
+test flat_response::groups::model::tests::review_repro_one_session_at_an_end_grants_no_range ... ok
+test flat_response::groups::model::tests::review_repro_the_tolerance_is_not_added_at_both_ends ... ok
+test flat_response::groups::model::tests::rotation_clusters_split_only_at_wide_gaps ... ok
+test flat_response::groups::model::tests::sessions_a_small_angle_apart_are_one_family_and_compared ... ok
+test flat_response::groups::model::tests::the_angle_term_comes_from_one_morning_at_two_angles ... ok
+test flat_response::groups::model::tests::too_few_sessions_or_nights_at_an_end_grant_nothing ... ok
+test flat_response::groups::model::tests::two_flat_sessions_allow_for_their_noise ... ok
+test flat_response::groups::model::tests::vignetting_alone_or_dust_within_focus_travel_carries_no_range ... ok
+test dust::tests::indexed_recurrence_equals_a_full_scan_on_large_lists ... ok
+test flat_response::evidence::tests::a_nebula_leaves_it_undecided ... ok
+test flat_response::metric::tests::a_changed_vignette_reads_as_broad ... ok
+test flat_response::metric::tests::a_response_takes_out_moving_stars_and_its_level ... ok
+test flat_response::metric::tests::a_straight_gradient_is_not_a_difference ... ok
+test dust::tests::optics_give_a_distance_and_rule_out_donuts ... ok
+test flat_response::metric::tests::planes_round_trip_through_the_cache_encoding ... ok
+test flat_response::metric::tests::stars_that_sat_still_are_not_dust ... ok
+test flat_response::metric::tests::the_reported_noise_is_the_responses_own ... ok
+test flat_response::choice::tests::a_nebula_chooses_nothing_rather_than_the_wrong_flats ... ok
+test flat_response::metric::tests::the_same_dust_with_fresh_noise_reads_as_nothing ... ok
+test flat_response::metric::tests::two_flats_make_a_response_and_one_does_not ... ok
+test library::json::tests::a_selection_reports_the_verified_frames_its_masters_take ... ok
+test library::json::tests::cached_metadata_drives_family_and_change_questions_without_files ... ok
+test library::json::tests::correction_plans_keep_response_dependencies_side_and_shared_identity ... ok
+test library::json::tests::evidence_questions_keep_targets_modes_and_personal_group_choices ... ok
+test library::json::tests::grades_and_eligibility_match_psf_guards_captured_measurements ... ok
+test library::json::tests::one_supplied_set_preserves_grades_manual_choices_and_excludes_poor_inputs ... ok
+test library::json::tests::one_supplied_set_rejects_incompatible_sources_and_does_not_relax_light_gates ... ok
+test library::json::tests::path_scoped_light_choices_do_not_leak_between_identical_basenames ... ok
+test library::json::tests::psf_guard_family_ties_and_unfitted_pairs_are_resolved_in_core ... ok
+test library::json::tests::raw_flat_response_plans_group_nights_modes_and_bound_samples ... ok
+test library::json::tests::response_preparation_preserves_explicit_night_boundaries_and_one_set_needs_no_dates ... ok
+test library::json::tests::selections_and_master_cohorts_match_psf_guard_reference ... ok
+test library::json::tests::supplied_one_set_keeps_all_eligible_frames_across_nights_without_the_auto_cap ... ok
+test library::json::tests::work_feedback_refuses_invalid_indices_duplicate_filters_and_empty_pixel_reads ... ok
+test library::rules::tests::a_night_zone_grades_again_and_keys_no_master ... ok
+test library::rules::tests::a_rig_names_its_night_zone_and_others_follow_the_global_or_their_site ... ok
+test library::rules::tests::a_rig_value_beats_the_global_one_which_beats_the_default ... ok
+test library::rules::tests::a_tolerance_seiza_would_refuse_is_refused_by_name ... ok
+test library::rules::tests::a_value_this_build_cannot_read_falls_through_to_the_next_layer ... ok
+test library::rules::tests::every_default_passes_its_own_validation ... ok
+test library::rules::tests::every_setting_key_names_one_row_and_reads_back ... ok
+test library::rules::tests::grade_limits_turn_off_a_step_with_null ... ok
+test library::rules::tests::grades_differ_only_when_a_grade_setting_changes ... ok
+test library::rules::tests::notes_list_what_differs_with_its_source_in_words ... ok
+test library::rules::tests::only_changed_matching_settings_change_a_stacks_key ... ok
+test library::rules::tests::the_defaults_are_the_values_the_checks_were_written_with ... ok
+test library::rules::tests::the_tolerances_grading_groups_by_grade_again ... ok
+test library::rules::tests::validation_names_the_setting_and_its_range ... ok
+test library::tests::a_master_never_mixes_readout_mode_names ... ok
+test library::tests::an_external_flat_master_at_another_gain_serves_only_when_allowed ... ok
+test library::tests::dark_flats_pair_with_the_raw_flats_not_a_nearer_master ... ok
+test matching::tests::a_camera_that_never_recorded_its_name_matches_on_geometry ... ok
+test matching::tests::a_coherent_subset_will_not_average_frames_that_disagree ... ok
+test matching::tests::a_different_sensor_mode_never_matches ... ok
+test matching::tests::a_flat_only_corrects_its_own_optical_path ... ok
+test matching::tests::a_light_rotation_is_written_only_when_it_is_not_the_default ... ok
+test matching::tests::a_measured_light_angle_replaces_the_recorded_one_for_flats ... ok
+test matching::tests::a_reading_that_is_not_finite_is_read_as_unknown ... ok
+test matching::tests::a_reference_that_recorded_nothing_matches_nothing ... ok
+test matching::tests::a_refusal_names_the_field_and_both_readings ... ok
+test matching::tests::a_sensor_refusal_names_every_field_that_differs ... ok
+test matching::tests::a_stray_frame_does_not_orphan_a_complete_session ... ok
+test matching::tests::an_unknown_setting_disqualifies_the_candidate_not_the_light ... ok
+test matching::tests::calibration_sensor_consistency_tolerates_missing_but_not_conflicting_settings ... ok
+test matching::tests::darks_match_on_exposure_and_temperature_within_tolerance ... ok
+test matching::tests::flat_optics_consistency_tolerates_missing_but_not_conflicting_settings ... ok
+test matching::tests::flats_additionally_have_to_share_a_session ... ok
+test matching::tests::flats_judged_against_each_other_keep_their_recorded_angles ... ok
+test matching::tests::indices_point_back_at_the_caller_s_own_frames ... ok
+test matching::tests::light_rotation_reads_the_words_and_angles_it_writes ... ok
+test matching::tests::nothing_coherent_enough_returns_the_first_cluster_rather_than_guessing ... ok
+test matching::tests::proximity_ordering_puts_the_nearest_calibration_first ... ok
+test matching::tests::rotation_wraps_and_forgives_what_was_never_recorded ... ok
+test matching::tests::tolerances_no_comparison_can_use_are_refused ... ok
+test matching::tests::tolerances_saved_before_a_field_existed_still_load ... ok
+test matching::tests::two_names_that_disagree_do_not_match_however_alike_the_sensors ... ok
+test pedestal::tests::a_flat_with_no_vignette_gives_the_line_no_lever ... ok
+test pedestal::tests::a_frame_with_no_pedestal_fits_near_zero ... ok
+test pedestal::tests::a_gradient_running_against_the_vignette_is_refused ... ok
+test pedestal::tests::mismatched_or_colour_frames_are_refused ... ok
+test pedestal::tests::recovers_a_pedestal_from_the_sky_against_the_vignette ... ok
+test pedestal::tests::the_difference_between_two_pedestals_comes_back_exactly ... ok
+test quality::dark::tests::a_clean_bias_reads_its_level_and_noise ... ok
+test quality::dark::tests::bias_banding_and_outliers_are_found ... ok
+test quality::dark::tests::dark_hot_pixels_and_stray_light_stand_out ... ok
+test quality::dark::tests::light_in_most_frames_does_not_make_the_good_one_look_hot ... ok
+test quality::dark::tests::noise_moves_smoothly_on_integer_samples ... ok
+test flat_response::metric::tests::a_moved_shadow_pairs_its_two_halves ... ok
+test quality::dark::tests::small_sets_skip_peer_checks ... ok
+test quality::dark::tests::rgb_frames_and_bad_options ... ok
+test flat_response::evidence::tests::shadows_across_the_frame_are_fitted_one_by_one ... ok
+test quality::flat::tests::a_deep_round_shadow_is_reported_once ... ok
+test quality::flat::tests::a_cfa_frame_is_measured_on_its_2x2_sums ... ok
+test quality::flat::tests::a_clean_flat_has_no_features_and_reads_its_noise ... ok
+test quality::flat::tests::a_droplet_is_found_where_it_is ... ok
+test quality::flat::tests::a_wide_shallow_disk_is_reported_before_the_compact_dips ... ok
+test quality::flat::tests::bad_options_and_small_frames_are_refused ... ok
+test quality::flat::tests::an_irregular_dip_is_reported_once ... ok
+test flat_response::evidence::tests::shadows_across_a_nebula_never_take_the_wrong_side ... ok
+test quality::flat::tests::a_shifted_pattern_stands_out_from_its_peers ... ok
+test quality::flat::tests::clipped_and_dim_flats_are_poor ... ok
+test quality::flat::tests::droplets_that_hold_still_are_caught_by_their_number ... ok
+test quality::flat::tests::median9_matches_a_sort ... ok
+test quality::flat::tests::parts_two_pixels_apart_are_one_feature ... ok
+test quality::flat::tests::measurements_round_trip_and_mismatched_sets_are_refused ... ok
+test flat_response::metric::tests::two_flat_sessions_of_the_same_dust_compare_alike ... ok
+test quality::tests::a_verdict_takes_its_worst_finding ... ok
+test quality::tests::codes_serialize_as_their_names ... ok
+test quality::tests::limits_grade_in_the_direction_asked ... ok
+test residual_flat::tests::builds_and_applies_a_bounded_repeated_shadow ... ok
+test residual_flat::tests::default_depth_keeps_a_one_percent_repeated_shadow ... ok
+test residual_flat::tests::legacy_diagnostics_default_to_the_initial_algorithm_version ... ok
+test residual_flat::tests::rejects_a_shadow_without_cross_frame_consensus ... ok
+test residual_flat::tests::rejects_scattered_repeated_pixels_without_a_coherent_region ... ok
+test residual_flat::tests::rejects_too_few_samples_and_invalid_cached_response ... ok
+test residual_flat::tests::removes_disconnected_corrections_from_an_accepted_patch ... ok
+test residual_flat::tests::validates_patch_bounds_and_channels_before_mutating ... ok
+test tests::image_view_rejects_invalid_buffers ... ok
+test flat_response::metric::tests::a_change_map_turns_an_after_flat_into_a_before_flat ... ok
+test quality::flat::tests::two_frames_are_judged_only_on_their_own ... ok
+test dust::tests::non_finite_and_tiny_planes_do_not_panic ... ok
+test flat_response::metric::tests::new_dust_reads_at_its_depth ... ok
+test quality::flat::tests::steady_dust_is_counted_but_not_held_against_anyone ... ok
+test dust::tests::wide_faint_new_dust_is_not_taken_for_a_star ... ok
+test quality::flat::tests::droplets_through_most_of_a_set_mark_the_master ... ok
+test quality::flat::tests::fading_droplets_mark_the_frames_that_hold_them ... ok
+test flat_response::evidence::tests::many_nebulae_never_take_the_wrong_side ... ok
+
+test result: ok. 207 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 38.65s
+
+     Running tests/flat_groups.rs (target/debug/deps/flat_groups-a32aed1debee19e9)
+
+running 7 tests
+test incomplete_measurements_do_not_claim_angle_equivalence ... ok
+test a_join_override_changes_groups_and_a_reset_restores_the_measurement ... ok
+test raw_imaging_rows_group_by_profile_and_three_hour_gaps ... ok
+test stale_choices_remain_orphaned_and_do_not_change_automatic_results ... ok
+test a_light_choice_resolves_separately_from_its_automatic_uncertainty ... ok
+test malformed_requests_fail_before_running_the_policy ... ok
+test the_psf_guard_fixture_keeps_its_groups_changes_and_uncertainty ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/flat_response.rs (target/debug/deps/flat_response-4c1691c9964d3038)
+
+running 14 tests
+test apply_change_map_with_zero_width_does_not_panic ... ok
+test map_at_on_an_empty_map_does_not_panic ... ok
+test measured_or_unknown_angle_still_refuses_other_optics ... ok
+test timing_at_1024 ... ignored
+test candidates_too_small_to_compare_are_not_alike ... ok
+test results_do_not_depend_on_the_thread_count ... ok
+test degenerate_planes_do_not_panic ... ok
+test two_flat_noise_matches_the_response ... ok
+test a_dark_globule_on_a_wrong_shadow_does_not_choose_it ... ok
+test a_background_blind_where_candidates_differ_is_not_alike ... ok
+test an_unfitted_pair_does_not_make_a_co_winner ... ok
+test an_unmeasurable_background_is_not_alike ... ok
+test candidate_order_does_not_change_the_choice ... ok
+test structured_skies_choose_the_truth_or_nothing ... ok
+
+test result: ok. 13 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 22.77s
+
+     Running tests/library_native.rs (target/debug/deps/library_native-fe4461841f43b018)
+
+running 6 tests
+test a_flat_retry_for_a_session_keeps_its_policy ... ok
+test a_native_host_is_refused_what_the_c_abi_is_refused ... ok
+test a_blank_readout_mode_name_names_no_mode_wherever_frames_come_from ... ok
+test a_supplied_set_keeps_to_the_lights_side_of_a_marked_change_and_reports_once ... ok
+test flat_sessions_do_not_depend_on_the_order_frames_are_given ... ok
+test grading_settings_differ_only_when_what_they_resolve_to_does ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/library_public_models.rs (target/debug/deps/library_public_models-52e04d713c2cd09a)
+
+running 1 test
+test native_hosts_can_name_and_match_result_models ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/library_recipes.rs (target/debug/deps/library_recipes-bdff5b9019caaf65)
+
+running 4 tests
+test lights_whose_masters_take_the_same_frames_share_one_session ... ok
+test resolved_recipes_determine_sessions_and_exposure ... ok
+test identity_tracks_effective_inputs_options_and_gate ... ok
+test cached_grouping_preserves_library_results_and_rejects_conflicting_inputs ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/master_policy.rs (target/debug/deps/master_policy-3ecbf4d8cb930eca)
+
+running 8 tests
+test every_policy_endpoint_validates_settings_with_context ... ok
+test an_alternate_flat_set_is_the_next_session_alone_without_masters ... ok
+test recipe_respects_cached_grades_overrides_and_star_masking ... ok
+test invalid_retry_feedback_is_rejected ... ok
+test successful_retry_feedback_implies_attempted_but_failed_retry_needs_a_flag ... ok
+test returned_session_carries_retry_policy_window_and_exclusions ... ok
+test flat_retry_preserves_psf_guard_decisions_and_optional_host_choices ... ok
+test verified_selected_planning_matches_library_recipes_options_and_identity ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/seiza-746e1bcb925cec77)
+
+running 144 tests
+test astap::tests::blind_fallback_does_not_retain_a_stale_fov_scale_constraint ... ok
+test astap::tests::blind_invocation_has_no_hint ... ok
+test astap::tests::ini_encodes_scale_rotation_and_parity ... ok
+test astap::tests::parses_detection_backend_extension ... ok
+test astap::tests::parses_nina_style_arguments ... ok
+test astap::tests::recognizes_the_installed_astap_copy_by_name ... ok
+test build_data::tests::a_possible_planetary_nebula_needs_abell_to_be_kept ... ok
+test build_data::tests::a_minkowski_planetary_nebula_does_not_merge_with_messier_11 ... ok
+test build_data::tests::a_planetary_nebula_in_a_cluster_stays_apart_from_it ... ok
+test build_data::tests::an_ngc_planetary_nebula_merges_with_openngc ... ok
+test build_data::tests::astap_record_decoding_matches_the_documented_sirius_example ... ok
+test build_data::tests::a_planetary_nebula_without_a_simbad_size_takes_its_strasbourg_eso_diameter ... ok
+test build_data::tests::canonical_geometry_is_selected_as_an_atomic_source_tuple ... ok
+test build_data::tests::abell_planetary_nebulae_take_abell_names ... ok
+test build_data::tests::a_sharpless_planetary_nebula_merges_and_becomes_one ... ok
+test build_data::tests::applies_proper_motion ... ok
+test build_data::tests::curation_provenance_excludes_git_metadata ... ok
+test build_data::tests::expands_bright_star_bayer_and_flamsteed_designations ... ok
+test build_data::tests::explicit_cross_identifiers_merge_and_preserve_provenance ... ok
+test build_data::tests::identical_centers_do_not_merge_without_a_cross_identifier ... ok
+test build_data::tests::metadata_audit_rejects_duplicate_primary_ids ... ok
+test build_data::tests::builds_bright_variable_double_and_proper_name_indexes ... ok
+test build_data::tests::normalizes_catalog_designations_for_identity_matching ... ok
+test build_data::tests::explicit_ugc_identity_merges_despite_zero_padding ... ok
+test build_data::tests::other_sources_keep_their_kind_when_merged ... ok
+test build_data::tests::openngc_retains_catalog_identifiers_as_aliases_and_ids ... ok
+test build_data::tests::parses_a_real_record ... ok
+test build_data::tests::parses_a_supplement_record_with_proper_motion ... ok
+test build_data::tests::astap_builder_reads_a_synthetic_area_file ... ok
+test build_data::tests::parses_disconnected_openngc_contours ... ok
+test build_data::tests::parses_cederblad_suffix_cross_identifiers_and_kind ... ok
+test build_data::tests::parses_lbn_cross_identifiers_and_extent ... ok
+test build_data::tests::rejects_magnitude_free_records ... ok
+test build_data::tests::repeated_cross_identifier_does_not_collapse_rows_from_one_catalog ... ok
+test build_data::tests::per_object_curation_rejects_outline_paths_on_every_platform ... ok
+test build_data::tests::openngc_outlines_attach_without_curation ... ok
+test build_data::tests::per_object_curation_rejects_unknown_fields_and_duplicate_targets ... ok
+test build_data::tests::one_dynamic_update_rolls_forward_v2_and_v4_bundles ... ok
+test build_distances::tests::catalog_keys_spell_names_like_the_object_catalog ... ok
+test build_distances::tests::dark_nebulae_take_the_nearest_cloud_sightline_within_a_degree ... ok
+test build_distances::tests::earlier_tiers_win_then_closer_name_matches ... ok
+test build_distances::tests::ellipses_hold_points_along_their_position_angle ... ok
+test build_distances::tests::name_matches_respect_kind_and_position ... ok
+test build_distances::tests::neighbours_lend_distances_by_containment_and_host_galaxy ... ok
+test build_distances::tests::simbad_choice_prefers_gaia_era_median_and_skips_redshifts_for_galaxies ... ok
+test build_distances::tests::simbad_measurements_convert_units_and_errors ... ok
+test build_distances::tests::vizier_tables_parse_header_units_and_rows ... ok
+test build_distances::tests::zucker_names_give_designations ... ok
+test cli_tests::a_narrow_range_that_misses_falls_back_to_the_wide_one ... ok
+test cli_tests::auto_retries_astronomy_and_converted_color_inputs ... ok
+test cli_tests::blind_fallback_budget_only_caps_the_primary_pass ... ok
+test build_data::tests::a_sharpless_planetary_nebula_is_built_as_one ... ok
+test cli_tests::explicit_satellite_metadata_overrides_fits_time_frame ... ok
+test build_data::tests::external_curation_preserves_lbn_measurement_and_selects_correction ... ok
+test cli_tests::download_data_help_leads_with_the_ready_to_use_route ... ok
+test cli_tests::fits_loader_keeps_u8_mtf_and_linear_f32_paths_distinct ... ok
+test cli_tests::color_commands_make_the_composition_mode_explicit ... ok
+test cli_tests::gaia_accepts_a_separated_negative_magnitude ... ok
+test cli_tests::gaia_rejects_zero_chunks_at_parse_time ... ok
+test cli_tests::jpeg_acquisition_time_is_utc_and_explicit_time_wins ... ok
+test cli_tests::jpeg_gps_is_optional_and_does_not_turn_a_stack_into_one_exposure ... ok
+test cli_tests::master_commands_require_multiple_calibration_frames ... ok
+test cli_tests::detection_backend_is_global_and_selectable ... ok
+test cli_tests::satellite_cli_sources_are_explicit_and_mutually_exclusive ... ok
+test cli_tests::satellite_exposure_prefers_unambiguous_fits_bounds ... ok
+test cli_tests::satellite_exposure_falls_back_to_date_obs_and_exptime ... ok
+test cli_tests::satellite_exposure_requires_observer_and_one_interval ... ok
+test cli_tests::satellite_exposure_supports_date_avg_as_the_midpoint ... ok
+test cli_tests::satellite_exposure_supports_date_end_as_shutter_close ... ok
+test cli_tests::solve_invocation_honors_disabled_fallback ... ok
+test cli_tests::satellite_history_accepts_multiple_explicit_epochs_and_cache ... ok
+test cli_tests::unoriented_extents_are_drawn_as_major_axis_circles ... ok
+test cli_tests::wide_fields_get_small_dense_overlay_markers ... ok
+test cli_tests::a_raw_colour_frame_is_detected_binned_and_placed_in_its_own_pixels ... ok
+test common::tests::gpu_flags_give_the_options_they_name ... ok
+test interrupt::tests::scratch_names_carry_their_owner ... ok
+test cli_tests::pipeline_commands_parse ... ok
+test interrupt::tests::stale_scratch_is_removed_and_live_scratch_kept ... ok
+test model::tests::an_unknown_backend_is_refused_at_the_command_line ... ok
+test model::tests::denoise_takes_its_amounts_and_a_backend_by_name ... ok
+test cli_tests::stack_requires_multiple_lights_and_linear_output ... ok
+test model::tests::the_cards_record_what_ran ... ok
+test parallax_video::tests::a_tour_files_cards_are_found_beside_it ... ok
+test parallax_video::tests::a_tour_line_ends_at_a_hash_outside_quotes ... ok
+test parallax_video::tests::object_distances_and_plane_files_parse ... ok
+test parallax_video::tests::planes_parse ... ok
+test parallax_video::tests::points_parse ... ok
+test parallax_video::tests::tour_files_read_as_editors_write_them ... ok
+test preview::tests::direct_display_map_clamps_and_rejects_non_finite_values ... ok
+test preview::tests::flat_linear_preview_keeps_the_previous_black_output ... ok
+test provenance::tests::collision_detection_resolves_parent_components ... ok
+test provenance::tests::path_roles_reject_aliases ... ok
+test setup::tests::confirmation_accepts_default_and_no ... ok
+test setup::tests::every_selective_preset_includes_sky_objects_and_plate_solving ... ok
+test setup::tests::full_bundle_is_option_five_and_includes_deep_gaia20 ... ok
+test setup::tests::next_action_returns_to_menu_or_quits ... ok
+test setup::tests::preset_prompt_defaults_to_lightweight_solver ... ok
+test setup::tests::preset_prompt_selects_deep_blind_package ... ok
+test setup::tests::preset_prompt_selects_deep_gaia20_package ... ok
+test cli_tests::sky_map_flags_are_checked_before_any_solve ... ok
+test sky_map::tests::bayer_names_spell_out_every_greek_letter ... ok
+test sky_map::tests::binomial_tail ... ok
+test sky_map::tests::a_ragged_horizon_makes_a_floor_that_keeps_the_sky ... ok
+test sky_map::tests::collect_finds_figures_names_and_objects ... ok
+test sky_map::tests::bright_bayer_stars_outrank_faint_proper_names ... ok
+test sky_map::tests::collect_without_catalogs_still_draws_figures ... ok
+test sky_map::tests::footer_wraps_and_notes_the_foreground_only_when_cut ... ok
+test sky_map::tests::foreground_marks_are_left_out_unless_the_image_shows_them ... ok
+test preview::tests::rgb_preview_sampling_cannot_alias_one_color_plane ... ok
+test sky_map::tests::only_detections_near_catalog_stars_are_confirmed ... ok
+test sky_map::tests::placer_avoids_overlaps_and_bounds ... ok
+test sky_map::tests::objects_centred_below_the_frame_are_judged_at_its_edge ... ok
+test sky_map::tests::evenly_spread_stars_never_make_a_floor ... ok
+test sky_map::tests::sky_floor_follows_the_lowest_stars ... ok
+test solve_field::tests::bash_mode_answers_the_version_handshake ... ok
+test solve_field::tests::parses_a_siril_style_xyls_table ... ok
+test solve_field::tests::parses_siril_argument_shape ... ok
+test solve_field::tests::parses_sirils_windows_asnet_script ... ok
+test cli_tests::jpeg_orientation_is_shared_by_detection_and_annotation_pixels ... ok
+test deconvolution::tests::command_restores_linear_fits_and_records_parameters ... ok
+test solve_field::tests::wcs_file_is_block_aligned_with_parseable_cards ... ok
+test solve_field::tests::redetection_recovers_orientation_and_offset_from_a_flipped_table ... ok
+test worker::tests::compound_request_id_is_rejected ... ok
+test worker::tests::expired_remote_deadline_is_reported ... ok
+test cli_tests::colour_fits_gets_a_neutral_colour_display_stretch ... ok
+test worker::tests::invalid_utf8_returns_parse_error_and_keeps_reading ... ok
+test worker::tests::blind_server_options_ignore_a_stale_hint ... ok
+test worker::tests::loop_handles_multiple_requests_until_eof ... ok
+test worker::tests::notification_executes_without_writing_a_response ... ok
+test worker::tests::malformed_json_returns_parse_error_and_keeps_reading ... ok
+test worker::tests::oversized_request_is_drained_before_the_next_request ... ok
+test worker::tests::remote_multipart_contains_compact_png_and_server_options ... ok
+test worker::tests::shutdown_stops_before_later_requests ... ok
+test worker::tests::solve_validation_requires_a_hint_for_hinted_mode ... ok
+test worker::tests::valid_json_with_no_method_is_an_invalid_request ... ok
+test worker::tests::result_uses_fits_one_based_crpix ... ok
+test worker::tests::one_request_then_eof_is_a_valid_one_shot_session ... ok
+test preview::tests::linear_preview_is_byte_identical_to_the_previous_curve ... ok
+test build_data::tests::satellite_manifest_rolls_cache_into_an_upload_ready_tree ... ok
+test sky_map::tests::resize_matches_the_image_crate ... ok
+test sky_map::tests::render_lays_out_header_photo_and_footer ... ok
+test worker::tests::a_cancel_stops_the_solves_that_arrived_before_it ... ok
+test build_data::tests::v4_manifest_builder_emits_content_addressed_complete_bundle ... ok
+test build_data::tests::retained_transports_roll_forward_in_v4_and_are_stripped_from_v2 ... ok
+
+test result: ok. 144 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.53s
+
+     Running tests/analyze.rs (target/debug/deps/analyze-bb789de2605e36ce)
+
+running 2 tests
+test analysis_writes_failure_diagnostics_and_never_overwrites ... ok
+test osc_cli_reports_components_without_counting_them_as_sources ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/annotate.rs (target/debug/deps/annotate-41e3f02cab88f366)
+
+running 1 test
+test annotated_fits_is_stretched_for_display_with_either_backend ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/background.rs (target/debug/deps/background-b4d897d1010bdcae)
+
+running 3 tests
+test background_cli_refuses_to_overwrite_its_input ... ok
+test background_cli_rejects_an_undebayered_cfa ... ok
+test background_cli_writes_corrected_model_and_diagnostics ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/catalog_query.rs (target/debug/deps/catalog_query-09aba4ae33fcc14a)
+
+running 3 tests
+test catalog_star_resolves_tyc_and_hip_identifiers ... ok
+test catalog_validate_auto_detects_supported_catalogs ... ok
+test catalog_objects_supports_cone_and_polygon_json_queries ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/clipped.rs (target/debug/deps/clipped-e2fe2a6647221cdc)
+
+running 2 tests
+test color_calibrate_renders_clipped_pixels_neutral ... ok
+test stack_writes_the_share_of_each_pixel_its_frames_clipped ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/color_calibrate.rs (target/debug/deps/color_calibrate-de496bb5ad504700)
+
+running 1 test
+test color_calibrate_cli_recovers_channel_gains_from_a_gaia_csv ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.78s
+
+     Running tests/color_composition.rs (target/debug/deps/color_composition-d9b38ea760a08d31)
+
+running 12 tests
+test foraxx_cli_rejects_sensor_units_when_normalization_is_disabled ... ok
+test foraxx_cli_marks_display_referred_output ... ok
+test narrowband_cli_validates_and_uses_only_palette_inputs ... ok
+test rgb_cli_flags_a_channel_far_from_the_others ... ok
+test display_balance_and_star_screen_cli_report_and_mark_nonlinear_outputs ... ok
+test narrowband_cli_writes_rgb_fits_and_preview ... ok
+test rgb_cli_crops_registration_borders_and_moves_the_solution ... ok
+test super_rgb_cli_targets_channel_sum_and_marks_output ... ok
+test super_lrgb_cli_adds_all_channels_and_marks_output ... ok
+test rgb_cli_registers_shifted_filter_stacks_by_default ... ok
+test linear_star_tone_is_display_only_and_screening_does_not_stretch_again ... ok
+test rgb_cli_aligns_on_the_cpu_with_no_gpu ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+
+     Running tests/continuum.rs (target/debug/deps/continuum-1c75e446285a9655)
+
+running 6 tests
+test failed_automatic_fit_writes_a_skip_report_without_a_new_output ... ok
+test paths_and_manual_coefficients_are_checked_before_writing ... ok
+test signed_xisf_output_and_raw_bayer_refusal_use_the_shared_image_contract ... ok
+test untagged_inputs_require_a_declaration_and_display_is_always_refused ... ok
+test manual_signed_residual_and_exact_plan_reuse_preserve_units_and_inputs ... ok
+test automatic_apertures_and_premeasured_stars_share_the_same_plan_contract ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/emission.rs (target/debug/deps/emission-86e835ee55d7431a)
+
+running 3 tests
+test calibrated_flux_cli_preserves_wcs_units_sign_and_file_provenance ... ok
+test screen_stars_cli_can_reduce_the_rgb_star_layer ... ok
+test blend_commands_preserve_transfer_and_refuse_display_data_as_linear ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/header.rs (target/debug/deps/header-eeb5535a2c4f3205)
+
+running 2 tests
+test header_cli_rejects_structural_cards ... ok
+test header_cli_sets_and_gets_fits_header_cards ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/hosted_integration.rs (target/debug/deps/hosted_integration-2ca85ed601852b51)
+
+running 5 tests
+test hosted_images_solve_to_known_solutions ... ignored, network: downloads real test images from downloads.seiza.fyi
+test hosted_remote_worker_uses_seiza_server_native_api ... ignored, network: requires SEIZA_SERVER_TEST_URL and downloads one FITS image
+test hosted_star_identifiers_are_downloadable_and_queryable ... ignored, network: downloads and validates the hosted stellar identifier sidecar
+test hosted_worker_solves_fits_path_twice_in_one_process ... ignored, network: downloads one FITS image and the hosted Tycho-2 lite catalog
+test concurrent_cache_publication_is_atomic ... ok
+
+test result: ok. 1 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/image_info.rs (target/debug/deps/image_info-632869482f5d0b2d)
+
+running 2 tests
+test image_info_explains_that_it_does_not_read_fits ... ok
+test image_info_reports_orientation_time_and_scale_hint ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/master.rs (target/debug/deps/master-29314058d609a285)
+
+running 9 tests
+test flat_help_does_not_advertise_leave_one_out_thresholds ... ok
+test defect_options_reject_invalid_commands_and_output_aliases ... ok
+test rgb_defect_mask_combines_channels_at_the_same_coordinate ... ok
+test master_cli_keeps_statistics_with_their_source_when_a_middle_flat_is_skipped ... ok
+test masked_flat_cli_reports_coverage_and_never_writes_an_unsupported_master ... ok
+test master_cli_flat_and_bias_fallbacks_report_the_actual_center ... ok
+test experimental_spatial_replacement_is_opt_in_flat_only_and_reported_separately ... ok
+test master_cli_reports_actual_integration_for_every_kind_and_input_count ... ok
+test flat_defect_suppression_and_mask_report_actual_changes ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
+
+     Running tests/stack_calibration.rs (target/debug/deps/stack_calibration-dd9002d3834eda01)
+
+running 13 tests
+test common_reference_rejects_output_aliases_with_either_channel_selection ... ok
+test a_dark_master_at_another_temperature_is_refused ... ok
+test a_dark_master_without_a_temperature_is_used_with_a_warning ... ok
+test a_dark_master_at_the_lights_temperature_calibrates_them ... ok
+test html_report_alone_collects_provenance_and_protects_inputs ... ok
+test common_reference_can_also_be_an_explicit_light_once ... ok
+test flat_gain_offset_mismatch_requires_opt_in_and_dark_subtraction ... ok
+test common_reference_is_not_calibrated_with_the_channel_masters ... ok
+test reference_auto_tries_the_next_light_when_the_best_does_not_align ... ok
+test report_levels_preserve_pixels_and_validate_destinations ... ok
+test a_placeholder_flat_rotation_is_refused_until_the_lights_angle_is_unknown ... ok
+test completed_reports_preserve_pixels_and_existing_provenance ... ok
+test common_reference_aligns_channels_without_contributing_pixels ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+
+     Running tests/stack_expand.rs (target/debug/deps/stack_expand-5ea8926d240b9afd)
+
+running 26 tests
+test cli_expand_rejects_incompatible_options_before_writing_output ... ok
+libEGL warning: egl: failed to create dri2 screen
+test expansion_connects_out_of_order_panels_without_integrating_template ... ok
+test expansion_bounds_the_seams_a_panel_gradient_leaves ... ok
+test expansion_from_paths_keeps_masters_for_reintegration_after_reopening ... ok
+test cli_expand_defaults_to_global_normalization ... ok
+test expansion_matches_panel_brightness_through_chained_overlaps ... ok
+test expansion_planning_timing_on_full_size_frames ... ignored, a timing run on full-size mosaic frames
+test expansion_places_a_frame_on_its_own_panel_after_a_neighbours ... ok
+test expansion_refuses_a_chance_alignment_in_a_crowded_field ... ok
+test cli_expand_preserves_all_panels_online_and_reintegrated ... ok
+test expansion_refuses_real_lights_of_another_target ... ignored, set SEIZA_STACKING_REAL_MOSAIC to overlapping lights, the first sorted the anchor, and SEIZA_STACKING_REAL_STRAYS to lights of another target
+test expansion_refuses_disconnected_panels_and_canvas_overflow ... ok
+test expansion_refuses_canvas_overflow_after_a_panel_has_joined ... ok
+test expansion_scales_real_panels_by_their_stars ... ignored, set SEIZA_STACKING_REAL_MOSAIC to a directory of one filter's overlapping lights
+test expansion_rejects_sources_changed_after_planning_and_honors_cancellation ... ok
+test a_frame_added_after_reopening_registers_as_before_without_a_lens ... ok
+test expansion_joins_sessions_at_any_rotation_and_rejects_a_stray_frame ... ok
+test expansion_rejects_sources_changed_during_planning ... ok
+test expansion_does_not_hide_a_source_change_in_the_lens_pass ... ok
+test a_conflicting_joined_frames_camera_disables_the_shared_lens ... ok
+test joint_canvas_extends_beyond_the_integrated_filters_coverage ... ok
+test separate_filters_reuse_a_saved_expanded_canvas ... ok
+test expansion_warps_frames_from_the_other_side_of_the_pier_onto_their_panel ... ok
+test a_frame_added_after_reopening_registers_as_before_through_the_lens ... ok
+test expansion_measures_one_lens_across_its_panels ... ok
+test expansion_connects_a_crowded_mosaic_through_narrow_overlaps ... ok
+
+test result: ok. 23 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 8.45s
+
+     Running tests/stack_report.rs (target/debug/deps/stack_report-6fea55d886a95c8d)
+
+running 1 test
+test combines_standalone_and_cli_reports_without_sources_and_protects_files ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/stretch.rs (target/debug/deps/stretch-25c025e1dd1a2969)
+
+running 5 tests
+test stretch_cli_refuses_to_overwrite_its_input ... ok
+test stretch_cli_accepts_manual_ghs_parameters ... ok
+test stretch_cli_applies_parameterized_percentile_asinh ... ok
+test stretch_cli_keeps_explicit_levels_in_sample_units ... ok
+test stretch_cli_maps_physical_samples_for_data_driven_models ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/worker_protocol.rs (target/debug/deps/worker_protocol-fc181f5297692c8b)
+
+running 3 tests
+test eof_cleanly_ends_a_one_shot_worker ... ok
+test worker_initializes_once_and_handles_multiple_requests ... ok
+test worker_adapts_json_rpc_to_the_seiza_server_native_api ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+
+     Running unittests src/lib.rs (target/debug/deps/seiza_core-011247376e513ed0)
+
+running 13 tests
+test cancel::tests::a_flag_reads_through_the_signal ... ok
+test prior::tests::a_header_gives_its_position_and_scale ... ok
+test prior::tests::a_header_wcs_gives_position_and_scale_too ... ok
+test wcs::tests::reference_point_maps_to_crval ... ok
+test wcs::tests::behind_horizon_is_none ... ok
+test wcs::tests::round_trips_across_the_frame ... ok
+test wcs::tests::round_trips_near_the_pole ... ok
+test wcs::tests::header_cards_read_back_into_the_same_solution ... ok
+test wcs::tests::scale_is_recovered_from_cd ... ok
+test wcs::tests::scale_matches_angular_separation ... ok
+test wcs::tests::sip_distortion_shifts_pixels_and_round_trips ... ok
+test wcs::tests::sip_forward_terms_follow_the_documented_order ... ok
+test wcs::tests::the_image_center_sits_between_the_middle_pixels ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/seiza_deconvolution-35e754cb3cba7678)
+
+running 23 tests
+test fft::tests::smooth_lengths_have_small_factors ... ok
+test fft::tests::forward_then_inverse_round_trips ... ok
+test field::tests::a_target_as_wide_as_the_psf_leaves_a_point ... ok
+test field::tests::the_remaining_kernel_of_two_gaussians_is_a_gaussian ... ok
+test tests::accepts_negative_linear_samples_without_changing_flux ... ok
+test tests::conservative_defaults_are_deliberately_light ... ok
+test tests::constant_field_and_rgb_layout_are_preserved ... ok
+test tests::convolution_matches_the_per_pixel_sums_bit_for_bit ... ok
+test tests::masked_constant_field_keeps_its_values_and_mask ... ok
+test tests::masked_entry_point_keeps_the_finite_fast_path_exact ... ok
+test tests::masked_star_restoration_keeps_registration_border_out_of_the_solution ... ok
+test tests::rejects_invalid_configuration_and_nonfinite_samples ... ok
+test tests::restores_one_rgb_channel_without_mixing_constant_channels ... ok
+test tests::restores_peak_and_reduces_second_moment_of_blurred_star ... ok
+test field::tests::the_kernel_at_an_edge_is_the_edge_nodes ... ok
+test field::tests::rejects_bad_targets_and_sizes ... ok
+test field::tests::reblur_consistency_holds_for_the_truth_and_fails_for_the_input ... ok
+test field::tests::transforming_kernels_as_it_goes_gives_the_kept_spectra_result ... ok
+test field::tests::a_global_psf_blurs_like_one_kernel ... ok
+test field::tests::the_adjoint_matches_the_forward_blur ... ok
+test field::tests::the_varying_blur_keeps_flux_and_a_flat_sky ... ok
+test field::tests::one_kernel_keeps_a_flat_sky_flat_to_the_edges ... ok
+test field::tests::deconvolution_sharpens_towards_the_target_and_keeps_flux ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.59s
+
+     Running tests/caller_pool.rs (target/debug/deps/caller_pool-5adec198c4980d7d)
+
+running 1 test
+test deconvolution_stays_in_the_callers_pool ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src/lib.rs (target/debug/deps/seiza_download-3432e0becda420d8)
+
+running 31 tests
+test catalog::tests::manifest_caches_are_scoped_without_discarding_the_legacy_v2_path ... ok
+test bundle::tests::hardlink_or_copy_links_a_clean_target ... ok
+test bundle::tests::hardlink_or_copy_falls_back_to_copy_when_link_fails ... ok
+test catalog::tests::materialize_removes_temporary_file_when_install_fails ... ok
+test catalog::tests::materialize_hardlinks_and_reruns_without_rehashing ... ok
+test bundle::tests::later_frames_cannot_reset_the_decoded_size_bound ... ok
+test bundle::tests::encoded_overrun_is_rejected_before_writing_decoded_bytes ... ok
+test bundle::tests::trailing_garbage_is_refused_even_when_its_transport_hash_matches ... ok
+test catalog::tests::offline_cache_hit_does_not_hash_the_artifact ... ok
+test manifest::tests::complete_manifest_and_explicit_selection_are_accepted ... ok
+test manifest::tests::default_set_is_small ... ok
+test manifest::tests::historical_v3_bundle_version_is_not_repurposed ... ok
+test manifest::tests::incomplete_bundle_is_rejected_for_a_single_file_request ... ok
+test manifest::tests::legacy_v2_manifest_without_keys_remains_accepted ... ok
+test manifest::tests::legacy_v2_rejects_alternate_transports ... ok
+test manifest::tests::named_solver_sets_include_annotation_data ... ok
+test manifest::tests::optional_deep_gaia20_is_hostable_but_not_required ... ok
+test manifest::tests::optional_gaia_photometry_is_hostable_but_not_required ... ok
+test manifest::tests::optional_object_distances_are_hostable_but_not_required ... ok
+test manifest::tests::traversal_and_unknown_names_are_rejected ... ok
+test manifest::tests::v4_accepts_content_addressed_zstd_and_unknown_transports ... ok
+test manifest::tests::unknown_json_fields_are_ignored ... ok
+test manifest::tests::v4_requires_content_addressed_artifact_keys ... ok
+test catalog::tests::materialize_repairs_a_corrupt_same_size_output ... ok
+test bundle::tests::concatenated_zstd_frames_are_verified_and_decoded_completely ... ok
+test bundle::tests::a_delayed_tail_cannot_hide_after_the_first_zstd_frame ... ok
+test catalog::tests::explicitly_configured_v2_manifest_uses_the_legacy_flat_url ... ok
+test catalog::tests::remote_manifest_and_artifact_are_streamed_into_the_cache ... ok
+test catalog::tests::oversized_zstd_frame_aborts_before_decompressing_completely ... ok
+test catalog::tests::invalid_zstd_transport_is_not_installed ... ok
+test catalog::tests::zstd_transport_is_streamed_into_the_uncompressed_cache ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+
+     Running unittests src/lib.rs (target/debug/deps/seiza_draw-7c867e1586cd9a33)
+
+running 2 tests
+test tests::missing_glyphs_are_named_once ... ok
+test tests::text_measures_and_draws ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/seiza_fits-5c87823e28908da7)
+
+running 82 tests
+test bayer::tests::offsets_shift_the_pattern ... ok
+test bayer::tests::row_order_parsing ... ok
+test bayer::tests::pattern_parsing ... ok
+test bayer::tests::integer_and_float_kernels_preserve_all_native_color_sites ... ok
+test bayer::tests::flat_color_field_reconstructs_exactly ... ok
+test bayer::tests::row_order_preserves_color_and_native_samples_in_both_kernels ... ok
+test compressed::tests::gzip_2_unshuffles_by_sample_width ... ok
+test compressed::tests::a_window_of_quantized_tiles_restores_them_as_the_whole_decode ... ok
+test compressed::tests::a_compressed_image_is_found_by_its_table_name ... ok
+test bayer::tests::interior_kernel_and_bands_match_the_reference_exactly ... ok
+test compressed::tests::a_window_of_a_tiled_image_reads_as_the_whole_decode ... ok
+test compressed::tests::header_updates_leave_the_compression_cards_alone ... ok
+test compressed::tests::plio_lists_from_cfitsio_decode_exactly ... ok
+test compressed::tests::a_window_decodes_only_the_tiles_it_crosses ... ok
+test compressed::tests::quantized_tiles_restore_exactly_as_cfitsio_does ... ok
+test compressed::tests::rice_tiles_from_cfitsio_decode_exactly ... ok
+test compressed::tests::rice_images_honor_bytepix_and_blocksize ... ok
+test compressed::tests::table_formats_and_reserved_keywords_parse ... ok
+test compressed::tests::cubes_keep_three_planes_and_skip_the_tiles_beyond ... ok
+test compressed::tests::gzip_2_rejects_partial_shuffled_samples ... ok
+test compressed::tests::the_dither_sequence_matches_cfitsio ... ok
+test compressed::tests::lossless_tiles_fill_in_where_quantizing_failed ... ok
+test compressed::tests::unsupported_and_damaged_tables_are_errors ... ok
+test compressed::tests::the_image_header_is_rebuilt_from_the_table ... ok
+test conversion_tests::large_mono_frames_and_mosaics_bin_for_detection ... ok
+test bayer::tests::parallel_bands_match_one_serial_pass ... ok
+test bayer::tests::luma_by_bands_matches_the_luma_of_the_full_debayer ... ok
+test conversion_tests::a_mosaic_is_detected_on_2x2_means_without_its_colour_pattern ... ok
+test conversion_tests::a_small_mono_image_is_detected_on_its_own_stretch ... ok
+test compressed::tests::windows_cross_spatial_and_plane_tiles_but_keep_only_the_first_higher_slice ... ok
+test hdu_tests::an_extension_with_inherit_false_stands_alone ... ok
+test hdu_tests::hierarch_cards_name_their_full_keyword ... ok
+test compressed::tests::integer_tiles_decode_like_the_plain_image ... ok
+test hdu_tests::a_named_image_is_found_past_the_primary_data_and_tables ... ok
+test hdu_tests::blank_samples_become_nan_in_physical_values ... ok
+test hdu_tests::files_without_an_image_extension_read_as_before ... ok
+test hdu_tests::corpus_like_files_decode ... ok
+test hdu_tests::header_updates_reach_the_extension_image ... ok
+test hdu_tests::an_empty_primary_hands_over_to_the_first_image_extension ... ok
+test header::tests::distinguishes_undefined_values_from_empty_strings ... ok
+test header::tests::parses_card_value_forms ... ok
+test hdu_tests::signed_16_bit_samples_keep_their_sign ... ok
+test hdu_tests::reads_64_bit_integers ... ok
+test io_tests::linear_f32_luma_affine_normalizes_float_data ... ok
+test io_tests::debayer_resolves_row_order_and_offsets_without_reordering_pixels ... ok
+test io_tests::commentary_cards_are_kept_beside_the_valued_cards ... ok
+test io_tests::linear_f32_luma_preserves_more_than_eight_bits ... ok
+test io_tests::camera_data_decodes_straight_to_the_physical_values_it_converts_to ... ok
+test io_tests::preserves_planar_rgb_and_bayer_metadata ... ok
+test io_tests::long_strings_continue_across_cards ... ok
+test hdu_tests::primary_and_extension_headers_keep_cards_across_block_boundaries ... ok
+test io_tests::decodes_integer_float_and_scaled_pixel_types ... ok
+test io_tests::open_streams_a_regular_file ... ok
+test io_tests::header_only_reader_does_not_require_or_touch_pixels ... ok
+test io_tests::random_groups_are_named_as_unsupported ... ok
+test io_tests::rejects_truncated_headers_and_pixel_payloads ... ok
+test io_tests::streamed_decode_stops_before_fits_padding ... ok
+test io_tests::values_without_a_space_after_the_equals_sign_read_whole ... ok
+test window::tests::a_blank_sample_is_nan ... ok
+test window::tests::an_image_in_an_extension_is_read_like_open_reads_it ... ok
+test writer::tests::a_named_primary_is_found_by_its_name ... ok
+test writer::tests::extension_headers_follow_the_standard_layout ... ok
+test window::tests::an_rgb_cube_gives_each_plane ... ok
+test window::tests::a_window_is_clipped_to_the_image_and_one_outside_is_empty ... ok
+test window::tests::a_window_too_large_is_refused_and_a_truncated_file_is_malformed ... ok
+test writer::tests::invalid_output_does_not_replace_an_existing_file ... ok
+test writer::tests::keywords_that_cannot_round_trip_are_rejected ... ok
+test writer::tests::long_keywords_round_trip_as_hierarch_cards ... ok
+test writer::tests::rgb_layouts_are_written_as_fits_planes ... ok
+test writer::tests::several_images_need_distinct_names ... ok
+test io_tests::streamed_decode_handles_a_partial_final_chunk ... ok
+test writer::tests::writer_preserves_undefined_and_empty_string_values ... ok
+test writer::tests::long_strings_split_without_breaking_quotes ... ok
+test writer::tests::writer_rejects_invalid_shapes_and_headers ... ok
+test writer::tests::a_written_file_syncs ... ok
+test window::tests::every_sample_type_reads_as_the_whole_image_converts_it ... ok
+test hdu_tests::long_primary_and_extension_headers_stop_at_the_data_without_a_size_limit ... ok
+test writer::tests::in_place_header_updates_existing_and_adds_new ... ok
+test writer::tests::atomic_mono_writer_round_trips_pixels_and_headers ... ok
+test writer::tests::in_place_updates_handle_hierarch_cards ... ok
+test writer::tests::several_images_round_trip_by_name ... ok
+test conversion_tests::parallel_u16_conversions_match_the_serial_ones ... ok
+
+test result: ok. 82 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+
+     Running tests/caller_pool.rs (target/debug/deps/caller_pool-c511f994ecd46d71)
+
+running 1 test
+test fits_conversions_stay_in_the_callers_pool ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+
+     Running tests/compressed_window_work.rs (target/debug/deps/compressed_window_work-eee7880904e4c839)
+
+running 1 test
+test one_pixel_does_not_allocate_for_unrelated_tiles ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/window_memory.rs (target/debug/deps/window_memory-d123d42fa78beea3)
+
+running 1 test
+test a_window_of_a_huge_image_allocates_for_the_window_alone ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/seiza_image_io-6d0236236e661bda)
+
+running 31 tests
+test raster::tests::the_exif_range_comes_first_and_the_full_range_follows ... ok
+test raster::tests::unknown_exposure_is_not_a_capture_interval ... ok
+test raster::tests::wide_field_prior_scales_with_dimensions ... ok
+test raster::tests::missing_timezone_and_bad_times_do_not_invent_utc ... ok
+test raster::tests::gps_requires_hemispheres_and_valid_dms ... ok
+test raster::tests::gps_time_supplies_utc_when_the_offset_is_missing ... ok
+test raster::tests::time_preserves_leading_zero_subseconds_and_crosses_utc_date ... ok
+test tests::a_jpeg_an_unknown_extension_or_a_short_image_is_not_written ... ok
+test raster::tests::metadata_is_found_by_content_not_file_name ... ok
+test raster::tests::the_pixel_budget_counts_decoded_samples_and_accepts_the_exact_limit ... ok
+test raster::tests::a_header_claiming_gigapixels_is_refused_not_allocated ... ok
+test tests::a_header_is_read_with_its_commentary_and_an_xisf_solution ... ok
+test raster::tests::absent_or_damaged_exif_does_not_block_pixel_loading ... ok
+test raster::tests::all_eight_exif_orientations_match_stored_pixel_coordinates ... ok
+test tests::atomic_raster_replacement_preserves_permissions ... ok
+test tests::an_eight_bit_png_reads_as_zero_to_one ... ok
+test tests::a_whole_normalized_xisf_is_put_on_the_scale_asked_for ... ok
+test tests::failed_raster_publication_cleans_up_temporary_file ... ok
+test tests::atomic_float_exports_match_direct_encoding ... ok
+test tests::a_solve_prior_is_read_from_headers_without_pixels ... ok
+test tests::formats_come_from_the_extension_whatever_its_case ... ok
+test tests::failed_raster_writes_preserve_existing_files ... ok
+test tests::a_window_puts_a_normalized_xisf_on_the_scale_asked_for ... ok
+test tests::fits_says_its_rows_run_top_down ... ok
+test tests::capture_time_and_optics_come_from_the_header ... ok
+test tests::a_window_reads_fits_and_xisf_alike ... ok
+test tests::several_images_are_saved_and_read_by_name ... ok
+test tests::borrowed_samples_keep_their_cards_bounds_and_planes ... ok
+test tests::atomic_display_exports_match_direct_encoding ... ok
+test tests::every_saved_format_reads_back_the_same ... ok
+test tests::display_images_go_out_as_their_extension_says ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/raster_decode_budget.rs (target/debug/deps/raster_decode_budget-af4717ac8fe1c537)
+
+running 1 test
+test uploaded_image_budget_is_checked_before_allocating_pixels ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/seiza_imgproc-90d258884a5ed06f)
+
+running 44 tests
+test blur::tests::auto_ksize_matches_opencv ... ok
+test blur::tests::kernel_normalized_and_symmetric ... ok
+test border::tests::reflect ... ok
+test border::tests::reflect101 ... ok
+test blur::tests::quantized_kernel_sums_to_256 ... ok
+test blur::tests::blur_f32_preserves_flat_image ... ok
+test blur::tests::blur_preserves_flat_image ... ok
+test blur::tests::median_removes_single_hot_pixel ... ok
+test border::tests::replicate ... ok
+test blur::tests::median_matches_naive_on_random_data ... ok
+test canny::tests::sobel_gradient_signs ... ok
+test components::tests::eight_connectivity_joins_a_diagonal ... ok
+test canny::tests::sobel_matches_naive ... ok
+test components::tests::four_connectivity_keeps_diagonal_pixels_apart ... ok
+test canny::tests::step_edge_detected ... ok
+test contours::tests::filled_square_metrics ... ok
+test canny::tests::flat_image_has_no_edges ... ok
+test contours::tests::hull_of_l_shape ... ok
+test contours::tests::single_pixel ... ok
+test components::tests::largest_component_does_not_replace_an_equal_first_match ... ok
+test components::tests::measures_bounds_centroid_and_fill ... ok
+test contours::tests::thin_line_contour ... ok
+test contours::tests::two_blobs ... ok
+test contours::tests::blob_inside_hole_not_reported ... ok
+test contours::tests::blob_touching_border ... ok
+test dtfilter::tests::flat_image_unchanged ... ok
+test contours::tests::empty_image ... ok
+test dtfilter::tests::smooths_noise_but_preserves_strong_edge ... ok
+test morphology::tests::dilate_single_pixel_rect3 ... ok
+test dtfilter::tests::tiny_sigma_color_means_identity_on_noisy_data ... ok
+test morphology::tests::ellipse_3x3_is_cross ... ok
+test morphology::tests::ellipse_5x5_shape ... ok
+test morphology::tests::erode_border_reflect_keeps_solid_image ... ok
+test morphology::tests::erode_removes_single_pixel ... ok
+test wavelets::tests::atrous_chain_is_clamped_and_sized ... ok
+test threshold::tests::bimodal_split ... ok
+test wavelets::tests::atrous_uniform_input_gives_near_zero_residual ... ok
+test wavelets::tests::atrous_chain_matches_dense_oracle ... ok
+test wavelets::tests::both_paths_have_correct_length ... ok
+test wavelets::tests::reflect_index_bounces_like_opencv_border_reflect ... ok
+test wavelets::tests::atrous_chain_removes_gradient_keeps_star ... ok
+test wavelets::tests::filtered_removes_gradient_keeps_peak ... ok
+test wavelets::tests::f32_entry_is_bit_identical_for_integer_data ... ok
+test morphology::tests::fast_path_matches_naive_on_random_data ... ok
+
+test result: ok. 44 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/caller_pool.rs (target/debug/deps/caller_pool-5f268b81b08eccad)
+
+running 1 test
+test filters_stay_in_the_callers_pool ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/golden.rs (target/debug/deps/golden-7c90cad490f10064)
+
+running 6 tests
+test quantized_gaussian_kernels_match_opencv ... ok
+test golden_contour_metrics ... ok
+test golden_dt_filter ... ok
+test golden_median_otsu_canny_morph ... ok
+test golden_gaussian_u8 ... ok
+test golden_f32_blur_and_structures ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/seiza_model-f323ea6b4ab04b37)
+
+running 52 tests
+test backend::tests::an_unmeasured_gpu_runs_only_when_asked_for ... ok
+test backend::tests::apple_s_gpu_comes_before_its_neural_engine ... ok
+test backend::tests::a_backend_s_word_reads_back_as_itself ... ok
+test backend::tests::only_the_neural_engine_defaults_to_f16_and_both_take_a_large_tile ... ok
+test bands::tests::amounts_out_of_range_are_refused ... ok
+test backend::tests::the_library_search_keeps_its_order_and_a_pin_never_falls_through ... ok
+test bundle::tests::a_card_lists_its_planes_in_the_graph_s_order ... ok
+test bundle::tests::a_parity_list_limits_what_runs_unasked ... ok
+test bundle::tests::a_card_must_read_the_image_once_and_name_each_tensor_once ... ok
+test bundle::tests::a_name_that_leaves_the_store_is_refused ... ok
+test bundle::tests::a_changed_graph_is_refused ... ok
+test bundle::tests::a_card_needing_the_stack_s_records_is_refused ... ok
+test model::tests::a_view_refuses_a_buffer_of_the_wrong_length ... ok
+test bands::tests::whole_amounts_add_the_residual_and_none_leave_the_image ... ok
+test model::tests::the_compile_cache_is_keyed_on_the_tile_and_only_core_ml_has_one ... ok
+test model::tests::a_blend_puts_each_channel_back_where_it_came_from ... ok
+test bundle::tests::a_plane_this_build_does_not_know_is_refused_by_name ... ok
+test bundle::tests::a_card_reads_back_and_its_graph_verifies ... ok
+test bands::tests::a_blur_keeps_the_sum_of_a_point_away_from_the_edges ... ok
+test model::tests::an_image_with_no_noise_or_no_pixels_is_refused ... ok
+test bands::tests::a_flat_residual_is_all_low_band ... ok
+test noise::tests::a_constant_map_holds_the_image_map_s_median_where_the_image_is_finite ... ok
+test model::tests::a_constant_map_fills_the_noise_plane_with_one_value ... ok
+test model::tests::a_residual_comes_back_in_the_image_s_units ... ok
+test sky::tests::extending_a_grid_carries_its_slope_on ... ok
+test sky::tests::scales_sample_every_17th_pixel_both_planes_hold ... ok
+test sky::tests::the_planes_come_out_as_the_card_lists_them ... ok
+test sky::tests::the_network_reads_nan_as_the_background_and_a_missing_map_as_one ... ok
+test sky::tests::the_smooth_sky_finds_a_gradient_and_keeps_the_image_s_level ... ok
+test stats::tests::a_median_is_the_middle_value_or_the_mean_of_the_two ... ok
+test sky::tests::upsampling_holds_past_the_outer_centres_and_runs_between_them ... ok
+test model::tests::a_runner_gets_as_many_planes_as_the_card_lists ... ok
+test store::tests::a_model_installs_lists_and_goes ... ok
+test store::tests::a_model_resolves_by_directory_by_name_or_alone ... ok
+test tiles::tests::a_second_plane_reaches_the_runner_after_the_first ... ok
+test tiles::tests::a_stop_ends_the_run_and_a_bad_tile_is_refused ... ok
+test tiles::tests::a_stride_cut_to_the_grid_widens_the_overlap ... ok
+test tiles::tests::a_window_is_zero_in_the_margin_and_flat_at_the_image_s_own_edge ... ok
+test tiles::tests::an_image_smaller_than_a_tile_is_padded_and_cut_back ... ok
+test tiles::tests::crossing_windows_sum_to_one_past_the_margins ... ok
+test tiles::tests::reflection_folds_an_index_back_without_repeating_the_edge ... ok
+test store::tests::a_bundle_that_does_not_match_its_card_never_installs ... ok
+test tiles::tests::tiles_cover_an_axis_and_end_flush_with_it ... ok
+test parity::tile_starts_and_windows_match_the_harness ... ok
+test parity::the_noise_map_matches_the_harness ... ok
+test parity::the_smooth_sky_matches_the_harness ... ok
+test parity::the_constant_map_s_level_matches_the_harness ... ok
+test parity::the_planes_a_network_reads_match_the_harness ... ok
+test tiles::tests::the_tile_count_matches_what_a_run_visits ... ok
+test tiles::tests::a_pixelwise_runner_blends_back_to_the_same_image ... ok
+test parity::blending_tiles_and_bands_match_the_harness ... ok
+test noise::tests::the_image_noise_map_finds_the_sky_s_noise_and_a_nebula_s ... ok
+
+test result: ok. 52 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/runtime.rs (target/debug/deps/runtime-732a9e5037a03599)
+
+running 10 tests
+test a_graph_of_a_fixed_size_takes_its_own_tile_and_no_other ... ok
+test a_core_ml_session_keeps_out_of_the_temp_folder ... ok
+test a_graph_says_what_its_tensors_hold_whatever_its_precision ... ok
+test a_graph_that_differs_from_its_card_is_refused_when_it_opens ... ok
+test a_mac_picks_the_gpu_unless_the_card_leaves_it_out ... ok
+test a_tiny_model_matches_the_harness_on_the_cpu_provider ... ok
+test a_tiny_model_stops_when_asked ... ok
+test an_f32_graph_is_refused_on_the_neural_engine ... ok
+test the_card_says_what_a_graph_reads ... ok
+test the_runtime_reports_its_version_and_cpu_backend ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/seiza_parallax-161768677a8a48b5)
+
+running 142 tests
+test cloud::tests::a_cloud_lies_where_the_stars_run_short ... ok
+test cloud::tests::a_cloud_with_too_few_stars_in_front_is_not_placed ... ok
+test dust::tests::a_map_of_another_shape_is_refused ... ok
+test cloud::tests::stars_as_many_as_the_clear_skys_show_no_cloud ... ok
+test dust::tests::too_few_stars_make_no_map ... ok
+test encode::openh264_sink::tests::nal_units_split_on_three_and_four_byte_start_codes ... ok
+test encode::tests::a_video_name_must_be_a_videos_in_a_folder_that_is_there ... ok
+test encode::tests::codecs_parse_by_their_common_names ... ok
+test encode::tests::ffmpeg_refuses_odd_frame_sizes ... ok
+test dust::tests::thick_dust_shows_as_a_shortage_of_stars ... ok
+test dust::tests::more_opacity_darkens_the_same_shortage ... ok
+test encode::tests::frame_sizes_parse_by_name_and_by_sides ... ok
+test encode::tests::ffmpeg_writes_a_video_and_cleans_up_one_it_did_not_finish ... ok
+test encode::tests::png_sequences_number_their_frames_and_check_sizes ... ok
+test field::tests::detections_take_the_nearest_unused_gaia_star ... ok
+test field::tests::hipparcos_places_move_to_gaias_epoch ... ok
+test field::tests::cones_cover_the_image_and_merged_rows_appear_once ... ok
+test field::tests::a_bright_star_gaia_lacks_takes_its_hipparcos_distance ... ok
+test dust::tests::a_float_map_outside_zero_to_one_is_refused ... ok
+test lift::tests::flat_ground_lifts_nothing ... ok
+test lift::tests::a_galaxy_lifts_off_its_nebula_and_adds_back ... ok
+test light::tests::a_nan_pixel_is_dark ... ok
+test light::tests::bilinear_sampling_hits_pixel_centres_and_fades_outside ... ok
+test light::tests::pixel_light_round_trips_and_keeps_hue_when_scaled ... ok
+test lift::tests::a_galaxy_beside_a_brighter_knot_is_not_walked_onto_it ... ok
+test light::tests::pyramid_levels_average_and_line_up ... ok
+test lift::tests::a_misplaced_catalog_ellipse_moves_onto_the_galaxy ... ok
+test dust::tests::a_fine_map_is_averaged_into_cells ... ok
+test light::tests::a_coarse_level_takes_the_edge_light_up_to_the_image_edge ... ok
+test light::tests::screen_blend_is_addition_of_light ... ok
+test dust::tests::a_painted_map_of_any_size_covers_the_image ... ok
+test overlay::tests::custom_labels_parse ... ok
+test overlay::tests::labels_and_colours_follow_the_image_overlays ... ok
+test overlay::tests::a_title_shows_while_the_camera_drifts_through_its_stop ... ok
+test overlay::tests::a_stops_card_shows_as_its_title_would_and_replaces_it ... ok
+test overlay::tests::marks_fade_out_as_they_leave_the_view_and_as_the_camera_flies_inside ... ok
+test overlay::tests::a_title_is_drawn_low_on_the_left ... ok
+test overlay::tests::smoothing_fades_a_step_over_the_window ... ok
+test picture::tests::a_card_fits_inside_the_frame_and_is_centred ... ok
+test picture::tests::a_picture_blends_by_its_alpha_and_the_opacity ... ok
+test picture::tests::a_scaled_picture_keeps_its_colour_at_soft_edges ... ok
+test overlay::tests::opening_and_closing_cards_fade_and_a_loop_still_joins ... ok
+test overlay::tests::a_label_covering_a_more_prominent_one_gives_way_and_density_limits_the_rest ... ok
+test overlay::tests::a_lifted_galaxys_other_listings_fly_with_it ... ok
+test pipeline::tests::a_dust_map_of_the_wrong_shape_or_without_dust_is_refused ... ok
+test overlay::tests::only_the_three_smallest_regions_around_the_frame_are_named ... ok
+test pipeline::tests::a_looping_tour_ends_at_its_first_view_and_frame ... ok
+test pipeline::tests::a_manual_stop_pulls_back_toward_whole_image_without_losing_its_target ... ok
+test pipeline::tests::a_crop_films_part_of_the_image_at_a_size_of_its_shape ... ok
+test dust::tests::a_dark_patch_full_of_stars_is_clear_sky ... ok
+test dust::tests::a_black_globule_blocks_what_the_counts_miss ... ok
+test pipeline::tests::a_given_dust_map_brings_stars_forward_and_another_can_take_its_place ... ok
+test pipeline::tests::a_plane_mask_of_the_wrong_shape_is_refused_and_an_empty_one_left_out ... ok
+test pipeline::tests::a_catalogued_dark_cloud_gets_a_plane_that_blocks_light ... ok
+test overlay::tests::the_watermark_image_sits_in_its_corner_inside_the_text ... ok
+test pipeline::tests::a_stop_written_out_reads_back ... ok
+test pipeline::tests::a_nebula_inside_another_moves_with_a_distance_given_for_the_other ... ok
+test pipeline::tests::a_tour_stop_off_the_image_is_refused_before_the_work ... ok
+test pipeline::tests::a_nebula_over_most_of_the_image_stays_with_the_nebula_and_its_parts_too ... ok
+test pipeline::tests::cropped_dust_keeps_source_coordinates_through_prepare_paint_and_reload ... ok
+test pipeline::tests::a_stop_or_a_refusing_sink_ends_the_video_early ... ok
+test pipeline::tests::eight_bit_images_are_told_from_deeper_ones ... ok
+test pipeline::tests::a_dust_cloud_over_most_of_the_image_stays_with_the_nebula ... ok
+test pipeline::tests::options_that_cannot_make_a_video_are_refused ... ok
+test pipeline::tests::a_prepared_video_hands_every_frame_to_the_callers_sink ... ok
+test pipeline::tests::pull_back_uses_the_combined_overall_and_stop_zoom ... ok
+test pipeline::tests::labels_wait_for_the_catalogue_and_fit_a_short_frame ... ok
+test pipeline::tests::a_reconfigured_video_shares_the_scene_and_leaves_the_first_alone ... ok
+test plane::tests::a_cloud_lifts_off_its_nebula_and_adds_back ... ok
+test plane::tests::a_flat_region_lifts_nothing_and_a_dark_cloud_blocks_light ... ok
+test plane::tests::a_mask_spans_the_image_at_any_size_of_its_shape ... ok
+test pipeline::tests::the_fit_is_reported_as_asked_and_used ... ok
+test plane::tests::a_plane_tells_which_image_edges_cut_its_light ... ok
+test plane::tests::an_ellipse_region_reaches_as_far_as_the_light_and_no_farther ... ok
+test plane::tests::an_outline_region_fills_its_polygons_with_a_soft_edge ... ok
+test dust::tests::counted_dust_written_out_and_read_back_is_the_same_dust ... ok
+test pipeline::tests::stars_without_a_distance_fly_in_front_of_a_target_beyond_them ... ok
+test render::tests::a_fit_frame_shows_the_whole_image_with_black_beside_it ... ok
+test dust::tests::a_thin_last_cell_is_not_taken_for_dust ... ok
+test render::tests::a_dark_cloud_slides_across_what_it_hides_at_its_own_depth ... ok
+test pipeline::tests::depth_planes_lift_smallest_first_and_keep_the_first_frame ... ok
+test render::tests::a_pan_turns_part_of_the_way_and_still_ends_on_the_focus ... ok
+test render::tests::a_fit_picture_ends_where_the_far_stars_do_rather_than_zooming_in ... ok
+test render::tests::a_high_quality_frame_is_the_same_view_drawn_finer ... ok
+test render::tests::a_shrunk_star_keeps_its_light_and_place_in_every_band ... ok
+test pipeline::tests::overlay_images_are_read_at_setup_and_odd_ones_warned_of ... ok
+test pipeline::tests::dark_nebulae_move_with_the_dust_clouds_they_lie_in ... ok
+test render::tests::a_plane_fades_as_the_camera_passes_through_it ... ok
+test render::tests::a_star_the_camera_passes_fades_out ... ok
+test render::tests::a_turned_star_turns_its_shape_with_the_frame ... ok
+test render::tests::a_smooth_sprite_drawn_small_stays_smooth ... ok
+test render::tests::a_plane_cut_by_the_image_edge_keeps_that_edge_out_of_view ... ok
+test render::tests::a_truck_too_wide_for_the_image_is_scaled_down ... ok
+test render::tests::a_turning_frame_turns_every_depth_about_its_centre ... ok
+test render::tests::a_turning_shot_zooms_in_to_stay_inside_the_image ... ok
+test render::tests::a_whole_start_shows_the_image_then_closes_on_the_focus ... ok
+test render::tests::levels_between_blend_toward_the_coarser_as_the_view_widens ... ok
+test render::tests::a_whole_start_toward_an_edge_zooms_in_until_its_last_frame_fits ... ok
+test render::tests::a_plane_keeps_the_first_frame_and_moves_at_its_own_depth ... ok
+test render::tests::dollying_toward_an_off_centre_focus_slides_no_depth ... ok
+test render::tests::the_camera_never_turns ... ok
+test render::tests::dollying_in_grows_the_background_about_the_focus_point ... ok
+test render::tests::trucking_moves_near_stars_against_far_ones ... ok
+test render::tour_tests::a_last_stop_with_a_push_still_comes_to_rest ... ok
+test render::tour_tests::a_push_flies_on_in_through_the_hold_at_an_even_pace ... ok
+test render::tour_tests::a_gliding_tour_never_stops_and_slows_through_its_stops ... ok
+test render::tests::the_first_frame_shows_the_image_around_the_focus_point ... ok
+test render::tour_tests::a_stop_on_a_depth_plane_leaves_where_its_hold_ends ... ok
+test render::tour_tests::a_spin_turns_the_held_frame_at_an_even_pace_and_later_stops_follow_on ... ok
+test render::tour_tests::a_tour_holds_still_and_moves_smoothly_between_stops ... ok
+test render::tour_tests::a_tour_arrives_at_each_stop_framed_as_asked ... ok
+test render::tour_tests::a_two_stop_loop_drifts_through_its_join ... ok
+test render::tour_tests::a_stop_on_a_depth_plane_centres_its_point_there ... ok
+test render::tests::a_plane_outgrown_slid_aside_or_flown_through_uncovers_its_fill ... ok
+test render::tour_tests::a_zero_travel_cuts_without_flinging_the_camera ... ok
+test render::tour_tests::an_unlooped_tour_slows_to_rest_through_its_last_hold ... ok
+test render::tour_tests::a_looped_tour_drifts_through_its_join_into_its_first_frame ... ok
+test render::tour_tests::turning_and_panning_keep_their_pace_through_a_stop_passed_by ... ok
+test scene::tests::a_bright_halo_stays_with_its_star_not_with_faint_neighbours ... ok
+test render::tests::a_tour_stop_showing_much_fill_flies_less_far_and_keeps_its_size ... ok
+test render::tests::light_lifted_in_front_of_a_dark_cloud_keeps_the_first_frame ... ok
+test scene::tests::a_second_peak_in_a_bright_core_joins_it ... ok
+test scene::tests::a_star_at_a_planes_distance_joins_it ... ok
+test scene::tests::a_star_in_a_glow_keeps_a_footprint_of_its_own_size ... ok
+test scene::tests::small_stars_stay_on_the_field_or_are_dropped ... ok
+test scene::tests::sprites_and_leftover_add_back_to_the_star_image ... ok
+test scene::tests::stars_at_the_edges_measure_inside_the_image ... ok
+test scene::tests::stars_seen_through_opaque_dust_fly_in_front_of_it ... ok
+test tour::tests::a_large_region_is_seen_close_at_an_edge_and_left_to_the_whole_view_inside ... ok
+test tour::tests::a_target_on_a_plane_is_framed_at_its_own_depth ... ok
+test tour::tests::a_tour_goes_round_its_targets_from_the_whole_image_and_back ... ok
+test tour::tests::no_motion_means_no_turn_or_pan ... ok
+test tour::tests::targets_are_the_objects_worth_a_visit_one_to_a_frame ... ok
+test render::tour_tests::a_wide_off_centre_stop_does_not_magnify_the_whole_tour ... ok
+test scene::tests::a_bright_stars_halo_goes_with_it_not_onto_the_leftover ... ok
+test render::tour_tests::endpoint_spins_fit_their_own_holds ... ok
+test scene::tests::a_knot_in_a_bright_stars_halo_is_not_cut_out_as_a_star ... ok
+test pipeline::tests::catalogued_nebulae_at_their_own_distances_get_planes ... ok
+test render::tour_tests::a_two_stop_turn_fits_without_changing_either_endpoint ... ok
+test pipeline::tests::a_stop_framed_at_a_depth_the_image_does_not_show_is_reported ... ok
+test render::tour_tests::a_tour_that_would_show_an_edge_zooms_in_until_it_does_not ... ok
+test render::edge_tests::a_whole_start_first_frame_counts_as_inside_whatever_the_scale ... ok
+
+test result: ok. 142 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.77s
+
+     Running unittests src/lib.rs (target/debug/deps/seiza_pipeline-2ca493a867bf28fe)
+
+running 14 tests
+test digest::tests::digests_print_and_parse_as_hex ... ok
+test digest::tests::parts_are_delimited ... ok
+test identity::tests::a_newer_schema_or_a_bad_card_is_refused ... ok
+test identity::tests::cards_round_trip ... ok
+test identity::tests::words_parse_in_either_case ... ok
+test partial::tests::carried_cards_keep_the_wcs_and_instrument_but_not_the_observer ... ok
+test partial::tests::combining_pools_variances_as_one_stack_of_every_frame ... ok
+test partial::tests::stacks_on_another_grid_or_given_twice_are_refused ... ok
+test partial::tests::combining_weighs_each_stack_by_its_weight ... ok
+test digest::tests::a_file_digest_is_its_bytes_digest ... ok
+test store::tests::a_stack_is_kept_under_its_key_and_never_replaced ... ok
+test partial::tests::deep_counts_are_written_as_floats_and_a_short_layer_is_refused ... ok
+test partial::tests::stacks_round_trip_through_fits_and_xisf ... ok
+test partial::tests::combining_files_matches_combining_in_memory ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/channel.rs (target/debug/deps/channel-57975c47c4b801f3)
+
+running 6 tests
+libEGL warning: egl: failed to create dri2 screen
+test what_cannot_be_combined_is_refused ... ok
+test a_transient_is_rejected_within_its_session ... ok
+test partial_stacks_combine_into_the_stack_of_every_light ... ok
+test a_context_that_cannot_be_extended_is_stacked_afresh ... ok
+test a_channel_run_again_does_only_what_is_missing ... ok
+test a_session_that_gains_lights_is_extended_from_its_context ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.59s
+
+     Running tests/output_version.rs (target/debug/deps/output_version-481ad987ed6dbf1a)
+
+running 2 tests
+test output_version_is_no_newer_than_the_next_minor_version ... ok
+test combined_tiles_keep_their_output ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/seiza_satellites-374496a01a031043)
+
+running 55 tests
+test history::tests::unix_epoch_has_the_standard_julian_date ... ok
+test mirror::tests::manifest_rejects_non_content_addressed_keys ... ok
+test mirror::tests::manifest_requires_sorted_content_addressed_entries ... ok
+test mirror::tests::zstd_entry_validates_and_rejects_inconsistent_encoded_fields ... ok
+test blocking::tests::a_raised_flag_stops_the_load ... ok
+test history::tests::shared_ceiling_counts_current_and_historical_catalogs ... ok
+test history::tests::cache_only_lookup_selects_the_nearest_historical_query ... ok
+test resolver::tests::resolver_owns_current_versus_historical_selection ... ok
+test blocking::tests::a_fresh_cache_loads_without_a_runtime_of_the_callers ... ok
+test mirror::tests::rejects_mirror_artifact_whose_size_disagrees_with_the_manifest ... ok
+test source::tests::cache_only_load_enforces_a_reduced_history_ceiling ... ok
+test source::tests::cache_only_load_selects_the_snapshot_nearest_the_exposure ... ok
+test source::tests::default_history_ceiling_is_five_gibibytes ... ok
+test history::tests::downloads_epoch_tles_only_when_requested_and_then_reuses_them ... ok
+test source::tests::cache_only_load_skips_a_corrupt_nearer_snapshot ... ok
+test mirror::tests::rejects_mirror_artifact_that_does_not_match_manifest_hash ... ok
+test mirror::tests::downloads_verified_mirror_artifact_and_then_reuses_cache ... ok
+test source::tests::retention_evicts_oldest_only_after_the_size_ceiling ... ok
+test source::tests::fresh_cache_load_enforces_the_history_ceiling_without_downloading ... ok
+test tests::all_malformed_tle_records_still_error ... ok
+test mirror::tests::downloads_and_decompresses_zstd_mirror_artifact ... ok
+test tests::angular_separation_handles_pole_and_wraparound ... ok
+test tests::assesses_bright_trail_risk_without_deciding_application_policy ... ok
+test tests::builds_exposure_around_a_supplied_midpoint ... ok
+test tests::builds_exposure_ending_at_a_supplied_timestamp ... ok
+test tests::catalog_fingerprint_tracks_content_not_retrieval_time ... ok
+test tests::clips_crossing_segments_to_the_image ... ok
+test tests::coarse_pass_pads_the_image_for_curved_paths ... ok
+test tests::compact_analysis_preserves_provenance_geometry_risk_and_accounting ... ok
+test tests::opens_tle_and_preserves_identity ... ok
+test tests::parses_fits_style_utc_without_z ... ok
+test source::tests::fresh_valid_cache_avoids_network ... ok
+test tests::refuses_to_extrapolate_stale_elements_by_default ... ok
+test tests::bright_trail_risk_level_uses_api_friendly_json_names ... ok
+test tests::rejects_non_positive_exposures ... ok
+test tests::predicts_a_topocentric_track_through_a_matching_wcs ... ok
+test source::tests::rate_limited_download_reports_retry_after ... ok
+test tests::rejects_sampling_requests_that_would_allocate_unbounded_vectors ... ok
+test tests::reports_apparent_and_pixel_rates ... ok
+test tests::satellite_tracks_round_trip_through_serde ... ok
+test tests::skips_malformed_tle_record_and_keeps_the_rest ... ok
+test trail_alignment::tests::a_small_valid_fragment_cannot_stand_in_for_a_long_path ... ok
+test source::tests::stale_snapshot_survives_rate_limited_refresh ... ok
+test resolver::tests::prewarm_uses_nearby_durable_cache_before_any_provider_network ... ok
+test source::tests::future_mtime_is_stale_rather_than_fresh_forever ... ok
+test trail_alignment::tests::short_paths_are_not_misreported_as_negative_evidence ... ok
+test source::tests::refresh_fallback_skips_a_corrupt_newer_snapshot ... ok
+test resolver::tests::genuinely_broken_mirror_falls_through_but_does_warn ... ok
+test trail_alignment::tests::paths_without_enough_sideband_coverage_are_not_evaluated ... ok
+test resolver::tests::mirror_without_coverage_falls_through_to_satchecker_silently ... ok
+test trail_alignment::tests::finds_a_large_orbital_offset_and_refines_its_tilt ... ok
+test trail_alignment::tests::preserves_the_full_previous_endpoint_tilt_range ... ok
+test trail_alignment::tests::evaluates_noise_as_not_detected ... ok
+test trail_alignment::tests::aligns_a_shifted_faint_trail_without_changing_the_prediction ... ok
+test trail_alignment::tests::follows_the_full_curved_prediction_instead_of_its_endpoint_chord ... ok
+
+test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+
+     Running tests/celestrak_live.rs (target/debug/deps/celestrak_live-9e70f34fd9a82b69)
+
+running 1 test
+test current_celestrak_omm_is_parseable_and_cached ... ignored, network: downloads the current CelesTrak active-satellite OMM set
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/satchecker_live.rs (target/debug/deps/satchecker_live-cd647ee4001218df)
+
+running 1 test
+test historical_satchecker_tles_are_parseable_and_cached ... ignored, network: downloads an epoch-appropriate IAU SatChecker TLE set
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/seiza_sources-2ab7aa1b4b2583b6)
+
+running 18 tests
+test tests::best_distance_falls_back_to_a_precise_parallax_only ... ok
+test tests::archive_failures_split_only_when_too_big ... ok
+test tests::healpix_tiles_are_source_id_ranges_that_nest ... ok
+test tests::gaia_distances_parse_with_and_without_parallaxes ... ok
+test tests::gaia_photometry_rows_parse_with_missing_colours ... ok
+test tests::hipparcos_rows_parse ... ok
+test tests::extracts_only_openngc_outline_objects ... ok
+test tests::text_tables_are_complete_with_header_and_final_newline ... ok
+test tests::overlapping_csv_rows_merge_once ... ok
+test tests::quarter_cones_cover_the_cone ... ok
+test tests::gzip_verification_detects_truncation ... ok
+test tests::validates_github_repository_names ... ok
+test tests::vdb_star_identifiers_are_padded_and_sanitized ... ok
+test tests::gaia_completion_check_reads_only_boundaries ... ok
+test tests::replace_file_overwrites_existing_target ... ok
+test tests::gaia_pieces_join_under_one_header ... ok
+test tests::gaia_rejects_invalid_arguments_before_creating_output ... ok
+test tests::a_distance_download_is_whole_only_with_every_tile ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (target/debug/deps/seiza_stacking-ca57b14ee6c5a3de)
+
+running 614 tests
+test batch::mosaic::tests::panel_ids_are_validated_before_loading ... ok
+test batch::mosaic::tests::paired_clipping_keeps_fractional_weighted_offsets_at_large_levels ... ok
+test batch::mosaic::tests::paired_differences_cancel_structure_with_partial_cells_and_channel_holes ... ok
+test batch::mosaic::tests::zero_and_negative_samples_are_data_and_sources_cannot_change ... ok
+test batch::tests::cancellation_and_loader_errors_do_not_return_partial_images ... ok
+test batch::tests::changed_shapes_samples_and_invalid_options_are_rejected ... ok
+test batch::tests::explicit_noise_floor_preserves_near_constant_samples ... ok
+test batch::tests::finite_coverage_is_per_sample_and_low_depth_is_not_clipped ... ok
+test batch::mosaic::tests::streamed_colour_corrections_match_bands_at_arbitrary_sample_offsets ... ok
+test batch::tests::frames_loaded_once_need_a_usable_directory_and_matching_shapes ... ok
+libEGL warning: egl: failed to create dri2 screen
+test batch::tests::band_reads_stay_in_the_callers_pool ... ok
+test batch::mosaic::tests::an_agreed_sky_keeps_its_diffuse_structure_and_missing_samples ... ok
+test batch::tests::noisy_star_field_retains_flux_while_rejecting_crossing_trails ... ok
+test batch::bands::tests::a_failed_gpu_pipeline_restarts_without_partial_outputs_or_counts ... ok
+test batch::bands::tests::gpu_pipeline_reuses_buffers_across_empty_and_partial_bands ... ok
+test batch::tests::real_frame_pixels_survive_injected_early_and_late_crossing_trails ... ignored, set SEIZA_STACKING_REAL_FRAME to a local FITS/XISF light
+test batch::tests::predictive_thresholds_keep_asymmetric_tail_probabilities ... ok
+test batch::tests::rgb_samples_keep_physical_scale_and_independent_masks ... ok
+test batch::tests::one_large_outlier_does_not_mask_moderate_ones ... ok
+test batch::tests::band_passes_stop_when_cancelled_or_a_read_fails ... ok
+test binning::tests::lengths_divide_with_floors_and_areas_divide_by_the_square ... ok
+test binning::tests::the_native_scale_changes_nothing ... ok
+test calibration::tests::a_light_gate_keeps_its_bytes_unless_the_light_angle_was_measured ... ok
+test calibration::tests::a_flat_refused_only_for_its_rotator_angle_is_a_flat_rotation_error ... ok
+test calibration::tests::a_master_dark_that_recorded_no_temperature_still_calibrates_a_cooled_light ... ok
+test batch::tests::two_intermittent_trails_are_removed_with_sufficient_depth ... ok
+test calibration::tests::a_tighter_tolerance_refuses_what_the_defaults_accept ... ok
+test calibration::tests::applies_bias_scaled_dark_and_normalized_flat ... ok
+test calibration::tests::auto_mode_sets_a_mismatched_flat_aside_instead_of_refusing_the_light ... ok
+test calibration::tests::caller_tolerances_admit_what_the_defaults_refuse ... ok
+test calibration::tests::caller_tolerances_reach_a_decoded_light_frame ... ok
+test calibration::tests::active_masters_refuse_master_or_already_calibrated_lights ... ok
+test calibration::tests::does_not_scale_a_dark_bias_pedestal_without_master_bias ... ok
+test calibration::tests::every_light_must_match_master_sensor_temperature_and_optics ... ok
+test calibration::tests::image_buffer_bytes_counts_all_master_sample_buffers ... ok
+test calibration::tests::a_master_that_never_recorded_its_optics_still_validates ... ok
+test calibration::tests::does_not_subtract_bias_twice_from_prepared_masters ... ok
+test calibration::tests::manual_master_loading_rejects_a_known_wrong_frame_role ... ok
+test calibration::tests::normalizes_planar_rgb_flat_channels_independently ... ok
+test calibration::tests::only_dark_calibrated_flats_can_opt_out_of_gain_and_offset_matching ... ok
+test calibration::tests::masters_decoded_from_files_keep_their_header_signature ... ok
+test calibration::tests::per_light_matching_distinguishes_scalable_and_pedestal_darks ... ok
+test calibration::tests::rejects_a_flat_with_a_different_bayer_layout ... ok
+test calibration::tests::rejects_invalid_exposure_metadata ... ok
+test calibration::tests::requires_light_exposure_when_scaling_a_dark ... ok
+test calibration::tests::rotation_is_measured_the_short_way_round ... ok
+test calibration::tests::the_defaults_are_unchanged ... ok
+test calibration::tests::the_gate_follows_a_measured_light_angle ... ok
+test calibration::tests::loaded_master_set_rejects_conflicting_sensor_metadata ... ok
+test calibration::tests::validation_passes_exactly_when_matching_drops_nothing ... ok
+test calibration::tests::parallel_flat_normalization_matches_the_serial_sort_bit_for_bit ... ok
+test calibration_files::tests::cancellation_and_staged_cache_changes_are_observed ... ok
+test calibration_files::tests::a_dark_subtracted_flat_master_at_another_gain_serves_when_the_rules_allow_it ... ok
+test calibration_files::tests::explicit_files_need_no_library ... ok
+test batch::tests::independent_gaussian_noise_retains_unbiased_finite_means ... ok
+test batch::mosaic::tests::mismatched_panel_skies_recover_shared_nebula_and_star_contrast ... ok
+test calibration_files::tests::library_grades_and_builds_shared_aba_assignments ... ok
+test batch::tests::isolated_bright_and_dark_trails_are_removed_at_every_position_and_depth ... ok
+test calibration_files::tests::linked_files_count_refusals_are_remembered_and_incomplete_is_not_reviewed ... ok
+test calibration_files::tests::manual_use_does_not_relax_sensor_gates ... ok
+test calibration_files::tests::drifting_flat_feedback_runs_native_trim_and_rebuild ... ok
+test calibration_files::tests::flat_only_fits_pedestal_through_shared_policy_and_materializes_a_bias ... ok
+test calibration_files::tests::native_coordinator_progress_review_binding_and_cache_lock_cancellation ... ok
+test calibration_files::tests::measured_response_groups_reach_association_and_reuse_cached_pixels ... ok
+test calibration_files::tests::native_sessions_share_master_sets_despite_candidate_order_and_unrelated_options ... ok
+test calibration_files::tests::normalized_xisf_staging_preserves_role_and_recovers_from_cache_tampering ... ok
+test calibration_files::tests::physical_aliases_are_not_separate_light_inputs ... ok
+test batch::tests::whole_frame_passes_match_the_original_bit_for_bit ... ok
+test calibration_files::tests::poor_grades_stay_out_until_explicit_use_and_regrade_is_native ... ok
+test calibration_files::tests::settings_regrade_memos_and_changed_review_is_refused ... ok
+test calibration_files::tests::source_changes_fail_closed ... ok
+test calibration_files::tests::tampered_staging_is_regenerated_instead_of_reusing_measurement_row ... ok
+test calibration_files::tests::the_c_call_refuses_unknown_settings_before_touching_files ... ok
+test calibration_files::tests::raw_flats_build_after_bias_and_run_shared_stability_policy ... ok
+test calibration_plan::tests::a_bias_lets_darks_of_another_exposure_match ... ok
+test calibration_plan::tests::a_probe_reads_a_header_without_its_pixels ... ok
+test calibration_plan::tests::bad_requests_are_refused ... ok
+test calibration_plan::tests::darks_are_ordered_by_time_and_each_exclusion_says_why ... ok
+test calibration_plan::tests::flat_readout_policy_never_relaxes_dark_flat_matching_or_master_coherence ... ok
+test calibration_plan::tests::kinds_read_their_own_spelling ... ok
+test color::tests::a_composition_carries_its_crop_diagnostics ... ok
+test color::tests::an_uncropped_composition_covers_the_whole_grid ... ok
+test color::tests::an_uncropped_composition_reports_no_coverage ... ok
+test color::tests::cropping_normalizes_from_the_kept_region_only ... ok
+test color::tests::cropping_rejects_channels_that_share_no_covered_pixel ... ok
+test color::tests::cropping_trims_the_registration_border_from_every_channel ... ok
+test color::tests::custom_matrix_ignores_zero_weight_sii_input ... ok
+test color::tests::direct_palette_does_not_validate_unused_foraxx_options ... ok
+test color::tests::direct_palettes_map_physical_filters ... ok
+test color::tests::display_prepared_inputs_reject_percentile_normalization ... ok
+test color::tests::foraxx_hoo_matches_the_published_dynamic_formula ... ok
+test color::tests::foraxx_uses_display_prepared_inputs_without_a_second_stretch ... ok
+test color::tests::foraxx_without_normalization_requires_unit_scaled_inputs ... ok
+test color::tests::foraxx_working_stretch_is_bit_identical_to_the_previous_path ... ok
+test color::tests::foraxx_working_stretch_places_the_median_at_its_target ... ok
+test color::tests::hoo_ignores_an_unused_sii_input ... ok
+test color::tests::lrgb_replaces_luminance_without_changing_rgb_ratios ... ok
+test color::tests::missing_registered_samples_mask_the_whole_output_pixel ... ok
+test color::tests::modes_carry_their_labels_and_refuse_a_weight_super_luminance_ignores ... ok
+test color::tests::narrowband_cropping_ignores_a_channel_the_palette_does_not_use ... ok
+test color::tests::palettes_check_the_sii_channel ... ok
+test color::tests::percentile_normalization_maps_ends_to_unit_range ... ok
+test color::tests::rgb_interleaves_linear_channels ... ok
+test color::tests::rgb_preserves_display_prepared_channels_and_transfer ... ok
+test color::tests::sho_requires_sii ... ok
+test color::tests::super_lrgb_adds_all_four_channels_and_preserves_chromaticity ... ok
+test color::tests::super_rgb_targets_channel_sum_and_preserves_chromaticity ... ok
+test batch::tests::band_passes_leave_out_frames_beyond_their_regions_to_the_bit ... ok
+test color_calibration::tests::a_colourless_neighbour_still_disqualifies_a_calibrator ... ok
+test color_calibration::tests::a_flat_topped_star_is_saturated_even_below_the_image_maximum ... ok
+test color_calibration::tests::a_solution_carries_through_registration_turns_and_crops ... ok
+test calibration_files::tests::manual_group_and_path_scoped_side_choices_reach_native_policy ... ok
+test color_calibration::tests::a_calibration_that_cannot_run_still_stretches_and_says_why ... ok
+test calibration_files::tests::light_change_evidence_is_measured_cached_and_used_in_selection ... ok
+test color_calibration::tests::gains_and_offsets_scale_each_channel_and_skip_non_finite_samples ... ok
+test color_calibration::tests::neutralize_clipped_fades_clipped_pixels_to_their_brightest_channel ... ok
+test color_calibration::tests::proper_motion_moves_the_star_to_the_observation_epoch ... ok
+test color_calibration::tests::too_few_stars_or_a_mono_image_are_refused ... ok
+test context::tests::match_tolerances_are_written_only_when_they_differ ... ok
+test context::tests::weight_sums_must_match_coverage_and_weighting ... ok
+test cosmetic::tests::a_cfa_frame_compares_only_its_own_plane ... ok
+test cosmetic::tests::leaves_smooth_structure_alone ... ok
+test cosmetic::tests::rejects_invalid_sigmas_and_cfa_multichannel ... ok
+test cosmetic::tests::replaces_a_dead_pixel_via_the_low_threshold ... ok
+test cosmetic::tests::replaces_a_hot_pixel_and_reports_it ... ok
+test crop::tests::a_channel_covering_nothing_is_named_in_the_error ... ok
+test calibration_files::tests::light_family_pixels_select_the_matching_response ... ok
+test crop::tests::a_fully_uncovered_grid_is_rejected ... ok
+test crop::tests::a_channel_far_from_the_others_is_flagged ... ok
+test crop::tests::a_report_measures_each_channels_own_coverage ... ok
+test crop::tests::an_rgb_channel_needs_every_plane_finite ... ok
+test crop::tests::bounds_keeps_uncovered_corners_that_inscribed_removes ... ok
+test crop::tests::bounds_trims_an_uncovered_border ... ok
+test crop::tests::a_large_stray_does_not_drag_the_others_past_the_limit ... ok
+test crop::tests::crop_modes_round_trip_through_their_names ... ok
+test crop::tests::inscribed_matches_a_brute_force_search ... ok
+test crop::tests::coverage_intersects_every_channel ... ok
+test crop::tests::mismatched_channel_dimensions_are_rejected ... ok
+test crop::tests::none_keeps_the_whole_grid ... ok
+test crop::tests::inscribed_prefers_area_over_the_widest_run ... ok
+test color_calibration::tests::calibrate_and_stretch_recovers_the_gains_through_a_derived_solution ... ok
+test defects::tests::a_long_session_is_sampled_evenly ... ok
+test defects::tests::a_star_on_a_hot_pixel_keeps_its_core ... ok
+test color_calibration::tests::calibration_recovers_the_camera_response_and_neutralizes_the_sky ... ok
+test crop::tests::ordinary_dither_is_not_flagged ... ok
+test crop::tests::two_channels_never_flag_each_other ... ok
+test defects::tests::maps_and_options_refuse_what_cannot_be_right ... ok
+test defects::tests::fewer_than_three_lights_cannot_tell_a_defect_from_the_sky ... ok
+test defects::tests::repair_takes_the_median_of_healthy_same_plane_neighbours ... ok
+test color_calibration::tests::calibration_links_a_per_channel_stretch_and_a_skip_keeps_it ... ok
+test defects::tests::the_gpu_screen_keeps_every_deviation ... ok
+test drizzle::tests::a_rotated_drop_spreads_its_whole_area ... ok
+test defects::tests::mono_screen_never_discards_a_neighbourhood_the_full_check_keeps ... ok
+test drizzle::tests::clipped_area_matches_known_overlaps ... ok
+test defects::tests::lights_without_defects_give_an_empty_map ... ok
+test drizzle::tests::drizzle_timing ... ignored, a timing run on a full-size frame
+test drizzle::tests::warp_inversion_recovers_the_reference_position ... ok
+test exchange::tests::a_normalized_image_keeps_its_scale_and_a_camera_image_maps_from_16_bits ... ok
+test exchange::tests::ringing_far_below_the_sky_neither_lifts_it_nor_reaches_the_tool ... ok
+test exchange::tests::samples_that_are_not_finite_go_out_as_background_and_come_back_unchanged ... ok
+test exchange::tests::the_map_matches_its_version ... ok
+test expand::tests::bounds_include_rotated_corners_and_negative_origins ... ok
+test expand::tests::chance_ceiling_corrects_for_the_transforms_searched ... ok
+test expand::tests::crop_reads_a_moving_canvas ... ok
+test defects::tests::tight_stars_that_never_moved_stay_out_of_the_map ... ok
+test expand::tests::optical_check_allows_filters_dates_and_rounded_measurements ... ok
+test expand::tests::legacy_lens_canvas_requires_replanning_before_adding_frames ... ok
+test expand::tests::optical_check_finds_conflicts_even_with_missing_anchor_metadata ... ok
+test expand::tests::paired_stars_keep_only_panel_stars_with_a_frame_star_nearby ... ok
+test expand::tests::overlap_counts_what_the_crop_holds ... ok
+test defects::tests::dithered_lights_reveal_hot_and_dead_pixels_and_no_stars ... ok
+test expand::tests::projected_registration_never_downgrades_when_too_few_stars_constrain_the_warp ... ok
+test expand::tests::projected_default_registration_retains_geometry_for_unplanned_exposures ... ok
+test expand::tests::projected_default_registration_retains_geometry_across_a_meridian_flip ... ok
+test expand::tests::residual_outliers_exclude_panel_starts_and_need_a_median ... ok
+test expand::tests::sample_limit_counts_channels ... ok
+test expand::tests::restored_panels_reject_invalid_bounds_and_stars ... ok
+test expand::tests::wide_panel_projection_uses_a_validated_cubic ... ok
+test external::tests::a_completely_silent_child_is_still_cancellable ... FAILED
+test external::tests::a_cancelled_run_reports_cancelled ... ok
+test external::tests::a_false_switch_emits_the_negation_and_old_contracts_drop_host ... ok
+test external::tests::a_linear_image_round_trips_with_a_stars_sidecar ... ok
+test external::tests::a_failing_tool_with_a_chatty_stderr_neither_deadlocks_nor_loses_the_reason ... ok
+test external::tests::a_requested_stars_image_that_never_appears_is_an_error ... ok
+test external::tests::a_physical_adu_scale_survives_the_round_trip ... ok
+test external::tests::a_stacks_uncovered_samples_come_back_uncovered_in_both_images ... ok
+test external::tests::a_stretched_image_splits_on_its_own_scale_even_with_a_sample_outside_it ... ok
+test external::tests::a_v3_contract_uses_engine_instead_of_device ... ok
+test external::tests::a_whole_number_is_accepted_for_a_float_parameter ... ok
+test external::tests::a_v3_document_without_a_license_object_reads_as_licensed ... ok
+test external::tests::an_unlicensed_schema_is_refused_before_spawning ... ok
+test external::tests::arguments_resolve_flags_from_the_schema ... ok
+test external::tests::int_parameters_accept_whole_floats_and_refuse_fractions ... ok
+test external::tests::out_of_range_unknown_and_gui_only_parameters_are_refused ... ok
+test external::tests::splitting_stars_returns_the_starless_and_stars_images ... ok
+test external::tests::the_event_stream_yields_outputs_device_and_progress ... ok
+test external::tests::the_live_schema_parses_with_types_ranges_and_license ... ok
+test external::tests::negative_samples_survive_the_round_trip ... ok
+test fits::tests::a_binned_frame_says_so_in_its_headers ... ok
+test fits::tests::a_declared_range_rides_along_without_touching_the_samples ... ok
+test external::tests::without_the_stars_switch_no_sidecar_comes_back ... ok
+test fits::tests::an_xisf_solution_without_wcs_cards_becomes_wcs_cards ... ok
+test fits::tests::applies_nonstandard_fits_scaling_once ... ok
+test fits::tests::binned_wcs_drizzles_back_to_the_sensor_grid ... ok
+test fits::tests::a_master_is_written_with_a_master_imagetyp_for_other_software ... ok
+test fits::tests::converts_native_pixel_types_without_display_normalization ... ok
+test fits::tests::cropped_color_output_moves_crpix_to_its_own_grid ... ok
+test fits::tests::drizzled_headers_describe_the_same_sky_on_the_finer_grid ... ok
+test fits::tests::bottom_up_cfa_is_resolved_before_preparation_and_survives_processed_output ... ok
+test fits::tests::float_writer_round_trips_linear_samples_and_stack_counts ... ok
+test fits::tests::hierarch_reference_cards_are_not_mistaken_for_wcs ... ok
+test fits::tests::master_writer_round_trips_state_and_canonicalizes_metadata_aliases ... ok
+test fits::tests::planar_color_becomes_interleaved ... ok
+test fits::tests::path_loader_accepts_xisf_as_linear_input ... ok
+test fits::tests::processed_rgb_writer_drops_stale_bayer_metadata ... ok
+test fits::tests::raw_bayer_headers_keep_one_channel_when_a_restored_image_is_prepared_rgb ... ok
+test fits::tests::processed_writer_preserves_source_metadata_without_structural_cards ... ok
+test fits::tests::replacement_wcs_drops_conflicting_reference_matrix_forms ... ok
+test fits::tests::uncropped_color_output_keeps_the_reference_crpix ... ok
+test fits::tests::xisf_output_path_round_trips_rgb_and_metadata ... ok
+test gpu::gather::tests::gpu_gather_preserves_sample_bits_and_counts_nonfinite_values ... ok
+test gpu::tests::a_call_keeps_each_pass_where_its_options_say ... ok
+test gpu::tests::a_frame_and_its_mask_resample_together_as_apart ... ok
+test gpu::tests::a_listed_clip_mask_resamples_as_its_image_does ... ok
+test gpu::tests::an_accumulator_that_would_crowd_the_card_stays_on_the_cpu ... ok
+test gpu::tests::gpu_band_integration_matches_the_cpu ... ok
+test gpu::tests::gpu_clipping_lists_preserve_every_contribution_and_dense_overflow ... ok
+test gpu::tests::gpu_resampling_matches_the_cpu ... ok
+test flat_stability::tests::coherent_spots_agree_transient_spots_and_unreadable_inputs_drift ... ok
+test gpu_options::tests::a_narrower_request_narrows_and_never_widens ... ok
+test gpu_options::tests::options_read_as_written_and_default_every_field ... ok
+test image::tests::a_flat_colour_field_demosaics_exactly ... ok
+test image::tests::a_frame_debayered_on_the_gpu_stays_there_whole ... ok
+test gpu::tests::the_shaders_validate ... ok
+test image::tests::binning_averages_finite_samples_and_drops_the_remainder ... ok
+test image::tests::crop_copies_the_requested_region ... ok
+test image::tests::crop_keeps_every_channel_of_an_rgb_pixel ... ok
+test image::tests::crop_rejects_a_region_outside_the_image ... ok
+test image::tests::debayer_preserves_samples_at_native_color_sites ... ok
+test image::tests::a_small_coloured_star_keeps_its_colour_across_its_profile ... ok
+test image::tests::gpu_vng_matches_the_cpu ... ok
+test image::tests::superpixel_takes_each_cell_s_photosites ... ok
+test image::tests::vng_lanes_match_the_per_pixel_vng_bit_for_bit ... ok
+test lens::tests::a_lens_fit_carries_between_the_sensor_and_a_binned_grid ... ok
+test calibration_files::tests::one_dark_set_builds_all_supplied_inputs_across_nights ... ok
+test image::tests::debayering_matches_the_previous_debayer_bit_for_bit ... ok
+test expand::tests::projected_registration_rejects_sparse_sensor_fixed_matches ... ok
+test lens::tests::estimate_declines_frames_without_distortion ... ok
+test lens::tests::estimate_declines_star_noise_alone ... ok
+test lens::tests::folding_distortion_is_invalid ... ok
+test lens::tests::similarity_fit_recovers_a_transform ... ok
+test lens::tests::undistort_inverts_distort ... ok
+test lens::tests::estimate_fits_a_mild_lens_behind_star_noise ... ok
+test mapping::tests::affine_output_stage_keeps_source_mapping_and_normalization ... ok
+test lens::tests::estimate_recovers_a_decentered_lens_by_similarities ... ok
+test mapping::tests::geometry_alone_resamples_as_extraction_does_without_the_normalization ... ok
+test mapping::tests::json_carries_the_bin_factor_and_compact_binary_leaves_it_out ... ok
+test lens::tests::estimate_recovers_a_decentered_lens_on_tangent_planes ... ok
+test mapping::tests::local_normalization_keeps_the_exact_two_stage_order ... ok
+test mapping::tests::mapping_rejects_an_unknown_schema ... ok
+test mapping::tests::mapping_round_trips_and_extracts_the_reference_region ... ok
+test drizzle::tests::bayer_frames_drizzle_as_the_reference_does ... ok
+test mapping::tests::superpixel_mapping_extracts_co_sited_planes_through_affine_and_warp ... ok
+test mapping::tests::rebinned_mappings_agree_with_converting_each_point ... ok
+test master::dark_rejection::tests::source_leases_honor_cancellation ... ok
+test master::dark_rejection::tests::source_leases_leave_descriptor_headroom ... ok
+test master::flat_rejection::tests::an_overly_tight_threshold_falls_back_to_the_median_not_the_outlier_mean ... ok
+test master::flat_rejection::tests::benchmark_flat_integration ... ignored, manual 64-frame, 1 MP flat-integration performance check
+test master::flat_rejection::tests::cancellation_during_tile_reads_removes_scratch ... ok
+test master::flat_rejection::tests::combining_reports_each_tile_and_then_the_end ... ok
+test master::flat_rejection::tests::insufficient_masked_or_post_clipped_coverage_fails_without_a_fallback ... ok
+test master::flat_rejection::tests::large_finite_responses_do_not_overflow_the_robust_center ... ok
+test master::flat_rejection::tests::masks_partition_counts_and_two_retained_samples_are_not_clipped ... ok
+test master::flat_rejection::tests::noisy_temporal_clipping_matches_across_tile_sizes_and_input_order ... ok
+test mapping::tests::json_carries_the_warp_and_compact_binary_leaves_it_out ... ok
+test master::flat_rejection::tests::order_keys_sort_as_total_cmp_and_round_trip ... ok
+test master::flat_rejection::tests::one_sort_finds_the_selected_median_and_deviation_bit_for_bit ... ok
+test master::flat_rejection::tests::robust_bounds_reject_both_tails_and_tolerate_flat_rounding ... ok
+test master::flat_rejection::tests::tile_planning_and_offsets_are_checked ... ok
+test master::flat_rejection::tests::truncated_scratch_fails_and_is_removed ... ok
+test master::flat_rejection::tests::two_frame_and_evenly_split_sets_do_not_guess_which_signal_is_real ... ok
+test master::star_masking::tests::broad_saturation_expands_even_for_an_elongated_core_at_an_odd_edge ... ok
+test master::star_masking::tests::isolated_saturation_is_reported_without_creating_a_star_hole ... ok
+test master::star_masking::tests::native_star_footprint_masks_all_channels_and_preserves_other_samples ... ok
+test master::star_masking::tests::saturation_uses_raw_encoding_or_explicit_metadata_not_observed_ranges ... ok
+test master::tests::a_bias_reports_each_frame_of_both_passes ... ok
+test master::tests::a_build_stops_at_an_unreadable_frame_or_a_late_cancel ... ok
+test master::tests::a_cancelled_build_stops_instead_of_returning_a_master ... ok
+test batch::tests::frames_loaded_once_match_the_original_bit_for_bit ... ok
+test master::tests::a_dark_screen_that_keeps_every_frame_reads_nothing_again ... ok
+test master::tests::a_flat_from_another_night_is_set_aside_not_fatal ... ok
+test master::tests::a_frame_set_aside_while_reading_still_counts_as_a_step ... ok
+test master::tests::a_flat_reports_its_reads_and_then_the_combine ... ok
+test master::tests::a_master_is_never_built_from_one_surviving_frame ... ok
+test mapping::tests::calls_given_cpu_options_debayer_and_resample_on_the_cpu ... ok
+test mapping::tests::affine_extraction_given_cpu_options_resamples_both_stages_on_the_cpu ... ok
+test master::tests::a_signal_that_never_fires_leaves_the_build_alone ... ok
+test master::tests::calibrates_and_normalizes_each_flat_before_integration ... ok
+test master::tests::a_screened_dark_reports_the_reread_and_integrates_only_what_it_kept ... ok
+test master::tests::dark_screening_replays_a_dawn_leak ... ok
+test master::tests::builds_a_sigma_clipped_master_without_retaining_inputs ... ok
+test master::dark_rejection::tests::rgb_bias_calibration_and_counts_do_not_depend_on_tile_boundaries ... ok
+test master::tests::leave_one_out_clipping_rejects_a_single_outlier_in_small_sets ... ok
+test master::tests::defect_suppression_removes_a_hot_pixel_every_flat_shares ... ok
+test master::tests::non_finite_samples_are_found_in_any_chunk ... ok
+test master::tests::dark_screening_keeps_a_steady_set_and_refuses_other_kinds ... ok
+test master::tests::callbacks_run_only_on_the_building_thread ... ok
+test master::tests::raw_dark_master_does_not_mix_dark_and_dark_flat_roles ... ok
+test master::tests::rejects_duplicate_source_paths ... ok
+test master::tests::dark_screening_sets_aside_frames_that_caught_light ... ok
+test master::tests::raw_master_build_rejects_wrong_roles_masters_and_preprocessed_inputs ... ok
+test master::tests::sky_flat_rejection_retains_cfa_sampling_and_persistent_pixel_response ... ok
+test master::tests::two_frame_sets_are_averaged_without_clipping ... ok
+test master::tests::sky_flat_clipping_removes_overlapping_moving_stars_without_erasing_response ... ok
+test master::tests::written_flat_master_preserves_matching_metadata_and_reloads_for_its_light ... ok
+test master::tests::parallel_bias_and_dark_loops_match_the_serial_loops_bit_for_bit ... ok
+test narrowband_balance::tests::hoo_ignores_the_unused_third_plane_and_skips_noise ... ok
+test narrowband_balance::tests::balance_protects_shadows_and_ha_and_skips_flat_channels ... ok
+test narrowband_balance::tests::invalid_samples_and_options_fail_without_mutation ... ok
+test narrowband_balance::tests::stars_keep_saturated_signal_above_a_nearly_white_base ... ok
+test narrowband_balance::tests::stars_reconstruct_original_and_mask_missing_coverage ... ok
+test normalization::tests::a_canvas_measures_the_widths_its_first_samples_lacked ... ok
+test normalization::tests::a_reference_without_measurable_stars_masks_nothing ... ok
+test normalization::tests::a_few_stars_still_scale_the_aperture ... ok
+test master::tests::stationary_star_fails_coverage_and_cleans_scratch_instead_of_filling_holes ... ok
+test narrowband_balance::masked_statistics_tests::exclusion_changes_statistics_without_masking_output_pixels ... ok
+test normalization::tests::a_tile_the_mask_leaves_little_of_takes_its_neighbours_offset ... ok
+test normalization::tests::a_width_too_broad_for_most_stamps_is_not_the_narrow_first_guess ... ok
+test normalization::tests::channel_mean_gain_averages_one_channel_across_tiles ... ok
+test normalization::tests::background_offsets_do_not_follow_seeing ... ok
+test normalization::tests::global_normalization_recovers_affine_background ... ok
+test normalization::tests::global_region_application_keeps_per_channel_coefficients ... ok
+test normalization::tests::local_background_fills_tiles_the_frame_does_not_cover ... ok
+test normalization::tests::background_refits_from_samples_alone_as_from_whole_images ... ok
+test normalization::tests::local_background_removes_a_gradient_with_one_gain ... ok
+test normalization::tests::malformed_serialized_maps_are_rejected_before_pixel_work ... ok
+test normalization::tests::normalization_maps_round_trip_for_cached_provenance ... ok
+test normalization::tests::local_normalization_rejects_an_unusable_tile ... ok
+test normalization::tests::paired_background_offsets_do_not_follow_shared_nebulae ... ok
+test normalization::tests::paired_background_offsets_require_finite_pairs_and_resist_outliers ... ok
+test normalization::tests::a_refit_refuses_a_mask_of_another_grid ... ok
+test master::tests::native_masks_remove_majority_stars_with_coverage_preserving_cfa_and_response ... ok
+test normalization::tests::photometric_gain_follows_stars_not_cloud ... ok
+test drizzle::tests::colour_and_monochrome_frames_drizzle_as_the_reference_does ... ok
+test normalization::tests::one_walk_of_a_tile_gives_each_channels_offsets ... ok
+test normalization::tests::photometry_shrinks_to_fit_rather_than_giving_up ... ok
+test normalization::tests::preserves_extreme_gain_for_admission_instead_of_clamping ... ok
+test normalization::tests::refitted_background_offsets_do_not_follow_seeing ... ok
+test normalization::tests::region_application_matches_the_same_part_of_the_full_image ... ok
+test normalization::tests::row_normalizer_matches_per_sample_interpolation_bit_for_bit ... ok
+test master::flat_rejection::tests::parallel_flat_combine_matches_the_serial_combine_bit_for_bit ... ok
+test normalization::tests::photometric_gain_does_not_follow_seeing ... ok
+test normalization::tests::photometry_leaves_out_stars_the_frame_clips ... ok
+test normalization::tests::stepped_tile_samples_are_the_divided_ones ... ok
+test normalization::tests::the_gpu_normalizes_a_frame_as_the_cpu_does ... ok
+test normalization::tests::spatial_background_residual_preserves_the_base_and_only_adds_offsets ... ok
+test normalization::tests::the_mask_leaves_at_least_half_the_grid ... ok
+test orientation::tests::canonical_wcs_keeps_dimensions_and_samples ... ok
+test orientation::tests::quarter_turn_retains_the_full_footprint_and_points_north_up ... ok
+test orientation::tests::mirrored_wcs_is_reprojected_to_east_left ... ok
+test paths::tests::resolves_parent_components_for_a_future_output ... ok
+test pipeline::pool_tests::budget_caps_explicit_workers_and_includes_rgb_intermediates ... ok
+test orientation::tests::apply_given_cpu_options_resamples_on_the_cpu ... ok
+test pipeline::pool_tests::an_ordinary_stack_costs_its_frames_at_the_reference_size ... ok
+test pipeline::pool_tests::derived_worker_counts_follow_the_callers_pool ... ok
+test pipeline::pool_tests::empty_batch_has_no_workers_or_artificial_timings ... ok
+test pipeline::pool_tests::callback_can_hold_non_send_coordinator_state ... ok
+test normalization::tests::photometric_gain_follows_transparency_at_any_seeing ... ok
+test pipeline::pool_tests::insufficient_budget_fails_before_any_source_is_read ... ok
+test normalization::tests::spatial_normalization_samples_match_whole_images_on_other_grids ... ok
+test pipeline::pool_tests::integration_is_available_while_another_reader_waits ... ok
+test pipeline::pool_tests::normalized_xisf_inputs_match_the_legacy_pool_fallback ... ok
+test pipeline::pool_tests::explicit_serial_stop_and_callback_panic_preserve_an_exact_resumable_prefix ... ok
+test pipeline::pool_tests::reads_and_preparation_overlap_on_the_intended_threads ... ok
+test pipeline::pool_tests::nested_same_or_other_single_thread_pool_falls_back_without_deadlock ... ok
+test pipeline::pool_tests::explicit_serial_pools_preserve_decisions_failures_and_caller_state ... ok
+test pipeline::pool_tests::serial_core_read_and_preparation_panics_propagate_without_advancing ... ok
+test pipeline::pool_tests::serial_scratch_and_persistent_buffers_fit_a_96_byte_sample_envelope ... ok
+test pipeline::pool_tests::read_and_preparation_panics_propagate_and_do_not_hang ... ok
+test pipeline::pool_tests::serial_core_keeps_reads_on_caller_and_does_not_read_past_stop ... ok
+test pipeline::pool_tests::the_older_call_inside_a_pool_prepares_frames_side_by_side_there ... ok
+test pipeline::tests::a_declared_unit_frame_is_scaled_as_it_is_read ... ok
+test pipeline::tests::a_derived_worker_count_falls_out_of_the_budget ... ok
+test normalization::tests::gathered_samples_preserve_every_preparation_fit ... ok
+test pipeline::pool_tests::cancellation_and_callback_panic_join_bounded_in_flight_work ... ok
+test pipeline::pool_tests::supplied_pool_session_master_changes_match_sequential_batches ... ok
+test pipeline::pool_tests::supplied_pools_preserve_exact_order_results_and_read_failures ... ok
+test pipeline::tests::a_path_already_stacked_is_refused_for_itself ... ok
+test pipeline::tests::a_repeat_is_refused_without_reading_the_file ... ok
+test pipeline::tests::a_session_swap_is_not_judged_against_the_reference_frame ... ok
+test pipeline::pool_tests::rgb_and_cfa_frames_match_sequential_preparation ... ok
+test pipeline::tests::a_panicking_callback_unwinds_instead_of_hanging ... ok
+test pipeline::tests::an_explicit_worker_count_is_held_to_a_ceiling ... ok
+test pipeline::tests::an_explicit_worker_count_is_taken_at_its_word ... ok
+test pipeline::tests::a_repeated_path_costs_that_path_alone ... ok
+test pipeline::tests::an_unreadable_path_is_reported_without_stopping_the_run ... ok
+test calibration_files::tests::unavailable_light_background_stays_undetermined ... ok
+test pipeline::tests::cancelling_opens_no_further_paths ... ok
+test pipeline::tests::frames_turned_away_after_registration_leave_no_retained_file ... ok
+test pipeline::tests::a_pipelined_stack_is_bit_identical_to_a_sequential_one ... ok
+test pipeline::tests::a_single_worker_pipeline_matches_too ... ok
+test pipeline::tests::a_two_batch_calibration_swap_is_bit_identical_to_a_sequential_one ... ok
+test batch::tests::band_passes_match_the_original_bit_for_bit ... ok
+test pipeline::tests::double_scale_drizzle_keeps_flux_and_star_positions ... ok
+test pipeline::tests::set_calibration_rejects_mismatched_masters_eagerly ... ok
+test pipeline::tests::reintegration_cleans_the_cache_and_refuses_invalid_scratch ... ok
+test pipeline::tests::reintegration_follows_calibration_sets_it_can_reload ... ok
+test pipeline::tests::stopping_early_leaves_the_remaining_paths_alone ... ok
+test pipeline::tests::reintegration_survives_a_saved_context_and_refuses_changed_sources ... ok
+test pipeline::tests::the_report_counts_what_the_run_did ... ok
+test pipeline::tests::a_resumed_stack_retains_later_frames_and_replays_the_same ... ok
+test pipeline::tests::reintegration_rejects_a_trail_the_live_pass_admitted_in_the_reference ... ok
+test pixinsight::tests::a_file_that_is_not_an_mldenoise_model_is_refused ... ok
+test pixinsight::tests::a_launcher_is_not_given_a_folder_the_shell_would_interpret ... ok
+test pixinsight::tests::a_model_header_gives_its_process_routes_and_identity ... ok
+test pipeline::tests::unit_scale_drizzle_matches_the_reintegration_and_rejects_the_trail ... ok
+test pipeline::tests::the_equivalence_holds_when_frames_are_rejected ... ok
+test pipeline::tests::weighted_pipelined_stack_matches_sequential_weighted_stack ... ok
+test normalization::tests::photometric_gain_does_not_follow_seeing_with_broad_wings ... ok
+test pixinsight::tests::only_the_core_ml_models_of_the_exited_instance_are_removed ... ok
+test pixinsight::tests::options_outside_pixinsights_ranges_are_refused ... ok
+test pixinsight::tests::real_pixinsight_denoises_an_image ... ignored, needs PixInsight and an MLDenoise model
+test recycle::tests::a_buffer_given_back_is_taken_again_only_where_it_fits ... ok
+test reference::tests::references_rank_the_flattest_near_the_best_then_by_score ... ok
+test reference::tests::sharp_clear_frames_outscore_trailed_noisy_or_hazy_ones ... ok
+test reference::tests::the_flattest_of_nearly_equal_frames_is_chosen ... ok
+test pipeline::tests::weighted_reintegration_replays_the_recorded_weights ... ok
+test registration::tests::a_star_too_faint_to_clamp_rings_little_even_stacked ... ok
+test registration::tests::affine_resampling_can_flip_an_image_horizontally ... ok
+test registration::tests::affine_transform_composition_preserves_a_parity_flip ... ok
+test registration::tests::bilinear_resampling_uses_inverse_transform ... ok
+test registration::tests::candidates_scored_in_parallel_keep_the_same_best ... ok
+test registration::tests::detection_normalization_handles_flat_images ... ok
+test registration::tests::detection_normalization_preserves_bright_sample_order ... ok
+test registration::tests::effective_drift_uses_the_larger_pixel_or_fractional_bound ... ok
+test registration::tests::every_footprint_fits_the_bound_at_any_rotation_and_admitted_scale ... ok
+test registration::tests::fits_known_similarity_transform ... ok
+test registration::tests::footprint_holds_every_sample_a_frame_gives_the_grid ... ok
+test registration::tests::footprint_leaves_out_where_a_lens_folds_back_far_from_the_frame ... ok
+test registration::tests::footprint_of_a_warp_that_cannot_be_inverted_is_the_whole_grid ... ok
+test registration::tests::geometric_seed_pairs_stars_beyond_the_similarity_search_radius ... ok
+test registration::tests::gpu_detection_matches_the_cpu ... ok
+test registration::tests::identity_resampling_preserves_the_final_row_and_column ... ok
+test registration::tests::interpolation_reads_and_writes_the_words_options_use ... ok
+test registration::tests::lanczos_clamps_a_star_at_twenty_times_the_noise ... ok
+test registration::tests::lanczos_identity_and_whole_pixel_shifts_return_the_samples ... ok
+test registration::tests::lanczos_keeps_a_star_peak_better_than_bilinear_without_ringing ... ok
+test pipeline::tests::retained_frames_replay_bit_identically_without_reading_sources ... ok
+test registration::tests::lanczos_leaves_a_faint_noisy_sky_unbiased_at_every_subpixel_phase ... ok
+test registration::tests::lanczos_still_clamps_a_bright_star_on_a_faint_noisy_sky ... ok
+test registration::tests::lens_warps_cannot_silently_lose_distortion_in_binary_serialization ... ok
+test registration::tests::low_drift_seed_honors_the_configured_search_bound ... ok
+test registration::tests::low_drift_seed_uses_common_stars_beyond_the_triangle_subset ... ok
+test registration::tests::photosite_noise_reads_a_plain_frame_as_frame_noise_does ... ok
+test registration::tests::polynomial_source_composition_preserves_every_order_and_rejects_a_lens ... ok
+test registration::tests::polynomial_warp_fit_recovers_a_quadratic_exactly ... ok
+test registration::tests::quadratic_registration_follows_a_distorted_field ... ok
+test registration::tests::region_resampling_matches_the_same_full_reference_crop ... ok
+test registration::tests::region_resampling_rejects_empty_or_out_of_bounds_regions ... ok
+test registration::tests::region_resampling_uses_absolute_reference_coordinates ... ok
+test registration::tests::registration_options_reject_invalid_drift_bounds ... ok
+test registration::tests::resampled_coverage_is_the_resampled_finite_samples ... ok
+test registration::tests::resampling_from_channel_sites_lines_colours_up ... ok
+test registration::tests::lanczos_leaves_a_demosaiced_faint_sky_unbiased_at_every_subpixel_phase ... ok
+test registration::tests::resampling_places_a_cropped_source_on_the_reference_grid ... ok
+test registration::tests::resampling_rejects_invalid_output_and_transform ... ok
+test registration::tests::resampling_undoes_a_meridian_flip_about_the_image_center ... ok
+test registration::tests::similarity_transform_composition_matches_sequential_application ... ok
+test registration::tests::spatial_index_checks_adjacent_and_negative_bins ... ok
+test registration::tests::translation_candidates_match_votes_kept_in_a_map ... ok
+test calibration_files::tests::native_correction_is_applied_to_the_published_flat_and_reused ... ok
+test replay::tests::background_sample_cache_preserves_bits_and_stores_only_footprint_tiles ... ok
+test replay::tests::background_sample_cache_rejects_malformed_files_and_regions ... ok
+test replay::tests::binned_drizzle_bounds_native_source_reads ... ok
+test registration::tests::resampling_matches_per_channel_filtering_bit_for_bit ... ok
+test pipeline::tests::banded_replay_matches_the_whole_frame_passes_bit_for_bit ... ok
+test replay::tests::chosen_frames_must_be_admitted_frames_named_once ... ok
+test replay::tests::explicit_replay_scratch_never_silently_disables_the_cache ... ok
+test registration::tests::triangle_candidates_match_a_scan_of_every_pair ... ok
+test replay::tests::frame_tolerances_are_kept_only_when_some_differ ... ok
+test pixinsight::tests::an_xisf_output_declares_the_range_its_input_declared ... ok
+test replay::tests::kept_frames_read_back_as_replay_makes_them_and_staged_files_go_with_their_frames ... ok
+test replay::tests::kept_photosites_normalize_as_the_whole_frame_passes_do ... ok
+test replay::tests::kept_regions_read_back_in_bands_as_the_images_they_stand_for ... ok
+test replay::tests::full_resolution_cache_checks_scratch_before_native_reads_and_uses_native_tiles ... ok
+test replay::tests::chosen_frames_integrate_alike_in_bands_and_whole ... ok
+test registration::tests::a_registrar_built_for_the_cpu_detects_stars_there ... ok
+test replay::tests::mosaic_background_reference_preserves_spatially_agreed_nebula ... ok
+test replay::tests::mixed_canvas_refinement_uses_warped_neighbours_without_refitting_them ... ok
+test replay::tests::explicit_replay_scratch_write_failure_does_not_fall_back ... ok
+test replay::tests::mosaic_background_refit_preserves_an_already_correct_spatial_map ... ok
+test replay::tests::mosaic_background_residual_matches_bands_and_whole_replay ... ok
+test replay::tests::weight_records_must_cover_every_frame_with_positive_weights ... ok
+test replay::tests::retained_cache_ignores_an_unused_replay_directory ... ok
+test report::tests::channel_support_and_rejection_are_measured_without_changing_pixels ... ok
+test report::tests::drizzle_reports_weight_not_frame_count ... ok
+test report::tests::final_diagnostics_are_explicit_and_validated ... ok
+test report::tests::map_is_bounded_block_mean_including_missing_pixels ... ok
+test residual_flat::tests::compatibility_adapter_applies_patch ... ok
+test residual_flat::tests::compatibility_adapter_preserves_response_fixture ... ok
+test saturation::tests::a_bayer_mask_spreads_two_pixels_and_binning_keeps_any_clipped_pixel ... ok
+test saturation::tests::a_mask_too_full_to_list_is_held_whole_and_both_read_alike ... ok
+test saturation::tests::saturation_uses_raw_encoding_or_explicit_metadata_not_observed_ranges ... ok
+test saturation::tests::the_raw_mask_marks_samples_at_the_ceiling_and_none_without_one ... ok
+test sessions::tests::a_light_given_twice_keeps_one_session ... ok
+test sessions::tests::a_plan_saved_with_device_identities_still_reads ... ok
+test sessions::tests::a_saved_plan_checks_each_source_only_when_it_is_used ... ok
+test sessions::tests::a_saved_plan_must_agree_with_itself ... ok
+test sessions::tests::a_saved_plan_verifies_sources_by_size_and_time ... ok
+test sessions::tests::assignments_and_gate_errors_are_refused_before_file_reads ... ok
+test sessions::tests::large_assignment_lists_have_no_frame_or_file_descriptor_cap ... ok
+test replay::tests::warped_canvas_refinement_skips_reads_but_replay_still_checks_sources ... ok
+test sessions::tests::physical_aliases_are_not_distinct_inputs_or_master_roles ... ok
+test snr::tests::a_frame_too_small_or_too_empty_is_not_measured ... ok
+test sessions::tests::replacing_a_file_with_preserved_length_and_time_invalidates_the_plan ... ok
+test pixinsight::tests::a_failed_run_explains_what_pixinsight_said ... ok
+test snr::tests::a_view_that_does_not_describe_its_own_slices_is_declined ... ok
+test snr::tests::checkpoint_depths_double_and_end_on_the_full_set ... ok
+test snr::tests::a_thin_dithered_edge_does_not_read_as_pixel_structure ... ok
+test snr::tests::frame_noise_reads_each_channel_of_one_image ... ok
+test snr::tests::averaging_four_times_the_frames_halves_the_measured_noise ... ok
+test snr::tests::noise_is_measured_through_a_sky_gradient_and_a_bright_target ... ok
+test snr::tests::uncovered_samples_are_not_measured ... ok
+test snr::tests::row_banding_is_not_averaged_away_by_the_other_axis ... ok
+test replay::tests::whole_frame_replay_matches_bands_inside_one_and_two_thread_pools ... ok
+test stack::binned_tests::a_binned_context_keeps_its_bin_factor ... ok
+test pixinsight::tests::an_image_returns_on_its_own_scale_with_the_runs_details ... ok
+test stack::binned_tests::bin_factors_outside_one_to_four_and_binned_bayer_drizzle_are_refused ... ok
+test stack::binned_tests::a_full_resolution_reintegration_masks_the_stars_where_they_lie ... ok
+test replay::tests::mosaic_background_reference_checks_cancellation_and_redundant_sources ... ok
+test replay::tests::choosing_every_frame_reintegrates_as_reintegrate_does ... ok
+test stack::binned_tests::reference_headers_follow_the_binned_grid_and_back ... ok
+test pixinsight::tests::a_slot_another_instance_took_is_tried_again ... ok
+test stack::binned_tests::binned_transforms_carry_to_the_sensor_through_a_half_turn ... ok
+test stack::binned_tests::prepared_pixels_are_binned_as_files_are ... ok
+test stack::canvas_tests::an_expanded_canvas_refuses_local_normalization ... ok
+test stack::canvas_tests::canvas_integration_timing_by_panel_count ... ignored, a timing run on large mosaic frames
+test stack::canvas_tests::canvas_reintegration_timing_by_panel_count ... ignored, a timing run on large mosaic frames
+test stack::binned_tests::a_binned_stack_drizzles_to_the_sensor_s_resolution ... ok
+test stack::binned_tests::superpixel_mapping_crops_match_live_reference_after_json_and_context ... ok
+test stack::binned_tests::a_superpixel_stack_lines_its_colours_up ... ok
+test replay::tests::mosaic_background_reference_uses_the_best_twenty_at_each_sample ... ok
+test pixinsight::tests::a_run_past_its_time_limit_or_cancelled_closes_pixinsight ... ok
+test stack::canvas_tests::a_binned_mosaic_reintegrates_at_full_resolution ... ok
+test stack::session_tests::a_repeated_or_linked_light_is_a_duplicate_frame_not_a_refused_plan ... ok
+test stack::session_tests::a_session_context_reopens_after_its_files_come_back_as_new_files ... ok
+test stack::session_tests::a_session_stack_reopened_takes_the_lights_its_session_gained ... ok
+test stack::session_tests::a_session_context_reopens_without_a_light_or_master_it_never_used ... ok
+test stack::binned_tests::a_binned_stack_reintegrates_at_full_resolution_as_a_native_stack ... ok
+test stack::tests::a_context_reopens_under_other_gpu_options ... ok
+test stack::session_tests::sequential_pushes_on_a_pool_report_calibration_sessions ... ok
+test stack::tests::a_defect_map_travels_in_the_options_and_the_context ... ok
+test stack::tests::a_defect_map_keeps_hot_photosites_out_of_registration_and_the_stack ... ok
+test stack::tests::a_light_admitted_at_its_measured_angle_replays_at_it ... ok
+test stack::tests::batch_rejection_removes_trail_that_live_warmup_cannot_revisit ... ok
+test stack::tests::a_stack_opened_on_a_reference_image_protects_it_and_keeps_its_path ... ok
+test stack::session_tests::a_session_context_saved_with_device_identities_still_opens ... ok
+test stack::tests::context_preserves_calibration_headers_and_source_ledger ... ok
+test stack::tests::cosmetic_correction_cleans_a_hot_pixel_from_reference_and_pushed_frames ... ok
+test stack::tests::a_stack_judges_each_light_under_its_gate_and_replays_it_so ... ok
+test stack::tests::delta_sigma_rejects_late_outlier_without_moving_mean ... ok
+test stack::session_tests::session_stacks_on_one_reference_combine_into_the_whole_stack ... ok
+test stack::canvas_tests::panels_just_short_of_the_minimum_overlap_are_noted_at_planning ... ok
+test stack::tests::export_snapshot_owns_only_a_frozen_finalized_mean ... ok
+test stack::tests::fraction_diagnostics_do_not_round_a_refusal_to_equality ... ok
+test stack::tests::gpu_options_leave_the_fingerprint_and_a_context_keeps_them ... ok
+test stack::tests::bayer_drizzle_integrates_one_photosite_per_pixel_and_replays_the_same ... ok
+test stack::tests::legacy_contexts_open_but_fail_closed_until_masters_are_reloaded ... ok
+test stack::tests::meridian_flip_rotation_is_measured_from_half_a_turn ... ok
+test stack::tests::context_resume_is_identical_to_uninterrupted_online_integration ... ok
+test stack::tests::master_building_tolerances_leave_a_stack_identity_alone ... ok
+test stack::tests::photosite_gaps_fill_from_the_same_channel_and_keep_zero_coverage ... ok
+test stack::tests::prepared_frame_constructor_retains_headers_and_rejects_raw_cfa ... ok
+test stack::tests::older_lens_context_drops_raw_anchor_wcs_on_reopening ... ok
+test stack::tests::prepared_stack_refuses_path_calibration_without_mutation ... ok
+test stack::tests::path_calibration_swap_is_atomic_updates_the_ledger_and_fingerprints ... ok
+test stack::tests::quadratic_registration_warps_survive_a_context_round_trip ... ok
+test stack::tests::rejects_invalid_online_options_before_allocating_state ... ok
+test stack::tests::expanded_context_without_panel_stars_still_registers_frames ... ok
+test stack::tests::sparse_clipping_matches_dense_across_regions_and_frame_order ... ok
+test stack::tests::stack_options_support_partial_json_and_reject_unknown_fields ... ok
+test stack::tests::the_accumulator_follows_the_gpu_options_a_context_reopens_under ... ok
+test stack::tests::the_admission_count_is_where_the_fraction_comparison_turns ... ok
+test stack::tests::the_gpu_accumulator_matches_the_cpu ... ok
+test stack::tests::the_next_channel_reference_is_tried_when_one_does_not_align ... ok
+test stack::tests::registration_rms_limit_does_not_follow_previous_frames ... ok
+test stack::tests::truncated_context_is_rejected ... ok
+test stack::tests::the_stack_records_where_frames_clipped_and_a_context_keeps_it ... ok
+test stack::tests::drizzled_bayer_frames_keep_their_colours_and_reject_a_trail ... ok
+test stack::weighting_tests::equal_weighting_is_not_serialized_and_weighted_options_parse ... ok
+test stack::tests::unusable_tolerances_are_refused_where_they_enter ... ok
+test stack::weighting_tests::equal_weighting_matches_the_release_before_weighting ... ok
+test stack::tests::external_reference_replays_cached_uncached_and_restored_lights ... ok
+test stack::weighting_tests::tampered_weighted_contexts_are_refused ... ok
+test stack::weighting_tests::a_weighted_snapshot_sums_its_frames_weights ... ok
+test stack::weighting_tests::weighted_batch_replay_matches_optimal_noise_and_removes_trails ... ok
+test stack::weighting_tests::unit_weights_integrate_bit_identically_to_equal_weights ... ok
+test star_stretch::tests::invalid_options_and_coverage ... ok
+test star_stretch::tests::physical_units_and_background_cancel_without_per_channel_scaling ... ok
+test star_stretch::tests::tone_matches_analytic_values_and_smaller_amount_subdues_stars ... ok
+test tasks::tests::a_dropped_task_that_has_not_started_never_runs ... ok
+test tasks::tests::a_one_thread_pool_never_waits_on_itself ... ok
+test tasks::tests::a_panic_in_started_work_reaches_the_caller ... ok
+test tasks::tests::inside_a_pool_the_work_and_its_rayon_work_stay_there ... ok
+test tasks::tests::outside_a_pool_helpers_do_the_work_themselves ... ok
+test stack::tests::reintegration_refits_backgrounds_against_an_integrated_reference ... ok
+test stack::weighting_tests::weighted_context_round_trips_bit_exactly_as_version_4 ... ok
+test stack::weighting_tests::inverse_noise_weighting_reaches_the_optimal_stack_noise ... ok
+test stack::canvas_tests::a_frame_is_resampled_over_its_footprint_alone ... ok
+test stack::weighting_tests::weighted_rejection_scales_sigma_to_each_frames_noise ... ok
+test stack::canvas_tests::footprints_stack_a_mono_mosaic_as_the_whole_canvas_does ... ok
+test stack::tests::retained_bayer_frames_replay_bit_identically ... ok
+test stack::canvas_tests::a_mosaic_plans_its_frames_memory_by_their_footprints ... ok
+test stack::canvas_tests::footprints_stack_a_colour_mosaic_as_the_whole_canvas_does ... ok
+
+failures:
+
+---- external::tests::a_completely_silent_child_is_still_cancellable stdout ----
+
+thread 'external::tests::a_completely_silent_child_is_still_cancellable' (2944528) panicked at seiza-stacking/src/external.rs:1514:9:
+assertion failed: matches!(error, Error::Cancelled)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    external::tests::a_completely_silent_child_is_still_cancellable
+
+test result: FAILED. 607 passed; 1 failed; 6 ignored; 0 measured; 0 filtered out; finished in 22.52s
+
+error: test failed, to rerun pass `-p seiza-stacking --lib`
