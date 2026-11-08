@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 
 from seiza_training.holes import HoleGuard, guarded, guarded_residual, sky_floor
-from seiza_training.noise_model import IMAGE_MAP_SCALE, SKY_BLOCK
+from seiza_training.noise_model import IMAGE_MAP_SCALE, NOISE_CORRELATION, SKY_BLOCK
 
 HERE = Path(__file__).parent
 WIDTH, HEIGHT = 230, 170
@@ -67,6 +67,7 @@ def main() -> None:
         "stride": STRIDE,
         "sky_block": SKY_BLOCK,
         "image_map_scale": IMAGE_MAP_SCALE,
+        "noise_correlation": NOISE_CORRELATION,
         "guard": guard.card(),
         "level": LEVEL,
         "floor": [float(value) for value in floor[::STRIDE, ::STRIDE].ravel()],

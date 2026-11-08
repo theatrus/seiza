@@ -642,7 +642,10 @@ mod tests {
             let installed: Value = serde_json::from_str(&taken(installed)).unwrap();
             assert_eq!(installed["name"], "noise-tiny");
             assert_eq!(installed["noiseMap"], "constant");
-            assert!(installed["holes"].is_null(), "the tiny model's card has no guard");
+            assert!(
+                installed["holes"].is_null(),
+                "the tiny model's card has no guard"
+            );
 
             let listed = seiza_model_list_json(store.as_ptr(), &mut error);
             let listed: Value = serde_json::from_str(&taken(listed)).unwrap();

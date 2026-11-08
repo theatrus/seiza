@@ -7,7 +7,7 @@ use crate::bands::NoiseBands;
 use crate::bundle::{HoleGuard, InputPlane, NoiseInput, NoisePlane, Reading, SkyInput};
 use crate::error::ModelError;
 use crate::holes::{guarded, guarded_residual, sky_floor};
-use crate::noise::input_sigma;
+use crate::noise::{input_sigma, noise_correlation};
 use crate::sky::{network_input, scales, seen, smooth_sky};
 use crate::tiles::{Tiling, infer, origins, window};
 use serde::Deserialize;
@@ -64,6 +64,7 @@ impl Fixture {
             sky_block: 32,
             flat_block: self.expected.flat_block,
             image_map_scale: self.expected.image_map_scale,
+            noise_correlation: None,
             holes: None,
         }
     }
@@ -213,6 +214,87 @@ fn local_filter(planes: &[f32], side: usize, residual: &mut [f32]) -> Result<(),
     Ok(())
 }
 
+/// The harness's image map on an image whose noise is spread over neighbours,
+/// as `tests/fixtures/make_spread_fixtures.py` recorded it.
+#[derive(Deserialize)]
+struct SpreadExpected {
+    width: usize,
+    height: usize,
+    stride: usize,
+    sky_block: usize,
+    image_map_scale: f64,
+    noise_correlation: f64,
+    correlation: f64,
+    image_sigma: Samples,
+}
+
+#[test]
+fn the_map_s_raise_for_spread_noise_matches_the_harness() {
+    let directory = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
+    let text = std::fs::read_to_string(format!("{directory}/spread.json")).unwrap();
+    let want: SpreadExpected = serde_json::from_str(&text).unwrap();
+    let image = read_f32(&format!("{directory}/spread.f32"));
+    let (width, height) = (want.width, want.height);
+    let correlation = noise_correlation(&image, width, height);
+    assert!(
+        (correlation / want.correlation - 1.0).abs() < 1e-9,
+        "{correlation} against {}",
+        want.correlation
+    );
+    assert!(correlation > 2.0, "the spread noise is seen as spread");
+
+    let reading = |noise_correlation| Reading {
+        noise_map: NoiseInput::Image,
+        noise_plane: NoisePlane::Asinh,
+        sky: SkyInput::Flat,
+        sky_block: want.sky_block,
+        flat_block: 256,
+        image_map_scale: want.image_map_scale,
+        noise_correlation,
+        holes: None,
+    };
+    let raised = input_sigma(
+        &image,
+        width,
+        height,
+        &reading(Some(want.noise_correlation)),
+    );
+    let mut expected = want.image_sigma.iter();
+    for y in (0..height).step_by(want.stride) {
+        for x in (0..width).step_by(want.stride) {
+            let got = f64::from(raised[y * width + x]);
+            match expected.next().unwrap() {
+                None => assert!(got.is_nan(), "({x}, {y}): {got} is not NaN"),
+                Some(value) => assert!(
+                    (got / value - 1.0).abs() < 1e-5,
+                    "({x}, {y}): {got} against {value}"
+                ),
+            }
+        }
+    }
+    assert!(expected.next().is_none());
+
+    let measured = input_sigma(&image, width, height, &reading(None));
+    let index = 100 * width + 120;
+    let ratio = raised[index] / measured[index];
+    let expected_ratio = (want.correlation / want.noise_correlation) as f32;
+    assert!(
+        (ratio - expected_ratio).abs() < 1e-5,
+        "a card without it leaves the map as measured: {ratio}"
+    );
+}
+
+/// Little-endian floats from a fixture file.
+fn read_f32(path: &str) -> Vec<f32> {
+    std::fs::read(path)
+        .unwrap()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
+        .collect()
+}
+
 /// The harness's hole guard on an image holding holes, as
 /// `tests/fixtures/make_hole_fixtures.py` recorded it.
 #[derive(Deserialize)]
@@ -222,6 +304,7 @@ struct HoleExpected {
     stride: usize,
     sky_block: usize,
     image_map_scale: f64,
+    noise_correlation: Option<f64>,
     guard: HoleGuard,
     level: f32,
     floor: Vec<f64>,
@@ -235,13 +318,7 @@ fn the_hole_guard_matches_the_harness() {
     let directory = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
     let text = std::fs::read_to_string(format!("{directory}/holes.json")).unwrap();
     let want: HoleExpected = serde_json::from_str(&text).unwrap();
-    let bytes = std::fs::read(format!("{directory}/holes.f32")).unwrap();
-    let image: Vec<f32> = bytes
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|chunk| f32::from_le_bytes(*chunk))
-        .collect();
+    let image = read_f32(&format!("{directory}/holes.f32"));
     let (width, height) = (want.width, want.height);
     let close = |name: &str, got: f32, want: f64, tolerance: f64| {
         let scale = want.abs().max(1.0);
@@ -255,7 +332,12 @@ fn the_hole_guard_matches_the_harness() {
     let mut expected = want.floor.iter();
     for y in (0..height).step_by(want.stride) {
         for x in (0..width).step_by(want.stride) {
-            close("floor", floor[y * width + x], *expected.next().unwrap(), 1e-6);
+            close(
+                "floor",
+                floor[y * width + x],
+                *expected.next().unwrap(),
+                1e-6,
+            );
         }
     }
 
@@ -266,15 +348,23 @@ fn the_hole_guard_matches_the_harness() {
         sky_block: want.sky_block,
         flat_block: 256,
         image_map_scale: want.image_map_scale,
+        noise_correlation: want.noise_correlation,
         holes: Some(want.guard),
     };
     let guarded = guarded(&image, width, height, &want.guard, &reading).unwrap();
     let masked: Vec<usize> = (0..image.len()).filter(|&i| guarded.mask[i]).collect();
-    assert_eq!(masked, want.mask, "the same pixels are kept from the network");
+    assert_eq!(
+        masked, want.mask,
+        "the same pixels are kept from the network"
+    );
     for (&index, &value) in masked.iter().zip(&want.read) {
         close("read", guarded.read[index], value, 1e-6);
     }
-    let found: Vec<f32> = guarded.read.iter().map(|value| want.level - value).collect();
+    let found: Vec<f32> = guarded
+        .read
+        .iter()
+        .map(|value| want.level - value)
+        .collect();
     let residual = guarded_residual(&image, &guarded, &found, &want.guard);
     for (&index, &value) in masked.iter().zip(&want.residual) {
         close("residual", residual[index], value, 1e-5);

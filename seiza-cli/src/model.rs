@@ -196,7 +196,7 @@ fn operation_cards(report: &DenoiseReport, bands: &NoiseBands) -> Vec<WriteHeade
     let number = |key: &str, value: f32, comment: &str| {
         WriteHeaderCard::new(key, HeaderValue::Float(f64::from(value))).with_comment(comment)
     };
-    vec![
+    let mut cards = vec![
         text("SEIZAMDL", report.model.clone(), "Seiza learned model"),
         text("SEIZATRF", "LINEAR".to_string(), "linear sample transfer"),
         text(
@@ -224,7 +224,14 @@ fn operation_cards(report: &DenoiseReport, bands: &NoiseBands) -> Vec<WriteHeade
             seiza_model::OUTPUT_VERSION.to_string(),
             "seiza-model output version",
         ),
-    ]
+    ];
+    if let Some(guard) = report.holes {
+        cards.push(
+            WriteHeaderCard::new("MDHOLES", HeaderValue::Float(guard.depth))
+                .with_comment("holes this many sigma deep kept from the model"),
+        );
+    }
+    cards
 }
 
 fn backends(args: &RuntimeArgs) -> Result<()> {
@@ -261,10 +268,15 @@ fn list() -> Result<()> {
             .map(|graph| graph.precision.to_string())
             .collect();
         println!(
-            "{}: {}, reads {} noise, {}",
+            "{}: {}, reads {} noise{}, {}",
             card.name,
             card.task,
             card.reading.noise_map,
+            if card.reading.holes.is_some() {
+                ", keeps holes from the network"
+            } else {
+                ""
+            },
             graphs.join(" and ")
         );
     }
@@ -367,11 +379,27 @@ mod tests {
             precision: Precision::F32,
             tile: 512,
             noise_map: seiza_model::NoiseInput::Constant,
+            holes: None,
             channels: Vec::new(),
         };
         let cards = operation_cards(&report, &NoiseBands::default());
         let keys: Vec<&str> = cards.iter().map(WriteHeaderCard::keyword).collect();
         assert!(keys.contains(&"MDHASH") && keys.contains(&"MDBACKND"));
+        assert!(
+            !keys.contains(&"MDHOLES"),
+            "a run without the guard says nothing of it"
+        );
         assert!(keys.iter().all(|key| key.len() <= 8), "{keys:?}");
+        let guarded = DenoiseReport {
+            holes: Some(seiza_model::HoleGuard {
+                depth: 30.0,
+                margin: 3,
+                fill_radius: 12,
+                restore: 5.0,
+            }),
+            ..report
+        };
+        let cards = operation_cards(&guarded, &NoiseBands::default());
+        assert!(cards.iter().any(|card| card.keyword() == "MDHOLES"));
     }
 }

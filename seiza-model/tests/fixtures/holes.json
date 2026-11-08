@@ -4,6 +4,7 @@
 "stride": 11,
 "sky_block": 32,
 "image_map_scale": 1.13,
+"noise_correlation": 1.24,
 "guard": {
 "depth": 30.0,
 "margin": 3,

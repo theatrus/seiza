@@ -112,6 +112,13 @@ pub struct Reading {
     pub flat_block: usize,
     /// The image map's level.
     pub image_map_scale: f64,
+    /// How much neighbouring pixels shared their noise in the stacks the model
+    /// was trained on: the second-difference noise of an image binned 2 × 2,
+    /// times 2, over its own, which white noise gives as 1. The image map is
+    /// raised by as much as an image's exceeds it, as a drizzled stack's does.
+    /// None leaves the map as measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub noise_correlation: Option<f64>,
     /// How the image's holes are kept from the network. None runs the network
     /// on the image as it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -254,6 +261,14 @@ impl ModelCard {
         }
         if self.graphs.is_empty() {
             return refuse(format!("{} names no graph", self.name));
+        }
+        if let Some(trained) = self.reading.noise_correlation
+            && !(trained > 0.0 && trained.is_finite())
+        {
+            return refuse(format!(
+                "{}'s noise correlation must be positive, not {trained}",
+                self.name
+            ));
         }
         if let Some(guard) = self.reading.holes {
             let positive = |value: f64| value > 0.0 && value.is_finite();

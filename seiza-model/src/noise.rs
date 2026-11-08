@@ -20,6 +20,12 @@ const IMAGE_GAIN_BLOCKS: usize = 20;
 /// No block's sky variance falls below this share of the image's.
 const SKY_VARIANCE_FLOOR: f64 = 0.25;
 
+/// The fewest second differences `noise_correlation` measures on.
+const CORRELATION_SAMPLES: usize = 1000;
+/// `noise_correlation` reads the sky's level from every this many pixels along
+/// each axis.
+const CORRELATION_STRIDE: usize = 3;
+
 /// The noise map `reading` asks for, NaN where the image is not finite.
 pub(crate) fn input_sigma(
     plane: &[f32],
@@ -32,7 +38,7 @@ pub(crate) fn input_sigma(
         width,
         height,
         reading.sky_block,
-        reading.image_map_scale,
+        map_scale(plane, width, height, reading),
     );
     match reading.noise_map {
         NoiseInput::Image => mapped,
@@ -45,6 +51,111 @@ pub(crate) fn input_sigma(
             mapped
         }
     }
+}
+
+/// The image map's level for `plane`: the card's `image_map_scale`, raised by
+/// as much as the image's [`noise_correlation`] exceeds the card's
+/// `noise_correlation`. A drizzled stack spreads its noise over neighbours, so
+/// second differences see far less of it than there is, and a model told that
+/// much leaves the finest noise as specks.
+pub(crate) fn map_scale(plane: &[f32], width: usize, height: usize, reading: &Reading) -> f64 {
+    let raised = reading.noise_correlation.map_or(1.0, |trained| {
+        (noise_correlation(plane, width, height) / trained).max(1.0)
+    });
+    reading.image_map_scale * raised
+}
+
+/// How much neighbouring pixels share their noise: the second-difference noise
+/// of the image binned 2 × 2, times 2, over the image's own, on the pixels
+/// within 3 robust spreads of its median. White noise gives 1; 1 too where too
+/// few pixels are left to measure.
+pub(crate) fn noise_correlation(plane: &[f32], width: usize, height: usize) -> f64 {
+    let values: Vec<f64> = plane.par_iter().map(|&value| f64::from(value)).collect();
+    let mut sampled = Vec::new();
+    for y in (0..height).step_by(CORRELATION_STRIDE) {
+        for &value in values[y * width..][..width]
+            .iter()
+            .step_by(CORRELATION_STRIDE)
+        {
+            if value.is_finite() {
+                sampled.push(value);
+            }
+        }
+    }
+    let Some(level) = median_f64(&mut sampled.clone()) else {
+        return 1.0;
+    };
+    let mut deviations: Vec<f64> = sampled.iter().map(|value| (value - level).abs()).collect();
+    let spread = 1.4826 * median_f64(&mut deviations).unwrap_or(f64::NAN);
+    let sky: Vec<bool> = values
+        .par_iter()
+        .map(|value| value.is_finite() && (value - level).abs() < 3.0 * spread)
+        .collect();
+
+    let (half_width, half_height) = (width / 2, height / 2);
+    let half = |at: &(dyn Fn(usize) -> f64 + Sync)| -> Vec<f64> {
+        (0..half_width * half_height)
+            .into_par_iter()
+            .map(|cell| {
+                let (y, x) = (cell / half_width * 2, cell % half_width * 2);
+                let top = y * width + x;
+                (at(top) + at(top + 1) + at(top + width) + at(top + width + 1)) / 4.0
+            })
+            .collect()
+    };
+    let binned = half(&|index| values[index]);
+    let binned_sky: Vec<bool> = half(&|index| if sky[index] { 1.0 } else { 0.0 })
+        .into_iter()
+        .map(|share| share == 1.0)
+        .collect();
+
+    let whole = second_difference_noise(&values, &sky, width, height);
+    let wide = second_difference_noise(&binned, &binned_sky, half_width, half_height);
+    let ratio = 2.0 * wide / whole;
+    if ratio.is_finite() && whole > 0.0 {
+        ratio
+    } else {
+        1.0
+    }
+}
+
+/// The noise of a plane's second differences along each axis, centred on the
+/// pixels `mask` holds, from their median absolute deviation; NaN with fewer
+/// than `CORRELATION_SAMPLES`.
+fn second_difference_noise(values: &[f64], mask: &[bool], width: usize, height: usize) -> f64 {
+    let mut found = Vec::new();
+    if width >= 3 {
+        for y in 0..height {
+            let line = &values[y * width..][..width];
+            for x in 1..width - 1 {
+                if mask[y * width + x] {
+                    let difference = line[x - 1] - 2.0 * line[x] + line[x + 1];
+                    if difference.is_finite() {
+                        found.push(difference);
+                    }
+                }
+            }
+        }
+    }
+    for y in 1..height.saturating_sub(1) {
+        for x in 0..width {
+            if mask[y * width + x] {
+                let at = |row: usize| values[row * width + x];
+                let difference = at(y - 1) - 2.0 * at(y) + at(y + 1);
+                if difference.is_finite() {
+                    found.push(difference);
+                }
+            }
+        }
+    }
+    if found.len() < CORRELATION_SAMPLES {
+        return f64::NAN;
+    }
+    let Some(centre) = median_f64(&mut found.clone()) else {
+        return f64::NAN;
+    };
+    let mut deviations: Vec<f64> = found.iter().map(|value| (value - centre).abs()).collect();
+    1.4826 * median_f64(&mut deviations).unwrap_or(f64::NAN) / 6.0_f64.sqrt()
 }
 
 /// A noise map from the image alone. The sky's variance is that of the
@@ -214,6 +325,7 @@ mod tests {
             sky_block: 32,
             flat_block: 256,
             image_map_scale: 1.0,
+            noise_correlation: None,
             holes: None,
         }
     }

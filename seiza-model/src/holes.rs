@@ -13,7 +13,7 @@
 //! This is the harness's `holes` module, held to it by the parity fixtures.
 
 use crate::bundle::{HoleGuard, Reading};
-use crate::noise::image_sigma;
+use crate::noise::{image_sigma, map_scale};
 use crate::sky::upsample;
 use crate::stats::median_f64;
 use rayon::prelude::*;
@@ -50,7 +50,7 @@ pub(crate) fn guarded(
         width,
         height,
         reading.sky_block,
-        reading.image_map_scale,
+        map_scale(plane, width, height, reading),
     );
     let floor = sky_floor(plane, width, height, reading.sky_block);
     let deep: Vec<bool> = plane
@@ -218,7 +218,8 @@ fn box_sums(plane: &[f64], width: usize, height: usize, radius: usize) -> Vec<f6
         let (top, bottom) = (y.saturating_sub(radius), (y + radius + 1).min(height));
         for (x, sum) in line.iter_mut().enumerate() {
             let (left, right) = (x.saturating_sub(radius), (x + radius + 1).min(width));
-            *sum = total[bottom * wide + right] - total[top * wide + right]
+            *sum = total[bottom * wide + right]
+                - total[top * wide + right]
                 - total[bottom * wide + left]
                 + total[top * wide + left];
         }
@@ -287,6 +288,7 @@ mod tests {
             sky_block: 32,
             flat_block: 256,
             image_map_scale: 1.13,
+            noise_correlation: None,
             holes: Some(GUARD),
         }
     }

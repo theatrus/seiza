@@ -5002,9 +5002,11 @@ const float *seiza_denoised_residual(const SeizaDenoised *denoised,
 
 /*
  What ran, as JSON lent until the result is freed: `model`, `sha256`,
- `backend`, `precision`, `tile`, `noiseMap`, and `channels`, each with its
- `background` and `noise`. A host keys cached results on `sha256`, `backend`,
- `precision` and [`seiza_model_output_version`].
+ `backend`, `precision`, `tile`, `noiseMap`, `holes`, and `channels`, each
+ with its `background` and `noise`. `holes` is null, or how the image's holes
+ were kept from the network, as the model's card asks: `depth`, `margin`,
+ `fillRadius` and `restore`. A host keys cached results on `sha256`,
+ `backend`, `precision`, `holes` and [`seiza_model_output_version`].
 
  # Safety
  `denoised` must be null or a live [`SeizaDenoised`].
@@ -5045,8 +5047,9 @@ char *seiza_model_backends_json(const char *options_json, char **error_out);
 
 /*
  The installed models, as a JSON array the caller frees with
- `seiza_string_free`, each with `name`, `path`, `task`, `noiseMap` and
- `precisions`. `store` may be null for the default store.
+ `seiza_string_free`, each with `name`, `path`, `task`, `noiseMap`, `holes`
+ (as [`seiza_denoised_report_json`] gives it) and `precisions`. `store` may
+ be null for the default store.
 
  # Safety
  `store` must be null or a NUL-terminated string. When non-null, `error_out`
