@@ -7233,6 +7233,32 @@ struct WcsFitsHeaderResponse {
 }
 
 #[unsafe(no_mangle)]
+/// Linear CD rotation, in degrees from -180 to 180, using the convention of
+/// [`seiza::Wcs::from_center_scale_rotation`]. This is the orientation of
+/// positive image-y on the tangent plane, measured from south toward east.
+/// `wcs_json` uses the same WCS representation as [`seiza_wcs_fits_header_json`].
+/// Shear, unequal scales and SIP distortion require the complete WCS, rather
+/// than reconstruction from a rotation and scalar scale.
+/// Returns NaN on an invalid request; free an `error_out` string with
+/// [`seiza_string_free`].
+///
+/// # Safety
+/// `wcs_json` must be a valid NUL-terminated UTF-8 string. When non-null,
+/// `error_out` must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_wcs_rotation_degrees(
+    wcs_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> f64 {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let request: parallax::WcsRequest = serde_json::from_str(&required_str(wcs_json, "WCS")?)
+            .map_err(|error| format!("invalid WCS: {error}"))?;
+        Ok(request.wcs()?.rotation_degrees())
+    })
+    .unwrap_or(f64::NAN)
+}
+
+#[unsafe(no_mangle)]
 /// A WCS as FITS header cards. `wcs_json` is a WCS as
 /// [`seiza_solve_image_json`] returns it: `crval`, `crpix`, `cd`, an
 /// optional `sip` and an optional `pixelOrigin` (0, the default, when
@@ -17618,6 +17644,44 @@ mod tests {
         }
         assert!(error.is_null());
         Ok(serde_json::from_str(&take(json)).unwrap())
+    }
+
+    #[test]
+    fn wcs_rotation_matches_the_native_constructor_and_reports_bad_requests() {
+        for flipped in [false, true] {
+            for angle in [-88.33, 0.0, 33.5, 180.0, 271.25] {
+                let wcs = seiza::Wcs::from_center_scale_rotation(
+                    (334.42417, 90.0),
+                    (5816.0, 5777.0),
+                    0.6037,
+                    angle,
+                    flipped,
+                );
+                for origin in [0, 1] {
+                    let request = CString::new(json!({
+                        "crval": [wcs.crval.0, wcs.crval.1],
+                        "crpix": [wcs.crpix.0 + f64::from(origin), wcs.crpix.1 + f64::from(origin)],
+                        "cd": wcs.cd, "pixelOrigin": origin,
+                    }).to_string()).unwrap();
+                    let mut error = ptr::null_mut();
+                    let actual =
+                        unsafe { seiza_wcs_rotation_degrees(request.as_ptr(), &mut error) };
+                    assert!(error.is_null());
+                    assert!((actual - wcs.rotation_degrees()).abs() < 1e-12);
+                }
+            }
+        }
+        for request in [
+            "{}",
+            "invalid",
+            r#"{"crval":[0,0],"crpix":[0,0],"cd":[[1,0],[0,1]],"pixelOrigin":2}"#,
+        ] {
+            let request = CString::new(request).unwrap();
+            let mut error = ptr::null_mut();
+            assert!(unsafe { seiza_wcs_rotation_degrees(request.as_ptr(), &mut error) }.is_nan());
+            assert!(!error.is_null());
+            unsafe { seiza_string_free(error) };
+        }
     }
 
     #[test]

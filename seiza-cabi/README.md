@@ -415,6 +415,12 @@ exposes the **superset** of what both apps need.
   object, in header order, that `seiza_color_calibrate_json` takes as its WCS
   keywords) and header `text`, as Python's `Solution.fits_header_cards` and
   `fits_header_text` do.
+  `seiza_wcs_rotation_degrees` reads the same WCS JSON and returns its linear
+  CD rotation in [-180, 180] degrees, as Python's `Wcs.rotation_deg` does.
+  This is `atan2(CD1_2, -CD2_2)`, the positive image-y axis measured from
+  south toward east, matching Rust's WCS constructor for either parity.
+  Invalid requests return NaN and set `error_out`; retain the complete WCS
+  to preserve shear, unequal axis scales and SIP distortion.
 - **Parallax videos** — `seiza_parallax_prepare_json` makes what `seiza
   parallax-video` makes from a JSON request: an image for StarXTerminator to
   split (through `rc-astro`) or its starless and stars files, an optional WCS

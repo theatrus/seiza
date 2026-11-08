@@ -126,6 +126,22 @@ seiza catalog distance --data data "Horsehead Nebula" --format json
 Explicit file paths still work everywhere a directory is shown, for
 custom-built catalogs or unusual layouts.
 
+### Solve rotation and WCS coordinates
+
+`solve` reports the linear CD-matrix rotation, using the same convention as
+Rust's `Wcs::from_center_scale_rotation` and Python's `Wcs.rotation_deg`.
+It is `atan2(CD1_2, -CD2_2)` in degrees: the positive image-y axis measured
+from south toward east on the tangent plane. At zero, image-y points south;
+image-x points west for normal parity and east for mirrored parity.
+
+Earlier solve summaries reported the angle of sky north in the image. For
+orthogonal, equally scaled normal-parity images that angle has the opposite
+sign; callers that compensated for it must remove that compensation. The
+solved CD matrix, sky coordinates and footprint are unchanged. The worker's
+`rotationDeg` uses the same corrected convention, normalized modulo 360.
+The CLI prints two decimal places. Rotation and scalar scale cannot reproduce
+shear, unequal axis scales or SIP distortion; use the complete WCS for those.
+
 ### JPEG metadata and pixel coordinates
 
 Raster inputs are decoded and EXIF Orientation is applied once, including

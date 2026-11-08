@@ -110,7 +110,8 @@ impl Wcs {
     ///
     /// * `center`: sky position (RA, Dec) at pixel `crpix`, degrees
     /// * `scale_arcsec_px`: pixel scale in arcseconds per pixel
-    /// * `rotation_deg`: position angle of north in the image, degrees E of N
+    /// * `rotation_deg`: linear CD rotation, as [`Self::rotation_degrees`]
+    ///   returns it, in degrees
     /// * `flipped`: true when the image parity is mirrored
     pub fn from_center_scale_rotation(
         center: (f64, f64),
@@ -123,8 +124,8 @@ impl Wcs {
         let r = rotation_deg.to_radians();
         let (sin_r, cos_r) = r.sin_cos();
         let parity = if flipped { -1.0 } else { 1.0 };
-        // Standard convention: xi increases to the east (negative RA axis
-        // handled inside the projection), eta to the north.
+        // Positive xi is east and eta is north. Rotate the basis that
+        // starts with image-x west (east if mirrored), image-y south.
         let cd = [
             [-s * parity * cos_r, s * sin_r],
             [-s * parity * sin_r, -s * cos_r],
@@ -141,6 +142,25 @@ impl Wcs {
     pub fn scale_arcsec_per_px(&self) -> f64 {
         let det = self.cd[0][0] * self.cd[1][1] - self.cd[0][1] * self.cd[1][0];
         det.abs().sqrt() * 3600.0
+    }
+
+    /// Rotation of the linear CD matrix, in degrees from -180 to 180.
+    ///
+    /// This is `atan2(CD1_2, -CD2_2)`: the orientation of the positive
+    /// image-y axis on the tangent plane, measured from south toward east.
+    /// It recovers the angle accepted by [`Self::from_center_scale_rotation`]
+    /// modulo 360 degrees, for either parity and a positive pixel scale.
+    /// At zero rotation image-y points south; image-x points west for
+    /// normal parity and east for mirrored parity.
+    ///
+    /// For an orthogonal, equally scaled CD matrix, the angle of sky north
+    /// measured from image up toward image right is the negative of this
+    /// angle for normal parity, and the same angle for mirrored parity.
+    /// A rotation and a scalar scale do not encode shear, unequal axis
+    /// scales or SIP distortion: retain [`Self::cd`] and [`Self::sip`] to
+    /// reproduce a general WCS exactly.
+    pub fn rotation_degrees(&self) -> f64 {
+        self.cd[0][1].atan2(-self.cd[1][1]).to_degrees()
     }
 
     /// Map a pixel coordinate to sky coordinates (RA, Dec) in degrees.
@@ -599,6 +619,48 @@ mod tests {
     fn behind_horizon_is_none() {
         let wcs = Wcs::from_center_scale_rotation((0.0, 0.0), (0.0, 0.0), 1.0, 0.0, false);
         assert!(wcs.world_to_pixel(180.0, 0.0).is_none());
+    }
+
+    #[test]
+    fn cd_rotation_recovers_the_constructor_for_both_parities_and_at_the_poles() {
+        for dec in [-90.0, -89.999, 0.0, 55.99702, 89.999, 90.0] {
+            for flipped in [false, true] {
+                for angle in [-180.0, -88.33, 0.0, 33.5, 180.0, 271.25, 720.0] {
+                    let wcs = Wcs::from_center_scale_rotation(
+                        (334.42417, dec),
+                        (5816.0, 5777.0),
+                        0.6037,
+                        angle,
+                        flipped,
+                    );
+                    let error = (wcs.rotation_degrees() - angle + 180.0).rem_euclid(360.0) - 180.0;
+                    assert!(error.abs() < 1e-12, "{angle}, {flipped}, {dec}: {error}");
+                    let rebuilt = Wcs::from_center_scale_rotation(
+                        wcs.crval,
+                        wcs.crpix,
+                        wcs.scale_arcsec_per_px(),
+                        wcs.rotation_degrees(),
+                        flipped,
+                    );
+                    for (a, b) in wcs.cd.iter().flatten().zip(rebuilt.cd.iter().flatten()) {
+                        assert!((a - b).abs() < 1e-18);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cd_rotation_describes_the_y_axis_independently_of_shear_and_sip() {
+        let mut wcs = Wcs::from_center_scale_rotation((10.0, 20.0), (0.0, 0.0), 2.0, 33.5, false);
+        wcs.cd[0][0] *= 1.1;
+        wcs.cd[1][0] += 1e-5;
+        wcs.sip = Some(Sip {
+            order: 2,
+            a: vec![1e-6; 3],
+            ..Sip::default()
+        });
+        assert!((wcs.rotation_degrees() - 33.5).abs() < 1e-12);
     }
 
     fn angular_separation_deg(ra1: f64, dec1: f64, ra2: f64, dec2: f64) -> f64 {
