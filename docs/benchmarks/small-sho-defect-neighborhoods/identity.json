@@ -1,0 +1,22 @@
+{
+  "base": "7cfe303921cca1f361870b8637a8e2bd8f7be512",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "platform": "Linux-6.8.0-138-generic-x86_64-with-glibc2.35",
+  "cpu_count": 10,
+  "rayon_threads": 8,
+  "workers": 2,
+  "pipeline_memory_mib": 1024,
+  "gpu": false,
+  "binary_sha256": {
+    "before": "f2d078d3e8e1251415d8dcdcd796574044058623f4eac3302a2fc3c1b8ea7e8b",
+    "after": "eb5f8cf4df9b13748f1c7fafa251c4a215e4888ea2f679bd95f39a5ed7db3cd8"
+  },
+  "final_release_sha256": "beba453d7113a9da30a43931e0145531970d0b6bad833962a6edc1b6303f8ab7",
+  "final_release_executable_code_matches_measured": true,
+  "final_release_differs_only_in_sections": [
+    ".note.gnu.build-id",
+    ".strtab"
+  ],
+  "production_source_before_test_module_matches_measured": true,
+  "gather_source_sha256": "4186c9ec52e4fa4e3354a37e339fd47b7a5862ec6c20b851d3acaa2c5a016561"
+}
