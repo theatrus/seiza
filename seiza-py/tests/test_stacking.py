@@ -438,6 +438,9 @@ def test_fits_live_stacker_protects_inputs_from_duplicates_and_output(tmp_path):
     output = tmp_path / "stack.fits"
     fits.writeto(first, image, overwrite=True)
     fits.writeto(second, image, overwrite=True)
+    linked = tmp_path / "linked-light.fits"
+    linked.hardlink_to(second)
+    original = second.read_bytes()
 
     stacker = seiza.LiveStacker(first, options=no_adjustment_options())
     assert stacker.push_fits(second).accepted
@@ -446,11 +449,21 @@ def test_fits_live_stacker_protects_inputs_from_duplicates_and_output(tmp_path):
     stacker = seiza.LiveStacker.open_context(context)
     with pytest.raises(ValueError, match="already been used"):
         stacker.push_fits(second)
+    with pytest.raises(ValueError, match="already been used"):
+        stacker.push_fits(linked)
+    with pytest.raises(ValueError, match="must not refer"):
+        stacker.snapshot().write_fits(linked)
+    with pytest.raises(seiza.StackError, match="must not replace"):
+        stacker.save_context(linked)
+    with pytest.raises(ValueError, match="must not refer"):
+        stacker.finish(linked)
     with pytest.raises(ValueError, match="must not refer"):
         stacker.finish(first)
     assert stacker.accepted_frames == 2
     assert stacker.finish(output).accepted_frames == 2
     assert output.exists()
+    assert second.read_bytes() == original
+    assert linked.read_bytes() == original
 
 
 def test_pipelined_push_matches_pushing_one_at_a_time(tmp_path):

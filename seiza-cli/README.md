@@ -128,6 +128,12 @@ custom-built catalogs or unusual layouts.
 
 ### Solve rotation and WCS coordinates
 
+`detect`, `solve`, and `solve-blind` check annotation, sky-map and WCS
+destinations before decoding image pixels or solving. Outputs must be
+distinct from the source image, the named catalog/index inputs and each
+other, including existing symlink and hard-link aliases. A WCS export is
+a separate header file; it cannot replace the source image in place.
+
 `solve` reports the linear CD-matrix rotation, using the same convention as
 Rust's `Wcs::from_center_scale_rotation` and Python's `Wcs.rotation_deg`.
 It is `atan2(CD1_2, -CD2_2)` in degrees: the positive image-y axis measured

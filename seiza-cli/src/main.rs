@@ -2463,6 +2463,12 @@ fn detect(
     detection_backend: DetectBackend,
     annotate: Option<&std::path::Path>,
 ) -> Result<()> {
+    if let Some(output) = annotate {
+        provenance::validate_output_paths(
+            &[("image input", path)],
+            &[("annotation output", output)],
+        )?;
+    }
     let img = load_image(path, detection_backend)?;
     let config = DetectConfig {
         backend: detection_backend,
@@ -3303,6 +3309,24 @@ fn solve_command(
     acquisition_jd: Option<f64>,
     satellite_request: Option<SatelliteSolveRequest>,
 ) -> Result<()> {
+    let mut inputs = vec![("image input", path), ("star catalog", data)];
+    inputs.extend(objects.map(|path| ("object catalog", path)));
+    inputs.extend(minor_bodies.map(|path| ("minor-body catalog", path)));
+    if let Some(SatelliteSolveRequest {
+        input: SatelliteInput::File(path),
+        ..
+    }) = &satellite_request
+    {
+        inputs.push(("satellite elements", path.as_path()));
+    }
+    let mut outputs = Vec::new();
+    outputs.extend(annotate.map(|path| ("annotation output", path)));
+    outputs.extend(
+        sky_map
+            .as_ref()
+            .map(|request| ("sky-map output", request.path)),
+    );
+    provenance::validate_output_paths(&inputs, &outputs)?;
     let img = load_image(path, detection_backend)?;
     let dims = img.dimensions();
 
@@ -4244,6 +4268,18 @@ fn solve_blind_command(
     data: &std::path::Path,
     options: SolveBlindOptions<'_>,
 ) -> Result<()> {
+    let mut inputs = vec![("image input", path), ("star catalog", data)];
+    inputs.extend(options.index_path.map(|path| ("blind index", path)));
+    let mut outputs = Vec::new();
+    outputs.extend(options.wcs_path.map(|path| ("WCS output", path)));
+    outputs.extend(options.annotate.map(|path| ("annotation output", path)));
+    outputs.extend(
+        options
+            .sky_map
+            .as_ref()
+            .map(|request| ("sky-map output", request.path)),
+    );
+    provenance::validate_output_paths(&inputs, &outputs)?;
     let img = load_image(path, options.detection_backend)?;
     let dims = img.dimensions();
     let metadata = if is_astronomy_image_path(path) {

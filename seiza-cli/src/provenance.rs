@@ -30,6 +30,27 @@ pub(crate) fn validate_path_roles<'a>(
     Ok(())
 }
 
+/// Refuse outputs that alias an input or another output, including hard
+/// links. Inputs may repeat; compare each output only with inputs and earlier
+/// outputs, so a long input list does not require all input pairs to be read.
+pub(crate) fn validate_output_paths(
+    inputs: &[(&str, &Path)],
+    outputs: &[(&str, &Path)],
+) -> Result<()> {
+    for (index, &(role, path)) in outputs.iter().enumerate() {
+        for &(other_role, other_path) in inputs.iter().chain(outputs[..index].iter()) {
+            if seiza_stacking::paths_refer_to_same_file(path, other_path) {
+                anyhow::bail!(
+                    "{role} {} refers to the same file as {other_role} {}",
+                    path.display(),
+                    other_path.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn file_identity(path: &Path) -> Result<FileIdentity> {
     let mut file = std::fs::File::open(path)
         .with_context(|| format!("failed to fingerprint {}", path.display()))?;
