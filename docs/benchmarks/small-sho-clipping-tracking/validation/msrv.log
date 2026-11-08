@@ -1,0 +1,6 @@
+    Checking seiza-stacking v0.57.0 (/home/ppicazo/Development/seiza/seiza-stacking)
+   Compiling seiza-cli v0.49.0 (/home/ppicazo/Development/seiza/seiza-cli)
+   Compiling seiza-cabi v0.49.0 (/home/ppicazo/Development/seiza/seiza-cabi)
+    Checking seiza-analysis v0.5.0 (/home/ppicazo/Development/seiza/seiza-analysis)
+    Checking seiza-pipeline v0.2.0 (/home/ppicazo/Development/seiza/seiza-pipeline)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 11.06s

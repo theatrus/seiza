@@ -1,0 +1,22 @@
+   Compiling seiza-stacking v0.57.0 (/home/ppicazo/Development/seiza/seiza-stacking)
+    Finished `test` profile [optimized + debuginfo] target(s) in 5.39s
+     Running tests/output_version.rs (target/debug/deps/output_version-2e5b89ac5b35b2c3)
+
+running 1 test
+test a_large_stack_keeps_its_clipped_fraction ... FAILED
+
+failures:
+
+---- a_large_stack_keeps_its_clipped_fraction stdout ----
+
+thread 'a_large_stack_keeps_its_clipped_fraction' (435) panicked at seiza-stacking/tests/output_version.rs:1971:50:
+called `Option::unwrap()` on a `None` value
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    a_large_stack_keeps_its_clipped_fraction
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 73 filtered out; finished in 0.66s
+
+error: test failed, to rerun pass `-p seiza-stacking --test output_version`

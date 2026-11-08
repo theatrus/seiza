@@ -1960,12 +1960,22 @@ fn a_large_stack_keeps_its_clipped_fraction() {
             }
         })
         .collect::<Vec<_>>();
-    for gpu in [GpuOptions::cpu(), GpuOptions::default()] {
+    for (gpu, track_clipping, interpolation) in [GpuOptions::cpu(), GpuOptions::default()]
+        .into_iter()
+        .flat_map(|gpu| {
+            [true, false].into_iter().flat_map(move |track| {
+                [Interpolation::Bilinear, Interpolation::Lanczos3]
+                    .map(move |interpolation| (gpu, track, interpolation))
+            })
+        })
+    {
         let mut stacker = LiveStacker::new(
             frames[0].clone(),
             CalibrationMasters::default(),
             StackOptions {
                 gpu,
+                track_clipping,
+                interpolation,
                 normalization: NormalizationMode::None,
                 rejection: RejectionMode::None,
                 ..StackOptions::default()
@@ -1975,6 +1985,77 @@ fn a_large_stack_keeps_its_clipped_fraction() {
         assert!(stacker.clipped_fraction().is_none());
         for frame in &frames[1..] {
             admit(stacker.push(frame.clone()).unwrap());
+        }
+        let expected_image = match interpolation {
+            Interpolation::Bilinear => &[
+                1.2699083e2,
+                4.6523645e2,
+                3.2818176e4,
+                1.0086214e2,
+                9.9956696e1,
+                1.0004606e2,
+                9.9492676e1,
+                9.9923233e1,
+                9.9848633e1,
+                9.9659042e1,
+                1.0156461e2,
+                1.0046982e2,
+                9.9432045e1,
+                9.9746765e1,
+                9.9746498e1,
+                9.9160324e1,
+                1.0093239e2,
+                9.9841454e1,
+                1.0020325e2,
+                1.0068443e2,
+                9.8760162e1,
+                9.9336227e1,
+                9.9516830e1,
+                9.9197311e1,
+                9.9763680e1,
+                1.0013423e2,
+                9.9218819e1,
+                1.0067850e2,
+            ],
+            Interpolation::Lanczos3 => &[
+                1.2784684e2,
+                4.8284114e2,
+                3.6708715e4,
+                1.0121179e2,
+                9.9925476e1,
+                9.9821457e1,
+                9.9507248e1,
+                9.9981300e1,
+                9.9804031e1,
+                9.9401421e1,
+                1.0203391e2,
+                1.0050050e2,
+                9.9732628e1,
+                9.9718925e1,
+                9.9794685e1,
+                9.9070923e1,
+                1.0125527e2,
+                9.9584869e1,
+                1.0002977e2,
+                1.0077060e2,
+                9.8551552e1,
+                9.9121269e1,
+                9.9593689e1,
+                9.8865112e1,
+                9.9308678e1,
+                1.0041342e2,
+                9.9069069e1,
+                1.0073582e2,
+            ],
+        };
+        check(
+            "LARGE_CLIPPED_IMAGE",
+            &summary(&stacker.snapshot().unwrap().image),
+            expected_image,
+        );
+        if !track_clipping {
+            assert!(stacker.clipped_fraction().is_none());
+            continue;
         }
         let clipped = stacker.clipped_fraction().unwrap();
         const LARGE_CLIPPED: &[f64] = &[
