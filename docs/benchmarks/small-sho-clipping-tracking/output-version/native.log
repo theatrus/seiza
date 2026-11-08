@@ -1,0 +1,10 @@
+    Blocking waiting for file lock on build directory
+   Compiling seiza-stacking v0.57.0 (/home/ppicazo/Development/seiza/seiza-stacking)
+    Finished `test` profile [optimized + debuginfo] target(s) in 53.33s
+     Running unittests src/lib.rs (target/debug/deps/seiza_stacking-2f69d071e0229e55)
+
+running 1 test
+test stack::tests::clipping_can_be_disabled_without_changing_pixels_or_legacy_options ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 612 filtered out; finished in 0.25s
+

@@ -1,0 +1,19 @@
+[
+  "/tmp/seiza-sho-clipping-combined/seiza-after",
+  "color",
+  "narrowband",
+  "--ha",
+  "/tmp/seiza-sho-clipping-combined/full/after/H.fits",
+  "--oiii",
+  "/tmp/seiza-sho-clipping-combined/full/after/O.fits",
+  "--sii",
+  "/tmp/seiza-sho-clipping-combined/full/after/S.fits",
+  "--palette",
+  "sho",
+  "--normalization",
+  "none",
+  "--no-register",
+  "--output",
+  "/tmp/seiza-sho-clipping-combined/full/after/SHO.fits",
+  "--no-gpu"
+]

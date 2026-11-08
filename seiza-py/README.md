@@ -626,6 +626,12 @@ stack's map as it is; each of its pixels reads the map pixel it lies in.
 
 ## Image stacking
 
+`StackOptions(track_clipping=False)` skips raw saturation-mask work when no
+clipping-fraction map is needed. The default is `True`, exposed by the
+`track_clipping` attribute. Disabling it changes no image samples but makes
+`LiveStacker.clipped_fraction()` return `None`, also after saving and reopening
+a context. Keep tracking enabled when using the map for colour calibration.
+
 The wheel includes the same linear calibration, registration, normalization,
 and online rejection engine as the Rust crate and CLI. Batch stacking accepts
 FITS paths and writes an unstretched linear `float32` FITS result:

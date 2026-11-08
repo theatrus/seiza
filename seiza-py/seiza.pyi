@@ -578,6 +578,7 @@ class GpuOptions:
     ) -> None: ...
 
 class StackOptions:
+    track_clipping: bool
     normalization: str
     local_tile_size: int | None
     demosaic: str
@@ -626,6 +627,7 @@ class StackOptions:
         bin_factor: int = 1,
         gpu: GpuOptions | None = None,
         interpolation: str = "bilinear",
+        track_clipping: bool = True,
     ) -> None: ...
 
 class FrameDisposition:

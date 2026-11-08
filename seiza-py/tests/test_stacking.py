@@ -1853,7 +1853,8 @@ def test_superpixel_mapping_channel_sites_survive_context(tmp_path, bin_factor):
     assert reopened.reference_mapping["channel_sites"] == sites
 
 
-def test_live_stacker_records_where_frames_clipped(tmp_path):
+@pytest.mark.parametrize("track_clipping", [True, False])
+def test_live_stacker_records_where_frames_clipped(tmp_path, track_clipping):
     # 16-bit frames clip at 65535, which their encoding declares.
     image = np.clip(synthetic_star_field(), 0, 65535).astype(np.uint16)
     clipped = image.copy()
@@ -1863,10 +1864,23 @@ def test_live_stacker_records_where_frames_clipped(tmp_path):
     fits.writeto(first, image, overwrite=True)
     fits.writeto(second, clipped, overwrite=True)
 
-    stacker = seiza.LiveStacker(first, options=no_adjustment_options())
+    options = seiza.StackOptions(normalization="none", rejection="none", track_clipping=track_clipping)
+    assert options.track_clipping is track_clipping
+    assert seiza.StackOptions().track_clipping is True
+    stacker = seiza.LiveStacker(first, options=options)
     assert stacker.clipped_fraction() is None
     assert stacker.push_fits(second).accepted
     fraction = stacker.clipped_fraction()
+    if not track_clipping:
+        assert fraction is None
+        tracked = seiza.LiveStacker(first, options=no_adjustment_options())
+        assert tracked.push_fits(second).accepted
+        np.testing.assert_array_equal(stacker.snapshot().image, tracked.snapshot().image)
+        context = tmp_path / "untracked.seiza-stack"
+        stacker.save_context(context)
+        reopened = seiza.LiveStacker.open_context(context)
+        assert reopened.clipped_fraction() is None
+        return
     assert fraction.shape == image.shape and fraction.dtype == np.float32
     # One of the two observations clipped at the core; none in the sky.
     assert 0.3 <= fraction[118:120, 91:93].min() and fraction.max() <= 0.5

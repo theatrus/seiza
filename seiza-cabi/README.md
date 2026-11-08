@@ -764,6 +764,12 @@ through statistics, background fitting, deconvolution, sample-domain mapping,
 and stretching; they are transparent in RGBA. The returned image is independent
 of the stack and uses the ordinary `SeizaRenderedImage` accessors/free function.
 
+`"trackClipping": false` disables saturation-fraction tracking when no clipping
+map is needed, saving mask detection, resampling and accumulation. It defaults
+to true. The stack pixels are unchanged; `seiza_live_stacker_clipped_fraction`
+returns false without an error when tracking is disabled. The setting is
+preserved in saved contexts.
+
 Stack options are serialized `seiza-stacking` `StackOptions`. Every nested
 object accepts omitted fields from its defaults. For example, this disables
 normalization/rejection while increasing the registration drift floor:

@@ -690,6 +690,8 @@ fn stack(options: StackArgs) -> Result<()> {
         }),
     };
     let mut stack_options = StackOptions {
+        // Preserve clipping history for requested maps and saved contexts.
+        track_clipping: options.clipped.is_some() || options.save_canvas.is_some(),
         normalization,
         rejection,
         demosaic: match options.demosaic {
