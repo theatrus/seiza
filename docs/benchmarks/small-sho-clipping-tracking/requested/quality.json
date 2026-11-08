@@ -1,0 +1,14 @@
+{
+  "requested_clipping_files_byte_identical": true,
+  "clipped_fits_sha256": "b539ae6b7cc2a261e632da36bf5690a730423989ba512aa6d8678ba84a2260cb",
+  "fixed_H_fits_sha256": "db1d812f11d403c3a5358b25520d69ce95e859d90570dac1f6e332941d1ff4f7",
+  "expanded_H_fits_sha256": "1ba412d4a94b1656a03d7dedf4649e2735e65b0ec41c582a4a9f01e187e50a5b",
+  "context_files_byte_identical": true,
+  "excluded_from_timing_summary": true,
+  "saved_context_clipping_shape": [
+    4184,
+    6264
+  ],
+  "saved_context_clipping_max": 1.0,
+  "saved_context_retains_nonempty_clipping_map": true
+}

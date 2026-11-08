@@ -1,0 +1,482 @@
+[
+  {
+    "path": "/tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0001.fit",
+    "source": "/mnt/astro/unsorted/2022-10-27-ASIRedCat/MonkeyJelly/Light_MonkeyJelly_180.0s_Bin1_H_0001.fit",
+    "bytes": 52194240,
+    "sha256": "373517fc00313ad85e2f645d559ff4d84f8b824b84418dac55f3a0612bc622f6",
+    "headers": {
+      "NAXIS1": 6248,
+      "NAXIS2": 4176,
+      "FILTER": "H",
+      "EXPTIME": 180.0,
+      "DATE-OBS": "2022-10-28T08:04:13.702363",
+      "INSTRUME": "ZWO ASI2600MM Pro",
+      "GAIN": 300,
+      "OFFSET": 50
+    }
+  },
+  {
+    "path": "/tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0002.fit",
+    "source": "/mnt/astro/unsorted/2022-10-27-ASIRedCat/MonkeyJelly/Light_MonkeyJelly_180.0s_Bin1_H_0002.fit",
+    "bytes": 52194240,
+    "sha256": "c382722627325198e7d90bfd617d29e0adffbca0b3a8001b561e3b80f833874d",
+    "headers": {
+      "NAXIS1": 6248,
+      "NAXIS2": 4176,
+      "FILTER": "H",
+      "EXPTIME": 180.0,
+      "DATE-OBS": "2022-10-28T08:07:15.233814",
+      "INSTRUME": "ZWO ASI2600MM Pro",
+      "GAIN": 300,
+      "OFFSET": 50
+    }
+  },
+  {
+    "path": "/tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0003.fit",
+    "source": "/mnt/astro/unsorted/2022-10-27-ASIRedCat/MonkeyJelly/Light_MonkeyJelly_180.0s_Bin1_H_0003.fit",
+    "bytes": 52194240,
+    "sha256": "e39b6a90c9abbeff2648140ef2871573856fc5eab69da3faed14be8ae98fe116",
+    "headers": {
+      "NAXIS1": 6248,
+      "NAXIS2": 4176,
+      "FILTER": "H",
+      "EXPTIME": 180.0,
+      "DATE-OBS": "2022-10-28T08:10:16.815241",
+      "INSTRUME": "ZWO ASI2600MM Pro",
+      "GAIN": 300,
+      "OFFSET": 50
+    }
+  },
+  {
+    "path": "/tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0004.fit",
+    "source": "/mnt/astro/unsorted/2022-10-27-ASIRedCat/MonkeyJelly/Light_MonkeyJelly_180.0s_Bin1_H_0004.fit",
+    "bytes": 52194240,
+    "sha256": "3cc70866ef553a6a4d8117919ddc25ff6330d3ebef40c7f4ccf3165063e97eb9",
+    "headers": {
+      "NAXIS1": 6248,
+      "NAXIS2": 4176,
+      "FILTER": "H",
+      "EXPTIME": 180.0,
+      "DATE-OBS": "2022-10-28T08:13:54.585403",
+      "INSTRUME": "ZWO ASI2600MM Pro",
+      "GAIN": 300,
+      "OFFSET": 50
+    }
+  },
+  {
+    "path": "/tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0005.fit",
+    "source": "/mnt/astro/unsorted/2022-10-27-ASIRedCat/MonkeyJelly/Light_MonkeyJelly_180.0s_Bin1_H_0005.fit",
+    "bytes": 52194240,
+    "sha256": "9ffe9643296b345dd17697ffef7b203b3decd12d487fe4469be1b6a592f20656",
+    "headers": {
+      "NAXIS1": 6248,
+      "NAXIS2": 4176,
+      "FILTER": "H",
+      "EXPTIME": 180.0,
+      "DATE-OBS": "2022-10-28T08:16:56.030873",
+      "INSTRUME": "ZWO ASI2600MM Pro",
+      "GAIN": 300,
+      "OFFSET": 50
+    }
+  },
+  {
+    "path": "/tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0006.fit",
+    "source": "/mnt/astro/unsorted/2022-10-27-ASIRedCat/MonkeyJelly/Light_MonkeyJelly_180.0s_Bin1_H_0006.fit",
+    "bytes": 52194240,
+    "sha256": "d91e07e58fdbe72c9a0fbdc69438e61fd40e7da1efab169e8f25b41c9429bb20",
+    "headers": {
+      "NAXIS1": 6248,
+      "NAXIS2": 4176,
+      "FILTER": "H",
+      "EXPTIME": 180.0,
+      "DATE-OBS": "2022-10-28T08:19:57.486024",
+      "INSTRUME": "ZWO ASI2600MM Pro",
+      "GAIN": 300,
+      "OFFSET": 50
+    }
+  },
+  {
+    "path": "/tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0007.fit",
+    "source": "/mnt/astro/unsorted/2022-10-27-ASIRedCat/MonkeyJelly/Light_MonkeyJelly_180.0s_Bin1_H_0007.fit",
+    "bytes": 52194240,
+    "sha256": "c04e00518c6a04dbd30102a28bd132837f82e689457c3b9211ebbab2cb87da74",
+    "headers": {
+      "NAXIS1": 6248,
+      "NAXIS2": 4176,
+      "FILTER": "H",
+      "EXPTIME": 180.0,
+      "DATE-OBS": "2022-10-28T08:23:36.041821",
+      "INSTRUME": "ZWO ASI2600MM Pro",
+      "GAIN": 300,
+      "OFFSET": 50
+    }
+  },
+  {
+    "path": "/tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0008.fit",
+    "source": "/mnt/astro/unsorted/2022-10-27-ASIRedCat/MonkeyJelly/Light_MonkeyJelly_180.0s_Bin1_H_0008.fit",
+    "bytes": 52194240,
+    "sha256": "bd35f6a6d61d511d12e657e30a8be25de569060f8479c03857ee18947c10ec63",
+    "headers": {
+      "NAXIS1": 6248,
+      "NAXIS2": 4176,
+      "FILTER": "H",
+      "EXPTIME": 180.0,
+      "DATE-OBS": "2022-10-28T08:26:37.567493",
+      "INSTRUME": "ZWO ASI2600MM Pro",
+      "GAIN": 300,
+      "OFFSET": 50
+    }
+  },
+  {
+    "path": "/tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0009.fit",
+    "source": "/mnt/astro/unsorted/2022-10-27-ASIRedCat/MonkeyJelly/Light_MonkeyJelly_180.0s_Bin1_H_0009.fit",
+    "bytes": 52194240,
+    "sha256": "d6c4b7c7fb9385f26579652276a639c2943fd48a79b03921bddeb9b485802005",
+    "headers": {
+      "NAXIS1": 6248,
+      "NAXIS2": 4176,
+      "FILTER": "H",
+      "EXPTIME": 180.0,
+      "DATE-OBS": "2022-10-28T08:29:39.139393",
+      "INSTRUME": "ZWO ASI2600MM Pro",
+      "GAIN": 300,
+      "OFFSET": 50
+    }
+  },
+  {
+    "path": "/tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0010.fit",
+    "source": "/mnt/astro/unsorted/2022-10-27-ASIRedCat/MonkeyJelly/Light_MonkeyJelly_180.0s_Bin1_H_0010.fit",
+    "bytes": 52194240,
+    "sha256": "4d169644e5e5043a8badafbf901d4c94bb3566e23f696e3119d180fced2e3663",
+    "headers": {
+      "NAXIS1": 6248,
+      "NAXIS2": 4176,
+      "FILTER": "H",
+      "EXPTIME": 180.0,
+      "DATE-OBS": "2022-10-28T08:33:28.731599",
+      "INSTRUME": "ZWO ASI2600MM Pro",
+      "GAIN": 300,
+      "OFFSET": 50
+    }
+  },
+  {
+    "path": "/tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_O_0001.fit",
+    "source": "/mnt/astro/unsorted/2022-10-27-ASIRedCat/MonkeyJelly/Light_MonkeyJelly_180.0s_Bin1_O_0001.fit",
+    "bytes": 52194240,
+    "sha256": "863111e7f6a98a00f8942be98805ae05ecef26cf699e9f546b49b90e8088f40a",
+    "headers": {
+      "NAXIS1": 6248,
+      "NAXIS2": 4176,
+      "FILTER": "O",
+      "EXPTIME": 180.0,
+      "DATE-OBS": "2022-10-28T08:39:30.950684",
+      "INSTRUME": "ZWO ASI2600MM Pro",
+      "GAIN": 300,
+      "OFFSET": 50
+    }
+  },
+  {
+    "path": "/tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_O_0002.fit",
+    "source": "/mnt/astro/unsorted/2022-10-27-ASIRedCat/MonkeyJelly/Light_MonkeyJelly_180.0s_Bin1_O_0002.fit",
+    "bytes": 52194240,
+    "sha256": "e57e79e3f861c43a2e4d095ec6485acf5274821db62483455827d66a6b354689",
+    "headers": {
+      "NAXIS1": 6248,
+      "NAXIS2": 4176,
+      "FILTER": "O",
+      "EXPTIME": 180.0,
+      "DATE-OBS": "2022-10-28T08:42:32.547201",
+      "INSTRUME": "ZWO ASI2600MM Pro",
+      "GAIN": 300,
+      "OFFSET": 50
+    }
+  },
+  {
+    "path": "/tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_O_0003.fit",
+    "source": "/mnt/astro/unsorted/2022-10-27-ASIRedCat/MonkeyJelly/Light_MonkeyJelly_180.0s_Bin1_O_0003.fit",
+    "bytes": 52194240,
+    "sha256": "d546b64e6758e49c2e7cd446507a4f5a339fe3c4aa6bb9d584575421ebfdb93b",
+    "headers": {
+      "NAXIS1": 6248,
+      "NAXIS2": 4176,
+      "FILTER": "O",
+      "EXPTIME": 180.0,
+      "DATE-OBS": "2022-10-28T08:46:10.548856",
+      "INSTRUME": "ZWO ASI2600MM Pro",
+      "GAIN": 300,
+      "OFFSET": 50
+    }
+  },
+  {
+    "path": "/tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_O_0004.fit",
+    "source": "/mnt/astro/unsorted/2022-10-27-ASIRedCat/MonkeyJelly/Light_MonkeyJelly_180.0s_Bin1_O_0004.fit",
+    "bytes": 52361280,
+    "sha256": "5771c16a4c260e5f36428dcc2be214d064c3b8a22a89bbb16a3c63244b9fae21",
+    "headers": {
+      "NAXIS1": 6248,
+      "NAXIS2": 4176,
+      "FILTER": "O",
+      "EXPTIME": 180.0,
+      "DATE-OBS": "2022-10-28T08:49:12.150",
+      "INSTRUME": "ZWO ASI2600MM Pro",
+      "GAIN": 300.0,
+      "OFFSET": 50.0
+    }
+  },
+  {
+    "path": "/tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_O_0005.fit",
+    "source": "/mnt/astro/unsorted/2022-10-27-ASIRedCat/MonkeyJelly/Light_MonkeyJelly_180.0s_Bin1_O_0005.fit",
+    "bytes": 52194240,
+    "sha256": "d8d08205b9840155c010d8ec347dcbdee501bcaeb5ec96e9a02eef7a2c9cfa68",
+    "headers": {
+      "NAXIS1": 6248,
+      "NAXIS2": 4176,
+      "FILTER": "O",
+      "EXPTIME": 180.0,
+      "DATE-OBS": "2022-10-28T08:52:14.014941",
+      "INSTRUME": "ZWO ASI2600MM Pro",
+      "GAIN": 300,
+      "OFFSET": 50
+    }
+  },
+  {
+    "path": "/tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_O_0006.fit",
+    "source": "/mnt/astro/unsorted/2022-10-27-ASIRedCat/MonkeyJelly/Light_MonkeyJelly_180.0s_Bin1_O_0006.fit",
+    "bytes": 52194240,
+    "sha256": "6d74c101f103e199849a92aa102dee4f99a3b285c211d8c62f795853eb3a9b92",
+    "headers": {
+      "NAXIS1": 6248,
+      "NAXIS2": 4176,
+      "FILTER": "O",
+      "EXPTIME": 180.0,
+      "DATE-OBS": "2022-10-28T08:55:43.068566",
+      "INSTRUME": "ZWO ASI2600MM Pro",
+      "GAIN": 300,
+      "OFFSET": 50
+    }
+  },
+  {
+    "path": "/tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_O_0007.fit",
+    "source": "/mnt/astro/unsorted/2022-10-27-ASIRedCat/MonkeyJelly/Light_MonkeyJelly_180.0s_Bin1_O_0007.fit",
+    "bytes": 52194240,
+    "sha256": "97ce60a482f1ecd81960064da0d8047d8e1806ae8714a0bc15fbad89c5696c4f",
+    "headers": {
+      "NAXIS1": 6248,
+      "NAXIS2": 4176,
+      "FILTER": "O",
+      "EXPTIME": 180.0,
+      "DATE-OBS": "2022-10-28T08:58:44.597154",
+      "INSTRUME": "ZWO ASI2600MM Pro",
+      "GAIN": 300,
+      "OFFSET": 50
+    }
+  },
+  {
+    "path": "/tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_O_0008.fit",
+    "source": "/mnt/astro/unsorted/2022-10-27-ASIRedCat/MonkeyJelly/Light_MonkeyJelly_180.0s_Bin1_O_0008.fit",
+    "bytes": 52194240,
+    "sha256": "2693abec7a7d5794ff2f7b4ded8e381a80fcd1f64407a464f97a12ad11cb55bb",
+    "headers": {
+      "NAXIS1": 6248,
+      "NAXIS2": 4176,
+      "FILTER": "O",
+      "EXPTIME": 180.0,
+      "DATE-OBS": "2022-10-28T09:01:46.132990",
+      "INSTRUME": "ZWO ASI2600MM Pro",
+      "GAIN": 300,
+      "OFFSET": 50
+    }
+  },
+  {
+    "path": "/tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_O_0009.fit",
+    "source": "/mnt/astro/unsorted/2022-10-27-ASIRedCat/MonkeyJelly/Light_MonkeyJelly_180.0s_Bin1_O_0009.fit",
+    "bytes": 52194240,
+    "sha256": "40458bb9be4a0eb13d5119de00da4583189aee03bc33c5b5b0be838ad49a9289",
+    "headers": {
+      "NAXIS1": 6248,
+      "NAXIS2": 4176,
+      "FILTER": "O",
+      "EXPTIME": 180.0,
+      "DATE-OBS": "2022-10-28T09:05:07.614277",
+      "INSTRUME": "ZWO ASI2600MM Pro",
+      "GAIN": 300,
+      "OFFSET": 50
+    }
+  },
+  {
+    "path": "/tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_O_0010.fit",
+    "source": "/mnt/astro/unsorted/2022-10-27-ASIRedCat/MonkeyJelly/Light_MonkeyJelly_180.0s_Bin1_O_0010.fit",
+    "bytes": 52194240,
+    "sha256": "72734c8317527166259cd3fd1155aba2cfde8361be6b3a14ed10b7bd956608ff",
+    "headers": {
+      "NAXIS1": 6248,
+      "NAXIS2": 4176,
+      "FILTER": "O",
+      "EXPTIME": 180.0,
+      "DATE-OBS": "2022-10-28T09:08:09.102696",
+      "INSTRUME": "ZWO ASI2600MM Pro",
+      "GAIN": 300,
+      "OFFSET": 50
+    }
+  },
+  {
+    "path": "/tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_S_0001.fit",
+    "source": "/mnt/astro/unsorted/2022-10-27-ASIRedCat/MonkeyJelly/Light_MonkeyJelly_180.0s_Bin1_S_0001.fit",
+    "bytes": 52194240,
+    "sha256": "bf116d2a472ff2167f02b16cd5668c191ab4d1207b1bbd273e6dda14877f82c4",
+    "headers": {
+      "NAXIS1": 6248,
+      "NAXIS2": 4176,
+      "FILTER": "S",
+      "EXPTIME": 180.0,
+      "DATE-OBS": "2022-10-28T09:14:26.256697",
+      "INSTRUME": "ZWO ASI2600MM Pro",
+      "GAIN": 300,
+      "OFFSET": 50
+    }
+  },
+  {
+    "path": "/tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_S_0002.fit",
+    "source": "/mnt/astro/unsorted/2022-10-27-ASIRedCat/MonkeyJelly/Light_MonkeyJelly_180.0s_Bin1_S_0002.fit",
+    "bytes": 52194240,
+    "sha256": "b9c41141c271545481709eed8f42e9d63ae2dd61f2d4d4dadf538d54ab38fd5d",
+    "headers": {
+      "NAXIS1": 6248,
+      "NAXIS2": 4176,
+      "FILTER": "S",
+      "EXPTIME": 180.0,
+      "DATE-OBS": "2022-10-28T09:17:49.401632",
+      "INSTRUME": "ZWO ASI2600MM Pro",
+      "GAIN": 300,
+      "OFFSET": 50
+    }
+  },
+  {
+    "path": "/tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_S_0003.fit",
+    "source": "/mnt/astro/unsorted/2022-10-27-ASIRedCat/MonkeyJelly/Light_MonkeyJelly_180.0s_Bin1_S_0003.fit",
+    "bytes": 52194240,
+    "sha256": "704ea7522444ea1ec711ad53d8d4b059416011096efd6b89a5e7e88ac6201429",
+    "headers": {
+      "NAXIS1": 6248,
+      "NAXIS2": 4176,
+      "FILTER": "S",
+      "EXPTIME": 180.0,
+      "DATE-OBS": "2022-10-28T09:20:50.981143",
+      "INSTRUME": "ZWO ASI2600MM Pro",
+      "GAIN": 300,
+      "OFFSET": 50
+    }
+  },
+  {
+    "path": "/tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_S_0004.fit",
+    "source": "/mnt/astro/unsorted/2022-10-27-ASIRedCat/MonkeyJelly/Light_MonkeyJelly_180.0s_Bin1_S_0004.fit",
+    "bytes": 52194240,
+    "sha256": "28b696e9122e110a03b03343a038c7c3a39137869a07dc519dd5c3c57a91e6c9",
+    "headers": {
+      "NAXIS1": 6248,
+      "NAXIS2": 4176,
+      "FILTER": "S",
+      "EXPTIME": 180.0,
+      "DATE-OBS": "2022-10-28T09:23:52.417637",
+      "INSTRUME": "ZWO ASI2600MM Pro",
+      "GAIN": 300,
+      "OFFSET": 50
+    }
+  },
+  {
+    "path": "/tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_S_0005.fit",
+    "source": "/mnt/astro/unsorted/2022-10-27-ASIRedCat/MonkeyJelly/Light_MonkeyJelly_180.0s_Bin1_S_0005.fit",
+    "bytes": 52194240,
+    "sha256": "c22f408661082b1241fa9bfad8f7853d4f1742fb198248969d428fbaef107f60",
+    "headers": {
+      "NAXIS1": 6248,
+      "NAXIS2": 4176,
+      "FILTER": "S",
+      "EXPTIME": 180.0,
+      "DATE-OBS": "2022-10-28T09:27:34.177841",
+      "INSTRUME": "ZWO ASI2600MM Pro",
+      "GAIN": 300,
+      "OFFSET": 50
+    }
+  },
+  {
+    "path": "/tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_S_0006.fit",
+    "source": "/mnt/astro/unsorted/2022-10-27-ASIRedCat/MonkeyJelly/Light_MonkeyJelly_180.0s_Bin1_S_0006.fit",
+    "bytes": 52194240,
+    "sha256": "f7f804123d8cff1b53b3c52a821f654a1d1d2ae6e99be64b9205600df6c59ab3",
+    "headers": {
+      "NAXIS1": 6248,
+      "NAXIS2": 4176,
+      "FILTER": "S",
+      "EXPTIME": 180.0,
+      "DATE-OBS": "2022-10-28T09:30:36.036685",
+      "INSTRUME": "ZWO ASI2600MM Pro",
+      "GAIN": 300,
+      "OFFSET": 50
+    }
+  },
+  {
+    "path": "/tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_S_0007.fit",
+    "source": "/mnt/astro/unsorted/2022-10-27-ASIRedCat/MonkeyJelly/Light_MonkeyJelly_180.0s_Bin1_S_0007.fit",
+    "bytes": 52194240,
+    "sha256": "0c350132e9c4637b265f1cee535a154826cd4561ea9fde6ae56f55eac45fabcc",
+    "headers": {
+      "NAXIS1": 6248,
+      "NAXIS2": 4176,
+      "FILTER": "S",
+      "EXPTIME": 180.0,
+      "DATE-OBS": "2022-10-28T09:33:37.983575",
+      "INSTRUME": "ZWO ASI2600MM Pro",
+      "GAIN": 300,
+      "OFFSET": 50
+    }
+  },
+  {
+    "path": "/tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_S_0008.fit",
+    "source": "/mnt/astro/unsorted/2022-10-27-ASIRedCat/MonkeyJelly/Light_MonkeyJelly_180.0s_Bin1_S_0008.fit",
+    "bytes": 52194240,
+    "sha256": "6c2a7e2857436f2c4451970c0bb87dff9abfb15898ca93efc1e9a62222988e9c",
+    "headers": {
+      "NAXIS1": 6248,
+      "NAXIS2": 4176,
+      "FILTER": "S",
+      "EXPTIME": 180.0,
+      "DATE-OBS": "2022-10-28T09:37:07.885544",
+      "INSTRUME": "ZWO ASI2600MM Pro",
+      "GAIN": 300,
+      "OFFSET": 50
+    }
+  },
+  {
+    "path": "/tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_S_0009.fit",
+    "source": "/mnt/astro/unsorted/2022-10-27-ASIRedCat/MonkeyJelly/Light_MonkeyJelly_180.0s_Bin1_S_0009.fit",
+    "bytes": 52194240,
+    "sha256": "cce416ce5baf35af5069d488375b6cd9855495ac92ce89e12c849840707f8d53",
+    "headers": {
+      "NAXIS1": 6248,
+      "NAXIS2": 4176,
+      "FILTER": "S",
+      "EXPTIME": 180.0,
+      "DATE-OBS": "2022-10-28T09:40:09.380159",
+      "INSTRUME": "ZWO ASI2600MM Pro",
+      "GAIN": 300,
+      "OFFSET": 50
+    }
+  },
+  {
+    "path": "/tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_S_0010.fit",
+    "source": "/mnt/astro/unsorted/2022-10-27-ASIRedCat/MonkeyJelly/Light_MonkeyJelly_180.0s_Bin1_S_0010.fit",
+    "bytes": 52194240,
+    "sha256": "1f353b158f7fc4dae4429ce18afd4a07bf7df3d904e1d8995e6afb65f558f04c",
+    "headers": {
+      "NAXIS1": 6248,
+      "NAXIS2": 4176,
+      "FILTER": "S",
+      "EXPTIME": 180.0,
+      "DATE-OBS": "2022-10-28T09:43:10.947685",
+      "INSTRUME": "ZWO ASI2600MM Pro",
+      "GAIN": 300,
+      "OFFSET": 50
+    }
+  }
+]

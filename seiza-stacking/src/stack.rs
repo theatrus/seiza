@@ -167,6 +167,15 @@ pub struct StackOptions {
     /// master to subtract their hot pixels; `None` (the default) leaves
     /// frames untouched.
     pub cosmetic: Option<crate::cosmetic::ImpulseFilterOptions>,
+    /// Track how much of each pixel came from saturated raw pixels for
+    /// [`LiveStacker::clipped_fraction`]. Enabled by default. Disable this
+    /// when no clipping map is needed to skip its detection, resampling and
+    /// accumulation; image samples, weights and rejection are unchanged.
+    /// Disabled stacks return no clipping map, including after saving and
+    /// reopening a context. The default is omitted from serialized options
+    /// so existing fingerprints and contexts retain their exact bytes.
+    #[serde(rename = "trackClipping", skip_serializing_if = "is_true")]
+    pub track_clipping: bool,
     /// Sensor defects repaired in each light after calibration and before
     /// the cosmetic filter and debayering: what [`crate::detect_defects`]
     /// learns from dithered lights whose calibration has no master dark to
@@ -256,6 +265,7 @@ impl Default for StackOptions {
             rejection: RejectionMode::default(),
             acceptance: FrameAcceptanceCriteria::default(),
             cosmetic: None,
+            track_clipping: true,
             defects: None,
             weighting: FrameWeighting::default(),
             cfa_integration: CfaIntegration::default(),
@@ -266,6 +276,10 @@ impl Default for StackOptions {
             gpu: crate::GpuOptions::default(),
         }
     }
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 fn native_bin_factor() -> u32 {
@@ -800,7 +814,10 @@ impl LiveStacker {
     ) -> Result<Self> {
         let source = crate::replay::FrameSource::of(&reference);
         let reference_metadata = reference.metadata();
-        let clipped = crate::saturation::raw_clip_mask(&reference);
+        let clipped = options
+            .track_clipping
+            .then(|| crate::saturation::raw_clip_mask(&reference))
+            .flatten();
         let (reference, cfa) =
             prepare_light(reference, &calibration, &options.match_tolerances, &options)
                 .map_err(LightFailure::into_error)?;
@@ -2107,7 +2124,11 @@ impl LiveStacker {
             frame.rescale_declared_unit_bounds(scale);
         }
         let source = crate::replay::FrameSource::of(&frame);
-        let clipped = crate::saturation::raw_clip_mask(&frame);
+        let clipped = self
+            .options
+            .track_clipping
+            .then(|| crate::saturation::raw_clip_mask(&frame))
+            .flatten();
         let (frame, cfa) = match prepare_light(
             frame,
             &self.calibration,
@@ -2296,12 +2317,12 @@ impl LiveStacker {
         let (_, mut integration) = self.split_for_pipeline();
         integration.integrate(prepared)
     }
-    /// Copy the current estimate and coverage masks into an owned snapshot.
     /// How much of each pixel's integrated observations came from clipped
     /// raw pixels, from 0 to 1, as a mono image on the stack's grid: where
     /// the sensor saturated, a stack records only that the sky was at least
     /// that bright, and its colour there means nothing. `None` when no
-    /// integrated frame clipped, or its saturation level was unknown.
+    /// integrated frame clipped, its saturation level was unknown, or
+    /// [`StackOptions::track_clipping`] is disabled.
     /// [`crate::neutralize_clipped`] renders those pixels neutral after
     /// colour calibration.
     pub fn clipped_fraction(&self) -> Option<LinearImage> {
@@ -2310,6 +2331,7 @@ impl LiveStacker {
         LinearImage::new(self.reference.width, self.reference.height, 1, fraction).ok()
     }
 
+    /// Copy the current estimate and coverage masks into an owned snapshot.
     pub fn snapshot(&self) -> Result<StackSnapshot> {
         let (mut mean, variance) = self.accumulator.snapshot();
         self.accumulator.check_kept()?;
@@ -2398,6 +2420,29 @@ impl LiveStacker {
             mapping.set_channel_sites(self.ledger.reference_channel_sites());
         }
         mapping
+    }
+
+    /// Consume this stack and reintegrate its admitted frames, releasing the
+    /// live accumulator before allocating the final integration buffers.
+    ///
+    /// This produces the same result and progress events as
+    /// [`Self::reintegrate`], including its per-frame diagnostics, but the
+    /// live stack cannot be continued. Its accumulator is not used by replay:
+    /// on the CPU, dropping it first releases 16 bytes per live sample
+    /// (20 when weighted), plus any retained clipping fractions. Reference
+    /// images, calibration and cached frames remain available until replay
+    /// finishes. The stack and its scratch files are dropped on success, error
+    /// or cancellation.
+    pub fn finish_reintegration(
+        mut self,
+        options: &crate::BatchStackOptions,
+        progress: impl FnMut(crate::BatchStackPass, usize, usize),
+    ) -> Result<crate::BatchStackResult> {
+        drop(std::mem::replace(
+            &mut self.accumulator,
+            Accumulator::new(0, false),
+        ));
+        self.reintegrate(options, progress)
     }
 
     /// Consume the live state and move its full-frame buffers into a final
@@ -4785,6 +4830,116 @@ mod tests {
             }
         }
         LinearImage::new(width, height, 1, data).unwrap()
+    }
+
+    #[test]
+    fn clipping_can_be_disabled_without_changing_pixels_or_legacy_options() {
+        let legacy = serde_json::to_value(StackOptions::default()).unwrap();
+        assert!(legacy.get("trackClipping").is_none());
+        assert!(
+            serde_json::from_value::<StackOptions>(legacy)
+                .unwrap()
+                .track_clipping
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let mut paths = Vec::new();
+        for index in 0..4 {
+            let mut image = stacking_star_field(160, 128);
+            image.data[118 * 160 + 91] = 65535.0;
+            let path = directory.path().join(format!("clipped-{index}.fits"));
+            crate::write_processed_image_fits_f32(
+                &path,
+                &image,
+                &[],
+                &[seiza_fits::WriteHeaderCard::new(
+                    "SATURATE",
+                    HeaderValue::Float(65535.0),
+                )],
+            )
+            .unwrap();
+            paths.push(path);
+        }
+        let mut expected = None;
+        let mut tracked_fingerprint = None;
+        for track_clipping in [true, false] {
+            for pipelined in [false, true] {
+                let options = StackOptions {
+                    track_clipping,
+                    normalization: NormalizationMode::None,
+                    rejection: RejectionMode::None,
+                    gpu: crate::GpuOptions::cpu(),
+                    ..StackOptions::default()
+                };
+                let serialized = serde_json::to_value(&options).unwrap();
+                if !track_clipping {
+                    assert_eq!(serialized["trackClipping"], false);
+                }
+                let mut stacker =
+                    LiveStacker::open_fits(&paths[0], None, None, None, None, options).unwrap();
+                assert_eq!(stacker.clipped_fraction().is_some(), track_clipping);
+                if pipelined {
+                    let report = stacker
+                        .push_fits_pipelined(
+                            &paths[1..3],
+                            &crate::PipelineOptions {
+                                workers: Some(2),
+                                ..crate::PipelineOptions::default()
+                            },
+                            |_, _| crate::Continue::Yes,
+                        )
+                        .unwrap();
+                    assert_eq!(report.integrated, 2);
+                    assert_eq!(report.failed + report.rejected, 0);
+                } else {
+                    for path in &paths[1..3] {
+                        assert!(matches!(
+                            stacker.push_fits(path).unwrap(),
+                            FrameDisposition::Accepted(_)
+                        ));
+                    }
+                }
+                assert_eq!(stacker.view().accepted_frames, 3);
+                assert_eq!(stacker.clipped_fraction().is_some(), track_clipping);
+                let snapshot = stacker.snapshot().unwrap();
+                let bits = (
+                    snapshot
+                        .image
+                        .data
+                        .iter()
+                        .map(|x| x.to_bits())
+                        .collect::<Vec<_>>(),
+                    snapshot
+                        .variance
+                        .data
+                        .iter()
+                        .map(|x| x.to_bits())
+                        .collect::<Vec<_>>(),
+                    snapshot.coverage,
+                );
+                match &expected {
+                    None => expected = Some(bits),
+                    Some(expected) => assert_eq!(&bits, expected),
+                }
+                if track_clipping {
+                    tracked_fingerprint = Some(stacker.configuration_fingerprint().to_owned());
+                } else {
+                    assert_ne!(
+                        tracked_fingerprint.as_deref().unwrap(),
+                        stacker.configuration_fingerprint()
+                    );
+                }
+                let context = directory.path().join("clipping.seiza-stack");
+                stacker.save_context(&context).unwrap();
+                let mut reopened = LiveStacker::open_context(&context).unwrap();
+                assert_eq!(reopened.options.track_clipping, track_clipping);
+                assert_eq!(reopened.clipped_fraction().is_some(), track_clipping);
+                assert!(matches!(
+                    reopened.push_fits(&paths[3]).unwrap(),
+                    FrameDisposition::Accepted(_)
+                ));
+                assert_eq!(reopened.clipped_fraction().is_some(), track_clipping);
+            }
+        }
     }
 
     /// Where a frame's raw pixels reach the sensor's ceiling, the stack

@@ -432,6 +432,26 @@ impl DetectionSample for f32 {
     type Background = f32;
     const ZERO: Self = 0.0;
 
+    // Keep the scalar search's first positive pixel, but skip background
+    // blocks with a reduction the compiler can vectorize.
+    fn next_positive(row: &[Self], from: usize) -> usize {
+        const BLOCK: usize = 32;
+        let mut at = from;
+        while at + BLOCK <= row.len() {
+            if row[at..at + BLOCK]
+                .iter()
+                .fold(false, |any, &value| any | (value > 0.0))
+            {
+                break;
+            }
+            at += BLOCK;
+        }
+        row[at..]
+            .iter()
+            .position(|&value| value > 0.0)
+            .map_or(row.len(), |offset| at + offset)
+    }
+
     fn estimate_background(
         pixels: &[Self],
         width: u32,
@@ -927,6 +947,39 @@ fn elongation(mxx: f64, myy: f64, mxy: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn f32_positive_search_matches_scalar_at_every_block_boundary() {
+        for length in [0, 1, 31, 32, 33, 63, 64, 65, 97] {
+            let background = [0.0, -0.0, -1.0, f32::NEG_INFINITY, f32::NAN];
+            let mut row = (0..length)
+                .map(|i| background[i % background.len()])
+                .collect::<Vec<_>>();
+            let check = |row: &[f32]| {
+                for from in 0..=row.len() {
+                    let expected = row[from..]
+                        .iter()
+                        .position(|&value| value > 0.0)
+                        .map_or(row.len(), |offset| from + offset);
+                    assert_eq!(<f32 as DetectionSample>::next_positive(row, from), expected);
+                }
+            };
+            check(&row);
+            for positive in [f32::from_bits(1), 1.0, f32::INFINITY] {
+                for at in 0..length {
+                    let original = row[at];
+                    row[at] = positive;
+                    check(&row);
+                    row[at] = original;
+                }
+            }
+            // Searches resume inside a block after flood fill removes a star.
+            for at in (0..length).step_by(7) {
+                row[at] = 1.0;
+            }
+            check(&row);
+        }
+    }
 
     #[test]
     fn threshold_rows_match_a_scalar_reference_on_every_dispatch() {

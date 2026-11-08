@@ -1,0 +1,24 @@
+   Compiling seiza-model v0.1.0 (/home/ppicazo/Development/seiza/seiza-model)
+    Finished `test` profile [optimized + debuginfo] target(s) in 1.24s
+     Running unittests src/lib.rs (target/debug/deps/seiza_model-2d2bec84b68a147c)
+
+running 1 test
+test noise::tests::changing_block_coverage_does_not_make_the_map_depend_on_the_thread_count ... FAILED
+
+failures:
+
+---- noise::tests::changing_block_coverage_does_not_make_the_map_depend_on_the_thread_count stdout ----
+
+thread 'noise::tests::changing_block_coverage_does_not_make_the_map_depend_on_the_thread_count' (340) panicked at seiza-model/src/noise.rs:326:21:
+assertion `left == right` failed: Image, 2 threads, pixel 128
+  left: 1073157590
+ right: 1071654123
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    noise::tests::changing_block_coverage_does_not_make_the_map_depend_on_the_thread_count
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 52 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p seiza-model --lib`

@@ -407,7 +407,8 @@ impl PyStackOptions {
         defects=None,
         bin_factor=1,
         gpu=None,
-        interpolation="bilinear"
+        interpolation="bilinear",
+        track_clipping=true
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -443,6 +444,7 @@ impl PyStackOptions {
         bin_factor: u32,
         gpu: Option<PyGpuOptions>,
         interpolation: &str,
+        track_clipping: bool,
     ) -> PyResult<Self> {
         let interpolation = match interpolation {
             "bilinear" => seiza_stacking::Interpolation::Bilinear,
@@ -522,6 +524,7 @@ impl PyStackOptions {
             weighting,
             interpolation,
             defects: defects.map(|defects| defects.inner.clone()),
+            track_clipping,
             ..StackOptions::default()
         };
         inner.registration.detection_sigma = detection_sigma;
@@ -555,6 +558,14 @@ impl PyStackOptions {
             inner,
             minimum_overlap,
         })
+    }
+
+    /// Whether raw saturation fractions are tracked. Disabling this saves
+    /// mask work and makes ``clipped_fraction()`` return ``None``; stack
+    /// image samples are unchanged.
+    #[getter]
+    fn track_clipping(&self) -> bool {
+        self.inner.track_clipping
     }
 
     #[getter]
@@ -2340,7 +2351,8 @@ impl PyLiveStacker {
     /// How much of each pixel's integrated observations came from clipped
     /// raw pixels, from 0 to 1, as a `(height, width)` array on the stack's
     /// grid, for `neutralize_clipped`; `None` when no integrated frame
-    /// clipped, or their saturation level was unknown.
+    /// clipped, their saturation level was unknown, or ``track_clipping``
+    /// was disabled in the stack options.
     fn clipped_fraction<'py>(
         &self,
         py: Python<'py>,
@@ -2558,6 +2570,32 @@ impl PyLiveStacker {
             full.refined_frames,
             full.registration_rms_pixels,
         ))
+    }
+
+    /// Consume the live stack and reintegrate its admitted frames, releasing
+    /// its accumulator first. Returns the same result as ``reintegrate()``.
+    /// After replay starts the stack is finished, including on failure.
+    #[pyo3(signature = (*, sigma_low=3.0, sigma_high=3.0, scratch_directory=None))]
+    fn finish_reintegration(
+        &mut self,
+        py: Python<'_>,
+        sigma_low: f32,
+        sigma_high: f32,
+        scratch_directory: Option<PathBuf>,
+    ) -> PyResult<PyStackSnapshot> {
+        let options = batch_options(sigma_low, sigma_high, scratch_directory)?;
+        let stacker = self.inner.take().ok_or_else(finished_error)?;
+        let reference_headers = stacker.reference_headers().to_vec();
+        let input_paths = stacker.protected_paths();
+        let result = py
+            .detach(|| stacker.finish_reintegration(&options, |_, _, _| {}))
+            .map_err(stack_error)?;
+        Ok(PyStackSnapshot {
+            final_samples: Some(result.frames),
+            inner: result.snapshot,
+            reference_headers,
+            input_paths,
+        })
     }
 
     /// Consume the accumulator, optionally write a linear FITS file, and return its arrays.

@@ -578,6 +578,7 @@ class GpuOptions:
     ) -> None: ...
 
 class StackOptions:
+    track_clipping: bool
     normalization: str
     local_tile_size: int | None
     demosaic: str
@@ -626,6 +627,7 @@ class StackOptions:
         bin_factor: int = 1,
         gpu: GpuOptions | None = None,
         interpolation: str = "bilinear",
+        track_clipping: bool = True,
     ) -> None: ...
 
 class FrameDisposition:
@@ -941,6 +943,10 @@ class LiveStacker:
         sigma_high: float = 3.0,
         scratch_directory: str | Path | None = None,
     ) -> tuple[StackSnapshot, int, float | None]: ...
+    def finish_reintegration(
+        self, *, sigma_low: float = 3.0, sigma_high: float = 3.0,
+        scratch_directory: str | Path | None = None,
+    ) -> StackSnapshot: ...
     def finish(self, output: str | Path | None = None) -> StackSnapshot: ...
 
 class PipelineReport:

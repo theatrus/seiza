@@ -730,6 +730,7 @@ seiza_live_stacker_reintegrate_full_resolution = "LiveStacker.reintegrate_full_r
 seiza_live_stacker_bin_factor = "LiveStacker.bin_factor"
 seiza_live_stacker_measure_depth = "LiveStacker.measure_depth"
 seiza_checkpoint_depths = "checkpoint_depths"
+seiza_live_stacker_finish_reintegration = "LiveStacker.finish_reintegration"
 seiza_live_stacker_finish = "LiveStacker.finish"
 seiza_live_stacker_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
 seiza_stack_choose_reference_json = "choose_reference"

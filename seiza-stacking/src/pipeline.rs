@@ -1025,7 +1025,11 @@ fn prepare_decoded(
     }
     // Recorded after the rescale, which a replay repeats.
     let source = crate::replay::FrameSource::of(&frame);
-    let clipped = crate::saturation::raw_clip_mask(&frame);
+    let clipped = half
+        .options
+        .track_clipping
+        .then(|| crate::saturation::raw_clip_mask(&frame))
+        .flatten();
     #[cfg(feature = "gpu")]
     trace.mark("raw clipping");
     let (frame, cfa) = match crate::stack::prepare_light(

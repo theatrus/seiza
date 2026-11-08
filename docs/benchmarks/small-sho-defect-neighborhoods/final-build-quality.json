@@ -1,0 +1,12 @@
+{
+  "binary_sha256": "beba453d7113a9da30a43931e0145531970d0b6bad833962a6edc1b6303f8ab7",
+  "sha256": {
+    "H": "db1d812f11d403c3a5358b25520d69ce95e859d90570dac1f6e332941d1ff4f7",
+    "O": "4b4a7d3d415b057e712a7deba4b3a349897af888498f020259c63aeeaed82a04",
+    "S": "feb63525ae012ef4d064a0eae42dd4563911ca7aac6ae0e759c1cddf1f4531fe",
+    "SHO": "b54c74d4c41155b52b6b396ecbbcee4cd72339ea3be12ce39b908767b6d98077"
+  },
+  "matches_all_measured_fits_files": true,
+  "admission_records_identical": true,
+  "excluded_from_timing_summary": true
+}

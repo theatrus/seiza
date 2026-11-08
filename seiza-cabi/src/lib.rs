@@ -3710,6 +3710,8 @@ pub unsafe extern "C" fn seiza_stack_detect_defects_json(
 /// (by default what the device has; with less, the live accumulator stays
 /// on the CPU sooner), and `"trace"`, which prints each GPU call's timings
 /// to stderr.
+/// `"trackClipping": false` skips raw saturation-mask work when no clipping
+/// map is needed; it defaults to true and changes no stack image samples.
 /// All files
 /// are fully read during this call and are not kept open afterward.
 /// Local-background offsets use median paired residuals after applying the
@@ -5150,7 +5152,8 @@ pub unsafe extern "C" fn seiza_live_stacker_coverage(
 /// raw pixels, from 0 to 1, into `out`: one float per pixel of the stack's
 /// grid, row by row, for [`seiza_color_neutralize_clipped`]. Returns true
 /// when it copied the map, and false with no error when no integrated frame
-/// clipped, or their saturation level was unknown. Fails, setting
+/// clipped, their saturation level was unknown, or `trackClipping` was false
+/// in the stack options. Fails, setting
 /// `error_out`, when `out` holds fewer than `width * height` floats.
 ///
 /// # Safety
@@ -5960,6 +5963,88 @@ pub unsafe extern "C" fn seiza_drizzle_result_free(drizzle: *mut SeizaDrizzleRes
     if !drizzle.is_null() {
         unsafe { drop(Box::from_raw(drizzle)) };
     }
+}
+
+#[unsafe(no_mangle)]
+/// Consume a live stacker and reintegrate its admitted frames, dropping the
+/// live accumulator before allocating the final integration buffers.
+/// The result and arguments are those of [`seiza_live_stacker_reintegrate`].
+/// `scratch_directory` is null for system temporary storage, or an existing
+/// parent directory for replay scratch files. A retained cache takes precedence.
+/// An explicit replay directory refuses a higher-memory whole-frame fallback.
+/// A non-null accepted handle is set to null and consumed on success,
+/// replay failure or cancellation; do not free or reuse its former value.
+///
+/// # Safety
+/// `stacker` must point to writable storage containing null or a live
+/// `SeizaLiveStacker` pointer, exclusively owned for this call. Other
+/// arguments have the requirements of [`seiza_live_stacker_reintegrate`].
+/// `scratch_directory` must be null or a valid NUL-terminated UTF-8 path.
+pub unsafe extern "C" fn seiza_live_stacker_finish_reintegration(
+    stacker: *mut *mut SeizaLiveStacker,
+    low_sigma: f32,
+    high_sigma: f32,
+    scratch_directory: *const c_char,
+    cancel: *const SeizaCancelSignal,
+    progress: SeizaStackReintegrateProgressCallback,
+    context: *mut c_void,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaStackSnapshot {
+    clear_error(error_out);
+    let context = context as usize;
+    ffi_result(error_out, || {
+        let scratch_directory = optional_path(scratch_directory)?;
+        if stacker.is_null() {
+            return Err("live stacker pointer storage is required".into());
+        }
+        let live = unsafe { *stacker };
+        if live.is_null() {
+            return Err("live stacker is required".into());
+        }
+        unsafe { *stacker = ptr::null_mut() };
+        let live = unsafe { Box::from_raw(live) };
+        let SeizaLiveStacker { stacker } = *live;
+        let reference_headers = stacker.reference_headers().to_vec();
+        let input_paths = stacker.protected_paths();
+        let sigma = |value: f32| {
+            if value.is_finite() && value > 0.0 {
+                value
+            } else {
+                3.0
+            }
+        };
+        let options = seiza_stacking::BatchStackOptions {
+            scratch_directory,
+            rejection: seiza_stacking::MasterRejectionOptions {
+                low_sigma: sigma(low_sigma),
+                high_sigma: sigma(high_sigma),
+            },
+            cancel: unsafe { cancel.as_ref() }
+                .map(|signal| CancelSignal::from(Arc::clone(&signal.cancelled))),
+            ..seiza_stacking::BatchStackOptions::default()
+        };
+        let result = stacker
+            .finish_reintegration(&options, |pass, index, count| {
+                if let Some(callback) = progress {
+                    let pass = match pass {
+                        seiza_stacking::BatchStackPass::Estimate => 0,
+                        seiza_stacking::BatchStackPass::Refine => 1,
+                        seiza_stacking::BatchStackPass::Integrate => 2,
+                    };
+                    unsafe { callback(pass, index, count, context as *mut c_void) };
+                }
+            })
+            .map_err(|error| error.to_string())?;
+        Ok(SeizaStackSnapshot {
+            final_samples: Some(result.frames),
+            snapshot: result.snapshot,
+            reference_headers,
+            input_paths,
+        })
+    })
+    .map_or(ptr::null_mut(), |snapshot| {
+        Box::into_raw(Box::new(snapshot))
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -10326,6 +10411,86 @@ mod tests {
     }
 
     #[test]
+    fn stack_options_can_skip_clipping_without_changing_pixels() {
+        assert!(stack_options(ptr::null()).unwrap().track_clipping);
+        let bad = CString::new(r#"{"trackClipping":"false"}"#).unwrap();
+        assert!(stack_options(bad.as_ptr()).is_err());
+        let directory = tempfile::tempdir().unwrap();
+        let mut data = stacking_star_field(160, 128);
+        data[118 * 160 + 91] = 65535.0;
+        let image = LinearImage::new(160, 128, 1, data).unwrap();
+        let path = directory.path().join("clipped.fits");
+        seiza_stacking::write_processed_image_fits_f32(
+            &path,
+            &image,
+            &[],
+            &[seiza_fits::WriteHeaderCard::new(
+                "SATURATE",
+                seiza_fits::HeaderValue::Float(65535.0),
+            )],
+        )
+        .unwrap();
+        let path = CString::new(path.to_str().unwrap()).unwrap();
+        let mut expected = None;
+        for track in [true, false] {
+            let options = CString::new(
+                serde_json::json!({"trackClipping":track,
+                "gpu":{"enabled":false}})
+                .to_string(),
+            )
+            .unwrap();
+            let mut error = ptr::null_mut();
+            let stacker = unsafe {
+                seiza_live_stacker_open_fits(
+                    path.as_ptr(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    0.0,
+                    options.as_ptr(),
+                    &mut error,
+                )
+            };
+            assert!(!stacker.is_null() && error.is_null());
+            let mut map = vec![-1.0; 160 * 128];
+            assert_eq!(
+                unsafe {
+                    seiza_live_stacker_clipped_fraction(
+                        stacker,
+                        map.as_mut_ptr(),
+                        map.len(),
+                        &mut error,
+                    )
+                },
+                track
+            );
+            assert!(error.is_null());
+            if track {
+                assert_eq!(map[118 * 160 + 91], 1.0);
+            } else {
+                assert!(map.iter().all(|&value| value == -1.0));
+            }
+            let snapshot = unsafe { seiza_live_stacker_snapshot(stacker, &mut error) };
+            assert!(!snapshot.is_null() && error.is_null());
+            let bits = unsafe { &*snapshot }
+                .snapshot
+                .image
+                .data
+                .iter()
+                .map(|x| x.to_bits())
+                .collect::<Vec<_>>();
+            match &expected {
+                None => expected = Some(bits),
+                Some(expected) => assert_eq!(&bits, expected),
+            }
+            unsafe {
+                seiza_stack_snapshot_free(snapshot);
+                seiza_live_stacker_free(stacker);
+            }
+        }
+    }
+
+    #[test]
     fn deconvolution_cabi_restores_in_place_and_reports_errors() {
         let size = 41;
         let center = size / 2;
@@ -12233,13 +12398,39 @@ mod tests {
             unsafe { seiza_stack_snapshot_free(snapshot) };
             (stacker, image)
         };
-        let (retained, kept) = replay(true);
+        let (mut retained, kept) = replay(true);
         assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 1);
-        let (fresh, expected) = replay(false);
+        let (mut fresh, expected) = replay(false);
         assert_eq!(kept, expected);
-        unsafe {
-            seiza_live_stacker_free(retained);
-            seiza_live_stacker_free(fresh);
+        for live in [&mut retained, &mut fresh] {
+            let finished = unsafe {
+                seiza_live_stacker_finish_reintegration(
+                    live,
+                    3.0,
+                    3.0,
+                    scratch_c.as_ptr(),
+                    ptr::null(),
+                    None,
+                    ptr::null_mut(),
+                    &mut error,
+                )
+            };
+            assert!((*live).is_null());
+            assert!(!finished.is_null() && error.is_null());
+            let value = unsafe { &*finished };
+            assert_eq!(
+                value
+                    .snapshot
+                    .image
+                    .data
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(value.final_samples.as_ref().unwrap().len(), paths.len());
+            assert_eq!(value.snapshot.accepted_frames as usize, paths.len());
+            unsafe { seiza_stack_snapshot_free(finished) };
         }
         assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0);
         assert!(!unsafe {
@@ -12249,6 +12440,68 @@ mod tests {
                 &mut error,
             )
         });
+        unsafe { seiza_string_free(error) };
+    }
+
+    #[test]
+    fn consuming_reintegration_cabi_nulls_handles_on_failure() {
+        let (width, height) = (160, 128);
+        let image = stacking_star_field(width, height);
+        let config = no_adjustment_stack_options();
+        let mut error = ptr::null_mut();
+        let mut live = unsafe {
+            seiza_live_stacker_create(
+                image.as_ptr(),
+                image.len(),
+                width,
+                height,
+                1,
+                config.as_ptr(),
+                &mut error,
+            )
+        };
+        assert!(!live.is_null() && error.is_null());
+        let result = unsafe {
+            seiza_live_stacker_finish_reintegration(
+                &mut live,
+                3.0,
+                3.0,
+                ptr::null(),
+                ptr::null(),
+                None,
+                ptr::null_mut(),
+                &mut error,
+            )
+        };
+        assert!(result.is_null() && live.is_null() && !error.is_null());
+        unsafe { seiza_string_free(error) };
+        let result = unsafe {
+            seiza_live_stacker_finish_reintegration(
+                &mut live,
+                3.0,
+                3.0,
+                ptr::null(),
+                ptr::null(),
+                None,
+                ptr::null_mut(),
+                &mut error,
+            )
+        };
+        assert!(result.is_null() && !error.is_null());
+        unsafe { seiza_string_free(error) };
+        let result = unsafe {
+            seiza_live_stacker_finish_reintegration(
+                ptr::null_mut(),
+                3.0,
+                3.0,
+                ptr::null(),
+                ptr::null(),
+                None,
+                ptr::null_mut(),
+                &mut error,
+            )
+        };
+        assert!(result.is_null() && !error.is_null());
         unsafe { seiza_string_free(error) };
     }
 
