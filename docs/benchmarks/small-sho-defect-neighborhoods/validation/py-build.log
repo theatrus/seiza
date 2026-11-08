@@ -1,0 +1,15 @@
+🐍 Found CPython 3.12 at /tmp/seiza-python-validation/bin/python
+🔗 Found pyo3 bindings with abi3-py3.11 support
+📡 Using build options features from pyproject.toml
+Ignoring onnxruntime: markers 'extra == "ml"' don't match your environment
+Requirement already satisfied: numpy>=1.23.2 in /tmp/seiza-python-validation/lib/python3.12/site-packages (2.5.4)
+   Compiling seiza-stacking v0.57.0 (/home/ppicazo/Development/seiza/seiza-stacking)
+   Compiling seiza-model v0.1.0 (/home/ppicazo/Development/seiza/seiza-model)
+   Compiling seiza-analysis v0.5.0 (/home/ppicazo/Development/seiza/seiza-analysis)
+   Compiling seiza-pipeline v0.2.0 (/home/ppicazo/Development/seiza/seiza-pipeline)
+   Compiling seiza-py v0.49.0 (/home/ppicazo/Development/seiza/seiza-py)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 13.19s
+📖 Found type stub file at seiza.pyi
+📦 Built wheel for abi3 Python ≥ 3.11 to /tmp/.tmpM1iCsh/seiza-0.49.0-cp311-abi3-linux_x86_64.whl
+✏️ Setting installed package as editable
+🛠 Installed seiza-0.49.0

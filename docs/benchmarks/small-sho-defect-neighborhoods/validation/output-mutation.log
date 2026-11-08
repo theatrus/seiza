@@ -1,0 +1,23 @@
+   Compiling seiza-stacking v0.57.0 (/home/ppicazo/Development/seiza/seiza-stacking)
+    Finished `test` profile [optimized + debuginfo] target(s) in 13.37s
+     Running tests/output_version.rs (target/debug/deps/output_version-2e5b89ac5b35b2c3)
+
+running 1 test
+test a_stack_repairing_learned_defects_keeps_its_output ... FAILED
+
+failures:
+
+---- a_stack_repairing_learned_defects_keeps_its_output stdout ----
+
+thread 'a_stack_repairing_learned_defects_keeps_its_output' (469) panicked at seiza-stacking/tests/output_version.rs:4133:5:
+DEFECTS: the output changed. If that is intended, set OUTPUT_VERSION in seiza-stacking/src/lib.rs to the release that will ship this change, and record the new output:
+const DEFECTS: &[f64] = &[1.4728663e2, 2.8423791e2, 3.9116528e3, 9.7242836e1, 9.9624306e1, 1.0100451e2, 1.3478386e2, 1.0542286e2, 9.7959328e1, 1.0025464e2, 1.0213885e2, 1.0339946e2, 1.0479445e2, 9.8228928e1, 1.0144611e2, 1.0334298e2, 1.0439066e2, 1.0643222e2, 1.0005348e2, 1.0090429e2, 1.0373550e2, 1.0631087e2, 1.0774182e2, 1.0090869e2, 1.8217436e2, 1.0489795e2, 1.0703057e2, 1.1149534e2];
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    a_stack_repairing_learned_defects_keeps_its_output
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 73 filtered out; finished in 0.14s
+
+error: test failed, to rerun pass `-p seiza-stacking --test output_version`

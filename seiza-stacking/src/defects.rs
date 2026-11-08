@@ -837,8 +837,33 @@ fn gather(
     channels: usize,
     into: &mut [f32],
 ) -> usize {
-    let step = step as isize;
     let mut count = 0;
+    if ring == 1 && x >= step && y >= step && x + step < width && y + step < height {
+        // The common inner ring lies wholly in the image. Compute its
+        // strides once instead of checking every neighbour's coordinates.
+        // Keep the same row-major order and finite-sample filtering.
+        let center = (y * width + x) * channels + channel;
+        let horizontal = step * channels;
+        let vertical = step * width * channels;
+        for index in [
+            center - vertical - horizontal,
+            center - vertical,
+            center - vertical + horizontal,
+            center - horizontal,
+            center + horizontal,
+            center + vertical - horizontal,
+            center + vertical,
+            center + vertical + horizontal,
+        ] {
+            let value = data[index];
+            if value.is_finite() {
+                into[count] = value;
+                count += 1;
+            }
+        }
+        return count;
+    }
+    let step = step as isize;
     for (dx, dy) in ring_offsets(ring) {
         let Some((nx, ny)) = offset(x, y, dx * step, dy * step, width, height) else {
             continue;
@@ -867,6 +892,71 @@ fn median_in_place(values: &mut [f32]) -> f32 {
 mod tests {
     use super::*;
     use seiza_fits::HeaderValue;
+
+    #[test]
+    fn gathered_rings_match_grid_coordinates_at_borders_and_in_the_interior() {
+        for (width, height) in [(1_usize, 1_usize), (3, 5), (9, 8)] {
+            for channels in [1, 3] {
+                let data = (0..width * height * channels)
+                    .map(|index| match index % 13 {
+                        0 => f32::NAN,
+                        1 => f32::INFINITY,
+                        2 => f32::NEG_INFINITY,
+                        3 => -0.0,
+                        _ => index as f32 - 20.0,
+                    })
+                    .collect::<Vec<_>>();
+                for step in [1, 2] {
+                    for ring in [1, 2] {
+                        for y in 0..height {
+                            for x in 0..width {
+                                for channel in 0..channels {
+                                    let mut expected = Vec::new();
+                                    for ny in 0..height {
+                                        for nx in 0..width {
+                                            let dx = nx.abs_diff(x);
+                                            let dy = ny.abs_diff(y);
+                                            if dx % step == 0
+                                                && dy % step == 0
+                                                && dx.max(dy) == step * ring
+                                            {
+                                                let value =
+                                                    data[(ny * width + nx) * channels + channel];
+                                                if value.is_finite() {
+                                                    expected.push(value.to_bits());
+                                                }
+                                            }
+                                        }
+                                    }
+                                    let mut actual = [f32::NAN; 24];
+                                    let count = gather(
+                                        &data,
+                                        x,
+                                        y,
+                                        channel,
+                                        step,
+                                        ring as isize,
+                                        width,
+                                        height,
+                                        channels,
+                                        &mut actual,
+                                    );
+                                    assert_eq!(
+                                        actual[..count]
+                                            .iter()
+                                            .map(|value| value.to_bits())
+                                            .collect::<Vec<_>>(),
+                                        expected,
+                                        "{width}x{height}, channels={channels}, ({x},{y},{channel}), step={step}, ring={ring}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     const SIZE: usize = 96;
     const SKY: f32 = 100.0;
