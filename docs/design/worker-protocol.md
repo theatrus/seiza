@@ -96,8 +96,22 @@ The CLI's global `--detection-backend`, `--detection-fallback`, and
 
 ## Solve result
 
+In solve results, `rotationDeg` is the linear CD-matrix rotation modulo 360:
+`atan2(wcs.cd[0][1], -wcs.cd[1][1])`, converted to degrees and normalized.
+It matches the angle accepted by Rust's `Wcs::from_center_scale_rotation`
+and Python's WCS constructor, for either parity. The positive image-y axis
+is measured from south toward east on the tangent plane. Earlier workers
+reported an angle derived from the direction of north in the image;
+for conformal normal-parity images its sign was reversed. Clients that
+compensated for that sign must remove the compensation. This corrects the
+reported angle without changing `wcs` or `footprint`.
+
+Retain the full `wcs` to reproduce the solution: one scale and rotation
+cannot encode shear, unequal axis scales or SIP distortion, and `center`
+is the image middle rather than necessarily `wcs.crval`.
+
 ```json
-{"jsonrpc":"2.0","id":2,"result":{"schemaVersion":1,"mode":"hinted","image":{"width":6248,"height":4176},"center":{"raDeg":328.4308,"decDeg":47.2731},"pixelScaleArcsecPerPixel":0.3265,"rotationDeg":182.4,"parity":"mirrored","radiusDeg":0.341,"matchedStars":81,"rmsArcsec":0.58,"falseMatchProbability":1.2e-180,"wcs":{"projection":"TAN","pixelOrigin":1,"crval":[328.4308,47.2731],"crpix":[3124.5,2088.5],"cd":[[-0.00009,0.0],[0.0,0.00009]]},"footprint":[{"raDeg":328.1,"decDeg":47.0},{"raDeg":328.8,"decDeg":47.0},{"raDeg":328.8,"decDeg":47.5},{"raDeg":328.1,"decDeg":47.5}],"timings":{"loadMs":72.0,"detectMs":48.0,"indexMs":0.0,"solveMs":90.0,"totalMs":214.0}}}
+{"jsonrpc":"2.0","id":2,"result":{"schemaVersion":1,"mode":"hinted","image":{"width":6248,"height":4176},"center":{"raDeg":328.4308,"decDeg":47.2731},"pixelScaleArcsecPerPixel":0.3265,"rotationDeg":180.0,"parity":"mirrored","radiusDeg":0.341,"matchedStars":81,"rmsArcsec":0.58,"falseMatchProbability":1.2e-180,"wcs":{"projection":"TAN","pixelOrigin":1,"crval":[328.4308,47.2731],"crpix":[3124.5,2088.5],"cd":[[-0.00009,0.0],[0.0,0.00009]]},"footprint":[{"raDeg":328.1,"decDeg":47.0},{"raDeg":328.8,"decDeg":47.0},{"raDeg":328.8,"decDeg":47.5},{"raDeg":328.1,"decDeg":47.5}],"timings":{"loadMs":72.0,"detectMs":48.0,"indexMs":0.0,"solveMs":90.0,"totalMs":214.0}}}
 ```
 
 `falseMatchProbability` is the chance that a wrong field would match as

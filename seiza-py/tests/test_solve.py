@@ -356,3 +356,18 @@ def test_sip_fit_on_distorted_field_and_header_output():
     assert abs(dec_s - dec_t) * 3600.0 < 2.0
     xi, yi = solution.wcs.world_to_pixel(ra_t, dec_t)
     assert math.hypot(xi - xd, yi - yd) < 1.0
+
+
+@pytest.mark.parametrize("flipped", [False, True])
+@pytest.mark.parametrize("angle", [-180.0, -88.33, 0.0, 33.5, 180.0, 271.25])
+@pytest.mark.parametrize("dec", [-90.0, 55.99702, 90.0])
+def test_wcs_rotation_reconstructs_the_constructor_at_either_parity(angle, flipped, dec):
+    wcs = seiza.Wcs.from_center_scale_rotation(
+        (334.42417, dec), (5816.0, 5777.0), 0.6037, angle, flipped
+    )
+    error = (wcs.rotation_deg - angle + 180.0) % 360.0 - 180.0
+    assert abs(error) < 1e-12
+    rebuilt = seiza.Wcs.from_center_scale_rotation(
+        wcs.crval, wcs.crpix, wcs.scale_arcsec_px, wcs.rotation_deg, wcs.flipped
+    )
+    np.testing.assert_allclose(rebuilt.cd, wcs.cd, rtol=0, atol=1e-18)

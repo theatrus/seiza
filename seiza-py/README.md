@@ -119,6 +119,16 @@ print(solution.rotation_deg, solution.flipped)
 ra, dec = solution.wcs.pixel_to_world(100.0, 200.0)
 ```
 
+`Wcs.rotation_deg` and `Solution.rotation_deg` report the linear CD rotation
+in [-180, 180] degrees, matching `Wcs.from_center_scale_rotation` modulo
+360 degrees for either parity. It is `atan2(CD1_2, -CD2_2)`: the positive
+image-y axis measured from south toward east on the tangent plane. Their
+values are unchanged. The CLI and worker now use this convention too;
+earlier CLI/worker results measured the direction of north in the image,
+whose sign was reversed for conformal normal-parity images. Preserve the
+full WCS or its FITS header cards to retain shear, unequal axis scales and
+SIP distortion; rotation and scalar scale alone cannot express those.
+
 `open` takes a file, a directory (the right catalog inside is picked — the
 deepest star catalog wins), or nothing at all. With no argument the standard
 places are searched: `SEIZA_STAR_DATA` / `SEIZA_BLIND_INDEX`, files next to

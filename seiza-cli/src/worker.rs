@@ -1421,6 +1421,7 @@ struct WorkerSolveResult {
     image: SolvedImage,
     center: SkyCoordinate,
     pixel_scale_arcsec_per_pixel: f64,
+    /// Linear CD rotation matching Wcs::from_center_scale_rotation, modulo 360.
     rotation_deg: f64,
     parity: String,
     radius_deg: f64,
@@ -1525,7 +1526,7 @@ fn solution_result(
     let middle = seiza::image_center(dimensions.0, dimensions.1);
     let center = wcs.pixel_to_world(middle.0, middle.1);
     let determinant = wcs.cd[0][0] * wcs.cd[1][1] - wcs.cd[0][1] * wcs.cd[1][0];
-    let rotation_deg = north_rotation_deg(wcs);
+    let rotation_deg = wcs.rotation_degrees().rem_euclid(360.0);
     let scale = wcs.scale_arcsec_per_px();
     let radius_deg =
         ((dimensions.0 as f64 * scale).hypot(dimensions.1 as f64 * scale) / 2.0) / 3600.0;
@@ -1576,17 +1577,6 @@ fn solution_result(
         timings,
         transfer: None,
     }
-}
-
-fn north_rotation_deg(wcs: &Wcs) -> f64 {
-    wcs.world_to_pixel(wcs.crval.0, wcs.crval.1 + 0.01)
-        .map(|(x, y)| {
-            (x - wcs.crpix.0)
-                .atan2(-(y - wcs.crpix.1))
-                .to_degrees()
-                .rem_euclid(360.0)
-        })
-        .unwrap_or(f64::NAN)
 }
 
 fn milliseconds(duration: Duration) -> f64 {
@@ -1877,6 +1867,54 @@ mod tests {
                 .to_string()
                 .contains("timed out")
         );
+    }
+
+    #[test]
+    fn result_rotation_reconstructs_the_linear_wcs_for_both_parities() {
+        for flipped in [false, true] {
+            for rotation in [0.0, 33.5, -88.33, 180.0, 271.25] {
+                let wcs = Wcs::from_center_scale_rotation(
+                    (334.42417, 55.99702),
+                    (5816.0, 5777.0),
+                    0.6037,
+                    rotation,
+                    flipped,
+                );
+                let solution = Solution {
+                    wcs,
+                    matched_stars: 42,
+                    rms_arcsec: 0.2,
+                    false_match_probability: 1e-30,
+                };
+                let result = solution_result(
+                    SolveMode::Hinted,
+                    &solution,
+                    (11633, 11555),
+                    SolveTimings::default(),
+                );
+                let rebuilt = Wcs::from_center_scale_rotation(
+                    solution.wcs.crval,
+                    solution.wcs.crpix,
+                    result.pixel_scale_arcsec_per_pixel,
+                    result.rotation_deg,
+                    result.parity == "mirrored",
+                );
+                let error = solution
+                    .wcs
+                    .cd
+                    .iter()
+                    .flatten()
+                    .zip(rebuilt.cd.iter().flatten())
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0_f64, f64::max);
+                assert!(
+                    error < 1e-15,
+                    "rotation={rotation}, flipped={flipped}, reported={}, CD error={error}",
+                    result.rotation_deg
+                );
+                assert!((0.0..360.0).contains(&result.rotation_deg));
+            }
+        }
     }
 
     #[test]
