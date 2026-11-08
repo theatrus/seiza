@@ -529,7 +529,9 @@ print(result.report.backend, result.report.channels[0].noise)
 
 `seiza.model_backends()` says which backends run here and why the others do not,
 and `install_model`, `installed_models`, `verify_model` and `remove_model` manage
-the store. Models run through ONNX Runtime, which the wheel does not carry.
+the store. Invalid tile geometry is refused when opening or installing a bundle,
+before loading ONNX Runtime or replacing an installed model.
+Models run through ONNX Runtime, which the wheel does not carry.
 `pip install seiza[ml]` brings the `onnxruntime` package, whose library Seiza finds
 for itself; `library=` or `SEIZA_ONNXRUNTIME` names another. Microsoft's builds
 report to Microsoft unless told not to, and Seiza tells them not to before it loads

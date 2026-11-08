@@ -1,0 +1,21 @@
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.06s
+     Running unittests src/lib.rs (target/debug/deps/seiza_model-2d2bec84b68a147c)
+
+running 1 test
+test bundle::tests::a_card_refuses_invalid_tile_geometry_before_loading_a_graph ... FAILED
+
+failures:
+
+---- bundle::tests::a_card_refuses_invalid_tile_geometry_before_loading_a_graph stdout ----
+
+thread 'bundle::tests::a_card_refuses_invalid_tile_geometry_before_loading_a_graph' (598) panicked at seiza-model/src/bundle.rs:356:9:
+assertion failed: matches!(ModelBundle::open(temp.path()), Err(ModelError::ModelContract(_)))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    bundle::tests::a_card_refuses_invalid_tile_geometry_before_loading_a_graph
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 53 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p seiza-model --lib`
