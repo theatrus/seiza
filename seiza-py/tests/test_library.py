@@ -318,6 +318,9 @@ def test_measured_rows_carry_the_response_and_what_would_not_read():
 def test_settings_follow_the_shared_table():
     schema = seiza.calibration_settings_schema()
     keys = [field["key"] for field in schema]
+    flat_age = next(field for field in schema if field["key"] == "flat_max_age_days")
+    assert flat_age["effect"] == "matching"
+
     assert "rotation_tolerance_deg" in keys and len(keys) == len(set(keys))
     ok = seiza.calibration_setting_check("rotation_tolerance_deg", 3.0)
     assert ok == {
