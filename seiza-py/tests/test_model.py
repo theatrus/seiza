@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import shutil
 import os
 import subprocess
 import sys
@@ -38,6 +40,33 @@ def test_a_model_installs_verifies_lists_and_goes(tmp_path: Path) -> None:
     seiza.remove_model("noise-tiny", store)
     with pytest.raises(seiza.EngineError, match="noise-tiny"):
         seiza.remove_model("noise-tiny", store)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("margin", sys.maxsize + 1),
+        ("ramp", 2 * sys.maxsize + 1),
+        ("tile", 0),
+        ("tile", 63),
+        ("tile", 16),
+        ("multiple", 0),
+    ],
+)
+def test_invalid_tiling_cannot_replace_an_installed_model(tmp_path: Path, field: str, value: int) -> None:
+    store = tmp_path / "store"
+    seiza.install_model(TINY, store)
+    source = tmp_path / "source"
+    shutil.copytree(TINY, source)
+    path = source / "card.json"
+    card = json.loads(path.read_text())
+    card["tiling"][field] = value
+    path.write_text(json.dumps(card))
+
+    with pytest.raises(seiza.EngineError, match="tiling"):
+        seiza.install_model(source, store)
+    seiza.verify_model("noise-tiny", store)
+    assert [model.name for model in seiza.installed_models(store)] == ["noise-tiny"]
 
 
 def test_a_changed_graph_is_refused(tmp_path: Path) -> None:

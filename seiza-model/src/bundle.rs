@@ -129,11 +129,12 @@ pub struct TilingCard {
 }
 
 impl TilingCard {
-    /// The tiling for a tile of `tile` pixels, or this card's own.
+    /// The tiling for a tile of `tile` pixels, or this card's own. An overlap
+    /// too large for `usize` saturates, and [`Tiling::tiles`] refuses it.
     pub fn tiling(&self, tile: Option<usize>) -> Tiling {
         Tiling {
             tile: tile.unwrap_or(self.tile),
-            overlap: 2 * self.margin + self.ramp,
+            overlap: self.margin.saturating_mul(2).saturating_add(self.ramp),
             margin: self.margin,
             multiple: self.multiple,
         }
@@ -201,6 +202,12 @@ impl ModelCard {
                 self.format
             ));
         }
+        self.tiling
+            .tiling(None)
+            .tiles(self.tiling.tile, self.tiling.tile)
+            .map_err(|error| {
+                ModelError::ModelContract(format!("{}'s tiling: {error}", self.name))
+            })?;
         if self.inputs.iter().any(|input| input.planes.is_empty()) {
             return refuse(format!("{} names an input with no planes", self.name));
         }
@@ -343,6 +350,35 @@ pub(crate) mod tests {
             }}"#
         );
         std::fs::write(root.join(CARD_FILE), card).unwrap();
+    }
+
+    #[test]
+    fn a_card_refuses_invalid_tile_geometry_before_loading_a_graph() {
+        let temp = tempfile::tempdir().unwrap();
+        write_bundle(temp.path(), "noise-test", "constant");
+        let path = temp.path().join(CARD_FILE);
+        let good: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        for (field, value) in [
+            ("margin", usize::MAX),
+            ("margin", usize::MAX / 2 + 1),
+            ("ramp", usize::MAX),
+            ("multiple", 0),
+            ("tile", 0),
+            ("tile", 511),
+            ("tile", 256),
+        ] {
+            let mut card = good.clone();
+            card["tiling"][field] = serde_json::json!(value);
+            std::fs::write(&path, serde_json::to_vec(&card).unwrap()).unwrap();
+            assert!(
+                matches!(
+                    ModelBundle::open(temp.path()),
+                    Err(ModelError::ModelContract(_))
+                ),
+                "{field}={value}"
+            );
+        }
     }
 
     #[test]

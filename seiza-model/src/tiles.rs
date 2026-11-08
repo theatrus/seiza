@@ -100,14 +100,23 @@ fn reflected(index: usize, length: usize) -> usize {
     }
 }
 
-/// How far an axis is padded: to a whole tile, or until its last tile starts on
-/// the grid.
-fn padding(length: usize, tile: usize, multiple: usize) -> usize {
-    if length <= tile {
-        tile - length
-    } else {
-        (length - tile).next_multiple_of(multiple) - (length - tile)
+/// An axis padded to a whole tile, or until its last tile starts on the grid.
+fn padded_length(length: usize, tile: usize, multiple: usize) -> Result<usize, ModelError> {
+    if length == 0 {
+        return Err(ModelError::InvalidImage(
+            "an image axis holds no pixels".to_string(),
+        ));
     }
+    // `tile` is already on the grid, so rounding the whole axis is the same
+    // as rounding its excess past one tile, without an unchecked final sum.
+    length
+        .max(tile)
+        .checked_next_multiple_of(multiple)
+        .ok_or_else(|| {
+            ModelError::InvalidImage(format!(
+                "an axis of {length} overflows when padded to {multiple}"
+            ))
+        })
 }
 
 impl Tiling {
@@ -132,7 +141,10 @@ impl Tiling {
             )));
         }
         let overlap = tile - stride;
-        if overlap < 2 * margin + 1 {
+        if margin
+            .checked_mul(2)
+            .is_none_or(|margins| overlap <= margins)
+        {
             return Err(ModelError::InvalidOption(format!(
                 "an overlap of {overlap} leaves no ramp past two margins of {margin}"
             )));
@@ -140,12 +152,18 @@ impl Tiling {
         Ok(overlap)
     }
 
-    /// How many tiles an image of this size takes.
+    /// How many tiles an image of this size takes, without allocating tile
+    /// positions. Refuses invalid tiling, empty axes, and dimensions whose
+    /// padding or total tile count cannot fit in `usize`.
     pub fn tiles(&self, width: usize, height: usize) -> Result<usize, ModelError> {
         let overlap = self.grid_overlap()?;
-        let full = |length| length + padding(length, self.tile, self.multiple);
-        Ok(origins(full(height), self.tile, overlap).len()
-            * origins(full(width), self.tile, overlap).len())
+        let count = |length| -> Result<usize, ModelError> {
+            let full = padded_length(length, self.tile, self.multiple)?;
+            Ok((full - self.tile).div_ceil(self.tile - overlap) + 1)
+        };
+        count(width)?.checked_mul(count(height)?).ok_or_else(|| {
+            ModelError::InvalidImage(format!("the tile count for {width} × {height} overflows"))
+        })
     }
 }
 
@@ -167,8 +185,9 @@ pub(crate) fn infer(
 ) -> Result<Vec<f32>, ModelError> {
     let tile = tiling.tile;
     let overlap = tiling.grid_overlap()?;
-    let full_width = width + padding(width, tile, tiling.multiple);
-    let full_height = height + padding(height, tile, tiling.multiple);
+    let count = tiling.tiles(width, height)?;
+    let full_width = padded_length(width, tile, tiling.multiple)?;
+    let full_height = padded_length(height, tile, tiling.multiple)?;
     let rows = origins(full_height, tile, overlap);
     let columns = origins(full_width, tile, overlap);
     let row_windows = windows(&rows, tile, overlap, tiling.margin);
@@ -184,7 +203,6 @@ pub(crate) fn infer(
     let source_y: Vec<usize> = (0..full_height).map(|y| reflected(y, height)).collect();
     let mut input = vec![0.0_f32; channels * tile * tile];
     let mut residual = vec![0.0_f32; tile * tile];
-    let count = rows.len() * columns.len();
     let mut done = 0;
     for (row, &top) in rows.iter().enumerate() {
         for (column, &left) in columns.iter().enumerate() {
@@ -285,6 +303,76 @@ mod tests {
             &mut |_, _| {},
         )
         .unwrap()
+    }
+
+    #[test]
+    fn an_unrepresentable_margin_is_refused() {
+        for margin in [usize::MAX, usize::MAX / 2 + 1] {
+            let bad = Tiling { margin, ..TILING };
+            assert!(matches!(
+                bad.tiles(200, 130),
+                Err(ModelError::InvalidOption(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn counting_tiles_refuses_empty_axes_and_overflow() {
+        for (width, height) in [(0, 64), (64, 0), (usize::MAX, 64), (64, usize::MAX)] {
+            assert!(matches!(
+                TILING.tiles(width, height),
+                Err(ModelError::InvalidImage(_))
+            ));
+        }
+        let dense = Tiling {
+            tile: 2,
+            overlap: 1,
+            margin: 0,
+            multiple: 1,
+        };
+        assert!(matches!(
+            dense.tiles(usize::MAX, usize::MAX),
+            Err(ModelError::InvalidImage(_))
+        ));
+        assert_eq!(dense.tiles(usize::MAX, 2).unwrap(), usize::MAX - 1);
+    }
+
+    #[test]
+    fn counted_tiles_match_materialized_origins_across_grids_and_partial_strides() {
+        for tile in [16, 32, 64] {
+            for multiple in [1, 2, 4, 8] {
+                for overlap in 1..tile {
+                    let tiling = Tiling {
+                        tile,
+                        overlap,
+                        margin: 0,
+                        multiple,
+                    };
+                    let Ok(overlap) = tiling.grid_overlap() else {
+                        continue;
+                    };
+                    for width in 1..3 * tile {
+                        let height = 3 * tile + 1 - width;
+                        let full = |length: usize| {
+                            if length <= tile {
+                                tile
+                            } else {
+                                tile + (length - tile).next_multiple_of(multiple)
+                            }
+                        };
+                        assert_eq!(padded_length(width, tile, multiple).unwrap(), full(width));
+                        assert_eq!(padded_length(height, tile, multiple).unwrap(), full(height));
+                        let columns = origins(full(width), tile, overlap);
+                        let rows = origins(full(height), tile, overlap);
+                        assert_eq!(
+                            tiling.tiles(width, height).unwrap(),
+                            rows.len() * columns.len(),
+                            "{tiling:?} {width} × {height}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

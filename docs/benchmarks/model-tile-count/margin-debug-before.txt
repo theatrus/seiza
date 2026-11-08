@@ -1,0 +1,24 @@
+   Compiling smallvec v1.16.3
+   Compiling ort v2.0.0-rc.15
+   Compiling seiza-model v0.1.0 (/home/ppicazo/Development/seiza/seiza-model)
+    Finished `test` profile [optimized + debuginfo] target(s) in 3.63s
+     Running unittests src/lib.rs (target/debug/deps/seiza_model-2d2bec84b68a147c)
+
+running 1 test
+test tiles::tests::an_unrepresentable_margin_is_refused ... FAILED
+
+failures:
+
+---- tiles::tests::an_unrepresentable_margin_is_refused stdout ----
+
+thread 'tiles::tests::an_unrepresentable_margin_is_refused' (585) panicked at seiza-model/src/tiles.rs:135:22:
+attempt to multiply with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tiles::tests::an_unrepresentable_margin_is_refused
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 53 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p seiza-model --lib`
