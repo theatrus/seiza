@@ -1,0 +1,9 @@
+   Compiling seiza-stacking v0.57.0 (/home/ppicazo/Development/seiza/seiza-stacking)
+    Finished `test` profile [optimized + debuginfo] target(s) in 4.63s
+     Running tests/output_version.rs (target/debug/deps/output_version-2e5b89ac5b35b2c3)
+
+running 1 test
+test a_large_stack_keeps_its_clipped_fraction ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 73 filtered out; finished in 0.79s
+

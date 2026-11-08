@@ -1419,6 +1419,8 @@ char *seiza_stack_detect_defects_json(const char *paths_json,
  (by default what the device has; with less, the live accumulator stays
  on the CPU sooner), and `"trace"`, which prints each GPU call's timings
  to stderr.
+ `"trackClipping": false` skips raw saturation-mask work when no clipping
+ map is needed; it defaults to true and changes no stack image samples.
  All files
  are fully read during this call and are not kept open afterward.
  Local-background offsets use median paired residuals after applying the
@@ -2082,7 +2084,8 @@ const uint32_t *seiza_live_stacker_coverage(const SeizaLiveStacker *stacker);
  raw pixels, from 0 to 1, into `out`: one float per pixel of the stack's
  grid, row by row, for [`seiza_color_neutralize_clipped`]. Returns true
  when it copied the map, and false with no error when no integrated frame
- clipped, or their saturation level was unknown. Fails, setting
+ clipped, their saturation level was unknown, or `trackClipping` was false
+ in the stack options. Fails, setting
  `error_out`, when `out` holds fewer than `width * height` floats.
 
  # Safety

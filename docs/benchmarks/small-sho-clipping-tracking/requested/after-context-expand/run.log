@@ -1,0 +1,27 @@
+chose      /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0010.fit as reference: 2000 stars, median area 8.0px, sky variation 48.9
+defects    3718 sensor pixel(s) from 10 light(s)
+plan       1/10 connected, 6248x4176: /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0001.fit
+plan       2/10 connected, 6263x4182: /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0002.fit
+plan       3/10 connected, 6263x4182: /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0003.fit
+plan       4/10 connected, 6264x4182: /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0004.fit
+plan       5/10 connected, 6264x4182: /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0005.fit
+plan       6/10 connected, 6264x4182: /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0006.fit
+plan       7/10 connected, 6264x4182: /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0007.fit
+plan       8/10 connected, 6264x4184: /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0008.fit
+plan       9/10 connected, 6264x4184: /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0009.fit
+plan       10/10 connected, 6264x4184: /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0010.fit
+reference  /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0010.fit (7532.8px registration drift limit)
+accepted   /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0010.fit: 800 stars, 0.000px RMS, 6.0px drift, +0.000deg, 100.0% samples
+accepted   /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0001.fit: 1941 stars, 0.072px RMS, 14.3px drift, +0.009deg, 100.0% samples
+accepted   /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0002.fit: 1924 stars, 0.070px RMS, 14.6px drift, +0.007deg, 100.0% samples
+accepted   /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0003.fit: 1925 stars, 0.070px RMS, 14.8px drift, +0.006deg, 100.0% samples
+accepted   /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0004.fit: 1929 stars, 0.068px RMS, 9.4px drift, +0.006deg, 100.0% samples
+accepted   /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0005.fit: 1925 stars, 0.067px RMS, 9.6px drift, +0.004deg, 94.9% samples
+accepted   /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0006.fit: 1926 stars, 0.069px RMS, 9.9px drift, +0.003deg, 95.3% samples
+accepted   /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0007.fit: 1932 stars, 0.071px RMS, 10.8px drift, +0.002deg, 96.1% samples
+accepted   /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0008.fit: 1937 stars, 0.070px RMS, 11.0px drift, +0.001deg, 95.6% samples
+accepted   /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0009.fit: 1938 stars, 0.071px RMS, 11.1px drift, -0.001deg, 95.4% samples
+reintegrate integrating 10 admitted frame(s)
+reintegrate rejected 988926 sample(s)
+wrote /tmp/seiza-sho-clipping-combined/requested/after-context-expand/H.fits: 10 accepted frame(s), 0 rejected frame(s), linear f32
+wrote /tmp/seiza-sho-clipping-combined/requested/after-context-expand/H.json: admission, provenance and completed-stack report

@@ -407,7 +407,8 @@ impl PyStackOptions {
         defects=None,
         bin_factor=1,
         gpu=None,
-        interpolation="bilinear"
+        interpolation="bilinear",
+        track_clipping=true
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -443,6 +444,7 @@ impl PyStackOptions {
         bin_factor: u32,
         gpu: Option<PyGpuOptions>,
         interpolation: &str,
+        track_clipping: bool,
     ) -> PyResult<Self> {
         let interpolation = match interpolation {
             "bilinear" => seiza_stacking::Interpolation::Bilinear,
@@ -522,6 +524,7 @@ impl PyStackOptions {
             weighting,
             interpolation,
             defects: defects.map(|defects| defects.inner.clone()),
+            track_clipping,
             ..StackOptions::default()
         };
         inner.registration.detection_sigma = detection_sigma;
@@ -555,6 +558,14 @@ impl PyStackOptions {
             inner,
             minimum_overlap,
         })
+    }
+
+    /// Whether raw saturation fractions are tracked. Disabling this saves
+    /// mask work and makes ``clipped_fraction()`` return ``None``; stack
+    /// image samples are unchanged.
+    #[getter]
+    fn track_clipping(&self) -> bool {
+        self.inner.track_clipping
     }
 
     #[getter]
@@ -2340,7 +2351,8 @@ impl PyLiveStacker {
     /// How much of each pixel's integrated observations came from clipped
     /// raw pixels, from 0 to 1, as a `(height, width)` array on the stack's
     /// grid, for `neutralize_clipped`; `None` when no integrated frame
-    /// clipped, or their saturation level was unknown.
+    /// clipped, their saturation level was unknown, or ``track_clipping``
+    /// was disabled in the stack options.
     fn clipped_fraction<'py>(
         &self,
         py: Python<'py>,
