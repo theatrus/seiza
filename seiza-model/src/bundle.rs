@@ -112,6 +112,31 @@ pub struct Reading {
     pub flat_block: usize,
     /// The image map's level.
     pub image_map_scale: f64,
+    /// How the image's holes are kept from the network. None runs the network
+    /// on the image as it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holes: Option<HoleGuard>,
+}
+
+/// How the image's holes are kept from a network: pixels far below the sky
+/// that every frame held, such as hot pixels a dark took too much of. A network
+/// that meets one fills it and overshoots into a bright spike ringed by
+/// speckle, so they are filled from their surroundings before it runs, and put
+/// back after.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HoleGuard {
+    /// How far below the sky's floor a pixel is a hole, in the image map's
+    /// noise.
+    pub depth: f64,
+    /// How far the mask reaches past a hole, in pixels, for the lobes
+    /// registration spreads round it.
+    pub margin: usize,
+    /// A masked pixel is filled with the mean of the unmasked pixels this far
+    /// round it.
+    pub fill_radius: usize,
+    /// Within the mask, the input is put back where it differs from the
+    /// network's output by more than this many of the image map's noise.
+    pub restore: f64,
 }
 
 /// How a model tiles an image.
@@ -229,6 +254,15 @@ impl ModelCard {
         }
         if self.graphs.is_empty() {
             return refuse(format!("{} names no graph", self.name));
+        }
+        if let Some(guard) = self.reading.holes {
+            let positive = |value: f64| value > 0.0 && value.is_finite();
+            if !(positive(guard.depth) && positive(guard.restore)) {
+                return refuse(format!(
+                    "{}'s holes need a positive depth and restore, not {} and {}",
+                    self.name, guard.depth, guard.restore
+                ));
+            }
         }
         let name = Path::new(&self.name);
         if self.name.is_empty() || name.file_name() != Some(name.as_os_str()) {
@@ -482,6 +516,39 @@ pub(crate) mod tests {
     fn a_name_that_leaves_the_store_is_refused() {
         let temp = tempfile::tempdir().unwrap();
         write_bundle(temp.path(), "../outside", "constant");
+        assert!(matches!(
+            ModelBundle::open(temp.path()),
+            Err(ModelError::ModelContract(_))
+        ));
+    }
+
+    #[test]
+    fn a_card_turns_the_hole_guard_on_with_its_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        write_bundle(temp.path(), "noise-test", "constant");
+        assert_eq!(
+            ModelBundle::open(temp.path()).unwrap().card().reading.holes,
+            None,
+            "a card without it runs the network on the image as it is"
+        );
+        let path = temp.path().join(CARD_FILE);
+        let mut card: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        card["reading"]["holes"] =
+            serde_json::json!({"depth": 30.0, "margin": 3, "fill_radius": 12, "restore": 5.0});
+        std::fs::write(&path, serde_json::to_vec(&card).unwrap()).unwrap();
+        let guard = ModelBundle::open(temp.path()).unwrap().card().reading.holes;
+        assert_eq!(
+            guard,
+            Some(HoleGuard {
+                depth: 30.0,
+                margin: 3,
+                fill_radius: 12,
+                restore: 5.0
+            })
+        );
+        card["reading"]["holes"]["restore"] = serde_json::json!(0.0);
+        std::fs::write(&path, serde_json::to_vec(&card).unwrap()).unwrap();
         assert!(matches!(
             ModelBundle::open(temp.path()),
             Err(ModelError::ModelContract(_))

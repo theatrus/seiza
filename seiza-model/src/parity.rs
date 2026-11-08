@@ -4,8 +4,9 @@
 //! what a shipped model reads.
 
 use crate::bands::NoiseBands;
-use crate::bundle::{InputPlane, NoiseInput, NoisePlane, Reading, SkyInput};
+use crate::bundle::{HoleGuard, InputPlane, NoiseInput, NoisePlane, Reading, SkyInput};
 use crate::error::ModelError;
+use crate::holes::{guarded, guarded_residual, sky_floor};
 use crate::noise::input_sigma;
 use crate::sky::{network_input, scales, seen, smooth_sky};
 use crate::tiles::{Tiling, infer, origins, window};
@@ -63,6 +64,7 @@ impl Fixture {
             sky_block: 32,
             flat_block: self.expected.flat_block,
             image_map_scale: self.expected.image_map_scale,
+            holes: None,
         }
     }
 
@@ -209,6 +211,74 @@ fn local_filter(planes: &[f32], side: usize, residual: &mut [f32]) -> Result<(),
         }
     }
     Ok(())
+}
+
+/// The harness's hole guard on an image holding holes, as
+/// `tests/fixtures/make_hole_fixtures.py` recorded it.
+#[derive(Deserialize)]
+struct HoleExpected {
+    width: usize,
+    height: usize,
+    stride: usize,
+    sky_block: usize,
+    image_map_scale: f64,
+    guard: HoleGuard,
+    level: f32,
+    floor: Vec<f64>,
+    mask: Vec<usize>,
+    read: Vec<f64>,
+    residual: Vec<f64>,
+}
+
+#[test]
+fn the_hole_guard_matches_the_harness() {
+    let directory = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
+    let text = std::fs::read_to_string(format!("{directory}/holes.json")).unwrap();
+    let want: HoleExpected = serde_json::from_str(&text).unwrap();
+    let bytes = std::fs::read(format!("{directory}/holes.f32")).unwrap();
+    let image: Vec<f32> = bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
+        .collect();
+    let (width, height) = (want.width, want.height);
+    let close = |name: &str, got: f32, want: f64, tolerance: f64| {
+        let scale = want.abs().max(1.0);
+        assert!(
+            (f64::from(got) - want).abs() <= tolerance * scale,
+            "{name}: {got} against {want}"
+        );
+    };
+
+    let floor = sky_floor(&image, width, height, want.sky_block);
+    let mut expected = want.floor.iter();
+    for y in (0..height).step_by(want.stride) {
+        for x in (0..width).step_by(want.stride) {
+            close("floor", floor[y * width + x], *expected.next().unwrap(), 1e-6);
+        }
+    }
+
+    let reading = Reading {
+        noise_map: NoiseInput::Constant,
+        noise_plane: NoisePlane::Asinh,
+        sky: SkyInput::Flat,
+        sky_block: want.sky_block,
+        flat_block: 256,
+        image_map_scale: want.image_map_scale,
+        holes: Some(want.guard),
+    };
+    let guarded = guarded(&image, width, height, &want.guard, &reading).unwrap();
+    let masked: Vec<usize> = (0..image.len()).filter(|&i| guarded.mask[i]).collect();
+    assert_eq!(masked, want.mask, "the same pixels are kept from the network");
+    for (&index, &value) in masked.iter().zip(&want.read) {
+        close("read", guarded.read[index], value, 1e-6);
+    }
+    let found: Vec<f32> = guarded.read.iter().map(|value| want.level - value).collect();
+    let residual = guarded_residual(&image, &guarded, &found, &want.guard);
+    for (&index, &value) in masked.iter().zip(&want.residual) {
+        close("residual", residual[index], value, 1e-5);
+    }
 }
 
 #[test]

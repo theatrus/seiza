@@ -10,8 +10,9 @@ use numpy::{PyArrayDyn, PyReadonlyArrayDyn};
 use pyo3::exceptions::{PyIndexError, PyValueError};
 use pyo3::prelude::*;
 use seiza_model::{
-    Backend, BackendOptions, ChannelScales, DenoiseOptions, DenoiseReport, Denoised, ImageView,
-    ModelBundle, ModelError, ModelStore, NoiseBands, NoiseModel, Precision, Progress, runtime_info,
+    Backend, BackendOptions, ChannelScales, DenoiseOptions, DenoiseReport, Denoised, HoleGuard,
+    ImageView, ModelBundle, ModelError, ModelStore, NoiseBands, NoiseModel, Precision, Progress,
+    runtime_info,
 };
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -78,9 +79,48 @@ impl PyChannelScales {
     }
 }
 
+/// How a model's card has the image's holes kept from the network: pixels
+/// more than `depth` of the image map's noise below the sky's floor, widened by
+/// `margin` pixels, are filled from the mean of the others within
+/// `fill_radius`, and put back after where they differ from the output by more
+/// than `restore` of the map's noise.
+#[pyclass(skip_from_py_object, name = "HoleGuard", module = "seiza", frozen)]
+#[derive(Clone)]
+pub(crate) struct PyHoleGuard {
+    #[pyo3(get)]
+    depth: f64,
+    #[pyo3(get)]
+    margin: usize,
+    #[pyo3(get)]
+    fill_radius: usize,
+    #[pyo3(get)]
+    restore: f64,
+}
+
+impl From<&HoleGuard> for PyHoleGuard {
+    fn from(guard: &HoleGuard) -> Self {
+        Self {
+            depth: guard.depth,
+            margin: guard.margin,
+            fill_radius: guard.fill_radius,
+            restore: guard.restore,
+        }
+    }
+}
+
+#[pymethods]
+impl PyHoleGuard {
+    fn __repr__(&self) -> String {
+        format!(
+            "HoleGuard(depth={}, margin={}, fill_radius={}, restore={})",
+            self.depth, self.margin, self.fill_radius, self.restore
+        )
+    }
+}
+
 /// What ran, for a file's provenance and a cache key: a cache keys on
-/// `sha256`, `backend`, `precision` and `MODEL_OUTPUT_VERSION`, not on the
-/// tile, which does not change the output.
+/// `sha256`, `backend`, `precision`, `holes` and `MODEL_OUTPUT_VERSION`, not
+/// on the tile, which does not change the output.
 #[pyclass(skip_from_py_object, name = "DenoiseReport", module = "seiza", frozen)]
 pub(crate) struct PyDenoiseReport {
     #[pyo3(get)]
@@ -96,6 +136,8 @@ pub(crate) struct PyDenoiseReport {
     #[pyo3(get)]
     noise_map: String,
     #[pyo3(get)]
+    holes: Option<PyHoleGuard>,
+    #[pyo3(get)]
     channels: Vec<PyChannelScales>,
 }
 
@@ -108,6 +150,7 @@ impl From<&DenoiseReport> for PyDenoiseReport {
             precision: report.precision.to_string(),
             tile: report.tile,
             noise_map: report.noise_map.to_string(),
+            holes: report.holes.as_ref().map(Into::into),
             channels: report.channels.iter().map(Into::into).collect(),
         }
     }
@@ -368,6 +411,8 @@ pub(crate) struct PyInstalledModel {
     #[pyo3(get)]
     noise_map: String,
     #[pyo3(get)]
+    holes: Option<PyHoleGuard>,
+    #[pyo3(get)]
     precisions: Vec<String>,
 }
 
@@ -379,6 +424,7 @@ impl From<&ModelBundle> for PyInstalledModel {
             path: bundle.root().to_path_buf(),
             task: card.task.to_string(),
             noise_map: card.reading.noise_map.to_string(),
+            holes: card.reading.holes.as_ref().map(Into::into),
             precisions: card
                 .graphs
                 .iter()
@@ -471,6 +517,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDenoised>()?;
     m.add_class::<PyDenoiseReport>()?;
     m.add_class::<PyChannelScales>()?;
+    m.add_class::<PyHoleGuard>()?;
     m.add_class::<PyModelBackend>()?;
     m.add_class::<PyModelRuntime>()?;
     m.add_class::<PyInstalledModel>()?;

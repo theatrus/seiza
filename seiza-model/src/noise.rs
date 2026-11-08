@@ -214,6 +214,7 @@ mod tests {
             sky_block: 32,
             flat_block: 256,
             image_map_scale: 1.0,
+            holes: None,
         }
     }
 

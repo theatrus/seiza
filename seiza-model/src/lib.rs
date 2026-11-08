@@ -31,6 +31,7 @@ mod backend;
 mod bands;
 mod bundle;
 mod error;
+mod holes;
 mod model;
 mod noise;
 #[cfg(test)]
@@ -47,8 +48,8 @@ pub use backend::{
 };
 pub use bands::NoiseBands;
 pub use bundle::{
-    GraphFile, GraphInput, InputPlane, ModelBundle, ModelCard, NoiseInput, NoisePlane, Reading,
-    SkyInput, Task, TilingCard,
+    GraphFile, GraphInput, HoleGuard, InputPlane, ModelBundle, ModelCard, NoiseInput, NoisePlane,
+    Reading, SkyInput, Task, TilingCard,
 };
 pub use error::ModelError;
 pub use model::{

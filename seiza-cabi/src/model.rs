@@ -12,8 +12,8 @@ use super::{
     required_f32_slice_mut, required_path, required_str,
 };
 use seiza_model::{
-    Backend, BackendOptions, DenoiseOptions, DenoiseReport, Denoised, ImageView, ModelBundle,
-    ModelStore, NoiseBands, NoiseModel, Precision, Progress, runtime_info,
+    Backend, BackendOptions, DenoiseOptions, DenoiseReport, Denoised, HoleGuard, ImageView,
+    ModelBundle, ModelStore, NoiseBands, NoiseModel, Precision, Progress, runtime_info,
 };
 use serde::{Deserialize, Serialize};
 use std::ffi::{CString, c_char, c_void};
@@ -118,6 +118,26 @@ struct ChannelScalesResponse {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct HoleGuardResponse {
+    depth: f64,
+    margin: usize,
+    fill_radius: usize,
+    restore: f64,
+}
+
+impl From<&HoleGuard> for HoleGuardResponse {
+    fn from(guard: &HoleGuard) -> Self {
+        Self {
+            depth: guard.depth,
+            margin: guard.margin,
+            fill_radius: guard.fill_radius,
+            restore: guard.restore,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct DenoiseReportResponse {
     model: String,
     sha256: String,
@@ -125,6 +145,7 @@ struct DenoiseReportResponse {
     precision: String,
     tile: usize,
     noise_map: String,
+    holes: Option<HoleGuardResponse>,
     channels: Vec<ChannelScalesResponse>,
 }
 
@@ -137,6 +158,7 @@ impl From<&DenoiseReport> for DenoiseReportResponse {
             precision: report.precision.to_string(),
             tile: report.tile,
             noise_map: report.noise_map.to_string(),
+            holes: report.holes.as_ref().map(Into::into),
             channels: report
                 .channels
                 .iter()
@@ -156,6 +178,7 @@ struct InstalledModelResponse {
     path: PathBuf,
     task: String,
     noise_map: String,
+    holes: Option<HoleGuardResponse>,
     precisions: Vec<String>,
 }
 
@@ -167,6 +190,7 @@ impl From<&ModelBundle> for InstalledModelResponse {
             path: bundle.root().to_path_buf(),
             task: card.task.to_string(),
             noise_map: card.reading.noise_map.to_string(),
+            holes: card.reading.holes.as_ref().map(Into::into),
             precisions: card
                 .graphs
                 .iter()
@@ -380,9 +404,11 @@ pub unsafe extern "C" fn seiza_denoised_residual(
 
 #[unsafe(no_mangle)]
 /// What ran, as JSON lent until the result is freed: `model`, `sha256`,
-/// `backend`, `precision`, `tile`, `noiseMap`, and `channels`, each with its
-/// `background` and `noise`. A host keys cached results on `sha256`, `backend`,
-/// `precision` and [`seiza_model_output_version`].
+/// `backend`, `precision`, `tile`, `noiseMap`, `holes`, and `channels`, each
+/// with its `background` and `noise`. `holes` is null, or how the image's holes
+/// were kept from the network, as the model's card asks: `depth`, `margin`,
+/// `fillRadius` and `restore`. A host keys cached results on `sha256`,
+/// `backend`, `precision`, `holes` and [`seiza_model_output_version`].
 ///
 /// # Safety
 /// `denoised` must be null or a live [`SeizaDenoised`].
@@ -455,8 +481,9 @@ pub unsafe extern "C" fn seiza_model_backends_json(
 
 #[unsafe(no_mangle)]
 /// The installed models, as a JSON array the caller frees with
-/// `seiza_string_free`, each with `name`, `path`, `task`, `noiseMap` and
-/// `precisions`. `store` may be null for the default store.
+/// `seiza_string_free`, each with `name`, `path`, `task`, `noiseMap`, `holes`
+/// (as [`seiza_denoised_report_json`] gives it) and `precisions`. `store` may
+/// be null for the default store.
 ///
 /// # Safety
 /// `store` must be null or a NUL-terminated string. When non-null, `error_out`
@@ -615,6 +642,7 @@ mod tests {
             let installed: Value = serde_json::from_str(&taken(installed)).unwrap();
             assert_eq!(installed["name"], "noise-tiny");
             assert_eq!(installed["noiseMap"], "constant");
+            assert!(installed["holes"].is_null(), "the tiny model's card has no guard");
 
             let listed = seiza_model_list_json(store.as_ptr(), &mut error);
             let listed: Value = serde_json::from_str(&taken(listed)).unwrap();
@@ -754,6 +782,7 @@ mod tests {
             assert_eq!(report["model"], "noise-tiny");
             assert_eq!(report["precision"], "f32");
             assert_eq!(report["noiseMap"], "constant");
+            assert!(report["holes"].is_null());
 
             let mut length = 0;
             let residual = seiza_denoised_residual(denoised, 0, &mut length);

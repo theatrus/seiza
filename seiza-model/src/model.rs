@@ -1,7 +1,8 @@
 use crate::backend::{Backend, BackendOptions, CoreMlUnits, Precision, runtime};
 use crate::bands::NoiseBands;
-use crate::bundle::{InputPlane, ModelBundle, ModelCard, NoiseInput, Reading, Task};
+use crate::bundle::{HoleGuard, InputPlane, ModelBundle, ModelCard, NoiseInput, Reading, Task};
 use crate::error::ModelError;
+use crate::holes::{guarded, guarded_residual};
 use crate::noise::input_sigma;
 use crate::session::OrtRunner;
 use crate::sky::{network_input, scales, seen};
@@ -107,6 +108,8 @@ pub struct DenoiseReport {
     pub tile: usize,
     /// What filled the noise plane.
     pub noise_map: NoiseInput,
+    /// How the image's holes were kept from the network, when the card asks.
+    pub holes: Option<HoleGuard>,
     /// The scales of each channel.
     pub channels: Vec<ChannelScales>,
 }
@@ -309,13 +312,16 @@ impl NoiseModel {
                 precision: self.precision,
                 tile: self.tiling.tile,
                 noise_map: self.card.reading.noise_map,
+                holes: self.card.reading.holes,
                 channels,
             },
         })
     }
 }
 
-/// What a model finds in one plane, and the scales it read it in.
+/// What a model finds in one plane, and the scales it read it in. With the
+/// card's hole guard, the network reads the plane with its holes filled, and
+/// what it finds there comes back as a residual of the plane as given.
 #[allow(clippy::too_many_arguments)]
 fn denoise_plane(
     runner: &mut dyn TileRunner,
@@ -328,8 +334,12 @@ fn denoise_plane(
     stop: &dyn Fn() -> bool,
     report: &dyn Fn(usize, usize),
 ) -> Result<(Vec<f32>, ChannelScales), ModelError> {
-    let sigma = input_sigma(plane, width, height, reading);
-    let looked = seen(plane, width, height, reading);
+    let guard = reading
+        .holes
+        .and_then(|guard| Some((guard, guarded(plane, width, height, &guard, reading)?)));
+    let read = guard.as_ref().map_or(plane, |(_, guarded)| &guarded.read);
+    let sigma = input_sigma(read, width, height, reading);
+    let looked = seen(read, width, height, reading);
     let (background, noise) = scales(&looked, &sigma)
         .ok_or_else(|| ModelError::InvalidImage("the image holds no finite pixel".to_string()))?;
     if !(noise > 0.0 && noise.is_finite()) {
@@ -359,6 +369,10 @@ fn denoise_plane(
             report(tile, tiles);
         },
     )?;
+    let found = match &guard {
+        Some((guard, guarded)) => guarded_residual(plane, guarded, &found, guard),
+        None => found,
+    };
     Ok((found, ChannelScales { background, noise }))
 }
 
@@ -420,6 +434,7 @@ mod tests {
             sky_block: 32,
             flat_block: 256,
             image_map_scale: 1.0,
+            holes: None,
         }
     }
 
@@ -543,6 +558,49 @@ mod tests {
     }
 
     #[test]
+    fn a_card_s_hole_guard_keeps_a_hole_from_the_network_and_puts_it_back() {
+        let (width, height) = (96, 80);
+        let mut image = noisy(width, height);
+        let hole = 40 * width + 50;
+        image[hole] -= 2000.0;
+        let deepest = |holes| {
+            let mut lowest = f32::INFINITY;
+            let mut watch = |planes: &[f32], side: usize, residual: &mut [f32]| {
+                lowest = planes[..side * side].iter().copied().fold(lowest, f32::min);
+                residual.fill(0.0);
+                Ok(())
+            };
+            let (found, _) = denoise_plane(
+                &mut watch,
+                &image,
+                width,
+                height,
+                &Reading {
+                    holes,
+                    ..reading(NoiseInput::Constant)
+                },
+                &BOTH,
+                &TILING,
+                &|| false,
+                &|_, _| {},
+            )
+            .unwrap();
+            (lowest, found[hole])
+        };
+        let (seen, _) = deepest(None);
+        assert!(seen < -5.0, "without the guard the network meets the hole");
+        let guard = HoleGuard {
+            depth: 30.0,
+            margin: 3,
+            fill_radius: 12,
+            restore: 5.0,
+        };
+        let (seen, found) = deepest(Some(guard));
+        assert!(seen > -3.0, "with it, the network reads only sky: {seen}");
+        assert_eq!(found, 0.0, "and the hole comes back as it was");
+    }
+
+    #[test]
     fn an_image_with_no_noise_or_no_pixels_is_refused() {
         let mut zero = |_: &[f32], _: usize, residual: &mut [f32]| {
             residual.fill(0.0);
@@ -578,6 +636,7 @@ mod tests {
                 precision: Precision::F32,
                 tile: 64,
                 noise_map: NoiseInput::Constant,
+                holes: None,
                 channels: Vec::new(),
             },
         };

@@ -32,6 +32,7 @@ def test_a_model_installs_verifies_lists_and_goes(tmp_path: Path) -> None:
     installed = seiza.install_model(TINY, store)
     assert installed.name == "noise-tiny"
     assert installed.noise_map == "constant"
+    assert installed.holes is None, "the tiny model's card has no hole guard"
     assert installed.precisions == ["f32", "f16"]
     assert [model.name for model in seiza.installed_models(store)] == ["noise-tiny"]
 
@@ -67,6 +68,19 @@ def test_invalid_tiling_cannot_replace_an_installed_model(tmp_path: Path, field:
         seiza.install_model(source, store)
     seiza.verify_model("noise-tiny", store)
     assert [model.name for model in seiza.installed_models(store)] == ["noise-tiny"]
+
+
+def test_a_card_s_hole_guard_is_listed_with_its_settings(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    shutil.copytree(TINY, source)
+    path = source / "card.json"
+    card = json.loads(path.read_text())
+    card["reading"]["holes"] = {"depth": 30.0, "margin": 3, "fill_radius": 12, "restore": 5.0}
+    path.write_text(json.dumps(card))
+
+    holes = seiza.install_model(source, tmp_path / "store").holes
+    assert isinstance(holes, seiza.HoleGuard)
+    assert (holes.depth, holes.margin, holes.fill_radius, holes.restore) == (30.0, 3, 12, 5.0)
 
 
 def test_a_changed_graph_is_refused(tmp_path: Path) -> None:
@@ -131,6 +145,7 @@ def test_a_tiny_model_runs_and_blends() -> None:
     report = result.report
     assert (report.model, report.backend, report.precision) == ("noise-tiny", "cpu", "f32")
     assert report.noise_map == "constant"
+    assert report.holes is None
     assert report.channels[0].noise > 0
 
     residual = result.residual()
