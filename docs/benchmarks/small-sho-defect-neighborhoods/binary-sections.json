@@ -1,0 +1,20 @@
+[
+  {
+    "section": ".note.gnu.build-id",
+    "different_bytes": 20,
+    "before_sha256": "33965015f8fbcf8194108aa8db829b890738fa3457c9838fc858090a54399d8e",
+    "after_sha256": "16c64f6c3fcf88c2e7583ecef08889955280ec1e4a0bbc0d13099c60f424de3f"
+  },
+  {
+    "section": ".text",
+    "different_bytes": 0,
+    "before_sha256": "b8143f6f6a61e325db890964747d0c151009abf38dd6ef68f21c852151efa40e",
+    "after_sha256": "b8143f6f6a61e325db890964747d0c151009abf38dd6ef68f21c852151efa40e"
+  },
+  {
+    "section": ".strtab",
+    "different_bytes": 2196,
+    "before_sha256": "10a849691efe261d9d7e0396926df7bf86ee473656a78b1a8df98d330b541175",
+    "after_sha256": "7ddd39ccebc96fae85bdd49453a94d6aa39b5ce393db5025a5c78ee1d0ba66ae"
+  }
+]

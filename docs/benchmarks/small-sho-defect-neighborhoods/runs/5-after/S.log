@@ -1,0 +1,19 @@
+chose      /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_S_0010.fit as reference: 2000 stars, median area 8.0px, sky variation 70.8
+defects    688 sensor pixel(s) from 10 light(s)
+normalize  /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_S_0010.fit (channel reference)
+reference  /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_H_0001.fit (937.2px registration drift limit)
+accepted   /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_S_0010.fit: 1529 stars, 0.093px RMS, 11.8px drift, -0.038deg, 99.7% samples
+accepted   /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_S_0001.fit: 1548 stars, 0.089px RMS, 8.6px drift, -0.031deg, 99.8% samples
+accepted   /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_S_0002.fit: 1543 stars, 0.094px RMS, 7.4px drift, -0.033deg, 99.8% samples
+accepted   /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_S_0003.fit: 1549 stars, 0.091px RMS, 7.3px drift, -0.034deg, 99.8% samples
+accepted   /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_S_0004.fit: 1542 stars, 0.096px RMS, 7.1px drift, -0.035deg, 99.8% samples
+accepted   /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_S_0005.fit: 1535 stars, 0.092px RMS, 10.0px drift, -0.034deg, 94.4% samples
+accepted   /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_S_0006.fit: 1539 stars, 0.094px RMS, 10.0px drift, -0.035deg, 94.7% samples
+accepted   /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_S_0007.fit: 1535 stars, 0.095px RMS, 9.8px drift, -0.036deg, 95.1% samples
+accepted   /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_S_0008.fit: 1538 stars, 0.093px RMS, 11.9px drift, -0.037deg, 95.3% samples
+accepted   /tmp/seiza-sho-benchmark/inputs/Light_MonkeyJelly_180.0s_Bin1_S_0009.fit: 1532 stars, 0.092px RMS, 11.8px drift, -0.037deg, 95.6% samples
+reintegrate estimating 10 admitted frame(s)
+reintegrate integrating 10 admitted frame(s)
+reintegrate rejected 800539 sample(s)
+wrote /tmp/seiza-sho-defect-benchmark/full/after/S.fits: 10 accepted frame(s), 0 rejected frame(s), linear f32
+wrote /tmp/seiza-sho-defect-benchmark/full/after/S.json: admission, provenance and completed-stack report

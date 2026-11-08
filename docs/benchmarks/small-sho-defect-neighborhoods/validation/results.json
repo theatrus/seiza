@@ -1,0 +1,121 @@
+[
+  {
+    "name": "fmt",
+    "command": [
+      "cargo",
+      "fmt",
+      "--all",
+      "--check"
+    ],
+    "code": 0,
+    "seconds": 9.778273839969188
+  },
+  {
+    "name": "py-fmt",
+    "command": [
+      "cargo",
+      "fmt",
+      "--check"
+    ],
+    "code": 0,
+    "seconds": 0.14140427904203534
+  },
+  {
+    "name": "clippy",
+    "command": [
+      "cargo",
+      "clippy",
+      "--workspace",
+      "--all-targets",
+      "--all-features",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "code": 0,
+    "seconds": 9.160621168091893
+  },
+  {
+    "name": "py-clippy",
+    "command": [
+      "cargo",
+      "clippy",
+      "--all-targets",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "code": 0,
+    "seconds": 6.7546321710105985
+  },
+  {
+    "name": "msrv",
+    "command": [
+      "cargo",
+      "+1.92.0",
+      "check",
+      "--workspace",
+      "--all-targets",
+      "--all-features",
+      "--locked"
+    ],
+    "code": 0,
+    "seconds": 8.25407227105461
+  },
+  {
+    "name": "tests",
+    "command": [
+      "cargo",
+      "test",
+      "--workspace",
+      "--all-features"
+    ],
+    "code": 0,
+    "seconds": 202.4677900930401
+  },
+  {
+    "name": "parity",
+    "command": [
+      "python3.12",
+      ".github/scripts/check_binding_parity.py",
+      "--base",
+      "origin/main"
+    ],
+    "code": 0,
+    "seconds": 16.07931002601981
+  },
+  {
+    "name": "py-build",
+    "command": [
+      "/tmp/seiza-python-validation/bin/maturin",
+      "develop"
+    ],
+    "code": 0,
+    "seconds": 16.512498171068728
+  },
+  {
+    "name": "py-tests",
+    "command": [
+      "/tmp/seiza-python-validation/bin/python",
+      "-m",
+      "pytest",
+      "tests",
+      "-q"
+    ],
+    "code": 0,
+    "seconds": 72.50313614495099
+  },
+  {
+    "name": "release",
+    "command": [
+      "cargo",
+      "build",
+      "--release",
+      "--locked",
+      "-p",
+      "seiza-cli"
+    ],
+    "code": 0,
+    "seconds": 39.36972802202217
+  }
+]
