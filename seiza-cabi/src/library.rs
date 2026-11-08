@@ -1036,6 +1036,14 @@ mod master_policy_tests {
             library::rules::fields().len()
         );
         assert!(schema[0].get("key").is_some());
+        let flat_age = schema
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|field| field["key"] == "flat_max_age_days")
+            .unwrap();
+        assert_eq!(flat_age["effect"], "matching");
+
         let check = |key: &str, value: Value| unsafe {
             call(
                 serde_json::json!({"key": key, "value": value}),

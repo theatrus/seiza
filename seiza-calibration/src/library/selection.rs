@@ -869,9 +869,16 @@ fn leave_out_stale_flat_masters(light: &Light, rules: &Rules, selected: &mut Cal
     if !selected.flat.iter().any(stale) {
         return;
     }
-    let raw: Vec<CalibrationFrame> = selected
-        .flat
-        .iter()
+    // Judge the replacement using the same verified candidate cap as the
+    // executable session, including any masters still within the age limit.
+    let candidates = selected.flat.iter().filter(|frame| !stale(frame));
+    let limit = if candidates.clone().all(|frame| frame.source_verified) {
+        MAX_MASTER_FRAMES
+    } else {
+        usize::MAX
+    };
+    let raw: Vec<CalibrationFrame> = candidates
+        .take(limit)
         .filter(|frame| !frame.is_master)
         .cloned()
         .collect();

@@ -363,6 +363,19 @@ fn prefer_takes_a_flat_master_within_the_age_limit_else_the_raw_flats() {
     assert_eq!(adopted(frames.clone(), rules("prefer", 1.0)), None);
     // Within the limit it is preferred, as before.
     assert_eq!(adopted(frames.clone(), rules("prefer", 60.0)), Some(1));
+    // Zero disables the age limit. Exactly 24 hours in either direction
+    // is within a one-day limit; one second beyond it is not.
+    assert_eq!(adopted(frames.clone(), rules("prefer", 0.0)), Some(1));
+    for direction in [-1, 1] {
+        let at_limit = frame(3, true, light.timestamp.unwrap() + direction * DAY);
+        let mut boundary = same_night_flats.clone();
+        boundary.push(at_limit);
+        assert_eq!(adopted(boundary, rules("prefer", 1.0)), Some(3));
+        let past_limit = frame(3, true, light.timestamp.unwrap() + direction * (DAY + 1));
+        let mut boundary = same_night_flats.clone();
+        boundary.push(past_limit);
+        assert_eq!(adopted(boundary, rules("prefer", 1.0)), None);
+    }
     // A master from the light's own night is preferred over its raw flats.
     let mut with_night_master = frames.clone();
     with_night_master.push(same_night_master);
@@ -371,6 +384,55 @@ fn prefer_takes_a_flat_master_within_the_age_limit_else_the_raw_flats() {
     // check reports it.
     let lone = vec![old_master.clone(), same_night_flats[0].clone()];
     assert_eq!(adopted(lone, rules("prefer", 1.0)), Some(1));
+    // A coherent pair outside the verified candidate cap cannot replace
+    // the master: the executable recipe must still have usable inputs.
+    let mut capped = vec![old_master.clone()];
+    capped.extend((0..MAX_MASTER_FRAMES).map(|index| {
+        let mut raw = frame(100 + index as i64, false, night - 22 * DAY - index as i64);
+        raw.readout_mode_name = Some(format!("mode-{index}"));
+        raw
+    }));
+    capped.extend((0..2).map(|index| {
+        let mut raw = frame(200 + index, false, night - 22 * DAY - 1000 - index);
+        raw.readout_mode_name = Some("complete".into());
+        raw
+    }));
+    assert_eq!(adopted(capped.clone(), rules("prefer", 1.0)), None);
+    for frame in &mut capped {
+        frame.source_verified = true;
+    }
+    let selected =
+        Library::new(capped.clone(), Default::default(), []).select(&light, rules("prefer", 1.0));
+    let session = resolve_session(
+        &selected,
+        &QualityIndex::default(),
+        &SessionOptions::default(),
+    );
+    let flat = session
+        .recipes
+        .iter()
+        .find(|recipe| recipe.kind == CalibrationKind::Flat)
+        .unwrap();
+    assert_eq!(flat.action, RecipeAction::External);
+    assert_eq!(flat.inputs, vec![old_master.frame_uuid]);
+    // Once a coherent pair is inside the cap, the raws really can replace it.
+    capped[1].readout_mode_name = Some("complete".into());
+    capped[2].readout_mode_name = Some("complete".into());
+    let selected =
+        Library::new(capped, Default::default(), []).select(&light, rules("prefer", 1.0));
+    let session = resolve_session(
+        &selected,
+        &QualityIndex::default(),
+        &SessionOptions::default(),
+    );
+    let flat = session
+        .recipes
+        .iter()
+        .find(|recipe| recipe.kind == CalibrationKind::Flat)
+        .unwrap();
+    assert_eq!(flat.action, RecipeAction::Integrate);
+    assert_eq!(flat.inputs.len(), 2);
+
     // Fallback still builds from raw flats when it can, whatever the limit.
     assert_eq!(adopted(frames, rules("fallback", 1.0)), None);
 }

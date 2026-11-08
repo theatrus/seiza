@@ -893,9 +893,9 @@ static FIELDS: LazyLock<Vec<FieldSpec>> = LazyLock::new(|| {
         number(
             SettingKey::FlatMaxAgeDays,
             Group::Checks,
-            Effect::Flags,
+            Effect::Matching,
             "Flat age limit",
-            "Flag lights as uncalibratable when the elapsed time to the nearest flat contributing to their master exceeds this limit. One day includes exactly 24 hours before or after the light.",
+            "Prefer raw flats that can build a master over an external flat master past this limit. Flag lights as uncalibratable when the elapsed time to the nearest flat contributing to their master exceeds this limit. One day includes exactly 24 hours before or after the light.",
             (0.0, 3650.0, 1.0),
             "days",
             Some("no limit"),
@@ -2131,6 +2131,12 @@ mod tests {
             BTreeMap::new(),
         );
         assert!(wider.global().matching_digest().is_some());
+        let flat_age = RuleBook::new(
+            values(&[("flat_max_age_days", json!(1.0))]),
+            BTreeMap::new(),
+        );
+        assert!(flat_age.global().matching_digest().is_some());
+
         assert_eq!(wider.global().coherence_tolerances().rotation_deg, 2.0);
         assert_eq!(wider.global().tolerances().rotation_deg, 5.0);
     }
