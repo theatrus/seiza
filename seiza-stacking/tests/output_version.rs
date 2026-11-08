@@ -932,6 +932,35 @@ fn gzip_2_light_stack(windowed: bool) {
 }
 
 #[test]
+fn uploaded_float_tiff_lights_keep_their_output() {
+    let read = |image: LinearImage| {
+        let packed = image.data.iter().flat_map(|&value| [value; 3]).collect();
+        let pixels = image::Rgb32FImage::from_raw(WIDTH as u32, HEIGHT as u32, packed).unwrap();
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb32F(pixels)
+            .write_to(&mut bytes, image::ImageFormat::Tiff)
+            .unwrap();
+        let decoded = seiza_image_io::raster::decode_oriented(bytes.get_ref()).unwrap();
+        assert_eq!(
+            decoded.coordinates.oriented_dimensions,
+            (WIDTH as u32, HEIGHT as u32)
+        );
+        let data = decoded
+            .pixels
+            .into_rgb32f()
+            .pixels()
+            .map(|pixel| pixel.0[0])
+            .collect();
+        LinearImage::new(WIDTH, HEIGHT, 1, data).unwrap()
+    };
+    check(
+        "MONO_DEFAULT",
+        &mono_stack_read(StackOptions::default(), read),
+        MONO_DEFAULT,
+    );
+}
+
+#[test]
 fn a_mono_stack_with_every_stage_configured_keeps_its_output() {
     let mut options = StackOptions {
         normalization: NormalizationMode::LocalBackground { tile_size: 32 },
@@ -1072,6 +1101,34 @@ fn a_stack_with_the_cosmetic_filter_keeps_its_output() {
 }
 
 #[test]
+fn a_stack_with_multiblock_fits_headers_keeps_its_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let paths = defective_lights(&directory);
+    for path in &paths {
+        let bytes = std::fs::read(path).unwrap();
+        let mut header = bytes[..2880].to_vec();
+        let end = header
+            .as_chunks::<80>()
+            .0
+            .iter()
+            .position(|card| &card[..8] == b"END     ")
+            .unwrap()
+            * 80;
+        header[end..end + 80].fill(b' ');
+        header.resize(5760, b' ');
+        header[2880..2883].copy_from_slice(b"END");
+        header.extend_from_slice(&bytes[2880..]);
+        std::fs::write(path, header).unwrap();
+    }
+    let options = StackOptions {
+        cosmetic: Some(ImpulseFilterOptions::default()),
+        ..StackOptions::default()
+    };
+    let snapshot = fits_stack(&paths, options);
+    check("COSMETIC", &summary(&snapshot.image), COSMETIC);
+}
+
+#[test]
 fn a_stack_repairing_learned_defects_keeps_its_output() {
     let directory = tempfile::tempdir().unwrap();
     let paths = defective_lights(&directory);
@@ -1167,6 +1224,14 @@ fn a_reintegration_and_its_drizzle_keep_their_output() {
         .reintegrate_drizzled(&options, &drizzle, |_, _, _| {})
         .unwrap();
     check("DRIZZLED", &summary(&drizzled.image), DRIZZLED);
+    let finished = stacker
+        .finish_reintegration(&options, |_, _, _| {})
+        .unwrap();
+    check(
+        "REINTEGRATED",
+        &summary(&finished.snapshot.image),
+        REINTEGRATED,
+    );
 }
 
 /// Frames a host registered and normalized itself, integrated with frame
@@ -1895,12 +1960,22 @@ fn a_large_stack_keeps_its_clipped_fraction() {
             }
         })
         .collect::<Vec<_>>();
-    for gpu in [GpuOptions::cpu(), GpuOptions::default()] {
+    for (gpu, track_clipping, interpolation) in [GpuOptions::cpu(), GpuOptions::default()]
+        .into_iter()
+        .flat_map(|gpu| {
+            [true, false].into_iter().flat_map(move |track| {
+                [Interpolation::Bilinear, Interpolation::Lanczos3]
+                    .map(move |interpolation| (gpu, track, interpolation))
+            })
+        })
+    {
         let mut stacker = LiveStacker::new(
             frames[0].clone(),
             CalibrationMasters::default(),
             StackOptions {
                 gpu,
+                track_clipping,
+                interpolation,
                 normalization: NormalizationMode::None,
                 rejection: RejectionMode::None,
                 ..StackOptions::default()
@@ -1910,6 +1985,77 @@ fn a_large_stack_keeps_its_clipped_fraction() {
         assert!(stacker.clipped_fraction().is_none());
         for frame in &frames[1..] {
             admit(stacker.push(frame.clone()).unwrap());
+        }
+        let expected_image = match interpolation {
+            Interpolation::Bilinear => &[
+                1.2699083e2,
+                4.6523645e2,
+                3.2818176e4,
+                1.0086214e2,
+                9.9956696e1,
+                1.0004606e2,
+                9.9492676e1,
+                9.9923233e1,
+                9.9848633e1,
+                9.9659042e1,
+                1.0156461e2,
+                1.0046982e2,
+                9.9432045e1,
+                9.9746765e1,
+                9.9746498e1,
+                9.9160324e1,
+                1.0093239e2,
+                9.9841454e1,
+                1.0020325e2,
+                1.0068443e2,
+                9.8760162e1,
+                9.9336227e1,
+                9.9516830e1,
+                9.9197311e1,
+                9.9763680e1,
+                1.0013423e2,
+                9.9218819e1,
+                1.0067850e2,
+            ],
+            Interpolation::Lanczos3 => &[
+                1.2784684e2,
+                4.8284114e2,
+                3.6708715e4,
+                1.0121179e2,
+                9.9925476e1,
+                9.9821457e1,
+                9.9507248e1,
+                9.9981300e1,
+                9.9804031e1,
+                9.9401421e1,
+                1.0203391e2,
+                1.0050050e2,
+                9.9732628e1,
+                9.9718925e1,
+                9.9794685e1,
+                9.9070923e1,
+                1.0125527e2,
+                9.9584869e1,
+                1.0002977e2,
+                1.0077060e2,
+                9.8551552e1,
+                9.9121269e1,
+                9.9593689e1,
+                9.8865112e1,
+                9.9308678e1,
+                1.0041342e2,
+                9.9069069e1,
+                1.0073582e2,
+            ],
+        };
+        check(
+            "LARGE_CLIPPED_IMAGE",
+            &summary(&stacker.snapshot().unwrap().image),
+            expected_image,
+        );
+        if !track_clipping {
+            assert!(stacker.clipped_fraction().is_none());
+            continue;
         }
         let clipped = stacker.clipped_fraction().unwrap();
         const LARGE_CLIPPED: &[f64] = &[
@@ -3108,8 +3254,16 @@ const FILE_PEDESTAL_AND_FLAT: &[f64] = &[
 ];
 
 fn mono_stack(options: StackOptions) -> Vec<f64> {
+    mono_stack_read(options, |image| image)
+}
+
+fn mono_stack_read(
+    options: StackOptions,
+    mut read: impl FnMut(LinearImage) -> LinearImage,
+) -> Vec<f64> {
     let gain = |frame: usize| 0.96 + 0.01 * frame as f32;
-    let mut stacker = LiveStacker::from_linear(mono_field(0.0, 0.0, gain(0), 0), options).unwrap();
+    let mut stacker =
+        LiveStacker::from_linear(read(mono_field(0.0, 0.0, gain(0), 0)), options).unwrap();
     for (frame, &(dx, dy)) in SHIFTS.iter().enumerate().skip(1) {
         let mut image = mono_field(dx, dy, gain(frame), frame);
         // A satellite trail in one frame, which rejection removes.
@@ -3119,7 +3273,7 @@ fn mono_stack(options: StackOptions) -> Vec<f64> {
                 image.data[y * WIDTH + x] += 3_000.0;
             }
         }
-        admit(stacker.push_linear(image).unwrap());
+        admit(stacker.push_linear(read(image)).unwrap());
     }
     let snapshot = stacker.snapshot().unwrap();
     let report =
@@ -4588,3 +4742,75 @@ fn varying_dark_pixels_keep_their_output() {
         &[100.0, 4000.0, 100.0, 6.0],
     );
 }
+
+/// Final CPU replay with the local background and noise weighting used by SHO.
+#[test]
+fn a_weighted_local_background_reintegration_keeps_its_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let paths = SHIFTS
+        .iter()
+        .enumerate()
+        .map(|(frame, &(dx, dy))| {
+            let image = mono_field(dx, dy, 0.96 + 0.01 * frame as f32, frame);
+            write_raw(&directory, "light", frame, image.data, "LIGHT")
+        })
+        .collect::<Vec<_>>();
+    let mut stacker = LiveStacker::open_fits(
+        &paths[0],
+        None,
+        None,
+        None,
+        None,
+        StackOptions {
+            normalization: NormalizationMode::LocalBackground { tile_size: 32 },
+            weighting: FrameWeighting::inverse_noise_variance(),
+            interpolation: Interpolation::Lanczos3,
+            gpu: GpuOptions::cpu(),
+            ..StackOptions::default()
+        },
+    )
+    .unwrap();
+    stacker.retain_frames_for_reintegration(None).unwrap();
+    for path in &paths[1..] {
+        admit(stacker.push_fits(path).unwrap());
+    }
+    let result = stacker
+        .finish_reintegration(&BatchStackOptions::default(), |_, _, _| {})
+        .unwrap();
+    check(
+        "REINTEGRATED_WEIGHTED_LOCAL",
+        &summary(&result.snapshot.image),
+        REINTEGRATED_WEIGHTED_LOCAL,
+    );
+}
+
+const REINTEGRATED_WEIGHTED_LOCAL: &[f64] = &[
+    1.4430051e2,
+    2.7762134e2,
+    3.9582263e3,
+    9.7750938e1,
+    1.0012254e2,
+    1.0118108e2,
+    1.1473328e2,
+    1.0543856e2,
+    9.8347527e1,
+    1.0060048e2,
+    1.0239714e2,
+    1.0340273e2,
+    1.0463651e2,
+    9.8407661e1,
+    1.0175587e2,
+    1.0338160e2,
+    1.0449772e2,
+    1.0624787e2,
+    1.0031862e2,
+    1.0082601e2,
+    1.0355362e2,
+    1.0656131e2,
+    1.0760386e2,
+    1.0117020e2,
+    1.7327388e2,
+    1.0507133e2,
+    1.0690379e2,
+    1.1121221e2,
+];

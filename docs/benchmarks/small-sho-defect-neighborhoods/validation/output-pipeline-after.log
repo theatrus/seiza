@@ -1,0 +1,10 @@
+   Compiling seiza-pipeline v0.2.0 (/home/ppicazo/Development/seiza/seiza-pipeline)
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.60s
+     Running tests/output_version.rs (target/debug/deps/output_version-21447c08aec21175)
+
+running 2 tests
+test output_version_is_no_newer_than_the_next_minor_version ... ok
+test combined_tiles_keep_their_output ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

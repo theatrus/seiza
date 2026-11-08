@@ -1,0 +1,18 @@
+   Compiling seiza-stacking v0.57.0 (/home/ppicazo/Development/seiza/seiza-stacking)
+    Finished `test` profile [optimized + debuginfo] target(s) in 35.91s
+     Running unittests src/lib.rs (target/debug/deps/seiza_stacking-2f69d071e0229e55)
+
+running 10 tests
+test defects::tests::a_long_session_is_sampled_evenly ... ok
+test defects::tests::a_star_on_a_hot_pixel_keeps_its_core ... ok
+test defects::tests::maps_and_options_refuse_what_cannot_be_right ... ok
+test defects::tests::repair_takes_the_median_of_healthy_same_plane_neighbours ... ok
+test defects::tests::mono_screen_never_discards_a_neighbourhood_the_full_check_keeps ... ok
+test defects::tests::fewer_than_three_lights_cannot_tell_a_defect_from_the_sky ... ok
+test defects::tests::dithered_lights_reveal_hot_and_dead_pixels_and_no_stars ... ok
+test defects::tests::tight_stars_that_never_moved_stay_out_of_the_map ... ok
+test defects::tests::lights_without_defects_give_an_empty_map ... ok
+test defects::tests::the_gpu_screen_keeps_every_deviation ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 603 filtered out; finished in 0.10s
+

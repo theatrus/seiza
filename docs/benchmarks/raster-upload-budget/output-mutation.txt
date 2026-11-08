@@ -1,0 +1,24 @@
+   Compiling seiza-image-io v0.13.0 (/home/ppicazo/Development/seiza/seiza-image-io)
+   Compiling seiza v0.49.0 (/home/ppicazo/Development/seiza/seiza)
+   Compiling seiza-stacking v0.57.0 (/home/ppicazo/Development/seiza/seiza-stacking)
+    Finished `test` profile [optimized + debuginfo] target(s) in 3.32s
+     Running tests/output_version.rs (target/debug/deps/output_version-ed8b9131fdc74f79)
+
+running 1 test
+test uploaded_float_tiff_lights_keep_their_output ... FAILED
+
+failures:
+
+---- uploaded_float_tiff_lights_keep_their_output stdout ----
+
+thread 'uploaded_float_tiff_lights_keep_their_output' (685) panicked at seiza-stacking/tests/output_version.rs:878:80:
+called `Result::unwrap()` on an `Err` value: Image(Limits(LimitError { kind: InsufficientMemory }))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    uploaded_float_tiff_lights_keep_their_output
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 70 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p seiza-stacking --test output_version`

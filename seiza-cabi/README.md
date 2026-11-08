@@ -165,6 +165,13 @@ exposes the **superset** of what both apps need.
   and `..._render_preview` renders from a bounded sample of the live mean
   without making a full-frame snapshot. `..._export_snapshot` copies only one
   full-frame mean for non-destructive FITS/XISF output on a worker thread.
+  `seiza_live_stacker_finish_reintegration` consumes a completed live stack,
+  clears the caller's handle, and frees its online accumulator before replay
+  allocates output buffers. It returns the same snapshot and per-frame
+  diagnostics as reintegration. The handle is consumed on replay failure or
+  cancellation too; a null scratch-directory argument uses system temporary
+  storage, and an existing directory can be supplied explicitly. The snapshot
+  retains reference headers and input-path protections.
   `seiza_live_stacker_reintegrate` rereads every admitted frame and returns a
   new snapshot integrated with leave-one-out rejection, which removes trails
   from the reference and warm-up frames that online rejection kept. It
@@ -763,6 +770,12 @@ directly rather than making a full snapshot. Zero-coverage pixels stay masked
 through statistics, background fitting, deconvolution, sample-domain mapping,
 and stretching; they are transparent in RGBA. The returned image is independent
 of the stack and uses the ordinary `SeizaRenderedImage` accessors/free function.
+
+`"trackClipping": false` disables saturation-fraction tracking when no clipping
+map is needed, saving mask detection, resampling and accumulation. It defaults
+to true. The stack pixels are unchanged; `seiza_live_stacker_clipped_fraction`
+returns false without an error when tracking is disabled. The setting is
+preserved in saved contexts.
 
 Stack options are serialized `seiza-stacking` `StackOptions`. Every nested
 object accepts omitted fields from its defaults. For example, this disables

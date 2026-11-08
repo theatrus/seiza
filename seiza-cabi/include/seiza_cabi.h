@@ -1419,6 +1419,8 @@ char *seiza_stack_detect_defects_json(const char *paths_json,
  (by default what the device has; with less, the live accumulator stays
  on the CPU sooner), and `"trace"`, which prints each GPU call's timings
  to stderr.
+ `"trackClipping": false` skips raw saturation-mask work when no clipping
+ map is needed; it defaults to true and changes no stack image samples.
  All files
  are fully read during this call and are not kept open afterward.
  Local-background offsets use median paired residuals after applying the
@@ -2082,7 +2084,8 @@ const uint32_t *seiza_live_stacker_coverage(const SeizaLiveStacker *stacker);
  raw pixels, from 0 to 1, into `out`: one float per pixel of the stack's
  grid, row by row, for [`seiza_color_neutralize_clipped`]. Returns true
  when it copied the map, and false with no error when no integrated frame
- clipped, or their saturation level was unknown. Fails, setting
+ clipped, their saturation level was unknown, or `trackClipping` was false
+ in the stack options. Fails, setting
  `error_out`, when `out` holds fewer than `width * height` floats.
 
  # Safety
@@ -2453,6 +2456,31 @@ bool seiza_drizzle_result_write_fits(const SeizaDrizzleResult *drizzle,
  [`seiza_live_stacker_reintegrate_drizzled`] and must not already be freed.
  */
 void seiza_drizzle_result_free(SeizaDrizzleResult *drizzle);
+
+/*
+ Consume a live stacker and reintegrate its admitted frames, dropping the
+ live accumulator before allocating the final integration buffers.
+ The result and arguments are those of [`seiza_live_stacker_reintegrate`].
+ `scratch_directory` is null for system temporary storage, or an existing
+ parent directory for replay scratch files. A retained cache takes precedence.
+ An explicit replay directory refuses a higher-memory whole-frame fallback.
+ A non-null accepted handle is set to null and consumed on success,
+ replay failure or cancellation; do not free or reuse its former value.
+
+ # Safety
+ `stacker` must point to writable storage containing null or a live
+ `SeizaLiveStacker` pointer, exclusively owned for this call. Other
+ arguments have the requirements of [`seiza_live_stacker_reintegrate`].
+ `scratch_directory` must be null or a valid NUL-terminated UTF-8 path.
+ */
+SeizaStackSnapshot *seiza_live_stacker_finish_reintegration(SeizaLiveStacker **stacker,
+                                                            float low_sigma,
+                                                            float high_sigma,
+                                                            const char *scratch_directory,
+                                                            const SeizaCancelSignal *cancel,
+                                                            SeizaStackReintegrateProgressCallback progress,
+                                                            void *context,
+                                                            char **error_out);
 
 /*
  Consumes a live stacker and moves its full-frame state into an immutable

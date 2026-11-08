@@ -1,0 +1,19 @@
+[
+  "/tmp/seiza-sho-defect-benchmark/seiza-before",
+  "color",
+  "narrowband",
+  "--ha",
+  "/tmp/seiza-sho-defect-benchmark/full/before/H.fits",
+  "--oiii",
+  "/tmp/seiza-sho-defect-benchmark/full/before/O.fits",
+  "--sii",
+  "/tmp/seiza-sho-defect-benchmark/full/before/S.fits",
+  "--palette",
+  "sho",
+  "--normalization",
+  "none",
+  "--no-register",
+  "--output",
+  "/tmp/seiza-sho-defect-benchmark/full/before/SHO.fits",
+  "--no-gpu"
+]

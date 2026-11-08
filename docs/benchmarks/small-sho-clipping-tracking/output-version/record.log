@@ -1,0 +1,20 @@
+   Compiling seiza-stacking v0.57.0 (/home/ppicazo/Development/seiza/seiza-stacking)
+    Finished `test` profile [optimized + debuginfo] target(s) in 6.47s
+     Running tests/output_version.rs (target/debug/deps/output_version-2e5b89ac5b35b2c3)
+
+running 1 test
+
+thread 'a_large_stack_keeps_its_clipped_fraction' (183) panicked at seiza-stacking/tests/output_version.rs:4134:5:
+LARGE_CLIPPED_IMAGE: the output changed. If that is intended, set OUTPUT_VERSION in seiza-stacking/src/lib.rs to the release that will ship this change, and record the new output:
+const LARGE_CLIPPED_IMAGE: &[f64] = &[1.2699083e2, 4.6523645e2, 3.2818176e4, 1.0086214e2, 9.9956696e1, 1.0004606e2, 9.9492676e1, 9.9923233e1, 9.9848633e1, 9.9659042e1, 1.0156461e2, 1.0046982e2, 9.9432045e1, 9.9746765e1, 9.9746498e1, 9.9160324e1, 1.0093239e2, 9.9841454e1, 1.0020325e2, 1.0068443e2, 9.8760162e1, 9.9336227e1, 9.9516830e1, 9.9197311e1, 9.9763680e1, 1.0013423e2, 9.9218819e1, 1.0067850e2];
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test a_large_stack_keeps_its_clipped_fraction ... FAILED
+
+failures:
+
+failures:
+    a_large_stack_keeps_its_clipped_fraction
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 73 filtered out; finished in 0.67s
+
+error: test failed, to rerun pass `-p seiza-stacking --test output_version`

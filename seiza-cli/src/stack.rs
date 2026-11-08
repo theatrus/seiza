@@ -690,6 +690,8 @@ fn stack(options: StackArgs) -> Result<()> {
         }),
     };
     let mut stack_options = StackOptions {
+        // Preserve clipping history for requested maps and saved contexts.
+        track_clipping: options.clipped.is_some() || options.save_canvas.is_some(),
         normalization,
         rejection,
         demosaic: match options.demosaic {
@@ -1164,23 +1166,22 @@ fn stack(options: StackArgs) -> Result<()> {
                 println!("reintegrate {what} {count} admitted frame(s)");
             }
         };
-        let result =
-            match &drizzle {
-                Some(drizzle) => stacker.reintegrate_drizzled(&batch, drizzle, progress).map(
-                    |(result, image)| {
-                        drizzled = Some(image);
-                        result
-                    },
-                ),
-                None => stacker.reintegrate(&batch, progress),
-            };
+        let result = match &drizzle {
+            Some(drizzle) => {
+                let result = stacker.reintegrate_drizzled(&batch, drizzle, progress);
+                drop(stacker);
+                result.map(|(result, image)| {
+                    drizzled = Some(image);
+                    result
+                })
+            }
+            None => stacker.finish_reintegration(&batch, progress),
+        };
+        // Both paths have consumed or dropped the live stack and its scratch.
         if crate::interrupt::interrupted() {
-            drop(stacker);
             stop_interrupted();
         }
         let result = result?;
-        // Free the frames' scratch files before writing the outputs.
-        drop(stacker);
         let rejected = result
             .snapshot
             .rejected_samples
