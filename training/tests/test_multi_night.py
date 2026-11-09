@@ -101,7 +101,10 @@ def test_a_seeing_pair_is_kept_only_where_its_halves_differ_in_the_psf_alone(bes
     if reason is None:
         # Measured unsmoothed, the stacks' widths keep their true ratio.
         assert stats["fwhm_ratio"] == pytest.approx(2.2 / 1.5, rel=0.06)
-        assert all(ratio > 1.25 for row in stats["fwhm_ratio_field"] for ratio in row)
+        # A ninth with too few stars found in it is left unmeasured: Seiza
+        # 0.50's detector leaves one corner of this field short.
+        measured = [ratio for row in stats["fwhm_ratio_field"] for ratio in row if ratio is not None]
+        assert len(measured) >= 7 and all(ratio > 1.25 for ratio in measured)
         # A gain and a sky plane are the trainer's to match, and recorded.
         assert stats["background_offset"] == pytest.approx(500.0 - change.get("sky", 500.0) - change.get(
             "tilt", 0.0) / 2, abs=0.5)
