@@ -58,6 +58,13 @@ SEAM_SPAN = 0.05
 # the same on every sheet, so sheets compare.
 STRENGTHS = (("Each star to 0.8 of its width", 0.8), ("To 0.65", 0.65), ("To 0.5", 0.5))
 FULL_STRENGTH = 0.65
+# A run with separate strengths for stars and the rest is asked for
+# these, stars' first: both alike, then the rest sharper than the stars,
+# then the rest alone; its full-size image is asked for both at
+# `FULL_STRENGTH`.
+NONSTELLAR_STRENGTHS = (("Stars and the rest to 0.8", (0.8, 0.8)), ("Both to 0.65", (0.65, 0.65)),
+                        ("Both to 0.5", (0.5, 0.5)), ("Stars 0.65, the rest 0.45", (0.65, 0.45)),
+                        ("Stars left, the rest 0.5", (1.0, 0.5)))
 # The whole image's widths are measured in cells of this many across and
 # down, and at most this many stars a measure, chosen evenly.
 CELLS = (4, 3)
@@ -161,10 +168,22 @@ class Sharpener:
                                      for row in range(stamps.shape[0])])
         self.ys, self.xs = field.arrays["ys"].astype(np.float64), field.arrays["xs"].astype(np.float64)
 
-    def ratio(self, strength: float) -> np.ndarray:
+    def ratio(self, strength: Any) -> Any:
+        """The ratio map, or the stars' and the rest's, for a strength or a
+        pair of them."""
+        if isinstance(strength, tuple):
+            return tuple(self.ratio(value) for value in strength)
         return ratio_map(self.widths, self.field, self.image.shape, strength, self.settings.floor_px)
 
-    def run(self, ratio: np.ndarray, top: int = 0, left: int = 0, bottom: int | None = None,
+    @property
+    def strengths(self) -> tuple[tuple[str, Any], ...]:
+        return NONSTELLAR_STRENGTHS if self.settings.nonstellar else STRENGTHS
+
+    @property
+    def full_strength(self) -> Any:
+        return (FULL_STRENGTH, FULL_STRENGTH) if self.settings.nonstellar else FULL_STRENGTH
+
+    def run(self, ratio: Any, top: int = 0, left: int = 0, bottom: int | None = None,
             right: int | None = None) -> np.ndarray:
         """The region's output, with the whole image's scales, PSF field and
         points, the field's vectors interpolated to every pixel (`sharpen`'s
@@ -176,7 +195,7 @@ class Sharpener:
         points[:, 1] -= top
         return sharpen(self.model, np.ascontiguousarray(self.image[top:bottom, left:right]),
                        lambda x, y: fitted_stamp(self.field.stamp_at(x + left, y + top))[0],
-                       ratio=np.ascontiguousarray(ratio[top:bottom, left:right]), points=points,
+                       ratio=cut(ratio, (slice(top, bottom), slice(left, right))), points=points,
                        noise_map=np.ascontiguousarray(self.noise_map[top:bottom, left:right]),
                        background=self.background, noise=self.noise, inference=self.record["inference"],
                        residual=self.settings.residual, where=self.where,
@@ -212,11 +231,11 @@ def render(store: Store, manifest: Manifest, record: dict[str, Any], model: Any,
 
     side = sheet.get("side", SIDE)
     height, width = image.shape
-    ratios = {strength: runner.ratio(strength) for _, strength in STRENGTHS}
+    ratios = {strength: runner.ratio(strength) for _, strength in runner.strengths}
     inference = record["inference"]
     pad = inference["margin"] + 16
     grid = inference.get("multiple", 1)
-    labels = ["Input", *(label for label, _ in STRENGTHS), *(entry["label"] for entry, _, _ in baselines)]
+    labels = ["Input", *(label for label, _ in runner.strengths), *(entry["label"] for entry, _, _ in baselines)]
     rows = []
     for crop in sheet["crops"]:
         x, y = min(crop["x"], width - side), min(crop["y"], height - side)
@@ -226,7 +245,7 @@ def render(store: Store, manifest: Manifest, record: dict[str, Any], model: Any,
         bottom, right = min(height, y + side + pad), min(width, x + side + pad)
         inner = (slice(y - top, y - top + side), slice(x - left, x - left + side))
         panels = [image[y:y + side, x:x + side]]
-        panels += [runner.run(ratios[strength], top, left, bottom, right)[inner] for _, strength in STRENGTHS]
+        panels += [runner.run(ratios[strength], top, left, bottom, right)[inner] for _, strength in runner.strengths]
         tiles = [look(panel, image_background) for panel in panels]
         tiles += [look(other[y:y + side, x:x + side], background_of) for _, other, background_of in baselines]
         rows.append((f"{crop['label']}: 1:1 crop at x {x}, y {y}", tiles))
@@ -254,7 +273,7 @@ def render(store: Store, manifest: Manifest, record: dict[str, Any], model: Any,
     write_png(path, np.asarray(canvas))
     if whole is None:
         return {}
-    written = full_size(runner, ratios.get(FULL_STRENGTH, runner.ratio(FULL_STRENGTH)),
+    written = full_size(runner, ratios.get(runner.full_strength, runner.ratio(runner.full_strength)),
                         lambda x: look(x, image_background), whole)
     valid = np.isfinite(image) & ~saturation(image, field.record.get("clip_level"))
     measures = {"run": whole_measures(image, written.pop("output"), runner, valid)}
@@ -264,12 +283,19 @@ def render(store: Store, manifest: Manifest, record: dict[str, Any], model: Any,
         write_png(shared, (look(other, background_of) * 255 + 0.5).astype(np.uint8))
         written[f"baseline-{entry['name']}"] = shared
         measures[entry["name"]] = whole_measures(image, other, runner, valid)
-    written["strength"] = FULL_STRENGTH
+    written["strength"] = runner.full_strength
     written["measures"] = measures
     return written
 
 
-def full_size(runner: Sharpener, ratio: np.ndarray, look: Any, stem: Path) -> dict[str, Any]:
+def cut(ratio: Any, region: tuple[slice, slice]) -> Any:
+    """A ratio map, or a pair of them, cut to `region`."""
+    if isinstance(ratio, tuple):
+        return tuple(np.ascontiguousarray(value[region]) for value in ratio)
+    return np.ascontiguousarray(ratio[region])
+
+
+def full_size(runner: Sharpener, ratio: Any, look: Any, stem: Path) -> dict[str, Any]:
     """Write the whole image sharpened at `ratio` as FITS and, through
     `look`, as PNG, and its seam map, at `stem` with their suffixes; answer
     their paths, the seams' size in units of each pixel's noise, and the

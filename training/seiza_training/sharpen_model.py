@@ -111,7 +111,14 @@ from .unet import SharpeningUNet, reach, receptive_field
 
 # The planes the network reads, in order, and the stamp's.
 PLANES = ("image", "noise", "ratio", "points")
+# The planes a model with separate strengths for stars and for the rest
+# reads: the ratio asked of each.
+PLANES_NONSTELLAR = ("image", "noise", "ratio", "nonstellar_ratio", "points")
 STAMP_PLANES = ("peak", "wings")
+# A known-kernel window's mask of its stars, `S / (S + STAR_MASK_NOISE σ)`
+# of its detections rendered with its stamp, `S`, and its noise, `σ`: the
+# stars' own share of each pixel, where they stand above the noise.
+STAR_MASK_NOISE = 3.0
 # The stamp's second plane is `asinh(s / (peak · WINGS)) / asinh(1 / WINGS)`:
 # its wings down to a ten-thousandth of the peak still show.
 WINGS = 1e-3
@@ -213,6 +220,16 @@ class Settings:
     centroid_offset: str = "light"
     ratio_source: str = "stamp"
     residual: str = "asinh"
+    # Separate strengths for stars and for the rest (`PLANES_NONSTELLAR`):
+    # a known-kernel window asks each for a ratio drawn between the
+    # sharpest its stack allows and 1, the same for both `equal_share` of
+    # the time; a pair asks both for its own.
+    nonstellar: bool = False
+    equal_share: float = 0.3
+
+    @property
+    def planes(self) -> tuple[str, ...]:
+        return PLANES_NONSTELLAR if self.nonstellar else PLANES
 
     def __post_init__(self) -> None:
         # Runs before the light offset recorded the detections' as "shift".
@@ -837,6 +854,14 @@ class Example:
     window: int
     asked: float | None = None
     details: dict[str, Any] = field(default_factory=dict)
+    # The ratio asked of what is not a star, where it is not `ratio`.
+    nonstellar_ratio: float | None = None
+
+    def ratios(self, settings: Settings) -> float | tuple[float, float]:
+        """The ratio planes' values the settings' network reads."""
+        if not settings.nonstellar:
+            return self.ratio
+        return self.ratio, self.ratio if self.nonstellar_ratio is None else self.nonstellar_ratio
 
 
 def stack_noise(sigma: np.ndarray, image: np.ndarray, fallback: np.ndarray | None = None) -> np.ndarray:
@@ -885,8 +910,29 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
     scale = math.exp(rng.uniform(-1.0, 1.0) * math.log(settings.exposure)) if scaled and settings.exposure > 1 else 1.0
     share = float(rng.uniform(0.0, settings.kernel_noise))
     signal = background + scale * (image - background)
+    points = window_points(bank, source, row)
+    points[:, 2] *= scale
+    points[:, 3] = background + scale * (points[:, 3] - background)
+    ratio, nonstellar_ratio, band = kernel.ratio, None, kernel.reach()
     if identity:
         blurred, target = signal, None
+    elif settings.nonstellar:
+        # Stars and the rest each asked for their own share of the input's
+        # width, no sharper than the stack allows and nearer that than 1
+        # (a quarter of the way up at the median): the target is the two
+        # blurs of the window, each where its part of the light is.
+        def drawn() -> float:
+            return kernel.ratio + (1.0 - kernel.ratio) * float(rng.random()) ** 2
+
+        ratio = drawn()
+        nonstellar_ratio = ratio if rng.random() < settings.equal_share else drawn()
+        blurs = [target_blur(stamp, kernel, value) for value in (ratio, nonstellar_ratio)]
+        blurred, stars, rest = blurred_images(signal, [kernel.covariance, *blurs])
+        rendered = point_map(points, stamp, image.shape, background)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            mask = np.clip(np.nan_to_num(rendered / (rendered + STAR_MASK_NOISE * scale * sigma)), 0.0, 1.0)
+        target = (mask * stars + (1.0 - mask) * rest).astype(np.float32)
+        band = max(band, *(blur_reach(blur) for blur in blurs))
     else:
         blurred, target = blurred_images(signal, [kernel.covariance, kernel.target])
     shown = blurred + (rng.standard_normal(image.shape).astype(np.float32) * (share * sigma))
@@ -894,7 +940,6 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
         target, target_sigma = shown, math.hypot(scale, share) * sigma
     else:
         target_sigma = scale * sigma
-    band = kernel.reach()
     # The clipped cores stay out of the loss, but not the pixels about them:
     # input and target are blurs of the same stack, clipped cores and all,
     # so they agree there. Blind to a bright star's surroundings out to the
@@ -903,13 +948,27 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
     valid = edge_band(image.shape, band) & ~saturated
     noise_map = image_sigma(shown)
     noise = float(np.median(noise_map[np.isfinite(noise_map)]))
-    points = window_points(bank, source, row)
-    points[:, 2] *= scale
-    points[:, 3] = background + scale * (points[:, 3] - background)
-    return Example(shown, target, noise_map, target_sigma.astype(np.float32), valid, kernel.stamp, kernel.ratio,
+    return Example(shown, target, noise_map, target_sigma.astype(np.float32), valid, kernel.stamp, ratio,
                    points, background, noise, kernel.widths["input"], "identity" if identity else "kernel", source,
                    window, kernel.asked, {"scale": scale, "noise_share": share, "widths": kernel.widths,
-                                          "kernel": kernel.covariance.tolist()})
+                                          "kernel": kernel.covariance.tolist(), "sharpest": kernel.ratio},
+                   nonstellar_ratio)
+
+
+def blur_reach(covariance: np.ndarray) -> int:
+    """How far a Gaussian blur of `covariance` reads, in pixels."""
+    return int(math.ceil(BLUR_REACH * math.sqrt(max(float(np.linalg.eigvalsh(covariance)[-1]), 0.0))))
+
+
+def target_blur(stamp: np.ndarray, kernel: Kernel, ratio: float) -> np.ndarray:
+    """The target's blur for a known-kernel window asked for `ratio` of its
+    input's width, no less than the sharpest its stack allows
+    (`kernel.ratio`): the blur that rounds the stamp, and as much more round
+    Gaussian as brings the rounded stamp to that width."""
+    if ratio <= kernel.ratio * (1 + RATIO_TOLERANCE):
+        return kernel.target
+    extra, _, _ = widened(blurred_stamp(stamp, kernel.target), kernel.widths["target"], ratio / kernel.ratio, 0.0, 0.0)
+    return kernel.target + extra
 
 
 def pair_example(bank: Bank, window: int, settings: Settings) -> Example:
@@ -991,17 +1050,19 @@ def point_map(points: np.ndarray, stamp: np.ndarray, shape: tuple[int, int], bac
     return rendered[pad:pad + shape[0], pad:pad + shape[1]].astype(np.float32)
 
 
-def network_planes(image: np.ndarray, noise_map: np.ndarray, ratio: float | np.ndarray, points: np.ndarray,
+def network_planes(image: np.ndarray, noise_map: np.ndarray, ratio: Any, points: np.ndarray,
                    background: float, noise: float) -> np.ndarray:
-    """The planes the network reads (`PLANES`): the image and the
+    """The planes the network reads (`PLANES`, or `PLANES_NONSTELLAR` given
+    a pair of ratios, the stars' and the rest's): the image and the
     point-source map as `asinh` in units of the median noise above the
-    background, the noise map as `asinh(σ / σ̄)`, and the ratio; NaN becomes
-    the background."""
+    background, the noise map as `asinh(σ / σ̄)`, and each ratio, a number
+    or a map; NaN becomes the background."""
     x = np.arcsinh(np.nan_to_num((image - background) / noise, nan=0.0))
     s = np.arcsinh(np.nan_to_num(noise_map / noise, nan=1.0))
-    r = np.broadcast_to(np.asarray(ratio, dtype=np.float32), image.shape)
+    ratios = ratio if isinstance(ratio, tuple) else (ratio,)
+    r = [np.broadcast_to(np.asarray(value, dtype=np.float32), image.shape) for value in ratios]
     p = np.arcsinh(points / noise)
-    return np.stack([x, s, r, p]).astype(np.float32)
+    return np.stack([x, s, *r, p]).astype(np.float32)
 
 
 def apertures(points: np.ndarray, valid: np.ndarray, radius: float, limit: int = APERTURES) -> np.ndarray:
@@ -1053,8 +1114,8 @@ def arrays_of(example: Example, rng: np.random.Generator | None, settings: Setti
     empty = rng is not None and rng.random() < settings.points_empty
     rendered = np.zeros((tile, tile), np.float32) if empty else point_map(points, example.stamp, (tile, tile),
                                                                           example.background)
-    planes = network_planes(example.image[cut], example.noise_map[cut], example.ratio, rendered, example.background,
-                            example.noise)
+    planes = network_planes(example.image[cut], example.noise_map[cut], example.ratios(settings), rendered,
+                            example.background, example.noise)
     valid = example.valid[cut]
     found = {
         "planes": planes,
@@ -1158,8 +1219,8 @@ def loss_terms(residual: torch.Tensor, batch: dict[str, torch.Tensor], settings:
 # Training.
 
 
-def build_model(width: int, levels: int) -> SharpeningUNet:
-    return SharpeningUNet(inputs=len(PLANES), width=width, levels=levels, stamp_inputs=len(STAMP_PLANES))
+def build_model(width: int, levels: int, planes: tuple[str, ...] = PLANES) -> SharpeningUNet:
+    return SharpeningUNet(inputs=len(planes), width=width, levels=levels, stamp_inputs=len(STAMP_PLANES))
 
 
 def run_directory(store: Store, name: str) -> Path:
@@ -1264,7 +1325,7 @@ def train(
     elif checkpoint_path.exists() or (directory / "run.json").exists():
         raise FileExistsError(f"a run named {name} is already recorded: resume it, or name another")
     banks, validation_banks = choice.train(settings), choice.validation(settings)
-    config = {**call, "planes": list(PLANES), "stamp_planes": list(STAMP_PLANES), "wings": WINGS,
+    config = {**call, "planes": list(settings.planes), "stamp_planes": list(STAMP_PLANES), "wings": WINGS,
               "banks": {kind: [bank.summary() for bank in group] for kind, group in banks.items()},
               "validation_banks": {kind: [bank.summary() for bank in group]
                                    for kind, group in validation_banks.items()}}
@@ -1274,7 +1335,7 @@ def train(
     torch.manual_seed(seed)
     where = where or device()
     cuda = where.type == "cuda"
-    model = build_model(width, levels).to(where)
+    model = build_model(width, levels, settings.planes).to(where)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     schedule = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=learning_rate, total_steps=steps, pct_start=0.05)
     guard = Rewind(model, optimizer, rewind) if rewind else None
@@ -1411,7 +1472,8 @@ def export(model: SharpeningUNet, path: Path, *, tile: int) -> dict[str, Any]:
     import onnxruntime
 
     model = model.cpu().eval()
-    planes, stamp = torch.randn(1, len(PLANES), tile, tile), torch.rand(1, len(STAMP_PLANES), STAMP, STAMP)
+    planes = torch.randn(1, model.first[0].in_channels, tile, tile)
+    stamp = torch.rand(1, len(STAMP_PLANES), STAMP, STAMP)
     torch.onnx.export(model, (planes, stamp), str(path), input_names=["planes", "stamp"], output_names=["residual"],
                       opset_version=17, dynamo=False)
     session = onnxruntime.InferenceSession(str(path), providers=["CPUExecutionProvider"])
@@ -1526,7 +1588,7 @@ def sharpen(model: SharpeningUNet, image: np.ndarray, stamp_at: Any, *, ratio: f
                                multiple=settings.get("multiple", model.multiple), origins_too=True)[0]
         output = background + noise * applied(np.nan_to_num((image - background) / noise), found_residual, residual)
         return np.where(np.isfinite(image), output, np.nan).astype(np.float32)
-    planes = network_planes(image, noise_map, ratio, np.zeros(image.shape, np.float32), background, noise)[:3]
+    planes = network_planes(image, noise_map, ratio, np.zeros(image.shape, np.float32), background, noise)[:-1]
 
     def run(tiles: np.ndarray, origins: list[tuple[int, int]]) -> np.ndarray:
         stamps, rendered = [], []
@@ -1831,7 +1893,8 @@ def evaluate(model: SharpeningUNet, banks: dict[str, list[Bank]], *, settings: S
                     # A window is one tile: whole-image inference on it.
                     inference = {**tiling(model.levels), "tile": example.image.shape[0]}
                     output = sharpen(model, example.image, lambda x, y, stamp=example.stamp: stamp,
-                                     ratio=example.ratio, points=example.points, noise_map=example.noise_map,
+                                     ratio=example.ratios(settings), points=example.points,
+                                     noise_map=example.noise_map,
                                      background=example.background, noise=example.noise, inference=inference,
                                      residual=settings.residual, where=where)
                     # The band its blur or shift read past is out of
@@ -1850,7 +1913,8 @@ def load_run(store: Store, name: str) -> tuple[dict[str, Any], SharpeningUNet]:
     """A recorded run's record and its model, on the CPU."""
     directory = run_directory(store, name)
     record = json.loads((directory / "run.json").read_text())
-    model = build_model(record["config"]["width"], record["config"]["levels"])
+    model = build_model(record["config"]["width"], record["config"]["levels"],
+                        tuple(record["config"].get("planes", PLANES)))
     model.load_state_dict(torch.load(directory / "weights.pt", map_location="cpu"))
     record["inference"] = tiling(record["config"]["levels"])
     return record, model.eval()

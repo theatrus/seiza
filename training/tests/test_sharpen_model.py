@@ -203,6 +203,51 @@ def test_known_kernel_examples_keep_the_window_s_noise_low_and_mask_the_band_the
     assert identity.kind == "identity" and identity.ratio == 1.0 and np.array_equal(identity.image, identity.target)
 
 
+def test_stars_and_the_rest_are_each_brought_to_the_ratio_asked_of_them(tmp_path):
+    bank = sm.Bank(kernel_bank(tmp_path), sm.Settings(tile=32))
+    stars = np.array(POSITIONS)
+
+    def width(image):
+        return sharpen_bank.stamp_width(sm.empirical_stamp(image, stars, 15))
+
+    alike = sm.Settings(tile=32, exposure=1.0, kernel_noise=0.0, nonstellar=True, equal_share=1.0)
+    for seed in range(4):
+        example = sm.kernel_example(bank, 0, np.random.default_rng(seed), alike, identity=False)
+        sharpest = example.details["sharpest"]
+        assert sharpest <= example.ratio <= 1.0 and example.nonstellar_ratio == example.ratio
+        assert width(example.target) / width(example.image) == pytest.approx(example.ratio, rel=0.05)
+        planes = sm.arrays_of(example, None, alike)["planes"]
+        assert planes.shape[0] == len(sm.PLANES_NONSTELLAR)
+        assert np.all(planes[2] == np.float32(example.ratio)) and np.all(planes[3] == np.float32(example.ratio))
+    # Asked apart, the stars, which stand far above the noise, follow
+    # their own ratio, not the rest's.
+    apart = sm.Settings(tile=32, exposure=1.0, kernel_noise=0.0, nonstellar=True, equal_share=0.0)
+    seen = 0
+    for seed in range(40):
+        example = sm.kernel_example(bank, 0, np.random.default_rng(seed), apart, identity=False)
+        if abs(example.nonstellar_ratio - example.ratio) < 0.15:
+            continue
+        assert width(example.target) / width(example.image) == pytest.approx(example.ratio, rel=0.06)
+        seen += 1
+    assert seen >= 3
+    # One ratio for a run without them, as before.
+    single = sm.kernel_example(bank, 0, np.random.default_rng(0), sm.Settings(tile=32), identity=False)
+    assert single.nonstellar_ratio is None and single.ratios(sm.Settings()) == single.ratio
+    assert sm.arrays_of(single, None, sm.Settings(tile=32))["planes"].shape[0] == len(sm.PLANES)
+
+
+def test_a_model_with_two_ratios_reads_five_planes_and_sharpens_with_a_pair():
+    model = sm.build_model(4, 3, sm.PLANES_NONSTELLAR)
+    assert model.first[0].in_channels == 5
+    image = stars_image(POSITIONS, FLUXES, np.diag([2.0, 2.0]))
+    stamp = gaussian(sharpen_bank.STAMP, np.diag([2.0, 2.0]))
+    inference = {"tile": 64, "overlap": 2 * reach(3) + 4, "margin": reach(3), "multiple": model.multiple}
+    output = sm.sharpen(model, image, lambda x, y: stamp, ratio=(0.6, 0.5), points=detections(POSITIONS, FLUXES),
+                        noise_map=np.ones_like(image), background=100.0, noise=1.0, inference=inference)
+    # A new model is the identity.
+    np.testing.assert_allclose(output, image, atol=1e-3)
+
+
 def test_where_one_frame_covers_the_sky_the_image_s_own_map_weighs_the_loss():
     image = np.random.default_rng(0).normal(100.0, 2.0, (SIDE, SIDE)).astype(np.float32)
     sigma = np.full((SIDE, SIDE), 2.0, np.float32)
