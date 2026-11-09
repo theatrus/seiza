@@ -104,7 +104,7 @@ import torch
 
 from . import psf_fields
 from .noise_model import Prefetch, Rewind, device, image_sigma, offloaded, step_generator, tiling
-from .sharpen_bank import STAMP, open_bank, stamp_width
+from .sharpen_bank import SATURATION_GROW, STAMP, grown, open_bank, stamp_width
 from .store import Store, versions
 from .tiles import infer
 from .unet import SharpeningUNet, reach, receptive_field
@@ -119,6 +119,19 @@ STAMP_PLANES = ("peak", "wings")
 # of its detections rendered with its stamp, `S`, and its noise, `σ`: the
 # stars' own share of each pixel, where they stand above the noise.
 STAR_MASK_NOISE = 3.0
+# A deep stack's clipped cores are flat plateaus; blurred, they became soft
+# bumps no camera makes, and runs trained on them dug dark rings 4 to 5
+# widths about real clipped stars, whose plateaus end steeply, down to
+# 19σ̄ below the sky (2026-11-09). So each clipped core is filled first:
+# the window's stamp at the core, scaled to the unclipped pixels out to
+# `FILL_REACH` widths, wherever it is brighter; the blurred input and the
+# target are then clipped where the stack clipped, as a camera clips after
+# the sky has blurred the star.
+FILL_REACH = 4.0
+# The core's place is sought this far, in pixels, either way of its
+# plateau's middle, at these steps.
+FILL_SHIFT = 0.6
+FILL_STEP = 0.1
 # The stamp's second plane is `asinh(s / (peak · WINGS)) / asinh(1 / WINGS)`:
 # its wings down to a ten-thousandth of the peak still show.
 WINGS = 1e-3
@@ -226,6 +239,9 @@ class Settings:
     # the time; a pair asks both for its own.
     nonstellar: bool = False
     equal_share: float = 0.3
+    # Fill a known-kernel window's clipped cores before its blur, and clip
+    # input and target after it (`FILL_REACH`).
+    fill_clipped: bool = False
 
     @property
     def planes(self) -> tuple[str, ...]:
@@ -913,6 +929,10 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
     points = window_points(bank, source, row)
     points[:, 2] *= scale
     points[:, 3] = background + scale * (points[:, 3] - background)
+    level = (bank.sources[source].get("input_psf") or {}).get("clip_level")
+    clip = background + scale * (level - background) if settings.fill_clipped and level is not None else None
+    if clip is not None and not identity and saturated.any():
+        signal = filled(signal, saturated, points, stamp, row["width"], background)
     ratio, nonstellar_ratio, band = kernel.ratio, None, kernel.reach()
     if identity:
         blurred, target = signal, None
@@ -941,11 +961,11 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
     else:
         target_sigma = scale * sigma
     # The clipped cores stay out of the loss, but not the pixels about them:
-    # input and target are blurs of the same stack, clipped cores and all,
-    # so they agree there. Blind to a bright star's surroundings out to the
-    # blur's reach, runs dug a dark ring about it, 1 to 4σ̄ below the sky
-    # at four to five widths, with a halo past it (2026-11-09).
+    # input and target are blurs of the same window there, and agree.
     valid = edge_band(image.shape, band) & ~saturated
+    if clip is not None:
+        shown, target = np.minimum(shown, clip), np.minimum(target, clip)
+        valid &= ~grown((shown >= clip) | (target >= clip), SATURATION_GROW)
     noise_map = image_sigma(shown)
     noise = float(np.median(noise_map[np.isfinite(noise_map)]))
     return Example(shown, target, noise_map, target_sigma.astype(np.float32), valid, kernel.stamp, ratio,
@@ -953,6 +973,76 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
                    window, kernel.asked, {"scale": scale, "noise_share": share, "widths": kernel.widths,
                                           "kernel": kernel.covariance.tolist(), "sharpest": kernel.ratio},
                    nonstellar_ratio)
+
+
+def filled(image: np.ndarray, saturated: np.ndarray, points: np.ndarray, stamp: np.ndarray, width: float,
+           background: float) -> np.ndarray:
+    """`image` with each clipped core put back: the stamp at the middle of
+    the core's clipped pixels, scaled to the unclipped pixels within
+    `FILL_REACH` widths, less the median of those out to half as far again,
+    wherever it is brighter than what the stack kept."""
+    columns = psf_fields.DETECTION_COLUMNS
+    cores = points[(points[:, columns.index("clipped")] == 1) | (points[:, columns.index("saturated")] == 1)]
+    out = image.astype(np.float32).copy()
+    reach = int(math.ceil(1.5 * FILL_REACH * width)) + 2
+    height, side = image.shape
+    for star in cores:
+        column, row = int(round(float(star[0]))), int(round(float(star[1])))
+        top, bottom = max(0, row - reach), min(height, row + reach + 1)
+        left, right = max(0, column - reach), min(side, column + reach + 1)
+        if bottom <= top or right <= left:
+            continue
+        box = (slice(top, bottom), slice(left, right))
+        down, across = np.mgrid[top:bottom, left:right]
+        near = saturated[box] & (np.hypot(across - star[0], down - star[1]) <= FILL_REACH * width)
+        if not near.any():
+            continue
+        # The middle of the plateau the detector found, where a flat top
+        # gives it no peak.
+        x, y = float(across[near].mean()), float(down[near].mean())
+        distance = np.hypot(across - x, down - y)
+        values = out[box]
+        finite = np.isfinite(values)
+        ring = ~saturated[box] & finite & (distance <= FILL_REACH * width)
+        sky = ~saturated[box] & finite & (distance > FILL_REACH * width) & (distance <= 1.5 * FILL_REACH * width)
+        if ring.sum() < 8 or sky.sum() < 8:
+            continue
+        level = float(np.median(values[sky]))
+        # The place within `FILL_SHIFT` of the plateau's middle whose stamp,
+        # scaled, best fits the unclipped ring: a sharp core's steep sides
+        # change much with a fraction of a pixel.
+        best = None
+        for dy in np.arange(-FILL_SHIFT, FILL_SHIFT + 1e-6, FILL_STEP):
+            for dx in np.arange(-FILL_SHIFT, FILL_SHIFT + 1e-6, FILL_STEP):
+                model = placed(stamp, values.shape, x - left + dx, y - top + dy)
+                weight = float((model[ring] ** 2).sum())
+                if not weight > 0:
+                    continue
+                scale = float((model[ring] * (values[ring] - level)).sum()) / weight
+                misfit = float(((values[ring] - level - scale * model[ring]) ** 2).sum())
+                if best is None or misfit < best[0]:
+                    best = (misfit, scale, model)
+        if best is None or not best[1] > 0:
+            continue
+        _, amplitude, model = best
+        core = saturated[box] & finite
+        values[core] = np.maximum(values[core], level + amplitude * model[core])
+        out[box] = values
+    return out
+
+
+def placed(stamp: np.ndarray, shape: tuple[int, int], x: float, y: float) -> np.ndarray:
+    """The stamp with its middle at (`x`, `y`) of a region of `shape`, cut
+    to it, moved the last fraction of a pixel through its transform, which
+    keeps a sharp stamp's width as a split over four pixels does not."""
+    column, row = int(round(x)), int(round(y))
+    half = stamp.shape[0] // 2
+    canvas = np.zeros(shape, dtype=np.float32)
+    top, left = row - half, column - half
+    rows = slice(max(0, top), min(shape[0], top + stamp.shape[0]))
+    columns = slice(max(0, left), min(shape[1], left + stamp.shape[1]))
+    canvas[rows, columns] = stamp[rows.start - top:rows.stop - top, columns.start - left:columns.stop - left]
+    return shifted(canvas, x - column, y - row)
 
 
 def blur_reach(covariance: np.ndarray) -> int:

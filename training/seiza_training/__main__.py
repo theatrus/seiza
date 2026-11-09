@@ -313,6 +313,9 @@ def main(argv: list[str] | None = None) -> int:
                                     "for each, and a known-kernel window asks each for its own")
     sharpen_train.add_argument("--equal-share", type=float, default=0.3,
                                help="with --nonstellar, the share of known-kernel windows asking both alike")
+    sharpen_train.add_argument("--fill-clipped", action=argparse.BooleanOptionalAction, default=True,
+                               help="fill a known-kernel window's clipped cores with its stamp before "
+                                    "its blur, and clip input and target after it, as a camera clips")
     sharpen_train.add_argument("--residual", choices=("asinh", "linear"), default="asinh",
                                help="add the network's residual to the input's asinh, as it reads it, and take it "
                                     "back through sinh, or add it to the input in units of the typical noise")
@@ -676,7 +679,7 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
         max_ratio=arguments.max_window_ratio, min_ratio=arguments.min_window_ratio,
         points_empty=arguments.points_empty, centroid_offset=arguments.centroid_offset,
         ratio_source=arguments.ratio_source, residual=arguments.residual, nonstellar=arguments.nonstellar,
-        equal_share=arguments.equal_share)
+        equal_share=arguments.equal_share, fill_clipped=arguments.fill_clipped)
     loss = sharpen_model.LossSettings(epsilon=arguments.charbonnier, noise_cap=arguments.noise_cap,
                                       gradient_weight=arguments.gradient_weight,
                                       gradient_scales=arguments.gradient_scales, flux_weight=arguments.flux_weight)
