@@ -491,8 +491,15 @@ def edges(image: np.ndarray, output: np.ndarray, runner: Sharpener) -> dict[str,
     steepness = np.hypot(smooth_x, smooth_y)
     free = np.isfinite(steepness) & np.isfinite(before)
     star_width = float(np.nanmedian(runner.widths))
-    reach = int(np.ceil(3 * star_width / EDGE_MEAN)) + EDGE_SMOOTH // 2
-    for x, y in runner.points[:, :2]:
+    # A star is kept clear of by three widths, and by three more for every
+    # tenfold its peak stands over `RING_PEAK` of the noise, up to fifteen:
+    # a bright star's halo is the steepest thing near it, and no edge.
+    peaks = (runner.points[:, psf_fields.DETECTION_COLUMNS.index("peak")] - getattr(runner, "background", 0.0)) \
+        / runner.measure_noise
+    with np.errstate(invalid="ignore", divide="ignore"):
+        widths_out = np.clip(3.0 + 3.0 * np.log10(np.maximum(np.nan_to_num(peaks, nan=1e6) / RING_PEAK, 1.0)), 3.0, 15.0)
+    for (x, y), clear in zip(runner.points[:, :2], widths_out):
+        reach = int(np.ceil(clear * star_width / EDGE_MEAN)) + EDGE_SMOOTH // 2
         row, column = int(y // EDGE_MEAN), int(x // EDGE_MEAN)
         free[max(0, row - reach):row + reach + 1, max(0, column - reach):column + reach + 1] = False
     if free.sum() < 1000:
