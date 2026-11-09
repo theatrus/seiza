@@ -79,11 +79,12 @@ from .store import Store
 # before is cut again.
 BANK_VERSION = 1
 # The side of the stamps a bank keeps: a field's stamp is seven times its
-# FWHM, so this holds whole the stamps of fields up to 12 px, wider than
-# any the corpus's worst seeing halves measure (C925, about 10–11 px). A
-# smaller stamp is padded with zeros; a larger one is cut to it, its sum
-# put back to one, and the share it lost recorded.
-STAMP = 85
+# FWHM, so this holds whole the stamps of fields up to 18.4 px, the widest
+# the corpus's worst seeing halves measure (a C925 night's, 14.9–18.4 px
+# across its field, 2026-11-08). A smaller stamp is padded with zeros; a
+# larger one is cut to it, its sum put back to one, and the share it lost
+# recorded.
+STAMP = 129
 # Windows of each deep stack, as the noise bank takes of each pair.
 DEEP_WINDOWS = 40
 # Windows of each seeing pair: a few dozen pairs to the deep stacks' many
