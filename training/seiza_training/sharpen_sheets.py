@@ -155,14 +155,20 @@ class Sharpener:
         self.points = field.points()
         self.widths = node_widths(field)
         self.where = device()
+        stamps = field.arrays["stamps"]
+        self.node_stamps = np.stack([np.stack([fitted_stamp(stamps[row, column])[0]
+                                               for column in range(stamps.shape[1])])
+                                     for row in range(stamps.shape[0])])
+        self.ys, self.xs = field.arrays["ys"].astype(np.float64), field.arrays["xs"].astype(np.float64)
 
     def ratio(self, strength: float) -> np.ndarray:
         return ratio_map(self.widths, self.field, self.image.shape, strength, self.settings.floor_px)
 
     def run(self, ratio: np.ndarray, top: int = 0, left: int = 0, bottom: int | None = None,
             right: int | None = None) -> np.ndarray:
-        """The region's output, with the whole image's scales, stamps and
-        points."""
+        """The region's output, with the whole image's scales, PSF field and
+        points, the field's vectors interpolated to every pixel (`sharpen`'s
+        `grid`)."""
         bottom = self.image.shape[0] if bottom is None else bottom
         right = self.image.shape[1] if right is None else right
         points = self.points.copy()
@@ -173,7 +179,8 @@ class Sharpener:
                        ratio=np.ascontiguousarray(ratio[top:bottom, left:right]), points=points,
                        noise_map=np.ascontiguousarray(self.noise_map[top:bottom, left:right]),
                        background=self.background, noise=self.noise, inference=self.record["inference"],
-                       residual=self.settings.residual, where=self.where)
+                       residual=self.settings.residual, where=self.where,
+                       grid=(self.ys - top, self.xs - left, self.node_stamps))
 
 
 def render(store: Store, manifest: Manifest, record: dict[str, Any], model: Any, sheet: dict[str, Any], path: Path,
@@ -207,12 +214,15 @@ def render(store: Store, manifest: Manifest, record: dict[str, Any], model: Any,
     height, width = image.shape
     ratios = {strength: runner.ratio(strength) for _, strength in STRENGTHS}
     inference = record["inference"]
-    pad = inference["margin"] + inference["tile"] // 2
+    pad = inference["margin"] + 16
+    grid = inference.get("multiple", 1)
     labels = ["Input", *(label for label, _ in STRENGTHS), *(entry["label"] for entry, _, _ in baselines)]
     rows = []
     for crop in sheet["crops"]:
         x, y = min(crop["x"], width - side), min(crop["y"], height - side)
-        top, left = max(0, y - pad), max(0, x - pad)
+        # From a corner on the model's grid, with its reach about the crop,
+        # which gives the whole image's output inside it.
+        top, left = max(0, y - pad) // grid * grid, max(0, x - pad) // grid * grid
         bottom, right = min(height, y + side + pad), min(width, x + side + pad)
         inner = (slice(y - top, y - top + side), slice(x - left, x - left + side))
         panels = [image[y:y + side, x:x + side]]

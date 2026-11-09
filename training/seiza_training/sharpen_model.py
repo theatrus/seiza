@@ -1426,18 +1426,77 @@ def export(model: SharpeningUNet, path: Path, *, tile: int) -> dict[str, Any]:
 # Inference.
 
 
+def node_features(model: SharpeningUNet, stamps: np.ndarray, where: torch.device, chunk: int = 64) -> np.ndarray:
+    """The stamp encoder's vector of each of a PSF field's node stamps,
+    (rows, columns, features)."""
+    rows, columns = stamps.shape[:2]
+    flat = np.stack([stamp_planes(stamp) for stamp in stamps.reshape(rows * columns, *stamps.shape[2:])])
+    with torch.no_grad():
+        found = [model.encoder(torch.from_numpy(flat[start:start + chunk]).to(where)).cpu().numpy()
+                 for start in range(0, len(flat), chunk)]
+    return np.concatenate(found)[:, :, 0, 0].reshape(rows, columns, -1)
+
+
+def interpolating(nodes: np.ndarray, positions: np.ndarray) -> np.ndarray:
+    """The weights, (positions, nodes), that interpolate values at `nodes`
+    linearly at `positions`, held at the ends."""
+    return np.stack([np.interp(positions, nodes, column) for column in np.eye(len(nodes))], axis=1)
+
+
+def sampled_features(features: np.ndarray, ys: np.ndarray, xs: np.ndarray, top: int, left: int, side: int,
+                     multiple: int) -> np.ndarray:
+    """The node vectors interpolated bilinearly at the middles of a tile's
+    bottleneck pixels, (features, side / multiple, side / multiple), for a
+    tile whose corner is at (`left`, `top`) in the nodes' coordinates."""
+    middles = (np.arange(side // multiple) + 0.5) * multiple - 0.5
+    return np.einsum("ri,ijf,cj->frc", interpolating(ys, top + middles), features,
+                     interpolating(xs, left + middles)).astype(np.float32)
+
+
+def field_point_map(points: np.ndarray, ys: np.ndarray, xs: np.ndarray, stamps: np.ndarray, shape: tuple[int, int],
+                    background: float) -> np.ndarray:
+    """The point sources rendered over an image of `shape`, each with the
+    stamp of the PSF field's node nearest it (`point_map`)."""
+    out = np.zeros(shape, dtype=np.float32)
+    if not len(points):
+        return out
+    pad = stamps.shape[-1] // 2 + 1
+    nearest_row = np.abs(points[:, 1:2] - ys[None, :]).argmin(axis=1)
+    nearest_column = np.abs(points[:, 0:1] - xs[None, :]).argmin(axis=1)
+    for row, column in sorted(set(zip(nearest_row.tolist(), nearest_column.tolist()))):
+        chosen = points[(nearest_row == row) & (nearest_column == column)]
+        top = max(0, int(math.floor(float(chosen[:, 1].min()))) - pad)
+        left = max(0, int(math.floor(float(chosen[:, 0].min()))) - pad)
+        bottom = min(shape[0], int(math.ceil(float(chosen[:, 1].max()))) + pad + 1)
+        right = min(shape[1], int(math.ceil(float(chosen[:, 0].max()))) + pad + 1)
+        if bottom <= top or right <= left:
+            continue
+        local = chosen.copy()
+        local[:, 0] -= left
+        local[:, 1] -= top
+        out[top:bottom, left:right] += point_map(local, stamps[row, column], (bottom - top, right - left), background)
+    return out
+
+
 def sharpen(model: SharpeningUNet, image: np.ndarray, stamp_at: Any, *, ratio: float | np.ndarray,
             points: np.ndarray | None = None, noise_map: np.ndarray | None = None, background: float | None = None,
             noise: float | None = None, inference: dict[str, int] | None = None, residual: str = "asinh",
-            where: torch.device | None = None) -> np.ndarray:
+            where: torch.device | None = None,
+            grid: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None) -> np.ndarray:
     """Sharpen a whole image: its overlapping tiles, each conditioned on
     `stamp_at(x, y)` at its centre and with its point sources rendered by
-    that stamp, blended as the noise model's are. `ratio` is a number or a
-    map. The noise map is made from the image unless given, and the
-    background and median noise from the two unless given. `points` are
-    the image's point sources in `psf_fields.DETECTION_COLUMNS` (none: an
-    empty map). The tiles' residuals are blended, then applied as
-    `residual` says (`applied`). NaN stays NaN."""
+    that stamp, blended as the noise model's are. Given a PSF field's
+    `grid`, (node rows, node columns, node stamps of `STAMP` pixels) in the
+    image's coordinates, `stamp_at` is not read: the nodes' vectors are
+    interpolated to every bottleneck pixel (`SharpeningUNet.mapped`) and
+    the point sources rendered once with their nearest node's stamp, so
+    the output does not depend on where the tiles fall. `ratio` is a
+    number or a map. The noise map is made from the image unless given,
+    and the background and median noise from the two unless given.
+    `points` are the image's point sources in
+    `psf_fields.DETECTION_COLUMNS` (none: an empty map). The tiles'
+    residuals are blended, then applied as `residual` says (`applied`).
+    NaN stays NaN."""
     noise_map = image_sigma(image) if noise_map is None else noise_map
     finite = np.isfinite(image) & np.isfinite(noise_map)
     if background is None:
@@ -1445,12 +1504,29 @@ def sharpen(model: SharpeningUNet, image: np.ndarray, stamp_at: Any, *, ratio: f
     if noise is None:
         noise = float(np.median(noise_map[finite][::17]))
     settings = inference or tiling(model.levels)
-    planes = network_planes(image, noise_map, ratio, np.zeros(image.shape, np.float32), background, noise)[:3]
     tile = settings["tile"]
     where = where or torch.device("cpu")
     model = model.to(where).eval()
     found = np.zeros((0, len(psf_fields.DETECTION_COLUMNS)), np.float32) if points is None else points
     height, width = image.shape
+    if grid is not None:
+        ys, xs, stamps = grid
+        features = node_features(model, stamps, where)
+        planes = network_planes(image, noise_map, ratio, field_point_map(found, ys, xs, stamps, image.shape,
+                                                                         background), background, noise)
+
+        def mapped(tiles: np.ndarray, origins: list[tuple[int, int]]) -> np.ndarray:
+            vectors = np.stack([sampled_features(features, ys, xs, top, left, tile, model.multiple)
+                                for top, left in origins])
+            with torch.no_grad():
+                return model.mapped(torch.from_numpy(np.ascontiguousarray(tiles)).to(where),
+                                    torch.from_numpy(vectors).to(where)).cpu().numpy()
+
+        found_residual = infer(mapped, planes, tile=tile, overlap=settings["overlap"], margin=settings["margin"],
+                               multiple=settings.get("multiple", model.multiple), origins_too=True)[0]
+        output = background + noise * applied(np.nan_to_num((image - background) / noise), found_residual, residual)
+        return np.where(np.isfinite(image), output, np.nan).astype(np.float32)
+    planes = network_planes(image, noise_map, ratio, np.zeros(image.shape, np.float32), background, noise)[:3]
 
     def run(tiles: np.ndarray, origins: list[tuple[int, int]]) -> np.ndarray:
         stamps, rendered = [], []
