@@ -20,7 +20,7 @@ import numpy as np
 from .holes import HoleGuard, guarded, guarded_residual
 from .noise_model import denoiser, device, input_sigma, load_run, view
 from .sharpen_bank import open_bank
-from .sharpen_model import CLEAN_PLANES
+from .sharpen_model import CLEAN_IMAGE, CLEAN_PLANES
 from .store import Store
 from .tiles import infer
 
@@ -54,20 +54,20 @@ def denoised(record: dict[str, Any], model: Any, image: np.ndarray, where: Any) 
 
 
 def clean(store: Store, noise_run: str, directory: Path) -> dict[str, Any]:
-    """Make a pair bank's denoised planes with `noise_run` of `store`; one
-    made before with the same run is left."""
+    """Make a bank's denoised planes with `noise_run` of `store`, a pair
+    bank's input and target or a known-kernel bank's image; one made before
+    with the same run is left."""
     directory = Path(directory)
     marker = directory / "clean.json"
     if marker.exists() and json.loads(marker.read_text()).get("noise_run") == noise_run:
         return {**json.loads(marker.read_text()), "kept": True}
     banked = open_bank(directory)
-    if not banked["done"]["pairs"]:
-        raise ValueError(f"{directory} is not a pair bank")
     record, model = load_run(store, noise_run)
     where = device()
     count = len(banked["info"])
     marker.unlink(missing_ok=True)
-    for name, source in zip(CLEAN_PLANES, ("input", "target")):
+    planes = zip(CLEAN_PLANES, ("input", "target")) if banked["done"]["pairs"] else zip(CLEAN_IMAGE, ("image",))
+    for name, source in planes:
         out = np.lib.format.open_memmap(directory / f"{name}.npy", mode="w+", dtype=np.float32,
                                         shape=banked[source].shape)
         for window in range(count):

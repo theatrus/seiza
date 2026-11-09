@@ -320,6 +320,12 @@ def main(argv: list[str] | None = None) -> int:
     sharpen_train.add_argument("--real-kernels", type=float, default=0.0,
                                help="the share of known-kernel windows blurred by a real PSF, another window's "
                                     "stamp, in place of a Gaussian")
+    sharpen_train.add_argument("--denoised", type=float, default=0.0,
+                               help="the share of windows met denoised, where their bank holds denoised planes "
+                                    "(clean-sharpen)")
+    sharpen_train.add_argument("--structure", type=float, default=0.0,
+                               help="draw windows with more structure away from their stars, nebula and its "
+                                    "edges, up to this many times more often")
     sharpen_train.add_argument("--round-target", action="store_true",
                                help="make a known-kernel target's PSF round about its middle, not only in its "
                                     "second moments, so a PSF's cross or lopsided wing is to be taken off")
@@ -695,7 +701,7 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
             excluded=recorded.excluded, object_cap=recorded.object_cap,
             manifest=str(manifest) if manifest else recorded.manifest, focus_check=recorded.focus_check,
             left_out_kinds=recorded.left_out_kinds, multi_night_share=recorded.multi_night_share,
-            more_kernels=recorded.more_kernels)
+            more_kernels=recorded.more_kernels, structure=recorded.structure)
         settings = sharpen_model.settings_from(record["config"]["settings"])
         return sharpen_model.evaluate_saved(store, arguments.name, choice.validation(settings), limit=arguments.limit,
                                             seed=arguments.seed)
@@ -715,7 +721,7 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
         ratio_source=arguments.ratio_source, residual=arguments.residual, nonstellar=arguments.nonstellar,
         equal_share=arguments.equal_share, fill_clipped=arguments.fill_clipped,
         pass_noise=arguments.pass_noise, real_kernels=arguments.real_kernels,
-        round_target=arguments.round_target)
+        round_target=arguments.round_target, denoised=arguments.denoised)
     loss = sharpen_model.LossSettings(epsilon=arguments.charbonnier, noise_cap=arguments.noise_cap,
                                       gradient_weight=arguments.gradient_weight,
                                       gradient_scales=arguments.gradient_scales, flux_weight=arguments.flux_weight)
@@ -731,7 +737,8 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
         focus_check=arguments.focus_check,
         left_out_kinds=tuple(kind for kind in arguments.leave_out_kinds.split(",") if kind),
         multi_night_share=arguments.multi_night_share,
-        more_kernels=tuple((str(Path(path)), weight) for path, weight in arguments.more_kernels))
+        more_kernels=tuple((str(Path(path)), weight) for path, weight in arguments.more_kernels),
+        structure=arguments.structure)
     record = sharpen_model.train(
         store, name=arguments.name, choice=choice, steps=arguments.steps, width=arguments.width,
         levels=arguments.levels, batch=arguments.batch, learning_rate=arguments.learning_rate, seed=arguments.seed,

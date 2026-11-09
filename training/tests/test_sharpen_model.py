@@ -330,8 +330,47 @@ def test_a_bank_s_windows_are_denoised_beside_it(tmp_path):
     np.testing.assert_allclose(np.load(directory / "input_clean.npy"), np.load(directory / "input.npy"), atol=1e-4)
     np.testing.assert_allclose(np.load(directory / "target_clean.npy"), np.load(directory / "target.npy"), atol=1e-4)
     assert sharpen_clean.clean(store, "n", directory)["kept"]
-    with pytest.raises(ValueError, match="not a pair bank"):
-        sharpen_clean.clean(store, "n", kernel_bank(tmp_path))
+    # A known-kernel bank's image likewise.
+    deep = kernel_bank(tmp_path)
+    assert sharpen_clean.clean(store, "n", deep)["windows"] == 4
+    np.testing.assert_allclose(np.load(deep / "image_clean.npy"), np.load(deep / "image.npy"), atol=1e-4)
+    # Met denoised, a window is blurred from its denoised plane, at a share
+    # of its noise; a pair's denoised input is asked for its denoised target.
+    np.save(deep / "image_clean.npy", np.load(deep / "image.npy") * 0 + 100.0)
+    bank = sm.Bank(deep, sm.Settings(tile=32))
+    settings = sm.Settings(tile=32, denoised=1.0, exposure=1.0)
+    example = sm.kernel_example(bank, 0, np.random.default_rng(0), settings, identity=False)
+    assert example.details["denoised"] and np.abs(example.target - 100.0).max() < 1e-3
+    assert float(example.sigma.max()) == pytest.approx(sm.DENOISED_NOISE)
+    np.save(directory / "input_clean.npy", np.load(directory / "input.npy") * 0 + 3.0)
+    np.save(directory / "target_clean.npy", np.load(directory / "target.npy") * 0 + 5.0)
+    pairs = sm.Bank(directory, sm.Settings(centroid_offset="none"))
+    met = sm.pair_example(pairs, 0, sm.Settings(centroid_offset="none", denoised=1.0), np.random.default_rng(0))
+    assert met.details["denoised"] and np.all(met.image == 3.0) and np.allclose(met.target, 5.0)
+    assert not sm.pair_example(pairs, 0, sm.Settings(centroid_offset="none", denoised=1.0)).details["denoised"]
+
+
+def test_windows_with_structure_are_drawn_more_often_and_a_pair_may_ask_the_rest_its_own(tmp_path):
+    directory = kernel_bank(tmp_path, count=6)
+    images = np.load(directory / "image.npy")
+    # One window holds a nebula's edge away from its stars.
+    images[4, :, 4:12] += 40.0
+    np.save(directory / "image.npy", images)
+    plain = sm.Bank(directory, sm.Settings(tile=32))
+    weighed = sm.Bank(directory, sm.Settings(tile=32), structure=4.0)
+    scores = sm.structure_scores(weighed)
+    assert int(np.argmax(scores)) == 4 and (directory / f"structure-{sm.STRUCTURE_VERSION}.npy").exists()
+    assert weighed.odds[4] == pytest.approx(5 * weighed.odds.min(), rel=1e-6) and np.ptp(plain.odds) < 1e-12
+    assert weighed.odds.sum() == pytest.approx(1.0)
+    # A supplied pair's record may carry the ratio asked of what is not a star.
+    pairs = pair_bank(tmp_path)
+    sources = json.loads((pairs / "sources.json").read_text())
+    sources[0]["record"]["nonstellar_ratio"] = 0.55
+    (pairs / "sources.json").write_text(json.dumps(sources))
+    bank = sm.Bank(pairs, sm.Settings())
+    two = sm.Settings(nonstellar=True)
+    assert sm.pair_example(bank, 0, two).ratios(two) == (pytest.approx(0.7), 0.55)
+    assert sm.pair_example(bank, 3, two).ratios(two) == (pytest.approx(0.7), pytest.approx(0.7))
 
 
 @pytest.mark.parametrize("factor", [2, 3, 4])

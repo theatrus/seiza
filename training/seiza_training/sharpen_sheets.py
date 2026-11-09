@@ -177,6 +177,10 @@ class Sharpener:
         finite = np.isfinite(image) & np.isfinite(self.noise_map)
         self.background = float(np.median(image[finite][::17]))
         self.noise = float(np.median(self.noise_map[finite][::17]))
+        # The noise the measures are in: the image's own, or, where the
+        # sheet denoised it first, the image's before that, so a sheet and
+        # its denoised twin read alike.
+        self.measure_noise = self.noise
         self.points = field.points()
         self.widths = node_widths(field)
         self.where = device()
@@ -234,8 +238,12 @@ def render(store: Store, manifest: Manifest, record: dict[str, Any], model: Any,
     if not field.usable:
         return None
     if sheet.get("denoise"):
+        finite = np.isfinite(image)
+        before = float(np.median(image_sigma(image)[finite][::17]))
         image = denoised_input(store, source, image, sheet["denoise"])
     runner = Sharpener(record, model, image, field)
+    if sheet.get("denoise"):
+        runner.measure_noise = before
     look = stretch(image)
     image_background = float(np.nanmedian(image[::31, ::31]))
     baselines = []
@@ -404,10 +412,10 @@ def whole_measures(image: np.ndarray, output: np.ndarray, runner: Sharpener, val
     radius = LIGHT_RADIUS * typical
     for star in stars:
         x, y = float(star[0]), float(star[1])
-        measured = ring_and_flux(output, image, x, y, typical, runner.noise)
+        measured = ring_and_flux(output, image, x, y, typical, runner.measure_noise)
         if measured["reference_flux"] > 0:
             kept.append(measured["flux"] / measured["reference_flux"])
-        if (star[columns.index("peak")] - runner.background) / runner.noise >= RING_PEAK:
+        if (star[columns.index("peak")] - runner.background) / runner.measure_noise >= RING_PEAK:
             rings.append(measured["ring_profile"])
         before, after = light_centre(image, x, y, radius), light_centre(output, x, y, radius)
         if before is not None and after is not None:
@@ -429,6 +437,82 @@ def whole_measures(image: np.ndarray, output: np.ndarray, runner: Sharpener, val
     found["brightest"] = brightest_rings(image, output, runner)
     found["spikes"] = spikes(image, output, runner)
     found["roundness"] = roundness(image, output, runner, valid)
+    found["edges"] = edges(image, output, runner)
+    return found
+
+
+# Edges are measured on means of `EDGE_MEAN` pixels a side: an edge is where
+# those means, smoothed over `EDGE_SMOOTH` of them, change most, the
+# steepest `EDGE_SHARE` of the cells no point source is within three widths
+# of.
+EDGE_MEAN = 2
+EDGE_SMOOTH = 9
+EDGE_SHARE = 0.02
+
+
+def box_mean(plane: np.ndarray, side: int) -> np.ndarray:
+    """The mean over `side` × `side` cells about each cell, by a summed
+    table; the cells within half a side of the edges are NaN."""
+    table = np.zeros((plane.shape[0] + 1, plane.shape[1] + 1), dtype=np.float64)
+    table[1:, 1:] = np.cumsum(np.cumsum(plane, axis=0, dtype=np.float64), axis=1)
+    out = np.full(plane.shape, np.nan, dtype=np.float32)
+    half = side // 2
+    total = table[side:, side:] - table[:-side, side:] - table[side:, :-side] + table[:-side, :-side]
+    out[half:half + total.shape[0], half:half + total.shape[1]] = total / side**2
+    return out
+
+
+def edges(image: np.ndarray, output: np.ndarray, runner: Sharpener) -> dict[str, Any]:
+    """What a sharpening did at the nebula's edges, away from the stars.
+    The edges are the input's: where its `EDGE_MEAN`-pixel means, smoothed,
+    are steepest. "gain" is the output's gradient across them over the
+    input's, each the mean of the signed gradient along the edge's own
+    normal, in which noise cancels: above 1, edges were steepened, their
+    contrast raised. "noise" is the spread of the gradient along the edges,
+    where sharpening an edge changes nothing, output over input: above the
+    sky's noise gain, noise was sharpened at the edges, which shows as
+    speckle."""
+    height, width = image.shape
+    rows, columns = height // EDGE_MEAN, width // EDGE_MEAN
+
+    def means(plane: np.ndarray) -> np.ndarray:
+        return plane[:rows * EDGE_MEAN, :columns * EDGE_MEAN].reshape(rows, EDGE_MEAN, columns, EDGE_MEAN).mean(
+            axis=(1, 3))
+
+    def gradient(cells: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        across, down = np.full(cells.shape, np.nan, np.float32), np.full(cells.shape, np.nan, np.float32)
+        across[:, 1:-1] = (cells[:, 2:] - cells[:, :-2]) / 2
+        down[1:-1] = (cells[2:] - cells[:-2]) / 2
+        return across, down
+
+    before = means(image)
+    filled = np.where(np.isfinite(before), before, np.nanmedian(before[::7, ::7]))
+    smooth_x, smooth_y = gradient(box_mean(filled, EDGE_SMOOTH))
+    steepness = np.hypot(smooth_x, smooth_y)
+    free = np.isfinite(steepness) & np.isfinite(before)
+    star_width = float(np.nanmedian(runner.widths))
+    reach = int(np.ceil(3 * star_width / EDGE_MEAN)) + EDGE_SMOOTH // 2
+    for x, y in runner.points[:, :2]:
+        row, column = int(y // EDGE_MEAN), int(x // EDGE_MEAN)
+        free[max(0, row - reach):row + reach + 1, max(0, column - reach):column + reach + 1] = False
+    if free.sum() < 1000:
+        return {"cells": int(free.sum())}
+    chosen = free & (steepness >= np.quantile(steepness[free], 1.0 - EDGE_SHARE))
+    normal_x, normal_y = smooth_x[chosen] / steepness[chosen], smooth_y[chosen] / steepness[chosen]
+    found: dict[str, Any] = {"cells": int(chosen.sum())}
+    measured = {}
+    for label, cells in (("input", before), ("output", means(output))):
+        across, down = gradient(cells)
+        across, down = across[chosen], down[chosen]
+        normal = across * normal_x + down * normal_y
+        along = -across * normal_y + down * normal_x
+        keep = np.isfinite(normal) & np.isfinite(along)
+        centred = along[keep] - np.median(along[keep])
+        measured[label] = (float(np.mean(normal[keep])), float(1.4826 * np.median(np.abs(centred))))
+    if measured["input"][0] > 0 and measured["input"][1] > 0:
+        found["gain"] = round(measured["output"][0] / measured["input"][0], 4)
+        found["noise"] = round(measured["output"][1] / measured["input"][1], 4)
+        found["steepness_sigma"] = round(measured["input"][0] / runner.measure_noise, 4)
     return found
 
 
@@ -530,7 +614,7 @@ def spikes(image: np.ndarray, output: np.ndarray, runner: Sharpener) -> dict[str
         for x, y in chosen:
             column, row = int(round(x)), int(round(y))
             cut = plane[row - reach:row + reach + 1, column - reach:column + reach + 1].astype(np.float64)
-            cuts.append((cut - np.nanmedian(cut[radius > 6.5 * width])) / runner.noise)
+            cuts.append((cut - np.nanmedian(cut[radius > 6.5 * width])) / runner.measure_noise)
         with np.errstate(invalid="ignore"):
             stacked = np.nanmedian(np.stack(cuts), axis=0)
         found[label] = {"arms": round(float(np.nanmean(stacked[arms])), 3),
@@ -619,7 +703,8 @@ def reblur(image: np.ndarray, output: np.ndarray, runner: Sharpener, valid: np.n
     inner = edge_band(look.shape, int(3 * variance**0.5) + 1) & look
     if not inner.any():
         return None
-    difference = (back - image[region])[inner] / runner.noise_map[region][inner]
+    difference = (back - image[region])[inner] / (runner.noise_map[region][inner] * (runner.measure_noise
+                                                                                      / runner.noise))
     return float(np.sqrt(np.mean(difference**2)))
 
 
@@ -669,7 +754,7 @@ def brightest_rings(image: np.ndarray, output: np.ndarray, runner: Sharpener) ->
             sums = np.bincount(bins[finite], values[finite] - sky, minlength=len(counts))
             seen = np.bincount(bins[finite], minlength=len(counts))
             with np.errstate(invalid="ignore", divide="ignore"):
-                profiles.append(sums / seen / runner.noise)
+                profiles.append(sums / seen / runner.measure_noise)
         if len(profiles) < 2:
             continue
         radii = np.arange(len(counts))

@@ -128,8 +128,17 @@ STAR_MASK_NOISE = 3.0
 # target are then clipped where the stack clipped, as a camera clips after
 # the sky has blurred the star.
 FILL_REACH = 4.0
-# A pair bank's denoised planes, which `sharpen_clean` makes beside it.
+# A bank's denoised planes, which `sharpen_clean` makes beside it: a pair
+# bank's, and a known-kernel bank's.
 CLEAN_PLANES = ("input_clean", "target_clean")
+CLEAN_IMAGE = ("image_clean",)
+# A denoised window's noise, for its fresh noise and its loss, as a share
+# of its stack's own: what a noise model leaves.
+DENOISED_NOISE = 0.15
+# A window's structure is measured on means of this many pixels a side,
+# away from its point sources; the scores are kept beside the bank.
+STRUCTURE_BLOCK = 8
+STRUCTURE_VERSION = 1
 # A known-kernel window's passed noise is blurred by up to this many pixels.
 NOISE_BLUR = 0.6
 # The core's place is sought this far, in pixels, either way of its
@@ -268,6 +277,12 @@ class Settings:
     # that took a star's round halo off left its cross standing, twice as
     # plain as the other sharpener leaves it (2026-11-09).
     round_target: bool = False
+    # The share of windows met denoised, where their bank holds denoised
+    # planes: a known-kernel window blurred from its denoised stack, with
+    # `DENOISED_NOISE` of its noise, and a pair's denoised input asked for
+    # its denoised target. Edges and faint structure are plain there, and
+    # an image denoised first is one the model will meet.
+    denoised: float = 0.0
 
     @property
     def planes(self) -> tuple[str, ...]:
@@ -373,7 +388,8 @@ class Bank:
 
     def __init__(self, directory: Path, settings: Settings, *, excluded: tuple[str, ...] = (), object_cap: float = 0.0,
                  set_names: dict[str, str] | None = None, weight: float = 1.0, focus_check: bool = True,
-                 left_out_kinds: tuple[str, ...] = (), multi_night_share: float = 0.0) -> None:
+                 left_out_kinds: tuple[str, ...] = (), multi_night_share: float = 0.0,
+                 structure: float = 0.0) -> None:
         self.directory = Path(directory)
         self.arrays = open_bank(self.directory)
         done = self.arrays["done"]
@@ -420,7 +436,16 @@ class Bank:
         if not len(self.kept):
             raise ValueError(f"the {self.label} bank at {self.directory} keeps no window")
         names = np.array(self.objects)
+        self.loaded: dict[int, np.ndarray] = {}
         self.odds = capped_odds(names[source_of[self.kept]], object_cap)
+        if structure > 0:
+            # Windows with more structure away from their stars, nebula and
+            # its edges, are drawn more often: up to `1 + structure` times,
+            # by the square of their rank, as most windows are sky.
+            scores = structure_scores(self)[self.kept]
+            rank = np.argsort(np.argsort(scores)) / max(len(scores) - 1, 1)
+            self.odds = self.odds * (1.0 + structure * rank**2)
+            self.odds = self.odds / self.odds.sum()
         deepest = (kinds == "multi-night")[source_of[self.kept]]
         if multi_night_share > 0 and not self.pairs and deepest.any() and (~deepest).any():
             self.odds = np.where(deepest, self.odds * multi_night_share / self.odds[deepest].sum(),
@@ -428,11 +453,11 @@ class Bank:
         self.multi_night_share = float(self.odds[deepest].sum())
         self.cumulative = np.cumsum(self.odds)
         self.object_cap = object_cap
-        self.loaded: dict[int, np.ndarray] = {}
         self.light = light_offsets(self) if self.pairs and settings.centroid_offset == "light" else {}
         self.clean: dict[str, Any] = {}
-        if self.pairs and (self.directory / "clean.json").exists():
-            self.clean = {name: np.load(self.directory / f"{name}.npy", mmap_mode="r") for name in CLEAN_PLANES}
+        if (self.directory / "clean.json").exists():
+            self.clean = {name: np.load(self.directory / f"{name}.npy", mmap_mode="r")
+                          for name in (CLEAN_PLANES if self.pairs else CLEAN_IMAGE)}
             self.clean["record"] = json.loads((self.directory / "clean.json").read_text())
 
     @staticmethod
@@ -501,6 +526,46 @@ def pair_id(source: dict[str, Any]) -> str:
     """A pair's id: its record's, as the seeing bank names it, or its
     input's."""
     return (source.get("record") or {}).get("pair") or source["input"]
+
+
+def structure_scores(bank: Bank) -> np.ndarray:
+    """How much structure each of a bank's windows holds away from its
+    stars: the root mean square of the differences of neighbouring means of
+    `STRUCTURE_BLOCK` pixels, less what its noise alone gives, in that
+    noise, over the blocks no point source or clipped pixel is in or next
+    to. Kept beside the bank's arrays once measured."""
+    path = bank.directory / f"structure-{STRUCTURE_VERSION}.npy"
+    if path.exists():
+        return np.load(path)
+    side = bank.side // STRUCTURE_BLOCK
+    name = "input" if bank.pairs else "image"
+    scores = np.zeros(len(bank.info), dtype=np.float32)
+    for window in range(len(bank.info)):
+        row = bank.row(window)
+        image = np.asarray(bank.arrays[name][window], dtype=np.float32)
+        means = image[:side * STRUCTURE_BLOCK, :side * STRUCTURE_BLOCK].reshape(
+            side, STRUCTURE_BLOCK, side, STRUCTURE_BLOCK).mean(axis=(1, 3))
+        busy = np.asarray(bank.arrays["saturated"][window])[:side * STRUCTURE_BLOCK, :side * STRUCTURE_BLOCK].reshape(
+            side, STRUCTURE_BLOCK, side, STRUCTURE_BLOCK).any(axis=(1, 3))
+        points = window_points(bank, int(row["source"]), row)
+        inside = (points[:, 0] >= 0) & (points[:, 1] >= 0) & (points[:, 0] < side * STRUCTURE_BLOCK) & (
+            points[:, 1] < side * STRUCTURE_BLOCK)
+        busy[(points[inside, 1] // STRUCTURE_BLOCK).astype(int), (points[inside, 0] // STRUCTURE_BLOCK).astype(int)] = True
+        grown_busy = busy.copy()
+        grown_busy[1:] |= busy[:-1]
+        grown_busy[:-1] |= busy[1:]
+        grown_busy[:, 1:] |= busy[:, :-1]
+        grown_busy[:, :-1] |= busy[:, 1:]
+        free = ~grown_busy & np.isfinite(means)
+        steps = np.concatenate([(means[:, 1:] - means[:, :-1])[free[:, 1:] & free[:, :-1]],
+                                (means[1:] - means[:-1])[free[1:] & free[:-1]]])
+        noise = row["noise"] / STRUCTURE_BLOCK
+        if steps.size >= 16 and noise > 0:
+            scores[window] = math.sqrt(max(float(np.mean(steps.astype(np.float64) ** 2)) - 2 * noise**2, 0.0)) / noise
+    partial = path.with_suffix(".partial.npy")
+    np.save(partial, scores)
+    partial.replace(path)
+    return scores
 
 
 def stamp_profiles(stamps: np.ndarray, chunk: int = 1024) -> np.ndarray:
@@ -671,12 +736,15 @@ class BankChoice:
     # Further known-kernel banks, such as a binned one, each with its
     # weight against the first's 1 in the known-kernel share of the mix.
     more_kernels: tuple[tuple[str, float], ...] = ()
+    # Draw windows with more structure away from their stars more often,
+    # up to `1 + structure` times (`Bank`).
+    structure: float = 0.0
 
     def options(self) -> dict[str, Any]:
         names = set_names(Path(self.manifest) if self.manifest else None)
         return {"excluded": self.excluded, "object_cap": self.object_cap, "set_names": names,
                 "focus_check": self.focus_check, "left_out_kinds": self.left_out_kinds,
-                "multi_night_share": self.multi_night_share}
+                "multi_night_share": self.multi_night_share, "structure": self.structure}
 
     def train(self, settings: Settings) -> dict[str, list[Bank]]:
         """The train banks, by kind."""
@@ -1080,6 +1148,10 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
     saturated = np.asarray(bank.arrays["saturated"][window]).astype(bool)
     stamp = np.asarray(bank.arrays["stamp"][window], dtype=np.float32)
     background = row["background"]
+    denoised = bool(settings.denoised > 0 and bank.clean and rng.random() < settings.denoised)
+    if denoised:
+        image = np.asarray(bank.clean["image_clean"][window], dtype=np.float32)
+        sigma = sigma * DENOISED_NOISE
     if identity is None:
         identity = bool(rng.random() < settings.identity)
     kernel = None
@@ -1149,7 +1221,7 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
                    points, background, noise, kernel.widths["input"], "identity" if identity else "kernel", source,
                    window, kernel.asked, {"scale": scale, "noise_share": share, "widths": kernel.widths,
                                           "kernel": kernel.covariance.tolist(), "sharpest": kernel.ratio,
-                                          "real": kernel.donor is not None},
+                                          "real": kernel.donor is not None, "denoised": denoised},
                    nonstellar_ratio)
 
 
@@ -1239,7 +1311,7 @@ def target_blur(stamp: np.ndarray, kernel: Kernel, ratio: float) -> np.ndarray:
     return kernel.target + extra
 
 
-def pair_example(bank: Bank, window: int, settings: Settings) -> Example:
+def pair_example(bank: Bank, window: int, settings: Settings, rng: np.random.Generator | None = None) -> Example:
     """A pair's window: the input and the target, moved back by the pair's
     offset at the window as the settings measure it, the input's image-only
     noise map and stamp, and the bank's ratio. The loss weighs by the target
@@ -1252,30 +1324,43 @@ def pair_example(bank: Bank, window: int, settings: Settings) -> Example:
     target = planes["target"].astype(np.float32)
     band = 0
     offset = bank.target_offset(window, settings.centroid_offset)
-    passed = settings.pass_noise and bool(bank.clean)
+    # Given `rng`, the settings' share of a bank's windows with denoised
+    # planes are met denoised: the denoised input asked for the denoised
+    # target.
+    denoised = bool(rng is not None and settings.denoised > 0 and bank.clean and rng.random() < settings.denoised)
+    passed = (settings.pass_noise or denoised) and bool(bank.clean)
     if passed:
         target = np.asarray(bank.clean["target_clean"][window], dtype=np.float32)
     if offset is not None:
         target = shifted(target, -offset[0], -offset[1])
         band = SHIFT_BAND
-    if passed:
+    shown, noise_map = planes["input"].astype(np.float32), planes["input_map"].astype(np.float32)
+    if denoised:
+        shown = np.asarray(bank.clean["input_clean"][window], dtype=np.float32)
+        noise_map = image_sigma(shown)
+    elif passed:
         # The target's denoised, and the noise the denoiser found in the
         # input: what the model is to leave where it is.
-        target = target + (planes["input"].astype(np.float32)
-                           - np.asarray(bank.clean["input_clean"][window], dtype=np.float32))
+        target = target + (shown - np.asarray(bank.clean["input_clean"][window], dtype=np.float32))
     sigma = stack_noise(planes["target_sigma"], planes["target"],
                         stack_noise(planes["input_sigma"], planes["input"], planes["input_map"]))
+    if denoised:
+        sigma = sigma * DENOISED_NOISE
     saturated = np.asarray(bank.arrays["saturated"][window]).astype(bool)
     valid = edge_band(target.shape, band) & ~saturated & np.isfinite(sigma)
-    return Example(planes["input"].astype(np.float32), target, planes["input_map"].astype(np.float32),
+    noise = float(np.median(noise_map[np.isfinite(noise_map)])) if denoised else row["noise"]
+    # A supplied pair may say what its target asked of what is not a star.
+    asked = (bank.sources[source].get("record") or {}).get("nonstellar_ratio")
+    return Example(shown, target, noise_map,
                    sigma.astype(np.float32), valid, np.asarray(bank.arrays["input_stamp"][window], dtype=np.float32),
                    row[RATIO_COLUMNS[settings.ratio_source]], window_points(bank, source, row), row["background"],
-                   row["noise"], row["input_width"], "pairs", source, window, None,
-                   {"offset": offset, "target_width": row["target_width"]})
+                   noise, row["input_width"], "pairs", source, window, None,
+                   {"offset": offset, "target_width": row["target_width"], "denoised": denoised},
+                   None if asked is None else float(asked))
 
 
 def example_from(bank: Bank, window: int, rng: np.random.Generator, settings: Settings) -> Example:
-    return pair_example(bank, window, settings) if bank.pairs else kernel_example(bank, window, rng, settings)
+    return pair_example(bank, window, settings, rng) if bank.pairs else kernel_example(bank, window, rng, settings)
 
 
 # What the network reads.
