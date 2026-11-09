@@ -135,6 +135,9 @@ CLEAN_IMAGE = ("image_clean",)
 # A denoised window's noise, for its fresh noise and its loss, as a share
 # of its stack's own: what a noise model leaves.
 DENOISED_NOISE = 0.15
+# A reblur-consistency window asks for a ratio drawn between these, no
+# sharper than the floor allows.
+REBLUR_RATIOS = (0.5, 0.95)
 # A window's structure is measured on means of this many pixels a side,
 # away from its point sources; the scores are kept beside the bank.
 STRUCTURE_BLOCK = 8
@@ -283,6 +286,14 @@ class Settings:
     # its denoised target. Edges and faint structure are plain there, and
     # an image denoised first is one the model will meet.
     denoised: float = 0.0
+    # The share of known-kernel windows, where their bank holds denoised
+    # planes, met as they are with no target: the denoised window itself,
+    # asked for a ratio drawn between `REBLUR_RATIOS`, and held only to
+    # give the window back when blurred to its own stars' width again
+    # (reblur consistency). No blur is added, so the model is asked to
+    # sharpen real images past their own resolution, and what it adds must
+    # be what their PSF would have hidden.
+    reblur: float = 0.0
 
     @property
     def planes(self) -> tuple[str, ...]:
@@ -1100,6 +1111,10 @@ class Example:
     details: dict[str, Any] = field(default_factory=dict)
     # The ratio asked of what is not a star, where it is not `ratio`.
     nonstellar_ratio: float | None = None
+    # The variance, in px², of the round Gaussian the output is blurred by
+    # before it is compared with the target, which is then the input:
+    # reblur consistency. 0: compared as it is.
+    reblur: float = 0.0
 
     def ratios(self, settings: Settings) -> float | tuple[float, float]:
         """The ratio planes' values the settings' network reads."""
@@ -1148,6 +1163,8 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
     saturated = np.asarray(bank.arrays["saturated"][window]).astype(bool)
     stamp = np.asarray(bank.arrays["stamp"][window], dtype=np.float32)
     background = row["background"]
+    if identity is None and settings.reblur > 0 and bank.clean and rng.random() < settings.reblur:
+        return reblur_example(bank, window, rng, settings)
     denoised = bool(settings.denoised > 0 and bank.clean and rng.random() < settings.denoised)
     if denoised:
         image = np.asarray(bank.clean["image_clean"][window], dtype=np.float32)
@@ -1223,6 +1240,33 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
                                           "kernel": kernel.covariance.tolist(), "sharpest": kernel.ratio,
                                           "real": kernel.donor is not None, "denoised": denoised},
                    nonstellar_ratio)
+
+
+def reblur_example(bank: Bank, window: int, rng: np.random.Generator, settings: Settings) -> Example:
+    """A known-kernel bank's denoised window with no target (see
+    `Settings.reblur`): the network reads it and its own PSF, is asked for
+    a ratio, and its output, blurred by the round Gaussian that takes
+    stars of that ratio back to the window's width, is compared with the
+    window."""
+    row = bank.row(window)
+    source = int(row["source"])
+    image = np.asarray(bank.clean["image_clean"][window], dtype=np.float32)
+    sigma = stack_noise(np.asarray(bank.arrays["sigma"][window], dtype=np.float32), image) * DENOISED_NOISE
+    saturated = np.asarray(bank.arrays["saturated"][window]).astype(bool)
+    stamp = np.asarray(bank.arrays["stamp"][window], dtype=np.float32)
+    width = row["width"]
+    low = max(REBLUR_RATIOS[0], min(REBLUR_RATIOS[1], settings.floor_px / width))
+    ratio = float(rng.uniform(low, REBLUR_RATIOS[1]))
+    variance = (width / FWHM_PER_SIGMA) ** 2 * (1.0 - ratio**2)
+    band = int(math.ceil(BLUR_REACH * math.sqrt(variance))) + 1
+    # The blur is circular over the tile: its reach from every edge is out
+    # of the loss (`arrays_of`).
+    valid = ~grown(saturated, band) & np.isfinite(image)
+    noise_map = image_sigma(image)
+    noise = float(np.median(noise_map[np.isfinite(noise_map)]))
+    return Example(image, image, noise_map, sigma.astype(np.float32), valid, stamp, ratio,
+                   window_points(bank, source, row), row["background"], noise, width, "reblur", source, window, None,
+                   {"denoised": True, "band": band}, None, float(variance))
 
 
 def filled(image: np.ndarray, saturated: np.ndarray, points: np.ndarray, stamp: np.ndarray, width: float,
@@ -1478,6 +1522,12 @@ def arrays_of(example: Example, rng: np.random.Generator | None, settings: Setti
     planes = network_planes(example.image[cut], example.noise_map[cut], example.ratios(settings), rendered,
                             example.background, example.noise)
     valid = example.valid[cut]
+    if example.reblur > 0:
+        # Blurred through the tile's own transform, which wraps: the
+        # blur's reach from the tile's edges is left out, and no star's
+        # flux is weighed, as the output is not compared star by star.
+        valid = valid & edge_band(valid.shape, example.details["band"])
+        points = points[:0]
     found = {
         "planes": planes,
         "stamp": stamp_planes(example.stamp),
@@ -1486,10 +1536,13 @@ def arrays_of(example: Example, rng: np.random.Generator | None, settings: Setti
         "sigma": (example.sigma[cut] / example.noise)[None],
         "valid": valid[None].astype(np.float32),
         "labels": apertures(points, valid, APERTURE_FWHM * example.width),
+        "reblur": np.float32(example.reblur),
     }
     if rng is not None:
         turns, flip = int(rng.integers(0, 4)), bool(rng.integers(0, 2))
         for name, values in found.items():
+            if np.ndim(values) < 2:
+                continue
             values = np.rot90(values, turns, axes=(-2, -1))
             found[name] = np.ascontiguousarray(values[..., ::-1] if flip else values)
     return found
@@ -1604,9 +1657,18 @@ def loss_terms(residual: torch.Tensor, batch: dict[str, torch.Tensor], settings:
     and set to zero where the loss may not look before any is averaged,
     so a clipped core cannot reach a block's mean.
 
-    Reblur consistency on real images without a target, and a centroid
-    shift at the point sources, would join these."""
+    A window with `reblur` above zero has its output blurred by a round
+    Gaussian of that variance first, and its target is its input: reblur
+    consistency. A centroid shift at the point sources would join these."""
     output = applied(batch["reference"], residual.float(), mode)
+    reblur = batch.get("reblur")
+    if reblur is not None and bool((reblur > 0).any()):
+        # Reblur consistency: those windows' outputs are blurred back to
+        # their inputs' width before they are compared with them.
+        ky = torch.fft.fftfreq(output.shape[-2], device=output.device).view(1, 1, -1, 1)
+        kx = torch.fft.rfftfreq(output.shape[-1], device=output.device).view(1, 1, 1, -1)
+        transfer = torch.exp(-2.0 * math.pi**2 * reblur.float().view(-1, 1, 1, 1) * (kx**2 + ky**2))
+        output = torch.fft.irfft2(torch.fft.rfft2(output) * transfer, s=output.shape[-2:])
     valid = batch["valid"]
     sigma = batch["sigma"].clamp(min=SIGMA_FLOOR)
     if settings.noise_cap > 0:

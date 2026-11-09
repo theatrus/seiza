@@ -466,6 +466,38 @@ def test_a_round_target_takes_a_psf_s_cross_off(tmp_path):
     assert example.ratio < 1 and not example.valid[:sm.ROUNDING_BAND].any()
 
 
+def test_a_reblur_window_is_held_to_give_itself_back_when_blurred_again(tmp_path):
+    deep = kernel_bank(tmp_path)
+    np.save(deep / "image_clean.npy", np.load(deep / "image.npy"))
+    (deep / "clean.json").write_text(json.dumps({"noise_run": "n"}))
+    bank = sm.Bank(deep, sm.Settings(tile=32))
+    settings = sm.Settings(tile=32, reblur=1.0)
+    example = sm.kernel_example(bank, 0, np.random.default_rng(0), settings)
+    assert example.kind == "reblur" and example.reblur > 0 and np.array_equal(example.image, example.target)
+    assert sm.REBLUR_RATIOS[0] <= example.ratio <= sm.REBLUR_RATIOS[1]
+    # Evaluation's windows, asked for a kernel or an identity, are never these.
+    assert sm.kernel_example(bank, 0, np.random.default_rng(0), settings, identity=False).kind == "kernel"
+    arrays = sm.arrays_of(example, np.random.default_rng(1), settings)
+    assert arrays["reblur"] == np.float32(example.reblur) and not arrays["labels"].any()
+    assert not arrays["valid"][0, 0].any()
+    # The loss: an output that is the input sharpened by the very blur
+    # asked back is right, and the input itself, blurred again, is wrong.
+    covariance = np.diag([1.3**2] * 2)
+    sharp = stars_image(POSITIONS, FLUXES, covariance) - 100.0
+    variance = 1.5
+    wide = sm.blurred_images(sharp, [variance * np.eye(2)], pad=0)[0]
+
+    def loss(output):
+        batch = {"reference": torch.from_numpy(wide)[None, None], "target": torch.from_numpy(wide)[None, None],
+                 "sigma": torch.ones(1, 1, SIDE, SIDE), "valid": torch.from_numpy(
+                     sm.edge_band((SIDE, SIDE), 8).astype(np.float32))[None, None],
+                 "labels": torch.zeros(1, SIDE, SIDE, dtype=torch.int64), "reblur": torch.tensor([variance])}
+        residual = torch.from_numpy(output - wide)[None, None]
+        return float(sm.loss_terms(residual, batch, sm.LossSettings(), "linear")["total"])
+
+    assert loss(sharp) < 0.05 * loss(wide)
+
+
 def test_a_model_with_two_ratios_reads_five_planes_and_sharpens_with_a_pair():
     model = sm.build_model(4, 3, sm.PLANES_NONSTELLAR)
     assert model.first[0].in_channels == 5
