@@ -299,6 +299,12 @@ def main(argv: list[str] | None = None) -> int:
     sharpen_train.add_argument("--focus-check", action=argparse.BooleanOptionalAction, default=True,
                                help="leave out windows whose stamps are out of focus, ringed or flat-topped, and "
                                     "every window of a source where more than a quarter are")
+    sharpen_train.add_argument("--leave-out-kinds", default="",
+                               help="leave out every bank's sources cut from these kinds of stack, comma-separated "
+                                    "(noise-a: the noise pairs' few-frame halves)")
+    sharpen_train.add_argument("--multi-night-share", type=float, default=0.0,
+                               help="the share of the known-kernel draws the stacks of many nights take, the nights' "
+                                    "own the rest (0: as their windows and the object cap fall)")
     sharpen_train.add_argument("--object-cap", type=float, default=0.03,
                                help="no object (telescope, target and filter, over its nights) takes more than this "
                                     "share of its bank's draws")
@@ -647,7 +653,8 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
             validation_seeing=tuple(str(path) for path in arguments.seeing_banks
                                     or [sharpen_model.find_bank(work, "seeing", "validation")]),
             excluded=recorded.excluded, object_cap=recorded.object_cap,
-            manifest=str(manifest) if manifest else recorded.manifest, focus_check=recorded.focus_check)
+            manifest=str(manifest) if manifest else recorded.manifest, focus_check=recorded.focus_check,
+            left_out_kinds=recorded.left_out_kinds, multi_night_share=recorded.multi_night_share)
         settings = sharpen_model.settings_from(record["config"]["settings"])
         return sharpen_model.evaluate_saved(store, arguments.name, choice.validation(settings), limit=arguments.limit,
                                             seed=arguments.seed)
@@ -676,7 +683,9 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
         pairs=tuple((str(Path(path)), weight) for path, weight in arguments.pairs_banks),
         excluded=tuple(pair for pair in arguments.exclude_pairs.split(",") if pair),
         object_cap=arguments.object_cap, manifest=str(manifest) if manifest else None,
-        focus_check=arguments.focus_check)
+        focus_check=arguments.focus_check,
+        left_out_kinds=tuple(kind for kind in arguments.leave_out_kinds.split(",") if kind),
+        multi_night_share=arguments.multi_night_share)
     record = sharpen_model.train(
         store, name=arguments.name, choice=choice, steps=arguments.steps, width=arguments.width,
         levels=arguments.levels, batch=arguments.batch, learning_rate=arguments.learning_rate, seed=arguments.seed,

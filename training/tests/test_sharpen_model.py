@@ -356,6 +356,26 @@ def test_windows_are_kept_by_their_ratio_and_pairs_left_out_by_id(tmp_path):
     assert sm.BankChoice("k", (), None, ()).excluded == ()
 
 
+def test_a_bank_leaves_out_kinds_and_gives_the_stacks_of_many_nights_their_share(tmp_path):
+    covariance = np.diag([1.3**2] * 2)
+    stamp = gaussian(sharpen_bank.STAMP, covariance)
+    windows = [{"image": stars_image(POSITIONS, FLUXES, covariance), "sigma": np.ones((SIDE, SIDE)),
+                "saturated": np.zeros((SIDE, SIDE)), "stamp": stamp,
+                "info": {"source": index // 3, "background": 100.0, "noise": 1.0,
+                         "width": sharpen_bank.stamp_width(stamp)}} for index in range(6)]
+    sources = [{"input": name, "input_kind": kind, "set": name.split("/")[0], "record": {},
+                "points": detections(POSITIONS, FLUXES)}
+               for name, kind in (("a/deep", "deep"), ("multi-night/b/stack", "multi-night"))]
+    directory = write_bank(tmp_path / "sharpen-deep-train-0", pairs=False, windows=windows, sources=sources,
+                           label="deep")
+    assert sm.Bank(directory, sm.Settings()).multi_night_share == pytest.approx(0.5)
+    weighted = sm.Bank(directory, sm.Settings(), multi_night_share=0.8)
+    assert weighted.multi_night_share == pytest.approx(0.8) and weighted.odds[3:].sum() == pytest.approx(0.8)
+    assert weighted.summary()["multi_night_share"] == pytest.approx(0.8)
+    left = sm.Bank(directory, sm.Settings(), left_out_kinds=("deep",))
+    assert list(left.kept) == [3, 4, 5] and left.left == {"kind:deep": 3}
+
+
 def test_no_object_takes_more_than_its_cap_of_the_draws():
     groups = np.array(["a"] * 60 + ["b"] * 20 + ["c"] * 10 + ["d"] * 10)
     odds = sm.capped_odds(groups, 0.4)

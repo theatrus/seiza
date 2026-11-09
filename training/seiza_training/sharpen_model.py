@@ -305,12 +305,16 @@ class Bank:
     out. A pair bank keeps the windows whose ratio is known and within the
     settings' bounds, of the pairs not `excluded`. With `focus_check`, any
     bank leaves out the windows whose stamps are out of focus, and every
-    window of a source where more than `OUT_OF_FOCUS_SHARE` are. `set_names`
-    names each set, so its object is known; without it a source's object is
-    its record's, or its set."""
+    window of a source where more than `OUT_OF_FOCUS_SHARE` are. Any bank
+    leaves out the sources whose input is of a kind in `left_out_kinds`.
+    `set_names` names each set, so its object is known; without it a
+    source's object is its record's, or its set. With `multi_night_share`,
+    a known-kernel bank's stacks of many nights take that share of its
+    draws, the nights' own stacks the rest."""
 
     def __init__(self, directory: Path, settings: Settings, *, excluded: tuple[str, ...] = (), object_cap: float = 0.0,
-                 set_names: dict[str, str] | None = None, weight: float = 1.0, focus_check: bool = True) -> None:
+                 set_names: dict[str, str] | None = None, weight: float = 1.0, focus_check: bool = True,
+                 left_out_kinds: tuple[str, ...] = (), multi_night_share: float = 0.0) -> None:
         self.directory = Path(directory)
         self.arrays = open_bank(self.directory)
         done = self.arrays["done"]
@@ -334,6 +338,10 @@ class Bank:
             excluded_sources = np.array([pair_id(source) in excluded or source["input"] in excluded
                                          or source.get("target") in excluded for source in self.sources])
             leave(excluded_sources[source_of], "excluded")
+        kinds = np.array([source.get("input_kind") for source in self.sources])
+        for kind in left_out_kinds:
+            leave((kinds == kind)[source_of], f"kind:{kind}")
+        if self.pairs:
             ratio = self.info[:, self.columns[RATIO_COLUMNS[settings.ratio_source]]]
             leave(~np.isfinite(ratio), "ratio-unknown")
             with np.errstate(invalid="ignore"):
@@ -354,6 +362,11 @@ class Bank:
             raise ValueError(f"the {self.label} bank at {self.directory} keeps no window")
         names = np.array(self.objects)
         self.odds = capped_odds(names[source_of[self.kept]], object_cap)
+        deepest = (kinds == "multi-night")[source_of[self.kept]]
+        if multi_night_share > 0 and not self.pairs and deepest.any() and (~deepest).any():
+            self.odds = np.where(deepest, self.odds * multi_night_share / self.odds[deepest].sum(),
+                                 self.odds * (1 - multi_night_share) / self.odds[~deepest].sum())
+        self.multi_night_share = float(self.odds[deepest].sum())
         self.cumulative = np.cumsum(self.odds)
         self.object_cap = object_cap
         self.loaded: dict[int, np.ndarray] = {}
@@ -411,7 +424,7 @@ class Bank:
         found = {"directory": str(self.directory), "label": self.label, "windows": int(len(self.info)),
                  "kept": int(len(self.kept)), "left": self.left, "objects": len(kept_objects),
                  "largest_object_share": round(max(shares.values()), 4), "object_cap": self.object_cap,
-                 "weight": self.weight}
+                 "weight": self.weight, "multi_night_share": round(self.multi_night_share, 4)}
         if self.light:
             kinds = [fit["kind"] for fit in self.light.values()]
             found["light_offsets"] = {kind: kinds.count(kind) for kind in sorted(set(kinds))}
@@ -588,11 +601,14 @@ class BankChoice:
     object_cap: float = 0.03
     manifest: str | None = None
     focus_check: bool = True
+    left_out_kinds: tuple[str, ...] = ()
+    multi_night_share: float = 0.0
 
     def options(self) -> dict[str, Any]:
         names = set_names(Path(self.manifest) if self.manifest else None)
         return {"excluded": self.excluded, "object_cap": self.object_cap, "set_names": names,
-                "focus_check": self.focus_check}
+                "focus_check": self.focus_check, "left_out_kinds": self.left_out_kinds,
+                "multi_night_share": self.multi_night_share}
 
     def train(self, settings: Settings) -> dict[str, list[Bank]]:
         """The train banks, by kind."""
