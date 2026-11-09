@@ -1503,39 +1503,75 @@ PixInsight Machine Learning Model Format - xmlm version 1.0
     fn a_run_past_its_time_limit_or_cancelled_closes_pixinsight() {
         let directory = tempfile::tempdir().unwrap();
         let model = model_file(directory.path(), HEADER);
-        let marker = directory.path().join("still-running");
-        let hanging = fake_pixinsight(
-            directory.path(),
-            "hanging",
-            &format!(
-                "time.sleep(2)\nopen({:?}, 'w').write('yes')",
-                marker.display().to_string()
-            ),
-        );
-        let started = Instant::now();
-        let options = MlDenoiseOptions {
-            timeout_seconds: Some(0.3),
-            ..MlDenoiseOptions::new(&model)
-        };
-        let error = hanging
-            .ml_denoise_image(&adu_image(), &options, None)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("did not finish within"), "{error}");
-        assert!(error.contains("license"), "{error}");
-        assert!(started.elapsed() < Duration::from_secs(2));
-
-        let started = Instant::now();
-        let cancel = CancelSignal::new(move || started.elapsed() > Duration::from_millis(300));
-        let error = hanging
-            .ml_denoise_image(&adu_image(), &MlDenoiseOptions::new(&model), Some(&cancel))
-            .unwrap_err();
-        assert!(matches!(error, Error::Cancelled), "{error}");
-        std::thread::sleep(Duration::from_secs(3));
-        assert!(
-            !marker.exists(),
-            "PixInsight kept running after the run ended"
-        );
+        for (name, cancel_after_start) in [("timed-out", false), ("cancelled", true)] {
+            let pid_path = directory.path().join(format!("{name}.pid"));
+            let finished = directory.path().join(format!("{name}.finished"));
+            let hanging = fake_pixinsight(
+                directory.path(),
+                name,
+                &format!(
+                    "with open({pid:?}, 'w') as file: file.write(str(os.getpid()))\n\
+                     time.sleep(60)\n\
+                     open({finished:?}, 'w').write('finished')",
+                    pid = pid_path.display().to_string(),
+                    finished = finished.display().to_string(),
+                ),
+            );
+            let ready = pid_path.clone();
+            let cancel = CancelSignal::new(move || {
+                // This callback runs after spawn. Wait for the actual child,
+                // even if preprocessing or the shared startup lock took longer
+                // than the timeout. The bound only guards a broken fixture.
+                let deadline = Instant::now() + Duration::from_secs(30);
+                loop {
+                    if std::fs::read_to_string(&ready)
+                        .is_ok_and(|text| text.parse::<libc::pid_t>().is_ok_and(|pid| pid > 0))
+                    {
+                        return cancel_after_start;
+                    }
+                    assert!(Instant::now() < deadline, "fake PixInsight did not start");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            });
+            let options = MlDenoiseOptions {
+                // For cancellation, leave ample time to observe readiness and
+                // return Cancelled. For timeout, the callback never cancels.
+                timeout_seconds: Some(if cancel_after_start { 30.0 } else { 0.3 }),
+                ..MlDenoiseOptions::new(&model)
+            };
+            let error = hanging
+                .ml_denoise_image(&adu_image(), &options, Some(&cancel))
+                .unwrap_err();
+            let pid: libc::pid_t = std::fs::read_to_string(&pid_path).unwrap().parse().unwrap();
+            assert!(pid > 0);
+            let mut status = 0;
+            // SAFETY: this is the PID our fixture just wrote; status is writable.
+            // A reaped child gives ECHILD, a running child gives zero, and an
+            // exited but unreaped child gives its PID. Neither latter case passes.
+            let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+            let wait_error = std::io::Error::last_os_error();
+            if waited == 0 {
+                // Clean up a child left alive by a regression before asserting.
+                // SAFETY: waitpid above confirmed this PID is still our child.
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                    libc::waitpid(pid, &mut status, 0);
+                }
+            }
+            assert_eq!(waited, -1, "{name}: PixInsight was not reaped");
+            assert_eq!(wait_error.raw_os_error(), Some(libc::ECHILD));
+            assert!(
+                !finished.exists(),
+                "{name}: PixInsight finished instead of being killed"
+            );
+            if cancel_after_start {
+                assert!(matches!(error, Error::Cancelled), "{error}");
+            } else {
+                let error = error.to_string();
+                assert!(error.contains("did not finish within"), "{error}");
+                assert!(error.contains("license"), "{error}");
+            }
+        }
     }
 
     #[test]
