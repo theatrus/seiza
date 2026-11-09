@@ -57,7 +57,8 @@ def test_reblur_gives_back_the_input_of_a_sharpening_that_only_undid_blur():
     def big(plane):
         return np.tile(plane, (cells[1], cells[0]))
 
-    runner = SimpleNamespace(noise_map=big(np.ones((side, side), np.float32)), background=100.0)
+    runner = SimpleNamespace(noise_map=big(np.ones((side, side), np.float32)), background=100.0, noise=1.0,
+                             measure_noise=1.0)
     valid = big(np.ones((side, side), dtype=bool))
     cell = {"cell": [0, 0], "ratio": 0.75, "width_px": 2.0 * sm.FWHM_PER_SIGMA}
     assert sharpen_sheets.reblur(big(blurred), big(sharp), runner, valid, cell) < 1.0
@@ -91,3 +92,25 @@ def test_a_star_s_ellipticity_is_its_light_s_and_roundness_counts_the_stars_pinc
     assert found["stars"] == 4 and found["worse_by_0_05"] == 1.0
     assert found["input"][1] == pytest.approx(0.0, abs=0.01) and found["output"][1] == pytest.approx(0.3, abs=0.02)
     assert sharpen_sheets.roundness(round_image, round_image, runner, valid)["worse_by_0_05"] == 0.0
+
+
+def test_edges_read_a_steepened_edge_and_noise_sharpened_along_it():
+    from seiza_training import psf_fields
+
+    rng = np.random.default_rng(3)
+    side = 512
+    down, across = np.mgrid[0:side, 0:side]
+
+    def scene(steep):
+        return (100.0 + 60.0 / (1.0 + np.exp(-(across - 256 + 0.1 * down) / steep))).astype(np.float32)
+
+    noise = rng.normal(0, 1.0, (side, side)).astype(np.float32)
+    image = scene(6.0) + noise
+    points = np.zeros((0, len(psf_fields.DETECTION_COLUMNS)), dtype=np.float32)
+    runner = SimpleNamespace(points=points, widths=np.array([[3.0]]), measure_noise=1.0)
+    same = sharpen_sheets.edges(image, image, runner)
+    assert same["gain"] == 1.0 and same["noise"] == 1.0 and same["cells"] > 500
+    sharper = sharpen_sheets.edges(image, scene(3.0) + noise, runner)
+    assert sharper["gain"] > 1.3 and sharper["noise"] == pytest.approx(1.0, abs=0.1)
+    speckled = sharpen_sheets.edges(image, scene(6.0) + 2.0 * noise, runner)
+    assert speckled["gain"] == pytest.approx(1.0, abs=0.1) and speckled["noise"] > 1.6
