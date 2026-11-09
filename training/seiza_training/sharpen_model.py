@@ -1238,6 +1238,75 @@ def batch_from(banks: list[Bank], shares: np.ndarray, size: int, rng: np.random.
     return {name: torch.from_numpy(np.stack([example[name] for example in examples])) for name in examples[0]}
 
 
+# Batches built in worker processes. Threads build a batch no faster past
+# four: blurs, maps and fills hold the interpreter's lock between their
+# NumPy calls, so on the box four threads gave 11 batches a second and 32
+# gave 7, while the network waited (2026-11-09). Each process opens the
+# banks once and builds whole batches; a batch depends on its step alone,
+# so they are the batches the loop would build itself.
+WORKER: dict[str, Any] = {}
+
+
+def worker_start(choice: BankChoice, settings: Settings, mix: tuple[float, float, float], size: int,
+                 seed: int) -> None:
+    """A worker's banks, opened once."""
+    torch.set_num_threads(1)
+    sources, shares = mixture(choice.train(settings), mix)
+    WORKER.update(sources=sources, shares=shares, size=size, seed=seed, settings=settings)
+
+
+def worker_batch(step: int) -> dict[str, np.ndarray]:
+    """A step's batch as arrays, its masks and labels as bytes where they
+    fit, to cross to the training process."""
+    tensors = batch_from(WORKER["sources"], WORKER["shares"], WORKER["size"], step_generator(WORKER["seed"], step),
+                         WORKER["settings"])
+    arrays = {name: value.numpy() for name, value in tensors.items()}
+    arrays["valid"] = arrays["valid"].astype(np.uint8)
+    if arrays["labels"].max(initial=0) < 256:
+        arrays["labels"] = arrays["labels"].astype(np.uint8)
+    return arrays
+
+
+class Workers:
+    """Steps `start` + 1, `start` + 2, …'s batches, built up to `depth`
+    ahead in `processes` worker processes and handed out in step order, as
+    `Prefetch` hands out its threads' (`worker_batch`)."""
+
+    def __init__(self, choice: BankChoice, settings: Settings, mix: tuple[float, float, float], size: int,
+                 seed: int, *, depth: int, processes: int, start: int = 0) -> None:
+        import multiprocessing
+        import os
+        from collections import deque
+        from concurrent.futures import ProcessPoolExecutor
+
+        # Each worker is one thread of NumPy and Torch: twelve of them
+        # should not each start a pool of their own.
+        for variable in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+            os.environ.setdefault(variable, "1")
+        self.pool = ProcessPoolExecutor(processes, mp_context=multiprocessing.get_context("spawn"),
+                                        initializer=worker_start, initargs=(choice, settings, mix, size, seed))
+        self.pending: deque[Any] = deque()
+        self.step = start
+        for _ in range(max(depth, processes)):
+            self.submit()
+
+    def submit(self) -> None:
+        self.step += 1
+        self.pending.append(self.pool.submit(worker_batch, self.step))
+
+    def get(self) -> dict[str, torch.Tensor]:
+        """The next step's batch as the loop builds it, or the error that
+        building it raised."""
+        arrays = self.pending.popleft().result()
+        self.submit()
+        arrays["valid"] = arrays["valid"].astype(np.float32)
+        arrays["labels"] = arrays["labels"].astype(np.int64)
+        return {name: torch.from_numpy(value) for name, value in arrays.items()}
+
+    def close(self) -> None:
+        self.pool.shutdown(wait=False, cancel_futures=True)
+
+
 # The loss.
 
 
@@ -1370,6 +1439,7 @@ def train(
     stop_after: int | None = None,
     prefetch: int = 8,
     batch_threads: int = 4,
+    workers: int = 0,
     where: torch.device | None = None,
 ) -> dict[str, Any]:
     """Train a PSF model on the banks `choice` names, the known-kernel,
@@ -1389,7 +1459,8 @@ def train(
     weights, the ONNX graph and the record (`run.json`) are written, with
     `evaluate`'s measures on `validation_windows` windows of each
     validation bank. `prefetch` batches are built ahead on `batch_threads`
-    threads, which leaves them as they are."""
+    threads, or with `workers`, in that many worker processes (`Workers`),
+    which leaves them as they are."""
     if precision not in ("fp32", "bf16"):
         raise ValueError(f"precision is fp32 or bf16, not {precision!r}")
     if checkpoint_every % log_every:
@@ -1462,7 +1533,11 @@ def train(
         return totals
 
     last = min(steps, stop_after) if stop_after else steps
-    source = Prefetch(assemble, prefetch, batch_threads, start=start) if prefetch else None
+    if workers:
+        source: Any = Workers(choice, settings, mix, batch, seed, depth=max(prefetch, 2 * workers), processes=workers,
+                              start=start)
+    else:
+        source = Prefetch(assemble, prefetch, batch_threads, start=start) if prefetch else None
     began = time.monotonic() - seconds
     running = torch.zeros(4, device=where)
     norms = torch.zeros(2, device=where)
@@ -1525,7 +1600,7 @@ def train(
     record = {
         "name": name,
         "created": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "config": {**config, "prefetch": prefetch, "batch_threads": batch_threads},
+        "config": {**config, "prefetch": prefetch, "batch_threads": batch_threads, "workers": workers},
         "parameters": sum(p.numel() for p in model.parameters()),
         "receptive_field_px": receptive_field(levels),
         "inference": tiling(levels),
@@ -1542,7 +1617,7 @@ def train(
 
 
 def resume_run(store: Store, name: str, *, stop_after: int | None = None, prefetch: int = 8,
-               batch_threads: int = 4, where: torch.device | None = None) -> dict[str, Any]:
+               batch_threads: int = 4, workers: int = 0, where: torch.device | None = None) -> dict[str, Any]:
     """Go on with a run from its last checkpoint, as its `config.json`
     records it, on `where` (default: the training device), which should be
     the device it ran on for the run to be the same."""
@@ -1552,7 +1627,7 @@ def resume_run(store: Store, name: str, *, stop_after: int | None = None, prefet
                  loss=LossSettings(**{key: tuple(value) if isinstance(value, list) else value
                                       for key, value in call["loss"].items()}),
                  mix=tuple(call["mix"]), resume=True, stop_after=stop_after, prefetch=prefetch,
-                 batch_threads=batch_threads, where=where, **arguments)
+                 batch_threads=batch_threads, workers=workers, where=where, **arguments)
 
 
 def export(model: SharpeningUNet, path: Path, *, tile: int) -> dict[str, Any]:
