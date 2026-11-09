@@ -128,6 +128,10 @@ STAR_MASK_NOISE = 3.0
 # target are then clipped where the stack clipped, as a camera clips after
 # the sky has blurred the star.
 FILL_REACH = 4.0
+# A pair bank's denoised planes, which `sharpen_clean` makes beside it.
+CLEAN_PLANES = ("input_clean", "target_clean")
+# A known-kernel window's passed noise is blurred by up to this many pixels.
+NOISE_BLUR = 0.6
 # The core's place is sought this far, in pixels, either way of its
 # plateau's middle, at these steps.
 FILL_SHIFT = 0.6
@@ -242,6 +246,16 @@ class Settings:
     # Fill a known-kernel window's clipped cores before its blur, and clip
     # input and target after it (`FILL_REACH`).
     fill_clipped: bool = False
+    # Targets carry their input's noise, so the model sharpens what is not
+    # noise and passes the noise on: a known-kernel window's fresh noise,
+    # shared a little between neighbours as a stack's is, is added to its
+    # target too, and a pair whose bank keeps denoised planes
+    # (`CLEAN_PLANES`) is asked for its target's denoised plus its input's
+    # own noise. Without it the first runs took out 94% of a wide-starred
+    # stack's pixel noise where the other sharpener takes out none
+    # (2026-11-09): a pair's halves hold noise of their own, and the
+    # likeliest target of an input's noise is none.
+    pass_noise: bool = False
 
     @property
     def planes(self) -> tuple[str, ...]:
@@ -404,6 +418,10 @@ class Bank:
         self.object_cap = object_cap
         self.loaded: dict[int, np.ndarray] = {}
         self.light = light_offsets(self) if self.pairs and settings.centroid_offset == "light" else {}
+        self.clean: dict[str, Any] = {}
+        if self.pairs and (self.directory / "clean.json").exists():
+            self.clean = {name: np.load(self.directory / f"{name}.npy", mmap_mode="r") for name in CLEAN_PLANES}
+            self.clean["record"] = json.loads((self.directory / "clean.json").read_text())
 
     @staticmethod
     def object_of(source: dict[str, Any], set_names: dict[str, str] | None) -> str:
@@ -458,6 +476,8 @@ class Bank:
                  "kept": int(len(self.kept)), "left": self.left, "objects": len(kept_objects),
                  "largest_object_share": round(max(shares.values()), 4), "object_cap": self.object_cap,
                  "weight": self.weight, "multi_night_share": round(self.multi_night_share, 4)}
+        if self.clean:
+            found["clean"] = self.clean["record"]
         if self.light:
             kinds = [fit["kind"] for fit in self.light.values()]
             found["light_offsets"] = {kind: kinds.count(kind) for kind in sorted(set(kinds))}
@@ -955,11 +975,21 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
         band = max(band, *(blur_reach(blur) for blur in blurs))
     else:
         blurred, target = blurred_images(signal, [kernel.covariance, kernel.target])
-    shown = blurred + (rng.standard_normal(image.shape).astype(np.float32) * (share * sigma))
+    fresh = rng.standard_normal(image.shape).astype(np.float32)
+    if settings.pass_noise:
+        # Shared with its neighbours by a blur up to `NOISE_BLUR` px, at the
+        # spread it had.
+        spread_px = float(rng.uniform(0.0, NOISE_BLUR))
+        fresh = blurred_images(fresh, [spread_px**2 * np.eye(2)], pad=8)[0]
+        fresh /= max(float(fresh.std()), 1e-6)
+    fresh = fresh * (share * sigma)
+    shown = blurred + fresh
     if target is None:
         target, target_sigma = shown, math.hypot(scale, share) * sigma
     else:
         target_sigma = scale * sigma
+        if settings.pass_noise:
+            target = target + fresh
     # The clipped cores stay out of the loss, but not the pixels about them:
     # input and target are blurs of the same window there, and agree.
     valid = edge_band(image.shape, band) & ~saturated
@@ -1074,9 +1104,17 @@ def pair_example(bank: Bank, window: int, settings: Settings) -> Example:
     target = planes["target"].astype(np.float32)
     band = 0
     offset = bank.target_offset(window, settings.centroid_offset)
+    passed = settings.pass_noise and bool(bank.clean)
+    if passed:
+        target = np.asarray(bank.clean["target_clean"][window], dtype=np.float32)
     if offset is not None:
         target = shifted(target, -offset[0], -offset[1])
         band = SHIFT_BAND
+    if passed:
+        # The target's denoised, and the noise the denoiser found in the
+        # input: what the model is to leave where it is.
+        target = target + (planes["input"].astype(np.float32)
+                           - np.asarray(bank.clean["input_clean"][window], dtype=np.float32))
     sigma = stack_noise(planes["target_sigma"], planes["target"],
                         stack_noise(planes["input_sigma"], planes["input"], planes["input_map"]))
     saturated = np.asarray(bank.arrays["saturated"][window]).astype(bool)

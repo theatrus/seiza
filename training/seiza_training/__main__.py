@@ -26,7 +26,7 @@ from .store import Store, versions
 READ_ONLY = ("psf-fields", "cut-sharpen", "sheet-sharpen")
 # The commands that read the sharpening banks, and the manifest, if at
 # all, only for the sets' names.
-BANKS_ONLY = ("train-sharpen", "evaluate-sharpen")
+BANKS_ONLY = ("train-sharpen", "evaluate-sharpen", "clean-sharpen")
 
 
 def numbers(text: str) -> tuple[float, ...]:
@@ -313,6 +313,11 @@ def main(argv: list[str] | None = None) -> int:
                                     "for each, and a known-kernel window asks each for its own")
     sharpen_train.add_argument("--equal-share", type=float, default=0.3,
                                help="with --nonstellar, the share of known-kernel windows asking both alike")
+    sharpen_train.add_argument("--pass-noise", action="store_true",
+                               help="targets carry their input's noise, so the model passes noise on: a "
+                                    "known-kernel window's fresh noise is in its target, and a pair bank with "
+                                    "denoised planes (clean-sharpen) asks for its target's denoised plus its "
+                                    "input's noise")
     sharpen_train.add_argument("--fill-clipped", action=argparse.BooleanOptionalAction, default=True,
                                help="fill a known-kernel window's clipped cores with its stamp before "
                                     "its blur, and clip input and target after it, as a camera clips")
@@ -362,6 +367,12 @@ def main(argv: list[str] | None = None) -> int:
     sheet = commands.add_parser("sheet-noise", help="make a trained noise model's contact sheets")
     sheet.add_argument("--name", required=True)
     sheet.add_argument("--sheet", action="append", dest="sheets_named", help="only this sheet (default: all)")
+
+    clean = commands.add_parser("clean-sharpen", help="denoise a sharpening pair bank's windows with a noise run, "
+                                                      "kept beside it, for --pass-noise")
+    clean.add_argument("--bank", required=True, type=Path, action="append", dest="banks")
+    clean.add_argument("--noise-run", required=True, help="the noise run, under its store's models/noise/")
+    clean.add_argument("--noise-store", type=Path, help="the store holding the noise run (default: --store)")
 
     sharpen_sheet = commands.add_parser("sheet-sharpen", help="make a trained PSF model's contact sheets, full-size "
                                                               "images and whole-image measures (reads the manifest "
@@ -653,6 +664,11 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
     """`train-sharpen` and `evaluate-sharpen`."""
     from . import sharpen_model
 
+    if arguments.command == "clean-sharpen":
+        from . import sharpen_clean
+
+        noise_store = Store(arguments.noise_store, arguments.scratch) if arguments.noise_store else store
+        return {str(bank): sharpen_clean.clean(noise_store, arguments.noise_run, bank) for bank in arguments.banks}
     work = arguments.work or store.scratch.parent / "sharpen"
     manifest = arguments.manifest or (store.manifest_path if store.manifest_path.exists() else None)
     if arguments.command == "evaluate-sharpen":
@@ -683,7 +699,8 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
         max_ratio=arguments.max_window_ratio, min_ratio=arguments.min_window_ratio,
         points_empty=arguments.points_empty, centroid_offset=arguments.centroid_offset,
         ratio_source=arguments.ratio_source, residual=arguments.residual, nonstellar=arguments.nonstellar,
-        equal_share=arguments.equal_share, fill_clipped=arguments.fill_clipped)
+        equal_share=arguments.equal_share, fill_clipped=arguments.fill_clipped,
+        pass_noise=arguments.pass_noise)
     loss = sharpen_model.LossSettings(epsilon=arguments.charbonnier, noise_cap=arguments.noise_cap,
                                       gradient_weight=arguments.gradient_weight,
                                       gradient_scales=arguments.gradient_scales, flux_weight=arguments.flux_weight)

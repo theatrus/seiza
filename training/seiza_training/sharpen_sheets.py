@@ -46,8 +46,8 @@ from .manifest import Manifest
 from .noise_model import device, image_sigma
 from .sharpen_bank import fitted_stamp, saturation, stamp_width
 from .sharpen_model import (LIGHT_RADIUS, RING_PEAK, edge_band, empirical_stamp, light_centre, load_run,
-                            measured_stars, measured_width, peak_centre, ring_and_flux, run_directory, settings_from,
-                            sharpen)
+                            FWHM_PER_SIGMA, blurred_images, measured_stars, measured_width, peak_centre,
+                            ring_and_flux, run_directory, settings_from, sharpen)
 from .sheets import typeface, stretch
 from .store import Store, write_png
 
@@ -371,6 +371,10 @@ def whole_measures(image: np.ndarray, output: np.ndarray, runner: Sharpener, val
             cells.append({"cell": [row, column], "stars": len(stars), "width_px": round(before, 3),
                           "ratio": round(after / before, 4) if before > 0 else None})
     found["cells"] = cells
+    found["noise_gain"] = noise_gain(image, output)
+    reblurred = [value for value in (reblur(image, output, runner, valid, cell) for cell in cells)
+                 if value is not None]
+    found["reblur_rms_sigma"] = spread(reblurred)
     ratios = [cell["ratio"] for cell in cells if cell["ratio"] is not None]
     found["width_ratio"] = spread(ratios)
     typical = float(np.nanmedian(runner.widths))
@@ -404,6 +408,72 @@ def whole_measures(image: np.ndarray, output: np.ndarray, runner: Sharpener, val
         found["bright_stars"] = len(rings)
     found["brightest"] = brightest_rings(image, output, runner)
     return found
+
+
+# Noise is compared on the faintest third of the image's blocks of this
+# many pixels, in the differences of neighbouring means of `NOISE_MEAN`.
+NOISE_BLOCK = 64
+NOISE_MEAN = 4
+# Reblur consistency is measured on this many pixels a side at most, at
+# each cell's middle.
+REBLUR_SIDE = 1024
+
+
+def noise_gain(image: np.ndarray, output: np.ndarray) -> dict[str, float]:
+    """The output's sky noise over the input's: at the pixel scale, the
+    medians of the maps made from each image alone, and at `NOISE_MEAN`
+    pixels, the robust spread of neighbouring block means' differences on
+    the faintest third of the input's `NOISE_BLOCK` blocks. 1 is noise left
+    as it was; below it, noise taken out; above, noise sharpened."""
+    height, width = image.shape
+    rows, columns = height // NOISE_BLOCK, width // NOISE_BLOCK
+    with np.errstate(invalid="ignore"):
+        coarse = np.nanmedian(image[:rows * NOISE_BLOCK, :columns * NOISE_BLOCK]
+                              .reshape(rows, NOISE_BLOCK, columns, NOISE_BLOCK), axis=(1, 3))
+    step = NOISE_BLOCK // NOISE_MEAN
+    faint = np.repeat(np.repeat(coarse <= np.nanpercentile(coarse, 33), step, axis=0), step, axis=1)
+
+    def measured(plane: np.ndarray) -> tuple[float, float]:
+        fine = float(np.nanmedian(image_sigma(plane)[::9, ::9]))
+        means = plane[:rows * NOISE_BLOCK, :columns * NOISE_BLOCK].reshape(
+            rows * step, NOISE_MEAN, columns * step, NOISE_MEAN).mean(axis=(1, 3))
+        steps = (means[:, 1:] - means[:, :-1])[faint[:, 1:] & faint[:, :-1]]
+        steps = steps[np.isfinite(steps)]
+        return fine, float(1.4826 * np.median(np.abs(steps - np.median(steps)))) if steps.size else float("nan")
+
+    before, after = measured(image), measured(output)
+    return {"pixel": round(after[0] / before[0], 4), "blocks": round(after[1] / before[1], 4)}
+
+
+def reblur(image: np.ndarray, output: np.ndarray, runner: Sharpener, valid: np.ndarray,
+           cell: dict[str, Any]) -> float | None:
+    """Reblur consistency in one cell: the output blurred back by the round
+    Gaussian that takes its stars' width to the input's, against the input,
+    as the root mean square of their difference in the input's noise, on
+    the cell's middle. A sharpening that only undid blur gives back the
+    input; detail that no blur of the input hid does not. None where the
+    cell's stars were not narrowed."""
+    ratio, width = cell.get("ratio"), cell.get("width_px")
+    if ratio is None or not 0 < ratio < 1 or not width > 0:
+        return None
+    height, wide = image.shape
+    row, column = cell["cell"]
+    top, left = row * height // CELLS[1], column * wide // CELLS[0]
+    bottom, right = (row + 1) * height // CELLS[1], (column + 1) * wide // CELLS[0]
+    side = min(REBLUR_SIDE, bottom - top, right - left)
+    top, left = (top + bottom - side) // 2, (left + right - side) // 2
+    region = (slice(top, top + side), slice(left, left + side))
+    look = valid[region] & np.isfinite(output[region]) & np.isfinite(runner.noise_map[region])
+    if look.mean() < 0.5:
+        return None
+    variance = (width / FWHM_PER_SIGMA) ** 2 * (1.0 - ratio**2)
+    filled = np.where(np.isfinite(output[region]), output[region], runner.background)
+    back = blurred_images(filled, [variance * np.eye(2)])[0]
+    inner = edge_band(look.shape, int(3 * variance**0.5) + 1) & look
+    if not inner.any():
+        return None
+    difference = (back - image[region])[inner] / runner.noise_map[region][inner]
+    return float(np.sqrt(np.mean(difference**2)))
 
 
 # The brightest stars looked at for rings, clipped cores and neighbours
