@@ -334,6 +334,27 @@ def test_a_bank_s_windows_are_denoised_beside_it(tmp_path):
         sharpen_clean.clean(store, "n", kernel_bank(tmp_path))
 
 
+@pytest.mark.parametrize("factor", [2, 3, 4])
+def test_a_binned_stamp_is_the_star_a_binned_image_holds(factor):
+    covariance = np.diag([3.0**2] * 2)
+    stamp = gaussian(33, covariance)
+    small = sharpen_bank.binned_stamp(stamp, factor)
+    assert small.shape[0] % 2 == 1 and float(small.sum()) == pytest.approx(1.0, abs=1e-5)
+    # A star at a binned pixel's middle, binned: the same profile.
+    side = 24 * factor
+    middle = (side // factor // 2 + 0.5) * factor - 0.5
+    image = sharpen_bank.binned(gaussian(side, covariance, (middle, middle)), factor) * factor**2
+    half, at = small.shape[0] // 2, side // factor // 2
+    cut = image[at - half:at + half + 1, at - half:at + half + 1]
+    np.testing.assert_allclose(small, cut / cut.sum(), atol=2e-4)
+    assert sharpen_bank.stamp_width(small) == pytest.approx(2.3548 * 3.0 / factor, rel=0.12)
+    # A noise map's block is its mean's noise; a mask's, any of it.
+    assert sharpen_bank.binned(np.full((8, 8), 2.0), factor, "noise")[0, 0] == pytest.approx(2.0 / factor)
+    mask = np.zeros((12, 12), dtype=bool)
+    mask[5, 5] = True
+    assert sharpen_bank.binned(mask, factor, "any").sum() == 1
+
+
 def test_a_model_with_two_ratios_reads_five_planes_and_sharpens_with_a_pair():
     model = sm.build_model(4, 3, sm.PLANES_NONSTELLAR)
     assert model.first[0].in_channels == 5
