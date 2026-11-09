@@ -313,6 +313,7 @@ impl ModelCard {
 pub struct ModelBundle {
     root: PathBuf,
     card: ModelCard,
+    card_sha256: String,
 }
 
 impl ModelBundle {
@@ -325,7 +326,12 @@ impl ModelBundle {
         let card: ModelCard = serde_json::from_str(&text)
             .map_err(|error| ModelError::ModelContract(format!("{}: {error}", path.display())))?;
         card.check()?;
-        Ok(Self { root, card })
+        let card_sha256 = hex(Sha256::digest(text.as_bytes()));
+        Ok(Self {
+            root,
+            card,
+            card_sha256,
+        })
     }
 
     /// The bundle's directory.
@@ -336,6 +342,16 @@ impl ModelBundle {
     /// The bundle's card.
     pub fn card(&self) -> &ModelCard {
         &self.card
+    }
+
+    /// The SHA-256 of the bundle's card file, in hexadecimal. The card names
+    /// each graph by its own hash, and everything a run reads the image by,
+    /// so this changes whenever a run's output could: a host keys cached
+    /// results on it, with the backend, the precision and
+    /// [`OUTPUT_VERSION`](crate::OUTPUT_VERSION). Installing copies the card
+    /// as it is, so an installed model's is its bundle's.
+    pub fn card_sha256(&self) -> &str {
+        &self.card_sha256
     }
 
     /// The graph of `precision`, when the bundle has one.
@@ -385,11 +401,15 @@ fn sha256_of(path: &Path) -> Result<String, ModelError> {
         }
         hasher.update(&buffer[..count]);
     }
-    Ok(hasher
-        .finalize()
+    Ok(hex(hasher.finalize()))
+}
+
+fn hex(digest: impl AsRef<[u8]>) -> String {
+    digest
+        .as_ref()
         .iter()
         .map(|byte| format!("{byte:02x}"))
-        .collect())
+        .collect()
 }
 
 #[cfg(test)]
@@ -443,6 +463,30 @@ pub(crate) mod tests {
                 "{field}={value}"
             );
         }
+    }
+
+    #[test]
+    fn a_card_s_hash_follows_what_it_holds() {
+        let temp = tempfile::tempdir().unwrap();
+        write_bundle(temp.path(), "noise-test", "constant");
+        let first = ModelBundle::open(temp.path()).unwrap();
+        assert_eq!(first.card_sha256().len(), 64);
+        assert_eq!(
+            ModelBundle::open(temp.path()).unwrap().card_sha256(),
+            first.card_sha256(),
+            "the same card, the same hash"
+        );
+        let path = temp.path().join(CARD_FILE);
+        let mut card: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        card["reading"]["holes"] =
+            serde_json::json!({"depth": 30.0, "margin": 3, "fill_radius": 12, "restore": 5.0});
+        std::fs::write(&path, serde_json::to_vec(&card).unwrap()).unwrap();
+        assert_ne!(
+            ModelBundle::open(temp.path()).unwrap().card_sha256(),
+            first.card_sha256(),
+            "a reading that changes the output changes the hash, though the graph does not"
+        );
     }
 
     #[test]

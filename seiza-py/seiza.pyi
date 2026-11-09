@@ -1605,10 +1605,11 @@ class HoleGuard:
     restore: float
 
 class DenoiseReport:
-    """What ran. A cache keys on sha256, backend, precision, holes and MODEL_OUTPUT_VERSION."""
+    """What ran. A cache keys on card_sha256, backend, precision and MODEL_OUTPUT_VERSION."""
 
     model: str
     sha256: str
+    card_sha256: str
     backend: str
     precision: str
     tile: int
@@ -1667,6 +1668,7 @@ class InstalledModel:
     name: str
     path: Path
     task: str
+    card_sha256: str
     noise_map: str
     holes: HoleGuard | None
     precisions: list[str]

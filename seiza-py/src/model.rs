@@ -151,14 +151,17 @@ impl PyHoleGuard {
 }
 
 /// What ran, for a file's provenance and a cache key: a cache keys on
-/// `sha256`, `backend`, `precision`, `holes` and `MODEL_OUTPUT_VERSION`, not
-/// on the tile, which does not change the output.
+/// `card_sha256`, `backend`, `precision` and `MODEL_OUTPUT_VERSION`, not on
+/// the tile, which does not change the output. The card names its graphs by
+/// their hashes and everything the image is read by.
 #[pyclass(skip_from_py_object, name = "DenoiseReport", module = "seiza", frozen)]
 pub(crate) struct PyDenoiseReport {
     #[pyo3(get)]
     model: String,
     #[pyo3(get)]
     sha256: String,
+    #[pyo3(get)]
+    card_sha256: String,
     #[pyo3(get)]
     backend: String,
     #[pyo3(get)]
@@ -178,6 +181,7 @@ impl From<&DenoiseReport> for PyDenoiseReport {
         Self {
             model: report.model.clone(),
             sha256: report.sha256.clone(),
+            card_sha256: report.card_sha256.clone(),
             backend: report.backend.to_string(),
             precision: report.precision.to_string(),
             tile: report.tile,
@@ -441,6 +445,8 @@ pub(crate) struct PyInstalledModel {
     #[pyo3(get)]
     task: String,
     #[pyo3(get)]
+    card_sha256: String,
+    #[pyo3(get)]
     noise_map: String,
     #[pyo3(get)]
     holes: Option<PyHoleGuard>,
@@ -455,6 +461,7 @@ impl From<&ModelBundle> for PyInstalledModel {
             name: card.name.clone(),
             path: bundle.root().to_path_buf(),
             task: card.task.to_string(),
+            card_sha256: bundle.card_sha256().to_string(),
             noise_map: card.reading.noise_map.to_string(),
             holes: card.reading.holes.as_ref().map(Into::into),
             precisions: card

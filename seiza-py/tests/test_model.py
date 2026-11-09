@@ -33,6 +33,7 @@ def test_a_model_installs_verifies_lists_and_goes(tmp_path: Path) -> None:
     assert installed.name == "noise-tiny"
     assert installed.noise_map == "constant"
     assert installed.holes is None, "the tiny model's card has no hole guard"
+    assert len(installed.card_sha256) == 64
     assert installed.precisions == ["f32", "f16"]
     assert [model.name for model in seiza.installed_models(store)] == ["noise-tiny"]
 
@@ -148,6 +149,7 @@ def test_a_tiny_model_runs_and_blends() -> None:
     assert (report.model, report.backend, report.precision) == ("noise-tiny", "cpu", "f32")
     assert report.noise_map == "constant"
     assert report.holes is None
+    assert len(report.card_sha256) == 64 and report.card_sha256 != report.sha256
     assert report.channels[0].noise > 0
 
     residual = result.residual()

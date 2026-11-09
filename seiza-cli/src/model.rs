@@ -204,6 +204,11 @@ fn operation_cards(report: &DenoiseReport, bands: &NoiseBands) -> Vec<WriteHeade
             report.sha256.chars().take(16).collect(),
             "model graph SHA-256, first 16",
         ),
+        text(
+            "MDCARD",
+            report.card_sha256.chars().take(16).collect(),
+            "model card SHA-256, first 16",
+        ),
         text("MDBACKND", report.backend.to_string(), "backend requested"),
         text("MDPREC", report.precision.to_string(), "graph precision"),
         text(
@@ -375,6 +380,7 @@ mod tests {
         let report = DenoiseReport {
             model: "noise-test".to_string(),
             sha256: "0123456789abcdef0123".to_string(),
+            card_sha256: "fedcba9876543210fedc".to_string(),
             backend: Backend::Cpu,
             precision: Precision::F32,
             tile: 512,
@@ -384,7 +390,7 @@ mod tests {
         };
         let cards = operation_cards(&report, &NoiseBands::default());
         let keys: Vec<&str> = cards.iter().map(WriteHeaderCard::keyword).collect();
-        assert!(keys.contains(&"MDHASH") && keys.contains(&"MDBACKND"));
+        assert!(keys.contains(&"MDHASH") && keys.contains(&"MDCARD") && keys.contains(&"MDBACKND"));
         assert!(
             !keys.contains(&"MDHOLES"),
             "a run without the guard says nothing of it"

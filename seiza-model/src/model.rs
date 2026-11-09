@@ -91,13 +91,18 @@ pub struct ChannelScales {
     pub noise: f32,
 }
 
-/// What ran, for a file's provenance and a host's cache key.
+/// What ran, for a file's provenance and a host's cache key: a host keys cached
+/// results on `card_sha256`, `backend`, `precision` and
+/// [`OUTPUT_VERSION`](crate::OUTPUT_VERSION).
 #[derive(Clone, Debug, PartialEq)]
 pub struct DenoiseReport {
     /// The model's name.
     pub model: String,
     /// The hash of the graph that ran.
     pub sha256: String,
+    /// The hash of the model's card ([`ModelBundle::card_sha256`]), which
+    /// covers the graphs and everything the image is read by.
+    pub card_sha256: String,
     /// The backend asked for. Core ML can place work on another unit without
     /// saying so.
     pub backend: Backend,
@@ -167,6 +172,7 @@ impl Denoised {
 /// A noise model, open on a backend.
 pub struct NoiseModel {
     card: ModelCard,
+    card_sha256: String,
     sha256: String,
     backend: Backend,
     precision: Precision,
@@ -247,6 +253,7 @@ impl NoiseModel {
         let sha256 = graph.sha256.clone();
         Ok(Self {
             card,
+            card_sha256: bundle.card_sha256().to_string(),
             sha256,
             backend,
             precision,
@@ -308,6 +315,7 @@ impl NoiseModel {
             report: DenoiseReport {
                 model: self.card.name.clone(),
                 sha256: self.sha256.clone(),
+                card_sha256: self.card_sha256.clone(),
                 backend: self.backend,
                 precision: self.precision,
                 tile: self.tiling.tile,
@@ -640,6 +648,7 @@ mod tests {
             report: DenoiseReport {
                 model: "test".to_string(),
                 sha256: String::new(),
+                card_sha256: String::new(),
                 backend: Backend::Cpu,
                 precision: Precision::F32,
                 tile: 64,

@@ -141,6 +141,7 @@ impl From<&HoleGuard> for HoleGuardResponse {
 struct DenoiseReportResponse {
     model: String,
     sha256: String,
+    card_sha256: String,
     backend: String,
     precision: String,
     tile: usize,
@@ -154,6 +155,7 @@ impl From<&DenoiseReport> for DenoiseReportResponse {
         Self {
             model: report.model.clone(),
             sha256: report.sha256.clone(),
+            card_sha256: report.card_sha256.clone(),
             backend: report.backend.to_string(),
             precision: report.precision.to_string(),
             tile: report.tile,
@@ -177,6 +179,7 @@ struct InstalledModelResponse {
     name: String,
     path: PathBuf,
     task: String,
+    card_sha256: String,
     noise_map: String,
     holes: Option<HoleGuardResponse>,
     precisions: Vec<String>,
@@ -189,6 +192,7 @@ impl From<&ModelBundle> for InstalledModelResponse {
             name: card.name.clone(),
             path: bundle.root().to_path_buf(),
             task: card.task.to_string(),
+            card_sha256: bundle.card_sha256().to_string(),
             noise_map: card.reading.noise_map.to_string(),
             holes: card.reading.holes.as_ref().map(Into::into),
             precisions: card
@@ -403,12 +407,14 @@ pub unsafe extern "C" fn seiza_denoised_residual(
 }
 
 #[unsafe(no_mangle)]
-/// What ran, as JSON lent until the result is freed: `model`, `sha256`,
-/// `backend`, `precision`, `tile`, `noiseMap`, `holes`, and `channels`, each
-/// with its `background` and `noise`. `holes` is null, or how the image's holes
-/// were kept from the network, as the model's card asks: `depth`, `margin`,
-/// `fillRadius` and `restore`. A host keys cached results on `sha256`,
-/// `backend`, `precision`, `holes` and [`seiza_model_output_version`].
+/// What ran, as JSON lent until the result is freed: `model`, `sha256` (the
+/// graph's), `cardSha256` (the model card's), `backend`, `precision`, `tile`,
+/// `noiseMap`, `holes`, and `channels`, each with its `background` and
+/// `noise`. `holes` is null, or how the image's holes were kept from the
+/// network, as the model's card asks: `depth`, `margin`, `fillRadius` and
+/// `restore`. The card names its graphs by their hashes and everything the
+/// image is read by, so a host keys cached results on `cardSha256`, `backend`,
+/// `precision` and [`seiza_model_output_version`].
 ///
 /// # Safety
 /// `denoised` must be null or a live [`SeizaDenoised`].
@@ -481,9 +487,9 @@ pub unsafe extern "C" fn seiza_model_backends_json(
 
 #[unsafe(no_mangle)]
 /// The installed models, as a JSON array the caller frees with
-/// `seiza_string_free`, each with `name`, `path`, `task`, `noiseMap`, `holes`
-/// (as [`seiza_denoised_report_json`] gives it) and `precisions`. `store` may
-/// be null for the default store.
+/// `seiza_string_free`, each with `name`, `path`, `task`, `cardSha256`,
+/// `noiseMap`, `holes` (as [`seiza_denoised_report_json`] gives them) and
+/// `precisions`. `store` may be null for the default store.
 ///
 /// # Safety
 /// `store` must be null or a NUL-terminated string. When non-null, `error_out`
@@ -642,6 +648,7 @@ mod tests {
             let installed: Value = serde_json::from_str(&taken(installed)).unwrap();
             assert_eq!(installed["name"], "noise-tiny");
             assert_eq!(installed["noiseMap"], "constant");
+            assert_eq!(installed["cardSha256"].as_str().unwrap().len(), 64);
             assert!(
                 installed["holes"].is_null(),
                 "the tiny model's card has no guard"
@@ -811,6 +818,7 @@ mod tests {
             assert_eq!(report["model"], "noise-tiny");
             assert_eq!(report["precision"], "f32");
             assert_eq!(report["noiseMap"], "constant");
+            assert_eq!(report["cardSha256"].as_str().unwrap().len(), 64);
             assert!(report["holes"].is_null());
 
             let mut length = 0;
