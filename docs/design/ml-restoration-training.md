@@ -1563,7 +1563,8 @@ in these ways:
   Trained under the guard, the same recipe came out level with that run
   measured under it: 2.208 against 2.217 on 4-frame halves and 1.317
   against 1.320 on 8-frame ones, and the deep halves kept 0.644 of their
-  error against 0.641. Both left 56% of the noise at 4 pixels, where the
+  error against 0.641; against clean targets, 0.797 against 0.799, with
+  those pairs guarded too. Both left 56% of the noise at 4 pixels, where the
   network trained without the guard, measured without it, left 42%: the
   cold pixels the guard keeps count as noise left too. What training
   under the guard bought shows on stacks that hold holes or spread noise:
