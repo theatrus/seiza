@@ -381,6 +381,52 @@ def test_a_real_psf_blurs_a_window_as_its_stamp_says(tmp_path):
     assert not plain.details["real"]
 
 
+def crossed(side: int, centre=None) -> np.ndarray:
+    """A round star with a cross of four arms along the axes, as a stamp."""
+    middle = (side - 1) / 2
+    core = gaussian(side, np.diag([1.6**2] * 2), centre)
+    arms = gaussian(side, np.diag([6.0**2, 0.8**2]), centre) + gaussian(side, np.diag([0.8**2, 6.0**2]), centre)
+    del middle
+    return (0.8 * core + 0.1 * arms).astype(np.float32)
+
+
+def arms_over_diagonals(stamp: np.ndarray) -> float:
+    middle = (stamp.shape[0] - 1) // 2
+    step = np.arange(6, 10)
+    between = np.mean([stamp[middle + step, middle + step], stamp[middle - step, middle - step],
+                       stamp[middle + step, middle - step], stamp[middle - step, middle + step]], axis=0)
+    # Along the axes at the diagonals' own radii, between whole pixels.
+    whole = np.arange(0, 18)
+    arm = np.mean([stamp[middle, middle + whole], stamp[middle, middle - whole], stamp[middle + whole, middle],
+                   stamp[middle - whole, middle]], axis=0)
+    along = np.exp(np.interp(step * math.sqrt(2), whole, np.log(np.maximum(arm, 1e-30))))
+    return float(np.mean(along / between))
+
+
+def test_a_round_target_takes_a_psf_s_cross_off(tmp_path):
+    stamp = crossed(sharpen_bank.STAMP)
+    assert arms_over_diagonals(stamp) > 5
+    # Round in its second moments already: a blur leaves the cross.
+    _, plain, _ = sm.rounded(stamp, 1.5)
+    assert arms_over_diagonals(plain) > 5
+    made, round_stamp = sm.rounding(plain)
+    assert arms_over_diagonals(round_stamp) == pytest.approx(1.0, abs=0.15)
+    assert float(made.sum()) == pytest.approx(1.0, abs=1e-5)
+    # A star of that PSF in an image, through the filter, is the round one.
+    star = 1e5 * crossed(97)
+    out = sm.blurred_images(star, [made])[0]
+    assert float(out.sum()) == pytest.approx(float(star.sum()), rel=1e-3)
+    assert arms_over_diagonals(out) < 1.6
+    # The settings carry it to the kernel and the example.
+    kernel = sm.known_kernel(stamp, np.random.default_rng(0), sm.Settings(round_target=True))
+    assert kernel.rounding is not None and sm.known_kernel(stamp, np.random.default_rng(0),
+                                                           sm.Settings()).rounding is None
+    bank = sm.Bank(kernel_bank(tmp_path), sm.Settings(tile=32))
+    example = sm.kernel_example(bank, 0, np.random.default_rng(1), sm.Settings(tile=32, round_target=True),
+                                identity=False)
+    assert example.ratio < 1 and not example.valid[:sm.ROUNDING_BAND].any()
+
+
 def test_a_model_with_two_ratios_reads_five_planes_and_sharpens_with_a_pair():
     model = sm.build_model(4, 3, sm.PLANES_NONSTELLAR)
     assert model.first[0].in_channels == 5

@@ -33,6 +33,13 @@ def test_noise_gain_reads_noise_left_taken_out_or_sharpened():
     calm = (100.0 + 0.5 * (image - 100.0)).astype(np.float32)
     found = sharpen_sheets.noise_gain(image, calm)
     assert found["pixel"] == pytest.approx(0.5, rel=0.05) and found["blocks"] == pytest.approx(0.5, rel=0.05)
+    # Away from its stars, the bright third's structure, sharpened or not.
+    image[:256] += 50.0 + 5.0 * np.sin(np.arange(512) / 3.0)[None, :]
+    points = np.array([[100.0, 100.0] + [0.0] * 8], dtype=np.float32)
+    assert sharpen_sheets.noise_gain(image, image, points, 3.0)["detail"] == 1.0
+    sharper = image.copy()
+    sharper[:256] += 5.0 * np.sin(np.arange(512) / 3.0)[None, :]
+    assert sharpen_sheets.noise_gain(image, sharper, points, 3.0)["detail"] > 1.3
 
 
 def test_reblur_gives_back_the_input_of_a_sharpening_that_only_undid_blur():
