@@ -23,7 +23,7 @@ from .manifest import Manifest
 from .store import Store, versions
 
 # The commands that only read the manifest and record no pass in it.
-READ_ONLY = ("psf-fields", "cut-sharpen")
+READ_ONLY = ("psf-fields", "cut-sharpen", "sheet-sharpen")
 # The commands that read the sharpening banks, and the manifest, if at
 # all, only for the sets' names.
 BANKS_ONLY = ("train-sharpen", "evaluate-sharpen")
@@ -346,6 +346,12 @@ def main(argv: list[str] | None = None) -> int:
     sheet.add_argument("--name", required=True)
     sheet.add_argument("--sheet", action="append", dest="sheets_named", help="only this sheet (default: all)")
 
+    sharpen_sheet = commands.add_parser("sheet-sharpen", help="make a trained PSF model's contact sheets, full-size "
+                                                              "images and whole-image measures (reads the manifest "
+                                                              "only)")
+    sharpen_sheet.add_argument("--name", required=True)
+    sharpen_sheet.add_argument("--sheet", action="append", dest="sheets_named", help="only this sheet (default: all)")
+
     evaluate = commands.add_parser("evaluate-noise", help="measure a trained noise model on a split")
     evaluate.add_argument("--name", required=True)
     evaluate.add_argument("--split", default="validation")
@@ -576,6 +582,11 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
 
         named = set(arguments.sheets_named) if arguments.sheets_named else None
         return render_saved(store, manifest, arguments.name, only=named)
+    if command == "sheet-sharpen":
+        from . import sharpen_sheets
+
+        named = set(arguments.sheets_named) if arguments.sheets_named else None
+        return sharpen_sheets.render_saved(store, manifest, arguments.name, only=named)
     if command == "evaluate-noise":
         from .noise_model import NoiseBands, evaluate_saved
 
