@@ -1182,8 +1182,10 @@ def sharpen(model: SharpeningUNet, image: np.ndarray, stamp_at: Any, *, ratio: f
 # Evaluation.
 
 # Stars measured for their width, flux and rings: unclipped detections at
-# this signal to noise or more, none other within their box.
-MEASURE_SNR = 30.0
+# this signal to noise or more, with no neighbour brighter than
+# `NEIGHBOUR_SHARE` of their flux within the box measured.
+MEASURE_SNR = 20.0
+NEIGHBOUR_SHARE = 0.1
 # Rings are looked for about stars whose peak is this many σ̄ above the
 # background.
 RING_PEAK = 50.0
@@ -1212,13 +1214,38 @@ def empirical_stamp(image: np.ndarray, stars: np.ndarray, side: int) -> np.ndarr
     return np.mean(found, axis=0) if found else None
 
 
+# An empirical stamp's width is fitted within this many input widths of its
+# middle, past the core's 5% level of any profile with β of 2.5 or more,
+# so a noisy pixel far out cannot join the core.
+WIDTH_REACH = 1.75
+
+
+def measured_width(stamp: np.ndarray | None, width: float) -> float:
+    """An empirical stamp's width, as `stamp_width` measures the field's,
+    fitted within `WIDTH_REACH` of the input's `width`; NaN where its peak
+    is not at its middle, as when the stars are lost."""
+    if stamp is None:
+        return float("nan")
+    middle = (stamp.shape[0] - 1) / 2
+    down, across = np.mgrid[0:stamp.shape[0], 0:stamp.shape[1]] - middle
+    distance = np.hypot(across, down)
+    peak = np.unravel_index(int(np.argmax(stamp)), stamp.shape)
+    if distance[peak] > max(2.0, 0.5 * width):
+        return float("nan")
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return stamp_width(np.where(distance <= WIDTH_REACH * width, stamp, 0.0))
+
+
 def measured_stars(points: np.ndarray, inner: np.ndarray, valid: np.ndarray, radius: int) -> np.ndarray:
-    """The point sources measured for their width and flux: unclipped
-    detections at `MEASURE_SNR` or more, whose box of `radius` lies on the
-    inner, valid region, with no other point source within it."""
+    """The point sources a measure within `radius` of them may use:
+    unclipped detections at `MEASURE_SNR` or more, whose box of `radius`
+    lies on the inner, valid region, with no neighbour within it brighter
+    than `NEIGHBOUR_SHARE` of their flux (a clipped core always is)."""
     columns = psf_fields.DETECTION_COLUMNS
+    flux = points[:, columns.index("flux")]
     usable = ((points[:, columns.index("detected")] == 1) & (points[:, columns.index("clipped")] == 0)
-              & (points[:, columns.index("saturated")] == 0) & (points[:, columns.index("snr")] >= MEASURE_SNR))
+              & (points[:, columns.index("saturated")] == 0) & (points[:, columns.index("snr")] >= MEASURE_SNR)
+              & np.isfinite(flux))
     height, width = inner.shape
     kept = []
     for index in np.nonzero(usable)[0]:
@@ -1229,9 +1256,10 @@ def measured_stars(points: np.ndarray, inner: np.ndarray, valid: np.ndarray, rad
         box = (slice(row - radius, row + radius + 1), slice(column - radius, column + radius + 1))
         if not (inner[box].all() and valid[box].all()):
             continue
-        near = np.hypot(points[:, 0] - x, points[:, 1] - y)
-        near[index] = np.inf
-        if near.min() <= radius:
+        near = (np.hypot(points[:, 0] - x, points[:, 1] - y) <= radius) & ~(
+            np.nan_to_num(flux, nan=np.inf) <= NEIGHBOUR_SHARE * flux[index])
+        near[index] = False
+        if near.any():
             continue
         kept.append(index)
     return points[kept]
@@ -1290,17 +1318,17 @@ def window_measures(example: Example, output: np.ndarray, band: int) -> dict[str
     if example.kind == "identity":
         found["change"] = float(np.sqrt(np.mean(((output - example.image) / example.noise)[look] ** 2)))
     side = int(min(65, max(9, 2 * math.ceil(2.5 * example.width) + 1)))
-    stars = measured_stars(example.points, inner, example.valid, max(side // 2 + 5, int(APERTURE_FWHM * example.width)
-                                                                      + 4))
+    stars = measured_stars(example.points, inner, example.valid, side // 2 + 5)
     found["stars"] = int(len(stars))
     if len(stars):
         widths = {}
         for label, plane in (("input", example.image), ("output", output), ("target", example.target)):
-            stamp = empirical_stamp(plane, stars, side)
-            widths[label] = stamp_width(stamp) if stamp is not None else float("nan")
+            widths[label] = measured_width(empirical_stamp(plane, stars, side), example.width)
         found["widths"] = widths
         found["achieved"] = widths["output"] / widths["input"]
         found["target_achieved"] = widths["target"] / widths["input"]
+    stars = measured_stars(example.points, inner, example.valid, int(math.ceil(APERTURE_FWHM * example.width)) + 4)
+    if len(stars):
         rows = [ring_and_flux(output, example.image, float(x), float(y), example.width, example.noise)
                 for x, y in stars[:, :2]]
         targets = [ring_and_flux(example.target, example.image, float(x), float(y), example.width, example.noise)
