@@ -366,4 +366,70 @@ def whole_measures(image: np.ndarray, output: np.ndarray, runner: Sharpener, val
         found["ring"] = spread(rings)
         found["rings_deeper_than_1"] = float(np.mean([ring < -1.0 for ring in rings]))
         found["bright_stars"] = len(rings)
+    found["brightest"] = brightest_rings(image, output, runner)
     return found
+
+
+# The brightest stars looked at for rings, clipped cores and neighbours
+# and all, that stand apart: those the measures above leave out, and the
+# ones that ring most.
+BRIGHTEST = 30
+
+
+def brightest_rings(image: np.ndarray, output: np.ndarray, runner: Sharpener) -> dict[str, Any]:
+    """About each of the `BRIGHTEST` stars by peak that stand apart, clipped
+    or not: the azimuthal mean profile less the median of an annulus 8 to
+    10 typical widths out, and its deepest point 1 to 6 widths out, in the
+    image's median noise, for input and output; and the output's highest
+    point between that dip and 8 widths, the halo past a ring."""
+    width = float(np.nanmedian(runner.widths))
+    reach = int(math.ceil(10 * width)) + 2
+    height, wide = image.shape
+    columns = psf_fields.DETECTION_COLUMNS
+    points = runner.points
+    order = np.argsort(-np.nan_to_num(points[:, columns.index("peak")], nan=-np.inf))
+    chosen: list[tuple[float, float]] = []
+    for index in order:
+        x, y = float(points[index, 0]), float(points[index, 1])
+        if not (reach <= x < wide - reach and reach <= y < height - reach):
+            continue
+        if any(math.hypot(x - cx, y - cy) < 2 * reach for cx, cy in chosen):
+            continue
+        chosen.append((x, y))
+        if len(chosen) == BRIGHTEST:
+            break
+    down, across = np.mgrid[-reach:reach + 1, -reach:reach + 1]
+    dips, halos, input_dips = [], [], []
+    for x, y in chosen:
+        column, row = int(round(x)), int(round(y))
+        distance = np.hypot(across + column - x, down + row - y)
+        bins = np.rint(distance).astype(int)
+        counts = np.bincount(bins.ravel())
+        sky_ring = (distance >= 8 * width) & (distance <= 10 * width)
+        profiles = []
+        for plane in (image, output):
+            values = plane[row - reach:row + reach + 1, column - reach:column + reach + 1].astype(np.float64)
+            finite = np.isfinite(values)
+            if not finite[sky_ring].any():
+                break
+            sky = float(np.median(values[sky_ring & finite]))
+            sums = np.bincount(bins[finite], values[finite] - sky, minlength=len(counts))
+            seen = np.bincount(bins[finite], minlength=len(counts))
+            with np.errstate(invalid="ignore", divide="ignore"):
+                profiles.append(sums / seen / runner.noise)
+        if len(profiles) < 2:
+            continue
+        radii = np.arange(len(counts))
+        inside = (radii >= width) & (radii <= 6 * width) & np.isfinite(profiles[1])
+        if not inside.any():
+            continue
+        at = radii[inside][np.argmin(profiles[1][inside])]
+        dips.append(float(profiles[1][at]))
+        input_dips.append(float(np.nanmin(np.where(inside, profiles[0], np.nan))))
+        past = (radii > at) & (radii <= 8 * width) & np.isfinite(profiles[1])
+        halos.append(float(profiles[1][past].max()) if past.any() else float("nan"))
+    if not dips:
+        return {"stars": 0}
+    return {"stars": len(dips), "dip": spread(dips), "dip_worst": round(float(min(dips)), 3),
+            "deeper_than_1": float(np.mean([dip < -1.0 for dip in dips])), "input_dip": spread(input_dips),
+            "halo": spread(halos)}
