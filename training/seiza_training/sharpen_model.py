@@ -39,7 +39,10 @@ detections will be. `b` and `σ̄` are the whole image's: a pair's from its
 bank; a known-kernel window's from the window, since its blur and noise
 are made here. The stamp is read as two planes, the stamp over its peak,
 and its asinh, which shows the wings. The stacks' own noise maps weigh the
-loss and nothing else. The output is a residual in σ̄, added to the input.
+loss and nothing else. The output is a residual added to the asinh of the
+input in σ̄, which the network reads, and taken back through sinh: on the
+sky a residual in σ̄, as the noise model's, and at a star's core nearly a
+log, so a core thousands of σ̄ from its target is in reach (`RESIDUALS`).
 
 The loss, in linear units:
 
@@ -107,6 +110,14 @@ FWHM_PER_SIGMA = 2.0 * math.sqrt(2.0 * math.log(2.0))
 SOURCES = ("kernel", "seeing", "pairs")
 CENTROID_OFFSETS = ("shift", "none")
 RATIO_SOURCES = ("stamp", "fit")
+# How the network's residual meets the input: added to it in σ̄, as the
+# noise model's is, or added to the asinh of it, which the network reads,
+# and taken back through sinh. On the sky the two agree; at a star's core,
+# where a sharpened target differs from its input by thousands of σ̄,
+# a linear residual starting from zero never got there: two smoke runs
+# (2026-11-09) gave cores residuals under 1σ̄ where their targets asked
+# 700σ̄ at the median, and sharpened nothing.
+RESIDUALS = ("asinh", "linear")
 # The bank's info column each ratio source reads.
 RATIO_COLUMNS = {"stamp": "width_ratio", "fit": "ratio"}
 # The defocused Ultracat object's seeing pairs, its night's split and its
@@ -167,8 +178,11 @@ class Settings:
     points_empty: float = 0.1
     centroid_offset: str = "shift"
     ratio_source: str = "stamp"
+    residual: str = "asinh"
 
     def __post_init__(self) -> None:
+        if self.residual not in RESIDUALS:
+            raise ValueError(f"residual is one of {RESIDUALS}, not {self.residual!r}")
         if self.centroid_offset not in CENTROID_OFFSETS:
             raise ValueError(f"centroid_offset is one of {CENTROID_OFFSETS}, not {self.centroid_offset!r}")
         if self.ratio_source not in RATIO_SOURCES:
@@ -183,9 +197,18 @@ class Settings:
 @dataclass(frozen=True)
 class LossSettings:
     """The loss's terms: Charbonnier's ε, in units of the target's noise;
-    the gradient term's weight and block sides; the flux term's weight."""
+    the most the target's noise is read as, in multiples of its tile's
+    median; the gradient term's weight and block sides; the flux term's
+    weight.
+
+    A stack's noise map at a star's core holds its frames' scatter with
+    the seeing, thousands of σ̄ where the sky's is one, and errors read in
+    it leave a blurred star all but free: a first run (2026-11-09) learnt
+    to denoise its pairs and never to sharpen. Capped at `noise_cap`, the
+    map still weighs the sky and the faint signal, and a core counts."""
 
     epsilon: float = 0.1
+    noise_cap: float = 10.0
     gradient_weight: float = 0.5
     gradient_scales: tuple[int, ...] = (1, 2, 4)
     flux_weight: float = 0.1
@@ -585,6 +608,18 @@ class Example:
     details: dict[str, Any] = field(default_factory=dict)
 
 
+def stack_noise(sigma: np.ndarray, image: np.ndarray, fallback: np.ndarray | None = None) -> np.ndarray:
+    """A stack's own noise map, where it knows the noise: none where one
+    frame alone covers the sky, whose variance is zero, and two C925 deep
+    stacks have such patches. There the map made from the image alone
+    (`fallback`, or `image_sigma` of `image`) stands in."""
+    known = np.isfinite(sigma) & (sigma > 0)
+    if known.all():
+        return sigma.astype(np.float32)
+    stand_in = image_sigma(image) if fallback is None else fallback
+    return np.where(known, sigma, stand_in).astype(np.float32)
+
+
 def edge_band(shape: tuple[int, int], band: int) -> np.ndarray:
     """True but within `band` pixels of the edges."""
     inside = np.zeros(shape, dtype=bool)
@@ -609,7 +644,7 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
     row = bank.row(window)
     source = int(row["source"])
     image = np.asarray(bank.arrays["image"][window], dtype=np.float32)
-    sigma = np.asarray(bank.arrays["sigma"][window], dtype=np.float32)
+    sigma = stack_noise(np.asarray(bank.arrays["sigma"][window], dtype=np.float32), image)
     saturated = np.asarray(bank.arrays["saturated"][window]).astype(bool)
     stamp = np.asarray(bank.arrays["stamp"][window], dtype=np.float32)
     background = row["background"]
@@ -656,7 +691,8 @@ def pair_example(bank: Bank, window: int, settings: Settings) -> Example:
     if settings.centroid_offset == "shift" and offset is not None:
         target = shifted(target, -offset[0], -offset[1])
         band = SHIFT_BAND
-    sigma = np.where(np.isfinite(planes["target_sigma"]), planes["target_sigma"], planes["input_sigma"])
+    sigma = stack_noise(planes["target_sigma"], planes["target"],
+                        stack_noise(planes["input_sigma"], planes["input"], planes["input_map"]))
     saturated = np.asarray(bank.arrays["saturated"][window]).astype(bool)
     valid = edge_band(target.shape, band) & ~saturated & np.isfinite(sigma)
     return Example(planes["input"].astype(np.float32), target, planes["input_map"].astype(np.float32),
@@ -817,21 +853,37 @@ def batch_from(banks: list[Bank], shares: np.ndarray, size: int, rng: np.random.
 # The loss.
 
 
+def applied(reference: Any, residual: Any, mode: str) -> Any:
+    """The output, in σ̄ above the background, of an input `reference` in
+    the same units and the network's `residual`, as `mode` says
+    (`RESIDUALS`): for tensors or arrays alike."""
+    if mode == "linear":
+        return reference + residual
+    if isinstance(reference, torch.Tensor):
+        return torch.sinh(torch.asinh(reference) + residual)
+    return np.sinh(np.arcsinh(reference) + residual)
+
+
 def charbonnier(values: torch.Tensor, epsilon: float) -> torch.Tensor:
     return torch.sqrt(values**2 + epsilon**2) - epsilon
 
 
-def loss_terms(residual: torch.Tensor, batch: dict[str, torch.Tensor], settings: LossSettings) -> dict[str, torch.Tensor]:
+def loss_terms(residual: torch.Tensor, batch: dict[str, torch.Tensor], settings: LossSettings,
+               mode: str = "asinh") -> dict[str, torch.Tensor]:
     """The loss's terms for a batch's residuals (see the module notes) and
-    their weighted sum, `total`. Errors are in units of the target's noise
+    their weighted sum, `total`, the residual applied as `mode` says
+    (`applied`). Errors are in units of the target's noise
     and set to zero where the loss may not look before any is averaged,
     so a clipped core cannot reach a block's mean.
 
     Reblur consistency on real images without a target, and a centroid
     shift at the point sources, would join these."""
-    output = batch["reference"] + residual.float()
+    output = applied(batch["reference"], residual.float(), mode)
     valid = batch["valid"]
     sigma = batch["sigma"].clamp(min=SIGMA_FLOOR)
+    if settings.noise_cap > 0:
+        typical = sigma.flatten(1).median(dim=1).values.view(-1, 1, 1, 1)
+        sigma = torch.minimum(sigma, settings.noise_cap * typical)
     error = (output - batch["target"]) / sigma * valid
     epsilon = settings.epsilon
     pixel = (charbonnier(error, epsilon) * valid).sum() / valid.sum().clamp(min=1.0)
@@ -1012,7 +1064,7 @@ def train(
         with torch.no_grad():
             for tensors in checks:
                 moved = {key: value.to(where) for key, value in tensors.items()}
-                terms = loss_terms(model(moved["planes"], moved["stamp"]), moved, loss)
+                terms = loss_terms(model(moved["planes"], moved["stamp"]), moved, loss, settings.residual)
                 for key, value in terms.items():
                     totals[key] = totals.get(key, 0.0) + float(value) / len(checks)
         return totals
@@ -1028,7 +1080,7 @@ def train(
             moved = {key: value.to(where, non_blocking=True) for key, value in tensors.items()}
             with torch.autocast(where.type, dtype=torch.bfloat16, enabled=precision == "bf16"):
                 residual = model(moved["planes"], moved["stamp"])
-            terms = loss_terms(residual, moved, loss)
+            terms = loss_terms(residual, moved, loss, settings.residual)
             optimizer.zero_grad(set_to_none=True)
             terms["total"].backward()
             if clip_grad:
@@ -1135,7 +1187,7 @@ def export(model: SharpeningUNet, path: Path, *, tile: int) -> dict[str, Any]:
 
 def sharpen(model: SharpeningUNet, image: np.ndarray, stamp_at: Any, *, ratio: float | np.ndarray,
             points: np.ndarray | None = None, noise_map: np.ndarray | None = None, background: float | None = None,
-            noise: float | None = None, inference: dict[str, int] | None = None,
+            noise: float | None = None, inference: dict[str, int] | None = None, residual: str = "asinh",
             where: torch.device | None = None) -> np.ndarray:
     """Sharpen a whole image: its overlapping tiles, each conditioned on
     `stamp_at(x, y)` at its centre and with its point sources rendered by
@@ -1143,7 +1195,8 @@ def sharpen(model: SharpeningUNet, image: np.ndarray, stamp_at: Any, *, ratio: f
     map. The noise map is made from the image unless given, and the
     background and median noise from the two unless given. `points` are
     the image's point sources in `psf_fields.DETECTION_COLUMNS` (none: an
-    empty map). NaN stays NaN."""
+    empty map). The tiles' residuals are blended, then applied as
+    `residual` says (`applied`). NaN stays NaN."""
     noise_map = image_sigma(image) if noise_map is None else noise_map
     finite = np.isfinite(image) & np.isfinite(noise_map)
     if background is None:
@@ -1170,13 +1223,13 @@ def sharpen(model: SharpeningUNet, image: np.ndarray, stamp_at: Any, *, ratio: f
             rendered.append(np.arcsinh(point_map(local, stamp, (tile, tile), background) / noise))
         batch = np.concatenate([tiles, np.stack(rendered)[:, None]], axis=1)
         with torch.no_grad():
-            residual = model(torch.from_numpy(np.ascontiguousarray(batch)).to(where),
-                             torch.from_numpy(np.stack(stamps)).to(where)).cpu().numpy()
-        return residual * noise
+            return model(torch.from_numpy(np.ascontiguousarray(batch)).to(where),
+                         torch.from_numpy(np.stack(stamps)).to(where)).cpu().numpy()
 
-    residual = infer(run, planes, tile=tile, overlap=settings["overlap"], margin=settings["margin"],
-                     multiple=settings.get("multiple", model.multiple), origins_too=True)[0]
-    return np.where(np.isfinite(image), image + residual, np.nan).astype(np.float32)
+    found_residual = infer(run, planes, tile=tile, overlap=settings["overlap"], margin=settings["margin"],
+                           multiple=settings.get("multiple", model.multiple), origins_too=True)[0]
+    output = background + noise * applied(np.nan_to_num((image - background) / noise), found_residual, residual)
+    return np.where(np.isfinite(image), output, np.nan).astype(np.float32)
 
 
 # Evaluation.
@@ -1296,14 +1349,18 @@ def ring_and_flux(image: np.ndarray, reference: np.ndarray, x: float, y: float, 
     return found
 
 
-def window_measures(example: Example, output: np.ndarray, band: int) -> dict[str, Any]:
+def window_measures(example: Example, output: np.ndarray, band: int,
+                    noise_cap: float = LossSettings.noise_cap) -> dict[str, Any]:
     """One window's measures: the error before and after against the target
-    in its own noise, and in σ̄; and, at its stars, the widths of the input's,
-    the output's and the target's own stamps, the flux the output keeps of
-    the input's and of the target's, and the rings about bright stars."""
+    in its own noise, read as the loss reads it (`noise_cap`), and in σ̄;
+    and, at its stars, the widths of the input's, the output's and the
+    target's own stamps, the flux the output keeps of the input's and of
+    the target's, and the rings about bright stars."""
     inner = edge_band(example.image.shape, band)
     look = inner & example.valid
     sigma = np.maximum(example.sigma, SIGMA_FLOOR * example.noise)
+    if noise_cap > 0:
+        sigma = np.minimum(sigma, noise_cap * float(np.median(sigma)))
     before = (example.image - example.target) / sigma
     after = (output - example.target) / sigma
     found: dict[str, Any] = {
@@ -1426,7 +1483,7 @@ def evaluate(model: SharpeningUNet, banks: dict[str, list[Bank]], *, settings: S
                     output = sharpen(model, example.image, lambda x, y, stamp=example.stamp: stamp,
                                      ratio=example.ratio, points=example.points, noise_map=example.noise_map,
                                      background=example.background, noise=example.noise, inference=inference,
-                                     where=where)
+                                     residual=settings.residual, where=where)
                     # The band its blur or shift read past is out of
                     # `valid` already.
                     measures = window_measures(example, output, reach(model.levels))

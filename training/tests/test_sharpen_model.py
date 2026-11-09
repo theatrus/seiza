@@ -203,6 +203,16 @@ def test_known_kernel_examples_keep_the_window_s_noise_low_and_mask_the_band_the
     assert identity.kind == "identity" and identity.ratio == 1.0 and np.array_equal(identity.image, identity.target)
 
 
+def test_where_one_frame_covers_the_sky_the_image_s_own_map_weighs_the_loss():
+    image = np.random.default_rng(0).normal(100.0, 2.0, (SIDE, SIDE)).astype(np.float32)
+    sigma = np.full((SIDE, SIDE), 2.0, np.float32)
+    sigma[:, :20] = 0.0
+    found = sm.stack_noise(sigma, image)
+    assert np.array_equal(found[:, 20:], sigma[:, 20:])
+    assert np.median(found[:, :20]) == pytest.approx(2.0, rel=0.3)
+    assert np.array_equal(sm.stack_noise(sigma, image, np.full_like(sigma, 7.0))[:, :20], np.full((SIDE, 20), 7.0))
+
+
 def test_a_pair_s_target_is_moved_by_its_centroid_offset(tmp_path):
     bank = sm.Bank(pair_bank(tmp_path, offset=(0.6, -0.4)), sm.Settings())
     stars = np.array(POSITIONS)
@@ -337,16 +347,20 @@ def test_tiles_with_their_own_stamp_and_points_reproduce_the_whole_image():
     points = detections([(40.5, 60.2), (150.3, 90.8), (100.0, 190.4), (65.7, 128.1)], [5e4, 3e4, 2e4, 1e4])
     inference = {"tile": 64, "overlap": 2 * reach(3) + 4, "margin": reach(3), "multiple": model.multiple}
     tiled = sm.sharpen(model, image, lambda x, y: stamp, ratio=0.6, points=points, noise_map=noise_map,
-                       background=100.0, noise=1.0, inference=inference)
+                       background=100.0, noise=1.0, inference=inference, residual="linear")
     rendered = sm.point_map(points, stamp, image.shape, 100.0)
     planes = sm.network_planes(image, noise_map, 0.6, rendered, 100.0, 1.0)
     with torch.no_grad():
         whole = model(torch.from_numpy(planes)[None], torch.from_numpy(sm.stamp_planes(stamp))[None]).numpy()[0, 0]
     np.testing.assert_allclose(tiled - image, whole, atol=1e-4 * np.abs(whole).max())
+    # Through asinh, the blended residual is added to the image's asinh.
+    curved = sm.sharpen(model, image, lambda x, y: stamp, ratio=0.6, points=points, noise_map=noise_map,
+                        background=100.0, noise=1.0, inference=inference)
+    np.testing.assert_allclose(curved, 100.0 + np.sinh(planes[0] + whole), rtol=1e-4, atol=1e-3)
     # A stamp that changes across the field changes each tile's output.
     other = gaussian(sharpen_bank.STAMP, np.diag([6.0, 3.0]))
     varied = sm.sharpen(model, image, lambda x, y: stamp if x < 100 else other, ratio=0.6, points=points,
-                        noise_map=noise_map, background=100.0, noise=1.0, inference=inference)
+                        noise_map=noise_map, background=100.0, noise=1.0, inference=inference, residual="linear")
     assert np.abs(varied - tiled)[:, :40].max() < 1e-4 * np.abs(whole).max()
     assert np.abs(varied - tiled)[:, -40:].max() > 1e-2 * np.abs(whole).max()
 
@@ -359,17 +373,21 @@ def test_the_loss_is_zero_on_the_target_and_blind_where_it_may_not_look():
              "labels": torch.zeros(2, 32, 32, dtype=torch.int64)}
     batch["labels"][0, 10:15, 10:15] = 1
     exact = batch["target"] - batch["reference"]
-    terms = sm.loss_terms(exact, batch, sm.LossSettings())
+    terms = sm.loss_terms(exact, batch, sm.LossSettings(), "linear")
     assert float(terms["total"]) == pytest.approx(0.0, abs=1e-6)
+    # Through asinh, the residual that reaches the target is the difference
+    # of the two asinh.
+    curved = torch.asinh(batch["target"]) - torch.asinh(batch["reference"])
+    assert float(sm.loss_terms(curved, batch, sm.LossSettings())["total"]) == pytest.approx(0.0, abs=1e-5)
     # An error where the loss may not look costs nothing.
     batch["valid"][:, :, :4] = 0
     off = exact.clone()
     off[:, :, :4] += 1000.0
-    assert float(sm.loss_terms(off, batch, sm.LossSettings())["total"]) == pytest.approx(0.0, abs=1e-6)
+    assert float(sm.loss_terms(off, batch, sm.LossSettings(), "linear")["total"]) == pytest.approx(0.0, abs=1e-6)
     # Flux taken from inside an aperture costs the flux term.
     dimmed = exact.clone()
     dimmed[0, 0, 10:15, 10:15] -= 0.5
-    terms = sm.loss_terms(dimmed, batch, sm.LossSettings())
+    terms = sm.loss_terms(dimmed, batch, sm.LossSettings(), "linear")
     assert float(terms["flux"]) == pytest.approx(math.sqrt(2.5**2 + 0.1**2) - 0.1, rel=1e-4)
     assert float(terms["gradient"]) > 0
 
