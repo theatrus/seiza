@@ -256,6 +256,12 @@ class Settings:
     # (2026-11-09): a pair's halves hold noise of their own, and the
     # likeliest target of an input's noise is none.
     pass_noise: bool = False
+    # The share of known-kernel windows blurred by a real PSF, another
+    # window's stamp, in place of a Gaussian: the wings, lopsided cores and
+    # tilted shapes that telescopes and seeing make, which are what an
+    # image is to be deconvolved of. A donor whose blur falls outside
+    # `kernel_ratios` gives way to a Gaussian.
+    real_kernels: float = 0.0
 
     @property
     def planes(self) -> tuple[str, ...]:
@@ -752,11 +758,27 @@ def filtered(image: np.ndarray, transforms: list[np.ndarray | None], pad: int,
     return found
 
 
+def fourier_stamp(shape: tuple[int, int], stamp: np.ndarray) -> np.ndarray:
+    """The transform, on `rfft2`'s frequencies, of a blur by `stamp`, its
+    middle the blur's origin, summing to one."""
+    side = stamp.shape[0]
+    canvas = np.zeros(shape, dtype=np.float64)
+    canvas[:side, :side] = stamp / stamp.sum(dtype=np.float64)
+    return np.fft.rfft2(np.roll(canvas, (-(side // 2), -(side // 2)), axis=(0, 1)))
+
+
+def blur_transform(shape: tuple[int, int], blur: np.ndarray) -> np.ndarray:
+    """A blur's transform: of a Gaussian, given its 2 × 2 covariance, or of
+    a stamp."""
+    return fourier_gaussian(shape, blur) if blur.shape == (2, 2) else fourier_stamp(shape, blur)
+
+
 def blurred_images(image: np.ndarray, covariances: list[np.ndarray | None], pad: int = WINDOW_PAD) -> list[np.ndarray]:
-    """`image` blurred by a Gaussian of each of `covariances` (None: as it
-    is), reflected past its edges."""
+    """`image` blurred by each of `covariances` (None: as it is), a
+    Gaussian's covariance or a stamp (`blur_transform`), reflected past its
+    edges."""
     shape = (image.shape[0] + 2 * pad, image.shape[1] + 2 * pad)
-    return filtered(image, [None if covariance is None else fourier_gaussian(shape, covariance)
+    return filtered(image, [None if covariance is None else blur_transform(shape, covariance)
                             for covariance in covariances], pad)
 
 
@@ -771,7 +793,7 @@ def blurred_stamp(stamp: np.ndarray, covariance: np.ndarray) -> np.ndarray:
     """A stamp blurred by a Gaussian of `covariance`, on a canvas wide
     enough not to wrap, cut back to its side and summing to one again."""
     pad = (STAMP_CANVAS - stamp.shape[0]) // 2
-    out = filtered(stamp, [fourier_gaussian((stamp.shape[0] + 2 * pad,) * 2, covariance)], pad, mode="constant")[0]
+    out = filtered(stamp, [blur_transform((stamp.shape[0] + 2 * pad,) * 2, covariance)], pad, mode="constant")[0]
     total = float(out.sum(dtype=np.float64))
     return (out / total).astype(np.float32) if total > 0 else out
 
@@ -834,15 +856,42 @@ class Kernel:
     ratio: float
     widths: dict[str, float]
     asked: float
+    # A real PSF that blurs in K's place, where one does.
+    donor: np.ndarray | None = None
 
     @property
     def identity(self) -> bool:
-        return not self.covariance.any()
+        return self.donor is None and not self.covariance.any()
+
+    @property
+    def blur(self) -> np.ndarray:
+        """What blurs the window into its input: the donor, or K."""
+        return self.covariance if self.donor is None else self.donor
 
     def reach(self) -> int:
         """How far the input's or the target's blur reads, in pixels."""
         largest = max(float(np.linalg.eigvalsh(self.covariance)[-1]), float(np.linalg.eigvalsh(self.target)[-1]))
-        return int(math.ceil(BLUR_REACH * math.sqrt(max(largest, 0.0))))
+        found = int(math.ceil(BLUR_REACH * math.sqrt(max(largest, 0.0))))
+        if self.donor is not None:
+            # A real PSF's wings run far past its core: three of its widths.
+            found = max(found, int(math.ceil(3 * stamp_width(self.donor))))
+        return min(found, WINDOW_PAD)
+
+
+def donor_kernel(stamp: np.ndarray, donor: np.ndarray, settings: Settings) -> Kernel | None:
+    """A known-kernel window's draw with a real PSF, `donor`, for K: None
+    where it widens the stamp by less or more than `kernel_ratios` allow,
+    or leaves the target wider than `max_ratio` of the input."""
+    reference = stamp_width(stamp)
+    blurred = blurred_stamp(stamp, donor)
+    width = stamp_width(blurred)
+    delta, _, target_width = rounded(stamp, settings.floor_px)
+    asked = width / reference
+    low, high = settings.kernel_ratios
+    if not low <= asked <= high or target_width > settings.max_ratio * width:
+        return None
+    return Kernel(np.zeros((2, 2)), delta, blurred, target_width / width,
+                  {"reference": reference, "input": width, "target": target_width}, asked, donor)
 
 
 def known_kernel(stamp: np.ndarray, rng: np.random.Generator, settings: Settings, *, identity: bool = False) -> Kernel:
@@ -947,7 +996,11 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
     background = row["background"]
     if identity is None:
         identity = bool(rng.random() < settings.identity)
-    kernel = known_kernel(stamp, rng, settings, identity=identity)
+    kernel = None
+    if not identity and settings.real_kernels > 0 and rng.random() < settings.real_kernels:
+        kernel = donor_kernel(stamp, np.asarray(bank.arrays["stamp"][bank.draw(rng)], dtype=np.float32), settings)
+    if kernel is None:
+        kernel = known_kernel(stamp, rng, settings, identity=identity)
     scale = math.exp(rng.uniform(-1.0, 1.0) * math.log(settings.exposure)) if scaled and settings.exposure > 1 else 1.0
     share = float(rng.uniform(0.0, settings.kernel_noise))
     signal = background + scale * (image - background)
@@ -972,14 +1025,14 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
         ratio = drawn()
         nonstellar_ratio = ratio if rng.random() < settings.equal_share else drawn()
         blurs = [target_blur(stamp, kernel, value) for value in (ratio, nonstellar_ratio)]
-        blurred, stars, rest = blurred_images(signal, [kernel.covariance, *blurs])
+        blurred, stars, rest = blurred_images(signal, [kernel.blur, *blurs])
         rendered = point_map(points, stamp, image.shape, background)
         with np.errstate(divide="ignore", invalid="ignore"):
             mask = np.clip(np.nan_to_num(rendered / (rendered + STAR_MASK_NOISE * scale * sigma)), 0.0, 1.0)
         target = (mask * stars + (1.0 - mask) * rest).astype(np.float32)
         band = max(band, *(blur_reach(blur) for blur in blurs))
     else:
-        blurred, target = blurred_images(signal, [kernel.covariance, kernel.target])
+        blurred, target = blurred_images(signal, [kernel.blur, kernel.target])
     fresh = rng.standard_normal(image.shape).astype(np.float32)
     if settings.pass_noise:
         # Shared with its neighbours by a blur up to `NOISE_BLUR` px, at the
@@ -1006,7 +1059,8 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
     return Example(shown, target, noise_map, target_sigma.astype(np.float32), valid, kernel.stamp, ratio,
                    points, background, noise, kernel.widths["input"], "identity" if identity else "kernel", source,
                    window, kernel.asked, {"scale": scale, "noise_share": share, "widths": kernel.widths,
-                                          "kernel": kernel.covariance.tolist(), "sharpest": kernel.ratio},
+                                          "kernel": kernel.covariance.tolist(), "sharpest": kernel.ratio,
+                                          "real": kernel.donor is not None},
                    nonstellar_ratio)
 
 

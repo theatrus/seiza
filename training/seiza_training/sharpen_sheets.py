@@ -371,7 +371,7 @@ def whole_measures(image: np.ndarray, output: np.ndarray, runner: Sharpener, val
             cells.append({"cell": [row, column], "stars": len(stars), "width_px": round(before, 3),
                           "ratio": round(after / before, 4) if before > 0 else None})
     found["cells"] = cells
-    found["noise_gain"] = noise_gain(image, output)
+    found["noise_gain"] = noise_gain(image, output, runner.points, float(np.nanmedian(runner.widths)))
     reblurred = [value for value in (reblur(image, output, runner, valid, cell) for cell in cells)
                  if value is not None]
     found["reblur_rms_sigma"] = spread(reblurred)
@@ -419,12 +419,18 @@ NOISE_MEAN = 4
 REBLUR_SIDE = 1024
 
 
-def noise_gain(image: np.ndarray, output: np.ndarray) -> dict[str, float]:
+def noise_gain(image: np.ndarray, output: np.ndarray, points: np.ndarray | None = None,
+               width: float = 0.0) -> dict[str, float]:
     """The output's sky noise over the input's: at the pixel scale, the
     medians of the maps made from each image alone, and at `NOISE_MEAN`
     pixels, the robust spread of neighbouring block means' differences on
     the faintest third of the input's `NOISE_BLOCK` blocks. 1 is noise left
-    as it was; below it, noise taken out; above, noise sharpened."""
+    as it was; below it, noise taken out; above, noise sharpened. Given the
+    image's `points` and its stars' `width`, also "detail": the same spread
+    on the brightest third of the blocks, away from every point source by
+    three widths, where what differs between neighbours is the nebula's
+    structure as well as noise; above the faint blocks' gain, structure
+    was sharpened."""
     height, width = image.shape
     rows, columns = height // NOISE_BLOCK, width // NOISE_BLOCK
     with np.errstate(invalid="ignore"):
@@ -432,17 +438,30 @@ def noise_gain(image: np.ndarray, output: np.ndarray) -> dict[str, float]:
                               .reshape(rows, NOISE_BLOCK, columns, NOISE_BLOCK), axis=(1, 3))
     step = NOISE_BLOCK // NOISE_MEAN
     faint = np.repeat(np.repeat(coarse <= np.nanpercentile(coarse, 33), step, axis=0), step, axis=1)
+    bright = None
+    if points is not None and width > 0:
+        bright = np.repeat(np.repeat(coarse >= np.nanpercentile(coarse, 67), step, axis=0), step, axis=1)
+        reach = int(np.ceil(3 * width / NOISE_MEAN))
+        for x, y in points[:, :2]:
+            row, column = int(y // NOISE_MEAN), int(x // NOISE_MEAN)
+            bright[max(0, row - reach):row + reach + 1, max(0, column - reach):column + reach + 1] = False
 
-    def measured(plane: np.ndarray) -> tuple[float, float]:
+    def steps_spread(means: np.ndarray, where: np.ndarray) -> float:
+        steps = (means[:, 1:] - means[:, :-1])[where[:, 1:] & where[:, :-1]]
+        steps = steps[np.isfinite(steps)]
+        return float(1.4826 * np.median(np.abs(steps - np.median(steps)))) if steps.size else float("nan")
+
+    def measured(plane: np.ndarray) -> tuple[float, float, float]:
         fine = float(np.nanmedian(image_sigma(plane)[::9, ::9]))
         means = plane[:rows * NOISE_BLOCK, :columns * NOISE_BLOCK].reshape(
             rows * step, NOISE_MEAN, columns * step, NOISE_MEAN).mean(axis=(1, 3))
-        steps = (means[:, 1:] - means[:, :-1])[faint[:, 1:] & faint[:, :-1]]
-        steps = steps[np.isfinite(steps)]
-        return fine, float(1.4826 * np.median(np.abs(steps - np.median(steps)))) if steps.size else float("nan")
+        return fine, steps_spread(means, faint), steps_spread(means, bright) if bright is not None else float("nan")
 
     before, after = measured(image), measured(output)
-    return {"pixel": round(after[0] / before[0], 4), "blocks": round(after[1] / before[1], 4)}
+    found = {"pixel": round(after[0] / before[0], 4), "blocks": round(after[1] / before[1], 4)}
+    if bright is not None and before[2] > 0:
+        found["detail"] = round(after[2] / before[2], 4)
+    return found
 
 
 def reblur(image: np.ndarray, output: np.ndarray, runner: Sharpener, valid: np.ndarray,
