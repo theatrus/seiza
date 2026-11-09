@@ -123,6 +123,24 @@ def input_field(store: Store, product: dict[str, Any]) -> psf_fields.Field:
     return psf_fields.Field(store, product["id"])
 
 
+def denoised_input(store: Store, source: dict[str, Any], image: np.ndarray, noise_run: str) -> np.ndarray:
+    """A sheet's input with all the noise `noise_run` finds taken out, as a
+    sharpening meets an image denoised first; kept under
+    `STORE/sheets/denoised/`, as every sharpening run draws the same."""
+    from .noise_model import load_run as load_noise_run
+    from .sharpen_clean import denoised
+
+    kept = store.root / "sheets" / "denoised" / f"{source['id'].replace('/', '-')}--{noise_run}.npy"
+    if kept.exists():
+        return np.load(kept)
+    record, model = load_noise_run(store, noise_run)
+    out = denoised(record, model, image, device())
+    out[~np.isfinite(image)] = np.nan
+    kept.parent.mkdir(parents=True, exist_ok=True)
+    np.save(kept, out)
+    return out
+
+
 def node_widths(field: psf_fields.Field) -> np.ndarray:
     """`stamp_width` of each of the field's node stamps; NaN where a node
     has none."""
@@ -215,6 +233,8 @@ def render(store: Store, manifest: Manifest, record: dict[str, Any], model: Any,
     field = input_field(store, source)
     if not field.usable:
         return None
+    if sheet.get("denoise"):
+        image = denoised_input(store, source, image, sheet["denoise"])
     runner = Sharpener(record, model, image, field)
     look = stretch(image)
     image_background = float(np.nanmedian(image[::31, ::31]))
@@ -408,7 +428,66 @@ def whole_measures(image: np.ndarray, output: np.ndarray, runner: Sharpener, val
         found["bright_stars"] = len(rings)
     found["brightest"] = brightest_rings(image, output, runner)
     found["spikes"] = spikes(image, output, runner)
+    found["roundness"] = roundness(image, output, runner, valid)
     return found
+
+
+# Stars' shapes are measured on unclipped stars at this signal to noise or
+# more that stand apart, within this many typical widths of each.
+ROUND_SNR = 50.0
+ROUND_RADIUS = 2.0
+ROUND_STARS = 1500
+
+
+def ellipticity(plane: np.ndarray, x: float, y: float, radius: float) -> float | None:
+    """A star's ellipticity, 1 − minor / major of its light's second
+    moments about its own centre within `radius`, less the median of the
+    annulus out to 1.5 `radius`: 0 for a round star."""
+    reach = int(math.ceil(1.5 * radius)) + 1
+    column, row = int(round(x)), int(round(y))
+    if row - reach < 0 or column - reach < 0 or row + reach >= plane.shape[0] or column + reach >= plane.shape[1]:
+        return None
+    values = plane[row - reach:row + reach + 1, column - reach:column + reach + 1].astype(np.float64)
+    if not np.isfinite(values).all():
+        return None
+    down, across = np.mgrid[-reach:reach + 1, -reach:reach + 1]
+    distance = np.hypot(across + column - x, down + row - y)
+    light = np.where(distance <= radius, values - np.median(values[(distance > radius) & (distance <= 1.5 * radius)]),
+                     0.0)
+    light = np.clip(light, 0.0, None)
+    total = light.sum()
+    if not total > 0:
+        return None
+    cx, cy = (light * across).sum() / total, (light * down).sum() / total
+    dx, dy = across - cx, down - cy
+    xx, yy, xy = (light * dx * dx).sum() / total, (light * dy * dy).sum() / total, (light * dx * dy).sum() / total
+    spread = math.hypot(xx - yy, 2 * xy)
+    major, minor = (xx + yy + spread) / 2, (xx + yy - spread) / 2
+    return 1.0 - math.sqrt(max(minor, 0.0) / major) if major > 0 else None
+
+
+def roundness(image: np.ndarray, output: np.ndarray, runner: Sharpener, valid: np.ndarray) -> dict[str, Any]:
+    """How round the stars are, before and after: the ellipticity of each
+    bright star that stands apart (`ellipticity`), as its 5th, 50th and
+    95th percentiles over the image for the input and the output, and the
+    share of stars the output left less round than the input by 0.05 or
+    more. A sharpening should leave no star pinched."""
+    width = float(np.nanmedian(runner.widths))
+    radius = max(ROUND_RADIUS * width, 3.0)
+    columns = psf_fields.DETECTION_COLUMNS
+    stars = measured_stars(runner.points, edge_band(image.shape, 8), valid, int(math.ceil(1.5 * radius)) + 2)
+    stars = evenly(stars[stars[:, columns.index("snr")] >= ROUND_SNR], ROUND_STARS)
+    before, after = [], []
+    for x, y in stars[:, :2]:
+        first, second = ellipticity(image, float(x), float(y), radius), ellipticity(output, float(x), float(y), radius)
+        if first is not None and second is not None:
+            before.append(first)
+            after.append(second)
+    if not before:
+        return {"stars": 0}
+    worse = np.array(after) - np.array(before)
+    return {"stars": len(before), "input": spread(before), "output": spread(after),
+            "worse_by_0_05": round(float(np.mean(worse >= 0.05)), 4)}
 
 
 # Spikes are looked for on this many of the brightest stars that stand
