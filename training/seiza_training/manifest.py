@@ -228,6 +228,23 @@ class Manifest:
                 f"{self.path} has manifest schema {stored}; this code reads {SCHEMA_VERSION}"
             )
 
+    @classmethod
+    def read_only(cls, path: str | Path) -> Manifest:
+        """The manifest opened for reading alone, as a pass that keeps its
+        results beside the store rather than in it opens it: no schema is
+        written, no journal mode set, and a write raises. Another machine's
+        pass may be writing the same file meanwhile."""
+        manifest = cls.__new__(cls)
+        manifest.path = Path(path)
+        if not manifest.path.exists():
+            raise FileNotFoundError(manifest.path)
+        manifest.db = sqlite3.connect(f"{manifest.path.resolve().as_uri()}?mode=ro", uri=True, timeout=60.0)
+        manifest.db.row_factory = sqlite3.Row
+        stored = manifest.meta("schema_version")
+        if stored is None or int(stored) != SCHEMA_VERSION:
+            raise RuntimeError(f"{manifest.path} has manifest schema {stored}; this code reads {SCHEMA_VERSION}")
+        return manifest
+
     def close(self) -> None:
         self.db.close()
 

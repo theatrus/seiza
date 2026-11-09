@@ -288,6 +288,38 @@ def sky_planes(medians: list[np.ndarray], faint: np.ndarray) -> list[np.ndarray]
     return fit(keep) if keep.sum() >= 3 else None
 
 
+def block_skies(
+    image_best: np.ndarray, image_worst: np.ndarray, covered: np.ndarray
+) -> tuple[np.ndarray, list[np.ndarray], np.ndarray | None, list[np.ndarray] | None]:
+    """The `SEEING_BLOCK_PX` blocks wholly inside `covered`, each half's
+    block medians, the faint blocks (those the best half puts at or below
+    its median), and each half's sky plane through them (`sky_planes`):
+    what `seeing_check` judges the skies by, and what a trainer matches
+    them by. The faint blocks and planes are None where no block is
+    covered."""
+    full = blocks(covered, SEEING_BLOCK_PX).all(axis=2)
+    with warnings.catch_warnings():
+        # A block outside the coverage may hold NaN; it is never used.
+        warnings.simplefilter("ignore", RuntimeWarning)
+        medians = [np.median(blocks(image, SEEING_BLOCK_PX), axis=2) for image in (image_best, image_worst)]
+    if not full.any():
+        return full, medians, None, None
+    faint = full & (medians[0] <= np.median(medians[0][full]))
+    return full, medians, faint, sky_planes(medians, faint)
+
+
+def plane_image(coefficients: np.ndarray, shape: tuple[int, int], block: int = SEEING_BLOCK_PX) -> np.ndarray:
+    """A plane `sky_planes` fitted over `block`-pixel blocks, evaluated at
+    every pixel of an image of `shape`: across and down run from 0 to 1
+    over the whole blocks, so a block's centre takes its own value."""
+    height, width = shape
+    rows, columns = height // block, width // block
+    across = (np.arange(width, dtype=np.float64) + 0.5) / (block * columns)
+    down = (np.arange(height, dtype=np.float64) + 0.5) / (block * rows)
+    offset, along, up = coefficients
+    return (offset + along * across[None, :] + up * down[:, None]).astype(np.float32)
+
+
 def seeing_check(
     best: tuple[np.ndarray, np.ndarray, list[Any]], worst: tuple[np.ndarray, np.ndarray, list[Any]]
 ) -> tuple[str, str | None, dict[str, Any]]:
@@ -348,16 +380,8 @@ def seeing_check(
     with np.errstate(invalid="ignore"):
         sigma = robust_sigma(np.where(covered, image_best - image_worst, np.nan).astype(np.float32))
         noise_best = robust_sigma(np.where(covered, image_best, np.nan).astype(np.float32))
-    full = blocks(covered, SEEING_BLOCK_PX).all(axis=2)
-    with warnings.catch_warnings():
-        # A block outside the coverage may hold NaN; it is never used.
-        warnings.simplefilter("ignore", RuntimeWarning)
-        medians = [np.median(blocks(image, SEEING_BLOCK_PX), axis=2) for image in (image_best, image_worst)]
+    full, medians, faint, planes = block_skies(image_best, image_worst, covered)
     stats["difference_sigma"] = sigma
-    planes = None
-    if full.any():
-        faint = full & (medians[0] <= np.median(medians[0][full]))
-        planes = sky_planes(medians, faint)
     if planes is not None:
         change = planes[0] - planes[1]
         stats["background_offset"] = float(change[0] + 0.5 * change[1] + 0.5 * change[2])
@@ -396,13 +420,19 @@ def counts(image: np.ndarray) -> np.ndarray:
     as its median. A few pixels far below the sky, which an edge of low
     coverage can leave, would otherwise take the whole range: one C925
     stack's 18 pixels below -100, down to -21,809, hid its 448 stars."""
+    return scaled_counts(image)[0]
+
+
+def scaled_counts(image: np.ndarray) -> tuple[np.ndarray, float, float]:
+    """`counts`, with the image values its 0 and 65535 stand for, which take
+    a flux measured in counts back to the image's units."""
     values = image if image.ndim == 2 else image[0]
     sample = np.asarray(values[::7, ::7])
     sample = sample[np.isfinite(sample)]
     low, high = float(np.percentile(sample, 0.01)), float(np.nanmax(values))
     with np.errstate(invalid="ignore"):
         scaled = (np.where(np.isfinite(values), values, np.median(sample)) - low) * (65535 / max(high - low, 1e-6))
-    return np.clip(scaled, 0, 65535).astype(np.uint16)
+    return np.clip(scaled, 0, 65535).astype(np.uint16), low, max(high, low + 1e-6)
 
 
 def stack_psf(image: np.ndarray) -> tuple[list[Any], dict[str, Any]]:
