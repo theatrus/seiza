@@ -283,9 +283,10 @@ def main(argv: list[str] | None = None) -> int:
                                help="scale a known-kernel window's signal by up to this either way before its "
                                     "noise is added")
     sharpen_train.add_argument("--floor-px", type=float, default=1.5, help="the narrowest target FWHM")
-    sharpen_train.add_argument("--centroid-offset", choices=("shift", "none"), default="shift",
-                               help="move each pair's target by its stars' median centroid offset, so the model "
-                                    "is not taught to move stars, or leave it")
+    sharpen_train.add_argument("--centroid-offset", choices=("light", "detection", "none"), default="light",
+                               help="move each pair's target back by its stars' offset, so the model is not taught "
+                                    "to move stars: of their light-weighted centres, over the field, or of their "
+                                    "detections' centroids, the median; or leave it")
     sharpen_train.add_argument("--ratio-source", choices=("stamp", "fit"), default="stamp",
                                help="a pair's ratio from its stamps' widths, which every window has, or from the "
                                     "field's Moffat fit, which fails below about 2 px")
@@ -293,9 +294,11 @@ def main(argv: list[str] | None = None) -> int:
                                help="leave out windows whose target is wider than this times their input")
     sharpen_train.add_argument("--min-window-ratio", type=float, default=0.0,
                                help="leave out windows whose target is narrower than this times their input")
-    sharpen_train.add_argument("--exclude-pairs",
-                               help="pairs left out, by pair, input or target id, comma-separated (default: the "
-                                    "seeing pairs of a field whose focus changes across it; '' leaves none out)")
+    sharpen_train.add_argument("--exclude-pairs", default="",
+                               help="pairs left out, by pair, input or target id, comma-separated")
+    sharpen_train.add_argument("--focus-check", action=argparse.BooleanOptionalAction, default=True,
+                               help="leave out windows whose stamps are out of focus, ringed or flat-topped, and "
+                                    "every window of a source where more than a quarter are")
     sharpen_train.add_argument("--object-cap", type=float, default=0.03,
                                help="no object (telescope, target and filter, over its nights) takes more than this "
                                     "share of its bank's draws")
@@ -633,7 +636,7 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
             validation_seeing=tuple(str(path) for path in arguments.seeing_banks
                                     or [sharpen_model.find_bank(work, "seeing", "validation")]),
             excluded=recorded.excluded, object_cap=recorded.object_cap,
-            manifest=str(manifest) if manifest else recorded.manifest)
+            manifest=str(manifest) if manifest else recorded.manifest, focus_check=recorded.focus_check)
         settings = sharpen_model.settings_from(record["config"]["settings"])
         return sharpen_model.evaluate_saved(store, arguments.name, choice.validation(settings), limit=arguments.limit,
                                             seed=arguments.seed)
@@ -660,9 +663,9 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
         validation_seeing=tuple(str(path) for path in arguments.validation_seeing_banks
                                 or [sharpen_model.find_bank(work, "seeing", "validation")]),
         pairs=tuple((str(Path(path)), weight) for path, weight in arguments.pairs_banks),
-        excluded=sharpen_model.FOCUS_PAIRS if arguments.exclude_pairs is None
-        else tuple(pair for pair in arguments.exclude_pairs.split(",") if pair),
-        object_cap=arguments.object_cap, manifest=str(manifest) if manifest else None)
+        excluded=tuple(pair for pair in arguments.exclude_pairs.split(",") if pair),
+        object_cap=arguments.object_cap, manifest=str(manifest) if manifest else None,
+        focus_check=arguments.focus_check)
     record = sharpen_model.train(
         store, name=arguments.name, choice=choice, steps=arguments.steps, width=arguments.width,
         levels=arguments.levels, batch=arguments.batch, learning_rate=arguments.learning_rate, seed=arguments.seed,

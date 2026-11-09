@@ -23,12 +23,16 @@ PSF's stamp. It learns from the banks `sharpen_bank` cuts:
   best half as target, and any pairs a caller supplies in that bank's
   format. The network reads the input's stamp and the bank's ratio, from
   the stamps' widths (which every window has) or from the field's Moffat
-  fit (which fails below about 2 px). The target is moved by its pair's
-  median centroid offset, so the model is never taught to move stars:
-  halves on one grid differ in their stars' centroids as much as their
-  PSFs differ in symmetry, which a stamp centred on its centroid does not
-  show. Windows whose target is wider than their input are left out, and
-  so are the pairs of a field whose focus changes across it.
+  fit (which fails below about 2 px). The target is moved so that its
+  stars' light-weighted centres meet the input's, so the model is never
+  taught to move stars: halves on one grid differ in their stars' centres
+  as much as their PSFs differ in symmetry, which a stamp centred on its
+  star does not show. Windows whose target is wider than their input are
+  left out.
+
+Windows of either kind whose stamps are out of focus, ringed or flat-topped,
+are left out, and so is every window of a source where more than a quarter
+are.
 
 What the network reads is made from the image alone, as it will be at
 inference: `asinh((x − b) / σ̄)` of the image, `asinh(σ / σ̄)` of a noise
@@ -113,7 +117,26 @@ STAMP_PLANES = ("peak", "wings")
 WINGS = 1e-3
 FWHM_PER_SIGMA = 2.0 * math.sqrt(2.0 * math.log(2.0))
 SOURCES = ("kernel", "seeing", "pairs")
-CENTROID_OFFSETS = ("shift", "none")
+# How a pair's target is moved, so the model is never taught to move stars:
+# by the shift of its stars' light-weighted centres, by the median shift of
+# their detections' centroids, or not at all. On the C925's lopsided worst
+# halves a star's peak and its light's centre move apart, by up to 2 px,
+# and a detection's centroid falls between them, nearer the peak the
+# fainter the star (2026-11-09). The light's centre is the same for every
+# star, and the one point that convolution with a PSF centred on its own
+# light keeps.
+CENTROID_OFFSETS = ("light", "detection", "none")
+# A pair's light offset is measured on its windows' isolated stars, each
+# within this many input widths, less the median of the annulus out to
+# half as far again ...
+LIGHT_RADIUS = 2.5
+# ... and fitted as a plane over the field where it finds this many stars,
+# as their median where it finds `LIGHT_LEAST`, and taken from its
+# detections' median where it finds fewer.
+LIGHT_PLANE_STARS = 30
+LIGHT_LEAST = 8
+# The version of the light offsets a bank keeps beside its arrays.
+LIGHT_VERSION = 1
 RATIO_SOURCES = ("stamp", "fit")
 # How the network's residual meets the input: added to it in σ̄, as the
 # noise model's is, or added to the asinh of it, which the network reads,
@@ -125,11 +148,17 @@ RATIO_SOURCES = ("stamp", "fit")
 RESIDUALS = ("asinh", "linear")
 # The bank's info column each ratio source reads.
 RATIO_COLUMNS = {"stamp": "width_ratio", "fit": "ratio"}
-# The defocused Ultracat object's seeing pairs, its night's split and its
-# many nights': their worst halves hold a focus gradient as well as seeing,
-# 2.7 px at one corner to 8.9 px at the other, with ring-shaped stamps
-# (cut-sharpen, 2026-11-08).
-FOCUS_PAIRS = ("667edfabbd66/seeing", "multi-night/64bd07caa07d/seeing")
+# A stamp is out of focus where its azimuthal profile rises again within
+# two widths of its middle (a ring), or where the radius at which it falls
+# to 90% of its centre is more than `FLAT_TOP` of the radius at which it
+# falls to half (a flat top: a Gaussian reads 0.2 to 0.35 sampled, a disc
+# near 1). Over the PSF fields' nodes, ringed and flat stamps read 0.6 to
+# 0.9, and stamps in focus 0.2 to 0.45 at any width, 2 px or 13 (2026-11-09).
+# A source with more than `OUT_OF_FOCUS_SHARE` of its windows out of focus
+# is left out whole: one Ultracat object's worst halves, with rings over
+# half their field, and a few deep stacks whose every corner is out.
+FLAT_TOP = 0.6
+OUT_OF_FOCUS_SHARE = 0.25
 # A known-kernel window's draw of K stops within this share of the width
 # ratio asked.
 RATIO_TOLERANCE = 0.01
@@ -181,11 +210,14 @@ class Settings:
     max_ratio: float = 1.0
     min_ratio: float = 0.0
     points_empty: float = 0.1
-    centroid_offset: str = "shift"
+    centroid_offset: str = "light"
     ratio_source: str = "stamp"
     residual: str = "asinh"
 
     def __post_init__(self) -> None:
+        # Runs before the light offset recorded the detections' as "shift".
+        if self.centroid_offset == "shift":
+            object.__setattr__(self, "centroid_offset", "detection")
         if self.residual not in RESIDUALS:
             raise ValueError(f"residual is one of {RESIDUALS}, not {self.residual!r}")
         if self.centroid_offset not in CENTROID_OFFSETS:
@@ -271,16 +303,19 @@ class Bank:
     """A sharpening bank as the trainer draws from it: its arrays, the
     windows it keeps, how often each is drawn, and why the rest are left
     out. A pair bank keeps the windows whose ratio is known and within the
-    settings' bounds, of the pairs not `excluded`. `set_names` names each
-    set, so its object is known; without it a source's object is its
-    record's, or its set."""
+    settings' bounds, of the pairs not `excluded`. With `focus_check`, any
+    bank leaves out the windows whose stamps are out of focus, and every
+    window of a source where more than `OUT_OF_FOCUS_SHARE` are. `set_names`
+    names each set, so its object is known; without it a source's object is
+    its record's, or its set."""
 
     def __init__(self, directory: Path, settings: Settings, *, excluded: tuple[str, ...] = (), object_cap: float = 0.0,
-                 set_names: dict[str, str] | None = None, weight: float = 1.0) -> None:
+                 set_names: dict[str, str] | None = None, weight: float = 1.0, focus_check: bool = True) -> None:
         self.directory = Path(directory)
         self.arrays = open_bank(self.directory)
         done = self.arrays["done"]
         self.label, self.pairs, self.weight = done["label"], bool(done["pairs"]), weight
+        self.side = int(done["window"])
         self.columns = {name: index for index, name in enumerate(done["info"])}
         self.info = np.asarray(self.arrays["info"])
         self.sources = self.arrays["sources"]
@@ -304,6 +339,16 @@ class Bank:
             with np.errstate(invalid="ignore"):
                 leave(ratio > settings.max_ratio, "ratio-above")
                 leave(ratio < settings.min_ratio, "ratio-below")
+        if focus_check:
+            stamps = (("input_stamp", "input_width"), ("target_stamp", "target_width")) if self.pairs \
+                else (("stamp", "width"),)
+            out = np.zeros(len(self.info), dtype=bool)
+            for name, width in stamps:
+                out |= out_of_focus(self.arrays[name], self.info[:, self.columns[width]])
+            counts = np.bincount(source_of, minlength=len(self.sources))
+            share = np.bincount(source_of, weights=out, minlength=len(self.sources)) / np.maximum(counts, 1)
+            leave((share > OUT_OF_FOCUS_SHARE)[source_of], "out-of-focus-source")
+            leave(out, "out-of-focus")
         self.kept = np.nonzero(keep)[0]
         if not len(self.kept):
             raise ValueError(f"the {self.label} bank at {self.directory} keeps no window")
@@ -312,6 +357,7 @@ class Bank:
         self.cumulative = np.cumsum(self.odds)
         self.object_cap = object_cap
         self.loaded: dict[int, np.ndarray] = {}
+        self.light = light_offsets(self) if self.pairs and settings.centroid_offset == "light" else {}
 
     @staticmethod
     def object_of(source: dict[str, Any], set_names: dict[str, str] | None) -> str:
@@ -335,9 +381,24 @@ class Bank:
         return self.loaded[source]
 
     def offset(self, source: int) -> tuple[float, float] | None:
-        """A pair's median centroid offset, target from input, (x, y)."""
+        """A pair's median detection offset, target from input, (x, y)."""
         found = (self.sources[source].get("alignment") or {}).get("offset_px")
         return None if found is None else (float(found[0]), float(found[1]))
+
+    def target_offset(self, window: int, how: str) -> tuple[float, float] | None:
+        """How far a pair's target stars sit from its input's at a window's
+        middle, (x, y), measured as `how` says (`CENTROID_OFFSETS`): the
+        light offset where its pair has one, else the detections'."""
+        if how == "none":
+            return None
+        source = int(self.info[window, 0])
+        fit = self.light.get(source) if how == "light" else None
+        if fit is None:
+            return self.offset(source)
+        middle = (self.side - 1) / 2
+        across = (self.info[window, self.columns["x"]] + middle - fit["centre"][0]) / 1000
+        down = (self.info[window, self.columns["y"]] + middle - fit["centre"][1]) / 1000
+        return tuple(float(c[0] + c[1] * across + c[2] * down) for c in (fit["dx"], fit["dy"]))
 
     def summary(self) -> dict[str, Any]:
         """What a run records of the bank."""
@@ -347,16 +408,156 @@ class Bank:
         for window_source, odds in zip(source_of, self.odds):
             name = self.objects[window_source]
             shares[name] = shares.get(name, 0.0) + float(odds)
-        return {"directory": str(self.directory), "label": self.label, "windows": int(len(self.info)),
-                "kept": int(len(self.kept)), "left": self.left, "objects": len(kept_objects),
-                "largest_object_share": round(max(shares.values()), 4), "object_cap": self.object_cap,
-                "weight": self.weight}
+        found = {"directory": str(self.directory), "label": self.label, "windows": int(len(self.info)),
+                 "kept": int(len(self.kept)), "left": self.left, "objects": len(kept_objects),
+                 "largest_object_share": round(max(shares.values()), 4), "object_cap": self.object_cap,
+                 "weight": self.weight}
+        if self.light:
+            kinds = [fit["kind"] for fit in self.light.values()]
+            found["light_offsets"] = {kind: kinds.count(kind) for kind in sorted(set(kinds))}
+            found["light_offsets"]["detection"] = len(self.sources) - len(kinds)
+        return found
 
 
 def pair_id(source: dict[str, Any]) -> str:
     """A pair's id: its record's, as the seeing bank names it, or its
     input's."""
     return (source.get("record") or {}).get("pair") or source["input"]
+
+
+def stamp_profiles(stamps: np.ndarray, chunk: int = 1024) -> np.ndarray:
+    """Each stamp's azimuthal mean profile about its middle, in whole-pixel
+    radii, for a stack of stamps of one side."""
+    side = stamps.shape[-1]
+    middle = (side - 1) / 2
+    down, across = np.mgrid[0:side, 0:side] - middle
+    radii = np.rint(np.hypot(across, down)).astype(int).ravel()
+    spread = np.zeros((side * side, radii.max() + 1), dtype=np.float32)
+    spread[np.arange(side * side), radii] = 1.0
+    spread /= spread.sum(axis=0)
+    return np.concatenate([np.asarray(stamps[start:start + chunk], dtype=np.float32).reshape(-1, side * side) @ spread
+                           for start in range(0, len(stamps), chunk)])
+
+
+def falling_to(profiles: np.ndarray, level: float) -> np.ndarray:
+    """The radius at which each profile first falls below `level` of its
+    centre, between whole-pixel radii; NaN where it never does."""
+    centre = profiles[:, 0]
+    below = profiles[:, 1:] < level * centre[:, None]
+    index = below.argmax(axis=1) + 1
+    rows = np.arange(len(profiles))
+    before, after = profiles[rows, index - 1], profiles[rows, index]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        radius = (index - 1) + (before - level * centre) / (before - after)
+    return np.where(below.any(axis=1) & (centre > 0), radius, np.nan)
+
+
+def out_of_focus(stamps: np.ndarray, widths: np.ndarray) -> np.ndarray:
+    """Which stamps are out of focus: a profile rising again within two
+    `widths` of the middle, a flat top (`FLAT_TOP`), or no positive centre."""
+    profiles = stamp_profiles(stamps)
+    reach = np.maximum(2, np.ceil(2 * np.nan_to_num(np.asarray(widths, dtype=np.float64), nan=1.0))).astype(int)
+    radii = np.arange(1, profiles.shape[1])
+    rising = np.where(radii[None, :] <= reach[:, None], profiles[:, 1:], -np.inf).max(axis=1) > profiles[:, 0]
+    with np.errstate(invalid="ignore"):
+        flat = falling_to(profiles, 0.9) / falling_to(profiles, 0.5) > FLAT_TOP
+    return rising | flat | ~(profiles[:, 0] > 0)
+
+
+def light_centre(plane: np.ndarray, x: float, y: float, radius: float) -> tuple[float, float] | None:
+    """A star's light-weighted centre within `radius` of (`x`, `y`), less
+    the median of the annulus out to 1.5 `radius`; None where either holds
+    a pixel not finite or the light is not positive."""
+    reach = int(math.ceil(1.5 * radius)) + 1
+    column, row = int(round(x)), int(round(y))
+    if row - reach < 0 or column - reach < 0 or row + reach >= plane.shape[0] or column + reach >= plane.shape[1]:
+        return None
+    values = plane[row - reach:row + reach + 1, column - reach:column + reach + 1].astype(np.float64)
+    down, across = np.mgrid[-reach:reach + 1, -reach:reach + 1]
+    distance = np.hypot(across + column - x, down + row - y)
+    inside, annulus = distance <= radius, (distance > radius) & (distance <= 1.5 * radius)
+    if not (np.isfinite(values[inside]).all() and np.isfinite(values[annulus]).all()):
+        return None
+    light = np.where(inside, values - float(np.median(values[annulus])), 0.0)
+    total = light.sum()
+    if not total > 0:
+        return None
+    return float(column + (light * across).sum() / total), float(row + (light * down).sum() / total)
+
+
+def peak_centre(plane: np.ndarray, x: float, y: float) -> tuple[float, float] | None:
+    """A star's peak: its brightest pixel within 2 px of (`x`, `y`), moved
+    by a parabola through each axis' three pixels."""
+    column, row = int(round(x)), int(round(y))
+    if row < 3 or column < 3 or row + 3 >= plane.shape[0] or column + 3 >= plane.shape[1]:
+        return None
+    box = plane[row - 2:row + 3, column - 2:column + 3]
+    if not np.isfinite(box).all():
+        return None
+    down, across = np.unravel_index(int(np.argmax(box)), box.shape)
+    row, column = row - 2 + int(down), column - 2 + int(across)
+    near = plane[row - 1:row + 2, column - 1:column + 2].astype(np.float64)
+    found = []
+    for low, middle, high in ((near[1, 0], near[1, 1], near[1, 2]), (near[0, 1], near[1, 1], near[2, 1])):
+        bend = low - 2 * middle + high
+        found.append(float(np.clip(0.5 * (low - high) / bend, -0.5, 0.5)) if bend < 0 else 0.0)
+    return column + found[0], row + found[1]
+
+
+def fitted_offsets(stars: np.ndarray) -> dict[str, Any]:
+    """A pair's light offsets from its stars' rows (x, y, dx, dy): a plane
+    over the field in each axis, clipped at three robust σ twice, where
+    there are `LIGHT_PLANE_STARS`, else the medians; its slopes per 1000 px
+    about the stars' middle."""
+    centre = np.median(stars[:, :2], axis=0)
+    if len(stars) < LIGHT_PLANE_STARS:
+        return {"kind": "median", "stars": len(stars), "centre": centre.tolist(),
+                "dx": [float(np.median(stars[:, 2])), 0.0, 0.0], "dy": [float(np.median(stars[:, 3])), 0.0, 0.0]}
+    design = np.column_stack([np.ones(len(stars)), (stars[:, 0] - centre[0]) / 1000, (stars[:, 1] - centre[1]) / 1000])
+    found: dict[str, Any] = {"kind": "plane", "stars": len(stars), "centre": centre.tolist()}
+    for axis, name in ((2, "dx"), (3, "dy")):
+        values = stars[:, axis]
+        keep = np.ones(len(values), dtype=bool)
+        for _ in range(3):
+            coefficients, *_ = np.linalg.lstsq(design[keep], values[keep], rcond=None)
+            residual = values - design @ coefficients
+            scatter = 1.4826 * float(np.median(np.abs(residual[keep] - np.median(residual[keep]))))
+            keep = np.abs(residual) <= 3 * max(scatter, 1e-3)
+        found[name] = [float(value) for value in coefficients]
+    return found
+
+
+def light_offsets(bank: Bank) -> dict[int, dict[str, Any]]:
+    """Each pair's light offset, target from input (`fitted_offsets`), from
+    the isolated stars of all its windows, measured by `light_centre` in
+    both within `LIGHT_RADIUS` input widths; kept beside the bank's arrays
+    once measured. A pair with fewer than `LIGHT_LEAST` stars has none."""
+    path = bank.directory / f"light-offsets-{LIGHT_VERSION}.json"
+    if path.exists():
+        return {int(source): fit for source, fit in json.loads(path.read_text()).items()}
+    rows: dict[int, list[tuple[float, float, float, float]]] = {}
+    for window in range(len(bank.info)):
+        row = bank.row(window)
+        source, width = int(row["source"]), row["input_width"]
+        if not width > 0:
+            continue
+        radius = LIGHT_RADIUS * width
+        image = np.asarray(bank.arrays["input"][window], dtype=np.float32)
+        target = np.asarray(bank.arrays["target"][window], dtype=np.float32)
+        valid = np.isfinite(image) & np.isfinite(target) & ~np.asarray(bank.arrays["saturated"][window]).astype(bool)
+        stars = measured_stars(window_points(bank, source, row), np.ones(image.shape, dtype=bool), valid,
+                               int(math.ceil(1.5 * radius)) + 1)
+        for x, y in stars[:, :2]:
+            before, after = light_centre(image, float(x), float(y), radius), light_centre(target, float(x), float(y),
+                                                                                           radius)
+            if before is not None and after is not None:
+                rows.setdefault(source, []).append((float(x) + row["x"], float(y) + row["y"], after[0] - before[0],
+                                                    after[1] - before[1]))
+    found = {source: fitted_offsets(np.array(stars)) for source, stars in rows.items() if len(stars) >= LIGHT_LEAST}
+    partial = path.with_suffix(".partial")
+    partial.write_text(json.dumps(found))
+    partial.replace(path)
+    return found
 
 
 def set_names(manifest_path: Path | None) -> dict[str, str]:
@@ -374,21 +575,24 @@ def set_names(manifest_path: Path | None) -> dict[str, str]:
 class BankChoice:
     """Which banks a run trains and is measured on, and how it reads them:
     every path, the supplied banks' weights, the pairs left out, the cap on
-    an object's draws, and the manifest whose set names give the objects.
-    A run records it, so a resumed run opens its banks as it did."""
+    an object's draws, the manifest whose set names give the objects, and
+    whether windows out of focus are left out. A run records it, so a
+    resumed run opens its banks as it did."""
 
     kernel: str
     seeing: tuple[str, ...]
     validation_kernel: str | None
     validation_seeing: tuple[str, ...]
     pairs: tuple[tuple[str, float], ...] = ()
-    excluded: tuple[str, ...] = FOCUS_PAIRS
+    excluded: tuple[str, ...] = ()
     object_cap: float = 0.03
     manifest: str | None = None
+    focus_check: bool = True
 
     def options(self) -> dict[str, Any]:
         names = set_names(Path(self.manifest) if self.manifest else None)
-        return {"excluded": self.excluded, "object_cap": self.object_cap, "set_names": names}
+        return {"excluded": self.excluded, "object_cap": self.object_cap, "set_names": names,
+                "focus_check": self.focus_check}
 
     def train(self, settings: Settings) -> dict[str, list[Bank]]:
         """The train banks, by kind."""
@@ -688,18 +892,19 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
 
 
 def pair_example(bank: Bank, window: int, settings: Settings) -> Example:
-    """A pair's window: the input and the target, moved by the pair's
-    centroid offset as the settings say, the input's image-only noise map
-    and stamp, and the bank's ratio. The loss weighs by the target stack's
-    noise, or the input stack's where the bank keeps none for its target."""
+    """A pair's window: the input and the target, moved back by the pair's
+    offset at the window as the settings measure it, the input's image-only
+    noise map and stamp, and the bank's ratio. The loss weighs by the target
+    stack's noise, or the input stack's where the bank keeps none for its
+    target."""
     row = bank.row(window)
     source = int(row["source"])
     planes = {name: np.asarray(bank.arrays[name][window]) for name in
               ("input", "target", "input_sigma", "input_map", "target_sigma")}
     target = planes["target"].astype(np.float32)
     band = 0
-    offset = bank.offset(source)
-    if settings.centroid_offset == "shift" and offset is not None:
+    offset = bank.target_offset(window, settings.centroid_offset)
+    if offset is not None:
         target = shifted(target, -offset[0], -offset[1])
         band = SHIFT_BAND
     sigma = stack_noise(planes["target_sigma"], planes["target"],
@@ -1311,10 +1516,13 @@ def measured_stars(points: np.ndarray, inner: np.ndarray, valid: np.ndarray, rad
     than `NEIGHBOUR_SHARE` of their flux (a clipped core always is)."""
     columns = psf_fields.DETECTION_COLUMNS
     flux = points[:, columns.index("flux")]
-    usable = ((points[:, columns.index("detected")] == 1) & (points[:, columns.index("clipped")] == 0)
-              & (points[:, columns.index("saturated")] == 0) & (points[:, columns.index("snr")] >= MEASURE_SNR)
-              & np.isfinite(flux))
     height, width = inner.shape
+    with np.errstate(invalid="ignore"):
+        column, row = np.rint(points[:, 0]), np.rint(points[:, 1])
+        usable = ((points[:, columns.index("detected")] == 1) & (points[:, columns.index("clipped")] == 0)
+                  & (points[:, columns.index("saturated")] == 0) & (points[:, columns.index("snr")] >= MEASURE_SNR)
+                  & np.isfinite(flux) & (column - radius >= 0) & (row - radius >= 0)
+                  & (column + radius < width) & (row + radius < height))
     kept = []
     for index in np.nonzero(usable)[0]:
         x, y = float(points[index, 0]), float(points[index, 1])
@@ -1414,7 +1622,29 @@ def window_measures(example: Example, output: np.ndarray, band: int,
         found["rings"] = [{"output": row["ring_profile"], "output_pixel": row["ring_pixel"],
                            "target": target["ring_profile"]}
                           for row, target, chosen in zip(rows, targets, bright) if chosen]
+    found["moved"] = star_moves(example, output, inner)
     return found
+
+
+def star_moves(example: Example, output: np.ndarray, inner: np.ndarray) -> list[dict[str, Any]]:
+    """How far each isolated star moved from the input to the output, (x,
+    y): its light-weighted centre within `LIGHT_RADIUS` input widths, its
+    peak, and how far the target's light sits from the input's."""
+    radius = LIGHT_RADIUS * example.width
+    stars = measured_stars(example.points, inner, example.valid, int(math.ceil(1.5 * radius)) + 1)
+    moves = []
+    for x, y in stars[:, :2]:
+        x, y = float(x), float(y)
+        light = [light_centre(plane, x, y, radius) for plane in (example.image, output, example.target)]
+        peak = [peak_centre(plane, x, y) for plane in (example.image, output)]
+        if light[0] is None or light[1] is None:
+            continue
+        moves.append({"light": [light[1][0] - light[0][0], light[1][1] - light[0][1]],
+                      "peak": [peak[1][0] - peak[0][0], peak[1][1] - peak[0][1]]
+                      if peak[0] is not None and peak[1] is not None else None,
+                      "target_light": [light[2][0] - light[0][0], light[2][1] - light[0][1]]
+                      if light[2] is not None else None})
+    return moves
 
 
 def summarized(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1457,6 +1687,14 @@ def summarized(rows: list[dict[str, Any]]) -> dict[str, Any]:
     changes = [row["change"] for row in rows if row.get("change") is not None]
     if changes:
         found["identity_change"] = spread(changes)
+    moves = [move for row in rows for move in row.get("moved", [])]
+    for key in ("light", "peak", "target_light"):
+        shifts = np.array([move[key] for move in moves if move.get(key) is not None])
+        if len(shifts):
+            found[f"moved_{key}_px"] = spread(list(np.hypot(shifts[:, 0], shifts[:, 1])))
+            found[f"moved_{key}_median"] = [round(float(np.median(shifts[:, axis])), 4) for axis in (0, 1)]
+    if moves:
+        found["moved_stars"] = len(moves)
     return found
 
 
