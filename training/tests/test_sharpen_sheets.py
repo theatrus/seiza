@@ -64,3 +64,30 @@ def test_reblur_gives_back_the_input_of_a_sharpening_that_only_undid_blur():
     # Twice the stars' light where none was: no blur of the input hid it.
     assert sharpen_sheets.reblur(big(blurred), big(100.0 + 2 * (sharp - 100.0)), runner, valid, cell) > 20.0
     assert sharpen_sheets.reblur(big(blurred), big(sharp), runner, valid, {**cell, "ratio": 1.02}) is None
+
+
+def test_a_star_s_ellipticity_is_its_light_s_and_roundness_counts_the_stars_pinched():
+    from seiza_training import psf_fields
+
+    side = 124
+    down, across = np.mgrid[0:side, 0:side]
+
+    def star(x, y, sx, sy):
+        return 5000.0 * np.exp(-((across - x) ** 2 / (2 * sx**2) + (down - y) ** 2 / (2 * sy**2)))
+
+    places = [(30.3, 30.6), (92.2, 32.1), (31.5, 92.4), (93.0, 93.7)]
+    round_image = (100.0 + sum(star(x, y, 2.0, 2.0) for x, y in places)).astype(np.float32)
+    pinched = (100.0 + sum(star(x, y, 2.0, 1.4) for x, y in places)).astype(np.float32)
+    assert sharpen_sheets.ellipticity(round_image, 30.3, 30.6, 9.0) == pytest.approx(0.0, abs=0.01)
+    assert sharpen_sheets.ellipticity(pinched, 30.3, 30.6, 9.0) == pytest.approx(0.3, abs=0.02)
+    columns = psf_fields.DETECTION_COLUMNS
+    points = np.zeros((4, len(columns)), dtype=np.float32)
+    points[:, :2] = places
+    points[:, columns.index("flux")], points[:, columns.index("snr")] = 1e5, 200.0
+    points[:, columns.index("detected")] = 1.0
+    runner = SimpleNamespace(points=points, widths=np.array([[4.7]]))
+    valid = np.ones((side, side), dtype=bool)
+    found = sharpen_sheets.roundness(round_image, pinched, runner, valid)
+    assert found["stars"] == 4 and found["worse_by_0_05"] == 1.0
+    assert found["input"][1] == pytest.approx(0.0, abs=0.01) and found["output"][1] == pytest.approx(0.3, abs=0.02)
+    assert sharpen_sheets.roundness(round_image, round_image, runner, valid)["worse_by_0_05"] == 0.0

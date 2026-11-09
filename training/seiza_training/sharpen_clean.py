@@ -29,8 +29,9 @@ IMAGE_MAPS = ("image", "constant")
 
 
 def denoised(record: dict[str, Any], model: Any, image: np.ndarray, where: Any) -> np.ndarray:
-    """`image`, one window, with all the noise the run finds taken out, as
-    one tile, under the hole guard where the run trained under it."""
+    """`image` with all the noise the run finds taken out, a window as one
+    tile and a larger image as the run tiles any, under the hole guard
+    where the run trained under it."""
     config = record["config"]
     kind = config.get("noise_map", "raw")
     if kind not in IMAGE_MAPS:
@@ -40,9 +41,12 @@ def denoised(record: dict[str, Any], model: Any, image: np.ndarray, where: Any) 
     sigma = input_sigma(kind, shown, None, None)
     planes, background, noise = view(shown, sigma, sky=config.get("sky", "global"),
                                      noise_plane=config.get("noise_plane", "linear"))
-    # The window is the one tile, whole.
     grid = record["inference"]["multiple"]
-    inference = {"tile": image.shape[0], "overlap": grid, "margin": 0, "multiple": grid}
+    if max(image.shape) <= record["inference"]["tile"] and image.shape[0] == image.shape[1]:
+        # A window is the one tile, whole.
+        inference = {"tile": image.shape[0], "overlap": grid, "margin": 0, "multiple": grid}
+    else:
+        inference = record["inference"]
     found = infer(denoiser(model, background, noise, where), planes, **inference)[0]
     if mask is not None:
         found = guarded_residual(image, shown, found, mask, mapped, guard)
