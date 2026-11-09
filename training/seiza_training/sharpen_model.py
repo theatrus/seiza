@@ -262,6 +262,12 @@ class Settings:
     # image is to be deconvolved of. A donor whose blur falls outside
     # `kernel_ratios` gives way to a Gaussian.
     real_kernels: float = 0.0
+    # Make a known-kernel window's target PSF round about its middle, not
+    # only in its second moments: a blur can even out a PSF's widths but
+    # not a cross of four arms, whose widths are alike already, and runs
+    # that took a star's round halo off left its cross standing, twice as
+    # plain as the other sharpener leaves it (2026-11-09).
+    round_target: bool = False
 
     @property
     def planes(self) -> tuple[str, ...]:
@@ -805,6 +811,75 @@ def positive(covariance: np.ndarray) -> np.ndarray:
     return (vectors * np.clip(values, 0.0, None)) @ vectors.T
 
 
+# A rounding filter's gain is held to this at most, where the PSF's
+# transform is all but nothing, and its transform's own floor.
+ROUNDING_GAIN = 2.0
+ROUNDING_FLOOR = 1e-3
+# The azimuthal profile is weighed over this many pixels of radius at the
+# middle, out to `ROUNDING_REACH`.
+ROUNDING_RING = 0.2
+ROUNDING_REACH = 40
+# The rounding filter reads this far past a pixel, at most, for the loss.
+ROUNDING_BAND = 12
+
+
+def azimuthal(stamp: np.ndarray) -> np.ndarray:
+    """A stamp averaged about its middle: at each radius, the mean of its
+    pixels weighed by a Gaussian in radius, `ROUNDING_RING` px wide at the
+    middle and a tenth of the radius wider, so that a ring always holds
+    pixels at every angle; read back at every pixel's own radius and
+    summing to what it did. Past `ROUNDING_REACH` px, where little is, the
+    weights are whole rings."""
+    middle = (stamp.shape[0] - 1) / 2
+    down, across = np.mgrid[0:stamp.shape[0], 0:stamp.shape[1]] - middle
+    radius = np.hypot(across, down).ravel()
+    values = stamp.astype(np.float64).ravel()
+    near = radius <= ROUNDING_REACH + 4
+    centres = np.arange(0.0, ROUNDING_REACH + 0.01, 0.25)
+    spread = ROUNDING_RING + 0.1 * centres
+    weights = np.exp(-0.5 * ((radius[near][None, :] - centres[:, None]) / spread[:, None]) ** 2)
+    profile = (weights @ values[near]) / weights.sum(axis=1)
+    rings = np.rint(radius).astype(int)
+    counts = np.maximum(np.bincount(rings), 1)
+    far_values = np.bincount(rings, values) / counts
+    far_radii = np.arange(len(far_values), dtype=np.float64)
+    far = far_radii > ROUNDING_REACH
+    out = np.interp(radius, np.concatenate([centres, far_radii[far]]),
+                    np.concatenate([profile, far_values[far]])).reshape(stamp.shape)
+    # The core is left as it is: its few pixels sit at few radii, and a
+    # mean over radius would sharpen or blur it. From one width out to two
+    # the mean takes over.
+    width = stamp_width(stamp)
+    if width > 0:
+        share = np.clip(radius.reshape(stamp.shape) / width - 1.0, 0.0, 1.0)
+        out = share * out + (1.0 - share) * stamp
+    total = out.sum()
+    return (out * (float(stamp.sum(dtype=np.float64)) / total)).astype(np.float32) if total > 0 else stamp
+
+
+def rounding(stamp: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """The filter, as a stamp to blur by, that takes a PSF `stamp` to its
+    azimuthal mean, and that mean: the ratio of their transforms, held to
+    `ROUNDING_GAIN`, and one where the PSF's own is under `ROUNDING_FLOOR`
+    of its largest."""
+    side = stamp.shape[0]
+    pad = (STAMP_CANVAS - side) // 2
+    canvas = (side + 2 * pad,) * 2
+    round_stamp = azimuthal(stamp)
+    before = np.fft.rfft2(np.pad(stamp.astype(np.float64), pad))
+    after = np.fft.rfft2(np.pad(round_stamp.astype(np.float64), pad))
+    size = np.abs(before)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = np.where(size > ROUNDING_FLOOR * size.max(), after / before, 1.0)
+    gain = np.abs(ratio)
+    ratio = np.where(gain > ROUNDING_GAIN, ratio * (ROUNDING_GAIN / np.maximum(gain, 1e-12)), ratio)
+    kernel = np.fft.fftshift(np.fft.irfft2(ratio, s=canvas))
+    centre = canvas[0] // 2
+    half = side // 2
+    kernel = kernel[centre - half:centre + half + 1, centre - half:centre + half + 1]
+    return (kernel / kernel.sum()).astype(np.float32), round_stamp
+
+
 def rounded(stamp: np.ndarray, floor_px: float) -> tuple[np.ndarray, np.ndarray, float]:
     """The blur that brings a stamp to a PSF round in its second moments,
     `Σ_T − Σ_ref` with `Σ_T` round at the stamp's largest eigenvalue, or as
@@ -858,6 +933,9 @@ class Kernel:
     asked: float
     # A real PSF that blurs in K's place, where one does.
     donor: np.ndarray | None = None
+    # The filter that makes the target's PSF round about its middle
+    # (`rounding`), where the settings ask it.
+    rounding: np.ndarray | None = None
 
     @property
     def identity(self) -> bool:
@@ -885,13 +963,17 @@ def donor_kernel(stamp: np.ndarray, donor: np.ndarray, settings: Settings) -> Ke
     reference = stamp_width(stamp)
     blurred = blurred_stamp(stamp, donor)
     width = stamp_width(blurred)
-    delta, _, target_width = rounded(stamp, settings.floor_px)
+    delta, target, target_width = rounded(stamp, settings.floor_px)
+    made = None
+    if settings.round_target:
+        made, target = rounding(target)
+        target_width = stamp_width(target)
     asked = width / reference
     low, high = settings.kernel_ratios
     if not low <= asked <= high or target_width > settings.max_ratio * width:
         return None
     return Kernel(np.zeros((2, 2)), delta, blurred, target_width / width,
-                  {"reference": reference, "input": width, "target": target_width}, asked, donor)
+                  {"reference": reference, "input": width, "target": target_width}, asked, donor, made)
 
 
 def known_kernel(stamp: np.ndarray, rng: np.random.Generator, settings: Settings, *, identity: bool = False) -> Kernel:
@@ -905,7 +987,11 @@ def known_kernel(stamp: np.ndarray, rng: np.random.Generator, settings: Settings
         zero = np.zeros((2, 2))
         return Kernel(zero, zero, stamp.astype(np.float32), 1.0,
                       {"reference": reference, "input": reference, "target": reference}, 1.0)
-    delta, _, target_width = rounded(stamp, settings.floor_px)
+    delta, target, target_width = rounded(stamp, settings.floor_px)
+    made = None
+    if settings.round_target:
+        made, target = rounding(target)
+        target_width = stamp_width(target)
     low, high = settings.kernel_ratios
     low = max(low, target_width / (reference * settings.max_ratio))
     asked = float(rng.uniform(low, max(low, high)))
@@ -913,7 +999,7 @@ def known_kernel(stamp: np.ndarray, rng: np.random.Generator, settings: Settings
     angle = float(rng.uniform(0.0, math.pi))
     covariance, blurred, width = widened(stamp, reference, asked, ellipticity, angle)
     return Kernel(covariance, delta, blurred, target_width / width,
-                  {"reference": reference, "input": width, "target": target_width}, asked)
+                  {"reference": reference, "input": width, "target": target_width}, asked, None, made)
 
 
 # Examples.
@@ -1042,6 +1128,9 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
         fresh /= max(float(fresh.std()), 1e-6)
     fresh = fresh * (share * sigma)
     shown = blurred + fresh
+    if target is not None and kernel.rounding is not None:
+        target = blurred_images(target, [kernel.rounding])[0]
+        band = max(band, ROUNDING_BAND)
     if target is None:
         target, target_sigma = shown, math.hypot(scale, share) * sigma
     else:

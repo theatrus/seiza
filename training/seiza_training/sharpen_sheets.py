@@ -407,6 +407,55 @@ def whole_measures(image: np.ndarray, output: np.ndarray, runner: Sharpener, val
         found["rings_deeper_than_1"] = float(np.mean([ring < -1.0 for ring in rings]))
         found["bright_stars"] = len(rings)
     found["brightest"] = brightest_rings(image, output, runner)
+    found["spikes"] = spikes(image, output, runner)
+    return found
+
+
+# Spikes are looked for on this many of the brightest stars that stand
+# apart, stacked, from 2 to 6 widths out along arms 3 px wide.
+SPIKE_STARS = 40
+
+
+def spikes(image: np.ndarray, output: np.ndarray, runner: Sharpener) -> dict[str, Any]:
+    """A cross of four arms about the stars, as a PSF may hold and a
+    sharpening may leave standing once the round light about it is gone:
+    over the median of the `SPIKE_STARS` brightest stars that stand apart,
+    each less its sky, the mean along the four axis arms and along the four
+    diagonals, 2 to 6 typical widths out, in the image's median noise, for
+    the input and the output. Arms above diagonals are a cross."""
+    width = float(np.nanmedian(runner.widths))
+    reach = int(7 * width) + 4
+    height, wide = image.shape
+    columns = psf_fields.DETECTION_COLUMNS
+    points = runner.points
+    chosen: list[tuple[float, float]] = []
+    for index in np.argsort(-np.nan_to_num(points[:, columns.index("peak")], nan=-np.inf)):
+        x, y = float(points[index, 0]), float(points[index, 1])
+        if not (reach < x < wide - reach and reach < y < height - reach):
+            continue
+        if any(abs(x - cx) < 2 * reach and abs(y - cy) < 2 * reach for cx, cy in chosen):
+            continue
+        chosen.append((x, y))
+        if len(chosen) == SPIKE_STARS:
+            break
+    if len(chosen) < 5:
+        return {"stars": len(chosen)}
+    down, across = np.mgrid[-reach:reach + 1, -reach:reach + 1]
+    radius = np.hypot(across, down)
+    band = (radius >= 2 * width) & (radius <= 6 * width)
+    arms = band & ((np.abs(across) <= 1) | (np.abs(down) <= 1))
+    diagonals = band & ((np.abs(across - down) <= 1) | (np.abs(across + down) <= 1))
+    found: dict[str, Any] = {"stars": len(chosen)}
+    for label, plane in (("input", image), ("output", output)):
+        cuts = []
+        for x, y in chosen:
+            column, row = int(round(x)), int(round(y))
+            cut = plane[row - reach:row + reach + 1, column - reach:column + reach + 1].astype(np.float64)
+            cuts.append((cut - np.nanmedian(cut[radius > 6.5 * width])) / runner.noise)
+        with np.errstate(invalid="ignore"):
+            stacked = np.nanmedian(np.stack(cuts), axis=0)
+        found[label] = {"arms": round(float(np.nanmean(stacked[arms])), 3),
+                        "diagonals": round(float(np.nanmean(stacked[diagonals])), 3)}
     return found
 
 
@@ -420,13 +469,13 @@ REBLUR_SIDE = 1024
 
 
 def noise_gain(image: np.ndarray, output: np.ndarray, points: np.ndarray | None = None,
-               width: float = 0.0) -> dict[str, float]:
+               star_width: float = 0.0) -> dict[str, float]:
     """The output's sky noise over the input's: at the pixel scale, the
     medians of the maps made from each image alone, and at `NOISE_MEAN`
     pixels, the robust spread of neighbouring block means' differences on
     the faintest third of the input's `NOISE_BLOCK` blocks. 1 is noise left
     as it was; below it, noise taken out; above, noise sharpened. Given the
-    image's `points` and its stars' `width`, also "detail": the same spread
+    image's `points` and its stars' `star_width`, also "detail": the same spread
     on the brightest third of the blocks, away from every point source by
     three widths, where what differs between neighbours is the nebula's
     structure as well as noise; above the faint blocks' gain, structure
@@ -439,9 +488,9 @@ def noise_gain(image: np.ndarray, output: np.ndarray, points: np.ndarray | None 
     step = NOISE_BLOCK // NOISE_MEAN
     faint = np.repeat(np.repeat(coarse <= np.nanpercentile(coarse, 33), step, axis=0), step, axis=1)
     bright = None
-    if points is not None and width > 0:
+    if points is not None and star_width > 0:
         bright = np.repeat(np.repeat(coarse >= np.nanpercentile(coarse, 67), step, axis=0), step, axis=1)
-        reach = int(np.ceil(3 * width / NOISE_MEAN))
+        reach = int(np.ceil(3 * star_width / NOISE_MEAN))
         for x, y in points[:, :2]:
             row, column = int(y // NOISE_MEAN), int(x // NOISE_MEAN)
             bright[max(0, row - reach):row + reach + 1, max(0, column - reach):column + reach + 1] = False
