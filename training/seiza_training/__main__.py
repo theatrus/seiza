@@ -6,8 +6,10 @@ builds one set at a time, which reads each frame over the network once.
 `multi-night` stacks the deepest objects over all their nights.
 `psf-fields` measures each sharpening source's PSF field, and
 `cut-sharpen` cuts the sharpening banks from them; both only read the
-manifest. `status` prints what the manifest holds; `decide` records a
-review decision.
+manifest. `train-sharpen` trains the PSF model on those banks and
+`evaluate-sharpen` measures one, reading the manifest, when there is
+one, only for the sets' names. `status` prints what the manifest holds;
+`decide` records a review decision.
 """
 
 from __future__ import annotations
@@ -22,6 +24,22 @@ from .store import Store, versions
 
 # The commands that only read the manifest and record no pass in it.
 READ_ONLY = ("psf-fields", "cut-sharpen")
+# The commands that read the sharpening banks, and the manifest, if at
+# all, only for the sets' names.
+BANKS_ONLY = ("train-sharpen", "evaluate-sharpen")
+
+
+def numbers(text: str) -> tuple[float, ...]:
+    return tuple(float(value) for value in text.split(","))
+
+
+def weighted(text: str) -> tuple[str, float]:
+    """`PATH[:WEIGHT]`: a bank and its weight, 1 when none is given."""
+    path, _, weight = text.rpartition(":")
+    try:
+        return (path, float(weight)) if path else (text, 1.0)
+    except ValueError:
+        return text, 1.0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -217,6 +235,103 @@ def main(argv: list[str] | None = None) -> int:
     sharpen.add_argument("--pair-windows", type=int, default=160, help="windows of each seeing pair")
     sharpen.add_argument("--limit", type=int, help="at most this many sources a bank, for a trial cut")
 
+    sharpen_train = commands.add_parser("train-sharpen", help="train a PSF model on the sharpening banks")
+    sharpen_train.add_argument("--name", required=True, help="the run's name, under STORE/models/sharpen/")
+    sharpen_train.add_argument("--resume", action="store_true",
+                               help="go on from the run's last checkpoint, as its config.json records it (the "
+                                    "options below, but --stop-after, --prefetch and --batch-threads, are not read)")
+    sharpen_train.add_argument("--stop-after", type=int,
+                               help="stop after this step with a checkpoint, to go on later with --resume")
+    sharpen_train.add_argument("--steps", type=int, default=20_000)
+    sharpen_train.add_argument("--width", type=int, default=32)
+    sharpen_train.add_argument("--levels", type=int, default=4)
+    sharpen_train.add_argument("--tile", type=int, default=256)
+    sharpen_train.add_argument("--batch", type=int, default=8)
+    sharpen_train.add_argument("--learning-rate", type=float, default=2e-4)
+    sharpen_train.add_argument("--seed", type=int, default=0)
+    sharpen_train.add_argument("--log-every", type=int, default=250)
+    sharpen_train.add_argument("--checkpoint-every", type=int, default=1000,
+                               help="save the run whole every this many steps, a multiple of --log-every")
+    sharpen_train.add_argument("--work", type=Path,
+                               help="where cut-sharpen cut the banks (default: beside the scratch directory, "
+                                    "~/.cache/seiza-training/sharpen); each bank not named below is the newest there")
+    sharpen_train.add_argument("--kernel-bank", type=Path, help="the train split's known-kernel (deep) bank")
+    sharpen_train.add_argument("--seeing-bank", type=Path, action="append", dest="seeing_banks",
+                               help="the train split's seeing bank (repeatable)")
+    sharpen_train.add_argument("--pairs-bank", type=weighted, action="append", dest="pairs_banks", default=[],
+                               metavar="PATH[:WEIGHT]",
+                               help="pairs a caller supplies, in the seeing bank's format, for the third share of "
+                                    "the mix, shared among such banks by their weights (repeatable)")
+    sharpen_train.add_argument("--validation-kernel-bank", type=Path)
+    sharpen_train.add_argument("--validation-seeing-bank", type=Path, action="append", dest="validation_seeing_banks")
+    sharpen_train.add_argument("--manifest", type=Path,
+                               help="the manifest whose set names give each window's object, opened for reading "
+                                    "alone (default: the store's, when it has one)")
+    sharpen_train.add_argument("--mix", type=numbers, default=(0.6, 0.25, 0.15),
+                               help="the shares of known-kernel, seeing and supplied windows in a batch; with no "
+                                    "supplied bank its share goes to seeing")
+    sharpen_train.add_argument("--kernel-ratios", type=numbers, default=(1.1, 2.0),
+                               help="FWHM(P_in) / FWHM(P_ref) of a known-kernel window, drawn between these")
+    sharpen_train.add_argument("--kernel-ellipticity", type=float, default=0.3,
+                               help="the most ellipticity (1 - minor/major) of a known kernel")
+    sharpen_train.add_argument("--kernel-noise", type=float, default=0.5,
+                               help="fresh white noise on a known-kernel input, drawn up to this share of the deep "
+                                    "stack's own")
+    sharpen_train.add_argument("--identity", type=float, default=0.1,
+                               help="the share of known-kernel windows left as they are, ratio 1, target the input")
+    sharpen_train.add_argument("--exposure", type=float, default=2.0,
+                               help="scale a known-kernel window's signal by up to this either way before its "
+                                    "noise is added")
+    sharpen_train.add_argument("--floor-px", type=float, default=1.5, help="the narrowest target FWHM")
+    sharpen_train.add_argument("--centroid-offset", choices=("shift", "none"), default="shift",
+                               help="move each pair's target by its stars' median centroid offset, so the model "
+                                    "is not taught to move stars, or leave it")
+    sharpen_train.add_argument("--ratio-source", choices=("stamp", "fit"), default="stamp",
+                               help="a pair's ratio from its stamps' widths, which every window has, or from the "
+                                    "field's Moffat fit, which fails below about 2 px")
+    sharpen_train.add_argument("--max-window-ratio", type=float, default=1.0,
+                               help="leave out windows whose target is wider than this times their input")
+    sharpen_train.add_argument("--min-window-ratio", type=float, default=0.0,
+                               help="leave out windows whose target is narrower than this times their input")
+    sharpen_train.add_argument("--exclude-pairs",
+                               help="pairs left out, by pair, input or target id, comma-separated (default: the "
+                                    "seeing pairs of a field whose focus changes across it; '' leaves none out)")
+    sharpen_train.add_argument("--object-cap", type=float, default=0.03,
+                               help="no object (telescope, target and filter, over its nights) takes more than this "
+                                    "share of its bank's draws")
+    sharpen_train.add_argument("--points-empty", type=float, default=0.1,
+                               help="leave the point-source map empty this share of the time")
+    sharpen_train.add_argument("--charbonnier", type=float, default=0.1,
+                               help="Charbonnier's epsilon, in units of the target's noise")
+    sharpen_train.add_argument("--gradient-weight", type=float, default=0.5)
+    sharpen_train.add_argument("--gradient-scales", type=lambda text: tuple(int(k) for k in text.split(",")),
+                               default=(1, 2, 4), help="the blocks the gradient term averages the error over")
+    sharpen_train.add_argument("--flux-weight", type=float, default=0.1,
+                               help="the weight of the point sources' aperture flux term")
+    sharpen_train.add_argument("--clip-grad", type=float, default=1.0,
+                               help="scale each step's gradient down to this norm where it is longer (0: never)")
+    sharpen_train.add_argument("--rewind", type=float, default=2.0,
+                               help="go back two log windows when one's mean loss is more than this many times the "
+                                    "lowest so far (0: never)")
+    sharpen_train.add_argument("--precision", choices=("fp32", "bf16"), default="fp32")
+    sharpen_train.add_argument("--prefetch", type=int, default=8)
+    sharpen_train.add_argument("--batch-threads", type=int, default=4)
+    sharpen_train.add_argument("--validation-batches", type=int, default=4,
+                               help="fixed validation batches whose loss is logged with each window's")
+    sharpen_train.add_argument("--validation-windows", type=int, default=200,
+                               help="windows of each validation bank measured at the end")
+
+    sharpen_evaluate = commands.add_parser("evaluate-sharpen", help="measure a trained PSF model on validation banks")
+    sharpen_evaluate.add_argument("--name", required=True)
+    sharpen_evaluate.add_argument("--limit", type=int, default=200, help="at most this many windows a bank")
+    sharpen_evaluate.add_argument("--seed", type=int, default=0, help="seeds each known-kernel window's draw")
+    sharpen_evaluate.add_argument("--work", type=Path)
+    sharpen_evaluate.add_argument("--kernel-bank", type=Path,
+                                  help="the known-kernel bank (default: the validation split's newest)")
+    sharpen_evaluate.add_argument("--seeing-bank", type=Path, action="append", dest="seeing_banks",
+                                  help="a seeing bank (default: the validation split's newest)")
+    sharpen_evaluate.add_argument("--manifest", type=Path)
+
     sheet = commands.add_parser("sheet-noise", help="make a trained noise model's contact sheets")
     sheet.add_argument("--name", required=True)
     sheet.add_argument("--sheet", action="append", dest="sheets_named", help="only this sheet (default: all)")
@@ -271,6 +386,9 @@ def main(argv: list[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
     store = Store(arguments.store, arguments.scratch)
     only = set(arguments.sets) if getattr(arguments, "sets", None) else None
+    if arguments.command in BANKS_ONLY:
+        print(json.dumps(sharpen(arguments, store), indent=2, default=str))
+        return 0
     if arguments.command in READ_ONLY:
         # These keep what they make beside the store, so they only read the
         # manifest, which another machine's pass may be writing meanwhile.
@@ -491,6 +609,69 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
 
         return review(manifest, store, only=only)
     raise AssertionError(command)
+
+
+def sharpen(arguments: argparse.Namespace, store: Store) -> dict:
+    """`train-sharpen` and `evaluate-sharpen`."""
+    from . import sharpen_model
+
+    work = arguments.work or store.scratch.parent / "sharpen"
+    manifest = arguments.manifest or (store.manifest_path if store.manifest_path.exists() else None)
+    if arguments.command == "evaluate-sharpen":
+        record, _ = sharpen_model.load_run(store, arguments.name)
+        recorded = sharpen_model.BankChoice.recorded(record["config"]["choice"])
+        choice = sharpen_model.BankChoice(
+            kernel=recorded.kernel, seeing=recorded.seeing,
+            validation_kernel=str(arguments.kernel_bank or sharpen_model.find_bank(work, "deep", "validation")),
+            validation_seeing=tuple(str(path) for path in arguments.seeing_banks
+                                    or [sharpen_model.find_bank(work, "seeing", "validation")]),
+            excluded=recorded.excluded, object_cap=recorded.object_cap,
+            manifest=str(manifest) if manifest else recorded.manifest)
+        settings = sharpen_model.settings_from(record["config"]["settings"])
+        return sharpen_model.evaluate_saved(store, arguments.name, choice.validation(settings), limit=arguments.limit,
+                                            seed=arguments.seed)
+    if arguments.resume:
+        return summary_of(sharpen_model.resume_run(store, arguments.name, stop_after=arguments.stop_after,
+                                                   prefetch=arguments.prefetch,
+                                                   batch_threads=arguments.batch_threads))
+    if len(arguments.mix) != 3:
+        raise SystemExit("--mix takes three shares: known-kernel, seeing and supplied")
+    settings = sharpen_model.Settings(
+        tile=arguments.tile, kernel_ratios=tuple(arguments.kernel_ratios),
+        kernel_ellipticity=arguments.kernel_ellipticity, kernel_noise=arguments.kernel_noise,
+        identity=arguments.identity, exposure=arguments.exposure, floor_px=arguments.floor_px,
+        max_ratio=arguments.max_window_ratio, min_ratio=arguments.min_window_ratio,
+        points_empty=arguments.points_empty, centroid_offset=arguments.centroid_offset,
+        ratio_source=arguments.ratio_source)
+    loss = sharpen_model.LossSettings(epsilon=arguments.charbonnier, gradient_weight=arguments.gradient_weight,
+                                      gradient_scales=arguments.gradient_scales, flux_weight=arguments.flux_weight)
+    choice = sharpen_model.BankChoice(
+        kernel=str(arguments.kernel_bank or sharpen_model.find_bank(work, "deep", "train")),
+        seeing=tuple(str(path) for path in arguments.seeing_banks or [sharpen_model.find_bank(work, "seeing", "train")]),
+        validation_kernel=str(arguments.validation_kernel_bank or sharpen_model.find_bank(work, "deep", "validation")),
+        validation_seeing=tuple(str(path) for path in arguments.validation_seeing_banks
+                                or [sharpen_model.find_bank(work, "seeing", "validation")]),
+        pairs=tuple((str(Path(path)), weight) for path, weight in arguments.pairs_banks),
+        excluded=sharpen_model.FOCUS_PAIRS if arguments.exclude_pairs is None
+        else tuple(pair for pair in arguments.exclude_pairs.split(",") if pair),
+        object_cap=arguments.object_cap, manifest=str(manifest) if manifest else None)
+    record = sharpen_model.train(
+        store, name=arguments.name, choice=choice, steps=arguments.steps, width=arguments.width,
+        levels=arguments.levels, batch=arguments.batch, learning_rate=arguments.learning_rate, seed=arguments.seed,
+        log_every=arguments.log_every, checkpoint_every=arguments.checkpoint_every, settings=settings, loss=loss,
+        mix=tuple(arguments.mix), clip_grad=arguments.clip_grad, rewind=arguments.rewind,
+        precision=arguments.precision, validation_batches=arguments.validation_batches,
+        validation_windows=arguments.validation_windows, stop_after=arguments.stop_after,
+        prefetch=arguments.prefetch, batch_threads=arguments.batch_threads)
+    return summary_of(record)
+
+
+def summary_of(record: dict) -> dict:
+    """A run's record without its windows' detail."""
+    validation = record.get("validation") or {}
+    return {**record, "validation": {key: ({inner: value for inner, value in entry.items() if inner != "windows_detail"}
+                                           if isinstance(entry, dict) else entry)
+                                     for key, entry in validation.items()}}
 
 
 def status(manifest: Manifest) -> dict:

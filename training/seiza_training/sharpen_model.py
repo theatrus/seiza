@@ -1,0 +1,1444 @@
+"""Train and evaluate the PSF model on the sharpening banks.
+
+The model maps an image whose PSF is P to the same sky through a round
+target PSF T, told the ratio FWHM(T) / FWHM(P) at each pixel and the local
+PSF's stamp. It learns from the banks `sharpen_bank` cuts:
+
+- **Known-kernel pairs**, from the deep stacks' windows. An elliptical
+  Gaussian K is drawn, so that P_in = P_ref ∗ K is 1.1 to 2 times as wide
+  as the window's own PSF, P_ref. The input is the window blurred by K,
+  with fresh white noise at a drawn share of the stack's own: the inputs
+  will be the noise model's output, which keeps a little noise. The target
+  is the window brought to a round T. Second moments add under
+  convolution, so blurring the window by the Gaussian whose covariance is
+  Σ_T − Σ_ref, with Σ_T round and at least Σ_ref's largest eigenvalue,
+  leaves a PSF whose second moments are round. A stamp's second moments
+  are its wings' as much as its core's, so T is often wider than P_ref:
+  by 9% at the median of the train bank's stamps. The ratio is FWHM(T) /
+  FWHM(P_in), both measured on the stamps as the bank measures stamp
+  widths (`stamp_width`), and the network reads P_in's stamp, never
+  P_ref's. A share of them are identity windows: K a point, the ratio 1,
+  and the target the input itself, which is the design's identity loss.
+- **Pairs** on one grid: the seeing bank's worst half as input and its
+  best half as target, and any pairs a caller supplies in that bank's
+  format. The network reads the input's stamp and the bank's ratio, from
+  the stamps' widths (which every window has) or from the field's Moffat
+  fit (which fails below about 2 px). The target is moved by its pair's
+  median centroid offset, so the model is never taught to move stars:
+  halves on one grid differ in their stars' centroids as much as their
+  PSFs differ in symmetry, which a stamp centred on its centroid does not
+  show. Windows whose target is wider than their input are left out, and
+  so are the pairs of a field whose focus changes across it.
+
+What the network reads is made from the image alone, as it will be at
+inference: `asinh((x − b) / σ̄)` of the image, `asinh(σ / σ̄)` of a noise
+map made from the image (`image_sigma`), the ratio, and a point-source map,
+`asinh` of the input's detections rendered with the local stamp, left
+empty a tenth of the time, as an image with no catalogue and few
+detections will be. `b` and `σ̄` are the whole image's: a pair's from its
+bank; a known-kernel window's from the window, since its blur and noise
+are made here. The stamp is read as two planes, the stamp over its peak,
+and its asinh, which shows the wings. The stacks' own noise maps weigh the
+loss and nothing else. The output is a residual in σ̄, added to the input.
+
+The loss, in linear units:
+
+- Charbonnier error of output against target, in units of the target's own
+  noise, which the stack's map gives (the input stack's where a supplied
+  pair keeps none), with clipped cores masked out, and the band at a
+  window's edge that its blur or shift read past;
+- the same on the error's gradient, the error averaged over 1, 2 and 4
+  pixel blocks, each times its side, so every scale's noise weighs alike;
+- Charbonnier error of each point source's flux within three times the
+  input's FWHM, in units of that flux's noise.
+
+Reblur consistency, `|R ∗ f(y) − y|²` on real images without a target,
+and a centroid-shift loss are left for later: both would be terms of
+`loss_terms`, the first on its own batches.
+
+Augmentation is the eight flips and turns, alike for the image, every map,
+the apertures and the stamp, and exposure scaling: a known-kernel window's
+signal is scaled about its background by up to `exposure` either way
+before the fresh noise is added, so the same noise meets a brighter or
+fainter sky. A pair's noise is its stacks' own, which a scale would move
+off its maps, so pairs are not scaled. There are no sub-pixel shifts.
+
+Batches are drawn as the noise trainer's are: each from a generator seeded
+by its step, so threads that build them ahead change nothing and a run
+resumed from a checkpoint is the run it continues. Within a bank, no
+object (a telescope, target and filter, over all its nights) takes more
+than `object_cap` of the draws: an object stacked over many nights is in
+the deep bank as each night's stack and as their multi-night stack, which
+share their sky.
+
+Inference (`sharpen`) runs the network over an image's overlapping tiles,
+each conditioned on the stamp at its centre and its own point-source map,
+which contact sheets and the bundle will call; evaluation runs it on the
+validation banks' windows.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import re
+import time
+from dataclasses import asdict, dataclass, field, replace
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import torch
+
+from . import psf_fields
+from .noise_model import Prefetch, Rewind, device, image_sigma, offloaded, step_generator, tiling
+from .sharpen_bank import STAMP, grown, open_bank, stamp_width
+from .store import Store, versions
+from .tiles import infer
+from .unet import SharpeningUNet, reach, receptive_field
+
+# The planes the network reads, in order, and the stamp's.
+PLANES = ("image", "noise", "ratio", "points")
+STAMP_PLANES = ("peak", "wings")
+# The stamp's second plane is `asinh(s / (peak · WINGS)) / asinh(1 / WINGS)`:
+# its wings down to a ten-thousandth of the peak still show.
+WINGS = 1e-3
+FWHM_PER_SIGMA = 2.0 * math.sqrt(2.0 * math.log(2.0))
+SOURCES = ("kernel", "seeing", "pairs")
+CENTROID_OFFSETS = ("shift", "none")
+RATIO_SOURCES = ("stamp", "fit")
+# The bank's info column each ratio source reads.
+RATIO_COLUMNS = {"stamp": "width_ratio", "fit": "ratio"}
+# The defocused Ultracat object's seeing pairs, its night's split and its
+# many nights': their worst halves hold a focus gradient as well as seeing,
+# 2.7 px at one corner to 8.9 px at the other, with ring-shaped stamps
+# (cut-sharpen, 2026-11-08).
+FOCUS_PAIRS = ("667edfabbd66/seeing", "multi-night/64bd07caa07d/seeing")
+# A known-kernel window's draw of K stops within this share of the width
+# ratio asked.
+RATIO_TOLERANCE = 0.01
+KERNEL_ITERATIONS = 8
+# The canvas a stamp is blurred on, so a wide kernel does not wrap.
+STAMP_CANVAS = 256
+# Windows are blurred and shifted with this much reflected around them.
+WINDOW_PAD = 64
+# A blur reads this many of its σ past a pixel: the band at a window's edge
+# it reads past, and how far a clipped core's error spreads.
+BLUR_REACH = 3.0
+# A pair's target is moved by its offset, which reads past the window's
+# edge by a few pixels.
+SHIFT_BAND = 4
+# The noise below which a pixel's error is not weighed further up, in σ̄.
+SIGMA_FLOOR = 0.25
+# Point sources whose flux the loss weighs: a detection, unclipped, at
+# least this signal to noise; at most `APERTURES` of them a tile, brightest
+# first, none whose aperture meets another's or a masked pixel.
+FLUX_SNR = 10.0
+APERTURES = 32
+APERTURE_FWHM = 3.0
+# Validation batches draw from generators seeded apart from the training
+# steps'.
+VALIDATION_STREAM = 1 << 20
+DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+@dataclass(frozen=True)
+class Settings:
+    """How windows become examples: the tile, the known-kernel draws, the
+    pairs' handling and the point-source map."""
+
+    tile: int = 256
+    # FWHM(P_in) / FWHM(P_ref), drawn uniformly between these.
+    kernel_ratios: tuple[float, float] = (1.1, 2.0)
+    # K's ellipticity, 1 − minor/major, drawn up to this, at a random angle.
+    kernel_ellipticity: float = 0.3
+    # The fresh noise's share of the deep stack's own, drawn up to this.
+    kernel_noise: float = 0.5
+    # The share of known-kernel windows that are identity windows.
+    identity: float = 0.1
+    # A known-kernel window's signal is scaled by up to this either way.
+    exposure: float = 2.0
+    # The narrowest target, as a stamp width.
+    floor_px: float = 1.5
+    # No window asks for a target wider than this times its input; a
+    # known-kernel window's K is drawn wide enough to keep it.
+    max_ratio: float = 1.0
+    min_ratio: float = 0.0
+    points_empty: float = 0.1
+    centroid_offset: str = "shift"
+    ratio_source: str = "stamp"
+
+    def __post_init__(self) -> None:
+        if self.centroid_offset not in CENTROID_OFFSETS:
+            raise ValueError(f"centroid_offset is one of {CENTROID_OFFSETS}, not {self.centroid_offset!r}")
+        if self.ratio_source not in RATIO_SOURCES:
+            raise ValueError(f"ratio_source is one of {RATIO_SOURCES}, not {self.ratio_source!r}")
+        low, high = self.kernel_ratios
+        if not 1.0 < low <= high:
+            raise ValueError(f"kernel ratios run from above 1 up: {self.kernel_ratios}")
+        if self.tile % 8:
+            raise ValueError(f"a tile of {self.tile} is not a multiple of 8")
+
+
+@dataclass(frozen=True)
+class LossSettings:
+    """The loss's terms: Charbonnier's ε, in units of the target's noise;
+    the gradient term's weight and block sides; the flux term's weight."""
+
+    epsilon: float = 0.1
+    gradient_weight: float = 0.5
+    gradient_scales: tuple[int, ...] = (1, 2, 4)
+    flux_weight: float = 0.1
+
+
+# Banks.
+
+
+def find_bank(work: Path, label: str, split: str) -> Path:
+    """The finished bank of `label` and `split` under `work`, the newest
+    where several are."""
+    found = sorted((path for path in work.glob(f"sharpen-{label}-{split}-*") if (path / "done.json").exists()),
+                   key=lambda path: (path / "done.json").stat().st_mtime)
+    if not found:
+        raise FileNotFoundError(f"no finished {label} bank of the {split} split under {work}: run cut-sharpen")
+    return found[-1]
+
+
+def object_name(set_name: str) -> str:
+    """A set's object, its name less its night: telescope, target and
+    filter, as the multi-night pass names an object."""
+    return "/".join(part for part in set_name.split("/") if not DATE.match(part))
+
+
+def capped_odds(groups: np.ndarray, cap: float) -> np.ndarray:
+    """How often to draw each window, given its object's index: every
+    window alike, except that no object takes more than `cap` of the draws
+    (or an even share, where fewer objects than `1 / cap` leave no other
+    way), the rest going to the others by their windows."""
+    count = len(groups)
+    if count == 0:
+        return np.zeros(0)
+    _, inverse, sizes = np.unique(groups, return_inverse=True, return_counts=True)
+    cap = max(cap, 1.0 / len(sizes)) if cap > 0 else 1.0
+    shares = sizes / count
+    capped = np.zeros(len(sizes), dtype=bool)
+    while True:
+        over = ~capped & (shares > cap * (1 + 1e-12))
+        if not over.any():
+            break
+        capped |= over
+        rest = (1.0 - cap * capped.sum()) / sizes[~capped].sum() if (~capped).any() else 0.0
+        shares = np.where(capped, cap, sizes * rest)
+    odds = shares[inverse] / sizes[inverse]
+    return odds / odds.sum()
+
+
+class Bank:
+    """A sharpening bank as the trainer draws from it: its arrays, the
+    windows it keeps, how often each is drawn, and why the rest are left
+    out. A pair bank keeps the windows whose ratio is known and within the
+    settings' bounds, of the pairs not `excluded`. `set_names` names each
+    set, so its object is known; without it a source's object is its
+    record's, or its set."""
+
+    def __init__(self, directory: Path, settings: Settings, *, excluded: tuple[str, ...] = (), object_cap: float = 0.0,
+                 set_names: dict[str, str] | None = None, weight: float = 1.0) -> None:
+        self.directory = Path(directory)
+        self.arrays = open_bank(self.directory)
+        done = self.arrays["done"]
+        self.label, self.pairs, self.weight = done["label"], bool(done["pairs"]), weight
+        self.columns = {name: index for index, name in enumerate(done["info"])}
+        self.info = np.asarray(self.arrays["info"])
+        self.sources = self.arrays["sources"]
+        self.objects = [self.object_of(source, set_names) for source in self.sources]
+        source_of = self.info[:, 0].astype(int)
+        keep = np.ones(len(self.info), dtype=bool)
+        self.left: dict[str, int] = {}
+
+        def leave(mask: np.ndarray, reason: str) -> None:
+            dropped = keep & mask
+            if dropped.any():
+                self.left[reason] = int(dropped.sum())
+            keep[dropped] = False
+
+        if self.pairs:
+            excluded_sources = np.array([pair_id(source) in excluded or source["input"] in excluded
+                                         or source.get("target") in excluded for source in self.sources])
+            leave(excluded_sources[source_of], "excluded")
+            ratio = self.info[:, self.columns[RATIO_COLUMNS[settings.ratio_source]]]
+            leave(~np.isfinite(ratio), "ratio-unknown")
+            with np.errstate(invalid="ignore"):
+                leave(ratio > settings.max_ratio, "ratio-above")
+                leave(ratio < settings.min_ratio, "ratio-below")
+        self.kept = np.nonzero(keep)[0]
+        if not len(self.kept):
+            raise ValueError(f"the {self.label} bank at {self.directory} keeps no window")
+        names = np.array(self.objects)
+        self.odds = capped_odds(names[source_of[self.kept]], object_cap)
+        self.cumulative = np.cumsum(self.odds)
+        self.object_cap = object_cap
+        self.loaded: dict[int, np.ndarray] = {}
+
+    @staticmethod
+    def object_of(source: dict[str, Any], set_names: dict[str, str] | None) -> str:
+        if set_names and source.get("set") in set_names:
+            return object_name(set_names[source["set"]])
+        return (source.get("record") or {}).get("object") or source.get("set") or source["input"]
+
+    def draw(self, rng: np.random.Generator) -> int:
+        """A window, drawn by the bank's odds."""
+        return int(self.kept[min(int(np.searchsorted(self.cumulative, rng.random() * self.cumulative[-1])),
+                                 len(self.kept) - 1)])
+
+    def row(self, window: int) -> dict[str, float]:
+        return {name: float(self.info[window, index]) for name, index in self.columns.items()}
+
+    def points(self, source: int) -> np.ndarray:
+        """A source's point sources, in `psf_fields.DETECTION_COLUMNS`, in
+        its image's coordinates."""
+        if source not in self.loaded:
+            self.loaded[source] = np.load(self.directory / "points" / f"{source}.npy")
+        return self.loaded[source]
+
+    def offset(self, source: int) -> tuple[float, float] | None:
+        """A pair's median centroid offset, target from input, (x, y)."""
+        found = (self.sources[source].get("alignment") or {}).get("offset_px")
+        return None if found is None else (float(found[0]), float(found[1]))
+
+    def summary(self) -> dict[str, Any]:
+        """What a run records of the bank."""
+        kept_objects = {self.objects[int(self.info[window, 0])] for window in self.kept}
+        source_of = self.info[self.kept, 0].astype(int)
+        shares: dict[str, float] = {}
+        for window_source, odds in zip(source_of, self.odds):
+            name = self.objects[window_source]
+            shares[name] = shares.get(name, 0.0) + float(odds)
+        return {"directory": str(self.directory), "label": self.label, "windows": int(len(self.info)),
+                "kept": int(len(self.kept)), "left": self.left, "objects": len(kept_objects),
+                "largest_object_share": round(max(shares.values()), 4), "object_cap": self.object_cap,
+                "weight": self.weight}
+
+
+def pair_id(source: dict[str, Any]) -> str:
+    """A pair's id: its record's, as the seeing bank names it, or its
+    input's."""
+    return (source.get("record") or {}).get("pair") or source["input"]
+
+
+def set_names(manifest_path: Path | None) -> dict[str, str]:
+    """Each set's name, from the manifest opened for reading alone; none
+    where there is no manifest."""
+    if manifest_path is None or not Path(manifest_path).exists():
+        return {}
+    from .manifest import Manifest
+
+    with Manifest.read_only(manifest_path) as manifest:
+        return {row["id"]: row["name"] for row in manifest.rows("SELECT id, name FROM sets")}
+
+
+@dataclass(frozen=True)
+class BankChoice:
+    """Which banks a run trains and is measured on, and how it reads them:
+    every path, the supplied banks' weights, the pairs left out, the cap on
+    an object's draws, and the manifest whose set names give the objects.
+    A run records it, so a resumed run opens its banks as it did."""
+
+    kernel: str
+    seeing: tuple[str, ...]
+    validation_kernel: str | None
+    validation_seeing: tuple[str, ...]
+    pairs: tuple[tuple[str, float], ...] = ()
+    excluded: tuple[str, ...] = FOCUS_PAIRS
+    object_cap: float = 0.03
+    manifest: str | None = None
+
+    def options(self) -> dict[str, Any]:
+        names = set_names(Path(self.manifest) if self.manifest else None)
+        return {"excluded": self.excluded, "object_cap": self.object_cap, "set_names": names}
+
+    def train(self, settings: Settings) -> dict[str, list[Bank]]:
+        """The train banks, by kind."""
+        options = self.options()
+        found = {"kernel": [Bank(Path(self.kernel), settings, **options)],
+                 "seeing": [Bank(Path(path), settings, **options) for path in self.seeing]}
+        if self.pairs:
+            found["pairs"] = [Bank(Path(path), settings, **options, weight=weight) for path, weight in self.pairs]
+        return found
+
+    def validation(self, settings: Settings) -> dict[str, list[Bank]]:
+        """The validation banks, by kind."""
+        options = self.options()
+        found: dict[str, list[Bank]] = {}
+        if self.validation_kernel:
+            found["kernel"] = [Bank(Path(self.validation_kernel), settings, **options)]
+        if self.validation_seeing:
+            found["seeing"] = [Bank(Path(path), settings, **options) for path in self.validation_seeing]
+        return found
+
+    @classmethod
+    def recorded(cls, values: dict[str, Any]) -> BankChoice:
+        return cls(**{key: (tuple(tuple(item) if isinstance(item, list) else item for item in value)
+                            if isinstance(value, list) else value) for key, value in values.items()})
+
+
+# Known-kernel maths.
+
+
+def moments(stamp: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """A stamp's centroid, (x, y) from its middle, and its second moments
+    about it, as a covariance in (x, y)."""
+    values = stamp.astype(np.float64)
+    total = values.sum()
+    middle = (stamp.shape[0] - 1) / 2
+    down, across = np.mgrid[0:stamp.shape[0], 0:stamp.shape[1]] - middle
+    x, y = (values * across).sum() / total, (values * down).sum() / total
+    dx, dy = across - x, down - y
+    covariance = np.array([[(values * dx * dx).sum(), (values * dx * dy).sum()],
+                           [(values * dx * dy).sum(), (values * dy * dy).sum()]]) / total
+    return np.array([x, y]), covariance
+
+
+def kernel_covariance(sigma: float, ellipticity: float, angle: float) -> np.ndarray:
+    """The covariance, (x, y), of an elliptical Gaussian `sigma` along its
+    major axis, `1 − ellipticity` times it along its minor, the major axis
+    `angle` from x."""
+    rotation = np.array([[math.cos(angle), -math.sin(angle)], [math.sin(angle), math.cos(angle)]])
+    return rotation @ np.diag([sigma**2, (sigma * (1.0 - ellipticity)) ** 2]) @ rotation.T
+
+
+def fourier_gaussian(shape: tuple[int, int], covariance: np.ndarray) -> np.ndarray:
+    """The transform, on `rfft2`'s frequencies, of a Gaussian of
+    `covariance` in (x, y): `exp(−2π² kᵀΣk)`. A degenerate covariance, flat
+    along one axis, blurs along the other alone."""
+    ky = np.fft.fftfreq(shape[0])[:, None]
+    kx = np.fft.rfftfreq(shape[1])[None, :]
+    (xx, xy), (_, yy) = covariance
+    return np.exp(-2.0 * math.pi**2 * (xx * kx**2 + 2.0 * xy * kx * ky + yy * ky**2))
+
+
+def fourier_shift(shape: tuple[int, int], dx: float, dy: float) -> np.ndarray:
+    """The transform that moves an image's content by (`dx`, `dy`)."""
+    ky = np.fft.fftfreq(shape[0])[:, None]
+    kx = np.fft.rfftfreq(shape[1])[None, :]
+    return np.exp(-2j * math.pi * (kx * dx + ky * dy))
+
+
+def filtered(image: np.ndarray, transforms: list[np.ndarray | None], pad: int,
+             mode: str = "reflect") -> list[np.ndarray]:
+    """`image` through each of `transforms` (None: as it is), from one
+    transform of it, padded by `pad` (reflected, or zeros with `mode`
+    "constant") so a filter's reach past its edge reads something like it."""
+    padded = np.pad(image.astype(np.float32), pad, mode=mode)
+    spectrum = np.fft.rfft2(padded)
+    found = []
+    for transform in transforms:
+        if transform is None:
+            found.append(image.astype(np.float32))
+            continue
+        out = np.fft.irfft2(spectrum * transform, s=padded.shape)
+        found.append(out[pad:pad + image.shape[0], pad:pad + image.shape[1]].astype(np.float32))
+    return found
+
+
+def blurred_images(image: np.ndarray, covariances: list[np.ndarray | None], pad: int = WINDOW_PAD) -> list[np.ndarray]:
+    """`image` blurred by a Gaussian of each of `covariances` (None: as it
+    is), reflected past its edges."""
+    shape = (image.shape[0] + 2 * pad, image.shape[1] + 2 * pad)
+    return filtered(image, [None if covariance is None else fourier_gaussian(shape, covariance)
+                            for covariance in covariances], pad)
+
+
+def shifted(image: np.ndarray, dx: float, dy: float, pad: int = 16) -> np.ndarray:
+    """`image` with its content moved by (`dx`, `dy`) pixels, through its
+    transform, reflected past its edges."""
+    shape = (image.shape[0] + 2 * pad, image.shape[1] + 2 * pad)
+    return filtered(image, [fourier_shift(shape, dx, dy)], pad)[0]
+
+
+def blurred_stamp(stamp: np.ndarray, covariance: np.ndarray) -> np.ndarray:
+    """A stamp blurred by a Gaussian of `covariance`, on a canvas wide
+    enough not to wrap, cut back to its side and summing to one again."""
+    pad = (STAMP_CANVAS - stamp.shape[0]) // 2
+    out = filtered(stamp, [fourier_gaussian((stamp.shape[0] + 2 * pad,) * 2, covariance)], pad, mode="constant")[0]
+    total = float(out.sum(dtype=np.float64))
+    return (out / total).astype(np.float32) if total > 0 else out
+
+
+def positive(covariance: np.ndarray) -> np.ndarray:
+    """A symmetric matrix with its negative eigenvalues, which only rounding
+    leaves, set to zero."""
+    values, vectors = np.linalg.eigh((covariance + covariance.T) / 2)
+    return (vectors * np.clip(values, 0.0, None)) @ vectors.T
+
+
+def rounded(stamp: np.ndarray, floor_px: float) -> tuple[np.ndarray, np.ndarray, float]:
+    """The blur that brings a stamp to a PSF round in its second moments,
+    `Σ_T − Σ_ref` with `Σ_T` round at the stamp's largest eigenvalue, or as
+    much wider as keeps its width at `floor_px` or more; the blurred stamp;
+    and its width."""
+    _, covariance = moments(stamp)
+    variance = float(np.linalg.eigvalsh(covariance)[-1])
+    for _ in range(KERNEL_ITERATIONS):
+        delta = positive(variance * np.eye(2) - covariance)
+        target = blurred_stamp(stamp, delta)
+        width = stamp_width(target)
+        if width >= floor_px:
+            break
+        # Widths a pixel or two across add in quadrature only roughly, so
+        # each step asks a little more than they say.
+        variance += 1.1 * ((floor_px / FWHM_PER_SIGMA) ** 2 - (width / FWHM_PER_SIGMA) ** 2) + 1e-3
+    return delta, target, width
+
+
+def widened(stamp: np.ndarray, reference: float, asked: float, ellipticity: float,
+            angle: float) -> tuple[np.ndarray, np.ndarray, float]:
+    """An elliptical Gaussian K, of `ellipticity` at `angle`, that makes
+    `stamp ∗ K` `asked` times as wide as the stamp's width `reference`, as
+    `stamp_width` measures both; its covariance, the blurred stamp and its
+    width. Its size starts from Gaussians' widths adding in quadrature and
+    is refined until the ratio is within `RATIO_TOLERANCE`."""
+    sigma = reference * math.sqrt(asked**2 - 1.0) / (FWHM_PER_SIGMA * math.sqrt(1.0 - ellipticity))
+    for _ in range(KERNEL_ITERATIONS):
+        covariance = kernel_covariance(sigma, ellipticity, angle)
+        blurred = blurred_stamp(stamp, covariance)
+        width = stamp_width(blurred)
+        got = width / reference
+        if abs(got - asked) <= RATIO_TOLERANCE * asked:
+            break
+        sigma *= float(np.clip(math.sqrt((asked**2 - 1.0) / max(got**2 - 1.0, 1e-6)), 0.5, 2.0))
+    return covariance, blurred, width
+
+
+@dataclass
+class Kernel:
+    """A known-kernel window's draw: K's covariance (zero for an identity
+    window), the target's blur `Σ_T − Σ_ref`, the stamp the network reads
+    (P_in), the ratio FWHM(T) / FWHM(P_in), the stamps' widths, and the
+    widening asked, FWHM(P_in) / FWHM(P_ref)."""
+
+    covariance: np.ndarray
+    target: np.ndarray
+    stamp: np.ndarray
+    ratio: float
+    widths: dict[str, float]
+    asked: float
+
+    @property
+    def identity(self) -> bool:
+        return not self.covariance.any()
+
+    def reach(self) -> int:
+        """How far the input's or the target's blur reads, in pixels."""
+        largest = max(float(np.linalg.eigvalsh(self.covariance)[-1]), float(np.linalg.eigvalsh(self.target)[-1]))
+        return int(math.ceil(BLUR_REACH * math.sqrt(max(largest, 0.0))))
+
+
+def known_kernel(stamp: np.ndarray, rng: np.random.Generator, settings: Settings, *, identity: bool = False) -> Kernel:
+    """Draw a known-kernel window's K for its PSF stamp, and the target's
+    blur (see the module notes). The widening is drawn from the settings'
+    `kernel_ratios`, from no less than keeps FWHM(T) / FWHM(P_in) within
+    `max_ratio`: T is wider than P_ref where the stamp's second moments are
+    elliptical."""
+    reference = stamp_width(stamp)
+    if identity:
+        zero = np.zeros((2, 2))
+        return Kernel(zero, zero, stamp.astype(np.float32), 1.0,
+                      {"reference": reference, "input": reference, "target": reference}, 1.0)
+    delta, _, target_width = rounded(stamp, settings.floor_px)
+    low, high = settings.kernel_ratios
+    low = max(low, target_width / (reference * settings.max_ratio))
+    asked = float(rng.uniform(low, max(low, high)))
+    ellipticity = float(rng.uniform(0.0, settings.kernel_ellipticity))
+    angle = float(rng.uniform(0.0, math.pi))
+    covariance, blurred, width = widened(stamp, reference, asked, ellipticity, angle)
+    return Kernel(covariance, delta, blurred, target_width / width,
+                  {"reference": reference, "input": width, "target": target_width}, asked)
+
+
+# Examples.
+
+
+@dataclass
+class Example:
+    """One window as the network meets it, before it is cut to a tile: the
+    input and target in the image's units, the noise map the network reads
+    (made from the input alone) and the target's own noise for the loss,
+    where the loss may look, the stamp and ratio the network reads, the
+    input's point sources in the window's coordinates, the background and
+    median noise the network's units are, and the input PSF's width."""
+
+    image: np.ndarray
+    target: np.ndarray
+    noise_map: np.ndarray
+    sigma: np.ndarray
+    valid: np.ndarray
+    stamp: np.ndarray
+    ratio: float
+    points: np.ndarray
+    background: float
+    noise: float
+    width: float
+    kind: str
+    source: int
+    window: int
+    asked: float | None = None
+    details: dict[str, Any] = field(default_factory=dict)
+
+
+def edge_band(shape: tuple[int, int], band: int) -> np.ndarray:
+    """True but within `band` pixels of the edges."""
+    inside = np.zeros(shape, dtype=bool)
+    if 2 * band < min(shape):
+        inside[band:shape[0] - band, band:shape[1] - band] = True
+    return inside
+
+
+def window_points(bank: Bank, source: int, row: dict[str, float]) -> np.ndarray:
+    """A source's point sources in a window's coordinates."""
+    points = bank.points(source).copy()
+    points[:, 0] -= row["x"]
+    points[:, 1] -= row["y"]
+    return points
+
+
+def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: Settings, *,
+                   identity: bool | None = None, scaled: bool = True) -> Example:
+    """A deep stack's window as a known-kernel pair (see the module notes);
+    an identity window by the settings' share, or as `identity` says. With
+    `scaled`, its signal is scaled by up to `exposure` either way."""
+    row = bank.row(window)
+    source = int(row["source"])
+    image = np.asarray(bank.arrays["image"][window], dtype=np.float32)
+    sigma = np.asarray(bank.arrays["sigma"][window], dtype=np.float32)
+    saturated = np.asarray(bank.arrays["saturated"][window]).astype(bool)
+    stamp = np.asarray(bank.arrays["stamp"][window], dtype=np.float32)
+    background = row["background"]
+    if identity is None:
+        identity = bool(rng.random() < settings.identity)
+    kernel = known_kernel(stamp, rng, settings, identity=identity)
+    scale = math.exp(rng.uniform(-1.0, 1.0) * math.log(settings.exposure)) if scaled and settings.exposure > 1 else 1.0
+    share = float(rng.uniform(0.0, settings.kernel_noise))
+    signal = background + scale * (image - background)
+    if identity:
+        blurred, target = signal, None
+    else:
+        blurred, target = blurred_images(signal, [kernel.covariance, kernel.target])
+    shown = blurred + (rng.standard_normal(image.shape).astype(np.float32) * (share * sigma))
+    if target is None:
+        target, target_sigma = shown, math.hypot(scale, share) * sigma
+    else:
+        target_sigma = scale * sigma
+    band = kernel.reach()
+    valid = edge_band(image.shape, band) & ~(grown(saturated, band) if band else saturated)
+    noise_map = image_sigma(shown)
+    noise = float(np.median(noise_map[np.isfinite(noise_map)]))
+    points = window_points(bank, source, row)
+    points[:, 2] *= scale
+    points[:, 3] = background + scale * (points[:, 3] - background)
+    return Example(shown, target, noise_map, target_sigma.astype(np.float32), valid, kernel.stamp, kernel.ratio,
+                   points, background, noise, kernel.widths["input"], "identity" if identity else "kernel", source,
+                   window, kernel.asked, {"scale": scale, "noise_share": share, "widths": kernel.widths,
+                                          "kernel": kernel.covariance.tolist()})
+
+
+def pair_example(bank: Bank, window: int, settings: Settings) -> Example:
+    """A pair's window: the input and the target, moved by the pair's
+    centroid offset as the settings say, the input's image-only noise map
+    and stamp, and the bank's ratio. The loss weighs by the target stack's
+    noise, or the input stack's where the bank keeps none for its target."""
+    row = bank.row(window)
+    source = int(row["source"])
+    planes = {name: np.asarray(bank.arrays[name][window]) for name in
+              ("input", "target", "input_sigma", "input_map", "target_sigma")}
+    target = planes["target"].astype(np.float32)
+    band = 0
+    offset = bank.offset(source)
+    if settings.centroid_offset == "shift" and offset is not None:
+        target = shifted(target, -offset[0], -offset[1])
+        band = SHIFT_BAND
+    sigma = np.where(np.isfinite(planes["target_sigma"]), planes["target_sigma"], planes["input_sigma"])
+    saturated = np.asarray(bank.arrays["saturated"][window]).astype(bool)
+    valid = edge_band(target.shape, band) & ~saturated & np.isfinite(sigma)
+    return Example(planes["input"].astype(np.float32), target, planes["input_map"].astype(np.float32),
+                   sigma.astype(np.float32), valid, np.asarray(bank.arrays["input_stamp"][window], dtype=np.float32),
+                   row[RATIO_COLUMNS[settings.ratio_source]], window_points(bank, source, row), row["background"],
+                   row["noise"], row["input_width"], "pairs", source, window, None,
+                   {"offset": offset, "target_width": row["target_width"]})
+
+
+def example_from(bank: Bank, window: int, rng: np.random.Generator, settings: Settings) -> Example:
+    return pair_example(bank, window, settings) if bank.pairs else kernel_example(bank, window, rng, settings)
+
+
+# What the network reads.
+
+
+def stamp_planes(stamp: np.ndarray) -> np.ndarray:
+    """The planes the network reads of a stamp (`STAMP_PLANES`): the stamp
+    over its peak, and its asinh, which shows the wings."""
+    peak = float(stamp.max())
+    scaled = stamp / peak if peak > 0 else np.zeros_like(stamp)
+    return np.stack([scaled, np.arcsinh(scaled / WINGS) / math.asinh(1.0 / WINGS)]).astype(np.float32)
+
+
+def point_fluxes(points: np.ndarray, stamp: np.ndarray, background: float) -> np.ndarray:
+    """Each point source's flux: the detector's, or, for a clipped core it
+    turned away, its peak over the stamp's, which a clipped peak makes too
+    low but places where it is."""
+    columns = psf_fields.DETECTION_COLUMNS
+    flux = points[:, columns.index("flux")].astype(np.float64)
+    peak = points[:, columns.index("peak")].astype(np.float64)
+    estimate = (peak - background) / max(float(stamp.max()), 1e-12)
+    return np.where(np.isfinite(flux), flux, np.clip(estimate, 0.0, None))
+
+
+def point_map(points: np.ndarray, stamp: np.ndarray, shape: tuple[int, int], background: float) -> np.ndarray:
+    """The point sources rendered with `stamp` over a region of `shape`
+    whose corner is the points' origin, each at its flux and sub-pixel
+    place, in the image's units above the background."""
+    pad = stamp.shape[0] // 2
+    canvas_shape = (shape[0] + 2 * pad, shape[1] + 2 * pad)
+    canvas = np.zeros(canvas_shape, dtype=np.float64)
+    if len(points):
+        flux = point_fluxes(points, stamp, background)
+        x, y = points[:, 0] + pad, points[:, 1] + pad
+        inside = (x >= 0) & (y >= 0) & (x < canvas_shape[1] - 1) & (y < canvas_shape[0] - 1) & np.isfinite(flux)
+        x, y, flux = x[inside], y[inside], flux[inside]
+        left, top = np.floor(x).astype(int), np.floor(y).astype(int)
+        across, down = x - left, y - top
+        for dy, dx, share in ((0, 0, (1 - down) * (1 - across)), (0, 1, (1 - down) * across),
+                              (1, 0, down * (1 - across)), (1, 1, down * across)):
+            np.add.at(canvas, (top + dy, left + dx), flux * share)
+    if not canvas.any():
+        return np.zeros(shape, dtype=np.float32)
+    kernel = np.zeros(canvas_shape, dtype=np.float64)
+    kernel[:stamp.shape[0], :stamp.shape[1]] = stamp
+    kernel = np.roll(kernel, (-pad, -pad), axis=(0, 1))
+    rendered = np.fft.irfft2(np.fft.rfft2(canvas) * np.fft.rfft2(kernel), s=canvas_shape)
+    return rendered[pad:pad + shape[0], pad:pad + shape[1]].astype(np.float32)
+
+
+def network_planes(image: np.ndarray, noise_map: np.ndarray, ratio: float | np.ndarray, points: np.ndarray,
+                   background: float, noise: float) -> np.ndarray:
+    """The planes the network reads (`PLANES`): the image and the
+    point-source map as `asinh` in units of the median noise above the
+    background, the noise map as `asinh(σ / σ̄)`, and the ratio; NaN becomes
+    the background."""
+    x = np.arcsinh(np.nan_to_num((image - background) / noise, nan=0.0))
+    s = np.arcsinh(np.nan_to_num(noise_map / noise, nan=1.0))
+    r = np.broadcast_to(np.asarray(ratio, dtype=np.float32), image.shape)
+    p = np.arcsinh(points / noise)
+    return np.stack([x, s, r, p]).astype(np.float32)
+
+
+def apertures(points: np.ndarray, valid: np.ndarray, radius: float, limit: int = APERTURES) -> np.ndarray:
+    """A label for each pixel within `radius` of a point source whose flux
+    the loss weighs: unclipped detections at `FLUX_SNR` or more, brightest
+    first, each wholly inside the region and on valid pixels and meeting no
+    other's aperture; 0 elsewhere."""
+    columns = psf_fields.DETECTION_COLUMNS
+    labels = np.zeros(valid.shape, dtype=np.int64)
+    if not len(points) or not radius > 0:
+        return labels
+    usable = ((points[:, columns.index("detected")] == 1) & (points[:, columns.index("clipped")] == 0)
+              & (points[:, columns.index("saturated")] == 0) & np.isfinite(points[:, columns.index("flux")])
+              & (points[:, columns.index("snr")] >= FLUX_SNR))
+    chosen = points[usable]
+    chosen = chosen[np.argsort(-chosen[:, columns.index("flux")], kind="stable")]
+    reach_px = int(math.ceil(radius))
+    offsets = np.arange(-reach_px, reach_px + 1)
+    disk = (offsets[:, None] ** 2 + offsets[None, :] ** 2) <= radius**2
+    height, width = valid.shape
+    count = 0
+    for x, y in chosen[:, :2]:
+        column, row = int(round(float(x))), int(round(float(y)))
+        if row - reach_px < 0 or column - reach_px < 0 or row + reach_px >= height or column + reach_px >= width:
+            continue
+        box = (slice(row - reach_px, row + reach_px + 1), slice(column - reach_px, column + reach_px + 1))
+        if not valid[box][disk].all() or labels[box][disk].any():
+            continue
+        count += 1
+        labels[box][disk] = count
+        if count == limit:
+            break
+    return labels
+
+
+def arrays_of(example: Example, rng: np.random.Generator | None, settings: Settings) -> dict[str, np.ndarray]:
+    """An example as a training tile: cut at a random place in its window,
+    its point-source map rendered (empty by the settings' share), its
+    apertures labelled, and everything flipped and turned one of eight ways
+    alike, stamp included. Without `rng` the whole window, as it is, with
+    its points."""
+    side = example.image.shape[0]
+    tile = min(settings.tile, side) if rng is not None else side
+    top, left = (int(value) for value in rng.integers(0, side - tile + 1, 2)) if rng is not None else (0, 0)
+    cut = (slice(top, top + tile), slice(left, left + tile))
+    points = example.points.copy()
+    points[:, 0] -= left
+    points[:, 1] -= top
+    empty = rng is not None and rng.random() < settings.points_empty
+    rendered = np.zeros((tile, tile), np.float32) if empty else point_map(points, example.stamp, (tile, tile),
+                                                                          example.background)
+    planes = network_planes(example.image[cut], example.noise_map[cut], example.ratio, rendered, example.background,
+                            example.noise)
+    valid = example.valid[cut]
+    found = {
+        "planes": planes,
+        "stamp": stamp_planes(example.stamp),
+        "reference": ((example.image[cut] - example.background) / example.noise)[None],
+        "target": ((example.target[cut] - example.background) / example.noise)[None],
+        "sigma": (example.sigma[cut] / example.noise)[None],
+        "valid": valid[None].astype(np.float32),
+        "labels": apertures(points, valid, APERTURE_FWHM * example.width),
+    }
+    if rng is not None:
+        turns, flip = int(rng.integers(0, 4)), bool(rng.integers(0, 2))
+        for name, values in found.items():
+            values = np.rot90(values, turns, axes=(-2, -1))
+            found[name] = np.ascontiguousarray(values[..., ::-1] if flip else values)
+    return found
+
+
+def batch_from(banks: list[Bank], shares: np.ndarray, size: int, rng: np.random.Generator,
+               settings: Settings) -> dict[str, torch.Tensor]:
+    """`size` tiles, each from a bank drawn by `shares` and a window drawn
+    by the bank's odds, as tensors: the planes, the stamps, the input and
+    target in σ̄ above the background, the target's noise in σ̄, where the
+    loss may look, and the apertures."""
+    cumulative = np.cumsum(shares)
+    examples = []
+    for _ in range(size):
+        bank = banks[min(int(np.searchsorted(cumulative, rng.random() * cumulative[-1])), len(banks) - 1)]
+        examples.append(arrays_of(example_from(bank, bank.draw(rng), rng, settings), rng, settings))
+    return {name: torch.from_numpy(np.stack([example[name] for example in examples])) for name in examples[0]}
+
+
+# The loss.
+
+
+def charbonnier(values: torch.Tensor, epsilon: float) -> torch.Tensor:
+    return torch.sqrt(values**2 + epsilon**2) - epsilon
+
+
+def loss_terms(residual: torch.Tensor, batch: dict[str, torch.Tensor], settings: LossSettings) -> dict[str, torch.Tensor]:
+    """The loss's terms for a batch's residuals (see the module notes) and
+    their weighted sum, `total`. Errors are in units of the target's noise
+    and set to zero where the loss may not look before any is averaged,
+    so a clipped core cannot reach a block's mean.
+
+    Reblur consistency on real images without a target, and a centroid
+    shift at the point sources, would join these."""
+    output = batch["reference"] + residual.float()
+    valid = batch["valid"]
+    sigma = batch["sigma"].clamp(min=SIGMA_FLOOR)
+    error = (output - batch["target"]) / sigma * valid
+    epsilon = settings.epsilon
+    pixel = (charbonnier(error, epsilon) * valid).sum() / valid.sum().clamp(min=1.0)
+    terms = []
+    for scale in settings.gradient_scales:
+        if scale == 1:
+            blocks, inside = error, valid
+        else:
+            blocks = scale * torch.nn.functional.avg_pool2d(error, scale)
+            inside = -torch.nn.functional.max_pool2d(-valid, scale)
+        across = blocks[..., :, 1:] - blocks[..., :, :-1]
+        down = blocks[..., 1:, :] - blocks[..., :-1, :]
+        inside_across = inside[..., :, 1:] * inside[..., :, :-1]
+        inside_down = inside[..., 1:, :] * inside[..., :-1, :]
+        weight = (inside_across.sum() + inside_down.sum()).clamp(min=1.0)
+        terms.append(((charbonnier(across, epsilon) * inside_across).sum()
+                      + (charbonnier(down, epsilon) * inside_down).sum()) / weight)
+    gradient = torch.stack(terms).mean() if terms else torch.zeros((), device=residual.device)
+    labels = batch["labels"].reshape(len(residual), -1)
+    sums = torch.zeros(len(residual), APERTURES + 1, device=residual.device)
+    variances = torch.zeros_like(sums)
+    sums.scatter_add_(1, labels, (output - batch["target"]).reshape(len(residual), -1))
+    variances.scatter_add_(1, labels, (sigma**2).reshape(len(residual), -1))
+    present = variances[:, 1:] > 0
+    scores = sums[:, 1:] / variances[:, 1:].clamp(min=1e-12).sqrt()
+    flux = (charbonnier(scores, epsilon) * present).sum() / present.sum().clamp(min=1)
+    total = pixel + settings.gradient_weight * gradient + settings.flux_weight * flux
+    return {"total": total, "pixel": pixel, "gradient": gradient, "flux": flux}
+
+
+# Training.
+
+
+def build_model(width: int, levels: int) -> SharpeningUNet:
+    return SharpeningUNet(inputs=len(PLANES), width=width, levels=levels, stamp_inputs=len(STAMP_PLANES))
+
+
+def run_directory(store: Store, name: str) -> Path:
+    return store.root / "models" / "sharpen" / name
+
+
+def mixture(train_banks: dict[str, list[Bank]], mix: tuple[float, float, float]) -> tuple[list[Bank], np.ndarray]:
+    """The banks a batch draws from and each one's share: the known-kernel
+    bank's, the seeing banks' and the supplied banks' shares of `mix`, the
+    supplied share shared among their banks by their weights and folded into
+    the seeing share where none is given."""
+    kernel, seeing, supplied = mix
+    if not train_banks.get("pairs"):
+        seeing, supplied = seeing + supplied, 0.0
+    banks, shares = [], []
+    for kind, share in (("kernel", kernel), ("seeing", seeing), ("pairs", supplied)):
+        group = train_banks.get(kind) or []
+        total = sum(bank.weight for bank in group)
+        for bank in group:
+            if share > 0:
+                banks.append(bank)
+                shares.append(share * bank.weight / total)
+    if not banks:
+        raise ValueError("no bank to draw from")
+    shares_array = np.array(shares, dtype=np.float64)
+    return banks, shares_array / shares_array.sum()
+
+
+def save_checkpoint(path: Path, state: dict[str, Any]) -> None:
+    """Write a checkpoint whole, then move it into place."""
+    torch.save(state, path.with_suffix(".tmp"))
+    path.with_suffix(".tmp").replace(path)
+
+
+def train(
+    store: Store,
+    *,
+    name: str,
+    choice: BankChoice,
+    steps: int,
+    width: int = 32,
+    levels: int = 4,
+    batch: int = 8,
+    learning_rate: float = 2e-4,
+    seed: int = 0,
+    log_every: int = 250,
+    checkpoint_every: int = 1000,
+    settings: Settings = Settings(),
+    loss: LossSettings = LossSettings(),
+    mix: tuple[float, float, float] = (0.6, 0.25, 0.15),
+    clip_grad: float = 1.0,
+    rewind: float = 2.0,
+    precision: str = "fp32",
+    validation_batches: int = 4,
+    validation_windows: int = 200,
+    resume: bool = False,
+    stop_after: int | None = None,
+    prefetch: int = 8,
+    batch_threads: int = 4,
+    where: torch.device | None = None,
+) -> dict[str, Any]:
+    """Train a PSF model on the banks `choice` names, the known-kernel,
+    seeing and supplied banks mixed by `mix`, record it under
+    `STORE/models/sharpen/<name>/` and measure it on the validation banks.
+
+    Every `log_every` steps the window's mean loss is logged, with the
+    loss on `validation_batches` fixed batches from the validation banks.
+    `rewind` goes back two log windows when one's loss is more than that
+    many times the lowest (see `Rewind`; 0: never), and `clip_grad` limits
+    each step's gradient norm (0: never). Every `checkpoint_every` steps,
+    at the end of a log window, the run is saved whole; with `resume`, a
+    run goes on from its last checkpoint and is the run it would have been
+    unstopped, as each batch depends on its step alone (`resume_run` reads
+    the configuration the run recorded). `stop_after` stops a run with a
+    checkpoint after that step, to be resumed later. At the end the
+    weights, the ONNX graph and the record (`run.json`) are written, with
+    `evaluate`'s measures on `validation_windows` windows of each
+    validation bank. `prefetch` batches are built ahead on `batch_threads`
+    threads, which leaves them as they are."""
+    if precision not in ("fp32", "bf16"):
+        raise ValueError(f"precision is fp32 or bf16, not {precision!r}")
+    if checkpoint_every % log_every:
+        raise ValueError(f"checkpoints ({checkpoint_every}) fall at the end of log windows ({log_every})")
+    if settings.tile % 2 ** (levels - 1):
+        raise ValueError(f"a tile of {settings.tile} is not a multiple of {2 ** (levels - 1)}")
+    directory = run_directory(store, name)
+    checkpoint_path = directory / "checkpoint.pt"
+    # Everything that decides the run, which a resumed run must match.
+    call = json.loads(json.dumps({
+        "steps": steps, "width": width, "levels": levels, "batch": batch, "learning_rate": learning_rate,
+        "seed": seed, "log_every": log_every, "checkpoint_every": checkpoint_every, "settings": asdict(settings),
+        "loss": asdict(loss), "mix": list(mix), "clip_grad": clip_grad, "rewind": rewind, "precision": precision,
+        "validation_batches": validation_batches, "validation_windows": validation_windows,
+        "choice": asdict(choice)}))
+    if resume:
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"{name} has no checkpoint to go on from")
+        recorded = json.loads((directory / "config.json").read_text())["call"]
+        changed = sorted(key for key in set(recorded) | set(call) if recorded.get(key) != call.get(key))
+        if changed:
+            raise ValueError(f"{name} was recorded with another {', '.join(changed)}: resume it as it was")
+    elif checkpoint_path.exists() or (directory / "run.json").exists():
+        raise FileExistsError(f"a run named {name} is already recorded: resume it, or name another")
+    banks, validation_banks = choice.train(settings), choice.validation(settings)
+    config = {**call, "planes": list(PLANES), "stamp_planes": list(STAMP_PLANES), "wings": WINGS,
+              "banks": {kind: [bank.summary() for bank in group] for kind, group in banks.items()},
+              "validation_banks": {kind: [bank.summary() for bank in group]
+                                   for kind, group in validation_banks.items()}}
+    if not resume:
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "config.json").write_text(json.dumps({"call": call, **config}, indent=2))
+    torch.manual_seed(seed)
+    where = where or device()
+    cuda = where.type == "cuda"
+    model = build_model(width, levels).to(where)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+    schedule = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=learning_rate, total_steps=steps, pct_start=0.05)
+    guard = Rewind(model, optimizer, rewind) if rewind else None
+    history: list[dict[str, Any]] = []
+    start, seconds = 0, 0.0
+    if resume:
+        state = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        model.load_state_dict(state["model"])
+        optimizer.load_state_dict(state["optimizer"])
+        schedule.load_state_dict(state["schedule"])
+        if guard is not None:
+            guard.restore(state["rewind"])
+        history, start, seconds = state["history"], state["step"], state["seconds"]
+        print(f"train {name}: resumed after step {start}", flush=True)
+    sources, shares = mixture(banks, mix)
+    checks = []
+    if validation_batches and validation_banks:
+        checked, checked_shares = mixture(validation_banks, mix)
+        checks = [batch_from(checked, checked_shares, batch, np.random.default_rng([seed, VALIDATION_STREAM, index]),
+                             settings) for index in range(validation_batches)]
+
+    def assemble(step: int) -> dict[str, torch.Tensor]:
+        tensors = batch_from(sources, shares, batch, step_generator(seed, step), settings)
+        return {key: value.pin_memory() for key, value in tensors.items()} if cuda else tensors
+
+    def validation_loss() -> dict[str, float]:
+        totals: dict[str, float] = {}
+        with torch.no_grad():
+            for tensors in checks:
+                moved = {key: value.to(where) for key, value in tensors.items()}
+                terms = loss_terms(model(moved["planes"], moved["stamp"]), moved, loss)
+                for key, value in terms.items():
+                    totals[key] = totals.get(key, 0.0) + float(value) / len(checks)
+        return totals
+
+    last = min(steps, stop_after) if stop_after else steps
+    source = Prefetch(assemble, prefetch, batch_threads, start=start) if prefetch else None
+    began = time.monotonic() - seconds
+    running = torch.zeros(4, device=where)
+    norms = torch.zeros(2, device=where)
+    try:
+        for step in range(start + 1, last + 1):
+            tensors = source.get() if source else assemble(step)
+            moved = {key: value.to(where, non_blocking=True) for key, value in tensors.items()}
+            with torch.autocast(where.type, dtype=torch.bfloat16, enabled=precision == "bf16"):
+                residual = model(moved["planes"], moved["stamp"])
+            terms = loss_terms(residual, moved, loss)
+            optimizer.zero_grad(set_to_none=True)
+            terms["total"].backward()
+            if clip_grad:
+                norm = torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad)
+                norms[0] += norm
+                norms[1] = torch.maximum(norms[1], norm)
+            optimizer.step()
+            schedule.step()
+            if guard and guard.rate != 1.0:
+                for group in optimizer.param_groups:
+                    group["lr"] *= guard.rate
+            running += torch.stack([terms[key].detach().float() for key in ("total", "pixel", "gradient", "flux")])
+            if step % log_every == 0 or step == last:
+                window = log_every if step % log_every == 0 else step % log_every
+                means = (running / window).tolist()
+                entry = {"step": step, "loss": means[0], "pixel": means[1], "gradient": means[2], "flux": means[3],
+                         "seconds": round(time.monotonic() - began, 1)}
+                noted = ""
+                if clip_grad:
+                    entry["grad_norm_mean"], entry["grad_norm_max"] = float(norms[0]) / window, float(norms[1])
+                    noted = f" gradient {entry['grad_norm_mean']:.3g} (largest {entry['grad_norm_max']:.3g})"
+                    norms.zero_()
+                if checks:
+                    entry["validation"] = validation_loss()
+                    noted += f", validation {entry['validation']['total']:.4f}"
+                back = guard.after(step, means[0]) if guard else None
+                if back is not None:
+                    entry["rewound_to"] = back
+                    noted += f", back to step {back}"
+                history.append(entry)
+                print(f"train {name}: step {step} loss {means[0]:.4f}{noted} ({entry['seconds']:.0f} s)", flush=True)
+                running.zero_()
+                if step % checkpoint_every == 0 or step == last:
+                    save_checkpoint(checkpoint_path, {
+                        "step": step, "model": offloaded(model.state_dict()),
+                        "optimizer": offloaded(optimizer.state_dict()), "schedule": schedule.state_dict(),
+                        "rewind": guard.state() if guard else None, "history": history,
+                        "seconds": time.monotonic() - began})
+    finally:
+        if source:
+            source.close()
+    if last < steps:
+        return {"name": name, "stopped_after": last, "history": history}
+    model = model.cpu().eval()
+    torch.save(model.state_dict(), directory / "weights.pt")
+    train_seconds = time.monotonic() - began
+    validation = evaluate(model, validation_banks, settings=settings, limit=validation_windows, seed=seed,
+                          where=where) if validation_windows else None
+    exported = export(model, directory / "model.onnx", tile=256)
+    record = {
+        "name": name,
+        "created": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "config": {**config, "prefetch": prefetch, "batch_threads": batch_threads},
+        "parameters": sum(p.numel() for p in model.parameters()),
+        "receptive_field_px": receptive_field(levels),
+        "inference": tiling(levels),
+        "device": str(where),
+        "seconds": {"train": round(train_seconds, 1)},
+        "history": history,
+        "validation": validation,
+        "export": exported,
+        "versions": versions(),
+    }
+    (directory / "run.json").write_text(json.dumps(record, indent=2))
+    checkpoint_path.unlink(missing_ok=True)
+    return record
+
+
+def resume_run(store: Store, name: str, *, stop_after: int | None = None, prefetch: int = 8,
+               batch_threads: int = 4, where: torch.device | None = None) -> dict[str, Any]:
+    """Go on with a run from its last checkpoint, as its `config.json`
+    records it, on `where` (default: the training device), which should be
+    the device it ran on for the run to be the same."""
+    call = json.loads((run_directory(store, name) / "config.json").read_text())["call"]
+    arguments = {key: value for key, value in call.items() if key not in ("settings", "loss", "choice", "mix")}
+    return train(store, name=name, choice=BankChoice.recorded(call["choice"]), settings=settings_from(call["settings"]),
+                 loss=LossSettings(**{key: tuple(value) if isinstance(value, list) else value
+                                      for key, value in call["loss"].items()}),
+                 mix=tuple(call["mix"]), resume=True, stop_after=stop_after, prefetch=prefetch,
+                 batch_threads=batch_threads, where=where, **arguments)
+
+
+def export(model: SharpeningUNet, path: Path, *, tile: int) -> dict[str, Any]:
+    """Write the model as ONNX at a static tile shape, reading the planes
+    and the stamp, and hold ONNX Runtime's CPU output to PyTorch's on a
+    random tile."""
+    import onnxruntime
+
+    model = model.cpu().eval()
+    planes, stamp = torch.randn(1, len(PLANES), tile, tile), torch.rand(1, len(STAMP_PLANES), STAMP, STAMP)
+    torch.onnx.export(model, (planes, stamp), str(path), input_names=["planes", "stamp"], output_names=["residual"],
+                      opset_version=17, dynamo=False)
+    session = onnxruntime.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+    with torch.no_grad():
+        expected = model(planes, stamp).numpy()
+    got = session.run(None, {"planes": planes.numpy(), "stamp": stamp.numpy()})[0]
+    scale = float(np.abs(expected).max()) or 1.0
+    return {"path": str(path), "opset": 17, "tile": tile,
+            "max_relative_error": float(np.abs(got - expected).max() / scale), "bytes": path.stat().st_size}
+
+
+# Inference.
+
+
+def sharpen(model: SharpeningUNet, image: np.ndarray, stamp_at: Any, *, ratio: float | np.ndarray,
+            points: np.ndarray | None = None, noise_map: np.ndarray | None = None, background: float | None = None,
+            noise: float | None = None, inference: dict[str, int] | None = None,
+            where: torch.device | None = None) -> np.ndarray:
+    """Sharpen a whole image: its overlapping tiles, each conditioned on
+    `stamp_at(x, y)` at its centre and with its point sources rendered by
+    that stamp, blended as the noise model's are. `ratio` is a number or a
+    map. The noise map is made from the image unless given, and the
+    background and median noise from the two unless given. `points` are
+    the image's point sources in `psf_fields.DETECTION_COLUMNS` (none: an
+    empty map). NaN stays NaN."""
+    noise_map = image_sigma(image) if noise_map is None else noise_map
+    finite = np.isfinite(image) & np.isfinite(noise_map)
+    if background is None:
+        background = float(np.median(image[finite][::17]))
+    if noise is None:
+        noise = float(np.median(noise_map[finite][::17]))
+    settings = inference or tiling(model.levels)
+    planes = network_planes(image, noise_map, ratio, np.zeros(image.shape, np.float32), background, noise)[:3]
+    tile = settings["tile"]
+    where = where or torch.device("cpu")
+    model = model.to(where).eval()
+    found = np.zeros((0, len(psf_fields.DETECTION_COLUMNS)), np.float32) if points is None else points
+    height, width = image.shape
+
+    def run(tiles: np.ndarray, origins: list[tuple[int, int]]) -> np.ndarray:
+        stamps, rendered = [], []
+        for top, left in origins:
+            stamp = np.asarray(stamp_at(min(left + (tile - 1) / 2, width - 1), min(top + (tile - 1) / 2, height - 1)),
+                               dtype=np.float32)
+            stamps.append(stamp_planes(stamp))
+            local = found.copy()
+            local[:, 0] -= left
+            local[:, 1] -= top
+            rendered.append(np.arcsinh(point_map(local, stamp, (tile, tile), background) / noise))
+        batch = np.concatenate([tiles, np.stack(rendered)[:, None]], axis=1)
+        with torch.no_grad():
+            residual = model(torch.from_numpy(np.ascontiguousarray(batch)).to(where),
+                             torch.from_numpy(np.stack(stamps)).to(where)).cpu().numpy()
+        return residual * noise
+
+    residual = infer(run, planes, tile=tile, overlap=settings["overlap"], margin=settings["margin"],
+                     multiple=settings.get("multiple", model.multiple), origins_too=True)[0]
+    return np.where(np.isfinite(image), image + residual, np.nan).astype(np.float32)
+
+
+# Evaluation.
+
+# Stars measured for their width, flux and rings: unclipped detections at
+# this signal to noise or more, none other within their box.
+MEASURE_SNR = 30.0
+# Rings are looked for about stars whose peak is this many σ̄ above the
+# background.
+RING_PEAK = 50.0
+
+
+def empirical_stamp(image: np.ndarray, stars: np.ndarray, side: int) -> np.ndarray | None:
+    """The mean of the stars' boxes of `side` pixels, each less the median
+    of its border, moved through its transform so the star sits on the
+    box's middle, and scaled to sum to one: the stars' own stamp, which
+    `stamp_width` measures as it measures the field's."""
+    half = side // 2
+    pad = 4
+    found = []
+    for x, y in stars[:, :2]:
+        column, row = int(round(float(x))), int(round(float(y)))
+        box = image[row - half - pad:row + half + pad + 1, column - half - pad:column + half + pad + 1]
+        if box.shape != (side + 2 * pad, side + 2 * pad) or not np.isfinite(box).all():
+            continue
+        border = np.concatenate([box[:2].ravel(), box[-2:].ravel(), box[:, :2].ravel(), box[:, -2:].ravel()])
+        box = box - float(np.median(border))
+        moved = filtered(box, [fourier_shift(box.shape, column - float(x), row - float(y))], 0)[0]
+        cut = moved[pad:pad + side, pad:pad + side].astype(np.float64)
+        total = cut.sum()
+        if total > 0:
+            found.append(cut / total)
+    return np.mean(found, axis=0) if found else None
+
+
+def measured_stars(points: np.ndarray, inner: np.ndarray, valid: np.ndarray, radius: int) -> np.ndarray:
+    """The point sources measured for their width and flux: unclipped
+    detections at `MEASURE_SNR` or more, whose box of `radius` lies on the
+    inner, valid region, with no other point source within it."""
+    columns = psf_fields.DETECTION_COLUMNS
+    usable = ((points[:, columns.index("detected")] == 1) & (points[:, columns.index("clipped")] == 0)
+              & (points[:, columns.index("saturated")] == 0) & (points[:, columns.index("snr")] >= MEASURE_SNR))
+    height, width = inner.shape
+    kept = []
+    for index in np.nonzero(usable)[0]:
+        x, y = float(points[index, 0]), float(points[index, 1])
+        column, row = int(round(x)), int(round(y))
+        if row - radius < 0 or column - radius < 0 or row + radius >= height or column + radius >= width:
+            continue
+        box = (slice(row - radius, row + radius + 1), slice(column - radius, column + radius + 1))
+        if not (inner[box].all() and valid[box].all()):
+            continue
+        near = np.hypot(points[:, 0] - x, points[:, 1] - y)
+        near[index] = np.inf
+        if near.min() <= radius:
+            continue
+        kept.append(index)
+    return points[kept]
+
+
+def ring_and_flux(image: np.ndarray, reference: np.ndarray, x: float, y: float, width: float,
+                  noise: float) -> dict[str, float]:
+    """About one star: the flux within `APERTURE_FWHM` widths above the
+    background of a thin annulus just outside it, of `image` and of
+    `reference`, and the deepest dip of `image` below that background in a
+    ring 1 to 3 widths out, in σ̄, as the lowest of its azimuthal means a
+    pixel wide and as its lowest pixel."""
+    radius = APERTURE_FWHM * width
+    reach_px = int(math.ceil(radius + 3))
+    column, row = int(round(x)), int(round(y))
+    box = (slice(row - reach_px, row + reach_px + 1), slice(column - reach_px, column + reach_px + 1))
+    offsets = np.arange(-reach_px, reach_px + 1)
+    distance = np.hypot(offsets[:, None] + row - y, offsets[None, :] + column - x)
+    annulus = (distance > radius) & (distance <= radius + 3)
+    aperture = distance <= radius
+    found: dict[str, float] = {}
+    for label, plane in (("", image), ("reference_", reference)):
+        values = plane[box]
+        level = float(np.median(values[annulus]))
+        found[f"{label}flux"] = float((values[aperture] - level).sum())
+        if label:
+            continue
+        ring = (distance >= width) & (distance <= 3 * width)
+        means = [float(values[ring & (np.abs(distance - r) < 0.5)].mean()) for r in np.arange(math.ceil(width),
+                                                                                                  3 * width + 0.5)
+                 if (ring & (np.abs(distance - r) < 0.5)).any()]
+        found["ring_profile"] = (min(means) - level) / noise if means else float("nan")
+        found["ring_pixel"] = float(values[ring].min() - level) / noise
+    return found
+
+
+def window_measures(example: Example, output: np.ndarray, band: int) -> dict[str, Any]:
+    """One window's measures: the error before and after against the target
+    in its own noise, and in σ̄; and, at its stars, the widths of the input's,
+    the output's and the target's own stamps, the flux the output keeps of
+    the input's and of the target's, and the rings about bright stars."""
+    inner = edge_band(example.image.shape, band)
+    look = inner & example.valid
+    sigma = np.maximum(example.sigma, SIGMA_FLOOR * example.noise)
+    before = (example.image - example.target) / sigma
+    after = (output - example.target) / sigma
+    found: dict[str, Any] = {
+        "kind": example.kind, "source": example.source, "window": example.window, "ratio": example.ratio,
+        "asked": example.asked,
+        "error_before": float(np.sqrt(np.mean(before[look] ** 2))) if look.any() else None,
+        "error_after": float(np.sqrt(np.mean(after[look] ** 2))) if look.any() else None,
+        "mse_before": float(np.mean(((example.image - example.target) / example.noise)[look] ** 2)) if look.any()
+        else None,
+        "mse_after": float(np.mean(((output - example.target) / example.noise)[look] ** 2)) if look.any() else None,
+    }
+    if example.kind == "identity":
+        found["change"] = float(np.sqrt(np.mean(((output - example.image) / example.noise)[look] ** 2)))
+    side = int(min(65, max(9, 2 * math.ceil(2.5 * example.width) + 1)))
+    stars = measured_stars(example.points, inner, example.valid, max(side // 2 + 5, int(APERTURE_FWHM * example.width)
+                                                                      + 4))
+    found["stars"] = int(len(stars))
+    if len(stars):
+        widths = {}
+        for label, plane in (("input", example.image), ("output", output), ("target", example.target)):
+            stamp = empirical_stamp(plane, stars, side)
+            widths[label] = stamp_width(stamp) if stamp is not None else float("nan")
+        found["widths"] = widths
+        found["achieved"] = widths["output"] / widths["input"]
+        found["target_achieved"] = widths["target"] / widths["input"]
+        rows = [ring_and_flux(output, example.image, float(x), float(y), example.width, example.noise)
+                for x, y in stars[:, :2]]
+        targets = [ring_and_flux(example.target, example.image, float(x), float(y), example.width, example.noise)
+                   for x, y in stars[:, :2]]
+        kept = [row["flux"] / row["reference_flux"] for row in rows if row["reference_flux"] > 0]
+        against = [row["flux"] / target["flux"] for row, target in zip(rows, targets) if target["flux"] > 0]
+        found["flux_kept"] = kept
+        found["flux_against_target"] = against
+        columns = psf_fields.DETECTION_COLUMNS
+        bright = (stars[:, columns.index("peak")] - example.background) / example.noise >= RING_PEAK
+        found["rings"] = [{"output": row["ring_profile"], "output_pixel": row["ring_pixel"],
+                           "target": target["ring_profile"]}
+                          for row, target, chosen in zip(rows, targets, bright) if chosen]
+    return found
+
+
+def summarized(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """A bank's windows' measures, pooled."""
+
+    def mean(key: str) -> float | None:
+        values = [row[key] for row in rows if row.get(key) is not None]
+        return float(np.mean(values)) if values else None
+
+    def spread(values: list[float]) -> list[float] | None:
+        values = [value for value in values if np.isfinite(value)]
+        return [round(float(np.percentile(values, q)), 4) for q in (5, 50, 95)] if values else None
+
+    found: dict[str, Any] = {"windows": len(rows), "error_before": mean("error_before"),
+                             "error_after": mean("error_after"), "mse_before": mean("mse_before"),
+                             "mse_after": mean("mse_after")}
+    if found["error_before"]:
+        found["error_ratio"] = found["error_after"] / found["error_before"]
+    measured = [row for row in rows if row.get("achieved") is not None and np.isfinite(row["achieved"])]
+    found["windows_with_stars"] = len(measured)
+    if measured:
+        asked = [row["achieved"] / row["ratio"] for row in measured]
+        found["achieved_over_asked"] = spread(asked)
+        found["achieved_within_10pc"] = float(np.mean([abs(value - 1) <= 0.1 for value in asked]))
+        found["target_over_asked"] = spread([row["target_achieved"] / row["ratio"] for row in measured])
+    kept = [value for row in rows for value in row.get("flux_kept", [])]
+    if kept:
+        found["flux_kept"] = spread(kept)
+        found["flux_kept_within_1pc"] = float(np.mean([abs(value - 1) <= 0.01 for value in kept]))
+        found["flux_against_target"] = spread([value for row in rows for value in row.get("flux_against_target", [])])
+        found["stars"] = len(kept)
+    rings = [ring for row in rows for ring in row.get("rings", [])]
+    if rings:
+        found["ring_output"] = spread([ring["output"] for ring in rings])
+        found["ring_output_worst"] = float(np.nanmin([ring["output"] for ring in rings]))
+        found["ring_output_pixel"] = spread([ring["output_pixel"] for ring in rings])
+        found["ring_target"] = spread([ring["target"] for ring in rings])
+        found["rings_deeper_than_1"] = float(np.mean([ring["output"] < -1.0 for ring in rings]))
+        found["bright_stars"] = len(rings)
+    changes = [row["change"] for row in rows if row.get("change") is not None]
+    if changes:
+        found["identity_change"] = spread(changes)
+    return found
+
+
+def chosen_windows(bank: Bank, limit: int | None) -> np.ndarray:
+    """Up to `limit` of a bank's kept windows, spread evenly over it, so
+    each source has its share."""
+    if limit is None or limit >= len(bank.kept):
+        return bank.kept
+    return bank.kept[np.unique(np.linspace(0, len(bank.kept) - 1, limit).round().astype(int))]
+
+
+def evaluate(model: SharpeningUNet, banks: dict[str, list[Bank]], *, settings: Settings = Settings(),
+             limit: int | None = 200, seed: int = 0, identity_share: float = 0.25,
+             where: torch.device | None = None) -> dict[str, Any]:
+    """Measure a model on up to `limit` windows of each bank, whole, through
+    `sharpen`: the known-kernel windows each with a K drawn for it alone
+    (seeded by the window), without exposure scaling, and `identity_share`
+    of them again as identity windows; the pairs as training reads them. A
+    window's measures are taken inside the network's reach of its edge and
+    the band its blur or shift read past (see `window_measures`)."""
+    where = where or device()
+    model = model.eval()
+    found: dict[str, Any] = {"limit": limit, "seed": seed}
+    for kind, group in banks.items():
+        for bank in group:
+            rows, identity_rows = [], []
+            windows = chosen_windows(bank, limit)
+            for order, window in enumerate(windows):
+                rng = np.random.default_rng([seed, int(window)])
+                if bank.pairs:
+                    examples = [pair_example(bank, int(window), settings)]
+                else:
+                    examples = [kernel_example(bank, int(window), rng, settings, identity=False, scaled=False)]
+                    if order < identity_share * len(windows):
+                        examples.append(kernel_example(bank, int(window), rng, settings, identity=True, scaled=False))
+                for example in examples:
+                    # A window is one tile: whole-image inference on it.
+                    inference = {**tiling(model.levels), "tile": example.image.shape[0]}
+                    output = sharpen(model, example.image, lambda x, y, stamp=example.stamp: stamp,
+                                     ratio=example.ratio, points=example.points, noise_map=example.noise_map,
+                                     background=example.background, noise=example.noise, inference=inference,
+                                     where=where)
+                    # The band its blur or shift read past is out of
+                    # `valid` already.
+                    measures = window_measures(example, output, reach(model.levels))
+                    (identity_rows if example.kind == "identity" else rows).append(measures)
+            entry = {"bank": bank.summary(), **summarized(rows)}
+            if identity_rows:
+                entry["identity"] = summarized(identity_rows)
+            entry["windows_detail"] = rows + identity_rows
+            found[f"{kind}:{bank.label}"] = entry
+    return found
+
+
+def load_run(store: Store, name: str) -> tuple[dict[str, Any], SharpeningUNet]:
+    """A recorded run's record and its model, on the CPU."""
+    directory = run_directory(store, name)
+    record = json.loads((directory / "run.json").read_text())
+    model = build_model(record["config"]["width"], record["config"]["levels"])
+    model.load_state_dict(torch.load(directory / "weights.pt", map_location="cpu"))
+    record["inference"] = tiling(record["config"]["levels"])
+    return record, model.eval()
+
+
+def evaluate_saved(store: Store, name: str, banks: dict[str, list[Bank]], *, limit: int | None, seed: int = 0,
+                   label: str | None = None) -> dict[str, Any]:
+    """Measure a recorded run's model on `banks` and add the measures to
+    its record, under `label` (default: the banks' labels and the limit).
+    Returns them without the per-window detail."""
+    directory = run_directory(store, name)
+    record, model = load_run(store, name)
+    settings = settings_from(record["config"]["settings"])
+    result = evaluate(model, banks, settings=settings, limit=limit, seed=seed)
+    label = label or ", ".join([*(f"{kind}:{bank.label}" for kind, group in banks.items() for bank in group),
+                                f"limit {limit}"])
+    record.setdefault("evaluations", {})[label] = result
+    (directory / "run.json").write_text(json.dumps(record, indent=2))
+    return {key: ({inner: value for inner, value in entry.items() if inner != "windows_detail"}
+                  if isinstance(entry, dict) else entry) for key, entry in result.items()}
+
+
+def settings_from(recorded: dict[str, Any]) -> Settings:
+    """A run's settings, as its record keeps them."""
+    return replace(Settings(), **{key: tuple(value) if isinstance(value, list) else value
+                                  for key, value in recorded.items()})

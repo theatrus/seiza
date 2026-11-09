@@ -64,13 +64,17 @@ def infer(
     batch: int = 8,
     outputs: int = 1,
     multiple: int = 1,
+    origins_too: bool = False,
 ) -> np.ndarray:
     """Run `run` over overlapping tiles of `planes`, (channels, height,
     width), and blend its (outputs, tile, tile) results into one image.
     `run` takes and returns a batch: (n, channels, tile, tile) to (n,
-    outputs, tile, tile). Every tile starts on a multiple of `multiple`. An
-    image smaller than a tile, or whose last tile would start off that grid,
-    is padded by reflection, and the padding is cut away again."""
+    outputs, tile, tile). With `origins_too` it is also given each tile's
+    top-left corner, (y, x), so it can read what belongs to the tile alone,
+    such as the PSF at its centre. Every tile starts on a multiple of
+    `multiple`. An image smaller than a tile, or whose last tile would start
+    off that grid, is padded by reflection, and the padding is cut away
+    again."""
     if tile % multiple:
         raise ValueError(f"a tile of {tile} is not a multiple of {multiple}")
     # A stride cut to the grid widens the overlap, never narrows it.
@@ -94,7 +98,7 @@ def infer(
     for begin in range(0, len(starts), batch):
         chunk = starts[begin:begin + batch]
         tiles = np.stack([planes[:, y:y + tile, x:x + tile] for y, x in chunk])
-        results = run(tiles)
+        results = run(tiles, chunk) if origins_too else run(tiles)
         for (y, x), result in zip(chunk, results):
             weight = np.outer(
                 window(tile, overlap, margin, first=y == rows[0], last=y == rows[-1]),
