@@ -27,18 +27,20 @@ FRAMES = 16
 
 
 def field(sigma: float, *, seed: int, gain: float = 1.0, sky: float = 500.0, stars: int = 12,
-          stretch: float = 1.0, clip: float | None = None, left_sigma: float | None = None) -> np.ndarray:
+          stretch: float = 1.0, clip: float | None = None, left_sigma: float | None = None,
+          shift: float = 0.0) -> np.ndarray:
     """A stack's image: `stars` × `stars` stars on a jittered grid at
     Gaussian width `sigma` (`left_sigma` in the left third), `stretch`
-    times as wide as high, through `gain`, on a flat sky with noise of 2;
-    three far brighter than the rest are clipped at `clip`."""
+    times as wide as high, moved `shift` pixels down, through `gain`, on a
+    flat sky with noise of 2; three far brighter than the rest are clipped
+    at `clip`."""
     down, across = np.mgrid[0:SIDE, 0:SIDE].astype(np.float32)
     image = np.full((SIDE, SIDE), sky, dtype=np.float32)
     place = np.random.default_rng(3)
     for row in range(stars):
         for column in range(stars):
             x = (column + 0.5) * SIDE / stars + place.uniform(-4, 4)
-            y = (row + 0.5) * SIDE / stars + place.uniform(-4, 4)
+            y = (row + 0.5) * SIDE / stars + place.uniform(-4, 4) + shift
             flux = place.uniform(20_000, 200_000)
             if (row, column) in ((0, 0), (0, 5), (5, 0)):
                 flux = 4_000_000
@@ -175,6 +177,24 @@ def test_a_seeing_pair_is_judged_matched_and_cut_with_both_psfs(store, tmp_path)
     assert banked["saturated"].dtype == np.uint8
     assert ((banked["input"] >= 0.8 * 30_000) <= (banked["saturated"] == 1)).all()
     assert len(np.load(banked["directory"] / "points" / "0.npy")) == pytest.approx(144, abs=6)
+    # The stamps' own widths give the ratio too.
+    assert np.allclose(info[:, column["target_width"]], 2.3548 * 1.5, rtol=0.1)
+    assert np.allclose(info[:, column["width_ratio"]], 1.5 / 2.2, rtol=0.08)
+
+
+@pytest.mark.parametrize("fwhm", [1.2, 1.8, 3.0, 8.0, 16.0])
+def test_a_stamp_s_width_is_its_core_s_whether_sharp_or_wide(fwhm):
+    middle = (sharpen_bank.STAMP - 1) / 2
+    down, across = np.mgrid[0:sharpen_bank.STAMP, 0:sharpen_bank.STAMP]
+    squared = (across - middle) ** 2 + (down - middle) ** 2
+    gaussian = np.exp(-squared / (2 * (fwhm / 2.3548) ** 2))
+    assert sharpen_bank.stamp_width(gaussian / gaussian.sum()) == pytest.approx(fwhm, rel=0.02)
+    # A Moffat's wings, of β 2.5, move it little: most where a stamp is
+    # sharp enough that its core is a few pixels.
+    alpha = fwhm / (2 * math.sqrt(2 ** (1 / 2.5) - 1))
+    moffat = (1 + squared / alpha**2) ** -2.5
+    assert sharpen_bank.stamp_width(moffat / moffat.sum()) == pytest.approx(fwhm, rel=0.15)
+    assert math.isnan(sharpen_bank.stamp_width(np.zeros((5, 5))))
 
 
 @pytest.mark.parametrize(("change", "reason"), [({"stretch": 1.3}, "psf-shape-mismatch"),
@@ -198,6 +218,19 @@ def test_a_caller_s_pairs_keep_their_record_and_need_no_variance(store, tmp_path
     assert banked["sources"][0]["target_sigma"] is False and np.isnan(banked["target_sigma"]).all()
     assert "match" not in banked["sources"][0]
     assert np.isfinite(banked["target"]).all() and len(banked["info"]) == 3
+
+
+def test_a_pair_s_centroids_may_move_a_little_but_not_off_its_grid(store, tmp_path):
+    source = product(store, "m/deep", field(2.2, seed=2))
+    near = product(store, "m/made/near", field(1.5, seed=1, shift=0.6), kind="made", variance=False)
+    far = product(store, "m/made/far", field(1.5, seed=1, shift=2.5), kind="made", variance=False)
+    for row in (source, near, far):
+        psf_fields.measure(store, row)
+    banked = sharpen_bank.cut(store, [{"input": source, "target": target, "record": {}} for target in (near, far)],
+                              label="extra", split="train", work=tmp_path / "work", per_source=2)
+    # A lopsided PSF moves its centroid as far, and a pair keeps its offset.
+    assert banked["sources"][0]["alignment"]["offset_px"][1] == pytest.approx(0.6, abs=0.05)
+    assert [left["reason"] for left in banked["done"]["dropped"]] == ["misaligned"]
 
 
 def test_a_sharpening_bank_cut_stopped_part_way_goes_on_to_the_same_bank(store, tmp_path, monkeypatch):
