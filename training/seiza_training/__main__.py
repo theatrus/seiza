@@ -4,8 +4,10 @@ The passes run in order — crawl, calibrate, stacks, split, measure,
 build, review — and each can be rerun alone. `process` measures and
 builds one set at a time, which reads each frame over the network once.
 `multi-night` stacks the deepest objects over all their nights.
-`status` prints what the manifest holds; `decide` records a review
-decision.
+`psf-fields` measures each sharpening source's PSF field, and
+`cut-sharpen` cuts the sharpening banks from them; both only read the
+manifest. `status` prints what the manifest holds; `decide` records a
+review decision.
 """
 
 from __future__ import annotations
@@ -17,6 +19,9 @@ from pathlib import Path
 
 from .manifest import Manifest
 from .store import Store, versions
+
+# The commands that only read the manifest and record no pass in it.
+READ_ONLY = ("psf-fields", "cut-sharpen")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -183,6 +188,35 @@ def main(argv: list[str] | None = None) -> int:
                             "256 × 256 pixels to both halves of every tile alike, so the model keeps them, as a "
                             "stack's over-subtracted hot or dead pixels, and does not fill or ring them")
 
+    psf = commands.add_parser("psf-fields", help="measure each sharpening source's PSF field once and keep it in "
+                                                 "the store, under psf/ (reads the manifest only)")
+    psf.add_argument("--set", action="append", dest="sets", help="only this set id")
+    psf.add_argument("--kind", action="append", dest="kinds",
+                     choices=("deep", "multi-night", "seeing-best", "seeing-worst", "multi-night-seeing-best",
+                              "multi-night-seeing-worst"),
+                     help="only products of this kind (default: every kind the sharpening bank cuts)")
+    psf.add_argument("--split", action="append", dest="splits", choices=("train", "validation", "test", "held-out"),
+                     help="only sets of this split (default: train and validation)")
+    psf.add_argument("--workers", type=int, default=4, help="measure this many products at once")
+    psf.add_argument("--limit", type=int, help="at most this many products not yet measured")
+    psf.add_argument("--again", action="store_true", help="measure products already measured")
+
+    sharpen = commands.add_parser("cut-sharpen", help="cut the sharpening banks from the source products and their "
+                                                      "PSF fields, onto local disk (reads the manifest only)")
+    sharpen.add_argument("--bank", action="append", dest="banks", choices=("deep", "seeing"),
+                         help="only this bank (default: both)")
+    sharpen.add_argument("--split", action="append", dest="splits", choices=("train", "validation"),
+                         help="only this split's banks (default: both, apart)")
+    sharpen.add_argument("--set", action="append", dest="sets", help="only this set id")
+    sharpen.add_argument("--work", type=Path,
+                         help="where the banks are cut, on local disk (default: beside the scratch directory, "
+                              "~/.cache/seiza-training/sharpen)")
+    sharpen.add_argument("--workers", type=int, default=4, help="read and prepare this many sources at once")
+    sharpen.add_argument("--seed", type=int, default=0)
+    sharpen.add_argument("--deep-windows", type=int, default=40, help="windows of each deep stack")
+    sharpen.add_argument("--pair-windows", type=int, default=160, help="windows of each seeing pair")
+    sharpen.add_argument("--limit", type=int, help="at most this many sources a bank, for a trial cut")
+
     sheet = commands.add_parser("sheet-noise", help="make a trained noise model's contact sheets")
     sheet.add_argument("--name", required=True)
     sheet.add_argument("--sheet", action="append", dest="sheets_named", help="only this sheet (default: all)")
@@ -237,6 +271,13 @@ def main(argv: list[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
     store = Store(arguments.store, arguments.scratch)
     only = set(arguments.sets) if getattr(arguments, "sets", None) else None
+    if arguments.command in READ_ONLY:
+        # These keep what they make beside the store, so they only read the
+        # manifest, which another machine's pass may be writing meanwhile.
+        with Manifest.read_only(store.manifest_path) as manifest:
+            summary = run(arguments, manifest, store, only)
+        print(json.dumps(summary, indent=2, default=str))
+        return 0
     with Manifest(store.manifest_path) as manifest:
         if arguments.command == "decide":
             manifest.record_review(
@@ -372,6 +413,36 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
             weight_map=arguments.weight_map, holes=arguments.holes, bank_workers=arguments.bank_workers, **extra,
         )
         return {**record, "sheets": render_saved(store, manifest, arguments.name)}
+    if command == "psf-fields":
+        from . import psf_fields
+
+        products = psf_fields.eligible(manifest, kinds=arguments.kinds or psf_fields.SOURCE_KINDS,
+                                       splits=arguments.splits or psf_fields.SPLITS, sets=only)
+        return psf_fields.run(manifest, store, products, workers=arguments.workers, again=arguments.again,
+                              limit=arguments.limit)
+    if command == "cut-sharpen":
+        from . import sharpen_bank
+
+        work = arguments.work or store.scratch.parent / "sharpen"
+        found: dict = {}
+        for split in arguments.splits or ("train", "validation"):
+            for name in arguments.banks or ("deep", "seeing"):
+                if name == "deep":
+                    sources, left = sharpen_bank.deep_sources(manifest, split, only), []
+                    per_source = arguments.deep_windows
+                else:
+                    sources, left = sharpen_bank.seeing_pairs(manifest, split, only)
+                    per_source = arguments.pair_windows
+                sources = sources[:arguments.limit]
+                if not sources:
+                    found[f"{name}:{split}"] = {"sources": 0, "left": left}
+                    continue
+                banked = sharpen_bank.cut(store, sources, label=name, split=split, work=work, seed=arguments.seed,
+                                          per_source=per_source, workers=arguments.workers)
+                found[f"{name}:{split}"] = {"directory": str(banked["directory"]), "left": left,
+                                            **{key: banked["done"][key] for key in ("windows", "sources", "dropped",
+                                                                                    "summary")}}
+        return found
     if command == "sheet-noise":
         from .sheets import render_saved
 

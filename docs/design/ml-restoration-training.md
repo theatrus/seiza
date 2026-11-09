@@ -1929,8 +1929,7 @@ A model is promoted only when all of these pass:
   input;
 - blind review by people at identical display stretches, using the
   [corpus note](../benchmarks/2026-07-deconvolution-corpus.md) convention;
-- a measurable advantage over its classical baseline and a no-op, with an
-  external learned tool as a reference only.
+- a measurable advantage over its classical baseline and a no-op.
 
 Each model also has gates of its own.
 
