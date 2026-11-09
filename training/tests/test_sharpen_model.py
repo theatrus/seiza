@@ -83,7 +83,7 @@ POSITIONS = [(20.3, 22.6), (44.8, 40.2), (30.1, 50.7)]
 FLUXES = [40_000.0, 20_000.0, 10_000.0]
 
 
-def kernel_bank(tmp_path, *, count: int = 4):
+def kernel_bank(tmp_path, *, count: int = 4, name: str = "sharpen-deep-train-0"):
     """A known-kernel bank of `count` windows of one stack: three Gaussian
     stars 1.3 px across on a sky of 100, noise 1."""
     covariance = np.diag([1.3**2, 1.3**2])
@@ -97,7 +97,7 @@ def kernel_bank(tmp_path, *, count: int = 4):
                                                  "width": sharpen_bank.stamp_width(stamp)}})
     sources = [{"input": "a/deep", "set": "a", "telescope": "Test Scope", "record": {}, "windows": [0, count],
                 "points": detections(POSITIONS, FLUXES)}]
-    return write_bank(tmp_path / "sharpen-deep-train-0", pairs=False, windows=windows, sources=sources, label="deep")
+    return write_bank(tmp_path / name, pairs=False, windows=windows, sources=sources, label="deep")
 
 
 def pair_bank(tmp_path, *, offset=(0.6, -0.4), ratios=None, name: str = "sharpen-seeing-train-0"):
@@ -402,3 +402,37 @@ def test_a_resumed_run_is_the_run_it_continues(tmp_path):
     assert not (sm.run_directory(store, "parts") / "checkpoint.pt").exists()
     _, model = sm.load_run(store, "parts")
     assert isinstance(model, SharpeningUNet)
+
+
+def test_the_commands_train_stop_resume_and_evaluate_from_the_banks_they_find(tmp_path, capsys):
+    from seiza_training.__main__ import main
+
+    work = tmp_path / "banks"
+    work.mkdir()
+    kernel_bank(work)
+    kernel_bank(work, name="sharpen-deep-validation-0")
+    pair_bank(work)
+    pair_bank(work, name="sharpen-seeing-validation-0")
+    common = ["--store", str(tmp_path / "store"), "--scratch", str(tmp_path / "scratch")]
+
+    def run(*arguments):
+        capsys.readouterr()
+        assert main([*common, *arguments]) == 0
+        # Training logs its windows first; the record follows.
+        out = capsys.readouterr().out
+        return json.loads(out if out.startswith("{") else out[out.index("\n{") + 1:])
+
+    stopped = run("train-sharpen", "--name", "cli", "--work", str(work), "--steps", "4", "--width", "4",
+                  "--levels", "2", "--tile", "32", "--batch", "2", "--log-every", "2", "--checkpoint-every", "2",
+                  "--stop-after", "2", "--exclude-pairs", "", "--validation-windows", "2", "--validation-batches", "1",
+                  "--prefetch", "0")
+    assert stopped["stopped_after"] == 2
+    record = run("train-sharpen", "--name", "cli", "--resume", "--prefetch", "0")
+    assert [entry["step"] for entry in record["history"]] == [2, 4]
+    assert record["config"]["choice"]["kernel"] == str(work / "sharpen-deep-train-0")
+    assert record["config"]["choice"]["excluded"] == []
+    assert "windows_detail" not in record["validation"]["kernel:deep"]
+    measured = run("evaluate-sharpen", "--name", "cli", "--work", str(work), "--limit", "3")
+    assert measured["kernel:deep"]["windows"] == 3 and measured["kernel:deep"]["identity"]["windows"] == 1
+    saved = json.loads((tmp_path / "store" / "models" / "sharpen" / "cli" / "run.json").read_text())
+    assert list(saved["evaluations"]) == ["kernel:deep, seeing:seeing, limit 3"]

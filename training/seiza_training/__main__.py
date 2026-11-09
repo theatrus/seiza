@@ -387,7 +387,7 @@ def main(argv: list[str] | None = None) -> int:
     store = Store(arguments.store, arguments.scratch)
     only = set(arguments.sets) if getattr(arguments, "sets", None) else None
     if arguments.command in BANKS_ONLY:
-        print(json.dumps(sharpen(arguments, store), indent=2, default=str))
+        print(json.dumps(run_sharpen(arguments, store), indent=2, default=str))
         return 0
     if arguments.command in READ_ONLY:
         # These keep what they make beside the store, so they only read the
@@ -611,7 +611,7 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
     raise AssertionError(command)
 
 
-def sharpen(arguments: argparse.Namespace, store: Store) -> dict:
+def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
     """`train-sharpen` and `evaluate-sharpen`."""
     from . import sharpen_model
 
