@@ -656,6 +656,9 @@ class BankChoice:
     focus_check: bool = True
     left_out_kinds: tuple[str, ...] = ()
     multi_night_share: float = 0.0
+    # Further known-kernel banks, such as a binned one, each with its
+    # weight against the first's 1 in the known-kernel share of the mix.
+    more_kernels: tuple[tuple[str, float], ...] = ()
 
     def options(self) -> dict[str, Any]:
         names = set_names(Path(self.manifest) if self.manifest else None)
@@ -666,7 +669,9 @@ class BankChoice:
     def train(self, settings: Settings) -> dict[str, list[Bank]]:
         """The train banks, by kind."""
         options = self.options()
-        found = {"kernel": [Bank(Path(self.kernel), settings, **options)],
+        found = {"kernel": [Bank(Path(self.kernel), settings, **options),
+                            *(Bank(Path(path), settings, **options, weight=weight)
+                              for path, weight in self.more_kernels)],
                  "seeing": [Bank(Path(path), settings, **options) for path in self.seeing]}
         if self.pairs:
             found["pairs"] = [Bank(Path(path), settings, **options, weight=weight) for path, weight in self.pairs]

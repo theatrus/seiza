@@ -221,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
 
     sharpen = commands.add_parser("cut-sharpen", help="cut the sharpening banks from the source products and their "
                                                       "PSF fields, onto local disk (reads the manifest only)")
-    sharpen.add_argument("--bank", action="append", dest="banks", choices=("deep", "seeing"),
+    sharpen.add_argument("--bank", action="append", dest="banks", choices=("deep", "seeing", "binned"),
                          help="only this bank (default: both)")
     sharpen.add_argument("--split", action="append", dest="splits", choices=("train", "validation"),
                          help="only this split's banks (default: both, apart)")
@@ -256,6 +256,10 @@ def main(argv: list[str] | None = None) -> int:
                                help="where cut-sharpen cut the banks (default: beside the scratch directory, "
                                     "~/.cache/seiza-training/sharpen); each bank not named below is the newest there")
     sharpen_train.add_argument("--kernel-bank", type=Path, help="the train split's known-kernel (deep) bank")
+    sharpen_train.add_argument("--more-kernel-bank", type=weighted, action="append", dest="more_kernels", default=[],
+                               metavar="PATH[:WEIGHT]",
+                               help="a further known-kernel bank, such as a binned one, sharing the known-kernel "
+                                    "share of the mix by its weight against the first's 1 (repeatable)")
     sharpen_train.add_argument("--seeing-bank", type=Path, action="append", dest="seeing_banks",
                                help="the train split's seeing bank (repeatable)")
     sharpen_train.add_argument("--pairs-bank", type=weighted, action="append", dest="pairs_banks", default=[],
@@ -592,6 +596,9 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
                 if name == "deep":
                     sources, left = sharpen_bank.deep_sources(manifest, split, only), []
                     per_source = arguments.deep_windows
+                elif name == "binned":
+                    sources, left = sharpen_bank.binned_sources(store, manifest, split, only), []
+                    per_source = arguments.deep_windows
                 else:
                     sources, left = sharpen_bank.seeing_pairs(manifest, split, only)
                     per_source = arguments.pair_windows
@@ -681,7 +688,8 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
                                     or [sharpen_model.find_bank(work, "seeing", "validation")]),
             excluded=recorded.excluded, object_cap=recorded.object_cap,
             manifest=str(manifest) if manifest else recorded.manifest, focus_check=recorded.focus_check,
-            left_out_kinds=recorded.left_out_kinds, multi_night_share=recorded.multi_night_share)
+            left_out_kinds=recorded.left_out_kinds, multi_night_share=recorded.multi_night_share,
+            more_kernels=recorded.more_kernels)
         settings = sharpen_model.settings_from(record["config"]["settings"])
         return sharpen_model.evaluate_saved(store, arguments.name, choice.validation(settings), limit=arguments.limit,
                                             seed=arguments.seed)
@@ -715,7 +723,8 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
         object_cap=arguments.object_cap, manifest=str(manifest) if manifest else None,
         focus_check=arguments.focus_check,
         left_out_kinds=tuple(kind for kind in arguments.leave_out_kinds.split(",") if kind),
-        multi_night_share=arguments.multi_night_share)
+        multi_night_share=arguments.multi_night_share,
+        more_kernels=tuple((str(Path(path)), weight) for path, weight in arguments.more_kernels))
     record = sharpen_model.train(
         store, name=arguments.name, choice=choice, steps=arguments.steps, width=arguments.width,
         levels=arguments.levels, batch=arguments.batch, learning_rate=arguments.learning_rate, seed=arguments.seed,
