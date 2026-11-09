@@ -340,6 +340,9 @@ def main(argv: list[str] | None = None) -> int:
     sharpen_train.add_argument("--precision", choices=("fp32", "bf16"), default="fp32")
     sharpen_train.add_argument("--prefetch", type=int, default=8)
     sharpen_train.add_argument("--batch-threads", type=int, default=4)
+    sharpen_train.add_argument("--workers", type=int, default=0,
+                               help="build batches in this many worker processes rather than on threads "
+                                    "(the same batches; 0: threads)")
     sharpen_train.add_argument("--validation-batches", type=int, default=4,
                                help="fixed validation batches whose loss is logged with each window's")
     sharpen_train.add_argument("--validation-windows", type=int, default=200,
@@ -669,7 +672,8 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
     if arguments.resume:
         return summary_of(sharpen_model.resume_run(store, arguments.name, stop_after=arguments.stop_after,
                                                    prefetch=arguments.prefetch,
-                                                   batch_threads=arguments.batch_threads))
+                                                   batch_threads=arguments.batch_threads,
+                                                   workers=arguments.workers))
     if len(arguments.mix) != 3:
         raise SystemExit("--mix takes three shares: known-kernel, seeing and supplied")
     settings = sharpen_model.Settings(
@@ -702,7 +706,7 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
         mix=tuple(arguments.mix), clip_grad=arguments.clip_grad, rewind=arguments.rewind,
         precision=arguments.precision, validation_batches=arguments.validation_batches,
         validation_windows=arguments.validation_windows, stop_after=arguments.stop_after,
-        prefetch=arguments.prefetch, batch_threads=arguments.batch_threads)
+        prefetch=arguments.prefetch, batch_threads=arguments.batch_threads, workers=arguments.workers)
     return summary_of(record)
 
 

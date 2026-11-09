@@ -470,6 +470,25 @@ def test_a_bank_leaves_out_kinds_and_gives_the_stacks_of_many_nights_their_share
     assert list(left.kept) == [3, 4, 5] and left.left == {"kind:deep": 3}
 
 
+def test_worker_processes_hand_out_the_batches_the_loop_would_build(tmp_path):
+    choice = sm.BankChoice(kernel=str(kernel_bank(tmp_path)), seeing=(str(pair_bank(tmp_path)),),
+                           validation_kernel=None, validation_seeing=())
+    settings = sm.Settings(tile=32)
+    mix = (0.6, 0.4, 0.0)
+    sources, shares = sm.mixture(choice.train(settings), mix)
+    workers = sm.Workers(choice, settings, mix, 3, 7, depth=2, processes=2, start=4)
+    try:
+        for step in (5, 6, 7):
+            built = workers.get()
+            expected = sm.batch_from(sources, shares, 3, sm.step_generator(7, step), settings)
+            assert set(built) == set(expected)
+            for name, value in expected.items():
+                assert built[name].dtype == value.dtype, name
+                assert torch.equal(built[name], value), name
+    finally:
+        workers.close()
+
+
 def test_no_object_takes_more_than_its_cap_of_the_draws():
     groups = np.array(["a"] * 60 + ["b"] * 20 + ["c"] * 10 + ["d"] * 10)
     odds = sm.capped_odds(groups, 0.4)
