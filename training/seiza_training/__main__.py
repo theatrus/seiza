@@ -308,6 +308,11 @@ def main(argv: list[str] | None = None) -> int:
     sharpen_train.add_argument("--object-cap", type=float, default=0.03,
                                help="no object (telescope, target and filter, over its nights) takes more than this "
                                     "share of its bank's draws")
+    sharpen_train.add_argument("--nonstellar", action="store_true",
+                               help="separate strengths for stars and for the rest: the network reads a ratio "
+                                    "for each, and a known-kernel window asks each for its own")
+    sharpen_train.add_argument("--equal-share", type=float, default=0.3,
+                               help="with --nonstellar, the share of known-kernel windows asking both alike")
     sharpen_train.add_argument("--residual", choices=("asinh", "linear"), default="asinh",
                                help="add the network's residual to the input's asinh, as it reads it, and take it "
                                     "back through sinh, or add it to the input in units of the typical noise")
@@ -670,7 +675,8 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
         identity=arguments.identity, exposure=arguments.exposure, floor_px=arguments.floor_px,
         max_ratio=arguments.max_window_ratio, min_ratio=arguments.min_window_ratio,
         points_empty=arguments.points_empty, centroid_offset=arguments.centroid_offset,
-        ratio_source=arguments.ratio_source, residual=arguments.residual)
+        ratio_source=arguments.ratio_source, residual=arguments.residual, nonstellar=arguments.nonstellar,
+        equal_share=arguments.equal_share)
     loss = sharpen_model.LossSettings(epsilon=arguments.charbonnier, noise_cap=arguments.noise_cap,
                                       gradient_weight=arguments.gradient_weight,
                                       gradient_scales=arguments.gradient_scales, flux_weight=arguments.flux_weight)
