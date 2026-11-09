@@ -1188,17 +1188,19 @@ def batch_from(
 
 
 class Prefetch:
-    """`make(step)` for steps 1, 2, …, built up to `depth` ahead on `threads`
-    threads and handed out in step order. A batch depends only on its step,
-    so the batches are those calling `make` in the loop would give, whatever
-    the threads. NumPy releases the interpreter lock for the copies and the
-    arithmetic, which is most of a batch."""
+    """`make(step)` for steps `start` + 1, `start` + 2, …, built up to
+    `depth` ahead on `threads` threads and handed out in step order. A batch
+    depends only on its step, so the batches are those calling `make` in
+    the loop would give, whatever the threads, and a run resumed after
+    `start` meets the batches it would have met. NumPy releases the
+    interpreter lock for the copies and the arithmetic, which is most of a
+    batch."""
 
-    def __init__(self, make: Callable[[int], Any], depth: int, threads: int = 1) -> None:
+    def __init__(self, make: Callable[[int], Any], depth: int, threads: int = 1, start: int = 0) -> None:
         self.make = make
         self.pool = ThreadPoolExecutor(max_workers=threads, thread_name_prefix="batch")
         self.pending: deque[Future] = deque()
-        self.step = 0
+        self.step = start
         for _ in range(max(depth, threads)):
             self.submit()
 
@@ -1351,6 +1353,17 @@ class Rewind:
         self.optimizer.load_state_dict(offloaded(optimizer_state))
         self.saved = self.saved[:1]
         return back
+
+    def state(self) -> dict[str, Any]:
+        """What a run's checkpoint keeps of the guard, so a resumed run
+        rewinds as the run it continues would have."""
+        return {"lowest": self.lowest, "count": self.count, "rate": self.rate, "recent": list(self.recent),
+                "saved": list(self.saved)}
+
+    def restore(self, state: dict[str, Any]) -> None:
+        """Put the guard back as `state` recorded it."""
+        self.lowest, self.count, self.rate = state["lowest"], state["count"], state["rate"]
+        self.recent, self.saved = list(state["recent"]), [tuple(entry) for entry in state["saved"]]
 
 
 def offloaded(state: Any) -> Any:

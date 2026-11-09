@@ -1,8 +1,14 @@
 """The restoration models' network: a residual U-Net built only from
 operations that Core ML, TensorRT and ONNX Runtime's CPU provider all run
 natively — 3×3 and 1×1 convolutions, stride-2 downsampling, nearest
-upsampling, concatenation, addition and SiLU — with no normalisation
-layers, so tiles never disagree through per-tile statistics.
+upsampling, concatenation, addition, broadcast multiplication and SiLU —
+with no normalisation layers, so tiles never disagree through per-tile
+statistics.
+
+The PSF model's network (`SharpeningUNet`) is the same U-Net told the
+local PSF: a small encoder reduces the PSF stamp to a vector with strided
+convolutions alone, and that vector scales and shifts the channels at the
+bottleneck and after each decoder level (FiLM).
 """
 
 from __future__ import annotations
@@ -56,6 +62,79 @@ class ResidualUNet(nn.Module):
         for level in reversed(range(self.levels - 1)):
             y = nn.functional.interpolate(y, scale_factor=2.0, mode="nearest")
             y = self.up[level](torch.cat([self.lift[level](y), skips[level]], dim=1))
+        return self.last(y)
+
+
+# The side of the PSF stamps the PSF model reads, as the sharpening bank
+# keeps them.
+STAMP_SIDE = 129
+
+
+class StampEncoder(nn.Sequential):
+    """A PSF stamp, `inputs` planes of `STAMP_SIDE` pixels a side, reduced to
+    `features` numbers: a 3×3 convolution at full resolution, so a stamp a
+    pixel or two wide is seen before any stride, then stride-2 3×3
+    convolutions, each halving the side, until one pixel is left (129, 65,
+    33, 17, 9, 5, 3, 2, 1). Strides alone reduce it, as no pooling is in
+    the operations every backend runs."""
+
+    def __init__(self, inputs: int = 2, width: int = 16, features: int = 64, side: int = STAMP_SIDE) -> None:
+        layers: list[nn.Module] = [nn.Conv2d(inputs, width, 3, padding=1), nn.SiLU()]
+        channels = width
+        while side > 1:
+            # Twice as many channels at each halving once the side is below
+            # half the stamp's, up to `features`.
+            following = min(features, channels * 2) if side < STAMP_SIDE // 2 else channels
+            layers += [nn.Conv2d(channels, following, 3, stride=2, padding=1), nn.SiLU()]
+            channels, side = following, (side - 1) // 2 + 1
+        if channels != features:
+            layers += [nn.Conv2d(channels, features, 1), nn.SiLU()]
+        super().__init__(*layers)
+        self.features = features
+
+
+class FiLM(nn.Module):
+    """Per-channel scale and shift of `channels` feature maps, from the
+    stamp's vector by two 1×1 convolutions. It starts as the identity: a
+    scale of one and a shift of zero, whatever the stamp."""
+
+    def __init__(self, features: int, channels: int) -> None:
+        super().__init__()
+        self.scale = nn.Conv2d(features, channels, 1)
+        self.shift = nn.Conv2d(features, channels, 1)
+        nn.init.zeros_(self.scale.weight)
+        nn.init.ones_(self.scale.bias)
+        nn.init.zeros_(self.shift.weight)
+        nn.init.zeros_(self.shift.bias)
+
+    def forward(self, y: torch.Tensor, vector: torch.Tensor) -> torch.Tensor:
+        return y * self.scale(vector) + self.shift(vector)
+
+
+class SharpeningUNet(ResidualUNet):
+    """The residual U-Net with the local PSF stamp's vector (`StampEncoder`)
+    scaling and shifting its channels (`FiLM`) at the bottleneck and after
+    each decoder level. It reads `inputs` image planes and `stamp_inputs`
+    stamp planes; its receptive field and tiling are the U-Net's."""
+
+    def __init__(self, inputs: int = 4, outputs: int = 1, width: int = 32, levels: int = 4, stamp_inputs: int = 2,
+                 stamp_width: int = 16, features: int = 64) -> None:
+        super().__init__(inputs=inputs, outputs=outputs, width=width, levels=levels)
+        widths = [width * 2**level for level in range(levels)]
+        self.encoder = StampEncoder(stamp_inputs, stamp_width, features)
+        self.film_bottom = FiLM(features, widths[-1])
+        self.film_up = nn.ModuleList(FiLM(features, widths[i]) for i in range(levels - 1))
+
+    def forward(self, x: torch.Tensor, stamp: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+        vector = self.encoder(stamp)
+        skips = [self.first(x)]
+        for down in self.down:
+            skips.append(down(skips[-1]))
+        y = self.film_bottom(skips.pop(), vector)
+        for level in reversed(range(self.levels - 1)):
+            y = nn.functional.interpolate(y, scale_factor=2.0, mode="nearest")
+            y = self.up[level](torch.cat([self.lift[level](y), skips[level]], dim=1))
+            y = self.film_up[level](y, vector)
         return self.last(y)
 
 
