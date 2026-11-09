@@ -355,6 +355,32 @@ def test_a_binned_stamp_is_the_star_a_binned_image_holds(factor):
     assert sharpen_bank.binned(mask, factor, "any").sum() == 1
 
 
+def test_a_real_psf_blurs_a_window_as_its_stamp_says(tmp_path):
+    settings = sm.Settings(kernel_ratios=(1.1, 3.0))
+    sharp = gaussian(sharpen_bank.STAMP, np.diag([1.3**2] * 2))
+    donor = 0.8 * moffat(sharpen_bank.STAMP, 3.0, stretch=1.3, angle=0.5) + 0.2 * gaussian(
+        sharpen_bank.STAMP, np.diag([4.0**2] * 2), (66.0, 64.0))
+    kernel = sm.donor_kernel(sharp, donor, settings)
+    assert kernel is not None and not kernel.identity and kernel.donor is donor
+    assert kernel.asked == pytest.approx(kernel.widths["input"] / kernel.widths["reference"])
+    # A window's stars, blurred by the donor, are as wide as P_in's stamp.
+    image = stars_image([(64.2, 63.7)], [1e5], np.diag([1.3**2] * 2), side=128, sky=0.0)
+    blurred = sm.blurred_images(image, [kernel.blur])[0]
+    assert float(blurred.sum()) == pytest.approx(float(image.sum()), rel=1e-3)
+    assert sharpen_bank.stamp_width(sm.empirical_stamp(blurred, np.array([[64.2, 63.7]]), 41)) == pytest.approx(
+        kernel.widths["input"], rel=0.03)
+    # A donor that widens too little or too much gives way.
+    assert sm.donor_kernel(sharp, gaussian(sharpen_bank.STAMP, np.diag([0.2**2] * 2)), settings) is None
+    assert sm.donor_kernel(sharp, gaussian(sharpen_bank.STAMP, np.diag([9.0**2] * 2)), settings) is None
+    # In a bank, by the settings' share; without it, the batches of before.
+    bank = sm.Bank(kernel_bank(tmp_path), sm.Settings(tile=32))
+    real = sm.Settings(tile=32, real_kernels=1.0, kernel_ratios=(1.1, 3.0))
+    example = sm.kernel_example(bank, 0, np.random.default_rng(2), real, identity=False)
+    assert example.details["real"] and example.ratio < 1
+    plain = sm.kernel_example(bank, 0, np.random.default_rng(2), sm.Settings(tile=32), identity=False)
+    assert not plain.details["real"]
+
+
 def test_a_model_with_two_ratios_reads_five_planes_and_sharpens_with_a_pair():
     model = sm.build_model(4, 3, sm.PLANES_NONSTELLAR)
     assert model.first[0].in_channels == 5

@@ -317,6 +317,9 @@ def main(argv: list[str] | None = None) -> int:
                                     "for each, and a known-kernel window asks each for its own")
     sharpen_train.add_argument("--equal-share", type=float, default=0.3,
                                help="with --nonstellar, the share of known-kernel windows asking both alike")
+    sharpen_train.add_argument("--real-kernels", type=float, default=0.0,
+                               help="the share of known-kernel windows blurred by a real PSF, another window's "
+                                    "stamp, in place of a Gaussian")
     sharpen_train.add_argument("--pass-noise", action="store_true",
                                help="targets carry their input's noise, so the model passes noise on: a "
                                     "known-kernel window's fresh noise is in its target, and a pair bank with "
@@ -708,7 +711,7 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
         points_empty=arguments.points_empty, centroid_offset=arguments.centroid_offset,
         ratio_source=arguments.ratio_source, residual=arguments.residual, nonstellar=arguments.nonstellar,
         equal_share=arguments.equal_share, fill_clipped=arguments.fill_clipped,
-        pass_noise=arguments.pass_noise)
+        pass_noise=arguments.pass_noise, real_kernels=arguments.real_kernels)
     loss = sharpen_model.LossSettings(epsilon=arguments.charbonnier, noise_cap=arguments.noise_cap,
                                       gradient_weight=arguments.gradient_weight,
                                       gradient_scales=arguments.gradient_scales, flux_weight=arguments.flux_weight)
