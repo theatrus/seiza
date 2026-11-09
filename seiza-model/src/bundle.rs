@@ -146,8 +146,8 @@ pub struct HoleGuard {
     /// How far the mask reaches past a hole, in pixels, for the lobes
     /// registration spreads round it.
     pub margin: usize,
-    /// A masked pixel is filled with the mean of the unmasked pixels this far
-    /// round it.
+    /// A masked pixel is filled with the median of the unmasked pixels this
+    /// far round it.
     pub fill_radius: usize,
     /// Within the mask, the input is put back where it differs from the
     /// network's output by more than this many of the image map's noise.
