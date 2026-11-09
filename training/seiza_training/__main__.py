@@ -26,7 +26,7 @@ from .store import Store, versions
 READ_ONLY = ("psf-fields", "cut-sharpen", "sheet-sharpen")
 # The commands that read the sharpening banks, and the manifest, if at
 # all, only for the sets' names.
-BANKS_ONLY = ("train-sharpen", "evaluate-sharpen", "clean-sharpen")
+BANKS_ONLY = ("train-sharpen", "evaluate-sharpen", "clean-sharpen", "cut-external")
 
 
 def numbers(text: str) -> tuple[float, ...]:
@@ -394,6 +394,17 @@ def main(argv: list[str] | None = None) -> int:
     clean.add_argument("--noise-run", required=True, help="the noise run, under its store's models/noise/")
     clean.add_argument("--noise-store", type=Path, help="the store holding the noise run (default: --store)")
 
+    external = commands.add_parser("cut-external", help="cut a known-kernel bank from sharper images than any stack, "
+                                                         "a space telescope archive's mosaics listed in "
+                                                         "ROOT/index.json")
+    external.add_argument("--root", required=True, type=Path, help="the mosaics' directory, holding index.json")
+    external.add_argument("--work", type=Path)
+    external.add_argument("--bins", type=lambda text: tuple(int(k) for k in text.split(",")), default=(2, 3),
+                          help="the factors each mosaic is brought down by")
+    external.add_argument("--windows", type=int, default=120, help="windows of each mosaic at each factor")
+    external.add_argument("--seed", type=int, default=0)
+    external.add_argument("--limit", type=int, help="at most this many mosaics, for a trial cut")
+
     sharpen_sheet = commands.add_parser("sheet-sharpen", help="make a trained PSF model's contact sheets, full-size "
                                                               "images and whole-image measures (reads the manifest "
                                                               "only)")
@@ -687,6 +698,14 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
     """`train-sharpen` and `evaluate-sharpen`."""
     from . import sharpen_model
 
+    if arguments.command == "cut-external":
+        from . import sharpen_external
+
+        banked = sharpen_external.cut(arguments.root, arguments.work or store.scratch.parent / "sharpen",
+                                      bins=arguments.bins, per_source=arguments.windows, seed=arguments.seed,
+                                      limit=arguments.limit)
+        return {"directory": str(banked["directory"]),
+                **{key: banked["done"][key] for key in ("windows", "sources", "dropped", "summary")}}
     if arguments.command == "clean-sharpen":
         from . import sharpen_clean
 
