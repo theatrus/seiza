@@ -104,7 +104,7 @@ import torch
 
 from . import psf_fields
 from .noise_model import Prefetch, Rewind, device, image_sigma, offloaded, step_generator, tiling
-from .sharpen_bank import STAMP, grown, open_bank, stamp_width
+from .sharpen_bank import STAMP, open_bank, stamp_width
 from .store import Store, versions
 from .tiles import infer
 from .unet import SharpeningUNet, reach, receptive_field
@@ -879,7 +879,12 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
     else:
         target_sigma = scale * sigma
     band = kernel.reach()
-    valid = edge_band(image.shape, band) & ~(grown(saturated, band) if band else saturated)
+    # The clipped cores stay out of the loss, but not the pixels about them:
+    # input and target are blurs of the same stack, clipped cores and all,
+    # so they agree there. Blind to a bright star's surroundings out to the
+    # blur's reach, runs dug a dark ring about it, 1 to 4σ̄ below the sky
+    # at four to five widths, with a halo past it (2026-11-09).
+    valid = edge_band(image.shape, band) & ~saturated
     noise_map = image_sigma(shown)
     noise = float(np.median(noise_map[np.isfinite(noise_map)]))
     points = window_points(bank, source, row)
