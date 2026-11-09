@@ -2,8 +2,21 @@
 
 Seiza's `plan_calibration` applies the same matching policy the desktop
 apps and PSF Guard use, to the masters the crawl found in the library. The
-plan must suit every light of the set. A set needs a flat, and a dark or a
-bias; a set without one is left out, with the reason recorded.
+plan must suit every light of the set. A set needs a dark or a bias; a set
+without either is left out, with the reason recorded. A set without a flat
+is built all the same, marked `ready:no-flat`: the halves of a noise pair
+share their calibration, so an uncorrected flat field is signal both halves
+hold, not noise. A model that learns the flat field's work, such as
+sharpening, leaves these sets out.
+
+The plan orders the masters that suit by time, nearest first, as frames to
+combine; it does not judge a master's own noise. A master's noise is the
+same in every light, so a bias or dark is chosen by it: the nearest whose
+noise, scaled to the lights' exposure, is at most `MASTER_NOISE` of one
+frame's read noise, or else the quietest. A master of `n` frames scaled by
+`s` adds `s / √n`: two 75-second darks scaled to 300 seconds add 2.8 times
+a frame's read noise to every light. A flat is taken nearest in time, as
+dust moves.
 """
 
 from __future__ import annotations
@@ -16,6 +29,41 @@ import seiza
 from .manifest import Manifest, dumps
 
 KINDS = ("bias", "dark", "flat")
+# The sets the later passes measure and build.
+CALIBRATABLE_SQL = "calibration_status IN ('ready', 'ready:no-flat')"
+# The read noise a bias or dark master may add, as a share of one frame's.
+MASTER_NOISE = 0.2
+_counts: dict[str, tuple[float | None, float | None]] = {}
+
+
+def master_noise(path: str, kind: str, exposure: float | None) -> float | None:
+    """The read noise the master at `path` adds to a light of `exposure`
+    seconds, as a share of one frame's: its scale over the square root of
+    the frames it combines. `None` when its header lacks either."""
+    if path not in _counts:
+        header = seiza.read_image_header(path)["headers"]
+        _counts[path] = (header.get("NCOMBINE"), header.get("EXPTIME"))
+    frames, seconds = _counts[path]
+    if not frames:
+        return None
+    scale = 1.0
+    if kind == "dark":
+        if not seconds or not exposure:
+            return None
+        scale = exposure / seconds
+    return scale / frames ** 0.5
+
+
+def quietest_near(paths: list[str], kind: str, exposure: float | None) -> tuple[str, float | None]:
+    """Of `paths`, nearest first, the first quiet enough, or the quietest."""
+    noises = [(path, master_noise(path, kind, exposure)) for path in paths]
+    for path, noise in noises:
+        if noise is not None and noise <= MASTER_NOISE:
+            return path, noise
+    known = [(noise, index) for index, (_, noise) in enumerate(noises) if noise is not None]
+    if not known:
+        return noises[0]
+    return noises[min(known)[1]]
 
 
 def signature(row: Any) -> seiza.FrameSignature:
@@ -70,17 +118,26 @@ def plan_set(lights: list[Any], masters: dict[str, list[Any]]) -> dict[str, Any]
             minimum=1,
             bias_available=chosen.get("bias") is not None,
         )
-        chosen[kind] = str(plan.selected_paths[0]) if plan.ready else None
         plans[kind] = {
             "ready": plan.ready,
             "candidates": len(candidates),
             "matched": len(plan.matched_paths),
             "excluded": dict(Counter(reason for _, reason in plan.excluded)),
         }
-    if chosen["flat"] is None:
-        status = "excluded:no-flat"
-    elif chosen["dark"] is None and chosen["bias"] is None:
+        if not plan.ready:
+            chosen[kind] = None
+        elif kind == "flat":
+            chosen[kind] = str(plan.selected_paths[0])
+        else:
+            matched = [str(path) for path in plan.matched_paths]
+            chosen[kind], noise = quietest_near(matched, kind, lights[0]["exposure_seconds"])
+            plans[kind]["noise"] = round(noise, 4) if noise is not None else None
+            nearest = master_noise(matched[0], kind, lights[0]["exposure_seconds"])
+            plans[kind]["nearest_noise"] = round(nearest, 4) if nearest is not None else None
+    if chosen["dark"] is None and chosen["bias"] is None:
         status = "excluded:no-dark-or-bias"
+    elif chosen["flat"] is None:
+        status = "ready:no-flat"
     else:
         status = "ready"
     return {"status": status, "masters": chosen, "plans": plans}
