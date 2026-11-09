@@ -1556,9 +1556,56 @@ in these ways:
   this run measured under it.
 
   The runtime, given the card's guard and the trained correlation, gives
-  the harness's output on the Trunk's plain master from the other stacker,
-  26 MP with 11,842 pixels guarded: 1.5e-6σ̄ RMS and 7.4e-4σ̄ at most on the
-  CPU in f32.
+  the harness's output on the Trunk's night stacked plain by Seiza, 26 MP
+  with 11,842 pixels guarded: 1.5e-6σ̄ RMS and 7.4e-4σ̄ at most on the CPU
+  in f32.
+
+  Trained under the guard, the same recipe came out level with that run
+  measured under it: 2.208 against 2.217 on 4-frame halves and 1.317
+  against 1.320 on 8-frame ones, and the deep halves kept 0.644 of their
+  error against 0.641. Both left 56% of the noise at 4 pixels, where the
+  network trained without the guard, measured without it, left 42%: the
+  cold pixels the guard keeps count as noise left too. What training
+  under the guard bought shows on stacks that hold holes or spread noise:
+  - on the Trunk's night, plain and drizzled, it sent 37 and 44 pixels
+    over 100σ̄, against 63 and 288, of them 0 and 1 above the input's
+    range, against 30 and 241; its largest steps were 354σ̄ and 707σ̄, against
+    1,122σ̄ and 3,125σ̄;
+  - on Seiza's other three drizzles it sent 1 pixel over 100σ̄, against
+    14, and left 6–8% of the pixel-scale noise, against 8–11%;
+  - on the other stacker's 16 masters the two were alike, leaving 2–8% of
+    the pixel-scale noise and sending at most 4 pixels over 100σ̄ on any
+    one;
+  - before the guard put anything back, its worst pixel on the Trunk's
+    4-frame image was 1,387σ̄, against 3,418σ̄. Its largest step on
+    spread noise was 27σ̄.
+
+  Its bundle gives the harness's output in the runtime on the Trunk's
+  night under the guard: 1.6e-6σ̄ RMS plain and 1.3e-6σ̄ on the 2×
+  drizzle, which holds 19,517 guarded pixels, and 9.2e-4σ̄ at most.
+
+  What it still sends over 100σ̄ on the Trunk's night are the dark moats:
+  pixels at the sky's level between leftover hot pixels of about
+  2,000σ̄, which it puts 140–710σ̄ below the sky. Both runs dig them
+  alike, and the guard cannot see them, since they are not below the
+  sky's floor. A model's output almost never falls far below the lowest
+  input pixel within 2 pixels: on the probe's four images, this run's
+  fell more than 20 times the image map's noise below it on 0–3 pixels
+  an image, and more than 5 times on 0–9. A floor there would end the
+  moats at almost no cost elsewhere.
+
+  Two results are worse with the stack's map in the loss, and not yet
+  explained:
+  - **Under the probe's sky gradient**, California's coarse level moved by
+    0.92σ̄ and 0.47σ̄ with these two runs, against 0.02σ̄ for the baseline
+    and 0.08σ̄ for the blind run. With the sky flattened before the
+    network, both moved it by 0.009σ̄. On the unchanged images that leaves
+    up to 8% more of the noise at 16 pixels.
+  - **On the Trunk's 4-frame image**, the run trained under the guard left
+    82% of the noise at 4 pixels, against 46%, though the image holds no
+    hole and the other three images match. Its sky, the dark lanes
+    between the nebula, is a small share of the frame, and on the sheets
+    the two runs look alike.
 - **Deep halves.** Training on a night's deep stack dealt into two halves,
   a quarter of every batch, taught a model to keep mottle: it left 37% of
   the coarse noise on empty sky. The halves share the night's flats,
