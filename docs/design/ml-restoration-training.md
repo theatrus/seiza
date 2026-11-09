@@ -869,6 +869,73 @@ halves, rather than with 1. The C ABI has `seiza_remaining_kernel_new` and
 `seiza_reblur_consistency_json`, and Python `seiza.RemainingKernel` and
 `seiza.reblur_consistency`.
 
+### Training data
+
+Two passes make the PSF model's real data. Both only read the manifest.
+
+- **`psf-fields`** measures each source product's `PsfField` once, with
+  no catalogue: the deep stacks, a night's and many nights', and both
+  halves of every seeing pair, of the train and validation sets calibrated
+  with a flat (never `ready:no-flat`). A field too sparse to vary is
+  measured again as one global PSF; one too sparse for that is refused. A
+  field cannot be saved, so its stamps and shapes are sampled on nodes at
+  most 256 px apart and read back bilinearly. Each record, under
+  `STORE/psf/<product id>/`, also keeps the stars the field used, every
+  star the measuring detector finds unsmoothed (the seeing check's
+  stars), the clipped cores the detector turns away, and the clip level,
+  from the image's own peaks as `PsfField` finds it.
+- **`cut-sharpen`** cuts 320 px windows onto local disk, each split's
+  bank apart, as the noise bank is cut: memory-mapped, the same for a
+  seed however many processes prepare it, and resumable to the same bank.
+  The known-kernel bank holds deep stacks' windows with the stack's noise
+  map, a mask of clipped cores, and the PSF stamp (129 px) and shape at
+  the centre; the trainer blurs them. The seeing bank holds each pair's
+  worst half as input and best half as target: the input's noise map
+  made from its image alone, both stacks' own maps for the loss, a mask
+  of either's clipped cores, both PSFs' stamps and shapes at the centre,
+  and their FWHM ratio there. The target is put on the input's flux and
+  sky by the check's gain and planes. A pair made before the check, every
+  night's split among them, is judged by the cut with the same check, its
+  verdict kept with the bank. The point sources are each input's
+  detections until the Gaia pass. The cut also takes pairs a caller
+  supplies, each with a record kept beside its windows.
+
+The windows are raw. The sharpener is to train on the noise model's
+output; those windows will be cut from the denoised stacks beside these.
+
+First run (2026-11-08), 4 processes, 52 minutes for the fields and 8 for
+the banks:
+
+- **Fields.** Of 773 products, 755 vary, 8 sparse C925 stacks, most of
+  them narrowband, take one global PSF from 5–24 stars, and 4 are
+  refused. The deep stacks' centre FWHM runs 1.8–10.5 px on the
+  astrographs (median 2.2: Ultracat, RedCat61, Askar107PHQ) and
+  4.7–15.6 px on the C925 (median 7.5). The frames' smoothed
+  measurements read about 5.7 px where the astrographs' stacks read 2.2.
+- **Seeing pairs.** On the C925 the fields' centre ratio, best over
+  worst, agrees with the multi-night checks' star medians (0.48–0.75
+  against 0.50–0.78). On the undersampled astrographs it is far smaller
+  (0.34 against 0.53, 0.55 against 0.66): the detector reads 2 px stars
+  wide. One Ultracat object's worst halves (its night's split, and its
+  many nights') carry a focus gradient as well as seeing, 2.7 px at one
+  corner to 8.9 px at the other, with ring-shaped stamps; they pass the
+  check, which asks for a round blur, wider everywhere.
+- **Banks.** The known-kernel banks hold 20,480 train windows from 512
+  stacks and 5,600 validation windows from 140 (19 and 5 GB). The seeing
+  banks hold 21 train pairs (3,360 windows, 7 GB) and 14 validation pairs
+  (2,240, 5 GB), with ratios 0.24–1.13: 0.7% of windows above 0.8, and
+  0.06% above 1, at field corners where the best half is the wider. Of
+  the 59 pairs, 17 C925 pairs are left out because their halves' star
+  centroids sit 0.35–0.98 px apart, nearly all along one axis, though
+  they share one grid: the worst half's PSF is lopsided, and its stamp,
+  centred on its centroid, cannot say so. Three fail the shape check, one
+  is too close in seeing, one worst half has too few stars for a field,
+  and two fail the frames' screen.
+
+Open: whether to keep the lopsided pairs with their targets shifted by
+the offset (or with stamps centred on Gaia positions), whether to train
+on focus pairs, and which window ratios to keep.
+
 ## Star model
 
 ### Star policy
