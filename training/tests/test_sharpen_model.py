@@ -388,7 +388,10 @@ def test_the_loss_is_zero_on_the_target_and_blind_where_it_may_not_look():
     dimmed = exact.clone()
     dimmed[0, 0, 10:15, 10:15] -= 0.5
     terms = sm.loss_terms(dimmed, batch, sm.LossSettings(), "linear")
-    assert float(terms["flux"]) == pytest.approx(math.sqrt(2.5**2 + 0.1**2) - 0.1, rel=1e-4)
+    # The star's error counts once for each of its aperture's 25 pixels, out
+    # of the valid pixels, as a pixel's error does.
+    valid = float(batch["valid"].sum())
+    assert float(terms["flux"]) == pytest.approx((math.sqrt(2.5**2 + 0.1**2) - 0.1) * 25 / valid, rel=1e-4)
     assert float(terms["gradient"]) > 0
 
 
