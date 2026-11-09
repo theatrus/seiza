@@ -285,6 +285,55 @@ def test_a_known_kernel_window_is_clipped_after_its_blur_as_a_camera_clips(tmp_p
     assert soft.image.max() < 2_000.0
 
 
+def test_targets_carry_their_input_s_noise_when_it_is_passed_on(tmp_path):
+    bank = sm.Bank(kernel_bank(tmp_path), sm.Settings(tile=32))
+    sky = (slice(2, 12), slice(2, 12))
+    passing = sm.Settings(tile=32, exposure=1.0, kernel_noise=3.0, pass_noise=True)
+    kept = sm.kernel_example(bank, 0, np.random.default_rng(1), passing, identity=False)
+    plain = sm.kernel_example(bank, 0, np.random.default_rng(1), sm.Settings(tile=32, exposure=1.0, kernel_noise=3.0),
+                              identity=False)
+    share = kept.details["noise_share"]
+    # Passed on, target and input differ on the sky by the stack's own
+    # noise alone; otherwise by the fresh noise too.
+    assert np.std((kept.target - kept.image)[sky]) < 1.2
+    assert np.std((plain.target - plain.image)[sky]) > 0.8 * share > 1.2
+    # A pair bank with denoised planes: its target's denoised, moved, plus
+    # the noise found in its input.
+    directory = pair_bank(tmp_path, offset=(0.0, 0.0))
+    inputs, targets = np.load(directory / "input.npy"), np.load(directory / "target.npy")
+    np.save(directory / "input_clean.npy", inputs - 0.25)
+    np.save(directory / "target_clean.npy", targets * 0 + 7.0)
+    (directory / "clean.json").write_text(json.dumps({"noise_run": "n"}))
+    pairs = sm.Bank(directory, sm.Settings(centroid_offset="none"))
+    assert pairs.summary()["clean"] == {"noise_run": "n"}
+    example = sm.pair_example(pairs, 0, sm.Settings(centroid_offset="none", pass_noise=True))
+    np.testing.assert_allclose(example.target, 7.25, atol=1e-5)
+    left = sm.pair_example(pairs, 0, sm.Settings(centroid_offset="none"))
+    assert np.array_equal(left.target, targets[0])
+
+
+def test_a_bank_s_windows_are_denoised_beside_it(tmp_path):
+    from seiza_training import sharpen_clean
+    from seiza_training.unet import ResidualUNet
+
+    store = Store(tmp_path / "store", tmp_path / "scratch")
+    run = store.root / "models" / "noise" / "n"
+    run.mkdir(parents=True)
+    model = ResidualUNet(width=4, levels=3)
+    torch.save(model.state_dict(), run / "weights.pt")
+    (run / "run.json").write_text(json.dumps({"name": "n", "config": {"width": 4, "levels": 3,
+                                                                       "noise_map": "constant", "holes": True}}))
+    directory = pair_bank(tmp_path)
+    found = sharpen_clean.clean(store, "n", directory)
+    assert found["windows"] == 4
+    # A new network finds nothing: the planes are the windows.
+    np.testing.assert_allclose(np.load(directory / "input_clean.npy"), np.load(directory / "input.npy"), atol=1e-4)
+    np.testing.assert_allclose(np.load(directory / "target_clean.npy"), np.load(directory / "target.npy"), atol=1e-4)
+    assert sharpen_clean.clean(store, "n", directory)["kept"]
+    with pytest.raises(ValueError, match="not a pair bank"):
+        sharpen_clean.clean(store, "n", kernel_bank(tmp_path))
+
+
 def test_a_model_with_two_ratios_reads_five_planes_and_sharpens_with_a_pair():
     model = sm.build_model(4, 3, sm.PLANES_NONSTELLAR)
     assert model.first[0].in_channels == 5
