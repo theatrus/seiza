@@ -236,6 +236,55 @@ def test_stars_and_the_rest_are_each_brought_to_the_ratio_asked_of_them(tmp_path
     assert sm.arrays_of(single, None, sm.Settings(tile=32))["planes"].shape[0] == len(sm.PLANES)
 
 
+def clipped_bank(tmp_path, level: float = 2_000.0):
+    """A known-kernel bank of one window holding a bright star clipped at
+    `level`, with fainter ones about it."""
+    covariance = np.diag([1.5**2] * 2)
+    positions, fluxes = [(32.3, 31.6), *POSITIONS[1:]], [400_000.0, *FLUXES[1:]]
+    true = stars_image(positions, fluxes, covariance)
+    image = np.minimum(true, level)
+    saturated = sharpen_bank.saturation(image, level)
+    stamp = gaussian(sharpen_bank.STAMP, covariance)
+    points = detections(positions, fluxes)
+    points[0, COLUMNS.index("clipped")] = 1.0
+    windows = [{"image": image, "sigma": np.ones((SIDE, SIDE)), "saturated": saturated, "stamp": stamp,
+                "info": {"source": 0, "background": 100.0, "noise": 1.0, "width": sharpen_bank.stamp_width(stamp)}}]
+    sources = [{"input": "a/deep", "set": "a", "record": {}, "input_psf": {"clip_level": level}, "points": points}]
+    directory = write_bank(tmp_path / "sharpen-deep-train-0", pairs=False, windows=windows, sources=sources,
+                           label="deep")
+    return directory, true, points, stamp
+
+
+def test_a_clipped_core_is_filled_with_the_stamp_scaled_to_its_wings(tmp_path):
+    _, true, points, stamp = clipped_bank(tmp_path)
+    image = np.minimum(true, 2_000.0)
+    saturated = sharpen_bank.saturation(image, 2_000.0)
+    back = sm.filled(image, saturated, points, stamp, sharpen_bank.stamp_width(stamp), 100.0)
+    core = image >= 2_000.0
+    np.testing.assert_allclose(back[core], true[core], rtol=0.05)
+    assert np.array_equal(back[~saturated], image[~saturated])
+
+
+def test_a_known_kernel_window_is_clipped_after_its_blur_as_a_camera_clips(tmp_path):
+    directory, _, _, _ = clipped_bank(tmp_path)
+    bank = sm.Bank(directory, sm.Settings(tile=32))
+    settings = sm.Settings(tile=32, exposure=1.0, kernel_noise=0.0, fill_clipped=True)
+    example = sm.kernel_example(bank, 0, np.random.default_rng(3), settings, identity=False)
+    clipped = example.image >= 2_000.0
+    # The filled core blurred is far above the clip: both are clipped flat
+    # there, and those pixels alone (and two about them) are left out.
+    assert clipped.sum() > 4 and example.image.max() == pytest.approx(2_000.0)
+    assert example.target.max() == pytest.approx(2_000.0)
+    assert not example.valid[clipped].any()
+    down, across = np.mgrid[0:SIDE, 0:SIDE]
+    ring = (np.hypot(across - 32.3, down - 31.6) > 8) & (np.hypot(across - 32.3, down - 31.6) < 12)
+    assert example.valid[ring].mean() > 0.9
+    # Unfilled, the clipped plateau blurs to a soft bump under the clip.
+    soft = sm.kernel_example(bank, 0, np.random.default_rng(3), sm.Settings(tile=32, exposure=1.0, kernel_noise=0.0),
+                             identity=False)
+    assert soft.image.max() < 2_000.0
+
+
 def test_a_model_with_two_ratios_reads_five_planes_and_sharpens_with_a_pair():
     model = sm.build_model(4, 3, sm.PLANES_NONSTELLAR)
     assert model.first[0].in_channels == 5
