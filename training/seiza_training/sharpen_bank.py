@@ -18,8 +18,13 @@ windows never reach a train bank:
   makes it), both stacks' own noise maps, for the loss to weigh by, and a
   saturation mask over either; with the stamp and shape of both halves'
   PSF at its centre and the ratio FWHM(target) / FWHM(input) there, the
-  value the ratio map takes. A caller's pairs carry a record of their own,
-  kept with their windows.
+  value the ratio map takes, both as the field's Moffat fit has it and as
+  the stamps' own widths do (`stamp_width`), since the fit fails on the
+  sharpest stamps. Each pair keeps the median offset of its stars'
+  centroids, target from input: halves on one grid differ by as much as
+  their PSFs differ in symmetry, which a stamp centred on its centroid
+  does not show. A caller's pairs carry a record of their own, kept with
+  their windows.
 
 What a network reads must be made from the image alone: the PSF stamp
 (from the input's PSF field), the noise map (`input_map`) and the
@@ -76,8 +81,9 @@ from .noise_model import CHECKPOINT_SECONDS, WINDOW, image_sigma, in_order, scal
 from .store import Store
 
 # Raised with the layout of a bank or what goes into it, so a bank cut
-# before is cut again.
-BANK_VERSION = 1
+# before is cut again. 2: stamp widths, and pairs kept whatever their
+# centroids' offset short of `ALIGNMENT_PX`.
+BANK_VERSION = 2
 # The side of the stamps a bank keeps: a field's stamp is seven times its
 # FWHM, so this holds whole the stamps of fields up to 18.4 px, the widest
 # the corpus's worst seeing halves measure (a C925 night's, 14.9–18.4 px
@@ -95,7 +101,18 @@ PAIR_WINDOWS = 160
 SATURATION_GROW = 2
 # A pair whose stars move between its halves by more than this, as the
 # median of the offsets of the stars found in both, is not on one grid.
-ALIGNMENT_PX = 0.25
+# Halves on one grid still move their stars' centroids where their PSFs
+# differ in shape: a lopsided PSF pulls its centroid from its peak, and a
+# sharper one pulls it less. The C925's seeing halves, and deconvolutions
+# of its stacks, move them by up to a pixel, all one way (2026-11-08), so
+# only a larger move is taken for a fault; each pair's offset is kept with
+# it.
+ALIGNMENT_PX = 1.5
+# `stamp_width` fits a round Gaussian to the stamp's pixels from this share
+# of its peak up: the core, where a Moffat's wings do not yet pull it wide.
+WIDTH_CORE = 0.05
+# The Gaussian widths, σ in pixels, it tries before refining the best.
+WIDTH_SIGMAS = np.geomspace(0.25, 30.0, 300)
 
 PAIR_PLANES = {"input": np.float32, "target": np.float32, "input_sigma": np.float32, "input_map": np.float32,
                "target_sigma": np.float32, "saturated": np.uint8}
@@ -104,10 +121,14 @@ PAIR_STAMPS = ("input_stamp", "target_stamp")
 DEEP_STAMPS = ("stamp",)
 # Each window's row of `info`: its source's index in the bank, its corner,
 # the background and median noise the network's units are (of the map it
-# reads), the share of it saturated, and the PSF's shape at its centre.
+# reads), the share of it saturated, and the PSF's shape at its centre:
+# the field's Moffat fit (NaN where it fails, as on stamps sharper than
+# about 2 px) and the stamp's own width (`stamp_width`), which never fails,
+# with each one's ratio, target over input.
 PAIR_INFO = ("source", "y", "x", "background", "noise", "saturated", "input_fwhm", "input_e1", "input_e2",
-             "input_beta", "target_fwhm", "target_e1", "target_e2", "target_beta", "ratio")
-DEEP_INFO = ("source", "y", "x", "background", "noise", "saturated", "fwhm", "e1", "e2", "beta")
+             "input_beta", "target_fwhm", "target_e1", "target_e2", "target_beta", "ratio", "input_width",
+             "target_width", "width_ratio")
+DEEP_INFO = ("source", "y", "x", "background", "noise", "saturated", "fwhm", "e1", "e2", "beta", "width")
 
 
 def layout(pairs: bool) -> tuple[dict[str, Any], tuple[str, ...], tuple[str, ...]]:
@@ -212,6 +233,30 @@ def fitted_stamp(stamp: np.ndarray) -> tuple[np.ndarray, float]:
     return (inner / inner.sum()).astype(np.float32), 1.0 - float(inner.sum()) / total
 
 
+def stamp_width(stamp: np.ndarray) -> float:
+    """A stamp's FWHM as a round Gaussian, centred on the stamp's middle,
+    fitted by least squares to its core (`WIDTH_CORE`): one measure for
+    every stamp, sharp or wide, where the field's Moffat fit fails on the
+    sharpest. NaN for a stamp with no positive peak."""
+    peak = float(np.nanmax(stamp)) if np.isfinite(stamp).any() else float("nan")
+    if not peak > 0:
+        return float("nan")
+    rows, columns = np.nonzero(stamp >= WIDTH_CORE * peak)
+    middle = (stamp.shape[0] - 1) / 2
+    squared = (columns - middle) ** 2 + (rows - middle) ** 2
+    values = stamp[rows, columns].astype(np.float64)
+    models = np.exp(-squared[None, :] / (2 * WIDTH_SIGMAS[:, None] ** 2))
+    amplitude = (models @ values) / np.einsum("ij,ij->i", models, models)
+    residual = np.sum((values[None, :] - amplitude[:, None] * models) ** 2, axis=1)
+    best = int(np.clip(np.argmin(residual), 1, len(WIDTH_SIGMAS) - 2))
+    # A parabola through the best three, in log σ, as the grid is.
+    low, middle_value, high = residual[best - 1:best + 2]
+    bend = low - 2 * middle_value + high
+    step = float(np.log(WIDTH_SIGMAS[1] / WIDTH_SIGMAS[0]))
+    shift = 0.5 * (low - high) / bend if bend > 0 else 0.0
+    return float(2.3548 * WIDTH_SIGMAS[best] * math.exp(float(np.clip(shift, -1, 1)) * step))
+
+
 def load(store: Store, product: dict[str, Any]) -> tuple[np.ndarray, np.ndarray | None]:
     """A product's image, NaN where nothing covers it, and its stack's noise
     map, `sqrt(variance / coverage)`, or None where it keeps no variance."""
@@ -263,11 +308,13 @@ def psf_summary(field: psf_fields.Field) -> dict[str, Any]:
 
 def alignment(input_points: np.ndarray, target_points: np.ndarray) -> dict[str, Any]:
     """The median offset of the target's stars from the input's, of those
-    found in both within `SEEING_MATCH_PX`, and how many."""
-    from .multi_night import SEEING_MATCH_PX, within
+    found in both within twice `ALIGNMENT_PX`, so that a move past it is
+    measured, and how many. With none found in both, the offset is None:
+    a pair cannot be judged, and is kept."""
+    from .multi_night import within
 
     targets = [Detected(row) for row in target_points]
-    near = within(targets, SEEING_MATCH_PX)
+    near = within(targets, 2 * ALIGNMENT_PX)
     offsets = []
     for row in input_points:
         found = near(float(row[0]), float(row[1]))
@@ -380,8 +427,10 @@ def prepared(store_root: str, scratch: str | None, seed: int, per_source: int,
             lost = max(lost, share)
             for name in ("fwhm", "e1", "e2", "beta"):
                 values[f"{prefix}_{name}" if prefix else name] = shape[name]
+            values[f"{prefix}_width" if prefix else "width"] = stamp_width(stamp)
         if pairs:
             values["ratio"] = values["target_fwhm"] / values["input_fwhm"]
+            values["width_ratio"] = values["target_width"] / values["input_width"]
         info[row] = [values.get(column, 0.0) for column in columns]
     record["stamp_lost"] = lost
     record["background"], record["noise"] = background, noise
@@ -485,7 +534,7 @@ def cut(
     pairs = "target" in sources[0]
     if any(("target" in source) != pairs for source in sources):
         raise ValueError("a bank holds deep stacks or pairs, not both")
-    parts = [BANK_VERSION, label, split, seed, WINDOW, STAMP, per_source, SATURATION_GROW] + [
+    parts = [BANK_VERSION, label, split, seed, WINDOW, STAMP, per_source, SATURATION_GROW, ALIGNMENT_PX] + [
         [source["input"]["id"], source.get("target", {}).get("id"), source.get("match", False), source.get("gain"),
          source.get("judge", False), source.get("record", {})] for source in sources]
     name = f"sharpen-{label}-{split}-" + hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()[:16]
@@ -541,6 +590,7 @@ def summarize(bank: Bank, pairs: bool) -> dict[str, Any]:
         values = values[np.isfinite(values)]
         return [round(float(np.percentile(values, q)), 3) for q in (0, 5, 50, 95, 100)] if values.size else None
 
-    for column in (("input_fwhm", "target_fwhm", "ratio") if pairs else ("fwhm",)) + ("saturated",):
+    for column in (("input_fwhm", "target_fwhm", "ratio", "input_width", "target_width", "width_ratio") if pairs
+                   else ("fwhm", "width")) + ("saturated",):
         found[column] = spread(column)
     return found
