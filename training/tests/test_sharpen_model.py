@@ -226,13 +226,115 @@ def test_a_pair_s_target_is_moved_by_its_centroid_offset(tmp_path):
             found.append([(box * across).sum() / box.sum(), (box * down).sum() / box.sum()])
         return np.array(found)
 
-    moved = sm.pair_example(bank, 0, sm.Settings(centroid_offset="shift"))
+    moved = sm.pair_example(bank, 0, sm.Settings(centroid_offset="detection"))
     left = sm.pair_example(bank, 0, sm.Settings(centroid_offset="none"))
     assert np.abs(centroids(left.target) - stars - [0.6, -0.4]).max() < 0.05
     assert np.abs(centroids(moved.target) - stars).max() < 0.05
     assert np.abs(centroids(moved.image) - stars).max() < 0.05
     # The few pixels the shift reads past the edge are out of the loss.
     assert not moved.valid[0].any() and left.valid[0].all()
+    # A run recorded before the light offset named the detections' "shift".
+    assert sm.Settings(centroid_offset="shift").centroid_offset == "detection"
+
+
+def lopsided_bank(tmp_path, *, windows: int = 10, wing=(2.0, 0.0), detection=(0.1, 0.0)):
+    """A seeing bank of one pair whose windows each hold one star at their
+    middle: the input's lopsided, a fifth of its light in a wing `wing` px
+    off its core, the target's round about the core. Its detections'
+    offset is recorded as `detection`."""
+    wide, sharp = np.diag([2.0**2] * 2), np.diag([1.4**2] * 2)
+    middle = (SIDE - 1) / 2 + 0.3
+    rng = np.random.default_rng(7)
+    rows = []
+    for index in range(windows):
+        core = gaussian(SIDE, wide, (middle, middle))
+        wing_light = gaussian(SIDE, wide, (middle + wing[0], middle + wing[1]))
+        image = 100.0 + 30_000.0 * (0.8 * core + 0.2 * wing_light) + rng.normal(0, 1, (SIDE, SIDE))
+        target = 100.0 + 30_000.0 * gaussian(SIDE, sharp, (middle, middle)) + rng.normal(0, 0.7, (SIDE, SIDE))
+        rows.append({"input": image.astype(np.float32), "target": target.astype(np.float32),
+                     "input_sigma": np.ones((SIDE, SIDE)), "input_map": np.ones((SIDE, SIDE)),
+                     "target_sigma": np.full((SIDE, SIDE), 0.7), "saturated": np.zeros((SIDE, SIDE)),
+                     "input_stamp": gaussian(sharpen_bank.STAMP, wide),
+                     "target_stamp": gaussian(sharpen_bank.STAMP, sharp),
+                     # Each window at its own place, as a bank's are.
+                     "info": {"source": 0, "x": 400.0 * index, "y": 300.0 * (index % 3), "background": 100.0,
+                              "noise": 1.0, "ratio": 0.82, "width_ratio": 0.7, "input_width": 2.3548 * 2.0,
+                              "target_width": 2.3548 * 1.4}})
+    points = detections([(middle + 400.0 * index, middle + 300.0 * (index % 3)) for index in range(windows)],
+                        [30_000.0] * windows)
+    sources = [{"input": "p/seeing/worst", "target": "p/seeing/best", "set": "p", "telescope": "Test Scope",
+                "record": {"pair": "p/seeing"}, "alignment": {"matched": windows, "offset_px": list(detection)},
+                "windows": [0, windows], "points": points}]
+    return write_bank(tmp_path / "sharpen-seeing-train-0", pairs=True, windows=rows, sources=sources, label="seeing")
+
+
+def test_a_pair_s_target_is_moved_so_its_stars_light_meets_the_input_s(tmp_path):
+    directory = lopsided_bank(tmp_path)
+    bank = sm.Bank(directory, sm.Settings())
+    # The wing pulls the input's light 0.4 px from the core the target is
+    # round about: the target moves by -0.4 px, by the light's measure.
+    assert bank.light[0]["kind"] == "median" and bank.light[0]["stars"] == 10
+    assert bank.target_offset(0, "light") == pytest.approx((-0.4, 0.0), abs=0.03)
+    assert bank.target_offset(0, "detection") == (0.1, 0.0)
+    assert bank.summary()["light_offsets"] == {"median": 1, "detection": 0}
+    example = sm.pair_example(bank, 0, sm.Settings())
+    star = (SIDE - 1) / 2 + 0.3
+    before = sm.light_centre(example.image, star, star, sm.LIGHT_RADIUS * example.width)
+    after = sm.light_centre(example.target, star, star, sm.LIGHT_RADIUS * example.width)
+    assert after == pytest.approx(before, abs=0.03)
+    # Measured once, then read from beside the bank.
+    assert (directory / f"light-offsets-{sm.LIGHT_VERSION}.json").exists()
+    assert sm.Bank(directory, sm.Settings()).light == bank.light
+    # Too few stars for a light offset: the detections' stands in.
+    few = sm.Bank(lopsided_bank(tmp_path / "few", windows=sm.LIGHT_LEAST - 1), sm.Settings())
+    assert few.light == {} and few.target_offset(0, "light") == (0.1, 0.0)
+
+
+def test_a_light_offset_over_enough_stars_is_a_plane_over_the_field():
+    rng = np.random.default_rng(2)
+    x, y = rng.uniform(0, 6000, 200), rng.uniform(0, 4000, 200)
+    dx = 0.1 + 0.2 * (x - 3000) / 1000 + rng.normal(0, 0.05, 200)
+    dy = -0.5 + 0.1 * (y - 2000) / 1000 + rng.normal(0, 0.05, 200)
+    dy[:10] = 5.0
+    fit = sm.fitted_offsets(np.column_stack([x, y, dx, dy]))
+    assert fit["kind"] == "plane"
+    at = lambda c, px, py: c[0] + c[1] * (px - fit["centre"][0]) / 1000 + c[2] * (py - fit["centre"][1]) / 1000  # noqa: E731
+    assert at(fit["dx"], 5000, 1000) == pytest.approx(0.5, abs=0.03)
+    # The stray stars are clipped.
+    assert at(fit["dy"], 3000, 4000) == pytest.approx(-0.3, abs=0.03)
+
+
+def test_stamps_out_of_focus_are_found_by_their_rings_and_flat_tops():
+    side = sharpen_bank.STAMP
+    middle = (side - 1) / 2
+    down, across = np.mgrid[0:side, 0:side] - middle
+    distance = np.hypot(across, down)
+    ring = np.exp(-0.5 * ((distance - 5.0) / 1.5) ** 2)
+    disc = 1.0 / (1.0 + np.exp((distance - 7.0) / 0.4))
+    stamps = [ring, disc, np.zeros((side, side))]
+    stamps += [gaussian(side, np.diag([s**2, s**2])) for s in (0.6, 1.0, 2.0, 5.0)]
+    stamps += [moffat(side, fwhm, beta) for fwhm in (1.5, 3.0, 13.0) for beta in (2.5, 4.0)]
+    stamps = np.stack([stamp / max(stamp.sum(), 1e-12) for stamp in stamps]).astype(np.float32)
+    widths = np.array([sharpen_bank.stamp_width(stamp) for stamp in stamps])
+    found = sm.out_of_focus(stamps, widths)
+    assert list(found[:3]) == [True, True, True]
+    assert not found[3:].any()
+
+
+def test_a_bank_leaves_out_windows_out_of_focus_and_sources_mostly_so(tmp_path):
+    directory = pair_bank(tmp_path, ratios=[0.7] * 8)
+    side = sharpen_bank.STAMP
+    down, across = np.mgrid[0:side, 0:side] - (side - 1) / 2
+    ring = np.exp(-0.5 * ((np.hypot(across, down) - 5.0) / 1.5) ** 2).astype(np.float32)
+    stamps = np.load(directory / "input_stamp.npy")
+    # One of pair p's four windows, and three of pair q's.
+    for window in (1, 4, 5, 6):
+        stamps[window] = ring / ring.sum()
+    np.save(directory / "input_stamp.npy", stamps)
+    bank = sm.Bank(directory, sm.Settings())
+    assert list(bank.kept) == [0, 2, 3]
+    assert bank.left == {"out-of-focus-source": 4, "out-of-focus": 1}
+    assert len(sm.Bank(directory, sm.Settings(), focus_check=False).kept) == 8
 
 
 def test_windows_are_kept_by_their_ratio_and_pairs_left_out_by_id(tmp_path):
@@ -250,8 +352,8 @@ def test_windows_are_kept_by_their_ratio_and_pairs_left_out_by_id(tmp_path):
         assert list(bank.kept) == [0] and bank.left["excluded"] == 3
     with pytest.raises(ValueError, match="keeps no window"):
         sm.Bank(directory, sm.Settings(), excluded=("p/seeing", "q/seeing"))
-    # The defaults leave out the field whose focus changes across it.
-    assert set(sm.FOCUS_PAIRS) == set(sm.BankChoice("k", (), None, ()).excluded)
+    # No pair is left out by name unless asked: focus is measured.
+    assert sm.BankChoice("k", (), None, ()).excluded == ()
 
 
 def test_no_object_takes_more_than_its_cap_of_the_draws():
