@@ -299,10 +299,16 @@ def main(argv: list[str] | None = None) -> int:
     sharpen_train.add_argument("--object-cap", type=float, default=0.03,
                                help="no object (telescope, target and filter, over its nights) takes more than this "
                                     "share of its bank's draws")
+    sharpen_train.add_argument("--residual", choices=("asinh", "linear"), default="asinh",
+                               help="add the network's residual to the input's asinh, as it reads it, and take it "
+                                    "back through sinh, or add it to the input in units of the typical noise")
     sharpen_train.add_argument("--points-empty", type=float, default=0.1,
                                help="leave the point-source map empty this share of the time")
     sharpen_train.add_argument("--charbonnier", type=float, default=0.1,
                                help="Charbonnier's epsilon, in units of the target's noise")
+    sharpen_train.add_argument("--noise-cap", type=float, default=10.0,
+                               help="read the target's noise no higher than this many times its tile's median, so "
+                                    "a star core, whose frames scatter with the seeing, still counts (0: no cap)")
     sharpen_train.add_argument("--gradient-weight", type=float, default=0.5)
     sharpen_train.add_argument("--gradient-scales", type=lambda text: tuple(int(k) for k in text.split(",")),
                                default=(1, 2, 4), help="the blocks the gradient term averages the error over")
@@ -642,8 +648,9 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
         identity=arguments.identity, exposure=arguments.exposure, floor_px=arguments.floor_px,
         max_ratio=arguments.max_window_ratio, min_ratio=arguments.min_window_ratio,
         points_empty=arguments.points_empty, centroid_offset=arguments.centroid_offset,
-        ratio_source=arguments.ratio_source)
-    loss = sharpen_model.LossSettings(epsilon=arguments.charbonnier, gradient_weight=arguments.gradient_weight,
+        ratio_source=arguments.ratio_source, residual=arguments.residual)
+    loss = sharpen_model.LossSettings(epsilon=arguments.charbonnier, noise_cap=arguments.noise_cap,
+                                      gradient_weight=arguments.gradient_weight,
                                       gradient_scales=arguments.gradient_scales, flux_weight=arguments.flux_weight)
     choice = sharpen_model.BankChoice(
         kernel=str(arguments.kernel_bank or sharpen_model.find_bank(work, "deep", "train")),

@@ -941,7 +941,101 @@ the banks:
   split is judged by the cut: 20 of 27 pass.
 
 Open: how the trainer uses the centroid offsets, whether to train on
-focus pairs, and which window ratios to keep.
+focus pairs, and which window ratios to keep. The trainer's first
+version answers each with a default, below, that the runs have still to
+confirm.
+
+### Trainer
+
+`train-sharpen` trains the PSF model on these banks and `evaluate-sharpen`
+measures a trained one. Runs are recorded under `STORE/models/sharpen/`
+as noise runs are: the configuration, the history of each log window
+with the loss on a few fixed validation batches, the weights, the ONNX
+graph and the measures. A run is saved whole every thousand steps, and
+one stopped goes on from there to the same weights it would have
+reached unstopped, since each batch is drawn from its step alone.
+
+- **Network.** The four-level residual U-Net, 32 wide (2.8 M
+  parameters), with the stamp encoder: a 3×3 convolution, then stride-2
+  3×3 convolutions from 129 px down to one, giving 64 numbers that scale
+  and shift the channels at the bottleneck and after each decoder level.
+  Its graph holds only convolutions, nearest upsampling, concatenation,
+  addition, multiplication and the sigmoid of SiLU. It reads four
+  planes: the image and the noise map as the noise model reads them, the
+  ratio, and a point-source map, the input's detections rendered with
+  the local stamp in `asinh`, left empty a tenth of the time. The noise
+  map is made from the image alone. The stamp is read as two planes, over
+  its peak and through `asinh`, which shows its wings. The output is a
+  residual added to the image's `asinh` plane and taken back through
+  `sinh`: on the sky a residual in σ̄, as the noise model's, and at a
+  star's core nearly a log. A sharpened core differs from its input by
+  hundreds to thousands of σ̄, and a residual in σ̄ that starts from zero
+  never reached it: two smoke runs gave cores residuals under 1σ̄ where
+  their targets asked 700σ̄ at the median, and narrowed no star.
+- **Known-kernel pairs**, 60% of a batch. An elliptical Gaussian `K`, of
+  ellipticity up to 0.3 at a random angle, is drawn so that
+  `FWHM(P_in) / FWHM(P_ref)` is 1.1 to 2, both measured as the bank
+  measures stamp widths. The input is the window blurred by `K`, with
+  fresh white noise up to half the stack's own, as the sharpener will
+  read the noise model's output. The target is the window blurred by the
+  Gaussian of covariance `Σ_T − Σ_ref`, with `Σ_T` round at `Σ_ref`'s
+  largest eigenvalue: second moments add under convolution, so the
+  target's PSF is round in them. A stamp's second moments are its wings'
+  as much as its core's, and rounded this way the train bank's targets
+  are 1% to 42% wider than `P_ref`, 9% at the median. The widening is
+  therefore drawn from no less than keeps the target narrower than the
+  input. The network reads `P_in`'s stamp, never `P_ref`'s. A tenth are
+  identity windows: `K` a point, the ratio 1, the target the input.
+  Measured on the validation stacks' own stars, the targets come to 0.98
+  to 1.06 of the ratio asked (5th to 95th percentile).
+- **Seeing pairs**, 25%, and pairs a caller supplies in the seeing
+  bank's format, 15%; without those, seeing pairs take their share. The
+  target is moved by its pair's median centroid offset, through its
+  transform, so the model is not taught to move stars. The ratio is the
+  stamps' widths', which every window has. Windows whose target is wider
+  than their input are left out, as are both pairs of the Ultracat field
+  whose focus changes across it. On the validation pairs the targets'
+  own stars come to the stamps' ratio, 1.00 at the median.
+- **Sampling.** No object, a telescope, target and filter over all its
+  nights, takes more than 3% of its bank's draws, or an even share in a
+  bank of fewer than 34 objects: an object stacked over many nights is
+  in the deep bank once for each night and again as their stack, all of
+  one sky.
+- **Loss.** Charbonnier error in units of the target stack's own noise,
+  read no higher than ten times its tile's median, with clipped cores,
+  and the band a blur or a shift reads past a window's edge, masked out.
+  At a star's core a stack's noise map holds its frames' scatter with the
+  seeing, thousands of σ̄: read in it uncapped, a blurred star cost all
+  but nothing, and the first smoke run learnt to denoise its pairs and
+  never to sharpen. The loss adds the same error on the error's
+  gradient, averaged over 1, 2 and 4 px blocks and each times its side,
+  at half weight, and the Charbonnier error of each point source's flux
+  within three times the input's FWHM, in units of that flux's noise, at
+  a tenth.
+- **Augmentation.** The eight flips and turns, alike for the image, every
+  map, the apertures and the stamp. Exposure scaling scales a
+  known-kernel window's signal by up to two either way before its noise
+  is added; a pair's noise is its stacks' own, which a scale would move
+  off its maps, so pairs are not scaled.
+- **Evaluation** runs the validation banks' windows whole through the
+  tiled inference that ships, each tile conditioned on its own stamp,
+  and measures inside the network's reach of a window's edge: the error
+  against the target before and after, in the target's noise; the width
+  ratio, output over input, of the stars' own stamps, stacked from
+  isolated detections and measured as the bank measures a field's,
+  against the ratio asked; the flux kept within three times the FWHM;
+  the deepest ring one to three FWHM out, as the lowest azimuthal mean
+  and the lowest pixel, in σ̄; and the change on identity windows. The
+  C925's validation windows hold about one detection each, so their
+  star measures rest on few windows; whole images will give many more.
+
+Left for later: reblur consistency on images without a target and a
+centroid-shift loss, which join the loss's terms; perturbing the
+conditioning stamp and the gate on a wrong PSF; random smooth ratio maps,
+and the halo and bloom controls; composites with re-rendered stars and
+Gaia's point-source maps; windows cut from the denoised stacks; and
+contact sheets, whole-image evaluation and the bundle, which will call
+the same inference.
 
 ## Star model
 
