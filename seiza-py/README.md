@@ -527,6 +527,15 @@ clean = result.blend(high=0.7, low=0.9, scale_px=5.0)
 print(result.report.backend, result.report.channels[0].noise)
 ```
 
+A model whose card asks for it keeps the image's holes from the network: pixels
+far below the sky that every frame held, such as hot pixels a dark took too much
+of, are filled from their surroundings before it runs and put back after, so the
+network never fills one and overshoots into a bright spike. `result.report.holes`
+gives the card's settings, or `None` for a model that runs on the image as it is.
+A cache of results keys on `report.card_sha256`, the backend, the precision and
+`MODEL_OUTPUT_VERSION`: the card names its graphs by their hashes and everything
+the image is read by, so the key changes whenever the output could.
+
 `seiza.model_backends()` says which backends run here and why the others do not,
 and `install_model`, `installed_models`, `verify_model` and `remove_model` manage
 the store. Invalid tile geometry is refused when opening or installing a bundle,

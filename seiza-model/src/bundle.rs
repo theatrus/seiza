@@ -9,6 +9,10 @@ use std::path::{Path, PathBuf};
 
 /// The card format this build reads.
 const CARD_FORMAT: u32 = 1;
+/// The widest margin a card's hole guard may ask for, in pixels.
+const MAX_HOLE_MARGIN: usize = 32;
+/// The widest box a card's hole guard may fill from, in pixels each way.
+const MAX_FILL_RADIUS: usize = 64;
 /// A card's file name in its bundle.
 pub(crate) const CARD_FILE: &str = "card.json";
 
@@ -97,8 +101,11 @@ pub enum SkyInput {
     Flat,
 }
 
-/// How a model reads an image: everything that must match its training.
+/// How a model reads an image: everything that must match its training. A
+/// setting this build does not know is refused, never ignored, so a card that
+/// asks for more than a build does cannot run without it.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Reading {
     /// What fills the noise plane.
     pub noise_map: NoiseInput,
@@ -112,6 +119,39 @@ pub struct Reading {
     pub flat_block: usize,
     /// The image map's level.
     pub image_map_scale: f64,
+    /// How much neighbouring pixels shared their noise in the stacks the model
+    /// was trained on: the second-difference noise of an image binned 2 × 2,
+    /// times 2, over its own, which white noise gives as 1. The image map is
+    /// raised by as much as an image's exceeds it, as a drizzled stack's does.
+    /// None leaves the map as measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub noise_correlation: Option<f64>,
+    /// How the image's holes are kept from the network. None runs the network
+    /// on the image as it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holes: Option<HoleGuard>,
+}
+
+/// How the image's holes are kept from a network: pixels far below the sky
+/// that every frame held, such as hot pixels a dark took too much of. A network
+/// that meets one fills it and overshoots into a bright spike ringed by
+/// speckle, so they are filled from their surroundings before it runs, and put
+/// back after.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HoleGuard {
+    /// How far below the sky's floor a pixel is a hole, in the image map's
+    /// noise.
+    pub depth: f64,
+    /// How far the mask reaches past a hole, in pixels, for the lobes
+    /// registration spreads round it.
+    pub margin: usize,
+    /// A masked pixel is filled with the mean of the unmasked pixels this far
+    /// round it.
+    pub fill_radius: usize,
+    /// Within the mask, the input is put back where it differs from the
+    /// network's output by more than this many of the image map's noise.
+    pub restore: f64,
 }
 
 /// How a model tiles an image.
@@ -230,6 +270,30 @@ impl ModelCard {
         if self.graphs.is_empty() {
             return refuse(format!("{} names no graph", self.name));
         }
+        if let Some(trained) = self.reading.noise_correlation
+            && !(trained > 0.0 && trained.is_finite())
+        {
+            return refuse(format!(
+                "{}'s noise correlation must be positive, not {trained}",
+                self.name
+            ));
+        }
+        if let Some(guard) = self.reading.holes {
+            let positive = |value: f64| value > 0.0 && value.is_finite();
+            if !(positive(guard.depth) && positive(guard.restore)) {
+                return refuse(format!(
+                    "{}'s holes need a positive depth and restore, not {} and {}",
+                    self.name, guard.depth, guard.restore
+                ));
+            }
+            if guard.margin > MAX_HOLE_MARGIN || guard.fill_radius > MAX_FILL_RADIUS {
+                return refuse(format!(
+                    "{}'s holes reach at most {MAX_HOLE_MARGIN} pixels past a hole and fill from \
+                     at most {MAX_FILL_RADIUS}, not {} and {}",
+                    self.name, guard.margin, guard.fill_radius
+                ));
+            }
+        }
         let name = Path::new(&self.name);
         if self.name.is_empty() || name.file_name() != Some(name.as_os_str()) {
             return refuse(format!("{:?} cannot name a model's directory", self.name));
@@ -249,6 +313,7 @@ impl ModelCard {
 pub struct ModelBundle {
     root: PathBuf,
     card: ModelCard,
+    card_sha256: String,
 }
 
 impl ModelBundle {
@@ -261,7 +326,12 @@ impl ModelBundle {
         let card: ModelCard = serde_json::from_str(&text)
             .map_err(|error| ModelError::ModelContract(format!("{}: {error}", path.display())))?;
         card.check()?;
-        Ok(Self { root, card })
+        let card_sha256 = hex(Sha256::digest(text.as_bytes()));
+        Ok(Self {
+            root,
+            card,
+            card_sha256,
+        })
     }
 
     /// The bundle's directory.
@@ -272,6 +342,16 @@ impl ModelBundle {
     /// The bundle's card.
     pub fn card(&self) -> &ModelCard {
         &self.card
+    }
+
+    /// The SHA-256 of the bundle's card file, in hexadecimal. The card names
+    /// each graph by its own hash, and everything a run reads the image by,
+    /// so this changes whenever a run's output could: a host keys cached
+    /// results on it, with the backend, the precision and
+    /// [`OUTPUT_VERSION`](crate::OUTPUT_VERSION). Installing copies the card
+    /// as it is, so an installed model's is its bundle's.
+    pub fn card_sha256(&self) -> &str {
+        &self.card_sha256
     }
 
     /// The graph of `precision`, when the bundle has one.
@@ -321,11 +401,15 @@ fn sha256_of(path: &Path) -> Result<String, ModelError> {
         }
         hasher.update(&buffer[..count]);
     }
-    Ok(hasher
-        .finalize()
+    Ok(hex(hasher.finalize()))
+}
+
+fn hex(digest: impl AsRef<[u8]>) -> String {
+    digest
+        .as_ref()
         .iter()
         .map(|byte| format!("{byte:02x}"))
-        .collect())
+        .collect()
 }
 
 #[cfg(test)]
@@ -379,6 +463,30 @@ pub(crate) mod tests {
                 "{field}={value}"
             );
         }
+    }
+
+    #[test]
+    fn a_card_s_hash_follows_what_it_holds() {
+        let temp = tempfile::tempdir().unwrap();
+        write_bundle(temp.path(), "noise-test", "constant");
+        let first = ModelBundle::open(temp.path()).unwrap();
+        assert_eq!(first.card_sha256().len(), 64);
+        assert_eq!(
+            ModelBundle::open(temp.path()).unwrap().card_sha256(),
+            first.card_sha256(),
+            "the same card, the same hash"
+        );
+        let path = temp.path().join(CARD_FILE);
+        let mut card: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        card["reading"]["holes"] =
+            serde_json::json!({"depth": 30.0, "margin": 3, "fill_radius": 12, "restore": 5.0});
+        std::fs::write(&path, serde_json::to_vec(&card).unwrap()).unwrap();
+        assert_ne!(
+            ModelBundle::open(temp.path()).unwrap().card_sha256(),
+            first.card_sha256(),
+            "a reading that changes the output changes the hash, though the graph does not"
+        );
     }
 
     #[test]
@@ -486,6 +594,63 @@ pub(crate) mod tests {
             ModelBundle::open(temp.path()),
             Err(ModelError::ModelContract(_))
         ));
+    }
+
+    #[test]
+    fn a_card_turns_the_hole_guard_on_with_its_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        write_bundle(temp.path(), "noise-test", "constant");
+        assert_eq!(
+            ModelBundle::open(temp.path()).unwrap().card().reading.holes,
+            None,
+            "a card without it runs the network on the image as it is"
+        );
+        let path = temp.path().join(CARD_FILE);
+        let mut card: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        card["reading"]["holes"] =
+            serde_json::json!({"depth": 30.0, "margin": 3, "fill_radius": 12, "restore": 5.0});
+        std::fs::write(&path, serde_json::to_vec(&card).unwrap()).unwrap();
+        let guard = ModelBundle::open(temp.path()).unwrap().card().reading.holes;
+        assert_eq!(
+            guard,
+            Some(HoleGuard {
+                depth: 30.0,
+                margin: 3,
+                fill_radius: 12,
+                restore: 5.0
+            })
+        );
+        for (field, value) in [
+            ("restore", serde_json::json!(0.0)),
+            ("margin", serde_json::json!(usize::MAX)),
+            ("fill_radius", serde_json::json!(100_000)),
+            ("kind", serde_json::json!("median")),
+        ] {
+            let mut bad = card.clone();
+            bad["reading"]["holes"][field] = value;
+            std::fs::write(&path, serde_json::to_vec(&bad).unwrap()).unwrap();
+            assert!(
+                matches!(
+                    ModelBundle::open(temp.path()),
+                    Err(ModelError::ModelContract(_))
+                ),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reading_this_build_does_not_know_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        write_bundle(temp.path(), "noise-test", "constant");
+        let path = temp.path().join(CARD_FILE);
+        let mut card: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        card["reading"]["stars"] = serde_json::json!({"keep": true});
+        std::fs::write(&path, serde_json::to_vec(&card).unwrap()).unwrap();
+        let error = ModelBundle::open(temp.path()).unwrap_err();
+        assert!(error.to_string().contains("stars"), "{error}");
     }
 
     #[test]

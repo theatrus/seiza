@@ -12,8 +12,8 @@ use super::{
     required_f32_slice_mut, required_path, required_str,
 };
 use seiza_model::{
-    Backend, BackendOptions, DenoiseOptions, DenoiseReport, Denoised, ImageView, ModelBundle,
-    ModelStore, NoiseBands, NoiseModel, Precision, Progress, runtime_info,
+    Backend, BackendOptions, DenoiseOptions, DenoiseReport, Denoised, HoleGuard, ImageView,
+    ModelBundle, ModelStore, NoiseBands, NoiseModel, Precision, Progress, runtime_info,
 };
 use serde::{Deserialize, Serialize};
 use std::ffi::{CString, c_char, c_void};
@@ -118,13 +118,35 @@ struct ChannelScalesResponse {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct HoleGuardResponse {
+    depth: f64,
+    margin: usize,
+    fill_radius: usize,
+    restore: f64,
+}
+
+impl From<&HoleGuard> for HoleGuardResponse {
+    fn from(guard: &HoleGuard) -> Self {
+        Self {
+            depth: guard.depth,
+            margin: guard.margin,
+            fill_radius: guard.fill_radius,
+            restore: guard.restore,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct DenoiseReportResponse {
     model: String,
     sha256: String,
+    card_sha256: String,
     backend: String,
     precision: String,
     tile: usize,
     noise_map: String,
+    holes: Option<HoleGuardResponse>,
     channels: Vec<ChannelScalesResponse>,
 }
 
@@ -133,10 +155,12 @@ impl From<&DenoiseReport> for DenoiseReportResponse {
         Self {
             model: report.model.clone(),
             sha256: report.sha256.clone(),
+            card_sha256: report.card_sha256.clone(),
             backend: report.backend.to_string(),
             precision: report.precision.to_string(),
             tile: report.tile,
             noise_map: report.noise_map.to_string(),
+            holes: report.holes.as_ref().map(Into::into),
             channels: report
                 .channels
                 .iter()
@@ -155,7 +179,9 @@ struct InstalledModelResponse {
     name: String,
     path: PathBuf,
     task: String,
+    card_sha256: String,
     noise_map: String,
+    holes: Option<HoleGuardResponse>,
     precisions: Vec<String>,
 }
 
@@ -166,7 +192,9 @@ impl From<&ModelBundle> for InstalledModelResponse {
             name: card.name.clone(),
             path: bundle.root().to_path_buf(),
             task: card.task.to_string(),
+            card_sha256: bundle.card_sha256().to_string(),
             noise_map: card.reading.noise_map.to_string(),
+            holes: card.reading.holes.as_ref().map(Into::into),
             precisions: card
                 .graphs
                 .iter()
@@ -379,9 +407,13 @@ pub unsafe extern "C" fn seiza_denoised_residual(
 }
 
 #[unsafe(no_mangle)]
-/// What ran, as JSON lent until the result is freed: `model`, `sha256`,
-/// `backend`, `precision`, `tile`, `noiseMap`, and `channels`, each with its
-/// `background` and `noise`. A host keys cached results on `sha256`, `backend`,
+/// What ran, as JSON lent until the result is freed: `model`, `sha256` (the
+/// graph's), `cardSha256` (the model card's), `backend`, `precision`, `tile`,
+/// `noiseMap`, `holes`, and `channels`, each with its `background` and
+/// `noise`. `holes` is null, or how the image's holes were kept from the
+/// network, as the model's card asks: `depth`, `margin`, `fillRadius` and
+/// `restore`. The card names its graphs by their hashes and everything the
+/// image is read by, so a host keys cached results on `cardSha256`, `backend`,
 /// `precision` and [`seiza_model_output_version`].
 ///
 /// # Safety
@@ -455,7 +487,8 @@ pub unsafe extern "C" fn seiza_model_backends_json(
 
 #[unsafe(no_mangle)]
 /// The installed models, as a JSON array the caller frees with
-/// `seiza_string_free`, each with `name`, `path`, `task`, `noiseMap` and
+/// `seiza_string_free`, each with `name`, `path`, `task`, `cardSha256`,
+/// `noiseMap`, `holes` (as [`seiza_denoised_report_json`] gives them) and
 /// `precisions`. `store` may be null for the default store.
 ///
 /// # Safety
@@ -615,6 +648,11 @@ mod tests {
             let installed: Value = serde_json::from_str(&taken(installed)).unwrap();
             assert_eq!(installed["name"], "noise-tiny");
             assert_eq!(installed["noiseMap"], "constant");
+            assert_eq!(installed["cardSha256"].as_str().unwrap().len(), 64);
+            assert!(
+                installed["holes"].is_null(),
+                "the tiny model's card has no guard"
+            );
 
             let listed = seiza_model_list_json(store.as_ptr(), &mut error);
             let listed: Value = serde_json::from_str(&taken(listed)).unwrap();
@@ -640,6 +678,32 @@ mod tests {
             assert!(!error.is_null(), "a second removal is an error");
             assert!(taken(error).contains("noise-tiny"));
         }
+    }
+
+    #[test]
+    fn a_card_s_hole_guard_is_listed_with_its_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        for entry in std::fs::read_dir(fixtures().join("tiny")).unwrap() {
+            let entry = entry.unwrap();
+            std::fs::copy(entry.path(), source.join(entry.file_name())).unwrap();
+        }
+        let path = source.join("card.json");
+        let mut card: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        card["reading"]["holes"] =
+            serde_json::json!({"depth": 30.0, "margin": 3, "fill_radius": 12, "restore": 5.0});
+        std::fs::write(&path, serde_json::to_vec(&card).unwrap()).unwrap();
+        let (source, store) = (text(&source), text(&temp.path().join("store")));
+        let mut error = ptr::null_mut();
+        let installed =
+            unsafe { seiza_model_install_json(source.as_ptr(), store.as_ptr(), &mut error) };
+        assert!(error.is_null());
+        let installed: Value = serde_json::from_str(&taken(installed)).unwrap();
+        assert_eq!(
+            installed["holes"],
+            serde_json::json!({"depth": 30.0, "margin": 3, "fillRadius": 12, "restore": 5.0})
+        );
     }
 
     #[test]
@@ -754,6 +818,8 @@ mod tests {
             assert_eq!(report["model"], "noise-tiny");
             assert_eq!(report["precision"], "f32");
             assert_eq!(report["noiseMap"], "constant");
+            assert_eq!(report["cardSha256"].as_str().unwrap().len(), 64);
+            assert!(report["holes"].is_null());
 
             let mut length = 0;
             let residual = seiza_denoised_residual(denoised, 0, &mut length);

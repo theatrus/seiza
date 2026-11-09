@@ -1596,15 +1596,25 @@ class ChannelScales:
     background: float
     noise: float
 
+class HoleGuard:
+    """How a model's card has the image's holes kept from the network and put back after."""
+
+    depth: float
+    margin: int
+    fill_radius: int
+    restore: float
+
 class DenoiseReport:
-    """What ran. A cache keys on sha256, backend, precision and MODEL_OUTPUT_VERSION."""
+    """What ran. A cache keys on card_sha256, backend, precision and MODEL_OUTPUT_VERSION."""
 
     model: str
     sha256: str
+    card_sha256: str
     backend: str
     precision: str
     tile: int
     noise_map: str
+    holes: HoleGuard | None
     channels: list[ChannelScales]
 
 class Denoised:
@@ -1658,7 +1668,9 @@ class InstalledModel:
     name: str
     path: Path
     task: str
+    card_sha256: str
     noise_map: str
+    holes: HoleGuard | None
     precisions: list[str]
 
 MODEL_OUTPUT_VERSION: str

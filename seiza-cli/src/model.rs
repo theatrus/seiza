@@ -196,13 +196,18 @@ fn operation_cards(report: &DenoiseReport, bands: &NoiseBands) -> Vec<WriteHeade
     let number = |key: &str, value: f32, comment: &str| {
         WriteHeaderCard::new(key, HeaderValue::Float(f64::from(value))).with_comment(comment)
     };
-    vec![
+    let mut cards = vec![
         text("SEIZAMDL", report.model.clone(), "Seiza learned model"),
         text("SEIZATRF", "LINEAR".to_string(), "linear sample transfer"),
         text(
             "MDHASH",
             report.sha256.chars().take(16).collect(),
             "model graph SHA-256, first 16",
+        ),
+        text(
+            "MDCARD",
+            report.card_sha256.chars().take(16).collect(),
+            "model card SHA-256, first 16",
         ),
         text("MDBACKND", report.backend.to_string(), "backend requested"),
         text("MDPREC", report.precision.to_string(), "graph precision"),
@@ -224,7 +229,14 @@ fn operation_cards(report: &DenoiseReport, bands: &NoiseBands) -> Vec<WriteHeade
             seiza_model::OUTPUT_VERSION.to_string(),
             "seiza-model output version",
         ),
-    ]
+    ];
+    if let Some(guard) = report.holes {
+        cards.push(
+            WriteHeaderCard::new("MDHOLES", HeaderValue::Float(guard.depth))
+                .with_comment("holes this many sigma deep kept from the model"),
+        );
+    }
+    cards
 }
 
 fn backends(args: &RuntimeArgs) -> Result<()> {
@@ -261,10 +273,15 @@ fn list() -> Result<()> {
             .map(|graph| graph.precision.to_string())
             .collect();
         println!(
-            "{}: {}, reads {} noise, {}",
+            "{}: {}, reads {} noise{}, {}",
             card.name,
             card.task,
             card.reading.noise_map,
+            if card.reading.holes.is_some() {
+                ", keeps holes from the network"
+            } else {
+                ""
+            },
             graphs.join(" and ")
         );
     }
@@ -363,15 +380,32 @@ mod tests {
         let report = DenoiseReport {
             model: "noise-test".to_string(),
             sha256: "0123456789abcdef0123".to_string(),
+            card_sha256: "fedcba9876543210fedc".to_string(),
             backend: Backend::Cpu,
             precision: Precision::F32,
             tile: 512,
             noise_map: seiza_model::NoiseInput::Constant,
+            holes: None,
             channels: Vec::new(),
         };
         let cards = operation_cards(&report, &NoiseBands::default());
         let keys: Vec<&str> = cards.iter().map(WriteHeaderCard::keyword).collect();
-        assert!(keys.contains(&"MDHASH") && keys.contains(&"MDBACKND"));
+        assert!(keys.contains(&"MDHASH") && keys.contains(&"MDCARD") && keys.contains(&"MDBACKND"));
+        assert!(
+            !keys.contains(&"MDHOLES"),
+            "a run without the guard says nothing of it"
+        );
         assert!(keys.iter().all(|key| key.len() <= 8), "{keys:?}");
+        let guarded = DenoiseReport {
+            holes: Some(seiza_model::HoleGuard {
+                depth: 30.0,
+                margin: 3,
+                fill_radius: 12,
+                restore: 5.0,
+            }),
+            ..report
+        };
+        let cards = operation_cards(&guarded, &NoiseBands::default());
+        assert!(cards.iter().any(|card| card.keyword() == "MDHOLES"));
     }
 }
