@@ -1,0 +1,19 @@
+[package]
+name = "seiza-image-ser"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "README.md"
+description = "Seekable raw SER image sequences for the Seiza astrophotography toolkit"
+keywords = ["astronomy", "ser", "planetary", "image"]
+categories = ["science", "multimedia::images", "parser-implementations"]
+
+[dependencies]
+seiza-fits.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
