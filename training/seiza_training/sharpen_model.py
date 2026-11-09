@@ -48,12 +48,17 @@ The loss, in linear units:
 
 - Charbonnier error of output against target, in units of the target's own
   noise, which the stack's map gives (the input stack's where a supplied
-  pair keeps none), with clipped cores masked out, and the band at a
-  window's edge that its blur or shift read past;
+  pair keeps none, and the image's own where one frame alone covers the
+  sky), read no higher than `noise_cap` times its tile's median, with
+  clipped cores masked out, and the band at a window's edge that its blur
+  or shift read past;
 - the same on the error's gradient, the error averaged over 1, 2 and 4
   pixel blocks, each times its side, so every scale's noise weighs alike;
 - Charbonnier error of each point source's flux within three times the
-  input's FWHM, in units of that flux's noise.
+  input's FWHM, in units of that flux's noise, counted once for each pixel
+  of its aperture, as a pixel's error is.
+
+The second and third weigh a tenth each (see `LossSettings`).
 
 Reblur consistency, `|R ∗ f(y) − y|²` on real images without a target,
 and a centroid-shift loss are left for later: both would be terms of
@@ -205,11 +210,17 @@ class LossSettings:
     the seeing, thousands of σ̄ where the sky's is one, and errors read in
     it leave a blurred star all but free: a first run (2026-11-09) learnt
     to denoise its pairs and never to sharpen. Capped at `noise_cap`, the
-    map still weighs the sky and the faint signal, and a core counts."""
+    map still weighs the sky and the faint signal, and a core counts.
+
+    The stars are a two-hundredth of a tile's pixels, and the targets' own
+    noise, which no model can predict, fills the rest; a term that adds
+    noise drowns them. Fitting one batch of known-kernel tiles, the cores
+    never moved with the gradient term at half weight; at a tenth they
+    reached four fifths of their targets in 300 steps."""
 
     epsilon: float = 0.1
     noise_cap: float = 10.0
-    gradient_weight: float = 0.5
+    gradient_weight: float = 0.1
     gradient_scales: tuple[int, ...] = (1, 2, 4)
     flux_weight: float = 0.1
 
@@ -904,12 +915,16 @@ def loss_terms(residual: torch.Tensor, batch: dict[str, torch.Tensor], settings:
     gradient = torch.stack(terms).mean() if terms else torch.zeros((), device=residual.device)
     labels = batch["labels"].reshape(len(residual), -1)
     sums = torch.zeros(len(residual), APERTURES + 1, device=residual.device)
-    variances = torch.zeros_like(sums)
+    variances, areas = torch.zeros_like(sums), torch.zeros_like(sums)
     sums.scatter_add_(1, labels, (output - batch["target"]).reshape(len(residual), -1))
     variances.scatter_add_(1, labels, (sigma**2).reshape(len(residual), -1))
-    present = variances[:, 1:] > 0
+    areas.scatter_add_(1, labels, torch.ones_like(sigma).reshape(len(residual), -1))
     scores = sums[:, 1:] / variances[:, 1:].clamp(min=1e-12).sqrt()
-    flux = (charbonnier(scores, epsilon) * present).sum() / present.sum().clamp(min=1)
+    # Each star's error counts once for each pixel of its aperture, over
+    # the valid pixels, as a pixel's does: as a mean over the stars, a
+    # tenth of it pulled each aperture's pixels a hundred times harder
+    # than the pixel term pulls its own, and no star was ever sharpened.
+    flux = (charbonnier(scores, epsilon) * areas[:, 1:]).sum() / valid.sum().clamp(min=1.0)
     total = pixel + settings.gradient_weight * gradient + settings.flux_weight * flux
     return {"total": total, "pixel": pixel, "gradient": gradient, "flux": flux}
 

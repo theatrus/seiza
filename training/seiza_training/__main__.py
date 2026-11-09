@@ -309,7 +309,8 @@ def main(argv: list[str] | None = None) -> int:
     sharpen_train.add_argument("--noise-cap", type=float, default=10.0,
                                help="read the target's noise no higher than this many times its tile's median, so "
                                     "a star core, whose frames scatter with the seeing, still counts (0: no cap)")
-    sharpen_train.add_argument("--gradient-weight", type=float, default=0.5)
+    sharpen_train.add_argument("--gradient-weight", type=float, default=0.1,
+                               help="the weight of the error gradient term; at 0.5 its noise drowned the stars")
     sharpen_train.add_argument("--gradient-scales", type=lambda text: tuple(int(k) for k in text.split(",")),
                                default=(1, 2, 4), help="the blocks the gradient term averages the error over")
     sharpen_train.add_argument("--flux-weight", type=float, default=0.1,

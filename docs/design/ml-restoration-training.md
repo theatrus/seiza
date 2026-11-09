@@ -1009,9 +1009,16 @@ reached unstopped, since each batch is drawn from its step alone.
   but nothing, and the first smoke run learnt to denoise its pairs and
   never to sharpen. The loss adds the same error on the error's
   gradient, averaged over 1, 2 and 4 px blocks and each times its side,
-  at half weight, and the Charbonnier error of each point source's flux
-  within three times the input's FWHM, in units of that flux's noise, at
-  a tenth.
+  and the Charbonnier error of each point source's flux within three
+  times the input's FWHM, in units of that flux's noise, counted once for
+  each pixel of its aperture, as a pixel's error is; each at a tenth.
+  Those weights come from fitting one batch of known-kernel tiles. The
+  stars are a two-hundredth of a tile's pixels and the targets' own noise
+  fills the rest, so terms that add noise drown them: with the gradient
+  term at half weight, or the flux term a mean over the stars, which
+  pulled each aperture's pixels a hundred times as hard as the pixel
+  term pulls its own, the cores never moved; with both at a tenth, as
+  set, they reached four fifths of their targets in 300 steps.
 - **Augmentation.** The eight flips and turns, alike for the image, every
   map, the apertures and the stamp. Exposure scaling scales a
   known-kernel window's signal by up to two either way before its noise
@@ -1028,6 +1035,20 @@ reached unstopped, since each batch is drawn from its step alone.
   and the lowest pixel, in σ̄; and the change on identity windows. The
   C925's validation windows hold about one detection each, so their
   star measures rest on few windows; whole images will give many more.
+
+The first smoke runs (2026-11-09, PyTorch's Metal backend, 2,000 steps
+of 8 tiles 192 px, 3 minutes each) proved the trainer, not a model. The first
+three narrowed no star, which led to the asinh residual, the cap on the
+target's noise and the light gradient and flux terms above. With them,
+the training loss fell from 0.94 to 0.83 and the validation batches'
+from 0.96 to 0.80. On 200 windows of each validation bank, the seeing
+pairs' error against their targets fell to 0.72 of the input's, mostly
+noise taken out; the known-kernel windows' stars narrowed by 2% where
+30% was asked, so it has only begun to sharpen. Flux in the apertures
+was kept within 0.5% at the median, no bright star but one in 177 had a
+ring deeper than 1σ̄, and identity windows changed by 0.03σ̄ at the
+median. Resumed from a checkpoint, a run gives the same weights as one
+never stopped.
 
 Left for later: reblur consistency on images without a target and a
 centroid-shift loss, which join the loss's terms; perturbing the
