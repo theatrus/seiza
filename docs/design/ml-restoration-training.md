@@ -1580,6 +1580,12 @@ in these ways:
     4-frame image was 1,387σ̄, against 3,418σ̄. Its largest step on
     spread noise was 27σ̄.
 
+  It gave back part of the weighted run's clean bright stars: on the
+  Trunk, stars of 200 to 2,000σ̄ kept +3.7σ̄ 2 pixels from the core,
+  against +1.2σ̄ and the baseline's +6.4σ̄, and the two brightest about
+  +12σ̄ out to 4 pixels, as the baseline did, against 2.5σ̄ at most. On
+  the Iris's deep stack the two were alike.
+
   Its bundle gives the harness's output in the runtime on the Trunk's
   night under the guard: 1.6e-6σ̄ RMS plain and 1.3e-6σ̄ on the 2×
   drizzle, which holds 19,517 guarded pixels, and 9.2e-4σ̄ at most.
