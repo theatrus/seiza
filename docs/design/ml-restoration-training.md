@@ -893,8 +893,10 @@ Two passes make the PSF model's real data. Both only read the manifest.
   worst half as input and best half as target: the input's noise map
   made from its image alone, both stacks' own maps for the loss, a mask
   of either's clipped cores, both PSFs' stamps and shapes at the centre,
-  and their FWHM ratio there. The target is put on the input's flux and
-  sky by the check's gain and planes. A pair made before the check, every
+  and their FWHM ratio there, as the field's Moffat fit has it and as the
+  stamps' own widths do (the fit fails on stamps sharper than about
+  2 px). The target is put on the input's flux and sky by the check's
+  gain and planes, and each pair keeps its stars' median centroid offset. A pair made before the check, every
   night's split among them, is judged by the cut with the same check, its
   verdict kept with the bank. The point sources are each input's
   detections until the Gaia pass. The cut also takes pairs a caller
@@ -903,7 +905,7 @@ Two passes make the PSF model's real data. Both only read the manifest.
 The windows are raw. The sharpener is to train on the noise model's
 output; those windows will be cut from the denoised stacks beside these.
 
-First run (2026-11-08), 4 processes, 52 minutes for the fields and 8 for
+First run (2026-11-08), 4 processes, 52 minutes for the fields and 7 for
 the banks:
 
 - **Fields.** Of 773 products, 755 vary, 8 sparse C925 stacks, most of
@@ -920,21 +922,26 @@ the banks:
   many nights') carry a focus gradient as well as seeing, 2.7 px at one
   corner to 8.9 px at the other, with ring-shaped stamps; they pass the
   check, which asks for a round blur, wider everywhere.
+- **Centroids.** On 17 C925 seeing pairs the halves' star centroids sit
+  0.35–0.98 px apart, nearly all along one axis, though both halves share
+  one grid. The C925's PSF is lopsided, its centroid pulled from its peak
+  by a tail, and a sharper PSF pulls it less. A first cut that dropped
+  pairs past 0.25 px lost them all; they are kept, with their offsets,
+  and only a move past 1.5 px is taken for a fault. A stamp centred on
+  its centroid cannot show the offset, so the trainer must shift the
+  target or the stamp by it, until stamps are centred on Gaia positions.
 - **Banks.** The known-kernel banks hold 20,480 train windows from 512
   stacks and 5,600 validation windows from 140 (19 and 5 GB). The seeing
-  banks hold 21 train pairs (3,360 windows, 7 GB) and 14 validation pairs
-  (2,240, 5 GB), with ratios 0.24–1.13: 0.7% of windows above 0.8, and
-  0.06% above 1, at field corners where the best half is the wider. Of
-  the 59 pairs, 17 C925 pairs are left out because their halves' star
-  centroids sit 0.35–0.98 px apart, nearly all along one axis, though
-  they share one grid: the worst half's PSF is lopsided, and its stamp,
-  centred on its centroid, cannot say so. Three fail the shape check, one
-  is too close in seeing, one worst half has too few stars for a field,
-  and two fail the frames' screen.
+  banks hold 31 train pairs (4,960 windows, 11 GB: 28 C925, 2 Ultracat,
+  1 RedCat61) and 18 validation pairs (2,880, 6 GB, all C925), with
+  ratios 0.24–1.13: 1.2% of train windows above 0.8, and 0.04% above 1,
+  at field corners where the best half is the wider. Of the 59 pairs, six
+  fail the shape check, one is too close in seeing, one worst half has
+  too few stars for a field, and two fail the frames' screen. A night's
+  split is judged by the cut: 20 of 27 pass.
 
-Open: whether to keep the lopsided pairs with their targets shifted by
-the offset (or with stamps centred on Gaia positions), whether to train
-on focus pairs, and which window ratios to keep.
+Open: how the trainer uses the centroid offsets, whether to train on
+focus pairs, and which window ratios to keep.
 
 ## Star model
 
