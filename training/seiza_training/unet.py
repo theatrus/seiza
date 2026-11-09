@@ -8,7 +8,9 @@ statistics.
 The PSF model's network (`SharpeningUNet`) is the same U-Net told the
 local PSF: a small encoder reduces the PSF stamp to a vector with strided
 convolutions alone, and that vector scales and shifts the channels at the
-bottleneck and after each decoder level (FiLM).
+bottleneck and after each decoder level (FiLM). Over a whole image the
+vector may be given as a map, sampled from the PSF field's nodes, which
+FiLM brings to each level's grid by bilinear resizing.
 """
 
 from __future__ import annotations
@@ -95,8 +97,11 @@ class StampEncoder(nn.Sequential):
 
 class FiLM(nn.Module):
     """Per-channel scale and shift of `channels` feature maps, from the
-    stamp's vector by two 1×1 convolutions. It starts as the identity: a
-    scale of one and a shift of zero, whatever the stamp."""
+    stamp's vector by two 1×1 convolutions. The vector is one for the whole
+    tile (1×1), or a map of it over the tile, whose scale and shift are
+    brought to the feature maps' grid bilinearly, as the vector would be:
+    the convolutions are linear. It starts as the identity: a scale of one
+    and a shift of zero, whatever the stamp."""
 
     def __init__(self, features: int, channels: int) -> None:
         super().__init__()
@@ -108,7 +113,11 @@ class FiLM(nn.Module):
         nn.init.zeros_(self.shift.bias)
 
     def forward(self, y: torch.Tensor, vector: torch.Tensor) -> torch.Tensor:
-        return y * self.scale(vector) + self.shift(vector)
+        scale, shift = self.scale(vector), self.shift(vector)
+        if scale.shape[-2:] != (1, 1) and scale.shape[-2:] != y.shape[-2:]:
+            scale = nn.functional.interpolate(scale, size=y.shape[-2:], mode="bilinear", align_corners=False)
+            shift = nn.functional.interpolate(shift, size=y.shape[-2:], mode="bilinear", align_corners=False)
+        return y * scale + shift
 
 
 class SharpeningUNet(ResidualUNet):
@@ -126,7 +135,15 @@ class SharpeningUNet(ResidualUNet):
         self.film_up = nn.ModuleList(FiLM(features, widths[i]) for i in range(levels - 1))
 
     def forward(self, x: torch.Tensor, stamp: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
-        vector = self.encoder(stamp)
+        return self.mapped(x, self.encoder(stamp))
+
+    def mapped(self, x: torch.Tensor, vector: torch.Tensor) -> torch.Tensor:
+        """The network given the stamp's vector rather than the stamp: one
+        a tile, (batch, features, 1, 1), or a map of it over the tile at the
+        bottleneck's grid, (batch, features, side / multiple, side /
+        multiple), each value the vector where that bottleneck pixel's
+        middle falls, so a PSF that changes over the image changes the
+        output smoothly, wherever the tiles fall."""
         skips = [self.first(x)]
         for down in self.down:
             skips.append(down(skips[-1]))

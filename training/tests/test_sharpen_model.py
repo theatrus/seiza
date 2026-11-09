@@ -487,6 +487,43 @@ def test_tiles_with_their_own_stamp_and_points_reproduce_the_whole_image():
     assert np.abs(varied - tiled)[:, -40:].max() > 1e-2 * np.abs(whole).max()
 
 
+def test_a_field_s_vectors_over_every_pixel_leave_the_output_where_the_tiles_fall():
+    torch.manual_seed(2)
+    model = SharpeningUNet(width=4, levels=3).eval()
+    for layer in model.modules():
+        if isinstance(layer, torch.nn.Conv2d):
+            torch.nn.init.normal_(layer.weight, std=0.3)
+    stars = [(40.5, 60.2), (150.3, 90.8), (100.0, 190.4), (65.7, 128.1), (200.2, 40.6)]
+    image = stars_image(stars, [5e4, 3e4, 2e4, 1e4, 4e4], np.diag([2.0, 2.0]), side=232)
+    noise_map = np.ones_like(image)
+    points = detections(stars, [5e4, 3e4, 2e4, 1e4, 4e4])
+    inference = {"tile": 64, "overlap": 2 * reach(3) + 4, "margin": reach(3), "multiple": model.multiple}
+    ys = xs = np.array([0.0, 115.5, 231.0])
+    stamps = np.stack([np.stack([gaussian(sharpen_bank.STAMP, np.diag([1.5 + row + column, 2.0 + row]))
+                                 for column in range(3)]) for row in range(3)])
+    common = dict(ratio=0.6, points=points, noise_map=noise_map, background=100.0, noise=1.0,
+                  inference=inference, residual="linear")
+    whole = sm.sharpen(model, image, None, grid=(ys, xs, stamps), **common)
+    # The same image from a corner 24 px in, on the model's grid: its tiles
+    # fall elsewhere, and inside the network's reach of the cut, its output
+    # is the whole image's.
+    shift = 24
+    part = sm.sharpen(model, np.ascontiguousarray(image[shift:, shift:]), None,
+                      grid=(ys - shift, xs - shift, stamps),
+                      **{**common, "points": points - np.array([shift, shift] + [0] * (points.shape[1] - 2),
+                                                               dtype=np.float32),
+                         "noise_map": noise_map[shift:, shift:]})
+    inner = (slice(inference["margin"], None), slice(inference["margin"], None))
+    change = np.abs(whole - image).max()
+    assert np.abs(part[inner] - whole[shift:, shift:][inner]).max() < 1e-4 * change
+    # The field changes the output: one stamp everywhere is another image.
+    flat = sm.sharpen(model, image, None, grid=(ys, xs, np.broadcast_to(stamps[0, 0], stamps.shape)), **common)
+    assert np.abs(flat - whole).max() > 1e-2 * change
+    # One stamp everywhere is what tiles conditioned on that stamp give.
+    tiled = sm.sharpen(model, image, lambda x, y: stamps[0, 0], **common)
+    np.testing.assert_allclose(flat, tiled, atol=1e-4 * change)
+
+
 def test_the_loss_is_zero_on_the_target_and_blind_where_it_may_not_look():
     rng = np.random.default_rng(0)
     batch = {"reference": torch.from_numpy(rng.normal(size=(2, 1, 32, 32)).astype(np.float32)),
