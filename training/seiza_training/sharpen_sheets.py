@@ -60,8 +60,10 @@ STRENGTHS = (("Each star to 0.8 of its width", 0.8), ("To 0.65", 0.65), ("To 0.5
 FULL_STRENGTH = 0.65
 # A run with separate strengths for stars and the rest is asked for
 # these, stars' first: both alike, then the rest sharper than the stars,
-# then the rest alone; its full-size image is asked for both at
-# `FULL_STRENGTH`.
+# then the rest alone. Its full-size image, and so its whole-image
+# measures, are at `FULL_NONSTELLAR`: its stars at `FULL_STRENGTH` and the
+# rest sharpened hard, which is what such a run is for.
+FULL_NONSTELLAR = (FULL_STRENGTH, 0.45)
 NONSTELLAR_STRENGTHS = (("Stars and the rest to 0.8", (0.8, 0.8)), ("Both to 0.65", (0.65, 0.65)),
                         ("Both to 0.5", (0.5, 0.5)), ("Stars 0.65, the rest 0.45", (0.65, 0.45)),
                         ("Stars left, the rest 0.5", (1.0, 0.5)))
@@ -203,7 +205,7 @@ class Sharpener:
 
     @property
     def full_strength(self) -> Any:
-        return (FULL_STRENGTH, FULL_STRENGTH) if self.settings.nonstellar else FULL_STRENGTH
+        return FULL_NONSTELLAR if self.settings.nonstellar else FULL_STRENGTH
 
     def run(self, ratio: Any, top: int = 0, left: int = 0, bottom: int | None = None,
             right: int | None = None) -> np.ndarray:
