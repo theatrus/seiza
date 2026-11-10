@@ -356,6 +356,13 @@ class LossSettings:
     # known-kernel windows runs gave 0.6 to 0.75 of their targets' edge
     # gain; this one counts falling short only. 0: no such term.
     edge_weight: float = 0.0
+    # The weight of the roundness term: each listed star's ellipticity in
+    # the output, from the second moments of its light above its
+    # aperture's mean, |Mxx - Myy| + 2|Mxy| over Mxx + Myy. A known-kernel
+    # target is round already; a pair's is as round as its stack, and the
+    # term asks for round stars whatever the target. It cannot see a
+    # cross, whose moments are a round star's. 0: no such term.
+    round_weight: float = 0.0
 
 
 # Banks.
@@ -1747,7 +1754,43 @@ def loss_terms(residual: torch.Tensor, batch: dict[str, torch.Tensor], settings:
         edge = edge_shortfall(output, batch["target"], valid * (batch["labels"].reshape(valid.shape) == 0))
         total = total + settings.edge_weight * edge
         terms_out["edge"] = edge
+    if settings.round_weight > 0:
+        roundness = star_ellipticity(output, batch["labels"])
+        total = total + settings.round_weight * roundness
+        terms_out["round"] = roundness
     return {"total": total, **terms_out}
+
+
+# A star counts in the roundness term when its light above its aperture's
+# mean comes to this many σ̄: fainter, its moments are its noise's.
+ROUND_LIGHT = 30.0
+
+
+def star_ellipticity(output: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    """The mean ellipticity of the labelled stars of `output` bright
+    enough to have one (`ROUND_LIGHT`): for each aperture, the second
+    moments about its centroid of the light above the aperture's mean,
+    as (|Mxx - Myy| + 2|Mxy|) / (Mxx + Myy)."""
+    batch, _, height, width = output.shape
+    flat = output.reshape(batch, -1).float()
+    marks = labels.reshape(batch, -1)
+
+    def summed(values: torch.Tensor) -> torch.Tensor:
+        return torch.zeros(batch, APERTURES + 1, device=output.device).scatter_add_(1, marks, values)
+
+    area = summed(torch.ones_like(flat)).clamp(min=1.0)
+    light = torch.relu(flat - (summed(flat) / area).gather(1, marks))
+    total = summed(light)
+    safe = total.clamp(min=1e-6)
+    ys = torch.arange(height, device=output.device, dtype=torch.float32).view(1, height, 1).expand(batch, height, width)
+    xs = torch.arange(width, device=output.device, dtype=torch.float32).view(1, 1, width).expand(batch, height, width)
+    ys, xs = ys.reshape(batch, -1), xs.reshape(batch, -1)
+    dx = xs - (summed(light * xs) / safe).gather(1, marks)
+    dy = ys - (summed(light * ys) / safe).gather(1, marks)
+    mxx, myy, mxy = (summed(light * a * b) / safe for a, b in ((dx, dx), (dy, dy), (dx, dy)))
+    ellipticity = ((mxx - myy).abs() + 2 * mxy.abs()) / (mxx + myy + 1e-6)
+    counted = (total.detach() >= ROUND_LIGHT)[:, 1:].float()
+    return (ellipticity[:, 1:] * counted).sum() / counted.sum().clamp(min=1.0)
 
 
 # The edge term's smoothing, in σ px, and the gradient of the smoothed

@@ -954,3 +954,19 @@ def test_the_edge_term_counts_falling_short_only():
     assert float(edge_shortfall(ramp, ramp, where)) < 1e-6
     assert float(edge_shortfall(1.5 * ramp, ramp, where)) < 1e-6
     assert abs(float(edge_shortfall(0.5 * ramp, ramp, where)) - 0.5) < 0.02
+
+
+def test_the_roundness_term_is_a_stars_ellipticity():
+    import torch
+
+    from seiza_training.sharpen_model import star_ellipticity
+
+    ys, xs = torch.meshgrid(torch.arange(64.0), torch.arange(64.0), indexing="ij")
+    labels = (((ys - 32) ** 2 + (xs - 32) ** 2) <= 15**2).long().view(1, 64, 64)
+
+    def star(sx, sy):
+        return (100 * torch.exp(-0.5 * (((xs - 32) / sx) ** 2 + ((ys - 32) / sy) ** 2))).view(1, 1, 64, 64)
+
+    assert float(star_ellipticity(star(3.0, 3.0), labels)) < 0.01
+    assert float(star_ellipticity(star(4.0, 3.0), labels)) > 0.15
+    assert float(star_ellipticity(0.001 * star(4.0, 3.0), labels)) == 0.0
