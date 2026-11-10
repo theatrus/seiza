@@ -362,9 +362,10 @@ def load(store: Store, product: dict[str, Any]) -> tuple[np.ndarray, np.ndarray 
     return image, sigma
 
 
-def window_corners(finite: np.ndarray, rng: random.Random, count: int) -> list[tuple[int, int]]:
+def window_corners(finite: np.ndarray, rng: random.Random, count: int, holes: float = 0.0) -> list[tuple[int, int]]:
     """Up to `count` window corners from the overlapping grid, at random,
-    each window wholly inside `finite`."""
+    each window inside `finite` but for at most a share `holes` of its
+    pixels."""
     height, width = finite.shape
     step = WINDOW // 2
     grid = [(y, x) for y in range(0, height - WINDOW, step) for x in range(0, width - WINDOW, step)]
@@ -374,7 +375,8 @@ def window_corners(finite: np.ndarray, rng: random.Random, count: int) -> list[t
     table[1:, 1:] = np.cumsum(np.cumsum(~finite, axis=0), axis=1)
     chosen = []
     for y, x in grid:
-        if table[y + WINDOW, x + WINDOW] - table[y, x + WINDOW] - table[y + WINDOW, x] + table[y, x] == 0:
+        missing = table[y + WINDOW, x + WINDOW] - table[y, x + WINDOW] - table[y + WINDOW, x] + table[y, x]
+        if missing <= holes * WINDOW * WINDOW:
             chosen.append((y, x))
             if len(chosen) == count:
                 break
