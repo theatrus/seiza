@@ -356,6 +356,18 @@ class LossSettings:
     # known-kernel windows runs gave 0.6 to 0.75 of their targets' edge
     # gain; this one counts falling short only. 0: no such term.
     edge_weight: float = 0.0
+    # Keep the edge term clear of every detected point source
+    # (`EDGE_CLEAR` input widths about each), not only of the stars the
+    # loss lists. A tile lists 32 stars at most, and on tiles of narrow
+    # stars two in three are not listed; the edge term, which counts
+    # falling short and never going past, then asks each of those for a
+    # steeper star. On supplied pairs with targets under 1.8 px a larger
+    # run's stars held 9% more flux than their inputs, where their targets
+    # held 2%; along "every star a little brighter" the edge term's slope
+    # at the stars not listed was -2.0 and all the other terms' +0.16, and
+    # at the listed stars the other terms' was +1.07
+    # (2026-11-10). A network cannot tell which stars a tile lists.
+    edge_clear: bool = False
     # The weight of the roundness term: each listed star's ellipticity in
     # the output, from the second moments of its light above its
     # aperture's mean, |Mxx - Myy| + 2|Mxy| over Mxx + Myy. A known-kernel
@@ -1561,12 +1573,34 @@ def apertures(points: np.ndarray, valid: np.ndarray, radius: float, limit: int =
     return labels
 
 
+def source_mask(points: np.ndarray, shape: tuple[int, int], radius: float) -> np.ndarray:
+    """1 at each pixel within `radius` of a detected point source, listed
+    by the loss or not, clipped or not; 0 elsewhere."""
+    mask = np.zeros(shape, dtype=np.uint8)
+    if not len(points) or not radius > 0:
+        return mask
+    reach = int(math.ceil(radius))
+    offsets = np.arange(-reach, reach + 1)
+    disk = ((offsets[:, None] ** 2 + offsets[None, :] ** 2) <= radius**2).astype(np.uint8)
+    height, width = shape
+    detected = points[points[:, psf_fields.DETECTION_COLUMNS.index("detected")] == 1]
+    for x, y in detected[:, :2]:
+        column, row = int(round(float(x))), int(round(float(y)))
+        top, left = max(row - reach, 0), max(column - reach, 0)
+        bottom, right = min(row + reach + 1, height), min(column + reach + 1, width)
+        if top >= bottom or left >= right:
+            continue
+        part = disk[top - (row - reach):bottom - (row - reach), left - (column - reach):right - (column - reach)]
+        np.maximum(mask[top:bottom, left:right], part, out=mask[top:bottom, left:right])
+    return mask
+
+
 def arrays_of(example: Example, rng: np.random.Generator | None, settings: Settings) -> dict[str, np.ndarray]:
     """An example as a training tile: cut at a random place in its window,
     its point-source map rendered (empty by the settings' share), its
-    apertures labelled, and everything flipped and turned one of eight ways
-    alike, stamp included. Without `rng` the whole window, as it is, with
-    its points."""
+    apertures labelled, every detected point source marked (`sources`),
+    and everything flipped and turned one of eight ways alike, stamp
+    included. Without `rng` the whole window, as it is, with its points."""
     side = example.image.shape[0]
     tile = min(settings.tile, side) if rng is not None else side
     top, left = (int(value) for value in rng.integers(0, side - tile + 1, 2)) if rng is not None else (0, 0)
@@ -1580,6 +1614,7 @@ def arrays_of(example: Example, rng: np.random.Generator | None, settings: Setti
     planes = network_planes(example.image[cut], example.noise_map[cut], example.ratios(settings), rendered,
                             example.background, example.noise)
     valid = example.valid[cut]
+    sources = source_mask(points, (tile, tile), EDGE_CLEAR * example.width)
     if example.reblur > 0:
         # Blurred through the tile's own transform, which wraps: the
         # blur's reach from the tile's edges is left out, and no star's
@@ -1594,6 +1629,7 @@ def arrays_of(example: Example, rng: np.random.Generator | None, settings: Setti
         "sigma": (example.sigma[cut] / example.noise)[None],
         "valid": valid[None].astype(np.float32),
         "labels": apertures(points, valid, APERTURE_FWHM * example.width),
+        "sources": sources[None],
         "reblur": np.float32(example.reblur),
     }
     if rng is not None:
@@ -1765,7 +1801,10 @@ def loss_terms(residual: torch.Tensor, batch: dict[str, torch.Tensor], settings:
     total = pixel + settings.gradient_weight * gradient + settings.flux_weight * flux
     terms_out = {"pixel": pixel, "gradient": gradient, "flux": flux}
     if settings.edge_weight > 0:
-        edge = edge_shortfall(output, batch["target"], valid * (batch["labels"].reshape(valid.shape) == 0))
+        away = valid * (batch["labels"].reshape(valid.shape) == 0)
+        if settings.edge_clear and "sources" in batch:
+            away = away * (batch["sources"].reshape(valid.shape) == 0)
+        edge = edge_shortfall(output, batch["target"], away)
         total = total + settings.edge_weight * edge
         terms_out["edge"] = edge
     if settings.round_weight > 0:
@@ -1858,6 +1897,9 @@ def star_quadrupoles(error: torch.Tensor, sigma: torch.Tensor,
 # passed-through noise alone gives about a tenth.
 EDGE_SMOOTH = 1.5
 EDGE_KNEE = 0.2
+# How far about each detected point source the edge term keeps clear
+# where it is asked to (`LossSettings.edge_clear`), in input PSF widths.
+EDGE_CLEAR = 2.0
 
 
 def smoothed_gradient(plane: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

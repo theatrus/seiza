@@ -1264,8 +1264,29 @@ nebulae.
     neighbours hold 0.87 of what a round star's would, read from the
     pixels one and two out along the axes (block means, at the same
     width: 0.78). The unbinned stacks' stars read 0.90 and the Hubble
-    bank's 0.94, but at 2.3 px, which is not like for like. The sheets'
-    cross measure on a run trained with the bank decides.
+    bank's 0.94, but at 2.3 px, which is not like for like.
+  - A run with the bank at half the native bank's weight puts no cross
+    on the California's stars (0.10; without it 0.13 and 0.06) and
+    takes the flux gain from 12.5% to 9.1%: at the floor only, and at
+    the reference's width it is 5% high as before. Narrow stars in the
+    known-kernel banks were not what was missing: on the new bank's own
+    windows the run without it leaves stars 7% *short* of their targets.
+  - **The gain is the edge term's.** It is there in training: on the
+    supplied pairs with targets under 1.8 px the larger run's stars hold
+    9% more flux than their inputs, where their targets hold 2% and
+    wider targets' stars 1.5%. A tile lists 32 stars at most for the
+    flux term and keeps the edge term off those; on tiles of narrow
+    stars two in three are not listed, and the edge term, which counts
+    falling short and never going past, asks each of them for a steeper
+    star. Along "every star a little brighter" its slope at the stars
+    not listed is -2.0 and the other terms' together +0.16; at the
+    listed stars the others' is +1.07, the edge term's none. The
+    network cannot tell which stars a tile lists, and settles between.
+    Wide-starred native windows list most of their stars and show no
+    gain (1.004 against their targets, listed or not).
+  - `--edge-clear` keeps the edge term two input widths clear of every
+    detected point source. With it the slope at the stars not listed is
+    +0.16.
 - **Roundness is the run's, not the ask's.** The larger run leaves the
   California's stars at a median ellipticity of 0.074 (input 0.092) at
   every ask from 0.85 to the floor; a small run and the reference leave
@@ -1286,7 +1307,10 @@ nebulae.
     the Trunk's second rim steepens ×1.29 where it steepened ×1.66, and
     the change the run shares with the reference at the finest scale
     falls from 0.87 to 0.65 of the reference's. On held-out tiles its
-    edge term is up a tenth and its flux term doubled.
+    edge term is up a tenth and its flux term doubled. At weight 20 all
+    of it goes further: stars at 0.88 of the input's width on the
+    California, the Trunk's first rim rising over 4.44 px where it rose
+    over 3.76, the shared change at 0.48.
   - The term reads what is not a star's shape. It takes the moments of
     all the light above an aperture's mean, and an aperture three
     widths out is mostly noise and nebula: the *targets* of held-out
@@ -1310,8 +1334,9 @@ In order, each only if the one before leaves a gap at the rims:
 1. **Round stars and true flux on the larger run.** Runs of its recipe:
    - with the shape term at 0.1 and at 0.3 (the flux term's weight and
      three times it);
-   - with the bank of brought-down stacks at half the native bank's
-     weight, for the narrow stars' flux.
+   - with the edge term clear of every detected star, alone and with
+     the bank of brought-down stacks at half the native bank's weight;
+   - then the three together.
 2. **Noisy space-telescope windows** (`--external-snr`) at more weight,
    blurred up to four times, on the run above.
 3. **A classical deconvolution as an input plane.** A few
