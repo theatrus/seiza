@@ -44,17 +44,6 @@ def test_a_model_installs_verifies_lists_and_goes(tmp_path: Path) -> None:
         seiza.remove_model("noise-tiny", store)
 
 
-@pytest.mark.parametrize(
-    "field,value",
-    [
-        ("margin", sys.maxsize + 1),
-        ("ramp", 2 * sys.maxsize + 1),
-        ("tile", 0),
-        ("tile", 63),
-        ("tile", 16),
-        ("multiple", 0),
-    ],
-)
 def test_a_hosted_model_downloads_and_installs(tmp_path: Path) -> None:
     import functools
     import hashlib
@@ -92,6 +81,17 @@ def test_a_hosted_model_downloads_and_installs(tmp_path: Path) -> None:
         server.shutdown()
 
 
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("margin", sys.maxsize + 1),
+        ("ramp", 2 * sys.maxsize + 1),
+        ("tile", 0),
+        ("tile", 63),
+        ("tile", 16),
+        ("multiple", 0),
+    ],
+)
 def test_invalid_tiling_cannot_replace_an_installed_model(tmp_path: Path, field: str, value: int) -> None:
     store = tmp_path / "store"
     seiza.install_model(TINY, store)
