@@ -276,6 +276,44 @@ def test_a_known_kernel_window_may_hold_a_halo_that_its_target_gives_up_as_it_is
     assert sm.kernel_example(bank, 0, np.random.default_rng(1), sm.Settings(tile=32), identity=False).details["halo"] is None
 
 
+def test_contrast_darkens_the_dark_side_of_a_rim_on_nebula_and_leaves_sky_and_stars(tmp_path):
+    side = 160
+    xs = np.mgrid[:side, :side][1].astype(np.float32)
+    # Nebula of 40 over a sky of 100 on the left, of 100 on the right of a
+    # rim at column 80; sky alone in the bottom rows; a star on the nebula.
+    rest = np.where(xs < 80, 140.0, 200.0).astype(np.float32)
+    rest[130:] = 100.0
+    points = np.zeros((1, len(COLUMNS)))
+    points[0, :2] = (40.0, 40.0)
+    points[0, COLUMNS.index("detected")] = 1
+    sigma = np.ones((side, side), np.float32)
+    made, reach = sm.contrasted(rest, 1.0, 9.0, points, 100.0, sigma)
+    change = made - rest
+    wide = sm.CONTRAST_WIDE * 9.0
+    assert reach == sm.blur_reach(wide**2 * np.eye(2))
+    # Darker on the dark side by the rim, lifted less on the lit side.
+    assert change[80, 72] < -3.0 and 0.0 < change[80, 87] < -change[80, 72] * 0.6
+    assert abs(change[80, 20]) < 0.2 and abs(change[80, 140]) < 0.2
+    # Not on sky, and not about the star.
+    assert np.abs(change[145:, :]).max() < 0.05
+    assert np.abs(change[35:46, 35:46]).max() < 1e-3
+    lone = sm.contrasted(rest, 1.0, 9.0, points[:0], 100.0, sigma)[0] - rest
+    assert np.abs(lone[40, 60:78]).max() > 1.0 > np.abs(change[40, 60:64]).max()
+    # None of it for stars at the sampling limit.
+    same, none = sm.contrasted(rest, 1.0, sm.CONTRAST_WIDTHS[0], points, 100.0, sigma)
+    assert same is rest and none == 0
+    # In a window: more the more is asked of the rest.
+    bank = sm.Bank(kernel_bank(tmp_path), sm.Settings(tile=32))
+    plain = sm.Settings(tile=32, exposure=1.0, kernel_noise=0.0, nonstellar=True)
+    asked = sm.Settings(tile=32, exposure=1.0, kernel_noise=0.0, nonstellar=True, contrast=2.0)
+    for seed in range(3):
+        without = sm.kernel_example(bank, 0, np.random.default_rng(seed), plain, identity=False)
+        example = sm.kernel_example(bank, 0, np.random.default_rng(seed), asked, identity=False)
+        assert without.details["contrast"] == 0.0
+        assert example.details["contrast"] == pytest.approx(2.0 * (1.0 - example.nonstellar_ratio))
+        assert example.ratio == without.ratio and np.array_equal(example.image, without.image)
+
+
 def clipped_bank(tmp_path, level: float = 2_000.0):
     """A known-kernel bank of one window holding a bright star clipped at
     `level`, with fainter ones about it."""
