@@ -120,19 +120,52 @@ class FiLM(nn.Module):
         return y * scale + shift
 
 
+class Attention(nn.Module):
+    """A transformer block over a feature map's pixels: self-attention and
+    a two-layer feed-forward, each after a normalisation over a pixel's
+    own channels (never over a tile, whose statistics tiles would disagree
+    through) and each added back. Every pixel of the coarsest grid can
+    then draw on every other in its tile, which is how a long rim is
+    drawn as one thing. Both added parts start at zero, so the block
+    starts as the identity. With it a tile's output depends on the whole
+    tile, not only on the network's convolutional reach."""
+
+    def __init__(self, channels: int, heads: int = 8) -> None:
+        super().__init__()
+        self.norm_attention = nn.LayerNorm(channels)
+        self.attention = nn.MultiheadAttention(channels, heads, batch_first=True)
+        self.norm_forward = nn.LayerNorm(channels)
+        self.forward_layers = nn.Sequential(nn.Linear(channels, 2 * channels), nn.GELU(), nn.Linear(2 * channels, channels))
+        nn.init.zeros_(self.attention.out_proj.weight)
+        nn.init.zeros_(self.attention.out_proj.bias)
+        nn.init.zeros_(self.forward_layers[-1].weight)
+        nn.init.zeros_(self.forward_layers[-1].bias)
+
+    def forward(self, y: torch.Tensor) -> torch.Tensor:
+        batch, channels, height, width = y.shape
+        tokens = y.flatten(2).transpose(1, 2)
+        normed = self.norm_attention(tokens)
+        tokens = tokens + self.attention(normed, normed, normed, need_weights=False)[0]
+        tokens = tokens + self.forward_layers(self.norm_forward(tokens))
+        return tokens.transpose(1, 2).reshape(batch, channels, height, width)
+
+
 class SharpeningUNet(ResidualUNet):
     """The residual U-Net with the local PSF stamp's vector (`StampEncoder`)
     scaling and shifting its channels (`FiLM`) at the bottleneck and after
-    each decoder level. It reads `inputs` image planes and `stamp_inputs`
-    stamp planes; its receptive field and tiling are the U-Net's."""
+    each decoder level, and with `attention` transformer blocks
+    (`Attention`) at the bottleneck. It reads `inputs` image planes and
+    `stamp_inputs` stamp planes; without attention its receptive field and
+    tiling are the U-Net's."""
 
     def __init__(self, inputs: int = 4, outputs: int = 1, width: int = 32, levels: int = 4, stamp_inputs: int = 2,
-                 stamp_width: int = 16, features: int = 64) -> None:
+                 stamp_width: int = 16, features: int = 64, attention: int = 0) -> None:
         super().__init__(inputs=inputs, outputs=outputs, width=width, levels=levels)
         widths = [width * 2**level for level in range(levels)]
         self.encoder = StampEncoder(stamp_inputs, stamp_width, features)
         self.film_bottom = FiLM(features, widths[-1])
         self.film_up = nn.ModuleList(FiLM(features, widths[i]) for i in range(levels - 1))
+        self.attention = nn.ModuleList(Attention(widths[-1]) for _ in range(attention))
 
     def forward(self, x: torch.Tensor, stamp: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
         return self.mapped(x, self.encoder(stamp))
@@ -148,6 +181,8 @@ class SharpeningUNet(ResidualUNet):
         for down in self.down:
             skips.append(down(skips[-1]))
         y = self.film_bottom(skips.pop(), vector)
+        for block in self.attention:
+            y = block(y)
         for level in reversed(range(self.levels - 1)):
             y = nn.functional.interpolate(y, scale_factor=2.0, mode="nearest")
             y = self.up[level](torch.cat([self.lift[level](y), skips[level]], dim=1))

@@ -246,6 +246,8 @@ def main(argv: list[str] | None = None) -> int:
     sharpen_train.add_argument("--steps", type=int, default=20_000)
     sharpen_train.add_argument("--width", type=int, default=32)
     sharpen_train.add_argument("--levels", type=int, default=4)
+    sharpen_train.add_argument("--attention", type=int, default=0,
+                               help="transformer blocks at the bottleneck, each pixel there drawing on its whole tile")
     sharpen_train.add_argument("--tile", type=int, default=256)
     sharpen_train.add_argument("--batch", type=int, default=8)
     sharpen_train.add_argument("--learning-rate", type=float, default=2e-4)
@@ -777,7 +779,8 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
         structure=arguments.structure)
     record = sharpen_model.train(
         store, name=arguments.name, choice=choice, steps=arguments.steps, width=arguments.width,
-        levels=arguments.levels, batch=arguments.batch, learning_rate=arguments.learning_rate, seed=arguments.seed,
+        levels=arguments.levels, attention=arguments.attention, batch=arguments.batch,
+        learning_rate=arguments.learning_rate, seed=arguments.seed,
         log_every=arguments.log_every, checkpoint_every=arguments.checkpoint_every, settings=settings, loss=loss,
         mix=tuple(arguments.mix), clip_grad=arguments.clip_grad, rewind=arguments.rewind,
         precision=arguments.precision, validation_batches=arguments.validation_batches,
