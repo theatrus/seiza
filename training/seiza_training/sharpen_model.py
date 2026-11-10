@@ -2132,9 +2132,10 @@ def edge_shortfall(output: torch.Tensor, target: torch.Tensor, where: torch.Tens
 # Training.
 
 
-def build_model(width: int, levels: int, planes: tuple[str, ...] = PLANES, attention: int = 0) -> SharpeningUNet:
+def build_model(width: int, levels: int, planes: tuple[str, ...] = PLANES, attention: int = 0,
+                oversample: int = 1) -> SharpeningUNet:
     return SharpeningUNet(inputs=len(planes), width=width, levels=levels, stamp_inputs=len(STAMP_PLANES),
-                          attention=attention)
+                          attention=attention, oversample=oversample)
 
 
 def run_directory(store: Store, name: str) -> Path:
@@ -2178,6 +2179,7 @@ def train(
     width: int = 32,
     levels: int = 4,
     attention: int = 0,
+    oversample: int = 1,
     batch: int = 8,
     learning_rate: float = 2e-4,
     seed: int = 0,
@@ -2201,6 +2203,9 @@ def train(
     """Train a PSF model on the banks `choice` names, the known-kernel,
     seeing and supplied banks mixed by `mix`, record it under
     `STORE/models/sharpen/<name>/` and measure it on the validation banks.
+    With `oversample` the network works that many times finer than the
+    image (`SharpeningUNet`): a tile costs its square times as much, and
+    the tile, the losses and the measures stay in the image's pixels.
 
     Every `log_every` steps the window's mean loss is logged, with the
     loss on `validation_batches` fixed batches from the validation banks.
@@ -2221,13 +2226,16 @@ def train(
         raise ValueError(f"precision is fp32 or bf16, not {precision!r}")
     if checkpoint_every % log_every:
         raise ValueError(f"checkpoints ({checkpoint_every}) fall at the end of log windows ({log_every})")
-    if settings.tile % 2 ** (levels - 1):
-        raise ValueError(f"a tile of {settings.tile} is not a multiple of {2 ** (levels - 1)}")
+    if oversample < 1 or 2 ** (levels - 1) % oversample:
+        raise ValueError(f"oversampling is by a power of two up to {2 ** (levels - 1)}, not {oversample}")
+    if settings.tile % (2 ** (levels - 1) // oversample):
+        raise ValueError(f"a tile of {settings.tile} is not a multiple of {2 ** (levels - 1) // oversample}")
     directory = run_directory(store, name)
     checkpoint_path = directory / "checkpoint.pt"
     # Everything that decides the run, which a resumed run must match.
     call = json.loads(json.dumps({
         "steps": steps, "width": width, "levels": levels, **({"attention": attention} if attention else {}),
+        **({"oversample": oversample} if oversample != 1 else {}),
         "batch": batch, "learning_rate": learning_rate,
         "seed": seed, "log_every": log_every, "checkpoint_every": checkpoint_every, "settings": asdict(settings),
         "loss": asdict(loss), "mix": list(mix), "clip_grad": clip_grad, "rewind": rewind, "precision": precision,
@@ -2253,7 +2261,7 @@ def train(
     torch.manual_seed(seed)
     where = where or device()
     cuda = where.type == "cuda"
-    model = build_model(width, levels, settings.planes, attention).to(where)
+    model = build_model(width, levels, settings.planes, attention, oversample).to(where)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     schedule = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=learning_rate, total_steps=steps, pct_start=0.05)
     guard = Rewind(model, optimizer, rewind) if rewind else None
@@ -2359,8 +2367,8 @@ def train(
         "created": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "config": {**config, "prefetch": prefetch, "batch_threads": batch_threads, "workers": workers},
         "parameters": sum(p.numel() for p in model.parameters()),
-        "receptive_field_px": receptive_field(levels),
-        "inference": tiling(levels),
+        "receptive_field_px": -(-receptive_field(levels) // oversample),
+        "inference": tiling(levels, oversample),
         "device": str(where),
         "seconds": {"train": round(train_seconds, 1)},
         "history": history,
@@ -2487,7 +2495,7 @@ def sharpen(model: SharpeningUNet, image: np.ndarray, stamp_at: Any, *, ratio: f
         background = float(np.median(image[finite][::17]))
     if noise is None:
         noise = float(np.median(noise_map[finite][::17]))
-    settings = inference or tiling(model.levels)
+    settings = inference or tiling(model.levels, model.oversample)
     tile = settings["tile"]
     where = where or torch.device("cpu")
     model = model.to(where).eval()
@@ -2813,7 +2821,7 @@ def evaluate(model: SharpeningUNet, banks: dict[str, list[Bank]], *, settings: S
                         examples.append(kernel_example(bank, int(window), rng, settings, identity=True, scaled=False))
                 for example in examples:
                     # A window is one tile: whole-image inference on it.
-                    inference = {**tiling(model.levels), "tile": example.image.shape[0]}
+                    inference = {**tiling(model.levels, model.oversample), "tile": example.image.shape[0]}
                     output = sharpen(model, example.image, lambda x, y, stamp=example.stamp: stamp,
                                      ratio=example.ratios(settings), points=example.points,
                                      noise_map=example.noise_map,
@@ -2821,7 +2829,7 @@ def evaluate(model: SharpeningUNet, banks: dict[str, list[Bank]], *, settings: S
                                      residual=settings.residual, where=where)
                     # The band its blur or shift read past is out of
                     # `valid` already.
-                    measures = window_measures(example, output, reach(model.levels))
+                    measures = window_measures(example, output, reach(model.levels, model.oversample))
                     (identity_rows if example.kind == "identity" else rows).append(measures)
             entry = {"bank": bank.summary(), **summarized(rows)}
             if identity_rows:
@@ -2836,9 +2844,10 @@ def load_run(store: Store, name: str) -> tuple[dict[str, Any], SharpeningUNet]:
     directory = run_directory(store, name)
     record = json.loads((directory / "run.json").read_text())
     model = build_model(record["config"]["width"], record["config"]["levels"],
-                        tuple(record["config"].get("planes", PLANES)), record["config"].get("attention", 0))
+                        tuple(record["config"].get("planes", PLANES)), record["config"].get("attention", 0),
+                        record["config"].get("oversample", 1))
     model.load_state_dict(torch.load(directory / "weights.pt", map_location="cpu"))
-    record["inference"] = tiling(record["config"]["levels"])
+    record["inference"] = tiling(record["config"]["levels"], record["config"].get("oversample", 1))
     return record, model.eval()
 
 

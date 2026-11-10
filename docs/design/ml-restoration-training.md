@@ -1469,6 +1469,19 @@ In order, each only if the one before leaves a gap at the rims:
    each. Closer to the physics and likely steadier across PSFs; a
    larger rewrite, and a follow-on to the above.
 
+Beside these, for images whose stars are a pixel or two wide: **a
+network that works finer than the image** (`--oversample 2`). Each pixel
+of the planes is repeated over a 2 by 2 square going in, the U-Net runs
+on that grid, and its last convolution takes each square back to one
+pixel, so what goes in and comes out is the image's size and the
+exported graph, the tiling and the runtime are as they were. The first
+level can then place what falls between pixels, where the runs' narrow
+stars come out less round than the reference's (the California: 0.07
+against 0.046) and gain flux. A tile costs four times as much; its reach
+and grid are halved in the image's pixels, so a six-level model tiles at
+512 with a margin of 125. First run: the recipe above on tiles of 384,
+which costs what a tile of 768 does now.
+
 Also open: applying a mild model twice with the PSF measured again
 between; a stricter best-seeing cut for the seeing pairs' targets; and
 the grain along lit rims.

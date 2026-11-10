@@ -963,6 +963,51 @@ def test_tiles_with_their_own_stamp_and_points_reproduce_the_whole_image():
     assert np.abs(varied - tiled)[:, -40:].max() > 1e-2 * np.abs(whole).max()
 
 
+def test_an_oversampled_network_keeps_the_image_s_size_and_its_tiles_reproduce_the_whole_image(tmp_path):
+    import onnx
+
+    torch.manual_seed(3)
+    model = SharpeningUNet(width=4, levels=3, oversample=2).eval()
+    # Its grid and its reach are halved in the image's pixels.
+    assert model.multiple == 2
+    assert reach(3, 2) == math.ceil(reach(3) / 2)
+    assert sm.tiling(6, 2) == {"tile": 512, "overlap": 2 * reach(6, 2) + 32, "margin": reach(6, 2), "multiple": 16}
+    planes = torch.randn(2, len(sm.PLANES), 48, 64)
+    stamps = torch.rand(2, len(sm.STAMP_PLANES), sharpen_bank.STAMP, sharpen_bank.STAMP)
+    # Untrained it is the identity, as the network at the image's grid is.
+    assert not model(planes, stamps).any()
+    for layer in model.modules():
+        if isinstance(layer, torch.nn.Conv2d):
+            torch.nn.init.normal_(layer.weight, std=0.3)
+    with torch.no_grad():
+        assert model(planes, stamps).shape == (2, 1, 48, 64)
+    path = tmp_path / "model.onnx"
+    assert sm.export(model, path, tile=64)["max_relative_error"] < 1e-4
+    operations = {node.op_type for node in onnx.load(str(path)).graph.node}
+    assert operations <= {"Conv", "Sigmoid", "Mul", "Add", "Concat", "Resize", "Constant"}
+    stars = [(40.5, 60.2), (150.3, 90.8), (100.0, 190.4), (65.7, 128.1)]
+    image = stars_image(stars, [5e4, 3e4, 2e4, 1e4], np.diag([2.0, 2.0]), side=200)[:, :]
+    image = np.concatenate([image, image[:, :32]], axis=1)
+    noise_map = np.ones_like(image)
+    stamp = gaussian(sharpen_bank.STAMP, np.diag([2.0, 2.0]))
+    points = detections(stars, [5e4, 3e4, 2e4, 1e4])
+    inference = {"tile": 64, "overlap": 2 * reach(3, 2) + 4, "margin": reach(3, 2), "multiple": model.multiple}
+    tiled = sm.sharpen(model.eval(), image, lambda x, y: stamp, ratio=0.6, points=points, noise_map=noise_map,
+                       background=100.0, noise=1.0, inference=inference, residual="linear")
+    rendered = sm.point_map(points, stamp, image.shape, 100.0)
+    planes = sm.network_planes(image, noise_map, 0.6, rendered, 100.0, 1.0)
+    with torch.no_grad():
+        whole = model(torch.from_numpy(planes)[None], torch.from_numpy(sm.stamp_planes(stamp))[None]).numpy()[0, 0]
+    assert np.abs(whole).max() > 0
+    np.testing.assert_allclose(tiled - image, whole, atol=1e-4 * np.abs(whole).max())
+    # Only powers of two the network's levels can hold.
+    for refused in (0, 3, 8):
+        with pytest.raises(ValueError, match="power of two"):
+            SharpeningUNet(width=4, levels=3, oversample=refused)
+    # A recorded run says how it was built, and is loaded as that.
+    assert sm.build_model(4, 3, sm.PLANES, 0, 2).oversample == 2
+
+
 def test_a_field_s_vectors_over_every_pixel_leave_the_output_where_the_tiles_fall():
     torch.manual_seed(2)
     model = SharpeningUNet(width=4, levels=3).eval()

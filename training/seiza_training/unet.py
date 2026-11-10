@@ -156,16 +156,39 @@ class SharpeningUNet(ResidualUNet):
     each decoder level, and with `attention` transformer blocks
     (`Attention`) at the bottleneck. It reads `inputs` image planes and
     `stamp_inputs` stamp planes; without attention its receptive field and
-    tiling are the U-Net's."""
+    tiling are the U-Net's.
+
+    With `oversample` above 1 (a power of two) the U-Net works on a grid
+    that many times finer than the image's: each pixel of the planes is
+    repeated over a square of `oversample` a side (nearest upsampling, so
+    nothing is interpolated for it), and the last convolution takes each
+    such square of the finest features back to one pixel. What goes in and
+    what comes out are still the image's size, so tiling and the exported
+    graph are unchanged for whoever runs it; the first level can then
+    hold what falls between pixels, such as a star a pixel or two wide,
+    at `oversample` squared times the work. Its reach and its grid, in the
+    image's pixels, are that many times smaller."""
 
     def __init__(self, inputs: int = 4, outputs: int = 1, width: int = 32, levels: int = 4, stamp_inputs: int = 2,
-                 stamp_width: int = 16, features: int = 64, attention: int = 0) -> None:
+                 stamp_width: int = 16, features: int = 64, attention: int = 0, oversample: int = 1) -> None:
         super().__init__(inputs=inputs, outputs=outputs, width=width, levels=levels)
+        if oversample < 1 or oversample & (oversample - 1) or oversample > 2 ** (levels - 1):
+            raise ValueError(f"oversampling is by a power of two up to {2 ** (levels - 1)}, not {oversample}")
         widths = [width * 2**level for level in range(levels)]
         self.encoder = StampEncoder(stamp_inputs, stamp_width, features)
         self.film_bottom = FiLM(features, widths[-1])
         self.film_up = nn.ModuleList(FiLM(features, widths[i]) for i in range(levels - 1))
         self.attention = nn.ModuleList(Attention(widths[-1]) for _ in range(attention))
+        self.oversample = oversample
+        if oversample > 1:
+            self.last = nn.Conv2d(widths[0], outputs, oversample, stride=oversample)
+            nn.init.zeros_(self.last.weight)
+            nn.init.zeros_(self.last.bias)
+
+    @property
+    def multiple(self) -> int:
+        """A tile's side must be a multiple of this, in the image's pixels."""
+        return 2 ** (self.levels - 1) // self.oversample
 
     def forward(self, x: torch.Tensor, stamp: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
         return self.mapped(x, self.encoder(stamp))
@@ -177,6 +200,8 @@ class SharpeningUNet(ResidualUNet):
         multiple), each value the vector where that bottleneck pixel's
         middle falls, so a PSF that changes over the image changes the
         output smoothly, wherever the tiles fall."""
+        if self.oversample > 1:
+            x = nn.functional.interpolate(x, scale_factor=float(self.oversample), mode="nearest")
         skips = [self.first(x)]
         for down in self.down:
             skips.append(down(skips[-1]))
@@ -206,10 +231,12 @@ def receptive_field(levels: int) -> int:
     return field
 
 
-def reach(levels: int) -> int:
+def reach(levels: int, oversample: int = 1) -> int:
     """How far the network's output looks to one side, at most: half its
     receptive field, and on the side it starts from, a pixel more at each
     finer scale than the coarsest, because nearest upsampling copies a
     coarse pixel onto the fine pixel after it. At five levels it looks 122
-    pixels left and up, but 107 right and down."""
-    return (receptive_field(levels) - 1) // 2 + 2 ** (levels - 1) - 1
+    pixels left and up, but 107 right and down. A network that works
+    `oversample` times finer than the image (`SharpeningUNet`) looks that
+    many times less far in the image's pixels, rounded up."""
+    return -(-((receptive_field(levels) - 1) // 2 + 2 ** (levels - 1) - 1) // oversample)
