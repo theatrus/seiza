@@ -1788,8 +1788,9 @@ def edge_shortfall(output: torch.Tensor, target: torch.Tensor, where: torch.Tens
 # Training.
 
 
-def build_model(width: int, levels: int, planes: tuple[str, ...] = PLANES) -> SharpeningUNet:
-    return SharpeningUNet(inputs=len(planes), width=width, levels=levels, stamp_inputs=len(STAMP_PLANES))
+def build_model(width: int, levels: int, planes: tuple[str, ...] = PLANES, attention: int = 0) -> SharpeningUNet:
+    return SharpeningUNet(inputs=len(planes), width=width, levels=levels, stamp_inputs=len(STAMP_PLANES),
+                          attention=attention)
 
 
 def run_directory(store: Store, name: str) -> Path:
@@ -1832,6 +1833,7 @@ def train(
     steps: int,
     width: int = 32,
     levels: int = 4,
+    attention: int = 0,
     batch: int = 8,
     learning_rate: float = 2e-4,
     seed: int = 0,
@@ -1881,7 +1883,8 @@ def train(
     checkpoint_path = directory / "checkpoint.pt"
     # Everything that decides the run, which a resumed run must match.
     call = json.loads(json.dumps({
-        "steps": steps, "width": width, "levels": levels, "batch": batch, "learning_rate": learning_rate,
+        "steps": steps, "width": width, "levels": levels, **({"attention": attention} if attention else {}),
+        "batch": batch, "learning_rate": learning_rate,
         "seed": seed, "log_every": log_every, "checkpoint_every": checkpoint_every, "settings": asdict(settings),
         "loss": asdict(loss), "mix": list(mix), "clip_grad": clip_grad, "rewind": rewind, "precision": precision,
         "validation_batches": validation_batches, "validation_windows": validation_windows,
@@ -1906,7 +1909,7 @@ def train(
     torch.manual_seed(seed)
     where = where or device()
     cuda = where.type == "cuda"
-    model = build_model(width, levels, settings.planes).to(where)
+    model = build_model(width, levels, settings.planes, attention).to(where)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     schedule = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=learning_rate, total_steps=steps, pct_start=0.05)
     guard = Rewind(model, optimizer, rewind) if rewind else None
@@ -2489,7 +2492,7 @@ def load_run(store: Store, name: str) -> tuple[dict[str, Any], SharpeningUNet]:
     directory = run_directory(store, name)
     record = json.loads((directory / "run.json").read_text())
     model = build_model(record["config"]["width"], record["config"]["levels"],
-                        tuple(record["config"].get("planes", PLANES)))
+                        tuple(record["config"].get("planes", PLANES)), record["config"].get("attention", 0))
     model.load_state_dict(torch.load(directory / "weights.pt", map_location="cpu"))
     record["inference"] = tiling(record["config"]["levels"])
     return record, model.eval()
