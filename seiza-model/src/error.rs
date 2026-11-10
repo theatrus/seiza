@@ -75,7 +75,7 @@ pub enum ModelError {
     /// name the manifest does not offer
     /// ([`ModelNotOffered`](seiza_download::Error::ModelNotOffered)).
     #[cfg(feature = "download")]
-    #[error("{0}")]
+    #[error(transparent)]
     Download(#[from] seiza_download::Error),
 }
 
