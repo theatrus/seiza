@@ -448,6 +448,10 @@ class Bank:
             raise ValueError(f"the {self.label} bank at {self.directory} keeps no window")
         names = np.array(self.objects)
         self.loaded: dict[int, np.ndarray] = {}
+        # The bank whose stamps blur this one's windows as real PSFs, where
+        # it is not its own: a bank of sharper images is blurred by the
+        # telescopes' PSFs, not by its own.
+        self.donors: Bank | None = None
         self.odds = capped_odds(names[source_of[self.kept]], object_cap)
         if structure > 0:
             # Windows with more structure away from their stars, nebula and
@@ -764,6 +768,8 @@ class BankChoice:
                             *(Bank(Path(path), settings, **options, weight=weight)
                               for path, weight in self.more_kernels)],
                  "seeing": [Bank(Path(path), settings, **options) for path in self.seeing]}
+        for extra in found["kernel"][1:]:
+            extra.donors = found["kernel"][0]
         if self.pairs:
             found["pairs"] = [Bank(Path(path), settings, **options, weight=weight) for path, weight in self.pairs]
         return found
@@ -1173,7 +1179,8 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
         identity = bool(rng.random() < settings.identity)
     kernel = None
     if not identity and settings.real_kernels > 0 and rng.random() < settings.real_kernels:
-        kernel = donor_kernel(stamp, np.asarray(bank.arrays["stamp"][bank.draw(rng)], dtype=np.float32), settings)
+        donors = bank.donors or bank
+        kernel = donor_kernel(stamp, np.asarray(donors.arrays["stamp"][donors.draw(rng)], dtype=np.float32), settings)
     if kernel is None:
         kernel = known_kernel(stamp, rng, settings, identity=identity)
     scale = math.exp(rng.uniform(-1.0, 1.0) * math.log(settings.exposure)) if scaled and settings.exposure > 1 else 1.0
