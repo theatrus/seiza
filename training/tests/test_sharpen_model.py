@@ -374,24 +374,64 @@ def test_windows_with_structure_are_drawn_more_often_and_a_pair_may_ask_the_rest
 
 
 @pytest.mark.parametrize("factor", [2, 3, 4])
-def test_a_binned_stamp_is_the_star_a_binned_image_holds(factor):
+def test_a_brought_down_stamp_is_the_star_a_brought_down_image_holds(factor):
+    from seiza_training.sharpen_external import brought_down
+
     covariance = np.diag([3.0**2] * 2)
     stamp = gaussian(33, covariance)
-    small = sharpen_bank.binned_stamp(stamp, factor)
+    small = sharpen_bank.brought_down_stamp(stamp, factor)
     assert small.shape[0] % 2 == 1 and float(small.sum()) == pytest.approx(1.0, abs=1e-5)
-    # A star at a binned pixel's middle, binned: the same profile.
-    side = 24 * factor
-    middle = (side // factor // 2 + 0.5) * factor - 0.5
-    image = sharpen_bank.binned(gaussian(side, covariance, (middle, middle)), factor) * factor**2
-    half, at = small.shape[0] // 2, side // factor // 2
+    # A star at one of the pixels taken, brought down: the same profile.
+    side, at = 48 * factor, 24
+    middle = at * factor + factor // 2
+    image = brought_down(gaussian(side, covariance, (middle, middle)), factor)
+    half = small.shape[0] // 2
     cut = image[at - half:at + half + 1, at - half:at + half + 1]
     np.testing.assert_allclose(small, cut / cut.sum(), atol=2e-4)
-    assert sharpen_bank.stamp_width(small) == pytest.approx(2.3548 * 3.0 / factor, rel=0.12)
-    # A noise map's block is its mean's noise; a mask's, any of it.
-    assert sharpen_bank.binned(np.full((8, 8), 2.0), factor, "noise")[0, 0] == pytest.approx(2.0 / factor)
-    mask = np.zeros((12, 12), dtype=bool)
-    mask[5, 5] = True
-    assert sharpen_bank.binned(mask, factor, "any").sum() == 1
+    assert sharpen_bank.stamp_width(small) == pytest.approx(sharpen_bank.down_width(2.3548 * 3.0, factor), rel=0.12)
+    # It stays round: as wide along the diagonals as along the axes, where
+    # block means square a star.
+    centre = half
+    assert float(small[centre, centre + 1]) == pytest.approx(float(small[centre + 1, centre]), rel=1e-4)
+    along, across = float(small[centre, centre + 2]), float(small[centre + 1, centre + 1])
+    assert across / along == pytest.approx(math.exp((4 - 2) / (2 * (sharpen_bank.down_width(2.3548 * 3.0, factor)
+                                                                    / 2.3548) ** 2)), rel=0.02)
+
+
+def test_stacks_are_brought_down_to_the_floor_a_star_is_asked_to():
+    assert [sharpen_bank.down_factor(width) for width in (2.0, 2.4, 3.0, 11.0)] == [2, 3, 3, 6]
+    for width in (2.0, 2.4, 3.0, 4.5):
+        assert sharpen_bank.down_width(width, sharpen_bank.down_factor(width)) == pytest.approx(
+            sharpen_bank.BINNED_PX, abs=0.12)
+
+
+def test_a_brought_down_field_puts_stars_among_the_pixels_taken():
+    factor = 3
+
+    class Stack:
+        record, usable = {"status": "measured"}, True
+
+        def points(self):
+            rows = np.zeros((1, len(COLUMNS)), dtype=np.float32)
+            rows[0, COLUMNS.index("x")], rows[0, COLUMNS.index("y")] = 10 * factor + factor // 2, 7 * factor + 1.5
+            rows[0, COLUMNS.index("flux")], rows[0, COLUMNS.index("fwhm")] = 900.0, 6.0
+            return rows
+
+        def shape_at(self, x, y):
+            return {"fwhm": 6.0, "e1": 0.2, "e2": 0.0, "beta": 3.0}
+
+    image = np.zeros((16, 16), dtype=np.float32)
+    image[7, 10] = 5.0
+    field = sharpen_bank.BroughtDownField(Stack(), factor, image)
+    star = dict(zip(COLUMNS, field.points()[0].tolist()))
+    assert (star["x"], star["y"]) == (pytest.approx(10.0), pytest.approx(7 + 0.5 / factor))
+    assert star["flux"] == pytest.approx(100.0) and star["peak"] == pytest.approx(5.0)
+    wide = math.hypot(6.0, 2.3548 * 0.5 * factor) / factor
+    assert star["fwhm"] == pytest.approx(wide)
+    assert field.full(10) == 10 * factor + factor // 2 and field.down(field.full(4.25)) == pytest.approx(4.25)
+    shape = field.shape_at(3.0, 3.0)
+    assert shape["fwhm"] == pytest.approx(wide)
+    assert shape["e1"] == pytest.approx(0.2 * (6.0 / (wide * factor)) ** 2) and shape["beta"] == 3.0
 
 
 def test_a_real_psf_blurs_a_window_as_its_stamp_says(tmp_path):
