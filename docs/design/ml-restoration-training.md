@@ -1058,6 +1058,102 @@ Gaia's point-source maps; windows cut from the denoised stacks; and
 contact sheets, whole-image evaluation and the bundle, which will call
 the same inference.
 
+### What the sharpening runs showed
+
+Runs since (2026-11-09, width 32, four levels, 20,000 steps of 8 tiles
+unless said; about 8 minutes each) are judged on whole images: contact
+sheets beside a reference sharpener at a mild and a strong setting, star
+width, flux, rings, cross and roundness, noise gain, and the rims of
+nebulae.
+
+- **Stars.** Runs reach the width asked. Moving each pair's target by
+  its light's offset keeps stars in place. Passing the input's noise
+  through to the target (`--pass-noise`, with the known-kernel noise up
+  to the stack's own) ended the rings and leaves the sky's noise at 0.99
+  of the input's. Leaving out one kind of supplied pair ended a cross
+  left standing at bright stars. A bank binned by block means gave
+  square stars and is not used.
+- **Two strengths.** With `--nonstellar` the network reads one ratio for
+  stars and one for the rest, and a known-kernel window's target is the
+  two blurs of the window, each where its part of the light is.
+- **Length.** 20,000 steps is short. On held-out known-kernel windows
+  such runs give 0.6 to 0.75 of the target's edge gain at asks of 0.4 to
+  0.85; at 100,000 steps, 0.92 to 0.94. A wider and deeper network
+  (64, five levels) at 30,000 steps gave no more than the small one.
+  Asks under 0.4 are next to untrained with kernel ratios up to 2.0.
+- **Space-telescope windows.** Drizzled Hubble and JWST mosaics from the
+  public archive, brought down two and three times (JWST one and two),
+  are a known-kernel bank whose truth holds edges sharper than any
+  seeing, blurred in training by the native bank's PSFs
+  (`cut-external`, `--more-kernel-bank`). Required whole, a window was
+  lost to one cosmic ray's pixels, and over half the mosaics gave none;
+  a window may now miss 2% of its pixels, filled from about them and
+  kept out of the loss, and the Hubble bank went from 842 windows to
+  10,694. The larger bank made stars rounder and edges no sharper.
+  Blurring by real PSFs at ratios up to 4 with reblur windows cost round
+  stars and is set aside.
+- **The edge term** (`--edge-weight`) is the share of the target's
+  smoothed gradient the output falls short of along the target's own
+  direction, away from the listed stars; going past the target costs
+  nothing in it. At 2 a 20,000-step run gives 0.77 to 0.87 of the
+  target's edge gain and stars as round as before. At 5 it goes past
+  the truth at mild asks, up to twice, and leaves a dotted texture in
+  dark nebula on denoised inputs.
+- **The measure that misled.** A whole-image edge gain (smoothed
+  gradient at the strongest edges, output over input) put such a run
+  level with the reference's strong setting, which the sheets did not
+  bear out: its rims of dark nebula were barely crisper than the
+  input's. The measure used now averages thousands of profiles taken
+  across the rims, which leaves the rim and averages the noise away,
+  and gives the rise from 20% to 80% in pixels. On the Elephant's Trunk
+  the input's is 5.7 px, the runs' 4.1 to 4.5, the reference's 4.6
+  (mild) and 3.7 (strong).
+- **Why the rims stay soft.** On the same image denoised first, the
+  runs do draw crisp rims. The space-telescope windows, which alone
+  hold edges sharper than the seeing, were met with their own noise,
+  next to none. A native stack's own noise is in its target, where no
+  run can follow it, so under noise the native windows teach caution.
+  `--external-snr LOW,HIGH` gives each external window noise of its
+  contrast over a ratio drawn between the two.
+
+### What is next for sharpening
+
+In order, each only if the one before leaves a gap at the rims:
+
+1. **Noisy space-telescope windows** (`--external-snr`), at more than
+   one weight, with and without JWST, then at 100,000 steps.
+2. **A classical deconvolution as an input plane.** A few
+   Richardson–Lucy iterations with the measured PSF, read by the network
+   beside the image: the network then cleans a sharp, ringing estimate
+   in place of inventing the sharpening. Computed from the image and
+   its PSF alone, so the model still needs nothing but the image.
+3. **A feature loss and a critic, held by reblur consistency.**
+   - Features from a network trained on photographs do not fit linear,
+     single-channel data that is mostly sky. The feature network is the
+     encoder of a trained noise model, which already reads this data in
+     units of its noise; features are compared with stars masked out,
+     as the edge term is, so the loss cannot pinch a star.
+   - The critic is a few layers over 64 px patches, told the PSF and the
+     ratios asked, scoring a patch as truth (the target, the
+     space-telescope windows) or output. It is trained beside the
+     sharpener, from a converged run and at a small weight.
+   - Reblur consistency is the leash: the output blurred by the input's
+     PSF must give the input back, weighted so that sharpness cannot be
+     bought with detail the data does not hold.
+   - The passed-through noise must be neither removed nor sharpened for
+     either loss's sake: both read a lightly smoothed residual, or the
+     denoised windows alone.
+   - Invented sharpness shows on the known-truth probe as a share of
+     the target's edge gain above 1.
+4. **An unrolled deconvolution**: the network as several deconvolution
+   steps with a learned correction between them and the PSF used at
+   each. Closer to the physics and likely steadier across PSFs; a
+   larger rewrite, and a follow-on to the above.
+
+Also open: applying a mild model twice with the PSF measured again
+between; a stricter best-seeing cut for the seeing pairs' targets; and
+the California's flux, 5% high at bright stars.
+
 ## Star model
 
 ### Star policy
