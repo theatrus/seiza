@@ -2266,17 +2266,19 @@ def load_run(store: Store, name: str) -> tuple[dict[str, Any], ResidualUNet]:
 TILE_OVERLAP = 0.6
 
 
-def tiling(levels: int) -> dict[str, int]:
+def tiling(levels: int, oversample: int = 1) -> dict[str, int]:
     """How a model of `levels` runs over an image: tiles of 512, a margin of
     its reach, which reproduces whole-image inference, a cosine over 32 more
     pixels, and every tile starting on its grid. A model deep enough that
     the overlap would take over `TILE_OVERLAP` of such a tile (six levels
     and more: its overlap is 532 px) runs on tiles twice its overlap, up to
-    the next multiple of 256."""
-    margin = reach(levels)
+    the next multiple of 256. A model that works `oversample` times finer
+    than the image has that much less reach and that much finer a grid in
+    the image's pixels."""
+    margin = reach(levels, oversample)
     overlap = 2 * margin + 32
     tile = 512 if overlap <= TILE_OVERLAP * 512 else -(-2 * overlap // 256) * 256
-    return {"tile": tile, "overlap": overlap, "margin": margin, "multiple": 2 ** (levels - 1)}
+    return {"tile": tile, "overlap": overlap, "margin": margin, "multiple": 2 ** (levels - 1) // oversample}
 
 
 def evaluate_saved(
