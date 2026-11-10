@@ -13,6 +13,7 @@ members = [
     "seiza-draw",
     "seiza-fits",
     "seiza-image-io",
+    "seiza-image-ser",
     "seiza-imgproc",
     "seiza-model",
     "seiza-parallax",
@@ -45,6 +46,7 @@ seiza-download = { path = "seiza-download", version = "0.9.1" }
 seiza-draw = { path = "seiza-draw", version = "0.1.0" }
 seiza-fits = { path = "seiza-fits", version = "0.8.1" }
 seiza-image-io = { path = "seiza-image-io", version = "0.13.1" }
+seiza-image-ser = { path = "seiza-image-ser", version = "0.1.0" }
 seiza-imgproc = { path = "seiza-imgproc", version = "0.3.2" }
 seiza-model = { path = "seiza-model", version = "0.1.0" }
 seiza-parallax = { path = "seiza-parallax", version = "0.20.1" }
