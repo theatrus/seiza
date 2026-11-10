@@ -996,6 +996,36 @@ def test_the_edge_term_counts_falling_short_only():
     assert abs(float(edge_shortfall(0.5 * ramp, ramp, where)) - 0.5) < 0.02
 
 
+def test_the_edge_term_can_keep_clear_of_stars_the_loss_does_not_list():
+    import torch
+
+    from seiza_training import psf_fields
+    from seiza_training.sharpen_model import LossSettings, loss_terms, source_mask
+
+    columns = psf_fields.DETECTION_COLUMNS
+    points = np.zeros((3, len(columns)))
+    points[:, columns.index("detected")] = (1, 1, 0)
+    points[:, :2] = ((32.2, 31.7), (2.0, 60.0), (50.0, 12.0))
+    mask = source_mask(points, (64, 64), 6.0)
+    # Both detections, the one at the edge cut off there; not the point
+    # that was not detected.
+    assert mask[32, 32] == 1 and mask[32, 38] == 1 and mask[32, 39] == 0 and mask[63, 0] == 1 and mask[12, 50] == 0
+    assert mask.dtype == np.uint8 and mask.sum() < 2 * 113 + 1
+
+    ys, xs = torch.meshgrid(torch.arange(64.0), torch.arange(64.0), indexing="ij")
+    star = (100 * torch.exp(-0.5 * ((xs - 32.2) ** 2 + (ys - 31.7) ** 2) / 1.5**2)).view(1, 1, 64, 64)
+    # A star the tile does not list, half as bright as its target, then
+    # twice as bright.
+    batch = {"reference": torch.zeros(1, 1, 64, 64), "target": star, "valid": torch.ones(1, 1, 64, 64),
+             "sigma": torch.ones(1, 1, 64, 64), "labels": torch.zeros(1, 64, 64, dtype=torch.int64),
+             "sources": torch.from_numpy(mask)[None, None]}
+    listed_only, clear = LossSettings(edge_weight=2.0), LossSettings(edge_weight=2.0, edge_clear=True)
+    assert float(loss_terms(0.5 * star, batch, listed_only, "linear")["edge"]) > 0.3
+    assert float(loss_terms(2.0 * star, batch, listed_only, "linear")["edge"]) < 1e-6
+    # What is left is the star's wing past the mask, next to no edge.
+    assert float(loss_terms(0.5 * star, batch, clear, "linear")["edge"]) < 0.05
+
+
 def test_the_roundness_term_is_a_stars_ellipticity():
     import torch
 

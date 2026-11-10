@@ -366,6 +366,9 @@ def main(argv: list[str] | None = None) -> int:
     sharpen_train.add_argument("--edge-weight", type=float, default=0.0,
                                help="the weight of the edge term: the share of the target's smoothed gradient the "
                                     "output falls short of, away from the listed stars (0: none)")
+    sharpen_train.add_argument("--edge-clear", action="store_true",
+                               help="keep the edge term clear of every detected point source, not only of the stars "
+                                    "the loss lists")
     sharpen_train.add_argument("--round-weight", type=float, default=0.0,
                                help="the weight of the roundness term: the listed stars' ellipticity in the output, "
                                     "from their second moments (0: none)")
@@ -769,7 +772,7 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
                                       gradient_weight=arguments.gradient_weight,
                                       gradient_scales=arguments.gradient_scales, flux_weight=arguments.flux_weight,
                                       edge_weight=arguments.edge_weight, round_weight=arguments.round_weight,
-                                      shape_weight=arguments.shape_weight)
+                                      shape_weight=arguments.shape_weight, edge_clear=arguments.edge_clear)
     choice = sharpen_model.BankChoice(
         kernel=str(arguments.kernel_bank or sharpen_model.find_bank(work, "deep", "train")),
         seeing=tuple(str(path) for path in arguments.seeing_banks or [sharpen_model.find_bank(work, "seeing", "train")]),
