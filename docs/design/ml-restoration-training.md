@@ -1149,8 +1149,8 @@ nebulae.
   its light's offset keeps stars in place. Passing the input's noise
   through to the target (`--pass-noise`, with the known-kernel noise up
   to the stack's own) ended the rings and leaves the sky's noise at 0.99
-  of the input's. A bank binned by block means gave square stars and is
-  not used.
+  of the input's. A bank binned by block means gave square stars and
+  was dropped (see "Narrow stars gain flux" below for its successor).
 - **Two strengths.** With `--nonstellar` the network reads one ratio for
   stars and one for the rest, and a known-kernel window's target is the
   two blurs of the window, each where its part of the light is.
@@ -1204,34 +1204,75 @@ nebulae.
   little beyond a rim's own width. The smaller and shorter runs leave
   speckle along the lit edges of dark nebula; a 100,000-step run leaves
   less.
+- **More context** (2026-11-10). Banks cut again with 1024 px windows
+  (`--window`), the Hubble bank brought down one and two times where it
+  was two and three; six levels at width 32 (42M parameters), 768 px
+  tiles in batches of 4, 30,000 steps at half the learning rate, kernel
+  ratios 1.1 to 3.0, the edge term at 2; about 70 minutes. Whole images
+  at stars 0.46 and the rest 0.5:
+  - On the Elephant's Trunk the rims rise from 20% to 80% in 3.76 px
+    (input 5.72; the small runs 3.94 to 4.18; the reference 3.74 at its
+    strong setting, 4.64 at its mild), their steepest slope 2.17 times
+    the input's (the reference 2.21). What the run changes follows what
+    the reference changes: a correlation of 0.71 at the pixel scale
+    (the small run 0.61) and 0.88 to 0.91 from 1 to 8 px.
+  - Stars there come to 0.47 of their width with their flux kept
+    (1.002), and the sky's noise passes at 0.99 (pixel) and 1.00 (4 px).
+  - By eye the rims are crisper than the small runs' and still carry a
+    grain along the lit edge that the reference's do not.
+  - About the 40 brightest stars on bright nebula in the California
+    there is no dark surround (the lowest ring 16 to 56 px out is at
+    +0.05σ at the median, the input's +0.03), where two of the small
+    runs dipped to −0.2 and −0.3σ.
+  - A network of six levels has an overlap of 532 px, more than a
+    512 px tile: such models run on tiles twice their overlap (1280 px).
+- **Attention bought nothing.** The same run with two transformer
+  blocks at its bottleneck (`--attention 2`, 59M parameters; a 768 px
+  tile is 24 × 24 positions there) ended at a validation loss of 0.849
+  against 0.841. With the blocks taken out of the trained network its
+  output on a rim's crop moves by 0.007σ rms, where the run itself
+  changes that crop by 1.5σ; over the whole image, by 0.3σ against
+  26σ. Its output is the same on 768 px and 1280 px tiles to 0.003σ
+  rms. So the
+  two runs are two draws of one recipe, and their difference is the
+  spread between runs: rims of 3.76 and 3.59 px on the Trunk, median
+  star ellipticity 0.021 and 0.034 there, 0.074 and 0.065 on the
+  California. Attention is not kept.
+- **Narrow stars gain flux.** On every sheet whose stars are 2.3 to
+  2.5 px across (five of six) the larger run adds 6 to 15% to a star's
+  flux; the small run up to 7%; the reference stays within 3%. Stars 8
+  and 11 px across keep theirs to 2%. On the California the gain is
+  10% out to eight widths, so it is not light moved in from the wings;
+  the faint third of the stars gains twice what the bright third does,
+  and a denoised input half as much.
+  - It grows as the ask nears the 1.5 px floor. On the California
+    (2.33 px): 0.4% at an ask of 1.0, 3% at 0.8, 5% at 0.75, 8% at 0.7,
+    12.5% at the floor (0.65). The stars' width follows the ask only so
+    far: 0.87, 0.68, 0.66, 0.64, 0.62 of the input's. At the reference's
+    width (0.65) the run is 5% high.
+  - The known-kernel banks hold next to no star under 2 px (3% of the
+    native windows, 7% of the Hubble bank's), so an ask that takes a
+    2.3 px star to 1.5 px is one the runs hardly met.
+  - `cut-sharpen --bank binned` now brings each stack down as the
+    mosaics are, through a round Gaussian and then every `bin`-th pixel,
+    by the factor that leaves its stars nearest 1.5 px. On a trial cut
+    its stars are as round as the unbinned stacks', where block means
+    squared them.
+- **Roundness is the run's, not the ask's.** The larger run leaves the
+  California's stars at a median ellipticity of 0.074 (input 0.092) at
+  every ask from 0.85 to the floor; a small run and the reference leave
+  0.044 and 0.046.
 
 ### What is next for sharpening
 
 In order, each only if the one before leaves a gap at the rims:
 
-1. **More context, then attention.** Banks cut again with 1024 px
-   windows (`--window`), the Hubble bank brought down one and two times
-   where it was two and three. Two runs on them, alike but for the
-   second's blocks: six levels at width 32 (42M parameters), 768 px
-   tiles in batches of 4, 30,000 steps, kernel ratios 1.1 to 3.0, the
-   edge term at 2.
-   - The first has no attention, and is judged first: the rims and the
-     speckle under dark nebula, star roundness, flux and noise gain.
-   - The second holds two transformer blocks at its bottleneck
-     (`--attention 2`, 59M parameters). Six levels down, a 768 px tile
-     is 24 × 24 positions there, so each block's self-attention spans
-     the whole tile at little cost, where convolutions alone reach
-     across it only by depth. What it should buy is agreement over long
-     rims and large dark regions, and a view of the whole of a bright
-     star's halo.
-   - Attention is kept only if the second run beats the first on the
-     sheets. It ties the model's reach to the tile's size, so tiles at
-     inference must then be as large as in training, and the seam maps
-     are checked again.
-   - A roundness term on the listed stars' ellipticity
-     (`--round-weight`) is written and not yet tried; it goes on
-     whichever run wins if its stars are less round than the small
-     runs'.
+1. **Round stars and true flux on the larger run.** Three runs of its
+   recipe:
+   - with the roundness term on the listed stars' ellipticity
+     (`--round-weight`) at 5 and at 20;
+   - with the bank of brought-down stacks at half the native bank's
+     weight, for the narrow stars' flux.
 2. **Noisy space-telescope windows** (`--external-snr`) at more weight,
    blurred up to four times, on the run above.
 3. **A classical deconvolution as an input plane.** A few
@@ -1264,7 +1305,7 @@ In order, each only if the one before leaves a gap at the rims:
 
 Also open: applying a mild model twice with the PSF measured again
 between; a stricter best-seeing cut for the seeing pairs' targets; and
-the California's flux, 5% high at bright stars.
+the grain along lit rims.
 
 ## Star model
 
