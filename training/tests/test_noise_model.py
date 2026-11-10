@@ -56,6 +56,17 @@ def test_the_reach_is_how_far_an_output_looks_to_either_side(levels):
     assert farthest == reach(levels) > (receptive_field(levels) - 1) // 2
 
 
+@pytest.mark.parametrize("levels", [3, 4, 5, 6, 7])
+def test_every_depth_has_a_tiling_with_a_stride(levels):
+    from seiza_training.noise_model import tiling
+
+    found = tiling(levels)
+    # Five levels and fewer keep the tile every run so far was made with.
+    assert found["tile"] == (512 if levels <= 5 else {6: 1280, 7: 2304}[levels])
+    assert found["tile"] % found["multiple"] == 0
+    assert (found["tile"] - found["overlap"]) // found["multiple"] * found["multiple"] >= found["tile"] // 2 - 64
+
+
 def test_overlapping_tiles_match_the_whole_image():
     model = phase_bound_model()
     # Neither side is a multiple of the model's grid, so tiling pads both.
