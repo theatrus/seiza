@@ -61,12 +61,16 @@ FULL_STRENGTH = 0.65
 # A run with separate strengths for stars and the rest is asked for
 # these, stars' first: both alike, then the rest sharper than the stars,
 # then the rest alone. Its full-size image, and so its whole-image
-# measures, are at `FULL_NONSTELLAR`: its stars at `FULL_STRENGTH` and the
-# rest sharpened hard, which is what such a run is for.
-FULL_NONSTELLAR = (FULL_STRENGTH, 0.45)
+# measures, are at `FULL_NONSTELLAR`: its stars narrowed hard and the
+# rest sharpened hard, which is what such a run is for. The stars' ask is
+# the width the reference sharpener's strong setting leaves them on the
+# sheets (0.46 of the input's on the Elephant's Trunk): with its stars
+# asked for 0.65 a run's rims were softer too, and it was compared with
+# a panel whose stars were a third narrower.
+FULL_NONSTELLAR = (0.46, 0.3)
 NONSTELLAR_STRENGTHS = (("Stars and the rest to 0.8", (0.8, 0.8)), ("Both to 0.65", (0.65, 0.65)),
                         ("Both to 0.5", (0.5, 0.5)), ("Stars 0.65, the rest 0.45", (0.65, 0.45)),
-                        ("Stars left, the rest 0.5", (1.0, 0.5)))
+                        ("Stars 0.46, the rest 0.3", FULL_NONSTELLAR), ("Stars left, the rest 0.5", (1.0, 0.5)))
 # The whole image's widths are measured in cells of this many across and
 # down, and at most this many stars a measure, chosen evenly.
 CELLS = (4, 3)
