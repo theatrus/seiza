@@ -299,6 +299,11 @@ def test_contrast_darkens_the_dark_side_of_a_rim_on_nebula_and_leaves_sky_and_st
     assert np.abs(change[35:46, 35:46]).max() < 1e-3
     lone = sm.contrasted(rest, 1.0, 9.0, points[:0], 100.0, sigma)[0] - rest
     assert np.abs(lone[40, 60:78]).max() > 1.0 > np.abs(change[40, 60:64]).max()
+    # Masked by what is there: a rim a hundredth as high, under the same
+    # noise, is given under half of a hundredth of the change.
+    faint = np.where(xs < 80, 140.0, 140.6).astype(np.float32)
+    slight = sm.contrasted(faint, 1.0, 9.0, points[:0], 100.0, sigma)[0] - faint
+    assert 0.0 < -slight[80, 72] < -lone[80, 72] / 200
     # A bright star the points do not list is kept clear all the same: no
     # dark ring about it.
     ys = np.mgrid[:side, :side][0].astype(np.float32)

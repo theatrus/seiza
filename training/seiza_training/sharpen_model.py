@@ -1242,6 +1242,9 @@ CONTRAST_KNEE = 3.0
 CONTRAST_CLEAR = 3.0
 CONTRAST_FEATHER = 2.0
 CONTRAST_STAR = 15.0
+# The detail counts half where it stands this many times the noise of its
+# own band, and less below: an unsharp mask's masking by what is there.
+CONTRAST_GATE = 3.0
 CONTRAST_WIDTHS = (2.0, 7.0)
 
 
@@ -1259,7 +1262,13 @@ def contrasted(rest: np.ndarray, amount: float, width: float, points: np.ndarray
     fine = min(CONTRAST_FINE * width, wide / 2)
     smooth, level = blurred_images(rest, [fine**2 * np.eye(2), wide**2 * np.eye(2)])
     detail = smooth - level
-    detail = np.minimum(detail, 0.0) + CONTRAST_LIFT * np.maximum(detail, 0.0)
+    # Masked by what is there: detail counts as it stands over the noise
+    # of its own band (white noise through the fine Gaussian), so that a
+    # truth's faint mottle is not taught as contrast to raise.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        floor = CONTRAST_GATE * np.nan_to_num(sigma) / (2.0 * math.sqrt(math.pi) * max(fine, 0.5))
+        gate = np.nan_to_num(np.abs(detail) / (np.abs(detail) + floor), nan=1.0)
+    detail = gate * (np.minimum(detail, 0.0) + CONTRAST_LIFT * np.maximum(detail, 0.0))
     light = np.clip(smooth - background, 0.0, None)
     with np.errstate(divide="ignore", invalid="ignore"):
         nebula = np.nan_to_num(light / (light + CONTRAST_KNEE * sigma))

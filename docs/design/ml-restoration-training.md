@@ -1376,6 +1376,15 @@ nebulae.
     widths in input PSF widths, none of it for stars 2 px across and all
     of it from 7 px up. The target is then no longer the truth: it is an
     enhancement, and it follows the ask.
+  - It is masked three ways. By place: on nebula, and clear of every
+    listed point source and of any compact peak far above its
+    surroundings (a field lists a few hundred stars, and a bright one
+    left out was given a dark ring). By scale: the detail is read from a
+    third of an input width up, which is what keeps a rim's knots as
+    they were; read from 1.5 px with every other mask in place, the
+    knots still rose from 2.1% to 2.4%. By what is there: detail counts
+    as it stands over the noise of its own band, half at three times
+    it, so a truth's faint mottle is not raised.
 - **Speckle along lit rims.** Runs break a lit rim into knots a few
   pixels across where the reference draws a line. The measure: within
   8 px of the steepest edges, off stars, the share of pixels where a
