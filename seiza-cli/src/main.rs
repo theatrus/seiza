@@ -1826,7 +1826,7 @@ async fn download_source(source: DownloadSource) -> Result<()> {
     Ok(())
 }
 
-fn report_download_event(event: seiza_download::DownloadEvent) {
+pub(crate) fn report_download_event(event: seiza_download::DownloadEvent) {
     use seiza_download::DownloadEvent;
     use std::io::{IsTerminal, Write};
     use std::sync::Mutex;

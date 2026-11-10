@@ -105,20 +105,33 @@ impl ModelStore {
     pub fn install(&self, source: impl AsRef<Path>) -> Result<ModelBundle, ModelError> {
         let bundle = ModelBundle::open(source)?;
         bundle.verify()?;
-        std::fs::create_dir_all(&self.root).map_err(ModelError::io(&self.root))?;
-        let name = &bundle.card().name;
-        let target = self.root.join(name);
-        let staging = self
-            .root
-            .join(format!(".installing-{name}-{}", std::process::id()));
-        let result = (|| {
-            std::fs::create_dir_all(&staging).map_err(ModelError::io(&staging))?;
+        self.install_staged(&bundle.card().name, |staging| {
             let files = std::iter::once(CARD_FILE)
                 .chain(bundle.card().graphs.iter().map(|graph| graph.file.as_str()));
             for file in files {
                 let from = bundle.root().join(file);
                 std::fs::copy(&from, staging.join(file)).map_err(ModelError::io(&from))?;
             }
+            Ok(())
+        })
+    }
+
+    /// Have `fill` put a bundle in a staging directory, then put that in place
+    /// of any model named `name`. Nothing replaces the model when `fill`
+    /// fails.
+    fn install_staged(
+        &self,
+        name: &str,
+        fill: impl FnOnce(&Path) -> Result<(), ModelError>,
+    ) -> Result<ModelBundle, ModelError> {
+        std::fs::create_dir_all(&self.root).map_err(ModelError::io(&self.root))?;
+        let target = self.root.join(name);
+        let staging = self
+            .root
+            .join(format!(".installing-{name}-{}", std::process::id()));
+        let result = (|| {
+            std::fs::create_dir_all(&staging).map_err(ModelError::io(&staging))?;
+            fill(&staging)?;
             if target.exists() {
                 std::fs::remove_dir_all(&target).map_err(ModelError::io(&target))?;
             }
@@ -135,6 +148,69 @@ impl ModelStore {
     pub fn remove(&self, name: &str) -> Result<(), ModelError> {
         let bundle = self.find(name)?;
         std::fs::remove_dir_all(bundle.root()).map_err(ModelError::io(bundle.root()))
+    }
+}
+
+#[cfg(feature = "download")]
+impl ModelStore {
+    /// Fetch the model `name` that `manager`'s hosted manifest offers and
+    /// install it, replacing any model of its name, once its card matches the
+    /// manifest and its graphs match its card. It appears whole or not at all.
+    ///
+    /// Its files are verified as they download and kept in `manager`'s cache,
+    /// so installing it again needs no network. The store links them from
+    /// there where the file system allows, so a model takes its space once.
+    /// `report` hears the download's progress.
+    pub async fn download<F>(
+        &self,
+        manager: &seiza_download::ModelManager,
+        name: &str,
+        report: F,
+    ) -> Result<ModelBundle, ModelError>
+    where
+        F: Fn(seiza_download::DownloadEvent) + Send + Sync,
+    {
+        let files = manager.ensure_with(name, report).await?;
+        let store = self.clone();
+        // Hashing the graphs takes a second or two: keep it off the runtime.
+        tokio::task::spawn_blocking(move || store.install_downloaded(&files))
+            .await
+            .map_err(|error| seiza_download::Error::BackgroundTask(error.to_string()))?
+    }
+
+    fn install_downloaded(
+        &self,
+        files: &seiza_download::ModelFiles,
+    ) -> Result<ModelBundle, ModelError> {
+        let card = files.artifact(seiza_download::MODEL_CARD_FILE)?;
+        self.install_staged(&files.name, |staging| {
+            for artifact in files.artifacts() {
+                let to = staging.join(&artifact.name);
+                // The cache's objects are never rewritten in place, so a link
+                // to one stays the bytes that were verified.
+                if std::fs::hard_link(&artifact.path, &to).is_err() {
+                    std::fs::copy(&artifact.path, &to).map_err(ModelError::io(&artifact.path))?;
+                }
+            }
+            let bundle = ModelBundle::open(staging)?;
+            if bundle.card().name != files.name {
+                return Err(ModelError::ModelContract(format!(
+                    "the manifest offers {}, but its card names {}",
+                    files.name,
+                    bundle.card().name
+                )));
+            }
+            // A cached file is checked by its size alone, so the card is
+            // checked against the manifest here, and the graphs against it.
+            if bundle.card_sha256() != card.sha256 {
+                return Err(ModelError::HashMismatch {
+                    file: card.path.clone(),
+                    expected: card.sha256.clone(),
+                    found: bundle.card_sha256().to_string(),
+                });
+            }
+            bundle.verify()
+        })
     }
 }
 
@@ -221,5 +297,153 @@ mod tests {
             Err(ModelError::HashMismatch { .. })
         ));
         assert!(store.list().unwrap().is_empty());
+    }
+}
+
+#[cfg(all(test, feature = "download"))]
+mod download_tests {
+    use super::*;
+    use seiza_download::bundle::sha256_hex;
+    use seiza_download::{CachePolicy, HostedModel, ManifestFile, ModelManager, ModelManifest};
+    use std::io::{Read, Write};
+
+    fn tiny() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tiny")
+    }
+
+    /// Serve a manifest offering the tiny fixture model as `name`, and its
+    /// files, for `requests` requests.
+    fn serve(name: &str, requests: usize) -> (String, std::thread::JoinHandle<()>) {
+        let mut routes = Vec::new();
+        let mut files = Vec::new();
+        for file in ["card.json", "model-f32.onnx", "model-f16.onnx"] {
+            let bytes = std::fs::read(tiny().join(file)).unwrap();
+            let sha256 = sha256_hex(&bytes);
+            let key = format!("artifacts/{sha256}/{file}");
+            files.push(ManifestFile {
+                name: file.to_string(),
+                key: Some(key.clone()),
+                bytes: bytes.len() as u64,
+                sha256,
+            });
+            routes.push((key, bytes));
+        }
+        let manifest = ModelManifest {
+            version: "model-bundle-v1-test".to_string(),
+            models: vec![HostedModel {
+                name: name.to_string(),
+                files,
+                extras: Vec::new(),
+                transports: Vec::new(),
+            }],
+        };
+        routes.push((
+            "manifest.json".to_string(),
+            serde_json::to_vec(&manifest).unwrap(),
+        ));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for _ in 0..requests {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 4096];
+                let read = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..read]);
+                let (_, body) = routes
+                    .iter()
+                    .find(|(path, _)| request.starts_with(&format!("GET /{path} ")))
+                    .unwrap_or_else(|| panic!("unexpected request: {request}"));
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(body).unwrap();
+            }
+        });
+        (format!("http://{address}"), server)
+    }
+
+    fn manager(cache: &Path, url: &str, policy: CachePolicy) -> ModelManager {
+        ModelManager::builder()
+            .cache_dir(cache)
+            .base_url(url)
+            .policy(policy)
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_hosted_model_downloads_and_installs_whole() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        let (url, server) = serve("noise-tiny", 4);
+        let store = ModelStore::new(temp.path().join("store"));
+        let installed = store
+            .download(
+                &manager(&cache, &url, CachePolicy::ForceRefresh),
+                "noise-tiny",
+                |_| {},
+            )
+            .await
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(installed.root(), store.root().join("noise-tiny"));
+        installed.verify().unwrap();
+        assert_eq!(
+            installed.card_sha256(),
+            ModelBundle::open(tiny()).unwrap().card_sha256(),
+            "the card installs as it was published"
+        );
+
+        // The cache holds it now: no server is needed to install it again.
+        let offline = manager(&cache, &url, CachePolicy::OfflineOnly);
+        store.remove("noise-tiny").unwrap();
+        let again = store
+            .download(&offline, "noise-tiny", |_| {})
+            .await
+            .unwrap();
+        again.verify().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let cached = offline.ensure("noise-tiny").await.unwrap();
+            let graph = cached.artifact("model-f32.onnx").unwrap();
+            let inode = |path: &Path| std::fs::metadata(path).unwrap().ino();
+            assert_eq!(
+                inode(&graph.path),
+                inode(&again.root().join("model-f32.onnx")),
+                "the store links the cache's file rather than copying it"
+            );
+        }
+
+        assert!(matches!(
+            store.download(&offline, "noise-other", |_| {}).await,
+            Err(ModelError::Download(
+                seiza_download::Error::ModelNotOffered { .. }
+            ))
+        ));
+        assert_eq!(store.list().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_hosted_model_whose_card_names_another_never_installs() {
+        let temp = tempfile::tempdir().unwrap();
+        let (url, server) = serve("noise-other", 4);
+        let store = ModelStore::new(temp.path().join("store"));
+        let manager = manager(&temp.path().join("cache"), &url, CachePolicy::ForceRefresh);
+        let result = store.download(&manager, "noise-other", |_| {}).await;
+        server.join().unwrap();
+        assert!(
+            matches!(&result, Err(ModelError::ModelContract(reason)) if reason.contains("noise-tiny")),
+            "{result:?}"
+        );
+        assert!(store.list().unwrap().is_empty());
+        assert_eq!(
+            std::fs::read_dir(store.root()).unwrap().count(),
+            0,
+            "no staging directory is left behind"
+        );
     }
 }

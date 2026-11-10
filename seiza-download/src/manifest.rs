@@ -270,15 +270,7 @@ impl BundleManifest {
                         file.name
                     )));
                 }
-                4 => {
-                    let expected = format!("artifacts/{}/{}", file.sha256, file.name);
-                    if file.key.as_deref() != Some(expected.as_str()) {
-                        return Err(Error::Manifest(format!(
-                            "v4 artifact {} must use immutable key {}",
-                            file.name, expected
-                        )));
-                    }
-                }
+                4 => validate_content_key(file, "v4 artifact")?,
                 _ => {}
             }
             if !offered.insert(file.name.as_str()) {
@@ -378,56 +370,87 @@ impl BundleManifestDocument {
             .iter()
             .map(|file| file.name.as_str())
             .collect::<BTreeSet<_>>();
-        let mut transports = BTreeSet::new();
-        for transport in &self.transports {
-            validate_file_name(&transport.name)?;
-            if !offered.contains(transport.name.as_str()) {
-                return Err(Error::Manifest(format!(
-                    "alternate transport references unknown file {}",
-                    transport.name
-                )));
-            }
-            if transport.encoding.is_empty()
-                || !transport
-                    .encoding
-                    .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-            {
-                return Err(Error::Manifest(format!(
-                    "{} has an invalid transport encoding {:?}",
-                    transport.name, transport.encoding
-                )));
-            }
-            if !transports.insert((transport.name.as_str(), transport.encoding.as_str())) {
-                return Err(Error::Manifest(format!(
-                    "{} has duplicate {} transports",
-                    transport.name, transport.encoding
-                )));
-            }
-            if transport.bytes == 0 {
-                return Err(Error::Manifest(format!(
-                    "{} {} transport is empty",
-                    transport.name, transport.encoding
-                )));
-            }
-            validate_sha256(
-                &transport.sha256,
-                &format!("{} {} transport", transport.name, transport.encoding),
-            )?;
-            validate_transport_key(transport)?;
-        }
-        Ok(())
+        validate_transports(&self.transports, &offered)
     }
 
     /// Best transport this version of the downloader understands.
     pub fn preferred_transport(&self, name: &str) -> Option<&ManifestTransport> {
-        self.transports
-            .iter()
-            .find(|transport| transport.name == name && transport.encoding == "zstd")
+        preferred_transport(&self.transports, name)
     }
 }
 
-fn validate_file_name(name: &str) -> Result<()> {
+/// The best of `transports` for the file `name` that this version of the
+/// downloader understands.
+pub(crate) fn preferred_transport<'a>(
+    transports: &'a [ManifestTransport],
+    name: &str,
+) -> Option<&'a ManifestTransport> {
+    transports
+        .iter()
+        .find(|transport| transport.name == name && transport.encoding == "zstd")
+}
+
+/// Refuse alternate transports that name a file outside `offered`, repeat an
+/// encoding, or are not content-addressed.
+pub(crate) fn validate_transports(
+    transports: &[ManifestTransport],
+    offered: &BTreeSet<&str>,
+) -> Result<()> {
+    let mut seen = BTreeSet::new();
+    for transport in transports {
+        validate_file_name(&transport.name)?;
+        if !offered.contains(transport.name.as_str()) {
+            return Err(Error::Manifest(format!(
+                "alternate transport references unknown file {}",
+                transport.name
+            )));
+        }
+        if transport.encoding.is_empty()
+            || !transport
+                .encoding
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        {
+            return Err(Error::Manifest(format!(
+                "{} has an invalid transport encoding {:?}",
+                transport.name, transport.encoding
+            )));
+        }
+        if !seen.insert((transport.name.as_str(), transport.encoding.as_str())) {
+            return Err(Error::Manifest(format!(
+                "{} has duplicate {} transports",
+                transport.name, transport.encoding
+            )));
+        }
+        if transport.bytes == 0 {
+            return Err(Error::Manifest(format!(
+                "{} {} transport is empty",
+                transport.name, transport.encoding
+            )));
+        }
+        validate_sha256(
+            &transport.sha256,
+            &format!("{} {} transport", transport.name, transport.encoding),
+        )?;
+        validate_transport_key(transport)?;
+    }
+    Ok(())
+}
+
+/// Refuse `file` unless its key is `artifacts/<sha256>/<name>`, so no
+/// published artifact is ever replaced. `kind` names it in the error.
+pub(crate) fn validate_content_key(file: &ManifestFile, kind: &str) -> Result<()> {
+    let expected = format!("artifacts/{}/{}", file.sha256, file.name);
+    if file.key.as_deref() != Some(expected.as_str()) {
+        return Err(Error::Manifest(format!(
+            "{kind} {} must use immutable key {}",
+            file.name, expected
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_file_name(name: &str) -> Result<()> {
     if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\\') {
         return Err(Error::Manifest(format!(
             "unsafe artifact filename: {name:?}"
@@ -436,7 +459,7 @@ fn validate_file_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_sha256(sha256: &str, label: &str) -> Result<()> {
+pub(crate) fn validate_sha256(sha256: &str, label: &str) -> Result<()> {
     if sha256.len() != 64
         || !sha256
             .bytes()

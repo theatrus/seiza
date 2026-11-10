@@ -26,10 +26,14 @@ enum ModelCommand {
     Backends(RuntimeArgs),
     /// List the installed models
     List,
-    /// Install a model bundle from a directory, once its hashes match
+    /// Install a published model by name, or a bundle from a directory, once
+    /// its hashes match
     Install {
-        /// A directory holding a bundle's card.json and graphs
-        path: PathBuf,
+        /// A published model's name, such as noise-v1-d33, which is
+        /// downloaded from downloads.seiza.fyi; or a directory holding a
+        /// bundle's card.json and graphs
+        #[arg(value_name = "NAME|PATH")]
+        model: String,
     },
     /// Check installed models against their cards
     Verify {
@@ -90,7 +94,7 @@ pub(crate) fn run(args: ModelArgs) -> Result<()> {
         ModelCommand::Denoise(args) => denoise(*args),
         ModelCommand::Backends(args) => backends(&args),
         ModelCommand::List => list(),
-        ModelCommand::Install { path } => install(&path),
+        ModelCommand::Install { model } => install(&model),
         ModelCommand::Verify { name } => verify(name.as_deref()),
         ModelCommand::Remove { name } => remove(&name),
     }
@@ -109,7 +113,7 @@ fn denoise(args: DenoiseArgs) -> Result<()> {
     bands.validate()?;
     let bundle = ModelStore::default_store()?
         .resolve(args.model.as_deref())
-        .context("give --model, or run `seiza model install`")?;
+        .context("give --model, or install one: `seiza model install noise-v1-d33`")?;
     let options = BackendOptions {
         library: args.runtime.onnxruntime,
         tile: args.tile,
@@ -288,17 +292,35 @@ fn list() -> Result<()> {
     Ok(())
 }
 
-fn install(path: &Path) -> Result<()> {
+fn install(model: &str) -> Result<()> {
     let store = ModelStore::default_store()?;
-    let bundle = store
-        .install(path)
-        .with_context(|| format!("could not install {}", path.display()))?;
+    let bundle = if names_a_path(model) {
+        store
+            .install(model)
+            .with_context(|| format!("could not install {model}"))?
+    } else {
+        let manager = seiza_download::ModelManager::builder()
+            .policy(seiza_download::CachePolicy::ForceRefresh)
+            .build()?;
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("failed to start the download runtime")?
+            .block_on(store.download(&manager, model, crate::report_download_event))
+            .with_context(|| format!("could not install {model}"))?
+    };
     println!(
         "installed {} in {}",
         bundle.card().name,
         bundle.root().display()
     );
     Ok(())
+}
+
+/// Whether `install`'s argument is a bundle's directory rather than a
+/// published model's name, which is never a path.
+fn names_a_path(model: &str) -> bool {
+    model.contains(['/', '\\']) || Path::new(model).exists()
 }
 
 fn verify(name: Option<&str>) -> Result<()> {
@@ -359,6 +381,22 @@ mod tests {
         assert_eq!(args.high_amount, 0.5);
         assert_eq!(args.low_amount, 0.9);
         assert_eq!(args.tile, Some(768));
+    }
+
+    #[test]
+    fn install_takes_a_published_name_or_a_bundle_s_directory() {
+        let parsed = Harness::try_parse_from(["model", "install", "noise-v1-d33"]).unwrap();
+        let ModelCommand::Install { model } = parsed.command else {
+            panic!("not install")
+        };
+        assert!(!names_a_path(&model), "a name is downloaded");
+        assert!(names_a_path("bundles/noise-v1-d33"));
+        assert!(names_a_path("bundles\\noise-v1-d33"));
+        let temp = tempfile::tempdir().unwrap();
+        assert!(
+            names_a_path(temp.path().to_str().unwrap()),
+            "a directory is installed from"
+        );
     }
 
     #[test]

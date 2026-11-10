@@ -419,8 +419,16 @@ mono/RGB FITS/XISF image, from any stacker, with a trained model. It needs
 nothing but the image:
 
 ```text
+seiza model install noise-v1-d33
 seiza model denoise stack.fits -o clean.fits --high-amount 0.7 --low-amount 0.9
 ```
+
+`seiza model install NAME` downloads a model Seiza publishes at
+downloads.seiza.fyi, as `download-data prebuilt` does a catalog: each file is
+verified by its SHA-256 as it arrives, and the model is installed once its card
+matches the published manifest and its graphs match its card. The download is
+about 520 MB. A name the manifest does not offer is refused with the names it
+does.
 
 `--high-amount` and `--low-amount` set how much of the pixel-scale grain and of
 the wider mottle is taken out; below 1, some of each is kept. A model runs on the
@@ -430,6 +438,7 @@ only the speed and memory of a run.
 ```text
 seiza model backends        # which backends run here, and why the others do not
 seiza model list | verify
+seiza model install NAME    # a published model, downloaded and verified
 seiza model install DIR     # a bundle's directory, once its hashes match
 seiza model remove NAME
 ```

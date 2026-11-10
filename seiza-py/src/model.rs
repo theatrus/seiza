@@ -7,8 +7,9 @@
 use crate::arrays::{float_array, float_image_view};
 use crate::stacking::{keep_first, python_cancel_signal};
 use numpy::{PyArrayDyn, PyReadonlyArrayDyn};
-use pyo3::exceptions::{PyIndexError, PyValueError};
+use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use seiza::downloads::{CachePolicy, ModelManager};
 use seiza_model::{
     Backend, BackendOptions, ChannelScales, DenoiseOptions, DenoiseReport, Denoised, HoleGuard,
     ImageView, ModelBundle, ModelError, ModelStore, NoiseBands, NoiseModel, Precision, Progress,
@@ -534,6 +535,39 @@ fn install_model(
     Ok((&bundle).into())
 }
 
+/// Download the model `name` that Seiza's hosted manifest offers and install
+/// it, replacing any model of its name, once its card matches the manifest
+/// and its graphs match its card. `base_url` reads another copy of the hosted
+/// models, and `cache_dir` keeps the downloads somewhere other than the
+/// default cache.
+#[pyfunction]
+#[pyo3(signature = (name, store=None, *, base_url=None, cache_dir=None))]
+fn download_model(
+    py: Python<'_>,
+    name: &str,
+    store: Option<PathBuf>,
+    base_url: Option<String>,
+    cache_dir: Option<PathBuf>,
+) -> PyResult<PyInstalledModel> {
+    let store = store_at(store)?;
+    let mut builder = ModelManager::builder().policy(CachePolicy::ForceRefresh);
+    if let Some(base_url) = base_url {
+        builder = builder.base_url(base_url);
+    }
+    if let Some(cache_dir) = cache_dir {
+        builder = builder.cache_dir(cache_dir);
+    }
+    let manager = builder.build().map_err(|error| model_error(error.into()))?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    let bundle = py
+        .detach(|| runtime.block_on(store.download(&manager, name, |_| {})))
+        .map_err(model_error)?;
+    Ok((&bundle).into())
+}
+
 /// Check a model's graphs against its card, raising when one differs. `model`
 /// is as for `NoiseModel`.
 #[pyfunction]
@@ -564,6 +598,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(model_runtime, m)?)?;
     m.add_function(wrap_pyfunction!(installed_models, m)?)?;
     m.add_function(wrap_pyfunction!(install_model, m)?)?;
+    m.add_function(wrap_pyfunction!(download_model, m)?)?;
     m.add_function(wrap_pyfunction!(verify_model, m)?)?;
     m.add_function(wrap_pyfunction!(remove_model, m)?)?;
     m.add("MODEL_OUTPUT_VERSION", seiza_model::OUTPUT_VERSION)?;

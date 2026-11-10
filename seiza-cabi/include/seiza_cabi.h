@@ -5072,6 +5072,29 @@ char *seiza_model_list_json(const char *store, char **error_out);
 char *seiza_model_install_json(const char *source, const char *store, char **error_out);
 
 /*
+ Download the model `name` that Seiza's hosted manifest offers and install
+ it, replacing any model of its name, once its card matches the manifest and
+ its graphs match its card. Returns the model as [`seiza_model_list_json`]
+ describes it, as JSON the caller frees with `seiza_string_free`. `store`
+ may be null for the default store. `options_json` may be null, or hold
+ `baseUrl`, another copy of the hosted models, and `cacheDir`, where
+ downloads are kept.
+
+ The call is synchronous and must run off the UI thread. It builds its own
+ Tokio runtime, so it must not be called from a thread already inside one;
+ doing so panics, which this call catches and returns through `error_out`.
+
+ # Safety
+ `name` must be a NUL-terminated string, and `store` and `options_json` null
+ or one. When non-null, `error_out` must point to writable storage for one
+ pointer.
+ */
+char *seiza_model_download_json(const char *name,
+                                const char *store,
+                                const char *options_json,
+                                char **error_out);
+
+/*
  Check a model's graphs against its card. `model` is as for
  [`seiza_noise_model_open`]; `store` may be null for the default store.
 

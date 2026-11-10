@@ -1681,6 +1681,13 @@ def installed_models(store: str | Path | None = None) -> list[InstalledModel]: .
 def install_model(
     source: str | Path, store: str | Path | None = None
 ) -> InstalledModel: ...
+def download_model(
+    name: str,
+    store: str | Path | None = None,
+    *,
+    base_url: str | None = None,
+    cache_dir: str | Path | None = None,
+) -> InstalledModel: ...
 def verify_model(
     model: str | None = None, store: str | Path | None = None
 ) -> None: ...

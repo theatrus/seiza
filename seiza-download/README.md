@@ -43,5 +43,13 @@ The Gaia DR3 photometry catalog for colour calibration (about 460 MB) is
 opt-in the same way: `CatalogSet::gaia_photometry()`. So are the distances to
 deep-sky objects in `objects.bin` (about 10 MB): `CatalogSet::object_distances()`.
 
+Learned models are published the same way, under their own manifest:
+`ModelManager::ensure("noise-v1-d33")` fetches a model's card and the graphs
+it names into the same kind of verified, content-addressed cache, through zstd
+where the manifest offers it, and returns their paths.
+[`seiza-model`](https://crates.io/crates/seiza-model)'s `ModelStore::download`
+installs them. A hosted model can list extras that installing it never
+fetches, such as the training weights its graphs were exported from.
+
 Raw Gaia, VizieR, MPC, and other builder inputs intentionally live in
 [`seiza-sources`](https://crates.io/crates/seiza-sources).
