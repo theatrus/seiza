@@ -236,6 +236,46 @@ def test_stars_and_the_rest_are_each_brought_to_the_ratio_asked_of_them(tmp_path
     assert sm.arrays_of(single, None, sm.Settings(tile=32))["planes"].shape[0] == len(sm.PLANES)
 
 
+def test_a_known_kernel_window_may_hold_a_halo_that_its_target_gives_up_as_it_is_asked(tmp_path):
+    bank = sm.Bank(kernel_bank(tmp_path), sm.Settings(tile=32))
+    clean = stars_image(POSITIONS, FLUXES, np.diag([1.3**2, 1.3**2]))
+    settings = sm.Settings(tile=32, exposure=1.0, kernel_noise=0.0, kernel_halo=0.3)
+    seen = 0
+    for seed in range(6):
+        example = sm.kernel_example(bank, 0, np.random.default_rng(seed), settings, identity=False)
+        share, width = example.details["halo"]
+        widths = example.details["widths"]
+        assert 0.0 <= share <= 0.3 and sm.HALO_WIDTHS[0] <= width <= sm.HALO_WIDTHS[1]
+        # The input is the window through K, less the halo's share, and
+        # that share through a round Gaussian `width` cores wide.
+        sigma = width * widths["core"] / sm.FWHM_PER_SIGMA
+        core, wide = sm.blurred_images(clean, [np.array(example.details["kernel"]), sigma**2 * np.eye(2)])
+        assert np.std(example.image - ((1 - share) * core + share * wide)) < 0.6
+        # The stamp the network reads holds the halo, and the widths and
+        # the sharpest ratio are the two together's.
+        assert example.stamp.sum() == pytest.approx(1.0, abs=1e-4)
+        assert widths["input"] >= widths["core"] and example.width == widths["input"]
+        assert example.details["sharpest"] == pytest.approx(widths["target"] / widths["input"])
+        # One ratio, the sharpest: none of the halo is left in the target.
+        assert np.std(example.target - sm.blurred_images(clean, [np.zeros((2, 2))])[0]) < 1.5
+        if share > 0.1:
+            assert np.std(example.image - core) > 2 * np.std(example.image - ((1 - share) * core + share * wide))
+            seen += 1
+    assert seen >= 2
+    # Asked for less, a target keeps of the halo what its ask leaves.
+    kernel = sm.known_kernel(np.asarray(bank.arrays["stamp"][0], dtype=np.float32), np.random.default_rng(0), settings)
+    halo = sm.Halo.drawn(np.asarray(bank.arrays["stamp"][0], dtype=np.float32), kernel, np.random.default_rng(0), settings)
+    assert halo.kept(halo.kernel.ratio, halo.kernel) == 0.0 and halo.kept(1.0, halo.kernel) == 1.0
+    assert halo.kept((1 + halo.kernel.ratio) / 2, halo.kernel) == pytest.approx(0.5)
+    ones, twos = np.ones((4, 4), np.float32), np.full((4, 4), 2.0, np.float32)
+    assert np.allclose(halo.mixed(ones, twos, 0.0), 1.0) and np.allclose(halo.mixed(ones, twos, 1.0), 1.0 + halo.share)
+    # With two ratios, each part keeps its own share.
+    both = sm.Settings(tile=32, exposure=1.0, kernel_noise=0.0, kernel_halo=0.3, nonstellar=True, equal_share=1.0)
+    example = sm.kernel_example(bank, 0, np.random.default_rng(1), both, identity=False)
+    assert example.details["halo"] is not None and example.nonstellar_ratio == example.ratio
+    assert sm.kernel_example(bank, 0, np.random.default_rng(1), sm.Settings(tile=32), identity=False).details["halo"] is None
+
+
 def clipped_bank(tmp_path, level: float = 2_000.0):
     """A known-kernel bank of one window holding a bright star clipped at
     `level`, with fainter ones about it."""
@@ -342,6 +382,17 @@ def test_a_bank_s_windows_are_denoised_beside_it(tmp_path):
     example = sm.kernel_example(bank, 0, np.random.default_rng(0), settings, identity=False)
     assert example.details["denoised"] and np.abs(example.target - 100.0).max() < 1e-3
     assert float(example.sigma.max()) == pytest.approx(sm.DENOISED_NOISE)
+    # A clean-truth window is the denoised plane too, met under fresh noise
+    # of half to all of its stack's own, which its target carries as well.
+    settings = sm.Settings(tile=32, clean_truth=1.0, exposure=1.0, pass_noise=True, kernel_noise=0.2)
+    example = sm.kernel_example(bank, 0, np.random.default_rng(0), settings, identity=False)
+    assert example.details["clean_truth"] and not example.details["denoised"]
+    assert sm.CLEAN_TRUTH_NOISE <= example.details["noise_share"] <= 1.0
+    assert float(example.sigma.max()) == pytest.approx(1.0)
+    assert np.abs(example.target - example.image).max() < 1e-3
+    assert np.std(example.image - 100.0) == pytest.approx(example.details["noise_share"], rel=0.1)
+    assert not sm.kernel_example(bank, 0, np.random.default_rng(0), sm.Settings(tile=32),
+                                 identity=False).details["clean_truth"]
     np.save(directory / "input_clean.npy", np.load(directory / "input.npy") * 0 + 3.0)
     np.save(directory / "target_clean.npy", np.load(directory / "target.npy") * 0 + 5.0)
     pairs = sm.Bank(directory, sm.Settings(centroid_offset="none"))

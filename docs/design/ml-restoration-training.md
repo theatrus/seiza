@@ -1326,17 +1326,56 @@ nebulae.
     the error, so noise and nebula the output shares with its target
     cancel, a wrong level or place has no quadrupole, and a star is
     asked to be as round as its target's and no rounder.
+  - At 0.1, the flux term's weight, it leaves the California's stars at
+    0.048 (the reference 0.046) and the Trunk's at 0.020, and costs the
+    rims nothing: the Trunk's steepen ×2.61 (without it ×2.17), the
+    California's ×1.67, and the change shared with the reference is
+    0.82 to 1.10 of the reference's at every scale to 8 px. At 0.3 the
+    California's stars are less round (0.057) and its rims steepen
+    ×1.36. It is kept at 0.1.
+- **The reference's contrast is broader than a Gaussian's.** Across the
+  Trunk's rims, out to 32 px either side, the reference's strong setting
+  darkens the dark side 8 to 16 px out about twice as much as the larger
+  run does (0.68 against 0.30 of the image's noise at 8 px, 0.42 against
+  0.17 at 12) and lifts the lit ridge a quarter more. Asking the run for
+  more of the rest (0.5 down to 0.25) makes the rim far steeper than the
+  reference's (×4.7 against ×2.2) and the ridge too tall, and changes
+  nothing beyond 8 px: by band, its share of the reference's change
+  from 8 to 64 px is 0.78, 0.73 and 0.72 at every ask. A Gaussian K
+  changes nothing further than about its own width from an edge, so no
+  known-kernel window asks for more; a real PSF has wings.
+  - `--kernel-halo MAX` gives each known-kernel window's input PSF a
+    halo: a share drawn up to MAX of the window's light goes through a
+    round Gaussian two to four times as wide as K's core. The target
+    keeps of the halo what its ask leaves between the sharpest its stack
+    allows (none) and 1 (all), stars and the rest each by their own. The
+    stamp the network reads holds the halo, as a measured PSF's does.
+- **Grain on images denoised first.** On noisy images the runs' grain is
+  the reference's, in sky, nebula, bright nebula and along rims. On
+  images denoised first it is not: along the California's rims the
+  reference leaves 0.58 of the input's pixel-to-pixel spread and the
+  larger run 0.85; in the Iris's bright nebula 0.41 and 0.61, along its
+  rims 0.35 and 0.59. A native known-kernel window holds its stack's
+  noise blurred in its input and sharp in its target, which asks a run
+  to sharpen every soft blob of noise into grain.
+  - `--clean-truth SHARE` takes that share of a bank's known-kernel
+    windows from its denoised plane and meets them as noisy windows are
+    met, under fresh noise of half to all of the stack's own, passed to
+    the target: nothing in the target is noise made sharp.
+- **Denoised sheets hold the reference too**: run on the same denoised
+  input, and listed as a file (`"file"`), since an input denoised by a
+  run is no product.
 
 ### What is next for sharpening
 
 In order, each only if the one before leaves a gap at the rims:
 
-1. **Round stars and true flux on the larger run.** Runs of its recipe:
-   - with the shape term at 0.1 and at 0.3 (the flux term's weight and
-     three times it);
-   - with the edge term clear of every detected star, alone and with
-     the bank of brought-down stacks at half the native bank's weight;
-   - then the three together.
+1. **Contrast and grain on the larger run.** Its recipe with the shape
+   term at 0.1 and the edge term clear of every detected star, and:
+   - a halo of up to 0.3 on the known-kernel windows;
+   - clean truth for 0.7 of the native windows;
+   - then both, and the bank of brought-down stacks if the run with it
+     reads better than the run without.
 2. **Noisy space-telescope windows** (`--external-snr`) at more weight,
    blurred up to four times, on the run above.
 3. **A classical deconvolution as an input plane.** A few

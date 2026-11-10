@@ -135,6 +135,9 @@ CLEAN_IMAGE = ("image_clean",)
 # A denoised window's noise, for its fresh noise and its loss, as a share
 # of its stack's own: what a noise model leaves.
 DENOISED_NOISE = 0.15
+# A clean-truth window's fresh noise, as a share of its stack's own, is
+# drawn from this up to all of it.
+CLEAN_TRUTH_NOISE = 0.5
 # A reblur-consistency window asks for a ratio drawn between these, no
 # sharper than the floor allows.
 REBLUR_RATIOS = (0.5, 0.95)
@@ -303,6 +306,28 @@ class Settings:
     # run can follow it, so under noise the native windows teach caution
     # (2026-11-09).
     external_snr: tuple[float, float] | None = None
+    # The largest share of a known-kernel window's input PSF held in a
+    # halo: each window draws its share up to this, in a round Gaussian
+    # `HALO_WIDTHS` times as wide as K's core, and its target keeps of the
+    # halo what its ask leaves between the sharpest (none) and 1 (all),
+    # stars and the rest each by their own ask. A Gaussian K changes
+    # nothing further than about its own width from an edge, and the runs
+    # trained on it changed nothing beyond 8 px whatever was asked of the
+    # rest, where the other sharpener's strong setting darkens the dark
+    # side of a rim twice as much 8 to 16 px out and lifts the lit ridge a
+    # quarter more (2026-11-10): a real PSF has wings, and taking them
+    # back is where an image's contrast comes from. 0: no halo.
+    kernel_halo: float = 0.0
+    # The share of known-kernel windows, where their bank holds denoised
+    # planes, whose truth is the denoised window but which are met as
+    # noisy ones are: under fresh noise of `CLEAN_TRUTH_NOISE` to all of
+    # the stack's own, passed to the target where the settings pass noise.
+    # A noisy stack's window holds its noise blurred in its input and
+    # sharp in its target, which asks a run to sharpen every soft blob of
+    # noise into grain; on images denoised first the runs left up to 1.9
+    # times the grain along rims and in bright nebula that the other
+    # sharpener left (2026-11-10). 0: none.
+    clean_truth: float = 0.0
 
     @property
     def planes(self) -> tuple[str, ...]:
@@ -1136,6 +1161,53 @@ def known_kernel(stamp: np.ndarray, rng: np.random.Generator, settings: Settings
                   {"reference": reference, "input": width, "target": target_width}, asked, None, made)
 
 
+# A known-kernel window's halo (`Settings.kernel_halo`) is this many
+# times as wide as the input PSF's core, drawn between the two.
+HALO_WIDTHS = (2.0, 4.0)
+
+
+@dataclass
+class Halo:
+    """A wide round Gaussian holding `share` of a known-kernel window's
+    input PSF beside K's core: how wide it is over the core (`width`), its
+    covariance, and the window's kernel with the stamp, the input width
+    and the sharpest ratio that core and halo have together."""
+
+    share: float
+    width: float
+    covariance: np.ndarray
+    kernel: Kernel
+
+    @classmethod
+    def drawn(cls, stamp: np.ndarray, kernel: Kernel, rng: np.random.Generator, settings: Settings) -> Halo:
+        share = float(rng.uniform(0.0, settings.kernel_halo))
+        width = float(rng.uniform(*HALO_WIDTHS))
+        # No wider than a window's padding lets a blur read.
+        sigma = min(width * kernel.widths["input"] / FWHM_PER_SIGMA, WINDOW_PAD / BLUR_REACH)
+        covariance = sigma**2 * np.eye(2)
+        both = (1.0 - share) * kernel.stamp + share * blurred_stamp(stamp, covariance)
+        both = (both / float(both.sum(dtype=np.float64))).astype(np.float32)
+        measured = stamp_width(both)
+        widths = {**kernel.widths, "input": measured, "core": kernel.widths["input"]}
+        return cls(share, width, covariance,
+                   replace(kernel, stamp=both, ratio=kernel.widths["target"] / measured, widths=widths))
+
+    def kept(self, ratio: float, kernel: Kernel) -> float:
+        """The part of the halo a target asked for `ratio` keeps: none of
+        it at the sharpest its stack allows, all of it at 1, evenly
+        between."""
+        if kernel.ratio >= 1.0:
+            return 1.0
+        return float(np.clip((ratio - kernel.ratio) / (1.0 - kernel.ratio), 0.0, 1.0))
+
+    def mixed(self, core: np.ndarray, wide: np.ndarray, kept: float) -> np.ndarray:
+        """The window through the core's blur (`core`) with `kept` of the
+        halo: that much of the halo's share taken from the core's and
+        given to the window through the halo (`wide`)."""
+        part = self.share * kept
+        return ((1.0 - part) * core + part * wide).astype(np.float32)
+
+
 # Examples.
 
 
@@ -1235,8 +1307,12 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
     if identity is None and settings.reblur > 0 and bank.clean and rng.random() < settings.reblur:
         return reblur_example(bank, window, rng, settings)
     denoised = bool(settings.denoised > 0 and bank.clean and rng.random() < settings.denoised)
-    if denoised:
+    # Its truth without its own noise, met under fresh noise all the same.
+    clean_truth = bool(not denoised and settings.clean_truth > 0 and bank.clean
+                       and rng.random() < settings.clean_truth)
+    if denoised or clean_truth:
         image = np.asarray(bank.clean["image_clean"][window], dtype=np.float32)
+    if denoised:
         sigma = sigma * DENOISED_NOISE
     if identity is None:
         identity = bool(rng.random() < settings.identity)
@@ -1246,8 +1322,14 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
         kernel = donor_kernel(stamp, np.asarray(donors.arrays["stamp"][donors.draw(rng)], dtype=np.float32), settings)
     if kernel is None:
         kernel = known_kernel(stamp, rng, settings, identity=identity)
+    halo = None
+    if not identity and kernel.donor is None and settings.kernel_halo > 0:
+        halo = Halo.drawn(stamp, kernel, rng, settings)
+        kernel = halo.kernel
     scale = math.exp(rng.uniform(-1.0, 1.0) * math.log(settings.exposure)) if scaled and settings.exposure > 1 else 1.0
     share = 1.0 if noisy else float(rng.uniform(0.0, settings.kernel_noise))
+    if clean_truth and not noisy:
+        share = float(rng.uniform(CLEAN_TRUTH_NOISE, 1.0))
     signal = background + scale * (image - background)
     points = window_points(bank, source, row)
     points[:, 2] *= scale
@@ -1270,14 +1352,26 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
         ratio = drawn()
         nonstellar_ratio = ratio if rng.random() < settings.equal_share else drawn()
         blurs = [target_blur(stamp, kernel, value) for value in (ratio, nonstellar_ratio)]
-        blurred, stars, rest = blurred_images(signal, [kernel.blur, *blurs])
+        if halo is None:
+            blurred, stars, rest = blurred_images(signal, [kernel.blur, *blurs])
+        else:
+            blurred, stars, rest, wide = blurred_images(signal, [kernel.blur, *blurs, halo.covariance])
+            blurred = halo.mixed(blurred, wide, 1.0)
+            stars = halo.mixed(stars, wide, halo.kept(ratio, kernel))
+            rest = halo.mixed(rest, wide, halo.kept(nonstellar_ratio, kernel))
+            band = max(band, blur_reach(halo.covariance))
         rendered = point_map(points, stamp, image.shape, background)
         with np.errstate(divide="ignore", invalid="ignore"):
             mask = np.clip(np.nan_to_num(rendered / (rendered + STAR_MASK_NOISE * scale * sigma)), 0.0, 1.0)
         target = (mask * stars + (1.0 - mask) * rest).astype(np.float32)
         band = max(band, *(blur_reach(blur) for blur in blurs))
-    else:
+    elif halo is None:
         blurred, target = blurred_images(signal, [kernel.blur, kernel.target])
+    else:
+        # Asked for the sharpest its stack allows: all of the halo goes.
+        blurred, target, wide = blurred_images(signal, [kernel.blur, kernel.target, halo.covariance])
+        blurred = halo.mixed(blurred, wide, 1.0)
+        band = max(band, blur_reach(halo.covariance))
     fresh = rng.standard_normal(image.shape).astype(np.float32)
     if settings.pass_noise:
         # Shared with its neighbours by a blur up to `NOISE_BLUR` px, at the
@@ -1308,7 +1402,9 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
                    points, background, noise, kernel.widths["input"], "identity" if identity else "kernel", source,
                    window, kernel.asked, {"scale": scale, "noise_share": share, "widths": kernel.widths,
                                           "kernel": kernel.covariance.tolist(), "sharpest": kernel.ratio,
-                                          "real": kernel.donor is not None, "denoised": denoised},
+                                          "real": kernel.donor is not None, "denoised": denoised,
+                                          "clean_truth": clean_truth,
+                                          "halo": None if halo is None else [halo.share, halo.width]},
                    nonstellar_ratio)
 
 
