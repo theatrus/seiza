@@ -59,18 +59,19 @@ SEAM_SPAN = 0.05
 STRENGTHS = (("Each star to 0.8 of its width", 0.8), ("To 0.65", 0.65), ("To 0.5", 0.5))
 FULL_STRENGTH = 0.65
 # A run with separate strengths for stars and the rest is asked for
-# these, stars' first: both alike, then the rest sharper than the stars,
-# then the rest alone. Its full-size image, and so its whole-image
-# measures, are at `FULL_NONSTELLAR`: its stars narrowed hard and the
-# rest sharpened hard, which is what such a run is for. The stars' ask is
-# the width the reference sharpener's strong setting leaves them on the
-# sheets (0.46 of the input's on the Elephant's Trunk): with its stars
-# asked for 0.65 a run's rims were softer too, and it was compared with
-# a panel whose stars were a third narrower.
-FULL_NONSTELLAR = (0.46, 0.3)
+# these, from the least sharpening on the left to the most, stars and the
+# rest moving together. Its full-size image, and so its whole-image
+# measures, are at `FULL_NONSTELLAR`, which is the third panel: its stars
+# at the width the reference sharpener's strong setting leaves them on
+# the sheets (0.46 of the input's on the Elephant's Trunk), so the two
+# are compared at one star size, and the rest at 0.5, which by eye
+# sharpens the nebula without the grain a harder ask brings.
+FULL_NONSTELLAR = (0.46, 0.5)
 NONSTELLAR_STRENGTHS = (("Stars and the rest to 0.8", (0.8, 0.8)), ("Both to 0.65", (0.65, 0.65)),
-                        ("Both to 0.5", (0.5, 0.5)), ("Stars 0.65, the rest 0.45", (0.65, 0.45)),
-                        ("Stars 0.46, the rest 0.3", FULL_NONSTELLAR), ("Stars left, the rest 0.5", (1.0, 0.5)))
+                        ("Stars 0.46, the rest 0.5", FULL_NONSTELLAR), ("Both to 0.35", (0.35, 0.35)))
+# How far under a run's sharpest trained ask a panel's may fall before it
+# is marked untrained.
+UNTRAINED_SLACK = 0.05
 # The whole image's widths are measured in cells of this many across and
 # down, and at most this many stars a measure, chosen evenly.
 CELLS = (4, 3)
@@ -205,7 +206,17 @@ class Sharpener:
 
     @property
     def strengths(self) -> tuple[tuple[str, Any], ...]:
-        return NONSTELLAR_STRENGTHS if self.settings.nonstellar else STRENGTHS
+        """The panels' labels and asks. An ask under the sharpest the run's
+        known-kernel windows were drawn at (one over its widest kernel
+        ratio) is one it was never trained on, and its panel says so: a
+        run asked for 0.3 when trained down to 0.5 blurred the nebula and
+        lost faint stars, and was read as a bad run."""
+        floor = 1.0 / max(self.settings.kernel_ratios) - UNTRAINED_SLACK
+        found = []
+        for label, ask in NONSTELLAR_STRENGTHS if self.settings.nonstellar else STRENGTHS:
+            lowest = min(ask) if isinstance(ask, tuple) else ask
+            found.append((f"{label} (below the trained range)" if lowest < floor else label, ask))
+        return tuple(found)
 
     @property
     def full_strength(self) -> Any:
