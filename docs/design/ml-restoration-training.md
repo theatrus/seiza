@@ -1058,6 +1058,85 @@ Gaia's point-source maps; windows cut from the denoised stacks; and
 contact sheets, whole-image evaluation and the bundle, which will call
 the same inference.
 
+### Space-telescope pairs
+
+A stack's own windows, blurred, teach a model to give the stack back:
+nothing in them is sharper than the stack's seeing. Hubble and JWST
+mosaics are real sky whose nebulae, dust and galaxies are sharp to the
+pixel, so a pair made from one has a truth sharper than any ground-based
+stack holds.
+
+**The source.** Drizzled mosaics from the public MAST archive, each a
+science image with its weight map: 71 Hubble mosaics (156 GB) and 88
+JWST mosaics, kept in the store under `external/`.
+
+**The cut** (`cut-external`, `sharpen_external.py`):
+
+1. A pixel counts where the mosaic's weight is at least half of its deep
+   parts' (the 90th percentile). Where few exposures overlap, cosmic
+   rays survive the drizzle and would be taught as sky. Those left are
+   found by their sharpness and dropped.
+2. The mosaic is brought down by a factor (`--bins`): smoothed by a
+   round Gaussian of σ half the factor, then every factor-th pixel. A
+   block mean in its place gave square stars. A pixel is kept where a
+   quarter of its weight fell on pixels the mosaic holds.
+3. The result is measured as a stack is: its PSF field and point
+   sources by the PSF pass's code, its noise map from the image alone.
+   A mosaic with too few stars for a field takes a round Gaussian, 2.4
+   of its own pixels wide before the factor.
+4. Windows (`--window`, 320 px or 1024 px) are cut where the mosaic
+   covers. A window may miss 2% of its pixels, which are filled from
+   about them and kept out of the loss.
+
+The bank has the known-kernel banks' layout, and the trainer draws from
+it beside the native deep bank (`--more-kernel-bank PATH:WEIGHT`).
+
+| Bank | Factors | Window | Windows |
+| --- | --- | --- | --- |
+| Hubble, windows required whole | 2, 3 | 320 px | 842 |
+| Hubble | 2, 3 | 320 px | 10,694 |
+| Hubble | 2, 3 | 1024 px | 364 |
+| JWST | 1, 2 | 1024 px | 1,173 |
+
+Brought down two and three times, most Hubble mosaics hold no clean
+window 1024 px across; that bank is being cut again at factors 1 and 2.
+
+**The blur** (`kernel_example`, the same for native deep windows). Each
+window carries its PSF stamp `P_ref`, measured where it was cut.
+
+- **The kernel.** A widening is drawn evenly from `--kernel-ratios`
+  (1.1 to 2.0 at first, now 1.1 to 3.0), with an ellipticity up to 0.3
+  at any angle. `K` is the elliptical Gaussian that makes `P_ref ∗ K`
+  that many times as wide as `P_ref`: sized from widths adding in
+  quadrature, then refined on the stamp itself until the ratio is within
+  1%. The input is the window blurred by `K`, and the network reads
+  `P_in = P_ref ∗ K`.
+- **The target** is the window blurred only as far as makes `P_ref`
+  round in its second moments and no narrower than 1.5 px. With two
+  strengths, a ratio is drawn for stars and one for the rest, each
+  between the sharpest the window allows and 1 and nearer the sharpest;
+  the target is the window at those two widths, joined by a mask
+  rendered from the listed stars.
+- **Exposure.** The signal above the background is scaled by up to 2
+  either way.
+- **Noise.** Fresh noise is added to the input, up to half the window's
+  own (`--kernel-noise`), shared with its neighbours by a blur of up to
+  0.6 px. With `--pass-noise` the same noise is added to the target, so
+  the network is asked to carry it through and not to remove it. A
+  space-telescope window has next to no noise of its own, so with
+  `--external-snr LOW,HIGH` it is given noise of its contrast (the range
+  of its 8 px means from the 10th to the 90th percentile) over a ratio
+  drawn between the two.
+- **Identity.** One window in ten is left as it is, asked for a ratio
+  of 1, with itself as the target.
+- **A real PSF for `K`** (`--real-kernels`): a stamp drawn from the
+  native bank blurs the window where it widens `P_ref` within the
+  ratios. Tried at ratios up to 4 with reblur windows, it cost round
+  stars and is off.
+
+Open: ten to twenty mosaics fail in the cut with a division by zero,
+not yet traced.
+
 ### What the sharpening runs showed
 
 Runs since (2026-11-09, width 32, four levels, 20,000 steps of 8 tiles
