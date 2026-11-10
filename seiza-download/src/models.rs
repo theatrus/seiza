@@ -17,7 +17,7 @@ use crate::{
     Result,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// The version every model manifest this build reads starts with.
@@ -94,6 +94,11 @@ impl HostedModel {
 pub struct ModelManifest {
     /// `model-bundle-v1-` and the day it was published.
     pub version: String,
+    /// The model to install for each task, as cards spell tasks (`denoise`),
+    /// when no model is named: the newest a task has passed its gates with.
+    /// Each names a model in `models`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub latest: BTreeMap<String, String>,
     /// The models offered.
     pub models: Vec<HostedModel>,
 }
@@ -125,6 +130,22 @@ impl ModelManifest {
                 )));
             }
         }
+        for (task, name) in &self.latest {
+            if task.is_empty()
+                || !task
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            {
+                return Err(Error::Manifest(format!(
+                    "latest names an invalid task {task:?}"
+                )));
+            }
+            if !names.contains(name.as_str()) {
+                return Err(Error::Manifest(format!(
+                    "the latest {task} model, {name}, is not offered"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -137,6 +158,15 @@ impl ModelManifest {
                 name: name.to_string(),
                 offered: self.models.iter().map(|model| model.name.clone()).collect(),
             })
+    }
+
+    /// The model the manifest names as the latest for `task`, as cards spell
+    /// tasks (`denoise`).
+    pub fn latest(&self, task: &str) -> Result<&HostedModel> {
+        let name = self.latest.get(task).ok_or_else(|| Error::NoLatestModel {
+            task: task.to_string(),
+        })?;
+        self.model(name)
     }
 }
 
@@ -263,10 +293,41 @@ impl ModelManager {
     {
         let manifest: ModelManifest = self.hosted.load_manifest(&report).await?;
         let model = manifest.model(name)?;
+        self.fetch(&manifest, model, &report).await
+    }
+
+    /// The files that install the model the manifest names as the latest for
+    /// `task`, as cards spell tasks (`denoise`), from the cache, or downloaded
+    /// and verified into it. Which model that is comes from the manifest as
+    /// the manager's [`CachePolicy`] allows; [`CachePolicy::ForceRefresh`]
+    /// asks the server.
+    pub async fn ensure_latest(&self, task: &str) -> Result<ModelFiles> {
+        self.ensure_latest_with(task, |_| {}).await
+    }
+
+    /// Like [`ensure_latest`](Self::ensure_latest), reporting what it does.
+    pub async fn ensure_latest_with<F>(&self, task: &str, report: F) -> Result<ModelFiles>
+    where
+        F: Fn(DownloadEvent) + Send + Sync,
+    {
+        let manifest: ModelManifest = self.hosted.load_manifest(&report).await?;
+        let model = manifest.latest(task)?;
+        self.fetch(&manifest, model, &report).await
+    }
+
+    async fn fetch<F>(
+        &self,
+        manifest: &ModelManifest,
+        model: &HostedModel,
+        report: &F,
+    ) -> Result<ModelFiles>
+    where
+        F: Fn(DownloadEvent) + Send + Sync,
+    {
         let mut artifacts = Vec::with_capacity(model.files.len());
         for file in &model.files {
             let transport = model.preferred_transport(&file.name);
-            let path = self.hosted.ensure_file(file, transport, &report).await?;
+            let path = self.hosted.ensure_file(file, transport, report).await?;
             artifacts.push(CatalogArtifact {
                 name: file.name.clone(),
                 bytes: file.bytes,
@@ -276,7 +337,7 @@ impl ModelManager {
         }
         Ok(ModelFiles {
             name: model.name.clone(),
-            version: manifest.version,
+            version: manifest.version.clone(),
             artifacts,
         })
     }
@@ -313,6 +374,7 @@ mod tests {
     fn manifest() -> ModelManifest {
         ModelManifest {
             version: "model-bundle-v1-test".into(),
+            latest: BTreeMap::from([("denoise".to_string(), "noise-test".to_string())]),
             models: vec![HostedModel {
                 name: "noise-test".into(),
                 files: vec![entry("card.json", b"{}"), entry("model-f32.onnx", b"graph")],
@@ -346,6 +408,51 @@ mod tests {
     }
 
     #[test]
+    fn the_latest_model_of_a_task_is_the_one_the_manifest_names() {
+        let manifest = manifest();
+        assert_eq!(manifest.latest("denoise").unwrap().name, "noise-test");
+        assert!(matches!(
+            manifest.latest("sharpen"),
+            Err(Error::NoLatestModel { task }) if task == "sharpen"
+        ));
+        let mut value = serde_json::to_value(&manifest).unwrap();
+        value.as_object_mut().unwrap().remove("latest");
+        let without = ModelManifest::parse(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(
+            matches!(without.latest("denoise"), Err(Error::NoLatestModel { .. })),
+            "a manifest without latest still reads, and names none"
+        );
+    }
+
+    #[test]
+    fn a_download_event_serializes_with_its_kind() {
+        let event = DownloadEvent::DownloadProgress {
+            name: "model-f32.onnx".into(),
+            downloaded: 3,
+            total: 9,
+            written: 4,
+        };
+        assert_eq!(
+            serde_json::to_value(&event).unwrap(),
+            serde_json::json!({
+                "event": "download-progress",
+                "name": "model-f32.onnx",
+                "downloaded": 3,
+                "total": 9,
+                "written": 4,
+            })
+        );
+        let event = DownloadEvent::UsingCachedManifest {
+            version: "v".into(),
+            stale: true,
+        };
+        assert_eq!(
+            serde_json::to_value(&event).unwrap()["event"],
+            "using-cached-manifest"
+        );
+    }
+
+    #[test]
     fn a_manifest_this_build_cannot_honour_is_refused() {
         let refused = |change: &dyn Fn(&mut ModelManifest), says: &str| {
             let mut manifest = manifest();
@@ -374,6 +481,18 @@ mod tests {
             "twice",
         );
         refused(&|m| m.models.push(m.models[0].clone()), "listed twice");
+        refused(
+            &|m| {
+                m.latest.insert("denoise".into(), "noise-gone".into());
+            },
+            "not offered",
+        );
+        refused(
+            &|m| {
+                m.latest.insert("De Noise".into(), "noise-test".into());
+            },
+            "invalid task",
+        );
         refused(&|m| m.models[0].name = "../outside".into(), "unsafe");
         refused(
             &|m| {
@@ -484,5 +603,14 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(again.ensure("noise-test").await.unwrap(), files);
+        assert_eq!(
+            again.ensure_latest("denoise").await.unwrap(),
+            files,
+            "the latest denoise model is the one the manifest names"
+        );
+        assert!(matches!(
+            again.ensure_latest("sharpen").await,
+            Err(Error::NoLatestModel { .. })
+        ));
     }
 }

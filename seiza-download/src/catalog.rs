@@ -5,6 +5,7 @@ use crate::{
     BundleManifestDocument, CatalogSet, DEFAULT_BUNDLE_BASE_URL, Dataset, Error,
     LEGACY_V2_BUNDLE_BASE_URL, Result,
 };
+use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -32,7 +33,12 @@ impl Default for CachePolicy {
 
 /// Observable cache and transfer activity. Libraries do not print; callers
 /// can translate these events into logs, progress bars, or UI state.
-#[derive(Clone, Debug, Eq, PartialEq)]
+///
+/// It serializes with its kind under `event`, spelt in kebab case, beside its
+/// fields: `{"event": "download-progress", "name": …, "downloaded": …}`. The
+/// C ABI and Python hand that to a host's progress callback.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "event", rename_all = "kebab-case")]
 pub enum DownloadEvent {
     FetchingManifest {
         url: String,

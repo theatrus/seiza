@@ -39,6 +39,13 @@ pub enum Error {
         offered: Vec<String>,
     },
 
+    /// The model manifest names no latest model for this task.
+    #[error("the hosted manifest names no latest {task} model")]
+    NoLatestModel {
+        /// The task asked for, as cards spell it.
+        task: String,
+    },
+
     #[error("offline mode requires a cached bundle manifest at {}", .0.display())]
     CachedManifestUnavailable(PathBuf),
 

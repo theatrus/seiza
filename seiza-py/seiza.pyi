@@ -1682,11 +1682,12 @@ def install_model(
     source: str | Path, store: str | Path | None = None
 ) -> InstalledModel: ...
 def download_model(
-    name: str,
+    name: str | None = None,
     store: str | Path | None = None,
     *,
     base_url: str | None = None,
     cache_dir: str | Path | None = None,
+    progress: Callable[[dict[str, Any]], Any] | None = None,
 ) -> InstalledModel: ...
 def verify_model(
     model: str | None = None, store: str | Path | None = None

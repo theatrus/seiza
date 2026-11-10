@@ -47,6 +47,9 @@ Learned models are published the same way, under their own manifest:
 `ModelManager::ensure("noise-v1-d33")` fetches a model's card and the graphs
 it names into the same kind of verified, content-addressed cache, through zstd
 where the manifest offers it, and returns their paths.
+`ModelManager::ensure_latest("denoise")` fetches the model the manifest's
+`latest` names for a task. `DownloadEvent` serializes with its kind under
+`event`, so a host can hand progress on as it is.
 [`seiza-model`](https://crates.io/crates/seiza-model)'s `ModelStore::download`
 installs them. A hosted model can list extras that installing it never
 fetches, such as the training weights its graphs were exported from.

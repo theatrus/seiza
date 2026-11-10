@@ -151,36 +151,84 @@ impl ModelStore {
     }
 }
 
+/// Which published model [`ModelStore::download`] installs.
+#[cfg(feature = "download")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Published<'a> {
+    /// The model of this name.
+    Named(&'a str),
+    /// The model the hosted manifest names as the latest for this task: the
+    /// newest that has passed its gates.
+    Latest(Task),
+}
+
 #[cfg(feature = "download")]
 impl ModelStore {
-    /// Fetch the model `name` that `manager`'s hosted manifest offers and
-    /// install it, replacing any model of its name, once its card matches the
-    /// manifest and its graphs match its card. It appears whole or not at all.
+    /// Fetch the `model` that `manager`'s hosted manifest offers and install
+    /// it, replacing any model of its name, once its card matches the manifest
+    /// and its graphs match its card. It appears whole or not at all.
     ///
     /// Its files are verified as they download and kept in `manager`'s cache,
     /// so installing it again needs no network. The store links them from
     /// there where the file system allows, so a model takes its space once.
-    /// `report` hears the download's progress.
+    /// `report` hears the download's progress, then `Installing` for each
+    /// file, `Verifying` for each graph and `InstallComplete` for the model's
+    /// directory.
     pub async fn download<F>(
         &self,
         manager: &seiza_download::ModelManager,
-        name: &str,
+        model: Published<'_>,
         report: F,
     ) -> Result<ModelBundle, ModelError>
     where
         F: Fn(seiza_download::DownloadEvent) + Send + Sync,
     {
-        let files = manager.ensure_with(name, report).await?;
+        use seiza_download::DownloadEvent;
+
+        let files = match model {
+            Published::Named(name) => manager.ensure_with(name, &report).await?,
+            Published::Latest(task) => {
+                manager
+                    .ensure_latest_with(&task.to_string(), &report)
+                    .await?
+            }
+        };
+        let target = self.root.join(&files.name);
+        for artifact in files.artifacts() {
+            report(DownloadEvent::Installing {
+                name: artifact.name.clone(),
+                path: target.join(&artifact.name),
+            });
+        }
+        for artifact in files.artifacts() {
+            if artifact.name != seiza_download::MODEL_CARD_FILE {
+                report(DownloadEvent::Verifying {
+                    name: artifact.name.clone(),
+                });
+            }
+        }
         let store = self.clone();
+        let task = match model {
+            Published::Named(_) => None,
+            Published::Latest(task) => Some(task),
+        };
         // Hashing the graphs takes a second or two: keep it off the runtime.
-        tokio::task::spawn_blocking(move || store.install_downloaded(&files))
+        let bundle = tokio::task::spawn_blocking(move || store.install_downloaded(&files, task))
             .await
-            .map_err(|error| seiza_download::Error::BackgroundTask(error.to_string()))?
+            .map_err(|error| seiza_download::Error::BackgroundTask(error.to_string()))??;
+        report(DownloadEvent::InstallComplete {
+            name: bundle.card().name.clone(),
+            path: bundle.root().to_path_buf(),
+        });
+        Ok(bundle)
     }
 
+    /// Install `files`, refusing a card that is not the manifest's, or not a
+    /// model of `task` when the manifest named it as one.
     fn install_downloaded(
         &self,
         files: &seiza_download::ModelFiles,
+        task: Option<Task>,
     ) -> Result<ModelBundle, ModelError> {
         let card = files.artifact(seiza_download::MODEL_CARD_FILE)?;
         self.install_staged(&files.name, |staging| {
@@ -198,6 +246,15 @@ impl ModelStore {
                     "the manifest offers {}, but its card names {}",
                     files.name,
                     bundle.card().name
+                )));
+            }
+            if let Some(task) = task
+                && bundle.card().task != task
+            {
+                return Err(ModelError::ModelContract(format!(
+                    "the manifest names {} as the latest {task} model, but its card says {}",
+                    files.name,
+                    bundle.card().task
                 )));
             }
             // A cached file is checked by its size alone, so the card is
@@ -330,6 +387,7 @@ mod download_tests {
         }
         let manifest = ModelManifest {
             version: "model-bundle-v1-test".to_string(),
+            latest: [("denoise".to_string(), name.to_string())].into(),
             models: vec![HostedModel {
                 name: name.to_string(),
                 files,
@@ -383,7 +441,7 @@ mod download_tests {
         let installed = store
             .download(
                 &manager(&cache, &url, CachePolicy::ForceRefresh),
-                "noise-tiny",
+                Published::Named("noise-tiny"),
                 |_| {},
             )
             .await
@@ -401,7 +459,7 @@ mod download_tests {
         let offline = manager(&cache, &url, CachePolicy::OfflineOnly);
         store.remove("noise-tiny").unwrap();
         let again = store
-            .download(&offline, "noise-tiny", |_| {})
+            .download(&offline, Published::Named("noise-tiny"), |_| {})
             .await
             .unwrap();
         again.verify().unwrap();
@@ -419,7 +477,9 @@ mod download_tests {
         }
 
         assert!(matches!(
-            store.download(&offline, "noise-other", |_| {}).await,
+            store
+                .download(&offline, Published::Named("noise-other"), |_| {})
+                .await,
             Err(ModelError::Download(
                 seiza_download::Error::ModelNotOffered { .. }
             ))
@@ -428,12 +488,54 @@ mod download_tests {
     }
 
     #[tokio::test]
+    async fn the_latest_model_of_a_task_installs_with_its_progress() {
+        use std::sync::Mutex;
+
+        let temp = tempfile::tempdir().unwrap();
+        let (url, server) = serve("noise-tiny", 4);
+        let store = ModelStore::new(temp.path().join("store"));
+        let manager = manager(&temp.path().join("cache"), &url, CachePolicy::ForceRefresh);
+        let events = Mutex::new(Vec::new());
+        let installed = store
+            .download(&manager, Published::Latest(Task::Denoise), |event| {
+                events.lock().unwrap().push(event)
+            })
+            .await
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(installed.card().name, "noise-tiny");
+        let kinds: Vec<String> = events
+            .into_inner()
+            .unwrap()
+            .iter()
+            .map(|event| serde_json::to_value(event).unwrap()["event"].to_string())
+            .collect();
+        for kind in [
+            "fetching-manifest",
+            "download-started",
+            "download-complete",
+            "installing",
+            "verifying",
+            "install-complete",
+        ] {
+            assert!(kinds.contains(&format!("\"{kind}\"")), "{kind}: {kinds:?}");
+        }
+        assert_eq!(
+            kinds.last().map(String::as_str),
+            Some("\"install-complete\""),
+            "the install is reported last, once the model is in place"
+        );
+    }
+
+    #[tokio::test]
     async fn a_hosted_model_whose_card_names_another_never_installs() {
         let temp = tempfile::tempdir().unwrap();
         let (url, server) = serve("noise-other", 4);
         let store = ModelStore::new(temp.path().join("store"));
         let manager = manager(&temp.path().join("cache"), &url, CachePolicy::ForceRefresh);
-        let result = store.download(&manager, "noise-other", |_| {}).await;
+        let result = store
+            .download(&manager, Published::Named("noise-other"), |_| {})
+            .await;
         server.join().unwrap();
         assert!(
             matches!(&result, Err(ModelError::ModelContract(reason)) if reason.contains("noise-tiny")),

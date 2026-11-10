@@ -5,15 +5,16 @@
 //! choosing how much noise to keep costs a blend and no inference.
 
 use crate::arrays::{float_array, float_image_view};
+use crate::convert::to_python;
 use crate::stacking::{keep_first, python_cancel_signal};
 use numpy::{PyArrayDyn, PyReadonlyArrayDyn};
 use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use seiza::downloads::{CachePolicy, ModelManager};
+use seiza::downloads::{CachePolicy, DownloadEvent, ModelManager};
 use seiza_model::{
     Backend, BackendOptions, ChannelScales, DenoiseOptions, DenoiseReport, Denoised, HoleGuard,
     ImageView, ModelBundle, ModelError, ModelStore, NoiseBands, NoiseModel, Precision, Progress,
-    runtime_info,
+    Published, Task, runtime_info,
 };
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -535,20 +536,28 @@ fn install_model(
     Ok((&bundle).into())
 }
 
-/// Download the model `name` that Seiza's hosted manifest offers and install
-/// it, replacing any model of its name, once its card matches the manifest
-/// and its graphs match its card. `base_url` reads another copy of the hosted
-/// models, and `cache_dir` keeps the downloads somewhere other than the
-/// default cache.
+/// Download the model `name` that Seiza's hosted manifest offers, or with no
+/// name the latest noise model it names, and install it, replacing any model
+/// of its name, once its card matches the manifest and its graphs match its
+/// card. `base_url` reads another copy of the hosted models, and `cache_dir`
+/// keeps the downloads somewhere other than the default cache. `progress`, when
+/// given, is called with each step as a dict: its kind under `"event"`, as the
+/// C ABI's callback has it, beside its fields. An exception it raises is raised
+/// once the download ends.
 #[pyfunction]
-#[pyo3(signature = (name, store=None, *, base_url=None, cache_dir=None))]
+#[pyo3(signature = (name=None, store=None, *, base_url=None, cache_dir=None, progress=None))]
 fn download_model(
     py: Python<'_>,
-    name: &str,
+    name: Option<&str>,
     store: Option<PathBuf>,
     base_url: Option<String>,
     cache_dir: Option<PathBuf>,
+    progress: Option<Py<PyAny>>,
 ) -> PyResult<PyInstalledModel> {
+    let model = match name {
+        Some(name) => Published::Named(name),
+        None => Published::Latest(Task::Denoise),
+    };
     let store = store_at(store)?;
     let mut builder = ModelManager::builder().policy(CachePolicy::ForceRefresh);
     if let Some(base_url) = base_url {
@@ -562,10 +571,24 @@ fn download_model(
         .enable_all()
         .build()
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-    let bundle = py
-        .detach(|| runtime.block_on(store.download(&manager, name, |_| {})))
-        .map_err(model_error)?;
-    Ok((&bundle).into())
+    let raised = Mutex::new(None);
+    let report = |event: DownloadEvent| {
+        let Some(callback) = &progress else { return };
+        Python::attach(|py| {
+            if raised.lock().is_ok_and(|slot| slot.is_some()) {
+                return;
+            }
+            let result = to_python(py, &event).and_then(|value| callback.call1(py, (value,)));
+            if let Err(error) = result {
+                keep_first(&raised, error);
+            }
+        });
+    };
+    let bundle = py.detach(|| runtime.block_on(store.download(&manager, model, report)));
+    if let Some(error) = raised.lock().ok().and_then(|mut slot| slot.take()) {
+        return Err(error);
+    }
+    Ok((&bundle.map_err(model_error)?).into())
 }
 
 /// Check a model's graphs against its card, raising when one differs. `model`
