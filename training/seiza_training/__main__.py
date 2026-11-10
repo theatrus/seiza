@@ -404,6 +404,8 @@ def main(argv: list[str] | None = None) -> int:
     external.add_argument("--windows", type=int, default=120, help="windows of each mosaic at each factor")
     external.add_argument("--seed", type=int, default=0)
     external.add_argument("--limit", type=int, help="at most this many mosaics, for a trial cut")
+    external.add_argument("--workers", type=int, default=1, help="mosaics read and brought down at once")
+    external.add_argument("--telescope", default="external", help="what the bank's sources are recorded as from")
 
     sharpen_sheet = commands.add_parser("sheet-sharpen", help="make a trained PSF model's contact sheets, full-size "
                                                               "images and whole-image measures (reads the manifest "
@@ -703,7 +705,8 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
 
         banked = sharpen_external.cut(arguments.root, arguments.work or store.scratch.parent / "sharpen",
                                       bins=arguments.bins, per_source=arguments.windows, seed=arguments.seed,
-                                      limit=arguments.limit)
+                                      limit=arguments.limit, workers=arguments.workers,
+                                      telescope=arguments.telescope)
         return {"directory": str(banked["directory"]),
                 **{key: banked["done"][key] for key in ("windows", "sources", "dropped", "summary")}}
     if arguments.command == "clean-sharpen":
