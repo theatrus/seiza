@@ -363,6 +363,20 @@ class LossSettings:
     # term asks for round stars whatever the target. It cannot see a
     # cross, whose moments are a round star's. 0: no such term.
     round_weight: float = 0.0
+    # The weight of the shape term: the two quadrupoles of each listed
+    # star's error about its middle, in a window of about a sharpened
+    # star's width, each over its noise (`star_quadrupoles`), weighed as
+    # the flux term weighs its sums. The roundness term reads what is not
+    # a star's shape: on held-out tiles the targets themselves read 0.15
+    # to 0.32 by it, from the noise and nebula in their apertures, and a
+    # run pushed toward none (weight 5) left its output further from its
+    # targets by that measure than its inputs were, its held-out edge
+    # term up a tenth and its flux term doubled (2026-11-10). This one is
+    # linear in the error: noise and nebula the output shares with its
+    # target cancel, a wrong level or place has no quadrupole, and a pair's
+    # star is asked to be as round as its target's and no rounder.
+    # 0: no such term.
+    shape_weight: float = 0.0
 
 
 # Banks.
@@ -1758,6 +1772,14 @@ def loss_terms(residual: torch.Tensor, batch: dict[str, torch.Tensor], settings:
         roundness = star_ellipticity(output, batch["labels"])
         total = total + settings.round_weight * roundness
         terms_out["round"] = roundness
+    if settings.shape_weight > 0:
+        # As the flux term: each star's counts once for each pixel of its
+        # aperture, over the valid pixels.
+        plus, cross, area = star_quadrupoles(output - batch["target"], sigma, batch["labels"])
+        shape = (((charbonnier(plus, epsilon) + charbonnier(cross, epsilon)) * area)[:, 1:].sum()
+                 / valid.sum().clamp(min=1.0))
+        total = total + settings.shape_weight * shape
+        terms_out["shape"] = shape
     return {"total": total, **terms_out}
 
 
@@ -1791,6 +1813,44 @@ def star_ellipticity(output: torch.Tensor, labels: torch.Tensor) -> torch.Tensor
     ellipticity = ((mxx - myy).abs() + 2 * mxy.abs()) / (mxx + myy + 1e-6)
     counted = (total.detach() >= ROUND_LIGHT)[:, 1:].float()
     return (ellipticity[:, 1:] * counted).sum() / counted.sum().clamp(min=1.0)
+
+
+# The shape term's window about each star: a Gaussian of the aperture's
+# radius over this. An aperture reaches `APERTURE_FWHM` input widths, so
+# the window is 0.7 of the input PSF's own σ: about a sharpened star's.
+SHAPE_WINDOW = 10.0
+
+
+def star_quadrupoles(error: torch.Tensor, sigma: torch.Tensor,
+                     labels: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """For each aperture of `labels` (the first is the sky's), the two
+    quadrupoles of `error` about the aperture's middle, each over its
+    noise, and the aperture's area: the sums of the error times
+    w (dx² - dy²) and times 2 w dx dy, w the Gaussian window
+    (`SHAPE_WINDOW`), over the root of the sums of their squares times
+    `sigma`². An error in a star's level or its place has none; a star
+    longer one way than its target has."""
+    batch, _, height, width = error.shape
+    marks = labels.reshape(batch, -1)
+
+    def summed(values: torch.Tensor) -> torch.Tensor:
+        return torch.zeros(batch, APERTURES + 1, device=error.device).scatter_add_(1, marks, values)
+
+    ys = torch.arange(height, device=error.device, dtype=torch.float32).view(1, height, 1).expand(batch, height, width)
+    xs = torch.arange(width, device=error.device, dtype=torch.float32).view(1, 1, width).expand(batch, height, width)
+    ys, xs = ys.reshape(batch, -1), xs.reshape(batch, -1)
+    area = summed(torch.ones_like(xs))
+    safe = area.clamp(min=1.0)
+    dx = xs - (summed(xs) / safe).gather(1, marks)
+    dy = ys - (summed(ys) / safe).gather(1, marks)
+    spread = (safe / math.pi / SHAPE_WINDOW**2).gather(1, marks)
+    window = torch.exp(-0.5 * (dx**2 + dy**2) / spread)
+    flat = error.reshape(batch, -1).float()
+    variance = (sigma.reshape(batch, -1).float()) ** 2
+    scores = []
+    for pattern in (window * (dx**2 - dy**2), window * 2 * dx * dy):
+        scores.append(summed(pattern * flat) / summed(pattern**2 * variance).clamp(min=1e-12).sqrt())
+    return scores[0], scores[1], area
 
 
 # The edge term's smoothing, in σ px, and the gradient of the smoothed

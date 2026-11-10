@@ -1270,15 +1270,46 @@ nebulae.
   California's stars at a median ellipticity of 0.074 (input 0.092) at
   every ask from 0.85 to the floor; a small run and the reference leave
   0.044 and 0.046.
+  - On held-out known-kernel tiles, whose inputs are blurred up to 0.3
+    elliptical and whose targets are round, the larger run's stars are
+    as far from their targets' shape as its inputs are: the quadrupoles
+    of a star's error about its middle, over their noise, have a median
+    of 5.3 after it and 7.6 before, and weighed as the loss weighs them
+    come to the same sum. The pixel and gradient terms do not ask for a
+    star's shape hard enough to get it.
+  - **The roundness term (`--round-weight`) is not the way to ask.** At
+    weight 5 it gives the sheets round stars (California 0.009, Trunk
+    0.021) and a flux within 2% of the input's, but the stars stop at
+    0.70 of the input's width where they were asked for 0.65 (flux
+    against width lies on the same curve as without the term: it did
+    not mend the gain, it kept the stars from the widths that have it),
+    the Trunk's second rim steepens ×1.29 where it steepened ×1.66, and
+    the change the run shares with the reference at the finest scale
+    falls from 0.87 to 0.65 of the reference's. On held-out tiles its
+    edge term is up a tenth and its flux term doubled.
+  - The term reads what is not a star's shape. It takes the moments of
+    all the light above an aperture's mean, and an aperture three
+    widths out is mostly noise and nebula: the *targets* of held-out
+    tiles read 0.15 to 0.32 by it. Pushed toward none, the run's output
+    read 0.04 to 0.09: its stars did come nearer their targets' shape
+    (quadrupoles of 4.4 at the median), but by the term's own measure
+    taken against the targets' its apertures ended further from them
+    than its inputs' were (0.18 against 0.16 on known-kernel tiles).
+  - The shape term (`--shape-weight`) asks through the error instead:
+    each listed star's two quadrupoles of output less target, in a
+    Gaussian window of about a sharpened star's width, each over its
+    noise, weighed as the flux term weighs its sums. It is linear in
+    the error, so noise and nebula the output shares with its target
+    cancel, a wrong level or place has no quadrupole, and a star is
+    asked to be as round as its target's and no rounder.
 
 ### What is next for sharpening
 
 In order, each only if the one before leaves a gap at the rims:
 
-1. **Round stars and true flux on the larger run.** Three runs of its
-   recipe:
-   - with the roundness term on the listed stars' ellipticity
-     (`--round-weight`) at 5 and at 20;
+1. **Round stars and true flux on the larger run.** Runs of its recipe:
+   - with the shape term at 0.1 and at 0.3 (the flux term's weight and
+     three times it);
    - with the bank of brought-down stacks at half the native bank's
      weight, for the narrow stars' flux.
 2. **Noisy space-telescope windows** (`--external-snr`) at more weight,
