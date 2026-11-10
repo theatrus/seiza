@@ -1070,9 +1070,8 @@ nebulae.
   its light's offset keeps stars in place. Passing the input's noise
   through to the target (`--pass-noise`, with the known-kernel noise up
   to the stack's own) ended the rings and leaves the sky's noise at 0.99
-  of the input's. Leaving out one kind of supplied pair ended a cross
-  left standing at bright stars. A bank binned by block means gave
-  square stars and is not used.
+  of the input's. A bank binned by block means gave square stars and is
+  not used.
 - **Two strengths.** With `--nonstellar` the network reads one ratio for
   stars and one for the rest, and a known-kernel window's target is the
   two blurs of the window, each where its part of the light is.
