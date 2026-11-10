@@ -328,6 +328,19 @@ class Settings:
     # times the grain along rims and in bright nebula that the other
     # sharpener left (2026-11-10). 0: none.
     clean_truth: float = 0.0
+    # Contrast asked of what is not a star, beyond the sharpening: a
+    # known-kernel window's target for the rest is given this, times one
+    # less the ratio asked of the rest, of a masked unsharp mask
+    # (`contrasted`). A Gaussian K asks for nothing further from an edge
+    # than its own width, and the runs trained on it sharpen a rim's crest
+    # and leave the dark beside it 4 to 16 px out nearly as it was, which
+    # is where an image's contrast is seen. An unsharp mask of the output
+    # itself gives that and roughens the rim; one that reads the detail
+    # from 4 px up, on nebula and off stars, does not (2026-11-10), and in
+    # a target it is read from the truth, before any noise. It is an
+    # enhancement, not a restoration: the target is no longer the truth.
+    # 0: none.
+    contrast: float = 0.0
 
     @property
     def planes(self) -> tuple[str, ...]:
@@ -1208,6 +1221,53 @@ class Halo:
         return ((1.0 - part) * core + part * wide).astype(np.float32)
 
 
+# The contrast a known-kernel target's rest is given
+# (`Settings.contrast`): what stands above a Gaussian of `CONTRAST_WIDE`
+# input widths (its σ) in the rest smoothed by `CONTRAST_FINE` of them,
+# so that no rim's own crest is raised again; what stands above is added
+# at `CONTRAST_LIFT` of what lies below, on nebula (the smoothed light
+# over itself plus `CONTRAST_KNEE` times the noise) and away from every
+# detected point source (`CONTRAST_CLEAR` input widths, feathered). A PSF
+# near the sampling limit leaves no room for it: none of it at the first
+# of `CONTRAST_WIDTHS` px, all of it from the second up. Set on the rims
+# of three stacks (stars 11.5, 7.9 and 2.3 px across), as a step applied
+# to a run's output: at 11.5 and 7.9 px an amount of 1 darkens a rim's
+# dark side by a third of the image's noise 8 px out and leaves the knots
+# along it as they were; at 2.3 px a tenth of that already roughens the
+# rim (2026-11-10).
+CONTRAST_WIDE = 1.05
+CONTRAST_FINE = 0.35
+CONTRAST_LIFT = 0.35
+CONTRAST_KNEE = 3.0
+CONTRAST_CLEAR = 3.0
+CONTRAST_FEATHER = 2.0
+CONTRAST_WIDTHS = (2.0, 7.0)
+
+
+def contrasted(rest: np.ndarray, amount: float, width: float, points: np.ndarray, background: float,
+               sigma: np.ndarray) -> tuple[np.ndarray, int]:
+    """`rest`, a known-kernel window's target for what is not a star, with
+    `amount` of a masked unsharp mask (see `CONTRAST_WIDE`), for an input
+    PSF `width` px across, and how far it reads. The detail is read from
+    the target before any fresh noise is added to it."""
+    low, high = CONTRAST_WIDTHS
+    amount = amount * float(np.clip((width - low) / (high - low), 0.0, 1.0))
+    if not amount > 0:
+        return rest, 0
+    wide = min(CONTRAST_WIDE * width, WINDOW_PAD / BLUR_REACH)
+    fine = min(CONTRAST_FINE * width, wide / 2)
+    smooth, level = blurred_images(rest, [fine**2 * np.eye(2), wide**2 * np.eye(2)])
+    detail = smooth - level
+    detail = np.minimum(detail, 0.0) + CONTRAST_LIFT * np.maximum(detail, 0.0)
+    light = np.clip(smooth - background, 0.0, None)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        nebula = np.nan_to_num(light / (light + CONTRAST_KNEE * sigma))
+    near = source_mask(points, rest.shape, CONTRAST_CLEAR * width).astype(np.float32)
+    near = blurred_images(near, [CONTRAST_FEATHER**2 * np.eye(2)], pad=16)[0]
+    away = np.clip(1.0 - 1.5 * near, 0.0, 1.0)
+    return (rest + amount * nebula * away * detail).astype(np.float32), blur_reach(wide**2 * np.eye(2))
+
+
 # Examples.
 
 
@@ -1338,7 +1398,7 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
     clip = background + scale * (level - background) if settings.fill_clipped and level is not None else None
     if clip is not None and not identity and saturated.any():
         signal = filled(signal, saturated, points, stamp, row["width"], background)
-    ratio, nonstellar_ratio, band = kernel.ratio, None, kernel.reach()
+    ratio, nonstellar_ratio, band, contrast = kernel.ratio, None, kernel.reach(), 0.0
     if identity:
         blurred, target = signal, None
     elif settings.nonstellar:
@@ -1360,6 +1420,11 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
             stars = halo.mixed(stars, wide, halo.kept(ratio, kernel))
             rest = halo.mixed(rest, wide, halo.kept(nonstellar_ratio, kernel))
             band = max(band, blur_reach(halo.covariance))
+        if settings.contrast > 0 and nonstellar_ratio < 1.0:
+            # More the more is asked of the rest, and none at 1.
+            contrast = settings.contrast * (1.0 - nonstellar_ratio)
+            rest, reach = contrasted(rest, contrast, kernel.widths["input"], points, background, scale * sigma)
+            band = max(band, reach)
         rendered = point_map(points, stamp, image.shape, background)
         with np.errstate(divide="ignore", invalid="ignore"):
             mask = np.clip(np.nan_to_num(rendered / (rendered + STAR_MASK_NOISE * scale * sigma)), 0.0, 1.0)
@@ -1403,7 +1468,7 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
                    window, kernel.asked, {"scale": scale, "noise_share": share, "widths": kernel.widths,
                                           "kernel": kernel.covariance.tolist(), "sharpest": kernel.ratio,
                                           "real": kernel.donor is not None, "denoised": denoised,
-                                          "clean_truth": clean_truth,
+                                          "clean_truth": clean_truth, "contrast": contrast,
                                           "halo": None if halo is None else [halo.share, halo.width]},
                    nonstellar_ratio)
 

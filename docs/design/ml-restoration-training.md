@@ -1271,7 +1271,8 @@ nebulae.
     the reference's width it is 5% high as before. Narrow stars in the
     known-kernel banks were not what was missing: on the new bank's own
     windows the run without it leaves stars 7% *short* of their targets.
-  - **The gain is the edge term's.** It is there in training: on the
+  - **The gain is there in training, and the edge term is a small part
+    of it.** On the
     supplied pairs with targets under 1.8 px the larger run's stars hold
     9% more flux than their inputs, where their targets hold 2% and
     wider targets' stars 1.5%. A tile lists 32 stars at most for the
@@ -1286,7 +1287,10 @@ nebulae.
     gain (1.004 against their targets, listed or not).
   - `--edge-clear` keeps the edge term two input widths clear of every
     detected point source. With it the slope at the stars not listed is
-    +0.16.
+    +0.16. A run with it took the California's gain from 12.5% to 10.8%
+    only, and with the brought-down bank as well to 7.1%: the slope said
+    which way the term pulled, not how far the stars had been pulled by
+    it. What holds the rest of the gain is not found.
 - **Roundness is the run's, not the ask's.** The larger run leaves the
   California's stars at a median ellipticity of 0.074 (input 0.092) at
   every ask from 0.85 to the floor; a small run and the reference leave
@@ -1339,17 +1343,49 @@ nebulae.
   run does (0.68 against 0.30 of the image's noise at 8 px, 0.42 against
   0.17 at 12) and lifts the lit ridge a quarter more. Asking the run for
   more of the rest (0.5 down to 0.25) makes the rim far steeper than the
-  reference's (×4.7 against ×2.2) and the ridge too tall, and changes
-  nothing beyond 8 px: by band, its share of the reference's change
-  from 8 to 64 px is 0.78, 0.73 and 0.72 at every ask. A Gaussian K
-  changes nothing further than about its own width from an edge, so no
-  known-kernel window asks for more; a real PSF has wings.
+  reference's (×4.7 against ×2.2) and the ridge too tall, and leaves
+  the dark side short still (0.49 at 8 px at an ask of 0.33). A Gaussian
+  K changes nothing further than about its own width from an edge, so no
+  known-kernel window asks for more; a real PSF has wings. (The change
+  by band beyond 8 px, which reads the same at every ask, is the stars'
+  halos and says nothing of nebula.)
   - `--kernel-halo MAX` gives each known-kernel window's input PSF a
     halo: a share drawn up to MAX of the window's light goes through a
     round Gaussian two to four times as wide as K's core. The target
     keeps of the halo what its ask leaves between the sharpest its stack
     allows (none) and 1 (all), stars and the rest each by their own. The
     stamp the network reads holds the halo, as a measured PSF's does.
+    Taking a halo of share h back is, to first order, an unsharp mask of
+    the halo's width and amount h / (1 - h); but a run taught this way
+    takes back the halo it finds, and a real image's may be slight.
+  - **A masked unsharp mask gives the dark side.** Applied to a run's
+    Trunk output (stars 11.5 px): what stands above a 12 px Gaussian in
+    the output smoothed by 4 px, at amount 1, on nebula and off stars,
+    with what stands above added at a quarter of what lies below. The
+    rims' dark side is then 0.64 of the image's noise under the input
+    8 px out (the output as it was: 0.33) and 0.41 at 12 (0.17), the lit
+    crest a tenth higher, and the knots along the rims are as they were.
+    Read from the output itself at 1.5 px it roughens the rim (knots
+    from 2.1% to 3.6%), and weighed alike both ways it lifts the lit
+    side by two thirds. On the same field at 7.9 px the same amount
+    does as much; at 2.3 px (the California) a tenth of it already
+    roughens the rim.
+  - `--contrast AMOUNT` asks for it in the target: a known-kernel
+    window's rest is given AMOUNT times one less its ratio of that
+    unsharp mask, read from the truth before any noise is added, its
+    widths in input PSF widths, none of it for stars 2 px across and all
+    of it from 7 px up. The target is then no longer the truth: it is an
+    enhancement, and it follows the ask.
+- **Speckle along lit rims.** Runs break a lit rim into knots a few
+  pixels across where the reference draws a line. The measure: within
+  8 px of the steepest edges, off stars, the share of pixels where a
+  blob filter (1 px less 2.5, and 1.5 less 4) stands more than three
+  times the sky's noise above the rim's own mean along itself. On the
+  Trunk at 1 to 2.5 px: input 0.4%, the runs 1.7 to 3.1%, the reference
+  1.0%; two draws of one recipe gave 1.8 and 3.1, so a run counts as
+  better only well under 1.7. With stars 11.5 px across nothing real is
+  1 to 4 px wide there. On the California the runs and the reference
+  are level (2.7%).
 - **Grain on images denoised first.** On noisy images the runs' grain is
   the reference's, in sky, nebula, bright nebula and along rims. On
   images denoised first it is not: along the California's rims the
@@ -1374,8 +1410,9 @@ In order, each only if the one before leaves a gap at the rims:
    term at 0.1 and the edge term clear of every detected star, and:
    - a halo of up to 0.3 on the known-kernel windows;
    - clean truth for 0.7 of the native windows;
-   - then both, and the bank of brought-down stacks if the run with it
-     reads better than the run without.
+   - contrast of 2 with that clean truth;
+   - then what holds of them together, and the bank of brought-down
+     stacks, which took a third of the narrow stars' flux gain off.
 2. **Noisy space-telescope windows** (`--external-snr`) at more weight,
    blurred up to four times, on the run above.
 3. **A classical deconvolution as an input plane.** A few
