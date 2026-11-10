@@ -323,6 +323,9 @@ def main(argv: list[str] | None = None) -> int:
     sharpen_train.add_argument("--denoised", type=float, default=0.0,
                                help="the share of windows met denoised, where their bank holds denoised planes "
                                     "(clean-sharpen)")
+    sharpen_train.add_argument("--external-snr", type=numbers, default=None,
+                               help="LOW,HIGH: give an external bank's windows noise of their contrast over a ratio "
+                                    "drawn between these (default: only their own)")
     sharpen_train.add_argument("--reblur", type=float, default=0.0,
                                help="the share of known-kernel windows met denoised, as they are, with no target: "
                                     "asked for a ratio and held to give the window back when blurred to its own "
@@ -750,7 +753,8 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
         ratio_source=arguments.ratio_source, residual=arguments.residual, nonstellar=arguments.nonstellar,
         equal_share=arguments.equal_share, fill_clipped=arguments.fill_clipped,
         pass_noise=arguments.pass_noise, real_kernels=arguments.real_kernels,
-        round_target=arguments.round_target, denoised=arguments.denoised, reblur=arguments.reblur)
+        round_target=arguments.round_target, denoised=arguments.denoised, reblur=arguments.reblur,
+        external_snr=arguments.external_snr)
     loss = sharpen_model.LossSettings(epsilon=arguments.charbonnier, noise_cap=arguments.noise_cap,
                                       gradient_weight=arguments.gradient_weight,
                                       gradient_scales=arguments.gradient_scales, flux_weight=arguments.flux_weight,

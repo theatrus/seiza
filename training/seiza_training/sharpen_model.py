@@ -294,6 +294,15 @@ class Settings:
     # sharpen real images past their own resolution, and what it adds must
     # be what their PSF would have hidden.
     reblur: float = 0.0
+    # Noise given to an external (space telescope) bank's windows: their
+    # contrast (`window_contrast`) over a ratio drawn between these two,
+    # evenly in its logarithm; None: only their own, which is next to
+    # none. Those windows alone hold edges sharper than the seeing, and
+    # met clean they taught runs to sharpen a clean rim and leave a noisy
+    # one soft: a native stack's own noise is in its target, where no
+    # run can follow it, so under noise the native windows teach caution
+    # (2026-11-09).
+    external_snr: tuple[float, float] | None = None
 
     @property
     def planes(self) -> tuple[str, ...]:
@@ -1164,6 +1173,15 @@ def window_points(bank: Bank, source: int, row: dict[str, float]) -> np.ndarray:
     return points
 
 
+def window_contrast(image: np.ndarray, block: int = 8) -> float:
+    """How far a window's light ranges: from the 10th to the 90th
+    percentile of its means over `block` pixels a side."""
+    side = (image.shape[0] // block) * block, (image.shape[1] // block) * block
+    means = image[:side[0], :side[1]].reshape(side[0] // block, block, side[1] // block, block).mean(axis=(1, 3))
+    low, high = np.percentile(means[np.isfinite(means)], (10, 90))
+    return float(high - low)
+
+
 def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: Settings, *,
                    identity: bool | None = None, scaled: bool = True) -> Example:
     """A deep stack's window as a known-kernel pair (see the module notes);
@@ -1176,6 +1194,11 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
     saturated = np.asarray(bank.arrays["saturated"][window]).astype(bool)
     stamp = np.asarray(bank.arrays["stamp"][window], dtype=np.float32)
     background = row["background"]
+    noisy = settings.external_snr is not None and bank.label == "external"
+    if noisy:
+        low, high = settings.external_snr
+        ratio_drawn = math.exp(rng.uniform(math.log(low), math.log(high)))
+        sigma = np.hypot(sigma, window_contrast(image) / ratio_drawn).astype(np.float32)
     if identity is None and settings.reblur > 0 and bank.clean and rng.random() < settings.reblur:
         return reblur_example(bank, window, rng, settings)
     denoised = bool(settings.denoised > 0 and bank.clean and rng.random() < settings.denoised)
@@ -1191,7 +1214,7 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
     if kernel is None:
         kernel = known_kernel(stamp, rng, settings, identity=identity)
     scale = math.exp(rng.uniform(-1.0, 1.0) * math.log(settings.exposure)) if scaled and settings.exposure > 1 else 1.0
-    share = float(rng.uniform(0.0, settings.kernel_noise))
+    share = 1.0 if noisy else float(rng.uniform(0.0, settings.kernel_noise))
     signal = background + scale * (image - background)
     points = window_points(bank, source, row)
     points[:, 2] *= scale
