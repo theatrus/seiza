@@ -299,6 +299,12 @@ def test_contrast_darkens_the_dark_side_of_a_rim_on_nebula_and_leaves_sky_and_st
     assert np.abs(change[35:46, 35:46]).max() < 1e-3
     lone = sm.contrasted(rest, 1.0, 9.0, points[:0], 100.0, sigma)[0] - rest
     assert np.abs(lone[40, 60:78]).max() > 1.0 > np.abs(change[40, 60:64]).max()
+    # A bright star the points do not list is kept clear all the same: no
+    # dark ring about it.
+    ys = np.mgrid[:side, :side][0].astype(np.float32)
+    star = 3000.0 * np.exp(-0.5 * ((xs - 40.0) ** 2 + (ys - 30.0) ** 2) / 3.8**2)
+    ringed = sm.contrasted(rest + star, 1.0, 9.0, points[:0], 100.0, sigma)[0] - (rest + star)
+    assert np.abs(ringed[15:46, 25:56]).max() < 1e-3 and ringed[110, 72] < -3.0
     # None of it for stars at the sampling limit.
     same, none = sm.contrasted(rest, 1.0, sm.CONTRAST_WIDTHS[0], points, 100.0, sigma)
     assert same is rest and none == 0

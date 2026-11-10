@@ -1241,6 +1241,7 @@ CONTRAST_LIFT = 0.35
 CONTRAST_KNEE = 3.0
 CONTRAST_CLEAR = 3.0
 CONTRAST_FEATHER = 2.0
+CONTRAST_STAR = 15.0
 CONTRAST_WIDTHS = (2.0, 7.0)
 
 
@@ -1263,6 +1264,21 @@ def contrasted(rest: np.ndarray, amount: float, width: float, points: np.ndarray
     with np.errstate(divide="ignore", invalid="ignore"):
         nebula = np.nan_to_num(light / (light + CONTRAST_KNEE * sigma))
     near = source_mask(points, rest.shape, CONTRAST_CLEAR * width).astype(np.float32)
+    # The point sources listed are not every star: a field's list holds a
+    # few hundred, and a bright star left out of it would be given a dark
+    # ring. So also whatever stands compact and far above its
+    # surroundings: over `CONTRAST_STAR` times the noise and over the
+    # window's own range of nebula (its wide-smoothed levels, 10th to
+    # 90th percentile), which a rim's crest is not.
+    finite = np.isfinite(sigma) & (sigma > 0)
+    noise = float(np.median(sigma[finite])) if finite.any() else 0.0
+    spread = np.percentile(level[::4, ::4], (10, 90))
+    bright = (smooth - level) > max(CONTRAST_STAR * noise, float(spread[1] - spread[0]))
+    if bright.any():
+        reach = int(min(math.ceil(CONTRAST_CLEAR * width), WINDOW_PAD))
+        grown_ = torch.nn.functional.max_pool2d(torch.from_numpy(bright.astype(np.float32))[None, None],
+                                                2 * reach + 1, stride=1, padding=reach)[0, 0].numpy()
+        near = np.maximum(near, grown_)
     near = blurred_images(near, [CONTRAST_FEATHER**2 * np.eye(2)], pad=16)[0]
     away = np.clip(1.0 - 1.5 * near, 0.0, 1.0)
     return (rest + amount * nebula * away * detail).astype(np.float32), blur_reach(wide**2 * np.eye(2))
