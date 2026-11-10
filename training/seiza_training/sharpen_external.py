@@ -21,6 +21,7 @@ from.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import random
@@ -32,7 +33,7 @@ from typing import Any
 import numpy as np
 
 from . import psf_fields
-from .noise_model import WINDOW, image_sigma, scales
+from .noise_model import WINDOW, image_sigma, in_order, scales
 from .sharpen_bank import (BANK_VERSION, STAMP, Bank, fitted_stamp, layout, saturation, stamp_width, summarize,
                            window_corners)
 
@@ -192,15 +193,25 @@ def prepared(entry: dict[str, Any], root: Path, factor: int, seed: int, per_sour
             "info": info, "points": field.table}
 
 
+def attempted(root: str, seed: int, per_source: int, job: tuple[dict[str, Any], int]) -> dict[str, Any]:
+    """`prepared` in a process of its own; an error is a dropped source,
+    so one bad mosaic does not stop the cut."""
+    entry, factor = job
+    try:
+        return prepared(entry, Path(root), factor, seed, per_source)
+    except Exception as error:  # noqa: BLE001
+        return {"status": "dropped", "record": {"input": entry["path"], "reason": str(error)}}
+
+
 def cut(root: Path, work: Path, *, bins: tuple[int, ...] = (2, 3), per_source: int = WINDOWS, seed: int = 0,
-        limit: int | None = None) -> dict[str, Any]:
+        limit: int | None = None, workers: int = 1, telescope: str = "external") -> dict[str, Any]:
     """Cut the bank of the mosaics `root`/index.json lists (each entry's
     `path` under `root`), each at each of `bins`, under `work`; one cut
     before from the same list is opened."""
     from .sharpen_bank import open_bank
 
     index = json.loads((root / "index.json").read_text())
-    entries = [{**entry, "telescope": entry.get("telescope", "HST")} for _, entry in sorted(index.items())][:limit]
+    entries = [{**entry, "telescope": entry.get("telescope", telescope)} for _, entry in sorted(index.items())][:limit]
     parts = [BANK_VERSION, "external", seed, WINDOW, STAMP, per_source, list(bins), PREFILTER,
              [entry["path"] for entry in entries]]
     name = "sharpen-external-train-" + hashlib.sha256(json.dumps(parts).encode()).hexdigest()[:16]
@@ -209,20 +220,17 @@ def cut(root: Path, work: Path, *, bins: tuple[int, ...] = (2, 3), per_source: i
     if not bank.done:
         dropped = []
         began = time.monotonic()
-        for done, entry in enumerate(entries, start=1):
-            for factor in bins:
-                try:
-                    result = prepared(entry, root, factor, seed, per_source)
-                except Exception as error:  # noqa: BLE001 - one bad mosaic does not stop the cut
-                    result = {"status": "dropped", "record": {"input": entry["path"], "reason": str(error)}}
-                if result["status"] == "dropped":
-                    dropped.append(result["record"])
-                else:
-                    bank.add(result)
-                print(json.dumps({"bank": name, "done": done, "of": len(entries), "input": entry["path"],
-                                  "bin": factor, "status": result["status"],
-                                  "reason": result["record"].get("reason"), "windows": bank.count,
-                                  "elapsed": round(time.monotonic() - began)}), file=sys.stderr, flush=True)
+        jobs = [(entry, factor) for entry in entries for factor in bins]
+        prepare = functools.partial(attempted, str(root), seed, per_source)
+        for done, ((entry, factor), result) in enumerate(zip(jobs, in_order(prepare, jobs, workers)), start=1):
+            if result["status"] == "dropped":
+                dropped.append(result["record"])
+            else:
+                bank.add(result)
+            print(json.dumps({"bank": name, "done": done, "of": len(jobs), "input": entry["path"],
+                              "bin": factor, "status": result["status"],
+                              "reason": result["record"].get("reason"), "windows": bank.count,
+                              "elapsed": round(time.monotonic() - began)}), file=sys.stderr, flush=True)
         bank.finish({"label": "external", "split": "train", "seed": seed, "per_source": per_source,
                      "dropped": dropped, "summary": summarize(bank, False)})
     return open_bank(directory)
