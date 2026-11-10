@@ -181,93 +181,112 @@ def seeing_pairs(manifest: Manifest, split: str, sets: set[str] | None = None) -
     return found, left
 
 
-# A binned bank's stacks are binned so their stars come to about this many
-# pixels across, by no less than 2 and no more than `BIN_MOST`.
-BINNED_PX = 1.6
+# A binned bank's stacks are brought down so their stars come to about this
+# many pixels across, the floor a star is asked down to, by a factor of 2
+# to `BIN_MOST`.
+BINNED_PX = 1.5
 BIN_MOST = 6
+# A pixel brought down is marked clipped where this share of its weight
+# fell on clipped pixels.
+CLIPPED_SHARE = 0.02
+
+
+def down_width(width: Any, factor: int) -> Any:
+    """How wide a star `width` px across is in an image brought down by
+    `factor`: widened by the smoothing, then in the pixels taken."""
+    from .sharpen_external import PREFILTER
+
+    return np.hypot(width, 2.3548 * PREFILTER * factor) / factor
+
+
+def down_factor(width: float) -> int:
+    """The factor that brings stars `width` px across nearest `BINNED_PX`."""
+    return min(range(2, BIN_MOST + 1), key=lambda factor: abs(float(down_width(width, factor)) - BINNED_PX))
 
 
 def binned_sources(store: Store, manifest: Manifest, split: str, sets: set[str] | None = None) -> list[dict[str, Any]]:
-    """The known-kernel bank's sources again, each to be binned (its
-    record's `bin`) until its stars are about `BINNED_PX` across: real sky
-    whose stars and detail are as sharp, in pixels, as the sharpest any
+    """The known-kernel bank's sources again, each to be brought down (by
+    its record's `bin`) until its stars are about `BINNED_PX` across: real
+    sky whose stars and detail are as sharp, in pixels, as the sharpest any
     image holds. A stack's own windows, blurred, give inputs no sharper
     than itself, and the model met no input as sharp as a well-sampled
     stack asked for its floor; asked on one, it over-reached, raising
     bright cores 3.4 times where 2.4 keeps their flux and digging the
-    difference out of a ring about them (2026-11-09)."""
+    difference out of a ring about them (2026-11-09). A stack is brought
+    down as a space telescope's mosaic is (`sharpen_external.brought_down`),
+    through a round Gaussian and then every `bin`-th pixel: block means, the
+    first way, squared its stars, and runs trained on them drew a cross on
+    every star."""
+    from .sharpen_external import PREFILTER
+
     found = []
     for source in deep_sources(manifest, split, sets):
         record = psf_fields.recorded(store, source["input"]["id"])
         width = ((record or {}).get("fwhm_px") or {}).get("median")
         if not width:
             continue
-        found.append({**source, "record": {"bin": int(min(BIN_MOST, max(2, round(width / BINNED_PX))))}})
+        found.append({**source, "record": {"bin": down_factor(width), "prefilter": PREFILTER}})
     return found
 
 
-def binned(plane: np.ndarray, factor: int, how: str = "mean") -> np.ndarray:
-    """`plane` in blocks of `factor` pixels a side, cut to whole blocks:
-    their mean, their root mean square over `factor` (a mean's noise, of a
-    noise map), or whether any is set."""
-    rows, columns = plane.shape[0] // factor, plane.shape[1] // factor
-    blocks = plane[:rows * factor, :columns * factor].reshape(rows, factor, columns, factor)
-    if how == "any":
-        return blocks.any(axis=(1, 3))
-    if how == "noise":
-        return (np.sqrt(np.mean(blocks.astype(np.float64) ** 2, axis=(1, 3))) / factor).astype(np.float32)
-    return blocks.mean(axis=(1, 3)).astype(np.float32)
+def brought_down_stamp(stamp: np.ndarray, factor: int) -> np.ndarray:
+    """A PSF stamp as an image brought down by `factor` holds it, a star at
+    one of the pixels taken: smoothed as the image is, then every
+    `factor`-th pixel about its middle, summing to one."""
+    from .sharpen_external import PREFILTER
+    from .sharpen_model import blur_transform, filtered
 
-
-def binned_stamp(stamp: np.ndarray, factor: int) -> np.ndarray:
-    """A PSF stamp as a `factor`-binned image holds it, a star at a binned
-    pixel's middle: blocks of `factor` about the stamp's middle, moved half
-    a pixel first where `factor` is even, summing to one."""
-    from .sharpen_model import shifted
-
-    size = stamp.shape[0]
-    middle = (size - 1) // 2
-    if factor % 2 == 0:
-        stamp = shifted(stamp, 0.5, 0.5, pad=4)
-        first = middle - factor // 2 + 1
-    else:
-        first = middle - (factor - 1) // 2
-    reach = min(first // factor, (size - first - factor) // factor)
-    start = first - reach * factor
-    side = 2 * reach + 1
-    out = stamp[start:start + side * factor, start:start + side * factor].reshape(side, factor, side, factor)
-    out = out.sum(axis=(1, 3)).astype(np.float64)
+    pad = int(4 * PREFILTER * factor) + 2
+    shape = (stamp.shape[0] + 2 * pad, stamp.shape[1] + 2 * pad)
+    smooth = filtered(stamp, [blur_transform(shape, (PREFILTER * factor) ** 2 * np.eye(2))], pad, mode="constant")[0]
+    middle = (stamp.shape[0] - 1) // 2
+    reach = middle // factor
+    taken = slice(middle - reach * factor, middle + reach * factor + 1, factor)
+    out = smooth[taken, taken].astype(np.float64)
     return (out / out.sum()).astype(np.float32)
 
 
-class BinnedField:
-    """A PSF field as a `factor`-binned image holds it: positions in binned
-    pixels, stamps and widths binned, point sources moved and scaled."""
+class BroughtDownField:
+    """A PSF field as an image brought down by `factor` holds it
+    (`sharpen_external.brought_down`): positions among the pixels taken,
+    stamps smoothed and taken as the image's were, widths and point sources
+    scaled."""
 
     def __init__(self, field: psf_fields.Field, factor: int, image: np.ndarray) -> None:
         self.field, self.factor, self.record, self.usable = field, factor, field.record, field.usable
         self.image = image
 
-    def full(self, value: float) -> float:
-        return (value + 0.5) * self.factor - 0.5
+    def full(self, value: Any) -> Any:
+        """The stack's pixel a brought-down one was taken at."""
+        return value * self.factor + self.factor // 2
+
+    def down(self, value: Any) -> Any:
+        """Where the stack's pixel `value` falls among the pixels taken."""
+        return (value - self.factor // 2) / self.factor
 
     def stamp_at(self, x: float, y: float) -> np.ndarray:
-        return binned_stamp(self.field.stamp_at(self.full(x), self.full(y)), self.factor)
+        return brought_down_stamp(self.field.stamp_at(self.full(x), self.full(y)), self.factor)
 
     def shape_at(self, x: float, y: float) -> dict[str, float]:
         shape = dict(self.field.shape_at(self.full(x), self.full(y)))
+        # A round smoothing leaves a star's elongation its own share of the
+        # widened star's variance.
+        own = shape.get("fwhm", float("nan"))
+        kept = (own / (float(down_width(own, self.factor)) * self.factor)) ** 2 if own > 0 else float("nan")
         for name in ("fwhm", "fwhm_major", "fwhm_minor"):
             if name in shape:
-                shape[name] = shape[name] / self.factor
+                shape[name] = float(down_width(shape[name], self.factor))
+        for name in ("e1", "e2"):
+            if name in shape:
+                shape[name] = shape[name] * kept
         return shape
 
     def points(self) -> np.ndarray:
         columns = psf_fields.DETECTION_COLUMNS
         points = self.field.points().copy()
-        points[:, 0] = (points[:, 0] + 0.5) / self.factor - 0.5
-        points[:, 1] = (points[:, 1] + 0.5) / self.factor - 0.5
+        points[:, 0], points[:, 1] = self.down(points[:, 0]), self.down(points[:, 1])
         points[:, columns.index("flux")] /= self.factor**2
-        points[:, columns.index("fwhm")] /= self.factor
+        points[:, columns.index("fwhm")] = down_width(points[:, columns.index("fwhm")], self.factor)
         points[:, columns.index("peak")] = psf_fields.raw_peaks(self.image, points[:, 0], points[:, 1])
         return points
 
@@ -449,9 +468,14 @@ def prepared(store_root: str, scratch: str | None, seed: int, per_source: int,
     saturated = saturation(image, level)
     factor = int(source.get("record", {}).get("bin", 1))
     if factor > 1 and not pairs:
-        image, sigma, saturated = binned(image, factor), binned(sigma, factor, "noise"), binned(saturated, factor,
-                                                                                               "any")
-        input_field = BinnedField(input_field, factor, image)
+        from .sharpen_external import brought_down
+
+        # The noise map is the brought-down image's own, as a mosaic's is:
+        # the stack's says nothing of what the smoothing left.
+        saturated = brought_down(saturated.astype(np.float32), factor) > CLIPPED_SHARE
+        image = brought_down(image, factor)
+        sigma = image_sigma(image)
+        input_field = BroughtDownField(input_field, factor, image)
     record["input_psf"] = psf_summary(input_field)
     planes: dict[str, np.ndarray] = {}
     if pairs:
