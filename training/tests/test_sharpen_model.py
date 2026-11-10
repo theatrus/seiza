@@ -1010,3 +1010,48 @@ def test_the_roundness_term_is_a_stars_ellipticity():
     assert float(star_ellipticity(star(3.0, 3.0), labels)) < 0.01
     assert float(star_ellipticity(star(4.0, 3.0), labels)) > 0.15
     assert float(star_ellipticity(0.001 * star(4.0, 3.0), labels)) == 0.0
+
+
+def test_the_shape_term_reads_a_stars_error_of_shape_and_no_other():
+    import math
+
+    import torch
+
+    from seiza_training.sharpen_model import LossSettings, loss_terms, star_quadrupoles
+
+    ys, xs = torch.meshgrid(torch.arange(64.0), torch.arange(64.0), indexing="ij")
+    labels = (((ys - 32) ** 2 + (xs - 32) ** 2) <= 15**2).long().view(1, 64, 64)
+    sigma = torch.ones(1, 1, 64, 64)
+
+    def star(sx, sy, turn=0.0, x=32.0, y=32.0):
+        across = (xs - x) * math.cos(turn) + (ys - y) * math.sin(turn)
+        along = -(xs - x) * math.sin(turn) + (ys - y) * math.cos(turn)
+        light = 100 * torch.exp(-0.5 * ((across / sx) ** 2 + (along / sy) ** 2))
+        return (light / (sx * sy)).view(1, 1, 64, 64)
+
+    def read(error):
+        plus, cross, area = star_quadrupoles(error, sigma, labels)
+        return float(plus[0, 1]), float(cross[0, 1]), float(area[0, 1])
+
+    target = star(2.0, 2.0)
+    # Longer across than its target, then down, then along a diagonal.
+    plus, cross, area = read(star(2.6, 2.0) - target)
+    assert plus > 5 and abs(cross) < 1e-3 and area == float(labels.sum())
+    assert read(star(2.0, 2.6) - target)[0] < -5
+    plus, cross, _ = read(star(2.6, 2.0, math.pi / 4) - target)
+    assert abs(plus) < 1e-3 and cross > 5
+    # A wrong level, a slope of nebula, a brighter or a wider round star:
+    # no quadrupole. A star half a pixel off has a little.
+    ramp = (3.0 + 0.5 * xs - 0.2 * ys).view(1, 1, 64, 64)
+    assert max(abs(value) for value in read(ramp)[:2]) < 1e-3
+    assert max(abs(value) for value in read(0.3 * target)[:2]) < 1e-3
+    assert max(abs(value) for value in read(star(2.6, 2.6) - target)[:2]) < 1e-3
+    assert max(abs(value) for value in read(star(2.0, 2.0, x=32.5) - target)[:2]) < 2.0
+    # In the loss: nothing where the output is its target, whatever lies
+    # under the star; something where the star is long.
+    nebula = (20.0 * (xs > 36).float()).view(1, 1, 64, 64)
+    batch = {"reference": torch.zeros(1, 1, 64, 64), "target": target + nebula, "valid": torch.ones(1, 1, 64, 64),
+             "sigma": sigma, "labels": labels}
+    settings = LossSettings(shape_weight=1.0)
+    assert float(loss_terms(target + nebula, batch, settings, "linear")["shape"]) == 0.0
+    assert float(loss_terms(star(2.6, 2.0) + nebula, batch, settings, "linear")["shape"]) > 1.0
