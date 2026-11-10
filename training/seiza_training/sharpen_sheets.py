@@ -10,6 +10,10 @@ The images are listed in `STORE/sheets/sharpen.json`:
                  "crops": [{"x": 1300, "y": 1550, "label": "The trunk's head and bright rim"}],
                  "baselines": [{"name": "other", "label": "Another sharpener", "product": "<product id>"}]}]}
 
+A sheet with `"denoise": "<noise run>"` has its input denoised by that run
+first; a baseline of such a sheet is an array made from that denoised
+input, given as `"file": "<path under STORE>.npy"` in place of a product.
+
 The model reads an input as it reads any image: its PSF field measured from
 it (the PSF pass's record, measured first where there is none), each tile
 conditioned on the stamp at its middle, the point sources found on it, and
@@ -120,6 +124,18 @@ def built(manifest: Manifest, product_id: str | None) -> dict[str, Any] | None:
     rows = manifest.rows("SELECT p.*, s.split, s.telescope, s.pixel_scale_arcsec FROM products p "
                          "JOIN sets s ON s.id = p.set_id WHERE p.id = ? AND p.status = 'built'", (product_id,))
     return dict(rows[0]) if rows else None
+
+
+def baseline_image(store: Store, manifest: Manifest, entry: dict[str, Any]) -> np.ndarray | None:
+    """A baseline's image: its built `product`, or the array kept at its
+    `file` under the store, which is how a sheet whose input is no product
+    (one denoised first) is given a baseline made from that input. None
+    where it is not there."""
+    if "file" in entry:
+        kept = store.root / entry["file"]
+        return np.load(kept).astype(np.float32) if kept.exists() else None
+    product = built(manifest, entry["product"])
+    return None if product is None else psf_fields.load_image(store, product)
 
 
 def input_field(store: Store, product: dict[str, Any]) -> psf_fields.Field:
@@ -265,12 +281,11 @@ def render(store: Store, manifest: Manifest, record: dict[str, Any], model: Any,
     image_background = float(np.nanmedian(image[::31, ::31]))
     baselines = []
     for entry in sheet.get("baselines", ()):
-        product = built(manifest, entry["product"])
-        if product is None:
+        other = baseline_image(store, manifest, entry)
+        if other is None:
             continue
-        other = psf_fields.load_image(store, product)
         if other.shape != image.shape:
-            raise ValueError(f"baseline {entry['product']} is {other.shape}, its sheet's input {image.shape}")
+            raise ValueError(f"baseline {entry['name']} is {other.shape}, its sheet's input {image.shape}")
         other[np.isnan(image)] = np.nan
         baselines.append((entry, other, float(np.nanmedian(other[::31, ::31]))))
 

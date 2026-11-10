@@ -1304,12 +1304,12 @@ nebulae.
     0.70 of the input's width where they were asked for 0.65 (flux
     against width lies on the same curve as without the term: it did
     not mend the gain, it kept the stars from the widths that have it),
-    the Trunk's second rim steepens ×1.29 where it steepened ×1.66, and
+    the California's rims steepen ×1.29 where they steepened ×1.66, and
     the change the run shares with the reference at the finest scale
     falls from 0.87 to 0.65 of the reference's. On held-out tiles its
     edge term is up a tenth and its flux term doubled. At weight 20 all
     of it goes further: stars at 0.88 of the input's width on the
-    California, the Trunk's first rim rising over 4.44 px where it rose
+    California, the Trunk's rims rising over 4.44 px where they rose
     over 3.76, the shared change at 0.48.
   - The term reads what is not a star's shape. It takes the moments of
     all the light above an aperture's mean, and an aperture three
