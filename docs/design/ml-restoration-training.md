@@ -1113,20 +1113,54 @@ nebulae.
   next to none. A native stack's own noise is in its target, where no
   run can follow it, so under noise the native windows teach caution.
   `--external-snr LOW,HIGH` gives each external window noise of its
-  contrast over a ratio drawn between the two.
+  contrast over a ratio drawn between the two. Runs with it showed no
+  change at the rims by eye.
+- **The trained range.** With kernel ratios up to 2.0 a run never meets
+  an ask much under 0.5. Asked for 0.3, the longer and the wider runs
+  smooth the image and lose faint stars, while the same runs are sharp
+  at asks they were trained on. Runs now draw ratios from 1.1 to 3.0
+  (`--kernel-ratios`), the sheets compare at asks inside the range, and
+  a panel asked for less is marked as below it.
+- **Small tiles.** At four levels and 320 px windows the network sees
+  little beyond a rim's own width. The smaller and shorter runs leave
+  speckle along the lit edges of dark nebula; a 100,000-step run leaves
+  less.
 
 ### What is next for sharpening
 
 In order, each only if the one before leaves a gap at the rims:
 
-1. **Noisy space-telescope windows** (`--external-snr`), at more than
-   one weight, with and without JWST, then at 100,000 steps.
-2. **A classical deconvolution as an input plane.** A few
+1. **More context, then attention.** Banks cut again with 1024 px
+   windows (`--window`), the Hubble bank brought down one and two times
+   where it was two and three. Two runs on them, alike but for the
+   second's blocks: six levels at width 32 (42M parameters), 768 px
+   tiles in batches of 4, 30,000 steps, kernel ratios 1.1 to 3.0, the
+   edge term at 2.
+   - The first has no attention, and is judged first: the rims and the
+     speckle under dark nebula, star roundness, flux and noise gain.
+   - The second holds two transformer blocks at its bottleneck
+     (`--attention 2`, 59M parameters). Six levels down, a 768 px tile
+     is 24 × 24 positions there, so each block's self-attention spans
+     the whole tile at little cost, where convolutions alone reach
+     across it only by depth. What it should buy is agreement over long
+     rims and large dark regions, and a view of the whole of a bright
+     star's halo.
+   - Attention is kept only if the second run beats the first on the
+     sheets. It ties the model's reach to the tile's size, so tiles at
+     inference must then be as large as in training, and the seam maps
+     are checked again.
+   - A roundness term on the listed stars' ellipticity
+     (`--round-weight`) is written and not yet tried; it goes on
+     whichever run wins if its stars are less round than the small
+     runs'.
+2. **Noisy space-telescope windows** (`--external-snr`) at more weight,
+   blurred up to four times, on the run above.
+3. **A classical deconvolution as an input plane.** A few
    Richardson–Lucy iterations with the measured PSF, read by the network
    beside the image: the network then cleans a sharp, ringing estimate
    in place of inventing the sharpening. Computed from the image and
    its PSF alone, so the model still needs nothing but the image.
-3. **A feature loss and a critic, held by reblur consistency.**
+4. **A feature loss and a critic, held by reblur consistency.**
    - Features from a network trained on photographs do not fit linear,
      single-channel data that is mostly sky. The feature network is the
      encoder of a trained noise model, which already reads this data in
@@ -1144,7 +1178,7 @@ In order, each only if the one before leaves a gap at the rims:
      denoised windows alone.
    - Invented sharpness shows on the known-truth probe as a share of
      the target's edge gain above 1.
-4. **An unrolled deconvolution**: the network as several deconvolution
+5. **An unrolled deconvolution**: the network as several deconvolution
    steps with a learned correction between them and the PSF used at
    each. Closer to the physics and likely steadier across PSFs; a
    larger rewrite, and a follow-on to the above.
