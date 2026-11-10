@@ -190,7 +190,8 @@ def loaded(path: Path) -> np.ndarray:
     return image
 
 
-def prepared(entry: dict[str, Any], root: Path, factor: int, seed: int, per_source: int) -> dict[str, Any]:
+def prepared(entry: dict[str, Any], root: Path, factor: int, seed: int, per_source: int,
+             window: int = WINDOW) -> dict[str, Any]:
     """One mosaic at one factor, as `Bank.add` takes a source's windows."""
     name = f"external/{entry['path']}/b{factor}"
     record: dict[str, Any] = {"input": name, "input_kind": "external", "set": entry.get("target", entry["path"]),
@@ -200,7 +201,7 @@ def prepared(entry: dict[str, Any], root: Path, factor: int, seed: int, per_sour
     field = MeasuredField(image, float(np.hypot(NATIVE_FWHM, 2.3548 * PREFILTER * factor) / factor))
     record["input_psf"] = {"status": field.status, "clip_level": field.level, "detections": len(field.table)}
     finite = np.isfinite(image)
-    corners = window_corners(finite, random.Random(f"{seed}/{name}"), per_source, HOLES)
+    corners = window_corners(finite, random.Random(f"{seed}/{name}"), per_source, HOLES, window)
     if not corners:
         return {"status": "dropped", "record": {**record, "reason": "no-window"}}
     saturated = saturation(image, field.level) | ~finite
@@ -209,11 +210,11 @@ def prepared(entry: dict[str, Any], root: Path, factor: int, seed: int, per_sour
     background, noise = scales(image, np.where(finite, sigma, np.nan))
     names, _, columns = layout(False)
     planes = {"image": image, "sigma": sigma, "saturated": saturated}
-    cut_planes = {plane: np.stack([planes[plane][y:y + WINDOW, x:x + WINDOW] for y, x in corners]).astype(names[plane])
+    cut_planes = {plane: np.stack([planes[plane][y:y + window, x:x + window] for y, x in corners]).astype(names[plane])
                   for plane in planes}
     stamps, info = [], np.zeros((len(corners), len(columns)), dtype=np.float32)
     for row, (y, x) in enumerate(corners):
-        centre = (x + (WINDOW - 1) / 2, y + (WINDOW - 1) / 2)
+        centre = (x + (window - 1) / 2, y + (window - 1) / 2)
         stamp, _ = fitted_stamp(field.stamp_at(*centre))
         shape = field.shape_at(*centre)
         stamps.append(stamp)
@@ -225,18 +226,20 @@ def prepared(entry: dict[str, Any], root: Path, factor: int, seed: int, per_sour
             "info": info, "points": field.table}
 
 
-def attempted(root: str, seed: int, per_source: int, job: tuple[dict[str, Any], int]) -> dict[str, Any]:
+def attempted(root: str, seed: int, per_source: int, job: tuple[dict[str, Any], int],
+              window: int = WINDOW) -> dict[str, Any]:
     """`prepared` in a process of its own; an error is a dropped source,
     so one bad mosaic does not stop the cut."""
     entry, factor = job
     try:
-        return prepared(entry, Path(root), factor, seed, per_source)
+        return prepared(entry, Path(root), factor, seed, per_source, window)
     except Exception as error:  # noqa: BLE001
         return {"status": "dropped", "record": {"input": entry["path"], "reason": str(error)}}
 
 
 def cut(root: Path, work: Path, *, bins: tuple[int, ...] = (2, 3), per_source: int = WINDOWS, seed: int = 0,
-        limit: int | None = None, workers: int = 1, telescope: str = "external") -> dict[str, Any]:
+        limit: int | None = None, workers: int = 1, telescope: str = "external",
+        window: int = WINDOW) -> dict[str, Any]:
     """Cut the bank of the mosaics `root`/index.json lists (each entry's
     `path` under `root`), each at each of `bins`, under `work`; one cut
     before from the same list is opened."""
@@ -244,16 +247,16 @@ def cut(root: Path, work: Path, *, bins: tuple[int, ...] = (2, 3), per_source: i
 
     index = json.loads((root / "index.json").read_text())
     entries = [{**entry, "telescope": entry.get("telescope", telescope)} for _, entry in sorted(index.items())][:limit]
-    parts = [BANK_VERSION, "external", seed, WINDOW, STAMP, per_source, list(bins), PREFILTER, HOLES,
+    parts = [BANK_VERSION, "external", seed, window, STAMP, per_source, list(bins), PREFILTER, HOLES,
              [entry["path"] for entry in entries]]
     name = "sharpen-external-train-" + hashlib.sha256(json.dumps(parts).encode()).hexdigest()[:16]
     directory = work / name
-    bank = Bank(directory, pairs=False, capacity=len(entries) * len(bins) * per_source)
+    bank = Bank(directory, pairs=False, capacity=len(entries) * len(bins) * per_source, window=window)
     if not bank.done:
         dropped = []
         began = time.monotonic()
         jobs = [(entry, factor) for entry in entries for factor in bins]
-        prepare = functools.partial(attempted, str(root), seed, per_source)
+        prepare = functools.partial(attempted, str(root), seed, per_source, window=window)
         for done, ((entry, factor), result) in enumerate(zip(jobs, in_order(prepare, jobs, workers)), start=1):
             if result["status"] == "dropped":
                 dropped.append(result["record"])
