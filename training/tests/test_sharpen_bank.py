@@ -339,3 +339,22 @@ def seeing_sources(banked: dict) -> list[dict]:
     from pathlib import Path
 
     return json.loads((Path(banked["directory"]) / "sources.json").read_text())
+
+
+def test_external_windows_may_miss_a_few_pixels_which_are_filled():
+    import random
+
+    from seiza_training import sharpen_external
+    from seiza_training.noise_model import WINDOW
+    from seiza_training.sharpen_bank import window_corners
+
+    rng = np.random.default_rng(0)
+    image = (10.0 + rng.standard_normal((WINDOW + 200, WINDOW + 200))).astype(np.float32)
+    image[250:253, 250:254] = np.nan
+    finite = np.isfinite(image)
+    assert window_corners(finite, random.Random(0), 5) == []
+    assert window_corners(finite, random.Random(0), 5, sharpen_external.HOLES)
+    filled = sharpen_external.filled_holes(image)
+    assert np.isfinite(filled).all()
+    assert np.array_equal(filled[finite], image[finite])
+    assert abs(float(filled[~finite].mean()) - 10.0) < 1.0

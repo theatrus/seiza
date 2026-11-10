@@ -56,6 +56,37 @@ PREFILTER = 0.5
 # Without stars enough for a field, the PSF is a round Gaussian of this
 # FWHM in the mosaic's own pixels, widened as the prefilter widens it.
 NATIVE_FWHM = 2.4
+# A window may miss this share of its pixels (cosmic rays, a chip gap's
+# end): required whole, over half the Hubble mosaics gave no window and
+# the rest a few. What is missing is filled from about it (`filled_holes`)
+# and marked saturated, which keeps it out of the loss.
+HOLES = 0.02
+# The Gaussians, in σ px, the holes are filled by, narrowest first.
+FILLS = (1.5, 4.0, 12.0)
+
+
+def filled_holes(image: np.ndarray) -> np.ndarray:
+    """`image` with what is not finite filled by the mean of what is held
+    about it, by the narrowest of `FILLS` that reaches held pixels, and by
+    the image's median where none does."""
+    from .sharpen_model import blurred_images
+
+    holes = ~np.isfinite(image)
+    if not holes.any():
+        return image
+    out = image.copy()
+    held = np.where(holes, 0.0, image).astype(np.float32)
+    weight = (~holes).astype(np.float32)
+    for sigma in FILLS:
+        left = ~np.isfinite(out)
+        if not left.any():
+            break
+        pad = int(4 * sigma) + 2
+        values, share = (blurred_images(plane, [sigma**2 * np.eye(2)], pad=pad)[0] for plane in (held, weight))
+        reached = left & (share > 0.05)
+        out[reached] = values[reached] / share[reached]
+    out[~np.isfinite(out)] = float(np.median(image[~holes])) if (~holes).any() else 0.0
+    return out
 
 
 def brought_down(image: np.ndarray, factor: int) -> np.ndarray:
@@ -167,14 +198,15 @@ def prepared(entry: dict[str, Any], root: Path, factor: int, seed: int, per_sour
                               "pixel_scale_arcsec": None, "record": {"bin": factor, "filters": entry.get("filters")}}
     image = brought_down(loaded(root / entry["path"]), factor)
     field = MeasuredField(image, float(np.hypot(NATIVE_FWHM, 2.3548 * PREFILTER * factor) / factor))
-    sigma = image_sigma(image)
-    saturated = saturation(image, field.level)
     record["input_psf"] = {"status": field.status, "clip_level": field.level, "detections": len(field.table)}
-    finite = np.isfinite(image) & np.isfinite(sigma)
-    corners = window_corners(finite, random.Random(f"{seed}/{name}"), per_source)
+    finite = np.isfinite(image)
+    corners = window_corners(finite, random.Random(f"{seed}/{name}"), per_source, HOLES)
     if not corners:
         return {"status": "dropped", "record": {**record, "reason": "no-window"}}
-    background, noise = scales(image, sigma)
+    saturated = saturation(image, field.level) | ~finite
+    image = filled_holes(image)
+    sigma = image_sigma(image)
+    background, noise = scales(image, np.where(finite, sigma, np.nan))
     names, _, columns = layout(False)
     planes = {"image": image, "sigma": sigma, "saturated": saturated}
     cut_planes = {plane: np.stack([planes[plane][y:y + WINDOW, x:x + WINDOW] for y, x in corners]).astype(names[plane])
@@ -212,7 +244,7 @@ def cut(root: Path, work: Path, *, bins: tuple[int, ...] = (2, 3), per_source: i
 
     index = json.loads((root / "index.json").read_text())
     entries = [{**entry, "telescope": entry.get("telescope", telescope)} for _, entry in sorted(index.items())][:limit]
-    parts = [BANK_VERSION, "external", seed, WINDOW, STAMP, per_source, list(bins), PREFILTER,
+    parts = [BANK_VERSION, "external", seed, WINDOW, STAMP, per_source, list(bins), PREFILTER, HOLES,
              [entry["path"] for entry in entries]]
     name = "sharpen-external-train-" + hashlib.sha256(json.dumps(parts).encode()).hexdigest()[:16]
     directory = work / name
