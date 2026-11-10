@@ -1149,7 +1149,7 @@ nebulae.
   its light's offset keeps stars in place. Passing the input's noise
   through to the target (`--pass-noise`, with the known-kernel noise up
   to the stack's own) ended the rings and leaves the sky's noise at 0.99
-  of the input's. A bank binned by block means gave square stars and
+  of the input's. A bank binned by block means put a cross on stars and
   was dropped (see "Narrow stars gain flux" below for its successor).
 - **Two strengths.** With `--nonstellar` the network reads one ratio for
   stars and one for the rest, and a known-kernel window's target is the
@@ -1255,9 +1255,17 @@ nebulae.
     2.3 px star to 1.5 px is one the runs hardly met.
   - `cut-sharpen --bank binned` now brings each stack down as the
     mosaics are, through a round Gaussian and then every `bin`-th pixel,
-    by the factor that leaves its stars nearest 1.5 px. On a trial cut
-    its stars are as round as the unbinned stacks', where block means
-    squared them.
+    by the factor that leaves its stars nearest 1.5 px. At 1024 px
+    windows that is 2,334 windows of 322 stacks, their stars 1.45 to
+    1.78 px across; the 190 stacks of wide stars, brought down five and
+    six times, are smaller than a window.
+  - Its stars are rounder than the block means' and may not be round.
+    Of stars that fall on a pixel's middle, the four diagonal
+    neighbours hold 0.87 of what a round star's would, read from the
+    pixels one and two out along the axes (block means, at the same
+    width: 0.78). The unbinned stacks' stars read 0.90 and the Hubble
+    bank's 0.94, but at 2.3 px, which is not like for like. The sheets'
+    cross measure on a run trained with the bank decides.
 - **Roundness is the run's, not the ask's.** The larger run leaves the
   California's stars at a median ellipticity of 0.074 (input 0.092) at
   every ask from 0.85 to the floor; a small run and the reference leave
