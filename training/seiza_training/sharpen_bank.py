@@ -362,31 +362,33 @@ def load(store: Store, product: dict[str, Any]) -> tuple[np.ndarray, np.ndarray 
     return image, sigma
 
 
-def window_corners(finite: np.ndarray, rng: random.Random, count: int, holes: float = 0.0) -> list[tuple[int, int]]:
-    """Up to `count` window corners from the overlapping grid, at random,
-    each window inside `finite` but for at most a share `holes` of its
-    pixels."""
+def window_corners(finite: np.ndarray, rng: random.Random, count: int, holes: float = 0.0,
+                   window: int = WINDOW) -> list[tuple[int, int]]:
+    """Up to `count` corners of windows `window` px a side from the
+    overlapping grid, at random, each window inside `finite` but for at
+    most a share `holes` of its pixels."""
     height, width = finite.shape
-    step = WINDOW // 2
-    grid = [(y, x) for y in range(0, height - WINDOW, step) for x in range(0, width - WINDOW, step)]
+    step = window // 2
+    grid = [(y, x) for y in range(0, height - window, step) for x in range(0, width - window, step)]
     rng.shuffle(grid)
     # How many pixels of each window are not finite, from a summed table.
     table = np.zeros((height + 1, width + 1), dtype=np.int64)
     table[1:, 1:] = np.cumsum(np.cumsum(~finite, axis=0), axis=1)
     chosen = []
     for y, x in grid:
-        missing = table[y + WINDOW, x + WINDOW] - table[y, x + WINDOW] - table[y + WINDOW, x] + table[y, x]
-        if missing <= holes * WINDOW * WINDOW:
+        missing = table[y + window, x + window] - table[y, x + window] - table[y + window, x] + table[y, x]
+        if missing <= holes * window * window:
             chosen.append((y, x))
             if len(chosen) == count:
                 break
     return chosen
 
 
-def centre_psf(field: psf_fields.Field, y: int, x: int) -> tuple[np.ndarray, float, dict[str, float]]:
+def centre_psf(field: psf_fields.Field, y: int, x: int,
+               window: int = WINDOW) -> tuple[np.ndarray, float, dict[str, float]]:
     """A window's PSF stamp at its centre, as `STAMP` pixels a side, the
     share a cut lost, and its shape there."""
-    centre = (x + (WINDOW - 1) / 2, y + (WINDOW - 1) / 2)
+    centre = (x + (window - 1) / 2, y + (window - 1) / 2)
     stamp, lost = fitted_stamp(field.stamp_at(*centre))
     return stamp, lost, field.shape_at(*centre)
 
@@ -421,7 +423,7 @@ def alignment(input_points: np.ndarray, target_points: np.ndarray) -> dict[str, 
 
 
 def prepared(store_root: str, scratch: str | None, seed: int, per_source: int,
-             source: dict[str, Any]) -> dict[str, Any]:
+             source: dict[str, Any], window: int = WINDOW) -> dict[str, Any]:
     """One source's windows, as `Bank.add` takes them, or why it was left
     out: read, judged, matched and cut in a process of its own."""
     store = Store(store_root, scratch)
@@ -506,11 +508,11 @@ def prepared(store_root: str, scratch: str | None, seed: int, per_source: int,
         planes = {"image": image, "sigma": sigma, "saturated": saturated}
         background, noise = scales(image, sigma)
     rng = random.Random(f"{seed}/{source['input']['id']}")
-    corners = window_corners(finite, rng, per_source)
+    corners = window_corners(finite, rng, per_source, window=window)
     if not corners:
         return left("no-window")
     names, stamp_names, columns = layout(pairs)
-    cut = {name: np.stack([plane[y:y + WINDOW, x:x + WINDOW] for y, x in corners]).astype(names[name])
+    cut = {name: np.stack([plane[y:y + window, x:x + window] for y, x in corners]).astype(names[name])
            for name, plane in planes.items()}
     stamps: dict[str, list[np.ndarray]] = {name: [] for name in stamp_names}
     info = np.zeros((len(corners), len(columns)), dtype=np.float32)
@@ -520,7 +522,7 @@ def prepared(store_root: str, scratch: str | None, seed: int, per_source: int,
                   "saturated": float(cut["saturated"][row].mean())}
         fields = (("input", input_field), ("target", target_field)) if pairs else (("", input_field),)
         for prefix, field in fields:
-            stamp, share, shape = centre_psf(field, y, x)
+            stamp, share, shape = centre_psf(field, y, x, window)
             stamps[f"{prefix}_stamp" if prefix else "stamp"].append(stamp)
             lost = max(lost, share)
             for name in ("fwhm", "e1", "e2", "beta"):
@@ -543,8 +545,10 @@ class Bank:
     it recorded, a cut stopped part way goes on from there; `resumed` says
     it did."""
 
-    def __init__(self, directory: Path, *, pairs: bool, capacity: int, resume: dict[str, Any] | None = None) -> None:
+    def __init__(self, directory: Path, *, pairs: bool, capacity: int, resume: dict[str, Any] | None = None,
+                 window: int = WINDOW) -> None:
         self.directory = directory
+        self.window = window
         self.pairs = pairs
         self.done = (directory / "done.json").exists()
         self.count = 0
@@ -554,7 +558,7 @@ class Bank:
             return
         (directory / "points").mkdir(parents=True, exist_ok=True)
         planes, stamps, info = layout(pairs)
-        shapes = {**{name: ((capacity, WINDOW, WINDOW), dtype) for name, dtype in planes.items()},
+        shapes = {**{name: ((capacity, window, window), dtype) for name, dtype in planes.items()},
                   **{name: ((capacity, STAMP, STAMP), np.float32) for name in stamps},
                   "info": ((capacity, len(info)), np.float32)}
         self.resumed = resume is not None and all((directory / f"{name}.npy").exists() for name in shapes)
@@ -595,7 +599,7 @@ class Bank:
             (self.directory / "done.json").write_text(json.dumps({
                 "bank_version": BANK_VERSION, "windows": self.count, "sources": len(self.sources),
                 "pairs": self.pairs, "planes": list(planes), "stamps": list(stamps), "info": list(info),
-                "window": WINDOW, "stamp": STAMP, **summary}, indent=1))
+                "window": self.window, "stamp": STAMP, **summary}, indent=1))
             self.done = True
         return open_bank(self.directory)
 
@@ -617,7 +621,7 @@ def open_bank(directory: Path) -> dict[str, Any]:
 
 def cut(
     store: Store, sources: list[dict[str, Any]], *, label: str, split: str, work: Path, seed: int = 0,
-    per_source: int = DEEP_WINDOWS, workers: int = 1,
+    per_source: int = DEEP_WINDOWS, workers: int = 1, window: int = WINDOW,
 ) -> dict[str, Any]:
     """Cut a bank of `sources` under `work`, named by `label`, `split` and a
     hash of what went into it. A source is a deep stack (`{"input": row}`)
@@ -632,7 +636,7 @@ def cut(
     pairs = "target" in sources[0]
     if any(("target" in source) != pairs for source in sources):
         raise ValueError("a bank holds deep stacks or pairs, not both")
-    parts = [BANK_VERSION, label, split, seed, WINDOW, STAMP, per_source, SATURATION_GROW, ALIGNMENT_PX] + [
+    parts = [BANK_VERSION, label, split, seed, window, STAMP, per_source, SATURATION_GROW, ALIGNMENT_PX] + [
         [source["input"]["id"], source.get("target", {}).get("id"), source.get("match", False), source.get("gain"),
          source.get("judge", False), source.get("record", {})] for source in sources]
     name = f"sharpen-{label}-{split}-" + hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()[:16]
@@ -640,15 +644,15 @@ def cut(
     checkpoint = directory / "progress.json"
     progress = json.loads(checkpoint.read_text()) if checkpoint.exists() else None
     capacity = len(sources) * per_source
-    bank = Bank(directory, pairs=pairs, capacity=capacity, resume=progress and progress["bank"])
+    bank = Bank(directory, pairs=pairs, capacity=capacity, resume=progress and progress["bank"], window=window)
     if progress and not bank.done and not bank.resumed:
         # A cut whose files are gone starts again.
         progress = None
-        bank = Bank(directory, pairs=pairs, capacity=capacity)
+        bank = Bank(directory, pairs=pairs, capacity=capacity, window=window)
     if not bank.done:
         start = progress["sources"] if progress else 0
         dropped = list(progress["dropped"]) if progress else []
-        prepare = functools.partial(prepared, str(store.root), str(store.scratch), seed, per_source)
+        prepare = functools.partial(prepared, str(store.root), str(store.scratch), seed, per_source, window=window)
         rest = sources[start:]
         recorded = began = time.monotonic()
         for done, (source, result) in enumerate(zip(rest, in_order(prepare, rest, workers)), start=start + 1):

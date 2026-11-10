@@ -231,6 +231,7 @@ def main(argv: list[str] | None = None) -> int:
                               "~/.cache/seiza-training/sharpen)")
     sharpen.add_argument("--workers", type=int, default=4, help="read and prepare this many sources at once")
     sharpen.add_argument("--seed", type=int, default=0)
+    sharpen.add_argument("--window", type=int, default=320, help="the windows' side in pixels")
     sharpen.add_argument("--deep-windows", type=int, default=40, help="windows of each deep stack")
     sharpen.add_argument("--pair-windows", type=int, default=160, help="windows of each seeing pair")
     sharpen.add_argument("--limit", type=int, help="at most this many sources a bank, for a trial cut")
@@ -409,6 +410,7 @@ def main(argv: list[str] | None = None) -> int:
                           help="the factors each mosaic is brought down by")
     external.add_argument("--windows", type=int, default=120, help="windows of each mosaic at each factor")
     external.add_argument("--seed", type=int, default=0)
+    external.add_argument("--window", type=int, default=320, help="the windows' side in pixels")
     external.add_argument("--limit", type=int, help="at most this many mosaics, for a trial cut")
     external.add_argument("--workers", type=int, default=1, help="mosaics read and brought down at once")
     external.add_argument("--telescope", default="external", help="what the bank's sources are recorded as from")
@@ -642,7 +644,7 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
                     found[f"{name}:{split}"] = {"sources": 0, "left": left}
                     continue
                 banked = sharpen_bank.cut(store, sources, label=name, split=split, work=work, seed=arguments.seed,
-                                          per_source=per_source, workers=arguments.workers)
+                                          per_source=per_source, workers=arguments.workers, window=arguments.window)
                 found[f"{name}:{split}"] = {"directory": str(banked["directory"]), "left": left,
                                             **{key: banked["done"][key] for key in ("windows", "sources", "dropped",
                                                                                     "summary")}}
@@ -712,7 +714,7 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
         banked = sharpen_external.cut(arguments.root, arguments.work or store.scratch.parent / "sharpen",
                                       bins=arguments.bins, per_source=arguments.windows, seed=arguments.seed,
                                       limit=arguments.limit, workers=arguments.workers,
-                                      telescope=arguments.telescope)
+                                      telescope=arguments.telescope, window=arguments.window)
         return {"directory": str(banked["directory"]),
                 **{key: banked["done"][key] for key in ("windows", "sources", "dropped", "summary")}}
     if arguments.command == "clean-sharpen":
