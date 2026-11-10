@@ -340,6 +340,13 @@ class LossSettings:
     gradient_weight: float = 0.1
     gradient_scales: tuple[int, ...] = (1, 2, 4)
     flux_weight: float = 0.1
+    # The weight of the edge term: the share of the target's gradient, each
+    # smoothed by `EDGE_SMOOTH` px, that the output falls short of along the
+    # target's own, away from the listed stars. The other terms pull a run
+    # toward the middle of what its input allows, and on held-out
+    # known-kernel windows runs gave 0.6 to 0.75 of their targets' edge
+    # gain; this one counts falling short only. 0: no such term.
+    edge_weight: float = 0.0
 
 
 # Banks.
@@ -1712,7 +1719,47 @@ def loss_terms(residual: torch.Tensor, batch: dict[str, torch.Tensor], settings:
     # than the pixel term pulls its own, and no star was ever sharpened.
     flux = (charbonnier(scores, epsilon) * areas[:, 1:]).sum() / valid.sum().clamp(min=1.0)
     total = pixel + settings.gradient_weight * gradient + settings.flux_weight * flux
-    return {"total": total, "pixel": pixel, "gradient": gradient, "flux": flux}
+    terms_out = {"pixel": pixel, "gradient": gradient, "flux": flux}
+    if settings.edge_weight > 0:
+        edge = edge_shortfall(output, batch["target"], valid * (batch["labels"].reshape(valid.shape) == 0))
+        total = total + settings.edge_weight * edge
+        terms_out["edge"] = edge
+    return {"total": total, **terms_out}
+
+
+# The edge term's smoothing, in σ px, and the gradient of the smoothed
+# target, in σ̄ a pixel, at which a pixel counts half as an edge: the
+# passed-through noise alone gives about a tenth.
+EDGE_SMOOTH = 1.5
+EDGE_KNEE = 0.2
+
+
+def smoothed_gradient(plane: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """The gradient (across, down) of `plane` smoothed by `EDGE_SMOOTH`."""
+    reach = int(math.ceil(3 * EDGE_SMOOTH))
+    taps = torch.exp(-0.5 * (torch.arange(-reach, reach + 1, device=plane.device, dtype=plane.dtype) / EDGE_SMOOTH) ** 2)
+    taps = taps / taps.sum()
+    pad = torch.nn.functional.pad
+    smooth = torch.nn.functional.conv2d(pad(plane, (reach, reach, 0, 0), mode="reflect"), taps.view(1, 1, 1, -1))
+    smooth = torch.nn.functional.conv2d(pad(smooth, (0, 0, reach, reach), mode="reflect"), taps.view(1, 1, -1, 1))
+    across = (smooth[..., :, 2:] - smooth[..., :, :-2])[..., 1:-1, :] / 2
+    down = (smooth[..., 2:, :] - smooth[..., :-2, :])[..., :, 1:-1] / 2
+    return across, down
+
+
+def edge_shortfall(output: torch.Tensor, target: torch.Tensor, where: torch.Tensor) -> torch.Tensor:
+    """The share of the target's smoothed gradient the output falls short
+    of along the target's own direction, over the pixels of `where` weighed
+    by how much of an edge each is (`EDGE_KNEE`). Going past the target
+    costs nothing here."""
+    target_across, target_down = smoothed_gradient(target)
+    size = torch.sqrt(target_across**2 + target_down**2 + 1e-12)
+    error_across, error_down = smoothed_gradient((output - target) * where)
+    along = (error_across * target_across + error_down * target_down) / size
+    reach = int(math.ceil(3 * EDGE_SMOOTH))
+    inside = -torch.nn.functional.max_pool2d(-where.float(), 2 * reach + 1, stride=1, padding=reach)[..., 1:-1, 1:-1]
+    weight = inside * size / (size + EDGE_KNEE)
+    return (weight * torch.relu(-along)).sum() / (weight * size).sum().clamp(min=1e-6)
 
 
 # Training.

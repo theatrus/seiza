@@ -942,3 +942,15 @@ def test_the_commands_train_stop_resume_and_evaluate_from_the_banks_they_find(tm
     assert measured["kernel:deep"]["windows"] == 3 and measured["kernel:deep"]["identity"]["windows"] == 1
     saved = json.loads((tmp_path / "store" / "models" / "sharpen" / "cli" / "run.json").read_text())
     assert list(saved["evaluations"]) == ["kernel:deep, seeing:seeing, limit 3"]
+
+
+def test_the_edge_term_counts_falling_short_only():
+    import torch
+
+    from seiza_training.sharpen_model import edge_shortfall
+
+    ramp = torch.linspace(0.0, 64.0, 64).view(1, 1, 1, 64).expand(1, 1, 64, 64).contiguous()
+    where = torch.ones_like(ramp)
+    assert float(edge_shortfall(ramp, ramp, where)) < 1e-6
+    assert float(edge_shortfall(1.5 * ramp, ramp, where)) < 1e-6
+    assert abs(float(edge_shortfall(0.5 * ramp, ramp, where)) - 0.5) < 0.02

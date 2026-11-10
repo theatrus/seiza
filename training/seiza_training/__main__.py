@@ -357,6 +357,9 @@ def main(argv: list[str] | None = None) -> int:
                                default=(1, 2, 4), help="the blocks the gradient term averages the error over")
     sharpen_train.add_argument("--flux-weight", type=float, default=0.1,
                                help="the weight of the point sources' aperture flux term")
+    sharpen_train.add_argument("--edge-weight", type=float, default=0.0,
+                               help="the weight of the edge term: the share of the target's smoothed gradient the "
+                                    "output falls short of, away from the listed stars (0: none)")
     sharpen_train.add_argument("--clip-grad", type=float, default=1.0,
                                help="scale each step's gradient down to this norm where it is longer (0: never)")
     sharpen_train.add_argument("--rewind", type=float, default=2.0,
@@ -750,7 +753,8 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
         round_target=arguments.round_target, denoised=arguments.denoised, reblur=arguments.reblur)
     loss = sharpen_model.LossSettings(epsilon=arguments.charbonnier, noise_cap=arguments.noise_cap,
                                       gradient_weight=arguments.gradient_weight,
-                                      gradient_scales=arguments.gradient_scales, flux_weight=arguments.flux_weight)
+                                      gradient_scales=arguments.gradient_scales, flux_weight=arguments.flux_weight,
+                                      edge_weight=arguments.edge_weight)
     choice = sharpen_model.BankChoice(
         kernel=str(arguments.kernel_bank or sharpen_model.find_bank(work, "deep", "train")),
         seeing=tuple(str(path) for path in arguments.seeing_banks or [sharpen_model.find_bank(work, "seeing", "train")]),
