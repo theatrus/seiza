@@ -1395,6 +1395,21 @@ nebulae.
   better only well under 1.7. With stars 11.5 px across nothing real is
   1 to 4 px wide there. On the California the runs and the reference
   are level (2.7%).
+  - It came with the widest blur. The small runs blurred up to twice
+    read 0.8 to 1.2% (the reference's 1.0%); of two alike but for the
+    widest blur, 2 and 3, the second reads 2.0% against 0.95%; every
+    larger run, all blurred up to 3, reads 1.7 to 3.3%. A wider small
+    run blurred up to 2 (64 wide, 60,000 steps) reads 0.8% with rims
+    rising over 4.18 px, where the larger run turned down to that
+    sharpness (the rest asked for 0.6) still reads 1.3%. By the larger
+    run's ask of the rest: 1.0% at 0.7, 1.3% at 0.6, 1.8% at 0.5, 2.5%
+    at 0.4.
+  - Clean truth does not mend it (3.1%), nor the halo (3.3%), nor the
+    edge term kept off stars (2.9%).
+  - A blur of 3 is there for the stars, which are asked for under half
+    their width; it also asks what is not a star for a third of its
+    width. `--rest-floor RATIO` keeps the rest's ask at RATIO or above
+    in known-kernel windows whatever their stars are asked.
 - **Grain on images denoised first.** On noisy images the runs' grain is
   the reference's, in sky, nebula, bright nebula and along rims. On
   images denoised first it is not: along the California's rims the
@@ -1420,6 +1435,8 @@ In order, each only if the one before leaves a gap at the rims:
    - a halo of up to 0.3 on the known-kernel windows;
    - clean truth for 0.7 of the native windows;
    - contrast of 2 with that clean truth;
+   - the rest's ask floored at 0.5, and the widest blur back at 2, each
+     on the recipe with the shape term alone, for the speckle;
    - then what holds of them together, and the bank of brought-down
      stacks, which took a third of the narrow stars' flux gain off.
 2. **Noisy space-telescope windows** (`--external-snr`) at more weight,

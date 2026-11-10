@@ -341,6 +341,17 @@ class Settings:
     # enhancement, not a restoration: the target is no longer the truth.
     # 0: none.
     contrast: float = 0.0
+    # The least share of its input's width that the rest of a
+    # known-kernel window is asked for, however sharp its stack allows
+    # and whatever is asked of its stars. Windows blurred up to three
+    # times, which the stars need to be brought to under half their
+    # width, also ask what is not a star for a third of its width, and
+    # the runs trained so break a lit rim into knots: of two small runs
+    # alike but for the widest blur (2 and 3), the second had twice the
+    # knots along the Trunk's rims (2.0% of pixels against 0.95%), and
+    # every larger run, all blurred up to 3, has 1.7 to 3.3%
+    # (2026-11-10). 0: no floor.
+    rest_floor: float = 0.0
 
     @property
     def planes(self) -> tuple[str, ...]:
@@ -1436,6 +1447,8 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
 
         ratio = drawn()
         nonstellar_ratio = ratio if rng.random() < settings.equal_share else drawn()
+        if settings.rest_floor > 0:
+            nonstellar_ratio = min(1.0, max(nonstellar_ratio, settings.rest_floor))
         blurs = [target_blur(stamp, kernel, value) for value in (ratio, nonstellar_ratio)]
         if halo is None:
             blurred, stars, rest = blurred_images(signal, [kernel.blur, *blurs])

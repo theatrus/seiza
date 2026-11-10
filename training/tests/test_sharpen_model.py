@@ -230,6 +230,16 @@ def test_stars_and_the_rest_are_each_brought_to_the_ratio_asked_of_them(tmp_path
         assert width(example.target) / width(example.image) == pytest.approx(example.ratio, rel=0.06)
         seen += 1
     assert seen >= 3
+    # With a floor, the rest is never asked for less, whatever its stars
+    # are; the stars still follow their own.
+    floored = sm.Settings(tile=32, exposure=1.0, kernel_noise=0.0, nonstellar=True, equal_share=1.0,
+                          kernel_ratios=(2.5, 3.0), rest_floor=0.7)
+    for seed in range(4):
+        example = sm.kernel_example(bank, 0, np.random.default_rng(seed), floored, identity=False)
+        assert example.nonstellar_ratio >= 0.7 and example.ratio >= example.details["sharpest"]
+        if example.ratio < 0.6:
+            assert example.nonstellar_ratio == 0.7
+            assert width(example.target) / width(example.image) == pytest.approx(example.ratio, rel=0.06)
     # One ratio for a run without them, as before.
     single = sm.kernel_example(bank, 0, np.random.default_rng(0), sm.Settings(tile=32), identity=False)
     assert single.nonstellar_ratio is None and single.ratios(sm.Settings()) == single.ratio
