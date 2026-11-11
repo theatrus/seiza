@@ -568,6 +568,17 @@ typedef struct {
 typedef void (*SeizaModelProgressCallback)(size_t, size_t, size_t, size_t, void*);
 
 /*
+ Told of each step of a model download, on the downloading thread: one
+ event as JSON, valid only for the duration of the call, and the caller's
+ context. The event's kind is under `event` (`fetching-manifest`,
+ `using-cached-manifest`, `cache-hit`, `download-started`,
+ `download-progress`, `download-complete`, `installing`, `verifying`,
+ `install-complete`), beside its fields: a transfer's `name`, `downloaded`
+ and `total` bytes on the wire, and `written` bytes once decompressed.
+ */
+typedef void (*SeizaModelDownloadProgressCallback)(const char*, void*);
+
+/*
  Progress for the parallax functions: one event as JSON, valid only for
  the call, plus the caller's context pointer. Events are
  `{"kind":"note","message":...}` for a step done or a choice made,
@@ -5072,6 +5083,33 @@ char *seiza_model_list_json(const char *store, char **error_out);
  non-null, `error_out` must point to writable storage for one pointer.
  */
 char *seiza_model_install_json(const char *source, const char *store, char **error_out);
+
+/*
+ Download the model `name` that Seiza's hosted manifest offers, or with
+ `name` null the latest noise model it names, and install it, replacing any
+ model of its name, once its card matches the manifest and its graphs match
+ its card. Returns the model as [`seiza_model_list_json`] describes it, as
+ JSON the caller frees with `seiza_string_free`. `store` may be null for the
+ default store. `options_json` may be null, or hold `baseUrl`, another copy
+ of the hosted models, and `cacheDir`, where downloads are kept. `progress`,
+ when non-null, hears each step as [`SeizaModelDownloadProgressCallback`]
+ describes.
+
+ The call is synchronous and must run off the UI thread. It builds its own
+ Tokio runtime, so it must not be called from a thread already inside one;
+ doing so panics, which this call catches and returns through `error_out`.
+
+ # Safety
+ `name`, `store` and `options_json` must be null or NUL-terminated strings.
+ `context` is passed through untouched to `progress`. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_model_download_json(const char *name,
+                                const char *store,
+                                const char *options_json,
+                                SeizaModelDownloadProgressCallback progress,
+                                void *context,
+                                char **error_out);
 
 /*
  Check a model's graphs against its card. `model` is as for

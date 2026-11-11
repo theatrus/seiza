@@ -5,15 +5,18 @@
 //! The [`SeizaDenoised`] that returns keeps what the model found, so
 //! [`seiza_denoised_blend`] chooses how much noise to keep with no second
 //! inference. [`seiza_model_backends_json`] says which backends run here and
-//! why the others do not.
+//! why the others do not, and [`seiza_model_download_json`] installs a model
+//! Seiza publishes.
 
 use super::{
     SeizaCancelSignal, clear_error, ffi_result, optional_path, owned_json, required_f32_slice,
     required_f32_slice_mut, required_path, required_str,
 };
+use seiza::downloads::{CachePolicy, DownloadEvent, ModelManager};
 use seiza_model::{
     Backend, BackendOptions, DenoiseOptions, DenoiseReport, Denoised, HoleGuard, ImageView,
-    ModelBundle, ModelStore, NoiseBands, NoiseModel, Precision, Progress, runtime_info,
+    ModelBundle, ModelStore, NoiseBands, NoiseModel, Precision, Progress, Published, Task,
+    runtime_info,
 };
 use serde::{Deserialize, Serialize};
 use std::ffi::{CString, c_char, c_void};
@@ -533,6 +536,109 @@ pub unsafe extern "C" fn seiza_model_install_json(
     .unwrap_or(ptr::null_mut())
 }
 
+/// Where a hosted model is fetched from. Both fields may be left out.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields, default)]
+struct ModelDownloadRequest {
+    base_url: Option<String>,
+    cache_dir: Option<PathBuf>,
+}
+
+impl ModelDownloadRequest {
+    fn parse(json: *const c_char) -> Result<Self, String> {
+        if json.is_null() {
+            return Ok(Self::default());
+        }
+        let json = required_str(json, "download options")?;
+        if json.is_empty() {
+            return Ok(Self::default());
+        }
+        serde_json::from_str(&json).map_err(|error| format!("invalid download options: {error}"))
+    }
+
+    fn manager(self) -> Result<ModelManager, String> {
+        let mut builder = ModelManager::builder().policy(CachePolicy::ForceRefresh);
+        if let Some(base_url) = self.base_url {
+            builder = builder.base_url(base_url);
+        }
+        if let Some(cache_dir) = self.cache_dir {
+            builder = builder.cache_dir(cache_dir);
+        }
+        builder.build().map_err(|error| error.to_string())
+    }
+}
+
+/// Told of each step of a model download, on the downloading thread: one
+/// event as JSON, valid only for the duration of the call, and the caller's
+/// context. The event's kind is under `event` (`fetching-manifest`,
+/// `using-cached-manifest`, `cache-hit`, `download-started`,
+/// `download-progress`, `download-complete`, `installing`, `verifying`,
+/// `install-complete`), beside its fields: a transfer's `name`, `downloaded`
+/// and `total` bytes on the wire, and `written` bytes once decompressed.
+pub type SeizaModelDownloadProgressCallback =
+    Option<unsafe extern "C" fn(*const c_char, *mut c_void)>;
+
+#[unsafe(no_mangle)]
+/// Download the model `name` that Seiza's hosted manifest offers, or with
+/// `name` null the latest noise model it names, and install it, replacing any
+/// model of its name, once its card matches the manifest and its graphs match
+/// its card. Returns the model as [`seiza_model_list_json`] describes it, as
+/// JSON the caller frees with `seiza_string_free`. `store` may be null for the
+/// default store. `options_json` may be null, or hold `baseUrl`, another copy
+/// of the hosted models, and `cacheDir`, where downloads are kept. `progress`,
+/// when non-null, hears each step as [`SeizaModelDownloadProgressCallback`]
+/// describes.
+///
+/// The call is synchronous and must run off the UI thread. It builds its own
+/// Tokio runtime, so it must not be called from a thread already inside one;
+/// doing so panics, which this call catches and returns through `error_out`.
+///
+/// # Safety
+/// `name`, `store` and `options_json` must be null or NUL-terminated strings.
+/// `context` is passed through untouched to `progress`. When non-null,
+/// `error_out` must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_model_download_json(
+    name: *const c_char,
+    store: *const c_char,
+    options_json: *const c_char,
+    progress: SeizaModelDownloadProgressCallback,
+    context: *mut c_void,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let name = if name.is_null() {
+            None
+        } else {
+            Some(required_str(name, "name")?)
+        };
+        let model = match &name {
+            Some(name) => Published::Named(name),
+            None => Published::Latest(Task::Denoise),
+        };
+        let store = store_at(optional_path(store)?)?;
+        let manager = ModelDownloadRequest::parse(options_json)?.manager()?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| format!("failed to start the model download runtime: {error}"))?;
+        let context = context as usize;
+        let report = move |event: DownloadEvent| {
+            let Some(callback) = progress else { return };
+            let Ok(json) = serde_json::to_string(&event) else {
+                return;
+            };
+            let Ok(json) = CString::new(json) else { return };
+            unsafe { callback(json.as_ptr(), context as *mut c_void) };
+        };
+        let bundle = runtime
+            .block_on(store.download(&manager, model, report))
+            .map_err(|error| error.to_string())?;
+        owned_json(&InstalledModelResponse::from(&bundle))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
 #[unsafe(no_mangle)]
 /// Check a model's graphs against its card. `model` is as for
 /// [`seiza_noise_model_open`]; `store` may be null for the default store.
@@ -678,6 +784,157 @@ mod tests {
             assert!(!error.is_null(), "a second removal is an error");
             assert!(taken(error).contains("noise-tiny"));
         }
+    }
+
+    /// Serve a model manifest offering the tiny fixture model, and its files,
+    /// for `requests` requests.
+    fn serve_tiny(requests: usize) -> (String, std::thread::JoinHandle<()>) {
+        use seiza::downloads::bundle::sha256_hex;
+        use seiza::downloads::{HostedModel, ManifestFile, ModelManifest};
+        use std::io::{Read, Write};
+
+        let mut routes = Vec::new();
+        let mut files = Vec::new();
+        for file in ["card.json", "model-f32.onnx", "model-f16.onnx"] {
+            let bytes = std::fs::read(fixtures().join("tiny").join(file)).unwrap();
+            let sha256 = sha256_hex(&bytes);
+            let key = format!("artifacts/{sha256}/{file}");
+            files.push(ManifestFile {
+                name: file.to_string(),
+                key: Some(key.clone()),
+                bytes: bytes.len() as u64,
+                sha256,
+            });
+            routes.push((key, bytes));
+        }
+        let manifest = ModelManifest {
+            version: "model-bundle-v1-test".to_string(),
+            latest: [("denoise".to_string(), "noise-tiny".to_string())].into(),
+            models: vec![HostedModel {
+                name: "noise-tiny".to_string(),
+                files,
+                extras: Vec::new(),
+                transports: Vec::new(),
+            }],
+        };
+        routes.push((
+            "manifest.json".to_string(),
+            serde_json::to_vec(&manifest).unwrap(),
+        ));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for _ in 0..requests {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 4096];
+                let read = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..read]);
+                let (_, body) = routes
+                    .iter()
+                    .find(|(path, _)| request.starts_with(&format!("GET /{path} ")))
+                    .unwrap_or_else(|| panic!("unexpected request: {request}"));
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(body).unwrap();
+            }
+        });
+        (format!("http://{address}"), server)
+    }
+
+    #[test]
+    fn a_hosted_model_downloads_and_installs() {
+        unsafe extern "C" fn record(json: *const c_char, context: *mut c_void) {
+            let events = unsafe { &*(context as *const std::sync::Mutex<Vec<Value>>) };
+            let json = unsafe { CStr::from_ptr(json) }.to_str().unwrap();
+            events
+                .lock()
+                .unwrap()
+                .push(serde_json::from_str(json).unwrap());
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        // The manifest and three files, then the manifest again, twice.
+        let (url, server) = serve_tiny(6);
+        let store = text(&temp.path().join("store"));
+        let options = CString::new(
+            serde_json::json!({
+                "baseUrl": url,
+                "cacheDir": temp.path().join("cache"),
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let name = CString::new("noise-tiny").unwrap();
+        let other = CString::new("noise-other").unwrap();
+        let events = std::sync::Mutex::new(Vec::<Value>::new());
+        let mut error = ptr::null_mut();
+        unsafe {
+            // No name: the latest noise model the manifest names.
+            let installed = seiza_model_download_json(
+                ptr::null(),
+                store.as_ptr(),
+                options.as_ptr(),
+                Some(record),
+                &events as *const _ as *mut c_void,
+                &mut error,
+            );
+            assert!(error.is_null(), "{}", taken(error));
+            let installed: Value = serde_json::from_str(&taken(installed)).unwrap();
+            assert_eq!(installed["name"], "noise-tiny");
+            assert_eq!(installed["precisions"], serde_json::json!(["f32", "f16"]));
+            assert!(seiza_model_verify(
+                name.as_ptr(),
+                store.as_ptr(),
+                &mut error
+            ));
+            let events = events.into_inner().unwrap();
+            let kinds: Vec<&str> = events
+                .iter()
+                .map(|event| event["event"].as_str().unwrap())
+                .collect();
+            assert_eq!(kinds.first(), Some(&"fetching-manifest"));
+            assert_eq!(kinds.last(), Some(&"install-complete"));
+            assert!(
+                events
+                    .iter()
+                    .any(|event| event["event"] == "download-started"
+                        && event["name"] == "model-f32.onnx"
+                        && event["bytes"].as_u64().is_some()),
+                "{events:?}"
+            );
+
+            // By name, with no callback.
+            let again = seiza_model_download_json(
+                name.as_ptr(),
+                store.as_ptr(),
+                options.as_ptr(),
+                None,
+                ptr::null_mut(),
+                &mut error,
+            );
+            assert!(error.is_null(), "{}", taken(error));
+            taken(again);
+
+            let missing = seiza_model_download_json(
+                other.as_ptr(),
+                store.as_ptr(),
+                options.as_ptr(),
+                None,
+                ptr::null_mut(),
+                &mut error,
+            );
+            assert!(missing.is_null());
+            let message = taken(error);
+            assert!(
+                message.contains("noise-other") && message.contains("noise-tiny"),
+                "the error names the model asked for and those offered: {message}"
+            );
+        }
+        server.join().unwrap();
     }
 
     #[test]

@@ -24,11 +24,27 @@ pub enum Error {
     #[error("{url} returned HTTP {status}")]
     HttpStatus { url: String, status: u16 },
 
-    #[error("catalog bundle manifest is invalid: {0}")]
+    #[error("hosted manifest is invalid: {0}")]
     Manifest(String),
 
-    #[error("catalog bundle manifest is not valid JSON: {0}")]
+    #[error("hosted manifest is not valid JSON: {0}")]
     ManifestJson(#[from] serde_json::Error),
+
+    /// The model manifest offers no model of this name.
+    #[error("no hosted model is named {name}; the manifest offers: {}", offered.join(", "))]
+    ModelNotOffered {
+        /// The name asked for.
+        name: String,
+        /// The models the manifest offers.
+        offered: Vec<String>,
+    },
+
+    /// The model manifest names no latest model for this task.
+    #[error("the hosted manifest names no latest {task} model")]
+    NoLatestModel {
+        /// The task asked for, as cards spell it.
+        task: String,
+    },
 
     #[error("offline mode requires a cached bundle manifest at {}", .0.display())]
     CachedManifestUnavailable(PathBuf),
@@ -47,7 +63,7 @@ pub enum Error {
         actual: String,
     },
 
-    #[error("catalog bundle does not contain {0}")]
+    #[error("{0} is not among the downloaded files")]
     MissingArtifact(String),
 
     #[error("background cache task failed: {0}")]

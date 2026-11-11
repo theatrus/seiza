@@ -1,15 +1,14 @@
-use crate::bundle::{self, ArtifactSpec, EncodedSpec, Encoding, TransferEvent};
+use crate::bundle;
 use crate::error::io;
+use crate::hosted::{Hosted, HostedManifest, scoped_manifest_file};
 use crate::{
     BundleManifestDocument, CatalogSet, DEFAULT_BUNDLE_BASE_URL, Dataset, Error,
-    LEGACY_V2_BUNDLE_BASE_URL, ManifestFile, ManifestTransport, Result,
+    LEGACY_V2_BUNDLE_BASE_URL, Result,
 };
-use directories::ProjectDirs;
-use fs2::FileExt;
+use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
-use tokio::io::AsyncWriteExt;
+use std::time::Duration;
 
 /// Controls when the small hosted bundle manifest may use the cached copy.
 /// Catalog artifacts themselves are immutable and content-addressed.
@@ -34,7 +33,12 @@ impl Default for CachePolicy {
 
 /// Observable cache and transfer activity. Libraries do not print; callers
 /// can translate these events into logs, progress bars, or UI state.
-#[derive(Clone, Debug, Eq, PartialEq)]
+///
+/// It serializes with its kind under `event`, spelt in kebab case, beside its
+/// fields: `{"event": "download-progress", "name": …, "downloaded": …}`. The
+/// C ABI and Python hand that to a host's progress callback.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "event", rename_all = "kebab-case")]
 pub enum DownloadEvent {
     FetchingManifest {
         url: String,
@@ -260,23 +264,15 @@ impl CatalogManagerBuilder {
     }
 
     pub fn build(self) -> Result<CatalogManager> {
-        let cache_dir = self
-            .cache_dir
-            .or_else(|| std::env::var_os("SEIZA_CACHE_DIR").map(PathBuf::from))
-            .or_else(|| {
-                ProjectDirs::from("fyi", "Seiza", "seiza")
-                    .map(|dirs| dirs.cache_dir().join("catalogs"))
-            })
-            .ok_or(Error::CacheDirectoryUnavailable)?;
-        let client = bundle::http_client(
-            format!("seiza-download/{}", env!("CARGO_PKG_VERSION")),
-            Duration::from_secs(300),
-        )?;
+        let manifest_file = manifest_cache_file_name(&self.base_url);
         Ok(CatalogManager {
-            cache_dir,
-            base_url: self.base_url,
-            policy: self.policy,
-            client,
+            hosted: Hosted::new(
+                self.cache_dir,
+                "catalogs",
+                self.base_url,
+                self.policy,
+                manifest_file,
+            )?,
         })
     }
 }
@@ -284,10 +280,7 @@ impl CatalogManagerBuilder {
 /// Async manager for hosted manifests and immutable catalog artifacts.
 #[derive(Clone, Debug)]
 pub struct CatalogManager {
-    cache_dir: PathBuf,
-    base_url: String,
-    policy: CachePolicy,
-    client: reqwest::Client,
+    hosted: Hosted,
 }
 
 impl CatalogManager {
@@ -296,7 +289,7 @@ impl CatalogManager {
     }
 
     pub fn cache_dir(&self) -> &Path {
-        &self.cache_dir
+        &self.hosted.cache_dir
     }
 
     pub async fn ensure(&self, set: &CatalogSet) -> Result<CatalogBundle> {
@@ -307,13 +300,13 @@ impl CatalogManager {
     where
         F: Fn(DownloadEvent) + Send + Sync,
     {
-        let manifest = self.load_manifest(&report).await?;
+        let manifest: BundleManifestDocument = self.hosted.load_manifest(&report).await?;
         let plan = manifest.manifest.plan(set)?;
         let mut artifacts = BTreeMap::new();
 
         for file in plan {
             let transport = manifest.preferred_transport(&file.name);
-            let path = self.ensure_file(&file, transport, &report).await?;
+            let path = self.hosted.ensure_file(&file, transport, &report).await?;
             artifacts.insert(
                 file.name.clone(),
                 CatalogArtifact {
@@ -330,296 +323,15 @@ impl CatalogManager {
             artifacts,
         })
     }
+}
 
-    async fn load_manifest<F>(&self, report: &F) -> Result<BundleManifestDocument>
-    where
-        F: Fn(DownloadEvent) + Send + Sync,
-    {
-        let cached = self.manifest_path();
-        match self.policy {
-            CachePolicy::OfflineOnly => {
-                let manifest = self
-                    .read_cached_manifest()
-                    .await?
-                    .ok_or_else(|| Error::CachedManifestUnavailable(cached))?;
-                report(DownloadEvent::UsingCachedManifest {
-                    version: manifest.manifest.version.clone(),
-                    stale: false,
-                });
-                Ok(manifest)
-            }
-            CachePolicy::PreferCached => {
-                if let Ok(Some(manifest)) = self.read_cached_manifest().await {
-                    report(DownloadEvent::UsingCachedManifest {
-                        version: manifest.manifest.version.clone(),
-                        stale: false,
-                    });
-                    Ok(manifest)
-                } else {
-                    self.fetch_manifest(report).await
-                }
-            }
-            CachePolicy::ForceRefresh => self.fetch_manifest(report).await,
-            CachePolicy::RefreshIfOlderThan(max_age) => {
-                if self.cached_manifest_is_fresh(max_age).await?
-                    && let Ok(Some(manifest)) = self.read_cached_manifest().await
-                {
-                    report(DownloadEvent::UsingCachedManifest {
-                        version: manifest.manifest.version.clone(),
-                        stale: false,
-                    });
-                    return Ok(manifest);
-                }
-                match self.fetch_manifest(report).await {
-                    Ok(manifest) => Ok(manifest),
-                    Err(fetch_error) => match self.read_cached_manifest().await {
-                        Ok(Some(manifest)) => {
-                            report(DownloadEvent::UsingCachedManifest {
-                                version: manifest.manifest.version.clone(),
-                                stale: true,
-                            });
-                            Ok(manifest)
-                        }
-                        _ => Err(fetch_error),
-                    },
-                }
-            }
-        }
+impl HostedManifest for BundleManifestDocument {
+    fn parse(json: &[u8]) -> Result<Self> {
+        BundleManifestDocument::parse(json)
     }
 
-    async fn cached_manifest_is_fresh(&self, max_age: Duration) -> Result<bool> {
-        let path = self.manifest_path();
-        let metadata = match tokio::fs::metadata(&path).await {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(source) => return Err(io("read metadata for", path, source)),
-        };
-        let modified = metadata
-            .modified()
-            .map_err(|source| io("read modification time for", &path, source))?;
-        Ok(SystemTime::now()
-            .duration_since(modified)
-            .map_or(true, |age| age <= max_age))
-    }
-
-    async fn read_cached_manifest(&self) -> Result<Option<BundleManifestDocument>> {
-        let path = self.manifest_path();
-        let bytes = match tokio::fs::read(&path).await {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(source) => return Err(io("read", path, source)),
-        };
-        BundleManifestDocument::parse(&bytes).map(Some)
-    }
-
-    async fn fetch_manifest<F>(&self, report: &F) -> Result<BundleManifestDocument>
-    where
-        F: Fn(DownloadEvent) + Send + Sync,
-    {
-        let url = format!("{}/manifest.json", self.base_url);
-        report(DownloadEvent::FetchingManifest { url: url.clone() });
-        let response = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|source| Error::Http {
-                url: url.clone(),
-                source,
-            })?;
-        if !response.status().is_success() {
-            return Err(Error::HttpStatus {
-                url,
-                status: response.status().as_u16(),
-            });
-        }
-        let bytes = response.bytes().await.map_err(|source| Error::Http {
-            url: url.clone(),
-            source,
-        })?;
-        let manifest = BundleManifestDocument::parse(&bytes)?;
-        self.write_cached_manifest(&bytes).await?;
-        Ok(manifest)
-    }
-
-    async fn write_cached_manifest(&self, bytes: &[u8]) -> Result<()> {
-        let path = self.manifest_path();
-        let parent = path.parent().expect("manifest path has a parent");
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|source| io("create directory", parent, source))?;
-        let temp = parent.join(format!(
-            ".{}.part-{}-{}",
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("catalog-manifest.json"),
-            std::process::id(),
-            bundle::next_sequence()
-        ));
-        let write = async {
-            let mut output = tokio::fs::File::create(&temp)
-                .await
-                .map_err(|source| io("create", &temp, source))?;
-            output
-                .write_all(bytes)
-                .await
-                .map_err(|source| io("write", &temp, source))?;
-            output
-                .sync_all()
-                .await
-                .map_err(|source| io("sync", &temp, source))?;
-            drop(output);
-            bundle::replace_file(&temp, &path).await
-        }
-        .await;
-        if write.is_err() {
-            let _ = tokio::fs::remove_file(&temp).await;
-        }
-        write
-    }
-
-    async fn ensure_file<F>(
-        &self,
-        file: &ManifestFile,
-        transport: Option<&ManifestTransport>,
-        report: &F,
-    ) -> Result<PathBuf>
-    where
-        F: Fn(DownloadEvent) + Send + Sync,
-    {
-        let target = self.object_path(file);
-        if bundle::size_matches(&target, file.bytes).await? {
-            report(DownloadEvent::CacheHit {
-                name: file.name.clone(),
-                path: target.clone(),
-            });
-            return Ok(target);
-        }
-
-        // Lock only cache misses, then re-check after waiting. This avoids
-        // duplicate multi-gigabyte transfers across application processes.
-        let _lock = self.acquire_artifact_lock(file).await?;
-        if bundle::size_matches(&target, file.bytes).await? {
-            report(DownloadEvent::CacheHit {
-                name: file.name.clone(),
-                path: target.clone(),
-            });
-            return Ok(target);
-        }
-
-        let partial_dir = self.cache_dir.join("partial");
-        tokio::fs::create_dir_all(&partial_dir)
-            .await
-            .map_err(|source| io("create directory", &partial_dir, source))?;
-        let temp = partial_dir.join(format!(
-            "{}-{}-{}-{}.part",
-            file.sha256,
-            std::process::id(),
-            bundle::next_sequence(),
-            file.name
-        ));
-        let install = async {
-            self.download_file(file, transport, &temp, report).await?;
-
-            let parent = target.parent().expect("object path has a parent");
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|source| io("create directory", parent, source))?;
-            if bundle::size_matches(&target, file.bytes).await? {
-                tokio::fs::remove_file(&temp)
-                    .await
-                    .map_err(|source| io("remove", &temp, source))?;
-            } else {
-                bundle::replace_file(&temp, &target).await?;
-            }
-            Ok(())
-        }
-        .await;
-        if let Err(error) = install {
-            let _ = tokio::fs::remove_file(&temp).await;
-            return Err(error);
-        }
-        report(DownloadEvent::DownloadComplete {
-            name: file.name.clone(),
-            path: target.clone(),
-        });
-        Ok(target)
-    }
-
-    async fn download_file<F>(
-        &self,
-        file: &ManifestFile,
-        transport: Option<&ManifestTransport>,
-        temp: &Path,
-        report: &F,
-    ) -> Result<()>
-    where
-        F: Fn(DownloadEvent) + Send + Sync,
-    {
-        let url = match transport {
-            Some(transport) => format!("{}/{}", self.base_url, transport.key),
-            None => format!("{}/{}", self.base_url, file.artifact_key()),
-        };
-        let encoded = transport.map(|transport| EncodedSpec {
-            encoding: Encoding::Zstd,
-            bytes: transport.bytes,
-            sha256: &transport.sha256,
-        });
-        let spec = ArtifactSpec {
-            label: &file.name,
-            url: &url,
-            decoded_bytes: file.bytes,
-            decoded_sha256: &file.sha256,
-            encoded,
-        };
-        bundle::stream_to_temp(&self.client, &spec, temp, |event| match event {
-            TransferEvent::Started { total } => report(DownloadEvent::DownloadStarted {
-                name: file.name.clone(),
-                bytes: total,
-            }),
-            TransferEvent::Progress(progress) => report(DownloadEvent::DownloadProgress {
-                name: file.name.clone(),
-                downloaded: progress.downloaded,
-                total: progress.total,
-                written: progress.written,
-            }),
-        })
-        .await
-    }
-
-    fn manifest_path(&self) -> PathBuf {
-        self.cache_dir
-            .join("manifests")
-            .join(manifest_cache_file_name(&self.base_url))
-    }
-
-    fn object_path(&self, file: &ManifestFile) -> PathBuf {
-        self.cache_dir
-            .join("objects")
-            .join(&file.sha256)
-            .join(&file.name)
-    }
-
-    async fn acquire_artifact_lock(&self, file: &ManifestFile) -> Result<std::fs::File> {
-        let lock_dir = self.cache_dir.join("locks");
-        tokio::fs::create_dir_all(&lock_dir)
-            .await
-            .map_err(|source| io("create directory", &lock_dir, source))?;
-        let path = lock_dir.join(format!("{}.lock", file.sha256));
-        let task_path = path.clone();
-        tokio::task::spawn_blocking(move || {
-            let lock = std::fs::OpenOptions::new()
-                .create(true)
-                .read(true)
-                .truncate(false)
-                .write(true)
-                .open(&task_path)?;
-            FileExt::lock_exclusive(&lock)?;
-            Ok::<_, std::io::Error>(lock)
-        })
-        .await
-        .map_err(|error| Error::BackgroundTask(error.to_string()))?
-        .map_err(|source| io("lock", path, source))
+    fn version(&self) -> &str {
+        &self.manifest.version
     }
 }
 
@@ -631,14 +343,13 @@ fn manifest_cache_file_name(base_url: &str) -> String {
         // Preserve the v0.5 cache location for explicitly configured v2 use.
         return "catalog-bundle-v2.json".into();
     }
-    let digest = bundle::sha256_hex(base_url.as_bytes());
-    format!("catalog-bundle-{}.json", &digest[..16])
+    scoped_manifest_file("catalog-bundle", base_url)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::REQUIRED_BUNDLE_FILES;
+    use crate::{ManifestFile, ManifestTransport, REQUIRED_BUNDLE_FILES};
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
@@ -685,7 +396,7 @@ mod tests {
             .policy(CachePolicy::OfflineOnly)
             .build()
             .unwrap();
-        let manifest_path = manager.manifest_path();
+        let manifest_path = manager.hosted.manifest_path();
         std::fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
         std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
 
@@ -729,7 +440,7 @@ mod tests {
             .policy(CachePolicy::OfflineOnly)
             .build()
             .unwrap();
-        let manifest_path = manager.manifest_path();
+        let manifest_path = manager.hosted.manifest_path();
         std::fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
         std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         let entry = manifest

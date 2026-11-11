@@ -3512,11 +3512,13 @@ dependencies = [
  "libloading 0.9.0",
  "ort",
  "rayon",
+ "seiza-download",
  "serde",
  "serde_json",
  "sha2 0.11.1",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
