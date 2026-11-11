@@ -623,7 +623,7 @@ class StackOptions:
         minimum_integrated_fraction: float = 0.50,
         demosaic: str = "vng",
         match_tolerances: MatchTolerances | None = None,
-        registration_model: str = "similarity",
+        registration_model: str = "quadratic",
         weighting: str = "equal",
         defects: DefectMap | None = None,
         bin_factor: int = 1,

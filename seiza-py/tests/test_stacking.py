@@ -921,7 +921,8 @@ def overlapping_panels(tmp_path, width=192, height=160, step=112):
 
 
 def test_stack_options_choose_a_registration_model():
-    assert seiza.StackOptions().registration_model == "similarity"
+    assert seiza.StackOptions().registration_model == "quadratic"
+    assert seiza.StackOptions(registration_model="similarity").registration_model == "similarity"
     options = seiza.StackOptions(registration_model="quadratic")
     assert options.registration_model == "quadratic"
     with pytest.raises(ValueError, match="registration_model"):

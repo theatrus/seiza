@@ -582,6 +582,8 @@ fn a_binned_mosaic_reintegrates_at_full_resolution() {
             ..StackOptions::default()
         };
         options.acceptance.minimum_overlap_fraction = 0.1;
+        // Refinement refits similarities; a warped frame carries its warp.
+        options.registration.model = RegistrationModel::Similarity;
         let mut stacker = LiveStacker::with_expanding_reference(
             &paths,
             CalibrationMasters::default(),

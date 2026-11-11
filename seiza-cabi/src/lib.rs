@@ -3698,7 +3698,9 @@ pub unsafe extern "C" fn seiza_stack_detect_defects_json(
 /// `"interpolation": "bilinear" | "lanczos3"`,
 /// `"normalization": {"mode": "local-background", "options": {"tile_size": 256}}`,
 /// `"weighting": {"mode": "inverse-noise-variance"}`,
-/// `"registration": {"model": "quadratic"}`,
+/// `"registration": {"model": "similarity" | "affine" | "quadratic"}`
+/// (quadratic by default; a `"registration"` object that names no model is
+/// a similarity, as options saved before 0.59 are),
 /// `"match_tolerances": {"rotation_deg": 5.0}`, the gate the reference and
 /// every pushed light are judged under against the masters (tolerances left
 /// out keep their defaults), or `"gpu": {"enabled": false}`, which keeps
@@ -10158,6 +10160,34 @@ mod tests {
             options.registration.model,
             seiza_stacking::RegistrationModel::Quadratic
         );
+        // No options, or none for registration, fit the default model; a
+        // registration object naming none is the similarity saved options
+        // leave out.
+        for defaults in [ptr::null(), c"{}".as_ptr(), c"".as_ptr()] {
+            assert_eq!(
+                stack_options(defaults).unwrap().registration.model,
+                seiza_stacking::RegistrationModel::Quadratic
+            );
+        }
+        for (json, model) in [
+            (
+                c"{\"registration\": {\"maximum_drift_pixels\": 512.0}}",
+                seiza_stacking::RegistrationModel::Similarity,
+            ),
+            (
+                c"{\"registration\": {\"model\": \"similarity\"}}",
+                seiza_stacking::RegistrationModel::Similarity,
+            ),
+            (
+                c"{\"registration\": {\"model\": \"affine\"}}",
+                seiza_stacking::RegistrationModel::Affine,
+            ),
+        ] {
+            assert_eq!(
+                stack_options(json.as_ptr()).unwrap().registration.model,
+                model
+            );
+        }
         let unknown = std::ffi::CString::new(r#"{"demosaic": "ahd"}"#).unwrap();
         assert!(stack_options(unknown.as_ptr()).is_err());
     }

@@ -231,7 +231,7 @@ pub const EXTERNAL_EXCHANGE_VERSION: u32 = 3;
 /// folds back onto the frame far beyond it, which 0.40.0 sampled (#307). The
 /// value stayed at "0.40.0" because no cache keyed on it predates 0.42.0,
 /// the first release to export it.
-pub const OUTPUT_VERSION: &str = "0.58.0";
+pub const OUTPUT_VERSION: &str = "0.59.0";
 
 /// Anything that can go wrong while calibrating, registering, normalizing, or
 /// stacking frames.

@@ -692,9 +692,11 @@ shared sky structure. `demosaic` chooses
 how one-shot-colour frames are demosaiced: `"vng"` (the default) keeps each
 star's colour across its profile, `"mhc"` gives slightly sharper stars but rings
 around small ones, and `"bilinear"` is fastest. `registration_model` is
-`"similarity"` (the default here), `"affine"`, or `"quadratic"`, which fits a
-polynomial to follow lens distortion, for example across a meridian flip; the
-CLI defaults to `"quadratic"`. `weighting` is `"equal"` (the default) or
+`"similarity"`, `"affine"`, or `"quadratic"` (the default, as in the CLI),
+which fits a polynomial to follow lens distortion, for example across a
+meridian flip, and the differential atmospheric refraction that squeezes a
+wide field as its target sinks; a frame with too few stars for its model keeps
+the similarity. `weighting` is `"equal"` (the default) or
 `"inverse-noise-variance"`, which weights each frame by the reference frame's
 noise over its own, squared. The CLI's Bayer drizzle option is not yet exposed
 here.
@@ -858,8 +860,8 @@ and scale the acceptance admits, rather than at the canvas's size; a derived
 megapixels from 26-megapixel frames, each worker is costed at 2.4 GiB rather
 than the canvas's 6.5 GiB.
 
-Lens-corrected mosaics preserve each panel's sky projection even with the
-default `registration_model="similarity"`, including new exposures added after
+Lens-corrected mosaics preserve each panel's sky projection even with
+`registration_model="similarity"`, including new exposures added after
 planning or reopening a saved context. Older saved lens-corrected contexts
 without panel projections can still be replayed; replan from the source lights
 before adding new exposures.
