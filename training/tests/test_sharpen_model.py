@@ -335,6 +335,76 @@ def test_contrast_darkens_the_dark_side_of_a_rim_on_nebula_and_leaves_sky_and_st
         assert example.ratio == without.ratio and np.array_equal(example.image, without.image)
 
 
+def test_clarity_raises_faint_detail_and_leaves_rims_and_stars_alone(tmp_path):
+    side = 200
+    ys, xs = np.mgrid[:side, :side].astype(np.float32)
+    # Faint ripples 12 px apart over a level of 140, left of a rim 60 high
+    # at column 120; a star on the ripples.
+    ripple = 0.3 * np.sin(2 * np.pi * xs / 12.0) * (xs < 90)
+    target = (np.where(xs < 120, 140.0, 200.0) + ripple).astype(np.float32)
+    points = np.zeros((1, len(COLUMNS)))
+    points[0, :2] = (40.0, 150.0)
+    points[0, COLUMNS.index("detected")] = 1
+    sigma = np.ones((side, side), np.float32)
+    made, reach = sm.clarified(target, 1.0, 9.0, points[:0], sigma)
+    change = made - target
+    fine = sm.CLARITY_FINE * 9.0
+    box = int(round(np.sqrt(3.0) * sm.CLARITY_WIDE * 9.0))
+    assert reach == 2 * box + sm.blur_reach(fine**2 * np.eye(2))
+    # The ripples stand higher, crest and trough alike, by the lift less
+    # what the fine smoothing takes of them.
+    rows = slice(60, 100)
+    gain = float((change[rows, 30:66] * ripple[rows, 30:66]).sum() / (ripple[rows, 30:66] ** 2).sum())
+    kept = float(np.exp(-0.5 * (2 * np.pi * fine / 12.0) ** 2))
+    assert gain == pytest.approx(sm.CLARITY_LIFT * kept, rel=0.15)
+    # No halo either side of the rim, where an unsharp mask of the same
+    # reach and amount would add a tenth of its height.
+    smooth = sm.blurred_images(target, [fine**2 * np.eye(2)])[0]
+    plain = sm.CLARITY_LIFT * (smooth - sm.box_means(smooth, box))
+    assert np.abs(plain[80, 108:132]).max() > 6.0
+    assert np.abs(change[80, 100:160]).max() < 0.3
+    # Twice the amount, twice the change; a rim as high as the noise is
+    # detail like any other.
+    assert np.allclose(sm.clarified(target, 2.0, 9.0, points[:0], sigma)[0] - target, 2 * change, atol=1e-3)
+    faint = np.where(xs < 120, 140.0, 140.5).astype(np.float32)
+    slight = sm.clarified(faint, 1.0, 9.0, points[:0], sigma)[0] - faint
+    assert slight[80, 112] < -0.03 and slight[80, 128] > 0.03
+    # A window with no noise of its own is judged by its range of light.
+    clean = sm.clarified(target, 1.0, 9.0, points[:0], np.zeros_like(sigma))[0] - target
+    assert np.abs(clean[80, 100:160]).max() < 0.3 and np.abs(clean[rows, 30:66]).max() > 0.02
+    # Kept clear of a listed star, and no ring about a bright one unlisted.
+    star = 3000.0 * np.exp(-0.5 * ((xs - 40.0) ** 2 + (ys - 150.0) ** 2) / 3.8**2)
+    listed = sm.clarified(target + star, 1.0, 9.0, points, sigma)[0] - (target + star)
+    assert np.abs(listed[140:161, 30:51]).max() < 1e-3
+    ringed = sm.clarified(target + star, 1.0, 9.0, points[:0], sigma)[0] - (target + star)
+    assert np.abs(ringed[120:181, 10:71]).max() < 1.0
+    # None of it for stars at the sampling limit.
+    same, none = sm.clarified(target, 1.0, sm.CONTRAST_WIDTHS[0], points, sigma)
+    assert same is target and none == 0
+    # A square's mean, reflected past the edges.
+    plane = np.arange(30, dtype=np.float32).reshape(5, 6)
+    padded = np.pad(plane, 2, mode="reflect")
+    assert sm.box_means(plane, 2)[3, 4] == pytest.approx(padded[3:8, 4:9].mean())
+    assert sm.box_means(plane, 2)[0, 0] == pytest.approx(padded[0:5, 0:5].mean())
+    # In a window: more the more is asked of the rest, on the target alone
+    # and after its noise.
+    bank = sm.Bank(kernel_bank(tmp_path), sm.Settings(tile=32))
+    plain = sm.Settings(tile=32, exposure=1.0, kernel_noise=1.0, nonstellar=True, pass_noise=True)
+    asked = sm.Settings(tile=32, exposure=1.0, kernel_noise=1.0, nonstellar=True, pass_noise=True, clarity=1.5)
+    for seed in range(3):
+        without = sm.kernel_example(bank, 0, np.random.default_rng(seed), plain, identity=False)
+        example = sm.kernel_example(bank, 0, np.random.default_rng(seed), asked, identity=False)
+        assert without.details["clarity"] == 0.0
+        assert example.details["clarity"] == pytest.approx(1.5 * (1.0 - example.nonstellar_ratio))
+        assert example.ratio == without.ratio and np.array_equal(example.image, without.image)
+        expected = sm.clarified(without.target, example.details["clarity"], example.width, example.points,
+                                np.asarray(bank.arrays["sigma"][0], dtype=np.float32))[0]
+        assert np.allclose(example.target, expected, atol=1e-3)
+        assert np.abs(example.target - without.target).max() > 0.01
+    identity = sm.kernel_example(bank, 0, np.random.default_rng(0), asked, identity=True)
+    assert identity.details["clarity"] == 0.0 and np.array_equal(identity.target, identity.image)
+
+
 def clipped_bank(tmp_path, level: float = 2_000.0):
     """A known-kernel bank of one window holding a bright star clipped at
     `level`, with fainter ones about it."""
