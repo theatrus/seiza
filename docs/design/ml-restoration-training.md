@@ -1395,17 +1395,41 @@ nebulae.
   better only well under 1.7. With stars 11.5 px across nothing real is
   1 to 4 px wide there. On the California the runs and the reference
   are level (2.7%).
-  - It came with the widest blur. The small runs blurred up to twice
-    read 0.8 to 1.2% (the reference's 1.0%); of two alike but for the
-    widest blur, 2 and 3, the second reads 2.0% against 0.95%; every
-    larger run, all blurred up to 3, reads 1.7 to 3.3%. A wider small
-    run blurred up to 2 (64 wide, 60,000 steps) reads 0.8% with rims
-    rising over 4.18 px, where the larger run turned down to that
-    sharpness (the rest asked for 0.6) still reads 1.3%. By the larger
-    run's ask of the rest: 1.0% at 0.7, 1.3% at 0.6, 1.8% at 0.5, 2.5%
-    at 0.4.
+  - It comes with the larger model. The small runs (four levels, tiles
+    of 256 in eights, blurred up to twice) read 0.8 to 1.2%, the
+    reference's 1.0%; every larger run (six levels 32 wide, tiles of 768
+    in fours, half the steps) reads 1.7 to 3.3%.
+    - Not the widest blur. The larger run blurred up to 2 in place of 3
+      reads 2.0% (3.2% on the multi-night Trunk, the reference 2.3%)
+      with the reference's rims: ×2.31 and a rise over 3.67 px against
+      ×2.21 and 3.74. Two small runs alike but for the widest blur had
+      read 0.95 and 2.0%, but both were rendered past what the first was
+      taught.
+    - Not the bank. The small recipe, 64 wide for 60,000 steps, read
+      0.8% from the banks of 256 px windows and reads 0.9% from those of
+      1024 (the multi-night Trunk 2.2% against the reference's 2.3, the
+      California 2.8 against 2.7).
+    - Not how much is asked. The larger run blurred up to 2 reads 1.6 to
+      2.0% at every ask of the rest from 0.2 to 0.7, while its rims'
+      rise goes from 3.30 to 4.24 px; at the small run's sharpness (4.24
+      against 4.17 px) it reads 1.65% against 0.92%. Blurred up to 3 it
+      had followed the ask: 1.0% at 0.7, 1.3% at 0.6, 1.8% at 0.5, 2.5%
+      at 0.4.
+    - The small run is not the answer as it stands. Its rims rise over
+      4.17 px at an ask of 0.5, the least it was taught, and the dark
+      side 8 px out is a third of the reference's (0.22 against 0.68);
+      asked for less than 0.5 it stops sharpening the rest at all (a
+      rise over 5.6 px at 0.4, the input's 5.7).
+    - What is left between the two: the levels and width, the tile and
+      batch, and the steps.
   - Clean truth does not mend it (3.1%), nor the halo (3.3%), nor the
     edge term kept off stars (2.9%).
+  - Contrast in the target is learned and makes it worse. A larger run
+    taught a contrast of 2 on clean truth, with the gradient term out to
+    16 px and before the mask by what is there, darkens the Trunk's dark
+    side 8 px out by 0.38 (0.25 to 0.30 without, the reference 0.68) and the
+    multi-night Trunk's by 0.40, the reference's own; its knots read
+    2.9% and, on the multi-night Trunk, 6.5%.
   - A blur of 3 is there for the stars, which are asked for under half
     their width; it also asks what is not a star for a third of its
     width. `--rest-floor RATIO` keeps the rest's ask at RATIO or above
@@ -1430,15 +1454,19 @@ nebulae.
 
 In order, each only if the one before leaves a gap at the rims:
 
-1. **Contrast and grain on the larger run.** Its recipe with the shape
-   term at 0.1 and the edge term clear of every detected star, and:
-   - a halo of up to 0.3 on the known-kernel windows;
-   - clean truth for 0.7 of the native windows;
-   - contrast of 2 with that clean truth;
-   - the rest's ask floored at 0.5, and the widest blur back at 2, each
-     on the recipe with the shape term alone, for the speckle;
-   - then what holds of them together, and the bank of brought-down
-     stacks, which took a third of the narrow stars' flux gain off.
+1. **What in the larger model makes the speckle, then contrast on a
+   clean one.** From the small recipe that reads clean (four levels 64
+   wide, tiles of 256 in eights, 60,000 steps, the banks of 1024 px
+   windows), one change each:
+   - tiles of 768 in fours for 30,000 steps;
+   - six levels 32 wide;
+   - blurred up to 3, so that the rest can be asked for under 0.5 and
+     its rims can reach the reference's.
+
+   Then, on whichever is clean at the reference's rims: a contrast of
+   0.5 with all three masks, clean truth for 0.7 of the native windows,
+   and the bank of brought-down stacks, which took a third of the narrow
+   stars' flux gain off.
 2. **Noisy space-telescope windows** (`--external-snr`) at more weight,
    blurred up to four times, on the run above.
 3. **A classical deconvolution as an input plane.** A few
@@ -1479,8 +1507,8 @@ level can then place what falls between pixels, where the runs' narrow
 stars come out less round than the reference's (the California: 0.07
 against 0.046) and gain flux. A tile costs four times as much; its reach
 and grid are halved in the image's pixels, so a six-level model tiles at
-512 with a margin of 125. First run: the recipe above on tiles of 384,
-which costs what a tile of 768 does now.
+512 with a margin of 125. First run: the larger run's recipe on tiles of
+384, which costs what a tile of 768 does now.
 
 Also open: applying a mild model twice with the PSF measured again
 between; a stricter best-seeing cut for the seeing pairs' targets; and
