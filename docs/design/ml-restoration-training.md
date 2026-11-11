@@ -1435,6 +1435,12 @@ nebulae.
       outer side; its California stars are less round (0.067 against
       0.043).
       The depth deepens the dark side to 0.47 with nothing asked.
+    - Blurred up to 3 as well, six levels are the four-level run with
+      more speckle. The rims are the same (×1.93 and a rise over 4.08 px
+      against ×1.92 and 4.18) and the dark side is back at 0.27; knots
+      read 1.3% against 1.1, on the multi-night Trunk 2.6% against 1.4
+      (3.6 blurred up to 2), and the California's stars gain 12% of
+      their flux against 7. Depth is left out of the small recipe.
     - What is left between the two: the tile and batch, and the steps.
   - Clean truth does not mend it (3.1%), nor the halo (3.3%), nor the
     edge term kept off stars (2.9%).
@@ -1467,6 +1473,7 @@ nebulae.
   | Small run, blurred up to 3 | 0.99, 0.99 | 1.06, 1.02 | 1.14, 1.07 |
   | The same with a contrast of 2 | 0.99, 0.98 | 1.07, 1.03 | 1.10, 1.06 |
   | Six levels 32 wide, blurred up to 2 | 0.92, 0.96 | 0.91, 0.98 | 1.06, 1.05 |
+  | Six levels 32 wide, blurred up to 3 | 0.96, 0.98 | 1.00, 1.01 | 1.20, 1.07 |
 
   - It goes with the PSF's width. On the California (stars 2.3 px) the
     runs and the reference are level in every band from 1 to 32 px (1.02
@@ -1529,8 +1536,10 @@ In order, each only if the one before leaves a gap at the rims:
    each:
    - a clarity of 1;
    - blurred up to 4, since 3 in place of 2 took the detail between 4
-     and 8 px from 0.81 to 0.99;
-   - six levels 32 wide (blurred up to 3 as well), for the dark side.
+     and 8 px from 0.81 to 0.99.
+
+   Six levels 32 wide, blurred up to 3 as well, were tried for the dark
+   side and gave none of it.
 
    Still open from before: tiles of 768 in fours for 30,000 steps, the
    last of what separates the small run from the speckled one. Then
