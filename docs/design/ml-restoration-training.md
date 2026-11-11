@@ -1472,6 +1472,7 @@ nebulae.
   | Small run, blurred up to 2 | 0.81, 0.87 | | |
   | Small run, blurred up to 3 | 0.99, 0.99 | 1.06, 1.02 | 1.14, 1.07 |
   | The same with a contrast of 2 | 0.99, 0.98 | 1.07, 1.03 | 1.10, 1.06 |
+  | The same with a clarity of 1 | 0.97, 0.98 | 1.19, 1.07 | 1.21, 1.10 |
   | Six levels 32 wide, blurred up to 2 | 0.92, 0.96 | 0.91, 0.98 | 1.06, 1.05 |
   | Six levels 32 wide, blurred up to 3 | 0.96, 0.98 | 1.00, 1.01 | 1.20, 1.07 |
 
@@ -1509,6 +1510,23 @@ nebulae.
     noise of its own (a space-telescope one) is judged by a twentieth of
     its range of light in the noise's place, and a denoised one by its
     stack's noise.
+  - A run taught a clarity of 1 learns it where stars are 7.9 px across:
+    1.19 and 1.07 on the multi-night Trunk, against the step's 1.21 and
+    1.09. Where they are 11.5 px it does not at an ask of 0.5 (0.97 and
+    0.98; denoised first 1.21 and 1.10, against the step's 1.33 and
+    1.20), and does as more is asked: 1.04 and 1.01 at 0.4, 1.12 and
+    1.03 at 0.33, where the run without reads 1.01, 0.99 and 1.03, 0.99.
+    Its rims and knots are the run's without it: knots 1.1%, and 1.6%
+    against 1.4 on the multi-night Trunk; at an ask of 0.4, ×2.98 and a
+    rise over 3.95 px with knots of 1.3%, and the dark side 8 px out at
+    0.41 against 0.3.
+  - Wide inputs are seldom asked for much. A window is asked for no more
+    than its blur took, and an input 9 to 12 px across is mostly wide
+    truth blurred a little: those are 6% of the known-kernel windows
+    drawn, three in ten of them asked for 0.58 or less, and their lift
+    is 0.017 of a pixel's noise where windows 7 to 9 px across are given
+    0.057. Blurred up to 4, the bank's median truth (2.9 px) is 11.8 px
+    across.
 - **Grain on images denoised first.** On noisy images the runs' grain is
   the reference's, in sky, nebula, bright nebula and along rims. On
   images denoised first it is not: along the California's rims the
@@ -1534,9 +1552,10 @@ In order, each only if the one before leaves a gap at the rims:
    eights, 60,000 steps, the banks of 1024 px windows) reads clean and
    reaches the reference's lit side at an ask of 0.4. On it, one change
    each:
-   - a clarity of 1;
    - blurred up to 4, since 3 in place of 2 took the detail between 4
-     and 8 px from 0.81 to 0.99.
+     and 8 px from 0.81 to 0.99;
+   - a clarity of 1 blurred up to 4, since blurred up to 3 it is learned
+     for stars 7.9 px across and, at an ask of 0.5, not for 11.5.
 
    Six levels 32 wide, blurred up to 3 as well, were tried for the dark
    side and gave none of it.
