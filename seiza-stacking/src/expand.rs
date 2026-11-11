@@ -3188,7 +3188,15 @@ mod tests {
         let window = Window::from_stars(
             region,
             reference,
-            Window::options(region, &RegistrationOptions::default(), Scale::NATIVE),
+            // A similarity model refines its seed as an affine warp.
+            Window::options(
+                region,
+                &RegistrationOptions {
+                    model: crate::RegistrationModel::Similarity,
+                    ..RegistrationOptions::default()
+                },
+                Scale::NATIVE,
+            ),
             Scale::NATIVE,
             &crate::GpuOptions::default(),
         )

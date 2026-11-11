@@ -3630,8 +3630,13 @@ mod tests {
             None,
             None,
             None,
+            // Similarities, so only the frames marked below carry a warp.
             crate::StackOptions {
                 normalization: crate::NormalizationMode::None,
+                registration: crate::RegistrationOptions {
+                    model: crate::RegistrationModel::Similarity,
+                    ..crate::RegistrationOptions::default()
+                },
                 ..crate::StackOptions::default()
             },
         )

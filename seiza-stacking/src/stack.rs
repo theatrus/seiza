@@ -7204,9 +7204,14 @@ mod tests {
 
     #[test]
     fn registration_rms_limit_does_not_follow_previous_frames() {
+        // A similarity leaves the distorted frame a residual to gate on.
         let options = StackOptions {
             normalization: NormalizationMode::None,
             rejection: RejectionMode::None,
+            registration: RegistrationOptions {
+                model: crate::RegistrationModel::Similarity,
+                ..RegistrationOptions::default()
+            },
             ..StackOptions::default()
         };
         let reference = crate::registration::test_star_field(false);
@@ -7599,6 +7604,11 @@ mod weighting_tests {
                 ..DeltaSigmaOptions::default()
             }),
             weighting,
+            // The model of that release, which had no other.
+            registration: RegistrationOptions {
+                model: crate::RegistrationModel::Similarity,
+                ..RegistrationOptions::default()
+            },
             ..StackOptions::default()
         }
     }

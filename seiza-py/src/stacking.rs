@@ -402,7 +402,7 @@ impl PyStackOptions {
         minimum_integrated_fraction=0.50,
         demosaic="vng",
         match_tolerances=None,
-        registration_model="similarity",
+        registration_model="quadratic",
         weighting="equal",
         defects=None,
         bin_factor=1,
@@ -603,7 +603,8 @@ impl PyStackOptions {
     }
 
     /// Geometry fitted after the similarity match: "similarity", "affine",
-    /// or "quadratic", which follows lens distortion.
+    /// or "quadratic" (the default), which follows lens distortion and
+    /// differential atmospheric refraction.
     #[getter]
     fn registration_model(&self) -> &'static str {
         match self.inner.registration.model {

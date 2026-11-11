@@ -293,10 +293,20 @@ pub struct RegistrationOptions {
     pub minimum_matches: usize,
     /// Cap on candidate transforms scored before choosing the best.
     pub maximum_candidates: usize,
-    /// The geometry fitted after the similarity match. The default,
-    /// [`RegistrationModel::Similarity`], is not serialized, so existing
-    /// options, fingerprints and contexts keep their exact bytes.
-    #[serde(default, skip_serializing_if = "RegistrationModel::is_similarity")]
+    /// The geometry fitted after the similarity match:
+    /// [`RegistrationModel::Quadratic`] by default.
+    ///
+    /// Serialized options name every model but
+    /// [`RegistrationModel::Similarity`], which they leave out, and options
+    /// read without a model are a similarity. Similarity was the default
+    /// until 0.59, so options, fingerprints and contexts saved with it keep
+    /// their exact bytes and their meaning. A host that passes a
+    /// `registration` object therefore names the model in it, or gets a
+    /// similarity; leaving the whole object out gives the default.
+    #[serde(
+        default = "RegistrationModel::when_unnamed",
+        skip_serializing_if = "RegistrationModel::is_similarity"
+    )]
     pub model: RegistrationModel,
 }
 
@@ -312,11 +322,18 @@ pub struct RegistrationOptions {
 /// 0.46-0.70px (similarity) to 0.37 (affine) and 0.29-0.31 (quadratic),
 /// against a 0.24px centroid-noise floor. A frame with too few paired stars
 /// for its model keeps the similarity.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+///
+/// Differential atmospheric refraction needs the polynomial too. It squeezes
+/// a frame along the altitude direction by an amount that grows as the
+/// target sinks, which no uniform scale matches. On a 3.9 degree field
+/// followed from 58 to 20 degrees of altitude, frames registered by
+/// similarity at 1.0-1.5px RMS and by quadratic at 0.05-0.09, and the red,
+/// green and blue stacks, each taken at its own altitude, disagreed by up to
+/// 1.1px at the corners under similarity and 0.08 under quadratic.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RegistrationModel {
     /// Shift, rotation and uniform scale.
-    #[default]
     Similarity,
     /// A first-order polynomial: adds shear and unequal scale.
     Affine,
@@ -326,9 +343,15 @@ pub enum RegistrationModel {
 }
 
 impl RegistrationModel {
-    /// Whether this is the default, which options leave unserialized.
+    /// Whether this is the similarity, which options leave unserialized.
     pub fn is_similarity(&self) -> bool {
         *self == Self::Similarity
+    }
+
+    /// The model of serialized options that name none: the similarity they
+    /// leave out, not the default.
+    fn when_unnamed() -> Self {
+        Self::Similarity
     }
 
     /// The polynomial order fitted after the similarity, if any.
@@ -780,7 +803,7 @@ impl Default for RegistrationOptions {
             maximum_drift_fraction: Self::DEFAULT_MAXIMUM_DRIFT_FRACTION,
             minimum_matches: 6,
             maximum_candidates: 384,
-            model: RegistrationModel::Similarity,
+            model: RegistrationModel::Quadratic,
         }
     }
 }
@@ -3362,6 +3385,38 @@ pub(crate) fn test_distortion(x: f64, y: f64) -> (f64, f64) {
 mod tests {
     use super::*;
 
+    /// The default model is quadratic, and serialized options keep the
+    /// meaning they had while it was the similarity: a similarity is left
+    /// out, and options naming no model are a similarity.
+    #[test]
+    fn the_default_model_is_quadratic_and_unnamed_models_stay_similarities() {
+        let default = RegistrationOptions::default();
+        assert_eq!(default.model, RegistrationModel::Quadratic);
+        assert_eq!(default.dense_star_count(), DISTORTION_STARS);
+        let written = serde_json::to_value(&default).unwrap();
+        assert_eq!(written["model"], "quadratic");
+        let read: RegistrationOptions = serde_json::from_value(written).unwrap();
+        assert_eq!(read.model, RegistrationModel::Quadratic);
+
+        let similarity = RegistrationOptions {
+            model: RegistrationModel::Similarity,
+            ..RegistrationOptions::default()
+        };
+        let written = serde_json::to_value(&similarity).unwrap();
+        assert!(written.get("model").is_none(), "{written}");
+        let read: RegistrationOptions = serde_json::from_value(written).unwrap();
+        assert_eq!(read.model, RegistrationModel::Similarity);
+        // Options saved before the default changed, and a host's partial
+        // object.
+        for saved in ["{}", r#"{"maximum_drift_pixels": 512.0}"#] {
+            let read: RegistrationOptions = serde_json::from_str(saved).unwrap();
+            assert_eq!(read.model, RegistrationModel::Similarity, "{saved}");
+        }
+        let named: RegistrationOptions =
+            serde_json::from_str(r#"{"model": "similarity"}"#).unwrap();
+        assert_eq!(named.model, RegistrationModel::Similarity);
+    }
+
     #[test]
     fn interpolation_reads_and_writes_the_words_options_use() {
         for interpolation in [Interpolation::Bilinear, Interpolation::Lanczos3] {
@@ -4318,7 +4373,11 @@ mod tests {
     fn quadratic_registration_follows_a_distorted_field() {
         let reference = test_star_field(false);
         let source = test_star_field(true);
-        let similar = Registrar::new(&reference, RegistrationOptions::default())
+        let similarity = RegistrationOptions {
+            model: RegistrationModel::Similarity,
+            ..RegistrationOptions::default()
+        };
+        let similar = Registrar::new(&reference, similarity)
             .unwrap()
             .register(&source)
             .unwrap();

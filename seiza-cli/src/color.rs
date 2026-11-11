@@ -549,6 +549,9 @@ impl CommonArgs {
         let options = RegistrationOptions {
             maximum_drift_pixels: self.max_registration_drift,
             maximum_drift_fraction: self.max_registration_drift_fraction,
+            // The channels are resampled through the similarity alone, so
+            // the match it reports must be the similarity's.
+            model: seiza_stacking::RegistrationModel::Similarity,
             ..RegistrationOptions::default()
         };
         Ok(Some(Registrar::new_with_gpu(

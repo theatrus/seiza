@@ -1407,7 +1407,9 @@ char *seiza_stack_detect_defects_json(const char *paths_json,
  `"interpolation": "bilinear" | "lanczos3"`,
  `"normalization": {"mode": "local-background", "options": {"tile_size": 256}}`,
  `"weighting": {"mode": "inverse-noise-variance"}`,
- `"registration": {"model": "quadratic"}`,
+ `"registration": {"model": "similarity" | "affine" | "quadratic"}`
+ (quadratic by default; a `"registration"` object that names no model is
+ a similarity, as options saved before 0.59 are),
  `"match_tolerances": {"rotation_deg": 5.0}`, the gate the reference and
  every pushed light are judged under against the masters (tolerances left
  out keep their defaults), or `"gpu": {"enabled": false}`, which keeps
