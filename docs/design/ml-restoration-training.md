@@ -1340,8 +1340,10 @@ nebulae.
 - **The reference's contrast is broader than a Gaussian's.** Across the
   Trunk's rims, out to 32 px either side, the reference's strong setting
   darkens the dark side 8 to 16 px out about twice as much as the larger
-  run does (0.68 against 0.30 of the image's noise at 8 px, 0.42 against
-  0.17 at 12) and lifts the lit ridge a quarter more. Asking the run for
+  run does (0.68 against 0.30 at 8 px, 0.42 against 0.17 at 12, in the
+  image's own units, in which a pixel's noise is 1.4 there and 0.5 on
+  the multi-night Trunk; so are the rims' levels below) and lifts the
+  lit ridge a quarter more. Asking the run for
   more of the rest (0.5 down to 0.25) makes the rim far steeper than the
   reference's (×4.7 against ×2.2) and the ridge too tall, and leaves
   the dark side short still (0.49 at 8 px at an ask of 0.33). A Gaussian
@@ -1362,7 +1364,7 @@ nebulae.
     Trunk output (stars 11.5 px): what stands above a 12 px Gaussian in
     the output smoothed by 4 px, at amount 1, on nebula and off stars,
     with what stands above added at a quarter of what lies below. The
-    rims' dark side is then 0.64 of the image's noise under the input
+    rims' dark side is then 0.64 under the input
     8 px out (the output as it was: 0.33) and 0.41 at 12 (0.17), the lit
     crest a tenth higher, and the knots along the rims are as they were.
     Read from the output itself at 1.5 px it roughens the rim (knots
@@ -1420,8 +1422,20 @@ nebulae.
       side 8 px out is a third of the reference's (0.22 against 0.68);
       asked for less than 0.5 it stops sharpening the rest at all (a
       rise over 5.6 px at 0.4, the input's 5.7).
-    - What is left between the two: the levels and width, the tile and
-      batch, and the steps.
+    - Blurred up to 3, the small run can be asked for less, and at an
+      ask of 0.4 its rims are the reference's on the lit side: ×2.92
+      against ×2.21, a rise over 3.86 px against 3.74, the ridge 5.3 and
+      6.7 over the input 4 and 6 px in against 5.4 and 6.5. Its knots
+      read 1.3% there (1.1% at 0.5; on the multi-night Trunk 1.4% against
+      the reference's 2.3). Under 0.4 the ridge overshoots. The dark
+      side stays near 0.3 at every ask.
+    - Six levels 32 wide, the small recipe otherwise, are not the
+      speckle on the deep Trunk (1.1%) and are on the multi-night one
+      (3.6%), and by eye it leaves bright dots along a lit ridge's
+      outer side; its California stars are less round (0.067 against
+      0.043).
+      The depth deepens the dark side to 0.47 with nothing asked.
+    - What is left between the two: the tile and batch, and the steps.
   - Clean truth does not mend it (3.1%), nor the halo (3.3%), nor the
     edge term kept off stars (2.9%).
   - Contrast in the target is learned and makes it worse. A larger run
@@ -1429,11 +1443,65 @@ nebulae.
     16 px and before the mask by what is there, darkens the Trunk's dark
     side 8 px out by 0.38 (0.25 to 0.30 without, the reference 0.68) and the
     multi-night Trunk's by 0.40, the reference's own; its knots read
-    2.9% and, on the multi-night Trunk, 6.5%.
+    2.9% and, on the multi-night Trunk, 6.5%. On the small run blurred up
+    to 3, a contrast of 2 with every mask is learned on the multi-night
+    Trunk (0.33 against 0.12 without) and hardly on the deep one (0.28
+    against 0.26), for knots of 2.1% against 1.4 and 1.2% against 1.1.
+    Finding the compact peaks took 2 to 17 s a 1024 px window (a square
+    maximum), and that run 5.3 hours against 1.5; taken a row and a
+    column at a time it is the same mask in under half a second.
   - A blur of 3 is there for the stars, which are asked for under half
     their width; it also asks what is not a star for a third of its
     width. `--rest-floor RATIO` keeps the rest's ask at RATIO or above
     in known-kernel windows whatever their stars are asked.
+- **Detail inside a cloud.** By eye the reference's strong setting
+  draws more structure inside a dark cloud than any run does. The
+  measure: on a sheet's crops, further than 24 px from the steepest
+  edges and 12 px from stars, the image's spread in a band (a Gaussian
+  of 4 px less one of 8, and one of 8 less one of 16) over the input's.
+
+  | | Trunk, stars 11.5 px | multi-night Trunk, 7.9 px | Trunk denoised first |
+  |---|---|---|---|
+  | The reference, strong | 1.13, 1.11 | 1.22, 1.11 | 1.48, 1.14 |
+  | Small run, blurred up to 2 | 0.81, 0.87 | | |
+  | Small run, blurred up to 3 | 0.99, 0.99 | 1.06, 1.02 | 1.14, 1.07 |
+  | The same with a contrast of 2 | 0.99, 0.98 | 1.07, 1.03 | 1.10, 1.06 |
+  | Six levels 32 wide, blurred up to 2 | 0.92, 0.96 | 0.91, 0.98 | 1.06, 1.05 |
+
+  - It goes with the PSF's width. On the California (stars 2.3 px) the
+    runs and the reference are level in every band from 1 to 32 px (1.02
+    to 1.07), so what the reference adds on the Trunk lies between about
+    a third of the stars' width and one and a half of them, and no
+    contrast of a fixed size is it.
+  - The widest blur moves it: 0.81 to 0.99 between 4 and 8 px, blurred
+    up to 3 in place of 2.
+  - `--contrast` does not: it is masked by what is there and to nebula
+    standing over the noise, and inside a dark cloud neither holds.
+  - **Local contrast that keeps strong edges gives it.** Applied to the
+    small run's Trunk output: what stands, in the output smoothed by a
+    third of the stars' width, above a guided filter of it over squares
+    2.8 widths across, 0.3 of it. The base follows the image wherever a
+    square's variance stands over the pixel noise squared, so a rim or
+    a star fills the squares it lies in and the detail beside it is read
+    from the squares that miss it. Inside the cloud the two bands then
+    read 1.13 and 1.12 (the multi-night Trunk 1.21 and 1.09), and 1.05
+    from 16 to 32 px against the reference's 1.04. The rims hardly move:
+    the dark side 8 px out 0.32 from 0.26, the lit side 12 px in 0.39
+    from 0.15 (the reference 0.37; a plain unsharp mask of a like reach,
+    masked to nebula, puts it at 0.9 and the cloud's detail at 1.04),
+    knots 1.14% from 1.11%. The California is unchanged.
+  - `--clarity AMOUNT` asks for it in the target: a known-kernel
+    window's target is given AMOUNT times one less the rest's ratio of
+    it, 0.6 of the detail at an amount of 1, with `--contrast`'s limits
+    on the stars' width and its clearing of listed point sources. It is
+    added after the noise the target passes. Read from the truth, as
+    `--contrast` is, it would ask a run to know from a noisy, blurred
+    window what faint structure lay under it, which is where the runs
+    hold back; read from the target with its noise, what is to be raised
+    is in the input's own band, whatever it is. A window with next to no
+    noise of its own (a space-telescope one) is judged by a twentieth of
+    its range of light in the noise's place, and a denoised one by its
+    stack's noise.
 - **Grain on images denoised first.** On noisy images the runs' grain is
   the reference's, in sky, nebula, bright nebula and along rims. On
   images denoised first it is not: along the California's rims the
@@ -1454,19 +1522,21 @@ nebulae.
 
 In order, each only if the one before leaves a gap at the rims:
 
-1. **What in the larger model makes the speckle, then contrast on a
-   clean one.** From the small recipe that reads clean (four levels 64
-   wide, tiles of 256 in eights, 60,000 steps, the banks of 1024 px
-   windows), one change each:
-   - tiles of 768 in fours for 30,000 steps;
-   - six levels 32 wide;
-   - blurred up to 3, so that the rest can be asked for under 0.5 and
-     its rims can reach the reference's.
+1. **Detail inside a cloud on the run that is clean at the rims.** The
+   small recipe blurred up to 3 (four levels 64 wide, tiles of 256 in
+   eights, 60,000 steps, the banks of 1024 px windows) reads clean and
+   reaches the reference's lit side at an ask of 0.4. On it, one change
+   each:
+   - a clarity of 1;
+   - blurred up to 4, since 3 in place of 2 took the detail between 4
+     and 8 px from 0.81 to 0.99;
+   - six levels 32 wide (blurred up to 3 as well), for the dark side.
 
-   Then, on whichever is clean at the reference's rims: a contrast of
-   0.5 with all three masks, clean truth for 0.7 of the native windows,
-   and the bank of brought-down stacks, which took a third of the narrow
-   stars' flux gain off.
+   Still open from before: tiles of 768 in fours for 30,000 steps, the
+   last of what separates the small run from the speckled one. Then
+   clean truth for 0.7 of the native windows, and the bank of
+   brought-down stacks, which took a third of the narrow stars' flux
+   gain off.
 2. **Noisy space-telescope windows** (`--external-snr`) at more weight,
    blurred up to four times, on the run above.
 3. **A classical deconvolution as an input plane.** A few

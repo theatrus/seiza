@@ -341,6 +341,20 @@ class Settings:
     # enhancement, not a restoration: the target is no longer the truth.
     # 0: none.
     contrast: float = 0.0
+    # Local contrast asked of what is not a star, beyond the sharpening
+    # (`clarified`): a known-kernel window's target, with the noise it
+    # passes, is given this, times one less the ratio asked of the rest,
+    # of its own detail between about a third of the input's width and
+    # three of them, read against a base that keeps strong edges. The
+    # runs sharpen a rim and leave the faint structure inside a cloud
+    # nearly as soft as they found it: under noise nothing tells them how
+    # sharp it was. Raising what is there in that band needs no such
+    # knowledge, so it is taught on the target after its noise, where the
+    # input's own band shows what to raise; and the base follows a rim or
+    # a star, so neither is given a halo, which `contrast`'s plain
+    # unsharp mask gives the lit side of a rim (2026-11-11). An
+    # enhancement, as `contrast` is. 0: none.
+    clarity: float = 0.0
     # The least share of its input's width that the rest of a
     # known-kernel window is asked for, however sharp its stack allows
     # and whatever is asked of its stars. Windows blurred up to three
@@ -1243,7 +1257,7 @@ class Halo:
 # of `CONTRAST_WIDTHS` px, all of it from the second up. Set on the rims
 # of three stacks (stars 11.5, 7.9 and 2.3 px across), as a step applied
 # to a run's output: at 11.5 and 7.9 px an amount of 1 darkens a rim's
-# dark side by a third of the image's noise 8 px out and leaves the knots
+# dark side by a fifth of the image's noise 8 px out and leaves the knots
 # along it as they were; at 2.3 px a tenth of that already roughens the
 # rim (2026-11-10).
 CONTRAST_WIDE = 1.05
@@ -1296,12 +1310,89 @@ def contrasted(rest: np.ndarray, amount: float, width: float, points: np.ndarray
     bright = (smooth - level) > max(CONTRAST_STAR * noise, float(spread[1] - spread[0]))
     if bright.any():
         reach = int(min(math.ceil(CONTRAST_CLEAR * width), WINDOW_PAD))
-        grown_ = torch.nn.functional.max_pool2d(torch.from_numpy(bright.astype(np.float32))[None, None],
-                                                2 * reach + 1, stride=1, padding=reach)[0, 0].numpy()
-        near = np.maximum(near, grown_)
+        # A square's maximum, taken along rows and then columns: the same
+        # values in a fortieth of the time at this reach.
+        pool = torch.nn.functional.max_pool2d
+        along = pool(torch.from_numpy(bright.astype(np.float32))[None, None], (2 * reach + 1, 1), stride=1,
+                     padding=(reach, 0))
+        near = np.maximum(near, pool(along, (1, 2 * reach + 1), stride=1, padding=(0, reach))[0, 0].numpy())
     near = blurred_images(near, [CONTRAST_FEATHER**2 * np.eye(2)], pad=16)[0]
     away = np.clip(1.0 - 1.5 * near, 0.0, 1.0)
     return (rest + amount * nebula * away * detail).astype(np.float32), blur_reach(wide**2 * np.eye(2))
+
+
+# The local contrast a known-kernel target is given (`Settings.clarity`):
+# `CLARITY_LIFT` times what stands, in the target smoothed by
+# `CLARITY_FINE` input widths (a Gaussian's σ, so that no pixel's own
+# noise is raised), above a base of it that keeps strong edges. The base
+# is a guided filter of the smoothed target by itself over squares
+# `CLARITY_WIDE` input widths across as a Gaussian's σ would be: where a
+# square's variance stands over the square of `CLARITY_EDGE` times the
+# stack's noise (or of `CLARITY_RANGE` of the window's range of light,
+# where a window has next to no noise of its own), the base follows the
+# target and nothing is added; where it does not, the base is the
+# square's mean, and the detail is an unsharp mask's. A rim or a star
+# fills the squares it lies in with variance, so the detail beside one is
+# read from the squares that miss it: no halo either side, and no ring.
+# Detected point sources are kept clear as `contrasted` keeps them, and a
+# PSF near the sampling limit is given none (`CONTRAST_WIDTHS`). Set on
+# two stacks (stars 11.5 and 7.9 px across), as a step applied to a run's
+# output asked for half the width: with a `clarity` of 1 the detail
+# inside a cloud, away from rims and stars, stands 14% and 13% higher
+# between 4 and 8 px and between 8 and 16 px on the first (4% higher
+# between 16 and 32), 14% and 7% on the second, where the plain
+# sharpening had left it as it found it; the first's rims move, in their
+# mean profile, by under a twentieth of the image's noise 8 px into the
+# dark side and by a sixth of it 12 px into the lit side, and the knots
+# along them are as they were, to a thirtieth. On a stack with stars
+# 2.3 px across it changes nothing (2026-11-11).
+CLARITY_WIDE = 0.8
+CLARITY_FINE = 0.35
+CLARITY_EDGE = 1.0
+CLARITY_RANGE = 0.05
+CLARITY_LIFT = 0.6
+
+
+def box_means(plane: np.ndarray, radius: int) -> np.ndarray:
+    """`plane`'s mean over the square reaching `radius` px each way from
+    each pixel, reflected past its edges."""
+    side = 2 * radius + 1
+    sums = np.pad(np.asarray(plane, dtype=np.float64), radius, mode="reflect")
+    for axis in (0, 1):
+        sums = np.cumsum(sums, axis=axis)
+        first = np.take(sums, [side - 1], axis=axis)
+        rest = np.take(sums, np.arange(side, sums.shape[axis]), axis=axis)
+        sums = np.concatenate([first, rest - np.take(sums, np.arange(sums.shape[axis] - side), axis=axis)], axis=axis)
+    return sums / side**2
+
+
+def clarified(target: np.ndarray, amount: float, width: float, points: np.ndarray,
+              sigma: np.ndarray) -> tuple[np.ndarray, int]:
+    """`target`, a known-kernel window's, with `amount` of local contrast
+    that keeps strong edges (see `CLARITY_WIDE`), for an input PSF `width`
+    px across and a stack whose noise is `sigma`, and how far it reads."""
+    low, high = CONTRAST_WIDTHS
+    amount = amount * CLARITY_LIFT * float(np.clip((width - low) / (high - low), 0.0, 1.0))
+    if not amount > 0:
+        return target, 0
+    fine = CLARITY_FINE * width
+    fine_reach = blur_reach(fine**2 * np.eye(2))
+    reach = max(int(round(math.sqrt(3.0) * CLARITY_WIDE * width)), 2)
+    reach = max(min(reach, (WINDOW_PAD - fine_reach) // 2, min(target.shape) - 1), 1)
+    smooth = blurred_images(target, [fine**2 * np.eye(2)])[0]
+    # About the window's middle level, in double precision: a square's
+    # variance is a small difference of large sums.
+    seen = smooth.astype(np.float64) - float(np.median(smooth[::4, ::4]))
+    mean = box_means(seen, reach)
+    spread = np.clip(box_means(seen * seen, reach) - mean * mean, 0.0, None)
+    floor = np.maximum(CLARITY_EDGE * np.nan_to_num(sigma), CLARITY_RANGE * window_contrast(smooth)) ** 2
+    with np.errstate(divide="ignore", invalid="ignore"):
+        follow = np.nan_to_num(spread / (spread + floor), nan=1.0)
+    detail = seen - (box_means(follow, reach) * seen + box_means(mean * (1.0 - follow), reach))
+    near = source_mask(points, target.shape, CONTRAST_CLEAR * width).astype(np.float32)
+    near = blurred_images(near, [CONTRAST_FEATHER**2 * np.eye(2)], pad=16)[0]
+    away = np.clip(1.0 - 1.5 * near, 0.0, 1.0)
+    return (target + amount * away * detail).astype(np.float32), 2 * reach + fine_reach
 
 
 # Examples.
@@ -1408,6 +1499,9 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
                        and rng.random() < settings.clean_truth)
     if denoised or clean_truth:
         image = np.asarray(bank.clean["image_clean"][window], dtype=np.float32)
+    # The stack's own noise, which a denoised window's edges are still
+    # judged against (`clarified`).
+    stack_sigma = sigma
     if denoised:
         sigma = sigma * DENOISED_NOISE
     if identity is None:
@@ -1434,7 +1528,7 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
     clip = background + scale * (level - background) if settings.fill_clipped and level is not None else None
     if clip is not None and not identity and saturated.any():
         signal = filled(signal, saturated, points, stamp, row["width"], background)
-    ratio, nonstellar_ratio, band, contrast = kernel.ratio, None, kernel.reach(), 0.0
+    ratio, nonstellar_ratio, band, contrast, clarity = kernel.ratio, None, kernel.reach(), 0.0, 0.0
     if identity:
         blurred, target = signal, None
     elif settings.nonstellar:
@@ -1463,6 +1557,8 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
             contrast = settings.contrast * (1.0 - nonstellar_ratio)
             rest, reach = contrasted(rest, contrast, kernel.widths["input"], points, background, scale * sigma)
             band = max(band, reach)
+        if settings.clarity > 0:
+            clarity = settings.clarity * (1.0 - nonstellar_ratio)
         rendered = point_map(points, stamp, image.shape, background)
         with np.errstate(divide="ignore", invalid="ignore"):
             mask = np.clip(np.nan_to_num(rendered / (rendered + STAR_MASK_NOISE * scale * sigma)), 0.0, 1.0)
@@ -1493,6 +1589,11 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
         target_sigma = scale * sigma
         if settings.pass_noise:
             target = target + fresh
+        if clarity > 0:
+            # After the noise: what the input shows in that band is what
+            # is raised, whatever it is.
+            target, reach = clarified(target, clarity, kernel.widths["input"], points, scale * stack_sigma)
+            band = max(band, reach)
     # The clipped cores stay out of the loss, but not the pixels about them:
     # input and target are blurs of the same window there, and agree.
     valid = edge_band(image.shape, band) & ~saturated
@@ -1507,6 +1608,7 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
                                           "kernel": kernel.covariance.tolist(), "sharpest": kernel.ratio,
                                           "real": kernel.donor is not None, "denoised": denoised,
                                           "clean_truth": clean_truth, "contrast": contrast,
+                                          "clarity": clarity,
                                           "halo": None if halo is None else [halo.share, halo.width]},
                    nonstellar_ratio)
 
