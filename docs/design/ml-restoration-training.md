@@ -1579,6 +1579,42 @@ nebulae.
     raised with its grain, where the reference draws broader dark lanes
     on a darker cloud. Against the deeper stack it holds what every
     other output does (0.02, 0.57 and 0.86).
+  - The step's shape is not what is missing. The same step on this
+    run's output at an ask of 0.5 (0.3 of the detail) reads 1.09, 1.18,
+    1.13 and 1.04 in those four bands, the reference's but for the
+    second, with knots of 1.08% and the rims where they were. Read
+    broader (the output smoothed by 0.7 widths, over squares twice as
+    wide, 0.2 of it) it reads 1.07, 1.10 and 1.07 from 4 px up: short
+    under 8 px and over past 16.
+  - The run gives the lift to structure and not to noise. On held-out
+    known-kernel windows drawn as it was taught (23 of them), its
+    output holds the taught lift whole over the run without: 0.9 to
+    1.3 of it in each band for inputs under 9 px across, 1.2 falling to
+    0.8 from 9 px up. On made images under the Trunk's PSF, with no
+    stars, between 4 and 8 px and between 8 and 16:
+    - white noise alone comes out lower, 0.89 and 0.83 of the input's
+      spread, where the step asks 1.06 and 1.09 (the run without: 0.93
+      and 0.91);
+    - a PSF-blurred texture as large as the pixel noise comes out with
+      the step's lift, 1.41 and 1.17 against 1.39 and 1.20 (the run
+      without: 1.23 and 1.06);
+    - at half the noise its gain is 1.28 and 1.10 against the step's
+      1.33 and 1.20;
+    - at a quarter of the noise it is not raised (0.97 and 0.92 against
+      1.20 and 1.13), and the run without no longer sharpens it either
+      (1.01 and 0.97, where the texture as large as the noise gains
+      1.22 and 1.07), though it is 0.65 and 0.90 of the input's
+      variance in those bands.
+
+    So one thing holds the runs back inside a faint cloud, for
+    sharpening and clarity alike: structure under about half the pixel
+    noise is left as it was found, however plainly it stands in its own
+    band. The reference raises those bands whatever is in them. A
+    likely cause, not yet tested: in a noisy known-kernel window a faint
+    blob of the input is as often the stack's own noise blurred, whose
+    sharp form cannot be known, and no window of this mix holds faint
+    structure under noise with its truth known. Clean truth and noisy
+    space-telescope windows do.
 - **Grain on images denoised first.** On noisy images the runs' grain is
   the reference's, in sky, nebula, bright nebula and along rims. On
   images denoised first it is not: along the California's rims the
@@ -1605,10 +1641,18 @@ In order, each only if the one before leaves a gap at the rims:
    windows) reads clean, and at an ask of 0.4 reaches the reference's
    lit side and raises a cloud's detail between 4 and 8 px past the
    reference's. It lacks the broader share, from 8 to 32 px, and the
-   dark side beside a rim. On it: a clarity read broader (more of the
-   stars' width in `CLARITY_FINE`, or a second, wider one beside it),
-   tried first as a step on this run's output, as the first was, and
-   taught only if the step gives the broad bands and leaves the rims.
+   dark side beside a rim, and it leaves structure under about half
+   the pixel noise alone. On it, one of:
+
+   - windows whose faint structure has a known sharp form: clean truth
+     for 0.7 of the native windows, and the noisy space-telescope
+     windows of item 2, read by the made images above (a texture at a
+     quarter of the noise should gain what one as large as the noise
+     does);
+   - the clarity as a step after the model, an amount the user sets:
+     at 0.3 on this run's output at an ask of 0.5 it gives the
+     reference's bands inside the cloud with the rims unmoved, and
+     raises the noise of those bands with them, as the reference does.
 
    Tried on it and left out: six levels 32 wide for the dark side,
    which gave none of it, and the blur up to 4 alone, which moved
