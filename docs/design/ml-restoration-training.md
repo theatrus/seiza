@@ -1479,9 +1479,10 @@ nebulae.
   | Small run, blurred up to 2 | 0.81, 0.87 | | |
   | The same on tiles of 768 | 0.96, 0.99 | 0.97, 1.00 | 1.05, 1.03 |
   | Small run, blurred up to 3 | 0.99, 0.99 | 1.06, 1.02 | 1.14, 1.07 |
-  | Small run, blurred up to 4 | 1.00, 0.98 | 1.06, 1.02 | 1.15, 1.07 |
   | The same with a contrast of 2 | 0.99, 0.98 | 1.07, 1.03 | 1.10, 1.06 |
   | The same with a clarity of 1 | 0.97, 0.98 | 1.19, 1.07 | 1.21, 1.10 |
+  | Small run, blurred up to 4 | 1.00, 0.98 | 1.06, 1.02 | 1.15, 1.07 |
+  | The same with a clarity of 1 | 1.03, 1.00 | 1.18, 1.08 | 1.18, 1.09 |
   | Six levels 32 wide, blurred up to 2 | 0.92, 0.96 | 0.91, 0.98 | 1.06, 1.05 |
   | Six levels 32 wide, blurred up to 3 | 0.96, 0.98 | 1.00, 1.01 | 1.20, 1.07 |
 
@@ -1555,6 +1556,29 @@ nebulae.
     is 0.017 of a pixel's noise where windows 7 to 9 px across are given
     0.057. Blurred up to 4, the bank's median truth (2.9 px) is 11.8 px
     across.
+  - Blurred up to 4 they are asked as narrower inputs are: windows 9 to
+    12 px across are a tenth of those drawn, 0.63 of them asked for 0.58
+    or less, and their lift is 0.054 of a pixel's noise against 0.063
+    for 7 to 9 px. The run taught so learns the clarity on the 11.5 px
+    Trunk as more is asked: 1.03 and 1.00 at an ask of 0.5, 1.18 and
+    1.06 at 0.4 (blurred up to 3, 1.04 and 1.01; blurred up to 4 without
+    it, 1.06 and 1.00), 1.34 and 1.12 at 0.33. Its rims are those of
+    the run without: ×1.99 and a rise over 4.29 px at 0.5 with knots of
+    1.05% (the reference 0.98), and 1.5% on the multi-night Trunk; the
+    reference's lit side at 0.4 (×3.14, 4.11 px, knots 1.16%), the ridge
+    overshooting below that. The dark side 8 px out reads 0.39 at 0.5
+    and 0.45 at 0.4, against 0.26 without it and the reference's 0.68.
+    The California's stars keep their 9% of flux.
+  - Its lift sits finer than the reference's. At an ask of 0.4 inside
+    the Trunk's cloud, from 2 to 4, 4 to 8, 8 to 16 and 16 to 32 px:
+    1.16, 1.18, 1.06 and 1.00, against the reference's 1.04, 1.13, 1.11
+    and 1.04, and 1.12, 1.06, 1.00 and 1.00 for the run without clarity.
+    So the clarity lands between 4 and 8 px, half of it between 8 and
+    16 and none beyond, and under 4 px the sharper ask raises the noise
+    whether clarity is taught or not. By eye it is the input's mottle
+    raised with its grain, where the reference draws broader dark lanes
+    on a darker cloud. Against the deeper stack it holds what every
+    other output does (0.02, 0.57 and 0.86).
 - **Grain on images denoised first.** On noisy images the runs' grain is
   the reference's, in sky, nebula, bright nebula and along rims. On
   images denoised first it is not: along the California's rims the
@@ -1576,11 +1600,15 @@ nebulae.
 In order, each only if the one before leaves a gap at the rims:
 
 1. **Detail inside a cloud on the run that is clean at the rims.** The
-   small recipe blurred up to 3 (four levels 64 wide, tiles of 256 in
-   eights, 60,000 steps, the banks of 1024 px windows) reads clean and
-   reaches the reference's lit side at an ask of 0.4. On it: a clarity
-   of 1 blurred up to 4, since blurred up to 3 it is learned for stars
-   7.9 px across and, at an ask of 0.5, not for 11.5.
+   small recipe blurred up to 4 with a clarity of 1 (four levels 64
+   wide, tiles of 256 in eights, 60,000 steps, the banks of 1024 px
+   windows) reads clean, and at an ask of 0.4 reaches the reference's
+   lit side and raises a cloud's detail between 4 and 8 px past the
+   reference's. It lacks the broader share, from 8 to 32 px, and the
+   dark side beside a rim. On it: a clarity read broader (more of the
+   stars' width in `CLARITY_FINE`, or a second, wider one beside it),
+   tried first as a step on this run's output, as the first was, and
+   taught only if the step gives the broad bands and leaves the rims.
 
    Tried on it and left out: six levels 32 wide for the dark side,
    which gave none of it, and the blur up to 4 alone, which moved
