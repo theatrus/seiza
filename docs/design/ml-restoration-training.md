@@ -1479,6 +1479,7 @@ nebulae.
   | Small run, blurred up to 2 | 0.81, 0.87 | | |
   | The same on tiles of 768 | 0.96, 0.99 | 0.97, 1.00 | 1.05, 1.03 |
   | Small run, blurred up to 3 | 0.99, 0.99 | 1.06, 1.02 | 1.14, 1.07 |
+  | Small run, blurred up to 4 | 1.00, 0.98 | 1.06, 1.02 | 1.15, 1.07 |
   | The same with a contrast of 2 | 0.99, 0.98 | 1.07, 1.03 | 1.10, 1.06 |
   | The same with a clarity of 1 | 0.97, 0.98 | 1.19, 1.07 | 1.21, 1.10 |
   | Six levels 32 wide, blurred up to 2 | 0.92, 0.96 | 0.91, 0.98 | 1.06, 1.05 |
@@ -1491,7 +1492,25 @@ nebulae.
     contrast of a fixed size is it.
   - The widest blur moves it: 0.81 to 0.99 between 4 and 8 px, blurred
     up to 3 in place of 2. Tiles of 768 in place of 256 move it as far
-    (0.96) with the blur left at 2.
+    (0.96) with the blur left at 2. Blurred up to 4 it goes no further
+    (1.00), and the rims are those of 3: ×2.02 and a rise over 4.20 px
+    at an ask of 0.5, the reference's lit side at 0.4 with knots of
+    1.15% (1.27 blurred up to 3), the ridge overshooting under 0.4 as
+    before. The California's stars gain 10% of their flux against 7.
+  - What is raised there is not more of the sky, as far as a deeper
+    stack can say. Inside the cloud the deep Trunk's bands match the
+    multi-night stack of the same field by 0.09 between 4 and 8 px,
+    0.60 between 8 and 16 and 0.86 between 16 and 32; the reference's
+    strong setting by 0.04, 0.57 and 0.87, and the runs by 0.03, 0.57
+    and 0.86. The reference's bands follow the input's own (0.95 to
+    0.99) at 1.2 to 1.4 times their size: it raises what the input
+    holds there, noise and all, by the PSF's width. On the Trunk
+    denoised first it doubles the light between 2 and 4 px, and that
+    matches the deeper stack no better (−0.04). So the look is
+    enhancement and a clarity is its like, and no wider blur will find
+    structure there that the input does not hold. (The multi-night
+    stack's own noise lowers what any match can reach, and the zone is
+    the faintest of the image; rims are another matter.)
   - `--contrast` does not: it is masked by what is there and to nebula
     standing over the noise, and inside a dark cloud neither holds.
   - **Local contrast that keeps strong edges gives it.** Applied to the
@@ -1559,16 +1578,17 @@ In order, each only if the one before leaves a gap at the rims:
 1. **Detail inside a cloud on the run that is clean at the rims.** The
    small recipe blurred up to 3 (four levels 64 wide, tiles of 256 in
    eights, 60,000 steps, the banks of 1024 px windows) reads clean and
-   reaches the reference's lit side at an ask of 0.4. On it, one change
-   each:
-   - blurred up to 4, since 3 in place of 2 took the detail between 4
-     and 8 px from 0.81 to 0.99;
-   - a clarity of 1 blurred up to 4, since blurred up to 3 it is learned
-     for stars 7.9 px across and, at an ask of 0.5, not for 11.5.
+   reaches the reference's lit side at an ask of 0.4. On it: a clarity
+   of 1 blurred up to 4, since blurred up to 3 it is learned for stars
+   7.9 px across and, at an ask of 0.5, not for 11.5.
 
-   Six levels 32 wide, blurred up to 3 as well, were tried for the dark
-   side and gave none of it.
+   Tried on it and left out: six levels 32 wide for the dark side,
+   which gave none of it, and the blur up to 4 alone, which moved
+   nothing.
 
+   Then the stars' halos: a sharpened core keeps its wings, which show
+   as a glow on an image denoised first and are there on a noisy one
+   (`--kernel-halo`, which has only been tried on the larger recipe).
    Then clean truth for 0.7 of the native windows, and the bank of
    brought-down stacks, which took a third of the narrow stars' flux
    gain off.
