@@ -1441,7 +1441,14 @@ nebulae.
       read 1.3% against 1.1, on the multi-night Trunk 2.6% against 1.4
       (3.6 blurred up to 2), and the California's stars gain 12% of
       their flux against 7. Depth is left out of the small recipe.
-    - What is left between the two: the tile and batch, and the steps.
+    - Tiles of 768 in fours for 30,000 steps, the small recipe
+      otherwise, are not the speckle either: 1.1%, and 1.5% on the
+      multi-night Trunk (the California 3.1% against 2.8). They buy
+      nothing at the rims (×1.95 and a rise over 4.26 px, the dark side
+      at 0.18) and leave the California's stars less round (0.063
+      against 0.053). So neither the depth nor the tile speckles the
+      deep Trunk alone, the two together do, and the small recipe keeps
+      its four levels and its tiles of 256.
   - Clean truth does not mend it (3.1%), nor the halo (3.3%), nor the
     edge term kept off stars (2.9%).
   - Contrast in the target is learned and makes it worse. A larger run
@@ -1470,6 +1477,7 @@ nebulae.
   |---|---|---|---|
   | The reference, strong | 1.13, 1.11 | 1.22, 1.11 | 1.48, 1.14 |
   | Small run, blurred up to 2 | 0.81, 0.87 | | |
+  | The same on tiles of 768 | 0.96, 0.99 | 0.97, 1.00 | 1.05, 1.03 |
   | Small run, blurred up to 3 | 0.99, 0.99 | 1.06, 1.02 | 1.14, 1.07 |
   | The same with a contrast of 2 | 0.99, 0.98 | 1.07, 1.03 | 1.10, 1.06 |
   | The same with a clarity of 1 | 0.97, 0.98 | 1.19, 1.07 | 1.21, 1.10 |
@@ -1482,7 +1490,8 @@ nebulae.
     a third of the stars' width and one and a half of them, and no
     contrast of a fixed size is it.
   - The widest blur moves it: 0.81 to 0.99 between 4 and 8 px, blurred
-    up to 3 in place of 2.
+    up to 3 in place of 2. Tiles of 768 in place of 256 move it as far
+    (0.96) with the blur left at 2.
   - `--contrast` does not: it is masked by what is there and to nebula
     standing over the noise, and inside a dark cloud neither holds.
   - **Local contrast that keeps strong edges gives it.** Applied to the
@@ -1560,9 +1569,7 @@ In order, each only if the one before leaves a gap at the rims:
    Six levels 32 wide, blurred up to 3 as well, were tried for the dark
    side and gave none of it.
 
-   Still open from before: tiles of 768 in fours for 30,000 steps, the
-   last of what separates the small run from the speckled one. Then
-   clean truth for 0.7 of the native windows, and the bank of
+   Then clean truth for 0.7 of the native windows, and the bank of
    brought-down stacks, which took a third of the narrow stars' flux
    gain off.
 2. **Noisy space-telescope windows** (`--external-snr`) at more weight,
