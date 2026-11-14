@@ -1692,8 +1692,27 @@ In order, each only if the one before leaves a gap at the rims:
      run's output at an ask of 0.5, an amount of 1 darkens the Trunk's
      rims 8, 6, 4 and 2 px out to 0.72, 0.84, 0.83 and 0.62 (the
      reference 0.68, 0.85, 1.00 and 0.99), with the lit side, the
-     knots and the cloud's detail where they were. A run taught it is
-     the next.
+     knots and the cloud's detail where they were.
+   - A run taught it (`--shade 1`, the rest as the run above; 60,000
+     steps, validation 0.792, not comparable since the target moved)
+     learns most of it and loses nothing. At an ask of 0.5 the Trunk's
+     rims 8, 6, 4, 2 and 0 px out darken by 0.53, 0.65, 0.70, 0.57 and
+     0.15, from 0.31, 0.39, 0.45, 0.41 and 0.07, to the reference's
+     0.68, 0.85, 1.00, 0.99 and 0.44; the multi-night Trunk's by 0.35,
+     0.48, 0.58, 0.52 and 0.22 to the reference's 0.40, 0.52, 0.66,
+     0.74 and 0.41. The lit side (+4.05 and +4.98), the slope (×1.87
+     over 4.33 px), the knots (0.98%, 1.91% and 3.03% on the Trunk,
+     the multi-night Trunk and the California) and the cloud's detail
+     (1.06, 1.09, 1.05 and 1.02) are the run's before. No star dips
+     below its surround, and the star beside the Trunk's rim that the
+     step gave a dark crescent has none. At an ask of 0.4 the dark
+     side is the reference's (0.72, 0.89, 0.97, 0.83 and 0.39) with
+     the lit side past it (+5.75 and +7.43), the cloud's detail past
+     it (1.16, 1.28, 1.16 and 1.03) and knots of 1.04%. What is left
+     at 0.5 is the lit side's height and the rim's rise (4.33 px
+     against 3.74), which a larger network is the next to try. The
+     California's stars keep 9% of flux and are a little less round
+     (0.057 from 0.044; the reference 0.046).
 
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
