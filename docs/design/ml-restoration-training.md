@@ -1629,6 +1629,12 @@ nebulae.
       goal's 1.04, 1.13, 1.11 and 1.04. At 0.4 it passes it: 1.14,
       1.24, 1.14 and 1.04. By eye the cloud's dark lanes are drawn at
       0.5, with small bright dots inside the cloud that grow at 0.4.
+      The dots are the input's noise peaks made brighter, and no more
+      of them than the goal makes: per megapixel of cloud, 42
+      stand above 6 of the input's spread at that size (the input 1,
+      the goal 44, an ask of 0.4 50), over places where the input
+      stood at 2.4, and the deeper stack shows something under 3% of
+      them, as under any place.
     - The rims are a little softer at 0.5 (×1.86, a rise over 4.31 px,
       knots 1.00%; the lit side 4 and 6 px in +3.99 and +4.88) and past
       the goal's lit side at 0.4 (×2.84, 4.00 px, knots 1.07%,
@@ -1694,8 +1700,10 @@ In order, each only if the one before leaves a gap at the rims:
    output alone, so it raises the noise of its bands with the detail,
    as the goal does. On this run's Trunk at an ask of 0.5, 0.5 of
    it reads 1.11, 1.25, 1.19 and 1.07 inside the cloud, past the
-   goal's, with knots of 1.01%. Its sheets go beside the run's
-   own (`sheets-clarity-<amount>`).
+   goal's, with knots of 1.01%; 0.25 of it reads 1.09, 1.17, 1.12
+   and 1.05, on the goal's 1.04, 1.13, 1.11 and 1.04 from 4 px
+   up, with the knots and the rims where the run left them. Its sheets
+   go beside the run's own (`sheets-clarity-<amount>`).
 
    Tried on it and left out: six levels 32 wide for the dark side,
    which gave none of it, and the blur up to 4 alone, which moved
