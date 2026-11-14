@@ -54,7 +54,7 @@ pub(crate) trait BandSource: Sync {
 
 /// Whether `region`, or the whole grid when there is none, holds any of
 /// rows `top..top + rows`.
-fn reaches_rows(region: Option<ReferenceRegion>, top: usize, rows: usize) -> bool {
+pub(super) fn reaches_rows(region: Option<ReferenceRegion>, top: usize, rows: usize) -> bool {
     region.is_none_or(|region| top < region.y + region.height && region.y < top + rows)
 }
 

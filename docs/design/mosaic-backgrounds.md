@@ -8,8 +8,34 @@ integration functions use it; C accepts `mosaicPanels`, Python accepts
 Inputs must already be calibrated, registered on the same pixel grid, and
 matched in photometric gain. Missing samples are NaN, including holes within
 a panel. Zero and negative finite samples are data. At most 256 distinct
-panels are accepted. A `LiveStacker` still manages its own background refit;
-this option belongs to the registered-frame integration path.
+panels are accepted.
+
+## Expanded canvases
+
+`LiveStacker::reintegrate` and the other replays of a stack on an expanded
+canvas match panel backgrounds the same way, with nothing to set: the option
+itself is still refused there, since the stack knows its own panels. Each
+admitted frame belongs to the panel planning made that its footprint shares
+the most pixels with. The matcher reads each frame as the replay normalizes
+it, after its recorded gain and level and any background refit, so it sees
+the samples the rejection passes see. Banded replays read every kept frame
+once more, a row of background cells at a time; whole-frame replays prepare
+every frame once more before their three passes.
+
+Nothing is matched where a stack keeps its inputs' intensities
+(`NormalizationMode::None`), where its frames all lie on one panel, or where
+planning made more than 256 panels. A reintegration of some frames alone fits
+the planes from those frames, so two subsets' stacks can differ by a smooth
+plane as well as by their frames. The live pass is unchanged: it cannot
+revisit a panel once later panels have joined.
+
+On two synthetic panels of six frames, whose nights' skies sloped opposite
+ways by a third of the sky level, the reintegrated stack stepped by 4.1 ADU
+where the second panel's coverage begins. With panel matching it steps by 0.1
+there and 0.5 where the first panel ends, measured against the same panels
+under level skies, whose noise is 0.7 ADU a pixel. Where skies agree already
+the matcher fits their noise: on two panels of two frames each, noise 3 to 6
+ADU a sample, it moved the stack by at most 0.6 ADU.
 
 ## Matching and blending
 
@@ -17,8 +43,12 @@ Each input contributes a bounded lattice of weighted samples to its panel.
 Samples retain their pixel positions and independent channel support until
 panels are compared. Partial edge cells contribute wherever the panels have
 matching finite samples. The lattice includes adjacent pixel pairs to retain both parities of
-alternating channel masks. Clipping operates on paired differences, so shared
-stars and emission cancel before averaging or rejection.
+alternating channel masks. A cell's difference between two panels is the
+median of its paired differences, so shared stars and emission cancel first
+and what is left of them cannot pull it. Panels whose gains differ by a few
+percent leave that share of every shared star in their differences, all of
+one sign; a mean clipped about the median averaged those wings in, and in a
+dense field tilted the planes of skies that agreed.
 
 Bright cells are excluded from the plane fit. When bright emission leaves
 separate background groups, paired residuals match those groups by a robust
@@ -32,8 +62,15 @@ with too few cells for a plane can still constrain a relative constant.
 At each matching sample position, corrected panel values form a common
 background weighted by distance from each channel's footprint edge and the
 recorded frame weights. Only differences from this common value are averaged
-into residual cells and interpolated. Residual differences are clipped before
-averaging so a sampled transient hit cannot spread into a smooth correction.
+into residual cells and interpolated. A cell's residual is the median of its
+samples' differences, so neither a sampled transient hit nor a star the
+panels' gains disagree about can spread into a smooth correction. A cell
+holding matching samples at fewer than half its positions, a sliver of a
+panel's edge, measures none and takes its neighbours' residual: its few
+samples are the frame's outermost pixels, and its centre lies beyond the
+panel, where interpolation would lean on it hardest. On two panels of a dense
+field such slivers held 20 to 40 ADU under skies that agreed, and bent the
+panel's last eight columns by 10 ADU.
 Full-resolution samples still undergo
 Seiza's usual weighted rejection; coverage and per-channel holes are preserved.
 This is background matching, not an absolute sky estimate: a gradient shared
@@ -74,8 +111,9 @@ checks that every later read matches those original samples.
 
 The output-version cases include a sampled Gaussian star under a steep sky,
 a partial-cell overlap, independent RGB missing samples, a sampled transient
-hit, and four overlapping panels with different skies
-and shared diffuse emission. Core tests measure recovery of the known scene
+hit, four overlapping panels with different skies
+and shared diffuse emission, and an expanded canvas of two panels whose
+nights' skies sloped opposite ways, reintegrated. Core tests measure recovery of the known scene
 up to the unobservable common plane, preserve a bright star and missing
 pixels, and compare whole-frame and banded output bit for bit. C and Python
 tests exercise the same panel-ID option and reject mismatched ID counts.

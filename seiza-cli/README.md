@@ -915,13 +915,24 @@ more lumpy, for 0.7% less noise; seams were level. Pass
 `--normalization local-background` for mosaics whose panels come from nights
 of different transparency, where only stars measure it. `local-background`
 matches panel brightness through their overlaps from stars: panels differing
-only in gain and offset match exactly. A gradient within one panel cannot be told apart from the sky,
-though, and the canvas does not feather. Uncalibrated lights also carry their
+only in gain and offset match exactly. A gradient within one panel cannot be told apart from the sky
+during the live pass, though, and the canvas does not feather. Uncalibrated lights also carry their
 vignetting into every overlap. In a synthetic test, a gradient spanning a third of the sky level across one panel
 left steps of about a tenth of it, and shifted the panel beyond by about half of
-it. For seamless backgrounds, stack each panel on its own, flatten each panel
-stack with `seiza background` (see [Background extraction](#background-extraction)),
-and expand the flattened panel stacks into the mosaic.
+it.
+
+`--reintegrate` removes those steps under either normalization. It fits one
+additive plane per panel through every overlap at once and tapers what the
+planes leave across each overlap, so panels from nights with different sky
+gradients meet level; see
+[registered mosaic backgrounds](../docs/design/mosaic-backgrounds.md). In
+a synthetic test of two panels whose skies sloped opposite ways, the step
+fell from 4.1 ADU to 0.1 to 0.5, under noise of 0.7 ADU a pixel. A gradient every panel shares is not removed, and
+neither is curvature within a panel, such as vignetting left by a missing
+flat: for those, stack each panel on its own, flatten each panel stack with
+`seiza background` (see [Background extraction](#background-extraction)),
+and expand the flattened panel stacks into the mosaic. `--normalization none`
+turns panel matching off with the rest.
 
 `--reintegrate` uses the same expanded canvas and recorded transforms.
 Planning reads every frame before the integration pass. Each frame being
