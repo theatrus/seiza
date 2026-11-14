@@ -343,6 +343,10 @@ def main(argv: list[str] | None = None) -> int:
                                help="local contrast asked of what is not a star: a known-kernel target, with the "
                                     "noise it passes, is given this, times one less its ratio, of its own detail "
                                     "above a base that keeps strong edges (0: none)")
+    sharpen_train.add_argument("--shade", type=float, default=0.0,
+                               help="shade asked on the dark side of strong edges: a known-kernel target, after its "
+                                    "noise and clarity, is given this, times one less its ratio, of what dips below "
+                                    "its local mean beside a strong edge (0: none)")
     sharpen_train.add_argument("--rest-floor", type=float, default=0.0,
                                help="the least ratio asked of what is not a star in a known-kernel window, whatever "
                                     "its stars are asked (0: none)")
@@ -789,6 +793,7 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
         round_target=arguments.round_target, denoised=arguments.denoised, reblur=arguments.reblur,
         external_snr=arguments.external_snr, kernel_halo=arguments.kernel_halo,
         clean_truth=arguments.clean_truth, contrast=arguments.contrast, clarity=arguments.clarity,
+        shade=arguments.shade,
         rest_floor=arguments.rest_floor)
     loss = sharpen_model.LossSettings(epsilon=arguments.charbonnier, noise_cap=arguments.noise_cap,
                                       gradient_weight=arguments.gradient_weight,
