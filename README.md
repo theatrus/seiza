@@ -14,13 +14,18 @@ and C ABI.
 - **Project analysis:** `seiza analyze` measures mono FITS/XISF projects without
   stacking, with per-filter noise-depth curves and portable JSON/HTML reports.
 - <a id="gpu-acceleration"></a>**Stacking:** calibrated batch and live stacking, GPU acceleration, rejection,
-  drizzle, mosaics, and resumable sessions.
+  drizzle, mosaics, and resumable sessions. Frames register through a quadratic
+  warp, which follows lens distortion and atmospheric refraction.
+- **Learned noise reduction (experimental):** `seiza model denoise` takes the
+  noise out of a stacked linear image from any stacker, with a trained model run
+  through ONNX Runtime on the CPU, CUDA, TensorRT, WebGPU or Core ML.
 - **Image processing:** stretching, background correction, RGB/LRGB and narrowband
   composition, photometric color calibration, and experimental deconvolution.
 - **Catalogs and overlays:** star and deep-sky lookup, constellations, sky maps,
   and satellite track prediction.
 - **Parallax videos:** distance-based fly-throughs from starless and star images.
-- **Image formats:** FITS, XISF, PNG, JPEG, and TIFF.
+- **Image formats:** FITS, XISF, PNG, JPEG, and TIFF, and SER planetary
+  sequences from Rust.
 
 <a id="ways-to-use-it"></a><a id="minimum-supported-rust-version"></a>
 
@@ -61,6 +66,7 @@ Seiza finds installed catalogs automatically and solves locally. See the
 
 - [Features and limits](docs/features.md)
 - <a id="commands-and-services"></a>[Solving, annotations, and workers](docs/solving.md)
+- [Learned noise reduction](seiza-cli/README.md#learned-models-experimental)
 - <a id="image-stacking"></a><a id="automatic-background-extraction"></a><a id="color-from-mono-stacks"></a><a id="light-deconvolution-experimental"></a>[Stacking, background correction, color, and deconvolution](docs/image-processing.md)
 - <a id="catalogs-and-data"></a>[Catalog setup, storage, and custom builds](docs/catalogs.md)
 - <a id="use-with-nina-astap-compatible-mode"></a><a id="use-with-siril-solve-field-compatible-mode"></a>[N.I.N.A., Siril, and application integration](docs/integrations.md)

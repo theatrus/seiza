@@ -1,6 +1,6 @@
 [package]
 name = "seiza-analysis"
-version = "0.5.1"
+version = "0.6.0"
 description = "Sampled project quality and integration-depth analysis for astrophotography"
 edition.workspace = true
 rust-version.workspace = true
