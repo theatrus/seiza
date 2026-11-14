@@ -33,6 +33,7 @@ without the solver. See [dependency and release rules](../RELEASE.md).
 | [seiza-fits](../seiza-fits/README.md) | FITS reading and atomic linear float writing |
 | [seiza-xisf](../seiza-xisf/README.md) | XISF reading and atomic linear float writing |
 | [seiza-image-io](../seiza-image-io/README.md) | Extension-based image I/O, EXIF orientation and metadata |
+| [seiza-image-ser](../seiza-image-ser/README.md) | Seekable reading of raw SER planetary sequences |
 | [seiza-stats](../seiza-stats/README.md) | Shared robust image statistics |
 | [seiza-imgproc](../seiza-imgproc/README.md) | Image-processing primitives |
 | [seiza-background](../seiza-background/README.md) | Robust background fitting and correction |
@@ -41,6 +42,7 @@ without the solver. See [dependency and release rules](../RELEASE.md).
 | [seiza-stacking](../seiza-stacking/README.md) | Calibration, registration, normalization, rejection, mosaics, and live stacking |
 | [seiza-pipeline](../seiza-pipeline/README.md) | Distributed stacking: partial stacks that describe themselves, combined and resumed by key |
 | [seiza-deconvolution](../seiza-deconvolution/README.md) | Experimental linear-image restoration |
+| [seiza-model](../seiza-model/README.md) | Learned restoration: tiling, noise input, hole guard and an ONNX Runtime backend |
 | [seiza-stars](../seiza-stars/src/lib.rs) | Peak-star detection and centroid refinement |
 | [seiza-draw](../seiza-draw/README.md) | Overlay drawing and labels |
 | [seiza-parallax](../seiza-parallax/README.md) | Distance-based scenes, tours, frames, and video |
