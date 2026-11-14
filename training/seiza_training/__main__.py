@@ -455,6 +455,10 @@ def main(argv: list[str] | None = None) -> int:
                                                               "only)")
     sharpen_sheet.add_argument("--name", required=True)
     sharpen_sheet.add_argument("--sheet", action="append", dest="sheets_named", help="only this sheet (default: all)")
+    sharpen_sheet.add_argument("--clarity", type=float, default=0.0,
+                               help="local contrast added to every output after the model, as train-sharpen's "
+                                    "--clarity asks of a run at a ratio of 0; its sheets go beside the run's own "
+                                    "(0: none)")
 
     evaluate = commands.add_parser("evaluate-noise", help="measure a trained noise model on a split")
     evaluate.add_argument("--name", required=True)
@@ -693,7 +697,7 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
         from . import sharpen_sheets
 
         named = set(arguments.sheets_named) if arguments.sheets_named else None
-        return sharpen_sheets.render_saved(store, manifest, arguments.name, only=named)
+        return sharpen_sheets.render_saved(store, manifest, arguments.name, only=named, clarity=arguments.clarity)
     if command == "evaluate-noise":
         from .noise_model import NoiseBands, evaluate_saved
 

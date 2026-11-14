@@ -49,7 +49,7 @@ from . import psf_fields
 from .manifest import Manifest
 from .noise_model import device, image_sigma
 from .sharpen_bank import fitted_stamp, saturation, stamp_width
-from .sharpen_model import (LIGHT_RADIUS, RING_PEAK, edge_band, empirical_stamp, light_centre, load_run,
+from .sharpen_model import (LIGHT_RADIUS, RING_PEAK, clarity_step, edge_band, empirical_stamp, light_centre, load_run,
                             FWHM_PER_SIGMA, blurred_images, measured_stars, measured_width, peak_centre,
                             ring_and_flux, run_directory, settings_from, sharpen)
 from .sheets import typeface, stretch
@@ -82,11 +82,15 @@ CELLS = (4, 3)
 MEASURED_STARS = 3000
 
 
-def render_saved(store: Store, manifest: Manifest, name: str, *, only: set[str] | None = None) -> dict[str, Any]:
+def render_saved(store: Store, manifest: Manifest, name: str, *, only: set[str] | None = None,
+                 clarity: float = 0.0) -> dict[str, Any]:
     """Make a recorded run's sheets, those named in `only` or all, and list
     them in its record. Without a sheet list, or without Pillow, nothing is
     made and the answer says why; a sheet whose input is not built is
-    skipped."""
+    skipped. With `clarity`, every output is given that much local
+    contrast after the model (`clarity_step`), and the sheets and
+    full-size images go beside the run's own, in `sheets-clarity-<amount>`
+    and `full-clarity-<amount>`, and are not listed in its record."""
     spec = store.root / SPEC
     if not spec.exists():
         return {"skipped": f"no sheet list at {spec}"}
@@ -100,9 +104,10 @@ def render_saved(store: Store, manifest: Manifest, name: str, *, only: set[str] 
     for sheet in json.loads(spec.read_text())["sheets"]:
         if only is not None and sheet["name"] not in only:
             continue
-        path = directory / "sheets" / f"{sheet['name']}.png"
-        whole = directory / "full" / sheet["name"] if sheet.get("full") else None
-        drawn = render(store, manifest, record, model, sheet, path, whole)
+        suffix = f"-clarity-{clarity:g}" if clarity > 0 else ""
+        path = directory / f"sheets{suffix}" / f"{sheet['name']}.png"
+        whole = directory / f"full{suffix}" / sheet["name"] if sheet.get("full") else None
+        drawn = render(store, manifest, record, model, sheet, path, whole, clarity=clarity)
         if drawn is None:
             missing.append(sheet["name"])
             continue
@@ -110,10 +115,11 @@ def render_saved(store: Store, manifest: Manifest, name: str, *, only: set[str] 
         if drawn:
             full[sheet["name"]] = {key: str(value.relative_to(store.root)) if isinstance(value, Path) else value
                                    for key, value in drawn.items()}
-    record = json.loads((directory / "run.json").read_text())
-    record["sheets"] = {**record.get("sheets", {}), **made}
-    record["full"] = {**record.get("full", {}), **full}
-    (directory / "run.json").write_text(json.dumps(record, indent=2))
+    if not clarity > 0:
+        record = json.loads((directory / "run.json").read_text())
+        record["sheets"] = {**record.get("sheets", {}), **made}
+        record["full"] = {**record.get("full", {}), **full}
+        (directory / "run.json").write_text(json.dumps(record, indent=2))
     return {"made": made, "full": {key: {k: v for k, v in value.items() if k != "measures"}
                                    for key, value in full.items()}, "missing": missing}
 
@@ -212,6 +218,8 @@ class Sharpener:
                                                for column in range(stamps.shape[1])])
                                      for row in range(stamps.shape[0])])
         self.ys, self.xs = field.arrays["ys"].astype(np.float64), field.arrays["xs"].astype(np.float64)
+        # Local contrast added after the model (`clarity_step`). 0: none.
+        self.clarity = 0.0
 
     def ratio(self, strength: Any) -> Any:
         """The ratio map, or the stars' and the rest's, for a strength or a
@@ -248,17 +256,18 @@ class Sharpener:
         points = self.points.copy()
         points[:, 0] -= left
         points[:, 1] -= top
-        return sharpen(self.model, np.ascontiguousarray(self.image[top:bottom, left:right]),
-                       lambda x, y: fitted_stamp(self.field.stamp_at(x + left, y + top))[0],
-                       ratio=cut(ratio, (slice(top, bottom), slice(left, right))), points=points,
-                       noise_map=np.ascontiguousarray(self.noise_map[top:bottom, left:right]),
-                       background=self.background, noise=self.noise, inference=self.record["inference"],
-                       residual=self.settings.residual, where=self.where,
-                       grid=(self.ys - top, self.xs - left, self.node_stamps))
+        noise_map = np.ascontiguousarray(self.noise_map[top:bottom, left:right])
+        output = sharpen(self.model, np.ascontiguousarray(self.image[top:bottom, left:right]),
+                         lambda x, y: fitted_stamp(self.field.stamp_at(x + left, y + top))[0],
+                         ratio=cut(ratio, (slice(top, bottom), slice(left, right))), points=points,
+                         noise_map=noise_map, background=self.background, noise=self.noise,
+                         inference=self.record["inference"], residual=self.settings.residual, where=self.where,
+                         grid=(self.ys - top, self.xs - left, self.node_stamps))
+        return clarity_step(output, self.clarity, float(np.nanmedian(self.widths)), points, noise_map)
 
 
 def render(store: Store, manifest: Manifest, record: dict[str, Any], model: Any, sheet: dict[str, Any], path: Path,
-           whole: Path | None = None) -> dict[str, Any] | None:
+           whole: Path | None = None, clarity: float = 0.0) -> dict[str, Any] | None:
     """Draw one sheet to `path`, and with `whole`, the stem of its full-size
     files, write them and measure them. None when its input is not built."""
     from PIL import Image, ImageDraw, ImageFont
@@ -275,6 +284,7 @@ def render(store: Store, manifest: Manifest, record: dict[str, Any], model: Any,
         before = float(np.median(image_sigma(image)[finite][::17]))
         image = denoised_input(store, source, image, sheet["denoise"])
     runner = Sharpener(record, model, image, field)
+    runner.clarity = clarity
     if sheet.get("denoise"):
         runner.measure_noise = before
     look = stretch(image)

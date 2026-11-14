@@ -1374,10 +1374,13 @@ def box_means(plane: np.ndarray, radius: int) -> np.ndarray:
 
 
 def clarified(target: np.ndarray, amount: float, width: float, points: np.ndarray,
-              sigma: np.ndarray) -> tuple[np.ndarray, int]:
+              sigma: np.ndarray, ranged: bool = True) -> tuple[np.ndarray, int]:
     """`target`, a known-kernel window's, with `amount` of local contrast
     that keeps strong edges (see `CLARITY_WIDE`), for an input PSF `width`
-    px across and a stack whose noise is `sigma`, and how far it reads."""
+    px across and a stack whose noise is `sigma`, and how far it reads.
+    Without `ranged`, an edge is judged by the noise alone, and not by the
+    target's range of light: for a whole image, whose range says nothing
+    of any one part of it."""
     low, high = CONTRAST_WIDTHS
     amount = amount * CLARITY_LIFT * float(np.clip((width - low) / (high - low), 0.0, 1.0))
     if not amount > 0:
@@ -1392,14 +1395,31 @@ def clarified(target: np.ndarray, amount: float, width: float, points: np.ndarra
     seen = smooth.astype(np.float64) - float(np.median(smooth[::4, ::4]))
     mean = box_means(seen, reach)
     spread = np.clip(box_means(seen * seen, reach) - mean * mean, 0.0, None)
-    floor = np.maximum(CLARITY_EDGE * np.nan_to_num(sigma), CLARITY_RANGE * window_contrast(smooth)) ** 2
+    floor = np.maximum(CLARITY_EDGE * np.nan_to_num(sigma),
+                       CLARITY_RANGE * window_contrast(smooth) if ranged else 0.0) ** 2
     with np.errstate(divide="ignore", invalid="ignore"):
         follow = np.nan_to_num(spread / (spread + floor), nan=1.0)
-    detail = seen - (box_means(follow, reach) * seen + box_means(mean * (1.0 - follow), reach))
+    detail =seen - (box_means(follow, reach) * seen + box_means(mean * (1.0 - follow), reach))
     near = source_mask(points, target.shape, CONTRAST_CLEAR * width).astype(np.float32)
     near = blurred_images(near, [CONTRAST_FEATHER**2 * np.eye(2)], pad=16)[0]
     away = np.clip(1.0 - 1.5 * near, 0.0, 1.0)
     return (target + amount * away * detail).astype(np.float32), 2 * reach + fine_reach
+
+
+def clarity_step(output: np.ndarray, amount: float, width: float, points: np.ndarray,
+                 noise_map: np.ndarray) -> np.ndarray:
+    """A sharpened image with `amount` of `clarified`'s local contrast
+    added after the model, as a fixed step the user sets: what a run
+    taught a `clarity` of `amount` is asked for at a ratio of 0, read from
+    the output alone, so it raises whatever the output shows in its band,
+    its noise with its detail. `width` is the input PSF's, in px, `points`
+    the image's point sources and `noise_map` its noise. NaN stays NaN."""
+    if not amount > 0:
+        return output
+    finite = np.isfinite(output)
+    filled = np.where(finite, output, np.float32(np.median(output[finite][::17]))).astype(np.float32)
+    made = clarified(filled, amount, width, points, np.nan_to_num(noise_map), ranged=False)[0]
+    return np.where(finite, made, np.nan).astype(np.float32)
 
 
 # The shade a known-kernel target is given on the dark side of a strong

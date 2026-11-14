@@ -405,6 +405,33 @@ def test_clarity_raises_faint_detail_and_leaves_rims_and_stars_alone(tmp_path):
     assert identity.details["clarity"] == 0.0 and np.array_equal(identity.target, identity.image)
 
 
+def test_the_clarity_step_is_the_taught_clarity_on_a_whole_image():
+    side = 200
+    ys, xs = np.mgrid[:side, :side].astype(np.float32)
+    ripple = 0.3 * np.sin(2 * np.pi * xs / 12.0) * (xs < 90)
+    image = (np.where(xs < 120, 140.0, 200.0) + ripple).astype(np.float32)
+    sigma = np.ones((side, side), np.float32)
+    none = np.zeros((0, len(COLUMNS)))
+    # None asked: the image itself.
+    assert sm.clarity_step(image, 0.0, 9.0, none, sigma) is image
+    made = sm.clarity_step(image, 0.5, 9.0, none, sigma)
+    # The ripples stand higher and the rim has no halo, as taught.
+    rows = slice(60, 100)
+    change = made - image
+    gain = float((change[rows, 30:66] * ripple[rows, 30:66]).sum() / (ripple[rows, 30:66] ** 2).sum())
+    kept = float(np.exp(-0.5 * (2 * np.pi * sm.CLARITY_FINE * 9.0 / 12.0) ** 2))
+    assert gain == pytest.approx(0.5 * sm.CLARITY_LIFT * kept, rel=0.15)
+    assert np.abs(change[80, 100:160]).max() < 0.3
+    # Judged by the noise alone, where a window is judged by its range too.
+    assert np.allclose(made, sm.clarified(image, 0.5, 9.0, none, sigma, ranged=False)[0])
+    # NaN stays NaN, and what is far from it is as it was.
+    holed = image.copy()
+    holed[10:14, 180:184] = np.nan
+    kept = sm.clarity_step(holed, 0.5, 9.0, none, sigma)
+    assert np.isnan(kept[10:14, 180:184]).all() and np.isfinite(kept).sum() == side * side - 16
+    assert np.allclose(kept[rows, 30:66], made[rows, 30:66], atol=1e-3)
+
+
 def test_shade_darkens_the_dark_side_of_a_rim_alone(tmp_path):
     side = 200
     ys, xs = np.mgrid[:side, :side].astype(np.float32)
