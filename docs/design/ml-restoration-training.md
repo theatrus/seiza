@@ -1680,9 +1680,23 @@ In order, each only if the one before leaves a gap at the rims:
      moved;
    - the dots inside a cloud: whether they are the stack's or made.
 
-   The clarity as a step after the model stays possible beside it, an
-   amount the user sets: it raises the noise of its bands with the
-   detail, as the reference does.
+   - `--shade AMOUNT` asks for the dark side in the target: what dips
+     below the local mean beside a strong edge, and only the dip, so
+     the sky side of a ridge is given no bright line. As a step on this
+     run's output at an ask of 0.5, an amount of 1 darkens the Trunk's
+     rims 8, 6, 4 and 2 px out to 0.72, 0.84, 0.83 and 0.62 (the
+     reference 0.68, 0.85, 1.00 and 0.99), with the lit side, the
+     knots and the cloud's detail where they were. A run taught it is
+     the next.
+
+   The clarity is also a step after the model, an amount the user sets
+   (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
+   taught that clarity is asked for at a ratio of 0, read from the
+   output alone, so it raises the noise of its bands with the detail,
+   as the reference does. On this run's Trunk at an ask of 0.5, 0.5 of
+   it reads 1.11, 1.25, 1.19 and 1.07 inside the cloud, past the
+   reference's, with knots of 1.01%. Its sheets go beside the run's
+   own (`sheets-clarity-<amount>`).
 
    Tried on it and left out: six levels 32 wide for the dark side,
    which gave none of it, and the blur up to 4 alone, which moved
