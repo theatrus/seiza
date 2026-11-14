@@ -355,6 +355,13 @@ class Settings:
     # unsharp mask gives the lit side of a rim (2026-11-11). An
     # enhancement, as `contrast` is. 0: none.
     clarity: float = 0.0
+    # Shade asked on the dark side of strong edges: a known-kernel
+    # target is given this, times one less the rest's ratio, of
+    # `shaded`'s dip, after its noise and its clarity. Sharpening a rim
+    # raises its lit side and hardly lowers the cloud beside it; the
+    # shade lowers it, with no bright line on the other side
+    # (2026-11-13). An enhancement, as `clarity` is. 0: none.
+    shade: float = 0.0
     # The least share of its input's width that the rest of a
     # known-kernel window is asked for, however sharp its stack allows
     # and whatever is asked of its stars. Windows blurred up to three
@@ -1395,6 +1402,55 @@ def clarified(target: np.ndarray, amount: float, width: float, points: np.ndarra
     return (target + amount * away * detail).astype(np.float32), 2 * reach + fine_reach
 
 
+# The shade a known-kernel target is given on the dark side of a strong
+# edge (`Settings.shade`): `SHADE_LIFT` times what falls, in the target
+# smoothed by `CLARITY_FINE` input widths, below its mean over squares
+# `SHADE_BOX` input widths across as a Gaussian's σ would be, and only
+# where the clarity's base follows the target (a strong edge within its
+# squares). An unsharp mask's dip at an edge lies on its dark side and
+# its rise on the lit side; only the dip is kept, so the sky side of a
+# ridge is given no bright line, and where no strong edge is near
+# nothing is added. Detected point sources are kept clear as
+# `contrasted` keeps them, and a PSF near the sampling limit is given
+# none (`CONTRAST_WIDTHS`). Set on one stack (stars 11.5 px across), as
+# a step applied to a run's output asked for half the width: with a
+# `shade` of 1 a rim's dark side, in its mean profile, is darker by 0.3
+# of the image's noise 8 px out and 0.25 of it 4 px out, its lit side
+# and the knots along it are as they were, and the detail inside a
+# cloud moves by a hundredth (2026-11-13).
+SHADE_BOX = 0.4
+SHADE_LIFT = 3.2
+
+
+def shaded(target: np.ndarray, amount: float, width: float, points: np.ndarray,
+           sigma: np.ndarray) -> tuple[np.ndarray, int]:
+    """`target`, a known-kernel window's, with `amount` of shade on the
+    dark side of its strong edges (see `SHADE_BOX`), for an input PSF
+    `width` px across and a stack whose noise is `sigma`, and how far it
+    reads."""
+    low, high = CONTRAST_WIDTHS
+    amount = amount * SHADE_LIFT * float(np.clip((width - low) / (high - low), 0.0, 1.0))
+    if not amount > 0:
+        return target, 0
+    fine = CLARITY_FINE * width
+    fine_reach = blur_reach(fine**2 * np.eye(2))
+    reach = max(int(round(math.sqrt(3.0) * CLARITY_WIDE * width)), 2)
+    reach = max(min(reach, (WINDOW_PAD - fine_reach) // 2, min(target.shape) - 1), 1)
+    box = max(min(int(round(math.sqrt(3.0) * SHADE_BOX * width)), reach), 1)
+    smooth = blurred_images(target, [fine**2 * np.eye(2)])[0]
+    seen = smooth.astype(np.float64) - float(np.median(smooth[::4, ::4]))
+    mean = box_means(seen, reach)
+    spread = np.clip(box_means(seen * seen, reach) - mean * mean, 0.0, None)
+    floor = np.maximum(CLARITY_EDGE * np.nan_to_num(sigma), CLARITY_RANGE * window_contrast(smooth)) ** 2
+    with np.errstate(divide="ignore", invalid="ignore"):
+        follow = np.nan_to_num(spread / (spread + floor), nan=1.0)
+    dip = np.minimum(seen - box_means(seen, box), 0.0) * box_means(follow, reach)
+    near = source_mask(points, target.shape, CONTRAST_CLEAR * width).astype(np.float32)
+    near = blurred_images(near, [CONTRAST_FEATHER**2 * np.eye(2)], pad=16)[0]
+    away = np.clip(1.0 - 1.5 * near, 0.0, 1.0)
+    return (target + amount * away * dip).astype(np.float32), 2 * reach + fine_reach
+
+
 # Examples.
 
 
@@ -1528,7 +1584,7 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
     clip = background + scale * (level - background) if settings.fill_clipped and level is not None else None
     if clip is not None and not identity and saturated.any():
         signal = filled(signal, saturated, points, stamp, row["width"], background)
-    ratio, nonstellar_ratio, band, contrast, clarity = kernel.ratio, None, kernel.reach(), 0.0, 0.0
+    ratio, nonstellar_ratio, band, contrast, clarity, shade = kernel.ratio, None, kernel.reach(), 0.0, 0.0, 0.0
     if identity:
         blurred, target = signal, None
     elif settings.nonstellar:
@@ -1559,6 +1615,8 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
             band = max(band, reach)
         if settings.clarity > 0:
             clarity = settings.clarity * (1.0 - nonstellar_ratio)
+        if settings.shade > 0:
+            shade = settings.shade * (1.0 - nonstellar_ratio)
         rendered = point_map(points, stamp, image.shape, background)
         with np.errstate(divide="ignore", invalid="ignore"):
             mask = np.clip(np.nan_to_num(rendered / (rendered + STAR_MASK_NOISE * scale * sigma)), 0.0, 1.0)
@@ -1594,6 +1652,9 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
             # is raised, whatever it is.
             target, reach = clarified(target, clarity, kernel.widths["input"], points, scale * stack_sigma)
             band = max(band, reach)
+        if shade > 0:
+            target, reach = shaded(target, shade, kernel.widths["input"], points, scale * stack_sigma)
+            band = max(band, reach)
     # The clipped cores stay out of the loss, but not the pixels about them:
     # input and target are blurs of the same window there, and agree.
     valid = edge_band(image.shape, band) & ~saturated
@@ -1608,7 +1669,7 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
                                           "kernel": kernel.covariance.tolist(), "sharpest": kernel.ratio,
                                           "real": kernel.donor is not None, "denoised": denoised,
                                           "clean_truth": clean_truth, "contrast": contrast,
-                                          "clarity": clarity,
+                                          "clarity": clarity, "shade": shade,
                                           "halo": None if halo is None else [halo.share, halo.width]},
                    nonstellar_ratio)
 

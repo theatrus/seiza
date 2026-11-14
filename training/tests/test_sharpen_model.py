@@ -405,6 +405,57 @@ def test_clarity_raises_faint_detail_and_leaves_rims_and_stars_alone(tmp_path):
     assert identity.details["clarity"] == 0.0 and np.array_equal(identity.target, identity.image)
 
 
+def test_shade_darkens_the_dark_side_of_a_rim_alone(tmp_path):
+    side = 200
+    ys, xs = np.mgrid[:side, :side].astype(np.float32)
+    # A rim 60 high at column 120, 4 px soft, with faint ripples far to
+    # its left; a star on the ripples.
+    ripple = 0.3 * np.sin(2 * np.pi * xs / 12.0) * (xs < 60)
+    rim = 30.0 * (1.0 + np.tanh((xs - 120.0) / 4.0))
+    target = (140.0 + rim + ripple).astype(np.float32)
+    points = np.zeros((1, len(COLUMNS)))
+    points[0, :2] = (30.0, 150.0)
+    points[0, COLUMNS.index("detected")] = 1
+    sigma = np.ones((side, side), np.float32)
+    made, reach = sm.shaded(target, 1.0, 9.0, points[:0], sigma)
+    change = made - target
+    fine = sm.CLARITY_FINE * 9.0
+    box = int(round(np.sqrt(3.0) * sm.CLARITY_WIDE * 9.0))
+    assert reach == 2 * box + sm.blur_reach(fine**2 * np.eye(2))
+    # Darker on the dark side, by more than the noise; nothing brighter
+    # anywhere, and the lit side as it was.
+    assert change[80, 104:118].min() < -2.0
+    assert change.max() <= 1e-4
+    assert np.abs(change[80, 126:160]).max() < 0.05
+    # Far from the rim the ripples are left alone.
+    assert np.abs(change[60:100, 10:40]).max() < 0.05
+    # Twice the amount, twice the change.
+    assert np.allclose(sm.shaded(target, 2.0, 9.0, points[:0], sigma)[0] - target, 2 * change, atol=1e-3)
+    # Kept clear of a listed star.
+    star = 3000.0 * np.exp(-0.5 * ((xs - 30.0) ** 2 + (ys - 150.0) ** 2) / 3.8**2)
+    listed = sm.shaded(target + star, 1.0, 9.0, points, sigma)[0] - (target + star)
+    assert np.abs(listed[140:161, 20:41]).max() < 1e-3
+    # None of it for stars at the sampling limit.
+    same, none = sm.shaded(target, 1.0, sm.CONTRAST_WIDTHS[0], points, sigma)
+    assert same is target and none == 0
+    # In a window: more the more is asked of the rest, after its noise.
+    bank = sm.Bank(kernel_bank(tmp_path), sm.Settings(tile=32))
+    plain = sm.Settings(tile=32, exposure=1.0, kernel_noise=1.0, nonstellar=True, pass_noise=True)
+    asked = sm.Settings(tile=32, exposure=1.0, kernel_noise=1.0, nonstellar=True, pass_noise=True, shade=1.5)
+    for seed in range(3):
+        without = sm.kernel_example(bank, 0, np.random.default_rng(seed), plain, identity=False)
+        example = sm.kernel_example(bank, 0, np.random.default_rng(seed), asked, identity=False)
+        assert without.details["shade"] == 0.0
+        assert example.details["shade"] == pytest.approx(1.5 * (1.0 - example.nonstellar_ratio))
+        assert np.array_equal(example.image, without.image)
+        expected = sm.shaded(without.target, example.details["shade"], example.width, example.points,
+                             np.asarray(bank.arrays["sigma"][0], dtype=np.float32))[0]
+        assert np.allclose(example.target, expected, atol=1e-3)
+        assert (example.target <= without.target + 1e-4).all()
+    identity = sm.kernel_example(bank, 0, np.random.default_rng(0), asked, identity=True)
+    assert identity.details["shade"] == 0.0 and np.array_equal(identity.target, identity.image)
+
+
 def clipped_bank(tmp_path, level: float = 2_000.0):
     """A known-kernel bank of one window holding a bright star clipped at
     `level`, with fainter ones about it."""
