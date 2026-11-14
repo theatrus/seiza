@@ -1483,6 +1483,7 @@ nebulae.
   | The same with a clarity of 1 | 0.97, 0.98 | 1.19, 1.07 | 1.21, 1.10 |
   | Small run, blurred up to 4 | 1.00, 0.98 | 1.06, 1.02 | 1.15, 1.07 |
   | The same with a clarity of 1 | 1.03, 1.00 | 1.18, 1.08 | 1.18, 1.09 |
+  | The same with clean truth and noisy space-telescope windows | 1.09, 1.05 | 1.24, 1.11 | 1.28, 1.13 |
   | Six levels 32 wide, blurred up to 2 | 0.92, 0.96 | 0.91, 0.98 | 1.06, 1.05 |
   | Six levels 32 wide, blurred up to 3 | 0.96, 0.98 | 1.00, 1.01 | 1.20, 1.07 |
 
@@ -1615,6 +1616,33 @@ nebulae.
     sharp form cannot be known, and no window of this mix holds faint
     structure under noise with its truth known. Clean truth and noisy
     space-telescope windows do.
+  - Windows that hold it lower the gate. The same run with clean truth
+    for 0.7 of the native windows (`--clean-truth 0.7`) and the
+    space-telescope windows under noise of their contrast over 1 to 60
+    (`--external-snr 1,60`) raises the made texture, between 4 and 8 px
+    and between 8 and 16, by 1.54 and 1.19 where it is as large as the
+    pixel noise, 1.55 and 1.22 at half, 1.31 and 1.16 at a quarter and
+    1.04 and 1.03 at a tenth, where the run before gave 1.40 and 1.16,
+    1.28 and 1.10, 0.97 and 0.92, and 0.89 and 0.88. What is left of
+    the noise at a tenth is the input's (1.01 and 0.99).
+    - Inside the Trunk's cloud at an ask of 0.5, from 2 to 4 px up:
+      1.07, 1.09, 1.05 and 1.03, from 1.05, 1.03, 1.00 and 1.00, to the
+      reference's 1.04, 1.13, 1.11 and 1.04. At 0.4 it passes it: 1.14,
+      1.24, 1.14 and 1.04. By eye the cloud's dark lanes are drawn at
+      0.5, with small bright dots inside the cloud that grow at 0.4.
+    - The rims are a little softer at 0.5 (×1.86, a rise over 4.31 px,
+      knots 1.00%; the lit side 4 and 6 px in +3.99 and +4.88) and past
+      the reference's lit side at 0.4 (×2.84, 4.00 px, knots 1.07%,
+      +5.74 and +7.35 against +5.41 and +6.46). The dark side 8 px out
+      is no nearer: 0.31, and 0.36 at 0.4, against 0.68.
+    - On an image denoised first its sky grain is 1.06, 1.08 and 1.03
+      of the input's at 1, 2 and 4 px (the run before 1.02, 1.01 and
+      0.93; the reference 1.22, 1.37 and 1.69). The California's stars
+      keep 8% of flux.
+    - Against the deeper stack the raised detail holds what every
+      output's does (0.03, 0.57 and 0.86): between 4 and 8 px what is
+      raised in this stack is still mostly its noise, as the
+      reference's is.
 - **Grain on images denoised first.** On noisy images the runs' grain is
   the reference's, in sky, nebula, bright nebula and along rims. On
   images denoised first it is not: along the California's rims the
@@ -1638,21 +1666,23 @@ In order, each only if the one before leaves a gap at the rims:
 1. **Detail inside a cloud on the run that is clean at the rims.** The
    small recipe blurred up to 4 with a clarity of 1 (four levels 64
    wide, tiles of 256 in eights, 60,000 steps, the banks of 1024 px
-   windows) reads clean, and at an ask of 0.4 reaches the reference's
-   lit side and raises a cloud's detail between 4 and 8 px past the
-   reference's. It lacks the broader share, from 8 to 32 px, and the
-   dark side beside a rim, and it leaves structure under about half
-   the pixel noise alone. On it, one of:
+   windows), with clean truth for 0.7 of the native windows and the
+   space-telescope windows under noise, reads clean and raises a
+   cloud's detail in every band from 2 to 32 px: short of the
+   reference's from 4 to 16 px at an ask of 0.5 and past it at 0.4,
+   where it also passes the reference's lit side. It lacks the dark
+   side beside a rim, half the reference's, and draws small bright
+   dots inside a cloud. On it:
 
-   - windows whose faint structure has a known sharp form: clean truth
-     for 0.7 of the native windows, and the noisy space-telescope
-     windows of item 2, read by the made images above (a texture at a
-     quarter of the noise should gain what one as large as the noise
-     does);
-   - the clarity as a step after the model, an amount the user sets:
-     at 0.3 on this run's output at an ask of 0.5 it gives the
-     reference's bands inside the cloud with the rims unmoved, and
-     raises the noise of those bands with them, as the reference does.
+   - an ask between 0.4 and 0.5 read against the reference, by eye and
+     by the measures above;
+   - the dark side beside a rim, which no change to the windows has
+     moved;
+   - the dots inside a cloud: whether they are the stack's or made.
+
+   The clarity as a step after the model stays possible beside it, an
+   amount the user sets: it raises the noise of its bands with the
+   detail, as the reference does.
 
    Tried on it and left out: six levels 32 wide for the dark side,
    which gave none of it, and the blur up to 4 alone, which moved
