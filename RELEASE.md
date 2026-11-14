@@ -21,7 +21,7 @@ PyPI**. They are cut from a single "Release `<version>`" PR followed by two tags
 
   At the time of writing that is `seiza-analysis`, `seiza-background`, `seiza-calibration`,
   `seiza-core`, `seiza-deconvolution`, `seiza-download`, `seiza-draw`, `seiza-fits`,
-  `seiza-image-io`, `seiza-imgproc`, `seiza-model`, `seiza-parallax`, `seiza-pipeline`,
+  `seiza-image-io`, `seiza-image-ser`, `seiza-imgproc`, `seiza-model`, `seiza-parallax`, `seiza-pipeline`,
   `seiza-satellites`, `seiza-sources`, `seiza-stacking`, `seiza-stars`,
   `seiza-stats`, `seiza-stretch`, and `seiza-xisf`. A list written down goes
   stale the first time a crate is added, which is how `seiza-calibration`,
@@ -100,12 +100,14 @@ waits for the index):
 
 ```
 seiza-stats  →  seiza-stretch  →  seiza-imgproc  →  seiza-fits  →  seiza-xisf
-→  seiza-core  →  seiza-image-io  →  seiza-background  →  seiza-calibration
-→  seiza-sources  →  seiza-download  →  seiza  →  seiza-satellites
-→  seiza-stacking  →  seiza-pipeline  →  seiza-stars  →  seiza-deconvolution
-→  seiza-draw  →  seiza-parallax  →  seiza-analysis  →  seiza-cabi  →  seiza-model
-→  seiza-cli
+→  seiza-image-ser  →  seiza-core  →  seiza-image-io  →  seiza-background
+→  seiza-calibration  →  seiza-sources  →  seiza-download  →  seiza
+→  seiza-satellites  →  seiza-stacking  →  seiza-pipeline  →  seiza-stars
+→  seiza-deconvolution  →  seiza-draw  →  seiza-parallax  →  seiza-analysis
+→  seiza-model  →  seiza-cabi  →  seiza-cli
 ```
+
+`seiza-model` sits before `seiza-cabi` and `seiza-cli`, which run its models.
 
 `seiza-deconvolution` sits after `seiza-stars`, whose `PsfField` its
 field-varying deconvolution takes.
