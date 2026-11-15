@@ -835,6 +835,7 @@ seiza_denoised_free = { none = "frees a C handle; Python's garbage collector fre
 seiza_model_backends_json = "model_backends"
 seiza_model_list_json = "installed_models"
 seiza_model_install_json = "install_model"
+seiza_model_download_json = "download_model"
 seiza_model_verify = "verify_model"
 seiza_model_remove = "remove_model"
 seiza_model_output_version = "MODEL_OUTPUT_VERSION"

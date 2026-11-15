@@ -422,6 +422,24 @@ nothing but the image:
 seiza model denoise stack.fits -o clean.fits --high-amount 0.7 --low-amount 0.9
 ```
 
+The first run fetches the model. With no noise model installed and no
+`--model` given, `seiza model denoise` downloads the latest one Seiza publishes
+at downloads.seiza.fyi, with its progress shown, installs it and runs; if the
+download site cannot be reached it stops and says to run `seiza model install`.
+Once a model is installed, runs use it without touching the network. A newer
+published model is never fetched over it: `seiza model install` brings the
+latest, and while more than one noise model is installed `--model` chooses.
+`--model NAME|DIR` always wins and is never downloaded.
+
+`seiza model install` downloads the latest published noise model, and
+`seiza model install NAME` a model by name, as `download-data prebuilt` does a
+catalog: each file is verified by its SHA-256 as it arrives, and the model is
+installed once its card matches the published manifest and its graphs match its
+card. The download is about 520 MB. A name the manifest does not offer is
+refused with the names it does. `seiza setup --noise-model`, or answering yes
+when interactive setup offers it, installs the latest noise model alongside the
+catalogs.
+
 `--high-amount` and `--low-amount` set how much of the pixel-scale grain and of
 the wider mottle is taken out; below 1, some of each is kept. A model runs on the
 best backend the machine has, or the one `--backend` names, and `--tile` changes
@@ -430,6 +448,7 @@ only the speed and memory of a run.
 ```text
 seiza model backends        # which backends run here, and why the others do not
 seiza model list | verify
+seiza model install [NAME]  # a published model (default: the latest noise model)
 seiza model install DIR     # a bundle's directory, once its hashes match
 seiza model remove NAME
 ```
@@ -1432,7 +1451,9 @@ For an interactive selection, run `seiza setup`. This is also the command
 offered by the Windows installer. It presents lightweight, Gaia, deep-blind,
 optional G≤20, and every-catalog presets, then delegates to the same verified
 prebuilt downloader. Every preset includes object search, Solar System objects,
-and active transients.
+and active transients. It then offers the learned noise model that
+`seiza model denoise` runs, which it installs only when asked (`--noise-model`
+when unattended).
 
 The downloader reads one standard bundle from `/data/v4/manifest.json` and
 caches its immutable, content-addressed files by SHA-256 before copying the

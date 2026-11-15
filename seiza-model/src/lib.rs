@@ -56,6 +56,8 @@ pub use model::{
     ChannelScales, DenoiseOptions, DenoiseReport, Denoised, ImageView, NoiseModel, Progress,
 };
 pub use store::ModelStore;
+#[cfg(feature = "download")]
+pub use store::Published;
 pub use tiles::Tiling;
 
 /// The version of this crate whose output a build reproduces. A host keys

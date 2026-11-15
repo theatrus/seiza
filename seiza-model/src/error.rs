@@ -71,6 +71,12 @@ pub enum ModelError {
         /// The underlying error.
         source: std::io::Error,
     },
+    /// A hosted model could not be fetched: its manifest or its files, or a
+    /// name the manifest does not offer
+    /// ([`ModelNotOffered`](seiza_download::Error::ModelNotOffered)).
+    #[cfg(feature = "download")]
+    #[error(transparent)]
+    Download(#[from] seiza_download::Error),
 }
 
 impl<R> From<ort::Error<R>> for ModelError {
