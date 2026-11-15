@@ -2196,6 +2196,9 @@ bool seiza_live_stacker_retain_frames_for_reintegration(SeizaLiveStacker *stacke
  detection and registration do not run again, and every admitted frame
  takes part.
 
+ Expanded canvases match panel backgrounds only when the stack was opened
+ with `matchMosaicBackgrounds: true`. This is independent of normalization
+ and defaults to false; use calibrated panels with matching photometric gains.
  The live stacker is not changed and may keep integrating afterwards. The
  stack must be replayable: `reintegrationUnavailable` in
  [`seiza_live_stacker_state_json`] says why not when it is not, and this

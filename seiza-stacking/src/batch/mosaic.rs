@@ -20,6 +20,21 @@ const TERMS: usize = 3;
 const SIDE: usize = 8;
 const POINTS: usize = SIDE * SIDE;
 const SAMPLE_BYTES: usize = 128 * 1024 * 1024;
+/// The fewest matching samples a cell's residual is measured from: half its
+/// sample positions.
+const RESIDUAL_SAMPLES: usize = POINTS / 2;
+/// The weight of a correction's mean over its panel's footprint, against an
+/// overlap's whole weight of one. It only fixes the level the panels share,
+/// which no overlap measures.
+const LEVEL_PENALTY: f64 = 1.0e-3;
+/// The weight of how far a correction varies over its panel's footprint,
+/// about that mean. An overlap a tenth of a panel wide measures a slope
+/// across itself over a tenth of the panel, so the slope costs a hundred
+/// times more over the footprint than it gains in the overlap: at this weight
+/// a quarter of such a slope is kept, and all but a thirtieth of one measured
+/// along an overlap as long as the panel. This bounds extrapolation of a
+/// slope measured only across a narrow strip of overlap.
+const SLOPE_PENALTY: f64 = 0.03;
 
 #[derive(Clone, Copy, Default)]
 struct Sample {
@@ -42,7 +57,9 @@ pub(super) struct Samples {
 }
 
 impl Samples {
-    pub(super) fn new(image: &LinearImage, panels: &[u32]) -> Self {
+    /// Room for the panels' samples of `width`, `height`, `channels` frames.
+    pub(super) fn new(shape: (usize, usize, usize), panels: &[u32]) -> Self {
+        let (width, height, channels) = shape;
         let mut ids = panels.to_vec();
         ids.sort_unstable();
         ids.dedup();
@@ -50,25 +67,33 @@ impl Samples {
         // Keep corresponding sample positions until panels can be compared.
         // Increase spacing with panel/channel count to bound aggregate storage,
         // rather than retaining a decoded image for every panel.
-        let cells = SAMPLE_BYTES / (ids.len() * image.channels * POINTS * size_of::<Sample>());
+        let cells = SAMPLE_BYTES / (ids.len() * channels * POINTS * size_of::<Sample>());
         let axis = (cells as f64).sqrt().floor().clamp(1.0, 128.0) as usize;
-        let cell = 16.max(image.width.max(image.height).div_ceil(axis));
-        let (columns, rows) = (image.width.div_ceil(cell), image.height.div_ceil(cell));
+        let cell = 16.max(width.max(height).div_ceil(axis));
+        let (columns, rows) = (width.div_ceil(cell), height.div_ceil(cell));
         Self {
-            shape: (image.width, image.height, image.channels),
+            shape,
             cell,
             columns,
             rows,
             frame_panels: panels.iter().map(|id| ids[id]).collect(),
-            samples: vec![
-                vec![Sample::default(); columns * rows * POINTS * image.channels];
-                ids.len()
-            ],
+            samples: vec![vec![Sample::default(); columns * rows * POINTS * channels]; ids.len()],
         }
     }
 
     fn position(&self, tile: usize, point: usize) -> (usize, usize) {
         position(self.shape, self.cell, self.columns, tile, point)
+    }
+
+    fn check_weights(&self, index: usize, options: &BatchStackOptions) -> Result<()> {
+        if let Some(weights) = &options.frame_weights
+            && weights[index].len() != self.shape.2
+        {
+            return Err(Error::Stack(
+                "mosaic frame weights do not match its channels".into(),
+            ));
+        }
+        Ok(())
     }
 
     pub(super) fn add(
@@ -78,24 +103,63 @@ impl Samples {
         options: &BatchStackOptions,
     ) -> Result<()> {
         super::validate_image(image, Some(self.shape))?;
-        let channels = image.channels;
-        if let Some(weights) = &options.frame_weights
-            && weights[index].len() != channels
-        {
-            return Err(Error::Stack(
-                "mosaic frame weights do not match its channels".into(),
-            ));
+        self.check_weights(index, options)?;
+        self.add_rows(index, 0, self.rows, 0, &image.data, options);
+        Ok(())
+    }
+
+    /// [`Self::add`], reading frame `index` from `source` a row of cells at
+    /// a time rather than holding it whole. Rows of cells beyond the
+    /// frame's region are not read. The samples, and the order they are
+    /// summed in, are those `add` takes from the whole frame.
+    pub(super) fn add_bands(
+        &mut self,
+        index: usize,
+        source: &impl BandSource,
+        options: &BatchStackOptions,
+    ) -> Result<()> {
+        self.check_weights(index, options)?;
+        let (width, height, channels) = self.shape;
+        let region = source.region(index);
+        let mut band = Vec::new();
+        for row in 0..self.rows {
+            let top = row * self.cell;
+            let rows = self.cell.min(height - top);
+            if !super::bands::reaches_rows(region, top, rows) {
+                continue;
+            }
+            check_cancelled(options)?;
+            band.resize(rows * width * channels, 0.0);
+            source.read(index, top, &mut band)?;
+            self.add_rows(index, row, row + 1, top, &band, options);
         }
+        Ok(())
+    }
+
+    /// Add frame `index`'s samples in rows of cells `first..last`, from
+    /// `data`: whole rows of the frame from image row `top` on.
+    fn add_rows(
+        &mut self,
+        index: usize,
+        first: usize,
+        last: usize,
+        top: usize,
+        data: &[f32],
+        options: &BatchStackOptions,
+    ) {
+        let channels = self.shape.2;
         let panel = self.frame_panels[index];
         let (shape, cell, columns) = (self.shape, self.cell, self.columns);
-        self.samples[panel]
+        let cells = columns * POINTS * channels;
+        self.samples[panel][first * cells..last * cells]
             .par_chunks_mut(POINTS * channels)
             .enumerate()
             .for_each(|(tile, samples)| {
+                let tile = first * columns + tile;
                 for point in 0..POINTS {
                     let (x, y) = position(shape, cell, columns, tile, point);
                     for channel in 0..channels {
-                        let value = image.data[(y * image.width + x) * channels + channel];
+                        let value = data[((y - top) * shape.0 + x) * channels + channel];
                         if !value.is_finite() {
                             continue;
                         }
@@ -109,15 +173,14 @@ impl Samples {
                     }
                 }
             });
-        Ok(())
     }
 
     fn at(&self, panel: usize, tile: usize, point: usize, channel: usize) -> Sample {
         self.samples[panel][(tile * POINTS + point) * self.shape.2 + channel]
     }
 
-    // Compare the same positions before any clipping or averaging. Shared
-    // stars and emission then cancel even at partially covered panel edges.
+    // Compare the same positions before taking any median. Shared stars
+    // and emission then cancel even at partially covered panel edges.
     fn pair(&self, a: usize, b: usize, tile: usize, channel: usize) -> Option<([f64; TERMS], f64)> {
         let mut pairs = Vec::with_capacity(POINTS);
         for point in 0..POINTS {
@@ -131,13 +194,13 @@ impl Samples {
         if pairs.is_empty() {
             return None;
         }
-        let mut differences = pairs.iter().map(|p| p.1).collect::<Vec<_>>();
-        let (center, limit) = clipping_range(&mut differences);
-        let (mut phi, mut sum, mut count) = ([0.0; TERMS], 0.0, 0.0);
-        for (point, diff) in pairs {
-            if (diff - center).abs() > limit {
-                continue;
-            }
+        // The cell's difference is the median of its samples'. A mean, even
+        // one clipped about the median, takes in the share of every shared
+        // star that a few percent between the panels' gains leaves in the
+        // differences, all of one sign: a dense field tilted the planes of
+        // skies that agreed.
+        let mut phi = [0.0; TERMS];
+        for &(point, _) in &pairs {
             let (x, y) = self.position(tile, point);
             let basis = [
                 1.0,
@@ -147,13 +210,12 @@ impl Samples {
             for term in 0..TERMS {
                 phi[term] += basis[term];
             }
-            sum += diff;
-            count += 1.0;
         }
         for value in &mut phi {
-            *value /= count;
+            *value /= pairs.len() as f64;
         }
-        Some((phi, sum / count))
+        let mut differences = pairs.iter().map(|p| p.1).collect::<Vec<_>>();
+        Some((phi, median_f64(&mut differences)))
     }
 
     pub(super) fn finish(self, options: &BatchStackOptions) -> Result<Corrections> {
@@ -235,11 +297,22 @@ impl Samples {
                     }
                 }
                 for panel in 0..means.len() {
-                    if !differences[panel].is_empty() {
-                        // Clip differences, never panel brightness: reject a
-                        // sampled cosmic ray without clipping shared stars.
+                    // A sliver of a panel's edge is too few samples to tell
+                    // sky from a star, and its cell's centre lies beyond the
+                    // panel, where interpolation would lean on it hardest:
+                    // it takes its neighbours' residual instead.
+                    if differences[panel].len() >= RESIDUAL_SAMPLES {
+                        // The median of differences, never of panel
+                        // brightness. Panels whose gains differ by a few
+                        // percent leave that share of every shared star in
+                        // their differences, all of one sign, and a dense
+                        // field puts some in most samples of a cell. A mean
+                        // clipped about the median still averaged those
+                        // wings in: tens of ADU in a cell, under skies that
+                        // agreed to a tenth. It also rejects a sampled
+                        // cosmic ray without clipping shared stars.
                         residuals[panel][tile * channels + channel] =
-                            clipped_mean(&mut differences[panel]) as f32;
+                            significant(&mut differences[panel]) as f32;
                     }
                 }
             }
@@ -310,6 +383,9 @@ impl Samples {
                 }
             }
         }
+        // Shifted quadratic bowls differ by a plane. No overlap count
+        // distinguishes vignetting from real panel gradients, so solve only
+        // the additive corrections callers explicitly requested.
         let n = means.len() * TERMS;
         let iterations = if edges.is_empty() { 0 } else { 4 };
         for _ in 0..iterations {
@@ -336,7 +412,8 @@ impl Samples {
             }
             // Penalize correction energy over each panel's actual footprint.
             // This fixes the common-plane gauge and bounds extrapolation from
-            // thin overlaps without assuming the sky itself is flat.
+            // thin overlaps without assuming the sky itself is flat. A slope
+            // costs more than a level: see `SLOPE_PENALTY`.
             for (panel, mean) in means.iter().enumerate() {
                 let count = mean
                     .iter()
@@ -345,15 +422,25 @@ impl Samples {
                     .filter(|v| v.is_finite())
                     .count()
                     .max(1);
+                // The correction's energy is its mean's square plus its
+                // variance about the mean; each takes its own weight.
+                let mut centre = [0.0; TERMS];
                 for tile in 0..self.columns * self.rows {
                     if mean[tile * channels + channel].is_finite() {
                         let phi = basis(self.shape, self.cell, self.columns, tile);
                         for i in 0..TERMS {
+                            centre[i] += phi[i] / count as f64;
                             for j in 0..TERMS {
                                 matrix[(panel * TERMS + i, panel * TERMS + j)] +=
-                                    1.0e-3 * phi[i] * phi[j] / count as f64;
+                                    SLOPE_PENALTY * phi[i] * phi[j] / count as f64;
                             }
                         }
+                    }
+                }
+                for i in 0..TERMS {
+                    for j in 0..TERMS {
+                        matrix[(panel * TERMS + i, panel * TERMS + j)] +=
+                            (LEVEL_PENALTY - SLOPE_PENALTY) * centre[i] * centre[j];
                     }
                 }
             }
@@ -482,25 +569,31 @@ fn median_f64(values: &mut [f64]) -> f64 {
     *values.select_nth_unstable_by(index, f64::total_cmp).1
 }
 
-fn clipping_range(values: &mut [f64]) -> (f64, f64) {
-    let center = median_f64(values);
-    let mut deviations = values
-        .iter()
-        .map(|v| (v - center).abs())
-        .collect::<Vec<_>>();
-    (
-        center,
-        (4.0 * 1.4826 * median_f64(&mut deviations)).max(1.0e-4),
-    )
-}
+/// How many of its own standard errors a cell's residual must reach to be
+/// applied nearly whole.
+const RESIDUAL_SIGMAS: f64 = 3.0;
 
-fn clipped_mean(values: &mut [f64]) -> f64 {
-    let (center, limit) = clipping_range(values);
-    let (sum, count) = values
-        .iter()
-        .filter(|v| (**v - center).abs() <= limit)
-        .fold((0.0, 0), |(sum, count), &value| (sum + value, count + 1));
-    sum / f64::from(count)
+/// The median of a cell's differences, shrunk by how far it stands above its
+/// own noise. A panel of a few short exposures measures a cell's residual no
+/// better than its samples' scatter over the root of their count, and a
+/// residual applied at that size prints the scatter into the stack as blotches
+/// a cell wide: on 121 twenty-second colour frames it raised the background's
+/// mottle by a tenth to a third. A residual under `RESIDUAL_SIGMAS` standard
+/// errors is noise and becomes zero; one well above keeps nearly all of itself.
+fn significant(differences: &mut [f64]) -> f64 {
+    let center = median_f64(differences);
+    let count = differences.len() as f64;
+    for value in differences.iter_mut() {
+        *value = (*value - center).abs();
+    }
+    // A median's standard error is 1.2533 times a mean's.
+    let error = 1.2533 * 1.4826 * median_f64(differences) / count.sqrt();
+    let threshold = RESIDUAL_SIGMAS * error;
+    if center.abs() <= threshold {
+        0.0
+    } else {
+        center * (1.0 - (threshold / center).powi(2))
+    }
 }
 
 fn position(
@@ -821,7 +914,9 @@ mod tests {
             let corrected = error_after_common_plane(&whole.snapshot.image, c);
             let original = error_after_common_plane(&uncorrected.snapshot.image, c);
             assert!(
-                corrected < 0.35 && corrected < original / 10.0,
+                // The weight on slopes leaves 3% of these skies'
+                // differences, which are as steep as their levels.
+                corrected < original * 0.04,
                 "channel {c}: {original} -> {corrected}"
             );
             let star = whole.snapshot.image.data[(110 * 240 + 130) * 3 + c];
@@ -886,6 +981,100 @@ mod tests {
                     assert!((value - sky(x, y, 0)).abs() < 0.001, "({x},{y}): {value}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn a_cell_s_residual_must_stand_above_its_own_noise() {
+        let mut seed = 7_u64;
+        let mut noise = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 33) as f64 / (1u64 << 31) as f64 - 0.5) * 100.0
+        };
+        // 64 samples scattering by 29 ADU measure their cell to 4.5 ADU: a
+        // residual of 5 is noise, and one of 60 is not.
+        let mut quiet = (0..POINTS).map(|_| 5.0 + noise()).collect::<Vec<_>>();
+        assert_eq!(significant(&mut quiet), 0.0);
+        let mut offset = (0..POINTS).map(|_| 60.0 + noise()).collect::<Vec<_>>();
+        let kept = significant(&mut offset);
+        assert!((45.0..70.0).contains(&kept), "kept {kept}");
+        // Samples that agree keep their residual whole.
+        assert_eq!(significant(&mut [2.5; POINTS]), 2.5);
+    }
+
+    // These backgrounds are planes, even though their differences also
+    // admit an explanation as shifted bowls. Overlaps cannot distinguish
+    // those explanations, regardless of the number of panels.
+    fn planar_panels(disconnected: bool) -> Vec<LinearImage> {
+        let height = if disconnected { 384 } else { 224 };
+        (0..4)
+            .map(|panel| {
+                let (left, top) = (
+                    (panel % 2) * 80,
+                    (panel / 2) * if disconnected { 240 } else { 80 },
+                );
+                let (cx, cy) = (left as f32 + 79.5, top as f32 + 71.5);
+                let data = (0..240 * height)
+                    .map(|i| {
+                        let (x, y) = (i % 240, i / 240);
+                        if x < left || x >= left + 160 || y < top || y >= top + 144 {
+                            return f32::NAN;
+                        }
+                        let (x, y) = (x as f32, y as f32);
+                        let slope = if disconnected && panel >= 2 {
+                            0.0
+                        } else {
+                            30.0 / 11_600.0
+                        };
+                        100.0
+                            - slope
+                                * (-2.0 * x * (cx - 119.5) - 2.0 * y * (cy - 111.5)
+                                    + cx * cx
+                                    + cy * cy
+                                    - 119.5 * 119.5
+                                    - 111.5 * 111.5)
+                    })
+                    .collect();
+                LinearImage::new(240, height, 1, data).unwrap()
+            })
+            .collect()
+    }
+
+    fn match_planar_panels(frames: &[LinearImage]) -> LinearImage {
+        let options = BatchStackOptions {
+            mosaic_panels: Some((0..frames.len() as u32).collect()),
+            gpu: GpuOptions {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        integrate_registered_frames(frames.len(), &options, |_, i| Ok(frames[i].clone()))
+            .unwrap()
+            .snapshot
+            .image
+    }
+
+    #[test]
+    fn four_planar_backgrounds_are_not_mistaken_for_vignetting() {
+        let image = match_planar_panels(&planar_panels(false));
+        for y in [40, 100] {
+            for x in [80, 160] {
+                let seam = image.data[y * 240 + x] - image.data[y * 240 + x - 1];
+                assert!(seam.abs() < 0.5, "({x}, {y}): {seam} ADU seam");
+            }
+        }
+    }
+
+    #[test]
+    fn disconnected_panels_do_not_change_each_others_corrections() {
+        let frames = planar_panels(true);
+        let pair = match_planar_panels(&frames[..2]);
+        let both = match_planar_panels(&frames);
+        for (a, b) in pair.data.iter().zip(&both.data).take(240 * 144) {
+            assert!((a - b).abs() < 1.0e-4, "disconnected pair moved {a} to {b}");
         }
     }
 
@@ -964,7 +1153,7 @@ mod tests {
         }
         let images = panels(3, true);
         let options = BatchStackOptions::default();
-        let mut samples = Samples::new(&images[0], &[0, 0, 1, 1, 2, 2, 3, 3]);
+        let mut samples = Samples::new((240, 224, 3), &[0, 0, 1, 1, 2, 2, 3, 3]);
         for (i, image) in images.iter().enumerate() {
             samples.add(i, image, &options).unwrap();
         }
@@ -1009,7 +1198,7 @@ mod tests {
                 LinearImage::new(25, 19, 3, data).unwrap()
             })
             .collect::<Vec<_>>();
-        let mut samples = Samples::new(&images[0], &[0, 1]);
+        let mut samples = Samples::new((25, 19, 3), &[0, 1]);
         for (i, image) in images.iter().enumerate() {
             samples
                 .add(i, image, &BatchStackOptions::default())
@@ -1034,7 +1223,7 @@ mod tests {
             frame_weights: Some(vec![vec![1.0], vec![2.0], vec![1.0], vec![2.0]]),
             ..Default::default()
         };
-        let mut samples = Samples::new(&images[0], &[0, 0, 1, 1]);
+        let mut samples = Samples::new((16, 16, 1), &[0, 0, 1, 1]);
         for (i, image) in images.iter().enumerate() {
             samples.add(i, image, &options).unwrap();
         }

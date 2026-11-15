@@ -697,7 +697,7 @@ enum Command {
     /// Run and manage learned models: denoise, list, install, verify, remove
     Model(model::ModelArgs),
     /// Register and incrementally stack linear FITS light frames
-    Stack(stack::StackArgs),
+    Stack(Box<stack::StackArgs>),
     /// Register and compose mono stacks into RGB, LRGB, or narrowband color
     Color(color::ColorArgs),
     /// Build sigma-clipped bias, dark, and flat masters from raw FITS frames
@@ -1644,7 +1644,7 @@ fn main() -> Result<()> {
         Command::ParallaxVideo(options) => parallax_video::run(*options),
         Command::Deconvolve(options) => deconvolution::run(options),
         Command::Model(options) => model::run(options),
-        Command::Stack(options) => stack::run(options),
+        Command::Stack(options) => stack::run(*options),
         Command::Color(options) => color::run(options),
         Command::Master(options) => master::run(options),
         Command::Pipeline(options) => pipeline::run(options),
@@ -4819,6 +4819,24 @@ mod cli_tests {
         ])
         .unwrap();
         assert!(matches!(cli.command, Command::Stack(_)));
+    }
+
+    #[test]
+    fn mosaic_background_matching_requires_reintegration() {
+        let mut args = vec![
+            "seiza",
+            "stack",
+            "one.fits",
+            "two.fits",
+            "--output",
+            "stack.fits",
+            "--reference",
+            "expand",
+            "--match-mosaic-backgrounds",
+        ];
+        assert!(Cli::try_parse_from(&args).is_err());
+        args.push("--reintegrate");
+        assert!(Cli::try_parse_from(&args).is_ok());
     }
 
     #[test]

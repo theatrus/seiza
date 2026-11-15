@@ -705,6 +705,11 @@ three-pass integration, and missing pixels remain missing.
 
 Inputs must already share one pixel grid and photometric scale. This matches
 relative backgrounds; it cannot remove a gradient shared by every panel.
+
+`LiveStacker::reintegrate` matches an expanded canvas's panels this way
+when `StackOptions::match_mosaic_backgrounds` is enabled (false by default),
+taking each frame's panel from the plan, unless the
+stack's normalization is `None`. The live pass does not.
 Rust, C (`mosaicPanels`) and Python (`mosaic_panels`) use the same core code.
 See [method, costs and limits](../docs/design/mosaic-backgrounds.md).
 

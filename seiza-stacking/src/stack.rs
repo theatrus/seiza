@@ -158,6 +158,14 @@ pub struct StackOptions {
     pub registration: RegistrationOptions,
     /// Background-matching mode.
     pub normalization: NormalizationMode,
+    /// Match panel backgrounds when replaying an expanded canvas. Disabled
+    /// by default, independently of normalization. Enable only for calibrated
+    /// panels with matching photometric gains: overlap differences cannot
+    /// distinguish vignetting from real sky gradients. The live pass and fixed
+    /// canvases are unaffected; `NormalizationMode::None` still preserves inputs.
+    /// The default is omitted to preserve existing context fingerprints.
+    #[serde(rename = "matchMosaicBackgrounds", skip_serializing_if = "is_false")]
+    pub match_mosaic_backgrounds: bool,
     /// Per-sample rejection rule.
     pub rejection: RejectionMode,
     /// Whole-frame admission gates.
@@ -262,6 +270,7 @@ impl Default for StackOptions {
         Self {
             registration: RegistrationOptions::default(),
             normalization: NormalizationMode::default(),
+            match_mosaic_backgrounds: false,
             rejection: RejectionMode::default(),
             acceptance: FrameAcceptanceCriteria::default(),
             cosmetic: None,
@@ -280,6 +289,10 @@ impl Default for StackOptions {
 
 fn is_true(value: &bool) -> bool {
     *value
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn native_bin_factor() -> u32 {

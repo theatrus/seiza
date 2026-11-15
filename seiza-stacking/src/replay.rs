@@ -1871,7 +1871,7 @@ impl Replay<'_> {
         };
         let drizzle_frames = if drizzle.is_some() { count } else { 0 };
         let mut total_units = 0;
-        let (result, fates) = crate::batch::integrate_bands(
+        let (result, fates) = crate::batch::integrate_panel_bands(
             source.shape,
             count,
             self.options,
@@ -2009,14 +2009,20 @@ impl Replay<'_> {
         // resampling with the rejection arithmetic, which leaves cores idle
         // when they alternate. Each in-flight frame holds about one prepared
         // image, so the lookahead stays small.
-        let order = [
-            BatchStackPass::Estimate,
-            BatchStackPass::Refine,
-            BatchStackPass::Integrate,
-        ]
-        .into_iter()
-        .flat_map(|pass| (0..count).map(move |index| (pass, index)))
-        .collect::<Vec<_>>();
+        // A mosaic's panel backgrounds are fitted from a read of every frame
+        // before the three passes, which the batch asks for as an estimate.
+        let order = options
+            .mosaic_panels
+            .is_some()
+            .then_some(BatchStackPass::Estimate)
+            .into_iter()
+            .chain([
+                BatchStackPass::Estimate,
+                BatchStackPass::Refine,
+                BatchStackPass::Integrate,
+            ])
+            .flat_map(|pass| (0..count).map(move |index| (pass, index)))
+            .collect::<Vec<_>>();
         let lookahead = replay_lookahead();
         // The calibrated source of the frame the final pass is integrating,
         // read alongside its registered image for the drizzle.
@@ -2702,6 +2708,15 @@ impl LiveStacker {
     /// read whole for each pass, it hears each pass and frame before the
     /// read.
     ///
+    /// With [`crate::StackOptions::match_mosaic_backgrounds`] enabled, an
+    /// expanded canvas's panel backgrounds are matched through their overlaps
+    /// first, as [`BatchStackOptions::mosaic_panels`]
+    /// describes, unless the stack's normalization is
+    /// [`crate::NormalizationMode::None`]: each frame is read once more for
+    /// it, and frames read whole are heard as a second
+    /// [`BatchStackPass::Estimate`] before the three passes. The options
+    /// must not name panels themselves.
+    ///
     /// A weighted stack replays each frame with the weight the live pass
     /// recorded, so noise is not measured again. It fills
     /// [`BatchStackOptions::frame_weights`] itself and refuses options that
@@ -2884,7 +2899,7 @@ impl LiveStacker {
             }
         }
         if options.mosaic_panels.is_some() {
-            return Err(Error::Stack("mosaic_panels belongs to registered-frame integration; a live stack manages its own backgrounds".into()));
+            return Err(Error::Stack("mosaic_panels belongs to registered-frame integration; a live stack on an expanded canvas names its own panels".into()));
         }
         if let Some(reason) = self.reintegration_unavailable() {
             return Err(Error::Stack(reason));
@@ -2911,6 +2926,7 @@ impl LiveStacker {
                     .collect(),
             );
         }
+        options.mosaic_panels = self.canvas_panels(selected);
         let options = &options;
         let count = ledger.frames.len();
         let masters = MastersCache::default();
@@ -2972,6 +2988,83 @@ impl LiveStacker {
         result.snapshot.rejected_frames = self.rejected_frames;
         self.fill_photosite_gaps(&mut result.snapshot.image.data, &result.snapshot.coverage);
         Ok((result, drizzled))
+    }
+
+    /// The panel of an expanded canvas each of the `selected` admitted
+    /// frames lies on, for [`BatchStackOptions::mosaic_panels`], or `None`
+    /// where there are no panel backgrounds to match: a fixed reference, a
+    /// stack that keeps its inputs' intensities, frames that all lie on one
+    /// panel, or more panels than the matcher takes.
+    ///
+    /// Normalization gives each frame a gain and a level, or matches its
+    /// background to the canvas under it, whose panels keep the skies of the
+    /// frames that started them. Neither makes two panels agree where they
+    /// overlap: nights whose gradients differed by a third of the sky left
+    /// steps of a tenth of it where coverage changes. So a replay solves
+    /// one additive plane per panel through every overlap at once, and
+    /// tapers what the planes leave, as registered-frame integration does.
+    ///
+    /// A frame belongs to the panel planning made that its footprint shares
+    /// the most pixels with, or the nearest when it reaches none. The ledger
+    /// keeps no frame's dimensions, so each footprint is that of the largest
+    /// frame planning read, through the frame's own registration.
+    fn canvas_panels(&self, selected: &[usize]) -> Option<Vec<u32>> {
+        if !self.options.match_mosaic_backgrounds {
+            return None;
+        }
+        let canvas = self.canvas_registrar.as_ref()?;
+        if self
+            .options
+            .scale()
+            .normalization(self.options.normalization)
+            == crate::NormalizationMode::None
+        {
+            return None;
+        }
+        let regions = canvas.regions();
+        let (width, height) = canvas.largest_frame();
+        let centre = |region: &ReferenceRegion| {
+            (
+                region.x as f64 + region.width as f64 / 2.0,
+                region.y as f64 + region.height as f64 / 2.0,
+            )
+        };
+        let panels = selected
+            .iter()
+            .map(|&index| {
+                let footprint = self.ledger.frames[index].mapping.footprint(width, height);
+                let (x, y) = centre(&footprint);
+                let shared = |panel: &ReferenceRegion| {
+                    let span = |a: usize, a_len: usize, b: usize, b_len: usize| {
+                        (a + a_len).min(b + b_len).saturating_sub(a.max(b))
+                    };
+                    span(footprint.x, footprint.width, panel.x, panel.width)
+                        * span(footprint.y, footprint.height, panel.y, panel.height)
+                };
+                let distance = |panel: &ReferenceRegion| {
+                    let (panel_x, panel_y) = centre(panel);
+                    (panel_x - x).hypot(panel_y - y)
+                };
+                // The most shared pixels, then the nearest, then the first.
+                let mut best = 0;
+                for panel in 1..regions.len() {
+                    let ordering = shared(&regions[panel])
+                        .cmp(&shared(&regions[best]))
+                        .then(distance(&regions[best]).total_cmp(&distance(&regions[panel])));
+                    if ordering.is_gt() {
+                        best = panel;
+                    }
+                }
+                best as u32
+            })
+            .collect::<Vec<_>>();
+        let distinct = panels
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        (2..=crate::batch::MAXIMUM_MOSAIC_PANELS)
+            .contains(&distinct)
+            .then_some(panels)
     }
 
     /// The reference a spatially normalized replay matches backgrounds to:
@@ -3891,6 +3984,45 @@ mod tests {
                 .unwrap();
         }
         (directory, stacker, cache, images, sky)
+    }
+
+    #[test]
+    fn mosaic_matching_is_opt_in_and_matches_whole_and_banded_replay() {
+        let (_directory, mut stacker, cache, images, _) = spatially_agreed_mosaic(128, 128);
+        stacker.canvas_registrar = Some(
+            crate::expand::CanvasRegistrar::new(
+                &stacker.reference,
+                &images.iter().map(|image| image.region).collect::<Vec<_>>(),
+                None,
+                None,
+                &stacker.options.registration,
+                stacker.options.scale(),
+                &crate::GpuOptions::default(),
+            )
+            .unwrap()
+            .with_largest_frame((384, 384)),
+        );
+        assert_eq!(stacker.canvas_panels(&[0, 1]), None);
+        stacker.options.match_mosaic_backgrounds = true;
+        assert_eq!(stacker.canvas_panels(&[0, 1]), Some(vec![0, 1]));
+        let normalization = stacker.options.normalization;
+        stacker.options.normalization = crate::NormalizationMode::None;
+        assert_eq!(stacker.canvas_panels(&[0, 1]), None);
+        stacker.options.normalization = normalization;
+        stacker.frame_cache = Some(cache);
+        let options = BatchStackOptions::default();
+        let banded = stacker
+            .replay_with(&options, None, |_, _, _| {}, true)
+            .unwrap()
+            .0;
+        let whole = stacker
+            .replay_with(&options, None, |_, _, _| {}, false)
+            .unwrap()
+            .0;
+        assert_eq!(
+            snapshot_bits(&banded.snapshot),
+            snapshot_bits(&whole.snapshot)
+        );
     }
 
     #[test]

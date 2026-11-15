@@ -344,7 +344,7 @@ const BINNED_DRIZZLED: &[f64] = &[
     1.7140848e2, 1.0446319e2, 1.0666625e2, 1.1061572e2,
 ];
 #[rustfmt::skip]
-const MOSAIC_FULL_RESOLUTION: &[f64] = &[2.2309596e2, 4.1374538e2, 5.0031992e3, 1.0006232e2, 1.0372755e2, 1.0403915e2, 1.4189590e2, 1.8816669e2, 1.0139931e2, 2.2200900e2, 9.8009119e2, 1.3597498e2, 1.4522026e2, 1.0218846e2, 1.0365665e2, 1.7008662e2, 1.7463997e2, 1.0589363e2, 1.0185441e2, 1.0169314e2, 1.0338206e2, 1.0569855e2, 1.0659129e2, 2.3925829e2, 1.8386810e2, 1.0565532e2, 8.6636499e2, 1.0785323e2];
+const MOSAIC_FULL_RESOLUTION: &[f64] = &[2.2315914e2, 4.1377094e2, 5.0030029e3, 1.0010548e2, 1.0351777e2, 1.0383824e2, 1.4219244e2, 1.8869864e2, 1.0145433e2, 2.2181110e2, 9.7989026e2, 1.3625967e2, 1.4574036e2, 1.0225571e2, 1.0347095e2, 1.7024207e2, 1.7491243e2, 1.0640150e2, 1.0193350e2, 1.0151929e2, 1.0318115e2, 1.0595915e2, 1.0708731e2, 2.3934959e2, 1.8370648e2, 1.0545441e2, 8.6661340e2, 1.0833702e2];
 #[rustfmt::skip]
 const LENS_MOSAIC_SIBLINGS: &[f64] = &[1.1248227e2, 1.3248900e2, 4.2809961e3, 9.9621635e1, 1.0401961e2, 1.0109291e2, 1.1935750e2, 9.7427887e1, 9.9319954e1, 1.0011208e2, 1.0266560e2, 1.6070786e2, 1.0302679e2, 1.0011884e2, 1.0015338e2, 1.0428073e2, 1.0138506e2, 1.0049202e2, 9.9340057e1, 9.8439827e1, 1.0166298e2, 1.0112801e2, 1.0463013e2, 1.1425014e2, 1.0245366e2, 1.0088453e2, 1.0183040e2, 9.8820175e1, 6.0000000e0, 6.1900000e2, 1.0160000e3];
 #[rustfmt::skip]
@@ -416,34 +416,34 @@ const CLIPPED_BAYER_MAP: &[f64] = &[
     3.9800000e2,
 ];
 const MOSAIC_BACKGROUND_REFERENCE: &[f64] = &[
-    2.5121962e2,
-    5.0305500e2,
-    5.8665977e3,
-    9.8756554e1,
-    1.0245377e2,
-    1.0134274e2,
-    2.8257590e2,
-    1.1098392e2,
-    9.9340103e1,
-    1.5776010e2,
-    2.3786123e3,
-    1.2093243e2,
-    1.1180345e2,
-    1.0040491e2,
-    1.0475528e2,
-    3.5554919e2,
-    3.1635480e2,
-    1.1201777e2,
-    9.7666214e1,
-    1.0216579e2,
-    1.0402927e2,
-    1.0333928e2,
-    1.4894194e2,
-    6.1432434e2,
-    1.2028179e2,
-    1.2133485e2,
-    4.5920206e2,
-    2.6313425e2,
+    2.5156472e2,
+    5.0320327e2,
+    5.8666670e3,
+    9.9539192e1,
+    1.0163221e2,
+    1.0005928e2,
+    2.8398230e2,
+    1.1400816e2,
+    1.0038542e2,
+    1.5720122e2,
+    2.3773079e3,
+    1.2204715e2,
+    1.1453600e2,
+    1.0172112e2,
+    1.0446729e2,
+    3.5422314e2,
+    3.1716870e2,
+    1.1444952e2,
+    9.9245110e1,
+    1.0214048e2,
+    1.0268233e2,
+    1.0386150e2,
+    1.5108200e2,
+    6.1617413e2,
+    1.2052737e2,
+    1.1996631e2,
+    4.5942349e2,
+    2.6497351e2,
 ];
 #[rustfmt::skip]
 const SHARED_NEBULA_BACKGROUND: &[f64] = &[
@@ -1363,34 +1363,34 @@ fn registered_mosaic_backgrounds_keep_their_output() {
 }
 
 const REGISTERED_MOSAIC_BACKGROUNDS: &[f64] = &[
-    1.1776097e2,
-    1.1963589e2,
-    2.1656921e2,
-    1.0051737e2,
-    1.0758487e2,
-    1.1445993e2,
-    1.2108497e2,
-    1.2822806e2,
-    9.8188171e1,
-    1.0771823e2,
-    1.1705459e2,
-    1.1880308e2,
-    1.2547261e2,
-    9.6052299e1,
-    1.4362491e2,
-    1.9097940e2,
-    1.1951297e2,
-    1.2271482e2,
-    9.3255600e1,
-    1.1458409e2,
-    1.3630460e2,
-    1.1491711e2,
-    1.2002249e2,
-    9.0404106e1,
-    9.7089279e1,
-    1.0401866e2,
-    1.1092870e2,
-    1.1739417e2,
+    1.1783483e2,
+    1.1948582e2,
+    2.1829887e2,
+    1.0593355e2,
+    1.0802983e2,
+    1.0996722e2,
+    1.1201355e2,
+    1.1455039e2,
+    1.0586729e2,
+    1.1042613e2,
+    1.1471807e2,
+    1.1176486e2,
+    1.1382815e2,
+    1.0600124e2,
+    1.4850890e2,
+    1.9072472e2,
+    1.1453160e2,
+    1.1306136e2,
+    1.0557236e2,
+    1.2173323e2,
+    1.3830853e2,
+    1.1219381e2,
+    1.1256300e2,
+    1.0508287e2,
+    1.0660040e2,
+    1.0831870e2,
+    1.1044353e2,
+    1.1217282e2,
 ];
 
 /// Extended emission fills the overlap: only a relative constant is
@@ -1539,26 +1539,26 @@ fn registered_mosaic_paired_samples_keep_their_output() {
     );
 }
 const REGISTERED_MOSAIC_PAIRED_SAMPLES: &[f64] = &[
-    4.4337287e2,
-    5.6152321e2,
-    1.3284091e3,
-    -1.5085341e2,
-    -1.5084932e2,
-    7.9943890e2,
-    5.6141522e2,
-    3.2374130e2,
-    8.1807182e1,
-    1.0373828e3,
-    7.9944031e2,
-    5.6146613e2,
-    3.1909070e2,
-    8.1805809e1,
-    1.0373842e3,
-    7.9944165e2,
-    5.5678729e2,
-    3.1906598e2,
-    8.1804436e1,
-    1.0373856e3,
+    4.4585402e2,
+    4.7241108e2,
+    1.3886158e3,
+    1.8723769e2,
+    1.8748378e2,
+    6.0814319e2,
+    4.8958960e2,
+    3.8584720e2,
+    2.8545847e2,
+    7.2622266e2,
+    6.0822565e2,
+    4.8985815e2,
+    3.8436948e2,
+    2.8537601e2,
+    7.2630511e2,
+    6.0830811e2,
+    4.8771036e2,
+    3.8255017e2,
+    2.8529355e2,
+    7.2638757e2,
     1.0900000e2,
     1.0900000e2,
     1.0900001e2,
@@ -1579,66 +1579,66 @@ const REGISTERED_MOSAIC_PAIRED_SAMPLES: &[f64] = &[
     1.0900001e2,
     1.0900000e2,
     1.0900001e2,
-    1.0893251e2,
-    1.0911080e2,
-    1.1959697e2,
-    9.8268074e1,
-    9.8268074e1,
-    1.0663826e2,
-    1.1527836e2,
-    1.0231677e2,
-    1.1095766e2,
-    1.1959697e2,
-    1.0663651e2,
-    1.1527836e2,
-    1.0231677e2,
-    1.1095838e2,
-    1.1959697e2,
-    1.0663716e2,
-    1.1527836e2,
-    1.0231677e2,
-    1.1095687e2,
-    1.1959697e2,
-    1.0906749e2,
-    1.0924557e2,
-    1.1973193e2,
-    9.8403030e1,
-    9.8403030e1,
-    1.0677322e2,
-    1.1541331e2,
-    1.0245173e2,
-    1.1109272e2,
-    1.1973193e2,
-    1.0677155e2,
-    1.1541331e2,
-    1.0245173e2,
-    1.1109341e2,
-    1.1973193e2,
-    1.0677222e2,
-    1.1541331e2,
-    1.0245173e2,
-    1.1109183e2,
-    1.1973193e2,
+    1.0899653e2,
+    1.0899700e2,
+    1.0954594e2,
+    1.0844716e2,
+    1.0844716e2,
+    1.0887928e2,
+    1.0932520e2,
+    1.0865411e2,
+    1.0910123e2,
+    1.0954594e2,
+    1.0887660e2,
+    1.0932520e2,
+    1.0865411e2,
+    1.0910234e2,
+    1.0954594e2,
+    1.0887759e2,
+    1.0932520e2,
+    1.0865411e2,
+    1.0910003e2,
+    1.0954594e2,
+    1.0900347e2,
+    1.0900395e2,
+    1.0955284e2,
+    1.0845406e2,
+    1.0845406e2,
+    1.0888618e2,
+    1.0933209e2,
+    1.0866101e2,
+    1.0910829e2,
+    1.0955284e2,
+    1.0888362e2,
+    1.0933209e2,
+    1.0866101e2,
+    1.0910936e2,
+    1.0955284e2,
+    1.0888465e2,
+    1.0933209e2,
+    1.0866101e2,
+    1.0910693e2,
+    1.0955284e2,
     1.0900000e2,
-    1.0917821e2,
-    1.1973193e2,
-    9.8268074e1,
-    9.8268074e1,
-    1.0677322e2,
-    1.1541331e2,
-    1.0245173e2,
-    1.1109272e2,
-    1.1973193e2,
-    1.0677155e2,
-    1.1541331e2,
-    1.0245173e2,
-    1.1109341e2,
-    1.1973193e2,
-    1.0677222e2,
-    1.1541331e2,
-    1.0245173e2,
-    1.1109183e2,
-    1.1973193e2,
+    1.0900048e2,
+    1.0955284e2,
+    1.0844716e2,
+    1.0844716e2,
+    1.0888618e2,
+    1.0933209e2,
+    1.0866101e2,
+    1.0910829e2,
+    1.0955284e2,
+    1.0888362e2,
+    1.0933209e2,
+    1.0866101e2,
+    1.0910936e2,
+    1.0955284e2,
+    1.0888465e2,
+    1.0933209e2,
+    1.0866101e2,
+    1.0910693e2,
+    1.0955284e2,
 ];
 
 /// A transient hit on a sampled position is rejected in the full-resolution
@@ -1684,34 +1684,34 @@ fn registered_mosaic_sampled_outliers_keep_their_output() {
     );
 }
 const REGISTERED_MOSAIC_SAMPLED_OUTLIERS: &[f64] = &[
-    1.0899995e2,
-    1.0923943e2,
-    1.2147171e2,
-    9.8092636e1,
-    1.0356977e2,
-    1.0904907e2,
-    1.1452798e2,
-    1.2000472e2,
-    9.8092636e1,
-    1.0356978e2,
-    1.0904911e2,
-    1.1452797e2,
-    1.2000471e2,
-    9.8092644e1,
-    1.0356978e2,
-    1.0904911e2,
-    1.1452797e2,
-    1.2000471e2,
-    9.8092644e1,
-    1.0356979e2,
-    1.0904911e2,
-    1.1452796e2,
-    1.2000471e2,
-    9.8092651e1,
-    1.0356979e2,
-    1.0904907e2,
-    1.1452795e2,
-    1.2000471e2,
+    1.0899991e2,
+    1.0900101e2,
+    1.0984227e2,
+    1.0826203e2,
+    1.0863063e2,
+    1.0900360e2,
+    1.0937584e2,
+    1.0974372e2,
+    1.0826204e2,
+    1.0863065e2,
+    1.0900368e2,
+    1.0937583e2,
+    1.0974371e2,
+    1.0826205e2,
+    1.0863065e2,
+    1.0900368e2,
+    1.0937582e2,
+    1.0974371e2,
+    1.0826206e2,
+    1.0863066e2,
+    1.0900368e2,
+    1.0937581e2,
+    1.0974370e2,
+    1.0826207e2,
+    1.0863068e2,
+    1.0900360e2,
+    1.0937580e2,
+    1.0974368e2,
 ];
 
 /// Frames large enough that, with the `gpu` feature and a GPU present,
@@ -2225,6 +2225,7 @@ fn a_binned_local_background_stack_s_full_resolution_reintegration_keeps_its_out
 
     let paths = mosaic_panels(&directory);
     let mut options = StackOptions {
+        match_mosaic_backgrounds: true,
         bin_factor: 2,
         normalization: NormalizationMode::LocalBackground { tile_size: 32 },
         ..StackOptions::default()
@@ -2263,7 +2264,7 @@ const BINNED_LOCAL_FULL_RESOLUTION: &[f64] = &[
     1.0634189e2, 1.0752493e2, 1.0110642e2, 1.7202321e2, 1.0488212e2, 1.0689706e2, 1.1106624e2,
 ];
 #[rustfmt::skip]
-const BINNED_LOCAL_MOSAIC_FULL_RESOLUTION: &[f64] = &[2.5399397e2, 5.0650340e2, 5.6862930e3, 9.9581108e1, 1.0385133e2, 1.0416724e2, 1.5597226e2, 2.2268317e2, 1.0141137e2, 2.2964627e2, 1.2164065e3, 1.5029947e2, 1.6048773e2, 1.0199554e2, 1.0388052e2, 1.8982347e2, 2.0439630e2, 1.0701572e2, 1.0184778e2, 1.0144427e2, 1.0312508e2, 1.0667531e2, 1.0800209e2, 2.4956131e2, 1.8660287e2, 1.0658926e2, 1.2557321e3, 1.1003092e2];
+const BINNED_LOCAL_MOSAIC_FULL_RESOLUTION: &[f64] = &[2.5407545e2, 5.0653893e2, 5.6863345e3, 9.9947464e1, 1.0387017e2, 1.0389508e2, 1.5607712e2, 2.2313878e2, 1.0179488e2, 2.2968225e2, 1.2161193e3, 1.5038718e2, 1.6092621e2, 1.0239674e2, 1.0393419e2, 1.8953618e2, 2.0446634e2, 1.0743649e2, 1.0226611e2, 1.0151509e2, 1.0283780e2, 1.0672820e2, 1.0840572e2, 2.4999733e2, 1.8669138e2, 1.0630198e2, 1.2557672e3, 1.1041686e2];
 
 /// Raw RGGB lights made into one pixel per 2x2 cell, their colours resampled
 /// from their photosites' places, and binned no further.
@@ -2323,6 +2324,7 @@ fn a_binned_mosaic_s_full_resolution_reintegration_keeps_its_output() {
     let directory = tempfile::tempdir().unwrap();
     let paths = mosaic_panels(&directory);
     let mut options = StackOptions {
+        match_mosaic_backgrounds: true,
         bin_factor: 2,
         ..StackOptions::default()
     };
@@ -2548,6 +2550,7 @@ fn a_mosaic_background_reference_keeps_its_output() {
     let directory = tempfile::tempdir().unwrap();
     let paths = uneven_mosaic_panels(&directory);
     let mut options = StackOptions {
+        match_mosaic_backgrounds: true,
         normalization: NormalizationMode::LocalBackground { tile_size: 32 },
         rejection: RejectionMode::None,
         ..StackOptions::default()
@@ -2589,6 +2592,117 @@ fn a_mosaic_background_reference_keeps_its_output() {
         MOSAIC_BACKGROUND_REFERENCE,
     );
 }
+
+/// Two panels shot on nights whose skies sloped opposite ways across the
+/// sensor, six dithered frames each. Normalization gives each frame a gain
+/// and a level, which cannot make the panels agree across their overlap; the
+/// reintegration fits each panel a plane through it, so the stack does not
+/// step where coverage changes.
+#[test]
+fn a_mosaic_of_differing_night_gradients_reintegrates_level() {
+    let directory = tempfile::tempdir().unwrap();
+    let originals = mosaic_panels(&directory);
+    let (width, height) = MOSAIC_PANEL;
+    let step = width * 7 / 10;
+    let panels = [0, 2].map(|index| {
+        seiza_image_io::read_astronomy(&originals[index])
+            .unwrap()
+            .image
+            .into_physical_f32()
+    });
+    let reintegrated = |gradients: bool| {
+        let paths = (0..12)
+            .map(|frame| {
+                let panel = frame / 6;
+                let data = panels[panel]
+                    .iter()
+                    .enumerate()
+                    .map(|(index, &sample)| {
+                        let (x, y) = ((index % width) as f32, (index / width) as f32);
+                        let night = match (gradients, panel) {
+                            (false, _) => 0.0,
+                            (true, 0) => 0.15 * x,
+                            (true, _) => 12.0 - 0.15 * x + 0.1 * y,
+                        };
+                        sample + night + noise(index, 100 + frame, 3.0)
+                    })
+                    .collect::<Vec<_>>();
+                let path = directory
+                    .path()
+                    .join(format!("night-{gradients}-{frame}.fits"));
+                let image = LinearImage::new(width, height, 1, data).unwrap();
+                write_processed_image_fits_f32(&path, &image, &[], &[]).unwrap();
+                path
+            })
+            .collect::<Vec<_>>();
+        let mut options = StackOptions {
+            match_mosaic_backgrounds: true,
+            ..StackOptions::default()
+        };
+        options.acceptance.minimum_overlap_fraction = 0.1;
+        let mut stacker = LiveStacker::with_expanding_reference(
+            &paths,
+            CalibrationMasters::default(),
+            options,
+            usize::MAX,
+            |_, _, _, _| Continue::Yes,
+        )
+        .unwrap();
+        for path in &paths {
+            admit(stacker.push_fits(path).unwrap());
+        }
+        stacker
+            .reintegrate(&BatchStackOptions::default(), |_, _, _| {})
+            .unwrap()
+            .snapshot
+    };
+    let level = reintegrated(false);
+    let sloped = reintegrated(true);
+    let (canvas, rows) = (level.image.width, level.image.height);
+    assert_eq!((canvas, rows), (sloped.image.width, sloped.image.height));
+    // What the nights' skies left in each column: the median down its rows
+    // of the stack less the stack of level skies, whose stars and noise are
+    // the same.
+    let left = (0..canvas)
+        .map(|x| {
+            let mut column = (8..rows - 8)
+                .map(|y| sloped.image.data[y * canvas + x] - level.image.data[y * canvas + x])
+                .filter(|value| value.is_finite())
+                .collect::<Vec<_>>();
+            column.sort_by(f32::total_cmp);
+            column.get(column.len() / 2).copied().unwrap_or(f32::NAN)
+        })
+        .collect::<Vec<_>>();
+    let median = |from: usize| {
+        let mut columns = left[from..from + 6].to_vec();
+        columns.sort_by(f32::total_cmp);
+        (columns[2] + columns[3]) / 2.0
+    };
+    // The panels' coverage changes where the second starts, `step` along,
+    // and where the first ends. Unmatched, the stack steps by 4.1 ADU at the
+    // first; matched, by 0.1 and 0.5. Matched by a mean of each cell's
+    // differences rather than their median, with a sliver of a panel's edge
+    // counted as a cell, it dipped by 10 ADU over the first panel's last
+    // columns.
+    let first = (0..canvas)
+        .position(|x| level.coverage[rows / 2 * canvas + x] > 0)
+        .unwrap();
+    for x in [first + step, first + width] {
+        let stepped = median(x) - median(x - 6);
+        assert!(
+            stepped.abs() < 0.8,
+            "column {x}: the stack steps by {stepped} ADU where coverage changes"
+        );
+    }
+    check(
+        "MOSAIC_NIGHT_GRADIENTS",
+        &summary(&sloped.image),
+        MOSAIC_NIGHT_GRADIENTS,
+    );
+}
+
+#[rustfmt::skip]
+const MOSAIC_NIGHT_GRADIENTS: &[f64] = &[2.4994639e2, 4.5535889e2, 5.8952295e3, 1.0974185e2, 1.1657433e2, 1.2161280e2, 2.8974487e2, 1.2622636e2, 1.1200473e2, 1.7388257e2, 2.0742751e3, 1.4441678e2, 1.2711516e2, 1.1303487e2, 1.2108554e2, 3.4613190e2, 2.7370865e2, 1.2675789e2, 1.1130523e2, 1.2061230e2, 1.2572331e2, 1.2707021e2, 1.4993584e2, 6.3018176e2, 1.3953711e2, 1.4100406e2, 4.0761230e2, 2.2946039e2];
 
 /// Two interleaved mosaic panels whose every exposure has its own sky
 /// gradient, as light pollution moves through a night. The live pass must
@@ -3805,15 +3919,20 @@ fn session_planning_matches_calibrated_sky_and_replays_after_resume() {
     let replay = resumed.reintegrate(&replay_options, |_, _, _| {}).unwrap();
     assert_eq!(live.accepted_frames, 4);
     assert_eq!(live.coverage, replay.snapshot.coverage);
-    for (a, b) in live
+    // The replay also matches the panels' backgrounds through their overlap.
+    // These skies agree already, so what it fits is the overlap's noise: 3
+    // ADU a sample, twice that where the flats' response is a half, in two
+    // frames a panel. That is a plane and a taper of a fraction of an ADU,
+    // under pixels whose own noise is 1 to 4.
+    let furthest = live
         .image
         .data
         .iter()
         .zip(&replay.snapshot.image.data)
         .filter(|(a, b)| a.is_finite() && b.is_finite())
-    {
-        assert!((a - b).abs() < 0.02, "live {a}, replay {b}");
-    }
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0, f32::max);
+    assert!(furthest < 1.0, "live and replay differ by {furthest}");
     std::fs::remove_file(sessions[1].flat.as_ref().unwrap()).unwrap();
     assert!(
         resumed

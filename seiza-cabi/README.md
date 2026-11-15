@@ -185,6 +185,12 @@ exposes the **superset** of what both apps need.
   before pushing frames keeps each admitted frame's registered image in a
   scratch directory as it is stacked, so reintegration reads it back instead
   of preparing the frame again, with the same result.
+  Expanded-canvas replays match panel backgrounds only when the stack's options
+  JSON includes `"matchMosaicBackgrounds": true`. It defaults to false,
+  independently of normalization, and is retained in saved contexts. Use
+  calibrated panels with matching photometric gains; vignetting cannot be
+  inferred from overlaps. This applies to full, selected-frame, consuming and
+  full-resolution reintegration; the live pass is unchanged.
   `seiza_live_stacker_reintegrate_drizzled` also drizzles the
   frames onto a grid 1 to 4 times finer, as WBPP's DrizzleIntegration does,
   and returns a `SeizaDrizzleResult` (image, weight, scale, and

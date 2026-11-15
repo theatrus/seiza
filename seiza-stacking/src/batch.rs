@@ -9,6 +9,9 @@ mod reference;
 
 pub(crate) use bands::{BandSource, band_rows, for_each_band, integrate_bands};
 
+/// The most distinct panels [`BatchStackOptions::mosaic_panels`] may name.
+pub(crate) const MAXIMUM_MOSAIC_PANELS: usize = 256;
+
 /// Rejection options for a completed stack of registered, normalized frames.
 #[derive(Clone, Debug)]
 pub struct BatchStackOptions {
@@ -36,11 +39,17 @@ pub struct BatchStackOptions {
     /// Photometric gains must already match; this does not flatten the sky.
     /// Missing samples remain missing, and star detail stays in rejection.
     /// At most 256 distinct panels are supported. `None` leaves normalization
-    /// untouched. A `LiveStacker` manages its own backgrounds and refuses this
-    /// option on reintegration.
+    /// untouched. A `LiveStacker` refuses this option on reintegration: on an
+    /// expanded canvas it names the panels itself, each frame's being the
+    /// panel planning made that its footprint shares the most pixels with,
+    /// and matches them this way when [`crate::StackOptions::match_mosaic_backgrounds`]
+    /// is enabled, unless its normalization is
+    /// [`crate::NormalizationMode::None`].
     ///
     /// Matching retains corresponding positions and independent channel
-    /// support, including partial overlap cells. At most 64 positions per
+    /// support, including partial overlap cells. A cell's difference is the
+    /// median of its paired samples', and a cell matched at fewer than half
+    /// its positions takes its neighbours' residual. At most 64 positions per
     /// cell on grids at most 128 by 128 use 16 bytes per panel and channel
     /// per position, with aggregate sample storage capped at 128 MiB by
     /// increasing grid spacing. Cell means, distances and corrections need
@@ -244,7 +253,9 @@ pub fn integrate_registered_frames_banded(
         validate_image(&image, shape)?;
         shape = Some((image.width, image.height, image.channels));
         if let Some(panels) = &options.mosaic_panels {
-            let samples = mosaic.get_or_insert_with(|| mosaic::Samples::new(&image, panels));
+            let samples = mosaic.get_or_insert_with(|| {
+                mosaic::Samples::new((image.width, image.height, image.channels), panels)
+            });
             samples.add(index, &image, options)?;
         }
         if !frames.keep(index, &image)? {
@@ -274,6 +285,38 @@ pub fn integrate_registered_frames_banded(
         },
     )?;
     Ok(result)
+}
+
+/// [`integrate_bands`], first matching the backgrounds of the panels
+/// [`BatchStackOptions::mosaic_panels`] names, when it names any, as
+/// [`integrate_registered_frames_banded`] matches them: every frame is read
+/// from `source` once more, a row of background cells at a time, before the
+/// bands are integrated.
+pub(crate) fn integrate_panel_bands(
+    shape: (usize, usize, usize),
+    frame_count: usize,
+    options: &BatchStackOptions,
+    source: &impl BandSource,
+    record_fates: bool,
+    progress: &mut dyn FnMut(usize, usize),
+) -> Result<(BatchStackResult, Option<Vec<PackedFates>>)> {
+    validate_options(frame_count, options)?;
+    let corrections = match &options.mosaic_panels {
+        Some(panels) => {
+            let mut samples = mosaic::Samples::new(shape, panels);
+            for index in 0..frame_count {
+                check_cancelled(options)?;
+                samples.add_bands(index, source, options)?;
+            }
+            Some(samples.finish(options)?)
+        }
+        None => None,
+    };
+    let source = mosaic::Corrected {
+        source,
+        corrections: corrections.as_ref(),
+    };
+    integrate_bands(shape, frame_count, options, &source, record_fates, progress)
 }
 
 /// What the final pass did with one registered sample.
@@ -386,7 +429,9 @@ pub(crate) fn integrate_registered_frames_observed(
             shape = Some((image.width, image.height, image.channels));
             checksums.push(sample_checksum(&image.data));
             samples
-                .get_or_insert_with(|| mosaic::Samples::new(&image, panels))
+                .get_or_insert_with(|| {
+                    mosaic::Samples::new((image.width, image.height, image.channels), panels)
+                })
                 .add(index, &image, options)?;
         }
         let corrections = samples.expect("a batch has inputs").finish(options)?;
@@ -473,7 +518,7 @@ pub(crate) fn validate_options(frame_count: usize, options: &BatchStackOptions) 
             ));
         }
         let ids: std::collections::BTreeSet<_> = panels.iter().collect();
-        if ids.len() > 256 {
+        if ids.len() > MAXIMUM_MOSAIC_PANELS {
             return Err(Error::Stack(
                 "mosaic integration supports at most 256 distinct panels".into(),
             ));
