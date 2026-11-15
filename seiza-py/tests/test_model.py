@@ -44,6 +44,61 @@ def test_a_model_installs_verifies_lists_and_goes(tmp_path: Path) -> None:
         seiza.remove_model("noise-tiny", store)
 
 
+def test_a_hosted_model_downloads_and_installs(tmp_path: Path) -> None:
+    import functools
+    import hashlib
+    import http.server
+    import threading
+
+    hosted = tmp_path / "hosted"
+    files = []
+    for name in ("card.json", "model-f32.onnx", "model-f16.onnx"):
+        data = (TINY / name).read_bytes()
+        sha256 = hashlib.sha256(data).hexdigest()
+        key = f"artifacts/{sha256}/{name}"
+        (hosted / key).parent.mkdir(parents=True)
+        (hosted / key).write_bytes(data)
+        files.append({"name": name, "key": key, "bytes": len(data), "sha256": sha256})
+    manifest = {
+        "version": "model-bundle-v1-test",
+        "latest": {"denoise": "noise-tiny"},
+        "models": [{"name": "noise-tiny", "files": files}],
+    }
+    (hosted / "manifest.json").write_text(json.dumps(manifest))
+
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(hosted))
+    handler.log_message = lambda *_: None  # type: ignore[attr-defined]
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}"
+        store, cache = tmp_path / "store", tmp_path / "cache"
+        events: list[dict] = []
+        # No name: the latest noise model the manifest names.
+        installed = seiza.download_model(store=store, base_url=url, cache_dir=cache, progress=events.append)
+        assert installed.name == "noise-tiny"
+        assert installed.precisions == ["f32", "f16"]
+        assert installed.card_sha256 == hashlib.sha256((TINY / "card.json").read_bytes()).hexdigest()
+        kinds = [event["event"] for event in events]
+        assert kinds[0] == "fetching-manifest" and kinds[-1] == "install-complete"
+        assert any(
+            event["event"] == "download-started" and event["name"] == "model-f32.onnx" for event in events
+        ), events
+        seiza.verify_model("noise-tiny", store)
+        assert [model.name for model in seiza.installed_models(store)] == ["noise-tiny"]
+        assert seiza.download_model("noise-tiny", store, base_url=url, cache_dir=cache).name == "noise-tiny"
+        with pytest.raises(seiza.EngineError, match="noise-tiny"):
+            seiza.download_model("noise-other", store, base_url=url, cache_dir=cache)
+
+        def refuse(event: dict) -> None:
+            raise RuntimeError(f"stop at {event['event']}")
+
+        with pytest.raises(RuntimeError, match="stop at fetching-manifest"):
+            seiza.download_model("noise-tiny", store, base_url=url, cache_dir=cache, progress=refuse)
+    finally:
+        server.shutdown()
+
+
 @pytest.mark.parametrize(
     "field,value",
     [

@@ -26,6 +26,10 @@ pub(crate) struct SetupArgs {
     /// (star-distances.bin) that `seiza parallax-video` uses offline
     #[arg(long)]
     star_distances: bool,
+    /// Also install the latest published noise model that `seiza model
+    /// denoise` runs (several hundred MB), into the model store
+    #[arg(long)]
+    noise_model: bool,
     /// Directory that receives the selected files (defaults to SEIZA_CATALOG_DIR when set)
     #[arg(long)]
     output: Option<PathBuf>,
@@ -192,6 +196,13 @@ fn run_setup(args: SetupArgs) -> Result<()> {
                 prompt_preset(&mut input, &mut output)?
             }
         };
+        // Offered on the menu as well as by its flag; never chosen unasked.
+        let noise_model = args.noise_model
+            || (args.preset.is_none() && {
+                let mut input = io::stdin().lock();
+                let mut output = io::stdout().lock();
+                prompt_noise_model(&mut input, &mut output)?
+            });
 
         let mut files = preset.files();
         for (wanted, dataset) in [
@@ -215,7 +226,17 @@ fn run_setup(args: SetupArgs) -> Result<()> {
         if args.star_distances && preset != SetupPreset::All {
             println!("          + distances to Gaia and Hipparcos stars");
         }
+        let model_store = if noise_model {
+            let store = seiza_model::ModelStore::default_store()?;
+            println!("          + the latest noise model for `seiza model denoise`");
+            Some(store)
+        } else {
+            None
+        };
         println!("Directory : {}", output.display());
+        if let Some(store) = &model_store {
+            println!("Models    : {}", store.root().display());
+        }
         println!("Downloads are SHA-256 verified and safe to retry.\n");
 
         if !args.yes {
@@ -233,9 +254,24 @@ fn run_setup(args: SetupArgs) -> Result<()> {
         }
 
         crate::run_prebuilt_download(output.clone(), files)?;
+        if let Some(store) = &model_store {
+            println!("\nFetching the latest noise model");
+            let bundle = crate::model::download(
+                store,
+                seiza_model::Published::Latest(seiza_model::Task::Denoise),
+            )
+            .context(
+                "the catalogs are installed, but the noise model is not; \
+                 install it later with `seiza model install`",
+            )?;
+            crate::model::installed(store, &bundle)?;
+        }
         println!("\nSuccess! Catalog setup is complete.");
         println!("Catalogs are ready in {}.", output.display());
         println!("Seiza's ASTAP-compatible solver mode will discover them automatically.");
+        if model_store.is_some() {
+            println!("`seiza model denoise` will run the noise model.");
+        }
 
         if args.preset.is_some() || !interactive {
             return Ok(());
@@ -305,6 +341,9 @@ fn elevated_parameters(args: &SetupArgs) -> Vec<u16> {
     }
     if args.star_distances {
         arguments.push(OsString::from("--star-distances"));
+    }
+    if args.noise_model {
+        arguments.push(OsString::from("--noise-model"));
     }
     if args.yes {
         arguments.push(OsString::from("--yes"));
@@ -416,6 +455,28 @@ fn prompt_preset<R: BufRead, W: Write>(input: &mut R, output: &mut W) -> Result<
     }
 }
 
+fn prompt_noise_model<R: BufRead, W: Write>(input: &mut R, output: &mut W) -> Result<bool> {
+    writeln!(
+        output,
+        "\nSeiza can also install its learned noise model, which `seiza model denoise` runs on"
+    )?;
+    writeln!(
+        output,
+        "a stacked linear image (several hundred MB; it needs ONNX Runtime to run)."
+    )?;
+    write!(output, "Also install the noise model? [y/N] ")?;
+    output.flush()?;
+    let mut answer = String::new();
+    input
+        .read_line(&mut answer)
+        .context("failed to read the noise model choice")?;
+    match answer.trim().to_ascii_lowercase().as_str() {
+        "" | "n" | "no" => Ok(false),
+        "y" | "yes" => Ok(true),
+        other => anyhow::bail!("invalid choice {other:?}; enter yes or no"),
+    }
+}
+
 fn prompt_confirm<R: BufRead, W: Write>(input: &mut R, output: &mut W) -> Result<bool> {
     write!(output, "Download this package now? [Y/n] ")?;
     output.flush()?;
@@ -514,6 +575,16 @@ mod tests {
             assert!(files.iter().any(|file| file == "transients.bin"));
             assert!(files.iter().any(|file| file.starts_with("stars-")));
         }
+    }
+
+    #[test]
+    fn the_noise_model_is_offered_but_never_chosen_unasked() {
+        let mut shown = Vec::new();
+        assert!(!prompt_noise_model(&mut Cursor::new("\n"), &mut shown).unwrap());
+        assert!(String::from_utf8(shown).unwrap().contains("[y/N]"));
+        assert!(prompt_noise_model(&mut Cursor::new("y\n"), &mut Vec::new()).unwrap());
+        assert!(!prompt_noise_model(&mut Cursor::new("no\n"), &mut Vec::new()).unwrap());
+        assert!(prompt_noise_model(&mut Cursor::new("maybe\n"), &mut Vec::new()).is_err());
     }
 
     #[test]

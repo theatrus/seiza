@@ -395,7 +395,7 @@ inference.
 ```text
 seiza model denoise stack.fits -o clean.fits --high-amount 0.7 --low-amount 0.9
 seiza model denoise stack.fits -o clean.fits --backend cpu --tile 512
-seiza model list | install <name> | verify | remove <name>
+seiza model list | install [<name|dir>] | verify | remove <name>
 seiza model backends      # which backends run here, and why the others do not
 ```
 
@@ -501,9 +501,78 @@ universal2. An Intel Mac gets `BackendUnavailable` unless a library is found.
 ### Model bundles
 
 A bundle holds `model-f32.onnx`, `model-f16.onnx` and `card.json`, verified
-and installed through `seiza-download`, as catalogues are, under a new
-`/models/v1/` path. `seiza model install` fetches only the precision the
-backend needs. A host can ship a bundle instead.
+and installed through `seiza-download`, as catalogues are, under
+`/models/v1/`. A host can ship a bundle instead.
+
+`/models/v1/manifest.json` lists the published models, each with the files
+that install it and the extras hosted beside it, in the form a
+[catalog bundle](catalog-bundles.md)'s files and transports take:
+
+```json
+{
+  "version": "model-bundle-v1-2026-11-10",
+  "latest": { "denoise": "noise-v1-d33" },
+  "models": [
+    {
+      "name": "noise-v1-d33",
+      "files": [
+        { "name": "card.json", "key": "artifacts/<sha256>/card.json", "bytes": 995, "sha256": "<sha256>" },
+        { "name": "model-f32.onnx", "key": "artifacts/<sha256>/model-f32.onnx", "bytes": 373285843, "sha256": "<sha256>" },
+        { "name": "model-f16.onnx", "key": "artifacts/<sha256>/model-f16.onnx", "bytes": 186650316, "sha256": "<sha256>" }
+      ],
+      "extras": [
+        { "name": "weights.pt", "key": "artifacts/<sha256>/weights.pt", "bytes": 373288961, "sha256": "<sha256>" }
+      ],
+      "transports": [
+        { "name": "model-f32.onnx", "encoding": "zstd", "key": "artifacts/<encoded-sha256>/model-f32.onnx.zst", "bytes": 346396783, "sha256": "<encoded-sha256>" }
+      ]
+    }
+  ]
+}
+```
+
+A model's name is its card's and its directory once installed. Its `files`
+are `card.json` and the graphs the card names; `extras`, here the PyTorch
+weights the graphs were exported from, are never fetched by an install. Every
+key is content-addressed, so no published artifact is replaced, and the
+zstd transports are verified before and after decoding, as a catalog's are.
+
+`latest` names, for each task as cards spell it, the model to install when
+none is named: the newest that has passed its gates. It is a pointer, as the
+catalogs' `manifest.json` is to their current bundle, rather than an order
+among `models` or a date to compare, so publishing a model never makes it
+the default by accident, and taking one back is a one-line change. Each name
+it holds must be offered, and the install refuses a card whose task is not
+the one it was named for. A manifest without it still reads; it then names
+no default.
+
+`ModelStore::download` installs a model by name (`Published::Named`) or the
+latest for a task (`Published::Latest`). The CLI's `seiza model install
+[NAME]`, `seiza setup --noise-model`, the C ABI's `seiza_model_download_json`
+(a null name for the latest) and Python's `download_model` (no name for the
+latest) all call it. It fetches the files into the download cache and installs
+them whole. It refuses a card that names another model or differs from its
+manifest entry, and graphs that differ from the card. The store hard-links the
+cached files where it can, so a model takes its space once. Each step is
+reported as a `DownloadEvent`, which the C ABI hands its callback as JSON and
+Python its `progress` as a dict, its kind under `event`. An install fetches
+both precisions for now, about 520 MB for a model of 93 million weights;
+fetching only the one a backend needs is still to come.
+
+`seiza model denoise` with no `--model` runs the one installed noise model
+and touches no network. With none installed, it fetches the manifest from the
+server, installs the latest noise model with its progress shown, and runs.
+If the manifest cannot be reached, it stops with an error that names
+`seiza model install`; it never falls back to a cached manifest or another
+model. A newer published model is not fetched over an installed one: `seiza
+model install` brings it, and while more than one is installed `--model`
+chooses. A model named with `--model` always wins and is never fetched.
+
+Publishing follows the catalogs' order: upload each artifact, uncompressed
+and as zstd, to its content-addressed key with an immutable cache lifetime;
+check every hosted object's size and hash, encoded and decoded; keep the
+manifest under `/models/v1/manifests/<version>.json`; and write
+`/models/v1/manifest.json`, with a short cache lifetime, last.
 
 The card is written from a list of allowed fields, never by copying
 `run.json`, which holds machine paths and the training configuration in
@@ -582,7 +651,9 @@ Steps 0 to 4 are built, with model delivery's local commands: `seiza-model`,
 `seiza model`, its C ABI and Python, and `bundle-noise` in `training/`. It
 matches the harness on a real image on a Mac, and a tiny model runs through ONNX
 Runtime in CI. The output bound is still not built, and no shipped channel
-carries the library yet.
+carries the library yet. Step 6 is built: `seiza model install [NAME]`,
+`/models/v1/`, where `noise-v1-d33` is published as the latest noise model,
+`seiza setup --noise-model`, and a first `seiza model denoise` that fetches it.
 
 | # | Step | Done when |
 |---|---|---|
