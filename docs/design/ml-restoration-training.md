@@ -1709,9 +1709,19 @@ In order, each only if the one before leaves a gap at the rims:
      the lit side past it (+5.75 and +7.43), the cloud's detail past
      it (1.16, 1.28, 1.16 and 1.03) and knots of 1.04%. What is left
      at 0.5 is the lit side's height and the rim's rise (4.33 px
-     against 3.74), which a larger network is the next to try. The
-     California's stars keep 9% of flux and are a little less round
-     (0.057 from 0.044; the goal 0.046).
+     against 3.74). The California's stars keep 9% of flux and are a
+     little less round (0.057 from 0.044; the goal 0.046).
+   - A larger network does not give them. The same recipe at five
+     levels 96 wide (nine times the weights; the same steps, batch,
+     tile and learning rate, and the same hours, validation 0.850
+     against 0.792) is that run a little weaker: the same slope
+     (×1.87, over 4.42 px), the lit side +3.71 and +4.57, the dark
+     side 0.40, 0.51, 0.55 and 0.48, the cloud's detail 1.03, 1.05,
+     1.04 and 1.02, knots of 0.82%, 2.28% and 3.12%. At an ask of 0.4
+     it is where the smaller run is at 0.45 or so (×2.71, 4.22 px, lit
+     +4.99 and +6.38). It does hold the California's flux (1.020 from
+     1.089) and leaves its stars less round (0.070). The rim's
+     steepness is the target's, not the network's size.
 
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
