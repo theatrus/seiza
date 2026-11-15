@@ -16,6 +16,7 @@ default = ["download"]
 # `ModelStore::download`: install a model the hosted manifest offers, through
 # `seiza-download`. A host that ships its own models can leave it out.
 download = ["dep:seiza-download", "dep:tokio"]
+files = ["dep:seiza-fits", "dep:seiza-image-io", "dep:seiza-stacking", "dep:seiza-stretch"]
 
 [dependencies]
 directories.workspace = true
@@ -25,9 +26,13 @@ libloading = "0.9"
 # so a build needs no native library and a machine without one still runs
 # everything else in Seiza. Pinned exactly because `ort` is a release candidate
 # whose API changes between candidates.
-ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "half", "coreml", "cuda", "tensorrt", "nvrtx", "webgpu"] }
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "half", "coreml", "cuda", "tensorrt", "nvrtx", "webgpu", "directml"] }
 rayon.workspace = true
 seiza-download = { workspace = true, optional = true }
+seiza-fits = { workspace = true, optional = true }
+seiza-image-io = { workspace = true, optional = true }
+seiza-stacking = { workspace = true, optional = true }
+seiza-stretch = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

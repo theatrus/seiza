@@ -827,12 +827,16 @@ seiza_noise_model_open = "NoiseModel"
 seiza_noise_model_backend = "NoiseModel.backend"
 seiza_noise_model_tile = "NoiseModel.tile"
 seiza_noise_model_denoise = "NoiseModel.denoise"
+seiza_noise_model_denoise_file = "NoiseModel.denoise_file"
+seiza_file_restoration_write = "FileRestoration.write_linear"
+seiza_file_restoration_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
 seiza_noise_model_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
 seiza_denoised_blend = "Denoised.blend"
 seiza_denoised_residual = "Denoised.residual"
 seiza_denoised_report_json = "Denoised.report"
 seiza_denoised_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
 seiza_model_backends_json = "model_backends"
+seiza_model_catalog_json = "model_catalog"
 seiza_model_list_json = "installed_models"
 seiza_model_install_json = "install_model"
 seiza_model_download_json = "download_model"
@@ -956,6 +960,7 @@ seiza_external_exchange_version = "EXTERNAL_EXCHANGE_VERSION"
 # export above gives as its twin: the C export that does the same job
 # ({ c = "..." }), or why there is none.
 [python_functions]
+"FileRestoration.write_comparison" = { c = "seiza_file_restoration_write" }
 "model_runtime" = { c = "seiza_model_backends_json" }
 "RemainingKernel.target_fwhm_range" = { c = "seiza_remaining_kernel_report_json" }
 # distributed stacking: the steps of the C ABI's one-call workflows

@@ -1626,6 +1626,17 @@ class Denoised:
     ) -> npt.NDArray[np.float32]: ...
     def residual(self, channel: int = 0) -> npt.NDArray[np.float32]: ...
 
+class FileRestoration:
+    """A restored file or center crop and its cached residual."""
+
+    def write_linear(
+        self, path: str | Path, *, high: float = 1.0, low: float = 1.0, scale_px: float = 5.0
+    ) -> DenoiseReport: ...
+    def write_comparison(
+        self, original: str | Path, restored: str | Path, *,
+        high: float = 1.0, low: float = 1.0, scale_px: float = 5.0
+    ) -> DenoiseReport: ...
+
 class NoiseModel:
     """A noise model, open on a backend. It needs only the image."""
 
@@ -1641,6 +1652,7 @@ class NoiseModel:
         cache_dir: str | Path | None = None,
         tile: int | None = None,
         precision: str | None = None,
+        device_id: int | None = None,
     ) -> None: ...
     def denoise(
         self,
@@ -1648,6 +1660,11 @@ class NoiseModel:
         progress: Callable[[int, int, int, int], object] | None = None,
         cancel: Callable[[], bool] | None = None,
     ) -> Denoised: ...
+    def denoise_file(
+        self, path: str | Path, *, center: bool = False,
+        progress: Callable[[int, int, int, int], object] | None = None,
+        cancel: Callable[[], bool] | None = None,
+    ) -> FileRestoration: ...
 
 class ModelRuntime:
     """Which ONNX Runtime this process loaded."""
@@ -1676,6 +1693,9 @@ class InstalledModel:
 MODEL_OUTPUT_VERSION: str
 
 def model_backends(library: str | Path | None = None) -> list[ModelBackend]: ...
+def model_catalog(
+    *, base_url: str | None = None, cache_dir: str | Path | None = None,
+) -> dict[str, Any]: ...
 def model_runtime(library: str | Path | None = None) -> ModelRuntime | None: ...
 def installed_models(store: str | Path | None = None) -> list[InstalledModel]: ...
 def install_model(

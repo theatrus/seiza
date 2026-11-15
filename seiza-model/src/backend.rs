@@ -63,6 +63,8 @@ pub enum Backend {
     TensorRtRtx,
     /// NVIDIA CUDA.
     Cuda,
+    /// DirectML on a Windows D3D12 GPU.
+    DirectMl,
     /// WebGPU, through ONNX Runtime's experimental provider.
     WebGpu,
     /// ONNX Runtime's CPU provider, which every build has.
@@ -83,6 +85,7 @@ impl fmt::Display for Backend {
             Self::TensorRt => "tensorrt",
             Self::TensorRtRtx => "tensorrt-rtx",
             Self::Cuda => "cuda",
+            Self::DirectMl => "directml",
             Self::WebGpu => "webgpu",
             Self::Cpu => "cpu",
         })
@@ -149,6 +152,8 @@ pub struct BackendOptions {
     pub tile: Option<usize>,
     /// The graph's precision, in place of the backend's default.
     pub precision: Option<Precision>,
+    /// DirectML's DXGI adapter index. Otherwise the high-performance GPU is preferred.
+    pub device_id: Option<i32>,
 }
 
 /// Which ONNX Runtime a process loaded.
@@ -309,13 +314,14 @@ fn usable(path: &Path, source: &str) -> Result<PathBuf, String> {
 impl Backend {
     /// Every backend, best first. Apple's GPU comes before its Neural Engine:
     /// on an otherwise idle M4 Max it was faster, at f32 as well as f16.
-    pub const ALL: [Backend; 8] = [
+    pub const ALL: [Backend; 9] = [
         Self::CoreMl(CoreMlUnits::Gpu),
         Self::CoreMl(CoreMlUnits::NeuralEngine),
         Self::CoreMl(CoreMlUnits::Cpu),
         Self::TensorRtRtx,
         Self::TensorRt,
         Self::Cuda,
+        Self::DirectMl,
         Self::WebGpu,
         Self::Cpu,
     ];
@@ -334,17 +340,18 @@ impl Backend {
     /// model card's. A larger tile keeps more of what it computes.
     pub fn default_tile(self) -> Option<usize> {
         match self {
-            Self::CoreMl(CoreMlUnits::Cpu) | Self::Cpu => None,
+            Self::CoreMl(CoreMlUnits::Cpu) | Self::DirectMl | Self::Cpu => None,
             _ => Some(1024),
         }
     }
 
     /// Whether [`Backend::detect`] may pick this backend on this machine.
-    /// NVIDIA and Intel GPUs have not been measured, so they run only when
-    /// asked for.
+    /// CUDA, TensorRT, and WebGPU are selected explicitly.
     fn automatic(self) -> bool {
         match self {
-            Self::CoreMl(CoreMlUnits::NeuralEngine | CoreMlUnits::Gpu) | Self::Cpu => true,
+            Self::CoreMl(CoreMlUnits::NeuralEngine | CoreMlUnits::Gpu)
+            | Self::DirectMl
+            | Self::Cpu => true,
             Self::CoreMl(CoreMlUnits::Cpu)
             | Self::TensorRt
             | Self::TensorRtRtx
@@ -365,6 +372,7 @@ impl Backend {
             Self::TensorRt => (ep::TensorRT::is_available(), "TensorRT"),
             Self::TensorRtRtx => (ep::NVRTX::is_available(), "TensorRT for RTX"),
             Self::Cuda => (ep::CUDA::is_available(), "CUDA"),
+            Self::DirectMl => (ep::DirectML::is_available(), "DirectML"),
             Self::WebGpu => (ep::WebGPU::is_available(), "WebGPU"),
             Self::Cpu => return None,
         };

@@ -540,7 +540,14 @@ the image is read by, so the key changes whenever the output could.
 and `install_model`, `installed_models`, `verify_model` and `remove_model` manage
 the store. Invalid tile geometry is refused when opening or installing a bundle,
 before loading ONNX Runtime or replacing an installed model.
-`seiza.download_model()` installs the latest noise model Seiza publishes at
+`model.denoise_file(path, center=True)` previews the center of a linear FITS or
+XISF. Its `write_comparison(original, restored)` uses one display stretch for
+both outputs. With `center=False`, `write_linear(path)` saves the full result
+with geometry and model provenance. On Windows, a DirectML-enabled runtime can
+run the `directml` backend. Pass `device_id` to select a DXGI adapter.
+
+`seiza.model_catalog()` lists the published model bundles without downloading
+their graphs. `seiza.download_model()` installs the latest noise model Seiza publishes at
 downloads.seiza.fyi, and `seiza.download_model("noise-v1-d33")` one by name: it
 fetches the model's card and graphs, verifying each by its SHA-256 as it
 downloads, and installs it once the card matches the hosted manifest and the

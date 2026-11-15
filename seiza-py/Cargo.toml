@@ -37,7 +37,7 @@ seiza-deconvolution = { path = "../seiza-deconvolution" }
 seiza-fits = { path = "../seiza-fits" }
 seiza-image-io = { path = "../seiza-image-io" }
 seiza-imgproc = { path = "../seiza-imgproc" }
-seiza-model = { path = "../seiza-model" }
+seiza-model = { path = "../seiza-model", features = ["files"] }
 seiza-satellites = { path = "../seiza-satellites" }
 seiza-sources = { path = "../seiza-sources" }
 seiza-parallax = { path = "../seiza-parallax" }
