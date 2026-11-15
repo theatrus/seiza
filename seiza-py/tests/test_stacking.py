@@ -44,6 +44,13 @@ def no_adjustment_options():
     return seiza.StackOptions(normalization="none", rejection="none")
 
 
+def test_mosaic_matching_is_independent_of_normalization():
+    assert not seiza.StackOptions().match_mosaic_backgrounds
+    options = seiza.StackOptions(match_mosaic_backgrounds=True)
+    assert options.match_mosaic_backgrounds
+    assert options.normalization == "global"
+
+
 def test_dark_calibrated_flat_readout_policy_and_context(tmp_path):
     def write(name, data, **cards):
         header = fits.Header()

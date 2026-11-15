@@ -1111,6 +1111,13 @@ for frame in frames:
 ```
 
 
+For expanded-canvas replay, open the stack with
+`StackOptions(match_mosaic_backgrounds=True)` to match panel backgrounds.
+This defaults to `False`, independently of normalization, and applies to
+reintegration, selected-frame replay and full-resolution replay. Use calibrated
+panels with matching photometric gains; the matcher cannot distinguish
+vignetting from sky gradients. The live pass is unchanged.
+
 For registered mosaic panels, pass `mosaic_panels=[0, 0, 1, 1]` when the
 first two inputs cover one panel and the next two cover another. Seiza matches
 additive background planes across overlaps, then tapers remaining smooth

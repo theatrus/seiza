@@ -581,6 +581,7 @@ class GpuOptions:
 
 class StackOptions:
     track_clipping: bool
+    match_mosaic_backgrounds: bool
     normalization: str
     local_tile_size: int | None
     demosaic: str
@@ -630,6 +631,7 @@ class StackOptions:
         gpu: GpuOptions | None = None,
         interpolation: str = "bilinear",
         track_clipping: bool = True,
+        match_mosaic_backgrounds: bool = False,
     ) -> None: ...
 
 class FrameDisposition:

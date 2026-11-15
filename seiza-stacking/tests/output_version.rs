@@ -1363,34 +1363,34 @@ fn registered_mosaic_backgrounds_keep_their_output() {
 }
 
 const REGISTERED_MOSAIC_BACKGROUNDS: &[f64] = &[
-    1.1868765e2,
-    1.2014872e2,
-    2.1545668e2,
-    1.0991409e2,
-    1.1011992e2,
-    1.1018275e2,
-    1.1414909e2,
-    1.1858456e2,
-    1.0833705e2,
-    1.1100543e2,
-    1.1342857e2,
-    1.1240912e2,
-    1.1637103e2,
-    1.0697379e2,
-    1.4757352e2,
-    1.8794354e2,
-    1.1369425e2,
-    1.1412582e2,
-    1.0808110e2,
-    1.2232689e2,
-    1.3701984e2,
-    1.1284927e2,
-    1.1512222e2,
-    1.0911497e2,
-    1.0871744e2,
-    1.0853522e2,
-    1.1257890e2,
-    1.1621197e2,
+    1.1783483e2,
+    1.1948582e2,
+    2.1829887e2,
+    1.0593355e2,
+    1.0802983e2,
+    1.0996722e2,
+    1.1201355e2,
+    1.1455039e2,
+    1.0586729e2,
+    1.1042613e2,
+    1.1471807e2,
+    1.1176486e2,
+    1.1382815e2,
+    1.0600124e2,
+    1.4850890e2,
+    1.9072472e2,
+    1.1453160e2,
+    1.1306136e2,
+    1.0557236e2,
+    1.2173323e2,
+    1.3830853e2,
+    1.1219381e2,
+    1.1256300e2,
+    1.0508287e2,
+    1.0660040e2,
+    1.0831870e2,
+    1.1044353e2,
+    1.1217282e2,
 ];
 
 /// Extended emission fills the overlap: only a relative constant is
@@ -2225,6 +2225,7 @@ fn a_binned_local_background_stack_s_full_resolution_reintegration_keeps_its_out
 
     let paths = mosaic_panels(&directory);
     let mut options = StackOptions {
+        match_mosaic_backgrounds: true,
         bin_factor: 2,
         normalization: NormalizationMode::LocalBackground { tile_size: 32 },
         ..StackOptions::default()
@@ -2323,6 +2324,7 @@ fn a_binned_mosaic_s_full_resolution_reintegration_keeps_its_output() {
     let directory = tempfile::tempdir().unwrap();
     let paths = mosaic_panels(&directory);
     let mut options = StackOptions {
+        match_mosaic_backgrounds: true,
         bin_factor: 2,
         ..StackOptions::default()
     };
@@ -2548,6 +2550,7 @@ fn a_mosaic_background_reference_keeps_its_output() {
     let directory = tempfile::tempdir().unwrap();
     let paths = uneven_mosaic_panels(&directory);
     let mut options = StackOptions {
+        match_mosaic_backgrounds: true,
         normalization: NormalizationMode::LocalBackground { tile_size: 32 },
         rejection: RejectionMode::None,
         ..StackOptions::default()
@@ -2632,7 +2635,10 @@ fn a_mosaic_of_differing_night_gradients_reintegrates_level() {
                 path
             })
             .collect::<Vec<_>>();
-        let mut options = StackOptions::default();
+        let mut options = StackOptions {
+            match_mosaic_backgrounds: true,
+            ..StackOptions::default()
+        };
         options.acceptance.minimum_overlap_fraction = 0.1;
         let mut stacker = LiveStacker::with_expanding_reference(
             &paths,

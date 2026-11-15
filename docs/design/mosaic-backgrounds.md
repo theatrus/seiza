@@ -13,8 +13,11 @@ panels are accepted.
 ## Expanded canvases
 
 `LiveStacker::reintegrate` and the other replays of a stack on an expanded
-canvas match panel backgrounds the same way, with nothing to set: the option
-itself is still refused there, since the stack knows its own panels. Each
+canvas match panel backgrounds when `StackOptions::match_mosaic_backgrounds`
+is enabled (C: `matchMosaicBackgrounds`, Python: `match_mosaic_backgrounds`,
+CLI: `--match-mosaic-backgrounds`). It defaults to false independently of
+normalization. The `mosaic_panels` option itself is still refused on replay,
+since the stack knows its own panels. Each
 admitted frame belongs to the panel planning made that its footprint shares
 the most pixels with. The matcher reads each frame as the replay normalizes
 it, after its recorded gain and level and any background refit, so it sees
@@ -37,25 +40,12 @@ under level skies, whose noise is 0.7 ADU a pixel. Where skies agree already
 the matcher fits their noise: on two panels of two frames each, noise 3 to 6
 ADU a sample, it moved the stack by at most 0.6 ADU.
 
-On real mosaics, reintegrated with and without panel matching, the spread of
-the sky over 128-pixel cells of the dimmer half of each stack, in ADU:
-
-| Mosaic | Unmatched | Matched |
-|---|---|---|
-| IC 1318 Hα, 4 panels, 83 frames over two nights, bias and flat | 10.4 | 8.5 |
-| The same frames uncalibrated | 10.4 | 10.7 |
-| M 31, 121 uncalibrated 20 s colour frames, R / G / B | 13.5 / 9.3 / 11.9 | 12.0 / 7.7 / 15.3 |
-| Elephant's Trunk Hα, 16 panels, 127 uncalibrated frames over three nights | 10.1 | 10.0 |
-
-The Elephant's Trunk panels stepped visibly where coverage changed, and no
-longer do; its spread is mostly the Milky Way's own. Before the shared bowl,
-the slopes' weight and the residuals' shrinking, matching raised the
-uncalibrated IC 1318 stack's spread to 11.9 and the M 31 stack's to 20.5,
-17.8 and 23.8, with blotches a cell wide. The M 31 stack's blue still spreads
-more matched than unmatched. On two calibrated panels of the Large
-Magellanic Cloud, ten frames a filter, the largest step where coverage
-changes fell from 2.4 to 0.2 ADU in green, 0.7 to 0.0 in red and 0.5 to 0.1
-in Hα; the step at the overlap's other edge rose by up to 0.4.
+Matching is opt-in because uncorrected vignetting and unequal photometric
+gains can be mistaken for additive backgrounds. Earlier experiments with an
+automatic shared-bowl model improved some mosaics but worsened others,
+including colour gradients. Those measurements do not validate this model.
+Calibrate and match photometric gains before enabling it; compare the result
+with matching disabled.
 
 ## Matching and blending
 
@@ -84,18 +74,11 @@ whole panel. A slope measured along an overlap as long as the panel keeps all
 but a thirtieth of itself. Narrow overlaps with too few cells for a plane can
 still constrain a relative constant.
 
-Frames that were not flat-fielded, or not well, darken toward their corners,
-so every panel's edge is darker than the middle of the panel it overlaps.
-Planes alone close those differences by tilting each panel toward the
-mosaic's middle. Where four or more panels overlap, the solve therefore takes
-one more unknown per channel: the depth of a radial bowl about each panel's
-centre, the same for all, free of the planes' penalty. Between panels such a
-bowl leaves exactly those tilts, so what it explains moves no panel. The bowl
-is never applied; flat-fielding is calibration's work. A depth that would
-brighten the corners is not vignetting but the part of the panels' own
-gradients that follows their positions, and the solve runs again without the
-bowl. Between two or three panels a bowl cannot be told from nights whose
-skies sloped apart, and none is solved.
+Vignetting is not inferred from overlap differences. The difference between
+two quadratic bowls about different centres is a plane, for any number of
+panels. An unpenalized common bowl therefore absorbs real sky gradients too.
+Only additive planes are fitted; disconnected overlap components do not share
+parameters. Flat-fielding belongs to calibration.
 
 At each matching sample position, corrected panel values form a common
 background weighted by distance from each channel's footprint edge and the
@@ -153,10 +136,11 @@ checks that every later read matches those original samples.
 
 The output-version cases include a sampled Gaussian star under a steep sky,
 a partial-cell overlap, independent RGB missing samples, a sampled transient
-hit, four overlapping panels with different skies
-and shared diffuse emission, whose summary moves when the shared bowl is not
-solved, and an expanded canvas of two panels whose
-nights' skies sloped opposite ways, reintegrated. Core tests measure recovery of the known scene
+hit, four overlapping panels with different skies and shared diffuse emission,
+and an expanded canvas of two panels whose nights' skies sloped opposite ways,
+reintegrated. Core tests reject false vignetting inference on four planar panels
+and check that adding a disconnected pair leaves existing corrections unchanged.
+They also measure recovery of the known scene
 up to the unobservable common plane, preserve a bright star and missing
 pixels, and compare whole-frame and banded output bit for bit. C and Python
 tests exercise the same panel-ID option and reject mismatched ID counts.

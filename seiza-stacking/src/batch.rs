@@ -42,7 +42,8 @@ pub struct BatchStackOptions {
     /// untouched. A `LiveStacker` refuses this option on reintegration: on an
     /// expanded canvas it names the panels itself, each frame's being the
     /// panel planning made that its footprint shares the most pixels with,
-    /// and matches them this way unless its normalization is
+    /// and matches them this way when [`crate::StackOptions::match_mosaic_backgrounds`]
+    /// is enabled, unless its normalization is
     /// [`crate::NormalizationMode::None`].
     ///
     /// Matching retains corresponding positions and independent channel

@@ -32,18 +32,9 @@ const LEVEL_PENALTY: f64 = 1.0e-3;
 /// across itself over a tenth of the panel, so the slope costs a hundred
 /// times more over the footprint than it gains in the overlap: at this weight
 /// a quarter of such a slope is kept, and all but a thirtieth of one measured
-/// along an overlap as long as the panel. At `LEVEL_PENALTY`'s weight both
-/// were kept nearly whole, and a slope read across a strip of overlap was
-/// carried over the whole panel: four panels of 83 calibrated frames came out
-/// with their sky's spread at 9.3 ADU, and at 8.5 with this weight, from
-/// 10.4 unmatched. Three times this weight leaves 7% of a real difference
-/// between two skies' slopes unmatched, and this one 3%.
+/// along an overlap as long as the panel. This bounds extrapolation of a
+/// slope measured only across a narrow strip of overlap.
 const SLOPE_PENALTY: f64 = 0.03;
-/// The fewest overlapping panels a shared bowl is solved for. Between two
-/// panels a bowl is one tilt, which nights whose skies sloped apart leave
-/// too; among four it is the part of every tilt that follows the panels'
-/// positions.
-const BOWL_PANELS: usize = 4;
 
 #[derive(Clone, Copy, Default)]
 struct Sample {
@@ -256,15 +247,10 @@ impl Samples {
             })
             .collect::<Vec<_>>();
         let mut planes = vec![vec![[0.0; TERMS]; channels]; means.len()];
-        let mut bowls = vec![];
         for channel in 0..channels {
             check_cancelled(options)?;
-            bowls.push(self.fit(&means, channel, &mut planes, options)?);
+            self.fit(&means, channel, &mut planes, options)?;
         }
-        let bowl_at = |panel: usize, channel: usize, phi: &[f64; TERMS]| {
-            let (centre, k) = &bowls[channel];
-            k * self.radius(&centre[panel], phi)
-        };
         let distances = means
             .iter()
             .map(|mean| {
@@ -296,9 +282,7 @@ impl Samples {
                         if let Some(value) = sample.mean() {
                             let w = (distances[panel][channel][tile] / 8.0).min(1.0).powi(2)
                                 * sample.weight;
-                            total += w
-                                * (value + dot(&planes[panel][channel], &phi)
-                                    - bowl_at(panel, channel, &phi));
+                            total += w * (value + dot(&planes[panel][channel], &phi));
                             weight += w;
                         }
                     }
@@ -307,10 +291,8 @@ impl Samples {
                     }
                     for panel in 0..means.len() {
                         if let Some(value) = self.at(panel, tile, point, channel).mean() {
-                            differences[panel].push(
-                                total / weight - value - dot(&planes[panel][channel], &phi)
-                                    + bowl_at(panel, channel, &phi),
-                            );
+                            differences[panel]
+                                .push(total / weight - value - dot(&planes[panel][channel], &phi));
                         }
                     }
                 }
@@ -355,28 +337,8 @@ impl Samples {
         channel: usize,
         planes: &mut [Vec<[f64; TERMS]>],
         options: &BatchStackOptions,
-    ) -> Result<(Vec<[f64; TERMS]>, f64)> {
+    ) -> Result<()> {
         let channels = self.shape.2;
-        // Each panel's footprint centre, about which its frames' shared
-        // bowl is taken to lie.
-        let centres = means
-            .iter()
-            .map(|mean| {
-                let mut centre = [0.0; TERMS];
-                let mut count = 0.0;
-                for tile in 0..self.columns * self.rows {
-                    if mean[tile * channels + channel].is_finite() {
-                        let phi = basis(self.shape, self.cell, self.columns, tile);
-                        for i in 0..TERMS {
-                            centre[i] += phi[i];
-                        }
-                        count += 1.0;
-                    }
-                }
-                centre.map(|v| v / f64::max(count, 1.0))
-            })
-            .collect::<Vec<_>>();
-        let mut bowl = 0.0;
         let thresholds = means
             .iter()
             .map(|mean| {
@@ -421,29 +383,12 @@ impl Samples {
                 }
             }
         }
-        // Frames that were not flat-fielded, or not well, each darken
-        // toward their corners, so every panel's edge is darker than the
-        // middle of the panel it overlaps. Planes alone explain that by
-        // tilting each panel toward the mosaic's middle, bending a stack
-        // that had no steps: 121 uncalibrated colour frames came out with
-        // their sky's spread up by half to double. One radial bowl about
-        // each panel's centre, of one depth for all, leaves exactly those
-        // tilts between panels, so the solve takes the depth as one more
-        // unknown, free of the penalty the planes pay. What it explains
-        // moves no panel, and the bowl itself is never applied: flat-fielding
-        // is calibration's work, and an additive bowl would be the wrong one.
-        let overlapping = edges
-            .iter()
-            .flat_map(|(a, b, _)| [*a, *b])
-            .collect::<std::collections::BTreeSet<_>>()
-            .len();
-        let mut shared = overlapping >= BOWL_PANELS;
-        let n = means.len() * TERMS + 1;
-        let last = n - 1;
+        // Shifted quadratic bowls differ by a plane. No overlap count
+        // distinguishes vignetting from real panel gradients, so solve only
+        // the additive corrections callers explicitly requested.
+        let n = means.len() * TERMS;
         let iterations = if edges.is_empty() { 0 } else { 4 };
-        let mut iteration = 0;
-        while iteration < iterations {
-            iteration += 1;
+        for _ in 0..iterations {
             check_cancelled(options)?;
             let mut matrix = DMatrix::<f64>::zeros(n, n);
             let mut right = DVector::<f64>::zeros(n);
@@ -451,18 +396,6 @@ impl Samples {
                 let weight = 1.0 / cells.iter().filter(|c| c.2).count().max(1) as f64;
                 for &(phi, diff, keep) in cells {
                     if keep {
-                        if shared {
-                            let g =
-                                self.radius(&centres[*b], &phi) - self.radius(&centres[*a], &phi);
-                            right[last] += weight * g * diff;
-                            matrix[(last, last)] += weight * g * g;
-                            for (p, sign_p) in [(*a, 1.0), (*b, -1.0)] {
-                                for i in 0..TERMS {
-                                    matrix[(p * TERMS + i, last)] += weight * sign_p * phi[i] * g;
-                                    matrix[(last, p * TERMS + i)] += weight * sign_p * phi[i] * g;
-                                }
-                            }
-                        }
                         for (p, sign_p) in [(*a, 1.0), (*b, -1.0)] {
                             for i in 0..TERMS {
                                 right[p * TERMS + i] += weight * sign_p * phi[i] * diff;
@@ -523,16 +456,12 @@ impl Samples {
                     planes[panel][channel][term] = solution[panel * TERMS + term];
                 }
             }
-            bowl = if shared { solution[last] } else { 0.0 };
             for (a, b, cells) in &mut edges {
                 let mut residuals = cells
                     .iter()
                     .map(|&(phi, diff, _)| {
-                        (dot(&planes[*a][channel], &phi) - dot(&planes[*b][channel], &phi)
-                            + bowl
-                                * (self.radius(&centres[*b], &phi)
-                                    - self.radius(&centres[*a], &phi))
-                            - diff) as f32
+                        (dot(&planes[*a][channel], &phi) - dot(&planes[*b][channel], &phi) - diff)
+                            as f32
                     })
                     .collect::<Vec<_>>();
                 let center = median(&mut residuals);
@@ -541,24 +470,9 @@ impl Samples {
                 }
                 let limit = (3.0 * 1.4826 * median(&mut residuals)).max(1.0e-4);
                 for (phi, diff, keep) in cells {
-                    let residual = dot(&planes[*a][channel], phi) - dot(&planes[*b][channel], phi)
-                        + bowl * (self.radius(&centres[*b], phi) - self.radius(&centres[*a], phi))
-                        - *diff;
+                    let residual =
+                        dot(&planes[*a][channel], phi) - dot(&planes[*b][channel], phi) - *diff;
                     *keep = (residual - f64::from(center)).abs() <= f64::from(limit);
-                }
-            }
-            // Vignetting darkens a frame toward its corners. A bowl that
-            // brightens them is not one: it is the part of the panels' own
-            // gradients that happens to follow their positions, which the
-            // planes must match. Solve again without it.
-            if shared && iteration == iterations && bowl > 0.0 {
-                shared = false;
-                bowl = 0.0;
-                iteration = 0;
-                for (_, _, cells) in &mut edges {
-                    for cell in cells {
-                        cell.2 = true;
-                    }
                 }
             }
         }
@@ -577,17 +491,7 @@ impl Samples {
                 }
             }
         }
-        self.match_levels(means, channel, planes, &groups, options)?;
-        Ok((centres, bowl))
-    }
-
-    /// Squared distance of `phi` from `centre`, in units of the canvas's
-    /// longer side.
-    fn radius(&self, centre: &[f64; TERMS], phi: &[f64; TERMS]) -> f64 {
-        let side = self.shape.0.max(self.shape.1) as f64;
-        let x = (phi[1] - centre[1]) * self.shape.0 as f64 / side;
-        let y = (phi[2] - centre[2]) * self.shape.1 as f64 / side;
-        x * x + y * y
+        self.match_levels(means, channel, planes, &groups, options)
     }
 
     fn match_levels(
@@ -1080,60 +984,6 @@ mod tests {
         }
     }
 
-    /// Frames that were never flat-fielded darken toward their corners, so
-    /// each panel's edge is darker than the middle of the panel it overlaps.
-    /// Planes alone tilt every panel toward the mosaic's middle to close
-    /// those differences; the shared bowl explains them and moves nothing.
-    #[test]
-    fn panels_that_share_a_vignetting_bowl_are_not_tilted() {
-        let frames = panels(1, false)
-            .into_iter()
-            .enumerate()
-            .map(|(frame, mut image)| {
-                let panel = frame / 2;
-                let (cx, cy) = (
-                    ((panel % 2) * 80) as f32 + 79.5,
-                    ((panel / 2) * 80) as f32 + 71.5,
-                );
-                for (index, value) in image.data.iter_mut().enumerate() {
-                    let (x, y) = ((index % 240) as f32, (index / 240) as f32);
-                    // 30 ADU darker at a panel's corner than at its centre.
-                    *value -= 30.0 * ((x - cx).powi(2) + (y - cy).powi(2)) / 11_600.0;
-                }
-                image
-            })
-            .collect::<Vec<_>>();
-        let options = BatchStackOptions {
-            mosaic_panels: Some((0..8).map(|i| i / 2).collect()),
-            gpu: GpuOptions {
-                enabled: false,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let matched =
-            integrate_registered_frames(8, &options, |_, i| Ok(frames[i].clone())).unwrap();
-        let unmatched = integrate_registered_frames(
-            8,
-            &BatchStackOptions {
-                mosaic_panels: None,
-                ..options.clone()
-            },
-            |_, i| Ok(frames[i].clone()),
-        )
-        .unwrap();
-        let moved = matched
-            .snapshot
-            .image
-            .data
-            .iter()
-            .zip(&unmatched.snapshot.image.data)
-            .filter(|(a, b)| a.is_finite() && b.is_finite())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0_f32, f32::max);
-        assert!(moved < 1.0, "matching moved the stack by {moved} ADU");
-    }
-
     #[test]
     fn a_cell_s_residual_must_stand_above_its_own_noise() {
         let mut seed = 7_u64;
@@ -1152,6 +1002,80 @@ mod tests {
         assert!((45.0..70.0).contains(&kept), "kept {kept}");
         // Samples that agree keep their residual whole.
         assert_eq!(significant(&mut [2.5; POINTS]), 2.5);
+    }
+
+    // These backgrounds are planes, even though their differences also
+    // admit an explanation as shifted bowls. Overlaps cannot distinguish
+    // those explanations, regardless of the number of panels.
+    fn planar_panels(disconnected: bool) -> Vec<LinearImage> {
+        let height = if disconnected { 384 } else { 224 };
+        (0..4)
+            .map(|panel| {
+                let (left, top) = (
+                    (panel % 2) * 80,
+                    (panel / 2) * if disconnected { 240 } else { 80 },
+                );
+                let (cx, cy) = (left as f32 + 79.5, top as f32 + 71.5);
+                let data = (0..240 * height)
+                    .map(|i| {
+                        let (x, y) = (i % 240, i / 240);
+                        if x < left || x >= left + 160 || y < top || y >= top + 144 {
+                            return f32::NAN;
+                        }
+                        let (x, y) = (x as f32, y as f32);
+                        let slope = if disconnected && panel >= 2 {
+                            0.0
+                        } else {
+                            30.0 / 11_600.0
+                        };
+                        100.0
+                            - slope
+                                * (-2.0 * x * (cx - 119.5) - 2.0 * y * (cy - 111.5)
+                                    + cx * cx
+                                    + cy * cy
+                                    - 119.5 * 119.5
+                                    - 111.5 * 111.5)
+                    })
+                    .collect();
+                LinearImage::new(240, height, 1, data).unwrap()
+            })
+            .collect()
+    }
+
+    fn match_planar_panels(frames: &[LinearImage]) -> LinearImage {
+        let options = BatchStackOptions {
+            mosaic_panels: Some((0..frames.len() as u32).collect()),
+            gpu: GpuOptions {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        integrate_registered_frames(frames.len(), &options, |_, i| Ok(frames[i].clone()))
+            .unwrap()
+            .snapshot
+            .image
+    }
+
+    #[test]
+    fn four_planar_backgrounds_are_not_mistaken_for_vignetting() {
+        let image = match_planar_panels(&planar_panels(false));
+        for y in [40, 100] {
+            for x in [80, 160] {
+                let seam = image.data[y * 240 + x] - image.data[y * 240 + x - 1];
+                assert!(seam.abs() < 0.5, "({x}, {y}): {seam} ADU seam");
+            }
+        }
+    }
+
+    #[test]
+    fn disconnected_panels_do_not_change_each_others_corrections() {
+        let frames = planar_panels(true);
+        let pair = match_planar_panels(&frames[..2]);
+        let both = match_planar_panels(&frames);
+        for (a, b) in pair.data.iter().zip(&both.data).take(240 * 144) {
+            assert!((a - b).abs() < 1.0e-4, "disconnected pair moved {a} to {b}");
+        }
     }
 
     #[test]

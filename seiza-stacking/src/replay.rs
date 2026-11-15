@@ -2708,8 +2708,9 @@ impl LiveStacker {
     /// read whole for each pass, it hears each pass and frame before the
     /// read.
     ///
-    /// On an expanded canvas the panels' backgrounds are matched through
-    /// their overlaps first, as [`BatchStackOptions::mosaic_panels`]
+    /// With [`crate::StackOptions::match_mosaic_backgrounds`] enabled, an
+    /// expanded canvas's panel backgrounds are matched through their overlaps
+    /// first, as [`BatchStackOptions::mosaic_panels`]
     /// describes, unless the stack's normalization is
     /// [`crate::NormalizationMode::None`]: each frame is read once more for
     /// it, and frames read whole are heard as a second
@@ -3008,6 +3009,9 @@ impl LiveStacker {
     /// keeps no frame's dimensions, so each footprint is that of the largest
     /// frame planning read, through the frame's own registration.
     fn canvas_panels(&self, selected: &[usize]) -> Option<Vec<u32>> {
+        if !self.options.match_mosaic_backgrounds {
+            return None;
+        }
         let canvas = self.canvas_registrar.as_ref()?;
         if self
             .options
@@ -3980,6 +3984,45 @@ mod tests {
                 .unwrap();
         }
         (directory, stacker, cache, images, sky)
+    }
+
+    #[test]
+    fn mosaic_matching_is_opt_in_and_matches_whole_and_banded_replay() {
+        let (_directory, mut stacker, cache, images, _) = spatially_agreed_mosaic(128, 128);
+        stacker.canvas_registrar = Some(
+            crate::expand::CanvasRegistrar::new(
+                &stacker.reference,
+                &images.iter().map(|image| image.region).collect::<Vec<_>>(),
+                None,
+                None,
+                &stacker.options.registration,
+                stacker.options.scale(),
+                &crate::GpuOptions::default(),
+            )
+            .unwrap()
+            .with_largest_frame((384, 384)),
+        );
+        assert_eq!(stacker.canvas_panels(&[0, 1]), None);
+        stacker.options.match_mosaic_backgrounds = true;
+        assert_eq!(stacker.canvas_panels(&[0, 1]), Some(vec![0, 1]));
+        let normalization = stacker.options.normalization;
+        stacker.options.normalization = crate::NormalizationMode::None;
+        assert_eq!(stacker.canvas_panels(&[0, 1]), None);
+        stacker.options.normalization = normalization;
+        stacker.frame_cache = Some(cache);
+        let options = BatchStackOptions::default();
+        let banded = stacker
+            .replay_with(&options, None, |_, _, _| {}, true)
+            .unwrap()
+            .0;
+        let whole = stacker
+            .replay_with(&options, None, |_, _, _| {}, false)
+            .unwrap()
+            .0;
+        assert_eq!(
+            snapshot_bits(&banded.snapshot),
+            snapshot_bits(&whole.snapshot)
+        );
     }
 
     #[test]

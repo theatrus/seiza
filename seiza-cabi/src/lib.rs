@@ -5339,6 +5339,9 @@ pub type SeizaStackReintegrateProgressCallback =
 /// detection and registration do not run again, and every admitted frame
 /// takes part.
 ///
+/// Expanded canvases match panel backgrounds only when the stack was opened
+/// with `matchMosaicBackgrounds: true`. This is independent of normalization
+/// and defaults to false; use calibrated panels with matching photometric gains.
 /// The live stacker is not changed and may keep integrating afterwards. The
 /// stack must be replayable: `reintegrationUnavailable` in
 /// [`seiza_live_stacker_state_json`] says why not when it is not, and this
@@ -10465,6 +10468,23 @@ mod tests {
             }"#,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn stack_options_can_select_mosaic_matching_independently() {
+        assert!(!stack_options(ptr::null()).unwrap().match_mosaic_backgrounds);
+        for enabled in [false, true] {
+            let json = CString::new(format!(r#"{{"matchMosaicBackgrounds":{enabled}}}"#)).unwrap();
+            let options = stack_options(json.as_ptr()).unwrap();
+            assert_eq!(options.match_mosaic_backgrounds, enabled);
+            assert_eq!(options.normalization, StackOptions::default().normalization);
+            let saved = serde_json::to_string(&options).unwrap();
+            let restored: StackOptions = serde_json::from_str(&saved).unwrap();
+            assert_eq!(restored.match_mosaic_backgrounds, enabled);
+            assert_eq!(saved.contains("matchMosaicBackgrounds"), enabled);
+        }
+        let invalid = CString::new(r#"{"matchMosaicBackgrounds":"true"}"#).unwrap();
+        assert!(stack_options(invalid.as_ptr()).is_err());
     }
 
     #[test]

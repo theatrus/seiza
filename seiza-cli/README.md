@@ -921,7 +921,10 @@ vignetting into every overlap. In a synthetic test, a gradient spanning a third 
 left steps of about a tenth of it, and shifted the panel beyond by about half of
 it.
 
-`--reintegrate` removes those steps under either normalization. It fits one
+`--reintegrate --match-mosaic-backgrounds` matches those steps under either
+normalization. Matching is off by default; enable it for calibrated panels
+with matching photometric gains. Uncorrected vignetting can be mistaken for
+background gradients. It fits one
 additive plane per panel through every overlap at once and tapers what the
 planes leave across each overlap, so panels from nights with different sky
 gradients meet level; see

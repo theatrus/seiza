@@ -408,7 +408,8 @@ impl PyStackOptions {
         bin_factor=1,
         gpu=None,
         interpolation="bilinear",
-        track_clipping=true
+        track_clipping=true,
+        match_mosaic_backgrounds=false
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -445,6 +446,7 @@ impl PyStackOptions {
         gpu: Option<PyGpuOptions>,
         interpolation: &str,
         track_clipping: bool,
+        match_mosaic_backgrounds: bool,
     ) -> PyResult<Self> {
         let interpolation = match interpolation {
             "bilinear" => seiza_stacking::Interpolation::Bilinear,
@@ -525,6 +527,7 @@ impl PyStackOptions {
             interpolation,
             defects: defects.map(|defects| defects.inner.clone()),
             track_clipping,
+            match_mosaic_backgrounds,
             ..StackOptions::default()
         };
         inner.registration.detection_sigma = detection_sigma;
@@ -566,6 +569,13 @@ impl PyStackOptions {
     #[getter]
     fn track_clipping(&self) -> bool {
         self.inner.track_clipping
+    }
+
+    /// Whether expanded-canvas replays match panel backgrounds. Disabled
+    /// by default; this needs calibrated panels with matching photometric gains.
+    #[getter]
+    fn match_mosaic_backgrounds(&self) -> bool {
+        self.inner.match_mosaic_backgrounds
     }
 
     #[getter]

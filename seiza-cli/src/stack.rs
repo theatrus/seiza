@@ -210,6 +210,10 @@ pub(crate) struct StackArgs {
     /// revisit.
     #[arg(long)]
     reintegrate: bool,
+    /// Match calibrated panels' backgrounds during expanded-canvas replay.
+    /// Requires --reintegrate; leave off for uncorrected vignetting or unequal gains.
+    #[arg(long, requires = "reintegrate")]
+    match_mosaic_backgrounds: bool,
     /// Drizzle the stack onto a grid this many times finer than the
     /// reference (1 to 4), as PixInsight's DrizzleIntegration does after
     /// ImageIntegration: implies --reintegrate, whose rejection decides which
@@ -342,6 +346,7 @@ struct ConfigurationReport {
     rejection_warmup: u32,
     rejection_minimum_sigma: f32,
     reintegrate: bool,
+    match_mosaic_backgrounds: bool,
     drizzle_scale: Option<u32>,
     drizzle_drop_shrink: Option<f32>,
     bayer_drizzle: bool,
@@ -692,6 +697,7 @@ fn stack(options: StackArgs) -> Result<()> {
     let mut stack_options = StackOptions {
         // Preserve clipping history for requested maps and saved contexts.
         track_clipping: options.clipped.is_some() || options.save_canvas.is_some(),
+        match_mosaic_backgrounds: options.match_mosaic_backgrounds,
         normalization,
         rejection,
         demosaic: match options.demosaic {
@@ -823,6 +829,7 @@ fn stack(options: StackArgs) -> Result<()> {
         sigma_high: options.sigma_high,
         rejection_warmup: options.rejection_warmup,
         reintegrate,
+        match_mosaic_backgrounds: options.match_mosaic_backgrounds,
         drizzle_scale: options.drizzle,
         drizzle_drop_shrink: options.drizzle.and(options.drizzle_drop_shrink),
         bayer_drizzle: options.bayer_drizzle,
