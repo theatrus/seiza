@@ -12,9 +12,10 @@ use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use seiza::downloads::{CachePolicy, DownloadEvent, ModelManager};
 use seiza_model::{
-    Backend, BackendOptions, ChannelScales, DenoiseOptions, DenoiseReport, Denoised, HoleGuard,
-    ImageView, ModelBundle, ModelError, ModelStore, NoiseBands, NoiseModel, Precision, Progress,
-    Published, Task, runtime_info,
+    Backend, BackendOptions, ChannelScales, DenoiseOptions, DenoiseReport, Denoised,
+    FileRestoration, HoleGuard, ImageView, ModelBundle, ModelError, ModelStore, NoiseBands,
+    NoiseModel, Precision, Progress, Published, RestorationArea, RestorationImage, Task,
+    runtime_info,
 };
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -292,7 +293,7 @@ pub(crate) struct PyNoiseModel {
 #[pymethods]
 impl PyNoiseModel {
     #[new]
-    #[pyo3(signature = (model=None, backend=None, *, store=None, library=None, cache_dir=None, tile=None, precision=None))]
+    #[pyo3(signature = (model=None, backend=None, *, store=None, library=None, cache_dir=None, tile=None, precision=None, device_id=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -303,6 +304,7 @@ impl PyNoiseModel {
         cache_dir: Option<PathBuf>,
         tile: Option<usize>,
         precision: Option<String>,
+        device_id: Option<i32>,
     ) -> PyResult<Self> {
         let precision = precision
             .as_deref()
@@ -319,6 +321,7 @@ impl PyNoiseModel {
             cache_dir,
             tile,
             precision,
+            device_id,
         };
         let bundle = store_at(store)?
             .resolve(model.as_deref())
@@ -365,6 +368,52 @@ impl PyNoiseModel {
         let view = float_image_view(&image)?;
         let view = ImageView::new(view.data, view.width, view.height, view.channels)
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let result = self.run_with_progress(py, progress, cancel, |model, options| {
+            model.denoise(view, options).map_err(model_error)
+        })?;
+        Ok(PyDenoised { result })
+    }
+
+    /// Restore a full linear file, or its center crop, without first constructing a Python array.
+    #[pyo3(signature = (path, *, center=false, progress=None, cancel=None))]
+    fn denoise_file(
+        &self,
+        py: Python<'_>,
+        path: PathBuf,
+        center: bool,
+        progress: Option<Py<PyAny>>,
+        cancel: Option<Py<PyAny>>,
+    ) -> PyResult<PyFileRestoration> {
+        let area = if center {
+            RestorationArea::Center
+        } else {
+            RestorationArea::Full
+        };
+        let result = self.run_with_progress(py, progress, cancel, |model, options| {
+            RestorationImage::open(&path, area)
+                .and_then(|image| image.denoise(model, options))
+                .map_err(|error| crate::EngineError::new_err(error.to_string()))
+        })?;
+        Ok(PyFileRestoration { result })
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "NoiseModel(backend={:?}, tile={})",
+            self.backend(),
+            self.tile
+        )
+    }
+}
+
+impl PyNoiseModel {
+    fn run_with_progress<T: Send>(
+        &self,
+        py: Python<'_>,
+        progress: Option<Py<PyAny>>,
+        cancel: Option<Py<PyAny>>,
+        run: impl FnOnce(&mut NoiseModel, &DenoiseOptions<'_>) -> PyResult<T> + Send,
+    ) -> PyResult<T> {
         let (signal, raised) = python_cancel_signal(cancel);
         let report = |step: Progress| {
             let Some(progress) = &progress else { return };
@@ -386,23 +435,68 @@ impl PyNoiseModel {
             let mut model = self
                 .model
                 .lock()
-                .map_err(|_| ModelError::Runtime("a run on this model panicked".to_string()))?;
-            model.denoise(view, &options)
+                .map_err(|_| crate::EngineError::new_err("a run on this model panicked"))?;
+            run(&mut model, &options)
         });
         if let Some(error) = raised.lock().ok().and_then(|mut slot| slot.take()) {
             return Err(error);
         }
-        Ok(PyDenoised {
-            result: result.map_err(model_error)?,
-        })
+        result
+    }
+}
+
+/// A full image or center preview and its reusable model residual.
+#[pyclass(
+    skip_from_py_object,
+    name = "FileRestoration",
+    module = "seiza",
+    frozen
+)]
+pub(crate) struct PyFileRestoration {
+    result: FileRestoration,
+}
+
+#[pymethods]
+impl PyFileRestoration {
+    /// Blend and write a full-resolution linear file, retaining its metadata.
+    #[pyo3(signature = (path, *, high=1.0, low=1.0, scale_px=5.0))]
+    fn write_linear(
+        &self,
+        py: Python<'_>,
+        path: PathBuf,
+        high: f32,
+        low: f32,
+        scale_px: f32,
+    ) -> PyResult<PyDenoiseReport> {
+        let bands = NoiseBands {
+            high,
+            low,
+            scale_px,
+        };
+        py.detach(|| self.result.write_linear(&path, &bands))
+            .map_err(|error| crate::EngineError::new_err(error.to_string()))?;
+        Ok(self.result.report().into())
     }
 
-    fn __repr__(&self) -> String {
-        format!(
-            "NoiseModel(backend={:?}, tile={})",
-            self.backend(),
-            self.tile
-        )
+    /// Blend and write the original and restored crop with one display stretch.
+    #[pyo3(signature = (original, restored, *, high=1.0, low=1.0, scale_px=5.0))]
+    fn write_comparison(
+        &self,
+        py: Python<'_>,
+        original: PathBuf,
+        restored: PathBuf,
+        high: f32,
+        low: f32,
+        scale_px: f32,
+    ) -> PyResult<PyDenoiseReport> {
+        let bands = NoiseBands {
+            high,
+            low,
+            scale_px,
+        };
+        py.detach(|| self.result.write_comparison(&original, &restored, &bands))
+            .map_err(|error| crate::EngineError::new_err(error.to_string()))?;
+        Ok(self.result.report().into())
     }
 }
 
@@ -608,7 +702,36 @@ fn remove_model(name: &str, store: Option<PathBuf>) -> PyResult<()> {
     store_at(store)?.remove(name).map_err(model_error)
 }
 
+/// Fetch the hosted model catalog without downloading any model files.
+#[pyfunction]
+#[pyo3(signature = (*, base_url=None, cache_dir=None))]
+fn model_catalog(
+    py: Python<'_>,
+    base_url: Option<String>,
+    cache_dir: Option<PathBuf>,
+) -> PyResult<Py<PyAny>> {
+    let catalog = py
+        .detach(|| -> Result<_, ModelError> {
+            let mut builder = ModelManager::builder().policy(CachePolicy::ForceRefresh);
+            if let Some(url) = base_url {
+                builder = builder.base_url(url);
+            }
+            if let Some(path) = cache_dir {
+                builder = builder.cache_dir(path);
+            }
+            let manager = builder.build()?;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| ModelError::Runtime(error.to_string()))?;
+            Ok(runtime.block_on(manager.manifest())?)
+        })
+        .map_err(model_error)?;
+    to_python(py, &catalog).map(Bound::unbind)
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyFileRestoration>()?;
     m.add_class::<PyNoiseModel>()?;
     m.add_class::<PyDenoised>()?;
     m.add_class::<PyDenoiseReport>()?;
@@ -618,6 +741,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyModelRuntime>()?;
     m.add_class::<PyInstalledModel>()?;
     m.add_function(wrap_pyfunction!(model_backends, m)?)?;
+    m.add_function(wrap_pyfunction!(model_catalog, m)?)?;
     m.add_function(wrap_pyfunction!(model_runtime, m)?)?;
     m.add_function(wrap_pyfunction!(installed_models, m)?)?;
     m.add_function(wrap_pyfunction!(install_model, m)?)?;

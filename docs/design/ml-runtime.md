@@ -237,6 +237,7 @@ pub enum Backend {
     TensorRt,
     TensorRtRtx,
     Cuda,
+    DirectMl,
     WebGpu,
     Cpu,
 }
@@ -251,14 +252,14 @@ is what a user needs when a GPU goes unused.
 |---|---|---|
 | Apple Silicon | GPU, Neural Engine, CPU | f32, or f16 on the Neural Engine |
 | NVIDIA | decided by the measurements; see [Work order](#work-order) | f16 or f32 |
-| Intel and AMD GPUs | WebGPU if measured worthwhile, else CPU | f32, or f16 if parity holds |
+| Windows with a DirectML-enabled runtime | DirectML, then CPU | f32 |
+| Other Intel and AMD GPUs | WebGPU on explicit selection, CPU by default | f32 |
 | Anything else | CPU | f32 |
 
-DirectML is left out. Microsoft keeps it in maintenance, with new work going
-to Windows ML. ONNX Runtime's WebGPU provider is still marked experimental,
-but it is the one provider that would cover Intel Xe, AMD and NVIDIA on
-Windows and Linux, which matches what the [stacker](gpu-stacking.md) does
-through wgpu. `ort`'s prebuilt list has it for both.
+DirectML uses the high-performance DXGI adapter by default. An explicit
+adapter index selects a particular GPU. It runs with sequential execution
+and memory patterns disabled. The bundled CPU runtime is still usable on
+machines without a DirectML-enabled runtime. WebGPU remains experimental.
 
 Finding the library follows the [catalog path rules](data-paths.md): an
 explicit path, then `SEIZA_ONNXRUNTIME`, then beside the executable, then the
@@ -489,7 +490,8 @@ it added 24 KB.
 | Homebrew | `depends_on "onnxruntime"` | Built with Core ML on macOS; 1.31.1 today. The formula lives in the tap, and gains this with the first release carrying `seiza-model`. |
 | Python wheel | `pip install seiza[ml]` brings `onnxruntime` | Seiza finds the package's library, under `onnxruntime/capi`, without importing it. Wheels exist for Python 3.11 to 3.14. NVIDIA users take `onnxruntime-gpu`. Our wheels stay abi3 and unlinked. |
 | Mac app | signed dylib in the bundle | Or `ort`'s static macOS build, if the app prefers one binary. |
-| Windows zip, MSI and app | `onnxruntime.dll` beside the binary, with the Visual C++ runtime | CPU, plus WebGPU if measured worthwhile. |
+| Windows CLI zip and MSI | `onnxruntime.dll` beside the binary, with the Visual C++ runtime | CPU in the default archive. An explicit DirectML-enabled runtime adds GPU execution. |
+| Windows desktop app | The DirectML-enabled ONNX Runtime bundled by Windows App SDK | DirectML or CPU. |
 | NVIDIA | a separate download | CUDA and TensorRT are too large for the installers, and their licences need reading before Seiza redistributes them. |
 | deb and rpm | private copy in `/usr/lib/seiza` | So Seiza does not depend on what each distribution carries. The search looks in `../lib/seiza` from the binary. |
 | `cargo install` | `seiza setup` fetches it | Into the shared data directory, verified through `seiza-download`, which the search covers. Not built yet. |

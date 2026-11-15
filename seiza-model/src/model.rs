@@ -249,6 +249,7 @@ impl NoiseModel {
             backend,
             tiling.tile,
             cache.as_deref(),
+            options.device_id,
         )?;
         let sha256 = graph.sha256.clone();
         Ok(Self {

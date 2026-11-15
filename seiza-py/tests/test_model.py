@@ -73,6 +73,7 @@ def test_a_hosted_model_downloads_and_installs(tmp_path: Path) -> None:
     try:
         url = f"http://127.0.0.1:{server.server_address[1]}"
         store, cache = tmp_path / "store", tmp_path / "cache"
+        assert seiza.model_catalog(base_url=url, cache_dir=cache) == manifest
         events: list[dict] = []
         # No name: the latest noise model the manifest names.
         installed = seiza.download_model(store=store, base_url=url, cache_dir=cache, progress=events.append)
@@ -219,6 +220,23 @@ def test_a_tiny_model_runs_and_blends() -> None:
         result.blend(high=2.0)
     with pytest.raises(IndexError):
         result.residual(1)
+
+
+@needs_runtime
+def test_a_file_run_writes_linear_or_comparison_output(tmp_path: Path) -> None:
+    model = seiza.NoiseModel(str(TINY), "cpu")
+    source = TINY.parent / "tiny-input.fits"
+    original = tmp_path / "original.fits"
+    restored = tmp_path / "restored.fits"
+    linear = tmp_path / "linear.fits"
+    preview = model.denoise_file(source, center=True)
+    report = preview.write_comparison(original, restored)
+    assert report.model == "noise-tiny"
+    assert original.read_bytes() != restored.read_bytes()
+    with pytest.raises(seiza.EngineError, match="separate model runs"):
+        preview.write_linear(linear)
+    assert model.denoise_file(source).write_linear(linear).backend == "cpu"
+    assert linear.is_file()
 
 
 @needs_runtime

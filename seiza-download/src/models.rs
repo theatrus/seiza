@@ -270,6 +270,11 @@ pub struct ModelManager {
 }
 
 impl ModelManager {
+    /// The verified catalog of published bundles, without downloading any model files.
+    pub async fn manifest(&self) -> Result<ModelManifest> {
+        self.hosted.load_manifest(&|_| {}).await
+    }
+
     /// A builder with the default URL, cache and policy.
     pub fn builder() -> ModelManagerBuilder {
         ModelManagerBuilder::default()

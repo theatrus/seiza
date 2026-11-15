@@ -256,6 +256,11 @@ typedef struct SeizaDenoised SeizaDenoised;
 typedef struct SeizaDrizzleResult SeizaDrizzleResult;
 
 /*
+ An owned file restoration. Release it with seiza_file_restoration_free.
+ */
+typedef struct SeizaFileRestoration SeizaFileRestoration;
+
+/*
  Immutable measured grouping book. Safe for concurrent read-only planning.
  */
 typedef struct SeizaFlatGroups SeizaFlatGroups;
@@ -4929,7 +4934,7 @@ char *seiza_master_flat_stability_json(const char *request_json, char **error_ou
 
  `model` names an installed model or a bundle's directory; null means the one
  installed noise model. `options_json` may be null, or hold `backend`,
- `store`, `library`, `cacheDir`, `tile` and `precision`. With no `backend`,
+ `store`, `library`, `cacheDir`, `tile`, `precision` and DirectML `deviceId`. With no `backend`,
  the best one this machine can run and the model's card allows is chosen.
  The first open on Core ML compiles the model, which can take some time.
  Release the result with [`seiza_noise_model_free`].
@@ -4983,6 +4988,45 @@ SeizaDenoised *seiza_noise_model_denoise(SeizaNoiseModel *model,
                                          const SeizaCancelSignal *cancel,
                                          void *context,
                                          char **error_out);
+
+/*
+ Run a model on a full linear file or on its center when center is true.
+
+ # Safety
+ The model is live and exclusively borrowed, input is a NUL-terminated path,
+ and the signal, context and error pointer follow seiza_noise_model_denoise.
+ */
+SeizaFileRestoration *seiza_noise_model_denoise_file(SeizaNoiseModel *model,
+                                                     const char *input,
+                                                     bool center,
+                                                     SeizaModelProgressCallback progress,
+                                                     const SeizaCancelSignal *cancel,
+                                                     void *context,
+                                                     char **error_out);
+
+/*
+ Write the blended linear file, or two display images for a center run.
+ On success returns a model report owned by the caller; free with seiza_string_free.
+
+ # Safety
+ The result is live, paths are NUL-terminated, original may be null, and
+ error_out is null or writable.
+ */
+char *seiza_file_restoration_write(const SeizaFileRestoration *result,
+                                   const char *output,
+                                   const char *original,
+                                   float high,
+                                   float low,
+                                   float scale_px,
+                                   char **error_out);
+
+/*
+ Release a file restoration.
+
+ # Safety
+ The result is null or an unreleased handle from seiza_noise_model_denoise_file.
+ */
+void seiza_file_restoration_free(SeizaFileRestoration *result);
 
 /*
  Write the image with `high` of the grain and `low` of the mottle the model
@@ -5083,6 +5127,15 @@ char *seiza_model_list_json(const char *store, char **error_out);
  non-null, `error_out` must point to writable storage for one pointer.
  */
 char *seiza_model_install_json(const char *source, const char *store, char **error_out);
+
+/*
+ Fetch and validate the hosted model catalog without downloading any graph.
+ The result is JSON owned by the caller. Release it with seiza_string_free.
+
+ # Safety
+ The options are null or a NUL-terminated string; error_out is null or writable.
+ */
+char *seiza_model_catalog_json(const char *options_json, char **error_out);
 
 /*
  Download the model `name` that Seiza's hosted manifest offers, or with

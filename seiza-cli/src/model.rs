@@ -1,13 +1,12 @@
 //! `seiza model`: run and manage learned models.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
-use seiza_fits::{HeaderValue, WriteHeaderCard};
 use seiza_model::{
-    Backend, BackendOptions, DenoiseOptions, DenoiseReport, ImageView, ModelBundle, ModelError,
-    ModelStore, NoiseBands, NoiseModel, Precision, Progress, Published, Task, runtime_info,
+    Backend, BackendOptions, DenoiseOptions, FileError, ModelBundle, ModelError, ModelStore,
+    NoiseBands, NoiseModel, Precision, Progress, Published, RestorationArea, RestorationImage,
+    Task, runtime_info,
 };
-use seiza_stacking::write_processed_image_fits_f32;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -78,6 +77,9 @@ struct DenoiseArgs {
     /// The graph's precision (default: the backend's)
     #[arg(long)]
     precision: Option<Precision>,
+    /// DXGI adapter index for DirectML.
+    #[arg(long, value_name = "INDEX")]
+    device_id: Option<i32>,
     /// The share of the pixel-scale grain the model finds that is taken out
     #[arg(long, default_value_t = 0.7)]
     high_amount: f32,
@@ -117,18 +119,13 @@ fn denoise(args: DenoiseArgs) -> Result<()> {
         library: args.runtime.onnxruntime,
         tile: args.tile,
         precision: args.precision,
+        device_id: args.device_id,
         ..Default::default()
     };
 
     // The input is read first, so a run that cannot start never waits on a
     // model's download.
-    let mut frame = crate::common::open_frame(&args.input, "model input")?;
-    if frame.bayer.is_some() {
-        bail!(
-            "a model cannot read the raw Bayer mosaic in {}; debayer or stack it first",
-            args.input.display()
-        );
-    }
+    let input = RestorationImage::open(&args.input, RestorationArea::Full)?;
     let bundle = denoise_model(args.model.as_deref(), &options)?;
     let backend = match args.backend {
         Some(backend) => backend,
@@ -142,8 +139,6 @@ fn denoise(args: DenoiseArgs) -> Result<()> {
     eprintln!("opened in {:.1} s", opening.elapsed().as_secs_f64());
 
     crate::interrupt::install();
-    let image = &frame.image;
-    let view = ImageView::new(&image.data, image.width, image.height, image.channels)?;
     let running = Instant::now();
     let progress = |step: Progress| {
         eprint!(
@@ -155,36 +150,39 @@ fn denoise(args: DenoiseArgs) -> Result<()> {
         );
         let _ = std::io::stderr().flush();
     };
-    let result = model.denoise(
-        view,
+    let result = input.denoise(
+        &mut model,
         &DenoiseOptions {
             progress: Some(&progress),
             cancel: Some(&crate::interrupt::interrupted),
         },
     );
     eprintln!();
-    if matches!(result, Err(seiza_model::ModelError::Cancelled)) {
+    if matches!(
+        result,
+        Err(FileError::Model(seiza_model::ModelError::Cancelled))
+    ) {
         std::process::exit(crate::interrupt::INTERRUPTED_EXIT_CODE);
     }
     let result = result.context("could not run the model")?;
     let seconds = running.elapsed().as_secs_f64();
 
-    frame.image.data = result.blend(&bands)?;
-    let cards = operation_cards(&result.report, &bands);
-    write_processed_image_fits_f32(&args.output, &frame.image, &frame.headers, &cards)
+    result
+        .write_linear(&args.output, &bands)
         .with_context(|| format!("could not write {}", args.output.display()))?;
+    let report = result.report();
     crate::common::wrote(
         &args.output,
         format_args!(
             "{} on {backend}, {}, tile {}, in {seconds:.1} s, taking out {:.0}% of the grain and {:.0}% of the mottle",
-            result.report.model,
-            result.report.precision,
-            result.report.tile,
+            report.model,
+            report.precision,
+            report.tile,
             bands.high * 100.0,
             bands.low * 100.0,
         ),
     );
-    for (channel, scales) in result.report.channels.iter().enumerate() {
+    for (channel, scales) in report.channels.iter().enumerate() {
         println!(
             "channel {}: noise {:.6}, background {:.6}",
             channel + 1,
@@ -233,56 +231,6 @@ pub(crate) fn download(store: &ModelStore, model: Published<'_>) -> Result<Model
         .context("failed to start the download runtime")?
         .block_on(store.download(&manager, model, crate::report_download_event))?;
     Ok(bundle)
-}
-
-fn operation_cards(report: &DenoiseReport, bands: &NoiseBands) -> Vec<WriteHeaderCard> {
-    let text = |key: &str, value: String, comment: &str| {
-        WriteHeaderCard::new(key, HeaderValue::String(value)).with_comment(comment)
-    };
-    let number = |key: &str, value: f32, comment: &str| {
-        WriteHeaderCard::new(key, HeaderValue::Float(f64::from(value))).with_comment(comment)
-    };
-    let mut cards = vec![
-        text("SEIZAMDL", report.model.clone(), "Seiza learned model"),
-        text("SEIZATRF", "LINEAR".to_string(), "linear sample transfer"),
-        text(
-            "MDHASH",
-            report.sha256.chars().take(16).collect(),
-            "model graph SHA-256, first 16",
-        ),
-        text(
-            "MDCARD",
-            report.card_sha256.chars().take(16).collect(),
-            "model card SHA-256, first 16",
-        ),
-        text("MDBACKND", report.backend.to_string(), "backend requested"),
-        text("MDPREC", report.precision.to_string(), "graph precision"),
-        text(
-            "MDNOISE",
-            report.noise_map.to_string(),
-            "noise input, made from the image",
-        ),
-        WriteHeaderCard::new(
-            "MDTILE",
-            HeaderValue::Integer(i64::try_from(report.tile).unwrap_or(i64::MAX)),
-        )
-        .with_comment("tile side in pixels"),
-        number("MDHIGH", bands.high, "share of the grain taken out"),
-        number("MDLOW", bands.low, "share of the mottle taken out"),
-        number("MDSCALE", bands.scale_px, "band scale in pixels"),
-        text(
-            "MDVERS",
-            seiza_model::OUTPUT_VERSION.to_string(),
-            "seiza-model output version",
-        ),
-    ];
-    if let Some(guard) = report.holes {
-        cards.push(
-            WriteHeaderCard::new("MDHOLES", HeaderValue::Float(guard.depth))
-                .with_comment("holes this many sigma deep kept from the model"),
-        );
-    }
-    cards
 }
 
 fn backends(args: &RuntimeArgs) -> Result<()> {
@@ -473,39 +421,5 @@ mod tests {
             "metal",
         ]);
         assert!(parsed.is_err());
-    }
-
-    #[test]
-    fn the_cards_record_what_ran() {
-        let report = DenoiseReport {
-            model: "noise-test".to_string(),
-            sha256: "0123456789abcdef0123".to_string(),
-            card_sha256: "fedcba9876543210fedc".to_string(),
-            backend: Backend::Cpu,
-            precision: Precision::F32,
-            tile: 512,
-            noise_map: seiza_model::NoiseInput::Constant,
-            holes: None,
-            channels: Vec::new(),
-        };
-        let cards = operation_cards(&report, &NoiseBands::default());
-        let keys: Vec<&str> = cards.iter().map(WriteHeaderCard::keyword).collect();
-        assert!(keys.contains(&"MDHASH") && keys.contains(&"MDCARD") && keys.contains(&"MDBACKND"));
-        assert!(
-            !keys.contains(&"MDHOLES"),
-            "a run without the guard says nothing of it"
-        );
-        assert!(keys.iter().all(|key| key.len() <= 8), "{keys:?}");
-        let guarded = DenoiseReport {
-            holes: Some(seiza_model::HoleGuard {
-                depth: 30.0,
-                margin: 3,
-                fill_radius: 12,
-                restore: 5.0,
-            }),
-            ..report
-        };
-        let cards = operation_cards(&guarded, &NoiseBands::default());
-        assert!(cards.iter().any(|card| card.keyword() == "MDHOLES"));
     }
 }

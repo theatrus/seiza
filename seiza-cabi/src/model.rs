@@ -14,9 +14,9 @@ use super::{
 };
 use seiza::downloads::{CachePolicy, DownloadEvent, ModelManager};
 use seiza_model::{
-    Backend, BackendOptions, DenoiseOptions, DenoiseReport, Denoised, HoleGuard, ImageView,
-    ModelBundle, ModelStore, NoiseBands, NoiseModel, Precision, Progress, Published, Task,
-    runtime_info,
+    Backend, BackendOptions, DenoiseOptions, DenoiseReport, Denoised, FileRestoration, HoleGuard,
+    ImageView, ModelBundle, ModelStore, NoiseBands, NoiseModel, Precision, Progress, Published,
+    RestorationArea, RestorationImage, Task, runtime_info,
 };
 use serde::{Deserialize, Serialize};
 use std::ffi::{CString, c_char, c_void};
@@ -53,6 +53,7 @@ struct ModelOpenRequest {
     cache_dir: Option<PathBuf>,
     tile: Option<usize>,
     precision: Option<String>,
+    device_id: Option<i32>,
 }
 
 impl ModelOpenRequest {
@@ -79,6 +80,7 @@ impl ModelOpenRequest {
             cache_dir: self.cache_dir.clone(),
             tile: self.tile,
             precision,
+            device_id: self.device_id,
         })
     }
 }
@@ -212,7 +214,7 @@ impl From<&ModelBundle> for InstalledModelResponse {
 ///
 /// `model` names an installed model or a bundle's directory; null means the one
 /// installed noise model. `options_json` may be null, or hold `backend`,
-/// `store`, `library`, `cacheDir`, `tile` and `precision`. With no `backend`,
+/// `store`, `library`, `cacheDir`, `tile`, `precision` and DirectML `deviceId`. With no `backend`,
 /// the best one this machine can run and the model's card allows is chosen.
 /// The first open on Core ML compiles the model, which can take some time.
 /// Release the result with [`seiza_noise_model_free`].
@@ -278,6 +280,38 @@ pub unsafe extern "C" fn seiza_noise_model_tile(model: *const SeizaNoiseModel) -
     unsafe { model.as_ref() }.map_or(0, |model| model.model.tiling().tile)
 }
 
+fn with_inference_options<T>(
+    progress: SeizaModelProgressCallback,
+    cancel: *const SeizaCancelSignal,
+    context: *mut c_void,
+    run: impl FnOnce(&DenoiseOptions<'_>) -> T,
+) -> T {
+    // Held as integers so that the closures are `Sync`: the core calls
+    // them only on this thread.
+    let context = context as usize;
+    let signal = cancel as usize;
+    let report = |step: Progress| {
+        if let Some(callback) = progress {
+            let Progress {
+                channel,
+                channels,
+                tile,
+                tiles,
+            } = step;
+            unsafe { callback(channel, channels, tile, tiles, context as *mut c_void) };
+        }
+    };
+    let stop = || {
+        unsafe { (signal as *const SeizaCancelSignal).as_ref() }
+            .is_some_and(|signal| signal.cancelled.load(Ordering::Relaxed))
+    };
+    let options = DenoiseOptions {
+        progress: Some(&report),
+        cancel: Some(&stop),
+    };
+    run(&options)
+}
+
 #[unsafe(no_mangle)]
 /// Run a model over an image, which is all it needs: a linear stack from any
 /// stacker, NaN where nothing covers a pixel. Samples are row-major with
@@ -309,33 +343,10 @@ pub unsafe extern "C" fn seiza_noise_model_denoise(
         let data = unsafe { required_f32_slice(data, data_length, "image")? };
         let view =
             ImageView::new(data, width, height, channels).map_err(|error| error.to_string())?;
-        // Held as integers so that the closures are `Sync`: the core calls
-        // them only on this thread.
-        let context = context as usize;
-        let signal = cancel as usize;
-        let report = |step: Progress| {
-            if let Some(callback) = progress {
-                let Progress {
-                    channel,
-                    channels,
-                    tile,
-                    tiles,
-                } = step;
-                unsafe { callback(channel, channels, tile, tiles, context as *mut c_void) };
-            }
-        };
-        let stop = || {
-            unsafe { (signal as *const SeizaCancelSignal).as_ref() }
-                .is_some_and(|signal| signal.cancelled.load(Ordering::Relaxed))
-        };
-        let options = DenoiseOptions {
-            progress: Some(&report),
-            cancel: Some(&stop),
-        };
-        let result = model
-            .model
-            .denoise(view, &options)
-            .map_err(|error| error.to_string())?;
+        let result = with_inference_options(progress, cancel, context, |options| {
+            model.model.denoise(view, options)
+        })
+        .map_err(|error| error.to_string())?;
         let report_json = serde_json::to_string(&DenoiseReportResponse::from(&result.report))
             .map_err(|error| error.to_string())?;
         let report_json = CString::new(report_json).map_err(|error| error.to_string())?;
@@ -345,6 +356,89 @@ pub unsafe extern "C" fn seiza_noise_model_denoise(
         })))
     })
     .unwrap_or(ptr::null_mut())
+}
+
+/// An owned file restoration. Release it with seiza_file_restoration_free.
+pub struct SeizaFileRestoration(FileRestoration);
+
+/// Run a model on a full linear file or on its center when center is true.
+///
+/// # Safety
+/// The model is live and exclusively borrowed, input is a NUL-terminated path,
+/// and the signal, context and error pointer follow seiza_noise_model_denoise.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_noise_model_denoise_file(
+    model: *mut SeizaNoiseModel,
+    input: *const c_char,
+    center: bool,
+    progress: SeizaModelProgressCallback,
+    cancel: *const SeizaCancelSignal,
+    context: *mut c_void,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaFileRestoration {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let model = unsafe { model.as_mut() }.ok_or("model is required")?;
+        let input = required_path(input, "input path")?;
+        let area = if center {
+            RestorationArea::Center
+        } else {
+            RestorationArea::Full
+        };
+        let image = RestorationImage::open(&input, area).map_err(|error| error.to_string())?;
+        let result = with_inference_options(progress, cancel, context, |options| {
+            image.denoise(&mut model.model, options)
+        })
+        .map_err(|error| error.to_string())?;
+        Ok(Box::into_raw(Box::new(SeizaFileRestoration(result))))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+/// Write the blended linear file, or two display images for a center run.
+/// On success returns a model report owned by the caller; free with seiza_string_free.
+///
+/// # Safety
+/// The result is live, paths are NUL-terminated, original may be null, and
+/// error_out is null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_file_restoration_write(
+    result: *const SeizaFileRestoration,
+    output: *const c_char,
+    original: *const c_char,
+    high: f32,
+    low: f32,
+    scale_px: f32,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let result = unsafe { result.as_ref() }.ok_or("a restoration result is required")?;
+        let output = required_path(output, "output path")?;
+        let bands = NoiseBands {
+            high,
+            low,
+            scale_px,
+        };
+        match optional_path(original)? {
+            Some(original) => result.0.write_comparison(&original, &output, &bands),
+            None => result.0.write_linear(&output, &bands),
+        }
+        .map_err(|error| error.to_string())?;
+        owned_json(&DenoiseReportResponse::from(result.0.report()))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+/// Release a file restoration.
+///
+/// # Safety
+/// The result is null or an unreleased handle from seiza_noise_model_denoise_file.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_file_restoration_free(result: *mut SeizaFileRestoration) {
+    if !result.is_null() {
+        unsafe { drop(Box::from_raw(result)) };
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -566,6 +660,31 @@ impl ModelDownloadRequest {
         }
         builder.build().map_err(|error| error.to_string())
     }
+}
+
+/// Fetch and validate the hosted model catalog without downloading any graph.
+/// The result is JSON owned by the caller. Release it with seiza_string_free.
+///
+/// # Safety
+/// The options are null or a NUL-terminated string; error_out is null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_model_catalog_json(
+    options_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let manager = ModelDownloadRequest::parse(options_json)?.manager()?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())?;
+        let catalog = runtime
+            .block_on(manager.manifest())
+            .map_err(|error| error.to_string())?;
+        owned_json(&catalog)
+    })
+    .unwrap_or(ptr::null_mut())
 }
 
 /// Told of each step of a model download, on the downloading thread: one

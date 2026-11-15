@@ -37,7 +37,11 @@ pub(crate) struct OrtRunner {
 }
 
 /// The provider for `backend`, or `None` for ONNX Runtime's own CPU provider.
-fn provider(backend: Backend, cache: Option<&Path>) -> Option<ExecutionProviderDispatch> {
+fn provider(
+    backend: Backend,
+    cache: Option<&Path>,
+    device_id: Option<i32>,
+) -> Option<ExecutionProviderDispatch> {
     let units = |units: CoreMlUnits| {
         let units = match units {
             CoreMlUnits::NeuralEngine => coreml::ComputeUnits::CPUAndNeuralEngine,
@@ -57,6 +61,16 @@ fn provider(backend: Backend, cache: Option<&Path>) -> Option<ExecutionProviderD
         Backend::TensorRt => Some(ep::TensorRT::default().build()),
         Backend::TensorRtRtx => Some(ep::NVRTX::default().build()),
         Backend::Cuda => Some(ep::CUDA::default().build()),
+        Backend::DirectMl => {
+            let ep = ep::DirectML::default();
+            let ep = match device_id {
+                Some(index) => ep.with_device_id(index),
+                None => ep.with_performance_preference(
+                    ep::directml::PerformancePreference::HighPerformance,
+                ),
+            };
+            Some(ep.build())
+        }
         Backend::WebGpu => Some(ep::WebGPU::default().build()),
         Backend::Cpu => None,
     }
@@ -120,12 +134,18 @@ impl OrtRunner {
         backend: Backend,
         side: usize,
         cache: Option<&Path>,
+        device_id: Option<i32>,
     ) -> Result<Self, ModelError> {
         let mut builder = Session::builder(&runtime.environment)?;
         for dimension in &card.dimensions {
             builder = builder.with_dimension_override(dimension, side as i64)?;
         }
-        if let Some(provider) = provider(backend, cache) {
+        if backend == Backend::DirectMl {
+            builder = builder
+                .with_parallel_execution(false)?
+                .with_memory_pattern(false)?;
+        }
+        if let Some(provider) = provider(backend, cache, device_id) {
             // A graph that does not fit its backend must fail, not run
             // elsewhere and report the backend asked for.
             builder = builder

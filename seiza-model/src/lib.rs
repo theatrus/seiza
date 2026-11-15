@@ -31,6 +31,8 @@ mod backend;
 mod bands;
 mod bundle;
 mod error;
+#[cfg(feature = "files")]
+mod file;
 mod holes;
 mod model;
 mod noise;
@@ -52,6 +54,8 @@ pub use bundle::{
     Reading, SkyInput, Task, TilingCard,
 };
 pub use error::ModelError;
+#[cfg(feature = "files")]
+pub use file::{FileError, FileRestoration, RestorationArea, RestorationImage};
 pub use model::{
     ChannelScales, DenoiseOptions, DenoiseReport, Denoised, ImageView, NoiseModel, Progress,
 };
