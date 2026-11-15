@@ -96,8 +96,9 @@ stands above its own noise, the scatter of its samples' differences over the
 root of their count: under three standard errors it is zero, and well above
 it keeps nearly all of itself. A panel of a few short exposures otherwise
 prints that scatter into the stack as blotches a cell wide.
-Full-resolution samples still undergo
-Seiza's usual weighted rejection; coverage and per-channel holes are preserved.
+Corrections respect the input samples' per-channel support. Full-resolution
+samples still undergo Seiza's usual weighted rejection; changing their
+backgrounds can change rejection decisions and output holes.
 This is background matching, not an absolute sky estimate: a gradient shared
 by all panels cannot be measured from their overlaps. Overlaps smaller than
 the sampling spacing may have no usable matching samples; disconnected
@@ -146,3 +147,6 @@ pixels, and compare whole-frame and banded output bit for bit. C and Python
 tests exercise the same panel-ID option and reject mismatched ID counts.
 
 [Heart and Soul before/after comparisons and measured residuals](../images/mosaic/README.md).
+
+[Real-data validation of the opt-in matcher](mosaic-background-validation.md)
+records both improvements and regressions on the author's five datasets.
