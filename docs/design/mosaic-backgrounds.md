@@ -37,6 +37,26 @@ under level skies, whose noise is 0.7 ADU a pixel. Where skies agree already
 the matcher fits their noise: on two panels of two frames each, noise 3 to 6
 ADU a sample, it moved the stack by at most 0.6 ADU.
 
+On real mosaics, reintegrated with and without panel matching, the spread of
+the sky over 128-pixel cells of the dimmer half of each stack, in ADU:
+
+| Mosaic | Unmatched | Matched |
+|---|---|---|
+| IC 1318 Hα, 4 panels, 83 frames over two nights, bias and flat | 10.4 | 8.5 |
+| The same frames uncalibrated | 10.4 | 10.7 |
+| M 31, 121 uncalibrated 20 s colour frames, R / G / B | 13.5 / 9.3 / 11.9 | 12.0 / 7.7 / 15.3 |
+| Elephant's Trunk Hα, 16 panels, 127 uncalibrated frames over three nights | 10.1 | 10.0 |
+
+The Elephant's Trunk panels stepped visibly where coverage changed, and no
+longer do; its spread is mostly the Milky Way's own. Before the shared bowl,
+the slopes' weight and the residuals' shrinking, matching raised the
+uncalibrated IC 1318 stack's spread to 11.9 and the M 31 stack's to 20.5,
+17.8 and 23.8, with blotches a cell wide. The M 31 stack's blue still spreads
+more matched than unmatched. On two calibrated panels of the Large
+Magellanic Cloud, ten frames a filter, the largest step where coverage
+changes fell from 2.4 to 0.2 ADU in green, 0.7 to 0.0 in red and 0.5 to 0.1
+in Hα; the step at the overlap's other edge rose by up to 0.4.
+
 ## Matching and blending
 
 Each input contributes a bounded lattice of weighted samples to its panel.
@@ -55,9 +75,27 @@ separate background groups, paired residuals match those groups by a robust
 constant. They do not add gradient constraints or contradict planes already
 connected through dim overlaps. All usable dim overlaps constrain the panels'
 additive planes in one solve; residual clipping rejects outlying cells. A
-small penalty on correction energy over each footprint bounds extrapolation
-from narrow overlaps and fixes the common-plane ambiguity. Narrow overlaps
-with too few cells for a plane can still constrain a relative constant.
+penalty on correction energy over each footprint fixes the common-plane
+ambiguity and bounds extrapolation from narrow overlaps. It weighs how far a
+correction varies over its footprint thirty times more than the correction's
+mean: an overlap a tenth of a panel wide measures a slope across itself over
+a tenth of the panel, and a slope read there must not be carried over the
+whole panel. A slope measured along an overlap as long as the panel keeps all
+but a thirtieth of itself. Narrow overlaps with too few cells for a plane can
+still constrain a relative constant.
+
+Frames that were not flat-fielded, or not well, darken toward their corners,
+so every panel's edge is darker than the middle of the panel it overlaps.
+Planes alone close those differences by tilting each panel toward the
+mosaic's middle. Where four or more panels overlap, the solve therefore takes
+one more unknown per channel: the depth of a radial bowl about each panel's
+centre, the same for all, free of the planes' penalty. Between panels such a
+bowl leaves exactly those tilts, so what it explains moves no panel. The bowl
+is never applied; flat-fielding is calibration's work. A depth that would
+brighten the corners is not vignetting but the part of the panels' own
+gradients that follows their positions, and the solve runs again without the
+bowl. Between two or three panels a bowl cannot be told from nights whose
+skies sloped apart, and none is solved.
 
 At each matching sample position, corrected panel values form a common
 background weighted by distance from each channel's footprint edge and the
@@ -70,7 +108,11 @@ panel's edge, measures none and takes its neighbours' residual: its few
 samples are the frame's outermost pixels, and its centre lies beyond the
 panel, where interpolation would lean on it hardest. On two panels of a dense
 field such slivers held 20 to 40 ADU under skies that agreed, and bent the
-panel's last eight columns by 10 ADU.
+panel's last eight columns by 10 ADU. A residual is also shrunk by how far it
+stands above its own noise, the scatter of its samples' differences over the
+root of their count: under three standard errors it is zero, and well above
+it keeps nearly all of itself. A panel of a few short exposures otherwise
+prints that scatter into the stack as blotches a cell wide.
 Full-resolution samples still undergo
 Seiza's usual weighted rejection; coverage and per-channel holes are preserved.
 This is background matching, not an absolute sky estimate: a gradient shared
@@ -112,7 +154,8 @@ checks that every later read matches those original samples.
 The output-version cases include a sampled Gaussian star under a steep sky,
 a partial-cell overlap, independent RGB missing samples, a sampled transient
 hit, four overlapping panels with different skies
-and shared diffuse emission, and an expanded canvas of two panels whose
+and shared diffuse emission, whose summary moves when the shared bowl is not
+solved, and an expanded canvas of two panels whose
 nights' skies sloped opposite ways, reintegrated. Core tests measure recovery of the known scene
 up to the unobservable common plane, preserve a bright star and missing
 pixels, and compare whole-frame and banded output bit for bit. C and Python
