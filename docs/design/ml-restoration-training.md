@@ -1756,8 +1756,24 @@ In order, each only if the one before leaves a gap at the rims:
      (`--overshoot-weight`) charges a run for more gradient than its
      target's where the target is flat, which the edge term never did;
      and a run can start from another's weights (`--init-from`) to be
-     taught these without its hours again. None of the three is
-     trained yet.
+     taught these without its hours again.
+   - Taught them (that run's weights, `--fine-snr 1 --overshoot-weight
+     0.5`, 30,000 steps at a learning rate of 3e-5, an hour and a
+     half; validation 0.650 on the moved target), the run holds the
+     fine part back by itself, and a little of everything else with
+     it. At an ask of 0.5 on the Trunk: 113 dots a megapixel (150
+     before, the step 105, the reference 103), knots of 0.96% (1.11%;
+     the multi-night Trunk 1.27% from 1.94%, the California 2.81% from
+     2.89%), the cloud's detail 1.02, 1.05, 1.08, 1.05 and 1.03 (from
+     1.04, 1.09, 1.12, 1.06 and 1.03), slope ×1.88 over 4.40 px, the
+     lit side +4.08 and +4.98, the dark side 0.47, 0.57, 0.59 and
+     0.47. The stars are where they were (the Trunk's flux 1.002, the
+     California's 1.045 and 0.068). That is the step's cleaning at a
+     slightly higher price in the rims (the step kept +4.16 and
+     +5.11), and it leaves the larger run where the smaller one was
+     with a sixth fewer dots: taught or applied, the roll-off takes the
+     noise out and does not put the gain between 4 and 16 px that the
+     reference has.
 
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
