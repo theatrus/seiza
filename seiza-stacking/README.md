@@ -1013,6 +1013,53 @@ tools. Both produce display-referred data, unsuitable for photometry or linear
 continuum subtraction. C ABI, Python and CLI counterparts provide the same
 operations; see the [color composition design](../docs/design/color-composition.md).
 
+## Forced aperture photometry
+
+`aperture_photometry(image, positions, options, maps)` measures a circular
+aperture at each supplied position on one linear mono `LinearImage`, such as
+a mono sub or an extracted green plane, and returns one `ApertureMeasurement`
+per position. It detects nothing, moves no position, and needs no sources,
+reference image or continuum fit.
+
+```rust
+use seiza_stacking::{
+    ApertureGeometry, ApertureMaps, AperturePhotometryOptions, aperture_photometry,
+};
+
+let mut options = AperturePhotometryOptions::new(ApertureGeometry::new(6.0, 10.0, 16.0));
+options.saturation = Some(65535.0);
+options.gain = Some(1.0);
+let stars = aperture_photometry(&plane, &[target, comparison], &options, &ApertureMaps::default())?;
+if let (Some(target), Some(comparison)) = (stars[0].magnitude, stars[1].magnitude) {
+    let differential = target - comparison;
+}
+```
+
+Positions are zero-based with pixel centres on whole numbers. Each pixel
+counts by the exact fraction of its area inside the aperture. The sky is the
+clipped plane fit continuum fitting measures its stars with, taken off under
+each aperture pixel. `flux` is signed and `None` only when `flags.unusable`;
+`flags.saturated` and `flags.missing_coverage` say when it is a lower bound
+or sums part of the aperture. `ApertureMaps` carries an optional mask, an
+optional producer saturation map and an optional per-pixel uncertainty map.
+The function's documentation gives the flux-error terms and what they
+assume: independent pixel noise, and no scintillation, flat-field or
+aperture-loss term.
+
+That error is a per-measurement noise estimate. Continuum fitting's held-out
+diagnostics (`validation_fractional_rms`, `ContinuumPixelValidation`) are the
+fit quality of a continuum model across stars; they are not photometric
+uncertainties and should not be shown as time-series errors. For a series,
+the scatter of a constant check star's differential magnitude is the test of
+the reported errors. Seiza does not yet run that comparison/check-star
+validation itself.
+
+The C export `seiza_aperture_photometry_json` takes the plane, the three
+optional maps and `{"positions": [[x, y], ...], "options": {...}}`, and
+returns `{"measurements": [...]}` under the same keys in camelCase. Python's
+`seiza.aperture_photometry` takes the options as keywords; see
+[Python usage](../seiza-py/README.md#forced-aperture-photometry).
+
 ## Continuum fitting and signed residuals
 
 Use continuum fitting **before stretching or removing stars**, on mono linear

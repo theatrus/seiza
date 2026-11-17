@@ -226,6 +226,77 @@ gives a rig's pixel scale, `classify_pixel_scale(scale)` the `preset` for
 it, and `recommend_detection_binning(hfr)` the `detection_binning` for a
 measured in-focus HFR.
 
+## Forced aperture photometry
+
+`aperture_photometry` measures stars where you say they are, on one linear
+mono plane: a circular aperture, a sky annulus, a local background, and from
+them flux, its error and an instrumental magnitude. It detects nothing, moves
+no position and needs no reference image, which is what a variable-star time
+series wants: the same target and comparison positions on every sub.
+
+```python
+import numpy as np
+import seiza
+
+plane = rgb[..., 1].astype(np.float32)   # the green plane of a linear sub
+target, comparison, check = (812.4, 603.1), (655.0, 710.8), (930.2, 488.6)
+stars = seiza.aperture_photometry(
+    plane, [target, comparison, check],
+    aperture_radius=6, annulus_inner=10, annulus_outer=16,
+    saturation=65535, gain=1.0)
+
+t, c, k = stars
+if not (t.flags or c.flags) and t.magnitude is not None and c.magnitude is not None:
+    differential = t.magnitude - c.magnitude
+    error = np.hypot(t.magnitude_error, c.magnitude_error)
+```
+
+[`examples/aperture_photometry.py`](examples/aperture_photometry.py) measures a
+target against a comparison ensemble across a series.
+
+- **Input.** `image` is a float32 `(height, width)` array, linear, and a view
+  such as `rgb[..., 1]` is taken as it is. A colour array is refused: no
+  channel is picked or averaged for you. `positions` are `(x, y)` pairs or an
+  `(n, 2)` array, zero-based with pixel centres on whole numbers (a FITS or
+  DS9 position less 1).
+- **Aperture.** Each pixel counts by the exact fraction of its area inside
+  the circle, so the sum follows a star smoothly across subpixel shifts. The
+  three radii are required; there is no default geometry.
+- **Background.** A plane fitted to the annulus, clipped at 3.5 robust sigma
+  so a neighbour does not raise it, and taken off under each aperture pixel:
+  a gradient across the star is removed. `background` is its value at the
+  position and `background_noise` the annulus's robust per-pixel scatter.
+- **One result per position**, in order. `flux` is signed: a faint source in
+  noise can measure below zero and is reported so, with `magnitude` `None`.
+  `flags` is falsy when nothing is wrong, and otherwise says what is:
+  `saturated` (a pixel at or above `saturation`, or set in
+  `saturation_mask`; the flux is a lower bound), `missing_coverage` (part of
+  the aperture is off the image, masked by `mask` or not finite; the flux
+  sums the `aperture_area` pixels that remain), and `unusable` (no aperture
+  pixel, or under half the annulus or twenty pixels of it left for a
+  background; `flux` is `None`).
+- **Flux error.** With `w` a pixel's weight, `area` their sum, `sky_noise`
+  the annulus's scatter: `variance = sum(w²)·sky_noise² + sky_variance`,
+  where `sky_variance` propagates the fitted plane coefficient covariance
+  through the weighted aperture. This includes slope uncertainty for an
+  asymmetric annulus or aperture; for centred symmetric coverage it reduces
+  to `area²·sky_noise²/n_sky`. Add the source's
+  photons, `flux / gain`, when you give `gain` in electrons per sample unit
+  (the mean of `n` subs has `n` times one sub's gain). `uncertainty`, a
+  float32 map of each pixel's total 1-sigma noise, replaces the first and
+  photon terms with `sum(w²·uncertainty²)`.
+- **What the error is not.** It assumes pixel noise is independent from
+  pixel to pixel. Debayered, registered or stacked pixels are correlated,
+  and their true error is larger. Scintillation, flat-field error and
+  aperture losses are not in it either. Measure a constant check star with
+  the same comparisons: the scatter of its differential magnitude across the
+  series is the test of these errors. The held-out residuals that continuum
+  fitting reports (below) are a different thing, the fit quality of a
+  continuum model, and are not photometric uncertainties.
+
+`magnitude` is `-2.5 log10(flux)` with no zero point, and `magnitude_error`
+`2.5 / ln(10) · flux_error / flux`.
+
 ## Measure the PSF field
 
 `PsfField.measure` measures an empirical PSF that varies across a linear

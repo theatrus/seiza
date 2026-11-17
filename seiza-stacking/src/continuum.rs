@@ -1,6 +1,7 @@
 //! Stellar continuum fitting and signed subtraction on aligned linear samples.
+use crate::photometry::{fit_sky, median};
 use crate::{Error, LinearImage, Result};
-use nalgebra::{DMatrix, DVector, Matrix3, Vector3};
+use nalgebra::{DMatrix, DVector};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -395,11 +396,6 @@ fn validate_images(
         }
     }
     Ok(())
-}
-fn median(values: &[f64]) -> f64 {
-    let mut sorted = values.to_vec();
-    sorted.sort_unstable_by(f64::total_cmp);
-    sorted[(sorted.len() - 1) / 2] / 2.0 + sorted[sorted.len() / 2] / 2.0
 }
 fn rms(values: &[f64]) -> f64 {
     values.iter().fold(0.0_f64, |sum, x| sum.hypot(*x)) / (values.len() as f64).sqrt()
@@ -1505,69 +1501,11 @@ fn measure_profile(
     if sky.len() < 20 || sky.len() * 4 < sky_area * 3 || aperture.len() < 4 {
         return Err(MissingCoverage);
     }
-    let pedestal = median(&sky.iter().map(|s| s.2).collect::<Vec<_>>());
-    let mut accepted: Vec<_> = (0..sky.len()).collect();
-    let mut plane = Vector3::zeros();
-    for _ in 0..4 {
-        let mut normal = Matrix3::zeros();
-        let mut target = Vector3::zeros();
-        for i in &accepted {
-            let (dx, dy, v) = sky[*i];
-            let row = Vector3::new(1.0, dx, dy);
-            normal += row * row.transpose();
-            target += row * (v - pedestal);
-        }
-        plane = normal.lu().solve(&target).ok_or(MissingCoverage)?;
-        let residuals: Vec<_> = sky
-            .iter()
-            .map(|(dx, dy, v)| v - pedestal - plane.dot(&Vector3::new(1.0, *dx, *dy)))
-            .collect();
-        let center = median(&accepted.iter().map(|i| residuals[*i]).collect::<Vec<_>>());
-        let sigma = 1.4826
-            * median(
-                &accepted
-                    .iter()
-                    .map(|i| (residuals[*i] - center).abs())
-                    .collect::<Vec<_>>(),
-            );
-        let threshold = (3.5 * sigma).max(1e-10 * pedestal.abs().max(1.0));
-        let next: Vec<_> = residuals
-            .iter()
-            .enumerate()
-            .filter_map(|(i, r)| ((r - center).abs() <= threshold).then_some(i))
-            .collect();
-        if next.len() < 20 {
-            return Err(MissingCoverage);
-        }
-        if next == accepted {
-            break;
-        }
-        accepted = next;
-    }
-    let sky_residuals: Vec<_> = accepted
-        .iter()
-        .map(|i| {
-            let (dx, dy, v) = sky[*i];
-            v - pedestal - plane.dot(&Vector3::new(1.0, dx, dy))
-        })
-        .collect();
-    let sky_center = median(&sky_residuals);
-    let noise = 1.4826
-        * median(
-            &sky_residuals
-                .iter()
-                .map(|r| (r - sky_center).abs())
-                .collect::<Vec<_>>(),
-        );
+    let sky = fit_sky(&sky).ok_or(MissingCoverage)?;
+    let noise = sky.noise;
     let signal: Vec<_> = aperture
         .iter()
-        .map(|(dx, dy, v)| {
-            (
-                *dx,
-                *dy,
-                v - pedestal - plane.dot(&Vector3::new(1.0, *dx, *dy)),
-            )
-        })
+        .map(|(dx, dy, v)| (*dx, *dy, v - sky.at(*dx, *dy)))
         .collect();
     let flux = signal.iter().map(|s| s.2).sum::<f64>();
     let peak = signal.iter().map(|s| s.2).fold(f64::NEG_INFINITY, f64::max);

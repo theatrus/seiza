@@ -1770,6 +1770,59 @@ def reblur_consistency(
     kernel: RemainingKernel,
 ) -> ReblurConsistency: ...
 
+class ApertureFlags:
+    """What is wrong with a measurement; falsy when nothing is."""
+    # A pixel of the aperture is saturated: the flux is a lower bound.
+    saturated: bool
+    # Part of the aperture is off the image, masked or not finite.
+    missing_coverage: bool
+    # No flux could be measured: flux, flux_error and magnitude are None.
+    unusable: bool
+    def __bool__(self) -> bool: ...
+
+class ApertureMeasurement:
+    """One position's forced aperture measurement, in the image's units."""
+    # The requested position, unchanged.
+    x: float
+    y: float
+    # Background-subtracted aperture sum; signed.
+    flux: float | None
+    # 1-sigma error of flux under the documented noise model.
+    flux_error: float | None
+    # -2.5 log10(flux), no zero point; None unless flux is positive.
+    magnitude: float | None
+    magnitude_error: float | None
+    # Local sky per pixel at the position, and its robust per-pixel scatter.
+    background: float | None
+    background_noise: float | None
+    # Aperture sum before the sky is taken off, and the area summed.
+    aperture_sum: float | None
+    aperture_area: float
+    # Annulus pixels the sky was fitted from, after clipping.
+    annulus_pixels: int
+    # Largest sample in the aperture, sky included.
+    peak: float | None
+    flags: ApertureFlags
+
+def aperture_photometry(
+    image: npt.NDArray[np.float32],
+    positions: Sequence[tuple[float, float]] | npt.NDArray[np.float64],
+    *,
+    aperture_radius: float,
+    annulus_inner: float,
+    annulus_outer: float,
+    saturation: float | None = None,
+    gain: float | None = None,
+    mask: npt.NDArray[np.bool_] | npt.NDArray[np.uint8] | None = None,
+    saturation_mask: npt.NDArray[np.bool_] | npt.NDArray[np.uint8] | None = None,
+    uncertainty: npt.NDArray[np.float32] | None = None,
+) -> list[ApertureMeasurement]:
+    """Forced aperture photometry at (x, y) positions on one linear mono plane.
+
+    One measurement per position, in order; nothing is detected or moved.
+    """
+    ...
+
 def fit_continuum(
     stars: Sequence[Mapping[str, Any]],
     sources: Mapping[str, Any],

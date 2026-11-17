@@ -74,6 +74,7 @@ mod narrowband_balance;
 mod normalization;
 mod orientation;
 mod paths;
+mod photometry;
 mod pipeline;
 mod pixinsight;
 mod recycle;
@@ -161,6 +162,10 @@ pub use narrowband_balance::{
 pub use normalization::{NormalizationMap, NormalizationMode};
 pub use orientation::{SKY_ORIENTATION_NAME, SKY_ORIENTATION_VERSION, SkyOrientationPlan};
 pub use paths::{path_identity, paths_refer_to_same_file};
+pub use photometry::{
+    ApertureFlags, ApertureGeometry, ApertureMaps, ApertureMeasurement, AperturePhotometryOptions,
+    aperture_photometry,
+};
 pub use pipeline::{
     Continue, MAXIMUM_WORKERS, PipelineExecution, PipelineOptions, PipelineReport, PipelineTimings,
     PoolPipelineMemory, PoolPipelineReport,
@@ -306,6 +311,9 @@ pub enum Error {
     /// Color composition inputs or options were rejected.
     #[error("color composition error: {0}")]
     Color(String),
+    /// Aperture photometry's image, geometry, maps or positions were rejected.
+    #[error("aperture photometry error: {0}")]
+    Photometry(String),
     /// Reading a FITS frame from disk failed.
     #[error("failed to read FITS frame {}: {source}", path.display())]
     FitsRead {

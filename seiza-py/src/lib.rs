@@ -20,6 +20,7 @@ mod imgproc;
 mod library;
 mod model;
 mod parallax;
+mod photometry;
 mod pipeline;
 mod pixinsight;
 mod psf_field;
@@ -1382,6 +1383,7 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(solve_image, m)?)?;
     color::register(m)?;
     continuum::register(m)?;
+    photometry::register(m)?;
     emission::register(m)?;
     color_calibration::register(m)?;
     deconvolution::register(m)?;
