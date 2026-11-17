@@ -5125,3 +5125,133 @@ const REINTEGRATED_WEIGHTED_LOCAL: &[f64] = &[
     1.0690379e2,
     1.1121221e2,
 ];
+
+#[test]
+fn forced_aperture_samples_keep_their_output() {
+    use seiza_stacking::{
+        ApertureGeometry, ApertureMaps, AperturePhotometryOptions, aperture_photometry,
+    };
+    let (width, height) = (96, 80);
+    let data = (0..width * height)
+        .map(|i| {
+            let (x, y) = ((i % width) as f64, (i / width) as f64);
+            (100.0 + 0.2 * x - 0.1 * y
+                + ((i * 17 % 101) as f64 - 50.0) * 0.1
+                + 400.0 * (-((x - 40.3).powi(2) + (y - 30.7).powi(2)) / 6.0).exp())
+                as f32
+        })
+        .collect();
+    let image = LinearImage::new(width, height, 1, data).unwrap();
+    let mut mask = vec![0; width * height];
+    mask[31 * width + 41] = 1;
+    let mut clipped = vec![0; width * height];
+    clipped[30 * width + 40] = 1;
+    let uncertainty = vec![4.0; width * height];
+    let mut options = AperturePhotometryOptions::new(ApertureGeometry::new(6.0, 10.0, 16.0));
+    options.gain = Some(2.0);
+    let mut summary = Vec::new();
+    for maps in [
+        ApertureMaps::default(),
+        ApertureMaps {
+            mask: Some(&mask),
+            saturation: Some(&clipped),
+            uncertainty: Some(&uncertainty),
+        },
+    ] {
+        for r in aperture_photometry(
+            &image,
+            &[[40.3, 30.7], [2.3, 50.4], [70.2, 40.1], [-40.0, 20.0]],
+            &options,
+            &maps,
+        )
+        .unwrap()
+        {
+            summary.extend([
+                r.flux.unwrap_or(-999.0),
+                r.flux_error.unwrap_or(-999.0),
+                r.background.unwrap_or(-999.0),
+                r.aperture_sum.unwrap_or(-999.0),
+                r.aperture_area,
+                r.annulus_pixels as f64,
+                f64::from(r.flags.saturated),
+                f64::from(r.flags.missing_coverage),
+                f64::from(r.flags.unusable),
+            ]);
+        }
+    }
+    check("FORCED_APERTURE", &summary, FORCED_APERTURE);
+}
+const FORCED_APERTURE: &[f64] = &[
+    7.5711537e3,
+    7.5300074e1,
+    1.0483404e2,
+    1.9427658e4,
+    1.1309734e2,
+    4.8900000e2,
+    0.0000000e0,
+    0.0000000e0,
+    0.0000000e0,
+    2.0497235e1,
+    4.5895204e1,
+    9.5214939e1,
+    8.5059408e3,
+    8.8885799e1,
+    2.7900000e2,
+    0.0000000e0,
+    1.0000000e0,
+    0.0000000e0,
+    3.8338201e1,
+    4.0837637e1,
+    1.0993919e2,
+    1.2472187e4,
+    1.1309734e2,
+    4.8900000e2,
+    0.0000000e0,
+    0.0000000e0,
+    0.0000000e0,
+    -9.9900000e2,
+    -9.9900000e2,
+    -9.9900000e2,
+    -9.9900000e2,
+    -0.0000000e0,
+    0.0000000e0,
+    0.0000000e0,
+    1.0000000e0,
+    1.0000000e0,
+    7.2046589e3,
+    4.5387091e1,
+    1.0483404e2,
+    1.8956215e4,
+    1.1209734e2,
+    4.8900000e2,
+    1.0000000e0,
+    1.0000000e0,
+    0.0000000e0,
+    2.0497235e1,
+    4.7932552e1,
+    9.5214939e1,
+    8.5059408e3,
+    8.8885799e1,
+    2.7900000e2,
+    0.0000000e0,
+    1.0000000e0,
+    0.0000000e0,
+    3.8338201e1,
+    4.5039040e1,
+    1.0993919e2,
+    1.2472187e4,
+    1.1309734e2,
+    4.8900000e2,
+    0.0000000e0,
+    0.0000000e0,
+    0.0000000e0,
+    -9.9900000e2,
+    -9.9900000e2,
+    -9.9900000e2,
+    -9.9900000e2,
+    -0.0000000e0,
+    0.0000000e0,
+    0.0000000e0,
+    1.0000000e0,
+    1.0000000e0,
+];
