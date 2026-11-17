@@ -1723,6 +1723,41 @@ In order, each only if the one before leaves a gap at the rims:
      +4.99 and +6.38). It does hold the California's flux (1.020 from
      1.089) and leaves its stars less round (0.070). The rim's
      steepness is the target's, not the network's size.
+   - Nor do larger tiles and twice the steps. That network on 512 px
+     tiles for 120,000 steps (batch 4, six hours; validation 0.684 on
+     16 batches of those tiles, not comparable) is the smaller run
+     turned up by a fifteenth at every scale, the noise's with the
+     rest: slope ×1.97 over 4.30 px, the lit side +4.34 and +5.34, the
+     dark side 0.51, 0.63, 0.68 and 0.57, knots of 1.11%, the cloud's
+     detail 1.04 between 1 and 2 px and then 1.09, 1.12, 1.06 and 1.03
+     (the reference 1.00, 1.04, 1.13, 1.11 and 1.04), and 150 bright
+     dots a megapixel inside the cloud above 4 of the input's spread
+     against the smaller run's 129 and the reference's 103, one in
+     thirty of them in the multi-night stack, which is chance. On open
+     sky all three leave the grain as it was. The Trunk's stars hold
+     their flux (0.999); the California's hold 1.049 and are no rounder
+     (0.067). The reference's gain lies between 4 and 16 px and falls
+     to nothing under 2; a deconvolution's rises toward the pixel, and
+     more of it brings the noise up first.
+   - The fine part of the change, held back under the noise
+     (`rolled_off`): the change is split at a Gaussian of 2 px, and its
+     fine part kept by its local power over that and the square of the
+     noise. A star's or a rim's stands far over the noise and stays;
+     what lies under it goes. As a step on that run's output at half
+     the input's noise (`sheet-sharpen --rolloff 0.5`), the dots fall to
+     105 a megapixel and the knots to 0.91%, the cloud's detail to 1.01
+     and 1.06 under 4 px and stays 1.11, 1.06 and 1.03 above, and the
+     rims keep 96% of their lit side (+4.16 and +5.11) and nine tenths
+     of their dark side (0.50, 0.59, 0.61 and 0.49). A plain blur of
+     the change at 1 px takes a seventh of the dots and, wide enough
+     to take more, a sixth of the lit side. As a target
+     (`--fine-snr`), it is asked of what is not a star under the noise
+     each window is shown under; an overshoot term
+     (`--overshoot-weight`) charges a run for more gradient than its
+     target's where the target is flat, which the edge term never did;
+     and a run can start from another's weights (`--init-from`) to be
+     taught these without its hours again. None of the three is
+     trained yet.
 
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
