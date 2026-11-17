@@ -188,8 +188,6 @@ fn the_flux_error_follows_the_documented_noise_terms() {
     let mut settings = options(6.0, 10.0, 16.0);
     let sky_only = measure(&data, &[star.0], &settings)[0].clone();
     let (area, sky_noise) = (sky_only.aperture_area, sky_only.background_noise.unwrap());
-    let pixels = sky_only.annulus_pixels as f64;
-    let sky_fit = area * area * sky_noise * sky_noise / pixels;
 
     // A supplied map stands for the annulus's scatter: each pixel's variance
     // by its weight squared, which is a little less than the area.
@@ -201,6 +199,7 @@ fn the_flux_error_follows_the_documented_noise_terms() {
         };
         aperture_photometry(&image(&data), &[star.0], settings, &maps).unwrap()[0].clone()
     };
+    let sky_fit = mapped(0.0, &settings).flux_error.unwrap().powi(2);
     let squared_weights = (mapped(5.0, &settings).flux_error.unwrap().powi(2) - sky_fit) / 25.0;
     assert!(
         squared_weights < area && squared_weights > area - 0.5 * PI * 6.0,
@@ -360,7 +359,13 @@ fn saturation_is_flagged_by_level_and_by_map_and_the_flux_kept() {
 #[test]
 fn every_position_gets_a_result_on_the_edge_and_off_the_image() {
     let star = ([3.0, 40.0], 2000.0);
-    let data = field(&[star], 1.6, |x, y| 80.0 + 0.1 * x + 0.05 * y);
+    // Nonzero sky noise prevents negligible analytic PSF wings from being
+    // clipped out of this already partial annulus.
+    let mut noise = Noise(0x1234_5678_9abc_def1);
+    let data: Vec<_> = field(&[star], 1.6, |x, y| 80.0 + 0.1 * x + 0.05 * y)
+        .into_iter()
+        .map(|v| v + 0.01 * noise.normal())
+        .collect();
     let geometry = options(5.0, 8.0, 14.0);
     let positions = [
         star.0,
@@ -436,4 +441,88 @@ fn input_that_cannot_be_measured_is_refused() {
         ..Default::default()
     };
     assert!(aperture_photometry(&mono, &[[20.0, 20.0]], &good, &maps).is_err());
+}
+
+#[test]
+fn asymmetric_sky_errors_match_repeated_frames() {
+    let mut noise = Noise(0x1234_5678_9abc_def1);
+    let settings = options(8.0, 10.0, 14.0);
+    let position = [48.0, 40.0];
+    let mask: Vec<u8> = (0..WIDTH * HEIGHT)
+        .map(|i| {
+            let dx = (i % WIDTH) as f64 - position[0];
+            let dy = (i / WIDTH) as f64 - position[1];
+            u8::from(dx < -1.0 && dx.hypot(dy) >= 10.0)
+        })
+        .collect();
+    let maps = ApertureMaps {
+        mask: Some(&mask),
+        ..Default::default()
+    };
+    let mut fluxes = Vec::new();
+    let mut errors = Vec::new();
+    for _ in 0..500 {
+        let data: Vec<f64> = (0..WIDTH * HEIGHT)
+            .map(|_| 100.0 + 3.0 * noise.normal())
+            .collect();
+        let result = aperture_photometry(&image(&data), &[position], &settings, &maps)
+            .unwrap()
+            .remove(0);
+        assert_eq!(result.flags, Default::default());
+        fluxes.push(result.flux.unwrap());
+        errors.push(result.flux_error.unwrap());
+    }
+    let mean = fluxes.iter().sum::<f64>() / fluxes.len() as f64;
+    let scatter =
+        (fluxes.iter().map(|f| (f - mean).powi(2)).sum::<f64>() / fluxes.len() as f64).sqrt();
+    let error = errors.iter().sum::<f64>() / errors.len() as f64;
+    assert!(
+        (scatter / error - 1.0).abs() < 0.15,
+        "reported sigma {error} does not match empirical sigma {scatter}"
+    );
+}
+
+#[test]
+fn sky_coverage_is_checked_after_clipping() {
+    let mut noise = Noise(0x1234_5678_9abc_def1);
+    let settings = options(6.0, 10.0, 16.0);
+    let mut count = 0;
+    let mut retained = 0;
+    let mut mask = vec![0u8; WIDTH * HEIGHT];
+    let data: Vec<f64> = (0..WIDTH * HEIGHT)
+        .map(|i| {
+            let dx = (i % WIDTH) as f64 - 48.0;
+            let dy = (i / WIDTH) as f64 - 40.0;
+            let r = dx.hypot(dy);
+            let mut v = 100.0 + noise.normal();
+            if (10.0..=16.0).contains(&r) {
+                count += 1;
+                if dx < -2.0 {
+                    mask[i] = 1;
+                } else {
+                    retained += 1;
+                    if i % 5 == 0 {
+                        v += 1000.0;
+                    }
+                }
+            }
+            v
+        })
+        .collect();
+    let maps = ApertureMaps {
+        mask: Some(&mask),
+        ..Default::default()
+    };
+    let result = aperture_photometry(&image(&data), &[[48.0, 40.0]], &settings, &maps)
+        .unwrap()
+        .remove(0);
+    assert!(retained * 2 > count, "coverage must pass before clipping");
+    assert!(
+        result.flags.unusable,
+        "less than half sky accepted without flag"
+    );
+    assert_eq!(
+        (result.flux, result.flux_error, result.magnitude),
+        (None, None, None)
+    );
 }

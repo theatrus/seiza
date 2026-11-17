@@ -276,8 +276,11 @@ target against a comparison ensemble across a series.
   pixel, or under half the annulus or twenty pixels of it left for a
   background; `flux` is `None`).
 - **Flux error.** With `w` a pixel's weight, `area` their sum, `sky_noise`
-  the annulus's scatter and `n_sky` the annulus pixels kept:
-  `variance = sum(w²)·sky_noise² + area²·sky_noise²/n_sky`, plus the source's
+  the annulus's scatter: `variance = sum(w²)·sky_noise² + sky_variance`,
+  where `sky_variance` propagates the fitted plane coefficient covariance
+  through the weighted aperture. This includes slope uncertainty for an
+  asymmetric annulus or aperture; for centred symmetric coverage it reduces
+  to `area²·sky_noise²/n_sky`. Add the source's
   photons, `flux / gain`, when you give `gain` in electrons per sample unit
   (the mean of `n` subs has `n` times one sub's gain). `uncertainty`, a
   float32 map of each pixel's total 1-sigma noise, replaces the first and

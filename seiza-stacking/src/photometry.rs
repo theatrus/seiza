@@ -191,6 +191,8 @@ pub(crate) fn median(values: &[f64]) -> f64 {
 pub(crate) struct Sky {
     pedestal: f64,
     plane: Vector3<f64>,
+    /// Normal matrix of the samples used for the fitted plane.
+    normal: Matrix3<f64>,
     /// Robust per-pixel scatter of the pixels kept, about the plane.
     pub(crate) noise: f64,
     /// Pixels kept after clipping.
@@ -214,8 +216,9 @@ pub(crate) fn fit_sky(sky: &[(f64, f64, f64)]) -> Option<Sky> {
     let pedestal = median(&sky.iter().map(|s| s.2).collect::<Vec<_>>());
     let mut accepted: Vec<_> = (0..sky.len()).collect();
     let mut plane = Vector3::zeros();
+    let mut normal = Matrix3::zeros();
     for _ in 0..4 {
-        let mut normal = Matrix3::zeros();
+        normal.fill(0.0);
         let mut target = Vector3::zeros();
         for i in &accepted {
             let (dx, dy, v) = sky[*i];
@@ -268,6 +271,7 @@ pub(crate) fn fit_sky(sky: &[(f64, f64, f64)]) -> Option<Sky> {
     Some(Sky {
         pedestal,
         plane,
+        normal,
         noise,
         pixels: accepted.len(),
     })
@@ -383,15 +387,20 @@ fn check_map(length: Option<usize>, pixels: usize, name: &str) -> Result<()> {
 ///
 /// **Flux error.** The flux is `sum(w * (value - sky))` over the aperture's
 /// pixels, `w` each pixel's weight. With `sky_noise` the annulus's robust
-/// per-pixel scatter, `area = sum(w)` and `n_sky` the annulus pixels kept:
+/// per-pixel scatter, `q = sum(w * [1, dx, dy])` over the aperture, and
+/// `N = sum([1, dx, dy] * [1, dx, dy]^T)` over the fitted sky samples:
 ///
 /// ```text
 /// variance = sum(w^2) * sky_noise^2                    sky, read and dark noise
-///          + area^2 * sky_noise^2 / n_sky              error of the fitted sky
+///          + sky_noise^2 * q^T * inverse(N) * q       error of the fitted sky
 ///          + max(sum(w^2 * (value - sky)), 0) / gain   source photons, with a gain
 /// ```
 ///
-/// The last term is `flux / gain` but for the pixels on the aperture's edge.
+/// The sky term propagates the plane coefficient covariance, including
+/// slopes when masking or missing coverage makes the annulus asymmetric.
+/// It reduces to `area^2 * sky_noise^2 / n_sky` for a centred symmetric
+/// aperture and annulus. The last term is `flux / gain` but for the pixels
+/// on the aperture's edge.
 /// With an uncertainty map the first and last terms are replaced by
 /// `sum(w^2 * uncertainty^2)`, the map being each pixel's total noise. This
 /// assumes pixel noise is independent from pixel to pixel and, without a
@@ -529,6 +538,11 @@ fn measure(
         result.flags = flags;
         return result;
     };
+    if (sky.pixels as f64) < MINIMUM_ANNULUS_FRACTION * annulus_area as f64 {
+        flags.unusable = true;
+        result.flags = flags;
+        return result;
+    }
     result.background = Some(sky.at(0.0, 0.0));
     result.background_noise = Some(sky.noise);
     result.annulus_pixels = sky.pixels;
@@ -538,12 +552,23 @@ fn measure(
         return result;
     }
 
-    let area = result.aperture_area;
     let flux: f64 = aperture
         .iter()
         .map(|(weight, dx, dy, value, _)| weight * (value - sky.at(*dx, *dy)))
         .sum();
-    let sky_error = area * area * sky.noise * sky.noise / sky.pixels as f64;
+    // The aperture sums predictions of a three-coefficient sky plane. Its
+    // error depends on the annulus geometry, including asymmetric masking,
+    // and on the first moments of the covered aperture, not only its area.
+    let moments = aperture
+        .iter()
+        .fold(Vector3::zeros(), |sum, (w, dx, dy, _, _)| {
+            sum + Vector3::new(*w, w * dx, w * dy)
+        });
+    let sky_error = sky
+        .normal
+        .lu()
+        .solve(&moments)
+        .map(|solution| (moments.dot(&solution) * sky.noise * sky.noise).max(0.0));
     // The flux is a weighted sum of whole pixels' values, so each pixel's
     // variance enters by its weight squared.
     let variance = match maps.uncertainty {
@@ -566,7 +591,9 @@ fn measure(
             Some(weights * sky.noise * sky.noise + photons)
         }
     };
-    let error = variance.map(|variance| (variance + sky_error).sqrt());
+    let error = variance
+        .zip(sky_error)
+        .map(|(variance, sky_error)| (variance + sky_error).sqrt());
     result.flux = Some(flux);
     result.flux_error = error;
     if flux > 0.0 {

@@ -222,13 +222,45 @@ def test_fluxes_and_errors_agree_with_a_photutils_annulus_reduction():
         # deviation also holds the gradient across the annulus.
         assert result.background_noise == pytest.approx(sigma, rel=0.2)
         assert scatter > result.background_noise
-        # photutils' error is the aperture's alone, each pixel's variance by its
+        # On this nearly symmetric annulus the plane covariance reduces
+        # approximately to the mean-sky term. photutils supplies only the
+        # aperture error, each pixel's variance by its
         # weight squared; Seiza adds the sky fit's.
         sky_term = result.aperture_area**2 * result.background_noise**2 / result.annulus_pixels
         assert result.flux_error**2 == pytest.approx(
-            row["aperture_sum_err"] ** 2 + sky_term, rel=1e-6)
+            row["aperture_sum_err"] ** 2 + sky_term, rel=0.01)
     # Without a map, the annulus's own scatter stands in for it.
     plain = seiza.aperture_photometry(image, POSITIONS, **GEOMETRY)
     for result, mapped in zip(plain, results):
         assert result.flux == mapped.flux
         assert result.flux_error == pytest.approx(mapped.flux_error, rel=0.15)
+
+
+def test_asymmetric_annulus_uncertainty_and_post_clip_coverage():
+    rng = np.random.default_rng(109)
+    y, x = np.mgrid[:HEIGHT, :WIDTH]
+    dx, dy = x - 60, y - 48
+    radius = np.hypot(dx, dy)
+    mask = (dx < -1) & (radius >= 10)
+    fluxes, errors = [], []
+    for _ in range(400):
+        image = (100 + rng.normal(0, 3, (HEIGHT, WIDTH))).astype(np.float32)
+        result = seiza.aperture_photometry(
+            image, [(60, 48)], aperture_radius=8, annulus_inner=10,
+            annulus_outer=14, mask=mask)[0]
+        assert not result.flags
+        fluxes.append(result.flux)
+        errors.append(result.flux_error)
+    assert np.std(fluxes) == pytest.approx(np.mean(errors), rel=0.15)
+
+    annulus = (radius >= 10) & (radius <= 16)
+    mask = annulus & (dx < -2)
+    contamination = annulus & ~mask & (x % 5 == 0)
+    image = (100 + rng.normal(0, 1, (HEIGHT, WIDTH))).astype(np.float32)
+    image[contamination] += 1000
+    assert np.count_nonzero(annulus & ~mask) > np.count_nonzero(annulus) / 2
+    result = seiza.aperture_photometry(
+        image, [(60, 48)], aperture_radius=6, annulus_inner=10,
+        annulus_outer=16, mask=mask)[0]
+    assert result.flags.unusable
+    assert result.flux is None and result.flux_error is None
