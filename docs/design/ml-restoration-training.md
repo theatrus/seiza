@@ -1789,7 +1789,15 @@ In order, each only if the one before leaves a gap at the rims:
      pixel, which no run before it did: the grain at 1 px is 0.95 on
      sky, 0.93 on nebula and 0.89 on bright nebula, and as it was at
      4 px (the California's is unchanged). The dark side and the
-     detail from 8 px are still short.
+     detail from 8 px are still short. At an ask of 0.4 it is at the
+     reference's rims with the reference's knots: the lit side +5.49
+     and +7.03, the dark side 0.70, 0.84, 0.88 and 0.71, knots of
+     1.00%, the cloud's detail 1.03, 1.13, 1.28, 1.16 and 1.03. On the
+     Trunk denoised first it smooths what grain is left, to 0.65 of it
+     on sky and 0.61 on nebula at the pixel (the run before the
+     roll-off 0.93 and 0.86; the reference raises it to 1.22 and
+     1.06); on the California and the Iris denoised first it does as
+     the runs before it.
 
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
