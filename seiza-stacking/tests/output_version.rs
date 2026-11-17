@@ -796,6 +796,158 @@ fn continuum_linear_modes_keep_their_output() {
     );
 }
 
+// Continuum measured from pixels: the sky annulus's clipped plane fit and the
+// aperture sums behind each star, on a noisy gradient with a neighbour's
+// light planted in every annulus, which only the clipping removes.
+#[test]
+fn continuum_measured_from_pixels_keeps_its_output() {
+    use seiza_stacking::{
+        ContinuumFitOutcome, ContinuumSource, ContinuumSources, ContinuumTransfer,
+        measure_and_fit_continuum,
+    };
+    let source = |name: &str| ContinuumSource {
+        name: name.into(),
+        revision: "v1".into(),
+        transfer: ContinuumTransfer::Linear,
+        saturation: Some(65535.0),
+        clipping_revision: None,
+    };
+    let sources = ContinuumSources {
+        width: 256,
+        height: 256,
+        narrowband: source("ha"),
+        references: vec![source("red")],
+    };
+    let positions: Vec<_> = (0..16)
+        .map(|i| [32.3 + 48.0 * (i % 4) as f64, 31.6 + 48.0 * (i / 4) as f64])
+        .collect();
+    let mut state = 0x2545_f491_4f6c_dd1d_u64;
+    let mut noise = move || {
+        // Twelve uniforms summed: close to a unit normal, and the same everywhere.
+        let mut sum = 0.0;
+        for _ in 0..12 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            sum += (state >> 11) as f64 / (1u64 << 53) as f64;
+        }
+        sum - 6.0
+    };
+    let mut narrow = vec![0.0_f32; 256 * 256];
+    let mut broad = narrow.clone();
+    for y in 0..256 {
+        for x in 0..256 {
+            let background = 300.0 + 0.15 * x as f64 + 0.1 * y as f64;
+            let (mut n, mut b) = (0.35 * background, background);
+            for (i, p) in positions.iter().enumerate() {
+                let star = |cx: f64, cy: f64, sigma: f64| {
+                    (-((x as f64 - cx).powi(2) + (y as f64 - cy).powi(2)) / (2.0 * sigma * sigma))
+                        .exp()
+                };
+                let amplitude = 400.0 + 60.0 * i as f64;
+                // The star, and a fainter neighbour inside its annulus.
+                let light = amplitude * star(p[0], p[1], 1.5)
+                    + 0.2 * amplitude * star(p[0] + 15.0, p[1] - 4.0, 1.5);
+                n += 0.35 * light;
+                b += light;
+            }
+            narrow[y * 256 + x] = (n + 0.4 * noise()) as f32;
+            broad[y * 256 + x] = (b + 0.8 * noise()) as f32;
+        }
+    }
+    let narrow = LinearImage::new(256, 256, 1, narrow).unwrap();
+    let broad = LinearImage::new(256, 256, 1, broad).unwrap();
+    let ContinuumFitOutcome::Fitted { plan } = measure_and_fit_continuum(
+        &narrow,
+        &[&broad],
+        &sources,
+        &positions,
+        &Default::default(),
+        &Default::default(),
+    )
+    .unwrap() else {
+        panic!("the measured continuum fit was skipped")
+    };
+    let diagnostics = plan.diagnostics.unwrap();
+    let mut summary = plan.coefficients.clone();
+    for star in &diagnostics.stars {
+        summary.extend([star.x, star.y, star.flux]);
+        summary.push(star.fractional_residual.unwrap_or(-1.0));
+    }
+    let pixels = diagnostics.pixel_validation.unwrap();
+    summary.extend([pixels.p90_absolute_fraction, pixels.median_core_fraction]);
+    check("CONTINUUM_MEASURED", &summary, CONTINUUM_MEASURED);
+}
+const CONTINUUM_MEASURED: &[f64] = &[
+    3.4997382e-1,
+    1.7626448e2,
+    1.7560938e2,
+    6.4372364e3,
+    1.1940252e-3,
+    1.2826209e2,
+    1.7560695e2,
+    6.1301254e3,
+    -4.8463083e-4,
+    8.0266213e1,
+    1.7560743e2,
+    5.8290441e3,
+    -1.2883795e-3,
+    3.2263078e1,
+    1.7560694e2,
+    5.5275967e3,
+    -1.2884550e-3,
+    1.7626411e2,
+    1.2760740e2,
+    5.2361453e3,
+    -2.2931757e-3,
+    1.2826346e2,
+    1.2760713e2,
+    4.9422452e3,
+    -1.0476712e-3,
+    8.0264429e1,
+    1.2760752e2,
+    4.6469829e3,
+    1.6705897e-3,
+    3.2265061e1,
+    1.2760775e2,
+    4.3512722e3,
+    1.1233758e-4,
+    1.7626491e2,
+    7.9606867e1,
+    4.0417017e3,
+    -4.0633523e-3,
+    1.2827770e2,
+    7.9607213e1,
+    3.7609851e3,
+    1.1602256e-3,
+    8.0264212e1,
+    7.9606919e1,
+    3.4639319e3,
+    -5.7037564e-4,
+    3.2267812e1,
+    7.9605643e1,
+    3.1628191e3,
+    1.1418997e-3,
+    1.7626367e2,
+    3.1609483e1,
+    2.8605851e3,
+    1.0567882e-3,
+    1.2825848e2,
+    3.1604096e1,
+    2.5846776e3,
+    5.4722386e-3,
+    8.0278415e1,
+    3.1610821e1,
+    2.2670017e3,
+    -2.4990892e-3,
+    3.2262938e1,
+    3.1601185e1,
+    1.9774045e3,
+    -2.3266541e-3,
+    4.1134494e-5,
+    -1.2649153e-4,
+];
+
 #[test]
 fn narrowband_display_modes_keep_their_output() {
     let mut physical = LinearImage::new(
