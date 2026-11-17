@@ -1773,6 +1773,22 @@ In order, each only if the one before leaves a gap at the rims:
      with a sixth fewer dots: taught or applied, the roll-off takes the
      noise out and does not put the gain between 4 and 16 px that the
      goal has.
+   - More corpus pairs give some of it. The same run again with a
+     corpus-pair bank nine times as large (1,325 pairs of 457 objects,
+     most of them fields of narrow stars; the earlier bank kept at a
+     quarter of the share for its wide ones) at 0.30 of the mix, from
+     0.15, is the best at an ask of 0.5 so far: slope ×2.05 over
+     4.36 px (×1.88 without, the goal ×2.21 over 3.74), the lit
+     side +4.50 and +5.58 (+4.08 and +4.98; the goal +5.41 and
+     +6.46), the dark side 0.53, 0.62, 0.65 and 0.52, the cloud's
+     detail 1.02, 1.07, 1.11, 1.05 and 1.02, with 123 dots a megapixel
+     and knots of 0.97%, 1.33% and 2.94%. The California's stars are
+     rounder (0.056 from 0.068; the goal 0.046) and hold 1.038 of
+     their flux. It also takes a little of the Trunk's noise out at the
+     pixel, which no run before it did: the grain at 1 px is 0.95 on
+     sky, 0.93 on nebula and 0.89 on bright nebula, and as it was at
+     4 px (the California's is unchanged). The dark side and the
+     detail from 8 px are still short.
 
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
