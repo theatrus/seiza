@@ -264,3 +264,38 @@ def test_asymmetric_annulus_uncertainty_and_post_clip_coverage():
         annulus_outer=16, mask=mask)[0]
     assert result.flags.unusable
     assert result.flux is None and result.flux_error is None
+
+
+def test_sparse_sampling_handles_strides_maps_and_multiple_batches():
+    rng = np.random.default_rng(479)
+    image = (field(STARS) + rng.normal(0, 2, (HEIGHT, WIDTH))).astype(np.float32)
+    mask = rng.random(image.shape) < .03
+    saturation = np.zeros(image.shape, np.uint8)
+    saturation[30, 40] = 1
+    uncertainty = np.full_like(image, 3)
+    uncertainty[60, 85] = np.nan
+    # Cross the binding's batch boundary, including partial and absent coverage.
+    positions = [*POSITIONS, (2, 50), (-60, 10)] * 27
+    fields = ("x", "y", "flux", "flux_error", "magnitude", "magnitude_error",
+              "background", "background_noise", "aperture_sum", "aperture_area",
+              "annulus_pixels", "peak")
+
+    def values(result):
+        return tuple(getattr(result, field) for field in fields) + (
+            result.flags.saturated, result.flags.missing_coverage, result.flags.unusable)
+
+    def measure(plane, mask, saturation, uncertainty):
+        return [values(result) for result in seiza.aperture_photometry(
+            plane, positions, mask=mask, saturation_mask=saturation,
+            uncertainty=uncertainty, **GEOMETRY)]
+
+    # Compare strided inputs with equivalent packed arrays: no coordinate changes.
+    for transform in (lambda a: a, lambda a: a.T,
+                      lambda a: a[::-1, ::-1], lambda a: a[::2, ::2],
+                      lambda a: np.stack([a, a, a], axis=-1)[..., 1]):
+        planes = [transform(a) for a in (image, mask, saturation, uncertainty)]
+        assert measure(*planes) == measure(*(np.ascontiguousarray(a) for a in planes))
+    assert seiza.aperture_photometry(image, [], **GEOMETRY) == []
+    with pytest.raises(ValueError):
+        seiza.aperture_photometry(image, [], aperture_radius=0,
+                                  annulus_inner=10, annulus_outer=16)

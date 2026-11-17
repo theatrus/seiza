@@ -259,6 +259,10 @@ target against a comparison ensemble across a series.
   channel is picked or averaged for you. `positions` are `(x, y)` pairs or an
   `(n, 2)` array, zero-based with pixel centres on whole numbers (a FITS or
   DS9 position less 1).
+- **Sampling.** Only aperture and annulus pixels are copied, including for
+  strided green-channel views and quality/noise maps. Sampling holds the GIL;
+  fitting runs without it on owned samples. Large position lists are processed
+  in batches of 64 to bound temporary storage.
 - **Aperture.** Each pixel counts by the exact fraction of its area inside
   the circle, so the sum follows a star smoothly across subpixel shifts. The
   three radii are required; there is no default geometry.
