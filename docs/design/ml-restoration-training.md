@@ -1797,6 +1797,14 @@ In order, each only if the one before leaves a gap at the rims:
      roll-off 0.93 and 0.86; the goal raises it to 1.22 and
      1.06); on the California and the Iris denoised first it does as
      the runs before it.
+   - More of the mix for them gives no more. At 0.45 of the mix
+     (known-kernel 0.4, seeing 0.15) the run is the one at 0.30 to
+     the second figure: slope ×2.05 over 4.31 px, the lit side +4.53
+     and +5.61, the dark side 0.52, 0.63, 0.67 and 0.55, knots of
+     0.96%, 1.37% and 2.96%, 119 dots, the cloud's detail 1.02, 1.06,
+     1.10, 1.05 and 1.02, the same grain on the Trunk and on the Trunk
+     denoised first. Only the California's stars move, a little: 0.053
+     and 1.031 of their flux. What the pairs teach is taught by 0.30.
 
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
