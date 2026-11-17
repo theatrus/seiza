@@ -4289,6 +4289,39 @@ char *seiza_reblur_consistency_json(const SeizaRemainingKernel *kernel,
                                     char **error_out);
 
 /*
+ Measure a circular aperture at each supplied position on one linear mono
+ plane. Request JSON is {"positions": [[x, y], ...], "options": {"geometry":
+ {"apertureRadius", "annulusInner", "annulusOuter"}, "saturation"?, "gain"?}}.
+ Positions are zero-based with pixel centres on whole numbers and are
+ measured where given; nothing is detected or moved. mask, saturation_mask
+ and uncertainty are nullable width*height planes: mask is nonzero where a
+ pixel must not be used, saturation_mask nonzero where it clipped, and
+ uncertainty each pixel's total 1-sigma noise in the image's units.
+
+ Returns {"measurements": [...]}, one per position in order, each with x, y,
+ flux, fluxError, magnitude, magnitudeError, background, backgroundNoise,
+ apertureSum, apertureArea, annulusPixels, peak and flags {saturated,
+ missingCoverage, unusable}. Flux is signed; values that could not be
+ measured are null. The noise model is the one
+ seiza_stacking::aperture_photometry documents. Free the result with
+ seiza_string_free. No input buffer is modified.
+
+ # Safety
+ data points to width*height readable floats. mask and saturation_mask, if
+ non-null, point to width*height readable bytes, and uncertainty, if
+ non-null, to width*height readable floats. request_json is NUL-terminated
+ UTF-8. error_out, if non-null, points to writable pointer storage.
+ */
+char *seiza_aperture_photometry_json(const float *data,
+                                     size_t width,
+                                     size_t height,
+                                     const uint8_t *mask,
+                                     const uint8_t *saturation_mask,
+                                     const float *uncertainty,
+                                     const char *request_json,
+                                     char **error_out);
+
+/*
  Grade/group/match provided FITS/XISF files or a recursive library and prepare
  cached masters through the native file coordinator. Run off the UI thread.
  camelCase request: operation (analyze/execute/verify/schema), lights, library
