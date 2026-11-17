@@ -526,3 +526,53 @@ fn sky_coverage_is_checked_after_clipping() {
         (None, None, None)
     );
 }
+
+#[test]
+fn sampled_photometry_reads_only_local_pixels_and_owns_its_snapshot() {
+    use seiza_stacking::{AperturePhotometry, AperturePixel};
+    let mut image = image(&field(&[([40.3, 30.7], 4000.0)], 1.6, |x, y| {
+        100.0 + 0.2 * x - 0.1 * y
+    }));
+    let settings = options(6.0, 10.0, 16.0);
+    let positions = [[40.3, 30.7], [2.3, 50.4], [-40.0, 20.0]];
+    let mut mask = vec![0; WIDTH * HEIGHT];
+    mask[31 * WIDTH + 41] = 1;
+    let mut clipped = vec![0; WIDTH * HEIGHT];
+    clipped[30 * WIDTH + 40] = 1;
+    let uncertainty = vec![3.0; WIDTH * HEIGHT];
+    let maps = ApertureMaps {
+        mask: Some(&mask),
+        saturation: Some(&clipped),
+        uncertainty: Some(&uncertainty),
+    };
+    let expected = aperture_photometry(&image, &positions, &settings, &maps).unwrap();
+    let mut reads = 0;
+    let sampled = AperturePhotometry::sample(WIDTH, HEIGHT, &positions, &settings, |x, y| {
+        assert!(x < WIDTH && y < HEIGHT);
+        assert!(positions.iter().any(|p| {
+            let d = (x as f64 - p[0]).hypot(y as f64 - p[1]);
+            d < 7.0 || (10.0..=16.0).contains(&d)
+        }));
+        reads += 1;
+        let index = y * WIDTH + x;
+        AperturePixel {
+            value: image.data[index],
+            masked: mask[index] != 0,
+            saturated: clipped[index] != 0,
+            uncertainty: Some(uncertainty[index]),
+        }
+    })
+    .unwrap();
+    assert!(
+        reads > 0 && reads < 1500,
+        "read {reads} pixels for two overlapping image regions"
+    );
+    image.data.fill(f32::NAN);
+    assert_eq!(sampled.measure(), expected);
+    assert!(
+        AperturePhotometry::sample(WIDTH, HEIGHT, &[[f64::NAN, 0.0]], &settings, |_, _| panic!(
+            "invalid requests must not read pixels"
+        ))
+        .is_err()
+    );
+}

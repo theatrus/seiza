@@ -1060,6 +1060,14 @@ returns `{"measurements": [...]}` under the same keys in camelCase. Python's
 `seiza.aperture_photometry` takes the options as keywords; see
 [Python usage](../seiza-py/README.md#forced-aperture-photometry).
 
+`AperturePhotometry::sample(width, height, positions, options, read)` reads only
+aperture and annulus pixels through a native `read(x, y) -> AperturePixel`
+callback. `sampled.measure()` then fits and measures owned local samples without
+accessing the original image or maps. This supports strided host storage without
+copying a full frame. For large catalogues, call these stages in bounded batches;
+the C and Python bindings use 64 positions per batch. The existing
+`aperture_photometry(&LinearImage, ...)` convenience API remains available.
+
 ## Continuum fitting and signed residuals
 
 Use continuum fitting **before stretching or removing stars**, on mono linear

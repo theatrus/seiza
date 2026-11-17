@@ -430,6 +430,39 @@ pub fn aperture_photometry(
     if image.data.len() != pixels {
         return Err(invalid("The image's samples do not match its size"));
     }
+    check_map(maps.mask.map(<[u8]>::len), pixels, "mask")?;
+    check_map(maps.saturation.map(<[u8]>::len), pixels, "saturation")?;
+    check_map(maps.uncertainty.map(<[f32]>::len), pixels, "uncertainty")?;
+    validate_sampling(image.width, image.height, positions, options)?;
+    let mut read = |x: usize, y: usize| {
+        let index = y * image.width + x;
+        AperturePixel {
+            value: image.data[index],
+            masked: maps.mask.is_some_and(|map| map[index] != 0),
+            saturated: maps.saturation.is_some_and(|map| map[index] != 0),
+            uncertainty: maps.uncertainty.map(|map| map[index]),
+        }
+    };
+    // The owned-image convenience call needs only one star's samples at a time.
+    Ok(positions
+        .iter()
+        .map(|position| {
+            sample(image.width, image.height, *position, options, &mut read).measure(options.gain)
+        })
+        .collect())
+}
+
+fn validate_sampling(
+    width: usize,
+    height: usize,
+    positions: &[[f64; 2]],
+    options: &AperturePhotometryOptions,
+) -> Result<()> {
+    if width == 0 || height == 0 || width.checked_mul(height).is_none() {
+        return Err(invalid(
+            "Aperture image dimensions must be nonzero and not overflow",
+        ));
+    }
     options.geometry.validate()?;
     if options.saturation.is_some_and(|level| !level.is_finite()) {
         return Err(invalid("The saturation level must be finite"));
@@ -440,24 +473,85 @@ pub fn aperture_photometry(
     {
         return Err(invalid("The gain must be finite and positive"));
     }
-    check_map(maps.mask.map(<[u8]>::len), pixels, "mask")?;
-    check_map(maps.saturation.map(<[u8]>::len), pixels, "saturation")?;
-    check_map(maps.uncertainty.map(<[f32]>::len), pixels, "uncertainty")?;
     if positions.iter().flatten().any(|value| !value.is_finite()) {
         return Err(invalid("Aperture positions must be finite"));
     }
-    Ok(positions
-        .iter()
-        .map(|position| measure(image, *position, options, maps))
-        .collect())
+    Ok(())
 }
 
-fn measure(
-    image: &LinearImage,
+/// One sample of a mono image and its optional quality/noise maps.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AperturePixel {
+    /// Linear sample in the image's units.
+    pub value: f32,
+    /// Exclude this pixel from the aperture and sky annulus.
+    pub masked: bool,
+    /// Producer-supplied clipping evidence, in addition to the scalar ceiling.
+    pub saturated: bool,
+    /// Total one-sigma error, including source photons. Supply `Some` for
+    /// every usable aperture pixel when a noise map is present; missing or
+    /// invalid errors in such an aperture leave its flux error unavailable.
+    /// With `None` throughout an aperture, use the annulus noise and gain.
+    pub uncertainty: Option<f32>,
+}
+
+/// Owned local samples ready for photometry, independent of the input buffers.
+/// This separates reading borrowed or strided host data from fitting the sky;
+/// a Python host can release the GIL after sampling without retaining NumPy
+/// memory. Storage scales with the sampled apertures and annuli, not image size.
+/// For large catalogues, sample and measure in bounded batches.
+pub struct AperturePhotometry {
+    samples: Vec<StarSamples>,
+    gain: Option<f64>,
+}
+
+impl AperturePhotometry {
+    /// Copy only pixels contributing to the requested apertures and annuli.
+    /// `read(x, y)` is called only for valid zero-based image coordinates.
+    /// The callback and its buffers are not retained. Geometry, options and
+    /// all positions are validated before the first read. Measurement rules
+    /// are identical to [`aperture_photometry`].
+    pub fn sample(
+        width: usize,
+        height: usize,
+        positions: &[[f64; 2]],
+        options: &AperturePhotometryOptions,
+        mut read: impl FnMut(usize, usize) -> AperturePixel,
+    ) -> Result<Self> {
+        validate_sampling(width, height, positions, options)?;
+        Ok(Self {
+            samples: positions
+                .iter()
+                .map(|position| sample(width, height, *position, options, &mut read))
+                .collect(),
+            gain: options.gain,
+        })
+    }
+
+    /// Fit the local skies and measure the saved samples in request order.
+    /// Consumes the samples and reads no host image memory.
+    pub fn measure(self) -> Vec<ApertureMeasurement> {
+        self.samples
+            .into_iter()
+            .map(|sample| sample.measure(self.gain))
+            .collect()
+    }
+}
+
+struct StarSamples {
+    result: ApertureMeasurement,
+    aperture: Vec<(f64, f64, f64, f64, Option<f32>)>,
+    sky: Vec<(f64, f64, f64)>,
+    annulus_area: usize,
+}
+
+fn sample(
+    width: usize,
+    height: usize,
     [x, y]: [f64; 2],
     options: &AperturePhotometryOptions,
-    maps: &ApertureMaps<'_>,
-) -> ApertureMeasurement {
+    read: &mut impl FnMut(usize, usize) -> AperturePixel,
+) -> StarSamples {
     let geometry = &options.geometry;
     let radius = geometry.aperture_radius;
     let outer = geometry.annulus_outer;
@@ -477,12 +571,7 @@ fn measure(
         peak: None,
         flags,
     };
-    let saturated = |index: usize, value: f64| {
-        options.saturation.is_some_and(|level| value >= level)
-            || maps.saturation.is_some_and(|map| map[index] != 0)
-    };
-
-    // (weight, dx, dy, value, index) of each usable aperture pixel.
+    // (weight, dx, dy, value, uncertainty) of each usable aperture pixel.
     let mut aperture = Vec::new();
     let mut sky = Vec::new();
     let mut annulus_area = 0_usize;
@@ -500,28 +589,28 @@ fn measure(
                 continue;
             }
             annulus_area += usize::from(in_annulus);
-            let on_image =
-                px >= 0 && py >= 0 && (px as usize) < image.width && (py as usize) < image.height;
-            let index = if on_image {
-                py as usize * image.width + px as usize
+            let on_image = px >= 0 && py >= 0 && (px as usize) < width && (py as usize) < height;
+            let pixel = if on_image {
+                read(px as usize, py as usize)
             } else {
-                0
+                AperturePixel {
+                    value: f32::NAN,
+                    ..Default::default()
+                }
             };
-            let value = if on_image {
-                f64::from(image.data[index])
-            } else {
-                f64::NAN
-            };
-            let usable = value.is_finite() && !maps.mask.is_some_and(|mask| mask[index] != 0);
+            let value = f64::from(pixel.value);
+            let usable = value.is_finite() && !pixel.masked;
+            let saturated =
+                pixel.saturated || options.saturation.is_some_and(|level| value >= level);
             if weight > 0.0 {
                 if usable {
-                    flags.saturated |= saturated(index, value);
-                    aperture.push((weight, dx, dy, value, index));
+                    flags.saturated |= saturated;
+                    aperture.push((weight, dx, dy, value, pixel.uncertainty));
                 } else {
                     flags.missing_coverage = true;
                 }
             }
-            if in_annulus && usable && !saturated(index, value) {
+            if in_annulus && usable && !saturated {
                 sky.push((dx, dy, value));
             }
         }
@@ -532,56 +621,74 @@ fn measure(
         result.peak = aperture.iter().map(|pixel| pixel.3).max_by(f64::total_cmp);
     }
 
-    let enough_sky = sky.len() as f64 >= MINIMUM_ANNULUS_FRACTION * annulus_area as f64;
-    let Some(sky) = enough_sky.then(|| fit_sky(&sky)).flatten() else {
-        flags.unusable = true;
-        result.flags = flags;
-        return result;
-    };
-    if (sky.pixels as f64) < MINIMUM_ANNULUS_FRACTION * annulus_area as f64 {
-        flags.unusable = true;
-        result.flags = flags;
-        return result;
+    result.flags = flags;
+    StarSamples {
+        result,
+        aperture,
+        sky,
+        annulus_area,
     }
-    result.background = Some(sky.at(0.0, 0.0));
-    result.background_noise = Some(sky.noise);
-    result.annulus_pixels = sky.pixels;
-    if aperture.is_empty() {
-        flags.unusable = true;
-        result.flags = flags;
-        return result;
-    }
+}
 
-    let flux: f64 = aperture
-        .iter()
-        .map(|(weight, dx, dy, value, _)| weight * (value - sky.at(*dx, *dy)))
-        .sum();
-    // The aperture sums predictions of a three-coefficient sky plane. Its
-    // error depends on the annulus geometry, including asymmetric masking,
-    // and on the first moments of the covered aperture, not only its area.
-    let moments = aperture
-        .iter()
-        .fold(Vector3::zeros(), |sum, (w, dx, dy, _, _)| {
-            sum + Vector3::new(*w, w * dx, w * dy)
-        });
-    let sky_error = sky
-        .normal
-        .lu()
-        .solve(&moments)
-        .map(|solution| (moments.dot(&solution) * sky.noise * sky.noise).max(0.0));
-    // The flux is a weighted sum of whole pixels' values, so each pixel's
-    // variance enters by its weight squared.
-    let variance = match maps.uncertainty {
-        Some(map) => aperture
+impl StarSamples {
+    fn measure(self, gain: Option<f64>) -> ApertureMeasurement {
+        let Self {
+            mut result,
+            aperture,
+            sky,
+            annulus_area,
+        } = self;
+        let mut flags = result.flags;
+        let enough_sky = sky.len() as f64 >= MINIMUM_ANNULUS_FRACTION * annulus_area as f64;
+        let Some(sky) = enough_sky.then(|| fit_sky(&sky)).flatten() else {
+            flags.unusable = true;
+            result.flags = flags;
+            return result;
+        };
+        if (sky.pixels as f64) < MINIMUM_ANNULUS_FRACTION * annulus_area as f64 {
+            flags.unusable = true;
+            result.flags = flags;
+            return result;
+        }
+        result.background = Some(sky.at(0.0, 0.0));
+        result.background_noise = Some(sky.noise);
+        result.annulus_pixels = sky.pixels;
+        if aperture.is_empty() {
+            flags.unusable = true;
+            result.flags = flags;
+            return result;
+        }
+
+        let flux: f64 = aperture
             .iter()
-            .map(|(weight, _, _, _, index)| {
-                let sigma = f64::from(map[*index]);
-                (sigma.is_finite() && sigma >= 0.0).then_some(weight * weight * sigma * sigma)
-            })
-            .sum::<Option<f64>>(),
-        None => {
+            .map(|(weight, dx, dy, value, _)| weight * (value - sky.at(*dx, *dy)))
+            .sum();
+        // The aperture sums predictions of a three-coefficient sky plane. Its
+        // error depends on the annulus geometry, including asymmetric masking,
+        // and on the first moments of the covered aperture, not only its area.
+        let moments = aperture
+            .iter()
+            .fold(Vector3::zeros(), |sum, (w, dx, dy, _, _)| {
+                sum + Vector3::new(*w, w * dx, w * dy)
+            });
+        let sky_error = sky
+            .normal
+            .lu()
+            .solve(&moments)
+            .map(|solution| (moments.dot(&solution) * sky.noise * sky.noise).max(0.0));
+        // The flux is a weighted sum of whole pixels' values, so each pixel's
+        // variance enters by its weight squared.
+        let variance = if aperture.iter().any(|pixel| pixel.4.is_some()) {
+            aperture
+                .iter()
+                .map(|(weight, _, _, _, uncertainty)| {
+                    let sigma = f64::from((*uncertainty)?);
+                    (sigma.is_finite() && sigma >= 0.0).then_some(weight * weight * sigma * sigma)
+                })
+                .sum::<Option<f64>>()
+        } else {
             let weights: f64 = aperture.iter().map(|pixel| pixel.0 * pixel.0).sum();
-            let photons = options.gain.map_or(0.0, |gain| {
+            let photons = gain.map_or(0.0, |gain| {
                 let source: f64 = aperture
                     .iter()
                     .map(|(weight, dx, dy, value, _)| weight * weight * (value - sky.at(*dx, *dy)))
@@ -589,19 +696,20 @@ fn measure(
                 source.max(0.0) / gain
             });
             Some(weights * sky.noise * sky.noise + photons)
+        };
+        let error = variance
+            .zip(sky_error)
+            .map(|(variance, sky_error)| (variance + sky_error).sqrt());
+        result.flux = Some(flux);
+        result.flux_error = error;
+        if flux > 0.0 {
+            result.magnitude = Some(-2.5 * flux.log10());
+            result.magnitude_error =
+                error.map(|error| 2.5 / std::f64::consts::LN_10 * error / flux);
         }
-    };
-    let error = variance
-        .zip(sky_error)
-        .map(|(variance, sky_error)| (variance + sky_error).sqrt());
-    result.flux = Some(flux);
-    result.flux_error = error;
-    if flux > 0.0 {
-        result.magnitude = Some(-2.5 * flux.log10());
-        result.magnitude_error = error.map(|error| 2.5 / std::f64::consts::LN_10 * error / flux);
+        result.flags = flags;
+        result
     }
-    result.flags = flags;
-    result
 }
 
 #[cfg(test)]

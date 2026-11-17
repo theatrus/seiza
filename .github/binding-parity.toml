@@ -388,12 +388,16 @@ core = "seiza-satellites::PixelSegment"
 # by the C ABI; otherwise an entry says why not. "crate::*" covers a whole
 # crate of building blocks.
 [core_functions]
+"seiza-stacking::aperture_photometry" = { none = "owned LinearImage convenience call; C and Python perform the same native photometry through AperturePhotometry sampling to avoid copying full host buffers" }
+"seiza-stacking::AperturePhotometry::*" = { none = "native sampling and measurement stages both run in seiza_aperture_photometry_json and Python aperture_photometry; neither binding exposes a staged lifetime" }
+
 "seiza-image-ser::*" = { none = "standalone raw sequence reader; explicitly scoped to Rust with no file-dispatch, stacker, C ABI or Python integration in this change" }
 "seiza-stacking::calibration_files::verify_sources" = { none = "source verification reached through the C calibration-files workflow and Python CalibrationFiles.verify" }
 "seiza-stacking::FileCalibration::*" = { none = "native coordinator methods are reached through seiza_calibration_files_json and bound directly by Python CalibrationFiles" }
 
 "seiza-stacking::measure_flat_stability" = { none = "C and Python offer both file and cached-image measurement; this native hybrid accepts a loaded master and streams file sources through the same algorithm" }
 objects = [
+    "seiza-stacking::AperturePhotometry",
     "seiza-image-ser::SerReader",
     "seiza-image-ser::ColorLayout",
     "seiza-stacking::FileCalibration",

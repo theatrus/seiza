@@ -1,6 +1,8 @@
 //! Thin JSON and planar-buffer translation of forced aperture photometry.
 use super::*;
-use seiza_stacking::{ApertureMaps, ApertureMeasurement, AperturePhotometryOptions};
+use seiza_stacking::{
+    ApertureMeasurement, AperturePhotometry, AperturePhotometryOptions, AperturePixel,
+};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -62,27 +64,35 @@ pub unsafe extern "C" fn seiza_aperture_photometry_json(
             parse_request(request_json, "aperture photometry")?;
         let length = display_length(width, height, 1)?;
         let samples = unsafe { required_f32_slice(data, length, "aperture photometry image")? };
-        let image =
-            LinearImage::new(width, height, 1, samples.to_vec()).map_err(photometry_error)?;
         let bytes = |plane: *const u8| {
             (!plane.is_null()).then(|| unsafe { std::slice::from_raw_parts(plane, length) })
         };
-        let maps = ApertureMaps {
-            mask: bytes(mask),
-            saturation: bytes(saturation_mask),
-            uncertainty: if uncertainty.is_null() {
-                None
-            } else {
-                Some(unsafe { required_f32_slice(uncertainty, length, "uncertainty map")? })
-            },
+        let mask = bytes(mask);
+        let saturation = bytes(saturation_mask);
+        let uncertainty = if uncertainty.is_null() {
+            None
+        } else {
+            Some(unsafe { required_f32_slice(uncertainty, length, "uncertainty map")? })
         };
-        let measurements = seiza_stacking::aperture_photometry(
-            &image,
-            &request.positions,
-            &request.options,
-            &maps,
-        )
-        .map_err(photometry_error)?;
+        let read = |x: usize, y: usize| {
+            let index = y * width + x;
+            AperturePixel {
+                value: samples[index],
+                masked: mask.is_some_and(|map| map[index] != 0),
+                saturated: saturation.is_some_and(|map| map[index] != 0),
+                uncertainty: uncertainty.map(|map| map[index]),
+            }
+        };
+        AperturePhotometry::sample(width, height, &[], &request.options, read)
+            .map_err(photometry_error)?;
+        let mut measurements = Vec::with_capacity(request.positions.len());
+        for positions in request.positions.chunks(64) {
+            measurements.extend(
+                AperturePhotometry::sample(width, height, positions, &request.options, read)
+                    .map_err(photometry_error)?
+                    .measure(),
+            );
+        }
         owned_json(&AperturePhotometryResponse { measurements })
     })
     .unwrap_or(ptr::null_mut())
@@ -91,7 +101,7 @@ pub unsafe extern "C" fn seiza_aperture_photometry_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use seiza_stacking::ApertureGeometry;
+    use seiza_stacking::{ApertureGeometry, ApertureMaps};
 
     #[test]
     fn json_measurements_match_the_core_with_and_without_maps() {
@@ -108,7 +118,11 @@ mod tests {
         let mut clipped = vec![0_u8; width * height];
         clipped[22 * width + 30] = 1;
         let uncertainty = vec![2.0_f32; width * height];
-        let positions = vec![[30.4, 22.7], [10.0, 40.0], [-50.0, 3.0]];
+        let positions: Vec<_> = [[30.4, 22.7], [10.0, 40.0], [-50.0, 3.0]]
+            .into_iter()
+            .cycle()
+            .take(70)
+            .collect();
         let mut options = AperturePhotometryOptions::new(ApertureGeometry::new(5.0, 8.0, 12.0));
         options.gain = Some(1.5);
         let image = LinearImage::new(width, height, 1, data.clone()).unwrap();

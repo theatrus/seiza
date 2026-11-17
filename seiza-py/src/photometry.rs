@@ -1,10 +1,11 @@
 //! Thin translation of the core's forced aperture photometry.
+use numpy::ndarray::{ArrayView2, Ix2};
 use numpy::{PyReadonlyArray2, PyReadonlyArrayDyn, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use seiza_stacking::{
-    ApertureFlags, ApertureGeometry, ApertureMaps, ApertureMeasurement, AperturePhotometryOptions,
-    LinearImage,
+    ApertureFlags, ApertureGeometry, ApertureMeasurement, AperturePhotometry,
+    AperturePhotometryOptions, AperturePixel,
 };
 
 /// What is wrong with a measurement, if anything.
@@ -122,53 +123,79 @@ impl PyApertureMeasurement {
     }
 }
 
-/// A mono plane's samples in row order. A strided view, such as one channel
-/// of a colour array, is read through its strides.
-fn mono_plane(
-    array: &PyReadonlyArrayDyn<'_, f32>,
-    name: &str,
-) -> PyResult<(usize, usize, Vec<f32>)> {
+/// Validate a plane without materializing its pixels.
+fn mono_shape(array: &PyReadonlyArrayDyn<'_, f32>, name: &str) -> PyResult<(usize, usize)> {
     let [height, width] = array.shape() else {
         return Err(PyValueError::new_err(format!(
-            "{name} must be one mono plane of shape (height, width); \
-             extract the channel to measure first, such as rgb[..., 1]"
+            "{name} must be one mono plane of shape (height, width); extract the channel to measure first, such as rgb[..., 1]"
         )));
     };
-    Ok((*width, *height, array.as_array().iter().copied().collect()))
+    Ok((*width, *height))
 }
 
-/// A boolean or uint8 plane on the image's grid, nonzero where set.
-fn byte_plane(
-    value: Option<&Bound<'_, PyAny>>,
+enum BytePlane<'py> {
+    Bool(PyReadonlyArrayDyn<'py, bool>),
+    Byte(PyReadonlyArrayDyn<'py, u8>),
+}
+impl BytePlane<'_> {
+    fn shape(&self) -> &[usize] {
+        match self {
+            Self::Bool(a) => a.shape(),
+            Self::Byte(a) => a.shape(),
+        }
+    }
+    fn view(&self) -> ByteView<'_> {
+        match self {
+            Self::Bool(a) => ByteView::Bool(
+                a.as_array()
+                    .into_dimensionality()
+                    .expect("validated map shape"),
+            ),
+            Self::Byte(a) => ByteView::Byte(
+                a.as_array()
+                    .into_dimensionality()
+                    .expect("validated map shape"),
+            ),
+        }
+    }
+}
+
+enum ByteView<'a> {
+    Bool(ArrayView2<'a, bool>),
+    Byte(ArrayView2<'a, u8>),
+}
+impl ByteView<'_> {
+    fn at(&self, x: usize, y: usize) -> bool {
+        match self {
+            Self::Bool(a) => a[[y, x]],
+            Self::Byte(a) => a[[y, x]] != 0,
+        }
+    }
+}
+
+/// Borrow a bool or uint8 map; sparse sampling reads through its strides.
+fn byte_plane<'py>(
+    value: Option<&Bound<'py, PyAny>>,
     width: usize,
     height: usize,
     name: &str,
-) -> PyResult<Option<Vec<u8>>> {
-    let Some(value) = value else {
-        return Ok(None);
+) -> PyResult<Option<BytePlane<'py>>> {
+    let Some(value) = value else { return Ok(None) };
+    let plane = if let Ok(array) = value.extract::<PyReadonlyArrayDyn<'py, bool>>() {
+        BytePlane::Bool(array)
+    } else if let Ok(array) = value.extract::<PyReadonlyArrayDyn<'py, u8>>() {
+        BytePlane::Byte(array)
+    } else {
+        return Err(PyValueError::new_err(format!(
+            "{name} must be a bool or uint8 array"
+        )));
     };
-    let (shape, bytes): (Vec<usize>, Vec<u8>) =
-        if let Ok(array) = value.extract::<PyReadonlyArrayDyn<'_, bool>>() {
-            (
-                array.shape().to_vec(),
-                array.as_array().iter().map(|set| u8::from(*set)).collect(),
-            )
-        } else if let Ok(array) = value.extract::<PyReadonlyArrayDyn<'_, u8>>() {
-            (
-                array.shape().to_vec(),
-                array.as_array().iter().copied().collect(),
-            )
-        } else {
-            return Err(PyValueError::new_err(format!(
-                "{name} must be a bool or uint8 array"
-            )));
-        };
-    if shape != [height, width] {
+    if plane.shape() != [height, width] {
         return Err(PyValueError::new_err(format!(
             "{name} must have the image's shape ({height}, {width})"
         )));
     }
-    Ok(Some(bytes))
+    Ok(Some(plane))
 }
 
 /// Positions as a sequence of (x, y) pairs or an (n, 2) float array.
@@ -214,37 +241,50 @@ fn aperture_photometry(
     saturation_mask: Option<&Bound<'_, PyAny>>,
     uncertainty: Option<PyReadonlyArrayDyn<'_, f32>>,
 ) -> PyResult<Vec<PyApertureMeasurement>> {
-    let (width, height, data) = mono_plane(&image, "image")?;
-    let image = LinearImage::new(width, height, 1, data)
-        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let (width, height) = mono_shape(&image, "image")?;
     let mask = byte_plane(mask, width, height, "mask")?;
     let saturation_mask = byte_plane(saturation_mask, width, height, "saturation_mask")?;
-    let uncertainty = uncertainty
-        .map(|array| {
-            let (map_width, map_height, data) = mono_plane(&array, "uncertainty")?;
-            if (map_width, map_height) != (width, height) {
-                return Err(PyValueError::new_err(format!(
-                    "uncertainty must have the image's shape ({height}, {width})"
-                )));
-            }
-            Ok(data)
-        })
-        .transpose()?;
+    if let Some(array) = &uncertainty
+        && mono_shape(array, "uncertainty")? != (width, height)
+    {
+        return Err(PyValueError::new_err(format!(
+            "uncertainty must have the image's shape ({height}, {width})"
+        )));
+    }
     let options = AperturePhotometryOptions {
         geometry: ApertureGeometry::new(aperture_radius, annulus_inner, annulus_outer),
         saturation,
         gain,
     };
-    let measurements = py
-        .detach(move || {
-            let maps = ApertureMaps {
-                mask: mask.as_deref(),
-                saturation: saturation_mask.as_deref(),
-                uncertainty: uncertainty.as_deref(),
-            };
-            seiza_stacking::aperture_photometry(&image, &positions, &options, &maps)
-        })
+    let image_view = image
+        .as_array()
+        .into_dimensionality::<Ix2>()
+        .expect("validated image shape");
+    let uncertainty_view = uncertainty.as_ref().map(|array| {
+        array
+            .as_array()
+            .into_dimensionality::<Ix2>()
+            .expect("validated uncertainty shape")
+    });
+    let mask_view = mask.as_ref().map(BytePlane::view);
+    let saturation_view = saturation_mask.as_ref().map(BytePlane::view);
+    // Snapshot local pixels while holding the GIL, then fit owned samples.
+    // No borrowed NumPy memory escapes into detached Rust execution.
+    let read = |x: usize, y: usize| AperturePixel {
+        value: image_view[[y, x]],
+        masked: mask_view.as_ref().is_some_and(|map| map.at(x, y)),
+        saturated: saturation_view.as_ref().is_some_and(|map| map.at(x, y)),
+        uncertainty: uncertainty_view.as_ref().map(|map| map[[y, x]]),
+    };
+    // Validate even an empty request, then bound snapshot memory for catalogues.
+    AperturePhotometry::sample(width, height, &[], &options, read)
         .map_err(crate::continuum::core_error)?;
+    let mut measurements = Vec::with_capacity(positions.len());
+    for positions in positions.chunks(64) {
+        let sampled = AperturePhotometry::sample(width, height, positions, &options, read)
+            .map_err(crate::continuum::core_error)?;
+        measurements.extend(py.detach(move || sampled.measure()));
+    }
     Ok(measurements.into_iter().map(Into::into).collect())
 }
 

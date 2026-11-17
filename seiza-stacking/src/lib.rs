@@ -163,8 +163,8 @@ pub use normalization::{NormalizationMap, NormalizationMode};
 pub use orientation::{SKY_ORIENTATION_NAME, SKY_ORIENTATION_VERSION, SkyOrientationPlan};
 pub use paths::{path_identity, paths_refer_to_same_file};
 pub use photometry::{
-    ApertureFlags, ApertureGeometry, ApertureMaps, ApertureMeasurement, AperturePhotometryOptions,
-    aperture_photometry,
+    ApertureFlags, ApertureGeometry, ApertureMaps, ApertureMeasurement, AperturePhotometry,
+    AperturePhotometryOptions, AperturePixel, aperture_photometry,
 };
 pub use pipeline::{
     Continue, MAXIMUM_WORKERS, PipelineExecution, PipelineOptions, PipelineReport, PipelineTimings,
