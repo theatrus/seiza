@@ -373,6 +373,22 @@ class Settings:
     # every larger run, all blurred up to 3, has 1.7 to 3.3%
     # (2026-11-10). 0: no floor.
     rest_floor: float = 0.0
+    # How hard the finest part of what is asked of the rest is held back
+    # under noise (`rolled_off`): a known-kernel window's target for the
+    # rest keeps of its change's fine part, under `FINE_SPLIT` px, the
+    # share its local power is of that power and the square of this times
+    # the noise the window is shown under. A target is its truth at the
+    # narrower width whatever its noise, and where the detail it asks for
+    # at 2 to 4 px lies under the noise no run can find it: the runs raise
+    # what the input shows in that band, its noise first. A larger run
+    # trained twice as long on larger tiles raised it more, not less: half
+    # again the bright dots inside a cloud that the goal leaves, of
+    # which one in thirty is in a deeper stack of the field, with the
+    # detail at 2 to 4 px 9% up where the goal's is 4% up, and that
+    # at 8 to 16 px 6% up against 11%. The same rule as a step on that
+    # run's output (`rolloff_step`) brought the dots and the knots along
+    # the rims to the goal's (2026-11-16). 0: none.
+    fine_snr: float = 0.0
 
     @property
     def planes(self) -> tuple[str, ...]:
@@ -438,6 +454,15 @@ class LossSettings:
     # at the listed stars the other terms' was +1.07
     # (2026-11-10). A network cannot tell which stars a tile lists.
     edge_clear: bool = False
+    # The weight of the overshoot term (`edge_overshoot`): the share by
+    # which the output's gradient, smoothed as the edge term's, stands over
+    # the target's where the target has next to none, away from the stars
+    # the edge term keeps clear of. The edge term counts falling short and
+    # never going past, on every pixel by how much of an edge it is; where
+    # there is no edge, only the passed noise's, nothing charged a run for
+    # a steeper one, and the runs raise the noise inside a cloud
+    # (`Settings.fine_snr`). 0: no such term.
+    overshoot_weight: float = 0.0
     # The weight of the roundness term: each listed star's ellipticity in
     # the output, from the second moments of its light above its
     # aperture's mean, |Mxx - Myy| + 2|Mxy| over Mxx + Myy. A known-kernel
@@ -1422,6 +1447,55 @@ def clarity_step(output: np.ndarray, amount: float, width: float, points: np.nda
     return np.where(finite, made, np.nan).astype(np.float32)
 
 
+# The fine part of a change that is held back under noise
+# (`Settings.fine_snr`): what a Gaussian of `FINE_SPLIT` px (σ) takes out
+# of it, kept by its power, its square smoothed over `FINE_AREA` px (σ),
+# over that power and the square of the noise asked about. A star's or a
+# sharp rim's fine change stands far over the noise and is kept whole;
+# faint detail's lies under it and goes, with what a run made of the
+# noise itself. As a step on a run's output, on a stack with stars
+# 11.5 px across asked for half the width, at half the noise: the bright
+# dots inside a cloud fell from 150 a megapixel to 105 and the knots
+# along the rims from 1.11% of pixels to 0.91% (the goal: 103 and
+# 0.98%), the detail between 1 and 2 px and between 2 and 4 px from 4%
+# and 9% over the input's to 1% and 6%, and that from 4 px up stayed; a
+# rim's lit side, in its mean profile, kept 96% of its rise 4 and 6 px in
+# (2026-11-16).
+FINE_SPLIT = 2.0
+FINE_AREA = 4.0
+
+
+def rolled_off(sharp: np.ndarray, soft: np.ndarray, amount: float, noise: np.ndarray | float) -> tuple[np.ndarray, int]:
+    """`sharp`, a sharpening of `soft`, with the fine part of its change
+    held back where it lies under `amount` times `noise` (see
+    `FINE_SPLIT`), and how far it reads."""
+    if not amount > 0:
+        return sharp, 0
+    change = sharp - soft
+    fine = change - blurred_images(change, [FINE_SPLIT**2 * np.eye(2)])[0]
+    power = np.clip(blurred_images(fine * fine, [FINE_AREA**2 * np.eye(2)])[0], 0.0, None)
+    floor = (amount * np.nan_to_num(noise)) ** 2
+    with np.errstate(divide="ignore", invalid="ignore"):
+        kept = np.nan_to_num(power / (power + floor), nan=1.0)
+    reach = blur_reach(FINE_SPLIT**2 * np.eye(2)) + blur_reach(FINE_AREA**2 * np.eye(2))
+    return (sharp - (1.0 - kept) * fine).astype(np.float32), reach
+
+
+def rolloff_step(output: np.ndarray, image: np.ndarray, amount: float, noise_map: np.ndarray) -> np.ndarray:
+    """A sharpened image with the fine part of its change from `image`,
+    its input, held back under `amount` times `noise_map`, the input's
+    noise, as a fixed step after the model (`rolled_off`): what a run
+    taught a `fine_snr` is asked for, on a run that was not. NaN stays
+    NaN."""
+    if not amount > 0:
+        return output
+    finite = np.isfinite(output) & np.isfinite(image)
+    level = np.float32(np.median(output[finite][::17]))
+    made = rolled_off(np.where(finite, output, level).astype(np.float32),
+                      np.where(finite, image, level).astype(np.float32), amount, noise_map)[0]
+    return np.where(finite, made, output).astype(np.float32)
+
+
 # The shade a known-kernel target is given on the dark side of a strong
 # edge (`Settings.shade`): `SHADE_LIFT` times what falls, in the target
 # smoothed by `CLARITY_FINE` input widths, below its mean over squares
@@ -1628,6 +1702,10 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
             stars = halo.mixed(stars, wide, halo.kept(ratio, kernel))
             rest = halo.mixed(rest, wide, halo.kept(nonstellar_ratio, kernel))
             band = max(band, blur_reach(halo.covariance))
+        if settings.fine_snr > 0:
+            # Under the noise the window is shown under, not its stack's.
+            rest, reach = rolled_off(rest, blurred, settings.fine_snr, share * sigma)
+            band = max(band, reach)
         if settings.contrast > 0 and nonstellar_ratio < 1.0:
             # More the more is asked of the rest, and none at 1.
             contrast = settings.contrast * (1.0 - nonstellar_ratio)
@@ -2182,13 +2260,18 @@ def loss_terms(residual: torch.Tensor, batch: dict[str, torch.Tensor], settings:
     flux = (charbonnier(scores, epsilon) * areas[:, 1:]).sum() / valid.sum().clamp(min=1.0)
     total = pixel + settings.gradient_weight * gradient + settings.flux_weight * flux
     terms_out = {"pixel": pixel, "gradient": gradient, "flux": flux}
-    if settings.edge_weight > 0:
+    if settings.edge_weight > 0 or settings.overshoot_weight > 0:
         away = valid * (batch["labels"].reshape(valid.shape) == 0)
         if settings.edge_clear and "sources" in batch:
             away = away * (batch["sources"].reshape(valid.shape) == 0)
+    if settings.edge_weight > 0:
         edge = edge_shortfall(output, batch["target"], away)
         total = total + settings.edge_weight * edge
         terms_out["edge"] = edge
+    if settings.overshoot_weight > 0:
+        overshoot = edge_overshoot(output, batch["target"], away)
+        total = total + settings.overshoot_weight * overshoot
+        terms_out["overshoot"] = overshoot
     if settings.round_weight > 0:
         roundness = star_ellipticity(output, batch["labels"])
         total = total + settings.round_weight * roundness
@@ -2312,6 +2395,23 @@ def edge_shortfall(output: torch.Tensor, target: torch.Tensor, where: torch.Tens
     return (weight * torch.relu(-along)).sum() / (weight * size).sum().clamp(min=1e-6)
 
 
+def edge_overshoot(output: torch.Tensor, target: torch.Tensor, where: torch.Tensor) -> torch.Tensor:
+    """The share by which the output's smoothed gradient stands over the
+    target's, in size, over the pixels of `where` weighed by how little of
+    an edge each is in the target (`EDGE_KNEE`, squared, so that going
+    past a rim's target stays all but free), as a share of the target's
+    with the knee: the edge term's other side, where the target is flat.
+    Falling short costs nothing here."""
+    target_across, target_down = smoothed_gradient(target * where)
+    size = torch.sqrt(target_across**2 + target_down**2 + 1e-12)
+    output_across, output_down = smoothed_gradient(output * where)
+    over = torch.relu(torch.sqrt(output_across**2 + output_down**2 + 1e-12) - size)
+    reach = int(math.ceil(3 * EDGE_SMOOTH))
+    inside = -torch.nn.functional.max_pool2d(-where.float(), 2 * reach + 1, stride=1, padding=reach)[..., 1:-1, 1:-1]
+    weight = inside * (EDGE_KNEE / (size + EDGE_KNEE)) ** 2
+    return (weight * over).sum() / (weight * (size + EDGE_KNEE)).sum().clamp(min=1e-6)
+
+
 # Training.
 
 
@@ -2382,10 +2482,14 @@ def train(
     batch_threads: int = 4,
     workers: int = 0,
     where: torch.device | None = None,
+    init_from: str | None = None,
 ) -> dict[str, Any]:
     """Train a PSF model on the banks `choice` names, the known-kernel,
     seeing and pairs banks mixed by `mix`, record it under
     `STORE/models/sharpen/<name>/` and measure it on the validation banks.
+    With `init_from`, the network starts from that recorded run's weights,
+    which must be of the same shape: a run taught one thing more, at a
+    fraction of its steps.
     With `oversample` the network works that many times finer than the
     image (`SharpeningUNet`): a tile costs its square times as much, and
     the tile, the losses and the measures stay in the image's pixels.
@@ -2419,6 +2523,7 @@ def train(
     call = json.loads(json.dumps({
         "steps": steps, "width": width, "levels": levels, **({"attention": attention} if attention else {}),
         **({"oversample": oversample} if oversample != 1 else {}),
+        **({"init_from": init_from} if init_from else {}),
         "batch": batch, "learning_rate": learning_rate,
         "seed": seed, "log_every": log_every, "checkpoint_every": checkpoint_every, "settings": asdict(settings),
         "loss": asdict(loss), "mix": list(mix), "clip_grad": clip_grad, "rewind": rewind, "precision": precision,
@@ -2444,7 +2549,11 @@ def train(
     torch.manual_seed(seed)
     where = where or device()
     cuda = where.type == "cuda"
-    model = build_model(width, levels, settings.planes, attention, oversample).to(where)
+    model = build_model(width, levels, settings.planes, attention, oversample)
+    if init_from and not resume:
+        model.load_state_dict(torch.load(run_directory(store, init_from) / "weights.pt", map_location="cpu"))
+        print(f"train {name}: starting from {init_from}'s weights", flush=True)
+    model = model.to(where)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     schedule = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=learning_rate, total_steps=steps, pct_start=0.05)
     guard = Rewind(model, optimizer, rewind) if rewind else None

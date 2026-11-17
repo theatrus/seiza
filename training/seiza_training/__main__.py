@@ -243,6 +243,9 @@ def main(argv: list[str] | None = None) -> int:
                                     "options below, but --stop-after, --prefetch and --batch-threads, are not read)")
     sharpen_train.add_argument("--stop-after", type=int,
                                help="stop after this step with a checkpoint, to go on later with --resume")
+    sharpen_train.add_argument("--init-from", metavar="RUN",
+                               help="start from this recorded run's weights, which must be of the same width, levels "
+                                    "and planes (default: from nothing)")
     sharpen_train.add_argument("--steps", type=int, default=20_000)
     sharpen_train.add_argument("--width", type=int, default=32)
     sharpen_train.add_argument("--levels", type=int, default=4)
@@ -347,6 +350,9 @@ def main(argv: list[str] | None = None) -> int:
                                help="shade asked on the dark side of strong edges: a known-kernel target, after its "
                                     "noise and clarity, is given this, times one less its ratio, of what dips below "
                                     "its local mean beside a strong edge (0: none)")
+    sharpen_train.add_argument("--fine-snr", type=float, default=0.0,
+                               help="hold back the finest part of what is asked of what is not a star where it lies "
+                                    "under this times the noise a known-kernel window is shown under (0: never)")
     sharpen_train.add_argument("--rest-floor", type=float, default=0.0,
                                help="the least ratio asked of what is not a star in a known-kernel window, whatever "
                                     "its stars are asked (0: none)")
@@ -390,6 +396,10 @@ def main(argv: list[str] | None = None) -> int:
     sharpen_train.add_argument("--edge-weight", type=float, default=0.0,
                                help="the weight of the edge term: the share of the target's smoothed gradient the "
                                     "output falls short of, away from the listed stars (0: none)")
+    sharpen_train.add_argument("--overshoot-weight", type=float, default=0.0,
+                               help="the weight of the overshoot term: the share by which the output's smoothed "
+                                    "gradient stands over the target's where the target is flat, away from the "
+                                    "listed stars (0: none)")
     sharpen_train.add_argument("--edge-clear", action="store_true",
                                help="keep the edge term clear of every detected point source, not only of the stars "
                                     "the loss lists")
@@ -459,6 +469,11 @@ def main(argv: list[str] | None = None) -> int:
                                help="local contrast added to every output after the model, as train-sharpen's "
                                     "--clarity asks of a run at a ratio of 0; its sheets go beside the run's own "
                                     "(0: none)")
+    sharpen_sheet.add_argument("--rolloff", type=float, default=0.0,
+                               help="hold back the finest part of every output's change from its input where it "
+                                    "lies under this times the input's noise, after the model and before any "
+                                    "clarity, as train-sharpen's --fine-snr asks of a run; its sheets go beside "
+                                    "the run's own (0: never)")
 
     evaluate = commands.add_parser("evaluate-noise", help="measure a trained noise model on a split")
     evaluate.add_argument("--name", required=True)
@@ -697,7 +712,8 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
         from . import sharpen_sheets
 
         named = set(arguments.sheets_named) if arguments.sheets_named else None
-        return sharpen_sheets.render_saved(store, manifest, arguments.name, only=named, clarity=arguments.clarity)
+        return sharpen_sheets.render_saved(store, manifest, arguments.name, only=named, clarity=arguments.clarity,
+                                           rolloff=arguments.rolloff)
     if command == "evaluate-noise":
         from .noise_model import NoiseBands, evaluate_saved
 
@@ -798,12 +814,13 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
         external_snr=arguments.external_snr, kernel_halo=arguments.kernel_halo,
         clean_truth=arguments.clean_truth, contrast=arguments.contrast, clarity=arguments.clarity,
         shade=arguments.shade,
-        rest_floor=arguments.rest_floor)
+        rest_floor=arguments.rest_floor, fine_snr=arguments.fine_snr)
     loss = sharpen_model.LossSettings(epsilon=arguments.charbonnier, noise_cap=arguments.noise_cap,
                                       gradient_weight=arguments.gradient_weight,
                                       gradient_scales=arguments.gradient_scales, flux_weight=arguments.flux_weight,
                                       edge_weight=arguments.edge_weight, round_weight=arguments.round_weight,
-                                      shape_weight=arguments.shape_weight, edge_clear=arguments.edge_clear)
+                                      shape_weight=arguments.shape_weight, edge_clear=arguments.edge_clear,
+                                      overshoot_weight=arguments.overshoot_weight)
     choice = sharpen_model.BankChoice(
         kernel=str(arguments.kernel_bank or sharpen_model.find_bank(work, "deep", "train")),
         seeing=tuple(str(path) for path in arguments.seeing_banks or [sharpen_model.find_bank(work, "seeing", "train")]),
@@ -826,7 +843,8 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
         mix=tuple(arguments.mix), clip_grad=arguments.clip_grad, rewind=arguments.rewind,
         precision=arguments.precision, validation_batches=arguments.validation_batches,
         validation_windows=arguments.validation_windows, stop_after=arguments.stop_after,
-        prefetch=arguments.prefetch, batch_threads=arguments.batch_threads, workers=arguments.workers)
+        prefetch=arguments.prefetch, batch_threads=arguments.batch_threads, workers=arguments.workers,
+        init_from=arguments.init_from)
     return summary_of(record)
 
 

@@ -432,6 +432,55 @@ def test_the_clarity_step_is_the_taught_clarity_on_a_whole_image():
     assert np.allclose(kept[rows, 30:66], made[rows, 30:66], atol=1e-3)
 
 
+def test_the_fine_part_of_a_change_is_held_back_under_noise(tmp_path):
+    side = 200
+    ys, xs = np.mgrid[:side, :side].astype(np.float32)
+    # A soft rim, sharpened; faint ripples 4 px long added far to its left.
+    soft = (140.0 + 30.0 * (1.0 + np.tanh((xs - 120.0) / 4.0))).astype(np.float32)
+    ripple = (0.2 * np.sin(2 * np.pi * xs / 4.0) * (xs < 60)).astype(np.float32)
+    sharp = (140.0 + 30.0 * (1.0 + np.tanh((xs - 120.0) / 1.5)) + ripple).astype(np.float32)
+    noise = np.ones((side, side), np.float32)
+    # None asked, or no noise: as it was.
+    assert sm.rolled_off(sharp, soft, 0.0, noise) == (sharp, 0)
+    assert np.allclose(sm.rolled_off(sharp, soft, 1.0, 0.0)[0], sharp, atol=1e-4)
+    made, reach = sm.rolled_off(sharp, soft, 1.0, noise)
+    assert reach == sm.blur_reach(sm.FINE_SPLIT**2 * np.eye(2)) + sm.blur_reach(sm.FINE_AREA**2 * np.eye(2))
+
+    def kept(columns):
+        asked, given = (sharp - soft)[80, columns], (made - soft)[80, columns]
+        return float((asked * given).sum() / (asked**2).sum())
+
+    # The ripples under the noise go, and the rim's sharpening stays.
+    assert kept(slice(10, 50)) < 0.1
+    assert kept(slice(112, 129)) > 0.9
+    # Twice the noise, less kept.
+    harder = sm.rolled_off(sharp, soft, 2.0, noise)[0]
+    assert np.abs(harder - soft)[80, 10:50].max() < np.abs(made - soft)[80, 10:50].max()
+    # As a step on a whole image: the same, and NaN stays NaN.
+    assert sm.rolloff_step(sharp, soft, 0.0, noise) is sharp
+    assert np.allclose(sm.rolloff_step(sharp, soft, 1.0, noise), made)
+    holed = sharp.copy()
+    holed[10:14, 180:184] = np.nan
+    step = sm.rolloff_step(holed, soft, 1.0, noise)
+    assert np.isnan(step[10:14, 180:184]).all() and np.isfinite(step).sum() == side * side - 16
+    assert np.allclose(step[60:100, 10:130], made[60:100, 10:130], atol=1e-3)
+    # In a window: on the target alone, and none without noise.
+    bank = sm.Bank(kernel_bank(tmp_path), sm.Settings(tile=32))
+    plain = sm.Settings(tile=32, exposure=1.0, kernel_noise=1.0, nonstellar=True, pass_noise=True)
+    asked = sm.Settings(tile=32, exposure=1.0, kernel_noise=1.0, nonstellar=True, pass_noise=True, fine_snr=1.0)
+    for seed in range(3):
+        without = sm.kernel_example(bank, 0, np.random.default_rng(seed), plain, identity=False)
+        example = sm.kernel_example(bank, 0, np.random.default_rng(seed), asked, identity=False)
+        assert example.ratio == without.ratio and np.array_equal(example.image, without.image)
+        assert np.abs(example.target - without.target).max() > 1e-4
+    quiet = sm.Settings(tile=32, exposure=1.0, kernel_noise=0.0, nonstellar=True, pass_noise=True, fine_snr=1.0)
+    still = sm.Settings(tile=32, exposure=1.0, kernel_noise=0.0, nonstellar=True, pass_noise=True)
+    assert np.allclose(sm.kernel_example(bank, 0, np.random.default_rng(0), quiet, identity=False).target,
+                       sm.kernel_example(bank, 0, np.random.default_rng(0), still, identity=False).target, atol=1e-4)
+    identity = sm.kernel_example(bank, 0, np.random.default_rng(0), asked, identity=True)
+    assert np.array_equal(identity.target, identity.image)
+
+
 def test_shade_darkens_the_dark_side_of_a_rim_alone(tmp_path):
     side = 200
     ys, xs = np.mgrid[:side, :side].astype(np.float32)
@@ -1253,6 +1302,26 @@ def test_a_resumed_run_is_the_run_it_continues(tmp_path):
     assert isinstance(model, SharpeningUNet)
 
 
+def test_a_run_can_start_from_another_runs_weights(tmp_path):
+    store = Store(tmp_path / "store", tmp_path / "scratch")
+    choice = sm.BankChoice(kernel=str(kernel_bank(tmp_path)), seeing=(str(pair_bank(tmp_path)),),
+                           validation_kernel=None, validation_seeing=(), excluded=())
+    options = {"choice": choice, "steps": 2, "width": 4, "levels": 2, "batch": 2, "log_every": 2,
+               "checkpoint_every": 2, "settings": sm.Settings(tile=32), "validation_batches": 0,
+               "validation_windows": 0, "prefetch": 0, "where": torch.device("cpu")}
+    sm.train(store, name="first", **options)
+    # At next to no learning rate the second run stays where it started.
+    sm.train(store, name="second", init_from="first", learning_rate=1e-12, seed=7, **options)
+    sm.train(store, name="fresh", learning_rate=1e-12, seed=7, **options)
+    first, second, fresh = (torch.load(sm.run_directory(store, name) / "weights.pt")
+                            for name in ("first", "second", "fresh"))
+    assert all(torch.allclose(first[key], second[key], atol=1e-6) for key in first)
+    assert not all(torch.allclose(first[key], fresh[key], atol=1e-6) for key in first)
+    recorded = json.loads((sm.run_directory(store, "second") / "config.json").read_text())["call"]
+    assert recorded["init_from"] == "first"
+    assert "init_from" not in json.loads((sm.run_directory(store, "fresh") / "config.json").read_text())["call"]
+
+
 def test_the_commands_train_stop_resume_and_evaluate_from_the_banks_they_find(tmp_path, capsys):
     from seiza_training.__main__ import main
 
@@ -1297,6 +1366,36 @@ def test_the_edge_term_counts_falling_short_only():
     assert float(edge_shortfall(ramp, ramp, where)) < 1e-6
     assert float(edge_shortfall(1.5 * ramp, ramp, where)) < 1e-6
     assert abs(float(edge_shortfall(0.5 * ramp, ramp, where)) - 0.5) < 0.02
+
+
+def test_the_overshoot_term_counts_going_past_where_the_target_is_flat():
+    import torch
+
+    from seiza_training.sharpen_model import edge_overshoot
+
+    torch.manual_seed(0)
+    grain = 0.3 * torch.randn(1, 1, 96, 96)
+    where = torch.ones_like(grain)
+    assert float(edge_overshoot(grain, grain, where)) < 1e-6
+    assert float(edge_overshoot(0.5 * grain, grain, where)) < 1e-6
+    doubled = float(edge_overshoot(2.0 * grain, grain, where))
+    assert doubled > 0.1
+    assert float(edge_overshoot(3.0 * grain, grain, where)) > 1.8 * doubled
+    # Going past a rim's target, in a tile that is flat elsewhere, is all
+    # but free, as the edge term has it.
+    rim = torch.zeros_like(grain)
+    rim[..., 40:56] = 4.0 * torch.arange(16.0)
+    rim[..., 56:] = 60.0
+    assert float(edge_overshoot(grain + 1.5 * rim, grain + rim, where)) < 0.03
+    assert float(edge_overshoot(2.0 * grain + rim, grain + rim, where)) > 0.05
+    # In the loss by its weight alone.
+    batch = {"reference": torch.zeros_like(grain), "target": grain, "valid": where, "sigma": torch.ones_like(grain),
+             "labels": torch.zeros(1, 1, 96, 96, dtype=torch.int64)}
+    plain = sm.loss_terms(2.0 * grain, batch, sm.LossSettings(), "linear")
+    asked = sm.loss_terms(2.0 * grain, batch, sm.LossSettings(overshoot_weight=2.0), "linear")
+    assert "overshoot" not in plain
+    assert float(asked["overshoot"]) == pytest.approx(doubled, rel=1e-5)
+    assert float(asked["total"]) == pytest.approx(float(plain["total"]) + 2.0 * doubled, rel=1e-5)
 
 
 def test_the_edge_term_can_keep_clear_of_stars_the_loss_does_not_list():
