@@ -5260,9 +5260,14 @@ char *seiza_model_backends_json(const char *options_json, char **error_out);
 
 /*
  The installed models, as a JSON array the caller frees with
- `seiza_string_free`, each with `name`, `path`, `task`, `cardSha256`,
- `noiseMap`, `holes` (as [`seiza_denoised_report_json`] gives them) and
- `precisions`. `store` may be null for the default store.
+ `seiza_string_free`, each with `name`, `path`, `task` (`denoise` or
+ `sharpen`), `cardSha256`, `noiseMap`, `holes` (as
+ [`seiza_denoised_report_json`] gives them), `sharpen` and `precisions`.
+ `sharpen` is null for a noise model; for a sharpening model it holds
+ `stars` and `rest`, the shares a run takes when told none, `floorPx`, the
+ narrowest in pixels a star is asked to be, and `sharpest`, the sharpest
+ share the model was trained to be asked for. `store` may be null for the
+ default store.
 
  # Safety
  `store` must be null or a NUL-terminated string. When non-null, `error_out`
