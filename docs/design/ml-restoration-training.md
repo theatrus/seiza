@@ -1875,6 +1875,42 @@ In order, each only if the one before leaves a gap at the rims:
      and the rise (4.35 px, the goal 3.74). Neither run had a
      control, so part of the change may be the further 30,000 steps
      rather than the split.
+   - What is particular to the Trunk's ridges, looked at on that run:
+     - Not the PSF. The field runs smoothly from 11.3 to 11.8 px over
+       the frame; the ridges' corner reads 11.56 px at an ellipticity of
+       0.11, as any other.
+     - Not the noise's texture. The stack's noise is shared between
+       neighbouring pixels no more than the California's (a correlation
+       of 0.11 at 1 px and none past 2 px, white noise blurred by about
+       0.25 px), well inside the fresh noise's blur in training (up to
+       0.6 px). The stars are wide because the telescope's focal length
+       oversamples the seeing, not from drizzle.
+     - Its scale. Inputs as wide as 11–13 px are about 5% of the
+       known-kernel windows once widened, and the space-telescope truth
+       (stamps of 2–4.5 px) never reaches 11.5 px at a ratio of 0.5: it
+       shows that width only at ratios of 0.4 and under. Run on the
+       image binned 3 × 3 (its stars 3.5 px, where most of training
+       is), the same model's change, brought back up, makes the
+       goal's rise (3.81 px, the goal 3.74, at full size 4.35)
+       and its rim's foot (0.70 and 0.48 below the input at 2 and 0 px,
+       the goal 0.99 and 0.44, at full size 0.51 and 0.10), with no
+       mottle (1.00 between 2 and 4 px). It lifts the lit side less
+       (+3.92 and +4.85). Binned 2 × 2 it raises the cloud's 8–16 px
+       detail to 1.20 but softens the rim (rise 4.74 px). The binned
+       change above 2 px with the full-size change below it gives a rise
+       of 4.00 px and a slope of ×2.11, the 2–4 px detail at 1.03 and
+       fewer knots, the lit side at +4.24 and +5.38. No version lifts
+       the cloud's 8–16 px detail past 1.05 but the 2 × 2, and by eye
+       the goal still draws the ridges' finger harder than any.
+       The network sharpens a rim better at the widths it was mostly
+       trained at: what is missing at the Trunk's width is training
+       there, real structure seen through an 11 px PSF.
+     - Sharpening both Trunk stacks and comparing the changes (their
+       noise is independent, so detail drawn from the sky is drawn on
+       both) does not tell real detail from noise under 8 px: there no
+       sharpener's changes agree, the goal's included, and at
+       4–8 px they disagree a little, likely as each sharpens the
+       deeper stack where it smooths the shallower.
 
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
