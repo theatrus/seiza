@@ -743,15 +743,16 @@ pub unsafe extern "C" fn seiza_sharpen_model_tile(model: *const SeizaSharpenMode
 /// whole image), `psfWidthPx` and `points`. A host keys cached results on
 /// `cardSha256`, `backend`, `precision`, the three strengths and
 /// [`seiza_model_output_version`]. An image with too few stars to measure a
-/// PSF from is refused.
+/// PSF from is refused, and so is an `out` that overlaps `data`.
 ///
 /// # Safety
 /// `model` must be a live [`SeizaSharpenModel`] no other thread is using,
 /// `data` must point to `data_length` floats and `out` to `out_length` writable
-/// floats. `options_json` must be null or a NUL-terminated string. `progress`
-/// may be null, and is passed `context`. `cancel` must be null or a live
-/// [`SeizaCancelSignal`] retained until this call returns. When non-null,
-/// `error_out` must point to writable storage for one pointer.
+/// floats, and the two must not overlap. `options_json` must be null or a
+/// NUL-terminated string. `progress` may be null, and is passed `context`.
+/// `cancel` must be null or a live [`SeizaCancelSignal`] retained until this
+/// call returns. When non-null, `error_out` must point to writable storage for
+/// one pointer.
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn seiza_sharpen_model_sharpen(
     model: *mut SeizaSharpenModel,
@@ -771,14 +772,19 @@ pub unsafe extern "C" fn seiza_sharpen_model_sharpen(
     clear_error(error_out);
     ffi_result(error_out, || {
         let model = unsafe { model.as_mut() }.ok_or("model is required")?;
-        let data = unsafe { required_f32_slice(data, data_length, "image")? };
-        let view =
-            ImageView::new(data, width, height, channels).map_err(|error| error.to_string())?;
         if out_length != data_length {
             return Err(format!(
                 "output has {out_length} floats; expected {data_length}"
             ));
         }
+        // The image is read while the output is written, so the two may not
+        // share memory: refused before either slice is made.
+        if overlapping(data, out, data_length) {
+            return Err("the output overlaps the image; give it a buffer of its own".to_string());
+        }
+        let data = unsafe { required_f32_slice(data, data_length, "image")? };
+        let view =
+            ImageView::new(data, width, height, channels).map_err(|error| error.to_string())?;
         let out = unsafe { required_f32_slice_mut(out, out_length, "output")? };
         let request = SharpenRequest::parse(options_json)?;
         let result = with_sharpen_options(&request, progress, cancel, context, |options| {
@@ -793,6 +799,18 @@ pub unsafe extern "C" fn seiza_sharpen_model_sharpen(
             .map_err(|error| error.to_string())
     })
     .unwrap_or(ptr::null_mut())
+}
+
+/// Whether `length` floats at `first` and `length` at `second` share any
+/// memory, from their addresses alone. A null pointer shares none, and is
+/// refused as missing instead.
+fn overlapping(first: *const f32, second: *const f32, length: usize) -> bool {
+    if first.is_null() || second.is_null() {
+        return false;
+    }
+    let bytes = length.saturating_mul(size_of::<f32>());
+    let (first, second) = (first as usize, second as usize);
+    bytes > 0 && first < second.saturating_add(bytes) && second < first.saturating_add(bytes)
 }
 
 /// Run `run` with what a sharpening is asked for, and the caller's progress
@@ -1534,6 +1552,22 @@ mod tests {
         assert!(backends.iter().any(|status| status["backend"] == "cpu"));
     }
 
+    #[test]
+    fn buffers_that_share_memory_overlap_and_neighbours_do_not() {
+        let buffer = [0.0_f32; 16];
+        let at = |index: usize| buffer[index..].as_ptr();
+        assert!(overlapping(at(0), at(0), 8), "the same buffer");
+        assert!(overlapping(at(0), at(7), 8), "one float shared");
+        assert!(overlapping(at(7), at(0), 8), "either way round");
+        assert!(!overlapping(at(0), at(8), 8), "side by side");
+        assert!(!overlapping(at(8), at(0), 8));
+        assert!(!overlapping(at(0), at(0), 0), "nothing to share");
+        assert!(
+            !overlapping(ptr::null(), at(0), 8),
+            "null is refused as missing"
+        );
+    }
+
     unsafe extern "C" fn count_tile(_: usize, _: usize, _: usize, _: usize, context: *mut c_void) {
         unsafe { *(context as *mut usize) += 1 };
     }
@@ -1743,6 +1777,32 @@ mod tests {
             );
             assert!(refused.is_null());
             assert!(taken(error).contains("share"));
+
+            // An output that overlaps the image is refused before either is
+            // read, and the image is left as it was.
+            let mut error = ptr::null_mut();
+            let mut both = pixels.clone();
+            both.extend_from_slice(&pixels[..width]);
+            let base = both.as_mut_ptr();
+            let refused = seiza_sharpen_model_sharpen(
+                model,
+                base,
+                pixels.len(),
+                width,
+                height,
+                1,
+                ptr::null(),
+                base.add(width),
+                pixels.len(),
+                None,
+                ptr::null(),
+                ptr::null_mut(),
+                &mut error,
+            );
+            assert!(refused.is_null());
+            assert!(taken(error).contains("overlaps"));
+            let bits = |values: &[f32]| values.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(&both[..pixels.len()]), bits(&pixels));
             seiza_sharpen_model_free(model);
         }
     }
