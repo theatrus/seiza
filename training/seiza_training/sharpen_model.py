@@ -390,6 +390,23 @@ class Settings:
     # run's output (`rolloff_step`) brought the dots and the knots along
     # the rims to the reference's (2026-11-16). 0: none.
     fine_snr: float = 0.0
+    # The roll-off's split (`rolled_off`), in px as a Gaussian's σ; the
+    # power it is judged by is read over twice that. Inside the Trunk's
+    # cloud a deeper stack of the field holds nothing under 8 px that
+    # this stack shows (its detail there correlates with the deeper
+    # stack's by 0.09 between 4 and 8 px and by none below), yet a run
+    # trained with the split at 2 px raised the detail between 2 and
+    # 4 px by 8% where the reference raises it by 4%, and the user saw
+    # the cloud mottled (2026-11-17).
+    fine_split: float = 2.0
+    # The clarity's band (`clarified`) as a multiple of its widths: its
+    # smoothing and its squares both this many times `CLARITY_FINE` and
+    # `CLARITY_WIDE` input widths. The reference raises the detail inside
+    # the Trunk's cloud by 11% between 8 and 16 px, where the deeper
+    # stack shows structure (correlation 0.57), and the runs with a
+    # clarity of 1.5 by 7%, with more of their gain under 8 px, where it
+    # shows none (2026-11-17). 1: as set on 2026-11-11.
+    clarity_scale: float = 1.0
 
     @property
     def planes(self) -> tuple[str, ...]:
@@ -1400,20 +1417,21 @@ def box_means(plane: np.ndarray, radius: int) -> np.ndarray:
 
 
 def clarified(target: np.ndarray, amount: float, width: float, points: np.ndarray,
-              sigma: np.ndarray, ranged: bool = True) -> tuple[np.ndarray, int]:
+              sigma: np.ndarray, ranged: bool = True, scale: float = 1.0) -> tuple[np.ndarray, int]:
     """`target`, a known-kernel window's, with `amount` of local contrast
     that keeps strong edges (see `CLARITY_WIDE`), for an input PSF `width`
     px across and a stack whose noise is `sigma`, and how far it reads.
     Without `ranged`, an edge is judged by the noise alone, and not by the
     target's range of light: for a whole image, whose range says nothing
-    of any one part of it."""
+    of any one part of it. `scale` moves the band: its smoothing and its
+    squares are that many times as wide (`Settings.clarity_scale`)."""
     low, high = CONTRAST_WIDTHS
     amount = amount * CLARITY_LIFT * float(np.clip((width - low) / (high - low), 0.0, 1.0))
     if not amount > 0:
         return target, 0
-    fine = CLARITY_FINE * width
+    fine = CLARITY_FINE * scale * width
     fine_reach = blur_reach(fine**2 * np.eye(2))
-    reach = max(int(round(math.sqrt(3.0) * CLARITY_WIDE * width)), 2)
+    reach = max(int(round(math.sqrt(3.0) * CLARITY_WIDE * scale * width)), 2)
     reach = max(min(reach, (WINDOW_PAD - fine_reach) // 2, min(target.shape) - 1), 1)
     smooth = blurred_images(target, [fine**2 * np.eye(2)])[0]
     # About the window's middle level, in double precision: a square's
@@ -1466,19 +1484,21 @@ FINE_SPLIT = 2.0
 FINE_AREA = 4.0
 
 
-def rolled_off(sharp: np.ndarray, soft: np.ndarray, amount: float, noise: np.ndarray | float) -> tuple[np.ndarray, int]:
-    """`sharp`, a sharpening of `soft`, with the fine part of its change
-    held back where it lies under `amount` times `noise` (see
-    `FINE_SPLIT`), and how far it reads."""
+def rolled_off(sharp: np.ndarray, soft: np.ndarray, amount: float, noise: np.ndarray | float,
+               split: float = FINE_SPLIT) -> tuple[np.ndarray, int]:
+    """`sharp`, a sharpening of `soft`, with the fine part of its change,
+    under `split` px, held back where it lies under `amount` times `noise`
+    (see `FINE_SPLIT`), and how far it reads."""
     if not amount > 0:
         return sharp, 0
+    area = FINE_AREA * split / FINE_SPLIT
     change = sharp - soft
-    fine = change - blurred_images(change, [FINE_SPLIT**2 * np.eye(2)])[0]
-    power = np.clip(blurred_images(fine * fine, [FINE_AREA**2 * np.eye(2)])[0], 0.0, None)
+    fine = change - blurred_images(change, [split**2 * np.eye(2)])[0]
+    power = np.clip(blurred_images(fine * fine, [area**2 * np.eye(2)])[0], 0.0, None)
     floor = (amount * np.nan_to_num(noise)) ** 2
     with np.errstate(divide="ignore", invalid="ignore"):
         kept = np.nan_to_num(power / (power + floor), nan=1.0)
-    reach = blur_reach(FINE_SPLIT**2 * np.eye(2)) + blur_reach(FINE_AREA**2 * np.eye(2))
+    reach = blur_reach(split**2 * np.eye(2)) + blur_reach(area**2 * np.eye(2))
     return (sharp - (1.0 - kept) * fine).astype(np.float32), reach
 
 
@@ -1705,7 +1725,7 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
             band = max(band, blur_reach(halo.covariance))
         if settings.fine_snr > 0:
             # Under the noise the window is shown under, not its stack's.
-            rest, reach = rolled_off(rest, blurred, settings.fine_snr, share * sigma)
+            rest, reach = rolled_off(rest, blurred, settings.fine_snr, share * sigma, settings.fine_split)
             band = max(band, reach)
         if settings.contrast > 0 and nonstellar_ratio < 1.0:
             # More the more is asked of the rest, and none at 1.
@@ -1749,7 +1769,8 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
         if clarity > 0:
             # After the noise: what the input shows in that band is what
             # is raised, whatever it is.
-            target, reach = clarified(target, clarity, kernel.widths["input"], points, scale * stack_sigma)
+            target, reach = clarified(target, clarity, kernel.widths["input"], points, scale * stack_sigma,
+                                      scale=settings.clarity_scale)
             band = max(band, reach)
         if shade > 0:
             target, reach = shaded(target, shade, kernel.widths["input"], points, scale * stack_sigma)

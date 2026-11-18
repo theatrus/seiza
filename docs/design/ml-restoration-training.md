@@ -1828,6 +1828,22 @@ In order, each only if the one before leaves a gap at the rims:
      and 1.04, knots of 1.03%, the slope ×2.68 over 4.35 px. The
      reference's strong setting lies between the two asks.
 
+     By eye the cloud behind the Trunk's upper right ridges is noisy,
+     mottled and not well defined where the reference's is clean. A
+     deeper stack of the field says why: inside the cloud this stack's
+     detail correlates with the deeper one's by 0.60 between 8 and
+     16 px, 0.09 between 4 and 8 and none below, so all it shows under
+     8 px is noise. This run raises the detail between 2 and 4 px by
+     8% and between 8 and 16 px by 7%; the reference by 4% and 11%.
+     The roll-off splits at 2 px, and the clarity's band, set in input
+     widths, starts at 4 px on this stack (its stars are 11.5 px
+     across). Held back as a step out to 4 px, the change loses its
+     mottle (90 dots a megapixel, the detail between 2 and 4 px 1.03)
+     and a tenth of the rims' lit side, which a step cannot tell from
+     noise; so the split (`--fine-split`) and the clarity's band
+     (`--clarity-scale`, the band's smoothing and squares that many
+     times as wide) can now be moved, for a run to learn it.
+
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
    taught that clarity is asked for at a ratio of 0, read from the
