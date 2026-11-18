@@ -1819,7 +1819,13 @@ In order, each only if the one before leaves a gap at the rims:
      California (0.98% and 2.93%), the grain and the stars are as they
      were; the multi-night Trunk's knots rise to 1.54% from 1.33% (the
      goal 2.31%). What is left at 0.5 is the dark side within
-     4 px of a rim, the lit side's height and the rim's rise.
+     4 px of a rim, the lit side's height and the rim's rise. At an
+     ask of 0.4 it goes past the goal everywhere but the rim's
+     foot and its rise, with the goal's knots: the dark side
+     0.95, 1.12, 1.12, 0.83 and 0.25 at 8, 6, 4, 2 and 0 px, the lit
+     side +5.63 and +7.17, the cloud's detail 1.03, 1.17, 1.39, 1.23
+     and 1.04, knots of 1.03%, the slope ×2.68 over 4.35 px. The
+     strong goal lies between the two asks.
 
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
