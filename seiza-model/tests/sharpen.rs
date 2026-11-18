@@ -1,7 +1,9 @@
 //! A tiny sharpening model through ONNX Runtime itself, against what the
 //! Python harness makes of the same image. These need the runtime's library,
 //! so they run only where `SEIZA_ONNXRUNTIME` names one, as CI's runtime job
-//! does.
+//! does on each platform (`--test sharpen`); elsewhere each passes with a
+//! note. The comparison on a real image needs a trained bundle as well, and
+//! runs only when asked for.
 
 use seiza_model::{
     Backend, BackendOptions, ImageView, ModelBundle, ModelError, NoiseModel, Precision,
