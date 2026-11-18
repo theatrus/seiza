@@ -3,7 +3,7 @@ field, so the crate's tests hold its Rust to the Python a model was trained
 with.
 
 It needs the sharpening trainer (`seiza_training.sharpen_model`,
-`sharpen_sheets`, `unet.SharpeningUNet` and the bundle writer's
+`psf_fields`, `sharpen_sheets`, `unet.SharpeningUNet` and the bundle writer's
 `sharpen_card` and `write_sharpen_bundle`), which is not in this branch yet:
 the fixtures beside it were recorded with it, and are committed so the tests
 run without it. Run it from a training environment that has the trainer and

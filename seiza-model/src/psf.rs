@@ -9,7 +9,10 @@ use crate::bundle::{PointsReading, PsfReading, StampEncoder, StampPlane};
 use crate::error::ModelError;
 use crate::stats::{median_f32, median_f64};
 use rayon::prelude::*;
-use seiza_stars::{MeasurementOptions, PsfField, PsfFieldError, SparseFieldPolicy};
+use seiza_stars::hocus_focus_star_detection::StructureRemovalMethod;
+use seiza_stars::{
+    MeasurementOptions, PSFType, PsfField, PsfFieldError, SparseFieldPolicy, TelescopeClass,
+};
 
 /// The widths a stamp's Gaussian is sought over, in pixels of σ, and how
 /// many: evenly in their logarithm.
@@ -27,6 +30,17 @@ const CLIP_CLUSTER: usize = 3;
 const CLIP_WITHIN: f64 = 0.98;
 const CLIP_BRIGHTEST: f64 = 0.9;
 const CLIP_LEVEL: f64 = 0.8;
+/// The point sources' detector, besides the card's noise reduction radius:
+/// the standard rig class's settings, stars fitted with a Moffat profile of
+/// β = 4, structure taken out by filtering, no binning, saturated stars left
+/// out, a sensitivity of 10 and one pass. The harness's detector ran with
+/// these, so they are named here rather than left to `seiza-stars`' defaults.
+const POINTS_CLASS: TelescopeClass = TelescopeClass::Standard;
+const POINTS_PSF: PSFType = PSFType::Moffat4;
+const POINTS_STRUCTURE: StructureRemovalMethod = StructureRemovalMethod::Filtered;
+const POINTS_BINNING: usize = 1;
+const POINTS_KEEP_SATURATED: bool = false;
+const POINTS_SENSITIVITY: f64 = 10.0;
 
 /// An image's PSF at a grid of nodes: both edges of each axis, at most the
 /// card's `grid_px` apart.
@@ -476,6 +490,27 @@ fn clip_level(peaks: &[f64]) -> Option<f64> {
     None
 }
 
+/// The detector the point sources are found with, every setting it takes
+/// named. The rest of its settings are the rig class's in `seiza-stars`,
+/// which these options do not reach: a change there changes the detector,
+/// as a change to its code does.
+fn detector(reading: &PointsReading) -> MeasurementOptions {
+    MeasurementOptions {
+        preset: Some(POINTS_CLASS),
+        // A preset is the whole classification: the optics are not read.
+        focal_length_mm: None,
+        pixel_size_um: None,
+        psf_type: POINTS_PSF,
+        structure_removal: Some(POINTS_STRUCTURE),
+        detection_binning: Some(POINTS_BINNING),
+        keep_saturated: Some(POINTS_KEEP_SATURATED),
+        noise_reduction_radius: Some(reading.noise_reduction_radius),
+        sensitivity: Some(POINTS_SENSITIVITY),
+        // One pass, with no retry for more stars.
+        target_star_count: None,
+    }
+}
+
 /// Every star the measuring detector finds on the image, unsmoothed, and the
 /// clipped cores it turns away, each at its brightest pixel with its peak
 /// alone.
@@ -493,11 +528,7 @@ pub(crate) fn detections(
         .collect();
     let level = clip_level(&brightest);
     let (counts, scale) = scaled_counts(plane, width, height);
-    let options = MeasurementOptions {
-        noise_reduction_radius: Some(reading.noise_reduction_radius),
-        ..Default::default()
-    };
-    let found = options.detect(&counts, width, height).stars;
+    let found = detector(reading).detect(&counts, width, height).stars;
     let mut known: Vec<(f64, f64)> = found.iter().map(|star| star.position).collect();
     let mut points: Vec<Point> = found
         .iter()

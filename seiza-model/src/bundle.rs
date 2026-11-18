@@ -461,9 +461,18 @@ impl ModelCard {
                 if self.inputs.len() != 1 {
                     return refuse(format!("{} must read its planes as one tensor", self.name));
                 }
+                // A sharpening run reads every other setting of `reading` as
+                // a noise run does; `flat_block` goes with a flat sky alone.
                 if self.reading.holes.is_some() {
                     return refuse(format!(
                         "{} is a sharpening model, which has no hole guard",
+                        self.name
+                    ));
+                }
+                if self.reading.sky != SkyInput::Global {
+                    return refuse(format!(
+                        "{} is a sharpening model, which reads the sky as one background, not \
+                         flattened",
                         self.name
                     ));
                 }
@@ -615,7 +624,9 @@ impl SharpenCard {
 
 impl PsfReading {
     /// The settings [`seiza_stars::PsfField::measure`] takes, with `sparse`
-    /// saying what too few stars lead to.
+    /// saying what too few stars lead to. Each is the card's or named here,
+    /// never `seiza-stars`' default, so a default changed there leaves a run
+    /// as it was.
     pub fn options(&self, sparse: seiza_stars::SparseFieldPolicy) -> seiza_stars::PsfFieldOptions {
         seiza_stars::PsfFieldOptions {
             components: self.components,
@@ -625,7 +636,16 @@ impl PsfReading {
             detection_sigma: self.detection_sigma,
             isolation_magnitudes: self.isolation_magnitudes,
             sparse,
-            ..Default::default()
+            // Left to the field, which takes each from the image as the
+            // harness's measurement did: the stamp's side (a run then cuts or
+            // pads each stamp to the encoder's), the level stars saturate at,
+            // from the brightest stars' common clip level, and the degree its
+            // components follow, by how well each predicts stars held out.
+            // These are how the field is measured rather than settings, and
+            // the fixtures hold them to the harness's.
+            stamp_size: None,
+            saturation: None,
+            degree: None,
         }
     }
 }
@@ -855,6 +875,9 @@ pub(crate) mod tests {
                 "/reading/holes",
                 json(r#"{"depth": 30.0, "margin": 3, "fill_radius": 12, "restore": 5.0}"#),
             ),
+            // A sharpening run reads the sky as one background: a card that
+            // asks for it flattened is refused, not read as global.
+            ("/reading/sky", json(r#""flat""#)),
         ] {
             let mut card = good.clone();
             match card.pointer_mut(pointer) {
