@@ -1806,6 +1806,21 @@ In order, each only if the one before leaves a gap at the rims:
      1.10, 1.05 and 1.02, the same grain on the Trunk and on the Trunk
      denoised first. Only the California's stars move, a little: 0.053
      and 1.031 of their flux. What the pairs teach is taught by 0.30.
+   - The clarity and the shade at 1.5, from 1, on the run at 0.30 (the
+     same start, steps and rate) move what they were meant to and
+     nothing else. At an ask of 0.5 the dark side is the reference's
+     from 8 px out (0.65, 0.42 and 0.27 at 8, 12 and 16 px; the
+     reference 0.68, 0.42 and 0.26) and nearer it than before closer
+     in (0.75, 0.77 and 0.58 at 6, 4 and 2 px, from 0.62, 0.65 and
+     0.52; the reference 0.85, 1.00 and 0.99); the cloud's detail
+     between 4 and 8 px is the reference's (1.14 against 1.13) and
+     between 8 and 16 px nearer it (1.07, from 1.05; the reference
+     1.11). The lit side (+4.59 and +5.67), the slope (×2.02 over
+     4.38 px), the dots (123), the knots on the Trunk and the
+     California (0.98% and 2.93%), the grain and the stars are as they
+     were; the multi-night Trunk's knots rise to 1.54% from 1.33% (the
+     reference 2.31%). What is left at 0.5 is the dark side within
+     4 px of a rim, the lit side's height and the rim's rise.
 
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
