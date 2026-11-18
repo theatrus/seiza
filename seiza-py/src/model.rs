@@ -3,6 +3,8 @@
 //! `NoiseModel` opens a model on a backend and runs it over an image, which is
 //! all it needs. The `Denoised` that returns keeps what the model found, so
 //! choosing how much noise to keep costs a blend and no inference.
+//! `SharpenModel` does the same for a sharpening model, which measures the
+//! image's PSF, point sources and noise itself.
 
 use crate::arrays::{float_array, float_image_view};
 use crate::convert::to_python;
@@ -14,8 +16,8 @@ use seiza::downloads::{CachePolicy, DownloadEvent, ModelManager};
 use seiza_model::{
     Backend, BackendOptions, ChannelScales, DenoiseOptions, DenoiseReport, Denoised,
     FileRestoration, HoleGuard, ImageView, ModelBundle, ModelError, ModelStore, NoiseBands,
-    NoiseModel, Precision, Progress, Published, RestorationArea, RestorationImage, Task,
-    runtime_info,
+    NoiseModel, Precision, Progress, Published, RestorationArea, RestorationImage, SharpenModel,
+    SharpenOptions, SharpenReport, Sharpened, SharpenedChannel, Task, runtime_info,
 };
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -324,7 +326,7 @@ impl PyNoiseModel {
             device_id,
         };
         let bundle = store_at(store)?
-            .resolve(model.as_deref())
+            .resolve(model.as_deref(), Task::Denoise)
             .map_err(model_error)?;
         let opened = py.detach(|| {
             let backend = match backend {
@@ -500,6 +502,403 @@ impl PyFileRestoration {
     }
 }
 
+/// What one channel of a sharpened image was read by: its `background` and
+/// median `noise`; the `psf_rows` and `psf_columns` of nodes its PSF field was
+/// sampled at, the `psf_stars` it was measured from, and whether too few of
+/// them left one PSF for the whole image (`psf_global`); the median of the
+/// nodes' widths, `psf_width_px`; and how many `points`, point sources, were
+/// found and rendered.
+#[pyclass(
+    skip_from_py_object,
+    name = "SharpenedChannel",
+    module = "seiza",
+    frozen
+)]
+#[derive(Clone)]
+pub(crate) struct PySharpenedChannel {
+    #[pyo3(get)]
+    background: f32,
+    #[pyo3(get)]
+    noise: f32,
+    #[pyo3(get)]
+    psf_rows: usize,
+    #[pyo3(get)]
+    psf_columns: usize,
+    #[pyo3(get)]
+    psf_stars: usize,
+    #[pyo3(get)]
+    psf_global: bool,
+    #[pyo3(get)]
+    psf_width_px: f32,
+    #[pyo3(get)]
+    points: usize,
+}
+
+impl From<&SharpenedChannel> for PySharpenedChannel {
+    fn from(read: &SharpenedChannel) -> Self {
+        Self {
+            background: read.background,
+            noise: read.noise,
+            psf_rows: read.psf_nodes.0,
+            psf_columns: read.psf_nodes.1,
+            psf_stars: read.psf_stars,
+            psf_global: read.psf_global,
+            psf_width_px: read.psf_width_px,
+            points: read.points,
+        }
+    }
+}
+
+#[pymethods]
+impl PySharpenedChannel {
+    fn __repr__(&self) -> String {
+        format!(
+            "SharpenedChannel(psf_width_px={}, psf_stars={}, points={}, noise={})",
+            self.psf_width_px, self.psf_stars, self.points, self.noise
+        )
+    }
+}
+
+/// What ran in a sharpening, for a file's provenance and a cache key: key
+/// cached results on `card_sha256`, `backend`, `precision`, `stars`, `rest`,
+/// `rolloff` and `MODEL_OUTPUT_VERSION`. `sha256` is the body graph's.
+#[pyclass(skip_from_py_object, name = "SharpenReport", module = "seiza", frozen)]
+#[derive(Clone)]
+pub(crate) struct PySharpenReport {
+    #[pyo3(get)]
+    model: String,
+    #[pyo3(get)]
+    sha256: String,
+    #[pyo3(get)]
+    card_sha256: String,
+    #[pyo3(get)]
+    backend: String,
+    #[pyo3(get)]
+    precision: String,
+    #[pyo3(get)]
+    tile: usize,
+    #[pyo3(get)]
+    stars: f32,
+    #[pyo3(get)]
+    rest: f32,
+    #[pyo3(get)]
+    rolloff: f32,
+    #[pyo3(get)]
+    channels: Vec<PySharpenedChannel>,
+}
+
+impl From<&SharpenReport> for PySharpenReport {
+    fn from(report: &SharpenReport) -> Self {
+        Self {
+            model: report.model.clone(),
+            sha256: report.sha256.clone(),
+            card_sha256: report.card_sha256.clone(),
+            backend: report.backend.to_string(),
+            precision: report.precision.to_string(),
+            tile: report.tile,
+            stars: report.stars,
+            rest: report.rest,
+            rolloff: report.rolloff,
+            channels: report.channels.iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[pymethods]
+impl PySharpenReport {
+    fn __repr__(&self) -> String {
+        format!(
+            "SharpenReport(model={:?}, backend={:?}, precision={:?}, stars={}, rest={})",
+            self.model, self.backend, self.precision, self.stars, self.rest
+        )
+    }
+}
+
+/// A sharpened image and what ran.
+#[pyclass(skip_from_py_object, name = "Sharpened", module = "seiza", frozen)]
+pub(crate) struct PySharpened {
+    result: Sharpened,
+}
+
+#[pymethods]
+impl PySharpened {
+    /// The sharpened image, shaped as the image given was. A pixel that was
+    /// not finite is NaN.
+    #[getter]
+    fn image<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
+        float_array(
+            py,
+            self.result.width(),
+            self.result.height(),
+            self.result.channels(),
+            self.result.image().to_vec(),
+        )
+    }
+
+    /// What ran.
+    #[getter]
+    fn report(&self) -> PySharpenReport {
+        (&self.result.report).into()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Sharpened(width={}, height={}, channels={})",
+            self.result.width(),
+            self.result.height(),
+            self.result.channels()
+        )
+    }
+}
+
+/// A sharpening model, open on a backend. `model` names an installed model or
+/// a bundle's directory; `None` means the one installed sharpening model. With
+/// no `backend`, the best one this machine can run and the model's card allows
+/// is chosen.
+#[pyclass(skip_from_py_object, name = "SharpenModel", module = "seiza", frozen)]
+pub(crate) struct PySharpenModel {
+    model: Mutex<SharpenModel>,
+    backend: Backend,
+    tile: usize,
+}
+
+/// A sharpening's refusal as Python raises it: too few stars for a PSF as
+/// `TooFewStarsError`, and a bad share or image as `ValueError`.
+fn sharpen_error(error: ModelError) -> PyErr {
+    match error {
+        ModelError::PsfField(seiza_stars::PsfFieldError::TooFewStars { .. }) => {
+            crate::psf_field::TooFewStarsError::new_err(error.to_string())
+        }
+        ModelError::InvalidOption(_) | ModelError::InvalidImage(_) => {
+            PyValueError::new_err(error.to_string())
+        }
+        other => model_error(other),
+    }
+}
+
+impl PySharpenModel {
+    /// Run `run` on the model with (stars, rest, rolloff) asked, the caller's
+    /// progress callback and cancel signal, and the interpreter released.
+    fn run<T: Send>(
+        &self,
+        py: Python<'_>,
+        (stars, rest, rolloff): (Option<f32>, Option<f32>, f32),
+        progress: Option<Py<PyAny>>,
+        cancel: Option<Py<PyAny>>,
+        run: impl FnOnce(&mut SharpenModel, &SharpenOptions<'_>) -> PyResult<T> + Send,
+    ) -> PyResult<T> {
+        let (signal, raised) = python_cancel_signal(cancel);
+        let report = |step: Progress| {
+            let Some(progress) = &progress else { return };
+            let called = Python::attach(|py| {
+                progress
+                    .call1(py, (step.channel, step.channels, step.tile, step.tiles))
+                    .map(|_| ())
+            });
+            if let Err(error) = called {
+                keep_first(&raised, error);
+            }
+        };
+        let stop = || signal.is_cancelled();
+        let options = SharpenOptions {
+            stars,
+            rest,
+            rolloff,
+            progress: Some(&report),
+            cancel: Some(&stop),
+        };
+        let result = py.detach(|| {
+            let mut model = self.model.lock().map_err(|_| {
+                model_error(ModelError::Runtime(
+                    "a run on this model panicked".to_string(),
+                ))
+            })?;
+            run(&mut model, &options)
+        });
+        if let Some(error) = raised.lock().ok().and_then(|mut slot| slot.take()) {
+            return Err(error);
+        }
+        result
+    }
+}
+
+#[pymethods]
+impl PySharpenModel {
+    #[new]
+    #[pyo3(signature = (model=None, backend=None, *, store=None, library=None, cache_dir=None, tile=None, precision=None, device_id=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        py: Python<'_>,
+        model: Option<String>,
+        backend: Option<String>,
+        store: Option<PathBuf>,
+        library: Option<PathBuf>,
+        cache_dir: Option<PathBuf>,
+        tile: Option<usize>,
+        precision: Option<String>,
+        device_id: Option<i32>,
+    ) -> PyResult<Self> {
+        let precision = precision
+            .as_deref()
+            .map(str::parse::<Precision>)
+            .transpose()
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let backend = backend
+            .as_deref()
+            .map(str::parse::<Backend>)
+            .transpose()
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let options = BackendOptions {
+            library: library.or_else(|| package_library(py)),
+            cache_dir,
+            tile,
+            precision,
+            device_id,
+        };
+        let bundle = store_at(store)?
+            .resolve(model.as_deref(), Task::Sharpen)
+            .map_err(model_error)?;
+        let opened = py.detach(|| {
+            let backend = match backend {
+                Some(backend) => backend,
+                None => Backend::detect(&bundle, &options)?,
+            };
+            SharpenModel::open(&bundle, backend, &options)
+        });
+        let model = opened.map_err(model_error)?;
+        Ok(Self {
+            backend: model.backend(),
+            tile: model.tiling().tile,
+            model: Mutex::new(model),
+        })
+    }
+
+    /// The backend this model's body runs on.
+    #[getter]
+    fn backend(&self) -> String {
+        self.backend.to_string()
+    }
+
+    /// The side of the tiles this model runs.
+    #[getter]
+    fn tile(&self) -> usize {
+        self.tile
+    }
+
+    /// Sharpen `image`, float32 of shape (height, width) or (height, width,
+    /// 3), NaN where nothing covers a pixel. Its PSF and how that changes
+    /// over the field, its point sources and its noise are measured from it,
+    /// each channel's on its own. `stars` is the share of its width every
+    /// star is brought to, and `rest` the share asked of everything that is
+    /// not a star: above 0 and at most 1, which leaves things as they are,
+    /// and the model's own when `None`. No star is asked to be narrower than
+    /// the model's floor. `rolloff` holds back the finest part of the change
+    /// where it lies under that many times the image's noise. `progress` is
+    /// called with (channel, channels, tile, tiles) after each tile, and
+    /// `cancel`, a callable returning true, stops the run. An image with too
+    /// few stars to measure a PSF from raises `TooFewStarsError`.
+    #[pyo3(signature = (image, stars=None, rest=None, *, rolloff=0.0, progress=None, cancel=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn sharpen(
+        &self,
+        py: Python<'_>,
+        image: PyReadonlyArrayDyn<'_, f32>,
+        stars: Option<f32>,
+        rest: Option<f32>,
+        rolloff: f32,
+        progress: Option<Py<PyAny>>,
+        cancel: Option<Py<PyAny>>,
+    ) -> PyResult<PySharpened> {
+        let view = float_image_view(&image)?;
+        let view = ImageView::new(view.data, view.width, view.height, view.channels)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let result = self.run(
+            py,
+            (stars, rest, rolloff),
+            progress,
+            cancel,
+            |model, options| model.sharpen(view, options).map_err(sharpen_error),
+        )?;
+        Ok(PySharpened { result })
+    }
+
+    /// Sharpen the full linear FITS or XISF file at `path` and write the
+    /// result to `output` as linear 32-bit FITS, with the input's geometry
+    /// and cards that say what ran, without first constructing a Python
+    /// array. The other arguments are `sharpen`'s.
+    #[pyo3(signature = (path, output, stars=None, rest=None, *, rolloff=0.0, progress=None, cancel=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn sharpen_file(
+        &self,
+        py: Python<'_>,
+        path: PathBuf,
+        output: PathBuf,
+        stars: Option<f32>,
+        rest: Option<f32>,
+        rolloff: f32,
+        progress: Option<Py<PyAny>>,
+        cancel: Option<Py<PyAny>>,
+    ) -> PyResult<PySharpenReport> {
+        let file_error = |error: seiza_model::FileError| match error {
+            seiza_model::FileError::Model(error) => sharpen_error(error),
+            other => crate::EngineError::new_err(other.to_string()),
+        };
+        self.run(
+            py,
+            (stars, rest, rolloff),
+            progress,
+            cancel,
+            |model, options| {
+                let image =
+                    RestorationImage::open(&path, RestorationArea::Full).map_err(file_error)?;
+                let result = image.sharpen(model, options).map_err(file_error)?;
+                result.write_linear(&output).map_err(file_error)?;
+                Ok(result.report().into())
+            },
+        )
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "SharpenModel(backend={:?}, tile={})",
+            self.backend(),
+            self.tile
+        )
+    }
+}
+
+/// What an installed sharpening model asks for unless told: the shares of
+/// their width `stars` and the `rest` are brought to; the narrowest a star is
+/// asked to be, `floor_px`; and the `sharpest` share it was trained to be
+/// asked for.
+#[pyclass(
+    skip_from_py_object,
+    name = "SharpenStrengths",
+    module = "seiza",
+    frozen
+)]
+#[derive(Clone)]
+pub(crate) struct PySharpenStrengths {
+    #[pyo3(get)]
+    stars: f64,
+    #[pyo3(get)]
+    rest: f64,
+    #[pyo3(get)]
+    floor_px: f64,
+    #[pyo3(get)]
+    sharpest: f64,
+}
+
+#[pymethods]
+impl PySharpenStrengths {
+    fn __repr__(&self) -> String {
+        format!(
+            "SharpenStrengths(stars={}, rest={}, floor_px={}, sharpest={})",
+            self.stars, self.rest, self.floor_px, self.sharpest
+        )
+    }
+}
+
 /// Which ONNX Runtime this process loaded.
 #[pyclass(skip_from_py_object, name = "ModelRuntime", module = "seiza", frozen)]
 pub(crate) struct PyModelRuntime {
@@ -547,6 +946,8 @@ pub(crate) struct PyInstalledModel {
     #[pyo3(get)]
     holes: Option<PyHoleGuard>,
     #[pyo3(get)]
+    sharpen: Option<PySharpenStrengths>,
+    #[pyo3(get)]
     precisions: Vec<String>,
 }
 
@@ -560,6 +961,12 @@ impl From<&ModelBundle> for PyInstalledModel {
             card_sha256: bundle.card_sha256().to_string(),
             noise_map: card.reading.noise_map.to_string(),
             holes: card.reading.holes.as_ref().map(Into::into),
+            sharpen: card.sharpen.as_ref().map(|sharpen| PySharpenStrengths {
+                stars: sharpen.strengths.stars,
+                rest: sharpen.strengths.rest,
+                floor_px: sharpen.floor_px,
+                sharpest: sharpen.sharpest,
+            }),
             precisions: card
                 .graphs
                 .iter()
@@ -691,7 +1098,7 @@ fn download_model(
 #[pyo3(signature = (model=None, store=None))]
 fn verify_model(py: Python<'_>, model: Option<String>, store: Option<PathBuf>) -> PyResult<()> {
     let store = store_at(store)?;
-    py.detach(|| store.resolve(model.as_deref())?.verify())
+    py.detach(|| store.resolve(model.as_deref(), Task::Denoise)?.verify())
         .map_err(model_error)
 }
 
@@ -740,6 +1147,11 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyModelBackend>()?;
     m.add_class::<PyModelRuntime>()?;
     m.add_class::<PyInstalledModel>()?;
+    m.add_class::<PySharpenModel>()?;
+    m.add_class::<PySharpened>()?;
+    m.add_class::<PySharpenReport>()?;
+    m.add_class::<PySharpenedChannel>()?;
+    m.add_class::<PySharpenStrengths>()?;
     m.add_function(wrap_pyfunction!(model_backends, m)?)?;
     m.add_function(wrap_pyfunction!(model_catalog, m)?)?;
     m.add_function(wrap_pyfunction!(model_runtime, m)?)?;

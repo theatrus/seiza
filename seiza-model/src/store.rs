@@ -72,8 +72,8 @@ impl ModelStore {
     }
 
     /// The model `chosen` names: a bundle's directory, or an installed model.
-    /// With nothing chosen, the one installed noise model.
-    pub fn resolve(&self, chosen: Option<&str>) -> Result<ModelBundle, ModelError> {
+    /// With nothing chosen, the one installed model of `task`.
+    pub fn resolve(&self, chosen: Option<&str>, task: Task) -> Result<ModelBundle, ModelError> {
         if let Some(chosen) = chosen {
             if Path::new(chosen).join(CARD_FILE).is_file() {
                 return ModelBundle::open(chosen);
@@ -83,11 +83,12 @@ impl ModelStore {
         let mut models: Vec<ModelBundle> = self
             .list()?
             .into_iter()
-            .filter(|bundle| bundle.card().task == Task::Denoise)
+            .filter(|bundle| bundle.card().task == task)
             .collect();
         match models.len() {
             0 => Err(ModelError::NoModelInstalled {
                 store: self.root.clone(),
+                task,
             }),
             1 => Ok(models.remove(0)),
             _ => Err(ModelError::SeveralModels {
@@ -95,6 +96,7 @@ impl ModelStore {
                     .iter()
                     .map(|bundle| bundle.card().name.clone())
                     .collect(),
+                task,
             }),
         }
     }
@@ -106,8 +108,7 @@ impl ModelStore {
         let bundle = ModelBundle::open(source)?;
         bundle.verify()?;
         self.install_staged(&bundle.card().name, |staging| {
-            let files = std::iter::once(CARD_FILE)
-                .chain(bundle.card().graphs.iter().map(|graph| graph.file.as_str()));
+            let files = std::iter::once(CARD_FILE).chain(bundle.card().files());
             for file in files {
                 let from = bundle.root().join(file);
                 std::fs::copy(&from, staging.join(file)).map_err(ModelError::io(&from))?;
@@ -274,7 +275,7 @@ impl ModelStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bundle::tests::write_bundle;
+    use crate::bundle::tests::{write_bundle, write_sharpen_bundle};
 
     #[test]
     fn a_model_installs_lists_and_goes() {
@@ -318,27 +319,64 @@ mod tests {
         write_bundle(&second, "noise-second", "image");
         let store = ModelStore::new(temp.path().join("store"));
         assert!(matches!(
-            store.resolve(None),
+            store.resolve(None, Task::Denoise),
             Err(ModelError::NoModelInstalled { .. })
         ));
 
         store.install(&first).unwrap();
-        assert_eq!(store.resolve(None).unwrap().card().name, "noise-first");
-        let by_path = store.resolve(Some(second.to_str().unwrap())).unwrap();
+        assert_eq!(
+            store.resolve(None, Task::Denoise).unwrap().card().name,
+            "noise-first"
+        );
+        let by_path = store
+            .resolve(Some(second.to_str().unwrap()), Task::Denoise)
+            .unwrap();
         assert_eq!(by_path.card().name, "noise-second");
 
         store.install(&second).unwrap();
         assert!(matches!(
-            store.resolve(None),
+            store.resolve(None, Task::Denoise),
             Err(ModelError::SeveralModels { .. })
         ));
         assert_eq!(
-            store.resolve(Some("noise-first")).unwrap().card().name,
+            store
+                .resolve(Some("noise-first"), Task::Denoise)
+                .unwrap()
+                .card()
+                .name,
             "noise-first"
         );
         assert!(matches!(
-            store.resolve(Some("nothing")),
+            store.resolve(Some("nothing"), Task::Denoise),
             Err(ModelError::ModelNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn a_sharpening_model_installs_with_its_encoder_and_resolves_for_its_task() {
+        let temp = tempfile::tempdir().unwrap();
+        let (noise, sharpen) = (temp.path().join("noise"), temp.path().join("sharpen"));
+        write_bundle(&noise, "noise-test", "constant");
+        write_sharpen_bundle(&sharpen, "sharpen-test");
+        let store = ModelStore::new(temp.path().join("store"));
+        store.install(&noise).unwrap();
+        let installed = store.install(&sharpen).unwrap();
+        assert!(installed.root().join("encoder-f32.onnx").is_file());
+        installed.verify().unwrap();
+        assert_eq!(
+            store.resolve(None, Task::Denoise).unwrap().card().name,
+            "noise-test",
+            "a sharpening model is no noise model"
+        );
+        assert_eq!(
+            store.resolve(None, Task::Sharpen).unwrap().card().name,
+            "sharpen-test"
+        );
+
+        std::fs::write(sharpen.join("encoder-f32.onnx"), b"other").unwrap();
+        assert!(matches!(
+            store.install(&sharpen),
+            Err(ModelError::HashMismatch { .. })
         ));
     }
 

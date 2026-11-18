@@ -611,6 +611,32 @@ A cache of results keys on `report.card_sha256`, the backend, the precision and
 `MODEL_OUTPUT_VERSION`: the card names its graphs by their hashes and everything
 the image is read by, so the key changes whenever the output could.
 
+A `SharpenModel` brings an image's stars, and everything that is not a star, to
+a share of their width. It too takes the image alone, and measures the PSF and
+how it changes over the field, the point sources and the noise from it, each
+channel's on its own:
+
+```python
+model = seiza.SharpenModel("sharpen-v1")
+result = model.sharpen(stack, stars=0.46, rest=0.5, rolloff=0.0)
+sharp = result.image
+print(result.report.channels[0].psf_width_px, result.report.channels[0].points)
+```
+
+`model.sharpen_file("stack.fits", "sharp.fits")` does the same from one linear
+FITS or XISF file to another, keeping the input's geometry and recording what
+ran in the output's header. No sharpening model is published yet: open one from
+a bundle's directory, or install that directory with `install_model`.
+
+`stars` and `rest` are those shares: 1 leaves things as they are, and less is
+sharper. No star is asked to be narrower than the model's floor in pixels, and a
+share left out is the model's own, which `installed_models()` lists under
+`sharpen`. `rolloff` holds back the finest part of the change where it lies
+under that many times the image's noise. An image with too few stars to measure
+a PSF from raises `TooFewStarsError`. A cache of results keys on
+`report.card_sha256`, the backend, the precision, the three strengths and
+`MODEL_OUTPUT_VERSION`.
+
 `seiza.model_backends()` says which backends run here and why the others do not,
 and `install_model`, `installed_models`, `verify_model` and `remove_model` manage
 the store. Invalid tile geometry is refused when opening or installing a bundle,
