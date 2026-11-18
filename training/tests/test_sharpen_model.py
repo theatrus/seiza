@@ -530,6 +530,64 @@ def test_the_roll_off_split_and_the_clarity_band_can_be_moved(tmp_path):
     assert not np.allclose(moved.target, plain.target)
 
 
+def test_a_magnified_window_s_stars_are_wider_and_where_its_points_say(tmp_path):
+    covariance = np.diag([1.3**2, 1.3**2])
+    # The resampler: twice as wide, about the middle, summing to one.
+    stamp = gaussian(sharpen_bank.STAMP, covariance)
+    wide = sm.magnified_stamp(stamp, 2.0)
+    assert wide.sum() == pytest.approx(1.0, abs=1e-5)
+    assert sharpen_bank.stamp_width(wide) / sharpen_bank.stamp_width(stamp) == pytest.approx(2.0, rel=0.03)
+    offset, _ = sm.moments(wide)
+    np.testing.assert_allclose(offset, 0.0, atol=0.02)
+    # A part of an image, its stars four times the flux where their points
+    # say, and its holes where they were.
+    image = stars_image(POSITIONS, FLUXES, covariance, sky=0.0).astype(np.float32)
+    corner = (6.0, 10.0)
+    made = sm.magnified(image, 2.0, corner)
+    moved = sm.magnified_points(detections(POSITIONS, FLUXES), 2.0, corner)
+    x, y = moved[0, :2]
+    assert (x, y) == pytest.approx(((POSITIONS[0][0] - 10.0 + 0.5) * 2 - 0.5, (POSITIONS[0][1] - 6.0 + 0.5) * 2 - 0.5))
+    assert moved[0, COLUMNS.index("flux")] == pytest.approx(4 * FLUXES[0])
+    ys, xs = np.mgrid[:SIDE, :SIDE]
+    near = np.hypot(xs - x, ys - y) < 10
+    assert made[near].sum() == pytest.approx(4 * FLUXES[0], rel=0.01)
+    assert float((made[near] * xs[near]).sum() / made[near].sum()) == pytest.approx(x, abs=0.05)
+    holed = image.copy()
+    holed[30:34, 30:34] = np.nan
+    assert np.isnan(sm.magnified(holed, 2.0, (0.0, 0.0))[61:67, 61:67]).all()
+    # The draws: within the range, none past the widest stars.
+    settings = sm.Settings(zoom=1.0, zoom_most=3.0, zoom_widest=6.0)
+    rng = np.random.default_rng(0)
+    draws = np.array([sm.zoom_drawn(2.0, rng, settings) for _ in range(200)])
+    assert draws.min() >= sm.ZOOM_LEAST and draws.max() <= 3.0 and draws.max() > 2.5
+    assert max(sm.zoom_drawn(4.0, rng, settings) for _ in range(50)) <= 1.5
+    assert sm.zoom_drawn(5.5, rng, settings) == 1.0
+    with pytest.raises(ValueError):
+        sm.Settings(zoom=0.5, zoom_most=1.1)
+    # In a window with a clean truth: its stars as wide as the draw makes
+    # them, and its input the magnified truth through the window's blur.
+    directory = kernel_bank(tmp_path)
+    clean = stars_image(POSITIONS, FLUXES, covariance).astype(np.float32)
+    np.save(directory / "image_clean.npy", np.stack([clean] * 4))
+    (directory / "clean.json").write_text(json.dumps({"noise_run": "n"}))
+    bank = sm.Bank(directory, sm.Settings(tile=32))
+    base = dict(tile=32, exposure=1.0, kernel_noise=1.0, clean_truth=1.0)
+    plain = sm.kernel_example(bank, 0, np.random.default_rng(0), sm.Settings(**base), identity=False)
+    assert plain.details["zoom"] == 1.0
+    zoomed = sm.kernel_example(bank, 0, np.random.default_rng(0), sm.Settings(**base, zoom=1.0), identity=False)
+    zoom = zoomed.details["zoom"]
+    assert sm.ZOOM_LEAST <= zoom <= 6.0 / plain.details["widths"]["reference"]
+    assert zoomed.details["widths"]["reference"] / plain.details["widths"]["reference"] == pytest.approx(zoom, rel=0.05)
+    corner = tuple(zoomed.details["zoom_corner"])
+    expected = sm.blurred_images(sm.magnified(clean, zoom, corner), [np.array(zoomed.details["kernel"])])[0]
+    assert np.std((zoomed.image - expected)[zoomed.valid]) < 1.05 * zoomed.details["noise_share"]
+    np.testing.assert_allclose(zoomed.points, sm.magnified_points(sm.window_points(bank, 0, bank.row(0)), zoom, corner),
+                               rtol=1e-5)
+    # Off, the draws are as they were.
+    off = sm.kernel_example(bank, 0, np.random.default_rng(0), sm.Settings(**base, zoom=0.0), identity=False)
+    assert np.array_equal(off.image, plain.image)
+
+
 def test_shade_darkens_the_dark_side_of_a_rim_alone(tmp_path):
     side = 200
     ys, xs = np.mgrid[:side, :side].astype(np.float32)
