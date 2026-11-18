@@ -5,7 +5,8 @@ use clap::{Args, Subcommand};
 use seiza_fits::{HeaderValue, WriteHeaderCard};
 use seiza_model::{
     Backend, BackendOptions, DenoiseOptions, DenoiseReport, ImageView, ModelStore, NoiseBands,
-    NoiseModel, Precision, Progress, Task, runtime_info,
+    NoiseModel, Precision, Progress, SharpenModel, SharpenOptions, SharpenReport, Task,
+    runtime_info,
 };
 use seiza_stacking::write_processed_image_fits_f32;
 use std::io::Write;
@@ -22,6 +23,9 @@ pub(crate) struct ModelArgs {
 enum ModelCommand {
     /// Take the noise out of a linear FITS image, keeping a share of it
     Denoise(Box<DenoiseArgs>),
+    /// Sharpen a linear FITS image: bring its stars, and everything else, to
+    /// a share of their width
+    Sharpen(Box<SharpenArgs>),
     /// Show which backends run here, and why the others do not
     Backends(RuntimeArgs),
     /// List the installed models
@@ -85,9 +89,48 @@ struct DenoiseArgs {
     runtime: RuntimeArgs,
 }
 
+#[derive(Args)]
+struct SharpenArgs {
+    /// Calibrated, stacked linear mono or RGB FITS or XISF input, from any
+    /// stacker
+    input: PathBuf,
+    /// Sharpened linear 32-bit floating-point FITS output
+    #[arg(short, long)]
+    output: PathBuf,
+    /// An installed model's name, or a bundle's directory (default: the one
+    /// installed sharpening model)
+    #[arg(long, value_name = "NAME|PATH")]
+    model: Option<String>,
+    /// What runs the model (default: the best this machine has)
+    #[arg(long)]
+    backend: Option<Backend>,
+    /// A tile's side in pixels (default: the backend's); it does not change
+    /// the result
+    #[arg(long)]
+    tile: Option<usize>,
+    /// The graph's precision (default: the backend's)
+    #[arg(long)]
+    precision: Option<Precision>,
+    /// The share of its width every star is brought to, above 0 and at most
+    /// 1, never below the model's floor in pixels (default: the model's)
+    #[arg(long)]
+    stars: Option<f32>,
+    /// The share asked of everything that is not a star (default: the
+    /// model's)
+    #[arg(long)]
+    rest: Option<f32>,
+    /// How hard the finest part of the change is held back where it lies
+    /// under the noise, in multiples of the image's noise; 0 keeps all of it
+    #[arg(long, default_value_t = 0.0)]
+    rolloff: f32,
+    #[command(flatten)]
+    runtime: RuntimeArgs,
+}
+
 pub(crate) fn run(args: ModelArgs) -> Result<()> {
     match args.command {
         ModelCommand::Denoise(args) => denoise(*args),
+        ModelCommand::Sharpen(args) => sharpen(*args),
         ModelCommand::Backends(args) => backends(&args),
         ModelCommand::List => list(),
         ModelCommand::Install { path } => install(&path),
@@ -189,6 +232,153 @@ fn denoise(args: DenoiseArgs) -> Result<()> {
     Ok(())
 }
 
+fn sharpen(args: SharpenArgs) -> Result<()> {
+    crate::provenance::validate_path_roles([
+        ("model input".into(), args.input.as_path()),
+        ("model output".into(), args.output.as_path()),
+    ])?;
+    let bundle = ModelStore::default_store()?
+        .resolve(args.model.as_deref(), Task::Sharpen)
+        .context("give --model, or run `seiza model install`")?;
+    let options = BackendOptions {
+        library: args.runtime.onnxruntime,
+        tile: args.tile,
+        precision: args.precision,
+        ..Default::default()
+    };
+    let backend = match args.backend {
+        Some(backend) => backend,
+        None => Backend::detect(&bundle, &options)?,
+    };
+
+    let mut frame = crate::common::open_frame(&args.input, "model input")?;
+    if frame.bayer.is_some() {
+        bail!(
+            "a model cannot read the raw Bayer mosaic in {}; debayer or stack it first",
+            args.input.display()
+        );
+    }
+
+    let opening = Instant::now();
+    eprintln!("opening {} on {backend}", bundle.card().name);
+    let mut model = SharpenModel::open(&bundle, backend, &options)
+        .with_context(|| format!("could not open {} on {backend}", bundle.card().name))?;
+    eprintln!("opened in {:.1} s", opening.elapsed().as_secs_f64());
+
+    crate::interrupt::install();
+    let image = &frame.image;
+    let view = ImageView::new(&image.data, image.width, image.height, image.channels)?;
+    let running = Instant::now();
+    let progress = |step: Progress| {
+        eprint!(
+            "\rchannel {}/{}: tile {}/{}",
+            step.channel + 1,
+            step.channels,
+            step.tile,
+            step.tiles
+        );
+        let _ = std::io::stderr().flush();
+    };
+    let result = model.sharpen(
+        view,
+        &SharpenOptions {
+            stars: args.stars,
+            rest: args.rest,
+            rolloff: args.rolloff,
+            progress: Some(&progress),
+            cancel: Some(&crate::interrupt::interrupted),
+        },
+    );
+    eprintln!();
+    if matches!(result, Err(seiza_model::ModelError::Cancelled)) {
+        std::process::exit(crate::interrupt::INTERRUPTED_EXIT_CODE);
+    }
+    let result = result.context("could not run the model")?;
+    let seconds = running.elapsed().as_secs_f64();
+
+    let report = result.report.clone();
+    frame.image.data = result.into_image();
+    let cards = sharpen_cards(&report);
+    write_processed_image_fits_f32(&args.output, &frame.image, &frame.headers, &cards)
+        .with_context(|| format!("could not write {}", args.output.display()))?;
+    crate::common::wrote(
+        &args.output,
+        format_args!(
+            "{} on {backend}, {}, tile {}, in {seconds:.1} s, stars to {:.0}% of their width and the rest to {:.0}%",
+            report.model,
+            report.precision,
+            report.tile,
+            report.stars * 100.0,
+            report.rest * 100.0,
+        ),
+    );
+    for (channel, read) in report.channels.iter().enumerate() {
+        println!(
+            "channel {}: stars {:.2} px wide, from {} stars at {} × {} nodes{}, {} point sources, noise {:.6}, background {:.6}",
+            channel + 1,
+            read.psf_width_px,
+            read.psf_stars,
+            read.psf_nodes.1,
+            read.psf_nodes.0,
+            if read.psf_global {
+                " (one PSF for the whole image)"
+            } else {
+                ""
+            },
+            read.points,
+            read.noise,
+            read.background
+        );
+    }
+    Ok(())
+}
+
+fn sharpen_cards(report: &SharpenReport) -> Vec<WriteHeaderCard> {
+    let text = |key: &str, value: String, comment: &str| {
+        WriteHeaderCard::new(key, HeaderValue::String(value)).with_comment(comment)
+    };
+    let number = |key: &str, value: f32, comment: &str| {
+        WriteHeaderCard::new(key, HeaderValue::Float(f64::from(value))).with_comment(comment)
+    };
+    vec![
+        text("SEIZAMDL", report.model.clone(), "Seiza learned model"),
+        text("SEIZATRF", "LINEAR".to_string(), "linear sample transfer"),
+        text(
+            "MDHASH",
+            report.sha256.chars().take(16).collect(),
+            "model graph SHA-256, first 16",
+        ),
+        text(
+            "MDCARD",
+            report.card_sha256.chars().take(16).collect(),
+            "model card SHA-256, first 16",
+        ),
+        text("MDBACKND", report.backend.to_string(), "backend requested"),
+        text("MDPREC", report.precision.to_string(), "graph precision"),
+        WriteHeaderCard::new(
+            "MDTILE",
+            HeaderValue::Integer(i64::try_from(report.tile).unwrap_or(i64::MAX)),
+        )
+        .with_comment("tile side in pixels"),
+        number(
+            "MDSTARS",
+            report.stars,
+            "share of their width stars are brought to",
+        ),
+        number("MDREST", report.rest, "share asked of what is not a star"),
+        number(
+            "MDROLL",
+            report.rolloff,
+            "fine change held back under this noise",
+        ),
+        text(
+            "MDVERS",
+            seiza_model::OUTPUT_VERSION.to_string(),
+            "seiza-model output version",
+        ),
+    ]
+}
+
 fn operation_cards(report: &DenoiseReport, bands: &NoiseBands) -> Vec<WriteHeaderCard> {
     let text = |key: &str, value: String, comment: &str| {
         WriteHeaderCard::new(key, HeaderValue::String(value)).with_comment(comment)
@@ -272,16 +462,27 @@ fn list() -> Result<()> {
             .iter()
             .map(|graph| graph.precision.to_string())
             .collect();
+        let reads = match &card.sharpen {
+            Some(sharpen) => format!(
+                "stars to {:.0}% of their width and the rest to {:.0}% unless told, no star under {} px",
+                sharpen.strengths.stars * 100.0,
+                sharpen.strengths.rest * 100.0,
+                sharpen.floor_px
+            ),
+            None => format!(
+                "reads {} noise{}",
+                card.reading.noise_map,
+                if card.reading.holes.is_some() {
+                    ", keeps holes from the network"
+                } else {
+                    ""
+                }
+            ),
+        };
         println!(
-            "{}: {}, reads {} noise{}, {}",
+            "{}: {}, {reads}, {}",
             card.name,
             card.task,
-            card.reading.noise_map,
-            if card.reading.holes.is_some() {
-                ", keeps holes from the network"
-            } else {
-                ""
-            },
             graphs.join(" and ")
         );
     }
@@ -359,6 +560,65 @@ mod tests {
         assert_eq!(args.high_amount, 0.5);
         assert_eq!(args.low_amount, 0.9);
         assert_eq!(args.tile, Some(768));
+    }
+
+    #[test]
+    fn sharpen_takes_its_two_shares_and_leaves_them_to_the_model_unasked() {
+        let parsed = Harness::try_parse_from([
+            "model",
+            "sharpen",
+            "in.fits",
+            "-o",
+            "out.fits",
+            "--stars",
+            "0.46",
+            "--rolloff",
+            "1",
+            "--backend",
+            "coreml-gpu",
+        ])
+        .unwrap();
+        let ModelCommand::Sharpen(args) = parsed.command else {
+            panic!("not sharpen")
+        };
+        assert_eq!(args.stars, Some(0.46));
+        assert_eq!(args.rest, None, "the model's own share, unless told");
+        assert_eq!(args.rolloff, 1.0);
+        assert_eq!(args.backend.unwrap().to_string(), "coreml-gpu");
+    }
+
+    #[test]
+    fn a_sharpening_s_cards_record_what_was_asked() {
+        let report = SharpenReport {
+            model: "sharpen-v1".to_string(),
+            sha256: "0123456789abcdef0123".to_string(),
+            card_sha256: "fedcba9876543210fedc".to_string(),
+            backend: Backend::Cpu,
+            precision: Precision::F32,
+            tile: 512,
+            stars: 0.46,
+            rest: 0.5,
+            rolloff: 0.0,
+            channels: Vec::new(),
+        };
+        let cards = sharpen_cards(&report);
+        let value = |key: &str| {
+            cards
+                .iter()
+                .find(|card| card.keyword() == key)
+                .map(|card| card.value().clone())
+        };
+        assert_eq!(
+            value("SEIZAMDL"),
+            Some(HeaderValue::String("sharpen-v1".to_string()))
+        );
+        assert_eq!(
+            value("MDCARD"),
+            Some(HeaderValue::String("fedcba9876543210".to_string()))
+        );
+        assert_eq!(value("MDREST"), Some(HeaderValue::Float(0.5)));
+        assert!(value("MDSTARS").is_some() && value("MDROLL").is_some());
+        assert!(value("MDHIGH").is_none(), "no noise bands in a sharpening");
     }
 
     #[test]
