@@ -26,7 +26,7 @@ from .store import Store, versions
 READ_ONLY = ("psf-fields", "cut-sharpen", "sheet-sharpen")
 # The commands that read the sharpening banks, and the manifest, if at
 # all, only for the sets' names.
-BANKS_ONLY = ("train-sharpen", "evaluate-sharpen", "clean-sharpen", "cut-external")
+BANKS_ONLY = ("train-sharpen", "evaluate-sharpen", "clean-sharpen", "cut-external", "bundle-sharpen")
 
 
 def numbers(text: str) -> tuple[float, ...]:
@@ -505,6 +505,17 @@ def main(argv: list[str] | None = None) -> int:
                         help="what the network reads, in place of the map it trained with")
     bundle.add_argument("--parity", action="append", default=[],
                         help="a backend the model has passed parity on (default: any may run it)")
+    sharpen_bundle = commands.add_parser("bundle-sharpen", help="write a trained PSF model as a bundle Seiza's "
+                                                                "runtime opens: its stamp encoder and its body")
+    sharpen_bundle.add_argument("--name", required=True, help="the run")
+    sharpen_bundle.add_argument("--out", required=True, type=Path, help="the bundle's directory")
+    sharpen_bundle.add_argument("--bundle-name", required=True, help="the model's name on its card")
+    sharpen_bundle.add_argument("--parity", action="append", default=[],
+                                help="a backend the model has passed parity on (default: any may run it)")
+    sharpen_bundle.add_argument("--strengths", type=numbers, default=None,
+                                help="the shares of their width stars and the rest are brought to when a caller "
+                                     "names none, as two numbers (default: the sheets' full-size ask)")
+
     bundle.add_argument("--holes", action=argparse.BooleanOptionalAction,
                         help="have the runtime keep the image's holes, pixels far below its sky, from the network "
                              "and put them back after, as the card's reading.holes says (default: as the run "
@@ -762,6 +773,12 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
 def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
     """`train-sharpen` and `evaluate-sharpen`."""
     from . import sharpen_model
+
+    if arguments.command == "bundle-sharpen":
+        from .bundle import write_sharpen_bundle
+
+        return write_sharpen_bundle(store, arguments.name, arguments.out, name=arguments.bundle_name,
+                                    parity=tuple(arguments.parity), strengths=arguments.strengths)
 
     if arguments.command == "cut-external":
         from . import sharpen_external

@@ -91,6 +91,7 @@ validation banks' windows.
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import re
@@ -2705,6 +2706,113 @@ def export(model: SharpeningUNet, path: Path, *, tile: int) -> dict[str, Any]:
     scale = float(np.abs(expected).max()) or 1.0
     return {"path": str(path), "opset": 17, "tile": tile,
             "max_relative_error": float(np.abs(got - expected).max() / scale), "bytes": path.stat().st_size}
+
+
+# The names of the two graphs' tensors and of the body's free dimensions, as
+# a bundle's card gives them to the runtime.
+ENCODER_INPUT, ENCODER_OUTPUT = "stamp", "vector"
+BODY_INPUTS, BODY_OUTPUT = ("planes", "vector"), "residual"
+BODY_AXES = {"planes": {2: "height", 3: "width"}, "vector": {2: "map_height", 3: "map_width"},
+             "residual": {2: "height", 3: "width"}}
+# The side of the sample the body is traced on, in bottleneck pixels.
+EXPORT_MAP = 4
+
+
+class ExportedBody(torch.nn.Module):
+    """`SharpeningUNet.mapped` for a vector map on the bottleneck's grid, as
+    a graph of its own: each level's scale and shift are resized by that
+    level's fixed factor, where `FiLM` resizes them to the size it reads
+    from the feature maps, so the graph holds no shape arithmetic and its
+    height and width stay free."""
+
+    def __init__(self, model: SharpeningUNet) -> None:
+        super().__init__()
+        self.model = model
+
+    @staticmethod
+    def film(layer: Any, y: torch.Tensor, vector: torch.Tensor, factor: int) -> torch.Tensor:
+        scale, shift = layer.scale(vector), layer.shift(vector)
+        if factor > 1:
+            scale = torch.nn.functional.interpolate(scale, scale_factor=float(factor), mode="bilinear",
+                                                    align_corners=False)
+            shift = torch.nn.functional.interpolate(shift, scale_factor=float(factor), mode="bilinear",
+                                                    align_corners=False)
+        return y * scale + shift
+
+    def forward(self, planes: torch.Tensor, vector: torch.Tensor) -> torch.Tensor:
+        model = self.model
+        x = planes
+        if model.oversample > 1:
+            x = torch.nn.functional.interpolate(x, scale_factor=float(model.oversample), mode="nearest")
+        skips = [model.first(x)]
+        for down in model.down:
+            skips.append(down(skips[-1]))
+        y = self.film(model.film_bottom, skips.pop(), vector, 1)
+        for block in model.attention:
+            y = block(y)
+        for level in reversed(range(model.levels - 1)):
+            y = torch.nn.functional.interpolate(y, scale_factor=2.0, mode="nearest")
+            y = model.up[level](torch.cat([model.lift[level](y), skips[level]], dim=1))
+            y = self.film(model.film_up[level], y, vector, 2 ** (model.levels - 1 - level))
+        return model.last(y)
+
+
+def export_parts(model: SharpeningUNet, directory: Path, *, half: bool = True) -> dict[str, Any]:
+    """Write the model as the two graphs a runtime needs to follow a PSF
+    that changes over the image: the stamp encoder, `stamp planes ->
+    vector`, run once for each node of the PSF field, and the body,
+    `planes, vector map -> residual` (`SharpeningUNet.mapped`), run on
+    every tile with the nodes' vectors interpolated to its bottleneck's
+    pixels. The body's height and width are free, and its map's, which a
+    runtime fixes together: a map is a tile over the model's `multiple`.
+    The encoder is written in single precision alone, since it is small and
+    its vectors are then the same whatever runs the body; the body in
+    single and, with `half`, half precision. Each single-precision graph is
+    held to PyTorch on a random input, on ONNX Runtime's CPU provider, at
+    a size the trace did not see."""
+    import onnxruntime
+
+    model = model.cpu().eval().float()
+    directory.mkdir(parents=True, exist_ok=True)
+    features = model.encoder.features
+    inputs = model.first[0].in_channels
+    side = EXPORT_MAP * model.multiple
+    written: dict[str, Any] = {"opset": 17, "features": features}
+
+    def held(path: Path, feeds: dict[str, torch.Tensor], expected: torch.Tensor) -> float:
+        session = onnxruntime.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+        got = session.run(None, {name: value.numpy() for name, value in feeds.items()})[0]
+        scale = float(expected.abs().max()) or 1.0
+        return float(np.abs(got - expected.numpy()).max() / scale)
+
+    encoder = directory / "encoder-f32.onnx"
+    stamp = torch.rand(1, len(STAMP_PLANES), STAMP, STAMP)
+    torch.onnx.export(model.encoder, (stamp,), str(encoder), input_names=[ENCODER_INPUT],
+                      output_names=[ENCODER_OUTPUT], opset_version=17, dynamo=False)
+    stamp = torch.rand(1, len(STAMP_PLANES), STAMP, STAMP)
+    with torch.no_grad():
+        error = held(encoder, {ENCODER_INPUT: stamp}, model.encoder(stamp))
+    written["encoder"] = {"file": encoder.name, "max_relative_error": error, "bytes": encoder.stat().st_size}
+
+    body = ExportedBody(model).eval()
+    written["body"] = []
+    for precision, dtype in (("f32", torch.float32), ("f16", torch.float16))[: 2 if half else 1]:
+        path = directory / f"body-{precision}.onnx"
+        # A copy, since half precision would round the caller's weights.
+        traced = body if dtype == torch.float32 else copy.deepcopy(body).to(dtype)
+        sample = (torch.randn(1, inputs, side, side, dtype=dtype),
+                  torch.randn(1, features, EXPORT_MAP, EXPORT_MAP, dtype=dtype))
+        torch.onnx.export(traced, sample, str(path), input_names=list(BODY_INPUTS), output_names=[BODY_OUTPUT],
+                          opset_version=17, dynamo=False, dynamic_axes=BODY_AXES)
+        entry = {"precision": precision, "file": path.name, "bytes": path.stat().st_size}
+        if precision == "f32":
+            planes = torch.randn(1, inputs, 2 * side, 3 * side)
+            vector = torch.randn(1, features, 2 * EXPORT_MAP, 3 * EXPORT_MAP)
+            with torch.no_grad():
+                entry["max_relative_error"] = held(path, dict(zip(BODY_INPUTS, (planes, vector))),
+                                                   model.mapped(planes, vector))
+        written["body"].append(entry)
+    return written
 
 
 # Inference.
