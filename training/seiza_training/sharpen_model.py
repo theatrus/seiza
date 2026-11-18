@@ -148,6 +148,9 @@ STRUCTURE_BLOCK = 8
 STRUCTURE_VERSION = 1
 # A known-kernel window's passed noise is blurred by up to this many pixels.
 NOISE_BLUR = 0.6
+# A magnified window (`Settings.zoom`) is magnified at least this much, or
+# not at all.
+ZOOM_LEAST = 1.2
 # The core's place is sought this far, in pixels, either way of its
 # plateau's middle, at these steps.
 FILL_SHIFT = 0.6
@@ -407,6 +410,22 @@ class Settings:
     # clarity of 1.5 by 7%, with more of their gain under 8 px, where it
     # shows none (2026-11-17). 1: as set on 2026-11-11.
     clarity_scale: float = 1.0
+    # The share of known-kernel windows with a clean truth (clean-truth
+    # and denoised windows, and the space-telescope bank's) seen
+    # magnified first (`magnified`): a part of the window `z` times
+    # smaller, resampled up to the window's size, its stars `z` times as
+    # wide, before its blur and its fresh noise. `z` is drawn
+    # log-uniformly from `ZOOM_LEAST` up to `zoom_most`, no larger than
+    # takes its stack's stars to `zoom_widest` px. The Trunk's stars are
+    # 11.5 px across, as wide as about 5% of the widened windows' inputs,
+    # and the space-telescope truth (stars of 2 to 4.5 px) shows that
+    # width only at asks of 0.4 and under; a run on that image binned
+    # 3 × 3 drew the goal's rise across its rims (3.81 px against
+    # 3.74, at full size 4.35) and their foot, with no mottle
+    # (2026-11-18). 0: none.
+    zoom: float = 0.0
+    zoom_most: float = 3.0
+    zoom_widest: float = 6.0
 
     @property
     def planes(self) -> tuple[str, ...]:
@@ -427,6 +446,11 @@ class Settings:
             raise ValueError(f"kernel ratios run from above 1 up: {self.kernel_ratios}")
         if self.tile % 8:
             raise ValueError(f"a tile of {self.tile} is not a multiple of 8")
+        if not 0.0 <= self.zoom <= 1.0:
+            raise ValueError(f"the zoom is a share of windows, from 0 to 1: {self.zoom}")
+        if self.zoom > 0 and not (self.zoom_most >= ZOOM_LEAST and self.zoom_widest > 0):
+            raise ValueError(f"a zoom of at most {self.zoom_most} to stars of {self.zoom_widest} px "
+                             f"magnifies nothing: it starts at {ZOOM_LEAST}")
 
 
 @dataclass(frozen=True)
@@ -1636,6 +1660,71 @@ def window_points(bank: Bank, source: int, row: dict[str, float]) -> np.ndarray:
     return points
 
 
+def zoom_drawn(width: float, rng: np.random.Generator, settings: Settings) -> float:
+    """How much a window whose stars are `width` px across is magnified
+    (`Settings.zoom`): log-uniformly from `ZOOM_LEAST` up to `zoom_most`,
+    or to as much as takes its stars to `zoom_widest` px; 1 where that is
+    under `ZOOM_LEAST`."""
+    most = min(settings.zoom_most, settings.zoom_widest / max(width, 1e-6))
+    if most < ZOOM_LEAST:
+        return 1.0
+    return float(math.exp(rng.uniform(math.log(ZOOM_LEAST), math.log(most))))
+
+
+def cubic_taps(positions: np.ndarray, length: int) -> tuple[np.ndarray, np.ndarray]:
+    """Keys' cubic convolution (a = −1/2) at `positions` along an axis of
+    `length` samples: the four samples about each, clamped to the axis,
+    and their weights."""
+    base = np.floor(positions).astype(np.int64)
+    offsets = np.arange(-1, 3)
+    distance = np.abs((positions - base)[:, None] - offsets[None, :])
+    weights = np.where(distance <= 1.0, 1.5 * distance**3 - 2.5 * distance**2 + 1.0,
+                       np.where(distance < 2.0, -0.5 * distance**3 + 2.5 * distance**2 - 4.0 * distance + 2.0, 0.0))
+    return np.clip(base[:, None] + offsets[None, :], 0, length - 1), weights
+
+
+def magnified(plane: np.ndarray, zoom: float, corner: tuple[float, float], *, nearest: bool = False) -> np.ndarray:
+    """`plane`'s part from `corner` (top, left, in its pixels), `zoom` times
+    smaller than it, resampled up to its size: the output's pixel (i, j)
+    reads the plane at `corner + ((i, j) + 1/2) / zoom − 1/2`, by Keys'
+    cubic, or the nearest sample. NaN stays NaN, where the nearest is."""
+    rows = corner[0] + (np.arange(plane.shape[0]) + 0.5) / zoom - 0.5
+    columns = corner[1] + (np.arange(plane.shape[1]) + 0.5) / zoom - 0.5
+    if nearest:
+        near_rows = np.clip(np.rint(rows).astype(np.int64), 0, plane.shape[0] - 1)
+        near_columns = np.clip(np.rint(columns).astype(np.int64), 0, plane.shape[1] - 1)
+        return plane[np.ix_(near_rows, near_columns)]
+    finite = np.isfinite(plane)
+    values = plane.astype(np.float64) if finite.all() else np.where(finite, plane, 0.0)
+    row_taps, row_weights = cubic_taps(rows, plane.shape[0])
+    column_taps, column_weights = cubic_taps(columns, plane.shape[1])
+    down = sum(values[row_taps[:, k], :] * row_weights[:, k, None] for k in range(4))
+    found = sum(down[:, column_taps[:, k]] * column_weights[None, :, k] for k in range(4)).astype(np.float32)
+    if not finite.all():
+        found[~magnified(finite, zoom, corner, nearest=True)] = np.nan
+    return found
+
+
+def magnified_stamp(stamp: np.ndarray, zoom: float) -> np.ndarray:
+    """A PSF stamp `zoom` times as wide about its middle, summing to one."""
+    middle = (np.asarray(stamp.shape, dtype=np.float64) - 1.0) / 2.0
+    corner = middle - (middle + 0.5) / zoom + 0.5
+    found = magnified(stamp, zoom, (float(corner[0]), float(corner[1])))
+    return (found / found.sum()).astype(np.float32)
+
+
+def magnified_points(points: np.ndarray, zoom: float, corner: tuple[float, float]) -> np.ndarray:
+    """Point sources (`psf_fields.DETECTION_COLUMNS`) where `magnified`, at
+    `zoom` from `corner`, puts them: their places, fluxes and widths."""
+    columns = psf_fields.DETECTION_COLUMNS
+    found = points.copy()
+    found[:, columns.index("x")] = (points[:, columns.index("x")] - corner[1] + 0.5) * zoom - 0.5
+    found[:, columns.index("y")] = (points[:, columns.index("y")] - corner[0] + 0.5) * zoom - 0.5
+    found[:, columns.index("flux")] *= zoom**2
+    found[:, columns.index("fwhm")] *= zoom
+    return found
+
+
 def window_contrast(image: np.ndarray, block: int = 8) -> float:
     """How far a window's light ranges: from the 10th to the 90th
     percentile of its means over `block` pixels a side."""
@@ -1670,6 +1759,19 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
                        and rng.random() < settings.clean_truth)
     if denoised or clean_truth:
         image = np.asarray(bank.clean["image_clean"][window], dtype=np.float32)
+    # Magnified, where its truth is clean, so its stars are wider than its
+    # stack's; its noise is drawn fresh after, a pixel's own.
+    zoom, corner, width = 1.0, (0.0, 0.0), float(row["width"])
+    if settings.zoom > 0 and (denoised or clean_truth or noisy) and rng.random() < settings.zoom:
+        zoom = zoom_drawn(width, rng, settings)
+    if zoom > 1.0:
+        corner = (float(rng.uniform(0.0, image.shape[0] * (1.0 - 1.0 / zoom))),
+                  float(rng.uniform(0.0, image.shape[1] * (1.0 - 1.0 / zoom))))
+        image = magnified(image, zoom, corner)
+        sigma = np.maximum(magnified(sigma, zoom, corner), 0.0)
+        saturated = magnified(saturated, zoom, corner, nearest=True)
+        stamp = magnified_stamp(stamp, zoom)
+        width *= zoom
     # The stack's own noise, which a denoised window's edges are still
     # judged against (`clarified`).
     stack_sigma = sigma
@@ -1693,12 +1795,14 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
         share = float(rng.uniform(CLEAN_TRUTH_NOISE, 1.0))
     signal = background + scale * (image - background)
     points = window_points(bank, source, row)
+    if zoom > 1.0:
+        points = magnified_points(points, zoom, corner)
     points[:, 2] *= scale
     points[:, 3] = background + scale * (points[:, 3] - background)
     level = (bank.sources[source].get("input_psf") or {}).get("clip_level")
     clip = background + scale * (level - background) if settings.fill_clipped and level is not None else None
     if clip is not None and not identity and saturated.any():
-        signal = filled(signal, saturated, points, stamp, row["width"], background)
+        signal = filled(signal, saturated, points, stamp, width, background)
     ratio, nonstellar_ratio, band, contrast, clarity, shade = kernel.ratio, None, kernel.reach(), 0.0, 0.0, 0.0
     if identity:
         blurred, target = signal, None
@@ -1789,7 +1893,8 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
                                           "kernel": kernel.covariance.tolist(), "sharpest": kernel.ratio,
                                           "real": kernel.donor is not None, "denoised": denoised,
                                           "clean_truth": clean_truth, "contrast": contrast,
-                                          "clarity": clarity, "shade": shade,
+                                          "clarity": clarity, "shade": shade, "zoom": zoom,
+                                          "zoom_corner": list(corner),
                                           "halo": None if halo is None else [halo.share, halo.width]},
                    nonstellar_ratio)
 

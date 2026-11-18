@@ -359,6 +359,14 @@ def main(argv: list[str] | None = None) -> int:
     sharpen_train.add_argument("--clarity-scale", type=float, default=1.0,
                                help="the clarity's band as a multiple of its widths: its smoothing and its squares "
                                     "this many times as wide (1: as set)")
+    sharpen_train.add_argument("--zoom", type=float, default=0.0,
+                               help="the share of known-kernel windows with a clean truth (clean-truth, denoised "
+                                    "and space-telescope windows) magnified before their blur and their fresh "
+                                    "noise, so their stars are wider than their stack's (0: none)")
+    sharpen_train.add_argument("--zoom-most", type=float, default=3.0,
+                               help="the most a --zoom window is magnified")
+    sharpen_train.add_argument("--zoom-widest", type=float, default=6.0,
+                               help="the widest, in px, a --zoom window's stars are made")
     sharpen_train.add_argument("--rest-floor", type=float, default=0.0,
                                help="the least ratio asked of what is not a star in a known-kernel window, whatever "
                                     "its stars are asked (0: none)")
@@ -838,7 +846,8 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
         clean_truth=arguments.clean_truth, contrast=arguments.contrast, clarity=arguments.clarity,
         shade=arguments.shade,
         rest_floor=arguments.rest_floor, fine_snr=arguments.fine_snr, fine_split=arguments.fine_split,
-        clarity_scale=arguments.clarity_scale)
+        clarity_scale=arguments.clarity_scale, zoom=arguments.zoom, zoom_most=arguments.zoom_most,
+        zoom_widest=arguments.zoom_widest)
     loss = sharpen_model.LossSettings(epsilon=arguments.charbonnier, noise_cap=arguments.noise_cap,
                                       gradient_weight=arguments.gradient_weight,
                                       gradient_scales=arguments.gradient_scales, flux_weight=arguments.flux_weight,
