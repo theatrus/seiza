@@ -1942,6 +1942,22 @@ In order, each only if the one before leaves a gap at the rims:
      0.90). By eye the two cannot be told apart. Asking more of the
      targets at the widths the model already knows does not reach the
      Trunk's ridges, as their scale suggested.
+   - The zoom (`--zoom 0.3`, a further 30,000 steps from the split's
+     run, the rest the same; validation 0.727 on zoomed windows too)
+     changes next to nothing either. The rise is 4.39 px (4.35 before),
+     the slope ×2.00 (×2.03), the lit side +4.51 and +5.56 (+4.64 and
+     +5.73), the dark side 0.57, 0.65, 0.66 and 0.52 at 8, 6, 4 and 2
+     px (0.55, 0.64, 0.66 and 0.51). Inside the cloud 1.06, 1.12 and
+     1.06 between 2–4, 4–8 and 8–16 px, 114 dots a megapixel, knots of
+     0.93% on the Trunk and 1.36% on the multi-night Trunk (1.28%). It
+     keeps more of the grain (0.93 on sky and 0.91 on bright nebula at
+     the pixel, from 0.90 and 0.81), and the California's stars have a
+     little less of the cross (arms 7.01, from 7.42). By eye it is the
+     run it started from. The run before it already scored 0.710 on
+     these zoomed windows, under its own 0.716, and the 30,000 steps
+     left them at 0.727: magnified windows are not ones the model gets
+     wrong, so what it does on a wide PSF is what its targets there ask
+     for, and the zoom cannot ask for more.
 
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
