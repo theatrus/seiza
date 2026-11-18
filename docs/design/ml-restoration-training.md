@@ -1926,6 +1926,21 @@ In order, each only if the one before leaves a gap at the rims:
        the split's run with `--zoom 0.3` and nothing else changed. Its
        validation draws zoomed windows too, so its validation loss is not
        that run's.
+   - The clarity and the shade at 2, from 1.5, on the split's run (a
+     further 30,000 steps from its weights, the rest the same;
+     validation 0.722, on targets of its own) change next to nothing.
+     The rise is 4.32 px (4.35 before), the slope ×2.05 (×2.03), the lit
+     side +4.75 and +5.85 (+4.64 and +5.73). The dark side it was asked
+     for more of is a little weaker: 0.52, 0.61, 0.63 and 0.50 below the
+     input at 8, 6, 4 and 2 px (0.55, 0.64, 0.66 and 0.51). Inside the
+     cloud it reads 1.05, 1.10 and 1.05 between 2–4, 4–8 and 8–16 px
+     (1.07, 1.12 and 1.05), with 114 dots a megapixel (113) and knots of
+     0.93% on the Trunk (0.94%), but 1.42% on the multi-night Trunk
+     (1.28%). It keeps a little more of the grain on bright nebula (0.87
+     at the pixel, from 0.81) and takes a little more on sky (0.87, from
+     0.90). By eye the two cannot be told apart. Asking more of the
+     targets at the widths the model already knows does not reach the
+     Trunk's ridges, as their scale suggested.
 
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
