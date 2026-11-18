@@ -125,3 +125,115 @@ def write_bundle(store: Store, run: str, directory: Path, *, name: str, noise_ma
     written = card(name, record, chosen, graphs, list(parity), HoleGuard() if guard else None)
     (directory / "card.json").write_text(json.dumps(written, indent=2) + "\n")
     return written
+
+
+# The PSF model's bundle.
+#
+# A sharpening bundle holds two graphs: the stamp encoder, run once for each
+# node of the image's PSF field, and the body, run on every tile with the
+# nodes' vectors interpolated to its bottleneck's pixels. Its card is a noise
+# card's with `task` "sharpen" and a `sharpen` section, which names
+# everything the runtime makes from the image for it: the PSF field and how
+# it is measured, the point sources, the stamp the encoder reads, and how the
+# residual is applied. The `reading` is the image map's, as `image_sigma`
+# makes it, and the planes are named as the run's are, with dashes.
+
+
+def sharpen_card(name: str, record: dict[str, Any], graphs: list[dict[str, str]], encoder: dict[str, Any],
+                 parity: list[str], strengths: tuple[float, float] | None = None) -> dict[str, Any]:
+    """A sharpening bundle's card, from the fields it may hold: `graphs`
+    are the body's, one per precision, and `encoder` the encoder's file,
+    hash and vector length."""
+    from . import psf_fields
+    from .multi_night import STACK_DETECTION
+    from .noise_model import IMAGE_MAP_REVISION
+    from .sharpen_bank import STAMP, WIDTH_CORE
+    from .sharpen_model import (BODY_AXES, BODY_INPUTS, BODY_OUTPUT, ENCODER_INPUT, ENCODER_OUTPUT, PLANES, STAMP_PLANES,
+                                WINGS, settings_from)
+    from .sharpen_sheets import FULL_NONSTELLAR, FULL_STRENGTH
+
+    unknown = [backend for backend in parity if backend not in BACKENDS]
+    if unknown:
+        raise ValueError(f"parity names backends the runtime knows, one of {BACKENDS}, not {unknown}")
+    config, inference = record["config"], record["inference"]
+    settings = settings_from(config["settings"])
+    planes = tuple(config.get("planes", PLANES))
+    if planes != settings.planes:
+        raise ValueError(f"the run reads {planes}, and its settings say {settings.planes}")
+    if IMAGE_MAP_REVISION != 2:
+        raise ValueError(f"the runtime makes the image map of revision 2, not {IMAGE_MAP_REVISION}")
+    stars, rest = strengths or (FULL_NONSTELLAR if settings.nonstellar else (FULL_STRENGTH, FULL_STRENGTH))
+    return {
+        "format": CARD_FORMAT,
+        "name": name,
+        "task": "sharpen",
+        "graphs": graphs,
+        "inputs": [{"tensor": BODY_INPUTS[0], "planes": [plane.replace("_", "-") for plane in planes]}],
+        "output": BODY_OUTPUT,
+        "dimensions": list(BODY_AXES[BODY_INPUTS[0]].values()),
+        "reading": {
+            "noise_map": "image",
+            "noise_plane": "asinh",
+            "sky": "global",
+            "sky_block": SKY_BLOCK,
+            "flat_block": FLAT_BLOCK,
+            "image_map_scale": IMAGE_MAP_SCALE,
+            "noise_correlation": NOISE_CORRELATION,
+        },
+        "tiling": {
+            "tile": inference["tile"],
+            "margin": inference["margin"],
+            "ramp": inference["overlap"] - 2 * inference["margin"],
+            "multiple": inference["multiple"],
+        },
+        "parity": parity,
+        "sharpen": {
+            "encoder": {
+                "file": encoder["file"],
+                "sha256": encoder["sha256"],
+                "input": ENCODER_INPUT,
+                "output": ENCODER_OUTPUT,
+                "planes": list(config.get("stamp_planes", STAMP_PLANES)),
+                "side": STAMP,
+                "wings": config.get("wings", WINGS),
+                "features": encoder["features"],
+            },
+            "vector": {"tensor": BODY_INPUTS[1], "dimensions": list(BODY_AXES[BODY_INPUTS[1]].values())},
+            "residual": settings.residual,
+            # The narrowest a star is asked to be, in pixels, and the
+            # sharpest ask the run's known-kernel windows were drawn at.
+            "floor_px": settings.floor_px,
+            "sharpest": 1.0 / max(settings.kernel_ratios),
+            "strengths": {"stars": stars, "rest": rest},
+            "psf": {**psf_fields.MEASURE_OPTIONS, "grid_px": psf_fields.GRID_PX, "width_core": WIDTH_CORE},
+            "points": {
+                "noise_reduction_radius": STACK_DETECTION["noise_reduction_radius"],
+                "clip_peaks": psf_fields.CLIP_PEAKS,
+                "peak_block": psf_fields.PEAK_BLOCK,
+                "core_radius": psf_fields.CORE_RADIUS,
+            },
+        },
+    }
+
+
+def write_sharpen_bundle(store: Store, run: str, directory: Path, *, name: str, parity: tuple[str, ...] = (),
+                         strengths: tuple[float, float] | None = None) -> dict[str, Any]:
+    """Write the sharpening `run` to `directory` as the bundle `name`: its
+    encoder and its body (`sharpen_model.export_parts`), each held to
+    PyTorch, and its card. `strengths` are the shares of their width stars
+    and the rest are brought to when a caller names none."""
+    from .sharpen_model import export_parts, load_run as load_sharpen_run
+
+    record, model = load_sharpen_run(store, run)
+    written = export_parts(model, directory)
+    worst = max([written["encoder"]["max_relative_error"],
+                 *(entry["max_relative_error"] for entry in written["body"] if "max_relative_error" in entry)])
+    if worst > 1e-3:
+        raise ValueError(f"an exported graph of {run} differs from PyTorch by {worst:.3g} of its output")
+    graphs = [{"precision": entry["precision"], "file": entry["file"], "sha256": sha256_of(directory / entry["file"])}
+              for entry in written["body"]]
+    encoder = {"file": written["encoder"]["file"], "sha256": sha256_of(directory / written["encoder"]["file"]),
+               "features": written["features"]}
+    made = sharpen_card(name, record, graphs, encoder, list(parity), strengths)
+    (directory / "card.json").write_text(json.dumps(made, indent=2) + "\n")
+    return {"card": made, "export": written}
