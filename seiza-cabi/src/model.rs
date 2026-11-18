@@ -13,7 +13,7 @@ use super::{
 };
 use seiza_model::{
     Backend, BackendOptions, DenoiseOptions, DenoiseReport, Denoised, HoleGuard, ImageView,
-    ModelBundle, ModelStore, NoiseBands, NoiseModel, Precision, Progress, runtime_info,
+    ModelBundle, ModelStore, NoiseBands, NoiseModel, Precision, Progress, Task, runtime_info,
 };
 use serde::{Deserialize, Serialize};
 use std::ffi::{CString, c_char, c_void};
@@ -232,7 +232,7 @@ pub unsafe extern "C" fn seiza_noise_model_open(
         let request = ModelOpenRequest::parse(options_json)?;
         let options = request.options()?;
         let bundle = store_at(request.store.clone())?
-            .resolve(chosen.as_deref())
+            .resolve(chosen.as_deref(), Task::Denoise)
             .map_err(|error| error.to_string())?;
         let backend = match request.backend.as_deref() {
             Some(word) => word.parse::<Backend>().map_err(|error| error.to_string())?,
@@ -553,7 +553,7 @@ pub unsafe extern "C" fn seiza_model_verify(
             Some(required_str(model, "model")?)
         };
         store_at(optional_path(store)?)?
-            .resolve(chosen.as_deref())
+            .resolve(chosen.as_deref(), Task::Denoise)
             .and_then(|bundle| bundle.verify())
             .map_err(|error| error.to_string())?;
         Ok(true)

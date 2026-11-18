@@ -2533,6 +2533,7 @@ dependencies = [
  "libloading 0.9.0",
  "ort",
  "rayon",
+ "seiza-stars",
  "serde",
  "serde_json",
  "sha2 0.11.1",

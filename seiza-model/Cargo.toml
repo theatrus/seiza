@@ -21,6 +21,7 @@ libloading = "0.9"
 # whose API changes between candidates.
 ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "half", "coreml", "cuda", "tensorrt", "nvrtx", "webgpu"] }
 rayon.workspace = true
+seiza-stars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

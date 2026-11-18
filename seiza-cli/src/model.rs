@@ -5,7 +5,7 @@ use clap::{Args, Subcommand};
 use seiza_fits::{HeaderValue, WriteHeaderCard};
 use seiza_model::{
     Backend, BackendOptions, DenoiseOptions, DenoiseReport, ImageView, ModelStore, NoiseBands,
-    NoiseModel, Precision, Progress, runtime_info,
+    NoiseModel, Precision, Progress, Task, runtime_info,
 };
 use seiza_stacking::write_processed_image_fits_f32;
 use std::io::Write;
@@ -108,7 +108,7 @@ fn denoise(args: DenoiseArgs) -> Result<()> {
     };
     bands.validate()?;
     let bundle = ModelStore::default_store()?
-        .resolve(args.model.as_deref())
+        .resolve(args.model.as_deref(), Task::Denoise)
         .context("give --model, or run `seiza model install`")?;
     let options = BackendOptions {
         library: args.runtime.onnxruntime,

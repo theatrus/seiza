@@ -1,4 +1,5 @@
 use crate::backend::Backend;
+use crate::bundle::Task;
 use std::path::PathBuf;
 
 /// Why a model could not be found, opened or run.
@@ -32,17 +33,25 @@ pub enum ModelError {
     #[error("no model named {0} is installed")]
     ModelNotFound(String),
     /// No model was named, and none is installed to take its place.
-    #[error("no noise model is installed in {}", store.display())]
+    #[error("no {task} model is installed in {}", store.display())]
     NoModelInstalled {
         /// The store searched.
         store: PathBuf,
+        /// What the model was wanted for.
+        task: Task,
     },
     /// No model was named, and more than one could take its place.
-    #[error("several noise models are installed, so name one: {}", names.join(", "))]
+    #[error("several {task} models are installed, so name one: {}", names.join(", "))]
     SeveralModels {
         /// The models installed.
         names: Vec<String>,
+        /// What the model was wanted for.
+        task: Task,
     },
+    /// The image's PSF could not be measured, so a sharpening model has
+    /// nothing to be told: too few stars, most often.
+    #[error("the image's PSF could not be measured: {0}")]
+    PsfField(#[from] seiza_stars::PsfFieldError),
     /// The image cannot be run: empty, the wrong length, or with no finite pixels.
     #[error("{0}")]
     InvalidImage(String),

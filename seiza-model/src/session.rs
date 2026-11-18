@@ -63,14 +63,26 @@ fn provider(backend: Backend, cache: Option<&Path>) -> Option<ExecutionProviderD
 }
 
 /// What `outlet` holds, once its shape is `planes` planes of `side` × `side`.
-/// A dimension the graph leaves free passes. A tensor that does not fit is
-/// refused here, since at run time it would stop at the first tile at best,
-/// and at worst keep part of what the network wrote.
 fn fitted(
     outlet: &Outlet,
     role: &str,
     planes: usize,
     side: usize,
+    model: &str,
+) -> Result<Element, ModelError> {
+    fitted_to(outlet, role, planes, side, side, model)
+}
+
+/// What `outlet` holds, once its shape is `planes` planes of `wide` × `high`.
+/// A dimension the graph leaves free passes. A tensor that does not fit is
+/// refused here, since at run time it would stop at the first tile at best,
+/// and at worst keep part of what the network wrote.
+fn fitted_to(
+    outlet: &Outlet,
+    role: &str,
+    planes: usize,
+    high: usize,
+    wide: usize,
     model: &str,
 ) -> Result<Element, ModelError> {
     let name = outlet.name();
@@ -102,12 +114,168 @@ fn fitted(
     if !fits(channels, planes) {
         return refuse(format!("holds {channels} planes, not {planes}"));
     }
-    if !fits(height, side) || !fits(width, side) {
+    if !fits(height, high) || !fits(width, wide) {
         return refuse(format!(
-            "is {width} × {height}, and this run's tile is {side} × {side}"
+            "is {width} × {height}, and this run gives it {wide} × {high}"
         ));
     }
     Ok(element)
+}
+
+/// A tensor as a run fixes it: its name, and `planes` planes of `width` ×
+/// `height`.
+#[derive(Clone, Debug)]
+pub(crate) struct TensorShape {
+    pub(crate) name: String,
+    pub(crate) planes: usize,
+    pub(crate) height: usize,
+    pub(crate) width: usize,
+}
+
+impl TensorShape {
+    fn len(&self) -> usize {
+        self.planes * self.height * self.width
+    }
+}
+
+/// A session over a graph of several input tensors, each of a size of its
+/// own, and one output: a sharpening model's encoder, and its body.
+pub(crate) struct OrtGraph {
+    session: Session,
+    inputs: Vec<(TensorShape, Element, Vec<f16>)>,
+    output: TensorShape,
+    output_element: Element,
+}
+
+impl OrtGraph {
+    /// Open `graph` with each free dimension in `dimensions` set, and hold
+    /// its tensors to `inputs` and `output`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn open(
+        runtime: &Runtime,
+        graph: &Path,
+        model: &str,
+        backend: Backend,
+        dimensions: &[(&str, usize)],
+        inputs: &[TensorShape],
+        output: &TensorShape,
+        cache: Option<&Path>,
+    ) -> Result<Self, ModelError> {
+        let mut builder = Session::builder(&runtime.environment)?;
+        for (dimension, size) in dimensions {
+            builder = builder.with_dimension_override(*dimension, *size as i64)?;
+        }
+        if let Some(provider) = provider(backend, cache) {
+            // As for a noise model: a graph that does not fit its backend
+            // must fail, not run elsewhere.
+            builder = builder
+                .with_config_entry("session.disable_cpu_ep_fallback", "1")?
+                .with_execution_providers([provider.error_on_failure()])?;
+        }
+        let session = builder.commit_from_file(graph)?;
+        let refuse = |reason: String| Err(ModelError::ModelContract(format!("{model}'s {reason}")));
+        if let Some(outlet) = session
+            .inputs()
+            .iter()
+            .find(|outlet| !inputs.iter().any(|input| input.name == outlet.name()))
+        {
+            return refuse(format!(
+                "graph reads {}, which its card does not name",
+                outlet.name()
+            ));
+        }
+        let mut held = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            let Some(outlet) = session
+                .inputs()
+                .iter()
+                .find(|outlet| outlet.name() == input.name)
+            else {
+                return refuse(format!(
+                    "card names the input {}, which its graph does not read",
+                    input.name
+                ));
+            };
+            let element = fitted_to(
+                outlet,
+                "input",
+                input.planes,
+                input.height,
+                input.width,
+                model,
+            )?;
+            held.push((input.clone(), element, Vec::new()));
+        }
+        let Some(outlet) = session
+            .outputs()
+            .iter()
+            .find(|outlet| outlet.name() == output.name)
+        else {
+            return refuse(format!(
+                "card names the output {}, which its graph does not write",
+                output.name
+            ));
+        };
+        let output_element = fitted_to(
+            outlet,
+            "output",
+            output.planes,
+            output.height,
+            output.width,
+            model,
+        )?;
+        Ok(Self {
+            session,
+            inputs: held,
+            output: output.clone(),
+            output_element,
+        })
+    }
+
+    /// Fill `out` from `inputs`, one slice for each tensor in the order
+    /// they were opened in.
+    pub(crate) fn run(&mut self, inputs: &[&[f32]], out: &mut [f32]) -> Result<(), ModelError> {
+        let mut tensors: Vec<(Cow<'_, str>, SessionInputValue<'_>)> =
+            Vec::with_capacity(self.inputs.len());
+        for ((shape, element, half), values) in self.inputs.iter_mut().zip(inputs) {
+            if values.len() != shape.len() {
+                return Err(ModelError::ModelContract(format!(
+                    "{} takes {} values, not {}",
+                    shape.name,
+                    shape.len(),
+                    values.len()
+                )));
+            }
+            let dimensions = [
+                1_i64,
+                shape.planes as i64,
+                shape.height as i64,
+                shape.width as i64,
+            ];
+            let value = match element {
+                Element::F32 => {
+                    SessionInputValue::from(TensorRef::from_array_view((dimensions, *values))?)
+                }
+                Element::F16 => {
+                    half.clear();
+                    half.extend(values.iter().map(|&value| f16::from_f32(value)));
+                    SessionInputValue::from(TensorRef::from_array_view((
+                        dimensions,
+                        half.as_slice(),
+                    ))?)
+                }
+            };
+            tensors.push((Cow::Borrowed(shape.name.as_str()), value));
+        }
+        let outputs = self.session.run(tensors)?;
+        let found = &outputs[self.output.name.as_str()];
+        match self.output_element {
+            Element::F32 => fill(out, found.try_extract_tensor::<f32>()?.1, |value| value),
+            Element::F16 => fill(out, found.try_extract_tensor::<f16>()?.1, |value: f16| {
+                value.to_f32()
+            }),
+        }
+    }
 }
 
 impl OrtRunner {

@@ -12,7 +12,7 @@ use pyo3::prelude::*;
 use seiza_model::{
     Backend, BackendOptions, ChannelScales, DenoiseOptions, DenoiseReport, Denoised, HoleGuard,
     ImageView, ModelBundle, ModelError, ModelStore, NoiseBands, NoiseModel, Precision, Progress,
-    runtime_info,
+    Task, runtime_info,
 };
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -319,7 +319,7 @@ impl PyNoiseModel {
             precision,
         };
         let bundle = store_at(store)?
-            .resolve(model.as_deref())
+            .resolve(model.as_deref(), Task::Denoise)
             .map_err(model_error)?;
         let opened = py.detach(|| {
             let backend = match backend {
@@ -540,7 +540,7 @@ fn install_model(
 #[pyo3(signature = (model=None, store=None))]
 fn verify_model(py: Python<'_>, model: Option<String>, store: Option<PathBuf>) -> PyResult<()> {
     let store = store_at(store)?;
-    py.detach(|| store.resolve(model.as_deref())?.verify())
+    py.detach(|| store.resolve(model.as_deref(), Task::Denoise)?.verify())
         .map_err(model_error)
 }
 
