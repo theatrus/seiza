@@ -1859,6 +1859,23 @@ In order, each only if the one before leaves a gap at the rims:
      the stars hold; the edge gain is the reference's, 1.51. Which of
      the two did which is not yet known: the clarity moved out is
      weaker, not further out.
+   - The split alone (the same fine-tune with `--fine-split 3` and the
+     clarity's band where it was; validation 0.716) does nearly all of
+     it. The dots (113 a megapixel), the knots (0.94% on the Trunk,
+     1.28% on the multi-night Trunk), the grain at the pixel (0.90 on
+     sky, 0.81 on bright nebula), the fall between 8 and 16 px (1.05)
+     and the weaker dark side (0.55, 0.64, 0.66 and 0.51 at 8, 6, 4
+     and 2 px) are the split's: the two runs agree on them to 0.01.
+     Moving the clarity's band out only took a further 0.02 from the
+     2–4 and 4–8 px bands (1.07 and 1.12 with the split alone, 1.05 and
+     1.10 with both) and added nothing between 8 and 16 px, where it
+     was meant to. So the clarity's scale stays at 1. The split at 3 px
+     is what takes the mottle out; what it costs, the cloud's 8–16 px
+     detail and the dark side near a rim, is what is left to win back,
+     with the lit side (+4.64 and +5.73, the reference +5.41 and +6.46)
+     and the rise (4.35 px, the reference 3.74). Neither run had a
+     control, so part of the change may be the further 30,000 steps
+     rather than the split.
 
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
