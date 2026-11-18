@@ -1092,13 +1092,16 @@ fn download_model(
     Ok((&bundle.map_err(model_error)?).into())
 }
 
-/// Check a model's graphs against its card, raising when one differs. `model`
-/// is as for `NoiseModel`.
+/// Check models' graphs, and a sharpening model's encoder, against their
+/// cards, raising at the first that differs. `model` names an installed model
+/// or a bundle's directory; `None` checks every installed model, noise and
+/// sharpening alike, and passes when none is installed.
 #[pyfunction]
 #[pyo3(signature = (model=None, store=None))]
 fn verify_model(py: Python<'_>, model: Option<String>, store: Option<PathBuf>) -> PyResult<()> {
     let store = store_at(store)?;
-    py.detach(|| store.resolve(model.as_deref(), Task::Denoise)?.verify())
+    py.detach(|| store.verify(model.as_deref()))
+        .map(drop)
         .map_err(model_error)
 }
 

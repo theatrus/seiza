@@ -1793,7 +1793,12 @@ def download_model(
 ) -> InstalledModel: ...
 def verify_model(
     model: str | None = None, store: str | Path | None = None
-) -> None: ...
+) -> None:
+    """Check models' graphs, and a sharpening model's encoder, against their
+    cards, raising at the first that differs. ``model`` names an installed
+    model or a bundle's directory; ``None`` checks every installed model,
+    noise and sharpening alike, and passes when none is installed."""
+    ...
 def remove_model(name: str, store: str | Path | None = None) -> None: ...
 
 class RemainingKernel:

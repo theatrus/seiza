@@ -1100,8 +1100,11 @@ pub unsafe extern "C" fn seiza_model_download_json(
 }
 
 #[unsafe(no_mangle)]
-/// Check a model's graphs against its card. `model` is as for
-/// [`seiza_noise_model_open`]; `store` may be null for the default store.
+/// Check models' graphs, and a sharpening model's encoder, against their
+/// cards. `model` names an installed model or a bundle's directory; null
+/// checks every installed model, noise and sharpening alike, and is true when
+/// none is installed. The first that does not match is the error. `store` may
+/// be null for the default store.
 ///
 /// # Safety
 /// `model` and `store` must be null or NUL-terminated strings. When non-null,
@@ -1119,8 +1122,7 @@ pub unsafe extern "C" fn seiza_model_verify(
             Some(required_str(model, "model")?)
         };
         store_at(optional_path(store)?)?
-            .resolve(chosen.as_deref(), Task::Denoise)
-            .and_then(|bundle| bundle.verify())
+            .verify(chosen.as_deref())
             .map_err(|error| error.to_string())?;
         Ok(true)
     })
@@ -1243,6 +1245,45 @@ mod tests {
             ));
             assert!(!error.is_null(), "a second removal is an error");
             assert!(taken(error).contains("noise-tiny"));
+        }
+    }
+
+    #[test]
+    fn verifying_with_no_name_checks_every_installed_model() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = text(&temp.path().join("store"));
+        let mut error = ptr::null_mut();
+        unsafe {
+            assert!(
+                seiza_model_verify(ptr::null(), store.as_ptr(), &mut error),
+                "an empty store has nothing to check"
+            );
+            assert!(error.is_null());
+
+            // A sharpening model alone, then one of each.
+            for source in [fixtures().join("sharpen/tiny"), fixtures().join("tiny")] {
+                let source = text(&source);
+                let installed =
+                    seiza_model_install_json(source.as_ptr(), store.as_ptr(), &mut error);
+                assert!(!installed.is_null() && error.is_null());
+                taken(installed);
+                assert!(seiza_model_verify(ptr::null(), store.as_ptr(), &mut error));
+                assert!(error.is_null());
+            }
+
+            // The sharpening model is checked too, with no name given.
+            let encoder = temp.path().join("store/sharpen-tiny/encoder-f32.onnx");
+            std::fs::write(encoder, b"other").unwrap();
+            assert!(!seiza_model_verify(ptr::null(), store.as_ptr(), &mut error));
+            assert!(taken(error).contains("encoder-f32.onnx"));
+            let name = CString::new("noise-tiny").unwrap();
+            let mut error = ptr::null_mut();
+            assert!(seiza_model_verify(
+                name.as_ptr(),
+                store.as_ptr(),
+                &mut error
+            ));
+            assert!(error.is_null());
         }
     }
 

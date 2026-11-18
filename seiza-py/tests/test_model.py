@@ -285,6 +285,20 @@ def test_a_sharpening_model_installs_with_its_encoder_and_lists_what_it_asks(tmp
     assert [model.name for model in seiza.installed_models(store=tmp_path)] == ["noise-tiny", "sharpen-tiny"]
 
 
+def test_verifying_with_no_name_checks_every_installed_model(tmp_path: Path) -> None:
+    seiza.verify_model(store=tmp_path / "empty")
+    installed = seiza.install_model(SHARPEN / "tiny", store=tmp_path)
+    seiza.verify_model(store=tmp_path)
+    seiza.install_model(TINY, store=tmp_path)
+    seiza.verify_model(store=tmp_path)
+
+    # The sharpening model is checked too, with no name given.
+    (installed.path / "encoder-f32.onnx").write_bytes(b"other")
+    with pytest.raises(seiza.EngineError, match="encoder-f32.onnx"):
+        seiza.verify_model(store=tmp_path)
+    seiza.verify_model("noise-tiny", store=tmp_path)
+
+
 @needs_runtime
 def test_a_tiny_sharpening_model_matches_the_harness() -> None:
     expected = json.loads((SHARPEN / "expected.json").read_text())

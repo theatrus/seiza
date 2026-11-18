@@ -72,13 +72,18 @@ impl ModelStore {
     }
 
     /// The model `chosen` names: a bundle's directory, or an installed model.
+    fn named(&self, chosen: &str) -> Result<ModelBundle, ModelError> {
+        if Path::new(chosen).join(CARD_FILE).is_file() {
+            return ModelBundle::open(chosen);
+        }
+        self.find(chosen)
+    }
+
+    /// The model `chosen` names: a bundle's directory, or an installed model.
     /// With nothing chosen, the one installed model of `task`.
     pub fn resolve(&self, chosen: Option<&str>, task: Task) -> Result<ModelBundle, ModelError> {
         if let Some(chosen) = chosen {
-            if Path::new(chosen).join(CARD_FILE).is_file() {
-                return ModelBundle::open(chosen);
-            }
-            return self.find(chosen);
+            return self.named(chosen);
         }
         let mut models: Vec<ModelBundle> = self
             .list()?
@@ -99,6 +104,20 @@ impl ModelStore {
                 task,
             }),
         }
+    }
+
+    /// Check models' graphs against their cards ([`ModelBundle::verify`]):
+    /// the model `chosen` names, as [`resolve`](Self::resolve) takes it, or
+    /// with nothing chosen every installed model, whatever its task. Returns
+    /// the models checked, in order of name: none when nothing is installed.
+    /// The first that does not match stops the check.
+    pub fn verify(&self, chosen: Option<&str>) -> Result<Vec<ModelBundle>, ModelError> {
+        let models = match chosen {
+            Some(chosen) => vec![self.named(chosen)?],
+            None => self.list()?,
+        };
+        models.iter().try_for_each(ModelBundle::verify)?;
+        Ok(models)
     }
 
     /// Copy the bundle at `source` into the store, replacing any model of the
@@ -377,6 +396,63 @@ mod tests {
         assert!(matches!(
             store.install(&sharpen),
             Err(ModelError::HashMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn verifying_with_no_name_checks_every_installed_model() {
+        let temp = tempfile::tempdir().unwrap();
+        let (noise, sharpen) = (temp.path().join("noise"), temp.path().join("sharpen"));
+        write_bundle(&noise, "noise-test", "constant");
+        write_sharpen_bundle(&sharpen, "sharpen-test");
+        let store = ModelStore::new(temp.path().join("store"));
+        let names = |models: Vec<ModelBundle>| -> Vec<String> {
+            models
+                .into_iter()
+                .map(|bundle| bundle.card().name.clone())
+                .collect()
+        };
+        assert!(
+            store.verify(None).unwrap().is_empty(),
+            "an empty store has nothing to check"
+        );
+
+        // A store holding a sharpening model alone checks it.
+        store.install(&sharpen).unwrap();
+        assert_eq!(names(store.verify(None).unwrap()), ["sharpen-test"]);
+        store.install(&noise).unwrap();
+        assert_eq!(
+            names(store.verify(None).unwrap()),
+            ["noise-test", "sharpen-test"],
+            "one of each: both are checked"
+        );
+        assert_eq!(
+            names(store.verify(Some("sharpen-test")).unwrap()),
+            ["sharpen-test"]
+        );
+        assert_eq!(
+            names(store.verify(Some(noise.to_str().unwrap())).unwrap()),
+            ["noise-test"],
+            "a bundle's directory, as resolve takes it"
+        );
+
+        // A changed encoder is found with no name given.
+        std::fs::write(
+            store.root().join("sharpen-test").join("encoder-f32.onnx"),
+            b"other",
+        )
+        .unwrap();
+        assert!(matches!(
+            store.verify(None),
+            Err(ModelError::HashMismatch { .. })
+        ));
+        assert!(matches!(
+            store.verify(Some("noise-test")),
+            Ok(models) if models.len() == 1
+        ));
+        assert!(matches!(
+            store.verify(Some("nothing")),
+            Err(ModelError::ModelNotFound(_))
         ));
     }
 

@@ -40,7 +40,8 @@ enum ModelCommand {
     },
     /// Check installed models against their cards
     Verify {
-        /// Only this model (default: all of them)
+        /// Only this model, installed or a bundle's directory (default: every
+        /// installed model)
         name: Option<String>,
     },
     /// Remove an installed model
@@ -484,15 +485,11 @@ fn names_a_path(model: &str) -> bool {
 
 fn verify(name: Option<&str>) -> Result<()> {
     let store = ModelStore::default_store()?;
-    let models = match name {
-        Some(name) => vec![store.find(name)?],
-        None => store.list()?,
-    };
+    let models = store.verify(name)?;
     if models.is_empty() {
         println!("no models are installed in {}", store.root().display());
     }
     for bundle in models {
-        bundle.verify()?;
         println!("{}: matches its card", bundle.card().name);
     }
     Ok(())
