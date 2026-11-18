@@ -1690,7 +1690,87 @@ class InstalledModel:
     card_sha256: str
     noise_map: str
     holes: HoleGuard | None
+    sharpen: SharpenStrengths | None
     precisions: list[str]
+
+class SharpenStrengths:
+    """What an installed sharpening model asks for unless told."""
+
+    stars: float
+    rest: float
+    floor_px: float
+    sharpest: float
+
+class SharpenedChannel:
+    """What one channel of a sharpened image was read by."""
+
+    background: float
+    noise: float
+    psf_rows: int
+    psf_columns: int
+    psf_stars: int
+    psf_global: bool
+    psf_width_px: float
+    points: int
+
+class SharpenReport:
+    """What ran in a sharpening."""
+
+    model: str
+    sha256: str
+    card_sha256: str
+    backend: str
+    precision: str
+    tile: int
+    stars: float
+    rest: float
+    rolloff: float
+    channels: list[SharpenedChannel]
+
+class Sharpened:
+    """A sharpened image and what ran."""
+
+    image: npt.NDArray[np.float32]
+    report: SharpenReport
+
+class SharpenModel:
+    """A sharpening model, open on a backend. It needs only the image."""
+
+    backend: str
+    tile: int
+    def __init__(
+        self,
+        model: str | None = None,
+        backend: str | None = None,
+        *,
+        store: str | Path | None = None,
+        library: str | Path | None = None,
+        cache_dir: str | Path | None = None,
+        tile: int | None = None,
+        precision: str | None = None,
+        device_id: int | None = None,
+    ) -> None: ...
+    def sharpen(
+        self,
+        image: npt.NDArray[np.float32],
+        stars: float | None = None,
+        rest: float | None = None,
+        *,
+        rolloff: float = 0.0,
+        progress: Callable[[int, int, int, int], object] | None = None,
+        cancel: Callable[[], bool] | None = None,
+    ) -> Sharpened: ...
+    def sharpen_file(
+        self,
+        path: str | Path,
+        output: str | Path,
+        stars: float | None = None,
+        rest: float | None = None,
+        *,
+        rolloff: float = 0.0,
+        progress: Callable[[int, int, int, int], object] | None = None,
+        cancel: Callable[[], bool] | None = None,
+    ) -> SharpenReport: ...
 
 MODEL_OUTPUT_VERSION: str
 

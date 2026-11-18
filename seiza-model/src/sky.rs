@@ -195,6 +195,8 @@ pub(crate) fn network_input(
                         };
                     });
             }
+            // A sharpening model's own planes, which its run fills.
+            InputPlane::Ratio | InputPlane::NonstellarRatio | InputPlane::Points => {}
         }
     }
     input
