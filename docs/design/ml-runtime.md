@@ -401,13 +401,16 @@ tile: `encoder-f32.onnx`, stamp planes to a vector, and `body-f32.onnx` and
 height and width free and the map's a tile over the model's grid. The
 encoder runs on ONNX Runtime's CPU provider whatever runs the body: it is
 small, it runs once for each node, and its vectors are then the same on
-every backend. The card is a noise card with `task` `sharpen`, the planes
-above, and a `sharpen` section: the encoder's file, hash, tensors, stamp
-side and vector length; the vector map's tensor and dimensions; how the
-residual is applied; the floor in pixels; the sharpest share the run was
-trained to be asked for; the shares a run takes when its caller names none;
-the PSF field's settings, the nodes' spacing and the core a width is fitted
-to; and the detector's settings and the clipped cores'. The sharpening
+every backend. The card is a noise card with `task` `sharpen`, the sky read
+as one background and no hole guard (a card that asks for either is
+refused), the planes above, and a `sharpen` section: the encoder's file,
+hash, tensors, stamp side and vector length; the vector map's tensor and
+dimensions; how the residual is applied; the floor in pixels; the sharpest
+share the run was trained to be asked for; the shares a run takes when its
+caller names none; the PSF field's settings, the nodes' spacing and the core
+a width is fitted to; and the detector's settings and the clipped cores'.
+The other options `seiza-stars` takes for the two are set in `seiza-model`,
+none left to its defaults. The sharpening
 trainer, which is not in the repository yet, will write the bundle with a
 `bundle-sharpen` command of its own, and hold each single-precision graph to
 PyTorch on a random input. No sharpening model is published, and
