@@ -353,6 +353,12 @@ def main(argv: list[str] | None = None) -> int:
     sharpen_train.add_argument("--fine-snr", type=float, default=0.0,
                                help="hold back the finest part of what is asked of what is not a star where it lies "
                                     "under this times the noise a known-kernel window is shown under (0: never)")
+    sharpen_train.add_argument("--fine-split", type=float, default=2.0,
+                               help="where --fine-snr splits a change into its fine part and the rest, in px as a "
+                                    "Gaussian's σ")
+    sharpen_train.add_argument("--clarity-scale", type=float, default=1.0,
+                               help="the clarity's band as a multiple of its widths: its smoothing and its squares "
+                                    "this many times as wide (1: as set)")
     sharpen_train.add_argument("--rest-floor", type=float, default=0.0,
                                help="the least ratio asked of what is not a star in a known-kernel window, whatever "
                                     "its stars are asked (0: none)")
@@ -831,7 +837,8 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
         external_snr=arguments.external_snr, kernel_halo=arguments.kernel_halo,
         clean_truth=arguments.clean_truth, contrast=arguments.contrast, clarity=arguments.clarity,
         shade=arguments.shade,
-        rest_floor=arguments.rest_floor, fine_snr=arguments.fine_snr)
+        rest_floor=arguments.rest_floor, fine_snr=arguments.fine_snr, fine_split=arguments.fine_split,
+        clarity_scale=arguments.clarity_scale)
     loss = sharpen_model.LossSettings(epsilon=arguments.charbonnier, noise_cap=arguments.noise_cap,
                                       gradient_weight=arguments.gradient_weight,
                                       gradient_scales=arguments.gradient_scales, flux_weight=arguments.flux_weight,

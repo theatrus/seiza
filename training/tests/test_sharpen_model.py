@@ -481,6 +481,55 @@ def test_the_fine_part_of_a_change_is_held_back_under_noise(tmp_path):
     assert np.array_equal(identity.target, identity.image)
 
 
+def test_the_roll_off_split_and_the_clarity_band_can_be_moved(tmp_path):
+    rng = np.random.default_rng(3)
+    noise = rng.standard_normal((256, 256)).astype(np.float32)
+    flat = np.full((256, 256), 100.0, np.float32)
+    sigma = np.ones((256, 256), np.float32)
+    none = np.zeros((0, len(COLUMNS)))
+
+    def band(plane, low, high):
+        return blurred_images_band(plane, low) - blurred_images_band(plane, high)
+
+    def blurred_images_band(plane, px):
+        return sm.blurred_images(plane, [px**2 * np.eye(2)])[0]
+
+    # The clarity, moved up an octave, raises less of the noise's finest
+    # part, and the rest of its gain lies further out than before.
+    inner = (slice(64, 192), slice(64, 192))
+    raised = {}
+    for scale in (1.0, 2.0):
+        made, reach = sm.clarified(flat + noise, 1.0, 6.0, none, sigma, ranged=False, scale=scale)
+        change = made - (flat + noise)
+        raised[scale] = [float(band(change, low, high)[inner].std()) for low, high in ((1.0, 2.0), (4.0, 8.0))]
+        assert reach > 0
+    assert raised[2.0][0] < 0.7 * raised[1.0][0]
+    assert raised[2.0][1] / raised[1.0][1] > 1.5 * raised[2.0][0] / raised[1.0][0]
+    # At a scale of 1 it is as it was.
+    assert np.array_equal(sm.clarified(flat + noise, 1.0, 6.0, none, sigma, ranged=False)[0],
+                          sm.clarified(flat + noise, 1.0, 6.0, none, sigma, ranged=False, scale=1.0)[0])
+    # The roll-off's split: at its default, as before; wider, it holds
+    # back a coarser part of a change that lies under the noise.
+    soft = flat + noise
+    ripple = (0.3 * np.sin(2 * np.pi * np.arange(256) / 10.0)).astype(np.float32)[None, :] + 0 * flat
+    sharp = soft + ripple
+    as_before = sm.rolled_off(sharp, soft, 1.0, sigma)
+    assert np.array_equal(as_before[0], sm.rolled_off(sharp, soft, 1.0, sigma, sm.FINE_SPLIT)[0])
+    wide, wide_reach = sm.rolled_off(sharp, soft, 1.0, sigma, 4.0)
+    assert wide_reach > as_before[1]
+    kept = float(((wide - soft)[inner] * ripple[inner]).sum() / (ripple[inner] ** 2).sum())
+    kept_before = float(((as_before[0] - soft)[inner] * ripple[inner]).sum() / (ripple[inner] ** 2).sum())
+    assert kept < 0.5 * kept_before
+    # In a window: the settings reach the target.
+    bank = sm.Bank(kernel_bank(tmp_path), sm.Settings(tile=32))
+    base = dict(tile=32, exposure=1.0, kernel_noise=1.0, nonstellar=True, pass_noise=True, clarity=1.0, fine_snr=1.0)
+    plain = sm.kernel_example(bank, 0, np.random.default_rng(0), sm.Settings(**base), identity=False)
+    moved = sm.kernel_example(bank, 0, np.random.default_rng(0),
+                              sm.Settings(**base, clarity_scale=2.0, fine_split=3.0), identity=False)
+    assert np.array_equal(moved.image, plain.image)
+    assert not np.allclose(moved.target, plain.target)
+
+
 def test_shade_darkens_the_dark_side_of_a_rim_alone(tmp_path):
     side = 200
     ys, xs = np.mgrid[:side, :side].astype(np.float32)
