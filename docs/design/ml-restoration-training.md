@@ -1842,6 +1842,22 @@ In order, each only if the one before leaves a gap at the rims:
      noise; so the split (`--fine-split`) and the clarity's band
      (`--clarity-scale`, the band's smoothing and squares that many
      times as wide) can now be moved, for a run to learn it.
+   - Both moved at once (that run's weights, `--fine-split 3
+     --clarity-scale 1.5`, 30,000 steps at 3e-5) take the mottle out
+     and some of the cloud's structure with it. Under 8 px the cloud's
+     detail is the goal's or less (1.01, 1.05 and 1.10 from 1–2
+     to 4–8 px; the run before 1.02, 1.08 and 1.14; the goal
+     1.00, 1.04 and 1.13), the dots fall to 112 a megapixel, and the
+     knots to 0.93% on the Trunk and 1.22% on the multi-night Trunk,
+     from 1.54%. But between 8 and 16 px the detail falls too, to 1.05
+     (the goal 1.11), the dark side within 8 px of a rim is
+     weaker (0.56, 0.65, 0.66 and 0.51 at 8, 6, 4 and 2 px, from 0.65,
+     0.75, 0.77 and 0.58), and the run takes more of the grain at the
+     pixel (0.90 on sky and 0.79 on bright nebula, from 0.95 and 0.90).
+     The lit side (+4.63 and +5.72), the slope (×2.02 over 4.38 px) and
+     the stars hold; the edge gain is the goal's, 1.51. Which of
+     the two did which is not yet known: the clarity moved out is
+     weaker, not further out.
 
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
