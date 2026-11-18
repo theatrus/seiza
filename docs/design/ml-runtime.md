@@ -440,6 +440,12 @@ its value: single-precision rounding through the sinh. The crop holds too
 few stars for a field that varies, so it ran with one PSF. Times are for the
 whole crop on an Apple-silicon Mac, measurement and all, after the model is open.
 
+The whole 26 MP sheet image (6248 × 4176) has a field that varies, measured
+from 273 stars and sampled at 18 × 26 nodes, with 278 point sources. There
+the Core ML GPU at f32 differs from the harness by 0.024σ̄ at most and
+2.2e-5σ̄ RMS, in 18.7 s, and the CPU by 0.028σ̄ and 2.3e-5σ̄, in 259 s. With
+a roll-off of 1 the RMS is 6.3e-5σ̄ on both.
+
 **Half precision loses the stars' cores.** The residual is added in asinh,
 so an error in it is a relative error in the pixel: the f16 graph is right
 to 3.4e-4σ̄ on the sky, and wrong by 0.1 to 0.2% RMS, 0.6% at most, of every
