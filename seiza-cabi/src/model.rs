@@ -13,7 +13,8 @@ use super::{
 };
 use seiza_model::{
     Backend, BackendOptions, DenoiseOptions, DenoiseReport, Denoised, HoleGuard, ImageView,
-    ModelBundle, ModelStore, NoiseBands, NoiseModel, Precision, Progress, Task, runtime_info,
+    ModelBundle, ModelStore, NoiseBands, NoiseModel, Precision, Progress, SharpenModel,
+    SharpenOptions, SharpenReport, Task, runtime_info,
 };
 use serde::{Deserialize, Serialize};
 use std::ffi::{CString, c_char, c_void};
@@ -32,6 +33,12 @@ pub struct SeizaNoiseModel {
 pub struct SeizaDenoised {
     result: Denoised,
     report_json: CString,
+}
+
+/// An opaque sharpening model, open on a backend. Release it with
+/// [`seiza_sharpen_model_free`]. One thread may run it at a time.
+pub struct SeizaSharpenModel {
+    model: SharpenModel,
 }
 
 /// Told after each tile, on the thread running the model: the channel from 0,
@@ -77,6 +84,29 @@ impl ModelOpenRequest {
             tile: self.tile,
             precision,
         })
+    }
+}
+
+/// What a sharpening is asked for. Every field may be left out: `stars` and
+/// `rest` are then the model's own shares, and nothing is rolled off.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields, default)]
+struct SharpenRequest {
+    stars: Option<f32>,
+    rest: Option<f32>,
+    rolloff: f32,
+}
+
+impl SharpenRequest {
+    fn parse(json: *const c_char) -> Result<Self, String> {
+        if json.is_null() {
+            return Ok(Self::default());
+        }
+        let json = required_str(json, "sharpening options")?;
+        if json.is_empty() {
+            return Ok(Self::default());
+        }
+        serde_json::from_str(&json).map_err(|error| format!("invalid sharpening options: {error}"))
     }
 }
 
@@ -175,6 +205,74 @@ impl From<&DenoiseReport> for DenoiseReportResponse {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct SharpenedChannelResponse {
+    background: f32,
+    noise: f32,
+    psf_rows: usize,
+    psf_columns: usize,
+    psf_stars: usize,
+    psf_global: bool,
+    psf_width_px: f32,
+    points: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SharpenReportResponse {
+    model: String,
+    sha256: String,
+    card_sha256: String,
+    backend: String,
+    precision: String,
+    tile: usize,
+    stars: f32,
+    rest: f32,
+    rolloff: f32,
+    channels: Vec<SharpenedChannelResponse>,
+}
+
+impl From<&SharpenReport> for SharpenReportResponse {
+    fn from(report: &SharpenReport) -> Self {
+        Self {
+            model: report.model.clone(),
+            sha256: report.sha256.clone(),
+            card_sha256: report.card_sha256.clone(),
+            backend: report.backend.to_string(),
+            precision: report.precision.to_string(),
+            tile: report.tile,
+            stars: report.stars,
+            rest: report.rest,
+            rolloff: report.rolloff,
+            channels: report
+                .channels
+                .iter()
+                .map(|read| SharpenedChannelResponse {
+                    background: read.background,
+                    noise: read.noise,
+                    psf_rows: read.psf_nodes.0,
+                    psf_columns: read.psf_nodes.1,
+                    psf_stars: read.psf_stars,
+                    psf_global: read.psf_global,
+                    psf_width_px: read.psf_width_px,
+                    points: read.points,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// What a sharpening model asks for unless told, and may be asked for.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SharpenStrengthsResponse {
+    stars: f64,
+    rest: f64,
+    floor_px: f64,
+    sharpest: f64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct InstalledModelResponse {
     name: String,
     path: PathBuf,
@@ -182,6 +280,7 @@ struct InstalledModelResponse {
     card_sha256: String,
     noise_map: String,
     holes: Option<HoleGuardResponse>,
+    sharpen: Option<SharpenStrengthsResponse>,
     precisions: Vec<String>,
 }
 
@@ -195,6 +294,15 @@ impl From<&ModelBundle> for InstalledModelResponse {
             card_sha256: bundle.card_sha256().to_string(),
             noise_map: card.reading.noise_map.to_string(),
             holes: card.reading.holes.as_ref().map(Into::into),
+            sharpen: card
+                .sharpen
+                .as_ref()
+                .map(|sharpen| SharpenStrengthsResponse {
+                    stars: sharpen.strengths.stars,
+                    rest: sharpen.strengths.rest,
+                    floor_px: sharpen.floor_px,
+                    sharpest: sharpen.sharpest,
+                }),
             precisions: card
                 .graphs
                 .iter()
@@ -443,6 +551,186 @@ pub unsafe extern "C" fn seiza_denoised_free(denoised: *mut SeizaDenoised) {
 /// `model` must be null or a pointer from [`seiza_noise_model_open`] that has
 /// not already been freed.
 pub unsafe extern "C" fn seiza_noise_model_free(model: *mut SeizaNoiseModel) {
+    if !model.is_null() {
+        unsafe { drop(Box::from_raw(model)) };
+    }
+}
+
+#[unsafe(no_mangle)]
+/// Open a sharpening model.
+///
+/// `model` names an installed model or a bundle's directory; null means the one
+/// installed sharpening model. `options_json` is as [`seiza_noise_model_open`]
+/// takes it. Release the result with [`seiza_sharpen_model_free`].
+///
+/// # Safety
+/// `model` and `options_json` must be null or NUL-terminated strings. When
+/// non-null, `error_out` must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_sharpen_model_open(
+    model: *const c_char,
+    options_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaSharpenModel {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let chosen = if model.is_null() {
+            None
+        } else {
+            Some(required_str(model, "model")?)
+        };
+        let request = ModelOpenRequest::parse(options_json)?;
+        let options = request.options()?;
+        let bundle = store_at(request.store.clone())?
+            .resolve(chosen.as_deref(), Task::Sharpen)
+            .map_err(|error| error.to_string())?;
+        let backend = match request.backend.as_deref() {
+            Some(word) => word.parse::<Backend>().map_err(|error| error.to_string())?,
+            None => Backend::detect(&bundle, &options).map_err(|error| error.to_string())?,
+        };
+        let model =
+            SharpenModel::open(&bundle, backend, &options).map_err(|error| error.to_string())?;
+        Ok(Box::into_raw(Box::new(SeizaSharpenModel { model })))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+/// The backend an open sharpening model's body runs on, as a string the caller
+/// frees with `seiza_string_free`.
+///
+/// # Safety
+/// `model` must be a live [`SeizaSharpenModel`]. When non-null, `error_out`
+/// must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_sharpen_model_backend(
+    model: *const SeizaSharpenModel,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let model = unsafe { model.as_ref() }.ok_or("model is required")?;
+        CString::new(model.model.backend().to_string())
+            .map(CString::into_raw)
+            .map_err(|error| error.to_string())
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+/// The side of the tiles an open sharpening model runs.
+///
+/// # Safety
+/// `model` must be null or a live [`SeizaSharpenModel`].
+pub unsafe extern "C" fn seiza_sharpen_model_tile(model: *const SeizaSharpenModel) -> usize {
+    unsafe { model.as_ref() }.map_or(0, |model| model.model.tiling().tile)
+}
+
+#[unsafe(no_mangle)]
+/// Sharpen an image, which is all the model needs: a linear stack from any
+/// stacker, NaN where nothing covers a pixel. Its PSF and how that changes over
+/// the field, its point sources and its noise are measured from it. Samples are
+/// row-major with channels interleaved, and each channel is measured and run
+/// alone. The sharpened image is written to `out`, laid out as `data` is.
+///
+/// `options_json` may be null, or hold `stars`, the share of its width every
+/// star is brought to, `rest`, the share asked of everything that is not a
+/// star, and `rolloff`, how hard the finest part of the change is held back
+/// where it lies under the noise. A share is above 0 and at most 1, which
+/// leaves things as they are; left out, it is the model's own. No star is asked
+/// to be narrower than the model's floor.
+///
+/// Returns what ran, as JSON the caller frees with `seiza_string_free`:
+/// `model`, `sha256` (the body graph's), `cardSha256`, `backend`, `precision`,
+/// `tile`, `stars`, `rest`, `rolloff`, and `channels`, each with its
+/// `background`, `noise`, `psfRows` and `psfColumns` (the nodes its PSF field
+/// was sampled at), `psfStars`, `psfGlobal` (too few stars left one PSF for the
+/// whole image), `psfWidthPx` and `points`. A host keys cached results on
+/// `cardSha256`, `backend`, `precision`, the three strengths and
+/// [`seiza_model_output_version`]. An image with too few stars to measure a
+/// PSF from is refused.
+///
+/// # Safety
+/// `model` must be a live [`SeizaSharpenModel`] no other thread is using,
+/// `data` must point to `data_length` floats and `out` to `out_length` writable
+/// floats. `options_json` must be null or a NUL-terminated string. `progress`
+/// may be null, and is passed `context`. `cancel` must be null or a live
+/// [`SeizaCancelSignal`] retained until this call returns. When non-null,
+/// `error_out` must point to writable storage for one pointer.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn seiza_sharpen_model_sharpen(
+    model: *mut SeizaSharpenModel,
+    data: *const f32,
+    data_length: usize,
+    width: usize,
+    height: usize,
+    channels: usize,
+    options_json: *const c_char,
+    out: *mut f32,
+    out_length: usize,
+    progress: SeizaModelProgressCallback,
+    cancel: *const SeizaCancelSignal,
+    context: *mut c_void,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let model = unsafe { model.as_mut() }.ok_or("model is required")?;
+        let data = unsafe { required_f32_slice(data, data_length, "image")? };
+        let view =
+            ImageView::new(data, width, height, channels).map_err(|error| error.to_string())?;
+        if out_length != data_length {
+            return Err(format!(
+                "output has {out_length} floats; expected {data_length}"
+            ));
+        }
+        let out = unsafe { required_f32_slice_mut(out, out_length, "output")? };
+        let request = SharpenRequest::parse(options_json)?;
+        // Held as integers so that the closures are `Sync`: the core calls
+        // them only on this thread.
+        let context = context as usize;
+        let signal = cancel as usize;
+        let report = |step: Progress| {
+            if let Some(callback) = progress {
+                let Progress {
+                    channel,
+                    channels,
+                    tile,
+                    tiles,
+                } = step;
+                unsafe { callback(channel, channels, tile, tiles, context as *mut c_void) };
+            }
+        };
+        let stop = || {
+            unsafe { (signal as *const SeizaCancelSignal).as_ref() }
+                .is_some_and(|signal| signal.cancelled.load(Ordering::Relaxed))
+        };
+        let options = SharpenOptions {
+            stars: request.stars,
+            rest: request.rest,
+            rolloff: request.rolloff,
+            progress: Some(&report),
+            cancel: Some(&stop),
+        };
+        let result = model
+            .model
+            .sharpen(view, &options)
+            .map_err(|error| error.to_string())?;
+        let report_json = serde_json::to_string(&SharpenReportResponse::from(&result.report))
+            .map_err(|error| error.to_string())?;
+        out.copy_from_slice(result.image());
+        CString::new(report_json)
+            .map(CString::into_raw)
+            .map_err(|error| error.to_string())
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+/// Release an open sharpening model.
+///
+/// # Safety
+/// `model` must be null or a pointer from [`seiza_sharpen_model_open`] that has
+/// not already been freed.
+pub unsafe extern "C" fn seiza_sharpen_model_free(model: *mut SeizaSharpenModel) {
     if !model.is_null() {
         unsafe { drop(Box::from_raw(model)) };
     }
@@ -855,6 +1143,98 @@ mod tests {
 
             seiza_denoised_free(denoised);
             seiza_noise_model_free(model);
+        }
+    }
+
+    #[test]
+    fn a_tiny_sharpening_model_runs_from_c() {
+        if std::env::var_os("SEIZA_ONNXRUNTIME").is_none() {
+            eprintln!("skipped: SEIZA_ONNXRUNTIME names no ONNX Runtime library");
+            return;
+        }
+        let (width, height) = (330, 250);
+        let bytes = std::fs::read(fixtures().join("sharpen/image.f32")).unwrap();
+        let pixels: Vec<f32> = bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| f32::from_le_bytes(*chunk))
+            .collect();
+        let source = text(&fixtures().join("sharpen/tiny"));
+        let options = CString::new(r#"{"backend": "cpu"}"#).unwrap();
+        let asked = CString::new(r#"{"stars": 0.6, "rolloff": 0.5}"#).unwrap();
+        let mut error = ptr::null_mut();
+        let mut tiles = 0_usize;
+        let mut out = vec![0.0_f32; pixels.len()];
+        unsafe {
+            assert!(
+                seiza_noise_model_open(source.as_ptr(), options.as_ptr(), &mut error).is_null(),
+                "a sharpening model is no noise model"
+            );
+            assert!(taken(error).contains("sharpen"));
+            let model = seiza_sharpen_model_open(source.as_ptr(), options.as_ptr(), &mut error);
+            assert!(!model.is_null());
+            assert_eq!(taken(seiza_sharpen_model_backend(model, &mut error)), "cpu");
+            assert_eq!(seiza_sharpen_model_tile(model), 128);
+            let report = seiza_sharpen_model_sharpen(
+                model,
+                pixels.as_ptr(),
+                pixels.len(),
+                width,
+                height,
+                1,
+                asked.as_ptr(),
+                out.as_mut_ptr(),
+                out.len(),
+                Some(count_tile),
+                ptr::null(),
+                (&raw mut tiles).cast(),
+                &mut error,
+            );
+            assert!(!report.is_null());
+            assert!(tiles > 1);
+            let report: Value = serde_json::from_str(&taken(report)).unwrap();
+            assert_eq!(report["model"], "sharpen-tiny");
+            assert_eq!(report["precision"], "f32");
+            assert_eq!(report["cardSha256"].as_str().unwrap().len(), 64);
+            assert!((report["stars"].as_f64().unwrap() - 0.6).abs() < 1e-6);
+            assert_eq!(report["rest"], 0.5, "the model's own, left out");
+            assert_eq!(report["rolloff"], 0.5);
+            let read = &report["channels"][0];
+            assert_eq!(
+                (read["psfRows"].as_u64(), read["psfColumns"].as_u64()),
+                (Some(4), Some(5))
+            );
+            assert_eq!(read["psfGlobal"], false);
+            assert!(read["points"].as_u64().unwrap() > 10);
+            assert!(read["psfWidthPx"].as_f64().unwrap() > 2.0);
+
+            let index = 100 * width + 150;
+            assert!(out[index].is_finite() && out[index] != pixels[index]);
+            assert!(
+                out[249 * width].is_nan(),
+                "a pixel with no data stays without"
+            );
+
+            let bad = CString::new(r#"{"stars": 1.5}"#).unwrap();
+            let refused = seiza_sharpen_model_sharpen(
+                model,
+                pixels.as_ptr(),
+                pixels.len(),
+                width,
+                height,
+                1,
+                bad.as_ptr(),
+                out.as_mut_ptr(),
+                out.len(),
+                None,
+                ptr::null(),
+                ptr::null_mut(),
+                &mut error,
+            );
+            assert!(refused.is_null());
+            assert!(taken(error).contains("share"));
+            seiza_sharpen_model_free(model);
         }
     }
 }

@@ -47,8 +47,8 @@ pub(crate) struct Field {
     pub(crate) global: bool,
 }
 
-/// Node positions along an axis of `length` pixels, as the harness keeps
-/// them: evenly from 0 to `length - 1`, and rounded to single precision.
+/// Node positions along an axis of `length` pixels, as the harness places
+/// them: evenly from 0 to `length - 1`, at most `grid_px` apart.
 pub(crate) fn grid_nodes(length: usize, grid_px: usize) -> Vec<f64> {
     let last = length.saturating_sub(1) as f64;
     let count = ((last / grid_px as f64).ceil() as usize + 1).max(2);

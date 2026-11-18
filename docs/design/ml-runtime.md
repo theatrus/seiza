@@ -369,6 +369,90 @@ for Seiza's stacks. Nothing here builds it. If one earns its place,
 `modelled_sigma` needs only its block grid and one gain, about 25,000 numbers
 for a 26 MP frame, which fits a small FITS extension.
 
+### Sharpening
+
+`SharpenModel` runs the PSF model: an image brought from its own PSF to a
+narrower one. It takes the image and two numbers, the share of their width
+stars are brought to and the share asked of everything that is not a star
+(1 leaves things as they are; the sheets ask for 0.46 and 0.5). Everything
+else the network reads is made from the image by fixed steps, which the
+bundle's card names:
+
+| What the network reads | How it is made from the image |
+|---|---|
+| The image, `asinh((x − b) / σ̄)` | The background `b` and median noise `σ̄` are the noise model's scales: the medians of every 17th pixel of the image and of its noise map. |
+| The noise map, `asinh(σ / σ̄)` | `image_sigma`, as the noise model reads it, with its raise for spread noise. |
+| The stars' ratio, FWHM(target) / FWHM(image) | The PSF field (`seiza-stars`' `PsfField`, with the card's settings; one PSF for the whole image when too few stars allow a field that varies) is sampled at a grid of nodes, both edges of each axis and at most 256 px apart. A node's width is a round Gaussian's, fitted to its stamp's core. Its ratio is the share asked, never under the card's floor in pixels over that width and never over 1, and the map is bilinear between nodes. |
+| The rest's ratio | The same, from the second share. A model trained with one strength has no such plane. |
+| The point sources, `asinh(p / σ̄)` | The stars the measuring detector finds on the image unsmoothed, with the clipped cores it turns away (found as the peaks of 16 px blocks at the image's clip level), each laid down at its flux and sub-pixel place as the stamp of the node nearest it. |
+| The PSF, as a vector at every pixel of the coarsest grid | Each node's stamp, cut or padded to 129 px, is read as two planes (over its peak, and its asinh, which shows the wings) by the stamp encoder, once. The nodes' vectors are interpolated bilinearly to the middle of every coarsest pixel of each tile, so the output does not depend on where the tiles fall. |
+
+The residual is added to the asinh of the image in σ̄ and taken back through
+sinh, as the card says, and a pixel that is not finite stays NaN. A colour
+image's channels run one by one, each with a PSF field, point sources and
+scales of its own. An image with too few stars for any PSF is refused with
+`ModelError::PsfField`, which a host can tell from every other refusal.
+
+A sharpening bundle holds two graphs where a noise bundle holds one, because
+one graph of planes and a stamp cannot follow a PSF that changes over a
+tile: `encoder-f32.onnx`, stamp planes to a vector, and `body-f32.onnx` and
+`body-f16.onnx`, planes and a vector map to the residual, with the body's
+height and width free and the map's a tile over the model's grid. The
+encoder runs on ONNX Runtime's CPU provider whatever runs the body: it is
+small, it runs once for each node, and its vectors are then the same on
+every backend. The card is a noise card with `task` `sharpen`, the planes
+above, and a `sharpen` section: the encoder's file, hash, tensors, stamp
+side and vector length; the vector map's tensor and dimensions; how the
+residual is applied; the floor in pixels; the sharpest share the run was
+trained to be asked for; the shares a run takes when its caller names none;
+the PSF field's settings, the nodes' spacing and the core a width is fitted
+to; and the detector's settings and the clipped cores'. `bundle-sharpen`
+writes it, and holds each single-precision graph to PyTorch on a random
+input.
+
+`SharpenOptions::rolloff` holds back the finest part of the change where it
+lies under the noise, after the model: the harness's `rolloff_step`. Its
+`clarity_step` is not ported.
+
+**Against the harness.** The port is held to the Python harness piece by
+piece on a synthetic star field with no runtime (the field's nodes, stamps
+and widths, the point sources, both ratio maps, the point-source map, a
+tile's vector map and the roll-off), and a tiny model's whole output through
+ONNX Runtime agrees with PyTorch's to 1.3e-4σ̄ at most. The harness renders
+the point sources with a Fourier transform and the runtime lays each stamp
+down directly; the two agree to rounding. The harness measures the PSF field
+and detects the stars through this workspace's own code, so those agree
+exactly.
+
+On a 1536 px crop of the Elephant's Trunk Hα sheet, with a trained model of
+width 96 (94M parameters), the runtime against the harness on PyTorch, both
+asked for stars at 0.46 and the rest at 0.5, in the image's noise σ̄:
+
+| Backend | Largest difference | RMS | On the sky (within 5σ̄ of the background), RMS | Time |
+|---|---|---|---|---|
+| CPU, f32, tile 512 | 0.020 | 4.3e-5 | 5.6e-7 | 19.5 s |
+| Core ML GPU, f32, tile 1024 | 0.017 | 4.1e-5 | | 1.7 s |
+| Core ML GPU, f16, tile 1024 | 68 | 0.14 | 3.4e-4 | 1.3 to 1.9 s |
+| Neural Engine, f16, tile 1024 | 242 | 0.64 | | 2.4 s |
+
+The largest f32 difference is at a star's core 20,400σ̄ high, a millionth of
+its value: single-precision rounding through the sinh. The crop holds too
+few stars for a field that varies, so it ran with one PSF. Times are for the
+whole crop on an Apple-silicon Mac, measurement and all, after the model is open.
+
+**Half precision loses the stars' cores.** The residual is added in asinh,
+so an error in it is a relative error in the pixel: the f16 graph is right
+to 3.4e-4σ̄ on the sky, and wrong by 0.1 to 0.2% RMS, 0.6% at most, of every
+pixel over 30σ̄, which is tens of σ̄ at a bright core. A sharpening bundle's
+card should list f32 backends alone under `parity` until an f16 graph is
+measured and found good enough, so the Neural Engine, which runs only f16,
+is not chosen unasked.
+
+**Memory.** A run holds the planes whole, five per pixel for a model with two
+strengths, as the harness does: 1.2 GB beside the image for a 61 MP frame.
+Cutting each tile's planes as it runs would bring that down to the point-source
+map and the noise map.
+
 ## What hosts see
 
 Following the [Rust-first rules](../../AGENTS.md#the-rust-api-comes-first).
@@ -406,7 +490,10 @@ it reads apart from the classical commands: `seiza deconvolve` beside
 `seiza pipeline` already exists.
 
 `--high-amount` and `--low-amount` are the harness's names, so sheets and the
-CLI speak alike. Output is 32-bit FITS, written through `seiza-image-io`.
+CLI speak alike. `seiza model sharpen` takes `--stars` and `--rest`, the two
+shares, each the model's own when left out, and `--rolloff`. Its C twin is
+`seiza_sharpen_model_sharpen`, which writes into the caller's buffer and
+answers with what ran, and its Python twin `SharpenModel.sharpen`. Output is 32-bit FITS, written through `seiza-image-io`.
 
 **C ABI.** The apps hold a model and a result, and run files as one call:
 
@@ -594,7 +681,7 @@ carries the library yet.
 | 5 | **Harness on the runtime.** `evaluate-noise` and the sheets through `seiza.NoiseModel`. | One run's measures and seam maps agree with the PyTorch path. |
 | 6 | **Model delivery.** `seiza model install`, `/models/v1/`, `seiza setup`. | A clean machine installs a model and denoises. |
 | 7 | **Packaging**, one PR per channel, each with a smoke test on an installed package. | Each row of the table above runs a tile after install. |
-| 8 | **PSF and star models**, as they pass their gates, with what they read made from the image: a PSF stamp from its PSF field, star and halo maps from its plate solution. | `seiza model sharpen` and `seiza model separate-stars` on the same runner. |
+| 8 | **PSF and star models**, as they pass their gates, with what they read made from the image: a PSF stamp from its PSF field, star and halo maps from its plate solution. The sharpening runtime is built (see Sharpening): `SharpenModel`, `seiza model sharpen` and its C and Python twins. | `seiza model sharpen` and `seiza model separate-stars` on the same runner. |
 | 9 | **NVIDIA and Intel**, when the machines are arranged. Measure CUDA, TensorRT, TensorRT-RTX and CPU on NVIDIA, and WebGPU and CPU on Intel Xe, with parity. | The backend table is filled in and NVIDIA's shipped provider is chosen. |
 
 Step 0 gates the rest only where it says so. Steps 1 and 2 can start at once
