@@ -464,9 +464,17 @@ measured and found good enough, so the Neural Engine, which runs only f16,
 is not chosen unasked.
 
 **Memory.** A run holds the planes whole, five per pixel for a model with two
-strengths, as the harness does: 1.2 GB beside the image for a 61 MP frame.
-Cutting each tile's planes as it runs would bring that down to the point-source
-map and the noise map.
+strengths, as the harness does, with its copy of the image and the noise map.
+Beside them it holds an f64 plane twice: the point-source map while it is
+rendered (with the f32 map made from it), and the blend's sums while the tiles
+run (with the residual made from them). That is ten f32 planes' worth, 2.4 GB
+beside the image and the result for a 61 MP frame. A roll-off runs once the
+planes are dropped, beside the image's copy, the noise map, the residual and
+the output: six f32 planes of its own, and a blur's f64 plane and the f32 one
+it makes, thirteen f32 planes' worth with the run's four, or 3.2 GB. Cutting
+each tile's planes as it runs would bring the first down to the point-source
+map and the noise map, and letting the roll-off's steps go as each is used
+would bring the second down by several planes.
 
 ## What hosts see
 
