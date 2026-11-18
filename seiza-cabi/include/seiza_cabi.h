@@ -5317,8 +5317,11 @@ char *seiza_model_download_json(const char *name,
                                 char **error_out);
 
 /*
- Check a model's graphs against its card. `model` is as for
- [`seiza_noise_model_open`]; `store` may be null for the default store.
+ Check models' graphs, and a sharpening model's encoder, against their
+ cards. `model` names an installed model or a bundle's directory; null
+ checks every installed model, noise and sharpening alike, and is true when
+ none is installed. The first that does not match is the error. `store` may
+ be null for the default store.
 
  # Safety
  `model` and `store` must be null or NUL-terminated strings. When non-null,

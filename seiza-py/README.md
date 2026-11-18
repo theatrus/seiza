@@ -639,8 +639,10 @@ a PSF from raises `TooFewStarsError`. A cache of results keys on
 
 `seiza.model_backends()` says which backends run here and why the others do not,
 and `install_model`, `installed_models`, `verify_model` and `remove_model` manage
-the store. Invalid tile geometry is refused when opening or installing a bundle,
-before loading ONNX Runtime or replacing an installed model.
+the store. `verify_model()` with no name checks every installed model, noise and
+sharpening alike, against its card. Invalid tile geometry is refused when
+opening or installing a bundle, before loading ONNX Runtime or replacing an
+installed model.
 `model.denoise_file(path, center=True)` previews the center of a linear FITS or
 XISF. Its `write_comparison(original, restored)` uses one display stretch for
 both outputs. With `center=False`, `write_linear(path)` saves the full result
