@@ -1912,6 +1912,21 @@ In order, each only if the one before leaves a gap at the rims:
        sharpener's changes agree, the reference's included, and at
        4–8 px they disagree a little, likely as each sharpens the
        deeper stack where it smooths the shallower.
+     - So a run can now be shown such windows (`--zoom SHARE`): that
+       share of the known-kernel windows with a clean truth (the
+       clean-truth and denoised windows, and the space-telescope bank's)
+       is magnified before its blur and its fresh noise. A part of the
+       window `z` times smaller is resampled up to its size by Keys'
+       cubic, with its noise map, its saturation, its stamp and its point
+       sources; `z` is log-uniform from 1.2 up to `--zoom-most` (3), or as
+       far as takes the stack's stars to `--zoom-widest` (6 px). Drawn
+       from the real banks, 15 of 24 deep windows and 23 of 24
+       space-telescope windows were magnified (1.2 to 2.7 times), their
+       stars then up to 6 px and their inputs up to 29 px, at a tenth of
+       a second more a window and no NaN. The first run with it continues
+       the split's run with `--zoom 0.3` and nothing else changed. Its
+       validation draws zoomed windows too, so its validation loss is not
+       that run's.
 
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
