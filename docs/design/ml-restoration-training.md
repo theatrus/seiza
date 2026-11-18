@@ -1957,6 +1957,30 @@ In order, each only if the one before leaves a gap at the rims:
      left them at 0.727: magnified windows are not ones the model gets
      wrong, so what it does on a wide PSF is what its targets there ask
      for, and the zoom cannot ask for more.
+   - Asking more of the split's run, on the Trunk at full size, makes a
+     rim taller, not narrower. At a rest ask of 0.4 the lit side is the
+     goal's (+5.40 and +6.85 at 4 and 6 px, the goal +5.41 and
+     +6.46) and the dark side 4–8 px out too (0.85, 0.97 and 0.95 below
+     the input at 8, 6 and 4 px), but the rise stays 4.42 px, with the
+     foot by the edge still shallow (0.69 and 0.18 at 2 and 0 px, the
+     goal 0.99 and 0.44); and the mottle is back (1.14 between 2
+     and 4 px, 1.34 between 4 and 8). At 0.35 the slope is ×3.13 over
+     the same 4.42 px.
+   - Binned 3 × 3 and asked 0.4, the same run makes a rim narrower than
+     the goal's: a rise of 3.57 px, the foot 0.82 and 0.69 below
+     the input at 2 and 0 px, with no mottle (1.00 between 2 and 4 px)
+     and the knots under the goal's (0.95%, the goal 0.98%).
+     It lifts the lit side less (+4.36 and +5.49), and the cloud's
+     4–8 and 8–16 px detail stays at 1.05 (the goal 1.13 and
+     1.11). 0.35 binned is much the same (3.53 px).
+   - Put together by scale, the binned run's change under a Gaussian of
+     6 px with the full-size run's above it (both at 0.4) comes nearest
+     the goal of anything yet: a rise of 3.86 px and a slope of
+     ×1.95, no mottle (1.02 between 2 and 4 px), the cloud at 1.17
+     between 4 and 8 px and between 8 and 16 px (a little over the
+     goal's 1.13 and 1.11), the lit side +4.68 and +5.85, knots
+     0.95%. At 4 px the rise is 4.01. By eye the goal still draws
+     the ridges' finger hardest.
 
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
