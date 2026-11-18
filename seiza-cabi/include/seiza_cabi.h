@@ -5188,15 +5188,16 @@ size_t seiza_sharpen_model_tile(const SeizaSharpenModel *model);
  whole image), `psfWidthPx` and `points`. A host keys cached results on
  `cardSha256`, `backend`, `precision`, the three strengths and
  [`seiza_model_output_version`]. An image with too few stars to measure a
- PSF from is refused.
+ PSF from is refused, and so is an `out` that overlaps `data`.
 
  # Safety
  `model` must be a live [`SeizaSharpenModel`] no other thread is using,
  `data` must point to `data_length` floats and `out` to `out_length` writable
- floats. `options_json` must be null or a NUL-terminated string. `progress`
- may be null, and is passed `context`. `cancel` must be null or a live
- [`SeizaCancelSignal`] retained until this call returns. When non-null,
- `error_out` must point to writable storage for one pointer.
+ floats, and the two must not overlap. `options_json` must be null or a
+ NUL-terminated string. `progress` may be null, and is passed `context`.
+ `cancel` must be null or a live [`SeizaCancelSignal`] retained until this
+ call returns. When non-null, `error_out` must point to writable storage for
+ one pointer.
  */
 char *seiza_sharpen_model_sharpen(SeizaSharpenModel *model,
                                   const float *data,
