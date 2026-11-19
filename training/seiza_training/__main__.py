@@ -499,6 +499,10 @@ def main(argv: list[str] | None = None) -> int:
     sharpen_sheet.add_argument("--scale-blend", type=float, default=None,
                                help="where --scale-to's two changes meet: the binned run's below a Gaussian of "
                                     "this times the stars' width, the full-size run's above (default 0.5)")
+    sharpen_sheet.add_argument("--scale-stars", type=float, default=None,
+                               help="keep the full-size change whole where a listed star's rendered light is this "
+                                    "many times the pixel noise, the scaled blend fading in below it (default 2; "
+                                    "0: the blend at the stars too)")
     sharpen_sheet.add_argument("--scale-rest", type=float, default=0.0,
                                help="the rest's ask on the binned image, for every panel, in place of the "
                                     "panel's own (a run with the two asks; 0: the panel's)")
@@ -763,9 +767,11 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
             values = tuple(float(value) for value in arguments.full.split(","))
             full = values if len(values) > 1 else values[0]
         blend = sharpen_sheets.SCALE_BLEND if arguments.scale_blend is None else arguments.scale_blend
+        stars = sharpen_sheets.SCALE_STARS if arguments.scale_stars is None else arguments.scale_stars
         return sharpen_sheets.render_saved(store, manifest, arguments.name, only=named, clarity=arguments.clarity,
                                            rolloff=arguments.rolloff, scale_to=arguments.scale_to,
-                                           scale_blend=blend, full_ask=full, scale_rest=arguments.scale_rest)
+                                           scale_blend=blend, full_ask=full, scale_rest=arguments.scale_rest,
+                                           scale_stars=stars)
     if command == "evaluate-noise":
         from .noise_model import NoiseBands, evaluate_saved
 

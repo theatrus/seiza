@@ -2085,8 +2085,22 @@ In order, each only if the one before leaves a gap at the rims:
        between 1.5 and 4 px at full size, S77 4.05%), and against the
        survey frames (below) its added detail is a little less the sky's
        (0.79 at 3 px on the ridges, S77 0.80). It keeps more of the grain
-       (0.97 of the input's on the sky at 1 px, S77 0.90) and its stars
-       hold. S77 stays.
+       (0.97 of the input's on the sky at 1 px, S77 0.90). Asked 0.35 for
+       both, its stars carry a deep dark ring, S77's a faint one. S77
+       stays.
+     - **Square stars.** The scaled pass's stars came out square, with a
+       dark moat: the binned run's star, a pixel and a half across on the
+       3 × 3 grid, brought back up by a separable cubic whose negative
+       lobes fall in a square about it. Second moments cannot see a
+       square, so the ellipticity read as before; the share of a star's
+       half-peak ring that follows cos 4θ can (`star_squares.py`): 0.017
+       at full size, 0.037 to 0.040 with the scaled pass. Now a star keeps
+       the full-size change whole where its rendered light (the network's
+       point plane) is at least twice the pixel noise, and the blend fades
+       in below that (`SCALE_STARS`, the card's `scaled.stars`). Its
+       stars read 0.017 again (width 0.459, ellipticity 0.027, as S77 at
+       full size), and the rims, the knots and the cloud are where the
+       scaled pass had them.
 
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run

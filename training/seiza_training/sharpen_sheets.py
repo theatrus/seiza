@@ -50,8 +50,8 @@ from .manifest import Manifest
 from .noise_model import device, image_sigma
 from .sharpen_bank import fitted_stamp, saturation, stamp_width
 from .sharpen_model import (LIGHT_RADIUS, RING_PEAK, clarity_step, cubic_taps, edge_band, empirical_stamp,
-                            light_centre, load_run, FWHM_PER_SIGMA, blurred_images, measured_stars, measured_width,
-                            peak_centre,
+                            light_centre, load_run, FWHM_PER_SIGMA, blurred_images, field_point_map, measured_stars,
+                            measured_width, peak_centre,
                             ring_and_flux, rolloff_step, run_directory, settings_from, sharpen)
 from .sheets import typeface, stretch
 from .store import Store, write_png
@@ -100,6 +100,14 @@ SCALE_LEAST = 2
 SCALE_TO = 3.5
 SCALE_REST = 0.35
 SCALED_FULL = (0.46, 0.45)
+# Where a listed star's light (rendered with its node's PSF, the network's
+# own point plane) stands this many times over the pixel noise, the
+# full-size change is kept whole, and the scaled blend fades in below it.
+# Brought up from a 3 × 3 binning by a separable cubic, the binned run's
+# stars came out square, with a dark moat where the cubic's negative lobes
+# fall (2026-11-18): the scaled pass is for the cloud, and a star is the
+# full-size run's. 0: the blend everywhere, stars too.
+SCALE_STARS = 2.0
 
 
 def scale_factor(width: float, scale_to: float) -> int:
@@ -144,21 +152,36 @@ def brought_up(plane: np.ndarray, factor: int) -> np.ndarray:
     return np.asarray(found, dtype=np.float32)
 
 
-def scale_blended(image: np.ndarray, output: np.ndarray, smaller: np.ndarray, sigma: float) -> np.ndarray:
+def scale_blended(image: np.ndarray, output: np.ndarray, smaller: np.ndarray, sigma: float,
+                  stars: np.ndarray | None = None) -> np.ndarray:
     """`output`, a sharpening of `image`, with the part of its change under
     a Gaussian of `sigma` px (σ) taken from `smaller`, the change of the
     binned run brought back up (`brought_up`), and the part above it kept.
-    NaN where `output` is NaN."""
+    With `stars`, a share from 0 to 1 at each pixel, `output` is kept whole
+    in that share (`star_share`). NaN where `output` is NaN."""
     change = np.nan_to_num(output - image)
     smaller = np.nan_to_num(smaller)
     covariance = sigma**2 * np.eye(2)
     coarse, smooth = blurred_images(change, [covariance])[0], blurred_images(smaller, [covariance])[0]
-    return np.where(np.isfinite(output), image + coarse + smaller - smooth, output).astype(np.float32)
+    blended = image + coarse + smaller - smooth
+    if stars is not None:
+        blended = stars * output + (1.0 - stars) * blended
+    return np.where(np.isfinite(output), blended, output).astype(np.float32)
+
+
+def star_share(point_plane: np.ndarray, noise_map: np.ndarray, least: float) -> np.ndarray:
+    """Where the stars are, from 0 to 1: a pixel's rendered star light
+    (`point_plane`, above the background) over `least` times its noise,
+    held to 1."""
+    with np.errstate(divide="ignore", invalid="ignore"):
+        share = np.nan_to_num(point_plane / (least * noise_map), nan=0.0, posinf=1.0)
+    return np.clip(share, 0.0, 1.0).astype(np.float32)
 
 
 def render_saved(store: Store, manifest: Manifest, name: str, *, only: set[str] | None = None,
                  clarity: float = 0.0, rolloff: float = 0.0, scale_to: float = 0.0,
-                 scale_blend: float = SCALE_BLEND, full_ask: Any = None, scale_rest: float = 0.0) -> dict[str, Any]:
+                 scale_blend: float = SCALE_BLEND, full_ask: Any = None, scale_rest: float = 0.0,
+                 scale_stars: float = SCALE_STARS) -> dict[str, Any]:
     """Make a recorded run's sheets, those named in `only` or all, and list
     them in its record. Without a sheet list, or without Pillow, nothing is
     made and the answer says why; a sheet whose input is not built is
@@ -191,12 +214,14 @@ def render_saved(store: Store, manifest: Manifest, name: str, *, only: set[str] 
         suffix = ((f"-scaled-{scale_to:g}" if scale_to > 0 else "")
                   + (f"-blend-{scale_blend:g}" if scale_to > 0 and scale_blend != SCALE_BLEND else "")
                   + (f"-rest-{scale_rest:g}" if scale_to > 0 and scale_rest > 0 else "")
+                  + (f"-stars-{scale_stars:g}" if scale_to > 0 and scale_stars != SCALE_STARS else "")
                   + (f"-rolloff-{rolloff:g}" if rolloff > 0 else "") + (f"-clarity-{clarity:g}" if clarity > 0 else "")
                   + ("" if full_ask is None else "-full-" + "-".join(f"{value:g}" for value in np.atleast_1d(full_ask))))
         path = directory / f"sheets{suffix}" / f"{sheet['name']}.png"
         whole = directory / f"full{suffix}" / sheet["name"] if sheet.get("full") else None
         drawn = render(store, manifest, record, model, sheet, path, whole, clarity=clarity, rolloff=rolloff,
-                       scale_to=scale_to, scale_blend=scale_blend, full_ask=full_ask, scale_rest=scale_rest)
+                       scale_to=scale_to, scale_blend=scale_blend, full_ask=full_ask, scale_rest=scale_rest,
+                       scale_stars=scale_stars)
         if drawn is None:
             missing.append(sheet["name"])
             continue
@@ -325,6 +350,8 @@ class Sharpener:
         # The rest's ask on the binned image in place of the full size's,
         # for a run with the two. 0: the same.
         self.scale_rest = 0.0
+        # Where the stars keep the full-size change whole (`SCALE_STARS`).
+        self.scale_stars = SCALE_STARS
         self._smaller: Sharpener | None = None
         # The full-size image's ask in place of `FULL_NONSTELLAR` (or
         # `FULL_STRENGTH`). None: that one.
@@ -379,7 +406,15 @@ class Sharpener:
         rows = slice(top - small_top * factor, bottom - small_top * factor)
         columns = slice(left - small_left * factor, right - small_left * factor)
         sigma = self.scale_blend * float(np.nanmedian(self.widths))
-        return scale_blended(self.image[top:bottom, left:right], output, up[rows, columns], sigma)
+        stars = None
+        if self.scale_stars > 0:
+            points = self.points.copy()
+            points[:, 0] -= left
+            points[:, 1] -= top
+            plane = field_point_map(points, self.ys - top, self.xs - left, self.node_stamps, output.shape,
+                                    self.background)
+            stars = star_share(plane, self.noise_map[top:bottom, left:right], self.scale_stars)
+        return scale_blended(self.image[top:bottom, left:right], output, up[rows, columns], sigma, stars)
 
     def ratio(self, strength: Any) -> Any:
         """The ratio map, or the stars' and the rest's, for a strength or a
@@ -434,7 +469,8 @@ class Sharpener:
 
 def render(store: Store, manifest: Manifest, record: dict[str, Any], model: Any, sheet: dict[str, Any], path: Path,
            whole: Path | None = None, clarity: float = 0.0, rolloff: float = 0.0, scale_to: float = 0.0,
-           scale_blend: float = SCALE_BLEND, full_ask: Any = None, scale_rest: float = 0.0) -> dict[str, Any] | None:
+           scale_blend: float = SCALE_BLEND, full_ask: Any = None, scale_rest: float = 0.0,
+           scale_stars: float = SCALE_STARS) -> dict[str, Any] | None:
     """Draw one sheet to `path`, and with `whole`, the stem of its full-size
     files, write them and measure them. None when its input is not built."""
     from PIL import Image, ImageDraw, ImageFont
@@ -454,7 +490,7 @@ def render(store: Store, manifest: Manifest, record: dict[str, Any], model: Any,
     runner.clarity = clarity
     runner.rolloff = rolloff
     runner.scale_to, runner.scale_blend, runner.full_ask = scale_to, scale_blend, full_ask
-    runner.scale_rest = scale_rest
+    runner.scale_rest, runner.scale_stars = scale_rest, scale_stars
     if sheet.get("denoise"):
         runner.measure_noise = before
     look = stretch(image)
