@@ -292,13 +292,9 @@ def measure(store: Store, product: dict[str, Any]) -> dict[str, Any]:
     notes); returns the record."""
     started = time.monotonic()
     image = load_image(store, product)
-    height, width = image.shape
     loaded = time.monotonic()
-    table, level, detection_error = detections(image)
-    detected = time.monotonic()
-    field, status, error = measure_field(image)
-    fitted = time.monotonic()
-    record: dict[str, Any] = {
+    record, arrays = measured_arrays(image)
+    record = {
         "pass_version": PSF_PASS_VERSION,
         "product": product["id"],
         "kind": product["kind"],
@@ -307,6 +303,34 @@ def measure(store: Store, product: dict[str, Any]) -> dict[str, Any]:
         "telescope": product.get("telescope"),
         "pixel_scale_arcsec": product.get("pixel_scale_arcsec"),
         "frame_fwhm_px": product.get("frame_fwhm_px"),
+        **record,
+    }
+    seconds = record.pop("seconds")
+    record["seconds"] = {"load": round(loaded - started, 1), **seconds,
+                         "total": round(time.monotonic() - started, 1)}
+    target = directory(store, product["id"])
+    target.mkdir(parents=True, exist_ok=True)
+    # Written whole and then moved, the JSON last: a record is there only
+    # once all of it is.
+    with (target / "field.npz.tmp").open("wb") as file:
+        np.savez(file, **arrays)
+    (target / "field.npz.tmp").replace(target / "field.npz")
+    (target / "field.json.tmp").write_text(json.dumps(record, indent=1))
+    (target / "field.json.tmp").replace(target / "field.json")
+    return record
+
+
+def measured_arrays(image: np.ndarray) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
+    """An image's PSF field as `measure` keeps it, its record (less what
+    is known of the product it came from) and its arrays, measured from the
+    image alone and kept nowhere."""
+    started = time.monotonic()
+    height, width = image.shape
+    table, level, detection_error = detections(image)
+    detected = time.monotonic()
+    field, status, error = measure_field(image)
+    fitted = time.monotonic()
+    record: dict[str, Any] = {
         "shape": [height, width],
         "status": status,
         "error": error,
@@ -356,18 +380,8 @@ def measure(store: Store, product: dict[str, Any]) -> dict[str, Any]:
             "unshaped_nodes": int(np.sum(~np.isfinite(shapes[..., 0]))),
             "stamp_sums": [float(sums.min()), float(sums.max())],
         })
-    record["seconds"] = {"load": round(loaded - started, 1), "detect": round(detected - loaded, 1),
-                         "field": round(fitted - detected, 1), "total": round(time.monotonic() - started, 1)}
-    target = directory(store, product["id"])
-    target.mkdir(parents=True, exist_ok=True)
-    # Written whole and then moved, the JSON last: a record is there only
-    # once all of it is.
-    with (target / "field.npz.tmp").open("wb") as file:
-        np.savez(file, **arrays)
-    (target / "field.npz.tmp").replace(target / "field.npz")
-    (target / "field.json.tmp").write_text(json.dumps(record, indent=1))
-    (target / "field.json.tmp").replace(target / "field.json")
-    return record
+    record["seconds"] = {"detect": round(detected - started, 1), "field": round(fitted - detected, 1)}
+    return record, arrays
 
 
 def measured(store_root: str, scratch: str | None, product: dict[str, Any]) -> dict[str, Any]:
@@ -446,6 +460,18 @@ class Field:
             raise FileNotFoundError(f"no PSF record for {product_id}: run the psf-fields pass first")
         with np.load(directory(store, product_id) / "field.npz") as arrays:
             self.arrays = {name: arrays[name] for name in arrays.files}
+
+    @classmethod
+    def of(cls, record: dict[str, Any], arrays: dict[str, np.ndarray]) -> Field:
+        """A field held in memory, as `measured_arrays` gives it."""
+        field = cls.__new__(cls)
+        field.record, field.arrays = record, arrays
+        return field
+
+    @classmethod
+    def measured_from(cls, image: np.ndarray) -> Field:
+        """An image's field, measured from it and kept nowhere."""
+        return cls.of(*measured_arrays(image))
 
     @property
     def usable(self) -> bool:

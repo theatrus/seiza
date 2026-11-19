@@ -26,6 +26,77 @@ def test_the_ratio_brings_each_star_to_its_share_never_below_the_floor_nor_above
     assert ratio.shape == (100, 100) and ratio.dtype == np.float32
 
 
+def test_an_image_is_binned_only_where_its_stars_are_far_wider_than_asked():
+    assert sharpen_sheets.scale_factor(11.5, 3.5) == 3
+    assert sharpen_sheets.scale_factor(7.0, 3.5) == 2
+    assert sharpen_sheets.scale_factor(5.0, 3.5) == 1
+    assert sharpen_sheets.scale_factor(11.5, 0.0) == 1
+    assert sharpen_sheets.scale_factor(float("nan"), 3.5) == 1
+
+
+def test_binning_takes_each_block_s_finite_mean_and_bringing_up_puts_it_back_at_its_middle():
+    plane = np.arange(7 * 8, dtype=np.float32).reshape(7, 8)
+    plane[0, 0] = np.nan
+    binned = sharpen_sheets.block_mean(plane, 3)
+    assert binned.shape == (3, 3)
+    assert binned[0, 0] == pytest.approx(np.nanmean(plane[:3, :3]))
+    # The last blocks take what is left: one row, two columns.
+    assert binned[2, 2] == pytest.approx(plane[6, 6:8].mean())
+    assert np.isnan(sharpen_sheets.block_mean(np.full((3, 3), np.nan, np.float32), 3)).all()
+    # A ramp binned and brought back up is the ramp again, away from the
+    # edges: each block's mean sits at the middle of its pixels.
+    down, across = np.mgrid[0:60, 0:90].astype(np.float32)
+    ramp = 3.0 * across - 2.0 * down
+    up = sharpen_sheets.brought_up(sharpen_sheets.block_mean(ramp, 3), 3)
+    assert up.shape == ramp.shape
+    assert np.abs(up - ramp)[6:-6, 6:-6].max() < 1e-3
+
+
+def test_the_scales_meet_the_binned_change_below_the_blend_the_full_size_change_above():
+    side = 256
+    down, across = np.mgrid[0:side, 0:side].astype(np.float32)
+    image = (100.0 + 0.1 * across).astype(np.float32)
+    bump = (40.0 * np.exp(-((across - 128) ** 2 + (down - 128) ** 2) / (2 * 30.0**2))).astype(np.float32)
+    ripple = (2.0 * np.sin(2 * np.pi * across / 4.0)).astype(np.float32)
+    # The same change from both is the full-size output itself.
+    output = image + bump + ripple
+    assert np.allclose(sharpen_sheets.scale_blended(image, output, bump + ripple, 6.0), output, atol=1e-3)
+    # The ripple from the binned run, the bump from the full-size one.
+    found = sharpen_sheets.scale_blended(image, image + bump, ripple, 6.0) - image
+    inner = (slice(40, -40), slice(40, -40))
+    assert np.abs(found - bump - ripple)[inner].max() < 0.05 * 40.0
+    # And the other way, neither: the ripple is under the blend, the bump
+    # over it, all but the little of the bump a 6 px Gaussian takes.
+    assert np.abs(sharpen_sheets.scale_blended(image, image + ripple, bump, 6.0) - image)[inner].max() < 0.05 * 40.0
+    # NaN stays NaN.
+    holed = output.copy()
+    holed[:5] = np.nan
+    assert np.isnan(sharpen_sheets.scale_blended(image, holed, ripple, 6.0)[:5]).all()
+
+
+def test_a_region_s_binned_change_lands_where_the_whole_image_s_would(monkeypatch):
+    rng = np.random.default_rng(4)
+    image = rng.normal(100.0, 5.0, (120, 150)).astype(np.float32)
+    binned = sharpen_sheets.block_mean(image, 3)
+    change = rng.normal(0.0, 1.0, binned.shape).astype(np.float32)
+    smaller = SimpleNamespace(image=binned, run=lambda ratio, top, left, bottom, right:
+                              (binned + change)[top:bottom, left:right])
+    runner = object.__new__(sharpen_sheets.Sharpener)
+    runner.image, runner.widths, runner.scale_to, runner.scale_blend = image, np.array([[10.0]]), 3.5, 0.5
+    runner.record = {"inference": {"margin": 4, "multiple": 1}}
+    runner._smaller = smaller
+    runner.smaller_ratio = lambda ratio, small: ratio
+    # What the blend is handed, as it is handed it.
+    monkeypatch.setattr(sharpen_sheets, "scale_blended", lambda region, output, up, sigma: up)
+    whole = sharpen_sheets.brought_up(change, 3)
+    assert runner.factor == 3
+    for top, left, bottom, right in ((7, 11, 70, 101), (0, 0, 120, 150), (50, 40, 120, 150)):
+        region = image[top:bottom, left:right]
+        found = runner.scaled(region, None, top, left, bottom, right)
+        assert found.shape == region.shape
+        assert np.allclose(found, whole[top:bottom, left:right], atol=1e-4)
+
+
 def test_noise_gain_reads_noise_left_taken_out_or_sharpened():
     rng = np.random.default_rng(0)
     image = (100.0 + rng.normal(0, 2.0, (512, 512))).astype(np.float32)

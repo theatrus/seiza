@@ -49,8 +49,9 @@ from . import psf_fields
 from .manifest import Manifest
 from .noise_model import device, image_sigma
 from .sharpen_bank import fitted_stamp, saturation, stamp_width
-from .sharpen_model import (LIGHT_RADIUS, RING_PEAK, clarity_step, edge_band, empirical_stamp, light_centre, load_run,
-                            FWHM_PER_SIGMA, blurred_images, measured_stars, measured_width, peak_centre,
+from .sharpen_model import (LIGHT_RADIUS, RING_PEAK, clarity_step, cubic_taps, edge_band, empirical_stamp,
+                            light_centre, load_run, FWHM_PER_SIGMA, blurred_images, measured_stars, measured_width,
+                            peak_centre,
                             ring_and_flux, rolloff_step, run_directory, settings_from, sharpen)
 from .sheets import typeface, stretch
 from .store import Store, write_png
@@ -80,10 +81,75 @@ UNTRAINED_SLACK = 0.05
 # down, and at most this many stars a measure, chosen evenly.
 CELLS = (4, 3)
 MEASURED_STARS = 3000
+# An image whose stars are far wider than most of training's is also
+# sharpened binned, where they are near `Sharpener.scale_to` px across,
+# and the two put together by scale (`scale_blended`): the binned run's
+# change below a Gaussian of `SCALE_BLEND` times the stars' width, the
+# full-size run's above it. On the Elephant's Trunk (stars 11.5 px,
+# binned 3 × 3 to 3.5 px) a run narrowed the rims it could not at full
+# size whatever it was asked (2026-11-18). Only from `SCALE_LEAST` up:
+# binned by less, the stars stay as wide as training mostly saw.
+SCALE_BLEND = 0.5
+SCALE_LEAST = 2
+
+
+def scale_factor(width: float, scale_to: float) -> int:
+    """How many pixels a side an image whose stars are `width` px across is
+    binned by to bring them near `scale_to` px: 1, not at all, where that
+    is under `SCALE_LEAST` or `scale_to` is 0."""
+    if not (scale_to > 0 and width > 0):
+        return 1
+    factor = round(width / scale_to)
+    return factor if factor >= SCALE_LEAST else 1
+
+
+def block_mean(plane: np.ndarray, factor: int) -> np.ndarray:
+    """`plane` binned `factor` × `factor` by the mean of each block's
+    finite pixels, its last blocks taking what is left of it; NaN where a
+    block has none."""
+    height, width = plane.shape
+    padded = np.full((-(-height // factor) * factor, -(-width // factor) * factor), np.nan, dtype=np.float32)
+    padded[:height, :width] = plane
+    blocks = padded.reshape(padded.shape[0] // factor, factor, padded.shape[1] // factor, factor)
+    finite = np.isfinite(blocks)
+    count = finite.sum(axis=(1, 3))
+    total = np.where(finite, blocks, 0.0).sum(axis=(1, 3))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where(count > 0, total / count, np.nan).astype(np.float32)
+
+
+def brought_up(plane: np.ndarray, factor: int) -> np.ndarray:
+    """A binned plane, finite, put back up `factor` times by Keys' cubic
+    (`cubic_taps`, which a ramp comes through whole), each block's value at
+    the middle of the pixels it was made from."""
+    values = np.asarray(plane, dtype=np.float32)
+    found = values
+    for axis in (0, 1):
+        positions = (np.arange(values.shape[axis] * factor) + 0.5) / factor - 0.5
+        taps, weights = cubic_taps(positions, values.shape[axis])
+        weights = weights.astype(np.float32)
+        if axis == 0:
+            found = sum(found[taps[:, k], :] * weights[:, k, None] for k in range(4))
+        else:
+            found = sum(found[:, taps[:, k]] * weights[None, :, k] for k in range(4))
+    return np.asarray(found, dtype=np.float32)
+
+
+def scale_blended(image: np.ndarray, output: np.ndarray, smaller: np.ndarray, sigma: float) -> np.ndarray:
+    """`output`, a sharpening of `image`, with the part of its change under
+    a Gaussian of `sigma` px (σ) taken from `smaller`, the change of the
+    binned run brought back up (`brought_up`), and the part above it kept.
+    NaN where `output` is NaN."""
+    change = np.nan_to_num(output - image)
+    smaller = np.nan_to_num(smaller)
+    covariance = sigma**2 * np.eye(2)
+    coarse, smooth = blurred_images(change, [covariance])[0], blurred_images(smaller, [covariance])[0]
+    return np.where(np.isfinite(output), image + coarse + smaller - smooth, output).astype(np.float32)
 
 
 def render_saved(store: Store, manifest: Manifest, name: str, *, only: set[str] | None = None,
-                 clarity: float = 0.0, rolloff: float = 0.0) -> dict[str, Any]:
+                 clarity: float = 0.0, rolloff: float = 0.0, scale_to: float = 0.0,
+                 scale_blend: float = SCALE_BLEND, full_ask: Any = None, scale_rest: float = 0.0) -> dict[str, Any]:
     """Make a recorded run's sheets, those named in `only` or all, and list
     them in its record. Without a sheet list, or without Pillow, nothing is
     made and the answer says why; a sheet whose input is not built is
@@ -93,7 +159,13 @@ def render_saved(store: Store, manifest: Manifest, name: str, *, only: set[str] 
     and `full-clarity-<amount>`, and are not listed in its record. With
     `rolloff`, the finest part of every output's change is first held
     back under that much of its input's noise (`rolloff_step`), and the
-    directories are named `-rolloff-<amount>` too."""
+    directories are named `-rolloff-<amount>` too. With `scale_to`, an
+    image whose stars are far wider is also sharpened binned to about that
+    width and the two put together by scale (`SCALE_BLEND`), and the
+    directories are named `-scaled-<px>` (and `-blend-<share>` where that
+    is not `SCALE_BLEND`). With `full_ask`, an ask (or a pair, for the stars
+    and the rest), the full-size images and their measures are at it, in
+    directories named `-full-<ask>`."""
     spec = store.root / SPEC
     if not spec.exists():
         return {"skipped": f"no sheet list at {spec}"}
@@ -107,10 +179,15 @@ def render_saved(store: Store, manifest: Manifest, name: str, *, only: set[str] 
     for sheet in json.loads(spec.read_text())["sheets"]:
         if only is not None and sheet["name"] not in only:
             continue
-        suffix = (f"-rolloff-{rolloff:g}" if rolloff > 0 else "") + (f"-clarity-{clarity:g}" if clarity > 0 else "")
+        suffix = ((f"-scaled-{scale_to:g}" if scale_to > 0 else "")
+                  + (f"-blend-{scale_blend:g}" if scale_to > 0 and scale_blend != SCALE_BLEND else "")
+                  + (f"-rest-{scale_rest:g}" if scale_to > 0 and scale_rest > 0 else "")
+                  + (f"-rolloff-{rolloff:g}" if rolloff > 0 else "") + (f"-clarity-{clarity:g}" if clarity > 0 else "")
+                  + ("" if full_ask is None else "-full-" + "-".join(f"{value:g}" for value in np.atleast_1d(full_ask))))
         path = directory / f"sheets{suffix}" / f"{sheet['name']}.png"
         whole = directory / f"full{suffix}" / sheet["name"] if sheet.get("full") else None
-        drawn = render(store, manifest, record, model, sheet, path, whole, clarity=clarity, rolloff=rolloff)
+        drawn = render(store, manifest, record, model, sheet, path, whole, clarity=clarity, rolloff=rolloff,
+                       scale_to=scale_to, scale_blend=scale_blend, full_ask=full_ask, scale_rest=scale_rest)
         if drawn is None:
             missing.append(sheet["name"])
             continue
@@ -118,11 +195,17 @@ def render_saved(store: Store, manifest: Manifest, name: str, *, only: set[str] 
         if drawn:
             full[sheet["name"]] = {key: str(value.relative_to(store.root)) if isinstance(value, Path) else value
                                    for key, value in drawn.items()}
-    if not (clarity > 0 or rolloff > 0):
+    if not (clarity > 0 or rolloff > 0 or scale_to > 0 or full_ask is not None):
         record = json.loads((directory / "run.json").read_text())
         record["sheets"] = {**record.get("sheets", {}), **made}
         record["full"] = {**record.get("full", {}), **full}
         (directory / "run.json").write_text(json.dumps(record, indent=2))
+    elif full:
+        # Beside the run's own: the files and measures in their directory,
+        # as the record would list them.
+        kept = directory / f"full{suffix}" / "full.json"
+        before = json.loads(kept.read_text()) if kept.exists() else {}
+        kept.write_text(json.dumps({**before, **full}, indent=2))
     return {"made": made, "full": {key: {k: v for k, v in value.items() if k != "measures"}
                                    for key, value in full.items()}, "missing": missing}
 
@@ -226,6 +309,68 @@ class Sharpener:
         # The fine part of the change held back after the model, before
         # any clarity (`rolloff_step`). 0: none.
         self.rolloff = 0.0
+        # The stars' width the image is also sharpened at, binned, where
+        # its own are far wider (`SCALE_BLEND`). 0: never.
+        self.scale_to = 0.0
+        self.scale_blend = SCALE_BLEND
+        # The rest's ask on the binned image in place of the full size's,
+        # for a run with the two. 0: the same.
+        self.scale_rest = 0.0
+        self._smaller: Sharpener | None = None
+        # The full-size image's ask in place of `FULL_NONSTELLAR` (or
+        # `FULL_STRENGTH`). None: that one.
+        self.full_ask: Any = None
+
+    @property
+    def factor(self) -> int:
+        """How many pixels a side the image is binned by for the smaller
+        scale's run; 1 for none (`scale_factor`)."""
+        return scale_factor(float(np.nanmedian(self.widths)), self.scale_to)
+
+    def smaller(self) -> Sharpener:
+        """The same run on the image binned by `factor`, its PSF field,
+        points and noise measured from the binned image, as any image's
+        are."""
+        if self._smaller is None:
+            binned = block_mean(self.image, self.factor)
+            field = psf_fields.Field.measured_from(binned)
+            if not field.usable:
+                raise ValueError(f"no PSF field on the image binned {self.factor} × {self.factor}: "
+                                 f"{field.record.get('error')}")
+            self._smaller = Sharpener(self.record, self.model, binned, field)
+        return self._smaller
+
+    def smaller_ratio(self, ratio: Any, smaller: Sharpener) -> Any:
+        """A ratio map, or a pair of them, binned to `smaller`'s image:
+        the same share of each star's width, no sharper than the run's
+        floor there."""
+        if isinstance(ratio, tuple):
+            found = tuple(self.smaller_ratio(value, smaller) for value in ratio)
+            if self.scale_rest > 0:
+                # The rest asked for its own share there: the rims are the
+                # binned run's, the cloud's breadth the full size's.
+                found = (*found[:-1], smaller.ratio(self.scale_rest))
+            return found
+        known = np.where(np.isfinite(smaller.widths), smaller.widths, np.nanmedian(smaller.widths))
+        floor = spread_over(np.minimum(1.0, smaller.settings.floor_px / known), smaller.field, smaller.image.shape)
+        binned = np.nan_to_num(block_mean(ratio, self.factor), nan=1.0)
+        return np.minimum(1.0, np.maximum(binned, floor)).astype(np.float32)
+
+    def scaled(self, output: np.ndarray, ratio: Any, top: int, left: int, bottom: int, right: int) -> np.ndarray:
+        """A region's full-size output put together with the binned run's
+        over the same region (`scale_blended`)."""
+        factor, smaller = self.factor, self.smaller()
+        inference = self.record["inference"]
+        pad, grid = inference["margin"] + 16, inference.get("multiple", 1)
+        height, width = smaller.image.shape
+        small_top, small_left = max(0, top // factor - pad) // grid * grid, max(0, left // factor - pad) // grid * grid
+        small_bottom, small_right = min(height, -(-bottom // factor) + pad), min(width, -(-right // factor) + pad)
+        made = smaller.run(self.smaller_ratio(ratio, smaller), small_top, small_left, small_bottom, small_right)
+        up = brought_up(np.nan_to_num(made - smaller.image[small_top:small_bottom, small_left:small_right]), factor)
+        rows = slice(top - small_top * factor, bottom - small_top * factor)
+        columns = slice(left - small_left * factor, right - small_left * factor)
+        sigma = self.scale_blend * float(np.nanmedian(self.widths))
+        return scale_blended(self.image[top:bottom, left:right], output, up[rows, columns], sigma)
 
     def ratio(self, strength: Any) -> Any:
         """The ratio map, or the stars' and the rest's, for a strength or a
@@ -250,6 +395,8 @@ class Sharpener:
 
     @property
     def full_strength(self) -> Any:
+        if self.full_ask is not None:
+            return self.full_ask
         return FULL_NONSTELLAR if self.settings.nonstellar else FULL_STRENGTH
 
     def run(self, ratio: Any, top: int = 0, left: int = 0, bottom: int | None = None,
@@ -270,12 +417,15 @@ class Sharpener:
                          noise_map=noise_map, background=self.background, noise=self.noise,
                          inference=self.record["inference"], residual=self.settings.residual, where=self.where,
                          grid=(self.ys - top, self.xs - left, self.node_stamps))
+        if self.factor > 1:
+            output = self.scaled(output, ratio, top, left, bottom, right)
         output = rolloff_step(output, image, self.rolloff, noise_map)
         return clarity_step(output, self.clarity, float(np.nanmedian(self.widths)), points, noise_map)
 
 
 def render(store: Store, manifest: Manifest, record: dict[str, Any], model: Any, sheet: dict[str, Any], path: Path,
-           whole: Path | None = None, clarity: float = 0.0, rolloff: float = 0.0) -> dict[str, Any] | None:
+           whole: Path | None = None, clarity: float = 0.0, rolloff: float = 0.0, scale_to: float = 0.0,
+           scale_blend: float = SCALE_BLEND, full_ask: Any = None, scale_rest: float = 0.0) -> dict[str, Any] | None:
     """Draw one sheet to `path`, and with `whole`, the stem of its full-size
     files, write them and measure them. None when its input is not built."""
     from PIL import Image, ImageDraw, ImageFont
@@ -294,6 +444,8 @@ def render(store: Store, manifest: Manifest, record: dict[str, Any], model: Any,
     runner = Sharpener(record, model, image, field)
     runner.clarity = clarity
     runner.rolloff = rolloff
+    runner.scale_to, runner.scale_blend, runner.full_ask = scale_to, scale_blend, full_ask
+    runner.scale_rest = scale_rest
     if sheet.get("denoise"):
         runner.measure_noise = before
     look = stretch(image)
@@ -337,7 +489,8 @@ def render(store: Store, manifest: Manifest, record: dict[str, Any], model: Any,
     font, small, big = (typeface(ImageFont, size) for size in (26, 22, 32))
     widths = runner.widths[np.isfinite(runner.widths)]
     title = (f"{sheet['title']}: {record['name']} ({record['parameters'] / 1e6:.3g}M parameters); stars "
-             f"{np.min(widths):.1f} to {np.max(widths):.1f} px, floor {runner.settings.floor_px:g} px")
+             f"{np.min(widths):.1f} to {np.max(widths):.1f} px, floor {runner.settings.floor_px:g} px"
+             + (f"; also binned {runner.factor} × {runner.factor}" if runner.factor > 1 else ""))
     draw.text((gap, 16), title, fill=235, font=big)
     top = title_height
     for row_title, tiles in rows:
