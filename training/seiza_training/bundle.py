@@ -154,7 +154,7 @@ def sharpen_card(name: str, record: dict[str, Any], graphs: list[dict[str, str]]
     from .sharpen_bank import STAMP, WIDTH_CORE
     from .sharpen_model import (BODY_AXES, BODY_INPUTS, BODY_OUTPUT, ENCODER_INPUT, ENCODER_OUTPUT, PLANES, STAMP_PLANES,
                                 WINGS, settings_from)
-    from .sharpen_sheets import (FULL_NONSTELLAR, FULL_STRENGTH, SCALE_BLEND, SCALE_REST, SCALE_TO,
+    from .sharpen_sheets import (FULL_NONSTELLAR, FULL_STRENGTH, SCALE_BLEND, SCALE_REST, SCALE_STARS, SCALE_TO,
                                  SCALED_FULL)
 
     unknown = [backend for backend in parity if backend not in BACKENDS]
@@ -171,8 +171,11 @@ def sharpen_card(name: str, record: dict[str, Any], graphs: list[dict[str, str]]
     stars, rest = strengths or own
     # The scaled pass: the stars' width an image is binned toward, the
     # share of its stars' width (as a Gaussian's σ) under which its change
-    # is the binned run's, and the rest's ask on the binned image.
-    binned = {"scaled": {"stars_px": SCALE_TO, "blend": SCALE_BLEND, "rest": SCALE_REST}} if scaled else {}
+    # is the binned run's, the rest's ask on the binned image, and the
+    # star light, in pixel noise, from which a star keeps the full-size
+    # change whole (`SCALE_STARS`).
+    binned = ({"scaled": {"stars_px": SCALE_TO, "blend": SCALE_BLEND, "rest": SCALE_REST, "stars": SCALE_STARS}}
+              if scaled else {})
     return {
         "format": CARD_FORMAT,
         "name": name,

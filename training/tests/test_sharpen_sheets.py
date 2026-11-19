@@ -74,6 +74,29 @@ def test_the_scales_meet_the_binned_change_below_the_blend_the_full_size_change_
     assert np.isnan(sharpen_sheets.scale_blended(image, holed, ripple, 6.0)[:5]).all()
 
 
+def test_a_star_keeps_the_full_size_change_and_the_blend_fades_in_about_it():
+    side = 128
+    down, across = np.mgrid[0:side, 0:side].astype(np.float32)
+    image = np.full((side, side), 100.0, dtype=np.float32)
+    star = (50.0 * np.exp(-((across - 64) ** 2 + (down - 64) ** 2) / (2 * 4.0**2))).astype(np.float32)
+    noise = np.full((side, side), 1.0, dtype=np.float32)
+    share = sharpen_sheets.star_share(star, noise, 2.0)
+    assert share[64, 64] == 1.0 and share[0, 0] == 0.0
+    assert 0.0 < share[64, 64 + 11] < 1.0, "the blend fades in where the star's light nears the noise"
+    # A square change from the binned run, a round one at full size: at the
+    # star the full size's alone, away from it the blend's.
+    full = image + 0.5 * star
+    square = np.zeros((side, side), dtype=np.float32)
+    square[56:72, 56:72] = 3.0
+    square[20:36, 20:36] = 3.0
+    kept = sharpen_sheets.scale_blended(image, full, square, 3.0, share)
+    blended = sharpen_sheets.scale_blended(image, full, square, 3.0)
+    held = share == 1.0
+    assert np.allclose(kept[held], full[held])
+    assert np.allclose(kept[share == 0.0], blended[share == 0.0])
+    assert np.abs(kept - full)[held].max() == 0.0 and np.abs(blended - full)[held].max() > 1.0
+
+
 def test_a_region_s_binned_change_lands_where_the_whole_image_s_would(monkeypatch):
     rng = np.random.default_rng(4)
     image = rng.normal(100.0, 5.0, (120, 150)).astype(np.float32)
@@ -83,11 +106,12 @@ def test_a_region_s_binned_change_lands_where_the_whole_image_s_would(monkeypatc
                               (binned + change)[top:bottom, left:right])
     runner = object.__new__(sharpen_sheets.Sharpener)
     runner.image, runner.widths, runner.scale_to, runner.scale_blend = image, np.array([[10.0]]), 3.5, 0.5
+    runner.scale_stars = 0.0
     runner.record = {"inference": {"margin": 4, "multiple": 1}}
     runner._smaller = smaller
     runner.smaller_ratio = lambda ratio, small: ratio
     # What the blend is handed, as it is handed it.
-    monkeypatch.setattr(sharpen_sheets, "scale_blended", lambda region, output, up, sigma: up)
+    monkeypatch.setattr(sharpen_sheets, "scale_blended", lambda region, output, up, sigma, stars: up)
     whole = sharpen_sheets.brought_up(change, 3)
     assert runner.factor == 3
     for top, left, bottom, right in ((7, 11, 70, 101), (0, 0, 120, 150), (50, 40, 120, 150)):
