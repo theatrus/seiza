@@ -1982,6 +1982,43 @@ In order, each only if the one before leaves a gap at the rims:
      reference's 1.13 and 1.11), the lit side +4.68 and +5.85, knots
      0.95%. At 4 px the rise is 4.01. By eye the reference still draws
      the ridges' finger hardest.
+   - So the renderer can now do it (`sheet-sharpen --scale-to PX`):
+     where an image's stars are at least twice that wide, the run is also
+     given the image binned to bring them near it (its PSF field, points
+     and noise measured from the binned image, as any image's are), and
+     the binned change, brought back up by Keys' cubic, stands in for the
+     full-size change below a Gaussian of half the stars' width
+     (`--scale-blend`). `--scale-rest` asks the binned rest for its own
+     share. On the Trunk at 3.5 px (binned 3 × 3), with the full size
+     asked 0.45 for the rest and the binned image 0.35:
+     - The cloud is the reference's in every band (0.99, 1.02, 1.12, 1.10
+       and 1.04 between 1–2 and 16–32 px; the reference 1.00, 1.04,
+       1.13, 1.11 and 1.04), with no mottle.
+     - The rim rises over 3.90 px (the reference 3.74, the split's run
+       alone 4.35), slope ×1.94, its foot 0.68 and 0.44 below the input
+       at 2 and 0 px (the reference 0.99 and 0.44). The lit side is +4.62
+       and +5.77 (the reference +5.41 and +6.46), and the dark side 4–8
+       px out is weaker than the reference's (0.45, 0.51 and 0.59 at 8, 6
+       and 4 px; the reference 0.68, 0.85 and 1.00).
+     - Knots 0.94% on the Trunk and 1.01% on the multi-night Trunk (the
+       run alone 1.28%, the reference 2.31%; its stars are 7.9 px, so it
+       is binned 2 × 2).
+     - The stars hold: width 0.455 of the input's (the reference 0.463),
+       flux 1.010, ellipticity 0.023 (the input 0.033, the reference
+       0.029), 95th percentile 0.352 (the reference 0.360). The
+       California (stars 2.3 px) is not binned and reads as before.
+     - The binned image's ask is held at the run's floor (1.5 px, so 0.38
+       of stars 3.9 px across): 0.35 and 0.4 there read alike. Binned 2
+       × 2 instead (stars 5.8 px), asked down to 0.3, the rims grow
+       taller (+7.35 and +8.65 at 4 and 6 px) but no narrower (4.36 and
+       4.23 px) and the mottle comes back (1.07 between 2 and 4 px).
+     - The binned image's dark side is not the shade's: its targets get
+       a third of the shade at 3.9 px (`CONTRAST_WIDTHS`), but given the
+       rest as a step after the model, the dark side 4–8 px out reaches
+       the reference's while the foot by the edge falls back (0.32 below
+       the input at 0 px) and the rise widens to 4.22 px. The reference's
+       dip lies 2–4 px from the edge; the binned run's has its shape, at
+       three quarters of its depth.
 
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run

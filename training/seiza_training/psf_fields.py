@@ -325,6 +325,7 @@ def measured_arrays(image: np.ndarray) -> tuple[dict[str, Any], dict[str, np.nda
     is known of the product it came from) and its arrays, measured from the
     image alone and kept nowhere."""
     started = time.monotonic()
+    image = np.ascontiguousarray(image, dtype=np.float32)
     height, width = image.shape
     table, level, detection_error = detections(image)
     detected = time.monotonic()
