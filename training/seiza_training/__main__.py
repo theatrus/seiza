@@ -541,7 +541,11 @@ def main(argv: list[str] | None = None) -> int:
                                 help="a backend the model has passed parity on (default: any may run it)")
     sharpen_bundle.add_argument("--strengths", type=numbers, default=None,
                                 help="the shares of their width stars and the rest are brought to when a caller "
-                                     "names none, as two numbers (default: the sheets' full-size ask)")
+                                     "names none, as two numbers (default: the scaled pass's full-size ask, or "
+                                     "the sheets' with --no-scaled)")
+    sharpen_bundle.add_argument("--scaled", action=argparse.BooleanOptionalAction, default=True,
+                                help="have the runtime also sharpen an image whose stars are far wider than "
+                                     "training's binned, and put the two together by scale (default: yes)")
 
     bundle.add_argument("--holes", action=argparse.BooleanOptionalAction,
                         help="have the runtime keep the image's holes, pixels far below its sky, from the network "
@@ -811,7 +815,8 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
         from .bundle import write_sharpen_bundle
 
         return write_sharpen_bundle(store, arguments.name, arguments.out, name=arguments.bundle_name,
-                                    parity=tuple(arguments.parity), strengths=arguments.strengths)
+                                    parity=tuple(arguments.parity), strengths=arguments.strengths,
+                                    scaled=arguments.scaled)
 
     if arguments.command == "cut-external":
         from . import sharpen_external

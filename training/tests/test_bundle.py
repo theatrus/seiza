@@ -73,11 +73,15 @@ def test_a_sharpening_card_names_what_the_runtime_makes_from_the_image():
                                "planes": ["peak", "wings"], "side": 129, "wings": 0.001, "features": 64}
     assert told["vector"] == {"tensor": "vector", "dimensions": ["map_height", "map_width"]}
     assert told["residual"] == "asinh" and told["floor_px"] == 1.5 and told["sharpest"] == 0.25
-    assert told["strengths"] == {"stars": 0.46, "rest": 0.5}, "the sheets' full-size ask, unless told"
+    assert told["strengths"] == {"stars": 0.46, "rest": 0.45}, "the scaled pass's full-size ask, unless told"
+    assert told["scaled"] == {"stars_px": 3.5, "blend": 0.5, "rest": 0.35}
     assert told["psf"]["grid_px"] == 256 and told["psf"]["minimum_snr"] == 30.0
     assert told["points"] == {"noise_reduction_radius": 0, "clip_peaks": 300, "peak_block": 16, "core_radius": 24.0}
     asked = bundle.sharpen_card("sharpen-test", SHARPEN_RECORD, graphs, encoder, [], (0.6, 0.7))
     assert asked["sharpen"]["strengths"] == {"stars": 0.6, "rest": 0.7}
+    whole = bundle.sharpen_card("sharpen-test", SHARPEN_RECORD, graphs, encoder, [], scaled=False)["sharpen"]
+    assert "scaled" not in whole, "a card without the scaled pass says nothing of it"
+    assert whole["strengths"] == {"stars": 0.46, "rest": 0.5}, "the sheets' full-size ask, unless told"
 
 
 def test_a_sharpening_bundle_s_graphs_match_the_model(monkeypatch, tmp_path):

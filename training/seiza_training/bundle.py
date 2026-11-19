@@ -140,17 +140,22 @@ def write_bundle(store: Store, run: str, directory: Path, *, name: str, noise_ma
 
 
 def sharpen_card(name: str, record: dict[str, Any], graphs: list[dict[str, str]], encoder: dict[str, Any],
-                 parity: list[str], strengths: tuple[float, float] | None = None) -> dict[str, Any]:
+                 parity: list[str], strengths: tuple[float, float] | None = None,
+                 scaled: bool = True) -> dict[str, Any]:
     """A sharpening bundle's card, from the fields it may hold: `graphs`
     are the body's, one per precision, and `encoder` the encoder's file,
-    hash and vector length."""
+    hash and vector length. With `scaled`, the runtime also sharpens an
+    image whose stars are far wider than `SCALE_TO` binned toward it, as
+    the sheets' scaled pass does, and a model with the rest's plane asks
+    `SCALED_FULL` at full size unless told."""
     from . import psf_fields
     from .multi_night import STACK_DETECTION
     from .noise_model import IMAGE_MAP_REVISION
     from .sharpen_bank import STAMP, WIDTH_CORE
     from .sharpen_model import (BODY_AXES, BODY_INPUTS, BODY_OUTPUT, ENCODER_INPUT, ENCODER_OUTPUT, PLANES, STAMP_PLANES,
                                 WINGS, settings_from)
-    from .sharpen_sheets import FULL_NONSTELLAR, FULL_STRENGTH
+    from .sharpen_sheets import (FULL_NONSTELLAR, FULL_STRENGTH, SCALE_BLEND, SCALE_REST, SCALE_TO,
+                                 SCALED_FULL)
 
     unknown = [backend for backend in parity if backend not in BACKENDS]
     if unknown:
@@ -162,7 +167,12 @@ def sharpen_card(name: str, record: dict[str, Any], graphs: list[dict[str, str]]
         raise ValueError(f"the run reads {planes}, and its settings say {settings.planes}")
     if IMAGE_MAP_REVISION != 2:
         raise ValueError(f"the runtime makes the image map of revision 2, not {IMAGE_MAP_REVISION}")
-    stars, rest = strengths or (FULL_NONSTELLAR if settings.nonstellar else (FULL_STRENGTH, FULL_STRENGTH))
+    own = (SCALED_FULL if scaled else FULL_NONSTELLAR) if settings.nonstellar else (FULL_STRENGTH, FULL_STRENGTH)
+    stars, rest = strengths or own
+    # The scaled pass: the stars' width an image is binned toward, the
+    # share of its stars' width (as a Gaussian's σ) under which its change
+    # is the binned run's, and the rest's ask on the binned image.
+    binned = {"scaled": {"stars_px": SCALE_TO, "blend": SCALE_BLEND, "rest": SCALE_REST}} if scaled else {}
     return {
         "format": CARD_FORMAT,
         "name": name,
@@ -212,16 +222,18 @@ def sharpen_card(name: str, record: dict[str, Any], graphs: list[dict[str, str]]
                 "peak_block": psf_fields.PEAK_BLOCK,
                 "core_radius": psf_fields.CORE_RADIUS,
             },
+            **binned,
         },
     }
 
 
 def write_sharpen_bundle(store: Store, run: str, directory: Path, *, name: str, parity: tuple[str, ...] = (),
-                         strengths: tuple[float, float] | None = None) -> dict[str, Any]:
+                         strengths: tuple[float, float] | None = None, scaled: bool = True) -> dict[str, Any]:
     """Write the sharpening `run` to `directory` as the bundle `name`: its
     encoder and its body (`sharpen_model.export_parts`), each held to
     PyTorch, and its card. `strengths` are the shares of their width stars
-    and the rest are brought to when a caller names none."""
+    and the rest are brought to when a caller names none; `scaled` gives
+    the card the scaled pass (`sharpen_card`)."""
     from .sharpen_model import export_parts, load_run as load_sharpen_run
 
     record, model = load_sharpen_run(store, run)
@@ -234,6 +246,6 @@ def write_sharpen_bundle(store: Store, run: str, directory: Path, *, name: str, 
               for entry in written["body"]]
     encoder = {"file": written["encoder"]["file"], "sha256": sha256_of(directory / written["encoder"]["file"]),
                "features": written["features"]}
-    made = sharpen_card(name, record, graphs, encoder, list(parity), strengths)
+    made = sharpen_card(name, record, graphs, encoder, list(parity), strengths, scaled)
     (directory / "card.json").write_text(json.dumps(made, indent=2) + "\n")
     return {"card": made, "export": written}
