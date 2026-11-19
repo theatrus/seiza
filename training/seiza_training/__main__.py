@@ -461,8 +461,8 @@ def main(argv: list[str] | None = None) -> int:
     clean.add_argument("--noise-store", type=Path, help="the store holding the noise run (default: --store)")
 
     external = commands.add_parser("cut-external", help="cut a known-kernel bank from sharper images than any stack, "
-                                                         "a space telescope archive's mosaics listed in "
-                                                         "ROOT/index.json")
+                                                         "a space telescope archive's mosaics or a survey's "
+                                                         "frames listed in ROOT/index.json")
     external.add_argument("--root", required=True, type=Path, help="the mosaics' directory, holding index.json")
     external.add_argument("--work", type=Path)
     external.add_argument("--bins", type=lambda text: tuple(int(k) for k in text.split(",")), default=(2, 3),
@@ -473,6 +473,10 @@ def main(argv: list[str] | None = None) -> int:
     external.add_argument("--limit", type=int, help="at most this many mosaics, for a trial cut")
     external.add_argument("--workers", type=int, default=1, help="mosaics read and brought down at once")
     external.add_argument("--telescope", default="external", help="what the bank's sources are recorded as from")
+    external.add_argument("--label", default="external",
+                          help="the bank's label: 'external' for images with next to no noise of their own, which "
+                               "train-sharpen's --external-snr gives noise; another (such as 'survey') for "
+                               "ground-based frames, met with their own noise as a stack's windows are")
 
     sharpen_sheet = commands.add_parser("sheet-sharpen", help="make a trained PSF model's contact sheets, full-size "
                                                               "images and whole-image measures (reads the manifest "
@@ -824,7 +828,8 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
         banked = sharpen_external.cut(arguments.root, arguments.work or store.scratch.parent / "sharpen",
                                       bins=arguments.bins, per_source=arguments.windows, seed=arguments.seed,
                                       limit=arguments.limit, workers=arguments.workers,
-                                      telescope=arguments.telescope, window=arguments.window)
+                                      telescope=arguments.telescope, window=arguments.window,
+                                      label=arguments.label)
         return {"directory": str(banked["directory"]),
                 **{key: banked["done"][key] for key in ("windows", "sources", "dropped", "summary")}}
     if arguments.command == "clean-sharpen":

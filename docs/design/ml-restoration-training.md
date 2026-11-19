@@ -1136,6 +1136,56 @@ window carries its PSF stamp `P_ref`, measured where it was cut.
 Open: ten to twenty mosaics fail in the cut with a division by zero,
 not yet traced.
 
+### Survey frames from the ground
+
+No space telescope has imaged the Elephant's Trunk (IC 1396A). The
+IPHAS/IGAPS survey has: the Isaac Newton Telescope's wide-field camera,
+120 s Hα exposures at 0.333″ a pixel, the C925 stacks' own scale, in
+seeing near 0.8″ (stars 2.4 to 3 px, against the deep Trunk stack's
+11.5). Its frames are public, each with a confidence map.
+
+**As truth for the Trunk.** The deep stack is plate-solved, each frame
+brought onto its grid through both WCSs and fitted to it (a gain and an
+offset at the stack's blur, stars masked). An output's added detail
+(output less input, at a scale `b`) is then compared with the detail
+the sky holds there and the input lacks (the frame at `b` less the frame
+blurred to the input's stars): their correlation, and the slope of one
+on the other. On the ridges of the Trunk sheet's second row, at `b` = 3,
+4 and 6 px:
+
+| Output | Correlation / slope |
+| --- | --- |
+| The goal, strong | 0.79 / 0.46, 0.81 / 0.57, 0.84 / 0.86 |
+| The goal, mild | 0.74 / 0.20, 0.78 / 0.25, 0.82 / 0.40 |
+| S77 | 0.80 / 0.44, 0.83 / 0.54, 0.85 / 0.81 |
+| S77 with the scaled pass | 0.83 / 0.49, 0.86 / 0.61, 0.89 / 0.93 |
+| S80 (halo kernels) | 0.79 / 0.44, 0.82 / 0.55, 0.85 / 0.84 |
+| S80 with the scaled pass | 0.81 / 0.48, 0.84 / 0.61, 0.87 / 0.94 |
+
+More of the scaled pass's added detail is the sky's than the
+goal's. Every output recovers about half of the real 3 to 4 px
+detail the input lacks. Frames within 1.5° of IC 1396A are kept for
+this test alone.
+
+**As a bank.** `cut-external` reads such frames as it reads mosaics:
+an index entry may name a separate weight file (`weight`, the
+confidence map) and its extension (`weight_hdu`, the frame's CCD), and
+compressed, unsigned frames are read whole. A frame is noisy as a stack
+is, so its bank takes a label of its own (`--label survey`):
+`--external-snr`, which gives a nearly noiseless mosaic noise of its
+contrast, leaves it alone, and the noise model's denoised planes
+(`clean-sharpen`) give it clean truth as the native bank has.
+
+**Choosing frames.** Most survey frames are star fields. A frame's
+diffuse structure is measured from the frame itself: the median of each
+32 px block, less a quadratic surface (twilight, moon, vignetting), its
+spread from the 10th to the 90th percentile in the frame's pixel noise.
+At 1 and above a frame holds visible nebula; 30% of the first 1,750
+fetched did. The frame's background over its night's median, the first
+fetch's proxy, does not predict it (rank correlation +0.04: it picked
+twilight and moonlit frames). Its background over the darkest CCD of
+the same exposure does (+0.51; 76% of its top quarter hold nebula).
+
 ### What the sharpening runs showed
 
 Runs since (2026-11-09, width 32, four levels, 20,000 steps of 8 tiles
@@ -2018,6 +2068,25 @@ In order, each only if the one before leaves a gap at the rims:
        the input at 0 px) and the rise widens to 4.22 px. The goal's
        dip lies 2–4 px from the edge; the binned run's has its shape, at
        three quarters of its depth.
+     - Halo kernels for the dark side (S80: S77's run continued 30,000
+       steps with `--kernel-halo 0.3`). The Trunk's measured PSF puts
+       about 6% of a rim's step, 4 to 8 px out, into the dark side beyond
+       what a Gaussian of its width does, about the dark side's shortfall
+       against the goal, and a Gaussian known kernel never asks for
+       that light back. With halos, the dark side 6 to 8 px out reaches
+       the goal's (0.77 and 0.85 below the input at 8 and 6 px at
+       full size; S77 0.55 and 0.64), nearer the edge it stays short
+       (0.54 at 2 px, the goal 0.99), and the step grows to the
+       goal's (9.95 against 9.96). With the scaled pass the foot
+       reaches it too (0.77 and 0.42 at 2 and 0 px). But the rim widens
+       (4.48 px at full size, S77 4.35; scaled 4.10, S77 3.90), the cloud
+       overshoots from 8 px up (1.21 between 8 and 16 px scaled, the
+       goal 1.11), knots on the multi-night Trunk rise (5.08%
+       between 1.5 and 4 px at full size, S77 4.05%), and against the
+       survey frames (below) its added detail is a little less the sky's
+       (0.79 at 3 px on the ridges, S77 0.80). It keeps more of the grain
+       (0.97 of the input's on the sky at 1 px, S77 0.90) and its stars
+       hold. S77 stays.
 
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
