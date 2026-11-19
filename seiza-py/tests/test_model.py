@@ -279,6 +279,7 @@ def test_a_sharpening_model_installs_with_its_encoder_and_lists_what_it_asks(tmp
     assert installed.sharpen is not None
     assert (installed.sharpen.stars, installed.sharpen.rest) == (0.46, 0.5)
     assert installed.sharpen.floor_px == 1.5 and installed.sharpen.sharpest == 0.25
+    assert (installed.sharpen.scaled_px, installed.sharpen.binned_rest) == (None, None), "no scaled pass"
     seiza.verify_model("sharpen-tiny", store=tmp_path)
     noise = seiza.install_model(TINY, store=tmp_path)
     assert noise.sharpen is None, "a noise model asks for no shares"
@@ -327,6 +328,38 @@ def test_a_tiny_sharpening_model_matches_the_harness() -> None:
     rolled = model.sharpen(image, rolloff=expected["rolloff"])
     want = np.array([np.nan if value is None else value for value in expected["rolled"]], dtype=np.float32)
     assert np.nanmax(np.abs(rolled.image[::stride, ::stride].ravel() - want)) < 2e-3 * expected["noise"]
+
+
+@needs_runtime
+def test_a_scaled_pass_bins_a_wide_starred_image_as_the_harness_does(tmp_path: Path) -> None:
+    expected = json.loads((SHARPEN / "expected.json").read_text())["scaled"]
+    image = np.fromfile(SHARPEN / "scaled.f32", dtype="<f4").reshape(expected["height"], expected["width"])
+    bundle = tmp_path / "scaled"
+    shutil.copytree(SHARPEN / "tiny", bundle)
+    card = json.loads((bundle / "card.json").read_text())
+    card["sharpen"]["scaled"] = expected["scaled"]
+    (bundle / "card.json").write_text(json.dumps(card))
+    installed = seiza.install_model(bundle, store=tmp_path / "store")
+    assert installed.sharpen is not None
+    assert (installed.sharpen.scaled_px, installed.sharpen.binned_rest) == (3.5, 0.35)
+
+    model = seiza.SharpenModel(str(bundle), "cpu")
+    result = model.sharpen(image, *expected["strengths"])
+    assert result.report.channels[0].binned == expected["factor"]
+    assert result.report.binned_rest == pytest.approx(0.35) and not result.report.full_size_only
+    stride = expected["stride"]
+    want = np.array([np.nan if value is None else value for value in expected["output"]], dtype=np.float32)
+    assert np.nanmax(np.abs(result.image[::stride, ::stride].ravel() - want)) < 2e-3 * expected["noise"]
+
+    held = model.sharpen(image, *expected["strengths"], full_size_only=True, binned_rest=0.5)
+    assert held.report.channels[0].binned == 1 and held.report.full_size_only
+    assert held.report.binned_rest is None, "nothing binned to ask of"
+    plain = seiza.SharpenModel(str(SHARPEN / "tiny"), "cpu").sharpen(image, *expected["strengths"])
+    assert np.array_equal(held.image, plain.image, equal_nan=True), "held to full size, the plain card's run"
+    asked = model.sharpen(image, *expected["strengths"], binned_rest=0.6)
+    assert asked.report.binned_rest == pytest.approx(0.6)
+    with pytest.raises(ValueError, match="share"):
+        model.sharpen(image, binned_rest=0.0)
 
 
 def write_fits(path: Path, image: np.ndarray) -> None:

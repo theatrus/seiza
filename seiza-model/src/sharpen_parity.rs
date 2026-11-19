@@ -4,10 +4,13 @@
 //! the PSF field and detects the stars through this workspace's own code,
 //! so those agree to rounding; the rest is the harness's arithmetic, ported.
 
-use crate::bundle::{ModelBundle, SharpenCard};
+use crate::bundle::{ModelBundle, ScaledCard, SharpenCard};
 use crate::noise::image_map;
 use crate::psf::{Field, Point, detections, field_point_map};
-use crate::sharpen::rolloff_step;
+use crate::sharpen::{
+    Asked, Binned, Read, SharpenOptions, block_mean, brought_up, rolloff_step, scale_blended,
+    scale_factor,
+};
 use crate::sky::scales;
 use serde::Deserialize;
 
@@ -279,5 +282,238 @@ fn the_roll_off_matches_the_harness() {
     assert!(
         moved > width * height / 4,
         "the fixture's change is held back: {moved}"
+    );
+}
+
+/// The scaled case: an image of wider stars and what the harness makes of
+/// it with a scaled pass.
+#[derive(Deserialize)]
+struct ScaledExpected {
+    scaled: ScaledCard,
+    width: usize,
+    height: usize,
+    stride: usize,
+    strengths: (f32, f32),
+    background: f32,
+    noise: f32,
+    typical: f64,
+    factor: usize,
+    sigma: f64,
+    binned: BinnedExpected,
+    edged_up: Vec<Option<f32>>,
+    edged_blended: Vec<Option<f32>>,
+}
+
+#[derive(Deserialize)]
+struct BinnedExpected {
+    width: usize,
+    height: usize,
+    background: f32,
+    noise: f32,
+    stars: usize,
+    ys: Vec<f64>,
+    xs: Vec<f64>,
+    widths: Vec<Option<f64>>,
+    points: usize,
+    image: Vec<Option<f32>>,
+    ratio_stars: Vec<Option<f32>>,
+    ratio_rest: Vec<Option<f32>>,
+}
+
+struct ScaledFixture {
+    expected: ScaledExpected,
+    image: Vec<f32>,
+    bundle: ModelBundle,
+    card: SharpenCard,
+}
+
+fn scaled_fixture() -> ScaledFixture {
+    let directory = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sharpen");
+    let text = std::fs::read_to_string(format!("{directory}/expected.json")).unwrap();
+    let mut all: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let expected: ScaledExpected = serde_json::from_value(all["scaled"].take()).unwrap();
+    let bytes = std::fs::read(format!("{directory}/scaled.f32")).unwrap();
+    let image = bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
+        .collect();
+    let bundle = ModelBundle::open(format!("{directory}/tiny")).unwrap();
+    let mut card = bundle.card().sharpen.clone().unwrap();
+    card.scaled = Some(expected.scaled);
+    ScaledFixture {
+        expected,
+        image,
+        bundle,
+        card,
+    }
+}
+
+/// Hold `plane`, `width` pixels across, to samples taken every `stride`th
+/// pixel each way, each within `tolerance` of the larger of one and the
+/// sample.
+fn check_every(
+    name: &str,
+    plane: &[f32],
+    width: usize,
+    stride: usize,
+    samples: &[Option<f32>],
+    tolerance: f32,
+) {
+    let height = plane.len() / width;
+    let mut samples = samples.iter();
+    for y in (0..height).step_by(stride) {
+        for x in (0..width).step_by(stride) {
+            let got = plane[y * width + x];
+            match samples.next().unwrap() {
+                None => assert!(got.is_nan(), "{name} at ({x}, {y}): {got} for no value"),
+                Some(want) => assert!(
+                    (got - want).abs() <= tolerance * want.abs().max(1.0),
+                    "{name} at ({x}, {y}): {got} against {want}"
+                ),
+            }
+        }
+    }
+    assert!(samples.next().is_none(), "{name}: samples left over");
+}
+
+#[test]
+fn a_scaled_pass_bins_and_reads_the_binned_image_as_the_harness_does() {
+    let fixture = scaled_fixture();
+    let want = &fixture.expected;
+    let card = fixture.bundle.card();
+    let (width, height) = (want.width, want.height);
+    let read = Read::of(&fixture.image, width, height, card, &fixture.card).unwrap();
+    assert_eq!(read.background, want.background);
+    assert!(
+        (read.noise / want.noise - 1.0).abs() < 1e-5,
+        "{}",
+        read.noise
+    );
+    assert!(
+        (read.typical / want.typical - 1.0).abs() < 1e-9,
+        "{}",
+        read.typical
+    );
+    let factor = scale_factor(read.typical, want.scaled.stars_px);
+    assert_eq!(factor, want.factor);
+    assert!((want.scaled.blend * read.typical - want.sigma).abs() < 1e-9);
+
+    let options = SharpenOptions {
+        stars: Some(want.strengths.0),
+        rest: Some(want.strengths.1),
+        ..Default::default()
+    };
+    let asked = Asked::from(&options, &fixture.card).unwrap();
+    let binned = Binned::of(
+        &fixture.image,
+        width,
+        height,
+        factor,
+        &read,
+        &asked,
+        card,
+        &fixture.card,
+    )
+    .unwrap()
+    .expect("the binned image has a PSF");
+    let got = &want.binned;
+    assert_eq!((binned.width, binned.height), (got.width, got.height));
+    check_every(
+        "the binned image",
+        &binned.plane,
+        binned.width,
+        want.stride,
+        &got.image,
+        0.0,
+    );
+    assert_eq!(binned.read.background, got.background);
+    assert!(
+        (binned.read.noise / got.noise - 1.0).abs() < 1e-5,
+        "{}",
+        binned.read.noise
+    );
+    let field = &binned.read.field;
+    assert_eq!((&field.ys, &field.xs), (&got.ys, &got.xs));
+    assert_eq!(field.stars, got.stars);
+    assert_eq!(binned.read.points.len(), got.points);
+    for (node, (found, want)) in field.widths.iter().zip(&got.widths).enumerate() {
+        let want = want.expect("every node has a width");
+        assert!(
+            (found / want - 1.0).abs() < 1e-9,
+            "node {node}: {found} against {want}"
+        );
+    }
+    check_every(
+        "the binned stars' ratio",
+        &binned.stars,
+        binned.width,
+        want.stride,
+        &got.ratio_stars,
+        1e-6,
+    );
+    let rest = field
+        .ratio_map(
+            binned.width,
+            binned.height,
+            want.scaled.rest,
+            fixture.card.floor_px,
+        )
+        .unwrap();
+    check_every(
+        "the binned rest's ratio",
+        &rest,
+        binned.width,
+        want.stride,
+        &got.ratio_rest,
+        1e-6,
+    );
+    assert!(
+        rest.iter()
+            .all(|&ratio| f64::from(ratio) > want.scaled.rest),
+        "the floor holds the binned rest above its ask"
+    );
+}
+
+#[test]
+fn a_known_change_is_brought_up_and_put_together_by_scale_as_the_harness_does() {
+    let fixture = scaled_fixture();
+    let want = &fixture.expected;
+    let (width, height) = (want.width, want.height);
+    let mut edged = fixture.image.clone();
+    for (line, source) in edged.chunks_mut(width).zip(fixture.image.chunks(width)) {
+        for x in 1..width {
+            line[x] += 0.5 * (source[x] - source[x - 1]);
+        }
+    }
+    let factor = want.factor;
+    let (small, small_width, small_height) = block_mean(&edged, width, height, factor);
+    let (image, _, _) = block_mean(&fixture.image, width, height, factor);
+    let change: Vec<f32> = small
+        .iter()
+        .zip(&image)
+        .map(|(edged, image)| {
+            let change = edged - image;
+            if change.is_nan() { 0.0 } else { change }
+        })
+        .collect();
+    let up = brought_up(&change, small_width, small_height, factor, width, height);
+    check_every(
+        "the brought-up change",
+        &up,
+        width,
+        want.stride,
+        &want.edged_up,
+        1e-6,
+    );
+    let blended = scale_blended(&fixture.image, &edged, &up, width, height, want.sigma);
+    check_every(
+        "the change put together",
+        &blended,
+        width,
+        want.stride,
+        &want.edged_blended,
+        2e-6,
     );
 }

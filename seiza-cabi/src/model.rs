@@ -92,14 +92,18 @@ impl ModelOpenRequest {
     }
 }
 
-/// What a sharpening is asked for. Every field may be left out: `stars` and
-/// `rest` are then the model's own shares, and nothing is rolled off.
+/// What a sharpening is asked for. Every field may be left out: `stars`,
+/// `rest` and `binnedRest` are then the model's own shares, nothing is
+/// rolled off, and an image whose stars are far wider than the model's is
+/// also sharpened binned where its card says so.
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields, default)]
 struct SharpenRequest {
     stars: Option<f32>,
     rest: Option<f32>,
     rolloff: f32,
+    binned_rest: Option<f32>,
+    full_size_only: bool,
 }
 
 impl SharpenRequest {
@@ -219,6 +223,7 @@ struct SharpenedChannelResponse {
     psf_global: bool,
     psf_width_px: f32,
     points: usize,
+    binned: usize,
 }
 
 #[derive(Serialize)]
@@ -233,6 +238,8 @@ struct SharpenReportResponse {
     stars: f32,
     rest: f32,
     rolloff: f32,
+    binned_rest: Option<f32>,
+    full_size_only: bool,
     channels: Vec<SharpenedChannelResponse>,
 }
 
@@ -248,6 +255,8 @@ impl From<&SharpenReport> for SharpenReportResponse {
             stars: report.stars,
             rest: report.rest,
             rolloff: report.rolloff,
+            binned_rest: report.binned_rest,
+            full_size_only: report.full_size_only,
             channels: report
                 .channels
                 .iter()
@@ -260,6 +269,7 @@ impl From<&SharpenReport> for SharpenReportResponse {
                     psf_global: read.psf_global,
                     psf_width_px: read.psf_width_px,
                     points: read.points,
+                    binned: read.binned,
                 })
                 .collect(),
         }
@@ -274,6 +284,8 @@ struct SharpenStrengthsResponse {
     rest: f64,
     floor_px: f64,
     sharpest: f64,
+    scaled_px: Option<f64>,
+    binned_rest: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -307,6 +319,8 @@ impl From<&ModelBundle> for InstalledModelResponse {
                     rest: sharpen.strengths.rest,
                     floor_px: sharpen.floor_px,
                     sharpest: sharpen.sharpest,
+                    scaled_px: sharpen.scaled.map(|scaled| scaled.stars_px),
+                    binned_rest: sharpen.scaled.map(|scaled| scaled.rest),
                 }),
             precisions: card
                 .graphs
@@ -733,17 +747,26 @@ pub unsafe extern "C" fn seiza_sharpen_model_tile(model: *const SeizaSharpenMode
 /// star, and `rolloff`, how hard the finest part of the change is held back
 /// where it lies under the noise. A share is above 0 and at most 1, which
 /// leaves things as they are; left out, it is the model's own. No star is asked
-/// to be narrower than the model's floor.
+/// to be narrower than the model's floor. Where the model's card has a scaled
+/// pass, an image whose stars are far wider than the model was trained on is
+/// also sharpened binned, toward the width the card names, and the two runs
+/// are put together by scale: `binnedRest` is the share asked of everything
+/// that is not a star there (left out, the card's), and `fullSizeOnly`, true,
+/// keeps a run at full size.
 ///
 /// Returns what ran, as JSON the caller frees with `seiza_string_free`:
 /// `model`, `sha256` (the body graph's), `cardSha256`, `backend`, `precision`,
-/// `tile`, `stars`, `rest`, `rolloff`, and `channels`, each with its
-/// `background`, `noise`, `psfRows` and `psfColumns` (the nodes its PSF field
-/// was sampled at), `psfStars`, `psfGlobal` (too few stars left one PSF for the
-/// whole image), `psfWidthPx` and `points`. A host keys cached results on
-/// `cardSha256`, `backend`, `precision`, the three strengths and
+/// `tile`, `stars`, `rest`, `rolloff`, `binnedRest` (null where the card has
+/// no scaled pass or the run was held to full size), `fullSizeOnly`, and
+/// `channels`, each with its `background`, `noise`, `psfRows` and
+/// `psfColumns` (the nodes its PSF field was sampled at), `psfStars`,
+/// `psfGlobal` (too few stars left one PSF for the whole image), `psfWidthPx`,
+/// `points` and `binned`, how many pixels a side it was also sharpened binned
+/// by (1: not at all). A host keys cached results on `cardSha256`, `backend`,
+/// `precision`, `stars`, `rest`, `rolloff`, `binnedRest`, `fullSizeOnly` and
 /// [`seiza_model_output_version`]. An image with too few stars to measure a
-/// PSF from is refused, and so is an `out` that overlaps `data`.
+/// PSF from is refused, and so is an `out` that overlaps `data`. Where only
+/// the binned image has too few, the channel is sharpened at full size alone.
 ///
 /// # Safety
 /// `model` must be a live [`SeizaSharpenModel`] no other thread is using,
@@ -845,6 +868,8 @@ fn with_sharpen_options<T>(
         stars: request.stars,
         rest: request.rest,
         rolloff: request.rolloff,
+        binned_rest: request.binned_rest,
+        full_size_only: request.full_size_only,
         progress: Some(&report),
         cancel: Some(&stop),
     })
@@ -948,9 +973,11 @@ pub unsafe extern "C" fn seiza_model_backends_json(
 /// [`seiza_denoised_report_json`] gives them), `sharpen` and `precisions`.
 /// `sharpen` is null for a noise model; for a sharpening model it holds
 /// `stars` and `rest`, the shares a run takes when told none, `floorPx`, the
-/// narrowest in pixels a star is asked to be, and `sharpest`, the sharpest
-/// share the model was trained to be asked for. `store` may be null for the
-/// default store.
+/// narrowest in pixels a star is asked to be, `sharpest`, the sharpest share
+/// the model was trained to be asked for, and, for a card with a scaled pass,
+/// `scaledPx`, the stars' width an image is binned toward, and `binnedRest`,
+/// the share asked of the rest there when told none (both null without one).
+/// `store` may be null for the default store.
 ///
 /// # Safety
 /// `store` must be null or a NUL-terminated string. When non-null, `error_out`
@@ -1293,6 +1320,20 @@ mod tests {
                 assert!(seiza_model_verify(ptr::null(), store.as_ptr(), &mut error));
                 assert!(error.is_null());
             }
+            let listed = seiza_model_list_json(store.as_ptr(), &mut error);
+            let listed: Value = serde_json::from_str(&taken(listed)).unwrap();
+            let sharpen = listed
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|model| model["task"] == "sharpen")
+                .unwrap();
+            assert_eq!(sharpen["sharpen"]["floorPx"], 1.5);
+            assert!(
+                sharpen["sharpen"]["scaledPx"].is_null()
+                    && sharpen["sharpen"]["binnedRest"].is_null(),
+                "the tiny card has no scaled pass"
+            );
 
             // The sharpening model is checked too, with no name given.
             let encoder = temp.path().join("store/sharpen-tiny/encoder-f32.onnx");
@@ -1717,6 +1758,9 @@ mod tests {
             assert_eq!(read["psfGlobal"], false);
             assert!(read["points"].as_u64().unwrap() > 10);
             assert!(read["psfWidthPx"].as_f64().unwrap() > 2.0);
+            assert_eq!(read["binned"], 1, "the tiny card has no scaled pass");
+            assert!(report["binnedRest"].is_null());
+            assert_eq!(report["fullSizeOnly"], false);
 
             let index = 100 * width + 150;
             assert!(out[index].is_finite() && out[index] != pixels[index]);
@@ -1763,6 +1807,28 @@ mod tests {
             let written = seiza_stacking::FitsFrame::open(&output).unwrap();
             assert_eq!(written.image.data[index], out[index]);
             assert!(written.headers.iter().any(|(key, _)| key == "MDSTARS"));
+
+            // Held to full size, and asked a binned share, a run says so.
+            let held = CString::new(r#"{"fullSizeOnly": true, "binnedRest": 0.4}"#).unwrap();
+            let report = seiza_sharpen_model_sharpen(
+                model,
+                pixels.as_ptr(),
+                pixels.len(),
+                width,
+                height,
+                1,
+                held.as_ptr(),
+                out.as_mut_ptr(),
+                out.len(),
+                None,
+                ptr::null(),
+                ptr::null_mut(),
+                &mut error,
+            );
+            assert!(!report.is_null());
+            let report: Value = serde_json::from_str(&taken(report)).unwrap();
+            assert_eq!(report["fullSizeOnly"], true);
+            assert!(report["binnedRest"].is_null(), "nothing binned to ask of");
 
             let bad = CString::new(r#"{"stars": 1.5}"#).unwrap();
             let refused = seiza_sharpen_model_sharpen(

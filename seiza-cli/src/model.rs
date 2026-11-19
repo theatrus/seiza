@@ -134,6 +134,14 @@ struct SharpenArgs {
     /// under the noise, in multiples of the image's noise; 0 keeps all of it
     #[arg(long, default_value_t = 0.0)]
     rolloff: f32,
+    /// The share asked of everything that is not a star on the binned image,
+    /// where the model's card has a scaled pass and the image's stars are far
+    /// wider than the model was trained on (default: the card's)
+    #[arg(long, value_name = "SHARE")]
+    binned_rest: Option<f32>,
+    /// Sharpen at full size alone, never binned, whatever the card says
+    #[arg(long)]
+    full_size_only: bool,
     #[command(flatten)]
     runtime: RuntimeArgs,
 }
@@ -287,6 +295,8 @@ fn sharpen(args: SharpenArgs) -> Result<()> {
             stars: args.stars,
             rest: args.rest,
             rolloff: args.rolloff,
+            binned_rest: args.binned_rest,
+            full_size_only: args.full_size_only,
             progress: Some(&progress),
             cancel: Some(&crate::interrupt::interrupted),
         },
@@ -318,7 +328,7 @@ fn sharpen(args: SharpenArgs) -> Result<()> {
     );
     for (channel, read) in report.channels.iter().enumerate() {
         println!(
-            "channel {}: stars {:.2} px wide, from {} stars at {} × {} nodes{}, {} point sources, noise {:.6}, background {:.6}",
+            "channel {}: stars {:.2} px wide, from {} stars at {} × {} nodes{}, {} point sources, noise {:.6}, background {:.6}{}",
             channel + 1,
             read.psf_width_px,
             read.psf_stars,
@@ -331,7 +341,14 @@ fn sharpen(args: SharpenArgs) -> Result<()> {
             },
             read.points,
             read.noise,
-            read.background
+            read.background,
+            match (read.binned, report.binned_rest) {
+                (1, _) | (_, None) => String::new(),
+                (binned, Some(rest)) => format!(
+                    ", also sharpened binned {binned} × {binned} with the rest to {:.0}%",
+                    rest * 100.0
+                ),
+            }
         );
     }
     Ok(())
@@ -412,10 +429,18 @@ fn list() -> Result<()> {
             .collect();
         let reads = match &card.sharpen {
             Some(sharpen) => format!(
-                "stars to {:.0}% of their width and the rest to {:.0}% unless told, no star under {} px",
+                "stars to {:.0}% of their width and the rest to {:.0}% unless told, no star under {} px{}",
                 sharpen.strengths.stars * 100.0,
                 sharpen.strengths.rest * 100.0,
-                sharpen.floor_px
+                sharpen.floor_px,
+                match sharpen.scaled {
+                    Some(scaled) => format!(
+                        ", wider stars also binned toward {} px with the rest to {:.0}%",
+                        scaled.stars_px,
+                        scaled.rest * 100.0
+                    ),
+                    None => String::new(),
+                }
             ),
             None => format!(
                 "reads {} noise{}",
@@ -583,6 +608,31 @@ mod tests {
         assert_eq!(args.rest, None, "the model's own share, unless told");
         assert_eq!(args.rolloff, 1.0);
         assert_eq!(args.backend.unwrap().to_string(), "coreml-gpu");
+        assert_eq!(
+            args.binned_rest, None,
+            "the card's own binned share, unless told"
+        );
+        assert!(
+            !args.full_size_only,
+            "binned where the card says so, unless told"
+        );
+
+        let parsed = Harness::try_parse_from([
+            "model",
+            "sharpen",
+            "in.fits",
+            "-o",
+            "out.fits",
+            "--binned-rest",
+            "0.4",
+            "--full-size-only",
+        ])
+        .unwrap();
+        let ModelCommand::Sharpen(args) = parsed.command else {
+            panic!("not sharpen")
+        };
+        assert_eq!(args.binned_rest, Some(0.4));
+        assert!(args.full_size_only);
     }
 
     #[test]

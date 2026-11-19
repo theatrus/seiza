@@ -506,8 +506,9 @@ impl PyFileRestoration {
 /// median `noise`; the `psf_rows` and `psf_columns` of nodes its PSF field was
 /// sampled at, the `psf_stars` it was measured from, and whether too few of
 /// them left one PSF for the whole image (`psf_global`); the median of the
-/// nodes' widths, `psf_width_px`; and how many `points`, point sources, were
-/// found and rendered.
+/// nodes' widths, `psf_width_px`; how many `points`, point sources, were
+/// found and rendered; and how many pixels a side it was also sharpened
+/// `binned` by, for the scaled pass (1: not at all).
 #[pyclass(
     skip_from_py_object,
     name = "SharpenedChannel",
@@ -532,6 +533,8 @@ pub(crate) struct PySharpenedChannel {
     psf_width_px: f32,
     #[pyo3(get)]
     points: usize,
+    #[pyo3(get)]
+    binned: usize,
 }
 
 impl From<&SharpenedChannel> for PySharpenedChannel {
@@ -545,6 +548,7 @@ impl From<&SharpenedChannel> for PySharpenedChannel {
             psf_global: read.psf_global,
             psf_width_px: read.psf_width_px,
             points: read.points,
+            binned: read.binned,
         }
     }
 }
@@ -553,15 +557,18 @@ impl From<&SharpenedChannel> for PySharpenedChannel {
 impl PySharpenedChannel {
     fn __repr__(&self) -> String {
         format!(
-            "SharpenedChannel(psf_width_px={}, psf_stars={}, points={}, noise={})",
-            self.psf_width_px, self.psf_stars, self.points, self.noise
+            "SharpenedChannel(psf_width_px={}, psf_stars={}, points={}, noise={}, binned={})",
+            self.psf_width_px, self.psf_stars, self.points, self.noise, self.binned
         )
     }
 }
 
 /// What ran in a sharpening, for a file's provenance and a cache key: key
 /// cached results on `card_sha256`, `backend`, `precision`, `stars`, `rest`,
-/// `rolloff` and `MODEL_OUTPUT_VERSION`. `sha256` is the body graph's.
+/// `rolloff`, `binned_rest`, `full_size_only` and `MODEL_OUTPUT_VERSION`.
+/// `sha256` is the body graph's. `binned_rest` is the share asked of the
+/// rest on a binned image, None where the card has no scaled pass or the
+/// run was held to full size.
 #[pyclass(skip_from_py_object, name = "SharpenReport", module = "seiza", frozen)]
 #[derive(Clone)]
 pub(crate) struct PySharpenReport {
@@ -584,6 +591,10 @@ pub(crate) struct PySharpenReport {
     #[pyo3(get)]
     rolloff: f32,
     #[pyo3(get)]
+    binned_rest: Option<f32>,
+    #[pyo3(get)]
+    full_size_only: bool,
+    #[pyo3(get)]
     channels: Vec<PySharpenedChannel>,
 }
 
@@ -599,6 +610,8 @@ impl From<&SharpenReport> for PySharpenReport {
             stars: report.stars,
             rest: report.rest,
             rolloff: report.rolloff,
+            binned_rest: report.binned_rest,
+            full_size_only: report.full_size_only,
             channels: report.channels.iter().map(Into::into).collect(),
         }
     }
@@ -676,13 +689,23 @@ fn sharpen_error(error: ModelError) -> PyErr {
     }
 }
 
+/// What a Python caller asks of a sharpening, before its progress callback
+/// and cancel signal.
+struct Asked {
+    stars: Option<f32>,
+    rest: Option<f32>,
+    rolloff: f32,
+    binned_rest: Option<f32>,
+    full_size_only: bool,
+}
+
 impl PySharpenModel {
-    /// Run `run` on the model with (stars, rest, rolloff) asked, the caller's
-    /// progress callback and cancel signal, and the interpreter released.
+    /// Run `run` on the model with what is `asked`, the caller's progress
+    /// callback and cancel signal, and the interpreter released.
     fn run<T: Send>(
         &self,
         py: Python<'_>,
-        (stars, rest, rolloff): (Option<f32>, Option<f32>, f32),
+        asked: Asked,
         progress: Option<Py<PyAny>>,
         cancel: Option<Py<PyAny>>,
         run: impl FnOnce(&mut SharpenModel, &SharpenOptions<'_>) -> PyResult<T> + Send,
@@ -701,9 +724,11 @@ impl PySharpenModel {
         };
         let stop = || signal.is_cancelled();
         let options = SharpenOptions {
-            stars,
-            rest,
-            rolloff,
+            stars: asked.stars,
+            rest: asked.rest,
+            rolloff: asked.rolloff,
+            binned_rest: asked.binned_rest,
+            full_size_only: asked.full_size_only,
             progress: Some(&report),
             cancel: Some(&stop),
         };
@@ -793,11 +818,18 @@ impl PySharpenModel {
     /// not a star: above 0 and at most 1, which leaves things as they are,
     /// and the model's own when `None`. No star is asked to be narrower than
     /// the model's floor. `rolloff` holds back the finest part of the change
-    /// where it lies under that many times the image's noise. `progress` is
-    /// called with (channel, channels, tile, tiles) after each tile, and
-    /// `cancel`, a callable returning true, stops the run. An image with too
-    /// few stars to measure a PSF from raises `TooFewStarsError`.
-    #[pyo3(signature = (image, stars=None, rest=None, *, rolloff=0.0, progress=None, cancel=None))]
+    /// where it lies under that many times the image's noise. Where the
+    /// model's card has a scaled pass, an image whose stars are far wider
+    /// than the model was trained on is also sharpened binned, toward the
+    /// width the card names, and the two runs put together by scale:
+    /// `binned_rest` is the share asked of what is not a star there (the
+    /// card's when `None`), and `full_size_only` keeps the run at full size.
+    /// `progress` is called with (channel, channels, tile, tiles) after each
+    /// tile, the binned run's counted in, and `cancel`, a callable returning
+    /// true, stops the run. An image with too few stars to measure a PSF from
+    /// raises `TooFewStarsError`. Where only the binned image has too few, the
+    /// channel is sharpened at full size alone.
+    #[pyo3(signature = (image, stars=None, rest=None, *, rolloff=0.0, binned_rest=None, full_size_only=false, progress=None, cancel=None))]
     #[allow(clippy::too_many_arguments)]
     fn sharpen(
         &self,
@@ -806,19 +838,24 @@ impl PySharpenModel {
         stars: Option<f32>,
         rest: Option<f32>,
         rolloff: f32,
+        binned_rest: Option<f32>,
+        full_size_only: bool,
         progress: Option<Py<PyAny>>,
         cancel: Option<Py<PyAny>>,
     ) -> PyResult<PySharpened> {
         let view = float_image_view(&image)?;
         let view = ImageView::new(view.data, view.width, view.height, view.channels)
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
-        let result = self.run(
-            py,
-            (stars, rest, rolloff),
-            progress,
-            cancel,
-            |model, options| model.sharpen(view, options).map_err(sharpen_error),
-        )?;
+        let asked = Asked {
+            stars,
+            rest,
+            rolloff,
+            binned_rest,
+            full_size_only,
+        };
+        let result = self.run(py, asked, progress, cancel, |model, options| {
+            model.sharpen(view, options).map_err(sharpen_error)
+        })?;
         Ok(PySharpened { result })
     }
 
@@ -826,7 +863,7 @@ impl PySharpenModel {
     /// result to `output` as linear 32-bit FITS, with the input's geometry
     /// and cards that say what ran, without first constructing a Python
     /// array. The other arguments are `sharpen`'s.
-    #[pyo3(signature = (path, output, stars=None, rest=None, *, rolloff=0.0, progress=None, cancel=None))]
+    #[pyo3(signature = (path, output, stars=None, rest=None, *, rolloff=0.0, binned_rest=None, full_size_only=false, progress=None, cancel=None))]
     #[allow(clippy::too_many_arguments)]
     fn sharpen_file(
         &self,
@@ -836,6 +873,8 @@ impl PySharpenModel {
         stars: Option<f32>,
         rest: Option<f32>,
         rolloff: f32,
+        binned_rest: Option<f32>,
+        full_size_only: bool,
         progress: Option<Py<PyAny>>,
         cancel: Option<Py<PyAny>>,
     ) -> PyResult<PySharpenReport> {
@@ -843,19 +882,19 @@ impl PySharpenModel {
             seiza_model::FileError::Model(error) => sharpen_error(error),
             other => crate::EngineError::new_err(other.to_string()),
         };
-        self.run(
-            py,
-            (stars, rest, rolloff),
-            progress,
-            cancel,
-            |model, options| {
-                let image =
-                    RestorationImage::open(&path, RestorationArea::Full).map_err(file_error)?;
-                let result = image.sharpen(model, options).map_err(file_error)?;
-                result.write_linear(&output).map_err(file_error)?;
-                Ok(result.report().into())
-            },
-        )
+        let asked = Asked {
+            stars,
+            rest,
+            rolloff,
+            binned_rest,
+            full_size_only,
+        };
+        self.run(py, asked, progress, cancel, |model, options| {
+            let image = RestorationImage::open(&path, RestorationArea::Full).map_err(file_error)?;
+            let result = image.sharpen(model, options).map_err(file_error)?;
+            result.write_linear(&output).map_err(file_error)?;
+            Ok(result.report().into())
+        })
     }
 
     fn __repr__(&self) -> String {
@@ -869,8 +908,10 @@ impl PySharpenModel {
 
 /// What an installed sharpening model asks for unless told: the shares of
 /// their width `stars` and the `rest` are brought to; the narrowest a star is
-/// asked to be, `floor_px`; and the `sharpest` share it was trained to be
-/// asked for.
+/// asked to be, `floor_px`; the `sharpest` share it was trained to be asked
+/// for; and, where its card has a scaled pass, the stars' width an image is
+/// binned toward, `scaled_px`, and the share asked of the rest there,
+/// `binned_rest` (both `None` without one).
 #[pyclass(
     skip_from_py_object,
     name = "SharpenStrengths",
@@ -887,6 +928,10 @@ pub(crate) struct PySharpenStrengths {
     floor_px: f64,
     #[pyo3(get)]
     sharpest: f64,
+    #[pyo3(get)]
+    scaled_px: Option<f64>,
+    #[pyo3(get)]
+    binned_rest: Option<f64>,
 }
 
 #[pymethods]
@@ -966,6 +1011,8 @@ impl From<&ModelBundle> for PyInstalledModel {
                 rest: sharpen.strengths.rest,
                 floor_px: sharpen.floor_px,
                 sharpest: sharpen.sharpest,
+                scaled_px: sharpen.scaled.map(|scaled| scaled.stars_px),
+                binned_rest: sharpen.scaled.map(|scaled| scaled.rest),
             }),
             precisions: card
                 .graphs

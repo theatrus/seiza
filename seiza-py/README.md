@@ -633,8 +633,19 @@ sharper. No star is asked to be narrower than the model's floor in pixels, and a
 share left out is the model's own, which `installed_models()` lists under
 `sharpen`. `rolloff` holds back the finest part of the change where it lies
 under that many times the image's noise. An image with too few stars to measure
-a PSF from raises `TooFewStarsError`. A cache of results keys on
-`report.card_sha256`, the backend, the precision, the three strengths and
+a PSF from raises `TooFewStarsError`.
+
+Where a model's card has a scaled pass (`installed_models()` lists its
+`scaled_px` under `sharpen`), an image whose stars are far wider than the model
+was trained on is also sharpened binned, by the whole number of pixels a side
+that brings its stars nearest `scaled_px`, and the two runs are put together by
+scale: the binned run makes the finest detail, the full-size run the rest.
+`binned_rest` is the share asked of what is not a star on the binned image (the
+card's own when left out), and `full_size_only=True` keeps a run at full size.
+`report.channels[0].binned` says how many pixels a side a channel was binned by,
+1 where it was not, as when the binned image has too few stars for a PSF. A
+cache of results keys on `report.card_sha256`, the backend, the precision,
+`stars`, `rest`, `rolloff`, `binned_rest`, `full_size_only` and
 `MODEL_OUTPUT_VERSION`.
 
 `seiza.model_backends()` says which backends run here and why the others do not,

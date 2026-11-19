@@ -345,6 +345,30 @@ pub struct SharpenCard {
     pub psf: PsfReading,
     /// How the point sources are found.
     pub points: PointsReading,
+    /// How an image whose stars are far wider than the model was trained on
+    /// is also sharpened binned. None: never.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scaled: Option<ScaledCard>,
+}
+
+/// The scaled pass: an image whose stars are far wider than `stars_px` is
+/// also sharpened binned toward it, and the two runs are put together by
+/// scale. The binned run's change makes everything finer than a Gaussian
+/// of `blend` times the stars' width, and the full-size run's everything
+/// coarser. An image is binned by the whole number of pixels a side that
+/// brings its stars nearest `stars_px`, and only by 2 or more.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScaledCard {
+    /// The stars' width, in pixels, an image is binned toward.
+    pub stars_px: f64,
+    /// The share of the stars' width, as a Gaussian's σ, below which the
+    /// change is the binned run's.
+    pub blend: f64,
+    /// The share asked of everything that is not a star on the binned
+    /// image, when a caller names none. A model with no
+    /// [`InputPlane::NonstellarRatio`] plane does not read it.
+    pub rest: f64,
 }
 
 /// One of a bundle's graphs.
@@ -618,6 +642,15 @@ impl SharpenCard {
                 self.points.core_radius
             ));
         }
+        if let Some(scaled) = &self.scaled
+            && !(positive(scaled.stars_px) && positive(scaled.blend) && share(scaled.rest))
+        {
+            return refuse(format!(
+                "bins toward stars {} px across, blends at {} of their width and asks {} of the \
+                 rest binned: the first two must be positive and the last above 0 and at most 1",
+                scaled.stars_px, scaled.blend, scaled.rest
+            ));
+        }
         Ok(())
     }
 }
@@ -849,12 +882,27 @@ pub(crate) mod tests {
             [StampPlane::Peak, StampPlane::Wings]
         );
         assert_eq!(sharpen.psf.grid_px, 256);
+        assert_eq!(
+            sharpen.scaled, None,
+            "a card without the scaled pass never bins"
+        );
         bundle.verify().unwrap();
 
         let path = temp.path().join(CARD_FILE);
-        let good: serde_json::Value =
+        let mut good: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let json = |text: &str| serde_json::from_str::<serde_json::Value>(text).unwrap();
+        good["sharpen"]["scaled"] = json(r#"{"stars_px": 3.5, "blend": 0.5, "rest": 0.35}"#);
+        std::fs::write(&path, serde_json::to_vec(&good).unwrap()).unwrap();
+        let scaled = ModelBundle::open(temp.path()).unwrap();
+        assert_eq!(
+            scaled.card().sharpen.as_ref().unwrap().scaled,
+            Some(ScaledCard {
+                stars_px: 3.5,
+                blend: 0.5,
+                rest: 0.35
+            })
+        );
         for (pointer, value) in [
             ("/task", json(r#""denoise""#)),
             ("/sharpen", serde_json::Value::Null),
@@ -870,6 +918,10 @@ pub(crate) mod tests {
             ("/sharpen/points/peak_block", json("0")),
             ("/sharpen/residual", json(r#""log""#)),
             ("/sharpen/stars", json("true")),
+            ("/sharpen/scaled/stars_px", json("0")),
+            ("/sharpen/scaled/blend", json("-0.5")),
+            ("/sharpen/scaled/rest", json("1.5")),
+            ("/sharpen/scaled/least", json("2")),
             ("/inputs/0/planes", json(r#"["image", "noise", "points"]"#)),
             (
                 "/reading/holes",
