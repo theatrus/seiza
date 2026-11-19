@@ -115,6 +115,12 @@ def test_a_field_is_recorded_on_a_grid_and_read_back_between_its_nodes(store):
     assert record["clip_level"] == pytest.approx(0.8 * 30_000.0, rel=0.01)
     clipped = points[points[:, psf_fields.DETECTION_COLUMNS.index("clipped")] == 1]
     assert len(clipped) == 3
+    # Measured in memory, from the image alone, it is the same field.
+    held = psf_fields.Field.measured_from(np.load(store.products / "a/deep" / "image.npy"))
+    assert held.usable and held.record["star_count"] == record["star_count"]
+    assert held.record["clip_level"] == record["clip_level"]
+    assert np.array_equal(held.arrays["stamps"], loaded.arrays["stamps"])
+    assert np.array_equal(held.points(), points, equal_nan=True)
 
 
 def test_a_field_with_too_few_stars_is_one_psf_or_refused(store):

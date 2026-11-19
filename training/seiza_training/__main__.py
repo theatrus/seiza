@@ -488,6 +488,19 @@ def main(argv: list[str] | None = None) -> int:
                                     "lies under this times the input's noise, after the model and before any "
                                     "clarity, as train-sharpen's --fine-snr asks of a run; its sheets go beside "
                                     "the run's own (0: never)")
+    sharpen_sheet.add_argument("--scale-to", type=float, default=0.0,
+                               help="where an image's stars are at least twice this wide (px), also sharpen it "
+                                    "binned to bring them near it, and put the two together by scale; its sheets "
+                                    "go beside the run's own (0: never)")
+    sharpen_sheet.add_argument("--scale-blend", type=float, default=None,
+                               help="where --scale-to's two changes meet: the binned run's below a Gaussian of "
+                                    "this times the stars' width, the full-size run's above (default 0.5)")
+    sharpen_sheet.add_argument("--scale-rest", type=float, default=0.0,
+                               help="the rest's ask on the binned image, for every panel, in place of the "
+                                    "panel's own (a run with the two asks; 0: the panel's)")
+    sharpen_sheet.add_argument("--full", default=None,
+                               help="the full-size image's ask in place of the usual: one ratio, or STARS,REST; "
+                                    "its files go beside the run's own")
 
     evaluate = commands.add_parser("evaluate-noise", help="measure a trained noise model on a split")
     evaluate.add_argument("--name", required=True)
@@ -737,8 +750,14 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
         from . import sharpen_sheets
 
         named = set(arguments.sheets_named) if arguments.sheets_named else None
+        full = None
+        if arguments.full is not None:
+            values = tuple(float(value) for value in arguments.full.split(","))
+            full = values if len(values) > 1 else values[0]
+        blend = sharpen_sheets.SCALE_BLEND if arguments.scale_blend is None else arguments.scale_blend
         return sharpen_sheets.render_saved(store, manifest, arguments.name, only=named, clarity=arguments.clarity,
-                                           rolloff=arguments.rolloff)
+                                           rolloff=arguments.rolloff, scale_to=arguments.scale_to,
+                                           scale_blend=blend, full_ask=full, scale_rest=arguments.scale_rest)
     if command == "evaluate-noise":
         from .noise_model import NoiseBands, evaluate_saved
 
