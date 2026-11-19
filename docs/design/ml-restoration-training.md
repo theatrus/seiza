@@ -1161,6 +1161,8 @@ on the other. On the ridges of the Trunk sheet's second row, at `b` = 3,
 | S77 with the scaled pass | 0.83 / 0.49, 0.86 / 0.61, 0.89 / 0.93 |
 | S80 (halo kernels) | 0.79 / 0.44, 0.82 / 0.55, 0.85 / 0.84 |
 | S80 with the scaled pass | 0.81 / 0.48, 0.84 / 0.61, 0.87 / 0.94 |
+| S81 (the survey bank) | 0.80 / 0.44, 0.82 / 0.54, 0.85 / 0.81 |
+| S81 with the scaled pass | 0.83 / 0.46, 0.86 / 0.58, 0.89 / 0.88 |
 
 More of the scaled pass's added detail is the sky's than the
 goal's. Every output recovers about half of the real 3 to 4 px
@@ -2101,6 +2103,30 @@ In order, each only if the one before leaves a gap at the rims:
        stars read 0.017 again (width 0.459, ellipticity 0.027, as S77 at
        full size), and the rims, the knots and the cloud are where the
        scaled pass had them.
+     - The survey bank (S81: S77's run continued 30,000 steps with it
+       beside the native and Hubble banks, at the native bank's weight).
+       Of 3,588 survey frames measured, 1,285 hold nebula (structure of
+       1 or more; 435 of 3 or more); six 1024 px windows each, 7,706 in
+       all, stars 2.3 to 4.7 px (median 3.4), cleaned as the native bank
+       is. S81 lands on S77: the rim 5.84 above the input at 6 px (S77
+       5.73, the goal 6.46) and 0.62 below it at −4 px (0.66, the
+       goal 1.00), the rise 4.25 px (4.35, the goal 3.74), the
+       cloud's detail between 4 and 8 px 1.35 times the input's (1.38),
+       knots on the deep Trunk the same and on the multi-night Trunk a
+       little more (4.42% between 1.5 and 4 px, S77 4.05%), its stars as
+       round (cos 4θ 0.018 at full size and scaled). Against the survey
+       frames its added detail is the sky's as S77's is. It keeps more of
+       the grain in the cloud (0.94 of the input's on nebula at 1 px, S77
+       0.90; on bright nebula 0.92, S77 0.81) and smooths the sky a
+       little more (0.87, S77 0.90). Asked 0.35 for both, the dark notch
+       S77 leaves beside a star is fainter. On the deep validation
+       windows its error falls to 0.271 of the input's (S77 0.277).
+       Frames at the stars' own scale do not move the rims. On the ridges
+       the model already adds as much of the sky's detail as the
+       goal does, and the goal's further contrast there is not
+       the sky's: blurred to its best match, the goal is the further
+       from the survey frames (a residual of 1.64 of their noise, S77
+       1.55, S81 1.59).
 
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
