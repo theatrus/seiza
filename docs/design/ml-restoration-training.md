@@ -2127,6 +2127,43 @@ In order, each only if the one before leaves a gap at the rims:
        the sky's: blurred to its best match, the goal is the further
        from the survey frames (a residual of 1.64 of their noise, S77
        1.55, S81 1.59).
+     - **Contrast at the rims, after the model** (`sheet-sharpen --edge
+       AMOUNT`, `edge_step`). After the scaled pass the cloud is the
+       goal's and the rise nearly so, but not the rim's two sides:
+       the goal's dark side is 0.2 to 0.4 of the noise deeper from
+       2 to 8 px out, and its lit side 0.7 to 0.8 higher 4 and 6 px in.
+       The shade darkens the dark side alone and the clarity keeps off
+       strong edges, so neither reaches it. The step adds an unsharp mask
+       of the output (smoothed by 0.25 star widths, less its mean over a
+       box of 0.3) where a strong edge lies near, by the clarity's test,
+       its dip at 1.4 and its rise at 0.5. Kept off the listed point
+       sources alone, a star beside a rim that the detector had not
+       listed took a dark ring: the field lists 278 of the deep Trunk's
+       stars, a search for blobs finds 1,462, and one in nine was ringed
+       past 0.3 of the noise. So every blob whose two curvatures, at a
+       star's σ, bend down by more than 45 times what the noise alone
+       gives is kept clear too, out to 1.2 widths; a rim or a ridge bends
+       one way only. A lower bar takes the rims' knots for stars and the
+       rims' contrast with them: at a sixth of it, 16% of the image was
+       cleared and the dark side 4 px out came back from 1.00 to 0.76.
+       At an amount of 1 on the deep Trunk:
+
+       | Measure | Scaled pass | Edge 0.5 | Edge 1 | The goal |
+       | --- | --- | --- | --- | --- |
+       | Dark side 8, 6, 4, 2 px out | 0.45, 0.51, 0.59, 0.68 | 0.55, 0.65, 0.77, 0.82 | 0.65, 0.80, 0.94, 0.96 | 0.68, 0.85, 1.00, 0.99 |
+       | Lit side 4, 6 px in | 4.62, 5.77 | 4.82, 6.00 | 5.02, 6.23 | 5.41, 6.46 |
+       | Rise, 20% to 80% | 3.90 px | 3.82 px | 3.74 px | 3.74 px |
+       | Knots along rims | 0.94% | 0.98% | 1.03% | 0.98% |
+       | Ring at a star's 1st percentile | | 0.09 | 0.18 | |
+
+       The cloud's detail stays the goal's (1.04, 1.13, 1.10 and
+       1.03 of the input's from 2–4 to 16–32 px at 1) and the stars are as they were in width, flux and
+       shape. On the multi-night Trunk (stars 7.9 px) the dark side 4 px
+       out goes from 0.46 to 0.71 (the goal 0.66) and the rise from
+       5.13 to 4.64 px (4.03), with 1.4% of stars ringed past 0.3 of its
+       lower noise at 1 and none at 0.5. The amount is the user's: it
+       gives the goal's look, which the survey frames say is more
+       contrast than the sky's.
 
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run

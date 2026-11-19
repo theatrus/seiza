@@ -588,6 +588,53 @@ def test_a_magnified_window_s_stars_are_wider_and_where_its_points_say(tmp_path)
     assert np.array_equal(off.image, plain.image)
 
 
+def test_the_edge_step_deepens_a_rim_both_ways_and_rings_no_star(monkeypatch):
+    side = 200
+    ys, xs = np.mgrid[:side, :side].astype(np.float32)
+    # A rim 60 high at column 120, 4 px soft, with faint ripples far to
+    # its left; a bright star the detector did not list, on the rim's
+    # dark side.
+    ripple = 0.3 * np.sin(2 * np.pi * xs / 12.0) * (xs < 60)
+    rim = 30.0 * (1.0 + np.tanh((xs - 120.0) / 4.0))
+    image = (140.0 + rim + ripple).astype(np.float32)
+    sigma = np.ones((side, side), np.float32)
+    none = np.zeros((0, len(COLUMNS)))
+    # None asked: the image itself; none for stars at the sampling limit.
+    assert sm.edge_step(image, 0.0, 9.0, none, sigma) is image
+    assert np.array_equal(sm.edge_step(image, 1.0, sm.CONTRAST_WIDTHS[0], none, sigma), image)
+    change = sm.edge_step(image, 1.0, 9.0, none, sigma) - image
+    # Darker on the dark side and brighter on the lit side, the dark side
+    # by more; the ripples far from the rim left alone.
+    assert change[80, 106:120].min() < -2.0
+    assert change[80, 121:136].max() > 0.5
+    assert -change[80, 100:120].min() > 2 * change[80, 120:140].max()
+    assert np.abs(change[60:100, 10:40]).max() < 0.05
+    # Twice the amount, twice the change.
+    assert np.allclose(sm.edge_step(image, 2.0, 9.0, none, sigma) - image, 2 * change, atol=1e-3)
+    # The unlisted star is found as a blob and kept clear; without that,
+    # the step would ring it.
+    star = 3000.0 * np.exp(-0.5 * ((xs - 95.0) ** 2 + (ys - 150.0) ** 2) / 3.8**2)
+    starred = (image + star).astype(np.float32)
+    dist = np.hypot(xs - 95.0, ys - 150.0)
+    ring = (dist > 0.7 * 9.0) & (dist < 1.7 * 9.0)
+    kept = sm.edge_step(starred, 1.0, 9.0, none, sigma) - starred
+    monkeypatch.setattr(sm, "EDGE_BLOB", np.inf)
+    ringed = sm.edge_step(starred, 1.0, 9.0, none, sigma) - starred
+    monkeypatch.undo()
+    assert ringed[ring].min() < -20.0
+    assert np.abs(kept[ring]).max() < 0.05 * np.abs(ringed[ring]).max()
+    # A ridge bends one way only: not a star.
+    ridge = (140.0 + 60.0 * np.exp(-0.5 * ((xs - 100.0) / 4.0) ** 2)).astype(np.float32)
+    assert not sm.star_blobs(ridge, 9.0, sigma)[20:-20].any()
+    assert sm.star_blobs(starred, 9.0, sigma)[150, 95]
+    # NaN stays NaN, and what is far from it is as it was.
+    holed = image.copy()
+    holed[10:14, 180:184] = np.nan
+    made = sm.edge_step(holed, 1.0, 9.0, none, sigma)
+    assert np.isnan(made[10:14, 180:184]).all() and np.isfinite(made).sum() == side * side - 16
+    assert np.allclose(made[60:100, 100:140], image[60:100, 100:140] + change[60:100, 100:140], atol=1e-3)
+
+
 def test_shade_darkens_the_dark_side_of_a_rim_alone(tmp_path):
     side = 200
     ys, xs = np.mgrid[:side, :side].astype(np.float32)
