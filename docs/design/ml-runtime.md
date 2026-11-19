@@ -408,7 +408,8 @@ hash, tensors, stamp side and vector length; the vector map's tensor and
 dimensions; how the residual is applied; the floor in pixels; the sharpest
 share the run was trained to be asked for; the shares a run takes when its
 caller names none; the PSF field's settings, the nodes' spacing and the core
-a width is fitted to; and the detector's settings and the clipped cores'.
+a width is fitted to; the detector's settings and the clipped cores'; and,
+where the model has one, the scaled pass below.
 The other options `seiza-stars` takes for the two are set in `seiza-model`,
 none left to its defaults. The sharpening
 trainer, which is not in the repository yet, will write the bundle with a
@@ -421,13 +422,44 @@ installed from its directory.
 lies under the noise, after the model: the harness's `rolloff_step`. Its
 `clarity_step` is not ported.
 
+**The scaled pass.** A model trained mostly on stars 2 to 5 px across does
+not narrow the rims of an image whose stars are 11.5 px across, whatever it
+is asked: on the Elephant's Trunk sheet, asked harder at full size, a rim
+grew taller rather than narrower, and the cloud mottled. Binned 3 × 3, where
+its stars are 3.9 px across, the same model narrows them. A card's
+`sharpen.scaled` names the pass the harness's sheets run: `stars_px`, the
+stars' width an image is binned toward; `blend`, a share of the stars'
+width; and `rest`, the share asked of what is not a star on the binned
+image. Where the median of the nodes' widths over `stars_px`, rounded to a
+whole number (a half to the even one, as the harness rounds), is 2 or more,
+the image is binned by it, each block's finite pixels averaged, and
+sharpened again, with a noise map, scales, PSF field, point sources and
+vectors measured from the binned image as from any image. The binned run is
+asked for the stars' ratio the full size asks, binned and held to the floor
+in the binned image's pixels, and for the rest at `rest`, or at
+`SharpenOptions::binned_rest`. Its change is brought back up by Keys' cubic
+(a = −½), each binned pixel at the middle of its block. The result takes
+everything finer than a Gaussian of `blend` times the stars' width from
+that change and everything coarser from the full-size run's:
+`image + G(full-size change) + up − G(up)`. The roll-off then runs as
+before. Where the binned image has too few stars for a PSF, the channel is
+sharpened at full size alone, and `SharpenedChannel::binned` says 1;
+`SharpenOptions::full_size_only` holds a run to full size whatever the card
+says. The trainer's `bundle-sharpen` writes the pass at 3.5 px, 0.5 and
+0.35, the Trunk's best, and with it asks 0.46 and 0.45 at full size unless
+told (`--no-scaled` leaves it out). A card without it runs as before, so
+the runtime's output for such a card is unchanged.
+
 **Against the harness.** The harness here is the sharpening trainer's
 Python inference, which is not in the repository yet; the fixtures recorded
 with it are. The port is held to it piece by
 piece on a synthetic star field with no runtime (the field's nodes, stamps
 and widths, the point sources, both ratio maps, the point-source map, a
-tile's vector map and the roll-off), and a tiny model's whole output through
-ONNX Runtime agrees with PyTorch's to 1.3e-4σ̄ at most. The harness renders
+tile's vector map and the roll-off, and with a scaled pass, on a second field
+of wider stars, the binned image, its scales and field, both binned ratio
+maps, and a known change brought up and put together by scale), and a tiny
+model's whole output through ONNX Runtime agrees with PyTorch's to 1.3e-4σ̄
+at most, and with the scaled pass to 9.8e-5σ̄. The harness renders
 the point sources with a Fourier transform and the runtime lays each stamp
 down directly; the two agree to rounding. The harness measures the PSF field
 and detects the stars through this workspace's own code, so those agree
@@ -455,6 +487,15 @@ the Core ML GPU at f32 differs from the harness by 0.024σ̄ at most and
 2.2e-5σ̄ RMS, in 18.7 s, and the CPU by 0.028σ̄ and 2.3e-5σ̄, in 259 s. With
 a roll-off of 1 the RMS is 6.3e-5σ̄ on both.
 
+With the scaled pass, a later model of the same width, its card written by
+`bundle-sharpen` with the pass and asked what the card asks (0.46 and 0.45 at
+full size, the rest at 0.35 binned), bins that image 3 × 3: its stars are
+11.5 px across, and binned it is 2083 × 1392, with a field of 188 stars
+sampled at 7 × 10 nodes. The Core ML GPU at f32 differs from the harness by
+0.018σ̄ at most and 2.3e-5σ̄ RMS, in 21.8 s against 17.9 s at full size
+alone, and the CPU by 0.025σ̄ and 3.0e-5σ̄, in 289 s against 264 s. The
+harness's output there is the sheet's own to 0.018σ̄.
+
 **Half precision loses the stars' cores.** The residual is added in asinh,
 so an error in it is a relative error in the pixel: the f16 graph is right
 to 3.4e-4σ̄ on the sky, and wrong by 0.1 to 0.2% RMS, 0.6% at most, of every
@@ -474,7 +515,11 @@ the output: six f32 planes of its own, and a blur's f64 plane and the f32 one
 it makes, thirteen f32 planes' worth with the run's four, or 3.2 GB. Cutting
 each tile's planes as it runs would bring the first down to the point-source
 map and the noise map, and letting the roll-off's steps go as each is used
-would bring the second down by several planes.
+would bring the second down by several planes. The scaled pass runs the
+binned image after the full size's planes are dropped: its planes are a
+ninth of those at 3 × 3 and a quarter at 2 × 2. Putting the two together
+then holds the full-size output, the change brought up, the full-size change
+and two blurs, with a blur's f64 plane while each is made.
 
 ## What hosts see
 
@@ -514,7 +559,8 @@ it reads apart from the classical commands: `seiza deconvolve` beside
 
 `--high-amount` and `--low-amount` are the harness's names, so sheets and the
 CLI speak alike. `seiza model sharpen` takes `--stars` and `--rest`, the two
-shares, each the model's own when left out, and `--rolloff`. Its C twin is
+shares, each the model's own when left out, `--rolloff`, and, for a card with
+a scaled pass, `--binned-rest` and `--full-size-only`. Its C twin is
 `seiza_sharpen_model_sharpen`, which writes into the caller's buffer and
 answers with what ran, and its Python twin `SharpenModel.sharpen`. From a
 file to a file, as the CLI runs it, they are `RestorationImage::sharpen` and

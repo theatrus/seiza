@@ -462,6 +462,13 @@ measure a PSF from is refused. Each channel of a colour image is measured and
 sharpened on its own. No sharpening model is published yet, so none is fetched:
 give `--model` a bundle's directory, or install one with `seiza model install DIR`.
 
+Where the model's card has a scaled pass, which `seiza model list` shows, an
+image whose stars are far wider than the model was trained on is also sharpened
+binned, toward the width the card names, and the two runs are put together by
+scale: the binned run makes the finest detail, the full-size run the rest.
+`--binned-rest` is the share asked of what is not a star on the binned image
+(left out, the card's), and `--full-size-only` keeps a run at full size.
+
 ```text
 seiza model backends        # which backends run here, and why the others do not
 seiza model list | verify

@@ -9,13 +9,22 @@
 //! noise map a noise model reads. The stamp encoder runs once for each node,
 //! and its vectors are interpolated to every pixel of each tile's coarsest
 //! grid, so the output does not depend on where the tiles fall.
+//!
+//! An image whose stars are far wider than the model was trained on, and
+//! whose card names a scaled pass ([`ScaledCard`]), is also sharpened binned,
+//! where its stars are near the width the card names, with a PSF field, point
+//! sources and scales measured from the binned image as any image's are. The
+//! binned run's change, brought back up, makes the finest scales of the
+//! result, and the full-size run's the coarser ones.
 
 use crate::backend::{Backend, BackendOptions, CoreMlUnits, Precision, runtime};
-use crate::bundle::{InputPlane, ModelBundle, ModelCard, ResidualMode, SharpenCard, Task};
+use crate::bundle::{
+    InputPlane, ModelBundle, ModelCard, ResidualMode, ScaledCard, SharpenCard, Task,
+};
 use crate::error::ModelError;
 use crate::model::{ImageView, Progress, compile_cache};
 use crate::noise::{image_map, noise_input};
-use crate::psf::{Field, detections, field_point_map, stamp_planes};
+use crate::psf::{Field, Point, detections, field_point_map, stamp_planes};
 use crate::session::{OrtGraph, TensorShape};
 use crate::sky::{network_input, scales};
 use crate::stats::median_f32;
@@ -31,6 +40,9 @@ const FINE_AREA: f64 = 4.0;
 const BLUR_REACH: f64 = 8.0;
 /// The scales' and the roll-off's medians read every 17th pixel.
 const LEVEL_STRIDE: usize = 17;
+/// The scaled pass bins an image by this many pixels a side or more, never
+/// less: binned by less, its stars stay about as wide as most of training's.
+const SCALE_LEAST: usize = 2;
 
 /// What a caller asks of a sharpening, and what it may watch and stop.
 #[derive(Clone, Copy, Default)]
@@ -47,7 +59,15 @@ pub struct SharpenOptions<'a> {
     /// the share its local power is of that power and the square of this
     /// times the image's noise. 0 keeps all of it.
     pub rolloff: f32,
-    /// Told after each tile.
+    /// The share asked of everything that is not a star on the binned image,
+    /// where the card's scaled pass bins it ([`ScaledCard`]): above 0 and at
+    /// most 1, and never below the model's floor in the binned image's
+    /// pixels. None takes the card's. A card without the scaled pass, or a
+    /// model with one strength, does not read it.
+    pub binned_rest: Option<f32>,
+    /// Sharpen at full size alone, never binned, whatever the card says.
+    pub full_size_only: bool,
+    /// Told after each tile, the binned run's counted with the full size's.
     pub progress: Option<&'a (dyn Fn(Progress) + Sync)>,
     /// Asked before each tile: true stops the run.
     pub cancel: Option<&'a (dyn Fn() -> bool + Sync)>,
@@ -70,11 +90,16 @@ pub struct SharpenedChannel {
     pub psf_width_px: f32,
     /// How many point sources were found and rendered.
     pub points: usize,
+    /// How many pixels a side the channel was also sharpened binned by, for
+    /// the scaled pass; 1 where it was not, as when its stars are not wide
+    /// enough, or no PSF could be measured on the binned image.
+    pub binned: usize,
 }
 
 /// What ran, for a file's provenance and a host's cache key: a host keys
-/// cached results on `card_sha256`, `backend`, `precision`, the three
-/// strengths and [`OUTPUT_VERSION`](crate::OUTPUT_VERSION).
+/// cached results on `card_sha256`, `backend`, `precision`, `stars`, `rest`,
+/// `rolloff`, `binned_rest`, `full_size_only` and
+/// [`OUTPUT_VERSION`](crate::OUTPUT_VERSION).
 #[derive(Clone, Debug, PartialEq)]
 pub struct SharpenReport {
     /// The model's name.
@@ -95,6 +120,11 @@ pub struct SharpenReport {
     pub rest: f32,
     /// How hard the change's finest part was held back.
     pub rolloff: f32,
+    /// The share asked of everything else on a binned image, for the scaled
+    /// pass; None where the card has none or the run was held to full size.
+    pub binned_rest: Option<f32>,
+    /// Whether the run was held to full size.
+    pub full_size_only: bool,
     /// What each channel was read by.
     pub channels: Vec<SharpenedChannel>,
 }
@@ -295,7 +325,11 @@ impl SharpenModel {
     /// own, and is brought to the asked share of its own stars' width.
     ///
     /// A channel whose PSF cannot be measured, for want of stars, stops the
-    /// run with [`ModelError::PsfField`].
+    /// run with [`ModelError::PsfField`]. One whose stars are far wider than
+    /// the model was trained on, under a card with a scaled pass, is also
+    /// sharpened binned ([`ScaledCard`]); where the binned image's PSF cannot
+    /// be measured, the channel is sharpened at full size alone, and its
+    /// report says so.
     pub fn sharpen(
         &mut self,
         image: ImageView<'_>,
@@ -355,6 +389,8 @@ impl SharpenModel {
                 stars: asked.stars,
                 rest: asked.rest,
                 rolloff: asked.rolloff,
+                binned_rest: asked.scaled.map(|scaled| scaled.rest),
+                full_size_only: options.full_size_only,
                 channels,
             },
         })
@@ -363,14 +399,28 @@ impl SharpenModel {
 
 /// What a run asks for, once checked.
 #[derive(Clone, Copy, Debug)]
-struct Asked {
+pub(crate) struct Asked {
     stars: f32,
     rest: f32,
     rolloff: f32,
+    /// The scaled pass, where the card has one and the run is not held to
+    /// full size.
+    scaled: Option<Scaled>,
+}
+
+/// The scaled pass a run follows: the card's, with the rest's binned ask.
+#[derive(Clone, Copy, Debug)]
+struct Scaled {
+    stars_px: f64,
+    blend: f64,
+    rest: f32,
 }
 
 impl Asked {
-    fn from(options: &SharpenOptions<'_>, card: &SharpenCard) -> Result<Self, ModelError> {
+    pub(crate) fn from(
+        options: &SharpenOptions<'_>,
+        card: &SharpenCard,
+    ) -> Result<Self, ModelError> {
         let share = |name: &str, asked: Option<f32>, own: f64| {
             let value = asked.unwrap_or(own as f32);
             if value > 0.0 && value <= 1.0 {
@@ -388,10 +438,28 @@ impl Asked {
                 options.rolloff
             )));
         }
+        // A binned ask is checked even where nothing reads it.
+        let binned_rest = options
+            .binned_rest
+            .map(|rest| share("what is not a star binned", Some(rest), 1.0))
+            .transpose()?;
+        let scaled = match card.scaled {
+            Some(ScaledCard {
+                stars_px,
+                blend,
+                rest,
+            }) if !options.full_size_only => Some(Scaled {
+                stars_px,
+                blend,
+                rest: binned_rest.unwrap_or(rest as f32),
+            }),
+            _ => None,
+        };
         Ok(Self {
             stars: share("stars", options.stars, card.strengths.stars)?,
             rest: share("what is not a star", options.rest, card.strengths.rest)?,
             rolloff: options.rolloff,
+            scaled,
         })
     }
 }
@@ -424,43 +492,264 @@ fn sharpen_plane(
         .map(|&value| if value.is_finite() { value } else { f32::NAN })
         .collect();
     let plane = plane.as_slice();
-    let reading = &card.reading;
-    let sigma = noise_input(image_map(plane, width, height, reading), reading);
-    let (background, noise) = scales(plane, &sigma)
-        .ok_or_else(|| ModelError::InvalidImage("the image holds no finite pixel".to_string()))?;
-    if !(noise > 0.0 && noise.is_finite()) {
-        return Err(ModelError::InvalidImage(format!(
-            "the image's noise measures {noise}, so it has no scale to be read in"
-        )));
-    }
-    let field = Field::measure(plane, width, height, &sharpen.psf, sharpen.encoder.side)?;
-    let typical = field.typical_width().ok_or_else(|| {
-        ModelError::InvalidImage("the image's PSF has no width at any node".to_string())
-    })?;
-    let points = detections(plane, width, height, &sharpen.points);
+    let read = Read::of(plane, width, height, card, sharpen)?;
 
+    // The binned image and its reading come first, so the progress counts
+    // its tiles from the start.
+    let binned = match asked.scaled {
+        Some(scaled) => match scale_factor(read.typical, scaled.stars_px) {
+            1 => None,
+            factor => Binned::of(plane, width, height, factor, &read, asked, card, sharpen)?,
+        },
+        None => None,
+    };
+    let full_tiles = tiling.tiles(width, height)?;
+    let tiles = full_tiles
+        + binned
+            .as_ref()
+            .map_or(Ok(0), |binned| tiling.tiles(binned.width, binned.height))?;
+
+    let mut output = network_output(
+        encode,
+        body,
+        plane,
+        width,
+        height,
+        &read,
+        (Ratio::Asked(asked.stars), Ratio::Asked(asked.rest)),
+        card,
+        sharpen,
+        tiling,
+        stop,
+        &mut |tile| report(tile, tiles),
+    )?;
+    if let (Some(binned), Some(scaled)) = (&binned, asked.scaled) {
+        let made = network_output(
+            encode,
+            body,
+            &binned.plane,
+            binned.width,
+            binned.height,
+            &binned.read,
+            (Ratio::Given(&binned.stars), Ratio::Asked(scaled.rest)),
+            card,
+            sharpen,
+            tiling,
+            stop,
+            &mut |tile| report(full_tiles + tile, tiles),
+        )?;
+        let change: Vec<f32> = made
+            .par_iter()
+            .zip(binned.plane.par_iter())
+            .map(|(&made, &image)| {
+                let change = made - image;
+                if change.is_nan() { 0.0 } else { change }
+            })
+            .collect();
+        let up = brought_up(
+            &change,
+            binned.width,
+            binned.height,
+            binned.factor,
+            width,
+            height,
+        );
+        output = scale_blended(
+            plane,
+            &output,
+            &up,
+            width,
+            height,
+            scaled.blend * read.typical,
+        );
+    }
+    if asked.rolloff > 0.0 {
+        output = rolloff_step(&output, plane, width, height, asked.rolloff, &read.sigma);
+    }
+    let channel = SharpenedChannel {
+        background: read.background,
+        noise: read.noise,
+        psf_nodes: (read.field.ys.len(), read.field.xs.len()),
+        psf_stars: read.field.stars,
+        psf_global: read.field.global,
+        psf_width_px: read.typical as f32,
+        points: read.points.len(),
+        binned: binned.as_ref().map_or(1, |binned| binned.factor),
+    };
+    Ok((output, channel))
+}
+
+/// What a run reads of an image, made from the image alone: its noise map,
+/// background and noise, its PSF field and the median of its nodes' widths,
+/// and its point sources.
+pub(crate) struct Read {
+    pub(crate) sigma: Vec<f32>,
+    pub(crate) background: f32,
+    pub(crate) noise: f32,
+    pub(crate) field: Field,
+    pub(crate) typical: f64,
+    pub(crate) points: Vec<Point>,
+}
+
+impl Read {
+    pub(crate) fn of(
+        plane: &[f32],
+        width: usize,
+        height: usize,
+        card: &ModelCard,
+        sharpen: &SharpenCard,
+    ) -> Result<Self, ModelError> {
+        let reading = &card.reading;
+        let sigma = noise_input(image_map(plane, width, height, reading), reading);
+        let (background, noise) = scales(plane, &sigma).ok_or_else(|| {
+            ModelError::InvalidImage("the image holds no finite pixel".to_string())
+        })?;
+        if !(noise > 0.0 && noise.is_finite()) {
+            return Err(ModelError::InvalidImage(format!(
+                "the image's noise measures {noise}, so it has no scale to be read in"
+            )));
+        }
+        let field = Field::measure(plane, width, height, &sharpen.psf, sharpen.encoder.side)?;
+        let typical = field.typical_width().ok_or_else(|| {
+            ModelError::InvalidImage("the image's PSF has no width at any node".to_string())
+        })?;
+        let points = detections(plane, width, height, &sharpen.points);
+        Ok(Self {
+            sigma,
+            background,
+            noise,
+            field,
+            typical,
+            points,
+        })
+    }
+}
+
+/// An image binned for the scaled pass, what it reads, and the stars' ratio
+/// its run is told.
+pub(crate) struct Binned {
+    pub(crate) plane: Vec<f32>,
+    pub(crate) width: usize,
+    pub(crate) height: usize,
+    pub(crate) factor: usize,
+    pub(crate) read: Read,
+    pub(crate) stars: Vec<f32>,
+}
+
+impl Binned {
+    /// `plane`, whose reading is `read`, binned `factor` × `factor`, with the
+    /// stars' ratio the full size asks binned too and held to the model's
+    /// floor in the binned image's own pixels, as the harness's
+    /// `smaller_ratio` makes it. None where the binned image cannot be read:
+    /// no PSF measured on it, or none with a width.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn of(
+        plane: &[f32],
+        width: usize,
+        height: usize,
+        factor: usize,
+        read: &Read,
+        asked: &Asked,
+        card: &ModelCard,
+        sharpen: &SharpenCard,
+    ) -> Result<Option<Self>, ModelError> {
+        let (binned, binned_width, binned_height) = block_mean(plane, width, height, factor);
+        let binned_read = match Read::of(&binned, binned_width, binned_height, card, sharpen) {
+            Ok(binned_read) => binned_read,
+            Err(ModelError::PsfField(_) | ModelError::InvalidImage(_)) => return Ok(None),
+            Err(other) => return Err(other),
+        };
+        let floor = sharpen.floor_px;
+        let full = read
+            .field
+            .ratio_map(width, height, f64::from(asked.stars), floor)
+            .unwrap_or_else(|| vec![1.0; width * height]);
+        let (stars, _, _) = block_mean(&full, width, height, factor);
+        drop(full);
+        // The narrowest the binned run may ask: the floor in the binned
+        // image's pixels, which is its ratio map asked for nothing.
+        let narrowest = binned_read
+            .field
+            .ratio_map(binned_width, binned_height, 0.0, floor)
+            .unwrap_or_else(|| vec![1.0; binned.len()]);
+        let stars = stars
+            .into_par_iter()
+            .zip(narrowest.par_iter())
+            .map(|(ratio, &narrowest)| {
+                let ratio = if ratio.is_nan() { 1.0 } else { ratio };
+                ratio.max(narrowest).min(1.0)
+            })
+            .collect();
+        Ok(Some(Self {
+            plane: binned,
+            width: binned_width,
+            height: binned_height,
+            factor,
+            read: binned_read,
+            stars,
+        }))
+    }
+}
+
+/// A ratio plane a run is told: asked as a share of each node's width, or
+/// given whole.
+enum Ratio<'a> {
+    Asked(f32),
+    Given(&'a [f32]),
+}
+
+/// The network's output on `plane`, read by `read` and told `ratios`, the
+/// stars' and the rest's: the residual applied to the image, before any
+/// roll-off. `report` is told how many of this run's tiles are done.
+#[allow(clippy::too_many_arguments)]
+fn network_output(
+    encode: &mut Encode<'_>,
+    body: &mut Body<'_>,
+    plane: &[f32],
+    width: usize,
+    height: usize,
+    read: &Read,
+    ratios: (Ratio<'_>, Ratio<'_>),
+    card: &ModelCard,
+    sharpen: &SharpenCard,
+    tiling: &Tiling,
+    stop: &dyn Fn() -> bool,
+    report: &mut dyn FnMut(usize),
+) -> Result<Vec<f32>, ModelError> {
+    let Read {
+        sigma,
+        background,
+        noise,
+        field,
+        points,
+        ..
+    } = read;
+    let (background, noise) = (*background, *noise);
     let inputs = card.planes();
     let pixels = width * height;
     let mut planes = network_input(
         plane,
-        &sigma,
+        sigma,
         background,
         noise,
-        reading.noise_plane,
+        card.reading.noise_plane,
         &inputs,
     );
+    let fill = |out: &mut [f32], ratio: &Ratio<'_>| match ratio {
+        Ratio::Asked(strength) => out.copy_from_slice(
+            &field
+                .ratio_map(width, height, f64::from(*strength), sharpen.floor_px)
+                .unwrap_or_else(|| vec![1.0; pixels]),
+        ),
+        Ratio::Given(ratio) => out.copy_from_slice(ratio),
+    };
     for (out, input) in planes.chunks_mut(pixels).zip(&inputs) {
-        let ratio = |strength: f32| {
-            field
-                .ratio_map(width, height, f64::from(strength), sharpen.floor_px)
-                .unwrap_or_else(|| vec![1.0; pixels])
-        };
         match input {
             InputPlane::Image | InputPlane::Noise => {}
-            InputPlane::Ratio => out.copy_from_slice(&ratio(asked.stars)),
-            InputPlane::NonstellarRatio => out.copy_from_slice(&ratio(asked.rest)),
+            InputPlane::Ratio => fill(out, &ratios.0),
+            InputPlane::NonstellarRatio => fill(out, &ratios.1),
             InputPlane::Points => {
-                let rendered = field_point_map(&points, &field, width, height, background);
+                let rendered = field_point_map(points, field, width, height, background);
                 out.par_iter_mut()
                     .zip(rendered.par_iter())
                     .for_each(|(out, &value)| *out = (value / noise).asinh());
@@ -497,11 +786,11 @@ fn sharpen_plane(
         tiling,
         1.0,
         stop,
-        &mut |tile, tiles| report(tile, tiles),
+        &mut |tile, _| report(tile),
     )?;
     drop(planes);
 
-    let mut output: Vec<f32> = plane
+    Ok(plane
         .par_iter()
         .zip(residual.par_iter())
         .map(|(&value, &residual)| {
@@ -515,20 +804,165 @@ fn sharpen_plane(
             };
             background + noise * applied
         })
-        .collect();
-    if asked.rolloff > 0.0 {
-        output = rolloff_step(&output, plane, width, height, asked.rolloff, &sigma);
+        .collect())
+}
+
+/// How many pixels a side an image whose stars are `width` px across is
+/// binned by to bring them near `stars_px`: the nearest whole number, a half
+/// to the even one, as the harness's `scale_factor` rounds it; 1, not at
+/// all, where that is under [`SCALE_LEAST`].
+pub(crate) fn scale_factor(width: f64, stars_px: f64) -> usize {
+    if !(stars_px > 0.0 && width > 0.0) {
+        return 1;
     }
-    let read = SharpenedChannel {
-        background,
-        noise,
-        psf_nodes: (field.ys.len(), field.xs.len()),
-        psf_stars: field.stars,
-        psf_global: field.global,
-        psf_width_px: typical as f32,
-        points: points.len(),
+    let factor = (width / stars_px).round_ties_even();
+    if factor >= SCALE_LEAST as f64 && factor.is_finite() {
+        factor as usize
+    } else {
+        1
+    }
+}
+
+/// `plane` binned `factor` × `factor` by the mean of each block's finite
+/// pixels, its last blocks taking what is left of it; NaN where a block has
+/// none. With the binned width and height. Each block is summed row by row
+/// in single precision and the rows' sums added in turn, as the harness's
+/// `block_mean` sums them.
+pub(crate) fn block_mean(
+    plane: &[f32],
+    width: usize,
+    height: usize,
+    factor: usize,
+) -> (Vec<f32>, usize, usize) {
+    let (binned_width, binned_height) = (width.div_ceil(factor), height.div_ceil(factor));
+    let mut out = vec![0.0_f32; binned_width * binned_height];
+    out.par_chunks_mut(binned_width)
+        .enumerate()
+        .for_each(|(row, line)| {
+            let rows = row * factor..((row + 1) * factor).min(height);
+            for (column, value) in line.iter_mut().enumerate() {
+                let columns = column * factor..((column + 1) * factor).min(width);
+                let (mut total, mut count) = (0.0_f32, 0_usize);
+                for y in rows.clone() {
+                    let mut sum = 0.0_f32;
+                    for &sample in &plane[y * width + columns.start..y * width + columns.end] {
+                        if sample.is_finite() {
+                            sum += sample;
+                            count += 1;
+                        }
+                    }
+                    total += sum;
+                }
+                *value = if count > 0 {
+                    (f64::from(total) / count as f64) as f32
+                } else {
+                    f32::NAN
+                };
+            }
+        });
+    (out, binned_width, binned_height)
+}
+
+/// Keys' cubic convolution (a = −½) at `position` along an axis of `length`
+/// samples: the four samples about it, held to the axis, and their weights,
+/// as the harness's `cubic_taps` makes them.
+fn cubic_taps(position: f64, length: usize) -> ([usize; 4], [f32; 4]) {
+    let base = position.floor();
+    let (mut taps, mut weights) = ([0_usize; 4], [0.0_f32; 4]);
+    for (index, offset) in (-1_i32..3).enumerate() {
+        let distance = (position - base - f64::from(offset)).abs();
+        let weight = if distance <= 1.0 {
+            1.5 * distance.powi(3) - 2.5 * distance.powi(2) + 1.0
+        } else if distance < 2.0 {
+            -0.5 * distance.powi(3) + 2.5 * distance.powi(2) - 4.0 * distance + 2.0
+        } else {
+            0.0
+        };
+        taps[index] = (base as i64 + i64::from(offset)).clamp(0, length as i64 - 1) as usize;
+        weights[index] = weight as f32;
+    }
+    (taps, weights)
+}
+
+/// A binned plane, `width` × `height` and finite, put back up `factor` times
+/// by Keys' cubic, each binned pixel at the middle of the block it was made
+/// from, and cut to `out_width` × `out_height` from its corner: the
+/// harness's `brought_up`, down its columns first and then along its rows,
+/// in single precision.
+pub(crate) fn brought_up(
+    plane: &[f32],
+    width: usize,
+    height: usize,
+    factor: usize,
+    out_width: usize,
+    out_height: usize,
+) -> Vec<f32> {
+    let taps = |count: usize, length: usize| -> Vec<([usize; 4], [f32; 4])> {
+        (0..count)
+            .map(|index| cubic_taps((index as f64 + 0.5) / factor as f64 - 0.5, length))
+            .collect()
     };
-    Ok((output, read))
+    let (down, across) = (taps(out_height, height), taps(out_width, width));
+    let mut tall = vec![0.0_f32; width * out_height];
+    tall.par_chunks_mut(width)
+        .zip(down.par_iter())
+        .for_each(|(line, (rows, weights))| {
+            for (x, value) in line.iter_mut().enumerate() {
+                let mut sum = plane[rows[0] * width + x] * weights[0];
+                for (&row, &weight) in rows.iter().zip(weights).skip(1) {
+                    sum += plane[row * width + x] * weight;
+                }
+                *value = sum;
+            }
+        });
+    let mut out = vec![0.0_f32; out_width * out_height];
+    out.par_chunks_mut(out_width)
+        .zip(tall.par_chunks(width))
+        .for_each(|(line, source)| {
+            for (value, (columns, weights)) in line.iter_mut().zip(&across) {
+                let mut sum = source[columns[0]] * weights[0];
+                for (&column, &weight) in columns.iter().zip(weights).skip(1) {
+                    sum += source[column] * weight;
+                }
+                *value = sum;
+            }
+        });
+    out
+}
+
+/// `output`, a sharpening of `image`, with the part of its change under a
+/// Gaussian of `sigma` pixels taken from `smaller`, the binned run's change
+/// brought back up, and the part above it kept: the harness's
+/// `scale_blended`. NaN where `output` is NaN.
+pub(crate) fn scale_blended(
+    image: &[f32],
+    output: &[f32],
+    smaller: &[f32],
+    width: usize,
+    height: usize,
+    sigma: f64,
+) -> Vec<f32> {
+    let change: Vec<f32> = output
+        .par_iter()
+        .zip(image.par_iter())
+        .map(|(&output, &image)| {
+            let change = output - image;
+            if change.is_nan() { 0.0 } else { change }
+        })
+        .collect();
+    let coarse = blurred(&change, width, height, sigma);
+    drop(change);
+    let smooth = blurred(smaller, width, height, sigma);
+    (0..output.len())
+        .into_par_iter()
+        .map(|index| {
+            if output[index].is_finite() {
+                image[index] + coarse[index] + smaller[index] - smooth[index]
+            } else {
+                output[index]
+            }
+        })
+        .collect()
 }
 
 /// Where an index past either end of an axis of `length` falls, by
@@ -722,5 +1156,154 @@ pub(crate) mod tests {
                 Err(ModelError::InvalidOption(_))
             ));
         }
+        assert!(
+            own.scaled.is_none(),
+            "a card without the scaled pass never bins"
+        );
+        let binned = SharpenOptions {
+            binned_rest: Some(0.0),
+            ..Default::default()
+        };
+        assert!(
+            matches!(
+                Asked::from(&binned, card),
+                Err(ModelError::InvalidOption(_))
+            ),
+            "a binned ask is checked even where nothing reads it"
+        );
+
+        let mut scaled = card.clone();
+        scaled.scaled = Some(ScaledCard {
+            stars_px: 3.5,
+            blend: 0.5,
+            rest: 0.35,
+        });
+        let own = Asked::from(&SharpenOptions::default(), &scaled)
+            .unwrap()
+            .scaled
+            .unwrap();
+        assert_eq!((own.stars_px, own.blend, own.rest), (3.5, 0.5, 0.35));
+        let told = SharpenOptions {
+            binned_rest: Some(0.4),
+            ..Default::default()
+        };
+        assert_eq!(
+            Asked::from(&told, &scaled).unwrap().scaled.unwrap().rest,
+            0.4
+        );
+        let held = SharpenOptions {
+            full_size_only: true,
+            ..told
+        };
+        assert!(Asked::from(&held, &scaled).unwrap().scaled.is_none());
+    }
+
+    #[test]
+    fn an_image_binned_to_almost_nothing_is_read_as_unreadable_not_a_panic() {
+        let temp = tempfile::tempdir().unwrap();
+        crate::bundle::tests::write_sharpen_bundle(temp.path(), "sharpen-test");
+        let bundle = ModelBundle::open(temp.path()).unwrap();
+        let card = bundle.card();
+        let sharpen = card.sharpen.as_ref().unwrap();
+        for (width, height) in [(1, 1), (3, 2), (7, 5)] {
+            let plane: Vec<f32> = (0..width * height)
+                .map(|index| 100.0 + index as f32)
+                .collect();
+            assert!(
+                Read::of(&plane, width, height, card, sharpen).is_err(),
+                "{width} × {height}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_image_is_binned_only_where_its_stars_are_far_wider_than_asked() {
+        assert_eq!(scale_factor(11.55, 3.5), 3, "the deep Trunk");
+        assert_eq!(scale_factor(7.93, 3.5), 2, "the multi-night Trunk");
+        assert_eq!(scale_factor(2.33, 3.5), 1, "the California");
+        // Halves go to the even factor, as the harness's `round` takes them.
+        assert_eq!(scale_factor(5.25, 3.5), 2);
+        assert_eq!(scale_factor(8.75, 3.5), 2);
+        assert_eq!(scale_factor(12.25, 3.5), 4);
+        assert_eq!(
+            scale_factor(5.2, 3.5),
+            1,
+            "binned by less than 2, not at all"
+        );
+        assert_eq!(scale_factor(f64::NAN, 3.5), 1);
+        assert_eq!(scale_factor(11.55, 0.0), 1);
+    }
+
+    #[test]
+    fn binning_takes_each_block_s_finite_mean_and_bringing_up_puts_it_back_at_its_middle() {
+        // Five by three, binned two by two: the last column and row take what
+        // is left, and a block of nothing but NaN is NaN.
+        let mut plane: Vec<f32> = (0..15).map(|index| index as f32).collect();
+        plane[0] = f32::NAN;
+        let (binned, width, height) = block_mean(&plane, 5, 3, 2);
+        assert_eq!((width, height), (3, 2));
+        assert_eq!(binned[0], (1.0 + 5.0 + 6.0) / 3.0);
+        assert_eq!(binned[2], (4.0 + 9.0) / 2.0);
+        assert_eq!(binned[3], (10.0 + 11.0) / 2.0);
+        let (none, _, _) = block_mean(&[f32::NAN; 4], 2, 2, 2);
+        assert!(none[0].is_nan());
+
+        // A ramp comes back through whole away from the edges, each binned
+        // pixel standing at the middle of its block.
+        let factor = 3;
+        let (wide, tall) = (60, 45);
+        let ramp: Vec<f32> = (0..wide * tall)
+            .map(|index| 0.5 * (index % wide) as f32 + 0.25 * (index / wide) as f32)
+            .collect();
+        let (small, small_width, small_height) = block_mean(&ramp, wide, tall, factor);
+        let up = brought_up(&small, small_width, small_height, factor, wide, tall);
+        for y in 2 * factor..tall - 2 * factor {
+            for x in 2 * factor..wide - 2 * factor {
+                let index = y * wide + x;
+                assert!(
+                    (up[index] - ramp[index]).abs() < 1e-3,
+                    "({x}, {y}): {} against {}",
+                    up[index],
+                    ramp[index]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_scales_meet_the_binned_change_below_the_blend_and_the_full_size_change_above() {
+        let (width, height) = (96, 80);
+        let image = vec![100.0_f32; width * height];
+        // The full-size run changes the image by a broad bump and a fine
+        // checkerboard; the binned run's change is the bump alone.
+        let bump = |index: usize| {
+            let (x, y) = ((index % width) as f32 - 48.0, (index / width) as f32 - 40.0);
+            40.0 * (-(x * x + y * y) / (2.0 * 30.0 * 30.0)).exp()
+        };
+        let checker = |index: usize| {
+            if (index % width + index / width).is_multiple_of(2) {
+                3.0
+            } else {
+                -3.0
+            }
+        };
+        let mut output: Vec<f32> = (0..width * height)
+            .map(|index| 100.0 + bump(index) + checker(index))
+            .collect();
+        output[7] = f32::NAN;
+        let smaller: Vec<f32> = (0..width * height).map(bump).collect();
+        let blended = scale_blended(&image, &output, &smaller, width, height, 6.0);
+        assert!(blended[7].is_nan(), "NaN stays NaN");
+        let middle = 40 * width + 48;
+        // Below the blend, the binned change: no checkerboard. Above it, the
+        // full size's: the bump.
+        assert!(
+            (blended[middle] - (100.0 + bump(middle))).abs() < 0.05 * 40.0,
+            "{} against {}",
+            blended[middle],
+            100.0 + bump(middle)
+        );
+        let fine = (blended[middle] - blended[middle + 1]).abs();
+        assert!(fine < 0.1, "the full size's fine change is gone: {fine}");
     }
 }

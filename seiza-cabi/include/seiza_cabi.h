@@ -5178,17 +5178,26 @@ size_t seiza_sharpen_model_tile(const SeizaSharpenModel *model);
  star, and `rolloff`, how hard the finest part of the change is held back
  where it lies under the noise. A share is above 0 and at most 1, which
  leaves things as they are; left out, it is the model's own. No star is asked
- to be narrower than the model's floor.
+ to be narrower than the model's floor. Where the model's card has a scaled
+ pass, an image whose stars are far wider than the model was trained on is
+ also sharpened binned, toward the width the card names, and the two runs
+ are put together by scale: `binnedRest` is the share asked of everything
+ that is not a star there (left out, the card's), and `fullSizeOnly`, true,
+ keeps a run at full size.
 
  Returns what ran, as JSON the caller frees with `seiza_string_free`:
  `model`, `sha256` (the body graph's), `cardSha256`, `backend`, `precision`,
- `tile`, `stars`, `rest`, `rolloff`, and `channels`, each with its
- `background`, `noise`, `psfRows` and `psfColumns` (the nodes its PSF field
- was sampled at), `psfStars`, `psfGlobal` (too few stars left one PSF for the
- whole image), `psfWidthPx` and `points`. A host keys cached results on
- `cardSha256`, `backend`, `precision`, the three strengths and
+ `tile`, `stars`, `rest`, `rolloff`, `binnedRest` (null where the card has
+ no scaled pass or the run was held to full size), `fullSizeOnly`, and
+ `channels`, each with its `background`, `noise`, `psfRows` and
+ `psfColumns` (the nodes its PSF field was sampled at), `psfStars`,
+ `psfGlobal` (too few stars left one PSF for the whole image), `psfWidthPx`,
+ `points` and `binned`, how many pixels a side it was also sharpened binned
+ by (1: not at all). A host keys cached results on `cardSha256`, `backend`,
+ `precision`, `stars`, `rest`, `rolloff`, `binnedRest`, `fullSizeOnly` and
  [`seiza_model_output_version`]. An image with too few stars to measure a
- PSF from is refused, and so is an `out` that overlaps `data`.
+ PSF from is refused, and so is an `out` that overlaps `data`. Where only
+ the binned image has too few, the channel is sharpened at full size alone.
 
  # Safety
  `model` must be a live [`SeizaSharpenModel`] no other thread is using,
@@ -5265,9 +5274,11 @@ char *seiza_model_backends_json(const char *options_json, char **error_out);
  [`seiza_denoised_report_json`] gives them), `sharpen` and `precisions`.
  `sharpen` is null for a noise model; for a sharpening model it holds
  `stars` and `rest`, the shares a run takes when told none, `floorPx`, the
- narrowest in pixels a star is asked to be, and `sharpest`, the sharpest
- share the model was trained to be asked for. `store` may be null for the
- default store.
+ narrowest in pixels a star is asked to be, `sharpest`, the sharpest share
+ the model was trained to be asked for, and, for a card with a scaled pass,
+ `scaledPx`, the stars' width an image is binned toward, and `binnedRest`,
+ the share asked of the rest there when told none (both null without one).
+ `store` may be null for the default store.
 
  # Safety
  `store` must be null or a NUL-terminated string. When non-null, `error_out`

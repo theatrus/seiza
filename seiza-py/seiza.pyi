@@ -1700,6 +1700,8 @@ class SharpenStrengths:
     rest: float
     floor_px: float
     sharpest: float
+    scaled_px: float | None
+    binned_rest: float | None
 
 class SharpenedChannel:
     """What one channel of a sharpened image was read by."""
@@ -1712,6 +1714,7 @@ class SharpenedChannel:
     psf_global: bool
     psf_width_px: float
     points: int
+    binned: int
 
 class SharpenReport:
     """What ran in a sharpening."""
@@ -1725,6 +1728,8 @@ class SharpenReport:
     stars: float
     rest: float
     rolloff: float
+    binned_rest: float | None
+    full_size_only: bool
     channels: list[SharpenedChannel]
 
 class Sharpened:
@@ -1757,6 +1762,8 @@ class SharpenModel:
         rest: float | None = None,
         *,
         rolloff: float = 0.0,
+        binned_rest: float | None = None,
+        full_size_only: bool = False,
         progress: Callable[[int, int, int, int], object] | None = None,
         cancel: Callable[[], bool] | None = None,
     ) -> Sharpened: ...
@@ -1768,6 +1775,8 @@ class SharpenModel:
         rest: float | None = None,
         *,
         rolloff: float = 0.0,
+        binned_rest: float | None = None,
+        full_size_only: bool = False,
         progress: Callable[[int, int, int, int], object] | None = None,
         cancel: Callable[[], bool] | None = None,
     ) -> SharpenReport: ...

@@ -66,11 +66,23 @@ fn run(
     want: &Expected,
     rolloff: f32,
 ) -> Result<Sharpened, ModelError> {
+    run_held(model, pixels, want, rolloff, false)
+}
+
+/// [`run`], held to full size or not.
+fn run_held(
+    model: &mut SharpenModel,
+    pixels: &[f32],
+    want: &Expected,
+    rolloff: f32,
+    full_size_only: bool,
+) -> Result<Sharpened, ModelError> {
     let view = ImageView::new(pixels, want.width, want.height, 1)?;
     let options = SharpenOptions {
         stars: Some(want.strengths.0),
         rest: Some(want.strengths.1),
         rolloff,
+        full_size_only,
         ..Default::default()
     };
     model.sharpen(view, &options)
@@ -79,15 +91,31 @@ fn run(
 /// The largest and root mean square difference between `got` and the
 /// harness's samples, in units of the image's noise.
 fn difference(got: &[f32], samples: &[Option<f32>], want: &Expected) -> (f32, f32) {
+    difference_in(
+        got,
+        samples,
+        (want.width, want.height, want.stride),
+        want.noise,
+    )
+}
+
+/// [`difference`], for an image `width` × `height` sampled every `stride`th
+/// pixel, whose noise is `noise`.
+fn difference_in(
+    got: &[f32],
+    samples: &[Option<f32>],
+    (width, height, stride): (usize, usize, usize),
+    noise: f32,
+) -> (f32, f32) {
     let (mut worst, mut squares, mut count) = (0.0_f32, 0.0_f64, 0_usize);
     let mut samples = samples.iter();
-    for y in (0..want.height).step_by(want.stride) {
-        for x in (0..want.width).step_by(want.stride) {
-            let value = got[y * want.width + x];
+    for y in (0..height).step_by(stride) {
+        for x in (0..width).step_by(stride) {
+            let value = got[y * width + x];
             match samples.next().unwrap() {
                 None => assert!(value.is_nan(), "({x}, {y}): {value} where nothing is"),
                 Some(sample) => {
-                    let off = (value - sample).abs() / want.noise;
+                    let off = (value - sample).abs() / noise;
                     assert!(off.is_finite(), "({x}, {y}): {value} against {sample}");
                     worst = worst.max(off);
                     squares += f64::from(off) * f64::from(off);
@@ -174,6 +202,159 @@ fn a_tiny_sharpening_model_matches_the_harness_on_the_cpu_provider() {
         "the fixture's card holds the strengths the harness ran"
     );
     assert_eq!(own.image()[5000], result.image()[5000]);
+}
+
+/// What the harness makes of `scaled.f32`, an image of wider stars, with a
+/// scaled pass.
+#[derive(Deserialize)]
+struct ScaledExpected {
+    scaled: serde_json::Value,
+    width: usize,
+    height: usize,
+    stride: usize,
+    strengths: (f32, f32),
+    rolloff: f32,
+    noise: f32,
+    factor: usize,
+    output: Vec<Option<f32>>,
+    rolled: Vec<Option<f32>>,
+}
+
+/// The tiny bundle copied into `directory`, its card given `scaled`.
+fn scaled_bundle(directory: &Path, scaled: &serde_json::Value) -> ModelBundle {
+    let source = fixtures().join("tiny");
+    for entry in std::fs::read_dir(&source).unwrap() {
+        let path = entry.unwrap().path();
+        std::fs::copy(&path, directory.join(path.file_name().unwrap())).unwrap();
+    }
+    let path = directory.join("card.json");
+    let mut card: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    card["sharpen"]["scaled"] = scaled.clone();
+    std::fs::write(&path, serde_json::to_vec_pretty(&card).unwrap()).unwrap();
+    ModelBundle::open(directory).unwrap()
+}
+
+#[test]
+fn a_scaled_pass_matches_the_harness_and_counts_both_runs_tiles() {
+    if !runtime_present() {
+        return;
+    }
+    let directory = fixtures();
+    let text = std::fs::read_to_string(directory.join("expected.json")).unwrap();
+    let mut all: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let want: ScaledExpected = serde_json::from_value(all["scaled"].take()).unwrap();
+    let pixels = floats(&directory.join("scaled.f32"));
+    let temp = tempfile::tempdir().unwrap();
+    let bundle = scaled_bundle(temp.path(), &want.scaled);
+    let mut model = SharpenModel::open(&bundle, Backend::Cpu, &BackendOptions::default()).unwrap();
+    let view = ImageView::new(&pixels, want.width, want.height, 1).unwrap();
+    let sampling = (want.width, want.height, want.stride);
+
+    let tiles = AtomicUsize::new(0);
+    let last = AtomicUsize::new(0);
+    let progress = |step: seiza_model::Progress| {
+        tiles.fetch_add(1, Ordering::Relaxed);
+        last.store(step.tiles, Ordering::Relaxed);
+    };
+    let options = SharpenOptions {
+        stars: Some(want.strengths.0),
+        rest: Some(want.strengths.1),
+        progress: Some(&progress),
+        ..Default::default()
+    };
+    let result = model.sharpen(view, &options).unwrap();
+    let tiling = model.tiling();
+    let binned = (
+        want.width.div_ceil(want.factor),
+        want.height.div_ceil(want.factor),
+    );
+    let counted =
+        tiling.tiles(want.width, want.height).unwrap() + tiling.tiles(binned.0, binned.1).unwrap();
+    assert_eq!(
+        tiles.load(Ordering::Relaxed),
+        counted,
+        "both runs' tiles are told"
+    );
+    assert_eq!(last.load(Ordering::Relaxed), counted, "out of both runs'");
+    assert_eq!(result.report.channels[0].binned, want.factor);
+    assert_eq!(result.report.binned_rest, Some(0.35), "the card's own");
+    assert!(!result.report.full_size_only);
+    let (worst, rms) = difference_in(result.image(), &want.output, sampling, want.noise);
+    println!("scaled: max {worst} rms {rms} of the noise");
+    assert!(
+        worst < 2e-3 && rms < 2e-4,
+        "the scaled output differs from the harness's by up to {worst} of the noise, {rms} rms"
+    );
+
+    let rolled = model
+        .sharpen(
+            view,
+            &SharpenOptions {
+                rolloff: want.rolloff,
+                ..options
+            },
+        )
+        .unwrap();
+    let (worst, rms) = difference_in(rolled.image(), &want.rolled, sampling, want.noise);
+    assert!(
+        worst < 2e-3 && rms < 2e-4,
+        "scaled and rolled off, by up to {worst} of the noise, {rms} rms"
+    );
+
+    // Held to full size, the run is the one a card without the pass makes.
+    let held = model
+        .sharpen(
+            view,
+            &SharpenOptions {
+                full_size_only: true,
+                ..options
+            },
+        )
+        .unwrap();
+    assert_eq!(held.report.channels[0].binned, 1);
+    assert_eq!(held.report.binned_rest, None);
+    assert!(held.report.full_size_only);
+    let plain = ModelBundle::open(directory.join("tiny")).unwrap();
+    let mut plain = SharpenModel::open(&plain, Backend::Cpu, &BackendOptions::default()).unwrap();
+    let whole = plain.sharpen(view, &options).unwrap();
+    assert_eq!(whole.report.channels[0].binned, 1, "no pass on its card");
+    assert!(
+        held.image()
+            .iter()
+            .zip(whole.image())
+            .all(|(a, b)| a == b || (a.is_nan() && b.is_nan())),
+        "held to full size, the run is the plain card's"
+    );
+    let moved = held
+        .image()
+        .iter()
+        .zip(result.image())
+        .filter(|(a, b)| (*a - *b).abs() > 0.01 * want.noise)
+        .count();
+    assert!(
+        moved > pixels.len() / 10,
+        "the binned run changes the output: {moved}"
+    );
+
+    // Asked for another share binned, the run says so and differs.
+    let asked = model
+        .sharpen(
+            view,
+            &SharpenOptions {
+                binned_rest: Some(0.6),
+                ..options
+            },
+        )
+        .unwrap();
+    assert_eq!(asked.report.binned_rest, Some(0.6));
+    assert!(
+        asked
+            .image()
+            .iter()
+            .zip(result.image())
+            .any(|(a, b)| a != b)
+    );
 }
 
 #[test]
@@ -287,7 +468,9 @@ fn an_image_too_bare_for_a_psf_is_refused_for_that() {
 /// directory `make_sharpen_fixtures.py --image … --run … --out DIRECTORY`
 /// wrote, named by `SEIZA_SHARPEN_PARITY`. `SEIZA_SHARPEN_BACKENDS` lists the
 /// backends to run, by their words and a precision, as `cpu:f32,coreml-gpu:f16`
-/// (default `cpu:f32`).
+/// (default `cpu:f32`). The output and its roll-off are held to full size;
+/// where the directory holds `scaled-output.f32` (`--scaled`), the run with
+/// the card's scaled pass is compared too.
 #[test]
 #[ignore = "needs a trained bundle and the harness's answers, which are not in the repository"]
 fn a_trained_model_matches_the_harness_on_a_real_image() {
@@ -297,10 +480,14 @@ fn a_trained_model_matches_the_harness_on_a_real_image() {
     let mut want = expected(&directory);
     want.stride = 1;
     let pixels = floats(&directory.join("image.f32"));
-    let outputs = [
-        (0.0, floats(&directory.join("output.f32"))),
-        (want.rolloff, floats(&directory.join("rolled.f32"))),
+    let mut outputs = vec![
+        (0.0, true, floats(&directory.join("output.f32"))),
+        (want.rolloff, true, floats(&directory.join("rolled.f32"))),
     ];
+    let scaled = directory.join("scaled-output.f32");
+    if scaled.exists() {
+        outputs.push((0.0, false, floats(&scaled)));
+    }
     let bundle = ModelBundle::open(directory.join("bundle")).unwrap();
     let backends =
         std::env::var("SEIZA_SHARPEN_BACKENDS").unwrap_or_else(|_| "cpu:f32".to_string());
@@ -315,20 +502,32 @@ fn a_trained_model_matches_the_harness_on_a_real_image() {
         let started = std::time::Instant::now();
         let mut model = SharpenModel::open(&bundle, backend, &options).unwrap();
         let opened = started.elapsed();
-        for (rolloff, expected) in &outputs {
+        for (rolloff, held, expected) in &outputs {
             let started = std::time::Instant::now();
-            let result = run(&mut model, &pixels, &want, *rolloff).unwrap();
+            let result = run_held(&mut model, &pixels, &want, *rolloff, *held).unwrap();
             let seconds = started.elapsed().as_secs_f32();
             let samples: Vec<Option<f32>> = expected
                 .iter()
                 .map(|&value| (!value.is_nan()).then_some(value))
                 .collect();
             let (worst, rms) = difference(result.image(), &samples, &want);
+            let mut errors: Vec<f32> = result
+                .image()
+                .iter()
+                .zip(expected)
+                .filter(|(got, sample)| got.is_finite() && sample.is_finite())
+                .map(|(got, sample)| (got - sample).abs() / want.noise)
+                .collect();
+            let middle = errors.len() / 2;
+            let median = *errors.select_nth_unstable_by(middle, f32::total_cmp).1;
             println!(
-                "{backend} {precision} roll-off {rolloff}: max {worst:.5} rms {rms:.6} of the \
-                 noise, in {seconds:.1} s (opened in {:.1} s), tile {}",
+                "{backend} {precision} roll-off {rolloff}{}: max {worst:.5} median {median:.6} \
+                 rms {rms:.6} of the noise, in {seconds:.1} s (opened in {:.1} s), tile {}, \
+                 binned {}",
+                if *held { ", full size" } else { ", scaled" },
                 opened.as_secs_f32(),
-                result.report.tile
+                result.report.tile,
+                result.report.channels[0].binned
             );
             if backend == Backend::Cpu && precision == Precision::F32 {
                 assert!(worst < 0.05 && rms < 0.002, "{worst} {rms}");

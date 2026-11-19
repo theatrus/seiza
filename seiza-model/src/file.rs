@@ -338,12 +338,33 @@ fn sharpen_cards(report: &SharpenReport) -> Vec<WriteHeaderCard> {
             report.rolloff,
             "fine change held back under this noise",
         ),
+        WriteHeaderCard::new(
+            "MDBIN",
+            HeaderValue::Integer(
+                report
+                    .channels
+                    .iter()
+                    .map(|channel| channel.binned)
+                    .max()
+                    .map_or(1, |binned| i64::try_from(binned).unwrap_or(i64::MAX)),
+            ),
+        )
+        .with_comment("also sharpened binned this much, 1 not"),
+        WriteHeaderCard::new("MDFULL", HeaderValue::Logical(report.full_size_only))
+            .with_comment("held to full size"),
         text(
             "MDVERS",
             crate::OUTPUT_VERSION.to_string(),
             "seiza-model output version",
         ),
     ]
+    .into_iter()
+    .chain(
+        report
+            .binned_rest
+            .map(|rest| number("MDBREST", rest, "share asked of the rest binned")),
+    )
+    .collect()
 }
 
 fn operation_cards(report: &DenoiseReport, bands: &NoiseBands) -> Vec<WriteHeaderCard> {
@@ -499,6 +520,8 @@ mod tests {
             stars: 0.46,
             rest: 0.5,
             rolloff: 0.0,
+            binned_rest: None,
+            full_size_only: true,
             channels: Vec::new(),
         };
         let cards = sharpen_cards(&report);
@@ -520,5 +543,42 @@ mod tests {
         assert!(value("MDSTARS").is_some() && value("MDROLL").is_some());
         assert!(value("MDHIGH").is_none(), "no noise bands in a sharpening");
         assert!(cards.iter().all(|card| card.keyword().len() <= 8));
+        assert_eq!(value("MDBIN"), Some(HeaderValue::Integer(1)));
+        assert_eq!(value("MDFULL"), Some(HeaderValue::Logical(true)));
+        assert!(
+            value("MDBREST").is_none(),
+            "no binned ask held to full size"
+        );
+
+        // Binned, the cards say by how much and what the rest was asked there.
+        let channel = |binned| crate::SharpenedChannel {
+            background: 0.1,
+            noise: 0.01,
+            psf_nodes: (3, 4),
+            psf_stars: 120,
+            psf_global: false,
+            psf_width_px: 11.5,
+            points: 400,
+            binned,
+        };
+        let binned = SharpenReport {
+            binned_rest: Some(0.35),
+            full_size_only: false,
+            channels: vec![channel(3), channel(1)],
+            ..report
+        };
+        let cards = sharpen_cards(&binned);
+        let value = |key: &str| {
+            cards
+                .iter()
+                .find(|card| card.keyword() == key)
+                .map(|card| card.value().clone())
+        };
+        assert_eq!(value("MDBIN"), Some(HeaderValue::Integer(3)));
+        assert_eq!(value("MDFULL"), Some(HeaderValue::Logical(false)));
+        assert_eq!(
+            value("MDBREST"),
+            Some(HeaderValue::Float(f64::from(0.35_f32)))
+        );
     }
 }
