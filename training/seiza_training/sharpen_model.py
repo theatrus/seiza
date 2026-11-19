@@ -1490,6 +1490,105 @@ def clarity_step(output: np.ndarray, amount: float, width: float, points: np.nda
     return np.where(finite, made, np.nan).astype(np.float32)
 
 
+# Contrast at strong edges, a step after the model that the user sets
+# (`edge_step`): an unsharp mask of the output, smoothed by `EDGE_FINE`
+# input widths (a Gaussian's σ) less its mean over squares `EDGE_BOX`
+# widths across as a Gaussian's σ would be, where a strong edge lies near
+# (the clarity's test: a square's variance over the square of
+# `CLARITY_EDGE` times the noise, averaged over the clarity's squares).
+# Its dip, on an edge's dark side, is added at `EDGE_DARK` and its rise,
+# on the lit side, at `EDGE_LIT`. Stars are kept clear of it: the listed
+# point sources, as the other steps keep them, and every blob whose lesser
+# curvature, smoothed to a star's σ (`EDGE_STAR` widths), bends down by
+# more than `EDGE_BLOB` times what the noise alone gives the curvature
+# there, out to `EDGE_CLEAR` widths. A rim or a ridge bends one way only,
+# and the detector lists few of an oversampled image's stars: 278 on a
+# stack with stars 11.5 px across, where an unlisted star beside a rim
+# took a dark ring. A PSF near the sampling limit is given none
+# (`CONTRAST_WIDTHS`). Set on that stack after the scaled pass at the
+# card's asks: with an amount of 1, a rim's dark side, in its mean
+# profile, is 0.65, 0.80, 0.94 and 0.96 of the image's noise below the
+# input 8, 6, 4 and 2 px out (from 0.45, 0.51, 0.59 and 0.68; the
+# reference's strong setting 0.68, 0.85, 1.00 and 0.99), its lit side
+# 5.02 and 6.23 above it 4 and 6 px in (from 4.62 and 5.77), the rise
+# from 20% to 80% 3.74 px (from 3.90; the reference's 3.74), the knots
+# along rims 1.03% (0.94%; the reference's 0.98%), the detail inside a
+# cloud as it was, the stars as they were in width, flux and shape, and
+# the ring about a star, 0.7 to 1.7 widths out, darker than 0.18 of the
+# noise for one star in a hundred. On a stack of the same object with
+# stars 7.9 px across, the dark side 4 px out 0.71 (from 0.46) and the
+# rise 4.64 px (from 5.13), with 1.4% of stars ringed past 0.3 of its
+# lower noise; at an amount of 0.5, none (2026-11-19).
+EDGE_FINE = 0.25
+EDGE_BOX = 0.3
+EDGE_DARK = 1.4
+EDGE_LIT = 0.5
+EDGE_STAR = 0.42
+EDGE_BLOB = 45.0
+EDGE_CLEAR = 1.2
+
+
+def star_blobs(plane: np.ndarray, width: float, noise_map: np.ndarray) -> np.ndarray:
+    """Where `plane` holds a blob a star's size (see `EDGE_BLOB`): both of
+    its curvatures, smoothed by a Gaussian of `EDGE_STAR` input widths,
+    bend down by more than `EDGE_BLOB` times the spread white noise of
+    `noise_map`'s σ gives their sum there, σ / (√(2π) s³)."""
+    s = EDGE_STAR * width
+    smooth = blurred_images(plane, [s**2 * np.eye(2)])[0].astype(np.float64)
+    gy, gx = np.gradient(smooth)
+    hyy, hyx = np.gradient(gy)
+    hxy, hxx = np.gradient(gx)
+    cross = 0.5 * (hxy + hyx)
+    larger = 0.5 * (hxx + hyy) + np.sqrt((0.5 * (hxx - hyy)) ** 2 + cross**2)
+    floor = EDGE_BLOB * np.nan_to_num(noise_map) / (math.sqrt(2.0 * math.pi) * s**3)
+    return -larger > floor
+
+
+def edged(image: np.ndarray, amount: float, width: float, points: np.ndarray,
+          noise_map: np.ndarray) -> np.ndarray:
+    """`image` with `amount` of contrast at its strong edges (see
+    `EDGE_FINE`), for a PSF `width` px across, its point sources `points`
+    and its noise `noise_map`, all finite."""
+    low, high = CONTRAST_WIDTHS
+    amount = amount * float(np.clip((width - low) / (high - low), 0.0, 1.0))
+    if not amount > 0:
+        return image
+    fine = EDGE_FINE * width
+    smooth = blurred_images(image, [fine**2 * np.eye(2)])[0]
+    # About the image's middle level, in double precision: a square's
+    # variance is a small difference of large sums.
+    seen = smooth.astype(np.float64) - float(np.median(smooth[::4, ::4]))
+    reach = max(min(round(math.sqrt(3.0) * CLARITY_WIDE * width), min(image.shape) - 1), 1)
+    box = max(min(round(math.sqrt(3.0) * EDGE_BOX * width), reach), 1)
+    mean = box_means(seen, reach)
+    spread = np.clip(box_means(seen * seen, reach) - mean * mean, 0.0, None)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        follow = np.nan_to_num(spread / (spread + (CLARITY_EDGE * noise_map) ** 2), nan=1.0)
+    detail = (seen - box_means(seen, box)) * box_means(follow, reach)
+    near = source_mask(points, image.shape, CONTRAST_CLEAR * width).astype(np.float32)
+    near = np.maximum(near, grown(star_blobs(image, width, noise_map), math.ceil(EDGE_CLEAR * width)))
+    near = blurred_images(near, [CONTRAST_FEATHER**2 * np.eye(2)], pad=16)[0]
+    away = np.clip(1.0 - 1.5 * near, 0.0, 1.0)
+    change = EDGE_DARK * np.minimum(detail, 0.0) + EDGE_LIT * np.maximum(detail, 0.0)
+    return (image + amount * away * change).astype(np.float32)
+
+
+def edge_step(output: np.ndarray, amount: float, width: float, points: np.ndarray,
+              noise_map: np.ndarray) -> np.ndarray:
+    """A sharpened image with `amount` of `edged`'s contrast at its strong
+    edges added after the model, as a fixed step the user sets: a rim's
+    dark side darker and its lit side brighter, stars and the cloud away
+    from rims left as they were. `width` is the input PSF's, in px,
+    `points` the image's point sources and `noise_map` its noise. NaN
+    stays NaN."""
+    if not amount > 0:
+        return output
+    finite = np.isfinite(output)
+    filled = np.where(finite, output, np.float32(np.median(output[finite][::17]))).astype(np.float32)
+    made = edged(filled, amount, width, points, np.nan_to_num(noise_map))
+    return np.where(finite, made, np.nan).astype(np.float32)
+
+
 # The fine part of a change that is held back under noise
 # (`Settings.fine_snr`): what a Gaussian of `FINE_SPLIT` px (σ) takes out
 # of it, kept by its power, its square smoothed over `FINE_AREA` px (σ),

@@ -487,6 +487,10 @@ def main(argv: list[str] | None = None) -> int:
                                help="local contrast added to every output after the model, as train-sharpen's "
                                     "--clarity asks of a run at a ratio of 0; its sheets go beside the run's own "
                                     "(0: none)")
+    sharpen_sheet.add_argument("--edge", type=float, default=0.0,
+                               help="contrast added at every output's strong edges after the model, a rim's dark "
+                                    "side darker and its lit side brighter, stars kept clear, before any clarity; "
+                                    "its sheets go beside the run's own (0: none)")
     sharpen_sheet.add_argument("--rolloff", type=float, default=0.0,
                                help="hold back the finest part of every output's change from its input where it "
                                     "lies under this times the input's noise, after the model and before any "
@@ -771,7 +775,7 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
         return sharpen_sheets.render_saved(store, manifest, arguments.name, only=named, clarity=arguments.clarity,
                                            rolloff=arguments.rolloff, scale_to=arguments.scale_to,
                                            scale_blend=blend, full_ask=full, scale_rest=arguments.scale_rest,
-                                           scale_stars=stars)
+                                           scale_stars=stars, edge=arguments.edge)
     if command == "evaluate-noise":
         from .noise_model import NoiseBands, evaluate_saved
 
