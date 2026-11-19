@@ -364,3 +364,31 @@ def test_external_windows_may_miss_a_few_pixels_which_are_filled():
     assert np.isfinite(filled).all()
     assert np.array_equal(filled[finite], image[finite])
     assert abs(float(filled[~finite].mean()) - 10.0) < 1.0
+
+
+def test_a_survey_frame_is_read_compressed_and_weighted_by_its_confidence_map(tmp_path):
+    from astropy.io import fits
+
+    from seiza_training import sharpen_external
+
+    rng = np.random.default_rng(0)
+    # Unsigned, as a CCD frame is: stored scaled (BZERO), not memory-mapped.
+    frame = (300 + rng.integers(0, 20, (64, 48))).astype(np.uint16)
+    frame[10, 12] = 5000
+    fits.HDUList([fits.PrimaryHDU(), fits.CompImageHDU(frame)]).writeto(tmp_path / "frame.fits.fz")
+    # A confidence map for each of two chips; the second is the frame's.
+    other, own = np.full((64, 48), 100, np.int16), np.full((64, 48), 100, np.int16)
+    own[:, :5] = 0
+    own[40:, 20:30] = 30
+    fits.HDUList([fits.PrimaryHDU(), fits.CompImageHDU(other), fits.CompImageHDU(own)]).writeto(
+        tmp_path / "conf.fits.fz")
+    image = sharpen_external.loaded(tmp_path / "frame.fits.fz", tmp_path / "conf.fits.fz", 2)
+    held = np.isfinite(image)
+    assert not held[:, :5].any() and not held[40:, 20:30].any()
+    assert not held[10, 12], "a pixel far sharper than any star is a cosmic ray"
+    # Next to what is dropped, the ray test eats two pixels as it does a mosaic's.
+    assert held[30:, 8:18].all()
+    assert np.array_equal(image[held], frame[held].astype(np.float32))
+    fits.HDUList([fits.PrimaryHDU(), fits.CompImageHDU(own[:32])]).writeto(tmp_path / "half.fits.fz")
+    with pytest.raises(ValueError):
+        sharpen_external.loaded(tmp_path / "frame.fits.fz", tmp_path / "half.fits.fz", 1)

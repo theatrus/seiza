@@ -17,6 +17,14 @@ noise map from the image alone, and cuts windows wholly inside what the
 mosaic covers well, into a bank in the known-kernel banks' layout
 (`sharpen_bank.layout`), which `train-sharpen --more-kernel-bank` draws
 from.
+
+A survey's single frames from the ground under good seeing are cut the
+same way: sharper than any stack of the same sky at the same scale, but
+noisy as a stack is. Their index entries name the confidence map each
+carries apart (`weight`, and its extension `weight_hdu`), and their bank
+is given a label of its own (`label`), so the trainer meets it as it
+meets a stack's windows and gives it no made noise (`--external-snr`
+reads only banks labelled `external`).
 """
 
 from __future__ import annotations
@@ -173,14 +181,31 @@ def cosmic_rays(image: np.ndarray, strip: int = 1024) -> np.ndarray:
     return grown(out, 1)
 
 
-def loaded(path: Path) -> np.ndarray:
-    """A mosaic's science image, NaN where its weight is thin or none and
-    at its cosmic rays."""
+def first_image(file: Any) -> Any:
+    """A FITS file's science image: its `SCI` extension, or else the first
+    extension holding an image (a compressed frame's is the second)."""
+    if "SCI" in file:
+        return file["SCI"]
+    return next(hdu for hdu in file if hdu.is_image and hdu.data is not None)
+
+
+def loaded(path: Path, weight_path: Path | None = None, weight_hdu: int | str | None = None) -> np.ndarray:
+    """A mosaic's or frame's science image, NaN where its weight is thin or
+    none and at its cosmic rays. The weight is the file's `WHT` extension,
+    or extension `weight_hdu` of `weight_path` (a frame's confidence map)."""
     from astropy.io import fits
 
-    with fits.open(path, memmap=True) as file:
-        image = np.asarray(file["SCI"].data, dtype=np.float32)
+    # Memory-mapped where it can be (astropy's default); a frame scaled to
+    # unsigned pixels, or compressed, is read whole.
+    with fits.open(path) as file:
+        image = np.asarray(first_image(file).data, dtype=np.float32)
         weight = np.asarray(file["WHT"].data, dtype=np.float32) if "WHT" in file else None
+    if weight_path is not None:
+        with fits.open(weight_path) as file:
+            weight = np.asarray((file[weight_hdu] if weight_hdu is not None else first_image(file)).data,
+                                dtype=np.float32)
+        if weight.shape != image.shape:
+            raise ValueError(f"{weight_path} is {weight.shape}, its frame {path} {image.shape}")
     covered = np.isfinite(image) & (image != 0)
     if weight is not None and (weight > 0).any():
         sample = weight[::8, ::8]
@@ -197,7 +222,8 @@ def prepared(entry: dict[str, Any], root: Path, factor: int, seed: int, per_sour
     record: dict[str, Any] = {"input": name, "input_kind": "external", "set": entry.get("target", entry["path"]),
                               "split": "train", "telescope": entry.get("telescope", "external"),
                               "pixel_scale_arcsec": None, "record": {"bin": factor, "filters": entry.get("filters")}}
-    image = brought_down(loaded(root / entry["path"]), factor)
+    weight = root / entry["weight"] if entry.get("weight") else None
+    image = brought_down(loaded(root / entry["path"], weight, entry.get("weight_hdu")), factor)
     field = MeasuredField(image, float(np.hypot(NATIVE_FWHM, 2.3548 * PREFILTER * factor) / factor))
     record["input_psf"] = {"status": field.status, "clip_level": field.level, "detections": len(field.table)}
     finite = np.isfinite(image)
@@ -239,17 +265,20 @@ def attempted(root: str, seed: int, per_source: int, job: tuple[dict[str, Any], 
 
 def cut(root: Path, work: Path, *, bins: tuple[int, ...] = (2, 3), per_source: int = WINDOWS, seed: int = 0,
         limit: int | None = None, workers: int = 1, telescope: str = "external",
-        window: int = WINDOW) -> dict[str, Any]:
+        window: int = WINDOW, label: str = "external") -> dict[str, Any]:
     """Cut the bank of the mosaics `root`/index.json lists (each entry's
-    `path` under `root`), each at each of `bins`, under `work`; one cut
-    before from the same list is opened."""
+    `path` under `root`, and its `weight` file if it names one), each at
+    each of `bins`, under `work`, labelled `label`; one cut before from the
+    same list is opened."""
     from .sharpen_bank import open_bank
 
     index = json.loads((root / "index.json").read_text())
     entries = [{**entry, "telescope": entry.get("telescope", telescope)} for _, entry in sorted(index.items())][:limit]
     parts = [BANK_VERSION, "external", seed, window, STAMP, per_source, list(bins), PREFILTER, HOLES,
              [entry["path"] for entry in entries]]
-    name = "sharpen-external-train-" + hashlib.sha256(json.dumps(parts).encode()).hexdigest()[:16]
+    if label != "external":
+        parts.append(label)
+    name = f"sharpen-{label}-train-" + hashlib.sha256(json.dumps(parts).encode()).hexdigest()[:16]
     directory = work / name
     bank = Bank(directory, pairs=False, capacity=len(entries) * len(bins) * per_source, window=window)
     if not bank.done:
@@ -266,6 +295,6 @@ def cut(root: Path, work: Path, *, bins: tuple[int, ...] = (2, 3), per_source: i
                               "bin": factor, "status": result["status"],
                               "reason": result["record"].get("reason"), "windows": bank.count,
                               "elapsed": round(time.monotonic() - began)}), file=sys.stderr, flush=True)
-        bank.finish({"label": "external", "split": "train", "seed": seed, "per_source": per_source,
+        bank.finish({"label": label, "split": "train", "seed": seed, "per_source": per_source,
                      "dropped": dropped, "summary": summarize(bank, False)})
     return open_bank(directory)
