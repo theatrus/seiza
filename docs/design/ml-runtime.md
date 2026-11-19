@@ -441,13 +441,23 @@ in the binned image's pixels, and for the rest at `rest`, or at
 (a = −½), each binned pixel at the middle of its block. The result takes
 everything finer than a Gaussian of `blend` times the stars' width from
 that change and everything coarser from the full-size run's:
-`image + G(full-size change) + up − G(up)`. The roll-off then runs as
-before. Where the binned image has too few stars for a PSF, the channel is
+`image + G(full-size change) + up − G(up)`. The stars keep the full-size
+change: brought back up from the binned grid by a separable cubic, a star's
+change comes out square, with a dark moat where the cubic's negative lobes
+fall, which a second-moment ellipticity cannot see. The point sources are
+rendered as the network reads them, and where their light over the noise
+map is at least `stars` times the noise (the card's `scaled.stars`, 2 when
+a card does not say; 0 blends at the stars too) the full-size output is
+kept whole, the blend fading in below that: `share · output + (1 − share) ·
+blended`, with the share that light over `stars` times the noise, held to 1.
+On the Elephant's Trunk, the share of a star's half-peak ring that follows
+cos 4θ is 0.017 at full size, 0.037 to 0.040 with the blend at the stars,
+and 0.017 with them kept. The roll-off then runs as before. Where the binned image has too few stars for a PSF, the channel is
 sharpened at full size alone, and `SharpenedChannel::binned` says 1;
 `SharpenOptions::full_size_only` holds a run to full size whatever the card
 says. The trainer's `bundle-sharpen` writes the pass at 3.5 px, 0.5 and
-0.35, the Trunk's best, and with it asks 0.46 and 0.45 at full size unless
-told (`--no-scaled` leaves it out). A card without it runs as before, so
+0.35, the Trunk's best, with `stars` at 2, and with it asks 0.46 and 0.45 at
+full size unless told (`--no-scaled` leaves it out). A card without it runs as before, so
 the runtime's output for such a card is unchanged.
 
 **Against the harness.** The harness here is the sharpening trainer's
@@ -457,7 +467,8 @@ piece on a synthetic star field with no runtime (the field's nodes, stamps
 and widths, the point sources, both ratio maps, the point-source map, a
 tile's vector map and the roll-off, and with a scaled pass, on a second field
 of wider stars, the binned image, its scales and field, both binned ratio
-maps, and a known change brought up and put together by scale), and a tiny
+maps, the stars' share, and a known change brought up and put together by
+scale), and a tiny
 model's whole output through ONNX Runtime agrees with PyTorch's to 1.3e-4σ̄
 at most, and with the scaled pass to 9.8e-5σ̄. The harness renders
 the point sources with a Fourier transform and the runtime lays each stamp
@@ -491,10 +502,11 @@ With the scaled pass, a later model of the same width, its card written by
 `bundle-sharpen` with the pass and asked what the card asks (0.46 and 0.45 at
 full size, the rest at 0.35 binned), bins that image 3 × 3: its stars are
 11.5 px across, and binned it is 2083 × 1392, with a field of 188 stars
-sampled at 7 × 10 nodes. The Core ML GPU at f32 differs from the harness by
-0.018σ̄ at most and 2.3e-5σ̄ RMS, in 21.8 s against 17.9 s at full size
-alone, and the CPU by 0.025σ̄ and 3.0e-5σ̄, in 289 s against 264 s. The
-harness's output there is the sheet's own to 0.018σ̄.
+sampled at 7 × 10 nodes. With the stars keeping the full-size change, the
+Core ML GPU at f32 differs from the sheet's own output by 0.018σ̄ at most
+and 1.2e-5σ̄ RMS, in 23.0 s against 18.0 s at full size alone, and the CPU
+by 0.025σ̄ and 2.2e-5σ̄, in 281 s against 257 s. Its stars read 0.017 on
+the cos 4θ measure, as the sheet's do.
 
 **Half precision loses the stars' cores.** The residual is added in asinh,
 so an error in it is a relative error in the pixel: the f16 graph is right

@@ -355,8 +355,9 @@ pub struct SharpenCard {
 /// also sharpened binned toward it, and the two runs are put together by
 /// scale. The binned run's change makes everything finer than a Gaussian
 /// of `blend` times the stars' width, and the full-size run's everything
-/// coarser. An image is binned by the whole number of pixels a side that
-/// brings its stars nearest `stars_px`, and only by 2 or more.
+/// coarser, except at the stars, which keep the full-size change (`stars`).
+/// An image is binned by the whole number of pixels a side that brings its
+/// stars nearest `stars_px`, and only by 2 or more.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScaledCard {
@@ -369,6 +370,20 @@ pub struct ScaledCard {
     /// image, when a caller names none. A model with no
     /// [`InputPlane::NonstellarRatio`] plane does not read it.
     pub rest: f64,
+    /// Where a listed star's light, rendered with its node's PSF (the
+    /// point-source plane the network reads), is at least this many times
+    /// the pixel noise, the full-size output is kept whole, and the blend
+    /// fades in below that. Brought back up from the binned grid, a star's
+    /// change is square, with a dark moat where the cubic's negative lobes
+    /// fall. 0: the blend at the stars too. A card without it takes 2.
+    #[serde(default = "scaled_stars")]
+    pub stars: f64,
+}
+
+/// The star light, in the pixel noise, from which a star keeps the
+/// full-size change, where a card's scaled pass does not say.
+fn scaled_stars() -> f64 {
+    2.0
 }
 
 /// One of a bundle's graphs.
@@ -651,6 +666,15 @@ impl SharpenCard {
                 scaled.stars_px, scaled.blend, scaled.rest
             ));
         }
+        if let Some(scaled) = &self.scaled
+            && !(scaled.stars >= 0.0 && scaled.stars.is_finite())
+        {
+            return refuse(format!(
+                "keeps a star's full-size change from {} times the noise, which must be finite and \
+                 not negative",
+                scaled.stars
+            ));
+        }
         Ok(())
     }
 }
@@ -892,6 +916,8 @@ pub(crate) mod tests {
         let mut good: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let json = |text: &str| serde_json::from_str::<serde_json::Value>(text).unwrap();
+        // A card that does not say from what light a star keeps the full-size
+        // change takes 2 times the noise.
         good["sharpen"]["scaled"] = json(r#"{"stars_px": 3.5, "blend": 0.5, "rest": 0.35}"#);
         std::fs::write(&path, serde_json::to_vec(&good).unwrap()).unwrap();
         let scaled = ModelBundle::open(temp.path()).unwrap();
@@ -900,8 +926,24 @@ pub(crate) mod tests {
             Some(ScaledCard {
                 stars_px: 3.5,
                 blend: 0.5,
-                rest: 0.35
+                rest: 0.35,
+                stars: 2.0
             })
+        );
+        good["sharpen"]["scaled"]["stars"] = json("0");
+        std::fs::write(&path, serde_json::to_vec(&good).unwrap()).unwrap();
+        let everywhere = ModelBundle::open(temp.path()).unwrap();
+        assert_eq!(
+            everywhere
+                .card()
+                .sharpen
+                .as_ref()
+                .unwrap()
+                .scaled
+                .unwrap()
+                .stars,
+            0.0,
+            "0 blends at the stars too"
         );
         for (pointer, value) in [
             ("/task", json(r#""denoise""#)),
@@ -921,6 +963,7 @@ pub(crate) mod tests {
             ("/sharpen/scaled/stars_px", json("0")),
             ("/sharpen/scaled/blend", json("-0.5")),
             ("/sharpen/scaled/rest", json("1.5")),
+            ("/sharpen/scaled/stars", json("-1")),
             ("/sharpen/scaled/least", json("2")),
             ("/inputs/0/planes", json(r#"["image", "noise", "points"]"#)),
             (

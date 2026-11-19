@@ -19,8 +19,8 @@ the network reads, and the tiny model's output, as it is and rolled off. Its
 `scaled` holds the same for `sharpen/scaled.f32`, an image of wider stars,
 with a scaled pass (`SCALED`) that the committed card leaves out and a test
 adds: the factor it is binned by, the binned image's reading and ratio
-maps, a known change put together by scale, and the output, as it is and
-rolled off.
+maps, the stars' share that keeps the full-size change, a known change put
+together by scale, and the output, as it is and rolled off.
 
 With `--image FILE.npy --run RUN --store STORE --out DIRECTORY`, it writes
 the same for a real image and a trained run instead, with the run's bundle,
@@ -39,7 +39,8 @@ import torch
 
 from seiza_training import psf_fields, sharpen_model
 from seiza_training.bundle import sha256_of, sharpen_card, write_sharpen_bundle
-from seiza_training.sharpen_sheets import SCALED_FULL, Sharpener, block_mean, brought_up, scale_blended
+from seiza_training.sharpen_sheets import (SCALED_FULL, Sharpener, block_mean, brought_up, scale_blended,
+                                           star_share)
 from seiza_training.unet import SharpeningUNet, reach
 
 HERE = Path(__file__).parent
@@ -58,8 +59,9 @@ SETTINGS = {"nonstellar": True, "kernel_ratios": [1.1, 4.0], "floor_px": 1.5, "r
 # The scaled pass a bundle's card has, which bins `scaled_image`'s stars,
 # about 7 px across, 2 × 2. That image is larger than `image`, so that its
 # binned half still holds stars enough for one PSF; the floor holds the
-# binned run's rest above the 0.35 asked.
-SCALED = {"stars_px": 3.5, "blend": 0.5, "rest": 0.35}
+# binned run's rest above the 0.35 asked; its stars keep the full-size
+# change where their light is twice the noise.
+SCALED = {"stars_px": 3.5, "blend": 0.5, "rest": 0.35, "stars": 2.0}
 SCALED_WIDTH, SCALED_HEIGHT = 400, 300
 
 
@@ -193,6 +195,7 @@ def scaled_answers(record: dict, model: torch.nn.Module, plane: np.ndarray, stri
     runner = Sharpener(record, model, plane, ImageField(plane))
     runner.where = torch.device("cpu")
     runner.scale_to, runner.scale_blend, runner.scale_rest = scaled["stars_px"], scaled["blend"], scaled["rest"]
+    runner.scale_stars = scaled["stars"]
     factor = runner.factor
     smaller = runner.smaller()
     smaller.where = runner.where
@@ -227,11 +230,18 @@ def scaled_answers(record: dict, model: torch.nn.Module, plane: np.ndarray, stri
         },
     }
     if known:
+        rendered = sharpen_model.field_point_map(runner.points, runner.ys, runner.xs, runner.node_stamps,
+                                                 plane.shape, runner.background)
+        share = star_share(rendered, runner.noise_map, scaled["stars"])
+        # The case covers both ends: stars whose share is 1 and sky where
+        # it is 0, with the blend fading in between.
+        assert (share == 1.0).any() and (share == 0.0).any() and ((share > 0) & (share < 1)).any()
+        found["star_share"] = sampled(share, stride)
         change = edged(plane)
         up = brought_up(np.nan_to_num(block_mean(change, factor) - smaller.image), factor)
         up = up[:plane.shape[0], :plane.shape[1]]
         found["edged_up"] = sampled(up, stride)
-        found["edged_blended"] = sampled(scale_blended(plane, change, up, sigma), stride)
+        found["edged_blended"] = sampled(scale_blended(plane, change, up, sigma, share), stride)
     found["output"] = sampled(runner.run(ratios), stride)
     if rolled:
         runner.rolloff = ROLLOFF

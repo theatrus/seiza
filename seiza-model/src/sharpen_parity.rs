@@ -9,7 +9,7 @@ use crate::noise::image_map;
 use crate::psf::{Field, Point, detections, field_point_map};
 use crate::sharpen::{
     Asked, Binned, Read, SharpenOptions, block_mean, brought_up, rolloff_step, scale_blended,
-    scale_factor,
+    scale_factor, star_share,
 };
 use crate::sky::scales;
 use serde::Deserialize;
@@ -300,6 +300,7 @@ struct ScaledExpected {
     factor: usize,
     sigma: f64,
     binned: BinnedExpected,
+    star_share: Vec<Option<f32>>,
     edged_up: Vec<Option<f32>>,
     edged_blended: Vec<Option<f32>>,
 }
@@ -507,7 +508,38 @@ fn a_known_change_is_brought_up_and_put_together_by_scale_as_the_harness_does() 
         &want.edged_up,
         1e-6,
     );
-    let blended = scale_blended(&fixture.image, &edged, &up, width, height, want.sigma);
+    // The stars keep the full-size change: their rendered light over the
+    // noise, as the network's point plane renders it.
+    let read = Read::of(
+        &fixture.image,
+        width,
+        height,
+        fixture.bundle.card(),
+        &fixture.card,
+    )
+    .unwrap();
+    let share = star_share(
+        field_point_map(&read.points, &read.field, width, height, read.background),
+        &read.sigma,
+        want.scaled.stars,
+    );
+    check_every(
+        "the stars' share",
+        &share,
+        width,
+        want.stride,
+        &want.star_share,
+        1e-5,
+    );
+    let blended = scale_blended(
+        &fixture.image,
+        &edged,
+        &up,
+        width,
+        height,
+        want.sigma,
+        Some(&share),
+    );
     check_every(
         "the change put together",
         &blended,

@@ -15,7 +15,9 @@
 //! where its stars are near the width the card names, with a PSF field, point
 //! sources and scales measured from the binned image as any image's are. The
 //! binned run's change, brought back up, makes the finest scales of the
-//! result, and the full-size run's the coarser ones.
+//! result, and the full-size run's the coarser ones. The stars keep the
+//! full-size change ([`ScaledCard::stars`]): brought up from the binned grid,
+//! a star comes out square, with a dark moat.
 
 use crate::backend::{Backend, BackendOptions, CoreMlUnits, Precision, runtime};
 use crate::bundle::{
@@ -414,6 +416,9 @@ struct Scaled {
     stars_px: f64,
     blend: f64,
     rest: f32,
+    /// The star light, in the pixel noise, from which a star keeps the
+    /// full-size change ([`ScaledCard::stars`]).
+    stars: f64,
 }
 
 impl Asked {
@@ -448,10 +453,12 @@ impl Asked {
                 stars_px,
                 blend,
                 rest,
+                stars,
             }) if !options.full_size_only => Some(Scaled {
                 stars_px,
                 blend,
                 rest: binned_rest.unwrap_or(rest as f32),
+                stars,
             }),
             _ => None,
         };
@@ -554,6 +561,15 @@ fn sharpen_plane(
             width,
             height,
         );
+        // The stars keep the full-size change: the point sources rendered
+        // as the network reads them, over the pixel noise.
+        let stars = (scaled.stars > 0.0).then(|| {
+            star_share(
+                field_point_map(&read.points, &read.field, width, height, read.background),
+                &read.sigma,
+                scaled.stars,
+            )
+        });
         output = scale_blended(
             plane,
             &output,
@@ -561,6 +577,7 @@ fn sharpen_plane(
             width,
             height,
             scaled.blend * read.typical,
+            stars.as_deref(),
         );
     }
     if asked.rolloff > 0.0 {
@@ -930,10 +947,32 @@ pub(crate) fn brought_up(
     out
 }
 
+/// Where the stars are, from 0 to 1: `rendered`, the point sources'
+/// light above the background, over `least` times the pixel noise `sigma`,
+/// held to 1; 0 where that is not a number. The harness's `star_share`,
+/// made in `rendered`'s place.
+pub(crate) fn star_share(mut rendered: Vec<f32>, sigma: &[f32], least: f64) -> Vec<f32> {
+    let least = least as f32;
+    rendered
+        .par_iter_mut()
+        .zip(sigma.par_iter())
+        .for_each(|(value, &sigma)| {
+            let share = *value / (least * sigma);
+            *value = if share.is_nan() {
+                0.0
+            } else {
+                share.clamp(0.0, 1.0)
+            };
+        });
+    rendered
+}
+
 /// `output`, a sharpening of `image`, with the part of its change under a
 /// Gaussian of `sigma` pixels taken from `smaller`, the binned run's change
 /// brought back up, and the part above it kept: the harness's
-/// `scale_blended`. NaN where `output` is NaN.
+/// `scale_blended`. With `stars`, a share from 0 to 1 at each pixel
+/// ([`star_share`]), `output` is kept whole in that share. NaN where
+/// `output` is NaN.
 pub(crate) fn scale_blended(
     image: &[f32],
     output: &[f32],
@@ -941,6 +980,7 @@ pub(crate) fn scale_blended(
     width: usize,
     height: usize,
     sigma: f64,
+    stars: Option<&[f32]>,
 ) -> Vec<f32> {
     let change: Vec<f32> = output
         .par_iter()
@@ -956,10 +996,13 @@ pub(crate) fn scale_blended(
     (0..output.len())
         .into_par_iter()
         .map(|index| {
-            if output[index].is_finite() {
-                image[index] + coarse[index] + smaller[index] - smooth[index]
-            } else {
-                output[index]
+            if !output[index].is_finite() {
+                return output[index];
+            }
+            let blended = image[index] + coarse[index] + smaller[index] - smooth[index];
+            match stars {
+                Some(stars) => stars[index] * output[index] + (1.0 - stars[index]) * blended,
+                None => blended,
             }
         })
         .collect()
@@ -1177,12 +1220,16 @@ pub(crate) mod tests {
             stars_px: 3.5,
             blend: 0.5,
             rest: 0.35,
+            stars: 2.0,
         });
         let own = Asked::from(&SharpenOptions::default(), &scaled)
             .unwrap()
             .scaled
             .unwrap();
-        assert_eq!((own.stars_px, own.blend, own.rest), (3.5, 0.5, 0.35));
+        assert_eq!(
+            (own.stars_px, own.blend, own.rest, own.stars),
+            (3.5, 0.5, 0.35, 2.0)
+        );
         let told = SharpenOptions {
             binned_rest: Some(0.4),
             ..Default::default()
@@ -1292,7 +1339,7 @@ pub(crate) mod tests {
             .collect();
         output[7] = f32::NAN;
         let smaller: Vec<f32> = (0..width * height).map(bump).collect();
-        let blended = scale_blended(&image, &output, &smaller, width, height, 6.0);
+        let blended = scale_blended(&image, &output, &smaller, width, height, 6.0, None);
         assert!(blended[7].is_nan(), "NaN stays NaN");
         let middle = 40 * width + 48;
         // Below the blend, the binned change: no checkerboard. Above it, the
@@ -1305,5 +1352,27 @@ pub(crate) mod tests {
         );
         let fine = (blended[middle] - blended[middle + 1]).abs();
         assert!(fine < 0.1, "the full size's fine change is gone: {fine}");
+
+        // Where a star's share is 1 the full-size output stands whole, where
+        // it is 0 the blend, and between them a share of each.
+        let mut stars = vec![0.0_f32; width * height];
+        stars[middle] = 1.0;
+        stars[middle + 1] = 0.25;
+        let kept = scale_blended(&image, &output, &smaller, width, height, 6.0, Some(&stars));
+        assert_eq!(kept[middle], output[middle]);
+        assert_eq!(kept[middle + 2], blended[middle + 2]);
+        let between = 0.25 * output[middle + 1] + 0.75 * blended[middle + 1];
+        assert!((kept[middle + 1] - between).abs() < 1e-4);
+        assert!(kept[7].is_nan(), "NaN stays NaN");
+    }
+
+    #[test]
+    fn a_star_s_share_is_its_light_over_the_noise_held_to_one() {
+        let rendered = vec![0.0, 1.0, 4.0, 100.0, f32::NAN, -3.0, 1.0];
+        let sigma = vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0];
+        assert_eq!(
+            star_share(rendered, &sigma, 2.0),
+            vec![0.0, 0.5, 1.0, 1.0, 0.0, 0.0, 1.0]
+        );
     }
 }

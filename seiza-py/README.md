@@ -639,7 +639,8 @@ Where a model's card has a scaled pass (`installed_models()` lists its
 `scaled_px` under `sharpen`), an image whose stars are far wider than the model
 was trained on is also sharpened binned, by the whole number of pixels a side
 that brings its stars nearest `scaled_px`, and the two runs are put together by
-scale: the binned run makes the finest detail, the full-size run the rest.
+scale: the binned run makes the finest detail, the full-size run the rest, and
+the stars keep the full-size run's change, so they stay round.
 `binned_rest` is the share asked of what is not a star on the binned image (the
 card's own when left out), and `full_size_only=True` keeps a run at full size.
 `report.channels[0].binned` says how many pixels a side a channel was binned by,
