@@ -91,6 +91,15 @@ MEASURED_STARS = 3000
 # binned by less, the stars stay as wide as training mostly saw.
 SCALE_BLEND = 0.5
 SCALE_LEAST = 2
+# What a bundle's card asks of the scaled pass, the Trunk's best of
+# 2026-11-18: binned toward stars 3.5 px across, the rest asked 0.35 there
+# (which the floor holds at 1.5 / 3.9 = 0.38 on the Trunk), and the
+# full-size image asked `SCALED_FULL`, the rest a little harder than
+# `FULL_NONSTELLAR`. On an image whose stars are under 3 px the floor
+# holds the rest at more than either asks.
+SCALE_TO = 3.5
+SCALE_REST = 0.35
+SCALED_FULL = (0.46, 0.45)
 
 
 def scale_factor(width: float, scale_to: float) -> int:
