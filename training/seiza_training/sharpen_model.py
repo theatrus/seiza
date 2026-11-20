@@ -526,6 +526,17 @@ class LossSettings:
     # star is asked to be as round as its target's and no rounder.
     # 0: no such term.
     shape_weight: float = 0.0
+    # The weight of the square term: the shape term's four-fold twin, the
+    # two parts r⁴ cos 4θ and r⁴ sin 4θ of each listed star's error about
+    # its middle (`star_four_folds`), weighed as the shape term weighs its
+    # quadrupoles. Second moments cannot see a square. A run that learned
+    # from the survey bank from its first step made its stars squares on
+    # the pixel grid (on the deep Trunk a mean cos 4θ of −0.0070 on the
+    # half-peak ring, the input −0.0020), and 30,000 steps more at a low
+    # rate without that bank took them only to −0.0052 (2026-11-20). As the
+    # shape term, it asks a star to be as square as its target and no
+    # squarer. 0: no such term.
+    square_weight: float = 0.0
 
 
 # Banks.
@@ -2510,6 +2521,12 @@ def loss_terms(residual: torch.Tensor, batch: dict[str, torch.Tensor], settings:
                  / valid.sum().clamp(min=1.0))
         total = total + settings.shape_weight * shape
         terms_out["shape"] = shape
+    if settings.square_weight > 0:
+        aligned, turned, area = star_four_folds(output - batch["target"], sigma, batch["labels"])
+        square = (((charbonnier(aligned, epsilon) + charbonnier(turned, epsilon)) * area)[:, 1:].sum()
+                  / valid.sum().clamp(min=1.0))
+        total = total + settings.square_weight * square
+        terms_out["square"] = square
     return {"total": total, **terms_out}
 
 
@@ -2579,6 +2596,54 @@ def star_quadrupoles(error: torch.Tensor, sigma: torch.Tensor,
     variance = (sigma.reshape(batch, -1).float()) ** 2
     scores = []
     for pattern in (window * (dx**2 - dy**2), window * 2 * dx * dy):
+        scores.append(summed(pattern * flat) / summed(pattern**2 * variance).clamp(min=1e-12).sqrt())
+    return scores[0], scores[1], area
+
+
+# The square term's window about each star: a Gaussian of the aperture's
+# radius over this, half the input PSF's σ, about a sharpened star's σ at
+# the asks the runs learn. Under it r⁴ cos 4θ is largest at twice that, on
+# the star's flank, where a square star leaves its target.
+SQUARE_WINDOW = 14.0
+
+
+def star_four_folds(error: torch.Tensor, sigma: torch.Tensor,
+                    labels: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """For each aperture of `labels` (the first is the sky's), the two
+    four-fold parts of `error` about the aperture's middle, each over its
+    noise, and the aperture's area: the sums of the error times
+    w r⁴ cos 4θ and times w r⁴ sin 4θ, w the Gaussian window
+    (`SQUARE_WINDOW`), each less its mean over the aperture in units of w,
+    over the root of the sums of their squares times `sigma`². The first
+    is negative where a star is a square along the pixel grid, positive
+    for a diamond; the second reads a square turned by 22.5°. A disc of
+    pixels is itself a little four-fold, so the patterns are made to sum
+    to nothing over each aperture: an error in a star's level, its place
+    or its width then reads a thousandth of a square's or less."""
+    batch, _, height, width = error.shape
+    marks = labels.reshape(batch, -1)
+
+    def summed(values: torch.Tensor) -> torch.Tensor:
+        return torch.zeros(batch, APERTURES + 1, device=error.device).scatter_add_(1, marks, values)
+
+    ys = torch.arange(height, device=error.device, dtype=torch.float32).view(1, height, 1).expand(batch, height, width)
+    xs = torch.arange(width, device=error.device, dtype=torch.float32).view(1, 1, width).expand(batch, height, width)
+    ys, xs = ys.reshape(batch, -1), xs.reshape(batch, -1)
+    area = summed(torch.ones_like(xs))
+    safe = area.clamp(min=1.0)
+    dx = xs - (summed(xs) / safe).gather(1, marks)
+    dy = ys - (summed(ys) / safe).gather(1, marks)
+    spread = (safe / math.pi / SQUARE_WINDOW**2).gather(1, marks)
+    window = torch.exp(-0.5 * (dx**2 + dy**2) / spread)
+    # r⁴ cos 4θ and r⁴ sin 4θ are the real and imaginary parts of
+    # (dx + i dy)⁴.
+    plus, cross = dx**2 - dy**2, 2 * dx * dy
+    flat = error.reshape(batch, -1).float()
+    variance = (sigma.reshape(batch, -1).float()) ** 2
+    scores = []
+    for shape in (plus**2 - cross**2, 2 * plus * cross):
+        pattern = window * shape
+        pattern = pattern - (summed(pattern) / summed(window).clamp(min=1e-12)).gather(1, marks) * window
         scores.append(summed(pattern * flat) / summed(pattern**2 * variance).clamp(min=1e-12).sqrt())
     return scores[0], scores[1], area
 
