@@ -1641,3 +1641,57 @@ def test_the_shape_term_reads_a_stars_error_of_shape_and_no_other():
     settings = LossSettings(shape_weight=1.0)
     assert float(loss_terms(target + nebula, batch, settings, "linear")["shape"]) == 0.0
     assert float(loss_terms(star(2.6, 2.0) + nebula, batch, settings, "linear")["shape"]) > 1.0
+
+
+def test_the_square_term_reads_a_square_star_and_no_other_error():
+    import math
+
+    import torch
+
+    from seiza_training.sharpen_model import LossSettings, loss_terms, star_four_folds
+
+    ys, xs = torch.meshgrid(torch.arange(64.0), torch.arange(64.0), indexing="ij")
+    labels = (((ys - 32) ** 2 + (xs - 32) ** 2) <= 15**2).long().view(1, 64, 64)
+    sigma = torch.ones(1, 1, 64, 64)
+
+    def star(size, power=2.0, turn=0.0, x=32.0, y=32.0):
+        # A superellipse's profile: round at a power of 2, a square along
+        # its axes above it.
+        across = (xs - x) * math.cos(turn) + (ys - y) * math.sin(turn)
+        along = -(xs - x) * math.sin(turn) + (ys - y) * math.cos(turn)
+        reach = (across.abs() ** power + along.abs() ** power) ** (2.0 / power)
+        return (1000 * torch.exp(-0.5 * reach / size**2)).view(1, 1, 64, 64)
+
+    def read(error):
+        aligned, turned, area = star_four_folds(error, sigma, labels)
+        return float(aligned[0, 1]), float(turned[0, 1]), float(area[0, 1])
+
+    target = star(2.0)
+    # A square along the pixels, a diamond, and a square turned 22.5°.
+    aligned, turned, area = read(star(2.0, 3.0) - target)
+    assert aligned < -100 and abs(turned) < 1e-3 and area == float(labels.sum())
+    assert read(star(2.0, 2.2) - target)[0] < -20
+    assert read(star(2.0, 3.0, math.pi / 4) - target)[0] > 100
+    aligned, turned, _ = read(star(2.0, 3.0, math.pi / 8) - target)
+    assert abs(aligned) < 0.01 * abs(turned) and turned < -100
+    # A wrong level, a slope of nebula, a brighter or a wider round star:
+    # next to nothing. A star half a pixel off its middle has a little.
+    ramp = (3.0 + 0.5 * xs - 0.2 * ys).view(1, 1, 64, 64)
+    assert max(abs(value) for value in read(ramp)[:2]) < 1e-2
+    assert max(abs(value) for value in read(0.3 * target)[:2]) < 0.1
+    assert max(abs(value) for value in read(star(2.6) - target)[:2]) < 0.2
+    assert max(abs(value) for value in read(star(2.0, x=32.5) - target)[:2]) < 0.5
+    # The second moments of a square star are a round one's: the shape
+    # term does not see it.
+    from seiza_training.sharpen_model import star_quadrupoles
+
+    plus, cross, _ = star_quadrupoles(star(2.0, 3.0) - target, sigma, labels)
+    assert abs(float(plus[0, 1])) < 1e-3 and abs(float(cross[0, 1])) < 1e-3
+    # In the loss: nothing where the output is its target, whatever lies
+    # under the star; something where the star is square.
+    nebula = (20.0 * (xs > 36).float()).view(1, 1, 64, 64)
+    batch = {"reference": torch.zeros(1, 1, 64, 64), "target": target + nebula, "valid": torch.ones(1, 1, 64, 64),
+             "sigma": sigma, "labels": labels}
+    settings = LossSettings(square_weight=1.0)
+    assert float(loss_terms(target + nebula, batch, settings, "linear")["square"]) == 0.0
+    assert float(loss_terms(star(2.0, 3.0) + nebula, batch, settings, "linear")["square"]) > 1.0

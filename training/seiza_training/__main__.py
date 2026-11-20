@@ -423,6 +423,9 @@ def main(argv: list[str] | None = None) -> int:
     sharpen_train.add_argument("--shape-weight", type=float, default=0.0,
                                help="the weight of the shape term: the quadrupoles of the listed stars' error about "
                                     "their middles, over their noise (0: none)")
+    sharpen_train.add_argument("--square-weight", type=float, default=0.0,
+                               help="the weight of the square term: the four-fold parts (r⁴ cos 4θ, r⁴ sin 4θ) of the "
+                                    "listed stars' error about their middles, over their noise (0: none)")
     sharpen_train.add_argument("--clip-grad", type=float, default=1.0,
                                help="scale each step's gradient down to this norm where it is longer (0: never)")
     sharpen_train.add_argument("--rewind", type=float, default=2.0,
@@ -891,7 +894,8 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
                                       gradient_weight=arguments.gradient_weight,
                                       gradient_scales=arguments.gradient_scales, flux_weight=arguments.flux_weight,
                                       edge_weight=arguments.edge_weight, round_weight=arguments.round_weight,
-                                      shape_weight=arguments.shape_weight, edge_clear=arguments.edge_clear,
+                                      shape_weight=arguments.shape_weight, square_weight=arguments.square_weight,
+                                      edge_clear=arguments.edge_clear,
                                       overshoot_weight=arguments.overshoot_weight)
     choice = sharpen_model.BankChoice(
         kernel=str(arguments.kernel_bank or sharpen_model.find_bank(work, "deep", "train")),
