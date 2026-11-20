@@ -2164,6 +2164,39 @@ In order, each only if the one before leaves a gap at the rims:
        lower noise at 1 and none at 0.5. The amount is the user's: it
        gives the goal's look, which the survey frames say is more
        contrast than the sky's.
+     - **From the first step, wider** (S82: S77's settings from the first
+       step instead of through a run and its continuations, the survey
+       bank beside the Hubble one, width 128, 167M parameters against
+       S77's 94M, 150,000 steps in about 10.6 hours on one GPU). Its
+       validation error ends at 0.751 (S81 0.722). On the deep Trunk at
+       full size, the rim is sharper and the cloud softer:
+       - The rim rises over 3.98 px (S77 4.35, the goal 3.74), and
+         its dark side near the edge is deeper: 0.75 and 0.79 below the
+         input at 4 and 2 px (S77 0.66 and 0.51, the goal 1.00 and
+         0.99). The lit side is S77's (+4.42 and +5.61 at 4 and 6 px).
+         There are more knots along the rims: 2.21% between 1.5 and 4 px
+         (S77 1.74%, the goal 1.93%).
+       - The cloud's detail is below the input's: 0.90, 0.91 and 0.97 of
+         it between 2–4, 4–8 and 8–16 px (S77 1.07, 1.12 and 1.05; the
+         goal 1.04, 1.13 and 1.11), and 0.98, 0.96 and 0.96 with the
+         scaled pass.
+       - It smooths the sky more (0.86 of the input's grain at 1 px, S77
+         0.90) and keeps more on bright nebula (0.89, S77 0.81).
+       - Its stars are less round. On the deep Trunk the ellipticity is
+         0.037 (the input 0.033, S77 0.028). On the California it is
+         0.078 (S77 0.056), and 21% of the stars come out more elongated
+         than the input's by 0.05 (S77 7%).
+       - Its stars are also squarer. The cos 4θ share is 0.021 at full
+         size and 0.022 scaled (S77 0.017, the input 0.014). Its mean
+         cos 4θ is −0.0070 ± 0.0007 (S77 and the input −0.0020), so the
+         square lies along the pixel grid.
+       - Against the survey frames, the ridges are level (a residual of
+         1.56 of their noise at the best blur, S77 1.55). On the trunk's
+         head the frames are nearer S82 (1.03; S77 1.15, the input 1.08),
+         but less of what it adds there is the sky's (a correlation of
+         0.59 at 3 px, S77 0.68).
+
+       Round stars come first, so S77 stays the card's model.
 
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
