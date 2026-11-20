@@ -2199,6 +2199,24 @@ In order, each only if the one before leaves a gap at the rims:
 
        Round stars come first, so S77 stays the card's model.
 
+       S77's line was never square: S71, the run it was continued from,
+       reads 0.017 (mean −0.0013). The banks' own stars at 2.5 to 3.5 px
+       read a mean cos 4θ of +0.007 in the native bank and −0.020 in the
+       survey and Hubble banks: squares on the pixel grid. S82 learned
+       from the survey bank at full weight from its first step. S83, S82
+       continued 30,000 steps at 3e-5 with S77's banks alone, moved little:
+       - Its validation error is 0.750.
+       - Squares: the mean cos 4θ goes from −0.0070 to −0.0052, but the
+         share stays 0.021.
+       - Ellipticity: as S82's, 0.037 on the deep Trunk and 0.078 on the
+         California.
+       - The cloud: 0.93 and 0.94 of the input's detail between 2–4 and
+         4–8 px (S82 0.90 and 0.91).
+       - The rims: S82's (rise 3.97 px, 0.77 and 0.80 below the input 4
+         and 2 px out).
+
+       A short run at a low rate keeps what the first run learned.
+
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
    taught that clarity is asked for at a ratio of 0, read from the
