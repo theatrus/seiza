@@ -89,6 +89,10 @@
     },
     "points": {
       "noise_reduction_radius": 0,
+      "structure_removals": [
+        "filtered",
+        "atrous"
+      ],
       "clip_peaks": 300,
       "peak_block": 16,
       "core_radius": 24.0

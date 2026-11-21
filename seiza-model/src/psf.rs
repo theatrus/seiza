@@ -5,6 +5,8 @@
 //! `detections`, `field_point_map`, `sampled_features`), because a model is
 //! trained on exactly what they make.
 
+#[cfg(test)]
+use crate::bundle::StructureRemoval;
 use crate::bundle::{PointsReading, PsfReading, StampEncoder, StampPlane};
 use crate::error::ModelError;
 use crate::stats::{median_f32, median_f64};
@@ -476,9 +478,11 @@ fn clip_level(peaks: &[f64]) -> Option<f64> {
     None
 }
 
-/// Every star the measuring detector finds on the image, unsmoothed, and the
-/// clipped cores it turns away, each at its brightest pixel with its peak
-/// alone.
+/// Every star the measuring detector finds on the image, unsmoothed, with
+/// each of the card's structure removals in turn, and the clipped cores it
+/// turns away, each at its brightest pixel with its peak alone. A star a
+/// later removal finds within the core radius of one already listed is the
+/// same star.
 pub(crate) fn detections(
     plane: &[f32],
     width: usize,
@@ -493,26 +497,35 @@ pub(crate) fn detections(
         .collect();
     let level = clip_level(&brightest);
     let (counts, scale) = scaled_counts(plane, width, height);
-    let options = MeasurementOptions {
-        noise_reduction_radius: Some(reading.noise_reduction_radius),
-        ..Default::default()
-    };
-    let found = options.detect(&counts, width, height).stars;
-    let mut known: Vec<(f64, f64)> = found.iter().map(|star| star.position).collect();
-    let mut points: Vec<Point> = found
-        .iter()
-        .map(|star| {
+    let reach = reading.core_radius * reading.core_radius;
+    let mut known: Vec<(f64, f64)> = Vec::new();
+    let mut points: Vec<Point> = Vec::new();
+    for (pass, removal) in reading.structure_removals.iter().enumerate() {
+        let options = MeasurementOptions {
+            noise_reduction_radius: Some(reading.noise_reduction_radius),
+            structure_removal: Some(removal.method()),
+            ..Default::default()
+        };
+        let listed = known.len();
+        for star in options.detect(&counts, width, height).stars {
             let (x, y) = star.position;
-            Point {
+            if pass > 0
+                && known[..listed]
+                    .iter()
+                    .any(|&(kx, ky)| (kx - x).powi(2) + (ky - y).powi(2) <= reach)
+            {
+                continue;
+            }
+            known.push((x, y));
+            points.push(Point {
                 x: x as f32,
                 y: y as f32,
                 flux: (star.flux * scale) as f32,
                 peak: raw_peak(plane, width, height, x, y) as f32,
-            }
-        })
-        .collect();
+            });
+        }
+    }
     if let Some(level) = level {
-        let reach = reading.core_radius * reading.core_radius;
         for &(value, x, y) in peaks.iter().take_while(|peak| peak.0 >= level) {
             let near = known
                 .iter()
@@ -871,6 +884,7 @@ mod tests {
         assert!(peaks.len() >= 3 && peaks[0].0 == 5000.0);
         let reading = PointsReading {
             noise_reduction_radius: 0,
+            structure_removals: vec![StructureRemoval::Filtered, StructureRemoval::Atrous],
             clip_peaks: 300,
             peak_block: 16,
             core_radius: 24.0,

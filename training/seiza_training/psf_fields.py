@@ -94,6 +94,16 @@ PEAK_BLOCK = 16
 # A clipped core within this many pixels of a brighter one, or of a star
 # the detector found, is the same star.
 CORE_RADIUS = 24.0
+# The structure removals the point-source detector runs with, in turn. Its
+# default, "filtered", takes bright stars on bright, structured nebula away
+# with the nebula, and a network that does not find them listed rings them:
+# on NGC 6820's night it lists 445 stars and none of the bright ones about
+# the pillar, which S77 ringed 6 to 27 times the noise below the sky. The à
+# trous removal keeps them. A star a later removal finds within
+# `CORE_RADIUS` of one already listed is the same star. Each record names
+# the removals its list was made with; `refresh_detections` makes a list
+# made with others again.
+STRUCTURE_REMOVALS = ("filtered", "atrous")
 
 
 def eligible(
@@ -230,9 +240,10 @@ def block_peaks(image: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 def detections(image: np.ndarray) -> tuple[np.ndarray, float | None, str | None]:
     """Every star the measuring detector finds on a stack, unsmoothed, as
-    `stack_psf` measures one, and the clipped cores it turns away, in
-    `DETECTION_COLUMNS`; the clip level, from the image's peaks; and the
-    detector's error where it failed."""
+    `stack_psf` measures one, with each of `STRUCTURE_REMOVALS` in turn,
+    and the clipped cores it turns away, in `DETECTION_COLUMNS`; the clip
+    level, from the image's peaks; and the detector's error where it
+    failed."""
     import seiza
 
     from .multi_night import STACK_DETECTION, scaled_counts
@@ -241,10 +252,19 @@ def detections(image: np.ndarray) -> tuple[np.ndarray, float | None, str | None]
     level = clip_level(peaks[:CLIP_PEAKS])
     counts, low, high = scaled_counts(image)
     error = None
-    try:
-        found = seiza.detect_measured_stars(counts, **STACK_DETECTION).stars
-    except Exception as failure:  # noqa: BLE001 - recorded, not fatal
-        found, error = [], str(failure)
+    found: list[Any] = []
+    for index, removal in enumerate(STRUCTURE_REMOVALS):
+        try:
+            stars = seiza.detect_measured_stars(counts, **STACK_DETECTION, structure_removal=removal).stars
+        except Exception as failure:  # noqa: BLE001 - recorded, not fatal
+            error = error or str(failure)
+            continue
+        if index:
+            # Against the stars earlier removals listed, not each other.
+            listed = np.array([[star.x, star.y] for star in found], dtype=np.float64).reshape(-1, 2)
+            stars = [star for star in stars if not len(listed)
+                     or np.min((listed[:, 0] - star.x) ** 2 + (listed[:, 1] - star.y) ** 2) > CORE_RADIUS**2]
+        found.extend(stars)
     # Counts above the 0.01st percentile, in the image's units.
     scale = (high - low) / 65535
     table = np.array([[star.x, star.y, star.flux * scale, 0.0, star.fwhm, star.snr,
@@ -308,16 +328,49 @@ def measure(store: Store, product: dict[str, Any]) -> dict[str, Any]:
     seconds = record.pop("seconds")
     record["seconds"] = {"load": round(loaded - started, 1), **seconds,
                          "total": round(time.monotonic() - started, 1)}
-    target = directory(store, product["id"])
+    keep(directory(store, product["id"]), record, arrays)
+    return record
+
+
+def keep(target: Path, record: dict[str, Any], arrays: dict[str, np.ndarray]) -> None:
+    """Write a record's arrays and then its JSON under `target`, each whole
+    and then moved, the JSON last: a record is there only once all of it
+    is."""
     target.mkdir(parents=True, exist_ok=True)
-    # Written whole and then moved, the JSON last: a record is there only
-    # once all of it is.
     with (target / "field.npz.tmp").open("wb") as file:
         np.savez(file, **arrays)
     (target / "field.npz.tmp").replace(target / "field.npz")
     (target / "field.json.tmp").write_text(json.dumps(record, indent=1))
     (target / "field.json.tmp").replace(target / "field.json")
-    return record
+
+
+def stale_detections(record: dict[str, Any]) -> bool:
+    """Whether a record's point sources were found with other structure
+    removals than `STRUCTURE_REMOVALS`; a record made before they were
+    named was made with the filtered removal alone."""
+    return tuple(record.get("structure_removals", ("filtered",))) != STRUCTURE_REMOVALS
+
+
+def refresh_detections(store: Store, product: dict[str, Any]) -> dict[str, Any]:
+    """Find a recorded product's point sources again where its record's
+    were found with other structure removals, and keep them in its record;
+    its field is left as it was. Returns the record, or a status where
+    there is none."""
+    record = recorded(store, product["id"])
+    if record is None:
+        return {"product": product["id"], "status": "unrecorded"}
+    if not stale_detections(record):
+        return {**record, "status": "current"}
+    image = np.ascontiguousarray(load_image(store, product), dtype=np.float32)
+    table, level, error = detections(image)
+    target = directory(store, product["id"])
+    with np.load(target / "field.npz") as kept:
+        arrays = {name: kept[name] for name in kept.files}
+    arrays["detections"] = table
+    record.update({"detections": len(table), "detection_error": error, "clip_level": level,
+                   "structure_removals": list(STRUCTURE_REMOVALS)})
+    keep(target, record, arrays)
+    return {**record, "status": "refreshed"}
 
 
 def measured_arrays(image: np.ndarray) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
@@ -339,6 +392,7 @@ def measured_arrays(image: np.ndarray) -> tuple[dict[str, Any], dict[str, np.nda
         "grid_px": GRID_PX,
         "detections": len(table),
         "detection_error": detection_error,
+        "structure_removals": list(STRUCTURE_REMOVALS),
         "clip_level": level,
         "versions": versions(),
     }
@@ -394,6 +448,41 @@ def measured(store_root: str, scratch: str | None, product: dict[str, Any]) -> d
         return measure(store, product)
     except Exception as error:  # noqa: BLE001 - reported in the summary
         return {"product": product["id"], "status": "failed", "error": f"{type(error).__name__}: {error}"}
+
+
+def refreshed(store_root: str, scratch: str | None, product: dict[str, Any]) -> dict[str, Any]:
+    """`refresh_detections` in a process of its own, as `measured` is."""
+    store = Store(store_root, scratch)
+    try:
+        return refresh_detections(store, product)
+    except Exception as error:  # noqa: BLE001 - reported in the summary
+        return {"product": product["id"], "status": "failed", "error": f"{type(error).__name__}: {error}"}
+
+
+def refresh(store: Store, products: list[dict[str, Any]], *, workers: int = 4,
+            limit: int | None = None) -> dict[str, Any]:
+    """Find the point sources of each recorded product of `products` whose
+    record's were found with other structure removals again, `workers` at
+    once; at most `limit` of them. Returns each status's count and the
+    products that failed."""
+    import functools
+
+    from .noise_model import in_order
+
+    todo = [product for product in products
+            if (record := recorded(store, product["id"])) is not None and stale_detections(record)]
+    todo = todo[:limit]
+    task = functools.partial(refreshed, str(store.root), str(store.scratch))
+    summary: dict[str, Any] = {"products": len(products), "stale": len(todo), "status": {}, "failed": []}
+    started = time.monotonic()
+    for done, record in enumerate(in_order(task, todo, workers), start=1):
+        summary["status"][record["status"]] = summary["status"].get(record["status"], 0) + 1
+        if record["status"] == "failed":
+            summary["failed"].append({"product": record["product"], "error": record["error"]})
+        print(json.dumps({"done": done, "of": len(todo), "product": record["product"], "status": record["status"],
+                          "detections": record.get("detections"), "elapsed": round(time.monotonic() - started)}),
+              file=sys.stderr, flush=True)
+    return summary
 
 
 def run(manifest: Manifest, store: Store, products: list[dict[str, Any]], *, workers: int = 4,

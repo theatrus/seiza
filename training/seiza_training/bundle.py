@@ -221,6 +221,7 @@ def sharpen_card(name: str, record: dict[str, Any], graphs: list[dict[str, str]]
             "psf": {**psf_fields.MEASURE_OPTIONS, "grid_px": psf_fields.GRID_PX, "width_core": WIDTH_CORE},
             "points": {
                 "noise_reduction_radius": STACK_DETECTION["noise_reduction_radius"],
+                "structure_removals": list(psf_fields.STRUCTURE_REMOVALS),
                 "clip_peaks": psf_fields.CLIP_PEAKS,
                 "peak_block": psf_fields.PEAK_BLOCK,
                 "core_radius": psf_fields.CORE_RADIUS,

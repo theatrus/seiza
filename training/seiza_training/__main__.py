@@ -218,6 +218,11 @@ def main(argv: list[str] | None = None) -> int:
     psf.add_argument("--workers", type=int, default=4, help="measure this many products at once")
     psf.add_argument("--limit", type=int, help="at most this many products not yet measured")
     psf.add_argument("--again", action="store_true", help="measure products already measured")
+    psf.add_argument("--product", action="append", dest="products",
+                     help="only this product id, of any kind or split (in place of --set, --kind and --split)")
+    psf.add_argument("--detections", action="store_true",
+                     help="only find the point sources again of products whose records found them with other "
+                          "structure removals than the pass's, leaving their fields")
 
     sharpen = commands.add_parser("cut-sharpen", help="cut the sharpening banks from the source products and their "
                                                       "PSF fields, onto local disk (reads the manifest only)")
@@ -730,8 +735,13 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
     if command == "psf-fields":
         from . import psf_fields
 
-        products = psf_fields.eligible(manifest, kinds=arguments.kinds or psf_fields.SOURCE_KINDS,
-                                       splits=arguments.splits or psf_fields.SPLITS, sets=only)
+        if arguments.products:
+            products = psf_fields.annotated(manifest, arguments.products)
+        else:
+            products = psf_fields.eligible(manifest, kinds=arguments.kinds or psf_fields.SOURCE_KINDS,
+                                           splits=arguments.splits or psf_fields.SPLITS, sets=only)
+        if arguments.detections:
+            return psf_fields.refresh(store, products, workers=arguments.workers, limit=arguments.limit)
         return psf_fields.run(manifest, store, products, workers=arguments.workers, again=arguments.again,
                               limit=arguments.limit)
     if command == "cut-sharpen":

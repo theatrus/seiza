@@ -163,7 +163,8 @@ def tiny(plane: np.ndarray) -> None:
               for entry in written["body"]]
     encoder = {"file": written["encoder"]["file"], "sha256": sha256_of(directory / written["encoder"]["file"]),
                "features": written["features"]}
-    card = sharpen_card("sharpen-tiny", record, graphs, encoder, ["cpu"], STRENGTHS)
+    # Without the scaled pass, which only the harness runs so far.
+    card = sharpen_card("sharpen-tiny", record, graphs, encoder, ["cpu"], STRENGTHS, scaled=False)
     (directory / "card.json").write_text(json.dumps(card, indent=2) + "\n")
     expected = answers(record, model, plane, STRIDE)
     (HERE / "sharpen" / "expected.json").write_text(json.dumps(expected, indent=0) + "\n")
@@ -177,7 +178,8 @@ def trained(arguments: argparse.Namespace) -> None:
     arguments.out.mkdir(parents=True, exist_ok=True)
     bundle = arguments.out / "bundle"
     if not (bundle / "card.json").exists():
-        write_sharpen_bundle(store, arguments.run, bundle, name=arguments.out.name, strengths=STRENGTHS)
+        write_sharpen_bundle(store, arguments.run, bundle, name=arguments.out.name, strengths=STRENGTHS,
+                             scaled=False)
     record, model = sharpen_model.load_run(store, arguments.run)
     plane.astype("<f4").tofile(arguments.out / "image.f32")
     expected = answers(record, model, plane, 1)
