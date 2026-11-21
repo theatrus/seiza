@@ -445,6 +445,31 @@ the wider mottle is taken out; below 1, some of each is kept. A model runs on th
 best backend the machine has, or the one `--backend` names, and `--tile` changes
 only the speed and memory of a run.
 
+`seiza model sharpen` brings such an image's stars, and everything that is not
+a star, to a share of their width, with a trained sharpening model. It too needs
+nothing but the image: the PSF and how it changes over the field, the point
+sources and the noise are measured from it.
+
+```text
+seiza model sharpen stack.fits -o sharp.fits --stars 0.46 --rest 0.5
+```
+
+`--stars` and `--rest` are those shares: 1 leaves things as they are, and less
+is sharper. No star is asked to be narrower than the model's floor in pixels.
+Left out, each is the model's own. `--rolloff 1` holds back the finest part of
+the change where it lies under the image's noise. An image with too few stars to
+measure a PSF from is refused. Each channel of a colour image is measured and
+sharpened on its own. No sharpening model is published yet, so none is fetched:
+give `--model` a bundle's directory, or install one with `seiza model install DIR`.
+
+Where the model's card has a scaled pass, which `seiza model list` shows, an
+image whose stars are far wider than the model was trained on is also sharpened
+binned, toward the width the card names, and the two runs are put together by
+scale: the binned run makes the finest detail, the full-size run the rest. The
+stars keep the full-size run's change, so they stay round. `--binned-rest` is
+the share asked of what is not a star on the binned image (left out, the
+card's), and `--full-size-only` keeps a run at full size.
+
 ```text
 seiza model backends        # which backends run here, and why the others do not
 seiza model list | verify

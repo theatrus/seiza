@@ -5,7 +5,7 @@ use clap::{Args, Subcommand};
 use seiza_model::{
     Backend, BackendOptions, DenoiseOptions, FileError, ModelBundle, ModelError, ModelStore,
     NoiseBands, NoiseModel, Precision, Progress, Published, RestorationArea, RestorationImage,
-    Task, runtime_info,
+    SharpenModel, SharpenOptions, Task, runtime_info,
 };
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -21,6 +21,9 @@ pub(crate) struct ModelArgs {
 enum ModelCommand {
     /// Take the noise out of a linear FITS image, keeping a share of it
     Denoise(Box<DenoiseArgs>),
+    /// Sharpen a linear FITS image: bring its stars, and everything else, to
+    /// a share of their width
+    Sharpen(Box<SharpenArgs>),
     /// Show which backends run here, and why the others do not
     Backends(RuntimeArgs),
     /// List the installed models
@@ -37,7 +40,8 @@ enum ModelCommand {
     },
     /// Check installed models against their cards
     Verify {
-        /// Only this model (default: all of them)
+        /// Only this model, installed or a bundle's directory (default: every
+        /// installed model)
         name: Option<String>,
     },
     /// Remove an installed model
@@ -93,9 +97,59 @@ struct DenoiseArgs {
     runtime: RuntimeArgs,
 }
 
+#[derive(Args)]
+struct SharpenArgs {
+    /// Calibrated, stacked linear mono or RGB FITS or XISF input, from any
+    /// stacker
+    input: PathBuf,
+    /// Sharpened linear 32-bit floating-point FITS output
+    #[arg(short, long)]
+    output: PathBuf,
+    /// An installed model's name, or a bundle's directory (default: the one
+    /// installed sharpening model)
+    #[arg(long, value_name = "NAME|PATH")]
+    model: Option<String>,
+    /// What runs the model (default: the best this machine has)
+    #[arg(long)]
+    backend: Option<Backend>,
+    /// A tile's side in pixels (default: the backend's); it does not change
+    /// the result
+    #[arg(long)]
+    tile: Option<usize>,
+    /// The graph's precision (default: the backend's)
+    #[arg(long)]
+    precision: Option<Precision>,
+    /// DXGI adapter index for DirectML.
+    #[arg(long, value_name = "INDEX")]
+    device_id: Option<i32>,
+    /// The share of its width every star is brought to, above 0 and at most
+    /// 1, never below the model's floor in pixels (default: the model's)
+    #[arg(long)]
+    stars: Option<f32>,
+    /// The share asked of everything that is not a star (default: the
+    /// model's)
+    #[arg(long)]
+    rest: Option<f32>,
+    /// How hard the finest part of the change is held back where it lies
+    /// under the noise, in multiples of the image's noise; 0 keeps all of it
+    #[arg(long, default_value_t = 0.0)]
+    rolloff: f32,
+    /// The share asked of everything that is not a star on the binned image,
+    /// where the model's card has a scaled pass and the image's stars are far
+    /// wider than the model was trained on (default: the card's)
+    #[arg(long, value_name = "SHARE")]
+    binned_rest: Option<f32>,
+    /// Sharpen at full size alone, never binned, whatever the card says
+    #[arg(long)]
+    full_size_only: bool,
+    #[command(flatten)]
+    runtime: RuntimeArgs,
+}
+
 pub(crate) fn run(args: ModelArgs) -> Result<()> {
     match args.command {
         ModelCommand::Denoise(args) => denoise(*args),
+        ModelCommand::Sharpen(args) => sharpen(*args),
         ModelCommand::Backends(args) => backends(&args),
         ModelCommand::List => list(),
         ModelCommand::Install { model } => install(model.as_deref()),
@@ -193,6 +247,113 @@ fn denoise(args: DenoiseArgs) -> Result<()> {
     Ok(())
 }
 
+fn sharpen(args: SharpenArgs) -> Result<()> {
+    crate::provenance::validate_path_roles([
+        ("model input".into(), args.input.as_path()),
+        ("model output".into(), args.output.as_path()),
+    ])?;
+    let options = BackendOptions {
+        library: args.runtime.onnxruntime,
+        tile: args.tile,
+        precision: args.precision,
+        device_id: args.device_id,
+        ..Default::default()
+    };
+
+    let input = RestorationImage::open(&args.input, RestorationArea::Full)?;
+    // No sharpening model is published, so none is fetched: one is named, or
+    // installed from a bundle's directory.
+    let bundle = ModelStore::default_store()?
+        .resolve(args.model.as_deref(), Task::Sharpen)
+        .context("give --model, or install a sharpening bundle with `seiza model install DIR`")?;
+    let backend = match args.backend {
+        Some(backend) => backend,
+        None => Backend::detect(&bundle, &options)?,
+    };
+
+    let opening = Instant::now();
+    eprintln!("opening {} on {backend}", bundle.card().name);
+    let mut model = SharpenModel::open(&bundle, backend, &options)
+        .with_context(|| format!("could not open {} on {backend}", bundle.card().name))?;
+    eprintln!("opened in {:.1} s", opening.elapsed().as_secs_f64());
+
+    crate::interrupt::install();
+    let running = Instant::now();
+    let progress = |step: Progress| {
+        eprint!(
+            "\rchannel {}/{}: tile {}/{}",
+            step.channel + 1,
+            step.channels,
+            step.tile,
+            step.tiles
+        );
+        let _ = std::io::stderr().flush();
+    };
+    let result = input.sharpen(
+        &mut model,
+        &SharpenOptions {
+            stars: args.stars,
+            rest: args.rest,
+            rolloff: args.rolloff,
+            binned_rest: args.binned_rest,
+            full_size_only: args.full_size_only,
+            progress: Some(&progress),
+            cancel: Some(&crate::interrupt::interrupted),
+        },
+    );
+    eprintln!();
+    if matches!(
+        result,
+        Err(FileError::Model(seiza_model::ModelError::Cancelled))
+    ) {
+        std::process::exit(crate::interrupt::INTERRUPTED_EXIT_CODE);
+    }
+    let result = result.context("could not run the model")?;
+    let seconds = running.elapsed().as_secs_f64();
+
+    result
+        .write_linear(&args.output)
+        .with_context(|| format!("could not write {}", args.output.display()))?;
+    let report = result.report();
+    crate::common::wrote(
+        &args.output,
+        format_args!(
+            "{} on {backend}, {}, tile {}, in {seconds:.1} s, stars to {:.0}% of their width and the rest to {:.0}%",
+            report.model,
+            report.precision,
+            report.tile,
+            report.stars * 100.0,
+            report.rest * 100.0,
+        ),
+    );
+    for (channel, read) in report.channels.iter().enumerate() {
+        println!(
+            "channel {}: stars {:.2} px wide, from {} stars at {} × {} nodes{}, {} point sources, noise {:.6}, background {:.6}{}",
+            channel + 1,
+            read.psf_width_px,
+            read.psf_stars,
+            read.psf_nodes.1,
+            read.psf_nodes.0,
+            if read.psf_global {
+                " (one PSF for the whole image)"
+            } else {
+                ""
+            },
+            read.points,
+            read.noise,
+            read.background,
+            match (read.binned, report.binned_rest) {
+                (1, _) | (_, None) => String::new(),
+                (binned, Some(rest)) => format!(
+                    ", also sharpened binned {binned} × {binned} with the rest to {:.0}%",
+                    rest * 100.0
+                ),
+            }
+        );
+    }
+    Ok(())
+}
+
 /// The model `denoise` runs. A model named with `--model` always wins, and is
 /// never fetched. Without one, the one installed noise model runs, with no
 /// network at all; with none installed, the latest published noise model is
@@ -200,11 +361,11 @@ fn denoise(args: DenoiseArgs) -> Result<()> {
 fn denoise_model(chosen: Option<&str>, options: &BackendOptions) -> Result<ModelBundle> {
     let store = ModelStore::default_store()?;
     if let Some(chosen) = chosen {
-        return store.resolve(Some(chosen)).with_context(|| {
+        return store.resolve(Some(chosen), Task::Denoise).with_context(|| {
             format!("install it with `seiza model install {chosen}`, or give a bundle's directory")
         });
     }
-    match store.resolve(None) {
+    match store.resolve(None, Task::Denoise) {
         Err(ModelError::NoModelInstalled { .. }) => {
             // Without ONNX Runtime the model could not run: say so before
             // fetching hundreds of megabytes.
@@ -266,16 +427,35 @@ fn list() -> Result<()> {
             .iter()
             .map(|graph| graph.precision.to_string())
             .collect();
+        let reads = match &card.sharpen {
+            Some(sharpen) => format!(
+                "stars to {:.0}% of their width and the rest to {:.0}% unless told, no star under {} px{}",
+                sharpen.strengths.stars * 100.0,
+                sharpen.strengths.rest * 100.0,
+                sharpen.floor_px,
+                match sharpen.scaled {
+                    Some(scaled) => format!(
+                        ", wider stars also binned toward {} px with the rest to {:.0}%",
+                        scaled.stars_px,
+                        scaled.rest * 100.0
+                    ),
+                    None => String::new(),
+                }
+            ),
+            None => format!(
+                "reads {} noise{}",
+                card.reading.noise_map,
+                if card.reading.holes.is_some() {
+                    ", keeps holes from the network"
+                } else {
+                    ""
+                }
+            ),
+        };
         println!(
-            "{}: {}, reads {} noise{}, {}",
+            "{}: {}, {reads}, {}",
             card.name,
             card.task,
-            card.reading.noise_map,
-            if card.reading.holes.is_some() {
-                ", keeps holes from the network"
-            } else {
-                ""
-            },
             graphs.join(" and ")
         );
     }
@@ -330,15 +510,11 @@ fn names_a_path(model: &str) -> bool {
 
 fn verify(name: Option<&str>) -> Result<()> {
     let store = ModelStore::default_store()?;
-    let models = match name {
-        Some(name) => vec![store.find(name)?],
-        None => store.list()?,
-    };
+    let models = store.verify(name)?;
     if models.is_empty() {
         println!("no models are installed in {}", store.root().display());
     }
     for bundle in models {
-        bundle.verify()?;
         println!("{}: matches its card", bundle.card().name);
     }
     Ok(())
@@ -407,6 +583,56 @@ mod tests {
             names_a_path(temp.path().to_str().unwrap()),
             "a directory is installed from"
         );
+    }
+
+    #[test]
+    fn sharpen_takes_its_two_shares_and_leaves_them_to_the_model_unasked() {
+        let parsed = Harness::try_parse_from([
+            "model",
+            "sharpen",
+            "in.fits",
+            "-o",
+            "out.fits",
+            "--stars",
+            "0.46",
+            "--rolloff",
+            "1",
+            "--backend",
+            "coreml-gpu",
+        ])
+        .unwrap();
+        let ModelCommand::Sharpen(args) = parsed.command else {
+            panic!("not sharpen")
+        };
+        assert_eq!(args.stars, Some(0.46));
+        assert_eq!(args.rest, None, "the model's own share, unless told");
+        assert_eq!(args.rolloff, 1.0);
+        assert_eq!(args.backend.unwrap().to_string(), "coreml-gpu");
+        assert_eq!(
+            args.binned_rest, None,
+            "the card's own binned share, unless told"
+        );
+        assert!(
+            !args.full_size_only,
+            "binned where the card says so, unless told"
+        );
+
+        let parsed = Harness::try_parse_from([
+            "model",
+            "sharpen",
+            "in.fits",
+            "-o",
+            "out.fits",
+            "--binned-rest",
+            "0.4",
+            "--full-size-only",
+        ])
+        .unwrap();
+        let ModelCommand::Sharpen(args) = parsed.command else {
+            panic!("not sharpen")
+        };
+        assert_eq!(args.binned_rest, Some(0.4));
+        assert!(args.full_size_only);
     }
 
     #[test]

@@ -263,3 +263,142 @@ def test_a_run_stops_on_cancel_and_raises_what_a_callback_raises() -> None:
 
     with pytest.raises(KeyError, match="from the callback"):
         model.denoise(image, progress=broken)
+
+
+SHARPEN = FIXTURES / "sharpen"
+
+
+def star_field() -> np.ndarray:
+    return np.fromfile(SHARPEN / "image.f32", dtype="<f4").reshape(250, 330)
+
+
+def test_a_sharpening_model_installs_with_its_encoder_and_lists_what_it_asks(tmp_path: Path) -> None:
+    installed = seiza.install_model(SHARPEN / "tiny", store=tmp_path)
+    assert installed.task == "sharpen"
+    assert (installed.path / "encoder-f32.onnx").is_file()
+    assert installed.sharpen is not None
+    assert (installed.sharpen.stars, installed.sharpen.rest) == (0.46, 0.5)
+    assert installed.sharpen.floor_px == 1.5 and installed.sharpen.sharpest == 0.25
+    assert (installed.sharpen.scaled_px, installed.sharpen.binned_rest) == (None, None), "no scaled pass"
+    seiza.verify_model("sharpen-tiny", store=tmp_path)
+    noise = seiza.install_model(TINY, store=tmp_path)
+    assert noise.sharpen is None, "a noise model asks for no shares"
+    assert [model.name for model in seiza.installed_models(store=tmp_path)] == ["noise-tiny", "sharpen-tiny"]
+
+
+def test_verifying_with_no_name_checks_every_installed_model(tmp_path: Path) -> None:
+    seiza.verify_model(store=tmp_path / "empty")
+    installed = seiza.install_model(SHARPEN / "tiny", store=tmp_path)
+    seiza.verify_model(store=tmp_path)
+    seiza.install_model(TINY, store=tmp_path)
+    seiza.verify_model(store=tmp_path)
+
+    # The sharpening model is checked too, with no name given.
+    (installed.path / "encoder-f32.onnx").write_bytes(b"other")
+    with pytest.raises(seiza.EngineError, match="encoder-f32.onnx"):
+        seiza.verify_model(store=tmp_path)
+    seiza.verify_model("noise-tiny", store=tmp_path)
+
+
+@needs_runtime
+def test_a_tiny_sharpening_model_matches_the_harness() -> None:
+    expected = json.loads((SHARPEN / "expected.json").read_text())
+    image = star_field()
+    model = seiza.SharpenModel(str(SHARPEN / "tiny"), "cpu")
+    assert (model.backend, model.tile) == ("cpu", 128)
+    seen: list[tuple[int, int, int, int]] = []
+    result = model.sharpen(image, *expected["strengths"], progress=lambda *step: seen.append(step))
+    assert seen and seen[-1][2] == seen[-1][3]
+    assert result.image.shape == image.shape and result.image.dtype == np.float32
+    assert np.isnan(result.image[-1, 0]), "a pixel with no data stays without"
+    report = result.report
+    assert (report.model, report.backend, report.precision) == ("sharpen-tiny", "cpu", "f32")
+    assert (report.stars, report.rest, report.rolloff) == (pytest.approx(0.46), 0.5, 0.0)
+    read = report.channels[0]
+    assert (read.psf_rows, read.psf_columns) == (len(expected["ys"]), len(expected["xs"]))
+    assert read.psf_stars == expected["stars"] and not read.psf_global
+    assert read.points == len(expected["points"])
+    stride = expected["stride"]
+    want = np.array([np.nan if value is None else value for value in expected["output"]], dtype=np.float32)
+    got = result.image[::stride, ::stride].ravel()
+    assert np.nanmax(np.abs(got - want)) < 2e-3 * expected["noise"]
+
+    own = model.sharpen(image)
+    assert (own.report.stars, own.report.rest) == (pytest.approx(0.46), 0.5), "the card's own shares, left out"
+    rolled = model.sharpen(image, rolloff=expected["rolloff"])
+    want = np.array([np.nan if value is None else value for value in expected["rolled"]], dtype=np.float32)
+    assert np.nanmax(np.abs(rolled.image[::stride, ::stride].ravel() - want)) < 2e-3 * expected["noise"]
+
+
+@needs_runtime
+def test_a_scaled_pass_bins_a_wide_starred_image_as_the_harness_does(tmp_path: Path) -> None:
+    expected = json.loads((SHARPEN / "expected.json").read_text())["scaled"]
+    image = np.fromfile(SHARPEN / "scaled.f32", dtype="<f4").reshape(expected["height"], expected["width"])
+    bundle = tmp_path / "scaled"
+    shutil.copytree(SHARPEN / "tiny", bundle)
+    card = json.loads((bundle / "card.json").read_text())
+    card["sharpen"]["scaled"] = expected["scaled"]
+    (bundle / "card.json").write_text(json.dumps(card))
+    installed = seiza.install_model(bundle, store=tmp_path / "store")
+    assert installed.sharpen is not None
+    assert (installed.sharpen.scaled_px, installed.sharpen.binned_rest) == (3.5, 0.35)
+
+    model = seiza.SharpenModel(str(bundle), "cpu")
+    result = model.sharpen(image, *expected["strengths"])
+    assert result.report.channels[0].binned == expected["factor"]
+    assert result.report.binned_rest == pytest.approx(0.35) and not result.report.full_size_only
+    stride = expected["stride"]
+    want = np.array([np.nan if value is None else value for value in expected["output"]], dtype=np.float32)
+    assert np.nanmax(np.abs(result.image[::stride, ::stride].ravel() - want)) < 2e-3 * expected["noise"]
+
+    held = model.sharpen(image, *expected["strengths"], full_size_only=True, binned_rest=0.5)
+    assert held.report.channels[0].binned == 1 and held.report.full_size_only
+    assert held.report.binned_rest is None, "nothing binned to ask of"
+    plain = seiza.SharpenModel(str(SHARPEN / "tiny"), "cpu").sharpen(image, *expected["strengths"])
+    assert np.array_equal(held.image, plain.image, equal_nan=True), "held to full size, the plain card's run"
+    asked = model.sharpen(image, *expected["strengths"], binned_rest=0.6)
+    assert asked.report.binned_rest == pytest.approx(0.6)
+    with pytest.raises(ValueError, match="share"):
+        model.sharpen(image, binned_rest=0.0)
+
+
+def write_fits(path: Path, image: np.ndarray) -> None:
+    """A minimal single-precision FITS image."""
+    cards = ["SIMPLE  =                    T", "BITPIX  =                  -32", "NAXIS   =                    2",
+             f"NAXIS1  = {image.shape[1]:>20}", f"NAXIS2  = {image.shape[0]:>20}", "END"]
+    header = "".join(card.ljust(80) for card in cards).ljust(2880).encode("ascii")
+    data = image.astype(">f4").tobytes()
+    path.write_bytes(header + data + b"\0" * (-len(data) % 2880))
+
+
+@needs_runtime
+def test_a_file_is_sharpened_to_a_file_that_says_what_ran(tmp_path: Path) -> None:
+    image = star_field()
+    source, output = tmp_path / "stars.fits", tmp_path / "sharp.fits"
+    write_fits(source, image)
+    model = seiza.SharpenModel(str(SHARPEN / "tiny"), "cpu")
+    report = model.sharpen_file(source, output, 0.6, rolloff=0.5)
+    assert (report.model, report.stars, report.rest, report.rolloff) == ("sharpen-tiny", pytest.approx(0.6), 0.5, 0.5)
+    header = output.read_bytes()[:5760].decode("ascii", "replace")
+    assert "SEIZAMDL" in header and "MDSTARS" in header and "MDREST" in header
+    written = np.frombuffer(output.read_bytes(), dtype=">f4", offset=header.index("END     ") // 2880 * 2880 + 2880,
+                            count=image.size).reshape(image.shape)
+    direct = model.sharpen(image, 0.6, rolloff=0.5).image
+    assert np.array_equal(written, direct, equal_nan=True)
+    with pytest.raises(seiza.EngineError):
+        model.sharpen_file(tmp_path / "missing.fits", output)
+
+
+@needs_runtime
+def test_a_sharpening_refuses_a_bad_share_a_bare_image_and_a_noise_model() -> None:
+    model = seiza.SharpenModel(str(SHARPEN / "tiny"), "cpu")
+    with pytest.raises(ValueError, match="share"):
+        model.sharpen(star_field(), stars=1.5)
+    rng = np.random.default_rng(3)
+    bare = (100.0 + rng.normal(0.0, 2.0, (160, 200))).astype(np.float32)
+    with pytest.raises(seiza.TooFewStarsError):
+        model.sharpen(bare)
+    with pytest.raises(seiza.EngineError, match="sharpening"):
+        seiza.SharpenModel(str(TINY), "cpu")
+    with pytest.raises(seiza.EngineError, match="noise model"):
+        seiza.NoiseModel(str(SHARPEN / "tiny"), "cpu")

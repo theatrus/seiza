@@ -1,0 +1,97 @@
+{
+  "format": 1,
+  "name": "sharpen-tiny",
+  "task": "sharpen",
+  "graphs": [
+    {
+      "precision": "f32",
+      "file": "body-f32.onnx",
+      "sha256": "7233c54f30dcb9e91fb5b06665825b205ee3b8b6d6cf3f2949664d24d2c9b6fb"
+    },
+    {
+      "precision": "f16",
+      "file": "body-f16.onnx",
+      "sha256": "cb6981321121c129267a62c0ad9a6124bab6dd875d75c7d41d1d37426b4c5203"
+    }
+  ],
+  "inputs": [
+    {
+      "tensor": "planes",
+      "planes": [
+        "image",
+        "noise",
+        "ratio",
+        "nonstellar-ratio",
+        "points"
+      ]
+    }
+  ],
+  "output": "residual",
+  "dimensions": [
+    "height",
+    "width"
+  ],
+  "reading": {
+    "noise_map": "image",
+    "noise_plane": "asinh",
+    "sky": "global",
+    "sky_block": 32,
+    "flat_block": 256,
+    "image_map_scale": 1.13,
+    "noise_correlation": 1.24
+  },
+  "tiling": {
+    "tile": 128,
+    "margin": 26,
+    "ramp": 8,
+    "multiple": 4
+  },
+  "parity": [
+    "cpu"
+  ],
+  "sharpen": {
+    "encoder": {
+      "file": "encoder-f32.onnx",
+      "sha256": "381ba44af975919157f4b1f97dd9223e6ab361acbf5c1d46f736d12460ba5859",
+      "input": "stamp",
+      "output": "vector",
+      "planes": [
+        "peak",
+        "wings"
+      ],
+      "side": 129,
+      "wings": 0.001,
+      "features": 8
+    },
+    "vector": {
+      "tensor": "vector",
+      "dimensions": [
+        "map_height",
+        "map_width"
+      ]
+    },
+    "residual": "asinh",
+    "floor_px": 1.5,
+    "sharpest": 0.25,
+    "strengths": {
+      "stars": 0.46,
+      "rest": 0.5
+    },
+    "psf": {
+      "components": 3,
+      "minimum_stars": 10,
+      "maximum_stars": 400,
+      "minimum_snr": 30.0,
+      "detection_sigma": 5.0,
+      "isolation_magnitudes": 5.0,
+      "grid_px": 96,
+      "width_core": 0.05
+    },
+    "points": {
+      "noise_reduction_radius": 0,
+      "clip_peaks": 300,
+      "peak_block": 16,
+      "core_radius": 24.0
+    }
+  }
+}

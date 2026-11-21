@@ -169,6 +169,19 @@ test can run the tools. A change to the map moves it up by one;
 `exchange::tests::the_map_matches_its_version` pins the map and fails
 until both are done.
 
+`seiza_model::OUTPUT_VERSION` gives the version of `seiza-model` whose
+learned-model output a build reproduces; hosts key restored and sharpened
+images on it with the model's `card_sha256`, backend and precision. It has no
+`output_version` test. Its cases are the fixtures under
+`seiza-model/tests/fixtures`, recorded with the trainer's Python, which
+`cargo test -p seiza-model` holds a run's reading of an image to, and
+`--test runtime --test sharpen` a tiny model's output, with
+`SEIZA_ONNXRUNTIME` set. A change that moves them, in `seiza-model` or in
+the `seiza-stars` star detection and PSF field a sharpening run calls, is a
+change to what models were trained on: the trainer makes it too, the
+fixtures are recorded again, and `OUTPUT_VERSION` moves to the crate's next
+minor version.
+
 ## Other rules
 
 - Which crate to depend on, and how releases work: `RELEASE.md`.

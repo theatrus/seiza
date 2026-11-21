@@ -7,7 +7,9 @@
 //! this crate links nothing native.
 //!
 //! A shipped model takes an image and nothing else, from any stacker. Whatever
-//! else it reads is made from that image, as its [`ModelCard`] says.
+//! else it reads is made from that image, as its [`ModelCard`] says: a noise
+//! model ([`NoiseModel`]) its noise map, and a sharpening model
+//! ([`SharpenModel`]) its PSF field and point sources besides.
 //!
 //! ```no_run
 //! use seiza_model::{
@@ -38,7 +40,11 @@ mod model;
 mod noise;
 #[cfg(test)]
 mod parity;
+mod psf;
 mod session;
+mod sharpen;
+#[cfg(test)]
+mod sharpen_parity;
 mod sky;
 mod stats;
 mod store;
@@ -51,14 +57,16 @@ pub use backend::{
 pub use bands::NoiseBands;
 pub use bundle::{
     GraphFile, GraphInput, HoleGuard, InputPlane, ModelBundle, ModelCard, NoiseInput, NoisePlane,
-    Reading, SkyInput, Task, TilingCard,
+    PointsReading, PsfReading, Reading, ResidualMode, ScaledCard, SharpenCard, SkyInput,
+    StampEncoder, StampPlane, Strengths, Task, TilingCard, VectorInput,
 };
 pub use error::ModelError;
 #[cfg(feature = "files")]
-pub use file::{FileError, FileRestoration, RestorationArea, RestorationImage};
+pub use file::{FileError, FileRestoration, FileSharpening, RestorationArea, RestorationImage};
 pub use model::{
     ChannelScales, DenoiseOptions, DenoiseReport, Denoised, ImageView, NoiseModel, Progress,
 };
+pub use sharpen::{SharpenModel, SharpenOptions, SharpenReport, Sharpened, SharpenedChannel};
 pub use store::ModelStore;
 #[cfg(feature = "download")]
 pub use store::Published;

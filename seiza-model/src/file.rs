@@ -2,6 +2,7 @@
 
 use crate::{
     DenoiseOptions, DenoiseReport, Denoised, ImageView, ModelError, NoiseBands, NoiseModel,
+    SharpenModel, SharpenOptions, SharpenReport, Sharpened,
 };
 use seiza_fits::{BayerPattern, FitsError, HeaderValue, WriteHeaderCard};
 use seiza_image_io::{Cause, read_header, read_window};
@@ -102,6 +103,57 @@ impl RestorationImage {
             None => OutputSource::Center(self.image),
         };
         Ok(FileRestoration { source, denoised })
+    }
+
+    /// Sharpen the image. Its PSF, point sources and noise are measured from
+    /// the pixels read, so a center crop is measured as the small image it
+    /// is, and may hold too few stars.
+    pub fn sharpen(
+        self,
+        model: &mut SharpenModel,
+        options: &SharpenOptions<'_>,
+    ) -> Result<FileSharpening, FileError> {
+        let image = &self.image;
+        let view = ImageView::new(&image.data, image.width, image.height, image.channels)?;
+        let sharpened = model.sharpen(view, options)?;
+        Ok(FileSharpening {
+            headers: self.headers,
+            sharpened,
+        })
+    }
+}
+
+/// The result of sharpening a whole file or its center.
+pub struct FileSharpening {
+    headers: Option<Vec<(String, HeaderValue)>>,
+    sharpened: Sharpened,
+}
+
+impl FileSharpening {
+    /// The model, graph and backend used for this run, and what was asked.
+    pub fn report(&self) -> &SharpenReport {
+        &self.sharpened.report
+    }
+
+    /// The sharpened pixels, laid out as the file's were.
+    pub fn sharpened(&self) -> &Sharpened {
+        &self.sharpened
+    }
+
+    /// Write the full linear result with the original geometry and provenance.
+    pub fn write_linear(&self, path: &Path) -> Result<(), FileError> {
+        let Some(headers) = &self.headers else {
+            return Err(FileError::OutputArea);
+        };
+        let result = &self.sharpened;
+        let image = LinearImage::new(
+            result.width(),
+            result.height(),
+            result.channels(),
+            result.image().to_vec(),
+        )?;
+        write_processed_image_fits_f32(path, &image, headers, &sharpen_cards(self.report()))?;
+        Ok(())
     }
 }
 
@@ -248,6 +300,73 @@ fn open_center(path: &Path) -> Result<LinearImage, FileError> {
     LinearImage::new(window.width, window.height, window.planes, data).map_err(Into::into)
 }
 
+fn sharpen_cards(report: &SharpenReport) -> Vec<WriteHeaderCard> {
+    let text = |key: &str, value: String, comment: &str| {
+        WriteHeaderCard::new(key, HeaderValue::String(value)).with_comment(comment)
+    };
+    let number = |key: &str, value: f32, comment: &str| {
+        WriteHeaderCard::new(key, HeaderValue::Float(f64::from(value))).with_comment(comment)
+    };
+    vec![
+        text("SEIZAMDL", report.model.clone(), "Seiza learned model"),
+        text("SEIZATRF", "LINEAR".to_string(), "linear sample transfer"),
+        text(
+            "MDHASH",
+            report.sha256.chars().take(16).collect(),
+            "model graph SHA-256, first 16",
+        ),
+        text(
+            "MDCARD",
+            report.card_sha256.chars().take(16).collect(),
+            "model card SHA-256, first 16",
+        ),
+        text("MDBACKND", report.backend.to_string(), "backend requested"),
+        text("MDPREC", report.precision.to_string(), "graph precision"),
+        WriteHeaderCard::new(
+            "MDTILE",
+            HeaderValue::Integer(i64::try_from(report.tile).unwrap_or(i64::MAX)),
+        )
+        .with_comment("tile side in pixels"),
+        number(
+            "MDSTARS",
+            report.stars,
+            "share of their width stars are brought to",
+        ),
+        number("MDREST", report.rest, "share asked of what is not a star"),
+        number(
+            "MDROLL",
+            report.rolloff,
+            "fine change held back under this noise",
+        ),
+        WriteHeaderCard::new(
+            "MDBIN",
+            HeaderValue::Integer(
+                report
+                    .channels
+                    .iter()
+                    .map(|channel| channel.binned)
+                    .max()
+                    .map_or(1, |binned| i64::try_from(binned).unwrap_or(i64::MAX)),
+            ),
+        )
+        .with_comment("also sharpened binned this much, 1 not"),
+        WriteHeaderCard::new("MDFULL", HeaderValue::Logical(report.full_size_only))
+            .with_comment("held to full size"),
+        text(
+            "MDVERS",
+            crate::OUTPUT_VERSION.to_string(),
+            "seiza-model output version",
+        ),
+    ]
+    .into_iter()
+    .chain(
+        report
+            .binned_rest
+            .map(|rest| number("MDBREST", rest, "share asked of the rest binned")),
+    )
+    .collect()
+}
+
 fn operation_cards(report: &DenoiseReport, bands: &NoiseBands) -> Vec<WriteHeaderCard> {
     let text = |key: &str, value: String, comment: &str| {
         WriteHeaderCard::new(key, HeaderValue::String(value)).with_comment(comment)
@@ -387,5 +506,79 @@ mod tests {
         };
         let cards = operation_cards(&guarded, &NoiseBands::default());
         assert!(cards.iter().any(|card| card.keyword() == "MDHOLES"));
+    }
+
+    #[test]
+    fn a_sharpening_s_cards_record_what_was_asked() {
+        let report = SharpenReport {
+            model: "sharpen-test".to_string(),
+            sha256: "0123456789abcdef0123".to_string(),
+            card_sha256: "fedcba9876543210fedc".to_string(),
+            backend: crate::Backend::Cpu,
+            precision: crate::Precision::F32,
+            tile: 512,
+            stars: 0.46,
+            rest: 0.5,
+            rolloff: 0.0,
+            binned_rest: None,
+            full_size_only: true,
+            channels: Vec::new(),
+        };
+        let cards = sharpen_cards(&report);
+        let value = |key: &str| {
+            cards
+                .iter()
+                .find(|card| card.keyword() == key)
+                .map(|card| card.value().clone())
+        };
+        assert_eq!(
+            value("SEIZAMDL"),
+            Some(HeaderValue::String("sharpen-test".to_string()))
+        );
+        assert_eq!(
+            value("MDCARD"),
+            Some(HeaderValue::String("fedcba9876543210".to_string()))
+        );
+        assert_eq!(value("MDREST"), Some(HeaderValue::Float(0.5)));
+        assert!(value("MDSTARS").is_some() && value("MDROLL").is_some());
+        assert!(value("MDHIGH").is_none(), "no noise bands in a sharpening");
+        assert!(cards.iter().all(|card| card.keyword().len() <= 8));
+        assert_eq!(value("MDBIN"), Some(HeaderValue::Integer(1)));
+        assert_eq!(value("MDFULL"), Some(HeaderValue::Logical(true)));
+        assert!(
+            value("MDBREST").is_none(),
+            "no binned ask held to full size"
+        );
+
+        // Binned, the cards say by how much and what the rest was asked there.
+        let channel = |binned| crate::SharpenedChannel {
+            background: 0.1,
+            noise: 0.01,
+            psf_nodes: (3, 4),
+            psf_stars: 120,
+            psf_global: false,
+            psf_width_px: 11.5,
+            points: 400,
+            binned,
+        };
+        let binned = SharpenReport {
+            binned_rest: Some(0.35),
+            full_size_only: false,
+            channels: vec![channel(3), channel(1)],
+            ..report
+        };
+        let cards = sharpen_cards(&binned);
+        let value = |key: &str| {
+            cards
+                .iter()
+                .find(|card| card.keyword() == key)
+                .map(|card| card.value().clone())
+        };
+        assert_eq!(value("MDBIN"), Some(HeaderValue::Integer(3)));
+        assert_eq!(value("MDFULL"), Some(HeaderValue::Logical(false)));
+        assert_eq!(
+            value("MDBREST"),
+            Some(HeaderValue::Float(f64::from(0.35_f32)))
+        );
     }
 }

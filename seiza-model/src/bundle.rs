@@ -22,13 +22,30 @@ pub(crate) const CARD_FILE: &str = "card.json";
 pub enum Task {
     /// Takes out noise.
     Denoise,
+    /// Brings an image's PSF to a narrower one.
+    Sharpen,
 }
 
 impl fmt::Display for Task {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Denoise => "denoise",
+            Self::Sharpen => "sharpen",
         })
+    }
+}
+
+impl std::str::FromStr for Task {
+    type Err = ModelError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text {
+            "denoise" => Ok(Self::Denoise),
+            "sharpen" => Ok(Self::Sharpen),
+            other => Err(ModelError::InvalidOption(format!(
+                "a model's task is denoise or sharpen, not {other:?}"
+            ))),
+        }
     }
 }
 
@@ -60,6 +77,14 @@ pub enum InputPlane {
     Image,
     /// The noise input, read as [`NoisePlane`] says.
     Noise,
+    /// The width a sharpening model is asked to bring each star to, as a
+    /// share of its own: FWHM(target) / FWHM(image), at every pixel.
+    Ratio,
+    /// The same share, asked of everything that is not a star.
+    NonstellarRatio,
+    /// The image's point sources, rendered with the local PSF, as
+    /// `asinh(p / σ̄)`.
+    Points,
 }
 
 impl fmt::Display for InputPlane {
@@ -67,6 +92,9 @@ impl fmt::Display for InputPlane {
         f.write_str(match self {
             Self::Image => "image",
             Self::Noise => "noise",
+            Self::Ratio => "ratio",
+            Self::NonstellarRatio => "nonstellar-ratio",
+            Self::Points => "points",
         })
     }
 }
@@ -181,6 +209,183 @@ impl TilingCard {
     }
 }
 
+/// What one plane of a PSF stamp holds, as a sharpening model's encoder reads
+/// it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StampPlane {
+    /// The stamp over its peak.
+    Peak,
+    /// `asinh(s / (peak · wings)) / asinh(1 / wings)`, which shows the wings.
+    Wings,
+}
+
+/// How a sharpening model's residual meets the image.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ResidualMode {
+    /// Added to the asinh of the image in σ̄, and taken back through sinh.
+    Asinh,
+    /// Added to the image in σ̄.
+    Linear,
+}
+
+/// The graph that reduces a PSF stamp to the vector a sharpening model's body
+/// reads. It is single precision and runs on ONNX Runtime's CPU provider
+/// whatever runs the body, once for each node of the PSF field, so the
+/// vectors are the same on every backend.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StampEncoder {
+    /// The file's name in the bundle.
+    pub file: String,
+    /// The file's SHA-256, in hexadecimal.
+    pub sha256: String,
+    /// The graph's input tensor: the stamp's planes.
+    pub input: String,
+    /// The graph's output tensor: the vector.
+    pub output: String,
+    /// The planes the stamp is read as, in order.
+    pub planes: Vec<StampPlane>,
+    /// The stamp's side in pixels, odd. A PSF field's stamp is cut or padded
+    /// to it about its middle.
+    pub side: usize,
+    /// The share of the peak the [`StampPlane::Wings`] plane is scaled by.
+    pub wings: f64,
+    /// The vector's length.
+    pub features: usize,
+}
+
+/// The body's tensor that holds the encoder's vectors as a map: one vector
+/// for each pixel of the network's coarsest grid, a tile's side over the
+/// tiling's multiple each way.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VectorInput {
+    /// The tensor's name in the graph.
+    pub tensor: String,
+    /// The graph's free dimensions for the map's height and width.
+    pub dimensions: Vec<String>,
+}
+
+/// The shares of their width a sharpening brings things to: 1 leaves them as
+/// they are, and less is sharper.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Strengths {
+    /// The share of its width every star is brought to.
+    pub stars: f64,
+    /// The share asked of everything that is not a star. A model with no
+    /// [`InputPlane::NonstellarRatio`] plane does not read it.
+    pub rest: f64,
+}
+
+/// How the image's PSF field is measured: [`seiza_stars::PsfFieldOptions`]'
+/// settings of the same names, and how the field is sampled.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PsfReading {
+    /// Principal components beyond the mean PSF.
+    pub components: usize,
+    /// The fewest stars a varying field is fitted from. With fewer, one PSF
+    /// is fitted for the whole image.
+    pub minimum_stars: usize,
+    /// The most stars the core is fitted from.
+    pub maximum_stars: usize,
+    /// The lowest signal-to-noise ratio of a star that gives the core.
+    pub minimum_snr: f64,
+    /// The detection threshold, in noise σ.
+    pub detection_sigma: f64,
+    /// How much fainter than a star a near neighbour may be.
+    pub isolation_magnitudes: f64,
+    /// The most the field's nodes are apart, in pixels. Both edges of each
+    /// axis hold a node.
+    pub grid_px: usize,
+    /// A stamp's width is a round Gaussian's, fitted to the pixels at this
+    /// share of its peak or more.
+    pub width_core: f64,
+}
+
+/// How the image's point sources are found.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PointsReading {
+    /// The detector's noise reduction radius; 0 detects on the image
+    /// unsmoothed.
+    pub noise_reduction_radius: usize,
+    /// The clip level is read from this many of the brightest objects' peaks.
+    pub clip_peaks: usize,
+    /// An object's peak is the largest value of a block of this side that
+    /// is the largest of the 3 × 3 blocks about it.
+    pub peak_block: usize,
+    /// A clipped core within this many pixels of a brighter one, or of a
+    /// detected star, is the same star.
+    pub core_radius: f64,
+}
+
+/// What a sharpening model reads beyond a noise model's card. Everything it
+/// names is made from the image alone.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SharpenCard {
+    /// The stamp encoder.
+    pub encoder: StampEncoder,
+    /// The body's vector map.
+    pub vector: VectorInput,
+    /// How the residual meets the image.
+    pub residual: ResidualMode,
+    /// The narrowest a star is asked to be, in pixels of its stamp's width.
+    pub floor_px: f64,
+    /// The sharpest share the model was trained to be asked for. A run may
+    /// ask for less, and is then outside what the model has seen.
+    pub sharpest: f64,
+    /// The shares a run asks for when its caller names none.
+    pub strengths: Strengths,
+    /// How the PSF field is measured.
+    pub psf: PsfReading,
+    /// How the point sources are found.
+    pub points: PointsReading,
+    /// How an image whose stars are far wider than the model was trained on
+    /// is also sharpened binned. None: never.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scaled: Option<ScaledCard>,
+}
+
+/// The scaled pass: an image whose stars are far wider than `stars_px` is
+/// also sharpened binned toward it, and the two runs are put together by
+/// scale. The binned run's change makes everything finer than a Gaussian
+/// of `blend` times the stars' width, and the full-size run's everything
+/// coarser, except at the stars, which keep the full-size change (`stars`).
+/// An image is binned by the whole number of pixels a side that brings its
+/// stars nearest `stars_px`, and only by 2 or more.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScaledCard {
+    /// The stars' width, in pixels, an image is binned toward.
+    pub stars_px: f64,
+    /// The share of the stars' width, as a Gaussian's σ, below which the
+    /// change is the binned run's.
+    pub blend: f64,
+    /// The share asked of everything that is not a star on the binned
+    /// image, when a caller names none. A model with no
+    /// [`InputPlane::NonstellarRatio`] plane does not read it.
+    pub rest: f64,
+    /// Where a listed star's light, rendered with its node's PSF (the
+    /// point-source plane the network reads), is at least this many times
+    /// the pixel noise, the full-size output is kept whole, and the blend
+    /// fades in below that. Brought back up from the binned grid, a star's
+    /// change is square, with a dark moat where the cubic's negative lobes
+    /// fall. 0: the blend at the stars too. A card without it takes 2.
+    #[serde(default = "scaled_stars")]
+    pub stars: f64,
+}
+
+/// The star light, in the pixel noise, from which a star keeps the
+/// full-size change, where a card's scaled pass does not say.
+fn scaled_stars() -> f64 {
+    2.0
+}
+
 /// One of a bundle's graphs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphFile {
@@ -218,6 +423,10 @@ pub struct ModelCard {
     /// The backends the model has passed parity on. Empty allows every one.
     #[serde(default)]
     pub parity: Vec<String>,
+    /// What a sharpening model reads besides: present exactly when `task`
+    /// is [`Task::Sharpen`]. Its `graphs` are then the body's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sharpen: Option<SharpenCard>,
 }
 
 impl ModelCard {
@@ -267,6 +476,60 @@ impl ModelCard {
         if count(InputPlane::Noise) > 1 {
             return refuse(format!("{} reads the noise input twice", self.name));
         }
+        let asked = [
+            InputPlane::Ratio,
+            InputPlane::NonstellarRatio,
+            InputPlane::Points,
+        ];
+        match (self.task, &self.sharpen) {
+            (Task::Denoise, None) => {
+                if let Some(plane) = asked.into_iter().find(|&plane| count(plane) > 0) {
+                    return refuse(format!(
+                        "{} is a noise model, which has no {plane} plane",
+                        self.name
+                    ));
+                }
+            }
+            (Task::Sharpen, Some(sharpen)) => {
+                if count(InputPlane::Ratio) != 1 {
+                    return refuse(format!("{} must read the ratio once", self.name));
+                }
+                if let Some(plane) = asked.into_iter().find(|&plane| count(plane) > 1) {
+                    return refuse(format!("{} reads the {plane} plane twice", self.name));
+                }
+                if self.inputs.len() != 1 {
+                    return refuse(format!("{} must read its planes as one tensor", self.name));
+                }
+                // A sharpening run reads every other setting of `reading` as
+                // a noise run does; `flat_block` goes with a flat sky alone.
+                if self.reading.holes.is_some() {
+                    return refuse(format!(
+                        "{} is a sharpening model, which has no hole guard",
+                        self.name
+                    ));
+                }
+                if self.reading.sky != SkyInput::Global {
+                    return refuse(format!(
+                        "{} is a sharpening model, which reads the sky as one background, not \
+                         flattened",
+                        self.name
+                    ));
+                }
+                sharpen.check(self)?;
+            }
+            (Task::Denoise, Some(_)) => {
+                return refuse(format!(
+                    "{} is a noise model with a sharpening section",
+                    self.name
+                ));
+            }
+            (Task::Sharpen, None) => {
+                return refuse(format!(
+                    "{} is a sharpening model with no sharpening section",
+                    self.name
+                ));
+            }
+        }
         if self.graphs.is_empty() {
             return refuse(format!("{} names no graph", self.name));
         }
@@ -298,13 +561,149 @@ impl ModelCard {
         if self.name.is_empty() || name.file_name() != Some(name.as_os_str()) {
             return refuse(format!("{:?} cannot name a model's directory", self.name));
         }
-        for graph in &self.graphs {
-            let file = Path::new(&graph.file);
+        for name in self.files() {
+            let file = Path::new(name);
             if file.file_name() != Some(file.as_os_str()) {
-                return refuse(format!("{:?} is not a file in the bundle", graph.file));
+                return refuse(format!("{name:?} is not a file in the bundle"));
             }
         }
         Ok(())
+    }
+
+    /// Every file the card names besides itself: its graphs, and a
+    /// sharpening model's encoder.
+    pub(crate) fn files(&self) -> impl Iterator<Item = &str> {
+        self.graphs.iter().map(|graph| graph.file.as_str()).chain(
+            self.sharpen
+                .iter()
+                .map(|sharpen| sharpen.encoder.file.as_str()),
+        )
+    }
+}
+
+impl SharpenCard {
+    /// Refuse a section a run could not follow.
+    fn check(&self, card: &ModelCard) -> Result<(), ModelError> {
+        let name = &card.name;
+        let refuse = |reason: String| Err(ModelError::ModelContract(format!("{name} {reason}")));
+        let positive = |value: f64| value > 0.0 && value.is_finite();
+        let share = |value: f64| value > 0.0 && value <= 1.0;
+        let encoder = &self.encoder;
+        if encoder.side.is_multiple_of(2) || !(9..=1025).contains(&encoder.side) {
+            return refuse(format!(
+                "reads a stamp of {} pixels, which must be odd and 9 to 1025",
+                encoder.side
+            ));
+        }
+        if encoder.planes.is_empty() || encoder.features == 0 || encoder.features > 4096 {
+            return refuse("names an encoder with no planes or no vector".to_string());
+        }
+        if !(positive(encoder.wings) && encoder.wings < 1.0) {
+            return refuse(format!(
+                "scales a stamp's wings by {}, which must lie between 0 and 1",
+                encoder.wings
+            ));
+        }
+        if self.vector.dimensions.len() != 2
+            || card.dimensions.len() != 2
+            || self
+                .vector
+                .dimensions
+                .iter()
+                .any(|dimension| card.dimensions.contains(dimension))
+        {
+            return refuse(
+                "must leave its body's height and width free, and its vector map's, under four \
+                 names"
+                    .to_string(),
+            );
+        }
+        if card
+            .inputs
+            .iter()
+            .any(|input| input.tensor == self.vector.tensor)
+        {
+            return refuse(format!("names {} twice", self.vector.tensor));
+        }
+        if !(positive(self.floor_px) && share(self.sharpest)) {
+            return refuse(format!(
+                "needs a positive floor and a sharpest share up to 1, not {} and {}",
+                self.floor_px, self.sharpest
+            ));
+        }
+        if !(share(self.strengths.stars) && share(self.strengths.rest)) {
+            return refuse(format!(
+                "asks for shares of {} and {}, which must be above 0 and at most 1",
+                self.strengths.stars, self.strengths.rest
+            ));
+        }
+        if self.psf.grid_px == 0 || !(positive(self.psf.width_core) && self.psf.width_core < 1.0) {
+            return refuse("names a PSF grid of no pixels or a core of no share".to_string());
+        }
+        let options = self.psf.options(seiza_stars::SparseFieldPolicy::Refuse);
+        if let Err(error) = options.validate() {
+            return refuse(format!(
+                "measures its PSF field with settings refused: {error}"
+            ));
+        }
+        if self.points.peak_block == 0 || self.points.clip_peaks == 0 {
+            return refuse(
+                "finds clipped cores in blocks of no pixels or from no peaks".to_string(),
+            );
+        }
+        if !(self.points.core_radius >= 0.0 && self.points.core_radius.is_finite()) {
+            return refuse(format!(
+                "merges clipped cores within {} pixels, which must be finite and not negative",
+                self.points.core_radius
+            ));
+        }
+        if let Some(scaled) = &self.scaled
+            && !(positive(scaled.stars_px) && positive(scaled.blend) && share(scaled.rest))
+        {
+            return refuse(format!(
+                "bins toward stars {} px across, blends at {} of their width and asks {} of the \
+                 rest binned: the first two must be positive and the last above 0 and at most 1",
+                scaled.stars_px, scaled.blend, scaled.rest
+            ));
+        }
+        if let Some(scaled) = &self.scaled
+            && !(scaled.stars >= 0.0 && scaled.stars.is_finite())
+        {
+            return refuse(format!(
+                "keeps a star's full-size change from {} times the noise, which must be finite and \
+                 not negative",
+                scaled.stars
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl PsfReading {
+    /// The settings [`seiza_stars::PsfField::measure`] takes, with `sparse`
+    /// saying what too few stars lead to. Each is the card's or named here,
+    /// never `seiza-stars`' default, so a default changed there leaves a run
+    /// as it was.
+    pub fn options(&self, sparse: seiza_stars::SparseFieldPolicy) -> seiza_stars::PsfFieldOptions {
+        seiza_stars::PsfFieldOptions {
+            components: self.components,
+            minimum_stars: self.minimum_stars,
+            maximum_stars: self.maximum_stars,
+            minimum_snr: self.minimum_snr,
+            detection_sigma: self.detection_sigma,
+            isolation_magnitudes: self.isolation_magnitudes,
+            sparse,
+            // Left to the field, which takes each from the image as the
+            // harness's measurement did: the stamp's side (a run then cuts or
+            // pads each stamp to the encoder's), the level stars saturate at,
+            // from the brightest stars' common clip level, and the degree its
+            // components follow, by how well each predicts stars held out.
+            // These are how the field is measured rather than settings, and
+            // the fixtures hold them to the harness's.
+            stamp_size: None,
+            saturation: None,
+            degree: None,
+        }
     }
 }
 
@@ -386,7 +785,26 @@ impl ModelBundle {
         self.card
             .graphs
             .iter()
-            .try_for_each(|graph| self.verify_graph(graph))
+            .try_for_each(|graph| self.verify_graph(graph))?;
+        self.verify_encoder()
+    }
+
+    /// Refuse a sharpening model's encoder whose file does not match the
+    /// card. A noise model has none.
+    pub(crate) fn verify_encoder(&self) -> Result<(), ModelError> {
+        let Some(sharpen) = &self.card.sharpen else {
+            return Ok(());
+        };
+        let file = self.root.join(&sharpen.encoder.file);
+        let found = sha256_of(&file)?;
+        if found != sharpen.encoder.sha256 {
+            return Err(ModelError::HashMismatch {
+                file,
+                expected: sharpen.encoder.sha256.clone(),
+                found,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -434,6 +852,156 @@ pub(crate) mod tests {
             }}"#
         );
         std::fs::write(root.join(CARD_FILE), card).unwrap();
+    }
+
+    /// A sharpening bundle of two small files and its card.
+    pub(crate) fn write_sharpen_bundle(root: &Path, name: &str) {
+        std::fs::create_dir_all(root).unwrap();
+        std::fs::write(root.join("body-f32.onnx"), b"body").unwrap();
+        std::fs::write(root.join("encoder-f32.onnx"), b"encoder").unwrap();
+        let body = sha256_of(&root.join("body-f32.onnx")).unwrap();
+        let encoder = sha256_of(&root.join("encoder-f32.onnx")).unwrap();
+        let card = format!(
+            r#"{{
+              "format": 1, "name": "{name}", "task": "sharpen",
+              "graphs": [{{"precision": "f32", "file": "body-f32.onnx", "sha256": "{body}"}}],
+              "inputs": [{{"tensor": "planes",
+                           "planes": ["image", "noise", "ratio", "nonstellar-ratio", "points"]}}],
+              "output": "residual",
+              "dimensions": ["height", "width"],
+              "reading": {{"noise_map": "image", "noise_plane": "asinh", "sky": "global",
+                           "sky_block": 32, "flat_block": 256, "image_map_scale": 1.13,
+                           "noise_correlation": 1.24}},
+              "tiling": {{"tile": 512, "margin": 122, "ramp": 32, "multiple": 16}},
+              "sharpen": {{
+                "encoder": {{"file": "encoder-f32.onnx", "sha256": "{encoder}", "input": "stamp",
+                             "output": "vector", "planes": ["peak", "wings"], "side": 129,
+                             "wings": 0.001, "features": 64}},
+                "vector": {{"tensor": "vector", "dimensions": ["map_height", "map_width"]}},
+                "residual": "asinh", "floor_px": 1.5, "sharpest": 0.25,
+                "strengths": {{"stars": 0.46, "rest": 0.5}},
+                "psf": {{"components": 3, "minimum_stars": 30, "maximum_stars": 400,
+                         "minimum_snr": 30.0, "detection_sigma": 5.0,
+                         "isolation_magnitudes": 5.0, "grid_px": 256, "width_core": 0.05}},
+                "points": {{"noise_reduction_radius": 0, "clip_peaks": 300, "peak_block": 16,
+                            "core_radius": 24.0}}
+              }}
+            }}"#
+        );
+        std::fs::write(root.join(CARD_FILE), card).unwrap();
+    }
+
+    #[test]
+    fn a_sharpening_card_reads_back_and_refuses_what_a_run_could_not_follow() {
+        let temp = tempfile::tempdir().unwrap();
+        write_sharpen_bundle(temp.path(), "sharpen-test");
+        let bundle = ModelBundle::open(temp.path()).unwrap();
+        let card = bundle.card();
+        assert_eq!(card.task, Task::Sharpen);
+        assert_eq!(card.planes().len(), 5);
+        let sharpen = card.sharpen.as_ref().unwrap();
+        assert_eq!(sharpen.residual, ResidualMode::Asinh);
+        assert_eq!(
+            sharpen.encoder.planes,
+            [StampPlane::Peak, StampPlane::Wings]
+        );
+        assert_eq!(sharpen.psf.grid_px, 256);
+        assert_eq!(
+            sharpen.scaled, None,
+            "a card without the scaled pass never bins"
+        );
+        bundle.verify().unwrap();
+
+        let path = temp.path().join(CARD_FILE);
+        let mut good: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let json = |text: &str| serde_json::from_str::<serde_json::Value>(text).unwrap();
+        // A card that does not say from what light a star keeps the full-size
+        // change takes 2 times the noise.
+        good["sharpen"]["scaled"] = json(r#"{"stars_px": 3.5, "blend": 0.5, "rest": 0.35}"#);
+        std::fs::write(&path, serde_json::to_vec(&good).unwrap()).unwrap();
+        let scaled = ModelBundle::open(temp.path()).unwrap();
+        assert_eq!(
+            scaled.card().sharpen.as_ref().unwrap().scaled,
+            Some(ScaledCard {
+                stars_px: 3.5,
+                blend: 0.5,
+                rest: 0.35,
+                stars: 2.0
+            })
+        );
+        good["sharpen"]["scaled"]["stars"] = json("0");
+        std::fs::write(&path, serde_json::to_vec(&good).unwrap()).unwrap();
+        let everywhere = ModelBundle::open(temp.path()).unwrap();
+        assert_eq!(
+            everywhere
+                .card()
+                .sharpen
+                .as_ref()
+                .unwrap()
+                .scaled
+                .unwrap()
+                .stars,
+            0.0,
+            "0 blends at the stars too"
+        );
+        for (pointer, value) in [
+            ("/task", json(r#""denoise""#)),
+            ("/sharpen", serde_json::Value::Null),
+            ("/sharpen/encoder/side", json("128")),
+            ("/sharpen/encoder/file", json(r#""../encoder.onnx""#)),
+            ("/sharpen/encoder/wings", json("0")),
+            ("/sharpen/vector/tensor", json(r#""planes""#)),
+            ("/sharpen/vector/dimensions", json(r#"["height", "width"]"#)),
+            ("/sharpen/floor_px", json("0")),
+            ("/sharpen/strengths/stars", json("1.5")),
+            ("/sharpen/psf/grid_px", json("0")),
+            ("/sharpen/psf/minimum_stars", json("1")),
+            ("/sharpen/points/peak_block", json("0")),
+            ("/sharpen/residual", json(r#""log""#)),
+            ("/sharpen/stars", json("true")),
+            ("/sharpen/scaled/stars_px", json("0")),
+            ("/sharpen/scaled/blend", json("-0.5")),
+            ("/sharpen/scaled/rest", json("1.5")),
+            ("/sharpen/scaled/stars", json("-1")),
+            ("/sharpen/scaled/least", json("2")),
+            ("/inputs/0/planes", json(r#"["image", "noise", "points"]"#)),
+            (
+                "/reading/holes",
+                json(r#"{"depth": 30.0, "margin": 3, "fill_radius": 12, "restore": 5.0}"#),
+            ),
+            // A sharpening run reads the sky as one background: a card that
+            // asks for it flattened is refused, not read as global.
+            ("/reading/sky", json(r#""flat""#)),
+        ] {
+            let mut card = good.clone();
+            match card.pointer_mut(pointer) {
+                Some(slot) => *slot = value,
+                None => {
+                    let (parent, key) = pointer.rsplit_once('/').unwrap();
+                    card.pointer_mut(parent).unwrap()[key] = value;
+                }
+            }
+            std::fs::write(&path, serde_json::to_vec(&card).unwrap()).unwrap();
+            assert!(
+                matches!(
+                    ModelBundle::open(temp.path()),
+                    Err(ModelError::ModelContract(_))
+                ),
+                "{pointer}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_noise_card_has_no_sharpening_planes() {
+        let temp = tempfile::tempdir().unwrap();
+        write_bundle(temp.path(), "noise-test", "constant");
+        let path = temp.path().join(CARD_FILE);
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, text.replace(r#""noise"]"#, r#""noise", "ratio"]"#)).unwrap();
+        let error = ModelBundle::open(temp.path()).unwrap_err();
+        assert!(error.to_string().contains("ratio"), "{error}");
     }
 
     #[test]

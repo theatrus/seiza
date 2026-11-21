@@ -611,10 +611,50 @@ A cache of results keys on `report.card_sha256`, the backend, the precision and
 `MODEL_OUTPUT_VERSION`: the card names its graphs by their hashes and everything
 the image is read by, so the key changes whenever the output could.
 
+A `SharpenModel` brings an image's stars, and everything that is not a star, to
+a share of their width. It too takes the image alone, and measures the PSF and
+how it changes over the field, the point sources and the noise from it, each
+channel's on its own:
+
+```python
+model = seiza.SharpenModel("sharpen-v1")
+result = model.sharpen(stack, stars=0.46, rest=0.5, rolloff=0.0)
+sharp = result.image
+print(result.report.channels[0].psf_width_px, result.report.channels[0].points)
+```
+
+`model.sharpen_file("stack.fits", "sharp.fits")` does the same from one linear
+FITS or XISF file to another, keeping the input's geometry and recording what
+ran in the output's header. No sharpening model is published yet: open one from
+a bundle's directory, or install that directory with `install_model`.
+
+`stars` and `rest` are those shares: 1 leaves things as they are, and less is
+sharper. No star is asked to be narrower than the model's floor in pixels, and a
+share left out is the model's own, which `installed_models()` lists under
+`sharpen`. `rolloff` holds back the finest part of the change where it lies
+under that many times the image's noise. An image with too few stars to measure
+a PSF from raises `TooFewStarsError`.
+
+Where a model's card has a scaled pass (`installed_models()` lists its
+`scaled_px` under `sharpen`), an image whose stars are far wider than the model
+was trained on is also sharpened binned, by the whole number of pixels a side
+that brings its stars nearest `scaled_px`, and the two runs are put together by
+scale: the binned run makes the finest detail, the full-size run the rest, and
+the stars keep the full-size run's change, so they stay round.
+`binned_rest` is the share asked of what is not a star on the binned image (the
+card's own when left out), and `full_size_only=True` keeps a run at full size.
+`report.channels[0].binned` says how many pixels a side a channel was binned by,
+1 where it was not, as when the binned image has too few stars for a PSF. A
+cache of results keys on `report.card_sha256`, the backend, the precision,
+`stars`, `rest`, `rolloff`, `binned_rest`, `full_size_only` and
+`MODEL_OUTPUT_VERSION`.
+
 `seiza.model_backends()` says which backends run here and why the others do not,
 and `install_model`, `installed_models`, `verify_model` and `remove_model` manage
-the store. Invalid tile geometry is refused when opening or installing a bundle,
-before loading ONNX Runtime or replacing an installed model.
+the store. `verify_model()` with no name checks every installed model, noise and
+sharpening alike, against its card. Invalid tile geometry is refused when
+opening or installing a bundle, before loading ONNX Runtime or replacing an
+installed model.
 `model.denoise_file(path, center=True)` previews the center of a linear FITS or
 XISF. Its `write_comparison(original, restored)` uses one display stretch for
 both outputs. With `center=False`, `write_linear(path)` saves the full result
