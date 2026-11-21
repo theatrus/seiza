@@ -366,9 +366,11 @@ pub struct PointsReading {
     /// The detector's noise reduction radius; 0 detects on the image
     /// unsmoothed.
     pub noise_reduction_radius: usize,
-    /// The detector runs once with each of these, in turn. A star a later
-    /// run finds within `core_radius` of one already listed is the same
-    /// star; the others are added after them.
+    /// The detector runs once with each of these, in turn. The clipped
+    /// cores are found after the first run, against its stars alone, so
+    /// its list and cores are as with that removal alone. A star a later
+    /// run finds within `core_radius` of a point already listed, a core
+    /// among them, is the same star; the others are added after them.
     #[serde(default = "filtered_alone")]
     pub structure_removals: Vec<StructureRemoval>,
     /// The clip level is read from this many of the brightest objects' peaks.

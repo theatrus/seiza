@@ -479,10 +479,12 @@ fn clip_level(peaks: &[f64]) -> Option<f64> {
 }
 
 /// Every star the measuring detector finds on the image, unsmoothed, with
-/// each of the card's structure removals in turn, and the clipped cores it
-/// turns away, each at its brightest pixel with its peak alone. A star a
-/// later removal finds within the core radius of one already listed is the
-/// same star.
+/// the card's first structure removal; the clipped cores it turns away,
+/// each at its brightest pixel with its peak alone; then the stars each
+/// later removal finds beyond the core radius of every point listed before
+/// it. The first removal's list and its cores are so the same as with that
+/// removal alone, and a later removal's star near a clipped core does not
+/// take the core's place.
 pub(crate) fn detections(
     plane: &[f32],
     width: usize,
@@ -498,6 +500,11 @@ pub(crate) fn detections(
     let level = clip_level(&brightest);
     let (counts, scale) = scaled_counts(plane, width, height);
     let reach = reading.core_radius * reading.core_radius;
+    let near = |known: &[(f64, f64)], x: f64, y: f64| {
+        known
+            .iter()
+            .any(|&(kx, ky)| (kx - x).powi(2) + (ky - y).powi(2) <= reach)
+    };
     let mut known: Vec<(f64, f64)> = Vec::new();
     let mut points: Vec<Point> = Vec::new();
     for (pass, removal) in reading.structure_removals.iter().enumerate() {
@@ -506,14 +513,11 @@ pub(crate) fn detections(
             structure_removal: Some(removal.method()),
             ..Default::default()
         };
+        // Against the points listed before this removal, not each other.
         let listed = known.len();
         for star in options.detect(&counts, width, height).stars {
             let (x, y) = star.position;
-            if pass > 0
-                && known[..listed]
-                    .iter()
-                    .any(|&(kx, ky)| (kx - x).powi(2) + (ky - y).powi(2) <= reach)
-            {
+            if pass > 0 && near(&known[..listed], x, y) {
                 continue;
             }
             known.push((x, y));
@@ -524,20 +528,20 @@ pub(crate) fn detections(
                 peak: raw_peak(plane, width, height, x, y) as f32,
             });
         }
-    }
-    if let Some(level) = level {
-        for &(value, x, y) in peaks.iter().take_while(|peak| peak.0 >= level) {
-            let near = known
-                .iter()
-                .any(|&(kx, ky)| (kx - x).powi(2) + (ky - y).powi(2) <= reach);
-            if !near {
-                known.push((x, y));
-                points.push(Point {
-                    x: x as f32,
-                    y: y as f32,
-                    flux: f32::NAN,
-                    peak: value as f32,
-                });
+        if pass > 0 {
+            continue;
+        }
+        if let Some(level) = level {
+            for &(value, x, y) in peaks.iter().take_while(|peak| peak.0 >= level) {
+                if !near(&known, x, y) {
+                    known.push((x, y));
+                    points.push(Point {
+                        x: x as f32,
+                        y: y as f32,
+                        flux: f32::NAN,
+                        peak: value as f32,
+                    });
+                }
             }
         }
     }

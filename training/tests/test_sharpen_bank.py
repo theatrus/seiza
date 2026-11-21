@@ -148,11 +148,37 @@ def test_a_later_structure_removal_lists_only_the_stars_the_earlier_missed(monke
     assert table[:, psf_fields.DETECTION_COLUMNS.index("detected")].tolist() == [1.0] * 5
 
 
+def test_a_clipped_core_keeps_its_place_beside_a_later_removals_star(monkeypatch):
+    def star(x: float, y: float) -> SimpleNamespace:
+        return SimpleNamespace(x=x, y=y, flux=1000.0, fwhm=3.0, snr=50.0, eccentricity=0.1, saturated=False)
+
+    # The filtered run finds a star beside the second core; the à trous
+    # run a fainter neighbour 10 px from the first core, and one far away.
+    found = {"filtered": [star(100, 100), star(605, 100)], "atrous": [star(410, 400), star(200, 200)]}
+    monkeypatch.setattr(seiza, "detect_measured_stars",
+                        lambda counts, *, structure_removal, **options: SimpleNamespace(stars=found[structure_removal]))
+    monkeypatch.setattr(psf_fields, "block_peaks", lambda image: (np.array([60_000.0, 60_000.0, 100.0]),
+                                                                  np.array([400.0, 600.0, 50.0]),
+                                                                  np.array([400.0, 100.0, 50.0])))
+    monkeypatch.setattr(psf_fields, "clip_level", lambda peaks: 50_000.0)
+    table, level, _ = psf_fields.detections(np.zeros((SIDE, SIDE), dtype=np.float32))
+    # The filtered list and its cores as with that removal alone (the core
+    # beside a filtered star is that star); then the à trous star beyond
+    # the core radius of all of them. The neighbour does not take the
+    # first core's place.
+    assert level == 50_000.0
+    assert table[:, :2].tolist() == [[100, 100], [605, 100], [400, 400], [200, 200]]
+    assert table[:, psf_fields.DETECTION_COLUMNS.index("detected")].tolist() == [1.0, 1.0, 0.0, 1.0]
+
+
 def test_a_record_found_with_other_structure_removals_is_refreshed_and_keeps_its_field(store):
     row = product(store, "a/deep", field(1.5, seed=1, clip=30_000.0))
     record = psf_fields.measure(store, row)
     assert record["structure_removals"] == list(psf_fields.STRUCTURE_REMOVALS)
     assert psf_fields.refresh_detections(store, row)["status"] == "current"
+    # A list put together with the cores after every removal is stale.
+    assert psf_fields.stale_detections({**record, "detection_version": 1})
+    assert not psf_fields.stale_detections(record)
     # A record made before the removals were named listed the filtered
     # removal's stars alone.
     target = psf_fields.directory(store, "a/deep")
