@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Fetch Microsoft's ONNX Runtime for this system, check it against its pinned
-# hash, and lay out what a package ships in seiza-cli/onnxruntime under names
-# that do not change with the version. Prints the library's path.
+# Fetch Microsoft's ONNX Runtime for this system, from PSF Guard's copy or
+# Microsoft's own release, check it against its pinned hash, and lay out what
+# a package ships in seiza-cli/onnxruntime under names that do not change with
+# the version. Prints the library's path.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -40,13 +41,31 @@ case "$(uname -s)-$(uname -m)" in
     ;;
 esac
 
+# Microsoft's repository has returned 404 since about 2026-11-18, so PSF
+# Guard's release serves a copy of each archive, byte for byte. Microsoft's
+# address stays second in case it comes back. Either must match the pin.
+sources=(
+  "https://github.com/theatrus/psf-guard/releases/download/onnxruntime-$version"
+  "https://github.com/microsoft/onnxruntime/releases/download/v$version"
+)
+
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-curl -fsSL --retry 3 -o "$work/$archive" \
-  "https://github.com/microsoft/onnxruntime/releases/download/v$version/$archive"
-found=$(sha256sum "$work/$archive" 2>/dev/null || shasum -a 256 "$work/$archive")
-if [ "${found%% *}" != "$sum" ]; then
-  echo "$archive hashes to ${found%% *}, not the pinned $sum" >&2
+fetched=
+for source in "${sources[@]}"; do
+  if ! curl -fsSL --retry 3 -o "$work/$archive" "$source/$archive"; then
+    echo "could not download $archive from $source" >&2
+    continue
+  fi
+  found=$(sha256sum "$work/$archive" 2>/dev/null || shasum -a 256 "$work/$archive")
+  if [ "${found%% *}" = "$sum" ]; then
+    fetched=1
+    break
+  fi
+  echo "$archive from $source hashes to ${found%% *}, not the pinned $sum" >&2
+done
+if [ -z "$fetched" ]; then
+  echo "no source served the pinned $archive" >&2
   exit 1
 fi
 case "$archive" in

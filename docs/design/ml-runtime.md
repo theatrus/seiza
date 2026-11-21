@@ -452,8 +452,11 @@ Rust 1.92 check need nothing native, and `seiza.exe` keeps its static CRT. Each
 channel supplies the library its own way.
 
 The packages carry Microsoft's own build, pinned once in
-`packaging/onnxruntime.env`, which CI reads too. Its archives are mostly debug
-symbols, and the libraries themselves are small:
+`packaging/onnxruntime.env`, which CI reads too. Microsoft's GitHub repository
+has returned 404 since about 2026-11-18, so the archives come first from PSF
+Guard's release `onnxruntime-1.31.1`, which holds the same files byte for byte,
+and from Microsoft second, each checked against the pinned hash. Its archives
+are mostly debug symbols, and the libraries themselves are small:
 
 | Archive | Library | Compressed | Notes |
 |---|---|---|---|

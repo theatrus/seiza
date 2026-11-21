@@ -221,6 +221,11 @@ carrying `seiza-model` adds.
 
 The deb, the rpm, the Windows zip and the MSI carry ONNX Runtime, pinned in
 `packaging/onnxruntime.env`, and the Windows two carry the Visual C++ runtime it
-links. CI and every package read that one file. To move the version, change it,
-read the new archive's `Privacy.md`, and let the `Packaged runtime` workflow run:
-it installs each package on a machine with nothing else on it.
+links. CI and every package read that one file. `packaging/fetch-onnxruntime.sh`
+downloads each archive from PSF Guard's release `onnxruntime-<version>` first,
+since Microsoft's repository has returned 404 since about 2026-11-18, and from
+Microsoft's release second; either must match the pinned hash. To move the
+version, change the file, upload Microsoft's new archives to a PSF Guard release
+of that name, read the new archive's `Privacy.md`, and let the `Packaged
+runtime` workflow run: it installs each package on a machine with nothing else
+on it.
