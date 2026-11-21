@@ -2247,6 +2247,25 @@ In order, each only if the one before leaves a gap at the rims:
        grid): crops of the pillar's head and bright rim, the dark lanes
        and ridges in the upper right, and the rims of the lower cloud.
 
+       NGC 6820's first sheets showed dark rings about bright stars on
+       the nebula by the pillar, which the Trunk's crops never had:
+       - At the card's setting S77 puts the darkest 30° sector beside
+         them 26.7, 15.7, 10.4 and 6.0 times the noise below the sky;
+         the plan's limit is 1. S84 leaves them within 1.3.
+       - None of them is in the point-source list. The detector's
+         default structure removal takes them with the nebula (445
+         stars listed); its à trous removal finds all of them. The
+         sheets' ring measure reads listed stars alone, so it read none.
+       - Listed, they ring no more: with the à trous stars added to the
+         list (beyond 24 px of a listed one), S77's darkest sectors 8 px
+         out are 2 to 18 times the noise above the sky at the card's
+         setting,
+         and its rims, knots, cloud and dots on the Trunk are unchanged
+         to the second place.
+
+       So the point-source list should be the union of both removals, in
+       the harness and the runtime alike.
+
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
    taught that clarity is asked for at a ratio of 0, read from the
