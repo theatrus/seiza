@@ -2332,6 +2332,23 @@ In order, each only if the one before leaves a gap at the rims:
        refreshed banks without that bank: the supplied share goes 3:1
        to the main bank and the Trunk's (7.5% of examples).
 
+       S86 is S85 a step further almost everywhere, and the two changes
+       are not separated:
+       - On the Trunk the rim's lit side is 5.08 and 6.36 over the input
+         4 and 6 px in (S85 4.90 and 6.10, the reference 5.41 and 6.46);
+         the cloud between 4 and 8 px holds 1.07 of the input's detail
+         (S85 1.06, the reference 1.13); the grain is as S85 left it.
+       - The California's stars are rounder: ellipticity 0.070, against
+         S85's 0.082 and the reference's 0.045, the first run since S77
+         to move it back. The Trunk's stars are as round as S85's.
+       - On NGC 6820, held out, the rims are still short of the
+         reference's (the lit side 5.45 over the input 4 px in, against
+         7.18). The cloud holds 1.16 of the input's detail between 4 and
+         8 px, and it shows more dots than the reference (182 per Mpx
+         against 161), fewer of them also in the deeper stack.
+       - Its validation score is not comparable with S85's: the
+         validation banks' lists changed too, and the model reads them.
+
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
    taught that clarity is asked for at a ratio of 0, read from the
