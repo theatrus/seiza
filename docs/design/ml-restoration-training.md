@@ -2274,6 +2274,21 @@ In order, each only if the one before leaves a gap at the rims:
        inputs were refreshed so: the deep Trunk lists 287 points (278
        before), NGC 6820's night 476 (445).
 
+       S77's sheets, rendered again with the union, change only at the
+       newly listed stars. On NGC 6820 the black rings about the pillar
+       are gone, and they are plain stars now. The rims, knots and
+       interior of the Trunk and NGC 6820 agree to the second place.
+       But the sheets' edge gain was being read at stars. `edges`
+       keeps clear of each listed point and takes the steepest 2% of
+       the rest, and the unlisted bright stars' halos were the
+       steepest. The same S77 image reads 1.59 with the old list and
+       0.95 with the union on NGC 6820's night, and 1.38 against 0.78
+       on the Trunk's multi-night stack. Read with one list, the
+       renders before and after agree within 0.09. So edge gains from
+       before the union measured how hard a run rang unlisted stars
+       as much as how it steepened rims. Runs are compared under one
+       list only.
+
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
    taught that clarity is asked for at a ratio of 0, read from the
