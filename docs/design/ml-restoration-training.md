@@ -2290,6 +2290,36 @@ In order, each only if the one before leaves a gap at the rims:
        as much as how it steepened rims. Runs are compared under one
        list only.
 
+       On the corpus the union first listed the clipped cores after
+       every removal's stars, so an à trous star within 24 px of a core
+       took its place. On three stacks it took 160: 146 were the same
+       star, now measured, but 14 were a fainter neighbour up to 15 px
+       off, and the saturated star itself was no longer listed. The
+       cores are now found after the first removal's stars, against
+       them alone, and a later removal's star must lie beyond 24 px of
+       every point before it (ce098ce6, `DETECTION_VERSION` 2). The
+       first removal's list is so kept whole, and the union only adds
+       to it. The training banks keep each source's list in a file of
+       its own, so their lists are refreshed in place, not cut again.
+
+       S85, S84 continued 30,000 steps at 3e-5 with the Trunk's
+       supplied pairs as a bank of their own at a fifth of the supplied
+       share (6% of examples), moved toward the reference everywhere
+       but in the stars, which stay as round as S84's. All of it is
+       read with the union lists:
+       - On the Trunk, now partly in training: the rim's lit side is
+         4.90 and 6.10 over the input 4 and 6 px in (S84 4.68 and 5.88,
+         the reference 5.41 and 6.46). The cloud between 4 and 8 px
+         holds 1.06 of the input's detail, against S84's 0.95, S77's
+         1.12 and the reference's 1.13. But the deep stack's grain is
+         smoothed more: 0.74 of the input's on the sky (S84 0.86).
+       - On NGC 6820, held out: the cloud between 4 and 8 px holds 1.15
+         of the input's detail, at or over the reference's (1.09). The
+         rims are still short of it: the lit side 5.34 over the input
+         4 px in, against 7.18.
+       - Against the survey frames S85 is the closest of the three
+         runs on the Trunk's ridges.
+
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
    taught that clarity is asked for at a ratio of 0, read from the
