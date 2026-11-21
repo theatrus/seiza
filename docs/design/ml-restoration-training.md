@@ -1169,6 +1169,13 @@ goal's. Every output recovers about half of the real 3 to 4 px
 detail the input lacks. Frames within 1.5° of IC 1396A are kept for
 this test alone.
 
+From S85 on the Trunk is no longer held out of training (below), and
+NGC 6820 (Sh2 86) is tested the same way: a C925 Hα field of the
+validation split, with a pillar, a bright rim and dark ridged lanes. The
+four frames over its sheet's crops (seeing 1.2″) are kept for this test
+alone. Two frames in the survey bank cover the field's right edge, not
+its crops.
+
 **As a bank.** `cut-external` reads such frames as it reads mosaics:
 an index entry may name a separate weight file (`weight`, the
 confidence map) and its extension (`weight_hdu`, the frame's CCD), and
@@ -2215,6 +2222,29 @@ In order, each only if the one before leaves a gap at the rims:
          and 2 px out).
 
        A short run at a low rate keeps what the first run learned.
+
+       Unless the loss can see it. S84, S83 continued 30,000 steps at
+       3e-5 with a term on the four-fold part of each star's error
+       (`--square-weight 0.3`, `star_four_folds`) and the shape term at
+       0.1, is round again:
+       - Squares: the mean cos 4θ is −0.0010 ± 0.0007, the share 0.016
+         (S77 −0.0020 and 0.017).
+       - The rest is S83's: a rise of 3.98 px, 0.92 and 0.95 of the
+         input's cloud detail between 2–4 and 4–8 px, the ridges level
+         against the survey frames (1.54).
+       - The California's stars stay elongated: 0.083, with 23% worse
+         than the input's by 0.05 (S77 0.056 and 7%).
+
+       What is left of S82's line is its softer cloud and the
+       California's stars. The cloud's look is what the Trunk sheet's
+       second row asks for, and few training pairs hold that case: wide
+       stars on bright, structured nebula. So from S85 the Trunk's own
+       corpus pairs train, in a bank of their own beside the main one,
+       and the Trunk's sheets stay as sheets but are no longer held out.
+       NGC 6820 takes their place (`ngc-6820-ha-deep`, one night of 22
+       frames, and `ngc-6820-ha-multi-night`, five nights of 94, on one
+       grid): crops of the pillar's head and bright rim, the dark lanes
+       and ridges in the upper right, and the rims of the lower cloud.
 
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
