@@ -2319,6 +2319,18 @@ In order, each only if the one before leaves a gap at the rims:
        - Against the survey frames S85 is the closest of the three
          runs on the Trunk's ridges.
 
+       The training banks' lists are then the union's. Every corpus
+       source keeps its old list as its first rows and gains 5–10% more
+       points. The Hubble sources gain 3.5 times as many, most of them
+       in the galaxies' disks (up to 23 times): clusters and resolved
+       stars, as compact as the old points, that the filtered removal
+       took as background. The runtime lists them too on such an image.
+       S82–S85 had also drawn from an earlier corpus-pair bank whose pairs
+       are all in the main one, so those pairs were drawn about four
+       times as often as the rest. S86 is S85's recipe from S84 on the
+       refreshed banks without that bank: the corpus pairs' share goes 3:1
+       to the main bank and the Trunk's (7.5% of examples).
+
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
    taught that clarity is asked for at a ratio of 0, read from the
