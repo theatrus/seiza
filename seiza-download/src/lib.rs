@@ -12,6 +12,9 @@ mod error;
 mod hosted;
 mod manifest;
 mod models;
+mod onnxruntime;
+
+pub use onnxruntime::{InstalledOnnxRuntime, OnnxRuntimeInstaller};
 
 pub use catalog::{
     CachePolicy, CatalogArtifact, CatalogBundle, CatalogManager, CatalogManagerBuilder,

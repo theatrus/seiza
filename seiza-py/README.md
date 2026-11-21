@@ -1,5 +1,21 @@
 # seiza (Python)
 
+## Installing ONNX Runtime
+
+`seiza.install_onnxruntime(directory, progress=None, cancel=None)` installs a
+verified CPU runtime and its dependencies into a host-owned directory. It
+returns `{"version": "1.31.1", "library": "/absolute/path/to/library"}`.
+Pass that library path to the model's runtime options. The installer never
+loads a library or switches an active backend. An existing verified install
+works offline. `seiza.installed_onnxruntime(directory)` verifies it and returns
+the same dictionary, or `None` if missing or damaged, without network access.
+
+`progress` receives download-event dictionaries, as `download_model` does.
+`cancel` returns `True` to stop; callback exceptions are propagated. A failed
+or cancelled install preserves the previous runtime. Windows x64 includes
+app-local VC++ dependencies; Linux x64 and Apple Silicon are also supported.
+An unsupported platform raises an error and can use its own installed runtime.
+
 ## Project analysis
 
 ```python

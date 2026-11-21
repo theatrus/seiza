@@ -56,3 +56,22 @@ fetches, such as the training weights its graphs were exported from.
 
 Raw Gaia, VizieR, MPC, and other builder inputs intentionally live in
 [`seiza-sources`](https://crates.io/crates/seiza-sources).
+
+`OnnxRuntimeInstaller::new(directory)` selects the tested CPU runtime for
+Windows x64, Linux x64 or Apple Silicon. `installed()` verifies an existing
+install without network access; `install(progress, cancel)` repairs it or
+downloads the pinned archives from PSF Guard's mirror, then Microsoft. Every
+archive is checked by size and SHA-256. Windows also receives the app-local
+VC++ libraries from a separately pinned Seiza CLI package, so a system-wide
+redistributable is unnecessary. The returned `InstalledOnnxRuntime` has the
+version and absolute library path. No call loads the runtime or selects a
+backend. Hosts that bundle DirectML should continue to prefer that library.
+
+Installation writes a fresh directory and atomically switches `current.json`.
+Failure or cancellation leaves the previous install intact. Old directories
+are retained because another process may have their libraries open; hosts can
+remove unused directories when their applications are stopped. Transfer uses
+30-second connection and 60-second inactivity timeouts. Receipt checks and
+extraction run on the calling thread, so desktop hosts call off the UI thread.
+The runtime pins are in `src/onnxruntime.json`; a regression test holds them to
+the package builder's `packaging/onnxruntime.env`.

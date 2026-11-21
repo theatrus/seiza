@@ -397,6 +397,7 @@ core = "seiza-satellites::PixelSegment"
 
 "seiza-stacking::measure_flat_stability" = { none = "C and Python offer both file and cached-image measurement; this native hybrid accepts a loaded master and streams file sources through the same algorithm" }
 objects = [
+    "seiza-download::OnnxRuntimeInstaller",
     "seiza-stacking::AperturePhotometry",
     "seiza-image-ser::SerReader",
     "seiza-image-ser::ColorLayout",
@@ -841,6 +842,8 @@ seiza_denoised_report_json = "Denoised.report"
 seiza_denoised_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
 seiza_model_backends_json = "model_backends"
 seiza_model_catalog_json = "model_catalog"
+seiza_onnxruntime_installed_json = "installed_onnxruntime"
+seiza_onnxruntime_install_json = "install_onnxruntime"
 seiza_model_list_json = "installed_models"
 seiza_model_install_json = "install_model"
 seiza_model_download_json = "download_model"
