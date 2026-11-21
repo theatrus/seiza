@@ -2262,8 +2262,17 @@ In order, each only if the one before leaves a gap at the rims:
          and its rims, knots, cloud and dots on the Trunk are unchanged
          to the second place.
 
-       So the point-source list should be the union of both removals, in
-       the harness and the runtime alike.
+       So the point-source list is now the union of both removals, in
+       the harness and the runtime alike (e8c596e0). A card names its
+       `structure_removals`, and the detector runs once with each in
+       turn. A star a later run finds within the core radius (24 px) of
+       one already listed is the same star. A card that names none
+       detects with the filtered removal alone, as cards did before.
+       Each PSF record names the removals its list was made with, and
+       `psf-fields --detections` finds a stale record's point sources
+       again without measuring its field again. The sheets' twelve
+       inputs were refreshed so: the deep Trunk lists 287 points (278
+       before), NGC 6820's night 476 (445).
 
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
