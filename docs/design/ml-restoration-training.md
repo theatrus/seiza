@@ -2348,6 +2348,30 @@ In order, each only if the one before leaves a gap at the rims:
        - Its validation score is not comparable with S85's: the
          validation banks' lists changed too, and the model reads them.
 
+       The Trunk's second crop, ridges where two cloud layers overlap,
+       is where S86 is furthest from the goal by eye. Each band's
+       robust spread over the input's, stars masked: over the crop,
+       S86 holds 1.10 and 1.07
+       between 8–16 and 16–32 px against the goal's 1.21 and 1.20;
+       where the layers overlap, 1.09 and 1.01 against 1.32 and 1.21.
+       The same shortfall shows in the deep Trunk's own training windows:
+       S86 adds about half of the goal's 8–32 px detail there too.
+       So more of the same pairs would not close it, and the larger model
+       (S82) did not move this band. A clarity step after the model does
+       not close it either. At 0.5 it brings the crop as a whole to the
+       goal's bands, but takes the rest of the cloud past them
+       (1.23 against 1.13 at 8–16 px) and still leaves the overlap short
+       (1.23 against 1.32). The overlapping layers' edges stay as wide as
+       S86's: clarity raises their contrast where the goal narrows
+       them.
+
+       What is left is the loss. The pixel term's error at these scales
+       is mostly noise, and the gradient term's blocks stop at 8 px.
+       S87 is S86 with them out to 32 (`--gradient-scales
+       1,2,4,8,16,32`), its one change. Each block's mean error is
+       scaled by its side, so noise reads the same at every block size
+       while a missing step across an edge reads its side times larger.
+
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
    taught that clarity is asked for at a ratio of 0, read from the
