@@ -204,6 +204,28 @@ fn load(options: &BackendOptions) -> Result<Runtime, String> {
         // only as it starts.
         unsafe { env::set_var(TELEMETRY_VARIABLE, "1") };
     }
+    // Windows resolves dependencies beside the host executable by default,
+    // not beside a DLL selected by absolute path. Keep a reference until ort
+    // has opened its own, so app-local CRT/provider DLLs work for every host.
+    #[cfg(windows)]
+    let _preloaded = if path.is_file() {
+        use libloading::os::windows::{
+            LOAD_LIBRARY_SEARCH_DEFAULT_DIRS, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, Library,
+        };
+        let absolute = std::path::absolute(&path).map_err(|error| error.to_string())?;
+        // SAFETY: this is the runtime the caller selected and ort would load.
+        Some(
+            unsafe {
+                Library::load_with_flags(
+                    &absolute,
+                    LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
+                )
+            }
+            .map_err(|error| format!("{}: {error}", absolute.display()))?,
+        )
+    } else {
+        None
+    };
     let builder = ort::init_from(&path).map_err(|error| {
         if path.is_absolute() {
             return error.to_string();

@@ -12,7 +12,7 @@ use super::{
     SeizaCancelSignal, clear_error, ffi_result, optional_path, owned_json, required_f32_slice,
     required_f32_slice_mut, required_path, required_str,
 };
-use seiza::downloads::{CachePolicy, DownloadEvent, ModelManager};
+use seiza::downloads::{CachePolicy, DownloadEvent, ModelManager, OnnxRuntimeInstaller};
 use seiza_model::{
     Backend, BackendOptions, DenoiseOptions, DenoiseReport, Denoised, FileRestoration, HoleGuard,
     ImageView, ModelBundle, ModelStore, NoiseBands, NoiseModel, Precision, Progress, Published,
@@ -697,6 +697,72 @@ pub unsafe extern "C" fn seiza_model_catalog_json(
 pub type SeizaModelDownloadProgressCallback =
     Option<unsafe extern "C" fn(*const c_char, *mut c_void)>;
 
+/// Return the verified installed CPU runtime as `{version, library}`, or JSON
+/// null when missing or damaged. Does not download or load a library. The
+/// returned JSON is released with `seiza_string_free`.
+///
+/// # Safety
+/// `directory` is a NUL-terminated path; `error_out` is null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_onnxruntime_installed_json(
+    directory: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let installer = OnnxRuntimeInstaller::new(required_path(directory, "runtime directory")?)
+            .map_err(|error| error.to_string())?;
+        owned_json(&installer.installed().map_err(|error| error.to_string())?)
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+/// Download and install the pinned CPU runtime, including the Windows CRT.
+/// Uses verified mirrors and atomic installation, and returns `{version,
+/// library}`. Never loads the library or changes the selected backend.
+/// Existing valid files work offline. Run off the UI thread, outside Tokio.
+/// `progress` receives the same events as model downloads; `cancel` can stop
+/// transfer and extraction before publication. Free JSON with seiza_string_free.
+///
+/// # Safety
+/// `directory` is a NUL-terminated path. `cancel` is null or a live signal held
+/// until return. `context` is passed to `progress`; `error_out` is null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_onnxruntime_install_json(
+    directory: *const c_char,
+    progress: SeizaModelDownloadProgressCallback,
+    cancel: *const SeizaCancelSignal,
+    context: *mut c_void,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let installer = OnnxRuntimeInstaller::new(required_path(directory, "runtime directory")?)
+            .map_err(|error| error.to_string())?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())?;
+        let report = |event: DownloadEvent| {
+            let Some(callback) = progress else { return };
+            let Ok(json) = serde_json::to_string(&event) else {
+                return;
+            };
+            let Ok(json) = CString::new(json) else { return };
+            unsafe { callback(json.as_ptr(), context) };
+        };
+        let stop = || {
+            unsafe { cancel.as_ref() }
+                .is_some_and(|signal| signal.cancelled.load(Ordering::Relaxed))
+        };
+        let installed = runtime
+            .block_on(installer.install(report, stop))
+            .map_err(|error| error.to_string())?;
+        owned_json(&installed)
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
 #[unsafe(no_mangle)]
 /// Download the model `name` that Seiza's hosted manifest offers, or with
 /// `name` null the latest noise model it names, and install it, replacing any
@@ -838,6 +904,33 @@ mod tests {
 
     fn fixtures() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../seiza-model/tests/fixtures")
+    }
+
+    #[test]
+    fn runtime_install_status_and_cancellation_do_not_download() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("runtime");
+        let path = text(&target);
+        let mut error = ptr::null_mut();
+        unsafe {
+            let status = seiza_onnxruntime_installed_json(path.as_ptr(), &mut error);
+            assert!(error.is_null());
+            assert!(!status.is_null());
+            assert_eq!(taken(status), "null");
+            let signal = crate::seiza_cancel_signal_create();
+            crate::seiza_cancel_signal_cancel(signal);
+            let result = seiza_onnxruntime_install_json(
+                path.as_ptr(),
+                None,
+                signal,
+                ptr::null_mut(),
+                &mut error,
+            );
+            assert!(result.is_null());
+            assert!(taken(error).contains("cancelled"));
+            crate::seiza_cancel_signal_free(signal);
+        }
+        assert!(!target.exists());
     }
 
     fn text(path: &Path) -> CString {

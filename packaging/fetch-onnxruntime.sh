@@ -53,7 +53,7 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 fetched=
 for source in "${sources[@]}"; do
-  if ! curl -fsSL --retry 3 -o "$work/$archive" "$source/$archive"; then
+  if ! curl -fsSL --retry 3 --connect-timeout 30 --speed-time 60 --speed-limit 1 -o "$work/$archive" "$source/$archive"; then
     echo "could not download $archive from $source" >&2
     continue
   fi

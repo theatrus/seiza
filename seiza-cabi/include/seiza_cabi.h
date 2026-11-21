@@ -5174,6 +5174,34 @@ char *seiza_model_install_json(const char *source, const char *store, char **err
 char *seiza_model_catalog_json(const char *options_json, char **error_out);
 
 /*
+ Return the verified installed CPU runtime as `{version, library}`, or JSON
+ null when missing or damaged. Does not download or load a library. The
+ returned JSON is released with `seiza_string_free`.
+
+ # Safety
+ `directory` is a NUL-terminated path; `error_out` is null or writable.
+ */
+char *seiza_onnxruntime_installed_json(const char *directory, char **error_out);
+
+/*
+ Download and install the pinned CPU runtime, including the Windows CRT.
+ Uses verified mirrors and atomic installation, and returns `{version,
+ library}`. Never loads the library or changes the selected backend.
+ Existing valid files work offline. Run off the UI thread, outside Tokio.
+ `progress` receives the same events as model downloads; `cancel` can stop
+ transfer and extraction before publication. Free JSON with seiza_string_free.
+
+ # Safety
+ `directory` is a NUL-terminated path. `cancel` is null or a live signal held
+ until return. `context` is passed to `progress`; `error_out` is null or writable.
+ */
+char *seiza_onnxruntime_install_json(const char *directory,
+                                     SeizaModelDownloadProgressCallback progress,
+                                     const SeizaCancelSignal *cancel,
+                                     void *context,
+                                     char **error_out);
+
+/*
  Download the model `name` that Seiza's hosted manifest offers, or with
  `name` null the latest noise model it names, and install it, replacing any
  model of its name, once its card matches the manifest and its graphs match

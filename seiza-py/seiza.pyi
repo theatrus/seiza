@@ -7,6 +7,18 @@ from typing import Any, Callable, Literal, Mapping, NotRequired, Required, Seque
 import numpy as np
 import numpy.typing as npt
 
+def installed_onnxruntime(directory: str | Path) -> dict[str, str] | None:
+    """Verify a shared CPU-runtime install without downloading or loading it."""
+    ...
+
+def install_onnxruntime(
+    directory: str | Path, *,
+    progress: Callable[[dict[str, Any]], Any] | None = None,
+    cancel: Callable[[], bool] | None = None,
+) -> dict[str, str]:
+    """Install the pinned CPU runtime atomically; return version and library path."""
+    ...
+
 __version__: str
 STACKING_OUTPUT_VERSION: str
 """The ``seiza-stacking`` crate version, not the Seiza release, whose stacking,
