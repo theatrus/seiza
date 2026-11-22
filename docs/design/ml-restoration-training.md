@@ -2397,6 +2397,30 @@ In order, each only if the one before leaves a gap at the rims:
        direct test is the share: the corpus-pair banks at 50% of examples in
        place of 30%, with the same split between them.
 
+       S88 is that test, and it rules the compromise out. The second
+       crop's 8–32 px detail is S86's (1.07 and 1.06 of the input's), and
+       so is the deep Trunk's own training windows' (1.02–1.06 between 8
+       and 16 px). What S88 does move: it keeps more of the input's grain
+       (0.87 of it on the Trunk's sky, S86 0.74, the goal 1.00), its
+       knots are the goal's, and NGC 6820, held out, shows 132 dots
+       per Mpx with 57% of them in the deeper stack (S86 182 and 44%, the
+       goal 161 and 52%). It costs the rims: the Trunk's lit side
+       4.57 over the input 4 px in (S86 5.08). The stars are level.
+
+       Nor is it the ask. S86 asked harder (the rest at 0.3 and 0.15)
+       takes the cloud's 4–32 px detail down to the input's; asked softer
+       (0.55 to 0.75) it peaks near the usual ask, at 1.10 between 8 and
+       16 px, against the goal's 1.21.
+
+       The Trunk's own targets on those windows hold 1.08–1.17 of the
+       input's detail between 8 and 16 px at the stronger nonstellar
+       setting, nearly as much at the weaker, and none unsharpened. So the
+       model is shown the lift on the very windows it trains on, at both
+       asks, and reaches about half of it whatever the loss's blocks, the
+       corpus pairs' share or the ask. It underfits a smooth, linear change.
+       The next question is whether it can fit it at all, trained on that
+       bank alone.
+
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
    taught that clarity is asked for at a ratio of 0, read from the
