@@ -2372,6 +2372,31 @@ In order, each only if the one before leaves a gap at the rims:
        scaled by its side, so noise reads the same at every block size
        while a missing step across an edge reads its side times larger.
 
+       S87 buys a little and is not kept over S86:
+       - Over the second crop, 8–16 px detail rises from 1.10 to 1.17 of
+         the input's (the goal 1.21), and where the layers overlap
+         from 1.09 to 1.17 (1.32). Between 16 and 32 px it hardly moves
+         (1.07 to 1.09, against 1.20). By eye S87 is S86: the layers'
+         edges stay soft where the goal draws thin lines.
+       - The Trunk's knots move toward the goal's, but the rim's lit
+         side falls back (4.78 over the input 4 px in, S86 5.08, the
+         goal 5.41) and its rise widens (4.08 px, S86 3.98).
+       - On NGC 6820, held out, the cloud between 4 and 8 px goes further
+         past the goal (1.20 against 1.09) and shows more dots (192
+         per Mpx, S86 182, the goal 161), fewer of them real.
+       - The stars are as S86 left them.
+
+       Why the loss alone does not reach it: a known-kernel target's
+       clarity adds nothing where a square's variance stands over the
+       noise, so at a strong edge that target is the truth, by design,
+       and its band ends at 0.8 input widths. The corpus pairs ask for
+       lift and narrower edges from 8 to 32 px; the 70% of examples drawn
+       from the known-kernel and seeing banks ask for neither. That S86
+       gets half of the goal's lift even on the Trunk's own windows
+       reads as a compromise between the two, not a gap in coverage. The
+       direct test is the share: the corpus-pair banks at 50% of examples in
+       place of 30%, with the same split between them.
+
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
    taught that clarity is asked for at a ratio of 0, read from the
