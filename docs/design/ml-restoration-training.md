@@ -2421,6 +2421,37 @@ In order, each only if the one before leaves a gap at the rims:
        The next question is whether it can fit it at all, trained on that
        bank alone.
 
+       S89 and S90 are that test, not candidates: S86 trained 5,000 more
+       steps on the Trunk's corpus pairs alone, and the same without the
+       overshoot term. It can fit the lift. On its own training windows S89
+       reaches the goal between 8 and 32 px (1.10–1.15 of the input's
+       between 8 and 16, the goal 1.04–1.15; 1.07–1.10 between 16
+       and 32, the goal 1.05–1.15) and passes it between 4 and 8
+       (1.07–1.12, the goal 1.01–1.04). So it is not the loss that
+       holds S86 at half the lift, and the overshoot term is little of it:
+       S90 adds 0.01–0.03 in each band. In the full mix it is the other
+       data.
+
+       On the second crop, which no training window covers, the bands
+       part. Between 8 and 16 px S89 reaches 1.16 (the goal 1.21,
+       S86 1.10); between 16 and 32 px it stays at 1.08 (the goal
+       1.20, S86 1.07), and S90 is the same within 0.02. In the zoom S89
+       adds fine texture and grain, but not the goal's broad contrast
+       across the ridges, the darker shadows beside brighter lit faces.
+       The crop asks for more of that band than any of the training
+       windows does (1.05–1.15). So the 16–32 px gap is one of
+       generalization: the model fits the lift where it is shown it and
+       does not carry it to new ridges. More pairs whose targets carry
+       that broad lift on other images is the lever, not a larger share of
+       the same pairs or a change to the loss.
+
+       Trained on the Trunk alone, the model also over-sharpens fine
+       scales. Between 4 and 8 px it gives 1.15 on the crop (the goal
+       1.07), its dots inside the Trunk's cloud double (217 per Mpx above
+       4σ, S86 90, the goal 103), and its knots reach 5.29% (the
+       goal 4.05%). It keeps more grain (0.81 on the sky, S86 0.74).
+       The stars are level, the California's at 0.069.
+
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
    taught that clarity is asked for at a ratio of 0, read from the
