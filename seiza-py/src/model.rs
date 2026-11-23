@@ -375,16 +375,28 @@ impl PyNoiseModel {
     }
 
     /// Restore a full linear file, or its center crop, without first constructing a Python array.
-    #[pyo3(signature = (path, *, center=false, progress=None, cancel=None))]
+    #[pyo3(signature = (path, *, center=false, region=None, progress=None, cancel=None))]
+    #[allow(clippy::too_many_arguments)]
     fn denoise_file(
         &self,
         py: Python<'_>,
         path: PathBuf,
         center: bool,
+        region: Option<(usize, usize, usize, usize)>,
         progress: Option<Py<PyAny>>,
         cancel: Option<Py<PyAny>>,
     ) -> PyResult<PyFileRestoration> {
-        let area = if center {
+        if center && region.is_some() {
+            return Err(PyValueError::new_err("choose center or region, not both"));
+        }
+        let area = if let Some((x, y, width, height)) = region {
+            RestorationArea::Region {
+                x,
+                y,
+                width,
+                height,
+            }
+        } else if center {
             RestorationArea::Center
         } else {
             RestorationArea::Full
@@ -475,6 +487,56 @@ impl PyFileRestoration {
         };
         py.detach(|| self.result.write_linear(&path, &bands))
             .map_err(|error| crate::EngineError::new_err(error.to_string()))?;
+        Ok(self.result.report().into())
+    }
+
+    /// Write the restored preview crop in linear samples, without full-frame WCS.
+    #[pyo3(signature = (path, *, high=1.0, low=1.0, scale_px=5.0))]
+    fn write_preview_linear(
+        &self,
+        py: Python<'_>,
+        path: PathBuf,
+        high: f32,
+        low: f32,
+        scale_px: f32,
+    ) -> PyResult<PyDenoiseReport> {
+        py.detach(|| {
+            self.result.write_preview_linear(
+                &path,
+                &NoiseBands {
+                    high,
+                    low,
+                    scale_px,
+                },
+            )
+        })
+        .map_err(|error| crate::EngineError::new_err(error.to_string()))?;
+        Ok(self.result.report().into())
+    }
+
+    /// Write the regional result within the unchanged full source image.
+    #[pyo3(signature = (source, output, *, high=1.0, low=1.0, scale_px=5.0))]
+    fn write_preview_in_context(
+        &self,
+        py: Python<'_>,
+        source: PathBuf,
+        output: PathBuf,
+        high: f32,
+        low: f32,
+        scale_px: f32,
+    ) -> PyResult<PyDenoiseReport> {
+        py.detach(|| {
+            self.result.write_preview_in_context(
+                &source,
+                &output,
+                &NoiseBands {
+                    high,
+                    low,
+                    scale_px,
+                },
+            )
+        })
+        .map_err(|error| crate::EngineError::new_err(error.to_string()))?;
         Ok(self.result.report().into())
     }
 

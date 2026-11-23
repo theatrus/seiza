@@ -35,11 +35,14 @@ pub enum FileError {
     /// The header has no usable value for a dimension.
     #[error("missing or invalid image dimension {0}")]
     Dimension(&'static str),
-    /// The center has no coverage in at least one channel.
-    #[error("the center crop has no usable data in at least one channel")]
+    /// The preview crop has no coverage in at least one channel.
+    #[error("the preview crop has no usable data in at least one channel")]
     EmptyCenter,
+    /// The preview rectangle is empty or outside the image.
+    #[error("preview region must be nonempty and inside the image")]
+    Region,
     /// The requested output belongs to a different input region.
-    #[error("a center comparison and a full image require separate model runs")]
+    #[error("a preview and a full image require separate model runs")]
     OutputArea,
 }
 
@@ -50,22 +53,50 @@ pub enum RestorationArea {
     Full,
     /// The center crop, up to 768 by 768 pixels.
     Center,
+    /// An explicit preview rectangle, in source pixels.
+    Region {
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+    },
 }
 
 /// The decoded linear file or center crop, ready for inference.
 pub struct RestorationImage {
     image: LinearImage,
     headers: Option<Vec<(String, HeaderValue)>>,
+    region: Option<ReferenceRegion>,
 }
 
 impl RestorationImage {
     /// Open a FITS or XISF stack. Compressed XISF is decoded before cropping.
     pub fn open(path: &Path, area: RestorationArea) -> Result<Self, FileError> {
-        let (mut image, headers) = match area {
-            RestorationArea::Center => (open_center(path)?, None),
+        let (mut image, headers, region) = match area {
+            RestorationArea::Center => {
+                let (image, region) = open_region(path, None)?;
+                (image, None, Some(region))
+            }
+            RestorationArea::Region {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                let (image, region) = open_region(
+                    path,
+                    Some(ReferenceRegion {
+                        x,
+                        y,
+                        width,
+                        height,
+                    }),
+                )?;
+                (image, None, Some(region))
+            }
             RestorationArea::Full => {
                 let frame = open_full(path)?;
-                (frame.image, Some(frame.headers))
+                (frame.image, Some(frame.headers), None)
             }
         };
         if headers.is_none()
@@ -85,7 +116,11 @@ impl RestorationImage {
                 *sample = f32::NAN;
             }
         }
-        Ok(Self { image, headers })
+        Ok(Self {
+            image,
+            headers,
+            region,
+        })
     }
 
     /// Run inference, retaining the residual for subsequent blends.
@@ -101,7 +136,11 @@ impl RestorationImage {
             Some(headers) => OutputSource::Full(headers),
             None => OutputSource::Center(self.image),
         };
-        Ok(FileRestoration { source, denoised })
+        Ok(FileRestoration {
+            source,
+            denoised,
+            region: self.region,
+        })
     }
 }
 
@@ -114,6 +153,7 @@ enum OutputSource {
 pub struct FileRestoration {
     source: OutputSource,
     denoised: Denoised,
+    region: Option<ReferenceRegion>,
 }
 
 impl FileRestoration {
@@ -153,6 +193,58 @@ impl FileRestoration {
             original_path,
             restored_path,
         )
+    }
+
+    /// Write a preview crop in linear samples for a host's processing pipeline.
+    /// Preview files deliberately contain no full-frame geometry or WCS.
+    pub fn write_preview_linear(&self, path: &Path, bands: &NoiseBands) -> Result<(), FileError> {
+        if !matches!(self.source, OutputSource::Center(_)) {
+            return Err(FileError::OutputArea);
+        }
+        write_processed_image_fits_f32(
+            path,
+            &self.blended_image(bands)?,
+            &[],
+            &operation_cards(self.report(), bands),
+        )?;
+        Ok(())
+    }
+
+    /// Write a full-sized preview with only the selected rectangle restored.
+    /// The caller supplies the unchanged inference source. Global background and
+    /// stretch stages can then analyze the whole frame rather than the crop.
+    pub fn write_preview_in_context(
+        &self,
+        source: &Path,
+        output: &Path,
+        bands: &NoiseBands,
+    ) -> Result<(), FileError> {
+        let region = self.region.ok_or(FileError::OutputArea)?;
+        let mut frame = open_full(source)?;
+        let patch = self.blended_image(bands)?;
+        if patch.channels != frame.image.channels
+            || region
+                .x
+                .checked_add(region.width)
+                .is_none_or(|end| end > frame.image.width)
+            || region
+                .y
+                .checked_add(region.height)
+                .is_none_or(|end| end > frame.image.height)
+        {
+            return Err(FileError::Region);
+        }
+        let stride = frame.image.width * frame.image.channels;
+        let patch_stride = patch.width * patch.channels;
+        for row in 0..patch.height {
+            let offset = (region.y + row) * stride + region.x * patch.channels;
+            frame.image.data[offset..offset + patch_stride]
+                .copy_from_slice(&patch.data[row * patch_stride..(row + 1) * patch_stride]);
+        }
+        let mut cards = operation_cards(self.report(), bands);
+        cards.push(WriteHeaderCard::new("MDPREV", HeaderValue::Logical(true)));
+        write_processed_image_fits_f32(output, &frame.image, &frame.headers, &cards)?;
+        Ok(())
     }
 
     fn blended_image(&self, bands: &NoiseBands) -> Result<LinearImage, FileError> {
@@ -195,7 +287,15 @@ fn center_region(width: usize, height: usize) -> ReferenceRegion {
     }
 }
 
+#[cfg(test)]
 fn open_center(path: &Path) -> Result<LinearImage, FileError> {
+    open_region(path, None).map(|(image, _)| image)
+}
+
+fn open_region(
+    path: &Path,
+    requested: Option<ReferenceRegion>,
+) -> Result<(LinearImage, ReferenceRegion), FileError> {
     let header = read_header(path)?;
     validate_linear(&header.cards)?;
     let dimension = |name: &'static str| {
@@ -208,7 +308,22 @@ fn open_center(path: &Path) -> Result<LinearImage, FileError> {
             .filter(|value| *value > 0)
             .ok_or(FileError::Dimension(name))
     };
-    let region = center_region(dimension("NAXIS1")?, dimension("NAXIS2")?);
+    let width = dimension("NAXIS1")?;
+    let height = dimension("NAXIS2")?;
+    let region = requested.unwrap_or_else(|| center_region(width, height));
+    if region.width == 0
+        || region.height == 0
+        || region
+            .x
+            .checked_add(region.width)
+            .is_none_or(|end| end > width)
+        || region
+            .y
+            .checked_add(region.height)
+            .is_none_or(|end| end > height)
+    {
+        return Err(FileError::Region);
+    }
     let window = match read_window(path, region.x, region.y, region.width, region.height, None) {
         Ok(window) => window,
         Err(error)
@@ -221,7 +336,8 @@ fn open_center(path: &Path) -> Result<LinearImage, FileError> {
             // Crop before running the model even on this path.
             let image = open_full(path)?.image;
             return image
-                .crop(center_region(image.width, image.height))
+                .crop(region)
+                .map(|image| (image, region))
                 .map_err(Into::into);
         }
         Err(error) => return Err(error.into()),
@@ -245,7 +361,9 @@ fn open_center(path: &Path) -> Result<LinearImage, FileError> {
     } else {
         window.values
     };
-    LinearImage::new(window.width, window.height, window.planes, data).map_err(Into::into)
+    LinearImage::new(window.width, window.height, window.planes, data)
+        .map(|image| (image, region))
+        .map_err(Into::into)
 }
 
 fn operation_cards(report: &DenoiseReport, bands: &NoiseBands) -> Vec<WriteHeaderCard> {
@@ -355,6 +473,54 @@ mod tests {
             image.crop(center_region(width, height)).unwrap().data
         );
     }
+    #[test]
+    fn explicit_regions_preserve_samples_and_reject_invalid_bounds() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("rgb.fits");
+        let image =
+            LinearImage::new(20, 12, 3, (0..720).map(|v| v as f32 - 30.0).collect()).unwrap();
+        write_processed_image_fits_f32(&path, &image, &[], &[]).unwrap();
+        let region = ReferenceRegion {
+            x: 3,
+            y: 5,
+            width: 9,
+            height: 4,
+        };
+        let (crop, _) = open_region(&path, Some(region)).unwrap();
+        assert_eq!(crop.data, image.crop(region).unwrap().data);
+        for region in [
+            ReferenceRegion {
+                x: 20,
+                y: 0,
+                width: 1,
+                height: 1,
+            },
+            ReferenceRegion {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 1,
+            },
+            ReferenceRegion {
+                x: usize::MAX,
+                y: 0,
+                width: 2,
+                height: 1,
+            },
+            ReferenceRegion {
+                x: 0,
+                y: 11,
+                width: 1,
+                height: 2,
+            },
+        ] {
+            assert!(matches!(
+                open_region(&path, Some(region)),
+                Err(FileError::Region)
+            ));
+        }
+    }
+
     #[test]
     fn the_cards_record_what_ran() {
         let report = DenoiseReport {

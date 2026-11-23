@@ -263,3 +263,46 @@ def test_a_run_stops_on_cancel_and_raises_what_a_callback_raises() -> None:
 
     with pytest.raises(KeyError, match="from the callback"):
         model.denoise(image, progress=broken)
+
+
+@needs_runtime
+def test_file_region_preview_stays_linear_and_rejects_full_export(tmp_path: Path) -> None:
+    model = seiza.NoiseModel(str(TINY), "cpu")
+    source = TINY.parent / "tiny-input.fits"
+    result = model.denoise_file(source, region=(10, 10, 100, 80))
+    output = tmp_path / "preview.fits"
+    assert result.write_preview_linear(output, high=0.0, low=0.0).model == "noise-tiny"
+    assert output.is_file()
+    # Read through Seiza's source-window API: no display stretch or quantization.
+    crop = seiza.read_image_window(output, 0, 0, 100, 80)
+    expected = seiza.read_image_window(source, 10, 10, 100, 80)
+    np.testing.assert_array_equal(crop.values, expected.values)
+    with pytest.raises(seiza.EngineError, match="separate model runs"):
+        result.write_linear(tmp_path / "full.fits")
+    with pytest.raises(ValueError, match="center or region"):
+        model.denoise_file(source, center=True, region=(0, 0, 10, 10))
+    for region in [(0, 0, 0, 5), (127, 0, 2, 1), (0, 95, 1, 2)]:
+        with pytest.raises(seiza.EngineError, match="preview region"):
+            model.denoise_file(source, region=region)
+
+
+@needs_runtime
+def test_region_preview_context_preserves_the_rest_of_the_frame(tmp_path: Path) -> None:
+    model = seiza.NoiseModel(str(TINY), "cpu")
+    source = TINY.parent / "tiny-input.fits"
+    result = model.denoise_file(source, region=(10, 10, 100, 80))
+    output = tmp_path / "context.fits"
+    result.write_preview_in_context(source, output, high=0.0, low=0.0)
+    expected = seiza.read_image_window(source, 0, 0, 128, 96).values
+    np.testing.assert_array_equal(seiza.read_image_window(output, 0, 0, 128, 96).values, expected)
+    result.write_preview_in_context(source, output)
+    actual = seiza.read_image_window(output, 0, 0, 128, 96).values
+    # Planar source windows: preserve all samples outside the requested crop.
+    a = actual.reshape(96, 128)
+    b = expected.reshape(96, 128)
+    np.testing.assert_array_equal(a[:10], b[:10])
+    np.testing.assert_array_equal(a[90:], b[90:])
+    np.testing.assert_array_equal(a[:, :10], b[:, :10])
+    np.testing.assert_array_equal(a[:, 110:], b[:, 110:])
+    assert np.any(a[10:90, 10:110] != b[10:90, 10:110])
+    assert seiza.read_image_header(output)["headers"]["MDPREV"] is True

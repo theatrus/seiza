@@ -395,6 +395,116 @@ pub unsafe extern "C" fn seiza_noise_model_denoise_file(
     .unwrap_or(ptr::null_mut())
 }
 
+/// Run a model on a bounded rectangle in source pixels; only that crop is inferred.
+///
+/// # Safety
+/// The pointers and callback obey seiza_noise_model_denoise_file.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_noise_model_denoise_file_region(
+    model: *mut SeizaNoiseModel,
+    input: *const c_char,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+    progress: SeizaModelProgressCallback,
+    cancel: *const SeizaCancelSignal,
+    context: *mut c_void,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaFileRestoration {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let model = unsafe { model.as_mut() }.ok_or("model is required")?;
+        let input = required_path(input, "input path")?;
+        let image = RestorationImage::open(
+            &input,
+            RestorationArea::Region {
+                x,
+                y,
+                width,
+                height,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let result = with_inference_options(progress, cancel, context, |options| {
+            image.denoise(&mut model.model, options)
+        })
+        .map_err(|error| error.to_string())?;
+        Ok(Box::into_raw(Box::new(SeizaFileRestoration(result))))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+/// Write a preview result as linear FITS for further processing, without full-frame WCS.
+///
+/// # Safety
+/// The result is live, output is NUL-terminated, and error_out is null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_file_restoration_write_preview_linear(
+    result: *const SeizaFileRestoration,
+    output: *const c_char,
+    high: f32,
+    low: f32,
+    scale_px: f32,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let result = unsafe { result.as_ref() }.ok_or("a restoration result is required")?;
+        let output = required_path(output, "output path")?;
+        result
+            .0
+            .write_preview_linear(
+                &output,
+                &NoiseBands {
+                    high,
+                    low,
+                    scale_px,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        owned_json(&DenoiseReportResponse::from(result.0.report()))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+/// Write a full-sized preview by restoring only the selected source rectangle.
+/// The source must be the unchanged file used for inference.
+///
+/// # Safety
+/// The result is live, paths are NUL-terminated, error_out is null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_file_restoration_write_preview_in_context(
+    result: *const SeizaFileRestoration,
+    source: *const c_char,
+    output: *const c_char,
+    high: f32,
+    low: f32,
+    scale_px: f32,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let result = unsafe { result.as_ref() }.ok_or("a restoration result is required")?;
+        let source = required_path(source, "source path")?;
+        let output = required_path(output, "output path")?;
+        result
+            .0
+            .write_preview_in_context(
+                &source,
+                &output,
+                &NoiseBands {
+                    high,
+                    low,
+                    scale_px,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        owned_json(&DenoiseReportResponse::from(result.0.report()))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
 /// Write the blended linear file, or two display images for a center run.
 /// On success returns a model report owned by the caller; free with seiza_string_free.
 ///

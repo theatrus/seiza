@@ -1646,6 +1646,13 @@ class FileRestoration:
     def write_linear(
         self, path: str | Path, *, high: float = 1.0, low: float = 1.0, scale_px: float = 5.0
     ) -> DenoiseReport: ...
+    def write_preview_linear(
+        self, path: str | Path, *, high: float = 1.0, low: float = 1.0, scale_px: float = 5.0
+    ) -> DenoiseReport: ...
+    def write_preview_in_context(
+        self, source: str | Path, output: str | Path, *,
+        high: float = 1.0, low: float = 1.0, scale_px: float = 5.0
+    ) -> DenoiseReport: ...
     def write_comparison(
         self, original: str | Path, restored: str | Path, *,
         high: float = 1.0, low: float = 1.0, scale_px: float = 5.0
@@ -1676,6 +1683,7 @@ class NoiseModel:
     ) -> Denoised: ...
     def denoise_file(
         self, path: str | Path, *, center: bool = False,
+        region: tuple[int, int, int, int] | None = None,
         progress: Callable[[int, int, int, int], object] | None = None,
         cancel: Callable[[], bool] | None = None,
     ) -> FileRestoration: ...
