@@ -2511,6 +2511,34 @@ In order, each only if the one before leaves a gap at the rims:
        and fine scales. At one ask the two kinds of target disagree, and
        the model splits the difference.
 
+       S94 takes the disagreement away: S93 with the Trunk's
+       strong-setting pairs labelled with a stronger ask, 0.35 of the
+       rest's width in place of 0.55, the arrays the same. The ask then
+       carries the look on the windows it was shown. Asked 0.35, S94
+       lifts all six of the deep Trunk's training windows to 1.08–1.10
+       between 8 and 16 px (S89 1.10–1.15, S93 at the same ask
+       1.01–1.11); asked 0.5, it falls below S93 on two of them. But
+       the second crop of row 2 reads 1.13 and 1.07 between 8 and 32 px
+       at either ask (the goal 1.21 and 1.20), and its overlap 1.12
+       and 1.02 (the goal 1.32 and 1.21). At 0.35 the dots come
+       with it, as in S89: 199 per Mpx on the Trunk, 256 on NGC 6820
+       with 38% in the deeper stack (the goal 161 and 52%). At 0.5
+       its dots on the Trunk are 111 per Mpx (the goal 103), and its
+       stars are level.
+
+       S86 asked 0.35 does the reverse of what the Trunk's pairs teach:
+       smoother inside the cloud than at 0.5 (row 2 1.01 between 8 and
+       16 px), with sharper rims (6.62 over the input 4 px in on NGC
+       6820, the goal 7.18) and fewer dots, 103 per Mpx with 71% in
+       the deeper stack.
+
+       So with the conflict gone the Trunk targets' look is learned where
+       it is shown and not carried to ridges no window covers, at either
+       ask. The broad lift on row 2 is a matter of generalization, and
+       the lever left is windows that show it: more windows per Trunk
+       pair over the cloud's ridges, and the other bank's images whose
+       targets carry the broad lift, labelled the same way.
+
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
    taught that clarity is asked for at a ratio of 0, read from the
