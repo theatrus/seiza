@@ -2452,6 +2452,36 @@ In order, each only if the one before leaves a gap at the rims:
        goal 4.05%). It keeps more grain (0.81 on the sky, S86 0.74).
        The stars are level, the California's at 0.069.
 
+       The two corpus-pair banks disagree. On the larger, 606 images, the
+       stronger setting's targets add next to nothing between 8 and 32 px
+       (a median of 1.00 of the input's, 1.01–1.02 at the 90th
+       percentile); the Trunk's bank adds up to 1.13–1.17 on its windows
+       of strongest structure. Nor is it the stars' width: measured in each
+       window's own FWHM, at matched width and structure, the larger bank
+       asks for a third to a half of the Trunk bank's lift, and S86 drew
+       three quarters of its corpus-pair windows from it.
+
+       S91 tests that: S86 with the split flipped, the Trunk's bank three
+       times the other, the corpus pairs' share still 30%. It gains nothing.
+       Row 2 reads 1.07 and 1.06 between 8 and 32 px (S86 1.10 and 1.07),
+       and on the Trunk's own training windows, drawn three times as often
+       as in S86, 0.98–1.05 between 8 and 16 px (S86 1.02–1.07, S89
+       1.10–1.15). Like S88 it keeps more grain (0.90 on the Trunk's sky)
+       and gives up rim (the lit side 4.56 over the input 4 px in, S86
+       5.08); on NGC 6820 its dots fall to 140 per Mpx with 55% in the
+       deeper stack (S86 182 and 44%, the goal 161 and 52%). In S86's
+       mix the Trunk pairs' lift is not learned however often they are
+       drawn; only on its own, in S89, is it fit.
+
+       Nor do the known-kernel targets withhold it. Their clarity, added
+       to S86's output over row 2 at the amount training gives at this ask
+       (1.5 × (1 − 0.5)), reads 1.30 and 1.18 between 8 and 32 px in the
+       overlap (the goal 1.32 and 1.21), with the strong-edge test
+       at 1 to 1,000 times the noise alike and the window's range of light
+       under the noise. So such a target asks for the lift there. As a
+       step after the model it over-lifts the rest of the cloud and
+       leaves the layer edges wide, as at 0.5 after S86.
+
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
    taught that clarity is asked for at a ratio of 0, read from the
