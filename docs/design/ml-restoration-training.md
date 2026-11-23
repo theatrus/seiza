@@ -2498,6 +2498,19 @@ In order, each only if the one before leaves a gap at the rims:
        known-kernel and seeing windows and drops the larger corpus-pair bank,
        to tell which.
 
+       It is mostly the known-kernel and seeing windows. With the Trunk's
+       pairs as the whole 70%, S93 keeps about a third of S89's gain over
+       S86 on the Trunk's training windows (1.04–1.10 between 8 and 16
+       px) and reads 1.12 and 1.06 on row 2. Its dots on NGC 6820 rise
+       to 239 per Mpx, and its rim there gains a little (the lit side
+       5.69 over the input, S86 5.45, the goal 7.18). The stars stay
+       level. Across S91, S92, S93 and S89 the lift follows the
+       Trunk pairs' share: none at 22.5%, a sixth at 52.5% beside
+       the larger bank, a third at 70%, all of it at 100%. No mix fits
+       the lift and keeps the hold the known-kernel windows give on dots
+       and fine scales. At one ask the two kinds of target disagree, and
+       the model splits the difference.
+
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
    taught that clarity is asked for at a ratio of 0, read from the
