@@ -5041,6 +5041,51 @@ SeizaFileRestoration *seiza_noise_model_denoise_file(SeizaNoiseModel *model,
                                                      char **error_out);
 
 /*
+ Run a model on a bounded rectangle in source pixels; only that crop is inferred.
+
+ # Safety
+ The pointers and callback obey seiza_noise_model_denoise_file.
+ */
+SeizaFileRestoration *seiza_noise_model_denoise_file_region(SeizaNoiseModel *model,
+                                                            const char *input,
+                                                            size_t x,
+                                                            size_t y,
+                                                            size_t width,
+                                                            size_t height,
+                                                            SeizaModelProgressCallback progress,
+                                                            const SeizaCancelSignal *cancel,
+                                                            void *context,
+                                                            char **error_out);
+
+/*
+ Write a preview result as linear FITS for further processing, without full-frame WCS.
+
+ # Safety
+ The result is live, output is NUL-terminated, and error_out is null or writable.
+ */
+char *seiza_file_restoration_write_preview_linear(const SeizaFileRestoration *result,
+                                                  const char *output,
+                                                  float high,
+                                                  float low,
+                                                  float scale_px,
+                                                  char **error_out);
+
+/*
+ Write a full-sized preview by restoring only the selected source rectangle.
+ The source must be the unchanged file used for inference.
+
+ # Safety
+ The result is live, paths are NUL-terminated, error_out is null or writable.
+ */
+char *seiza_file_restoration_write_preview_in_context(const SeizaFileRestoration *result,
+                                                      const char *source,
+                                                      const char *output,
+                                                      float high,
+                                                      float low,
+                                                      float scale_px,
+                                                      char **error_out);
+
+/*
  Write the blended linear file, or two display images for a center run.
  On success returns a model report owned by the caller; free with seiza_string_free.
 

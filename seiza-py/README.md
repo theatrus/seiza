@@ -631,6 +631,19 @@ the image is read by, so the key changes whenever the output could.
 and `install_model`, `installed_models`, `verify_model` and `remove_model` manage
 the store. Invalid tile geometry is refused when opening or installing a bundle,
 before loading ONNX Runtime or replacing an installed model.
+`model.denoise_file(path, region=(x, y, width, height))` restores an explicit
+preview rectangle in source pixels. The rectangle must be nonempty and fully
+inside the source; it cannot be combined with `center=True`. Compressed XISF
+may require decoding the full file, but inference runs only on the rectangle.
+Use `result.write_preview_linear(path, high=..., low=..., scale_px=...)` to
+feed the cached residual through a host's linear processing and stretch stages.
+These preview files omit full-frame geometry and WCS. Alternatively,
+`result.write_preview_in_context(source, output, high=..., low=..., scale_px=...)`
+places the restored rectangle back into the unchanged source before writing a
+full-sized preview. Use it to run global background/stretch stages without
+a crop-specific contrast change. It retains source WCS and marks `MDPREV=T`. Full-image saving still
+requires a separate full-image run; changing blend strengths does not rerun inference.
+
 `model.denoise_file(path, center=True)` previews the center of a linear FITS or
 XISF. Its `write_comparison(original, restored)` uses one display stretch for
 both outputs. With `center=False`, `write_linear(path)` saves the full result

@@ -833,6 +833,9 @@ seiza_noise_model_backend = "NoiseModel.backend"
 seiza_noise_model_tile = "NoiseModel.tile"
 seiza_noise_model_denoise = "NoiseModel.denoise"
 seiza_noise_model_denoise_file = "NoiseModel.denoise_file"
+seiza_noise_model_denoise_file_region = "NoiseModel.denoise_file"
+seiza_file_restoration_write_preview_linear = "FileRestoration.write_preview_linear"
+seiza_file_restoration_write_preview_in_context = "FileRestoration.write_preview_in_context"
 seiza_file_restoration_write = "FileRestoration.write_linear"
 seiza_file_restoration_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
 seiza_noise_model_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
