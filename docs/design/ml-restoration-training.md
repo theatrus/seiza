@@ -2482,6 +2482,22 @@ In order, each only if the one before leaves a gap at the rims:
        step after the model it over-lifts the rest of the cloud and
        leaves the layer edges wide, as at 0.5 after S86.
 
+       S92 asks how large a share the lift needs: S89's 5,000 steps from
+       S86, with the corpus pairs at 70% of draws (the Trunk's bank
+       three times the other, so the Trunk 52.5%) beside 20% known-kernel
+       and 10% seeing windows. The lift is all gone. Row 2 reads 1.11
+       and 1.06 between 8 and 32 px (S86 1.10 and 1.07, S89 1.16 and
+       1.08, the goal 1.21 and 1.20), and the Trunk's own training
+       windows 1.01–1.08 between 8 and 16 px (S86 1.02–1.07, S89
+       1.10–1.15). Its dots fall from S89's 217 per Mpx to 140 on the
+       Trunk (S86 90, the goal 103) but rise on NGC 6820, 229 with
+       40% in the deeper stack (S86 182 and 44%, the goal 161 and
+       52%). The stars are level. So it is not a dose: at half the draws
+       the Trunk pairs' lift is not fit, where on their own it is.
+       Something in the rest of the mix cancels it. S93 keeps S92's
+       known-kernel and seeing windows and drops the larger corpus-pair bank,
+       to tell which.
+
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
    taught that clarity is asked for at a ratio of 0, read from the
