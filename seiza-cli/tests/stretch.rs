@@ -75,6 +75,43 @@ fn stretch_cli_accepts_manual_ghs_parameters() {
 }
 
 #[test]
+fn stretch_cli_ht_clips_and_rescales() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("linear.fits");
+    let output = directory.path().join("ht.png");
+    let values = (0..=10).map(|step| step as f32 / 10.0).collect::<Vec<_>>();
+    write_f32_image(&input, 11, 1, F32ImageData::Mono(&values), &[]).unwrap();
+
+    let result = Command::new(env!("CARGO_BIN_EXE_seiza"))
+        .args([
+            "stretch",
+            input.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+            "ht",
+            "--shadows",
+            "0.2",
+            "--midtone",
+            "0.25",
+            "--highlights",
+            "0.8",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let preview = image::open(output).unwrap().to_luma8();
+    let level = |x| preview.get_pixel(x, 0).0[0];
+    assert_eq!(level(1), 0);
+    assert_eq!(level(9), 255);
+    // x = 0.5 of the rescaled range: 0.75 * 0.5 / (0.5 * 0.5 + 0.25) = 0.75.
+    assert_eq!(level(5), 191);
+}
+
+#[test]
 fn stretch_cli_refuses_to_overwrite_its_input() {
     let directory = tempfile::tempdir().unwrap();
     let input = directory.path().join("linear.fits");

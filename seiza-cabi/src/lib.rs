@@ -6452,7 +6452,10 @@ pub unsafe extern "C" fn seiza_rendered_image_open_with_rgb_stretch(
 /// `StretchConfig` (the original schema), a non-empty array of configs, or an
 /// object with `stretch`, optional `background`, optional `deconvolution`,
 /// optional `sample_domain`, optional `interactive_preview` and optional
-/// `gpu` fields. `gpu` takes the fields of the `"gpu"` member of
+/// `gpu` fields. A config's `mtf` model shifts samples by its `shadows` and
+/// `highlights` as N.I.N.A. does; its `ht` model takes the same fields, and
+/// clips and rescales as PixInsight's HistogramTransformation does. `gpu`
+/// takes the fields of the `"gpu"` member of
 /// [`seiza_live_stacker_open_fits`]'s options, such as `{"enabled": false}`,
 /// and says whether a raw Bayer frame rendered in physical units is
 /// debayered on the GPU; by default it may be. Array
@@ -16353,6 +16356,26 @@ mod tests {
         let metadata: Value = serde_json::from_str(image.metadata_json.to_str().unwrap()).unwrap();
         assert_eq!(metadata["format"], "FITS");
         assert!(metadata["displayHistogram"].is_object());
+    }
+
+    #[test]
+    fn renders_the_ht_stretch_clipped_and_rescaled() {
+        let fits = FitsImage {
+            width: 3,
+            height: 1,
+            planes: 1,
+            pixels: seiza_fits::Pixels::F32(vec![0.1, 0.5, 0.9]),
+            headers: Vec::new(),
+        };
+        let request: StretchConfigRequest = serde_json::from_value(json!({
+            "model": {"type": "ht", "shadows": 0.2, "midtone": 0.25, "highlights": 0.8},
+            "color_strategy": "linked",
+            "max_analysis_samples": 4096
+        }))
+        .unwrap();
+        let image = render_fits_with_stack(fits, &request.into_stack(), 0).unwrap();
+        let levels = image.rgba.iter().step_by(4).copied().collect::<Vec<_>>();
+        assert_eq!(levels, [0, 191, 255]);
     }
 
     #[test]

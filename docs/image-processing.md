@@ -193,8 +193,8 @@ Stretching is explicit and separate from linear calibration/stacking output.
 `seiza-stretch` separates image analysis, transfer-plan resolution, and
 application, allowing previews and full-resolution processing to reuse a plan.
 An ordered `StretchStack` stores float intermediates and each resolved plan.
-Models include MTF/Auto-MTF, GHS, asinh, percentile-asinh, median-anchor, and
-layered stretching.
+Models include MTF/Auto-MTF, PixInsight's HT, GHS, asinh, percentile-asinh,
+median-anchor, and layered stretching.
 
 See the [stretch API](../seiza-stretch/README.md),
 [CLI JSON examples](../seiza-cli/README.md#parameterized-display-stretching), and

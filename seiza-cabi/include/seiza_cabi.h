@@ -2711,7 +2711,10 @@ SeizaRenderedImage *seiza_rendered_image_open_with_rgb_stretch(const char *path,
  `StretchConfig` (the original schema), a non-empty array of configs, or an
  object with `stretch`, optional `background`, optional `deconvolution`,
  optional `sample_domain`, optional `interactive_preview` and optional
- `gpu` fields. `gpu` takes the fields of the `"gpu"` member of
+ `gpu` fields. A config's `mtf` model shifts samples by its `shadows` and
+ `highlights` as N.I.N.A. does; its `ht` model takes the same fields, and
+ clips and rescales as PixInsight's HistogramTransformation does. `gpu`
+ takes the fields of the `"gpu"` member of
  [`seiza_live_stacker_open_fits`]'s options, such as `{"enabled": false}`,
  and says whether a raw Bayer frame rendered in physical units is
  debayered on the GPU; by default it may be. Array
