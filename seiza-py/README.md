@@ -1375,6 +1375,8 @@ preview = seiza.stretch(linear_rgb, model="auto-mtf",
 preview = seiza.stretch(linear, model="ghs", stretch_factor=4,
                         local_intensity=-1, symmetry_point=0.35,
                         protect_shadows=0.1, protect_highlights=0.8)
+preview = seiza.stretch(linear, model="ht", shadows=0.02, midtone=0.1,
+                        highlights=0.8)
 preview = seiza.stretch(linear, model="median-anchor", target_median=0.25,
                         black_point_sigma=2.7, hdr_amount=0.3)
 preview = seiza.stretch(linear_rgb, model="layered", target_background=0.15,
@@ -1383,8 +1385,13 @@ preview = seiza.stretch(linear_rgb, model="layered", target_background=0.15,
 ```
 
 Available models are `identity`, `linear`, `asinh`, `percentile-asinh`, `mtf`,
-manual `ghs`, `auto-mtf`, `median-anchor`, and `layered`; color strategies are `linked`,
-`unlinked`, and `luminance-preserving`. `median-anchor` places the background
+`ht`, manual `ghs`, `auto-mtf`, `median-anchor`, and `layered`; color strategies are `linked`,
+`unlinked`, and `luminance-preserving`. `mtf` and `ht` both take `shadows`,
+`midtone` and `highlights`. `mtf` shifts samples as N.I.N.A. does, the MTF of
+`value - shadows + 1 - highlights`, so shadows 0.2 with highlights 0.8 gives
+the same output as 0 with 1. `ht` clips and rescales as PixInsight's
+HistogramTransformation does, the MTF of
+`(value - shadows) / (highlights - shadows)`, read from a 24-bit table. `median-anchor` places the background
 median exactly on `target_median` (default 0.25; `auto-mtf` defaults to 0.2),
 with the black point `black_point_sigma` robust sigmas below the median
 (`None` uses the image minimum), then optional `curves_boost`, `hdr_amount`
