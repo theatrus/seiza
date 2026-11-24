@@ -1833,9 +1833,9 @@ In order, each only if the one before leaves a gap at the rims:
      noise out and does not put the gain between 4 and 16 px that the
      goal has.
    - More corpus pairs give some of it. The same run again with a
-     corpus-pair bank nine times as large (1,325 pairs of 457 objects,
+     bank of them nine times as large (1,325 pairs of 457 objects,
      most of them fields of narrow stars; the earlier bank kept at a
-     quarter of the share for its wide ones) at 0.30 of the mix, from
+     quarter of the draws for its wide ones) at 0.30 of the mix, from
      0.15, is the best at an ask of 0.5 so far: slope ×2.05 over
      4.36 px (×1.88 without, the goal ×2.21 over 3.74), the lit
      side +4.50 and +5.58 (+4.08 and +4.98; the goal +5.41 and
@@ -2238,8 +2238,9 @@ In order, each only if the one before leaves a gap at the rims:
        What is left of S82's line is its softer cloud and the
        California's stars. The cloud's look is what the Trunk sheet's
        second row asks for, and few training pairs hold that case: wide
-       stars on bright, structured nebula. So from S85 the Trunk's own
-       corpus pairs train, in a bank of their own beside the main one,
+       stars on bright, structured nebula. So from S85 pairs of the
+       Trunk's own sets train, in a bank of their own beside the
+       457-object bank,
        and the Trunk's sheets stay as sheets but are no longer held out.
        NGC 6820 takes their place (`ngc-6820-ha-deep`, one night of 22
        frames, and `ngc-6820-ha-multi-night`, five nights of 94, on one
@@ -2302,8 +2303,8 @@ In order, each only if the one before leaves a gap at the rims:
        its own, so their lists are refreshed in place, not cut again.
 
        S85, S84 continued 30,000 steps at 3e-5 with the Trunk's
-       corpus pairs as a bank of their own at a fifth of the corpus
-       pairs' share (6% of examples), moved toward the goal everywhere
+       pairs as a bank of their own (6% of examples), moved toward the
+       goal everywhere
        but in the stars, which stay as round as S84's. All of it is
        read with the union lists:
        - On the Trunk, now partly in training: the rim's lit side is
@@ -2325,11 +2326,11 @@ In order, each only if the one before leaves a gap at the rims:
        in the galaxies' disks (up to 23 times): clusters and resolved
        stars, as compact as the old points, that the filtered removal
        took as background. The runtime lists them too on such an image.
-       S82–S85 had also drawn from an earlier corpus-pair bank whose pairs
-       are all in the main one, so those pairs were drawn about four
+       S82–S85 had also drawn from an earlier bank whose pairs are all
+       in the 457-object one, so those pairs were drawn about four
        times as often as the rest. S86 is S85's recipe from S84 on the
-       refreshed banks without that bank: the corpus pairs' share goes 3:1
-       to the main bank and the Trunk's (7.5% of examples).
+       refreshed banks without that bank: the corpus pairs' 30% goes
+       3:1 to the 457-object bank and the Trunk's (7.5% of examples).
 
        S86 is S85 a step further almost everywhere, and the two changes
        are not separated:
@@ -2394,8 +2395,8 @@ In order, each only if the one before leaves a gap at the rims:
        from the known-kernel and seeing banks ask for neither. That S86
        gets half of the goal's lift even on the Trunk's own windows
        reads as a compromise between the two, not a gap in coverage. The
-       direct test is the share: the corpus-pair banks at 50% of examples in
-       place of 30%, with the same split between them.
+       direct test is the share: the corpus pairs at 50% of examples in
+       place of 30%, with the same split between their two banks.
 
        S88 is that test, and it rules the compromise out. The second
        crop's 8–32 px detail is S86's (1.07 and 1.06 of the input's), and
@@ -2413,16 +2414,16 @@ In order, each only if the one before leaves a gap at the rims:
        16 px, against the goal's 1.21.
 
        The Trunk's own targets on those windows hold 1.08–1.17 of the
-       input's detail between 8 and 16 px at the stronger nonstellar
-       setting, nearly as much at the weaker, and none unsharpened. So the
-       model is shown the lift on the very windows it trains on, at both
-       asks, and reaches about half of it whatever the loss's blocks, the
-       corpus pairs' share or the ask. It underfits a smooth, linear change.
+       input's detail between 8 and 16 px where they ask 0.55 of the
+       rest's width, nearly as much where they ask 0.75, and none where
+       they ask 1. So the model is shown the lift on the very windows it
+       trains on, at both asks, and reaches about half of it whatever the
+       loss's blocks, the banks' shares or the ask. It underfits a smooth, linear change.
        The next question is whether it can fit it at all, trained on that
        bank alone.
 
        S89 and S90 are that test, not candidates: S86 trained 5,000 more
-       steps on the Trunk's corpus pairs alone, and the same without the
+       steps on the Trunk's pairs alone, and the same without the
        overshoot term. It can fit the lift. On its own training windows S89
        reaches the goal between 8 and 32 px (1.10–1.15 of the input's
        between 8 and 16, the goal 1.04–1.15; 1.07–1.10 between 16
@@ -2452,17 +2453,17 @@ In order, each only if the one before leaves a gap at the rims:
        goal 4.05%). It keeps more grain (0.81 on the sky, S86 0.74).
        The stars are level, the California's at 0.069.
 
-       The two corpus-pair banks disagree. On the larger, 606 images, the
-       stronger setting's targets add next to nothing between 8 and 32 px
+       The two corpus-pair banks disagree. On the 457-object bank's 606
+       inputs, the targets asking 0.55 add next to nothing between 8 and 32 px
        (a median of 1.00 of the input's, 1.01–1.02 at the 90th
        percentile); the Trunk's bank adds up to 1.13–1.17 on its windows
        of strongest structure. Nor is it the stars' width: measured in each
-       window's own FWHM, at matched width and structure, the larger bank
-       asks for a third to a half of the Trunk bank's lift, and S86 drew
-       three quarters of its corpus-pair windows from it.
+       window's own FWHM, at matched width and structure, the 457-object
+       bank asks for a third to a half of the Trunk bank's lift, and S86
+       drew three quarters of its corpus-pair windows from it.
 
        S91 tests that: S86 with the split flipped, the Trunk's bank three
-       times the other, the corpus pairs' share still 30%. It gains nothing.
+       times the other, the two still 30% of examples. It gains nothing.
        Row 2 reads 1.07 and 1.06 between 8 and 32 px (S86 1.10 and 1.07),
        and on the Trunk's own training windows, drawn three times as often
        as in S86, 0.98–1.05 between 8 and 16 px (S86 1.02–1.07, S89
@@ -2495,7 +2496,7 @@ In order, each only if the one before leaves a gap at the rims:
        52%). The stars are level. So it is not a dose: at half the draws
        the Trunk pairs' lift is not fit, where on their own it is.
        Something in the rest of the mix cancels it. S93 keeps S92's
-       known-kernel and seeing windows and drops the larger corpus-pair bank,
+       known-kernel and seeing windows and drops the 457-object bank,
        to tell which.
 
        It is mostly the known-kernel and seeing windows. With the Trunk's
@@ -2505,15 +2506,15 @@ In order, each only if the one before leaves a gap at the rims:
        to 239 per Mpx, and its rim there gains a little (the lit side
        5.69 over the input, S86 5.45, the goal 7.18). The stars stay
        level. Across S91, S92, S93 and S89 the lift follows the
-       Trunk pairs' share: none at 22.5%, a sixth at 52.5% beside
-       the larger bank, a third at 70%, all of it at 100%. No mix fits
+       Trunk pairs' share of draws: none at 22.5%, a sixth at 52.5%
+       beside the 457-object bank, a third at 70%, all of it at 100%. No mix fits
        the lift and keeps the hold the known-kernel windows give on dots
        and fine scales. At one ask the two kinds of target disagree, and
        the model splits the difference.
 
-       S94 takes the disagreement away: S93 with the Trunk's
-       strong-setting pairs labelled with a stronger ask, 0.35 of the
-       rest's width in place of 0.55, the arrays the same. The ask then
+       S94 takes the disagreement away: S93 with the Trunk's pairs
+       that asked 0.55 of the rest's width labelled with a stronger
+       ask, 0.35, the arrays the same. The ask then
        carries the look on the windows it was shown. Asked 0.35, S94
        lifts all six of the deep Trunk's training windows to 1.08–1.10
        between 8 and 16 px (S89 1.10–1.15, S93 at the same ask
