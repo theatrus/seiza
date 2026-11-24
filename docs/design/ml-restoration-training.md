@@ -2540,6 +2540,32 @@ In order, each only if the one before leaves a gap at the rims:
        pair over the cloud's ridges, and the other bank's images whose
        targets carry the broad lift, labelled the same way.
 
+       S95 shows them: the Trunk's 263 pairs at 24 windows a pair
+       (6,312, the six before among them), so nearly all of its field
+       is covered, row 2 with it; and beside them the 28 images of the
+       457-object bank whose targets lift 8–32 px by 4% or more, mostly
+       fields of 6–12 px stars, at 24 windows a pair (1,848). Both carry
+       S94's ask of 0.35 and share the pairs' 70% evenly; all else is
+       S94's. Each Trunk window is drawn about once, S94's about nine
+       times. With row 2 trained on, the held-out test is NGC 6820's
+       dark-lane crop, whose right half the goal lifts 1.13 and 1.11
+       between 8 and 32 px (S94 1.12 and 1.06). S95 reads 1.11 and 1.05
+       there, 1.07 and 1.02 asked 0.35: nothing gained. Row 2, now in
+       its windows, reads as S94's (the overlap 1.12 and 1.02, the goal
+       1.32 and 1.21). Its stars are level on NGC 6820 and the Trunk,
+       but on the California's wide stars it undoes S94's rounding:
+       ellipticity 0.093 from the input's 0.092 (S94 0.062, the goal
+       0.045), a third of them longer than they came. On NGC 6820 the
+       rim's dark side deepens toward the goal's, −0.48 at −4 px (S94
+       −0.25, the goal −0.65).
+
+       So the broad band stays where the input has it even where the
+       windows show it. The loss's gradient term averages the error
+       over blocks of 1 to 8 px; a lift 16 to 32 px wide is weighed by
+       the pixel term alone, where it is a small share of the noise.
+       The next lever is the loss: blocks of 16 and 32 px at the same
+       weight a scale.
+
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
    taught that clarity is asked for at a ratio of 0, read from the
