@@ -82,6 +82,69 @@ def test_triangle_tilt_analysis_rejects_a_non_finite_angle():
         seiza.triangle_tilt_analysis(result, angle_degrees=float("inf"))
 
 
+def test_multi_frame_tilt_combines_the_frames():
+    frames = [
+        seiza.detect_measured_stars(
+            synthetic_field(soft_top_left=True), psf_type="gaussian"
+        )
+        for _ in range(3)
+    ]
+    tilt = seiza.multi_frame_tilt_analysis(frames, triangle_angle_degrees=-30)
+
+    assert (tilt.width, tilt.height) == (frames[0].width, frames[0].height)
+    assert len(tilt.frames) == 3
+    assert tilt.frames[0].star_count == len(frames[0].stars)
+    assert tilt.frames[0].summary.worst_corner == "top-left"
+    assert len(tilt.cells) == 9
+    top_left = tilt.cells[0]
+    assert (top_left.row, top_left.col) == (0, 0)
+    assert top_left.star_count == sum(
+        cell.star_count
+        for frame in frames
+        for cell in seiza.tilt_analysis(frame)[0]
+        if (cell.row, cell.col) == (0, 0)
+    )
+    assert top_left.relative_hfr.frame_count == 3
+    assert top_left.relative_hfr.median > 1.0
+    assert (
+        top_left.relative_hfr.lower_quartile
+        <= top_left.relative_hfr.median
+        <= top_left.relative_hfr.upper_quartile
+    )
+    assert top_left.median_hfr == pytest.approx(
+        top_left.relative_hfr.median * tilt.median_frame_hfr
+    )
+    assert tilt.summary.worst_corner == "top-left"
+    assert tilt.worst_corner_frame_count == 3
+    assert tilt.frame_tilt_percent.frame_count == 3
+    assert tilt.triangle.summary.angle_degrees == pytest.approx(330.0)
+    assert len(tilt.triangle.sector_relative_hfr) == 3
+    assert tilt.frames[0].triangle is not None
+
+    # The soft top-left corner is a plane softening toward the top left.
+    plane = tilt.focal_plane
+    assert 270.0 <= plane.tilt_angle_degrees < 360.0
+    assert plane.tilt_percent > 0
+    assert 0.0 <= plane.tilt_r_squared <= plane.r_squared <= 1.0
+    assert plane.radial_percent == pytest.approx(100 * plane.radial)
+    assert tilt.cells[4].elongation_from_radial_degrees is None
+    for cell in tilt.cells:
+        angle = cell.elongation_from_radial_degrees
+        assert angle is None or 0.0 <= angle <= 90.0
+
+
+def test_multi_frame_tilt_refuses_mixed_sensors_and_no_frames():
+    small = seiza.detect_measured_stars(
+        synthetic_field(height=200, width=300), psf_type="none"
+    )
+    large = seiza.detect_measured_stars(synthetic_field(), psf_type="none")
+    with pytest.raises(ValueError, match="frame 1 is 320x256"):
+        seiza.multi_frame_tilt_analysis([small, large])
+    with pytest.raises(ValueError, match="at least one frame"):
+        seiza.multi_frame_tilt_analysis([])
+    assert seiza.multi_frame_tilt_analysis([large]).triangle is None
+
+
 def test_a_bad_knob_is_an_error_not_a_default():
     with pytest.raises(ValueError, match="psf_type"):
         seiza.detect_measured_stars(synthetic_field(), psf_type="parabolic")

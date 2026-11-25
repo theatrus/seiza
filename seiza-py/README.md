@@ -230,6 +230,46 @@ and 240°. Per-sector medians remain available for sparse data, but `ready`,
 stars per sector. `overall_median_hfr` is the median of every selected annular
 star, not the median of the sector medians.
 
+One frame's tilt carries that frame's seeing, guiding and wind. To judge it
+over a night's subs, measure each and combine them:
+
+```python
+frames = [seiza.detect_measured_stars_file(path) for path in sub_paths]
+tilt = seiza.multi_frame_tilt_analysis(frames, triangle_angle_degrees=0)
+print(tilt.summary.tilt_percent, tilt.summary.worst_corner)
+print(tilt.worst_corner_frame_count, "of", len(tilt.frames), "frames agree")
+print(tilt.frame_tilt_percent.lower_quartile, tilt.frame_tilt_percent.upper_quartile)
+for cell in tilt.cells:
+    print(cell.row, cell.col, cell.relative_hfr and cell.relative_hfr.median)
+```
+
+Each cell's and sector's HFR is divided by its frame's own median HFR, so
+focus drift and changing seeing cancel, and those ratios are combined by
+median over the frames (`relative_hfr`, with quartiles). A cell or sector
+counts in a frame only with at least 3 stars there. `cells[i].median_hfr` is
+the ratio times `median_frame_hfr`, and `summary` and `triangle.summary` are
+the single-frame verdicts over those values. The frames need not be
+registered, but must share one size; elongation directions pool every star.
+
+`focal_plane` tells tilt from backfocus. It fits the nine cells as
+`constant + tilt_x*u + tilt_y*v + radial*(u**2 + v**2)`, where `(u, v)` is a
+pixel's offset from the sensor's middle over the middle-to-corner distance
+(`u` right, `v` down):
+
+```python
+plane = tilt.focal_plane
+print(plane.tilt_percent, plane.tilt_angle_degrees)  # across the diagonal; 0 up, clockwise
+print(plane.radial_percent)                          # corners vs middle
+print(plane.tilt_r_squared, plane.radial_r_squared, plane.r_squared)
+```
+
+Tilt softens one side and sharpens the other; a backfocus error softens every
+edge alike, and stretches every edge cell's stars the same way, which each
+cell's `elongation_from_radial_degrees` shows (0 toward the middle, 90
+around it). A tilted plane also softens both sides of its in-focus line, so
+`radial_percent` is an upper bound on a backfocus error. Removing the
+`tilt_x` and `tilt_y` terms gives what a spot would show with the tilt fixed.
+
 `detect_measured_stars_file(path, ...)` measures a FITS or XISF file
 directly: its linear 16-bit luminance, with a Bayer mosaic debayered first,
 and with the focal length (`FOCALLEN`, `FOCALLENGTH` or `FOCAL`) and pixel
