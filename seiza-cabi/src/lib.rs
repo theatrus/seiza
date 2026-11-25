@@ -1269,6 +1269,9 @@ struct SolveResponse {
     matched_stars: usize,
     rms_arcsec: f64,
     false_match_probability: f64,
+    /// Why the solution is linear although the request asked for SIP
+    /// distortion; null when SIP was fitted or not asked for.
+    sip_rejected: Option<SipRejectionResponse>,
     /// `"header-checked"`, `"header-hint"`, `"blind"`, or
     /// `"header-unchecked"` when nothing solved and the file's own WCS
     /// stands unchecked.
@@ -1284,6 +1287,33 @@ struct SolveResponse {
     overlay_unavailable_reasons: BTreeMap<String, String>,
     overlay_counts: BTreeMap<String, usize>,
     wcs: WcsResponse,
+}
+
+/// A refused SIP fit, as [`seiza::solve::SipRejection`].
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SipRejectionResponse {
+    /// `"too-few-stars"`, `"singular"`, `"linear-drift"`,
+    /// `"reference-shift"`, `"corner-correction"`, `"inverse-mismatch"` or
+    /// `"no-improvement"`.
+    reason: String,
+    /// What the check measured, where it has a limit.
+    measured: Option<f64>,
+    /// The limit `measured` passed.
+    limit: Option<f64>,
+    /// The refusal as a sentence.
+    message: String,
+}
+
+impl From<&seiza::solve::SipRejection> for SipRejectionResponse {
+    fn from(rejection: &seiza::solve::SipRejection) -> Self {
+        Self {
+            reason: rejection.reason.to_string(),
+            measured: rejection.measured,
+            limit: rejection.limit,
+            message: rejection.to_string(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -7167,6 +7197,10 @@ pub unsafe extern "C" fn seiza_solve_image_with_limits_json(
             matched_stars: solution.matched_stars,
             rms_arcsec: solution.rms_arcsec,
             false_match_probability: solution.false_match_probability,
+            sip_rejected: solution
+                .sip_rejected
+                .as_ref()
+                .map(SipRejectionResponse::from),
             solved_from: source.as_str(),
             detected_stars: stars.len(),
             elapsed_milliseconds: started.elapsed().as_millis(),

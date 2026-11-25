@@ -3393,6 +3393,8 @@ fn solve_command(
             "  distortion : SIP order {} (forward and inverse)",
             sip.order
         );
+    } else if let Some(rejection) = &solution.sip_rejected {
+        println!("  distortion : none: {rejection}");
     }
     let footprint = wcs.footprint(dims.0, dims.1);
     println!(

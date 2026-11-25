@@ -329,8 +329,18 @@ def test_sip_fit_on_distorted_field_and_header_output():
     kwargs = dict(ra=CENTER[0], dec=CENTER[1], scale_arcsec_px=SCALE)
     linear = seiza.solve(image_stars, catalog, WIDTH, HEIGHT, **kwargs)
     assert linear.wcs.sip_order is None
+    assert linear.sip_rejected is None
     solution = seiza.solve(image_stars, catalog, WIDTH, HEIGHT, sip_order=3, **kwargs)
     assert solution.wcs.sip_order is not None and solution.wcs.sip_order >= 2
+    assert solution.sip_rejected is None
+
+    # Too few stars for a polynomial: the solve stays linear and says why.
+    sparse = seiza.solve(image_stars[:15], catalog, WIDTH, HEIGHT, sip_order=3, **kwargs)
+    assert sparse.wcs.sip_order is None
+    assert sparse.sip_rejected is not None
+    assert sparse.sip_rejected.reason == "too-few-stars"
+    assert sparse.sip_rejected.measured is None
+    assert "too few" in str(sparse.sip_rejected)
     assert solution.rms_arcsec < linear.rms_arcsec
 
     coefficients = solution.wcs.sip_coefficients()

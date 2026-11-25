@@ -135,6 +135,14 @@ print(solution.rotation_deg, solution.flipped)
 ra, dec = solution.wcs.pixel_to_world(100.0, 200.0)
 ```
 
+When `sip_order` asks for distortion and the solution comes back linear,
+`solution.sip_rejected` says why: a `SipRejection` whose `reason` is one of
+`"too-few-stars"`, `"singular"`, `"linear-drift"`, `"reference-shift"`,
+`"corner-correction"`, `"inverse-mismatch"` or `"no-improvement"`, with the
+`measured` value and `limit` where the check has one; `str()` gives it as a
+sentence. It is `None` when SIP was fitted or not asked for. The C ABI's
+solve answer carries the same as `sipRejected`.
+
 `Wcs.rotation_deg` and `Solution.rotation_deg` report the linear CD rotation
 in [-180, 180] degrees, matching `Wcs.from_center_scale_rotation` modulo
 360 degrees for either parity. It is `atan2(CD1_2, -CD2_2)`: the positive

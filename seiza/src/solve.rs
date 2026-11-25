@@ -52,6 +52,128 @@ pub struct Solution {
     /// frame holds, across every candidate the search scored. Near 0 for a
     /// sure solution; a value near 1 means the matches prove nothing.
     pub false_match_probability: f64,
+    /// Why the solution is linear when the hint asked for SIP distortion
+    /// (`sip_order` 2 or more); `None` when SIP was fitted or not asked for.
+    /// A host can warn, or retry at a lower order, on a field whose
+    /// distortion seiza refused to model.
+    pub sip_rejected: Option<SipRejection>,
+}
+
+/// Why a SIP distortion fit was refused, leaving a solution linear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SipRejectionReason {
+    /// Too few matched stars to constrain even a quadratic polynomial.
+    TooFewStars,
+    /// The fit's equations had no unique solution.
+    Singular,
+    /// The polynomial's linear part moved the scale, rotation or shear more
+    /// than the linear solution allows.
+    LinearDrift,
+    /// The polynomial's constant part moved the reference pixel too far.
+    ReferenceShift,
+    /// The polynomial moved an image corner implausibly far.
+    CornerCorrection,
+    /// The inverse polynomial could not undo the forward one across the
+    /// frame, so sky-to-pixel positions would disagree with pixel-to-sky.
+    InverseMismatch,
+    /// The polynomial fitted, but explained no more than its extra
+    /// coefficients would by chance.
+    NoImprovement,
+}
+
+impl SipRejectionReason {
+    const WORDS: [(Self, &'static str); 7] = [
+        (Self::TooFewStars, "too-few-stars"),
+        (Self::Singular, "singular"),
+        (Self::LinearDrift, "linear-drift"),
+        (Self::ReferenceShift, "reference-shift"),
+        (Self::CornerCorrection, "corner-correction"),
+        (Self::InverseMismatch, "inverse-mismatch"),
+        (Self::NoImprovement, "no-improvement"),
+    ];
+}
+
+impl std::fmt::Display for SipRejectionReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let word = Self::WORDS
+            .iter()
+            .find(|(reason, _)| reason == self)
+            .map_or("", |(_, word)| word);
+        f.write_str(word)
+    }
+}
+
+/// A word that names no [`SipRejectionReason`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown SIP rejection reason {0:?}")]
+pub struct ParseSipRejectionReasonError(pub String);
+
+impl std::str::FromStr for SipRejectionReason {
+    type Err = ParseSipRejectionReasonError;
+
+    fn from_str(word: &str) -> Result<Self, Self::Err> {
+        Self::WORDS
+            .iter()
+            .find(|(_, known)| *known == word)
+            .map(|(reason, _)| *reason)
+            .ok_or_else(|| ParseSipRejectionReasonError(word.to_string()))
+    }
+}
+
+/// A refused SIP fit: why, and by how much where a limit was passed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SipRejection {
+    /// The check that refused the fit.
+    pub reason: SipRejectionReason,
+    /// What the check measured, for the checks with a limit: the largest
+    /// relative change of the CD matrix for [`SipRejectionReason::LinearDrift`],
+    /// and pixels for [`SipRejectionReason::ReferenceShift`],
+    /// [`SipRejectionReason::CornerCorrection`] and
+    /// [`SipRejectionReason::InverseMismatch`].
+    pub measured: Option<f64>,
+    /// The limit `measured` passed, in the same unit.
+    pub limit: Option<f64>,
+}
+
+impl SipRejection {
+    fn new(reason: SipRejectionReason) -> Self {
+        Self {
+            reason,
+            measured: None,
+            limit: None,
+        }
+    }
+
+    fn over(reason: SipRejectionReason, measured: f64, limit: f64) -> Self {
+        Self {
+            reason,
+            measured: Some(measured),
+            limit: Some(limit),
+        }
+    }
+}
+
+impl std::fmt::Display for SipRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let text = match self.reason {
+            SipRejectionReason::TooFewStars => "too few matched stars for a SIP fit",
+            SipRejectionReason::Singular => "the SIP fit has no unique solution",
+            SipRejectionReason::LinearDrift => "the SIP fit changed the linear solution too much",
+            SipRejectionReason::ReferenceShift => "the SIP fit moved the reference pixel too far",
+            SipRejectionReason::CornerCorrection => "the SIP fit moved a corner too far",
+            SipRejectionReason::InverseMismatch => {
+                "the inverse SIP polynomial does not undo the forward one"
+            }
+            SipRejectionReason::NoImprovement => {
+                "the SIP fit did not improve on the linear solution"
+            }
+        };
+        f.write_str(text)?;
+        if let (Some(measured), Some(limit)) = (self.measured, self.limit) {
+            write!(f, " ({measured:.3} against a limit of {limit:.3})")?;
+        }
+        Ok(())
+    }
 }
 
 /// When a solve must give up: at a deadline, when the caller cancels, or
@@ -624,12 +746,17 @@ fn refine_to_solution(
     // become available once the polynomial predicts their positions.
     // Accepted only when the polynomial beats the linear solution over the
     // same matched set; the linear solution otherwise stands.
+    let mut sip_rejected = None;
     if hint.sip_order >= 2 {
         let linear = wcs.clone();
         let mut fit_set: Vec<PointPair> = final_pairs.clone();
         for _ in 0..2 {
-            let Some(candidate) = fit_sip(hint.sip_order, &wcs, &fit_set, dimensions) else {
-                break;
+            let candidate = match fit_sip(hint.sip_order, &wcs, &fit_set, dimensions) {
+                Ok(candidate) => candidate,
+                Err(rejection) => {
+                    sip_rejected = Some(rejection);
+                    break;
+                }
             };
             let matched = match_sky_pairs(
                 &candidate,
@@ -640,6 +767,7 @@ fn refine_to_solution(
                 MATCH_TOLERANCE_PX,
             );
             if matched.len() < MIN_INLIERS || matched.len() < fit_set.len() {
+                sip_rejected = Some(SipRejection::new(SipRejectionReason::NoImprovement));
                 break;
             }
             let sum_sq_over = |wcs: &Wcs| {
@@ -664,6 +792,7 @@ fn refine_to_solution(
             let reduced_candidate = candidate_sum_sq / (observations - candidate_parameters);
             let reduced_linear = sum_sq_over(&linear) / (observations - 6.0);
             if !reduced_candidate.is_finite() || reduced_candidate >= reduced_linear {
+                sip_rejected = Some(SipRejection::new(SipRejectionReason::NoImprovement));
                 break;
             }
             wcs = candidate;
@@ -694,11 +823,14 @@ fn refine_to_solution(
         trials,
     );
 
+    // A rejection after a polynomial was accepted only ends the refinement.
+    let sip_rejected = sip_rejected.filter(|_| wcs.sip.is_none());
     Ok(Solution {
         wcs,
         matched_stars,
         rms_arcsec,
         false_match_probability,
+        sip_rejected,
     })
 }
 
@@ -752,6 +884,7 @@ pub(crate) fn deepen(
     let mut wcs = solution.wcs.clone();
     let mut tolerance_px = MATCH_TOLERANCE_PX;
     let mut matched = Vec::new();
+    let mut sip_rejected = None;
     for _ in 0..DEEP_ITERATIONS {
         let pairs = match_sky_pairs(&wcs, stars, &cat, &recentre, dimensions, tolerance_px);
         if pairs.len() < MIN_INLIERS.max(solution.matched_stars) {
@@ -773,10 +906,13 @@ pub(crate) fn deepen(
             cd: [[affine.a, affine.b], [affine.d, affine.e]],
             sip: None,
         };
-        let fitted = if sip_order >= 2 {
-            fit_sip(sip_order, &linear, &fit_pairs, dimensions).unwrap_or(linear)
+        let (fitted, rejection) = if sip_order >= 2 {
+            match fit_sip(sip_order, &linear, &fit_pairs, dimensions) {
+                Ok(fitted) => (fitted, None),
+                Err(rejection) => (linear, Some(rejection)),
+            }
         } else {
-            linear
+            (linear, None)
         };
         let residual_px = (pairs
             .iter()
@@ -794,6 +930,7 @@ pub(crate) fn deepen(
             break;
         }
         wcs = fitted;
+        sip_rejected = rejection;
         matched = pairs;
         tolerance_px = (3.0 * residual_px).clamp(1.0, MATCH_TOLERANCE_PX);
     }
@@ -813,6 +950,7 @@ pub(crate) fn deepen(
         matched_stars: matched.len(),
         rms_arcsec: (sum_sq / matched.len() as f64).sqrt(),
         false_match_probability: solution.false_match_probability,
+        sip_rejected,
     }
 }
 
@@ -1362,15 +1500,28 @@ impl DetectionsByX {
 /// parts are folded back into CRPIX and CD, leaving a pure SIP polynomial.
 /// Returns `None` when the pair count cannot support even a quadratic fit
 /// or the fitted distortion is implausibly large.
-fn fit_sip(order: u8, wcs: &Wcs, pairs: &[PointPair], dimensions: (u32, u32)) -> Option<Wcs> {
+/// The largest relative change a SIP fit may make to the linear CD matrix.
+const MAX_SIP_LINEAR_DRIFT: f64 = 0.05;
+/// How far, in pixels, the inverse SIP polynomial may miss undoing the
+/// forward one anywhere in the frame.
+const MAX_SIP_INVERSE_ERROR_PX: f64 = 0.1;
+/// The highest SIP order fitted, forward or inverse.
+const MAX_SIP_ORDER: u8 = 5;
+
+fn fit_sip(
+    order: u8,
+    wcs: &Wcs,
+    pairs: &[PointPair],
+    dimensions: (u32, u32),
+) -> Result<Wcs, SipRejection> {
     use crate::wcs::Sip;
 
     // Reduce the order until the matched pairs comfortably constrain the
     // coefficient count; each axis needs its own fit.
-    let mut order = order.min(5);
+    let mut order = order.min(MAX_SIP_ORDER);
     let (terms, sip_terms) = loop {
         if order < 2 {
-            return None;
+            return Err(SipRejection::new(SipRejectionReason::TooFewStars));
         }
         // The fit basis includes constant and linear terms; `sip_terms` is
         // the (p + q >= 2) subset retained as SIP coefficients.
@@ -1384,7 +1535,7 @@ fn fit_sip(order: u8, wcs: &Wcs, pairs: &[PointPair], dimensions: (u32, u32)) ->
 
     let det = wcs.cd[0][0] * wcs.cd[1][1] - wcs.cd[0][1] * wcs.cd[1][0];
     if det.abs() < 1e-18 {
-        return None;
+        return Err(SipRejection::new(SipRejectionReason::Singular));
     }
     // Normalize pixel offsets so high-order monomials stay well conditioned.
     let (width, height) = (dimensions.0 as f64, dimensions.1 as f64);
@@ -1416,8 +1567,13 @@ fn fit_sip(order: u8, wcs: &Wcs, pairs: &[PointPair], dimensions: (u32, u32)) ->
             .all(|value| value.is_finite())
             .then_some(scaled)
     };
-    let w_u = unscale(&solve_least_squares(&rows, &target_u)?, &terms)?;
-    let w_v = unscale(&solve_least_squares(&rows, &target_v)?, &terms)?;
+    let fit = |targets: &[f64]| {
+        solve_least_squares(&rows, targets)
+            .and_then(|coefficients| unscale(&coefficients, &terms))
+            .ok_or(SipRejection::new(SipRejectionReason::Singular))
+    };
+    let w_u = fit(&target_u)?;
+    let w_v = fit(&target_v)?;
 
     // Split the full fit T(u, v) = c + M*(u, v) + H(u, v): the affine part
     // becomes CRPIX/CD corrections, the higher-order part becomes SIP.
@@ -1436,13 +1592,18 @@ fn fit_sip(order: u8, wcs: &Wcs, pairs: &[PointPair], dimensions: (u32, u32)) ->
     // The affine correction must stay a refinement of the linear stage,
     // including its off-diagonals: an unchecked shear or rotation drift is
     // as much a warp as a scale drift.
-    if m_det.abs() < 1e-12
-        || (m[0][0] - 1.0).abs() > 0.05
-        || (m[1][1] - 1.0).abs() > 0.05
-        || m[0][1].abs() > 0.05
-        || m[1][0].abs() > 0.05
-    {
-        return None;
+    if m_det.abs() < 1e-12 {
+        return Err(SipRejection::new(SipRejectionReason::Singular));
+    }
+    let drift = [m[0][0] - 1.0, m[1][1] - 1.0, m[0][1], m[1][0]]
+        .into_iter()
+        .fold(0.0_f64, |worst, value| worst.max(value.abs()));
+    if drift > MAX_SIP_LINEAR_DRIFT {
+        return Err(SipRejection::over(
+            SipRejectionReason::LinearDrift,
+            drift,
+            MAX_SIP_LINEAR_DRIFT,
+        ));
     }
     let m_inverse = [
         [m[1][1] / m_det, -m[0][1] / m_det],
@@ -1456,8 +1617,13 @@ fn fit_sip(order: u8, wcs: &Wcs, pairs: &[PointPair], dimensions: (u32, u32)) ->
         m_inverse[0][0] * c.0 + m_inverse[0][1] * c.1,
         m_inverse[1][0] * c.0 + m_inverse[1][1] * c.1,
     );
-    if shift.0.hypot(shift.1) > 8.0 * MATCH_TOLERANCE_PX {
-        return None;
+    let shift_px = shift.0.hypot(shift.1);
+    if shift_px > 8.0 * MATCH_TOLERANCE_PX {
+        return Err(SipRejection::over(
+            SipRejectionReason::ReferenceShift,
+            shift_px,
+            8.0 * MATCH_TOLERANCE_PX,
+        ));
     }
     let crpix = (wcs.crpix.0 - shift.0, wcs.crpix.1 - shift.1);
     let cd = [
@@ -1477,7 +1643,7 @@ fn fit_sip(order: u8, wcs: &Wcs, pairs: &[PointPair], dimensions: (u32, u32)) ->
         a.push(m_inverse[0][0] * h.0 + m_inverse[0][1] * h.1);
         b.push(m_inverse[1][0] * h.0 + m_inverse[1][1] * h.1);
     }
-    let mut sip = Sip {
+    let sip = Sip {
         order,
         a,
         b,
@@ -1495,60 +1661,109 @@ fn fit_sip(order: u8, wcs: &Wcs, pairs: &[PointPair], dimensions: (u32, u32)) ->
         (0.0, height - 1.0),
     ] {
         let (f, g) = sip.forward(x - crpix.0, y - crpix.1);
-        if !f.is_finite() || !g.is_finite() || f.abs() > max_correction || g.abs() > max_correction
-        {
-            return None;
+        let correction_px = f.abs().max(g.abs());
+        if !correction_px.is_finite() || correction_px > max_correction {
+            return Err(SipRejection::over(
+                SipRejectionReason::CornerCorrection,
+                correction_px,
+                max_correction,
+            ));
         }
     }
 
     // Inverse polynomials fitted over a uniform grid of forward-distorted
     // offsets, so `world_to_pixel` works everywhere in the frame, not just
-    // at the matched stars.
-    let inverse_terms = Sip::inverse_terms(order);
-    let mut inverse_rows = Vec::new();
-    let mut inverse_u = Vec::new();
-    let mut inverse_v = Vec::new();
-    const GRID: usize = 12;
-    for gy in 0..GRID {
-        for gx in 0..GRID {
-            let u = (width - 1.0) * gx as f64 / (GRID - 1) as f64 - crpix.0;
-            let v = (height - 1.0) * gy as f64 / (GRID - 1) as f64 - crpix.1;
-            let (f, g) = sip.forward(u, v);
-            let cap_u = u + f;
-            let cap_v = v + g;
-            inverse_rows.push(monomials(&inverse_terms, cap_u * scale, cap_v * scale));
-            inverse_u.push((u - cap_u) * scale);
-            inverse_v.push((v - cap_v) * scale);
-        }
-    }
-    sip.ap = unscale(
-        &solve_least_squares(&inverse_rows, &inverse_u)?,
-        &inverse_terms,
-    )?;
-    sip.bp = unscale(
-        &solve_least_squares(&inverse_rows, &inverse_v)?,
-        &inverse_terms,
-    )?;
-    // The inverse is an approximation; a solution whose world_to_pixel
-    // cannot reproduce its own forward mapping is not worth keeping.
-    for gy in 0..GRID {
-        for gx in 0..GRID {
-            let u = (width - 1.0) * gx as f64 / (GRID - 1) as f64 - crpix.0;
-            let v = (height - 1.0) * gy as f64 / (GRID - 1) as f64 - crpix.1;
-            let (f, g) = sip.forward(u, v);
-            let (cap_u, cap_v) = (u + f, v + g);
-            let (fi, gi) = sip.inverse(cap_u, cap_v);
-            if (cap_u + fi - u).hypot(cap_v + gi - v) > 0.1 {
-                return None;
+    // at the matched stars. The inverse of a polynomial is not a polynomial
+    // of the same order: on a wide field with tens of pixels of distortion
+    // an inverse at the forward order misses by tenths of a pixel at the
+    // corners. A higher inverse order fixes that, and the forward
+    // polynomial, padded with zero terms to that order, is unchanged.
+    let grid_offset = |gx: usize, gy: usize, cells: usize| {
+        (
+            (width - 1.0) * gx as f64 / (cells - 1) as f64 - crpix.0,
+            (height - 1.0) * gy as f64 / (cells - 1) as f64 - crpix.1,
+        )
+    };
+    const GRID: usize = 16;
+    // Checked between the fit's own grid points too, where a polynomial
+    // fitted only at those points is likeliest to stray.
+    const CHECK_GRID: usize = 2 * GRID - 1;
+    let mut worst_error_px = f64::INFINITY;
+    for inverse_order in order..=MAX_SIP_ORDER.max(order) {
+        let forward_terms = Sip::forward_terms(order);
+        let padded = |values: &[f64]| {
+            Sip::forward_terms(inverse_order)
+                .iter()
+                .map(|term| {
+                    forward_terms
+                        .iter()
+                        .position(|known| known == term)
+                        .map_or(0.0, |index| values[index])
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut sip = Sip {
+            order: inverse_order,
+            a: padded(&sip.a),
+            b: padded(&sip.b),
+            ap: Vec::new(),
+            bp: Vec::new(),
+        };
+        let inverse_terms = Sip::inverse_terms(inverse_order);
+        let mut inverse_rows = Vec::new();
+        let mut inverse_u = Vec::new();
+        let mut inverse_v = Vec::new();
+        for gy in 0..GRID {
+            for gx in 0..GRID {
+                let (u, v) = grid_offset(gx, gy, GRID);
+                let (f, g) = sip.forward(u, v);
+                let cap_u = u + f;
+                let cap_v = v + g;
+                inverse_rows.push(monomials(&inverse_terms, cap_u * scale, cap_v * scale));
+                inverse_u.push((u - cap_u) * scale);
+                inverse_v.push((v - cap_v) * scale);
             }
         }
+        let fit_inverse = |targets: &[f64]| {
+            solve_least_squares(&inverse_rows, targets)
+                .and_then(|coefficients| unscale(&coefficients, &inverse_terms))
+                .ok_or(SipRejection::new(SipRejectionReason::Singular))
+        };
+        sip.ap = fit_inverse(&inverse_u)?;
+        sip.bp = fit_inverse(&inverse_v)?;
+        // The inverse is an approximation; a solution whose world_to_pixel
+        // cannot reproduce its own forward mapping is not worth keeping.
+        let mut error_px: f64 = 0.0;
+        for gy in 0..CHECK_GRID {
+            for gx in 0..CHECK_GRID {
+                let (u, v) = grid_offset(gx, gy, CHECK_GRID);
+                let (f, g) = sip.forward(u, v);
+                let (cap_u, cap_v) = (u + f, v + g);
+                let (fi, gi) = sip.inverse(cap_u, cap_v);
+                let miss = (cap_u + fi - u).hypot(cap_v + gi - v);
+                // NaN must count as a miss, which `max` would drop.
+                error_px = if miss.is_nan() {
+                    f64::INFINITY
+                } else {
+                    error_px.max(miss)
+                };
+            }
+        }
+        if error_px <= MAX_SIP_INVERSE_ERROR_PX {
+            return Ok(Wcs {
+                crval: wcs.crval,
+                crpix,
+                cd,
+                sip: Some(sip),
+            });
+        }
+        worst_error_px = worst_error_px.min(error_px);
     }
-    Some(Wcs {
-        crval: wcs.crval,
-        crpix,
-        cd,
-        sip: Some(sip),
-    })
+    Err(SipRejection::over(
+        SipRejectionReason::InverseMismatch,
+        worst_error_px,
+        MAX_SIP_INVERSE_ERROR_PX,
+    ))
 }
 
 fn monomials(terms: &[(u8, u8)], u: f64, v: f64) -> Vec<f64> {
@@ -2602,6 +2817,116 @@ mod tests {
             by_x.nearest_within(stars[7].x, stars[7].y, 1.0),
             Some((0.0, 7))
         );
+    }
+
+    /// A 9576 x 6388 field at 1.47"/px, 3.9 x 2.6 degrees, with radial
+    /// distortion of 76 px at the corners: the wide fields of #495, whose
+    /// inverse polynomial at the forward order misses by a fifth of a pixel.
+    fn distorted_wide_field() -> (Wcs, MemoryCatalog, Vec<DetectedStar>) {
+        let mut rng = Lcg(0xACC0_0003);
+        let s = 1.47 / 3600.0;
+        let dims = (9576.0, 6388.0);
+        let truth = Wcs {
+            crval: (305.0, 36.0),
+            crpix: (4787.5, 3193.5),
+            cd: [[-s, 0.0], [0.0, s]],
+            sip: None,
+        };
+        let mut catalog = Vec::new();
+        let mut detected = Vec::new();
+        for _ in 0..30000 {
+            let ra = 305.0 + (rng.next() - 0.5) * 5.6;
+            let dec = 36.0 + (rng.next() - 0.5) * 3.2;
+            let mag = (6.0 + rng.next() * 10.0) as f32;
+            catalog.push(CatalogStar { ra, dec, mag });
+            let Some((x, y)) = truth.world_to_pixel(ra, dec) else {
+                continue;
+            };
+            let (u, v) = (x - truth.crpix.0, y - truth.crpix.1);
+            let factor = 1.0 + 4e-10 * (u * u + v * v);
+            let (x, y) = (truth.crpix.0 + u * factor, truth.crpix.1 + v * factor);
+            if x < 0.0 || y < 0.0 || x >= dims.0 || y >= dims.1 || rng.next() < 0.2 {
+                continue;
+            }
+            detected.push(DetectedStar {
+                x: x + (rng.next() - 0.5) * 0.2,
+                y: y + (rng.next() - 0.5) * 0.2,
+                flux: 10f64.powf(-0.4 * mag as f64) * 1e6,
+                peak: 0.5,
+                area: 20,
+            });
+        }
+        detected.sort_by(|a, b| b.flux.total_cmp(&a.flux));
+        detected.truncate(3000);
+        (truth, MemoryCatalog::new(catalog), detected)
+    }
+
+    #[test]
+    fn a_strongly_distorted_wide_field_keeps_its_sip_fit() {
+        let (truth, catalog, detected) = distorted_wide_field();
+        let dims = (9576, 6388);
+        let hint = SolveHint {
+            center: truth.crval,
+            radius_deg: 0.0,
+            scale_arcsec_px: 1.47,
+            scale_tolerance: 0.05,
+            sip_order: 3,
+        };
+        let accepted =
+            solve_accepted(&detected, &catalog, &hint, dims, &SolveLimits::default()).unwrap();
+        assert!(accepted.wcs.sip.is_some(), "{:?}", accepted.sip_rejected);
+        let solution = deepen(accepted, &detected, &catalog, 3, dims);
+        assert_eq!(solution.sip_rejected, None);
+        assert!(solution.wcs.sip.is_some());
+        assert!(solution.matched_stars > 2500, "{}", solution.matched_stars);
+        assert!(solution.rms_arcsec < 0.3, "{}", solution.rms_arcsec);
+        // Sky to pixel undoes pixel to sky at the corners, where the
+        // distortion is largest.
+        for (x, y) in [(0.0, 0.0), (9575.0, 0.0), (9575.0, 6387.0), (0.0, 6387.0)] {
+            let (ra, dec) = solution.wcs.pixel_to_world(x, y);
+            let (xb, yb) = solution.wcs.world_to_pixel(ra, dec).unwrap();
+            assert!((xb - x).hypot(yb - y) < 0.1, "({x}, {y}) -> ({xb}, {yb})");
+        }
+    }
+
+    #[test]
+    fn a_solution_says_why_it_has_no_sip_fit() {
+        let (truth, catalog, mut detected) = distorted_wide_field();
+        // Too few stars for even a quadratic: the solve stays linear and
+        // says so.
+        detected.truncate(15);
+        let hint = SolveHint {
+            center: truth.crval,
+            radius_deg: 0.0,
+            scale_arcsec_px: 1.47,
+            scale_tolerance: 0.05,
+            sip_order: 3,
+        };
+        let solution = solve(&detected, &catalog, &hint, (9576, 6388)).unwrap();
+        assert!(solution.wcs.sip.is_none());
+        let rejection = solution.sip_rejected.expect("a rejection");
+        assert_eq!(rejection.reason, SipRejectionReason::TooFewStars);
+        // Linear solves ask for no polynomial, so nothing was refused.
+        let linear = solve(
+            &detected,
+            &catalog,
+            &SolveHint {
+                sip_order: 0,
+                ..hint
+            },
+            (9576, 6388),
+        )
+        .unwrap();
+        assert_eq!(linear.sip_rejected, None);
+    }
+
+    #[test]
+    fn sip_rejection_reasons_are_words() {
+        for (reason, word) in SipRejectionReason::WORDS {
+            assert_eq!(reason.to_string(), word);
+            assert_eq!(word.parse::<SipRejectionReason>(), Ok(reason));
+        }
+        assert!("linear".parse::<SipRejectionReason>().is_err());
     }
 
     #[test]

@@ -1085,6 +1085,7 @@ impl ServerSolution {
             rms_arcsec: self.rms_arcsec,
             // Unknown, and reported as absent, when the server sends none.
             false_match_probability: self.false_match_probability.unwrap_or(f64::NAN),
+            sip_rejected: None,
         };
         let mut result = solution_result(
             mode,
@@ -1885,6 +1886,7 @@ mod tests {
                     matched_stars: 42,
                     rms_arcsec: 0.2,
                     false_match_probability: 1e-30,
+                    sip_rejected: None,
                 };
                 let result = solution_result(
                     SolveMode::Hinted,
@@ -1929,6 +1931,7 @@ mod tests {
             matched_stars: 42,
             rms_arcsec: 0.5,
             false_match_probability: 1e-30,
+            sip_rejected: None,
         };
         let result = solution_result(
             SolveMode::Hinted,

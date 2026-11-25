@@ -503,6 +503,11 @@ struct PySolution {
     /// candidate the search tried. Near 0 for a sure solution.
     #[pyo3(get)]
     false_match_probability: f64,
+    /// Why the solution is linear although the solve asked for SIP
+    /// distortion (``sip_order`` 2 or more); ``None`` when SIP was fitted
+    /// or not asked for.
+    #[pyo3(get)]
+    sip_rejected: Option<PySipRejection>,
     /// Where :func:`solve_with_prior` or :func:`solve_image` found the solution:
     /// ``"header-checked"``, ``"header-hint"``, ``"blind"``, or
     /// ``"header-unchecked"`` when nothing solved and the image's own WCS
@@ -571,12 +576,54 @@ impl PySolution {
     }
 }
 
+/// A refused SIP distortion fit, as ``Solution.sip_rejected`` reports it.
+#[pyclass(frozen, skip_from_py_object, name = "SipRejection", module = "seiza")]
+#[derive(Clone)]
+struct PySipRejection {
+    rejection: seiza::solve::SipRejection,
+}
+
+#[pymethods]
+impl PySipRejection {
+    /// The check that refused the fit: ``"too-few-stars"``, ``"singular"``,
+    /// ``"linear-drift"``, ``"reference-shift"``, ``"corner-correction"``,
+    /// ``"inverse-mismatch"`` or ``"no-improvement"``.
+    #[getter]
+    fn reason(&self) -> String {
+        self.rejection.reason.to_string()
+    }
+
+    /// What the check measured, for the checks with a limit: the relative
+    /// change of the CD matrix for ``"linear-drift"``, pixels otherwise.
+    #[getter]
+    fn measured(&self) -> Option<f64> {
+        self.rejection.measured
+    }
+
+    /// The limit ``measured`` passed, in the same unit.
+    #[getter]
+    fn limit(&self) -> Option<f64> {
+        self.rejection.limit
+    }
+
+    fn __str__(&self) -> String {
+        self.rejection.to_string()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("SipRejection({:?})", self.rejection.to_string())
+    }
+}
+
 fn solution_to_py(solution: seiza::solve::Solution, dimensions: (u32, u32)) -> PySolution {
     PySolution {
         wcs: PyWcs { wcs: solution.wcs },
         matched_stars: solution.matched_stars,
         rms_arcsec: solution.rms_arcsec,
         false_match_probability: solution.false_match_probability,
+        sip_rejected: solution
+            .sip_rejected
+            .map(|rejection| PySipRejection { rejection }),
         source: None,
         width: dimensions.0,
         height: dimensions.1,
@@ -1362,6 +1409,7 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyBlindIndex>()?;
     m.add_class::<PyWcs>()?;
     m.add_class::<PySolution>()?;
+    m.add_class::<PySipRejection>()?;
     background::register(m)?;
     analysis::register(m)?;
     m.add_class::<satellites::PySatelliteCatalog>()?;
