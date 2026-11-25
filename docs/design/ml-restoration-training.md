@@ -2804,6 +2804,22 @@ In order, each only if the one before leaves a gap at the rims:
        their targets keep. S100 is S99 with both, `--pairs-noise 2`; made
        together, its result will not tell them apart.
 
+       S100's result is S99's to within a few hundredths. On the halves,
+       asked 0.35, it raises the noise between 8 and 16 px by 1.11, 1.20
+       and 1.36 in the three thirds of the Trunk's cloud (S99 1.13, 1.22
+       and 1.37) for structure raised by 1.12, 1.31 and 1.46, and by 1.21,
+       1.31 and 1.34 on NGC 6820 (S99 1.22, 1.34 and 1.37) for 1.34, 1.41
+       and 1.24. The Trunk's lit side is 5.30 and 6.40 at 4 and 6 px, its
+       slope 2.08 times the input's and its knots 2.69%; NGC 6820's lit
+       side 5.85 and its knots 1.81%; row 2's overlap 1.32 and 1.15 between
+       8 and 16 px and 16 and 32; the dots inside the Trunk's cloud 125 per
+       Mpx at the usual ask and 127 at 0.35; ellipticity 0.037, 0.059 and
+       0.021 on the Trunk, the California and NGC 6820. So the two parts
+       named above are not what raises the noise, or 10,000 steps from
+       S86's weights cannot undo it. The training loss of S98, S99 and S100
+       was still falling over their last 2,000 steps (S99 0.98 to 0.83),
+       some of it the learning rate easing off. S99 stays the candidate.
+
        Along an edge the runs vary more than the goal does. S99 draws the
        lit edge of row 2's overlap in pieces, with a kink and a blob where
        the goal has one thin line, and its knots along the Trunk's rims,
