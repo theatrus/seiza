@@ -405,6 +405,103 @@ def test_clarity_raises_faint_detail_and_leaves_rims_and_stars_alone(tmp_path):
     assert identity.details["clarity"] == 0.0 and np.array_equal(identity.target, identity.image)
 
 
+class OtherNoise:
+    """`seed`'s generator, with its planes of noise drawn from another's."""
+
+    def __init__(self, seed: int, other: int) -> None:
+        self.base, self.other = np.random.default_rng(seed), np.random.default_rng(other)
+
+    def standard_normal(self, size=None):
+        return (self.other if isinstance(size, tuple) and len(size) == 2 else self.base).standard_normal(size)
+
+    def __getattr__(self, name):
+        return getattr(self.base, name)
+
+
+def test_clarity_and_shade_leave_the_noise_they_do_not_read(tmp_path):
+    # A faint cloud under a wide PSF, which the two act on, with no star to
+    # keep clear of.
+    down, across = np.mgrid[:SIDE, :SIDE]
+    stamp = gaussian(sharpen_bank.STAMP, np.diag([3.2**2] * 2))
+    windows = [{"image": (100.0 + 3.0 * np.sin(across / 4.0) * np.sin(down / 5.0)).astype(np.float32),
+                "sigma": np.ones((SIDE, SIDE)), "saturated": np.zeros((SIDE, SIDE)), "stamp": stamp,
+                "info": {"source": 0, "background": 100.0, "noise": 1.0, "width": sharpen_bank.stamp_width(stamp)}}]
+    sources = [{"input": "a/deep", "set": "a", "telescope": "Test Scope", "record": {}, "windows": [0, 1],
+                "points": detections(POSITIONS, FLUXES)[:0]}]
+    bank = sm.Bank(write_bank(tmp_path / "sharpen-deep-train-0", pairs=False, windows=windows, sources=sources,
+                              label="deep"), sm.Settings(tile=32), focus_check=False)
+    base = dict(tile=32, exposure=1.0, kernel_noise=1.0, nonstellar=True, pass_noise=True, fine_snr=0.0)
+
+    def noise_kept(seed: int, **settings) -> tuple[float, float]:
+        """The slope of the target's noise on the input's and the most it
+        departs from it, for one window met under two noises."""
+        first, second = (sm.kernel_example(bank, 0, OtherNoise(seed, other), sm.Settings(**base, **settings),
+                                           identity=False) for other in (1, 2))
+        shown, asked = first.image - second.image, first.target - second.target
+        return float((asked * shown).sum() / (shown * shown).sum()), float(np.abs(asked - shown).max())
+
+    lifted = []
+    for seed in range(4):
+        raised, _ = noise_kept(seed, clarity=1.5, shade=1.5, clarity_reads="shown")
+        lifted.append(raised)
+        kept, most = noise_kept(seed, clarity=1.5, shade=1.5, clarity_reads="structure")
+        assert kept == pytest.approx(1.0, abs=1e-3) and most < 1e-2
+    # Read as shown, as a run's record from before reads, noise is raised
+    # with the cloud in the clarity's band, and the shade moves it too.
+    assert max(lifted) > 1.005
+    assert sm.settings_from({"clarity": 1.5}).clarity_reads == "shown"
+    # The structure is raised as before: without noise the two are one.
+    quiet = dict(base, kernel_noise=0.0, clarity=1.5, shade=1.5)
+    one, two = (sm.kernel_example(bank, 0, np.random.default_rng(3), sm.Settings(**quiet, clarity_reads=reads),
+                                  identity=False) for reads in sm.CLARITY_READS)
+    assert one.details["clarity"] > 0
+    np.testing.assert_allclose(one.target, two.target, atol=1e-3)
+    with pytest.raises(ValueError, match="clarity_reads"):
+        sm.Settings(clarity_reads="noise")
+
+
+def test_a_pairs_bank_s_windows_are_met_under_noise_their_targets_keep(tmp_path):
+    directory = pair_bank(tmp_path, offset=(0.0, 0.0))
+    saturated = np.load(directory / "saturated.npy")
+    saturated[:, 30:33, 30:33] = 1
+    np.save(directory / "saturated.npy", saturated)
+    settings = sm.Settings(centroid_offset="none", pairs_noise=2.0, pairs_noise_share=1.0)
+    bank = sm.Bank(directory, settings, same_stack=True)
+    plain = sm.pair_example(bank, 0, sm.Settings(centroid_offset="none"), np.random.default_rng(4))
+    noisy = sm.pair_example(bank, 0, settings, np.random.default_rng(4))
+    share = noisy.details["noise_share"]
+    assert 0.0 < share <= 2.0 and plain.details["noise_share"] == 0.0
+    added = noisy.image - plain.image
+    # The same noise on both, as wide as its share of the stack's, and none
+    # on a clipped core.
+    np.testing.assert_allclose(noisy.target - plain.target, added, atol=2e-3)
+    clipped = saturated[0].astype(bool)
+    assert not added[clipped].any()
+    sigma = np.asarray(bank.arrays["input_sigma"][0], dtype=np.float32)
+    assert np.std((added / sigma)[~clipped]) == pytest.approx(share, rel=0.05)
+    # The network is told the noise it meets, and the loss still weighs by
+    # the stack's.
+    np.testing.assert_array_equal(noisy.noise_map, sm.image_sigma(noisy.image))
+    assert noisy.noise > plain.noise
+    np.testing.assert_array_equal(noisy.sigma, plain.sigma)
+    np.testing.assert_array_equal(noisy.valid, plain.valid)
+    # A pair of two stacks, one drawn without a generator (validation) and
+    # a record that names none are as they were.
+    two = sm.pair_example(sm.Bank(directory, settings), 0, settings, np.random.default_rng(4))
+    still = sm.pair_example(bank, 0, settings)
+    for other in (two, still):
+        assert np.array_equal(other.image, plain.image) and np.array_equal(other.target, plain.target)
+    assert sm.settings_from({"centroid_offset": "light"}).pairs_noise == 0.0
+    # About half of them, unless told.
+    half = sm.Settings(centroid_offset="none", pairs_noise=2.0)
+    rng = np.random.default_rng(5)
+    met = [sm.pair_example(bank, 0, half, rng).details["noise_share"] > 0 for _ in range(60)]
+    assert 18 <= sum(met) <= 42
+    with pytest.raises(ValueError, match="under noise"):
+        sm.Settings(pairs_noise=-1.0)
+
+
+
 def test_the_clarity_step_is_the_taught_clarity_on_a_whole_image():
     side = 200
     ys, xs = np.mgrid[:side, :side].astype(np.float32)

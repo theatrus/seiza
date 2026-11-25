@@ -310,6 +310,14 @@ def main(argv: list[str] | None = None) -> int:
                                help="where a pairs bank's target, made from its input's own stack, is moved by its "
                                     "stars' offset: at its stars alone, its nebula and noise left where the input's "
                                     "lie, or whole, as every run's was until 2026-11-24")
+    sharpen_train.add_argument("--pairs-noise", type=float, default=0.0,
+                               help="meet --pairs-noise-share of the pairs banks' windows under fresh noise besides "
+                                    "their own, up to this many times their stack's, that their targets keep")
+    sharpen_train.add_argument("--pairs-noise-share", type=float, default=0.5)
+    sharpen_train.add_argument("--clarity-reads", choices=("shown", "structure"), default="structure",
+                               help="whether --clarity and --shade read a known-kernel window's target before its "
+                                    "noise is added, so that they raise its structure alone, or under it, as every "
+                                    "run's did until 2026-11-25")
     sharpen_train.add_argument("--ratio-source", choices=("stamp", "fit"), default="stamp",
                                help="a pair's ratio from its stamps' widths, which every window has, or from the "
                                     "field's Moffat fit, which fails below about 2 px")
@@ -352,13 +360,13 @@ def main(argv: list[str] | None = None) -> int:
                                help="contrast asked of what is not a star: a known-kernel target's rest is given this, "
                                     "times one less its ratio, of a masked unsharp mask (0: none)")
     sharpen_train.add_argument("--clarity", type=float, default=0.0,
-                               help="local contrast asked of what is not a star: a known-kernel target, with the "
-                                    "noise it passes, is given this, times one less its ratio, of its own detail "
-                                    "above a base that keeps strong edges (0: none)")
+                               help="local contrast asked of what is not a star: a known-kernel target is given "
+                                    "this, times one less its ratio, of its own detail above a base that keeps "
+                                    "strong edges (see --clarity-reads; 0: none)")
     sharpen_train.add_argument("--shade", type=float, default=0.0,
                                help="shade asked on the dark side of strong edges: a known-kernel target, after its "
-                                    "noise and clarity, is given this, times one less its ratio, of what dips below "
-                                    "its local mean beside a strong edge (0: none)")
+                                    "clarity, is given this, times one less its ratio, of what dips below "
+                                    "its local mean beside a strong edge (see --clarity-reads; 0: none)")
     sharpen_train.add_argument("--fine-snr", type=float, default=0.0,
                                help="hold back the finest part of what is asked of what is not a star where it lies "
                                     "under this times the noise a known-kernel window is shown under (0: never)")
@@ -894,7 +902,9 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
         identity=arguments.identity, exposure=arguments.exposure, floor_px=arguments.floor_px,
         max_ratio=arguments.max_window_ratio, min_ratio=arguments.min_window_ratio,
         points_empty=arguments.points_empty, centroid_offset=arguments.centroid_offset,
-        pairs_offset=arguments.pairs_offset, ratio_source=arguments.ratio_source, residual=arguments.residual, nonstellar=arguments.nonstellar,
+        pairs_offset=arguments.pairs_offset, pairs_noise=arguments.pairs_noise,
+        pairs_noise_share=arguments.pairs_noise_share, clarity_reads=arguments.clarity_reads,
+        ratio_source=arguments.ratio_source, residual=arguments.residual, nonstellar=arguments.nonstellar,
         equal_share=arguments.equal_share, fill_clipped=arguments.fill_clipped,
         pass_noise=arguments.pass_noise, real_kernels=arguments.real_kernels,
         round_target=arguments.round_target, denoised=arguments.denoised, reblur=arguments.reblur,

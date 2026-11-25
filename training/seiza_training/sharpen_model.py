@@ -146,8 +146,12 @@ REBLUR_RATIOS = (0.5, 0.95)
 # away from its point sources; the scores are kept beside the bank.
 STRUCTURE_BLOCK = 8
 STRUCTURE_VERSION = 1
-# A known-kernel window's passed noise is blurred by up to this many pixels.
+# A window's passed noise is blurred by up to this many pixels.
 NOISE_BLUR = 0.6
+# What a known-kernel window's clarity and shade read: its target under the
+# noise it is met under, whose noise they raised with the rest, or its target
+# before that noise, which is then passed on as it came.
+CLARITY_READS = ("shown", "structure")
 # A magnified window (`Settings.zoom`) is magnified at least this much, or
 # not at all.
 ZOOM_LEAST = 1.2
@@ -270,6 +274,15 @@ class Settings:
     # A pairs bank's target is moved whole, as every run's was before this
     # was a setting, or at its stars alone (`PAIRS_OFFSETS`).
     pairs_offset: str = "whole"
+    # `pairs_noise_share` of the pairs banks' windows are met under fresh
+    # noise besides their own, up to this many times their stack's, that
+    # their targets keep: the goal raises an image's broad bands more where
+    # they hold structure than where they hold noise, and a pair shows the
+    # two together, at one noise. On independent halves of the Trunk a run
+    # trained without it raised the noise between 8 and 16 px about twice
+    # as much as the goal does, for the same structure (2026-11-25). 0: none.
+    pairs_noise: float = 0.0
+    pairs_noise_share: float = 0.5
     ratio_source: str = "stamp"
     residual: str = "asinh"
     # Separate strengths for stars and for the rest (`PLANES_NONSTELLAR`):
@@ -362,22 +375,23 @@ class Settings:
     # 0: none.
     contrast: float = 0.0
     # Local contrast asked of what is not a star, beyond the sharpening
-    # (`clarified`): a known-kernel window's target, with the noise it
-    # passes, is given this, times one less the ratio asked of the rest,
-    # of its own detail between about a third of the input's width and
-    # three of them, read against a base that keeps strong edges. The
-    # runs sharpen a rim and leave the faint structure inside a cloud
-    # nearly as soft as they found it: under noise nothing tells them how
-    # sharp it was. Raising what is there in that band needs no such
-    # knowledge, so it is taught on the target after its noise, where the
-    # input's own band shows what to raise; and the base follows a rim or
-    # a star, so neither is given a halo, which `contrast`'s plain
-    # unsharp mask gives the lit side of a rim (2026-11-11). An
-    # enhancement, as `contrast` is. 0: none.
+    # (`clarified`): a known-kernel window's target is given this, times
+    # one less the ratio asked of the rest, of its own detail between
+    # about a third of the input's width and three of them, read against
+    # a base that keeps strong edges. The runs sharpen a rim and leave the
+    # faint structure inside a cloud nearly as soft as they found it:
+    # under noise nothing tells them how sharp it was. Raising what is
+    # there in that band needs no such knowledge, so until 2026-11-25 it
+    # was taught on the target after its noise, where the input's own band
+    # shows what to raise, its noise with it (`clarity_reads`); and the
+    # base follows a rim or a star, so neither is given a halo, which
+    # `contrast`'s plain unsharp mask gives the lit side of a rim
+    # (2026-11-11). An enhancement, as `contrast` is. 0: none.
     clarity: float = 0.0
     # Shade asked on the dark side of strong edges: a known-kernel
     # target is given this, times one less the rest's ratio, of
-    # `shaded`'s dip, after its noise and its clarity. Sharpening a rim
+    # `shaded`'s dip, after its clarity (and its noise, `clarity_reads`).
+    # Sharpening a rim
     # raises its lit side and hardly lowers the cloud beside it; the
     # shade lowers it, with no bright line on the other side
     # (2026-11-13). An enhancement, as `clarity` is. 0: none.
@@ -426,6 +440,12 @@ class Settings:
     # clarity of 1.5 by 7%, with more of their gain under 8 px, where it
     # shows none (2026-11-17). 1: as set on 2026-11-11.
     clarity_scale: float = 1.0
+    # What the clarity and the shade read (`CLARITY_READS`); every run's
+    # read what was shown until 2026-11-25. On white noise alone a clarity
+    # and a shade of 1.5 asked 0.35 raise it by 1.25 between 8 and 16 px
+    # and 1.40 between 16 and 32 for stars 11 px across, 1.38 and 1.36 for
+    # stars 7 px across.
+    clarity_reads: str = "shown"
     # The share of known-kernel windows with a clean truth (clean-truth
     # and denoised windows, and the space-telescope bank's) seen
     # magnified first (`magnified`): a part of the window `z` times
@@ -457,6 +477,11 @@ class Settings:
             raise ValueError(f"centroid_offset is one of {CENTROID_OFFSETS}, not {self.centroid_offset!r}")
         if self.pairs_offset not in PAIRS_OFFSETS:
             raise ValueError(f"pairs_offset is one of {PAIRS_OFFSETS}, not {self.pairs_offset!r}")
+        if self.clarity_reads not in CLARITY_READS:
+            raise ValueError(f"clarity_reads is one of {CLARITY_READS}, not {self.clarity_reads!r}")
+        if not (self.pairs_noise >= 0 and 0.0 <= self.pairs_noise_share <= 1.0):
+            raise ValueError(f"pairs are met under noise of 0 or more, {self.pairs_noise}, a share of them from 0 "
+                             f"to 1, {self.pairs_noise_share}")
         if self.ratio_source not in RATIO_SOURCES:
             raise ValueError(f"ratio_source is one of {RATIO_SOURCES}, not {self.ratio_source!r}")
         low, high = self.kernel_ratios
@@ -1776,6 +1801,17 @@ def stack_noise(sigma: np.ndarray, image: np.ndarray, fallback: np.ndarray | Non
     return np.where(known, sigma, stand_in).astype(np.float32)
 
 
+def fresh_noise(shape: tuple[int, int], rng: np.random.Generator, shared: bool = True) -> np.ndarray:
+    """Noise of spread 1: white, or `shared` between neighbours by a blur
+    up to `NOISE_BLUR` px, at the spread it had."""
+    fresh = rng.standard_normal(shape).astype(np.float32)
+    if shared:
+        spread_px = float(rng.uniform(0.0, NOISE_BLUR))
+        fresh = blurred_images(fresh, [spread_px**2 * np.eye(2)], pad=8)[0]
+        fresh /= max(float(fresh.std()), 1e-6)
+    return fresh
+
+
 def edge_band(shape: tuple[int, int], band: int) -> np.ndarray:
     """True but within `band` pixels of the edges."""
     inside = np.zeros(shape, dtype=bool)
@@ -1984,14 +2020,7 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
         blurred, target, wide = blurred_images(signal, [kernel.blur, kernel.target, halo.covariance])
         blurred = halo.mixed(blurred, wide, 1.0)
         band = max(band, blur_reach(halo.covariance))
-    fresh = rng.standard_normal(image.shape).astype(np.float32)
-    if settings.pass_noise:
-        # Shared with its neighbours by a blur up to `NOISE_BLUR` px, at the
-        # spread it had.
-        spread_px = float(rng.uniform(0.0, NOISE_BLUR))
-        fresh = blurred_images(fresh, [spread_px**2 * np.eye(2)], pad=8)[0]
-        fresh /= max(float(fresh.std()), 1e-6)
-    fresh = fresh * (share * sigma)
+    fresh = fresh_noise(image.shape, rng, settings.pass_noise) * (share * sigma)
     shown = blurred + fresh
     if target is not None and kernel.rounding is not None:
         target = blurred_images(target, [kernel.rounding])[0]
@@ -2000,17 +2029,18 @@ def kernel_example(bank: Bank, window: int, rng: np.random.Generator, settings: 
         target, target_sigma = shown, math.hypot(scale, share) * sigma
     else:
         target_sigma = scale * sigma
-        if settings.pass_noise:
+        if settings.pass_noise and settings.clarity_reads == "shown":
+            # What the input shows in their bands is raised, whatever it is.
             target = target + fresh
         if clarity > 0:
-            # After the noise: what the input shows in that band is what
-            # is raised, whatever it is.
             target, reach = clarified(target, clarity, kernel.widths["input"], points, scale * stack_sigma,
                                       scale=settings.clarity_scale)
             band = max(band, reach)
         if shade > 0:
             target, reach = shaded(target, shade, kernel.widths["input"], points, scale * stack_sigma)
             band = max(band, reach)
+        if settings.pass_noise and settings.clarity_reads == "structure":
+            target = target + fresh
     # The clipped cores stay out of the loss, but not the pixels about them:
     # input and target are blurs of the same window there, and agree.
     valid = edge_band(image.shape, band) & ~saturated
@@ -2162,9 +2192,10 @@ def pair_example(bank: Bank, window: int, settings: Settings, rng: np.random.Gen
     """A pair's window: the input and the target, moved back by the pair's
     offset at the window as the settings measure it (a pairs bank's whole
     or at its stars alone, `PAIRS_OFFSETS`), the input's image-only noise
-    map and stamp, and the bank's ratio. The loss weighs by the target
-    stack's noise, or the input stack's where the bank keeps none for its
-    target."""
+    map and stamp, and the bank's ratio. A share of a pairs bank's windows
+    are met under fresh noise, which their targets keep (`pairs_noise`). The
+    loss weighs by the target stack's noise, or the input stack's where the
+    bank keeps none for its target."""
     row = bank.row(window)
     source = int(row["source"])
     planes = {name: np.asarray(bank.arrays[name][window]) for name in
@@ -2200,14 +2231,23 @@ def pair_example(bank: Bank, window: int, settings: Settings, rng: np.random.Gen
         sigma = sigma * DENOISED_NOISE
     saturated = np.asarray(bank.arrays["saturated"][window]).astype(bool)
     valid = edge_band(target.shape, band) & ~saturated & np.isfinite(sigma)
-    noise = float(np.median(noise_map[np.isfinite(noise_map)])) if denoised else row["noise"]
+    noise_share = 0.0
+    if (rng is not None and bank.same_stack and not denoised and settings.pairs_noise > 0
+            and rng.random() < settings.pairs_noise_share):
+        noise_share = float(rng.uniform(0.0, settings.pairs_noise))
+        own = stack_noise(planes["input_sigma"], planes["input"], planes["input_map"])
+        fresh = fresh_noise(shown.shape, rng) * (noise_share * np.nan_to_num(own) * ~saturated)
+        shown, target = (shown + fresh).astype(np.float32), (target + fresh).astype(np.float32)
+        noise_map = image_sigma(shown)
+    noise = float(np.median(noise_map[np.isfinite(noise_map)])) if denoised or noise_share > 0 else row["noise"]
     # A banked pair may say what its target asked of what is not a star.
     asked = (bank.sources[source].get("record") or {}).get("nonstellar_ratio")
     return Example(shown, target, noise_map,
                    sigma.astype(np.float32), valid, np.asarray(bank.arrays["input_stamp"][window], dtype=np.float32),
                    row[RATIO_COLUMNS[settings.ratio_source]], window_points(bank, source, row), row["background"],
                    noise, row["input_width"], "pairs", source, window, None,
-                   {"offset": offset, "target_width": row["target_width"], "denoised": denoised},
+                   {"offset": offset, "target_width": row["target_width"], "denoised": denoised,
+                    "noise_share": noise_share},
                    None if asked is None else float(asked))
 
 
