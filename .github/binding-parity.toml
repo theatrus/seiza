@@ -519,7 +519,6 @@ objects = [
 "seiza-background::BackgroundFit::correct_with_strength" = { none = "the C ABI uses correct_in_place_with_strength, which writes into the caller's buffer" }
 "seiza-background::BackgroundFit::render_model" = { none = "the C ABI uses render_model_into, which writes into the caller's buffer" }
 "seiza-background::BackgroundFit::value_at" = { none = "one point; the C ABI renders the whole model" }
-"seiza-background::BackgroundFit::correct_region_in_place_with_strength" = { none = "one rectangle, for a Rust caller that holds an image as tiles; C and Python hosts hold the whole image and correct it with correct_in_place_with_strength" }
 
 # calibration
 "seiza-calibration::coherent_subset_indices" = { none = "C hosts get it through the planner, seiza_calibration_plan_json" }
@@ -825,6 +824,7 @@ seiza_background_model_diagnostics_json = "BackgroundModel.diagnostics"
 seiza_background_model_render = "BackgroundModel.render"
 seiza_background_model_correct_in_place = "BackgroundModel.correct"
 seiza_background_model_correct_in_place_with_strength = "BackgroundModel.correct"
+seiza_background_model_correct_region_in_place_with_strength = "BackgroundModel.correct_region"
 seiza_background_model_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
 seiza_background_select_shared_model_json = "select_shared_model"
 seiza_deconvolve_in_place = "deconvolve"

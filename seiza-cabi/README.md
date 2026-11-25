@@ -76,7 +76,10 @@ exposes the **superset** of what both apps need.
   model from interleaved linear mono or RGB `float` samples. Callers can inspect
   its borrowed diagnostics JSON, render it into a caller-owned buffer, or apply
   subtractive/divisive correction in place before freeing the model. A second
-  correction entry point accepts a strength from zero to one. Optional settings
+  correction entry point accepts a strength from zero to one, and
+  `seiza_background_model_correct_region_in_place_with_strength` corrects one
+  rectangle of the image with the values the whole-image correction gives, so
+  a host that holds an image as tiles can apply one fit tile by tile. Optional settings
   use serialized `seiza-background` `BackgroundConfig` JSON, including
   polynomial, radial-basis, and automatic model selection, so the ABI stays
   stable as model options grow. The JSON config can carry normalized ellipses

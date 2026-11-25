@@ -135,6 +135,51 @@ impl PyBackgroundModel {
         float_array(py, image.width, image.height, image.channels, corrected)
     }
 
+    /// Correct one rectangle of the fitted image and return it.
+    ///
+    /// `image` holds the rectangle whose top-left pixel is (`x`, `y`) in the
+    /// fitted image; its shape gives the rectangle's width and height. Each
+    /// sample gets the value `correct` gives it in the whole image. NaNs are
+    /// preserved.
+    ///
+    /// The input array is read in place while the GIL is released; do not
+    /// mutate it from another thread until the call returns.
+    #[pyo3(signature = (image, x, y, *, mode="subtract", strength=1.0))]
+    fn correct_region<'py>(
+        &self,
+        py: Python<'py>,
+        image: PyReadonlyArrayDyn<'_, f32>,
+        x: usize,
+        y: usize,
+        mode: &str,
+        strength: f64,
+    ) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
+        let image = float_image_view(&image)?;
+        if image.channels != self.fit.channels {
+            return Err(PyValueError::new_err(
+                "image channel count differs from the fitted background model",
+            ));
+        }
+        let mode = correction_mode(mode)?;
+        let corrected = py
+            .detach(|| {
+                let mut corrected = image.data.to_vec();
+                self.fit
+                    .correct_region_in_place_with_strength(
+                        &mut corrected,
+                        x,
+                        y,
+                        image.width,
+                        image.height,
+                        mode,
+                        strength,
+                    )
+                    .map(|()| corrected)
+            })
+            .map_err(|error| crate::EngineError::new_err(error.to_string()))?;
+        float_array(py, image.width, image.height, image.channels, corrected)
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "BackgroundModel(width={}, height={}, channels={}, model={}, accepted_samples={})",

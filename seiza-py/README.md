@@ -569,6 +569,22 @@ for x, y, values, dispersion, weight, status in model.samples():
     print(x, y, values, status)
 ```
 
+To correct an image one tile at a time, pass a rectangle
+of it and the position of its top-left pixel to `model.correct_region()`:
+
+```python
+tile = np.ascontiguousarray(stack[y:y + 256, x:x + 256])
+corrected_tile = model.correct_region(tile, x, y, strength=0.6)
+```
+
+`correct_region` takes the same `mode` and `strength` as `correct` and returns
+a corrected copy of the rectangle, whose width and height come from the
+array's shape. Each sample gets the value `correct` gives it in the whole
+image. A rectangle that reaches outside the fitted image raises
+`seiza.EngineError`. With `mode="divide"`, a rectangle is refused only when
+the divisor is unusable at a pixel inside it, where `correct` refuses the
+whole image.
+
 Fitted one channel at a time, the channels of a colour image can each pick
 a different automatic surface, and the mismatch shows as a colour cast toward
 the edges. `select_shared_model` chooses one surface from the held-out errors

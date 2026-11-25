@@ -105,3 +105,31 @@ def test_channels_fitted_apart_share_one_surface():
 
     fixed = [seiza.fit_background(channel, model="polynomial", degree=1) for channel in channels]
     assert seiza.select_shared_model(fixed) is None
+
+
+@pytest.mark.parametrize("mode", ["subtract", "divide"])
+def test_a_corrected_rectangle_equals_that_rectangle_of_the_whole_image(mode: str) -> None:
+    image = np.stack([gradient(), gradient() * 1.5, gradient() + 0.1], axis=-1)
+    image = np.ascontiguousarray(image, dtype=np.float32)
+    model = seiza.fit_background(image, degree=1, samples_per_axis=9, sample_radius=2)
+    whole = model.correct(image, mode=mode, strength=0.7)
+    x, y, width, height = 17, 9, 40, 23
+    tile = np.ascontiguousarray(image[y : y + height, x : x + width])
+    before = tile.copy()
+    corrected = model.correct_region(tile, x, y, mode=mode, strength=0.7)
+    assert corrected.dtype == np.float32
+    assert corrected.shape == tile.shape
+    assert np.array_equal(corrected, whole[y : y + height, x : x + width])
+    assert np.array_equal(tile, before)
+
+
+def test_a_rectangle_outside_the_fitted_image_is_refused() -> None:
+    image = gradient()
+    model = seiza.fit_background(image, degree=1, samples_per_axis=9, sample_radius=2)
+    tile = np.ascontiguousarray(image[:16, :32])
+    with pytest.raises(seiza.EngineError, match="outside the fitted"):
+        model.correct_region(tile, image.shape[1] - 31, 0)
+    with pytest.raises(seiza.EngineError, match="outside the fitted"):
+        model.correct_region(tile, 0, image.shape[0] - 15)
+    with pytest.raises(ValueError, match="channel count"):
+        model.correct_region(np.zeros((4, 4, 3), dtype=np.float32), 0, 0)
