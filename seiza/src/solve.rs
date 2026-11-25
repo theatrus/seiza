@@ -52,6 +52,80 @@ pub struct Solution {
     /// frame holds, across every candidate the search scored. Near 0 for a
     /// sure solution; a value near 1 means the matches prove nothing.
     pub false_match_probability: f64,
+    /// Why the solution is linear although the solve asked for SIP
+    /// distortion. `None` when it has SIP terms or the solve asked for none.
+    pub sip_rejected: Option<SipRejection>,
+}
+
+/// Why a solve that asked for SIP distortion gave a linear solution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SipRejection {
+    /// Too few matched stars to rest a polynomial on.
+    TooFewStars,
+    /// The deeper match a polynomial rests on found no more stars than the
+    /// linear solution already had.
+    NoMoreStars,
+    /// The matched stars do not determine the polynomial's terms.
+    Undetermined,
+    /// The fit's linear part strays too far from the linear solution.
+    LinearDrift,
+    /// The fit moves the reference pixel too far.
+    ReferenceShift,
+    /// The fitted distortion is too large to be one.
+    TooLarge,
+    /// The fitted distortion cannot be inverted across the frame.
+    NotInvertible,
+    /// The polynomial matches fewer stars than the linear solution, or
+    /// explains no more of their residuals than its extra terms would by
+    /// chance.
+    NoBetterThanLinear,
+}
+
+impl SipRejection {
+    /// As a word: `"too-few-stars"`, `"no-more-stars"`, `"undetermined"`, `"linear-drift"`,
+    /// `"reference-shift"`, `"too-large"`, `"not-invertible"` or
+    /// `"no-better-than-linear"`.
+    fn word(self) -> &'static str {
+        match self {
+            Self::TooFewStars => "too-few-stars",
+            Self::NoMoreStars => "no-more-stars",
+            Self::Undetermined => "undetermined",
+            Self::LinearDrift => "linear-drift",
+            Self::ReferenceShift => "reference-shift",
+            Self::TooLarge => "too-large",
+            Self::NotInvertible => "not-invertible",
+            Self::NoBetterThanLinear => "no-better-than-linear",
+        }
+    }
+
+    const ALL: [Self; 8] = [
+        Self::TooFewStars,
+        Self::NoMoreStars,
+        Self::Undetermined,
+        Self::LinearDrift,
+        Self::ReferenceShift,
+        Self::TooLarge,
+        Self::NotInvertible,
+        Self::NoBetterThanLinear,
+    ];
+}
+
+impl std::fmt::Display for SipRejection {
+    /// A word, such as `too-few-stars`, that [`str::parse`] reads back.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.pad(self.word())
+    }
+}
+
+impl std::str::FromStr for SipRejection {
+    type Err = String;
+
+    fn from_str(word: &str) -> Result<Self, String> {
+        Self::ALL
+            .into_iter()
+            .find(|rejection| rejection.word() == word)
+            .ok_or_else(|| format!("unknown SIP rejection {word:?}"))
+    }
 }
 
 /// When a solve must give up: at a deadline, when the caller cancels, or
@@ -617,6 +691,7 @@ fn refine_to_solution(
     let mut rms_arcsec = rms(&wcs);
 
     let mut matched_stars = pairs.len();
+    let mut sip_rejected = None;
 
     // Optional SIP distortion fit. Fit on the current inliers, then
     // re-match against the distorted model and fit again: stars whose
@@ -628,8 +703,12 @@ fn refine_to_solution(
         let linear = wcs.clone();
         let mut fit_set: Vec<PointPair> = final_pairs.clone();
         for _ in 0..2 {
-            let Some(candidate) = fit_sip(hint.sip_order, &wcs, &fit_set, dimensions) else {
-                break;
+            let candidate = match fit_sip(hint.sip_order, &wcs, &fit_set, dimensions) {
+                Ok(candidate) => candidate,
+                Err(rejection) => {
+                    sip_rejected = Some(rejection);
+                    break;
+                }
             };
             let matched = match_sky_pairs(
                 &candidate,
@@ -640,6 +719,7 @@ fn refine_to_solution(
                 MATCH_TOLERANCE_PX,
             );
             if matched.len() < MIN_INLIERS || matched.len() < fit_set.len() {
+                sip_rejected = Some(SipRejection::NoBetterThanLinear);
                 break;
             }
             let sum_sq_over = |wcs: &Wcs| {
@@ -664,6 +744,7 @@ fn refine_to_solution(
             let reduced_candidate = candidate_sum_sq / (observations - candidate_parameters);
             let reduced_linear = sum_sq_over(&linear) / (observations - 6.0);
             if !reduced_candidate.is_finite() || reduced_candidate >= reduced_linear {
+                sip_rejected = Some(SipRejection::NoBetterThanLinear);
                 break;
             }
             wcs = candidate;
@@ -695,6 +776,8 @@ fn refine_to_solution(
     );
 
     Ok(Solution {
+        // A later round that fails leaves the earlier round's polynomial.
+        sip_rejected: sip_rejected.filter(|_| wcs.sip.is_none()),
         wcs,
         matched_stars,
         rms_arcsec,
@@ -752,6 +835,7 @@ pub(crate) fn deepen(
     let mut wcs = solution.wcs.clone();
     let mut tolerance_px = MATCH_TOLERANCE_PX;
     let mut matched = Vec::new();
+    let mut sip_rejected = None;
     for _ in 0..DEEP_ITERATIONS {
         let pairs = match_sky_pairs(&wcs, stars, &cat, &recentre, dimensions, tolerance_px);
         if pairs.len() < MIN_INLIERS.max(solution.matched_stars) {
@@ -773,10 +857,13 @@ pub(crate) fn deepen(
             cd: [[affine.a, affine.b], [affine.d, affine.e]],
             sip: None,
         };
-        let fitted = if sip_order >= 2 {
-            fit_sip(sip_order, &linear, &fit_pairs, dimensions).unwrap_or(linear)
+        let (fitted, rejection) = if sip_order >= 2 {
+            match fit_sip(sip_order, &linear, &fit_pairs, dimensions) {
+                Ok(fitted) => (fitted, None),
+                Err(rejection) => (linear, Some(rejection)),
+            }
         } else {
-            linear
+            (linear, None)
         };
         let residual_px = (pairs
             .iter()
@@ -794,11 +881,19 @@ pub(crate) fn deepen(
             break;
         }
         wcs = fitted;
+        sip_rejected = rejection;
         matched = pairs;
         tolerance_px = (3.0 * residual_px).clamp(1.0, MATCH_TOLERANCE_PX);
     }
     if matched.len() <= solution.matched_stars.max(MIN_INLIERS) {
-        return solution;
+        let linear = sip_order >= 2 && solution.wcs.sip.is_none();
+        return Solution {
+            sip_rejected: linear.then(|| {
+                let rejected = solution.sip_rejected.or(sip_rejected);
+                rejected.unwrap_or(SipRejection::NoMoreStars)
+            }),
+            ..solution
+        };
     }
     let sum_sq: f64 = matched
         .iter()
@@ -813,6 +908,7 @@ pub(crate) fn deepen(
         matched_stars: matched.len(),
         rms_arcsec: (sum_sq / matched.len() as f64).sqrt(),
         false_match_probability: solution.false_match_probability,
+        sip_rejected,
     }
 }
 
@@ -1360,9 +1456,14 @@ impl DetectionsByX {
 /// distortion scale, so the residual field contains a linear component the
 /// (order >= 2) SIP terms cannot express. The fitted constant and linear
 /// parts are folded back into CRPIX and CD, leaving a pure SIP polynomial.
-/// Returns `None` when the pair count cannot support even a quadratic fit
-/// or the fitted distortion is implausibly large.
-fn fit_sip(order: u8, wcs: &Wcs, pairs: &[PointPair], dimensions: (u32, u32)) -> Option<Wcs> {
+/// Refuses a pair count that cannot support even a quadratic fit, and a fit
+/// that is implausibly large or cannot be inverted.
+fn fit_sip(
+    order: u8,
+    wcs: &Wcs,
+    pairs: &[PointPair],
+    dimensions: (u32, u32),
+) -> Result<Wcs, SipRejection> {
     use crate::wcs::Sip;
 
     // Reduce the order until the matched pairs comfortably constrain the
@@ -1370,7 +1471,7 @@ fn fit_sip(order: u8, wcs: &Wcs, pairs: &[PointPair], dimensions: (u32, u32)) ->
     let mut order = order.min(5);
     let (terms, sip_terms) = loop {
         if order < 2 {
-            return None;
+            return Err(SipRejection::TooFewStars);
         }
         // The fit basis includes constant and linear terms; `sip_terms` is
         // the (p + q >= 2) subset retained as SIP coefficients.
@@ -1384,7 +1485,7 @@ fn fit_sip(order: u8, wcs: &Wcs, pairs: &[PointPair], dimensions: (u32, u32)) ->
 
     let det = wcs.cd[0][0] * wcs.cd[1][1] - wcs.cd[0][1] * wcs.cd[1][0];
     if det.abs() < 1e-18 {
-        return None;
+        return Err(SipRejection::Undetermined);
     }
     // Normalize pixel offsets so high-order monomials stay well conditioned.
     let (width, height) = (dimensions.0 as f64, dimensions.1 as f64);
@@ -1405,7 +1506,7 @@ fn fit_sip(order: u8, wcs: &Wcs, pairs: &[PointPair], dimensions: (u32, u32)) ->
         target_u.push(cap_u * scale);
         target_v.push(cap_v * scale);
     }
-    let unscale = |coefficients: &[f64], terms: &[(u8, u8)]| -> Option<Vec<f64>> {
+    let unscale = |coefficients: &[f64], terms: &[(u8, u8)]| -> Result<Vec<f64>, SipRejection> {
         let scaled = coefficients
             .iter()
             .zip(terms)
@@ -1415,9 +1516,14 @@ fn fit_sip(order: u8, wcs: &Wcs, pairs: &[PointPair], dimensions: (u32, u32)) ->
             .iter()
             .all(|value| value.is_finite())
             .then_some(scaled)
+            .ok_or(SipRejection::Undetermined)
     };
-    let w_u = unscale(&solve_least_squares(&rows, &target_u)?, &terms)?;
-    let w_v = unscale(&solve_least_squares(&rows, &target_v)?, &terms)?;
+    let fit = |rows: &[Vec<f64>], target: &[f64], terms: &[(u8, u8)]| {
+        let values = solve_least_squares(rows, target).ok_or(SipRejection::Undetermined)?;
+        unscale(&values, terms)
+    };
+    let w_u = fit(&rows, &target_u, &terms)?;
+    let w_v = fit(&rows, &target_v, &terms)?;
 
     // Split the full fit T(u, v) = c + M*(u, v) + H(u, v): the affine part
     // becomes CRPIX/CD corrections, the higher-order part becomes SIP.
@@ -1442,7 +1548,7 @@ fn fit_sip(order: u8, wcs: &Wcs, pairs: &[PointPair], dimensions: (u32, u32)) ->
         || m[0][1].abs() > 0.05
         || m[1][0].abs() > 0.05
     {
-        return None;
+        return Err(SipRejection::LinearDrift);
     }
     let m_inverse = [
         [m[1][1] / m_det, -m[0][1] / m_det],
@@ -1457,7 +1563,7 @@ fn fit_sip(order: u8, wcs: &Wcs, pairs: &[PointPair], dimensions: (u32, u32)) ->
         m_inverse[1][0] * c.0 + m_inverse[1][1] * c.1,
     );
     if shift.0.hypot(shift.1) > 8.0 * MATCH_TOLERANCE_PX {
-        return None;
+        return Err(SipRejection::ReferenceShift);
     }
     let crpix = (wcs.crpix.0 - shift.0, wcs.crpix.1 - shift.1);
     let cd = [
@@ -1497,13 +1603,13 @@ fn fit_sip(order: u8, wcs: &Wcs, pairs: &[PointPair], dimensions: (u32, u32)) ->
         let (f, g) = sip.forward(x - crpix.0, y - crpix.1);
         if !f.is_finite() || !g.is_finite() || f.abs() > max_correction || g.abs() > max_correction
         {
-            return None;
+            return Err(SipRejection::TooLarge);
         }
     }
 
     // Inverse polynomials fitted over a uniform grid of forward-distorted
-    // offsets, so `world_to_pixel` works everywhere in the frame, not just
-    // at the matched stars.
+    // offsets, so `world_to_pixel` starts close everywhere in the frame, not
+    // just at the matched stars.
     let inverse_terms = Sip::inverse_terms(order);
     let mut inverse_rows = Vec::new();
     let mut inverse_u = Vec::new();
@@ -1521,29 +1627,26 @@ fn fit_sip(order: u8, wcs: &Wcs, pairs: &[PointPair], dimensions: (u32, u32)) ->
             inverse_v.push((v - cap_v) * scale);
         }
     }
-    sip.ap = unscale(
-        &solve_least_squares(&inverse_rows, &inverse_u)?,
-        &inverse_terms,
-    )?;
-    sip.bp = unscale(
-        &solve_least_squares(&inverse_rows, &inverse_v)?,
-        &inverse_terms,
-    )?;
-    // The inverse is an approximation; a solution whose world_to_pixel
-    // cannot reproduce its own forward mapping is not worth keeping.
+    sip.ap = fit(&inverse_rows, &inverse_u, &inverse_terms)?;
+    sip.bp = fit(&inverse_rows, &inverse_v, &inverse_terms)?;
+    // A solution whose world_to_pixel cannot reproduce its own forward
+    // mapping is not worth keeping. world_to_pixel refines the inverse
+    // polynomials, which follow a strong distortion only to some tenths of a
+    // pixel: that alone is no fault in the fit.
     for gy in 0..GRID {
         for gx in 0..GRID {
             let u = (width - 1.0) * gx as f64 / (GRID - 1) as f64 - crpix.0;
             let v = (height - 1.0) * gy as f64 / (GRID - 1) as f64 - crpix.1;
             let (f, g) = sip.forward(u, v);
             let (cap_u, cap_v) = (u + f, v + g);
-            let (fi, gi) = sip.inverse(cap_u, cap_v);
-            if (cap_u + fi - u).hypot(cap_v + gi - v) > 0.1 {
-                return None;
+            let (back_u, back_v) = sip.undistort(cap_u, cap_v);
+            let miss = (back_u - u).hypot(back_v - v);
+            if miss.is_nan() || miss > 0.1 {
+                return Err(SipRejection::NotInvertible);
             }
         }
     }
-    Some(Wcs {
+    Ok(Wcs {
         crval: wcs.crval,
         crpix,
         cd,
@@ -2565,6 +2668,155 @@ mod tests {
         let rms = (sum_sq / count as f64).sqrt();
         assert!(count > 1000, "{count}");
         assert!(rms < 0.25, "{rms}");
+    }
+
+    /// Issue #495: a wide field whose corners the lens moves by tens of
+    /// pixels, starting from the linear solution its header holds. A cubic
+    /// inverse follows such a distortion only to a few tenths of a pixel,
+    /// and for that the solve used to drop a forward fit good to 0.1".
+    #[test]
+    fn a_strongly_distorted_wide_field_keeps_its_sip() {
+        let (width, height) = (9576.0, 6388.0);
+        let dimensions = (9576, 6388);
+        let s = 1.47 / 3600.0;
+        for (axis, corner) in [((0.5, 0.5), -40.0), ((0.3, 0.6), 20.0)] {
+            let mut rng = Lcg(0x0495_0001);
+            let truth = Wcs {
+                crval: (305.0, 38.0),
+                crpix: (width * axis.0, height * axis.1),
+                cd: [[-s, 0.0], [0.0, s]],
+                sip: None,
+            };
+            let k = corner / f64::hypot(width / 2.0, height / 2.0).powi(3);
+            let distort = |x: f64, y: f64| {
+                let (u, v) = (x - truth.crpix.0, y - truth.crpix.1);
+                let factor = 1.0 + k * (u * u + v * v);
+                (truth.crpix.0 + u * factor, truth.crpix.1 + v * factor)
+            };
+            let mut catalog = Vec::new();
+            let mut detected = Vec::new();
+            for _ in 0..9000 {
+                let ra = 305.0 + (rng.next() - 0.5) * 7.0;
+                let dec = 38.0 + (rng.next() - 0.5) * 5.0;
+                let mag = (6.0 + rng.next().powf(0.4) * 10.0) as f32;
+                catalog.push(CatalogStar { ra, dec, mag });
+                let Some((x, y)) = truth.world_to_pixel(ra, dec) else {
+                    continue;
+                };
+                let (x, y) = distort(x, y);
+                if x < 0.0 || y < 0.0 || x >= width || y >= height || rng.next() < 0.2 {
+                    continue;
+                }
+                detected.push(DetectedStar {
+                    x: x + (rng.next() - 0.5) * 0.5,
+                    y: y + (rng.next() - 0.5) * 0.5,
+                    flux: 10f64.powf(-0.4 * mag as f64) * 1e6,
+                    peak: 0.5,
+                    area: 20,
+                });
+            }
+            detected.sort_by(|a, b| b.flux.total_cmp(&a.flux));
+            detected.truncate(1500);
+            let grid = (0..400).map(|index| {
+                let x = f64::from(index % 20) / 19.0 * width;
+                let y = f64::from(index / 20) / 19.0 * height;
+                (distort(x, y), truth.pixel_to_world(x, y))
+            });
+            let middle = crate::wcs::image_center(dimensions.0, dimensions.1);
+            let center = truth.pixel_to_world(middle.0, middle.1);
+            let tangent = tangent_wcs(center);
+            let pairs = grid
+                .clone()
+                .map(|(pixel, sky)| (pixel, tangent.world_to_pixel(sky.0, sky.1).unwrap()))
+                .collect::<Vec<PointPair>>();
+            let affine = Affine::fit(&pairs).unwrap();
+            let header = Wcs {
+                crval: center,
+                crpix: affine.zero_point().unwrap(),
+                cd: [[affine.a, affine.b], [affine.d, affine.e]],
+                sip: None,
+            };
+            let catalog = MemoryCatalog::new(catalog);
+            let hint = SolveHint {
+                center,
+                radius_deg: 0.0,
+                scale_arcsec_px: 1.47,
+                scale_tolerance: 0.05,
+                sip_order: 3,
+            };
+            let limits = SolveLimits::default();
+            let solution =
+                solve_from_coarse_wcs(&detected, &catalog, &header, &hint, dimensions, &limits)
+                    .unwrap();
+            let solution = deepen(solution, &detected, &catalog, 3, dimensions);
+            assert_eq!(solution.sip_rejected, None, "{corner}");
+            assert!(solution.wcs.sip.is_some(), "{corner}");
+            assert!(solution.matched_stars > 1400, "{}", solution.matched_stars);
+            for ((x, y), sky) in grid {
+                let (ra, dec) = solution.wcs.pixel_to_world(x, y);
+                let error = angular_separation_deg(ra, dec, sky.0, sky.1) * 3600.0;
+                assert!(error < 1.0, "{corner} at {x}, {y}: {error}");
+                // The pixel its own sky position maps back to.
+                let (x2, y2) = solution.wcs.world_to_pixel(ra, dec).unwrap();
+                assert!((x2 - x).hypot(y2 - y) < 1.0e-4, "{corner} at {x}, {y}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_linear_solution_says_why_it_has_no_sip() {
+        let mut rng = Lcg(0xACC0_0003);
+        let (truth, catalog, detected) = distorted_crowded_field(&mut rng);
+        let hint = |sip_order| SolveHint {
+            center: truth.crval,
+            radius_deg: 0.0,
+            scale_arcsec_px: 2.0,
+            scale_tolerance: 0.05,
+            sip_order,
+        };
+        let solved = |detected: &[DetectedStar], sip_order| {
+            solve(detected, &catalog, &hint(sip_order), (4000, 3000)).unwrap()
+        };
+        let fitted = solved(&detected, 3);
+        assert!(fitted.wcs.sip.is_some());
+        assert_eq!(fitted.sip_rejected, None);
+        // Asked for none.
+        assert_eq!(solved(&detected, 0).sip_rejected, None);
+        // Too few stars for a quadratic's terms.
+        let few = solved(&detected[..14], 3);
+        assert!(few.wcs.sip.is_none());
+        assert_eq!(few.sip_rejected, Some(SipRejection::TooFewStars));
+        // A deeper match that adds no star.
+        let linear = solve_accepted(
+            &detected,
+            &catalog,
+            &hint(0),
+            (4000, 3000),
+            &SolveLimits::default(),
+        )
+        .unwrap();
+        let empty = MemoryCatalog::new(Vec::new());
+        let kept = deepen(linear.clone(), &detected, &empty, 3, (4000, 3000));
+        assert_eq!(kept.sip_rejected, Some(SipRejection::NoMoreStars));
+        let kept = deepen(linear, &detected, &empty, 0, (4000, 3000));
+        assert_eq!(kept.sip_rejected, None);
+        // One that adds stars, but not enough of them.
+        let sparse = Solution {
+            matched_stars: MIN_INLIERS + 1,
+            ..solved(&detected[..16], 0)
+        };
+        let deeper = deepen(sparse, &detected[..16], &catalog, 3, (4000, 3000));
+        assert!(deeper.matched_stars > MIN_INLIERS + 1);
+        assert!(deeper.wcs.sip.is_none());
+        assert_eq!(deeper.sip_rejected, Some(SipRejection::TooFewStars));
+    }
+
+    #[test]
+    fn sip_rejections_read_back_from_their_words() {
+        for rejection in SipRejection::ALL {
+            assert_eq!(rejection.to_string().parse(), Ok(rejection));
+        }
+        assert!("linear".parse::<SipRejection>().is_err());
     }
 
     #[test]

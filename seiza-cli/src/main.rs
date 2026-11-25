@@ -3288,6 +3288,18 @@ fn load_satellite_catalog(input: SatelliteInput) -> Result<SatelliteCatalog> {
     }
 }
 
+/// The line that says which SIP distortion a solve fitted, or why none.
+fn print_distortion(solution: &seiza::solve::Solution) {
+    if let Some(sip) = &solution.wcs.sip {
+        println!(
+            "  distortion : SIP order {} (forward and inverse)",
+            sip.order
+        );
+    } else if let Some(rejected) = solution.sip_rejected {
+        println!("  distortion : none fitted ({rejected})");
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn solve_command(
     path: &std::path::Path,
@@ -3388,12 +3400,7 @@ fn solve_command(
         "  by chance  : {:.1e} (false-match probability)",
         solution.false_match_probability
     );
-    if let Some(sip) = &wcs.sip {
-        println!(
-            "  distortion : SIP order {} (forward and inverse)",
-            sip.order
-        );
-    }
+    print_distortion(&solution);
     let footprint = wcs.footprint(dims.0, dims.1);
     println!(
         "  footprint  : {:.4},{:.4} / {:.4},{:.4} / {:.4},{:.4} / {:.4},{:.4}",
@@ -4357,6 +4364,7 @@ fn solve_blind_command(
         "  by chance  : {:.1e} (false-match probability)",
         solution.false_match_probability
     );
+    print_distortion(&solution);
     if let Some(path) = options.wcs_path {
         solve_field::write_wcs_file(path, wcs)?;
         println!("WCS written to {} (EXIF-oriented pixels)", path.display());

@@ -1085,6 +1085,7 @@ impl ServerSolution {
             rms_arcsec: self.rms_arcsec,
             // Unknown, and reported as absent, when the server sends none.
             false_match_probability: self.false_match_probability.unwrap_or(f64::NAN),
+            sip_rejected: None,
         };
         let mut result = solution_result(
             mode,
@@ -1431,6 +1432,10 @@ struct WorkerSolveResult {
     /// remote server did not say.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     false_match_probability: Option<f64>,
+    /// Why the solution is linear although the request asked for SIP, as
+    /// [`seiza::SipRejection`]'s word.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sip_rejected: Option<String>,
     wcs: WorkerWcs,
     footprint: Vec<SkyCoordinate>,
     timings: SolveTimings,
@@ -1559,6 +1564,7 @@ fn solution_result(
         rms_arcsec: solution.rms_arcsec,
         false_match_probability: Some(solution.false_match_probability)
             .filter(|probability| probability.is_finite()),
+        sip_rejected: solution.sip_rejected.map(|rejected| rejected.to_string()),
         wcs: WorkerWcs {
             projection: if wcs.sip.is_some() {
                 "TAN-SIP".to_string()
@@ -1885,6 +1891,7 @@ mod tests {
                     matched_stars: 42,
                     rms_arcsec: 0.2,
                     false_match_probability: 1e-30,
+                    sip_rejected: None,
                 };
                 let result = solution_result(
                     SolveMode::Hinted,
@@ -1929,6 +1936,7 @@ mod tests {
             matched_stars: 42,
             rms_arcsec: 0.5,
             false_match_probability: 1e-30,
+            sip_rejected: None,
         };
         let result = solution_result(
             SolveMode::Hinted,

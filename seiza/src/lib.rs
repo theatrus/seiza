@@ -42,7 +42,7 @@ pub use seiza_core::CancelSignal;
 /// Plate solutions, shared with the crates that need them without the
 /// solver; see `seiza-core`.
 pub use seiza_core::wcs;
-pub use solve::SolveLimits;
+pub use solve::{SipRejection, SolveLimits};
 pub use wcs::{FitsCardValue, Sip, Wcs, image_center};
 
 /// Host-neutral calibration response kernels.

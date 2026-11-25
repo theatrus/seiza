@@ -418,7 +418,10 @@ fn report_solution(
         solution.rms_arcsec,
         match (&solution.wcs.sip, args.sip_order) {
             (Some(sip), _) => format!(", SIP order {}", sip.order),
-            (None, order) if order >= 2 => ", SIP not fitted (kept linear)".to_string(),
+            (None, order) if order >= 2 => match solution.sip_rejected {
+                Some(rejected) => format!(", SIP not fitted (kept linear: {rejected})"),
+                None => ", SIP not fitted (kept linear)".to_string(),
+            },
             _ => String::new(),
         }
     );

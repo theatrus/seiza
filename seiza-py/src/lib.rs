@@ -503,6 +503,13 @@ struct PySolution {
     /// candidate the search tried. Near 0 for a sure solution.
     #[pyo3(get)]
     false_match_probability: f64,
+    /// Why the solution is linear although the solve asked for SIP
+    /// distortion, or ``None``: ``"too-few-stars"``, ``"no-more-stars"``,
+    /// ``"undetermined"``,
+    /// ``"linear-drift"``, ``"reference-shift"``, ``"too-large"``,
+    /// ``"not-invertible"`` or ``"no-better-than-linear"``.
+    #[pyo3(get)]
+    sip_rejected: Option<String>,
     /// Where :func:`solve_with_prior` or :func:`solve_image` found the solution:
     /// ``"header-checked"``, ``"header-hint"``, ``"blind"``, or
     /// ``"header-unchecked"`` when nothing solved and the image's own WCS
@@ -577,6 +584,7 @@ fn solution_to_py(solution: seiza::solve::Solution, dimensions: (u32, u32)) -> P
         matched_stars: solution.matched_stars,
         rms_arcsec: solution.rms_arcsec,
         false_match_probability: solution.false_match_probability,
+        sip_rejected: solution.sip_rejected.map(|rejected| rejected.to_string()),
         source: None,
         width: dimensions.0,
         height: dimensions.1,

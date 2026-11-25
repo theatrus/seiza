@@ -1269,6 +1269,11 @@ struct SolveResponse {
     matched_stars: usize,
     rms_arcsec: f64,
     false_match_probability: f64,
+    /// Why the solution is linear although the request asked for SIP
+    /// distortion, or null: `"too-few-stars"`, `"no-more-stars"`, `"undetermined"`,
+    /// `"linear-drift"`, `"reference-shift"`, `"too-large"`,
+    /// `"not-invertible"` or `"no-better-than-linear"`.
+    sip_rejected: Option<String>,
     /// `"header-checked"`, `"header-hint"`, `"blind"`, or
     /// `"header-unchecked"` when nothing solved and the file's own WCS
     /// stands unchecked.
@@ -7167,6 +7172,7 @@ pub unsafe extern "C" fn seiza_solve_image_with_limits_json(
             matched_stars: solution.matched_stars,
             rms_arcsec: solution.rms_arcsec,
             false_match_probability: solution.false_match_probability,
+            sip_rejected: solution.sip_rejected.map(|rejected| rejected.to_string()),
             solved_from: source.as_str(),
             detected_stars: stars.len(),
             elapsed_milliseconds: started.elapsed().as_millis(),
