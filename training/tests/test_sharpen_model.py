@@ -1045,6 +1045,48 @@ def test_a_pair_s_target_is_moved_by_its_centroid_offset(tmp_path):
     assert sm.Settings(centroid_offset="shift").centroid_offset == "detection"
 
 
+def test_a_pairs_bank_s_target_is_moved_at_its_stars_alone(tmp_path):
+    # A target made from its input's own stack: the input's noise and a
+    # faint cloud where the input has them, its stars sharper and moved.
+    offset = (0.6, -0.4)
+    directory = pair_bank(tmp_path, offset=offset)
+    wide, sharp = np.diag([2.0**2] * 2), np.diag([1.4**2] * 2)
+    moved = [(x + offset[0], y + offset[1]) for x, y in POSITIONS]
+    rng = np.random.default_rng(8)
+    down, across = np.mgrid[:SIDE, :SIDE]
+    sky = rng.normal(0, 1, (SIDE, SIDE)) + 8.0 * np.sin(across / 5.0) * np.sin(down / 7.0)
+    image = (stars_image(POSITIONS, FLUXES, wide) + sky).astype(np.float32)
+    target = (stars_image(moved, FLUXES, sharp) + sky).astype(np.float32)
+    for name, plane in (("input", image), ("target", target)):
+        kept = np.load(directory / f"{name}.npy")
+        kept[:] = plane
+        np.save(directory / f"{name}.npy", kept)
+    settings = sm.Settings(centroid_offset="detection", pairs_offset="stars")
+    own = sm.Bank(directory, settings, same_stack=True)
+    example = sm.pair_example(own, 0, settings)
+    far = np.ones((SIDE, SIDE), bool)
+    for x, y in POSITIONS:
+        far &= (across - x) ** 2 + (down - y) ** 2 > 14**2
+    assert far.sum() > 200
+    # Away from the stars it is the bank's target, its noise and its cloud
+    # on the input's; at the stars it is the moved one.
+    assert np.abs(example.target - target)[far].max() < 0.05
+    assert np.abs(example.target - example.image)[far].max() < 0.05
+    whole = sm.pair_example(own, 0, sm.Settings(centroid_offset="detection"))
+    assert np.abs(whole.target - target)[far].max() > 0.5
+    for x, y in POSITIONS:
+        row, column = int(round(y)), int(round(x))
+        core = (slice(row - 2, row + 3), slice(column - 2, column + 3))
+        assert np.abs(example.target - whole.target)[core].max() < 0.01 * target[core].max()
+    # A pair of two stacks is moved whole whatever the setting, and an
+    # older run's record, which names none, was.
+    two = sm.pair_example(sm.Bank(directory, settings), 0, settings)
+    assert np.array_equal(two.target, whole.target)
+    assert sm.settings_from({"centroid_offset": "light"}).pairs_offset == "whole"
+    with pytest.raises(ValueError, match="pairs_offset"):
+        sm.Settings(pairs_offset="nebula")
+
+
 def lopsided_bank(tmp_path, *, windows: int = 10, wing=(2.0, 0.0), detection=(0.1, 0.0)):
     """A seeing bank of one pair whose windows each hold one star at their
     middle: the input's lopsided, a fifth of its light in a wing `wing` px

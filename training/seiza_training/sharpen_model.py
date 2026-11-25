@@ -169,6 +169,19 @@ SOURCES = ("kernel", "seeing", "pairs")
 # star, and the one point that convolution with a PSF centred on its own
 # light keeps.
 CENTROID_OFFSETS = ("light", "detection", "none")
+# Where a pairs bank's target is moved by that offset. Its target is made
+# from its input's own stack: only its stars sit elsewhere, at a lopsided
+# PSF's peak and not at its light's centre, while its nebula and its noise
+# lie on the input's to the pixel (correlation 1.00 under 4 px on the
+# Trunk's pairs). Moved whole, as a pair of two stacks is, such a target
+# asked the model to move nebula and noise too, by a median 0.64 px on the
+# Trunk's pairs, with a spread of 0.29 and 0.25 px from source to source:
+# the likeliest noise moved by a shift no one tells is the mean of its
+# moved copies, 0.67 to 0.75 of it at a period of 2 px and 0.90 to 0.93 at
+# 4. The runs taught so moved the Trunk's grain and cloud by 0.4 to 1 px
+# under 6 px and the held-out NGC 6820's by 0.8 to 2 px, and kept 0.70 to
+# 0.82 of the Trunk's grain (S86 to S98, 2026-11-24).
+PAIRS_OFFSETS = ("whole", "stars")
 # A pair's light offset is measured on its windows' isolated stars, each
 # within this many input widths, less the median of the annulus out to
 # half as far again ...
@@ -254,6 +267,9 @@ class Settings:
     min_ratio: float = 0.0
     points_empty: float = 0.1
     centroid_offset: str = "light"
+    # A pairs bank's target is moved whole, as every run's was before this
+    # was a setting, or at its stars alone (`PAIRS_OFFSETS`).
+    pairs_offset: str = "whole"
     ratio_source: str = "stamp"
     residual: str = "asinh"
     # Separate strengths for stars and for the rest (`PLANES_NONSTELLAR`):
@@ -439,6 +455,8 @@ class Settings:
             raise ValueError(f"residual is one of {RESIDUALS}, not {self.residual!r}")
         if self.centroid_offset not in CENTROID_OFFSETS:
             raise ValueError(f"centroid_offset is one of {CENTROID_OFFSETS}, not {self.centroid_offset!r}")
+        if self.pairs_offset not in PAIRS_OFFSETS:
+            raise ValueError(f"pairs_offset is one of {PAIRS_OFFSETS}, not {self.pairs_offset!r}")
         if self.ratio_source not in RATIO_SOURCES:
             raise ValueError(f"ratio_source is one of {RATIO_SOURCES}, not {self.ratio_source!r}")
         low, high = self.kernel_ratios
@@ -592,13 +610,16 @@ class Bank:
     `set_names` names each set, so its object is known; without it a
     source's object is its record's, or its set. With `multi_night_share`,
     a known-kernel bank's stacks of many nights take that share of its
-    draws, the nights' own stacks the rest."""
+    draws, the nights' own stacks the rest. `same_stack` says each pair's
+    target is made from its input's own stack (a pairs bank), so the two
+    share their noise (`PAIRS_OFFSETS`)."""
 
     def __init__(self, directory: Path, settings: Settings, *, excluded: tuple[str, ...] = (), object_cap: float = 0.0,
                  set_names: dict[str, str] | None = None, weight: float = 1.0, focus_check: bool = True,
                  left_out_kinds: tuple[str, ...] = (), multi_night_share: float = 0.0,
-                 structure: float = 0.0) -> None:
+                 structure: float = 0.0, same_stack: bool = False) -> None:
         self.directory = Path(directory)
+        self.same_stack = same_stack
         self.arrays = open_bank(self.directory)
         done = self.arrays["done"]
         self.label, self.pairs, self.weight = done["label"], bool(done["pairs"]), weight
@@ -968,7 +989,8 @@ class BankChoice:
         for extra in found["kernel"][1:]:
             extra.donors = found["kernel"][0]
         if self.pairs:
-            found["pairs"] = [Bank(Path(path), settings, **options, weight=weight) for path, weight in self.pairs]
+            found["pairs"] = [Bank(Path(path), settings, **options, weight=weight, same_stack=True)
+                              for path, weight in self.pairs]
         return found
 
     def validation(self, settings: Settings) -> dict[str, list[Bank]]:
@@ -2122,10 +2144,25 @@ def target_blur(stamp: np.ndarray, kernel: Kernel, ratio: float) -> np.ndarray:
     return kernel.target + extra
 
 
+def pair_star_share(bank: Bank, source: int, row: dict[str, float], planes: dict[str, np.ndarray],
+                    window: int) -> np.ndarray:
+    """The stars' own share of each pixel of a pair's window, as a
+    known-kernel window's mask has it (`STAR_MASK_NOISE`): the input's
+    point sources rendered with its stamp, against its noise."""
+    image = planes["input"]
+    rendered = point_map(window_points(bank, source, row),
+                         np.asarray(bank.arrays["input_stamp"][window], dtype=np.float32), image.shape,
+                         row["background"])
+    sigma = stack_noise(planes["input_sigma"], image, planes["input_map"])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.clip(np.nan_to_num(rendered / (rendered + STAR_MASK_NOISE * sigma)), 0.0, 1.0)
+
+
 def pair_example(bank: Bank, window: int, settings: Settings, rng: np.random.Generator | None = None) -> Example:
     """A pair's window: the input and the target, moved back by the pair's
-    offset at the window as the settings measure it, the input's image-only
-    noise map and stamp, and the bank's ratio. The loss weighs by the target
+    offset at the window as the settings measure it (a pairs bank's whole
+    or at its stars alone, `PAIRS_OFFSETS`), the input's image-only noise
+    map and stamp, and the bank's ratio. The loss weighs by the target
     stack's noise, or the input stack's where the bank keeps none for its
     target."""
     row = bank.row(window)
@@ -2143,7 +2180,11 @@ def pair_example(bank: Bank, window: int, settings: Settings, rng: np.random.Gen
     if passed:
         target = np.asarray(bank.clean["target_clean"][window], dtype=np.float32)
     if offset is not None:
-        target = shifted(target, -offset[0], -offset[1])
+        moved = shifted(target, -offset[0], -offset[1])
+        if bank.same_stack and settings.pairs_offset == "stars":
+            share = pair_star_share(bank, source, row, planes, window)
+            moved = (share * moved + (1.0 - share) * target).astype(np.float32)
+        target = moved
         band = SHIFT_BAND
     shown, noise_map = planes["input"].astype(np.float32), planes["input_map"].astype(np.float32)
     if denoised:

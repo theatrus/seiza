@@ -306,6 +306,10 @@ def main(argv: list[str] | None = None) -> int:
                                help="move each pair's target back by its stars' offset, so the model is not taught "
                                     "to move stars: of their light-weighted centres, over the field, or of their "
                                     "detections' centroids, the median; or leave it")
+    sharpen_train.add_argument("--pairs-offset", choices=("whole", "stars"), default="stars",
+                               help="where a pairs bank's target, made from its input's own stack, is moved by its "
+                                    "stars' offset: at its stars alone, its nebula and noise left where the input's "
+                                    "lie, or whole, as every run's was until 2026-11-24")
     sharpen_train.add_argument("--ratio-source", choices=("stamp", "fit"), default="stamp",
                                help="a pair's ratio from its stamps' widths, which every window has, or from the "
                                     "field's Moffat fit, which fails below about 2 px")
@@ -890,7 +894,7 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
         identity=arguments.identity, exposure=arguments.exposure, floor_px=arguments.floor_px,
         max_ratio=arguments.max_window_ratio, min_ratio=arguments.min_window_ratio,
         points_empty=arguments.points_empty, centroid_offset=arguments.centroid_offset,
-        ratio_source=arguments.ratio_source, residual=arguments.residual, nonstellar=arguments.nonstellar,
+        pairs_offset=arguments.pairs_offset, ratio_source=arguments.ratio_source, residual=arguments.residual, nonstellar=arguments.nonstellar,
         equal_share=arguments.equal_share, fill_clipped=arguments.fill_clipped,
         pass_noise=arguments.pass_noise, real_kernels=arguments.real_kernels,
         round_target=arguments.round_target, denoised=arguments.denoised, reblur=arguments.reblur,
