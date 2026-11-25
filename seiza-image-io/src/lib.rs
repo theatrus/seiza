@@ -406,6 +406,8 @@ pub fn read_image(path: &Path, options: &ReadOptions) -> Result<ImageFile, Error
             let pixels = width * height;
             planar.truncate((plane + 1) * pixels);
             planar.drain(..plane * pixels);
+            // The other planes' memory, which the result need not hold.
+            planar.shrink_to_fit();
             FloatImage::gray(width, height, planar)
         }
         None => FloatImage {
@@ -1434,6 +1436,7 @@ mod tests {
                     };
                     let one = read_image(&path, &options).unwrap().image;
                     assert_eq!((one.channels, one.samples.len()), (1, width * height));
+                    assert!(one.samples.capacity() < 2 * width * height);
                     for (index, &sample) in one.samples.iter().enumerate() {
                         assert_eq!(sample, image.samples[index * channels + plane]);
                     }

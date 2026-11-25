@@ -7419,9 +7419,9 @@ pub struct SeizaImageWindow {
 /// rectangle is clipped to the image, and a side longer than 1024 is
 /// refused. Returns false with `error_out` set when the file cannot be read,
 /// when its samples cannot be reached without decoding it all (a compressed,
-/// CIELab or complex XISF image; [`seiza_read_image`] reads the first two), or when `values` is too short; in that
-/// last case `window_out` still holds the window, so a caller can size the
-/// buffer and call again.
+/// CIELab or complex XISF image; [`seiza_read_image`] reads the first two),
+/// or when `values` is too short; in that last case `window_out` still holds
+/// the window, so a caller can size the buffer and call again.
 ///
 /// # Safety
 /// `path` must be a valid NUL-terminated string, `values` must be null or
