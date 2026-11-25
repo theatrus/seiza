@@ -39,7 +39,8 @@ use std::str::FromStr;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use candidates::{Mesh, PeakGrid, adaptive_moments, clip_level, find_peaks, median_f64, smooth};
+pub(crate) use candidates::adaptive_moments;
+use candidates::{Mesh, PeakGrid, clip_level, find_peaks, median_f64, smooth};
 use model::{ChannelModel, MAX_DEGREE, StarStamp};
 pub use shape::{MAXIMUM_BETA, PsfShape};
 use stamps::{LANCZOS_REACH, Plane, aperture_sum, radii};
