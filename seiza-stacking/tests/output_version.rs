@@ -10,10 +10,11 @@ use seiza_fits::{HeaderValue, WriteHeaderCard};
 use seiza_stacking::{
     BatchStackOptions, CalibrationMasters, CancelSignal, CfaIntegration, Continue,
     DefectDetectionOptions, Demosaic, DrizzleOptions, FileCalibration, FitsFrame,
-    FrameAcceptanceCriteria, FrameDisposition, FrameWeighting, GpuOptions, ImpulseFilterOptions,
-    Interpolation, LinearImage, LiveStacker, MasterBuildOptions, MasterFrameKind,
-    NormalizationMode, RegistrationModel, RejectionMode, StackOptions, StackSnapshot,
-    build_master_from_fits, detect_defects, write_master_fits_f32, write_processed_image_fits_f32,
+    FrameAcceptanceCriteria, FrameDisposition, FrameSelectionOptions, FrameWeighting, GpuOptions,
+    ImpulseFilterOptions, Interpolation, LinearImage, LiveStacker, MasterBuildOptions,
+    MasterFrameKind, NormalizationMode, RegistrationModel, RejectionMode, StackOptions,
+    StackSnapshot, build_master_from_fits, detect_defects, write_master_fits_f32,
+    write_processed_image_fits_f32,
 };
 use std::path::PathBuf;
 
@@ -279,11 +280,41 @@ const MONO_DEFAULT: &[f64] = &[
     1.7523038e2, 1.0491113e2, 1.0702999e2, 1.1143148e2,
 ];
 #[rustfmt::skip]
+const MONO_SELECTED: &[f64] = &[
+    1.4623915e2, 2.6674309e2, 3.3138757e3, 9.6941544e1, 9.9409340e1, 1.0037880e2, 1.3246945e2,
+    1.0479386e2, 9.7747719e1, 9.9764702e1, 1.0159086e2, 1.0316692e2, 1.0551293e2, 9.8309464e1,
+    1.0077248e2, 1.0308546e2, 1.0458808e2, 1.0695569e2, 1.0029667e2, 1.0047546e2, 1.0310334e2,
+    1.0540090e2, 1.0721133e2, 1.0067213e2, 1.9995909e2, 1.0420575e2, 1.0640292e2, 1.1696678e2,
+];
 const MONO_CONFIGURED: &[f64] = &[
-    1.4679377e2, 2.8053118e2, 3.9579722e3, 9.7689346e1, 1.0004929e2, 1.0113741e2, 1.1472302e2,
-    1.0543855e2, 9.8265144e1, 1.0051174e2, 1.0234735e2, 1.0338989e2, 1.0463287e2, 9.8356514e1,
-    1.0220255e2, 4.1954968e2, 1.0448453e2, 1.0627813e2, 1.0029060e2, 1.0078748e2, 1.0352750e2,
-    1.0656592e2, 1.0761611e2, 1.0117270e2, 1.7328545e2, 1.0506029e2, 1.0691836e2, 1.1124123e2,
+    1.4679377e2,
+    2.8053118e2,
+    3.9579722e3,
+    9.7689346e1,
+    1.0004929e2,
+    1.0113741e2,
+    1.1472302e2,
+    1.0543855e2,
+    9.8265144e1,
+    1.0051174e2,
+    1.0234735e2,
+    1.0338989e2,
+    1.0463287e2,
+    9.8356514e1,
+    1.0220255e2,
+    4.1954968e2,
+    1.0448453e2,
+    1.0627813e2,
+    1.0029060e2,
+    1.0078748e2,
+    1.0352750e2,
+    1.0656592e2,
+    1.0761611e2,
+    1.0117270e2,
+    1.7328545e2,
+    1.0506029e2,
+    1.0691836e2,
+    1.1124123e2,
 ];
 #[rustfmt::skip]
 const BAYER_DEFAULT: &[f64] = &[
@@ -1115,6 +1146,95 @@ fn a_mono_stack_with_every_stage_configured_keeps_its_output() {
     };
     options.registration.model = RegistrationModel::Quadratic;
     check("MONO_CONFIGURED", &mono_stack(options), MONO_CONFIGURED);
+}
+
+/// The mono lights with one light's stars widened and one light trailed,
+/// selected and weighted from their scores.
+#[test]
+fn a_selected_and_psf_weighted_stack_keeps_its_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let gain = |frame: usize| 0.96 + 0.01 * frame as f32;
+    let smear = |image: &LinearImage, length: usize| {
+        let data = (0..image.data.len())
+            .map(|index| {
+                let x = index % WIDTH;
+                let start = x.saturating_sub(length / 2);
+                let end = (start + length).min(WIDTH);
+                let row = index - x;
+                image.data[row + start..row + end].iter().sum::<f32>() / (end - start) as f32
+            })
+            .collect();
+        LinearImage::new(WIDTH, HEIGHT, 1, data).unwrap()
+    };
+    // A 3 by 3 mean spreads every star alike, without elongating it.
+    let widen = |image: &LinearImage| {
+        let data = (0..image.data.len())
+            .map(|index| {
+                let (x, y) = (index % WIDTH, index / WIDTH);
+                let (mut sum, mut count) = (0.0, 0.0);
+                for row in y.saturating_sub(1)..=(y + 1).min(HEIGHT - 1) {
+                    for column in x.saturating_sub(1)..=(x + 1).min(WIDTH - 1) {
+                        sum += image.data[row * WIDTH + column];
+                        count += 1.0;
+                    }
+                }
+                sum / count
+            })
+            .collect();
+        LinearImage::new(WIDTH, HEIGHT, 1, data).unwrap()
+    };
+    let paths = SHIFTS
+        .iter()
+        .enumerate()
+        .map(|(frame, &(dx, dy))| {
+            let mut image = mono_field(dx, dy, gain(frame), frame);
+            if frame == 3 {
+                image = widen(&image);
+            }
+            if frame == 5 {
+                image = smear(&image, 9);
+            }
+            let path = directory.path().join(format!("light-{frame}.fits"));
+            write_processed_image_fits_f32(&path, &image, &[], &[]).unwrap();
+            path
+        })
+        .collect::<Vec<_>>();
+    let (_, scores) = seiza_stacking::choose_reference(&paths, 2).unwrap();
+    // The widened light spreads its stars by more than the default margin.
+    let options = FrameSelectionOptions {
+        minimum_psf_area_margin: 0.6,
+        ..FrameSelectionOptions::default()
+    };
+    let selection = seiza_stacking::select_frames(&scores, &options).unwrap();
+    let kept = selection.kept().collect::<Vec<_>>();
+    assert!(
+        !kept.contains(&5),
+        "the trailed light is turned away: {selection:?}"
+    );
+    assert!(kept.contains(&3), "the softer light is kept: {selection:?}");
+    let reference = selection.reference(&scores).unwrap();
+    assert!(selection.weight_factor(3, reference).unwrap() < 1.0);
+    let options = StackOptions {
+        weighting: FrameWeighting::inverse_noise_variance(),
+        gpu: GpuOptions::cpu(),
+        ..StackOptions::default()
+    };
+    let mut stacker =
+        LiveStacker::open_fits(&paths[reference], None, None, None, None, options).unwrap();
+    stacker
+        .set_frame_weight_factors(kept.iter().map(|&frame| {
+            (
+                paths[frame].as_path(),
+                selection.weight_factor(frame, reference).unwrap(),
+            )
+        }))
+        .unwrap();
+    for &frame in kept.iter().filter(|&&frame| frame != reference) {
+        admit(stacker.push_fits(&paths[frame]).unwrap());
+    }
+    let snapshot = stacker.snapshot().unwrap();
+    assert_eq!(snapshot.accepted_frames, kept.len() as u32);
+    check("MONO_SELECTED", &summary(&snapshot.image), MONO_SELECTED);
 }
 
 #[test]

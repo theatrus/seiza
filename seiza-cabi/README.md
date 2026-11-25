@@ -253,6 +253,16 @@ exposes the **superset** of what both apps need.
   subtracting its excess scaled to the light's exposure, as a dark would,
   and the rest from their same-colour neighbours' median. Options JSON
   (`sigma`, `persistence`, `maximum_frames`) is optional.
+- **Frame selection** — `seiza_stack_select_frames_json` takes the `scores`
+  `seiza_stack_choose_reference_json` returned and turns away the outliers:
+  too little starlight, too few stars, stars too elongated or too spread out,
+  each against the batch's own medians. It names the best kept light as
+  `reference` and gives each kept light a `weightFactor`, the reference's PSF
+  area over its own. Stack the kept lights against the reference with
+  inverse-noise weighting and pass their factors to
+  `seiza_live_stacker_set_frame_weight_factors_json`, which multiplies them
+  into each light's noise weight. Scores now also carry `psfArea` and
+  `eccentricity`, that of the scored stars' mean shape.
 - **Automatic stack reference** — `seiza_stack_choose_reference_json` scores
   an ordered JSON array of FITS/XISF paths using the native stacking algorithm.
   It chooses the flattest background among frames with nearly the best star

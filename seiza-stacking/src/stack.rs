@@ -109,6 +109,22 @@ impl FrameWeighting {
         matches!(self, Self::Equal)
     }
 
+    /// `weights` each multiplied by `factor`, within this weighting's
+    /// bounds. Equal weighting has no weights to scale.
+    fn scale(&self, weights: &[f32], factor: f32) -> Vec<f32> {
+        let Self::InverseNoiseVariance {
+            minimum_weight,
+            maximum_weight,
+        } = *self
+        else {
+            return weights.to_vec();
+        };
+        weights
+            .iter()
+            .map(|weight| (weight * factor).clamp(minimum_weight, maximum_weight))
+            .collect()
+    }
+
     /// Check that the weight bounds are finite and bracket 1.
     pub fn validate(&self) -> Result<()> {
         if let Self::InverseNoiseVariance {
@@ -784,6 +800,9 @@ pub struct LiveStacker {
     pub(crate) accepted_frames: u32,
     pub(crate) rejected_frames: u32,
     input_paths: Vec<PathBuf>,
+    /// Factors [`Self::set_frame_weight_factors`] multiplies into the
+    /// weights of frames pushed from these paths, by path identity.
+    weight_factors: std::collections::HashMap<PathBuf, f32>,
     input_mode: FrameInputMode,
     configuration_fingerprint: String,
     pub(crate) ledger: crate::replay::Ledger,
@@ -1391,6 +1410,7 @@ impl LiveStacker {
             accepted_frames: self.accepted_frames,
             rejected_frames: self.rejected_frames,
             input_paths: self.input_paths.clone(),
+            weight_factors: self.weight_factors.clone(),
             input_mode: self.input_mode,
             configuration_fingerprint: self.configuration_fingerprint.clone(),
             ledger: self.ledger.rebinned(1)?,
@@ -1587,6 +1607,7 @@ impl LiveStacker {
             accepted_frames: u32::from(reference_is_integrated),
             rejected_frames: 0,
             input_paths: Vec::new(),
+            weight_factors: std::collections::HashMap::new(),
             input_mode,
             configuration_fingerprint,
             ledger,
@@ -1900,6 +1921,7 @@ impl LiveStacker {
             accepted_frames: restored.accepted_frames,
             rejected_frames: restored.rejected_frames,
             input_paths: restored.input_paths,
+            weight_factors: std::collections::HashMap::new(),
             input_mode: restored.input_mode,
             configuration_fingerprint,
             ledger,
@@ -2210,6 +2232,41 @@ impl LiveStacker {
                 .any(|input| paths_refer_to_same_file(input, path))
     }
 
+    /// Multiply the weight of every frame later pushed from one of these
+    /// paths by its factor: the PSF factor [`crate::FrameSelection::weight_factor`]
+    /// gives, so a stack weights each frame by its noise and its stars'
+    /// spread together. The product stays within the
+    /// [`FrameWeighting::InverseNoiseVariance`] bounds and is what the frame's
+    /// [`FrameDiagnostics::weight`] and a later reintegration record.
+    ///
+    /// Replaces any factors set before; frames already integrated keep their
+    /// weights, and a path with no factor keeps its noise weight. Refused
+    /// unless the stack weights by noise, since an equally weighted stack
+    /// holds no weights to scale, and for a factor that is not a finite
+    /// positive number. Factors are not saved in a context.
+    pub fn set_frame_weight_factors<'p>(
+        &mut self,
+        factors: impl IntoIterator<Item = (&'p Path, f32)>,
+    ) -> Result<()> {
+        if self.options.weighting.is_equal() {
+            return Err(Error::Stack(
+                "frame weight factors need inverse-noise-variance weighting".into(),
+            ));
+        }
+        let mut table = std::collections::HashMap::new();
+        for (path, factor) in factors {
+            if !(factor.is_finite() && factor > 0.0) {
+                return Err(Error::Stack(format!(
+                    "frame weight factor {factor} for {} is not a finite positive number",
+                    path.display()
+                )));
+            }
+            table.insert(path_identity(path), factor);
+        }
+        self.weight_factors = table;
+        Ok(())
+    }
+
     /// Retain a consumed path in resumable context state.
     pub(crate) fn record_input_path(&mut self, path: &Path) {
         self.input_paths.push(path_identity(path));
@@ -2316,6 +2373,7 @@ impl LiveStacker {
                 accepted_frames: &mut self.accepted_frames,
                 rejected_frames: &mut self.rejected_frames,
                 input_paths: &mut self.input_paths,
+                weight_factors: &self.weight_factors,
                 ledger: &mut self.ledger,
                 frame_cache: cache_admissions,
                 expanded_canvas: self.canvas_registrar.is_some(),
@@ -3594,6 +3652,7 @@ pub(crate) struct IntegrationHalf<'a> {
     accepted_frames: &'a mut u32,
     rejected_frames: &'a mut u32,
     input_paths: &'a mut Vec<PathBuf>,
+    weight_factors: &'a std::collections::HashMap<PathBuf, f32>,
     ledger: &'a mut crate::replay::Ledger,
     frame_cache: Option<crate::replay::CacheAdmissions<'a>>,
     /// Integrated fractions count the frame's finite footprint.
@@ -3675,6 +3734,13 @@ impl IntegrationHalf<'_> {
         let mut registered = registered;
         #[cfg_attr(not(feature = "gpu"), allow(unused_mut))]
         let mut pending_normalization = pending_normalization;
+        let weight = match source
+            .as_ref()
+            .and_then(|source| self.weight_factors.get(&path_identity(source.path())))
+        {
+            Some(&factor) => self.options.weighting.scale(&weight, factor),
+            None => weight,
+        };
         let weights = (!weight.is_empty()).then_some(weight.as_slice());
 
         // A photosite frame offers one sample per pixel, not one per channel.
@@ -4843,6 +4909,98 @@ mod tests {
             }
         }
         LinearImage::new(width, height, 1, data).unwrap()
+    }
+
+    #[test]
+    fn frame_weight_factors_scale_the_noise_weight_of_their_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = (0..4)
+            .map(|index| {
+                let path = directory.path().join(format!("light-{index}.fits"));
+                crate::write_processed_image_fits_f32(
+                    &path,
+                    &stacking_star_field(160, 128),
+                    &[],
+                    &[],
+                )
+                .unwrap();
+                path
+            })
+            .collect::<Vec<_>>();
+        let options = StackOptions {
+            weighting: FrameWeighting::inverse_noise_variance(),
+            normalization: NormalizationMode::None,
+            gpu: crate::GpuOptions::cpu(),
+            ..StackOptions::default()
+        };
+        for pipelined in [false, true] {
+            let mut stacker =
+                LiveStacker::open_fits(&paths[0], None, None, None, None, options.clone()).unwrap();
+            stacker
+                .set_frame_weight_factors([(paths[1].as_path(), 0.5), (paths[2].as_path(), 100.0)])
+                .unwrap();
+            let mut weights = Vec::new();
+            if pipelined {
+                let report = stacker
+                    .push_fits_pipelined(
+                        &paths[1..],
+                        &crate::PipelineOptions {
+                            workers: Some(2),
+                            ..crate::PipelineOptions::default()
+                        },
+                        |_, outcome| {
+                            let Ok(FrameDisposition::Accepted(diagnostics)) = outcome else {
+                                panic!("identical lights are accepted");
+                            };
+                            weights.push(diagnostics.weight[0]);
+                            crate::Continue::Yes
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(report.integrated, 3);
+            } else {
+                for path in &paths[1..] {
+                    let FrameDisposition::Accepted(diagnostics) = stacker.push_fits(path).unwrap()
+                    else {
+                        panic!("identical lights are accepted");
+                    };
+                    weights.push(diagnostics.weight[0]);
+                }
+            }
+            // Identical lights have the reference's noise: weight 1, then
+            // halved, clamped to the weighting's maximum of 20, and untouched.
+            assert_eq!(weights, [0.5, 20.0, 1.0], "pipelined {pipelined}");
+        }
+
+        let mut stacker =
+            LiveStacker::open_fits(&paths[0], None, None, None, None, options.clone()).unwrap();
+        assert!(
+            stacker
+                .set_frame_weight_factors([(paths[1].as_path(), 0.0)])
+                .is_err()
+        );
+        assert!(
+            stacker
+                .set_frame_weight_factors([(paths[1].as_path(), f32::NAN)])
+                .is_err()
+        );
+        let mut equal = LiveStacker::open_fits(
+            &paths[0],
+            None,
+            None,
+            None,
+            None,
+            StackOptions {
+                weighting: FrameWeighting::Equal,
+                ..options
+            },
+        )
+        .unwrap();
+        assert!(
+            equal
+                .set_frame_weight_factors([(paths[1].as_path(), 0.5)])
+                .is_err()
+        );
     }
 
     #[test]

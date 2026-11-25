@@ -627,7 +627,9 @@ struct SkippedChannelReferenceResponse {
     reason: String,
 }
 
-#[derive(Serialize)]
+/// A light's score as [`seiza_stack_choose_reference_json`] returns it, and
+/// as [`seiza_stack_select_frames_json`] takes it back.
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StackReferenceScoreResponse {
     stars: usize,
@@ -635,6 +637,8 @@ struct StackReferenceScoreResponse {
     background: f32,
     background_variation: f32,
     score: f32,
+    psf_area: f32,
+    eccentricity: Option<f32>,
 }
 
 impl From<seiza_stacking::ReferenceScore> for StackReferenceScoreResponse {
@@ -645,8 +649,118 @@ impl From<seiza_stacking::ReferenceScore> for StackReferenceScoreResponse {
             background: score.background,
             background_variation: score.background_variation,
             score: score.score,
+            psf_area: score.psf_area,
+            eccentricity: score.eccentricity,
         }
     }
+}
+
+impl From<StackReferenceScoreResponse> for seiza_stacking::ReferenceScore {
+    fn from(score: StackReferenceScoreResponse) -> Self {
+        Self {
+            stars: score.stars,
+            median_star_area: score.median_star_area,
+            background: score.background,
+            background_variation: score.background_variation,
+            score: score.score,
+            psf_area: score.psf_area,
+            eccentricity: score.eccentricity,
+        }
+    }
+}
+
+/// The request [`seiza_stack_select_frames_json`] takes.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FrameSelectionRequest {
+    /// One score per light, null for one that could not be scored: the
+    /// `scores` of a [`seiza_stack_choose_reference_json`] response.
+    scores: Vec<Option<StackReferenceScoreResponse>>,
+    #[serde(default)]
+    options: Option<FrameSelectionOptionsRequest>,
+}
+
+/// [`seiza_stacking::FrameSelectionOptions`], each field optional.
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FrameSelectionOptionsRequest {
+    minimum_relative_score: Option<f32>,
+    minimum_relative_stars: Option<f32>,
+    eccentricity_sigma: Option<f32>,
+    minimum_eccentricity_margin: Option<f32>,
+    maximum_eccentricity: Option<f32>,
+    psf_area_sigma: Option<f32>,
+    minimum_psf_area_margin: Option<f32>,
+    minimum_weight_factor: Option<f32>,
+    maximum_weight_factor: Option<f32>,
+}
+
+impl FrameSelectionOptionsRequest {
+    fn options(&self) -> seiza_stacking::FrameSelectionOptions {
+        let defaults = seiza_stacking::FrameSelectionOptions::default();
+        seiza_stacking::FrameSelectionOptions {
+            minimum_relative_score: self
+                .minimum_relative_score
+                .unwrap_or(defaults.minimum_relative_score),
+            minimum_relative_stars: self
+                .minimum_relative_stars
+                .unwrap_or(defaults.minimum_relative_stars),
+            eccentricity_sigma: self
+                .eccentricity_sigma
+                .unwrap_or(defaults.eccentricity_sigma),
+            minimum_eccentricity_margin: self
+                .minimum_eccentricity_margin
+                .unwrap_or(defaults.minimum_eccentricity_margin),
+            maximum_eccentricity: self.maximum_eccentricity.or(defaults.maximum_eccentricity),
+            psf_area_sigma: self.psf_area_sigma.unwrap_or(defaults.psf_area_sigma),
+            minimum_psf_area_margin: self
+                .minimum_psf_area_margin
+                .unwrap_or(defaults.minimum_psf_area_margin),
+            minimum_weight_factor: self
+                .minimum_weight_factor
+                .unwrap_or(defaults.minimum_weight_factor),
+            maximum_weight_factor: self
+                .maximum_weight_factor
+                .unwrap_or(defaults.maximum_weight_factor),
+        }
+    }
+}
+
+/// One light's verdict in [`FrameSelectionResponse`].
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FrameVerdictResponse {
+    kept: bool,
+    /// Its stars' PSF area, for a kept light.
+    psf_area: Option<f32>,
+    /// Its weight factor against the selection's reference, for a kept light.
+    weight_factor: Option<f32>,
+    /// Why it was turned away: `unscored`, `low-signal`, `few-stars`,
+    /// `elongated` or `soft`.
+    reason: Option<String>,
+    /// The measured value and limit it failed, for a scored rejected light.
+    value: Option<f32>,
+    limit: Option<f32>,
+}
+
+/// What [`seiza_stack_select_frames_json`] returns.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FrameSelectionResponse {
+    schema_version: u32,
+    /// The best kept light to stack against, which weight factors are
+    /// relative to; null when no light is kept.
+    reference: Option<usize>,
+    frames: Vec<FrameVerdictResponse>,
+    median_score: f32,
+    median_stars: f32,
+    median_psf_area: f32,
+    median_eccentricity: Option<f32>,
+    score_limit: f32,
+    stars_limit: f32,
+    psf_area_limit: f32,
+    eccentricity_limit: Option<f32>,
+    expected_snr_gain: f64,
 }
 
 #[derive(Serialize)]
@@ -3560,7 +3674,9 @@ pub unsafe extern "C" fn seiza_wcs_transform_json(
 /// leads it), and `scores` (one entry per input in the original order). A
 /// score is null for an unreadable or unscorable frame; otherwise it
 /// contains `stars`, `medianStarArea`, `background`, `backgroundVariation`,
-/// and `score`.
+/// `score`, `psfArea` (median flux over peak of the scored stars) and
+/// `eccentricity` (of the scored stars' mean shape: the stretch they share;
+/// null when too few stars could be shaped).
 /// `medianStarArea` is in half-resolution pixels, and background measurements
 /// use the scorer's half-resolution luminance units, not display pixels.
 /// See `seiza_stacking::ReferenceScore` for the native measurements.
@@ -3599,6 +3715,95 @@ pub unsafe extern "C" fn seiza_stack_choose_reference_json(
                 .into_iter()
                 .map(|score| score.map(StackReferenceScoreResponse::from))
                 .collect(),
+        })
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+/// Choose which lights a stack keeps, and how much each counts, from the
+/// scores [`seiza_stack_choose_reference_json`] gave them.
+///
+/// `request_json` is `{"scores": [score or null, ...], "options"?: {...}}`,
+/// the scores exactly as that call returned them. A light is turned away
+/// only as an outlier against the batch's scored lights, for the first of
+/// these it fails: `low-signal` (its `score`, starlight over the sky, below
+/// `minimumRelativeScore` of the median: cloud, haze), `few-stars` (below
+/// `minimumRelativeStars` of the median count), `elongated` (its
+/// `eccentricity` more than `eccentricitySigma` robust spreads, and at
+/// least `minimumEccentricityMargin`, above the median, or above
+/// `maximumEccentricity`), and `soft` (its `psfArea` more than
+/// `psfAreaSigma` robust spreads, and at least `minimumPsfAreaMargin` of the
+/// median, above the median). Unscored lights are `unscored`. Every option is
+/// optional and defaults as `seiza_stacking::FrameSelectionOptions` does.
+///
+/// The returned schema-1 JSON has `reference`, the best kept light as
+/// `ranking` would order them, or null; `frames`, one verdict per light with
+/// `kept`, and for a kept light its `psfArea` and `weightFactor` (the
+/// reference's PSF area over its own, between `minimumWeightFactor` and
+/// `maximumWeightFactor`), or for a rejected one its `reason`, `value` and
+/// `limit`; the batch medians and limits; and `expectedSnrGain`, the
+/// point-source signal to noise of the kept lights weighted this way over
+/// that of every light at equal weight. Stack the kept lights against
+/// `reference`, weighting by inverse noise variance, and pass their factors
+/// to [`seiza_live_stacker_set_frame_weight_factors_json`].
+///
+/// # Safety
+/// `request_json` must point to a NUL-terminated UTF-8 string. When
+/// non-null, `error_out` must point to writable storage for one pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_stack_select_frames_json(
+    request_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let request: FrameSelectionRequest = parse_request(request_json, "frame selection")?;
+        let options = request.options.unwrap_or_default().options();
+        let scores = request
+            .scores
+            .into_iter()
+            .map(|score| score.map(seiza_stacking::ReferenceScore::from))
+            .collect::<Vec<_>>();
+        let selection =
+            seiza_stacking::select_frames(&scores, &options).map_err(|error| error.to_string())?;
+        let reference = selection.reference(&scores);
+        let frames = selection
+            .verdicts
+            .iter()
+            .enumerate()
+            .map(|(index, verdict)| match verdict {
+                Ok(psf_area) => FrameVerdictResponse {
+                    kept: true,
+                    psf_area: Some(*psf_area),
+                    weight_factor: reference
+                        .and_then(|reference| selection.weight_factor(index, reference)),
+                    reason: None,
+                    value: None,
+                    limit: None,
+                },
+                Err(rejection) => FrameVerdictResponse {
+                    kept: false,
+                    psf_area: None,
+                    weight_factor: None,
+                    reason: Some(rejection.kind().to_string()),
+                    value: rejection.value(),
+                    limit: rejection.limit(),
+                },
+            })
+            .collect();
+        owned_json(&FrameSelectionResponse {
+            schema_version: 1,
+            reference,
+            frames,
+            median_score: selection.median_score,
+            median_stars: selection.median_stars,
+            median_psf_area: selection.median_psf_area,
+            median_eccentricity: selection.median_eccentricity,
+            score_limit: selection.score_limit,
+            stars_limit: selection.stars_limit,
+            psf_area_limit: selection.psf_area_limit,
+            eccentricity_limit: selection.eccentricity_limit,
+            expected_snr_gain: selection.expected_snr_gain,
         })
     })
     .unwrap_or(ptr::null_mut())
@@ -4603,6 +4808,56 @@ pub unsafe extern "C" fn seiza_live_stacker_set_match_tolerances(
         stacker
             .stacker
             .set_match_tolerances(tolerances)
+            .map_err(|error| error.to_string())
+    })
+    .is_some()
+}
+
+/// One path's factor for [`seiza_live_stacker_set_frame_weight_factors_json`].
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FrameWeightFactorRequest {
+    path: String,
+    factor: f32,
+}
+
+/// Multiply the weight of every frame later pushed from one of these paths
+/// by its factor, as `seiza_stacking::LiveStacker::set_frame_weight_factors`
+/// does: the `weightFactor` [`seiza_stack_select_frames_json`] gives each
+/// kept light. `factors_json` is `[{"path": ..., "factor": ...}, ...]`. It
+/// replaces any factors set before, and is refused unless the stack weights
+/// by inverse noise variance, or for a factor that is not a finite positive
+/// number. Returns false with `error_out` set when refused.
+///
+/// # Safety
+///
+/// `stacker` must be a live stacker from this library, with this call
+/// externally synchronized against every other operation on it.
+/// `factors_json` must point to a NUL-terminated UTF-8 string. When
+/// non-null, `error_out` must point to writable storage for one pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_live_stacker_set_frame_weight_factors_json(
+    stacker: *mut SeizaLiveStacker,
+    factors_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> bool {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let stacker = unsafe { required_live_stacker_mut(stacker)? };
+        let factors: Vec<FrameWeightFactorRequest> =
+            parse_request(factors_json, "frame weight factors")?;
+        let paths = factors
+            .iter()
+            .map(|factor| PathBuf::from(&factor.path))
+            .collect::<Vec<_>>();
+        stacker
+            .stacker
+            .set_frame_weight_factors(
+                paths
+                    .iter()
+                    .zip(&factors)
+                    .map(|(path, factor)| (path.as_path(), factor.factor)),
+            )
             .map_err(|error| error.to_string())
     })
     .is_some()
@@ -10644,6 +10899,122 @@ mod tests {
         assert!(raw.is_null());
         assert!(!error.is_null());
         unsafe { seiza_string_free(error) };
+    }
+
+    #[test]
+    fn frame_selection_over_the_c_surface_keeps_scores_and_weights_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let image = LinearImage::new(320, 256, 1, stacking_star_field(320, 256)).unwrap();
+        let paths = (0..5)
+            .map(|index| {
+                let path = directory.path().join(format!("light-{index}.fits"));
+                seiza_stacking::write_processed_image_fits_f32(&path, &image, &[], &[]).unwrap();
+                path.to_str().unwrap().to_owned()
+            })
+            .collect::<Vec<_>>();
+        let paths_json = CString::new(serde_json::to_string(&paths).unwrap()).unwrap();
+        let raw =
+            unsafe { seiza_stack_choose_reference_json(paths_json.as_ptr(), 2, ptr::null_mut()) };
+        let choice: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(raw) }.to_str().unwrap()).unwrap();
+        unsafe { seiza_string_free(raw) };
+        let score = &choice["scores"][0];
+        assert!(score["psfArea"].as_f64().unwrap() > 0.0);
+        // A dozen stars, some by the edge: too few to shape.
+        assert!(score["eccentricity"].as_f64().is_none_or(|e| e < 0.5));
+
+        // The scores go back unchanged, with a missing light among them.
+        let mut scores = choice["scores"].as_array().unwrap().clone();
+        scores.push(Value::Null);
+        let selection = call_json(
+            seiza_stack_select_frames_json,
+            &serde_json::json!({"scores": scores, "options": {"maximumWeightFactor": 2.0}}),
+        )
+        .unwrap();
+        assert_eq!(selection["schemaVersion"], 1);
+        let frames = selection["frames"].as_array().unwrap();
+        assert_eq!(frames.len(), 6);
+        let reference = selection["reference"].as_u64().unwrap() as usize;
+        assert!(reference < 5);
+        for frame in &frames[..5] {
+            assert_eq!(frame["kept"], true, "{frame}");
+            assert_eq!(frame["weightFactor"], 1.0, "identical lights spread alike");
+        }
+        assert_eq!(frames[5]["kept"], false);
+        assert_eq!(frames[5]["reason"], "unscored");
+        assert!(frames[5]["limit"].is_null());
+        assert!(selection["expectedSnrGain"].as_f64().unwrap() > 0.99);
+        let message = call_json(
+            seiza_stack_select_frames_json,
+            &serde_json::json!({"scores": [null], "options": {}}),
+        )
+        .unwrap_err();
+        assert!(message.contains("no light could be scored"), "{message}");
+        let message = call_json(
+            seiza_stack_select_frames_json,
+            &serde_json::json!({"scores": scores, "options": {"minimumWeightFactor": 3.0}}),
+        )
+        .unwrap_err();
+        assert!(
+            message.contains("invalid frame selection options"),
+            "{message}"
+        );
+
+        // The factors reach the stack's weights.
+        let options = CString::new(
+            serde_json::json!({"weighting": {"mode": "inverse-noise-variance"}, "gpu": {"enabled": false}})
+                .to_string(),
+        )
+        .unwrap();
+        let reference_path = CString::new(paths[reference].clone()).unwrap();
+        let mut error = ptr::null_mut();
+        let stacker = unsafe {
+            seiza_live_stacker_open_fits(
+                reference_path.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                0.0,
+                options.as_ptr(),
+                &mut error,
+            )
+        };
+        assert!(!stacker.is_null() && error.is_null());
+        let other = paths
+            .iter()
+            .find(|path| **path != paths[reference])
+            .unwrap();
+        let factors =
+            CString::new(serde_json::json!([{"path": other, "factor": 0.5}]).to_string()).unwrap();
+        assert!(unsafe {
+            seiza_live_stacker_set_frame_weight_factors_json(stacker, factors.as_ptr(), &mut error)
+        });
+        assert!(error.is_null());
+        let other_path = CString::new(other.clone()).unwrap();
+        let pushed =
+            unsafe { seiza_live_stacker_push_fits_json(stacker, other_path.as_ptr(), &mut error) };
+        assert!(
+            !pushed.is_null(),
+            "{}",
+            unsafe { CStr::from_ptr(error) }.to_str().unwrap()
+        );
+        let disposition: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(pushed) }.to_str().unwrap()).unwrap();
+        unsafe { seiza_string_free(pushed) };
+        assert_eq!(
+            disposition["diagnostics"]["weight"][0], 0.5,
+            "{disposition}"
+        );
+        let bad =
+            CString::new(serde_json::json!([{"path": other, "factor": -1.0}]).to_string()).unwrap();
+        assert!(!unsafe {
+            seiza_live_stacker_set_frame_weight_factors_json(stacker, bad.as_ptr(), &mut error)
+        });
+        assert!(!error.is_null());
+        unsafe {
+            seiza_string_free(error);
+            seiza_live_stacker_free(stacker);
+        }
     }
 
     #[test]

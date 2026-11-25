@@ -1373,7 +1373,9 @@ char *seiza_wcs_transform_json(const char *wcs_json, const char *transform_json,
  leads it), and `scores` (one entry per input in the original order). A
  score is null for an unreadable or unscorable frame; otherwise it
  contains `stars`, `medianStarArea`, `background`, `backgroundVariation`,
- and `score`.
+ `score`, `psfArea` (median flux over peak of the scored stars) and
+ `eccentricity` (of the scored stars' mean shape: the stretch they share;
+ null when too few stars could be shaped).
  `medianStarArea` is in half-resolution pixels, and background measurements
  use the scorer's half-resolution luminance units, not display pixels.
  See `seiza_stacking::ReferenceScore` for the native measurements.
@@ -1392,6 +1394,40 @@ char *seiza_wcs_transform_json(const char *wcs_json, const char *transform_json,
 char *seiza_stack_choose_reference_json(const char *paths_json,
                                         size_t concurrency,
                                         char **error_out);
+
+/*
+ Choose which lights a stack keeps, and how much each counts, from the
+ scores [`seiza_stack_choose_reference_json`] gave them.
+
+ `request_json` is `{"scores": [score or null, ...], "options"?: {...}}`,
+ the scores exactly as that call returned them. A light is turned away
+ only as an outlier against the batch's scored lights, for the first of
+ these it fails: `low-signal` (its `score`, starlight over the sky, below
+ `minimumRelativeScore` of the median: cloud, haze), `few-stars` (below
+ `minimumRelativeStars` of the median count), `elongated` (its
+ `eccentricity` more than `eccentricitySigma` robust spreads, and at
+ least `minimumEccentricityMargin`, above the median, or above
+ `maximumEccentricity`), and `soft` (its `psfArea` more than
+ `psfAreaSigma` robust spreads, and at least `minimumPsfAreaMargin` of the
+ median, above the median). Unscored lights are `unscored`. Every option is
+ optional and defaults as `seiza_stacking::FrameSelectionOptions` does.
+
+ The returned schema-1 JSON has `reference`, the best kept light as
+ `ranking` would order them, or null; `frames`, one verdict per light with
+ `kept`, and for a kept light its `psfArea` and `weightFactor` (the
+ reference's PSF area over its own, between `minimumWeightFactor` and
+ `maximumWeightFactor`), or for a rejected one its `reason`, `value` and
+ `limit`; the batch medians and limits; and `expectedSnrGain`, the
+ point-source signal to noise of the kept lights weighted this way over
+ that of every light at equal weight. Stack the kept lights against
+ `reference`, weighting by inverse noise variance, and pass their factors
+ to [`seiza_live_stacker_set_frame_weight_factors_json`].
+
+ # Safety
+ `request_json` must point to a NUL-terminated UTF-8 string. When
+ non-null, `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_stack_select_frames_json(const char *request_json, char **error_out);
 
 /*
  Learn a sensor's hot and dead pixels from its lights, as the CLI's
@@ -1841,6 +1877,26 @@ int32_t seiza_live_stacker_validate_calibration(const SeizaLiveStacker *stacker,
 bool seiza_live_stacker_set_match_tolerances(SeizaLiveStacker *stacker,
                                              const SeizaMatchTolerances *tolerances,
                                              char **error_out);
+
+/*
+ Multiply the weight of every frame later pushed from one of these paths
+ by its factor, as `seiza_stacking::LiveStacker::set_frame_weight_factors`
+ does: the `weightFactor` [`seiza_stack_select_frames_json`] gives each
+ kept light. `factors_json` is `[{"path": ..., "factor": ...}, ...]`. It
+ replaces any factors set before, and is refused unless the stack weights
+ by inverse noise variance, or for a factor that is not a finite positive
+ number. Returns false with `error_out` set when refused.
+
+ # Safety
+
+ `stacker` must be a live stacker from this library, with this call
+ externally synchronized against every other operation on it.
+ `factors_json` must point to a NUL-terminated UTF-8 string. When
+ non-null, `error_out` must point to writable storage for one pointer.
+ */
+bool seiza_live_stacker_set_frame_weight_factors_json(SeizaLiveStacker *stacker,
+                                                      const char *factors_json,
+                                                      char **error_out);
 
 /*
  Fill `tolerances` with the stack's own, every flag set: the gate its

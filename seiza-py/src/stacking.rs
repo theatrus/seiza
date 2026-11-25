@@ -937,6 +937,9 @@ pub(crate) struct PyStackResult {
     #[pyo3(get)]
     reference_light: PathBuf,
     frames: Vec<PyFrameDisposition>,
+    /// Which lights ``select=True`` kept, or ``None`` without it.
+    #[pyo3(get)]
+    selection: Option<PyFrameSelection>,
 }
 
 #[pymethods]
@@ -983,6 +986,15 @@ pub(crate) struct PyReferenceScore {
     /// The bright stars' signal over the sky noise; higher is better.
     #[pyo3(get)]
     score: f32,
+    /// Median flux over peak of the same stars, in half-resolution pixels:
+    /// how far their light spreads. Seeing, focus and trails raise it.
+    #[pyo3(get)]
+    psf_area: f32,
+    /// Eccentricity of the same stars' mean shape, 0 for round: the stretch
+    /// they share, as guiding, wind and trailing give; ``None`` when too few
+    /// could be shaped.
+    #[pyo3(get)]
+    eccentricity: Option<f32>,
 }
 
 impl From<seiza_stacking::ReferenceScore> for PyReferenceScore {
@@ -993,8 +1005,218 @@ impl From<seiza_stacking::ReferenceScore> for PyReferenceScore {
             background: score.background,
             background_variation: score.background_variation,
             score: score.score,
+            psf_area: score.psf_area,
+            eccentricity: score.eccentricity,
         }
     }
+}
+
+impl From<&PyReferenceScore> for seiza_stacking::ReferenceScore {
+    fn from(score: &PyReferenceScore) -> Self {
+        Self {
+            stars: score.stars,
+            median_star_area: score.median_star_area,
+            background: score.background,
+            background_variation: score.background_variation,
+            score: score.score,
+            psf_area: score.psf_area,
+            eccentricity: score.eccentricity,
+        }
+    }
+}
+
+/// One light's verdict in a :class:`FrameSelection`.
+#[pyclass(
+    skip_from_py_object,
+    frozen,
+    name = "FrameSelectionVerdict",
+    module = "seiza"
+)]
+#[derive(Clone)]
+pub(crate) struct PyFrameVerdict {
+    #[pyo3(get)]
+    kept: bool,
+    /// Its stars' PSF area, for a kept light.
+    #[pyo3(get)]
+    psf_area: Option<f32>,
+    /// Its weight factor against the selection's reference, for a kept light.
+    #[pyo3(get)]
+    weight_factor: Option<f32>,
+    /// ``"unscored"``, ``"low-signal"``, ``"few-stars"``, ``"elongated"`` or
+    /// ``"soft"`` for a light turned away.
+    #[pyo3(get)]
+    reason: Option<String>,
+    /// The value that failed, and its limit, for a scored rejected light.
+    #[pyo3(get)]
+    value: Option<f32>,
+    #[pyo3(get)]
+    limit: Option<f32>,
+}
+
+#[pymethods]
+impl PyFrameVerdict {
+    fn __repr__(&self) -> String {
+        match &self.reason {
+            None => format!(
+                "FrameSelectionVerdict(kept=True, weight_factor={:.3})",
+                self.weight_factor.unwrap_or(f32::NAN)
+            ),
+            Some(reason) => format!("FrameSelectionVerdict(kept=False, reason={reason:?})"),
+        }
+    }
+}
+
+/// Which lights :func:`select_frames` kept, against what limits.
+#[pyclass(skip_from_py_object, frozen, name = "FrameSelection", module = "seiza")]
+#[derive(Clone)]
+pub(crate) struct PyFrameSelection {
+    /// The best kept light to stack against, which weight factors are
+    /// relative to; ``None`` when no light is kept.
+    #[pyo3(get)]
+    reference: Option<usize>,
+    frames: Vec<PyFrameVerdict>,
+    #[pyo3(get)]
+    median_score: f32,
+    #[pyo3(get)]
+    median_stars: f32,
+    #[pyo3(get)]
+    median_psf_area: f32,
+    #[pyo3(get)]
+    median_eccentricity: Option<f32>,
+    #[pyo3(get)]
+    score_limit: f32,
+    #[pyo3(get)]
+    stars_limit: f32,
+    #[pyo3(get)]
+    psf_area_limit: f32,
+    #[pyo3(get)]
+    eccentricity_limit: Option<f32>,
+    /// Point-source signal to noise of the kept lights, weighted, over that
+    /// of every light at equal weight.
+    #[pyo3(get)]
+    expected_snr_gain: f64,
+}
+
+#[pymethods]
+impl PyFrameSelection {
+    /// One verdict per light, in the order the scores were given.
+    #[getter]
+    fn frames(&self, py: Python<'_>) -> PyResult<Vec<Py<PyFrameVerdict>>> {
+        self.frames
+            .iter()
+            .cloned()
+            .map(|frame| Py::new(py, frame))
+            .collect()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "FrameSelection(kept={} of {}, reference={:?}, expected_snr_gain={:.3})",
+            self.frames.iter().filter(|frame| frame.kept).count(),
+            self.frames.len(),
+            self.reference,
+            self.expected_snr_gain,
+        )
+    }
+}
+
+impl PyFrameSelection {
+    fn from_rust(selection: &seiza_stacking::FrameSelection, reference: Option<usize>) -> Self {
+        let frames = selection
+            .verdicts
+            .iter()
+            .enumerate()
+            .map(|(index, verdict)| match verdict {
+                Ok(psf_area) => PyFrameVerdict {
+                    kept: true,
+                    psf_area: Some(*psf_area),
+                    weight_factor: reference
+                        .and_then(|reference| selection.weight_factor(index, reference)),
+                    reason: None,
+                    value: None,
+                    limit: None,
+                },
+                Err(rejection) => PyFrameVerdict {
+                    kept: false,
+                    psf_area: None,
+                    weight_factor: None,
+                    reason: Some(rejection.kind().to_string()),
+                    value: rejection.value(),
+                    limit: rejection.limit(),
+                },
+            })
+            .collect();
+        Self {
+            reference,
+            frames,
+            median_score: selection.median_score,
+            median_stars: selection.median_stars,
+            median_psf_area: selection.median_psf_area,
+            median_eccentricity: selection.median_eccentricity,
+            score_limit: selection.score_limit,
+            stars_limit: selection.stars_limit,
+            psf_area_limit: selection.psf_area_limit,
+            eccentricity_limit: selection.eccentricity_limit,
+            expected_snr_gain: selection.expected_snr_gain,
+        }
+    }
+}
+
+/// Choose which lights a stack keeps, and how much each counts, from the
+/// scores :func:`choose_reference` gave them (``None`` for an unscored
+/// light). A light is turned away only as an outlier against the batch's
+/// scored lights: too little starlight (cloud, haze), too few stars,
+/// stars too elongated (wind, guiding) or too spread out (focus, seeing).
+/// Each kept light's ``weight_factor`` is the reference's PSF area over its
+/// own: stack the kept lights against ``reference`` with inverse-noise
+/// weighting and pass the factors to
+/// :meth:`LiveStacker.set_frame_weight_factors`, or let
+/// :func:`stack_fits` do it with ``select=True``.
+#[pyfunction]
+#[pyo3(signature = (
+    scores,
+    *,
+    minimum_relative_score=0.5,
+    minimum_relative_stars=0.5,
+    eccentricity_sigma=3.0,
+    minimum_eccentricity_margin=0.03,
+    maximum_eccentricity=None,
+    psf_area_sigma=3.0,
+    minimum_psf_area_margin=0.1,
+    minimum_weight_factor=0.25,
+    maximum_weight_factor=4.0,
+))]
+#[allow(clippy::too_many_arguments)]
+fn select_frames(
+    scores: Vec<Option<PyRef<'_, PyReferenceScore>>>,
+    minimum_relative_score: f32,
+    minimum_relative_stars: f32,
+    eccentricity_sigma: f32,
+    minimum_eccentricity_margin: f32,
+    maximum_eccentricity: Option<f32>,
+    psf_area_sigma: f32,
+    minimum_psf_area_margin: f32,
+    minimum_weight_factor: f32,
+    maximum_weight_factor: f32,
+) -> PyResult<PyFrameSelection> {
+    let scores = scores
+        .iter()
+        .map(|score| score.as_deref().map(seiza_stacking::ReferenceScore::from))
+        .collect::<Vec<_>>();
+    let options = seiza_stacking::FrameSelectionOptions {
+        minimum_relative_score,
+        minimum_relative_stars,
+        eccentricity_sigma,
+        minimum_eccentricity_margin,
+        maximum_eccentricity,
+        psf_area_sigma,
+        minimum_psf_area_margin,
+        minimum_weight_factor,
+        maximum_weight_factor,
+    };
+    let selection = seiza_stacking::select_frames(&scores, &options).map_err(stack_error)?;
+    let reference = selection.reference(&scores);
+    Ok(PyFrameSelection::from_rust(&selection, reference))
 }
 
 #[pymethods]
@@ -2115,6 +2337,24 @@ impl PyLiveStacker {
     /// saved context keeps every gate. Raises :class:`StackError` for
     /// tolerances that are negative or not finite, and for a stack started
     /// from prepared pixels.
+    /// Multiply the weight of every frame later pushed from one of these
+    /// paths by its factor: the ``weight_factor`` :func:`select_frames`
+    /// gives each kept light, so the stack weights each frame by its noise
+    /// and its stars' spread together. Replaces any factors set before.
+    /// Raises :class:`StackError` unless the stack weights by inverse noise
+    /// variance, or for a factor that is not a finite positive number.
+    fn set_frame_weight_factors(&mut self, factors: Vec<(PathBuf, f32)>) -> PyResult<()> {
+        self.active_mut()
+            .and_then(|stacker| {
+                stacker.set_frame_weight_factors(
+                    factors
+                        .iter()
+                        .map(|(path, factor)| (path.as_path(), *factor)),
+                )
+            })
+            .map_err(stack_error)
+    }
+
     #[pyo3(signature = (tolerances=None))]
     fn set_match_tolerances(
         &mut self,
@@ -2868,7 +3108,8 @@ impl PyMasterResult {
     dark_exposure_seconds=None,
     reference_image=None,
     reference="first",
-    defects="auto"
+    defects="auto",
+    select=false
 ))]
 #[allow(clippy::too_many_arguments)]
 fn stack_fits(
@@ -2883,6 +3124,7 @@ fn stack_fits(
     reference_image: Option<PathBuf>,
     reference: &str,
     defects: &str,
+    select: bool,
 ) -> PyResult<PyStackResult> {
     if images.len() < 2 {
         return Err(PyValueError::new_err(
@@ -2936,12 +3178,37 @@ fn stack_fits(
         .map_or_else(StackOptions::default, |options| options.inner.clone());
     py.detach(move || {
         let calibration = load_calibration(bias, dark, flat, dark_exposure_seconds)?;
-        let mut images = images;
+        let images = images;
         // The lights that may become the reference light, best first. With
         // a reference image, the next ones stand in when the best does not
         // align to it.
         let mut candidates = vec![0];
-        if automatic {
+        let mut selection = None;
+        if select {
+            // Keep only the lights that are not outliers, the best of them
+            // first, and weight each by its noise and its stars' spread.
+            let (_, scores) = seiza_stacking::choose_reference(&images, 8)?;
+            let chosen = seiza_stacking::select_frames(
+                &scores,
+                &seiza_stacking::FrameSelectionOptions::default(),
+            )?;
+            let kept = scores
+                .iter()
+                .enumerate()
+                .map(|(index, score)| score.clone().filter(|_| chosen.verdicts[index].is_ok()))
+                .collect::<Vec<_>>();
+            candidates = seiza_stacking::rank_references(&kept);
+            if candidates.is_empty() {
+                return Err(seiza_stacking::Error::Stack(
+                    "frame selection kept no light".into(),
+                ));
+            }
+            candidates.truncate(CHANNEL_REFERENCE_ATTEMPTS);
+            if options.weighting.is_equal() {
+                options.weighting = seiza_stacking::FrameWeighting::inverse_noise_variance();
+            }
+            selection = Some((chosen, scores));
+        } else if automatic {
             let (_, scores) = seiza_stacking::choose_reference(&images, 8)?;
             candidates = seiza_stacking::rank_references(&scores);
             candidates.truncate(CHANNEL_REFERENCE_ATTEMPTS);
@@ -2988,7 +3255,42 @@ fn stack_fits(
                 candidates[0],
             ),
         };
-        let reference_light = images.remove(chosen);
+        let mut selected = None;
+        if let Some((chosen_lights, _)) = &selection {
+            let factors = chosen_lights
+                .kept()
+                .filter_map(|index| {
+                    chosen_lights
+                        .weight_factor(index, chosen)
+                        .map(|factor| (images[index].as_path(), factor))
+                })
+                .collect::<Vec<_>>();
+            stacker.set_frame_weight_factors(factors)?;
+            selected = Some(PyFrameSelection::from_rust(chosen_lights, Some(chosen)));
+        }
+        let kept = selection
+            .as_ref()
+            .map(|(chosen_lights, _)| {
+                chosen_lights
+                    .verdicts
+                    .iter()
+                    .map(Result::is_ok)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| vec![true; images.len()]);
+        let mut images = images
+            .into_iter()
+            .zip(kept)
+            .enumerate()
+            .filter(|(index, (_, kept))| *kept || *index == chosen)
+            .map(|(index, (path, _))| (index, path))
+            .collect::<Vec<_>>();
+        let position = images
+            .iter()
+            .position(|(index, _)| *index == chosen)
+            .expect("the reference light is kept");
+        let (_, reference_light) = images.remove(position);
+        let mut images = images.into_iter().map(|(_, path)| path).collect::<Vec<_>>();
         images.insert(0, reference_light.clone());
         let lights = &images[usize::from(reference_image.is_none())..];
         let mut frames = Vec::new();
@@ -3016,6 +3318,7 @@ fn stack_fits(
             channels: snapshot.image.channels,
             reference_light,
             frames,
+            selection: selected,
         })
     })
     .map_err(stack_error)
@@ -3886,6 +4189,8 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyPipelineReport>()?;
     module.add_class::<PyStackResult>()?;
     module.add_class::<PyReferenceScore>()?;
+    module.add_class::<PyFrameVerdict>()?;
+    module.add_class::<PyFrameSelection>()?;
     module.add_class::<PyReferenceChoice>()?;
     module.add_class::<PyChannelReferenceSelection>()?;
     module.add_class::<PyStackSnapshot>()?;
@@ -3902,6 +4207,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(match_linear, module)?)?;
     module.add_function(wrap_pyfunction!(stack_fits, module)?)?;
     module.add_function(wrap_pyfunction!(py_choose_reference, module)?)?;
+    module.add_function(wrap_pyfunction!(select_frames, module)?)?;
     module.add_function(wrap_pyfunction!(build_bias, module)?)?;
     module.add_function(wrap_pyfunction!(build_dark, module)?)?;
     module.add_function(wrap_pyfunction!(build_flat, module)?)?;

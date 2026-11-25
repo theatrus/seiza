@@ -324,6 +324,13 @@ core = "seiza-deconvolution::ChannelConsistency"
 [rust.ReblurConsistencyResponse]
 core = "seiza-deconvolution::ReblurConsistency"
 
+[rust.FrameSelectionOptionsRequest]
+core = "seiza-stacking::FrameSelectionOptions"
+
+[rust.FrameSelectionResponse]
+core = "seiza-stacking::FrameSelection"
+verdicts = { c = "frames" }
+
 [rust.DetectedStarJson]
 core = "seiza-stars::HocusFocusStar"
 position = { c = "x" }
@@ -762,6 +769,7 @@ seiza_live_stacker_compatible_calibration_json = "LiveStacker.compatible_calibra
 seiza_live_stacker_validate_calibration = "LiveStacker.validate_calibration"
 seiza_live_stacker_match_tolerances = "LiveStacker.match_tolerances"
 seiza_live_stacker_set_match_tolerances = "LiveStacker.set_match_tolerances"
+seiza_live_stacker_set_frame_weight_factors_json = "LiveStacker.set_frame_weight_factors"
 # Python's MatchTolerances carries the light angle, so a stack's whole gate is set and read at once.
 seiza_live_stacker_set_light_rotation = "LiveStacker.set_match_tolerances"
 seiza_live_stacker_light_rotation = "LiveStacker.match_tolerances"
@@ -796,6 +804,7 @@ seiza_live_stacker_finish_reintegration = "LiveStacker.finish_reintegration"
 seiza_live_stacker_finish = "LiveStacker.finish"
 seiza_live_stacker_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
 seiza_stack_choose_reference_json = "choose_reference"
+seiza_stack_select_frames_json = "select_frames"
 seiza_stack_detect_defects_json = "detect_defects"
 seiza_stack_integrate_registered_json = "integrate_registered_frames"
 

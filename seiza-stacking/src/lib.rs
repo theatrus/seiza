@@ -89,6 +89,7 @@ pub use report::{
 };
 mod residual_flat;
 mod saturation;
+mod selection;
 mod sessions;
 pub use sessions::FileCalibrationSession;
 mod snr;
@@ -176,7 +177,9 @@ pub use pixinsight::{
     MlDenoiseLocalSupport, MlDenoiseModel, MlDenoiseOptions, MlDenoisePrecision, MlDenoiseRun,
     MlDenoised, PixInsight,
 };
-pub use reference::{ReferenceScore, choose_reference, rank_references, reference_score};
+pub use reference::{
+    ReferenceScore, SHAPED_STARS_MINIMUM, choose_reference, rank_references, reference_score,
+};
 pub use registration::{
     AffineTransform, Interpolation, PolynomialWarp, ReferenceRegion, Registrar, RegistrationModel,
     RegistrationOptions, RegistrationResult, SimilarityTransform, resample_region_photosites,
@@ -193,6 +196,9 @@ pub use residual_flat::{
 };
 /// Defined in `seiza`, so a solve and a stack take the same signal.
 pub use seiza::CancelSignal;
+pub use selection::{
+    FrameRejection, FrameRejectionKind, FrameSelection, FrameSelectionOptions, select_frames,
+};
 pub use snr::{
     SIGNAL_FRACTION, SnrSample, checkpoint_depths, frame_noise, measure_depth, noise_at_scale,
 };

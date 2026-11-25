@@ -44,6 +44,13 @@ pub(crate) struct FrameSource {
 }
 
 impl FrameSource {
+    /// The file the frame was read from.
+    pub(crate) fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl FrameSource {
     /// The provenance of a frame opened from disk and not changed since,
     /// apart from a declared-range rescale. `None` for a frame built from
     /// pixels.

@@ -99,6 +99,74 @@ def test_stack_options_reject_unknown_modes():
         seiza.StackOptions(demosaic="mystery")
 
 
+def selection_lights(tmp_path):
+    """Six steady lights, one under cloud and one trailed by 9 px."""
+    positions = np.random.default_rng(3).uniform(16, 240, size=(40, 2))
+    yy, xx = np.mgrid[:256, :256]
+
+    def field(seed, amplitude=1.0, smear=1):
+        image = np.random.default_rng(seed).normal(100.0, 1.5, (256, 256))
+        for index, (y, x) in enumerate(positions):
+            image += amplitude * (600 + 20 * index) * np.exp(
+                -((xx - x) ** 2 + (yy - y) ** 2) / 4.0
+            )
+        if smear > 1:
+            kernel = np.ones(smear) / smear
+            image = np.apply_along_axis(
+                lambda row: np.convolve(row, kernel, mode="same"), 1, image
+            )
+        return image.astype(np.float32)
+
+    lights = []
+    for index, image in enumerate(
+        [field(seed) for seed in range(6)] + [field(6, amplitude=0.15), field(7, smear=9)]
+    ):
+        path = tmp_path / f"light-{index}.fits"
+        fits.writeto(path, image)
+        lights.append(path)
+    return lights
+
+
+def test_select_frames_turns_away_outliers_and_weights_the_rest(tmp_path):
+    lights = selection_lights(tmp_path)
+    choice = seiza.choose_reference(lights)
+    score = choice.scores[0]
+    assert score.psf_area > 0
+    assert score.eccentricity is not None and score.eccentricity < 0.3
+
+    selection = seiza.select_frames(choice.scores)
+    assert len(selection.frames) == len(lights)
+    assert [frame.kept for frame in selection.frames] == [True] * 6 + [False, False]
+    assert selection.frames[6].reason == "low-signal"
+    assert selection.frames[7].reason in ("elongated", "soft")
+    assert selection.frames[7].value > selection.frames[7].limit
+    assert selection.reference in range(6)
+    for frame in selection.frames[:6]:
+        assert frame.weight_factor == pytest.approx(1.0, abs=0.2)
+    assert selection.expected_snr_gain > 1.0
+    with pytest.raises(seiza.StackError, match="invalid frame selection options"):
+        seiza.select_frames(choice.scores, minimum_weight_factor=2.0)
+
+    result = seiza.stack_fits(lights, tmp_path / "selected.fits", select=True)
+    assert result.selection is not None
+    assert result.selection.reference is not None
+    assert result.accepted_frames == 6
+    assert result.reference_light in lights[:6]
+    assert all(frame.source in lights[:6] for frame in result.frames)
+    assert seiza.stack_fits(lights, tmp_path / "all.fits").selection is None
+
+    weighted = seiza.StackOptions(weighting="inverse-noise-variance")
+    stacker = seiza.LiveStacker(lights[0], options=weighted)
+    stacker.set_frame_weight_factors([(lights[1], 0.5)])
+    assert stacker.push_fits(lights[1]).weight[0] == pytest.approx(
+        0.5 * stacker.push_fits(lights[2]).weight[0], rel=0.2
+    )
+    with pytest.raises(seiza.StackError, match="finite positive"):
+        stacker.set_frame_weight_factors([(lights[1], 0.0)])
+    with pytest.raises(seiza.StackError, match="inverse-noise-variance"):
+        seiza.LiveStacker(lights[0]).set_frame_weight_factors([(lights[1], 0.5)])
+
+
 def test_stack_options_choose_the_demosaic():
     assert seiza.StackOptions().demosaic == "vng"
     for method in ["vng", "mhc", "bilinear"]:
