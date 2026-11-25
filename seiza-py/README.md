@@ -344,7 +344,13 @@ target against a comparison ensemble across a series.
   photons, `flux / gain`, when you give `gain` in electrons per sample unit
   (the mean of `n` subs has `n` times one sub's gain). `uncertainty`, a
   float32 map of each pixel's total 1-sigma noise, replaces the first and
-  photon terms with `sum(w²·uncertainty²)`.
+  photon terms with `sum(w²·uncertainty²)`. The squared weights follow from
+  propagating independent pixel errors through the weighted flux sum: a
+  half-covered pixel contributes half its value and one quarter of its
+  variance. Older Photutils releases used linear overlap weights for
+  variance, so their reported aperture errors can be larger even when the
+  flux sums agree. The comparison tests use Photutils' exact overlap masks
+  to check the squared-weight propagation across versions.
 - **What the error is not.** It assumes pixel noise is independent from
   pixel to pixel. Debayered, registered or stacked pixels are correlated,
   and their true error is larger. Scintillation, flat-field error and
@@ -356,6 +362,45 @@ target against a comparison ensemble across a series.
 
 `magnitude` is `-2.5 log10(flux)` with no zero point, and `magnitude_error`
 `2.5 / ln(10) · flux_error / flux`.
+
+### Real-data performance and parity check
+
+[`examples/benchmark_aperture_real_data.py`](examples/benchmark_aperture_real_data.py)
+uses five 20-second Seestar S30 Pro FITS frames supplied by Kai Yung. The
+[`pinned manifest`](examples/v1337-cas-v1.json) records their public Spaces
+URLs, sizes, SHA-256 hashes and fixed pixel positions. The FITS files stay
+outside the repository and normal tests never download them.
+
+Run with an installed Seiza build and NumPy (Python 3.11 or newer):
+
+```sh
+python seiza-py/examples/benchmark_aperture_real_data.py \
+  --data-dir ./target/photometry-data --download --output before.json
+# Install the other revision, built with the same optimized profile.
+python seiza-py/examples/benchmark_aperture_real_data.py \
+  --data-dir ./target/photometry-data --output after.json --compare before.json
+```
+
+Use the same script and manifest for both revisions. Existing local files
+are verified every run; `--download` fetches only missing files (about 83 MB).
+A size or checksum mismatch stops the run. Each result contains every
+measurement field and flag, plus per-round timings and environment metadata.
+`--compare` fails on different inputs or any numerical/flag difference and
+records per-scenario speedups when parity passes. Timing is descriptive,
+not a pass/fail threshold. Use `--iterations 100 --rounds 5` for longer runs;
+the defaults are 20 calls per round and five rounds.
+
+The 60 scenarios cover 1, 8, 9 and 100 positions, with contiguous float32,
+strided RGB green views, and contiguous input with masks and uncertainty
+maps. FITS reads go through Seiza's image I/O; the two green samples in each
+GRBG cell are averaged into a 1080-by-1920 plane. Downloading, decoding and
+green extraction are excluded from timings. The first nine positions are
+distinct detected stars; the 100-position workload cycles the available
+isolated stars. The aperture and annulus radii are 6, 10 and 16 green pixels.
+These are performance and numerical-parity fixtures, not WCS-identified
+comparison stars or a reproduction of Kai's full-night ALP reduction.
+Desktop results do not establish Raspberry Pi performance; run the same
+command on the Pi to measure that host.
 
 ## Measure the PSF field
 
