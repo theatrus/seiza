@@ -1246,6 +1246,110 @@ fn header_dict(py: Python<'_>, header: seiza_image_io::FitsHeader) -> PyResult<P
     Ok(dict.unbind())
 }
 
+/// A value a file records, and where: ``source`` says which card, property
+/// or line it came from, or how it follows from others.
+#[pyclass(frozen, name = "RecordedValue", module = "seiza")]
+struct PyRecordedValue {
+    #[pyo3(get)]
+    value: Py<PyAny>,
+    #[pyo3(get)]
+    source: String,
+}
+
+#[pymethods]
+impl PyRecordedValue {
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        Ok(format!(
+            "RecordedValue({}, source={:?})",
+            self.value.bind(py).repr()?,
+            self.source
+        ))
+    }
+}
+
+/// What a stacked image records of its integration, from
+/// :func:`read_master_info`: each a :class:`RecordedValue`, or ``None`` when
+/// it cannot be told.
+#[pyclass(frozen, name = "MasterInfo", module = "seiza")]
+struct PyMasterInfo {
+    info: seiza_image_io::MasterInfo,
+}
+
+fn recorded<'py, T>(
+    py: Python<'py>,
+    recorded: &Option<seiza_image_io::Recorded<T>>,
+) -> PyResult<Option<PyRecordedValue>>
+where
+    T: Clone + pyo3::IntoPyObjectExt<'py>,
+{
+    recorded
+        .as_ref()
+        .map(|recorded| {
+            Ok(PyRecordedValue {
+                value: recorded.value.clone().into_py_any(py)?,
+                source: recorded.source.clone(),
+            })
+        })
+        .transpose()
+}
+
+#[pymethods]
+impl PyMasterInfo {
+    /// Exposure over all its frames, in seconds. In a colour image, the
+    /// channel with the most.
+    #[getter]
+    fn total_exposure_seconds(&self, py: Python<'_>) -> PyResult<Option<PyRecordedValue>> {
+        recorded(py, &self.info.total_exposure_seconds)
+    }
+
+    /// Frames it was made from.
+    #[getter]
+    fn frames(&self, py: Python<'_>) -> PyResult<Option<PyRecordedValue>> {
+        recorded(py, &self.info.frames)
+    }
+
+    /// One frame's exposure in seconds: a recorded one, or the total over the
+    /// count, which is the mean of frames that differ.
+    #[getter]
+    fn sub_exposure_seconds(&self, py: Python<'_>) -> PyResult<Option<PyRecordedValue>> {
+        recorded(py, &self.info.sub_exposure_seconds)
+    }
+
+    #[getter]
+    fn filter(&self, py: Python<'_>) -> PyResult<Option<PyRecordedValue>> {
+        recorded(py, &self.info.filter)
+    }
+
+    /// The program that integrated it.
+    #[getter]
+    fn integrator(&self, py: Python<'_>) -> PyResult<Option<PyRecordedValue>> {
+        recorded(py, &self.info.integrator)
+    }
+
+    /// Output pixels per input pixel, when it was drizzled.
+    #[getter]
+    fn drizzle_scale(&self, py: Python<'_>) -> PyResult<Option<PyRecordedValue>> {
+        recorded(py, &self.info.drizzle_scale)
+    }
+
+    /// What to know before relying on the values.
+    #[getter]
+    fn notes(&self) -> Vec<String> {
+        self.info.notes.clone()
+    }
+}
+
+/// What the FITS or XISF image at ``path`` records of its integration, read
+/// without decoding its pixels. XISF when the extension says so, FITS
+/// otherwise. Every integrator records it its own way, and what cannot be
+/// told is ``None``. Raises ``ValueError`` when the file cannot be read.
+#[pyfunction]
+fn read_master_info(py: Python<'_>, path: PathBuf) -> PyResult<PyMasterInfo> {
+    py.detach(|| seiza_image_io::read_master_info(&path))
+        .map(|info| PyMasterInfo { info })
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
 /// What a FITS or XISF file says about where it points, read without
 /// decoding its pixels: ``{"wcs": Wcs or None, "center": (ra, dec) or None,
 /// "scale_arcsec_px": float or None}``, from its WCS cards or PixInsight
@@ -1424,6 +1528,9 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(read_image_window, m)?)?;
     m.add_function(wrap_pyfunction!(read_image, m)?)?;
     m.add_function(wrap_pyfunction!(read_image_header, m)?)?;
+    m.add_class::<PyRecordedValue>()?;
+    m.add_class::<PyMasterInfo>()?;
+    m.add_function(wrap_pyfunction!(read_master_info, m)?)?;
     m.add_function(wrap_pyfunction!(read_solve_prior, m)?)?;
     m.add_function(wrap_pyfunction!(solve_with_prior, m)?)?;
     m.add_function(wrap_pyfunction!(solve_image, m)?)?;

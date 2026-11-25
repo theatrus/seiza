@@ -1598,6 +1598,23 @@ def read_image(
     normalized_full_scale: float | None = None,
 ) -> tuple[npt.NDArray[np.float32], dict[str, Any]]: ...
 
+class RecordedValue:
+    """A value a file records, and where."""
+    value: Any
+    source: str
+
+class MasterInfo:
+    """What a stacked image records of its integration."""
+    total_exposure_seconds: RecordedValue | None
+    frames: RecordedValue | None
+    sub_exposure_seconds: RecordedValue | None
+    filter: RecordedValue | None
+    integrator: RecordedValue | None
+    drizzle_scale: RecordedValue | None
+    notes: list[str]
+
+def read_master_info(path: str | Path) -> MasterInfo: ...
+
 class ImageWindow:
     values: npt.NDArray[np.float32]
     image_width: int

@@ -3172,6 +3172,23 @@ const char *seiza_image_file_header_json(const SeizaImageFile *image);
 void seiza_image_file_free(SeizaImageFile *image);
 
 /*
+ What the FITS or XISF image at `path` records of its integration, read
+ without decoding its pixels: XISF when the extension says so, FITS
+ otherwise. Returns an owned JSON object with `totalExposureSeconds`,
+ `frames`, `subExposureSeconds`, `filter`, `integrator` and `drizzleScale`,
+ each null or `{"value", "source"}`, where `source` says which card,
+ property or line it came from, and `notes`, an array of what to know
+ before relying on them. Every integrator records these its own way, and
+ what cannot be told is null. Free the result, or an `error_out` string,
+ with [`seiza_string_free`].
+
+ # Safety
+ `path` must be a valid NUL-terminated string. When non-null, `error_out`
+ must point to writable storage for one pointer.
+ */
+char *seiza_read_master_info_json(const char *path, char **error_out);
+
+/*
  Read the samples of the rectangle at (`x`, `y`), `width` × `height`
  pixels, of every plane of the FITS or XISF image at `path`, without
  decoding the rest of it: XISF when the extension says so, FITS

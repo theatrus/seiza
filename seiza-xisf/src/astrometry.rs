@@ -267,6 +267,18 @@ fn parse_version(version: &str) -> Option<(u32, u32)> {
 
 type Layer<T> = Result<T, String>;
 
+impl XisfMetadata {
+    /// The numbers of the image property with a given identifier, when it is
+    /// a real vector that can be decoded.
+    pub fn vector(&self, id: &str) -> Option<Vec<f64>> {
+        let properties = Properties {
+            elements: BTreeMap::from([(id, self.property(id)?)]),
+            legacy: false,
+        };
+        properties.vector(id, None).ok().flatten()
+    }
+}
+
 /// The `AstrometricSolution` properties of an image, by identifier without
 /// the namespace prefix.
 struct Properties<'a> {

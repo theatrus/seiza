@@ -7482,6 +7482,69 @@ pub unsafe extern "C" fn seiza_image_file_free(image: *mut SeizaImageFile) {
     }
 }
 
+/// A value a file records, and where.
+#[derive(Serialize)]
+struct RecordedJson<T> {
+    value: T,
+    source: String,
+}
+
+impl<T> From<seiza_image_io::Recorded<T>> for RecordedJson<T> {
+    fn from(recorded: seiza_image_io::Recorded<T>) -> Self {
+        Self {
+            value: recorded.value,
+            source: recorded.source,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MasterInfoJson {
+    total_exposure_seconds: Option<RecordedJson<f64>>,
+    frames: Option<RecordedJson<u64>>,
+    sub_exposure_seconds: Option<RecordedJson<f64>>,
+    filter: Option<RecordedJson<String>>,
+    integrator: Option<RecordedJson<String>>,
+    drizzle_scale: Option<RecordedJson<f64>>,
+    notes: Vec<String>,
+}
+
+#[unsafe(no_mangle)]
+/// What the FITS or XISF image at `path` records of its integration, read
+/// without decoding its pixels: XISF when the extension says so, FITS
+/// otherwise. Returns an owned JSON object with `totalExposureSeconds`,
+/// `frames`, `subExposureSeconds`, `filter`, `integrator` and `drizzleScale`,
+/// each null or `{"value", "source"}`, where `source` says which card,
+/// property or line it came from, and `notes`, an array of what to know
+/// before relying on them. Every integrator records these its own way, and
+/// what cannot be told is null. Free the result, or an `error_out` string,
+/// with [`seiza_string_free`].
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated string. When non-null, `error_out`
+/// must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_read_master_info_json(
+    path: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let path = required_path(path, "image path")?;
+        let info = seiza_image_io::read_master_info(&path).map_err(|error| error.to_string())?;
+        owned_json(&MasterInfoJson {
+            total_exposure_seconds: info.total_exposure_seconds.map(Into::into),
+            frames: info.frames.map(Into::into),
+            sub_exposure_seconds: info.sub_exposure_seconds.map(Into::into),
+            filter: info.filter.map(Into::into),
+            integrator: info.integrator.map(Into::into),
+            drizzle_scale: info.drizzle_scale.map(Into::into),
+            notes: info.notes,
+        })
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
 /// Where a window [`seiza_read_image_window`] read lies, and the image it
 /// lies in.
 #[repr(C)]
@@ -18460,6 +18523,49 @@ mod tests {
             assert_eq!(seiza_image_file_info(ptr::null()).width, 0);
             seiza_image_file_free(ptr::null_mut());
         }
+    }
+
+    #[test]
+    fn reads_what_a_master_records_of_its_integration() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("master.fits");
+        let cards = [
+            seiza_fits::WriteHeaderCard::new("NUMFRAME", HeaderValue::Integer(67)),
+            seiza_fits::WriteHeaderCard::new("EXPTIME", HeaderValue::Float(20_100.0)),
+            seiza_fits::WriteHeaderCard::new("FILTER", HeaderValue::String("Ha".into())),
+        ];
+        seiza_image_io::save_f32(
+            &path,
+            2,
+            2,
+            seiza_fits::F32ImageData::Mono(&[0.0; 4]),
+            &seiza_image_io::SaveOptions {
+                headers: &cards,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let c_path = CString::new(path.to_str().unwrap()).unwrap();
+        let mut error = ptr::null_mut();
+        let info =
+            owned_json_value(unsafe { seiza_read_master_info_json(c_path.as_ptr(), &mut error) });
+        assert_eq!(
+            info,
+            json!({
+                "totalExposureSeconds": {"value": 20100.0, "source": "EXPTIME"},
+                "frames": {"value": 67, "source": "NUMFRAME"},
+                "subExposureSeconds": {"value": 300.0, "source": "EXPTIME ÷ frames"},
+                "filter": {"value": "Ha", "source": "FILTER"},
+                "integrator": null,
+                "drizzleScale": null,
+                "notes": [],
+            })
+        );
+        let missing =
+            CString::new(directory.path().join("missing.xisf").to_str().unwrap()).unwrap();
+        let info = unsafe { seiza_read_master_info_json(missing.as_ptr(), &mut error) };
+        assert!(info.is_null() && !error.is_null());
+        unsafe { seiza_string_free(error) };
     }
 
     #[test]

@@ -110,6 +110,12 @@ core = "seiza-image-io::PhotoMetadata"
 [rust.ScaleHintResponse]
 core = "seiza-image-io::ScaleHint"
 
+[rust.MasterInfoJson]
+core = "seiza-image-io::MasterInfo"
+
+[rust.RecordedJson]
+core = "seiza-image-io::Recorded"
+
 [rust.SeizaImageWindow]
 core = "seiza-fits::ImageWindow"
 values = { none = "seiza_read_image_window writes the samples to the caller's buffer" }
@@ -491,6 +497,7 @@ objects = [
 "seiza::objects::predicted_prominence" = { none = "used by parallax labels and tours" }
 "seiza::star_ids::normalize_star_name" = { none = "used inside catalog lookups" }
 "seiza-download::bundle::*" = { none = "download internals behind seiza_catalog_setup" }
+"seiza-image-io::master_info" = { none = "read_master_info, which both bindings call, reads a file's header and gives it this" }
 "seiza-image-io::raster::*" = { none = "reached through seiza_image_io::open and the photo metadata call" }
 "seiza-imgproc::*" = { none = "image-processing primitives inside the other crates; Python offers some for its callers (gaussian_blur and the rest)" }
 "seiza-parallax::light::*" = { none = "display conversions inside rendering" }
@@ -717,6 +724,7 @@ seiza_read_capture_time_json = "read_capture_time"
 seiza_read_photo_metadata_json = "read_photo_metadata"
 seiza_read_image_window = "read_image_window"
 seiza_read_image_header_json = "read_image_header"
+seiza_read_master_info_json = "read_master_info"
 seiza_read_image = "read_image"
 seiza_image_file_info = "read_image"
 seiza_image_file_samples = "read_image"

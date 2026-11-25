@@ -26,7 +26,10 @@
 //! them. [`save`] writes them top-down with a `ROWORDER` card saying so,
 //! which PixInsight and Siril follow.
 
+mod master;
 pub mod raster;
+
+pub use master::{MasterInfo, Recorded, master_info, read_master_info};
 
 use image::{DynamicImage, ImageBuffer, ImageFormat, Luma, Rgb, Rgb32FImage};
 use raster::OrientedRaster;
