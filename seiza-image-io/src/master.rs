@@ -34,7 +34,8 @@ pub struct MasterInfo {
     pub total_exposure_seconds: Option<Recorded<f64>>,
     /// Frames it was made from.
     pub frames: Option<Recorded<u64>>,
-    /// One frame's exposure in seconds, when they share it.
+    /// One frame's exposure in seconds: a recorded one, or the total over the
+    /// count, which is the mean of frames that differ.
     pub sub_exposure_seconds: Option<Recorded<f64>>,
     pub filter: Option<Recorded<String>>,
     /// The program that integrated it.

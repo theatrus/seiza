@@ -1300,7 +1300,8 @@ impl PyMasterInfo {
         recorded(py, &self.info.frames)
     }
 
-    /// One frame's exposure in seconds, when they share it.
+    /// One frame's exposure in seconds: a recorded one, or the total over the
+    /// count, which is the mean of frames that differ.
     #[getter]
     fn sub_exposure_seconds(&self, py: Python<'_>) -> PyResult<Option<PyRecordedValue>> {
         recorded(py, &self.info.sub_exposure_seconds)
