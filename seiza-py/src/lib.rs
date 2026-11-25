@@ -1051,7 +1051,8 @@ fn read_photo_metadata(
     Ok(crate::convert::to_python(py, &value)?.unbind())
 }
 
-/// A rectangle of an image's samples, read by :func:`read_image_window`.
+/// A rectangle of an image's samples, read by :func:`read_image_window`, or
+/// the whole image, read by :func:`read_image`.
 #[pyclass(skip_from_py_object, frozen, name = "ImageWindow", module = "seiza")]
 struct PyImageWindow {
     inner: seiza_image_io::ImageWindow,
@@ -1155,6 +1156,35 @@ fn read_image_window(
     normalized_full_scale: Option<f32>,
 ) -> PyResult<PyImageWindow> {
     py.detach(|| seiza_image_io::read_window(&path, x, y, width, height, normalized_full_scale))
+        .map(|inner| PyImageWindow { inner })
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+/// Every sample of every plane of the FITS or XISF image at ``path``, as an
+/// :class:`ImageWindow` covering the whole image: ``values`` is a
+/// ``float32`` array shaped ``(planes, height, width)``, and ``x`` and
+/// ``y`` are 0. XISF when the extension says so, FITS otherwise. Unlike
+/// :func:`read_image_window` it reads an image of any size and any XISF
+/// codec (zlib, lz4, zstd, byte-shuffled or not), decoding it all.
+///
+/// The samples are in physical units, as :func:`read_image_window` gives
+/// them, rows in stored order. ``normalized_full_scale`` puts an XISF image
+/// the file declares as normalized (``bounds="0:1"``, as PixInsight writes)
+/// onto that scale: ``65535.0`` reads it on a 16-bit camera's scale.
+/// ``None`` leaves every sample as stored. A FITS image declares no bounds,
+/// so it reads the same either way. Its header is
+/// :func:`read_image_header`'s.
+///
+/// Raises ``ValueError`` for a scale that is not finite and positive, or a
+/// file that cannot be read.
+#[pyfunction]
+#[pyo3(signature = (path, *, normalized_full_scale=None))]
+fn read_image(
+    py: Python<'_>,
+    path: PathBuf,
+    normalized_full_scale: Option<f32>,
+) -> PyResult<PyImageWindow> {
+    py.detach(|| seiza_image_io::read_image(&path, normalized_full_scale))
         .map(|inner| PyImageWindow { inner })
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }
@@ -1377,6 +1407,7 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(read_capture_time, m)?)?;
     m.add_class::<PyImageWindow>()?;
     m.add_function(wrap_pyfunction!(read_image_window, m)?)?;
+    m.add_function(wrap_pyfunction!(read_image, m)?)?;
     m.add_function(wrap_pyfunction!(read_image_header, m)?)?;
     m.add_function(wrap_pyfunction!(read_solve_prior, m)?)?;
     m.add_function(wrap_pyfunction!(solve_with_prior, m)?)?;

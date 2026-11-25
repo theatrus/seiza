@@ -7351,6 +7351,102 @@ pub unsafe extern "C" fn seiza_read_image_window(
     .unwrap_or(false)
 }
 
+/// Every sample of an image, read by [`seiza_read_image`]. The samples
+/// [`seiza_image_samples_values`] gives are borrowed until
+/// [`seiza_image_samples_free`] is called.
+pub struct SeizaImageSamples {
+    window: seiza_image_io::ImageWindow,
+}
+
+#[unsafe(no_mangle)]
+/// Read every sample of every plane of the FITS or XISF image at `path`:
+/// XISF when the extension says so, FITS otherwise. Unlike
+/// [`seiza_read_image_window`] it takes an image of any size and any XISF
+/// codec (zlib, lz4, zstd, byte-shuffled or not), decoding it all.
+///
+/// `window_out` receives the image's size and plane count, with `x` and `y`
+/// 0 and `width` and `height` the image's. [`seiza_image_samples_values`]
+/// gives the samples in physical units, plane by plane, each row by row:
+/// `values[(plane * height + row) * width + column]`, as
+/// [`seiza_read_image_window`] writes them. FITS samples have `BZERO`,
+/// `BSCALE` and `BLANK` applied (a blank sample is NaN); XISF samples are as
+/// stored. Rows count in stored order.
+///
+/// `normalized_full_scale` puts an XISF image the file declares as
+/// normalized (`bounds="0:1"`, as PixInsight writes) onto that scale: pass
+/// 65535.0 to read it on a 16-bit camera's scale, or 0 to leave every
+/// sample exactly as stored. Any other value must be finite and positive.
+///
+/// Returns null with `error_out` set when the file cannot be read. Free
+/// the result with [`seiza_image_samples_free`].
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated string and `window_out` must point
+/// to one writable `SeizaImageWindow`. When non-null, `error_out` must point
+/// to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_read_image(
+    path: *const c_char,
+    normalized_full_scale: f32,
+    window_out: *mut SeizaImageWindow,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaImageSamples {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let window_out = unsafe { window_out.as_mut() }.ok_or("window_out is required")?;
+        let path = required_path(path, "image path")?;
+        let normalized_full_scale = (normalized_full_scale != 0.0).then_some(normalized_full_scale);
+        let window = seiza_image_io::read_image(&path, normalized_full_scale)
+            .map_err(|error| error.to_string())?;
+        *window_out = SeizaImageWindow {
+            image_width: window.image_width,
+            image_height: window.image_height,
+            planes: window.planes,
+            x: window.x,
+            y: window.y,
+            width: window.width,
+            height: window.height,
+        };
+        Ok(Box::into_raw(Box::new(SeizaImageSamples { window })))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+/// The samples [`seiza_read_image`] read, `planes × width × height` floats
+/// laid out as it describes, with their count in `length_out`. Borrowed
+/// until [`seiza_image_samples_free`]; null for a null handle.
+///
+/// # Safety
+/// `samples` must be null or a live handle from [`seiza_read_image`], and
+/// `length_out` must be null or point to one writable `usize`.
+pub unsafe extern "C" fn seiza_image_samples_values(
+    samples: *const SeizaImageSamples,
+    length_out: *mut usize,
+) -> *const f32 {
+    let Some(samples) = (unsafe { samples.as_ref() }) else {
+        if let Some(length_out) = unsafe { length_out.as_mut() } {
+            *length_out = 0;
+        }
+        return ptr::null();
+    };
+    if let Some(length_out) = unsafe { length_out.as_mut() } {
+        *length_out = samples.window.values.len();
+    }
+    samples.window.values.as_ptr()
+}
+
+#[unsafe(no_mangle)]
+/// Free samples [`seiza_read_image`] returned. Null is ignored.
+///
+/// # Safety
+/// `samples` must be null or a handle from [`seiza_read_image`] not yet
+/// freed.
+pub unsafe extern "C" fn seiza_image_samples_free(samples: *mut SeizaImageSamples) {
+    if !samples.is_null() {
+        drop(unsafe { Box::from_raw(samples) });
+    }
+}
+
 /// FITS header cards in the order they are written, as a JSON object of
 /// keyword to value.
 struct FitsCardsJson(Vec<(String, seiza::FitsCardValue)>);
@@ -18087,6 +18183,57 @@ mod tests {
         let json = unsafe { seiza_read_image_header_json(missing.as_ptr(), &mut error) };
         assert!(json.is_null() && !error.is_null());
         unsafe { seiza_string_free(error) };
+    }
+
+    #[test]
+    fn reads_a_whole_compressed_image() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("whole.xisf");
+        let (width, height) = (1200, 1030);
+        let samples: Vec<f32> = (0..width * height)
+            .map(|index| (index % 1000) as f32 / 1000.0)
+            .collect();
+        seiza_xisf::write_f32_image_with_options(
+            &path,
+            width,
+            height,
+            seiza_fits::F32ImageData::Mono(&samples),
+            &[],
+            &seiza_xisf::WriteOptions {
+                compression: Some(seiza_xisf::WriteCompression::recommended()),
+                bounds: Some((0.0, 1.0)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let c_path = CString::new(path.to_str().unwrap()).unwrap();
+
+        let mut window = SeizaImageWindow::default();
+        let mut error = ptr::null_mut();
+        let read = unsafe { seiza_read_image(c_path.as_ptr(), 65535.0, &mut window, &mut error) };
+        assert!(!read.is_null() && error.is_null());
+        assert_eq!(
+            (window.image_width, window.image_height, window.planes),
+            (width, height, 1)
+        );
+        assert_eq!(
+            (window.x, window.y, window.width, window.height),
+            (0, 0, width, height)
+        );
+        let mut length = 0;
+        let values = unsafe { seiza_image_samples_values(read, &mut length) };
+        assert_eq!(length, width * height);
+        let values = unsafe { std::slice::from_raw_parts(values, length) };
+        assert_eq!(values[1234], samples[1234] * 65535.0);
+        unsafe { seiza_image_samples_free(read) };
+
+        let missing =
+            CString::new(directory.path().join("missing.xisf").to_str().unwrap()).unwrap();
+        let read = unsafe { seiza_read_image(missing.as_ptr(), 0.0, &mut window, &mut error) };
+        assert!(read.is_null() && !error.is_null());
+        unsafe { seiza_string_free(error) };
+        assert!(unsafe { seiza_image_samples_values(ptr::null(), &mut length) }.is_null());
+        assert_eq!(length, 0);
     }
 
     #[test]

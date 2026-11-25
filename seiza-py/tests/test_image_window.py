@@ -1,4 +1,5 @@
-"""read_image_window reads a rectangle of a file's samples in physical units."""
+"""read_image_window reads a rectangle of a file's samples in physical units,
+and read_image the whole image."""
 
 import numpy as np
 import pytest
@@ -100,3 +101,52 @@ def test_a_normalized_xisf_reads_as_stored_or_on_the_scale_asked_for(tmp_path):
     for scale in (0.0, -1.0, float("nan"), float("inf")):
         with pytest.raises(ValueError, match="normalized_full_scale"):
             seiza.read_image_window(path, 0, 0, 1, 1, normalized_full_scale=scale)
+
+
+def write_compressed_xisf(path, samples):
+    """A monolithic XISF file of the gray float32 `samples` (height, width),
+    zlib-compressed and declared normalized, as PixInsight can write it."""
+    import base64
+    import zlib
+
+    height, width = samples.shape
+    raw = samples.astype("<f4").tobytes()
+    data = base64.b64encode(zlib.compress(raw)).decode("ascii")
+    header = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<xisf version="1.0" xmlns="http://www.pixinsight.com/xisf">'
+        f'<Image geometry="{width}:{height}:1" sampleFormat="Float32" bounds="0:1" '
+        f'colorSpace="Gray" compression="zlib:{len(raw)}" location="inline:base64">'
+        f"{data}</Image></xisf>"
+    ).encode("utf-8")
+    path.write_bytes(b"XISF0100" + len(header).to_bytes(4, "little") + bytes(4) + header)
+
+
+def test_a_whole_image_reads_past_the_window_limit(tmp_path):
+    cube = (np.arange(3 * 1100 * 1300, dtype=np.float32) % 4093).reshape(3, 1100, 1300)
+    path = tmp_path / "rgb.fits"
+    write_fits(path, cube, -32)
+
+    whole = seiza.read_image(path)
+    assert (whole.x, whole.y, whole.width, whole.height) == (0, 0, 1300, 1100)
+    assert (whole.image_width, whole.image_height, whole.planes) == (1300, 1100, 3)
+    assert whole.values.dtype == np.float32
+    np.testing.assert_array_equal(whole.values, cube)
+
+
+def test_a_compressed_xisf_reads_whole(tmp_path):
+    samples = (np.arange(40 * 30, dtype=np.float32) / 1200).reshape(30, 40)
+    path = tmp_path / "master.xisf"
+    write_compressed_xisf(path, samples)
+
+    # A window cannot reach a compressed image's samples; the whole image can.
+    with pytest.raises(ValueError):
+        seiza.read_image_window(path, 0, 0, 4, 4)
+    np.testing.assert_array_equal(seiza.read_image(path).values[0], samples)
+    scaled = seiza.read_image(path, normalized_full_scale=65535.0)
+    np.testing.assert_array_equal(scaled.values[0], samples * np.float32(65535))
+
+    with pytest.raises(ValueError, match="normalized_full_scale"):
+        seiza.read_image(path, normalized_full_scale=0.0)
+    with pytest.raises(ValueError):
+        seiza.read_image(tmp_path / "missing.xisf")

@@ -607,7 +607,18 @@ master = seiza.read_image_window(
 A rectangle that runs off the image is clipped to it, and one wholly off it
 gives an empty window. A side may be at most 1024 pixels. A compressed,
 CIELab or complex XISF image cannot be read this way, because its samples
-are decoded as a whole; open it instead.
+are decoded as a whole; read it with `read_image` instead.
+
+`read_image` reads every sample of a FITS or XISF image, of any size and
+compressed or not (zlib, lz4, zstd, byte-shuffled or not), as a window that
+covers it all. It takes `normalized_full_scale` as `read_image_window` does,
+and its header is `read_image_header`'s.
+
+```python
+master = seiza.read_image("masterLight.xisf", normalized_full_scale=65535.0)
+master.values.shape          # (planes, height, width), float32
+red = master.values[0]
+```
 
 `read_image_header` reads a FITS or XISF file's header without decoding its
 pixels. `headers` maps each keyword to its value; an XISF file's PixInsight

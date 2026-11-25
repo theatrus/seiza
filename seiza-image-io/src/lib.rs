@@ -397,6 +397,48 @@ pub fn read_window(
     seiza_fits::read_window(path, x, y, width, height).map_err(|error| Error::open(path, error))
 }
 
+/// Read every sample of every plane of a FITS or XISF image: XISF when the
+/// extension says so, FITS otherwise, as [`read_astronomy`] chooses. The
+/// whole-image counterpart of [`read_window`], for an image of any size and
+/// any XISF codec (zlib, lz4, zstd, byte-shuffled or not), which
+/// [`read_window`] cannot reach without decoding it all.
+///
+/// The answer is an [`ImageWindow`] covering the whole image, so `x` and
+/// `y` are 0 and `width` and `height` are the image's. Its samples are in
+/// physical units, plane by plane and row by row in stored order, as
+/// [`read_window`] gives them: FITS samples with `BZERO`, `BSCALE` and
+/// `BLANK` applied (a blank sample is NaN), XISF samples as stored.
+///
+/// `normalized_full_scale` puts an XISF image the file declares as
+/// normalized (`bounds="0:1"`, as PixInsight writes) onto that scale, as
+/// [`read_window`] does: 65535.0 reads it on a 16-bit camera's scale. `None`
+/// leaves every sample as stored. A scale that is not finite and positive is
+/// refused.
+pub fn read_image(path: &Path, normalized_full_scale: Option<f32>) -> Result<ImageWindow, Error> {
+    if normalized_full_scale.is_some_and(|scale| !scale.is_finite() || scale <= 0.0) {
+        return Err(Error::open(
+            path,
+            "normalized_full_scale must be finite and positive",
+        ));
+    }
+    let mut read = read_astronomy(path)?;
+    if let Some(scale) = normalized_full_scale {
+        read.rescale_normalized_to(scale);
+    }
+    let image = read.image;
+    let (width, height, planes) = (image.width, image.height, image.planes);
+    Ok(ImageWindow {
+        image_width: width,
+        image_height: height,
+        planes,
+        x: 0,
+        y: 0,
+        width,
+        height,
+        values: image.into_physical_f32(),
+    })
+}
+
 /// Read a FITS or XISF file's header without decoding its pixels: XISF
 /// when the extension says so, FITS otherwise, as [`read_astronomy`]
 /// chooses.
@@ -1337,6 +1379,91 @@ mod tests {
                 "{scale}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn a_whole_image_reads_as_its_windows_do() {
+        let directory = tempfile::tempdir().unwrap();
+        let (width, height) = (1500, 1100);
+        let rgb = FloatImage {
+            width,
+            height,
+            channels: 3,
+            samples: (0..width * height * 3)
+                .map(|index| (index % 4093) as f32 / 4093.0)
+                .collect(),
+        };
+        let fits = directory.path().join("rgb.fits");
+        let xisf = directory.path().join("rgb.xisf");
+        save(&fits, &rgb).unwrap();
+        save(&xisf, &rgb).unwrap();
+        // Larger than a window may be, and compressed as PixInsight writes.
+        let compressed = |name: &str, codec, byte_shuffle| {
+            let path = directory.path().join(name);
+            seiza_xisf::write_f32_image_with_options(
+                &path,
+                width,
+                height,
+                rgb.data(),
+                &[],
+                &seiza_xisf::WriteOptions {
+                    compression: Some(seiza_xisf::WriteCompression {
+                        codec,
+                        byte_shuffle,
+                        level: None,
+                    }),
+                    bounds: Some((0.0, 1.0)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            path
+        };
+        let zstd = compressed("zstd.xisf", seiza_xisf::CompressionCodec::Zstd, true);
+        let zlib = compressed("zlib.xisf", seiza_xisf::CompressionCodec::Zlib, false);
+        let lz4 = compressed("lz4.xisf", seiza_xisf::CompressionCodec::Lz4, true);
+        assert!(
+            read_window(&zstd, 0, 0, 4, 4, None).is_err(),
+            "a window of a compressed image"
+        );
+
+        let window = read_window(&fits, 100, 200, 300, 400, None).unwrap();
+        for path in [&fits, &xisf, &zstd, &zlib, &lz4] {
+            let whole = read_image(path, None).unwrap();
+            assert_eq!(
+                (whole.x, whole.y, whole.width, whole.height, whole.planes),
+                (0, 0, width, height, 3),
+                "{}",
+                path.display()
+            );
+            assert_eq!((whole.image_width, whole.image_height), (width, height));
+            assert_eq!(whole.values.len(), width * height * 3);
+            for plane in 0..3 {
+                for (x, y) in [(100, 200), (399, 599), (250, 333)] {
+                    assert_eq!(
+                        whole.get(plane, x, y),
+                        window.get(plane, x, y),
+                        "{} plane {plane} ({x}, {y})",
+                        path.display()
+                    );
+                }
+            }
+        }
+
+        // A normalized XISF goes onto the scale asked for; FITS does not.
+        let scaled = read_image(&zstd, Some(65535.0)).unwrap();
+        let stored = read_image(&zstd, None).unwrap();
+        assert_eq!(scaled.values[12345], stored.values[12345] * 65535.0);
+        assert_eq!(
+            read_image(&fits, Some(65535.0)).unwrap().values,
+            read_image(&fits, None).unwrap().values
+        );
+        for scale in [0.0, -1.0, f32::NAN] {
+            let error = read_image(&fits, Some(scale)).unwrap_err();
+            assert!(matches!(error.cause(), Cause::Invalid(_)), "{scale}");
+        }
+        let missing = directory.path().join("missing.xisf");
+        assert_eq!(read_image(&missing, None).unwrap_err().path(), missing);
     }
 
     #[test]

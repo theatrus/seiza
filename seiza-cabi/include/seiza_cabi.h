@@ -266,6 +266,13 @@ typedef struct SeizaFileRestoration SeizaFileRestoration;
 typedef struct SeizaFlatGroups SeizaFlatGroups;
 
 /*
+ Every sample of an image, read by [`seiza_read_image`]. The samples
+ [`seiza_image_samples_values`] gives are borrowed until
+ [`seiza_image_samples_free`] is called.
+ */
+typedef struct SeizaImageSamples SeizaImageSamples;
+
+/*
  An opaque incremental stacker. Release it with
  [`seiza_live_stacker_free`], or consume it with
  [`seiza_live_stacker_finish`].
@@ -3080,6 +3087,58 @@ bool seiza_read_image_window(const char *path,
                              size_t values_length,
                              SeizaImageWindow *window_out,
                              char **error_out);
+
+/*
+ Read every sample of every plane of the FITS or XISF image at `path`:
+ XISF when the extension says so, FITS otherwise. Unlike
+ [`seiza_read_image_window`] it takes an image of any size and any XISF
+ codec (zlib, lz4, zstd, byte-shuffled or not), decoding it all.
+
+ `window_out` receives the image's size and plane count, with `x` and `y`
+ 0 and `width` and `height` the image's. [`seiza_image_samples_values`]
+ gives the samples in physical units, plane by plane, each row by row:
+ `values[(plane * height + row) * width + column]`, as
+ [`seiza_read_image_window`] writes them. FITS samples have `BZERO`,
+ `BSCALE` and `BLANK` applied (a blank sample is NaN); XISF samples are as
+ stored. Rows count in stored order.
+
+ `normalized_full_scale` puts an XISF image the file declares as
+ normalized (`bounds="0:1"`, as PixInsight writes) onto that scale: pass
+ 65535.0 to read it on a 16-bit camera's scale, or 0 to leave every
+ sample exactly as stored. Any other value must be finite and positive.
+
+ Returns null with `error_out` set when the file cannot be read. Free
+ the result with [`seiza_image_samples_free`].
+
+ # Safety
+ `path` must be a valid NUL-terminated string and `window_out` must point
+ to one writable `SeizaImageWindow`. When non-null, `error_out` must point
+ to writable storage for one pointer.
+ */
+SeizaImageSamples *seiza_read_image(const char *path,
+                                    float normalized_full_scale,
+                                    SeizaImageWindow *window_out,
+                                    char **error_out);
+
+/*
+ The samples [`seiza_read_image`] read, `planes × width × height` floats
+ laid out as it describes, with their count in `length_out`. Borrowed
+ until [`seiza_image_samples_free`]; null for a null handle.
+
+ # Safety
+ `samples` must be null or a live handle from [`seiza_read_image`], and
+ `length_out` must be null or point to one writable `usize`.
+ */
+const float *seiza_image_samples_values(const SeizaImageSamples *samples, size_t *length_out);
+
+/*
+ Free samples [`seiza_read_image`] returned. Null is ignored.
+
+ # Safety
+ `samples` must be null or a handle from [`seiza_read_image`] not yet
+ freed.
+ */
+void seiza_image_samples_free(SeizaImageSamples *samples);
 
 /*
  Linear CD rotation, in degrees from -180 to 180, using the convention of

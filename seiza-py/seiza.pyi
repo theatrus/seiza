@@ -1609,6 +1609,11 @@ def read_image_window(
     *,
     normalized_full_scale: float | None = None,
 ) -> ImageWindow: ...
+def read_image(
+    path: str | Path,
+    *,
+    normalized_full_scale: float | None = None,
+) -> ImageWindow: ...
 def field_objects(
     wcs: Wcs,
     width: int,
