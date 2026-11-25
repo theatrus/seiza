@@ -2206,3 +2206,62 @@ def test_finish_reintegration_checks_arguments_before_consuming(tmp_path):
     with pytest.raises(ValueError, match="positive"):
         stack.finish_reintegration(sigma_low=0)
     assert stack.accepted_frames == 1
+
+
+def _master(level: float, scale: float, sigma: float, seed: int) -> np.ndarray:
+    y, x = np.mgrid[0:384, 0:512] / 512.0
+    signal = np.sin(4 * x + 1) * np.cos(5 * y) + 0.6 * np.sin(7 * (x + y))
+    noise = np.random.default_rng(seed).normal(0.0, sigma, signal.shape)
+    return (level + scale * signal + noise).astype(np.float32)
+
+
+def test_noise_at_scale_takes_in_noise_that_pixels_share() -> None:
+    rng = np.random.default_rng(5)
+    white = rng.normal(100.0, 8.0, (640, 640)).astype(np.float32)
+    assert seiza.noise_at_scale(white, 1) == seiza.frame_noise(white)
+    assert seiza.noise_at_scale(white, 4) == pytest.approx([2.0], rel=0.07)
+    # Every pixel twice along each axis: the per-pixel reading is too low.
+    doubled = np.repeat(np.repeat(white, 2, axis=0), 2, axis=1)
+    (per_pixel,) = seiza.frame_noise(doubled)
+    assert per_pixel < 5.0
+    assert seiza.noise_at_scale(doubled, 8) == pytest.approx([2.0], rel=0.07)
+    assert seiza.noise_at_scale(white, 64) is None
+    rgb = np.stack([white, white * 2, white * 3], axis=-1)
+    assert seiza.noise_at_scale(rgb, 4) == pytest.approx([2.0, 4.0, 6.0], rel=0.07)
+    with pytest.raises(ValueError):
+        seiza.noise_at_scale(white, 0)
+
+
+@pytest.mark.parametrize(("image_noise", "reference_noise"), [(0.2, 0.04), (2.0, 0.04), (0.2, 2.5)])
+def test_match_linear_does_not_depend_on_which_image_is_noisy(
+    image_noise: float, reference_noise: float
+) -> None:
+    image = _master(100.0, 0.5, image_noise, 1)
+    reference = _master(230.0, 1.0, reference_noise, 2)
+    (fit,) = seiza.match_linear(image, reference)
+    assert fit.gain == pytest.approx(2.0, rel=0.05)
+    assert fit.gain * 100.0 + fit.offset == pytest.approx(230.0, abs=0.3)
+    assert 0.0 < fit.gain_error < 0.1
+    assert fit.blocks + fit.rejected == 96 * 128
+    assert "ChannelMatch(gain=" in repr(fit)
+
+
+def test_match_linear_masks_and_refuses() -> None:
+    image = _master(100.0, 0.5, 0.2, 3)
+    reference = _master(230.0, 1.0, 0.1, 4)
+    mask = np.zeros(image.shape, dtype=bool)
+    mask[:64] = True
+    image[:64] = 5000.0
+    (fit,) = seiza.match_linear(image, reference, mask=mask, bin=8, clip_sigma=4.0)
+    assert fit.gain == pytest.approx(2.0, rel=0.03)
+    assert fit.blocks + fit.rejected == 40 * 64
+    with pytest.raises(ValueError, match="shape"):
+        seiza.match_linear(image, reference, mask=mask[:10])
+    with pytest.raises(ValueError, match="differ in size"):
+        seiza.match_linear(image, reference[:100])
+    with pytest.raises(ValueError, match="sigma"):
+        seiza.match_linear(image, reference, clip_sigma=0.0)
+    with pytest.raises(seiza.StackError, match="too few"):
+        seiza.match_linear(image[:8, :8].copy(), reference[:8, :8].copy())
+    with pytest.raises(seiza.StackError, match="too little signal"):
+        seiza.match_linear(_master(1.0, 0.0, 1.0, 5), _master(1.0, 0.0, 1.0, 6))

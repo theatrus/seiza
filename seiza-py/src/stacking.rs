@@ -1,18 +1,20 @@
 use crate::arrays::{image_array, linear_image, u32_array};
-use numpy::{PyArrayDyn, PyReadonlyArrayDyn};
+use numpy::{PyArrayDyn, PyReadonlyArrayDyn, PyUntypedArrayMethods};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use seiza_stacking::{
     BatchStackOptions, CalibrationMasters, CancelSignal, DarkLevelScreening,
     DefectDetectionOptions, DefectMap, DeltaSigmaOptions, Demosaic, DrizzleOptions, DrizzleResult,
     FitsFrame, FlatStarMaskingOptions, FlatStarMaskingStatistics, FrameAcceptanceCriteria,
-    FrameDisposition, FrameWeighting, GpuOptions, ImpulseFilterOptions, LinearImage, LiveStacker,
-    MasterBuildOptions, MasterDark, MasterFrameKind, MasterRejectionOptions, NormalizationMode,
-    PipelineOptions, PipelineReport, RegistrationModel, RejectionMode, SnrSample, StackOptions,
-    StackSnapshot, build_master_from_fits, build_master_from_fits_with_scratch, checkpoint_depths,
-    path_identity, paths_refer_to_same_file, write_drizzle_fits_f32, write_fits_f32,
-    write_master_fits_f32, write_stack_export_fits_f32,
+    FrameDisposition, FrameWeighting, GpuOptions, ImpulseFilterOptions, LinearImage,
+    LinearMatchError, LinearMatchOptions, LiveStacker, MasterBuildOptions, MasterDark,
+    MasterFrameKind, MasterRejectionOptions, NormalizationMode, PipelineOptions, PipelineReport,
+    RegistrationModel, RejectionMode, SnrSample, StackOptions, StackSnapshot,
+    build_master_from_fits, build_master_from_fits_with_scratch, checkpoint_depths, path_identity,
+    paths_refer_to_same_file, write_drizzle_fits_f32, write_fits_f32, write_master_fits_f32,
+    write_stack_export_fits_f32,
 };
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -3741,6 +3743,136 @@ fn frame_noise(py: Python<'_>, image: PyReadonlyArrayDyn<'_, f32>) -> PyResult<O
     Ok(py.detach(|| seiza_stacking::frame_noise(&image)))
 }
 
+/// Measure a linear image's noise in each channel at the scale of ``block``
+/// by ``block`` pixels: the standard deviation of those blocks' means in the
+/// image's own units.
+///
+/// :func:`frame_noise` reads neighbouring pixels, so it under-reads the noise
+/// they share after drizzle or resampling. Blocks several times the
+/// resampling's reach take it in, and blocks of one size on the sky compare
+/// images of different pixel scales. For independent noise it is
+/// ``frame_noise(image) / block``, and ``frame_noise`` itself at 1. Stars
+/// pass, but structure that covers much of the image and curves within four
+/// blocks reads as noise. Returns ``None`` when the image has too few whole
+/// blocks of finite samples, about 36 by 36.
+#[pyfunction]
+fn noise_at_scale(
+    py: Python<'_>,
+    image: PyReadonlyArrayDyn<'_, f32>,
+    block: NonZeroUsize,
+) -> PyResult<Option<Vec<f32>>> {
+    let image = linear_image(image)?;
+    Ok(py.detach(|| seiza_stacking::noise_at_scale(&image, block)))
+}
+
+/// One channel's fit by :func:`match_linear`:
+/// ``reference = gain * image + offset``.
+#[pyclass(skip_from_py_object, frozen, name = "ChannelMatch", module = "seiza")]
+struct PyChannelMatch {
+    inner: seiza_stacking::ChannelMatch,
+}
+
+#[pymethods]
+impl PyChannelMatch {
+    /// What to multiply the image by.
+    #[getter]
+    fn gain(&self) -> f64 {
+        self.inner.gain
+    }
+
+    /// What to add after that.
+    #[getter]
+    fn offset(&self) -> f64 {
+        self.inner.offset
+    }
+
+    /// Standard error of ``gain`` from the two images' noise, a third low
+    /// where both are several times the signal.
+    #[getter]
+    fn gain_error(&self) -> f64 {
+        self.inner.gain_error
+    }
+
+    /// Blocks the fit used.
+    #[getter]
+    fn blocks(&self) -> usize {
+        self.inner.blocks
+    }
+
+    /// Blocks the clipping left out.
+    #[getter]
+    fn rejected(&self) -> usize {
+        self.inner.rejected
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ChannelMatch(gain={:.6}, offset={:.6}, gain_error={:.2e}, blocks={}, rejected={})",
+            self.inner.gain,
+            self.inner.offset,
+            self.inner.gain_error,
+            self.inner.blocks,
+            self.inner.rejected
+        )
+    }
+}
+
+/// Fit the gain and offset that put a linear image on a reference's scale,
+/// ``reference = gain * image + offset``, one :class:`ChannelMatch` per
+/// channel. It is for comparing finished masters registered to one grid.
+///
+/// The fit weighs the noise it measures in both images, so it depends on
+/// neither's depth. It reads means of ``bin`` by ``bin`` blocks and leaves
+/// out any that holds a non-finite sample or a pixel ``mask``, a boolean
+/// ``(height, width)`` array, excludes. Blocks more than ``clip_sigma`` robust
+/// sigmas from the line are clipped. Raises ``StackError`` when a channel has
+/// too few whole blocks, or too little signal in common.
+#[pyfunction]
+#[pyo3(signature = (image, reference, *, mask=None, bin=None, clip_sigma=3.0))]
+fn match_linear(
+    py: Python<'_>,
+    image: PyReadonlyArrayDyn<'_, f32>,
+    reference: PyReadonlyArrayDyn<'_, f32>,
+    mask: Option<PyReadonlyArrayDyn<'_, bool>>,
+    bin: Option<NonZeroUsize>,
+    clip_sigma: f64,
+) -> PyResult<Vec<PyChannelMatch>> {
+    let image = linear_image(image)?;
+    let reference = linear_image(reference)?;
+    let mask = match &mask {
+        Some(mask) => {
+            if mask.shape() != [image.height, image.width] {
+                return Err(PyValueError::new_err(
+                    "match mask must have shape (height, width)",
+                ));
+            }
+            Some(
+                mask.as_slice()
+                    .map_err(|_| PyValueError::new_err("match mask must be C-contiguous"))?,
+            )
+        }
+        None => None,
+    };
+    let options = LinearMatchOptions {
+        bin: bin.unwrap_or(LinearMatchOptions::default().bin),
+        clip_sigma,
+    };
+    let channels = py
+        .detach(|| seiza_stacking::match_linear(&image, &reference, mask, &options))
+        .map_err(|error| match error {
+            LinearMatchError::TooFewBlocks { .. } | LinearMatchError::NoCommonSignal { .. } => {
+                StackError::new_err(error.to_string())
+            }
+            LinearMatchError::Shape
+            | LinearMatchError::Mask { .. }
+            | LinearMatchError::ClipSigma => PyValueError::new_err(error.to_string()),
+        })?;
+    Ok(channels
+        .into_iter()
+        .map(|inner| PyChannelMatch { inner })
+        .collect())
+}
+
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyCanvasChannel>()?;
     module.add_class::<PyStackOptions>()?;
@@ -3762,6 +3894,9 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyMasterResult>()?;
     module.add_class::<PyFlatStarMasking>()?;
     module.add_function(wrap_pyfunction!(frame_noise, module)?)?;
+    module.add_function(wrap_pyfunction!(noise_at_scale, module)?)?;
+    module.add_class::<PyChannelMatch>()?;
+    module.add_function(wrap_pyfunction!(match_linear, module)?)?;
     module.add_function(wrap_pyfunction!(stack_fits, module)?)?;
     module.add_function(wrap_pyfunction!(py_choose_reference, module)?)?;
     module.add_function(wrap_pyfunction!(build_bias, module)?)?;

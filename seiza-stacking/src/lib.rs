@@ -68,6 +68,7 @@ pub use lens::ExpandedLens;
 #[cfg(feature = "gpu")]
 mod gpu;
 mod gpu_options;
+mod linear_match;
 mod mapping;
 mod master;
 mod narrowband_balance;
@@ -148,6 +149,7 @@ pub use fits::{
 };
 pub use gpu_options::GpuOptions;
 pub use image::{BayerLayout, Demosaic, LinearImage};
+pub use linear_match::{ChannelMatch, LinearMatchError, LinearMatchOptions, match_linear};
 pub use mapping::RegisteredFrameMapping;
 pub use master::{
     DarkLevel, DarkLevelScreening, FlatStarMaskingOptions, FlatStarMaskingStatistics,
@@ -191,7 +193,9 @@ pub use residual_flat::{
 };
 /// Defined in `seiza`, so a solve and a stack take the same signal.
 pub use seiza::CancelSignal;
-pub use snr::{SIGNAL_FRACTION, SnrSample, checkpoint_depths, frame_noise, measure_depth};
+pub use snr::{
+    SIGNAL_FRACTION, SnrSample, checkpoint_depths, frame_noise, measure_depth, noise_at_scale,
+};
 pub use stack::{
     CanvasChannel, CfaIntegration, DeltaSigmaOptions, FrameAcceptanceCriteria, FrameDiagnostics,
     FrameDisposition, FrameInputMode, FrameRejectionReason, FrameWeighting, FullResolutionStack,

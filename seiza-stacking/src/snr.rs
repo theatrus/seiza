@@ -45,6 +45,7 @@ use crate::stack::StackView;
 use rayon::prelude::*;
 use seiza_stats::{NORMAL_MAD_SCALE, median_in_place};
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroUsize;
 
 /// Rows read per measurement, at most. Noise and level statistics converge
 /// long before a full frame is consumed, and this keeps the cost of a
@@ -256,6 +257,10 @@ pub fn measure_depth(view: StackView<'_>) -> Option<SnrSample> {
 /// 512 rows are read, so the cost does not grow with sensor height.
 /// Non-finite samples, and differences that touch one, are skipped.
 ///
+/// It reads neighbouring pixels, so it measures noise that is independent
+/// from one to the next. Noise they share, as after drizzle or resampling,
+/// reads low; [`noise_at_scale`] measures it.
+///
 /// The result has one entry per channel, interleaved channel order. It is
 /// `None` when the image is smaller than 3 by 3 pixels, its buffer does not
 /// match its dimensions, or any channel has fewer than 1024 usable
@@ -310,6 +315,115 @@ pub fn frame_noise(image: &LinearImage) -> Option<Vec<f32>> {
             Some(noise as f32)
         })
         .collect()
+}
+
+/// Per-channel noise of an image at the scale of `block` by `block` pixels,
+/// as the standard deviation of those blocks' means in the image's own units.
+///
+/// [`frame_noise`] reads neighbouring pixels, so it under-reads noise that
+/// neighbours share, which drizzle and resampling leave: one 2x drizzle at
+/// full drop size read 2.7 times low. Means of blocks larger than the shared
+/// reach take the correlation in. The same blocks on the sky, 8 pixels of a
+/// 2x drizzle or 4 of the native stack, then compare the two. On that
+/// drizzle, 4-pixel blocks read 16% low, 8-pixel blocks 5 to 8%, 16-pixel
+/// blocks 5%: choose blocks several times the resampling's reach.
+///
+/// For independent noise it is [`frame_noise`] divided by `block`, and
+/// [`frame_noise`] itself at 1. Above 1 the second differences are between
+/// blocks two apart, since neighbouring blocks share the noise at their
+/// common edge. The median passes over stars, but structure that covers much
+/// of the image and curves within four blocks reads as noise: subtract a
+/// model or a deeper image first, or measure a region of sky.
+///
+/// A block with a non-finite sample is left out. `None` as for
+/// [`frame_noise`], with blocks for pixels: each axis needs 1024 usable
+/// differences, about 36 by 36 blocks.
+pub fn noise_at_scale(image: &LinearImage, block: NonZeroUsize) -> Option<Vec<f32>> {
+    let block = block.get();
+    if block == 1 {
+        return frame_noise(image);
+    }
+    let (width, height, channels) = (image.width, image.height, image.channels);
+    let samples = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(channels));
+    if channels == 0 || samples != Some(image.data.len()) {
+        return None;
+    }
+    (0..channels)
+        .into_par_iter()
+        .map(|channel| {
+            let means = block_means(image, channel, block, None);
+            grid_noise(&means, width / block, height / block).map(|noise| noise as f32)
+        })
+        .collect()
+}
+
+/// The means of one channel's whole blocks of `block` by `block` pixels, row
+/// by row, NaN where a block holds a non-finite sample or a pixel `mask`, one
+/// entry per pixel, sets.
+pub(crate) fn block_means(
+    image: &LinearImage,
+    channel: usize,
+    block: usize,
+    mask: Option<&[bool]>,
+) -> Vec<f32> {
+    let (columns, rows) = (image.width / block, image.height / block);
+    let area = (block * block) as f64;
+    let mut means = vec![f32::NAN; columns * rows];
+    if columns == 0 {
+        return means;
+    }
+    means
+        .par_chunks_mut(columns)
+        .enumerate()
+        .for_each(|(row, means)| {
+            let mut sums = vec![0.0_f64; columns];
+            for y in row * block..(row + 1) * block {
+                for (column, sum) in sums.iter_mut().enumerate() {
+                    for x in column * block..(column + 1) * block {
+                        let pixel = y * image.width + x;
+                        // A NaN or infinite sample leaves the sum so.
+                        *sum += match mask {
+                            Some(mask) if mask[pixel] => f64::NAN,
+                            _ => f64::from(image.data[pixel * image.channels + channel]),
+                        };
+                    }
+                }
+            }
+            for (mean, sum) in means.iter_mut().zip(sums) {
+                if sum.is_finite() {
+                    *mean = (sum / area) as f32;
+                }
+            }
+        });
+    means
+}
+
+/// The noise of a grid of block means, from second differences between
+/// blocks two apart, keeping the noisier axis.
+pub(crate) fn grid_noise(means: &[f32], columns: usize, rows: usize) -> Option<f64> {
+    const GAP: usize = 2;
+    if columns <= 2 * GAP || rows <= 2 * GAP {
+        return None;
+    }
+    let mut horizontal = Vec::with_capacity(means.len());
+    let mut vertical = Vec::with_capacity(means.len());
+    for (index, &value) in means.iter().enumerate() {
+        let (x, y) = (index % columns, index / columns);
+        if x >= GAP && x + GAP < columns {
+            horizontal.push(means[index - GAP] - 2.0 * value + means[index + GAP]);
+        }
+        if y >= GAP && y + GAP < rows {
+            let reach = GAP * columns;
+            vertical.push(means[index - reach] - 2.0 * value + means[index + reach]);
+        }
+    }
+    horizontal.retain(|difference| difference.is_finite());
+    vertical.retain(|difference| difference.is_finite());
+    let noise =
+        second_difference_noise(&mut horizontal)?.max(second_difference_noise(&mut vertical)?);
+    Some(noise)
 }
 
 /// Per-channel noise of the samples an image was built from, for the
@@ -667,5 +781,139 @@ mod tests {
         }
         let tiny = LinearImage::new(2, 2, 1, vec![1.0; 4]).unwrap();
         assert_eq!(crate::frame_noise(&tiny), None);
+    }
+
+    fn white(size: usize, sigma: f64, seed: u64) -> LinearImage {
+        let mut noise = Noise(seed);
+        let data = (0..size * size)
+            .map(|index| {
+                let gradient = (index % size) as f64 * 0.05 + (index / size) as f64 * 0.03;
+                (500.0 + gradient + noise.next_normal() * sigma) as f32
+            })
+            .collect();
+        LinearImage::new(size, size, 1, data).unwrap()
+    }
+
+    fn scaled(image: &LinearImage, block: usize) -> f64 {
+        f64::from(noise_at_scale(image, NonZeroUsize::new(block).unwrap()).unwrap()[0])
+    }
+
+    #[test]
+    fn independent_noise_falls_with_the_block_and_matches_the_frames_at_one() {
+        let image = white(640, 8.0, 21);
+        assert_eq!(
+            noise_at_scale(&image, NonZeroUsize::MIN),
+            frame_noise(&image)
+        );
+        for block in [2, 4, 8] {
+            let expected = 8.0 / block as f64;
+            let measured = scaled(&image, block);
+            assert!(
+                (measured / expected - 1.0).abs() < 0.07,
+                "block {block}: {measured}"
+            );
+        }
+    }
+
+    /// Each pixel of `image` drawn as a square two pixels wide, the mean of
+    /// several copies at fractional shifts, as a 2x drizzle leaves them.
+    fn drizzled(size: usize, sigma: f64, frames: u64, seed: u64) -> LinearImage {
+        let fine = size * 2;
+        let mut data = vec![0.0_f64; fine * fine];
+        let mut shifts = Noise(99);
+        for frame in 0..frames {
+            let native = white(size, sigma, seed + frame);
+            let (dx, dy) = (shifts.next_uniform(), shifts.next_uniform());
+            // A fine pixel covers half of a native one along each axis.
+            let axis = |fine_index: usize, shift: f64| {
+                let start = (fine_index as f64 + shift * 2.0) / 2.0;
+                let (first, inside) = (start.floor(), start.fract());
+                let next = ((inside - 0.5) / 0.5).clamp(0.0, 1.0);
+                let last = size - 1;
+                (
+                    (first as usize).min(last),
+                    (first as usize + 1).min(last),
+                    next,
+                )
+            };
+            for y in 0..fine {
+                let (y0, y1, fy) = axis(y, dy);
+                for x in 0..fine {
+                    let (x0, x1, fx) = axis(x, dx);
+                    let at = |x: usize, y: usize| f64::from(native.data[y * size + x]);
+                    data[y * fine + x] += (1.0 - fy) * ((1.0 - fx) * at(x0, y0) + fx * at(x1, y0))
+                        + fy * ((1.0 - fx) * at(x0, y1) + fx * at(x1, y1));
+                }
+            }
+        }
+        let data = data
+            .into_iter()
+            .map(|sum| (sum / frames as f64) as f32)
+            .collect();
+        LinearImage::new(fine, fine, 1, data).unwrap()
+    }
+
+    #[test]
+    fn a_drizzles_noise_reads_as_its_native_stacks_at_one_scale() {
+        let (sigma, frames) = (8.0, 8);
+        let image = drizzled(320, sigma, frames, 1_000);
+        let native = sigma / (frames as f64).sqrt();
+        // Neighbouring pixels share their noise, so per pixel it reads low.
+        let per_pixel = f64::from(frame_noise(&image).unwrap()[0]);
+        assert!(per_pixel < 0.5 * native, "{per_pixel} vs {native}");
+        // 8 fine pixels are 4 native ones.
+        let measured = scaled(&image, 8) * 4.0;
+        assert!(
+            (measured / native - 1.0).abs() < 0.12,
+            "{measured} vs {native}"
+        );
+    }
+
+    /// The true scatter of the block means is that of two drizzles'
+    /// difference, whose sky cancels. At this size differences between
+    /// neighbouring blocks would read it 15% low.
+    #[test]
+    fn small_blocks_of_a_drizzle_read_their_means_true_scatter() {
+        let image = drizzled(320, 8.0, 8, 1_000);
+        let other = drizzled(320, 8.0, 8, 2_000);
+        let differences = block_means(&image, 0, 2, None)
+            .into_iter()
+            .zip(block_means(&other, 0, 2, None))
+            .map(|(a, b)| f64::from(a - b))
+            .collect::<Vec<_>>();
+        let mean = mean(&differences);
+        let variance = differences
+            .iter()
+            .map(|difference| (difference - mean).powi(2))
+            .sum::<f64>()
+            / differences.len() as f64;
+        let scatter = (variance / 2.0).sqrt();
+        let measured = scaled(&image, 2);
+        assert!(
+            (measured / scatter - 1.0).abs() < 0.05,
+            "{measured} vs {scatter}"
+        );
+    }
+
+    #[test]
+    fn blocks_skip_gaps_and_refuse_images_too_small() {
+        let mut image = white(640, 8.0, 22);
+        for pixel in image.data.iter_mut().take(640 * 100) {
+            *pixel = f32::NAN;
+        }
+        let measured = scaled(&image, 4);
+        assert!((measured / 2.0 - 1.0).abs() < 0.07, "{measured}");
+        let block = |block| NonZeroUsize::new(block).unwrap();
+        assert_eq!(noise_at_scale(&image, block(64)), None);
+        assert_eq!(noise_at_scale(&image, block(10_000)), None);
+        let means = block_means(&image, 0, 4, None);
+        assert_eq!(means.len(), 160 * 160);
+        assert!(means[..160 * 25].iter().all(|mean| mean.is_nan()));
+        let first = (400..404)
+            .flat_map(|y| (0..4).map(move |x| (x, y)))
+            .map(|(x, y)| f64::from(image.data[y * 640 + x]))
+            .sum::<f64>()
+            / 16.0;
+        assert!((f64::from(means[100 * 160]) - first).abs() < 1.0e-3);
     }
 }
