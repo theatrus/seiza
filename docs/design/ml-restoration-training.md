@@ -2541,26 +2541,28 @@ In order, each only if the one before leaves a gap at the rims:
        targets carry the broad lift, labelled the same way.
 
        S95 shows them: the Trunk's 263 pairs at 24 windows a pair
-       (6,312, the six before among them), so nearly all of its field
-       is covered, row 2 with it; and beside them the 28 images of the
+       (6,312, the six before among them), about three quarters of the
+       deep stack's field covered; and beside them the 28 images of the
        457-object bank whose targets lift 8–32 px by 4% or more, mostly
        fields of 6–12 px stars, at 24 windows a pair (1,848). Both carry
        S94's ask of 0.35 and share the pairs' 70% evenly; all else is
        S94's. Each Trunk window is drawn about once, S94's about nine
-       times. With row 2 trained on, the held-out test is NGC 6820's
+       times. With row 2 partly trained on (its windows are counted in
+       S97's paragraph), the held-out test is NGC 6820's
        dark-lane crop, whose right half the goal lifts 1.13 and 1.11
        between 8 and 32 px (S94 1.12 and 1.06). S95 reads 1.11 and 1.05
-       there, 1.07 and 1.02 asked 0.35: nothing gained. Row 2, now in
-       its windows, reads as S94's (the overlap 1.12 and 1.02, the goal
-       1.32 and 1.21). Its stars are level on NGC 6820 and the Trunk,
-       but on the California's wide stars it undoes S94's rounding:
+       there, 1.07 and 1.02 asked 0.35: nothing gained. Row 2's overlap
+       reads as S94's (1.12 and 1.02, the goal 1.32 and 1.21). Its
+       stars are level on NGC 6820 and the Trunk, but on the
+       California's wide stars it undoes S94's rounding:
        ellipticity 0.093 from the input's 0.092 (S94 0.062, the goal
        0.045), a third of them longer than they came. On NGC 6820 the
        rim's dark side deepens toward the goal's, −0.48 at −4 px (S94
        −0.25, the goal −0.65).
 
-       So the broad band stays where the input has it even where the
-       windows show it. The loss's gradient term averages the error
+       So the broad band stays where the input has it, though the
+       windows show row 2 only in part and were drawn about once
+       each. The loss's gradient term averages the error
        over blocks of 1 to 8 px; a lift 16 to 32 px wide is weighed by
        the pixel term alone, where it is a small share of the noise.
        The next lever is the loss: blocks of 16 and 32 px at the same
@@ -2569,7 +2571,8 @@ In order, each only if the one before leaves a gap at the rims:
        S96 is that: S94 with the gradient term's blocks doubled up to 16
        and 32 px (0.75 over six scales, S94's 0.5 over four), its bank
        and the rest S94's. It is the first run to move row 2 since S89,
-       although no window of it is trained on: the overlap reads 1.18
+       though the deep stack's windows hold none of the overlap (the
+       six-night stack's hold 68% of it): it reads 1.18
        and 1.05 between 8 and 16 and 16 and 32 px (S94 1.13 and 1.02,
        the goal 1.32 and 1.21), the whole crop 1.18 and 1.08 (S94 1.13
        and 1.07, the goal 1.21 and 1.20). On two of its six trained
@@ -2590,6 +2593,44 @@ In order, each only if the one before leaves a gap at the rims:
        little to see, and the squares' test is level. Dots and grain are level. By eye the row is close to
        S94's, and the goal's thin rim lines still sit sharper. The loss
        was part of it; the windows still have row 2 to give.
+
+       S97 is S96 with the Trunk's bank cut at 24 windows a pair at the
+       0.35 ask in place of its six-window one, and 10,000 steps, twice
+       as many: 4.4 draws a window, where S95 made about one. Two
+       changes, the bank and the steps, not separated. On NGC 6820's
+       dark-lane crop (held out) the right half reads 1.16 and 1.08
+       between 8 and 16 and 16 and 32 px (S96 1.13 and 1.08, the goal
+       1.13 and 1.11); asked 0.35, 1.13 and 1.06 (S96 1.09 and 1.05).
+       So the 16 to 32 px band does not move at the usual ask, and at
+       0.35 by 0.01; between 8 and 16 px it passes the goal, by 0.03
+       here and by 0.08 on the whole crop (1.18, the goal 1.10). The
+       third crop falls between 16 and 32 px, 1.02 from S96's 1.04 (the
+       goal 1.07). Row 2's overlap reads 1.20 and 1.07 (S96 1.18 and
+       1.05, the goal 1.32 and 1.21), and asked 0.35 as S96 (1.18 and
+       1.05); its whole crop 1.19 and 1.10 (S96 1.18 and 1.08, the goal
+       1.21 and 1.20). The rims win back part of what S96 gave up: the
+       Trunk's lit side 4.26 and 5.18 over the input at 4 and 6 px (S96
+       4.06 and 4.96, S94 4.52 and 5.51, the goal 5.41 and 6.46), NGC
+       6820's 5.27 at 4 px, S94's, though asked 0.35 they are 5.40 to
+       S96's 5.53. Stars are level or better: ellipticity 0.028 on NGC
+       6820 (S96 0.029), 0.041 on the Trunk (S96 0.046, the goal 0.030),
+       0.064 on the California (S96 0.065). Dots inside the Trunk's
+       cloud fall to 93 per Mpx above 4 (S96 104, the goal 103). On the
+       squares' test and grain it is level.
+
+       A count of the windows made for S97 corrects what the paragraphs
+       above said about row 2. In the 24-window bank the deep stack's
+       own windows hold 27% of the overlap, its 8-frame half's all of
+       it and the six-night stack's windows the whole in two, 68% and
+       32%; in the six-window bank they hold none, 13% and 68%. So row
+       2 has been partly trained on since S94, neither out of the
+       windows nor in them at the deep stack's strength. Where the
+       deep stack's windows are, S97 asked 0.35 lifts them 1.10 to
+       1.16 between 8 and 16 px and 1.07 to 1.11 between 16 and 32
+       (the goal 1.04 to 1.15 and 1.05 to 1.15): nearly one lift for
+       all of them, where the goal's differs with the window. The
+       next lever is the overlap itself, shown whole at the deep
+       stack's strength.
 
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
