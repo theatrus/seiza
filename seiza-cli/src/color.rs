@@ -281,7 +281,7 @@ struct NarrowbandArgs {
     foraxx_shadows_clip: f32,
     /// Standard deviation, in pixels, of the Gaussian blur applied to the
     /// Foraxx blend factors; 0 applies none
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = 0.0, allow_negative_numbers = true)]
     foraxx_mask_smoothing: f32,
 }
 

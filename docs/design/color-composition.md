@@ -203,6 +203,17 @@ existed. Values up to `ForaxxOptions::MAX_MASK_SMOOTHING` (64) are accepted.
 Unlike the stretch settings, the smoothing also applies when the inputs are
 already display-referred.
 
+The blur runs on the composed region. With a crop, the image is mirrored at the
+crop's edge, so a cropped composition differs slightly near its edge from the
+same region of an uncropped one.
+
+Time grows with the standard deviation, because the kernel grows with it. On a
+26-megapixel Foraxx-SHO image, composition without smoothing takes under a
+tenth of a second on a recent desktop processor. A standard deviation of a few
+pixels adds about a tenth of a second, and the largest adds several seconds,
+more when some pixels are uncovered and the weights are blurred too. While it
+runs, the pass holds several extra `f32` planes of the image's size.
+
 The FITS writer records `SEIZATRF='DISPLAY'` for Foraxx and for any composition
 whose inputs were explicitly marked display-referred. Linear inputs remain
 `SEIZATRF='LINEAR'` for RGB, LRGB, super-LRGB, super-RGB, direct palettes, and

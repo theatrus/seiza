@@ -68,6 +68,16 @@ pub struct ForaxxOptions {
     /// any channel does not cover carry no weight in the blur and stay
     /// non-finite in the output. Unlike the other fields, this one also
     /// applies to display-referred inputs.
+    ///
+    /// The blur runs on the composed region and mirrors it at the region's
+    /// edges. With a [`ColorCrop`], the edge is the crop's, so a cropped
+    /// composition differs slightly near its edge from the same region of an
+    /// uncropped one.
+    ///
+    /// Time grows with the value, because the kernel spans four standard
+    /// deviations each way. On a 26-megapixel image a few pixels add about a
+    /// tenth of a second and the largest value adds several seconds, and the
+    /// pass holds several extra planes of the image's size while it runs.
     pub mask_smoothing: f32,
 }
 
@@ -599,12 +609,15 @@ pub fn combine_narrowband(
         let blurred_weights = any_uncovered.then(|| {
             blur_factor_plane(&weights, region.width, region.height, foraxx.mask_smoothing)
         });
+        // Each plane is a whole image, so free one once its blur exists.
+        drop(weights);
         let smooth = |factors: Vec<f32>| {
             if factors.is_empty() {
                 return factors;
             }
             let mut blurred =
                 blur_factor_plane(&factors, region.width, region.height, foraxx.mask_smoothing);
+            drop(factors);
             match &blurred_weights {
                 // Uncovered pixels entered the blur as zero with zero weight,
                 // so dividing by the blurred weights leaves the weighted mean
@@ -1560,6 +1573,69 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn foraxx_mask_smoothing_of_a_crop_equals_smoothing_the_cropped_inputs() {
+        // SII lacks a border three pixels wide on the left and two on the
+        // top, which an inscribed crop removes.
+        let (width, height) = (40, 30);
+        let h = plane(width, height, |index| 0.2 + 0.6 * uniform(index, 11));
+        let o = plane(width, height, |index| 0.1 + 0.7 * uniform(index, 12));
+        let s = plane(width, height, |index| {
+            if index % width < 3 || index / width < 2 {
+                f32::NAN
+            } else {
+                0.1 + 0.5 * uniform(index, 13)
+            }
+        });
+        let compose = |h: &LinearImage, o: &LinearImage, s: &LinearImage, crop| {
+            combine_narrowband(
+                h,
+                o,
+                Some(s),
+                NarrowbandPalette::ForaxxSho,
+                &ColorOptions {
+                    crop,
+                    ..display_options()
+                },
+                &smoothed(2.0),
+            )
+            .unwrap()
+        };
+        let cropped = compose(&h, &o, &s, ColorCrop::Inscribed);
+        let region = cropped.region;
+        assert_eq!(
+            region,
+            ReferenceRegion {
+                x: 3,
+                y: 2,
+                width: width - 3,
+                height: height - 2
+            }
+        );
+        let cut = |image: &LinearImage| {
+            plane(region.width, region.height, |index| {
+                let (x, y) = (index % region.width, index / region.width);
+                image.data[(region.y + y) * width + region.x + x]
+            })
+        };
+        let from_cut = compose(&cut(&h), &cut(&o), &cut(&s), ColorCrop::None);
+        assert!(cropped.image.data.iter().all(|value| value.is_finite()));
+        assert_eq!(
+            cropped
+                .image
+                .data
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            from_cut
+                .image
+                .data
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

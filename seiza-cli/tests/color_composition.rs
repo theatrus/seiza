@@ -302,13 +302,17 @@ fn foraxx_cli_smooths_the_blend_factors_and_checks_the_setting() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    let result = run("65");
-    assert!(!result.status.success());
-    assert!(
-        String::from_utf8_lossy(&result.stderr).contains("Foraxx mask smoothing"),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
+    // A negative value reaches the option's own check, not the argument
+    // parser's.
+    for invalid in ["65", "-1"] {
+        let result = run(invalid);
+        assert!(!result.status.success());
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("Foraxx mask smoothing"),
+            "{invalid}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
 }
 
 #[test]
