@@ -32,7 +32,8 @@ star catalog; the index is also discovered there. After `seiza setup`, explicit
 `--data` and `--index` are optional. See [catalog discovery](catalogs.md#locations).
 
 Use `--sip-order 2` through `5` to request distortion fitting and `--time-limit`
-to bound solving. Full position, scale, and output options are in the
+to bound solving. When Seiza cannot fit any distortion, the output says why.
+Full position, scale, and output options are in the
 [CLI reference](../seiza-cli/README.md#solving).
 
 ## Overlays and sky maps

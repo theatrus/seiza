@@ -956,12 +956,19 @@ pub fn solve_blind_with_limits(
         scale_tolerance: 0.05,
         sip_order: params.sip_order,
     };
-    match crate::solve::solve_with_limits(stars, catalog, &hint, dimensions, limits) {
+    // What was accepted stands when the re-solve does no better, and says
+    // why it is linear.
+    let reason = match crate::solve::solve_with_limits(stars, catalog, &hint, dimensions, limits) {
         Ok(refined) if refined.matched_stars >= solution.matched_stars => {
-            Ok(across_fields(refined))
+            return Ok(across_fields(refined));
         }
-        _ => Ok(solution),
-    }
+        Ok(refined) => refined.sip_rejected.or(deepened.sip_rejected),
+        Err(_) => deepened.sip_rejected,
+    };
+    Ok(Solution {
+        sip_rejected: reason,
+        ..solution
+    })
 }
 
 /// Run the blind funnel with a selected ladder of globally bright image-star
@@ -1944,6 +1951,94 @@ pub(crate) mod tests {
         let (true_ra, true_dec) = truth.pixel_to_world(3900.0, 2900.0);
         let off = crate::catalog::angular_separation_deg(ra, dec, true_ra, true_dec) * 3600.0;
         assert!(off < 0.5, "a corner is {off:.2}″ off");
+    }
+
+    /// When neither the deeper fit nor the re-solve can add SIP, the accepted
+    /// linear solution says so.
+    #[test]
+    fn a_blind_solution_left_linear_says_why() {
+        use std::sync::atomic::AtomicUsize;
+        /// A catalog that runs dry after so many searches.
+        struct Dry<'a> {
+            catalog: &'a MemoryCatalog,
+            searches: AtomicUsize,
+            last: usize,
+        }
+        impl StarCatalog for Dry<'_> {
+            fn cone_search(
+                &self,
+                ra: f64,
+                dec: f64,
+                radius_deg: f64,
+                limit: usize,
+            ) -> Vec<CatalogStar> {
+                if self.searches.fetch_add(1, Ordering::Relaxed) >= self.last {
+                    return Vec::new();
+                }
+                self.catalog.cone_search(ra, dec, radius_deg, limit)
+            }
+        }
+
+        // Centroids off by more than a pixel, so the linear fit is not close
+        // enough to leave alone.
+        let mut rng = Lcg(0xACC0_0002);
+        let dims = (4000u32, 3000u32);
+        let truth =
+            Wcs::from_center_scale_rotation((150.0, 33.0), (1999.5, 1499.5), 2.0, 0.0, true);
+        let mut stars = Vec::new();
+        let mut detected = Vec::new();
+        for _ in 0..600 {
+            let ra = 150.0 + (rng.next() - 0.5) * 3.6;
+            let dec = 33.0 + (rng.next() - 0.5) * 3.0;
+            let mag = (6.0 + rng.next() * 10.0) as f32;
+            stars.push(CatalogStar { ra, dec, mag });
+            let Some((x, y)) = truth.world_to_pixel(ra, dec) else {
+                continue;
+            };
+            if x < 0.0 || y < 0.0 || x >= 4000.0 || y >= 3000.0 {
+                continue;
+            }
+            detected.push(DetectedStar {
+                x: x + (rng.next() - 0.5) * 3.0,
+                y: y + (rng.next() - 0.5) * 3.0,
+                flux: 10f64.powf(-0.4 * mag as f64) * 1e6,
+                peak: 0.5,
+                area: 20,
+            });
+        }
+        detected.sort_by(|a, b| b.flux.total_cmp(&a.flux));
+        let catalog = MemoryCatalog::new(stars);
+        let params = BlindParams {
+            min_scale_arcsec_px: 1.0,
+            max_scale_arcsec_px: 4.0,
+            max_pattern_deg: 1.5,
+            index_mag_limit: 16.0,
+            ..Default::default()
+        };
+        let index = BlindIndex::build(&catalog, &params);
+        let solved = |sip_order: u8, last: usize| {
+            let dry = Dry {
+                catalog: &catalog,
+                searches: AtomicUsize::new(0),
+                last,
+            };
+            let params = BlindParams {
+                sip_order,
+                ..params.clone()
+            };
+            let solution = solve_blind(&detected, &dry, &index, &params, dims).unwrap();
+            (solution, dry.searches.into_inner())
+        };
+        let (linear, searches) = solved(0, usize::MAX);
+        assert_eq!(linear.sip_rejected, None);
+        // The last search is the deeper fit's: it and the re-solve get none.
+        let (fallback, fallback_searches) = solved(3, searches - 1);
+        assert!(fallback_searches > searches, "the field is solved again");
+        assert!(fallback.wcs.sip.is_none());
+        assert_eq!(
+            fallback.sip_rejected,
+            Some(crate::SipRejection::NoMoreStars)
+        );
     }
 
     #[test]

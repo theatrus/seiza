@@ -130,7 +130,14 @@ When a solve fits SIP distortion, `projection` becomes `"TAN-SIP"` and the
 is an explicit `[p, q, value]` triple, so the wire format does not depend on
 an implied term ordering; values map directly to FITS `A_p_q`/`B_p_q`/
 `AP_p_q`/`BP_p_q` keywords. Clients that ignore `sip` still receive the
-correct linear part in `cd`.
+correct linear part in `cd`. The block's `order` can be higher than the
+`sipOrder` asked for, with the added `a`/`b` terms zero: the inverse of a
+strong distortion needs the higher order.
+
+When the request set `sipOrder` to 2 or more and the result is linear all the
+same, `sipRejected` says why: `too-few-stars`, `no-more-stars`,
+`undetermined`, `linear-drift`, `reference-shift`, `too-large`,
+`not-invertible` or `no-better-than-linear`. A remote result never has it.
 
 `indexMs` is normally zero for a worker started with `--index`. If the worker
 builds an index lazily, the build time is reported there rather than in

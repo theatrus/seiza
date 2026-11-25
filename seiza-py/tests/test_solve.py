@@ -329,8 +329,15 @@ def test_sip_fit_on_distorted_field_and_header_output():
     kwargs = dict(ra=CENTER[0], dec=CENTER[1], scale_arcsec_px=SCALE)
     linear = seiza.solve(image_stars, catalog, WIDTH, HEIGHT, **kwargs)
     assert linear.wcs.sip_order is None
+    # It asked for none.
+    assert linear.sip_rejected is None
     solution = seiza.solve(image_stars, catalog, WIDTH, HEIGHT, sip_order=3, **kwargs)
     assert solution.wcs.sip_order is not None and solution.wcs.sip_order >= 2
+    assert solution.sip_rejected is None
+    # Twelve stars are too few for a polynomial.
+    few = seiza.solve(image_stars[:12], catalog, WIDTH, HEIGHT, sip_order=3, **kwargs)
+    assert few.wcs.sip_order is None
+    assert few.sip_rejected == "too-few-stars"
     assert solution.rms_arcsec < linear.rms_arcsec
 
     coefficients = solution.wcs.sip_coefficients()
@@ -346,8 +353,7 @@ def test_sip_fit_on_distorted_field_and_header_output():
     assert len(text) % 80 == 0
     assert "A_ORDER" in text and "AP_0_0" in text
 
-    # Distorted pixels land on true sky positions and round-trip through
-    # the inverse polynomials.
+    # Distorted pixels land on true sky positions, and back on themselves.
     x, y = 200.0, 900.0
     ra_t, dec_t = truth.pixel_to_world(x, y)
     xd, yd = distort(x, y)
@@ -356,6 +362,8 @@ def test_sip_fit_on_distorted_field_and_header_output():
     assert abs(dec_s - dec_t) * 3600.0 < 2.0
     xi, yi = solution.wcs.world_to_pixel(ra_t, dec_t)
     assert math.hypot(xi - xd, yi - yd) < 1.0
+    xb, yb = solution.wcs.world_to_pixel(ra_s, dec_s)
+    assert math.hypot(xb - xd, yb - yd) < 1.0e-5
 
 
 @pytest.mark.parametrize("flipped", [False, True])

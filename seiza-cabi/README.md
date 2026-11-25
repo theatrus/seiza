@@ -416,6 +416,8 @@ exposes the **superset** of what both apps need.
   `falseMatchProbability` is the chance that a wrong field would match as
   well, counting every candidate the search tried: a true field scores far
   below one in a billion, and a solve that scores above that is refused.
+  `sipRejected` says why the solution is linear although `sipOrder` asked for
+  distortion, such as `too-few-stars`, and is null otherwise.
   The returned `wcs` counts pixels from 0, with each pixel's center on a
   whole number, and says so with `"pixelOrigin": 0`; add 1 to `crpix` for a
   FITS header, whose pixels count from 1. The image's middle is

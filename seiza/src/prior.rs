@@ -180,6 +180,7 @@ pub fn solve_with_prior(
                 matched_stars: 0,
                 rms_arcsec: 0.0,
                 false_match_probability: 1.0,
+                sip_rejected: None,
             },
             SolveSource::HeaderUnchecked,
         );

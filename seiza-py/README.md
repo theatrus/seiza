@@ -509,6 +509,11 @@ match as well, counting every candidate the search tried. A true field scores
 far below one in a billion; a blind solve above that is refused, and a hinted
 one above one in a thousand.
 
+A solve asked for SIP distortion gives a linear solution when it cannot fit any.
+`solution.sip_rejected` then says why, such as `"too-few-stars"` or
+`"not-invertible"`. `"no-better-than-linear"` and `"no-more-stars"` are normal for
+a field with little distortion.
+
 For faint fields, the optional `stars-deep-gaia20.bin` catalog reaches Gaia
 G≤20 (about 9 GB). It is intentionally not included in `fetch_catalogs("all")`,
 so request it explicitly with the same G≤16 blind index:
