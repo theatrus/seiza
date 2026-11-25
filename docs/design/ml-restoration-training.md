@@ -2725,8 +2725,9 @@ In order, each only if the one before leaves a gap at the rims:
        goal's, and the cloud stays where it is: within 0.003 px of the
        input's under 6 px on both fields (S98 0.57 and 0.78). On halves
        the noise between 1 and 2 px is 1.00 at every ask, and the dip near
-       equal asks is a third of S98's (1.06 between 8 and 16 px on the
-       Trunk's faintest third at 0.45, 1.14 at 0.55 and 1.13 at 0.35). The
+       equal asks is two fifths of S98's (1.06 between 8 and 16 px on the
+       Trunk's faintest third at 0.45, 1.14 at 0.55 and 1.13 at 0.35; S98
+       0.99, 1.17 and 1.19). The
        rims come to the goal's: the Trunk's lit side 5.30 and 6.38 at 4
        and 6 px (S98 4.75 and 5.71, the goal 5.41 and 6.46), its dark side
        -0.97 and -0.91 at -4 and -2 (-1.00 and -0.99), its steepest slope
