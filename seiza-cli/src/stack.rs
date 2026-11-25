@@ -244,6 +244,14 @@ pub(crate) struct StackArgs {
     /// variance relative to the reference, so hazy frames count for less
     #[arg(long, value_enum, default_value = "inverse-noise")]
     weighting: WeightingArg,
+    /// Turn away the lights that are outliers against the rest: too little
+    /// starlight (cloud, haze), too few stars, stars too elongated (wind,
+    /// guiding) or too spread out (focus, seeing). Weight each kept light by
+    /// its noise and its stars' spread together, which gives faint stars
+    /// the most signal to noise. Needs --reference auto and --weighting
+    /// inverse-noise
+    #[arg(long)]
+    select: bool,
     /// How registration resamples each frame: bilinear, or Lanczos-3 clamped
     /// against ringing, which is sharper and slower
     #[arg(long, value_enum, default_value = "lanczos3")]
@@ -468,6 +476,12 @@ pub(crate) fn run(options: StackArgs) -> Result<()> {
 }
 
 fn stack(options: StackArgs) -> Result<()> {
+    if options.select && !matches!(options.reference, ReferenceArg::Auto) {
+        anyhow::bail!("--select chooses the reference itself; use it with --reference auto");
+    }
+    if options.select && matches!(options.weighting, WeightingArg::Equal) {
+        anyhow::bail!("--select weights frames by their noise; use --weighting inverse-noise");
+    }
     let expand = matches!(options.reference, ReferenceArg::Expand)
         || options.reference_canvas.is_some()
         || options.joint_canvas.is_some();
@@ -742,8 +756,53 @@ fn stack(options: StackArgs) -> Result<()> {
     // The lights to try in turn as the channel reference of a stack on
     // `--reference-image`, best first.
     let mut channel_candidates = vec![ordered[0].clone()];
+    // Each kept light's PSF weight factor, when --select chose the lights.
+    let mut weight_factors = Vec::new();
     if matches!(options.reference, ReferenceArg::Auto | ReferenceArg::Expand) {
-        let (best, scores) = seiza_stacking::choose_reference(&ordered, 8)?;
+        let (mut best, mut scores) = seiza_stacking::choose_reference(&ordered, 8)?;
+        if options.select {
+            let selection = seiza_stacking::select_frames(
+                &scores,
+                &seiza_stacking::FrameSelectionOptions::default(),
+            )?;
+            for (path, verdict) in ordered.iter().zip(&selection.verdicts) {
+                if let Err(rejection) = verdict {
+                    eprintln!("selected out {}: {rejection}", path.display());
+                }
+            }
+            best = selection
+                .reference(&scores)
+                .ok_or_else(|| anyhow::anyhow!("frame selection kept no light"))?;
+            weight_factors = selection
+                .kept()
+                .filter_map(|index| {
+                    selection
+                        .weight_factor(index, best)
+                        .map(|factor| (ordered[index].clone(), factor))
+                })
+                .collect::<Vec<_>>();
+            println!(
+                "selected   {} of {} lights; median eccentricity {}, PSF area {:.1}px; \
+                 expected point-source SNR x{:.3} against every light at equal weight",
+                weight_factors.len(),
+                ordered.len(),
+                selection
+                    .median_eccentricity
+                    .map_or_else(|| "unmeasured".into(), |e| format!("{e:.3}")),
+                selection.median_psf_area,
+                selection.expected_snr_gain,
+            );
+            let kept = selection
+                .verdicts
+                .iter()
+                .map(Result::is_ok)
+                .collect::<Vec<_>>();
+            best = kept[..best].iter().filter(|kept| **kept).count();
+            let mut flags = kept.iter();
+            ordered.retain(|_| *flags.next().expect("one verdict per light"));
+            let mut flags = kept.iter();
+            scores.retain(|_| *flags.next().expect("one verdict per light"));
+        }
         channel_candidates = seiza_stacking::rank_references(&scores)
             .into_iter()
             .take(CHANNEL_REFERENCE_ATTEMPTS)
@@ -978,6 +1037,13 @@ fn stack(options: StackArgs) -> Result<()> {
         seiza_stacking::LiveStacker::new(reference, calibration, stack_options)
             .with_context(initialize)?
     };
+    if !weight_factors.is_empty() {
+        stacker.set_frame_weight_factors(
+            weight_factors
+                .iter()
+                .map(|(path, factor)| (path.as_path(), *factor)),
+        )?;
+    }
     let normalization_identity = options
         .reference_image
         .as_ref()

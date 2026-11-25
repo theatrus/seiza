@@ -954,6 +954,33 @@ light and takes the best, as the CLI's `--reference auto` does. The result's
 the same choice on its own: its `reference_path`, a `ranking` of the scored
 lights' indices, best first, and each light's `scores`.
 
+Pass `select=True` to keep only the lights that are not outliers and weight
+each kept light by its noise and its stars' spread, as the CLI's `--select`
+does. A light is turned away when, against the batch's own lights, its
+starlight is too faint (cloud, haze), it has too few stars, its stars are too
+elongated (wind, guiding) or too spread out (focus, seeing). Each kept light's
+inverse-noise weight is multiplied by the reference's PSF area over its own:
+noise variance times PSF area is the weight that gives faint stars the most
+signal to noise. The best kept light becomes the reference, equal weighting
+becomes inverse-noise, and `result.selection` reports every verdict:
+
+```python
+result = seiza.stack_fits(lights, "stack.fits", select=True)
+for path, frame in zip(lights, result.selection.frames):
+    if not frame.kept:
+        print(f"{path}: {frame.reason} ({frame.value:.3f} against {frame.limit:.3f})")
+print(result.selection.expected_snr_gain)
+```
+
+`seiza.select_frames(choice.scores)` gives the same verdicts on their own, with
+keyword arguments for each limit (`minimum_relative_score`,
+`eccentricity_sigma`, `maximum_eccentricity`, `psf_area_sigma`, ...). Each
+score now also carries `psf_area`, its bright stars' median flux over peak,
+and `eccentricity`, that of their mean shape: the stretch they share, which
+guiding, wind and trailing give, while noise and neighbours cancel. For a live stack, pass the kept lights' factors to
+`LiveStacker.set_frame_weight_factors([(path, factor), ...])` before pushing
+them.
+
 To stack each filter onto the same grid, pass every run the same
 `reference_image`, as the CLI's `--reference-image` does. It sets only the
 alignment grid and WCS; the reference light still sets normalization and noise

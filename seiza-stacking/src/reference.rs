@@ -28,7 +28,25 @@ pub struct ReferenceScore {
     /// over the sky noise. Poor seeing, trailing, haze and twilight all
     /// lower it.
     pub score: f32,
+    /// Median over the same stars of flux over peak, in half-resolution
+    /// pixels: the area a star's light is spread over. Poor seeing, focus,
+    /// trailing and elongation all raise it.
+    pub psf_area: f32,
+    /// Eccentricity of the same stars' mean shape, 0 for round: each star's
+    /// adaptive second moments give its ellipticity as a vector, at twice
+    /// its orientation, and the stars' mean vector is a stretch they share.
+    /// Guiding, wind and trailing stretch every star alike and show here;
+    /// noise and a neighbour's light point each star a different way and
+    /// cancel, as a pattern that varies across the field, like tilt's,
+    /// largely does. Measured on a mono frame's own samples and on the
+    /// half-resolution luminance otherwise, so a Bayer pattern cannot pass
+    /// for elongation. `None` when fewer than [`SHAPED_STARS_MINIMUM`] stars
+    /// could be measured.
+    pub eccentricity: Option<f32>,
 }
+
+/// Fewest stars whose shapes give a frame's [`ReferenceScore::eccentricity`].
+pub const SHAPED_STARS_MINIMUM: usize = 10;
 
 /// Stars the scoring detection keeps.
 const SCORING_STARS: usize = 2_000;
@@ -97,13 +115,21 @@ pub fn reference_score(frame: &FitsFrame) -> Option<ReferenceScore> {
     // peak grows with a star's area, so this falls with poor seeing and with
     // trails (which the detector breaks into many short pieces), as well as
     // with haze, which dims stars, and twilight, which raises the noise.
-    let mut signal = stars
+    let scored = stars
         .iter()
         .filter(|star| star.peak < 0.9 && star.flux > 0.0 && star.peak > 0.0)
         .take(SCORED_STARS)
+        .collect::<Vec<_>>();
+    let mut signal = scored
+        .iter()
         .map(|star| ((star.flux * f64::from(star.peak)).sqrt() / f64::from(noise)) as f32)
         .collect::<Vec<_>>();
     let score = seiza_stats::median_in_place(&mut signal)?;
+    let mut spread = scored
+        .iter()
+        .map(|star| (star.flux / f64::from(star.peak)) as f32)
+        .collect::<Vec<_>>();
+    let psf_area = seiza_stats::median_in_place(&mut spread)?;
     let background_variation = block_variation(&luma, width, height, 64)?;
     Some(ReferenceScore {
         stars: stars.len(),
@@ -111,7 +137,152 @@ pub fn reference_score(frame: &FitsFrame) -> Option<ReferenceScore> {
         background,
         background_variation,
         score,
+        psf_area,
+        eccentricity: mean_shape_eccentricity(frame, &normalized, width, height, &scored),
     })
+}
+
+/// The eccentricity of `stars`' mean shape, found on the half-resolution
+/// grid `normalized` is: measured on a mono frame's own samples, where a
+/// star's shape is twice as finely sampled, and on `normalized` otherwise.
+fn mean_shape_eccentricity(
+    frame: &FitsFrame,
+    normalized: &[f32],
+    width: usize,
+    height: usize,
+    stars: &[&seiza::DetectedStar],
+) -> Option<f32> {
+    let full = frame.bayer.is_none() && frame.image.channels == 1;
+    let (samples, grid_width, grid_height, scale) = if full {
+        (
+            frame.image.data.as_slice(),
+            frame.image.width,
+            frame.image.height,
+            2.0,
+        )
+    } else {
+        (normalized, width, height, 1.0)
+    };
+    let mut sky = samples
+        .iter()
+        .step_by(97)
+        .copied()
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    let sky = seiza_stats::median_in_place(&mut sky)?;
+    let shapes = stars
+        .par_iter()
+        .filter_map(|star| {
+            // A half-resolution pixel's middle is two full pixels' corner.
+            let (x, y) = if full {
+                (star.x * scale + 0.5, star.y * scale + 0.5)
+            } else {
+                (star.x, star.y)
+            };
+            star_shape(samples, grid_width, grid_height, x, y, sky)
+        })
+        .collect::<Vec<_>>();
+    if shapes.len() < SHAPED_STARS_MINIMUM {
+        return None;
+    }
+    let count = shapes.len() as f64;
+    let (one, two) = shapes.iter().fold((0.0_f64, 0.0_f64), |(one, two), shape| {
+        (one + shape.0, two + shape.1)
+    });
+    Some(eccentricity_of(one.hypot(two) / count) as f32)
+}
+
+/// The eccentricity, `sqrt(1 − b²/a²)`, of a shape whose ellipticity is
+/// `chi`, `(a² − b²) / (a² + b²)`.
+fn eccentricity_of(chi: f64) -> f64 {
+    let chi = chi.clamp(0.0, 1.0 - 1e-12);
+    (2.0 * chi / (1.0 + chi)).sqrt()
+}
+
+/// The ellipticity of the star near `(x, y)` as a vector at twice its
+/// orientation, `((Ixx − Iyy), 2 Ixy) / (Ixx + Iyy)`, from adaptive
+/// (matched Gaussian) second moments above `sky`, or `None` when they do
+/// not settle on a finite shape inside a 15-pixel reach.
+fn star_shape(
+    samples: &[f32],
+    width: usize,
+    height: usize,
+    x: f64,
+    y: f64,
+    sky: f32,
+) -> Option<(f64, f64)> {
+    let (mut cx, mut cy) = (x, y);
+    let mut weight = [2.25_f64, 0.0, 2.25];
+    for _ in 0..30 {
+        let determinant = weight[0] * weight[2] - weight[1] * weight[1];
+        if determinant.is_nan() || determinant <= 0.0 {
+            return None;
+        }
+        let (ixx, ixy, iyy) = (
+            weight[2] / determinant,
+            -weight[1] / determinant,
+            weight[0] / determinant,
+        );
+        let reach = (3.0 * weight[0].max(weight[2]).sqrt())
+            .ceil()
+            .clamp(3.0, 15.0) as isize;
+        let (px, py) = (cx.round() as isize, cy.round() as isize);
+        if px - reach < 0
+            || py - reach < 0
+            || px + reach >= width as isize
+            || py + reach >= height as isize
+        {
+            return None;
+        }
+        let (mut sum, mut sx, mut sy, mut sxx, mut sxy, mut syy) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        for row in py - reach..=py + reach {
+            for column in px - reach..=px + reach {
+                let value = samples[row as usize * width + column as usize];
+                if !value.is_finite() {
+                    return None;
+                }
+                let (dx, dy) = (column as f64 - cx, row as f64 - cy);
+                let gaussian = (-0.5 * (ixx * dx * dx + 2.0 * ixy * dx * dy + iyy * dy * dy)).exp();
+                let sample = f64::from(value - sky) * gaussian;
+                sum += sample;
+                sx += sample * dx;
+                sy += sample * dy;
+                sxx += sample * dx * dx;
+                sxy += sample * dx * dy;
+                syy += sample * dy * dy;
+            }
+        }
+        if sum.is_nan() || sum <= 0.0 {
+            return None;
+        }
+        let (mx, my) = (sx / sum, sy / sum);
+        cx += mx;
+        cy += my;
+        if (cx - x).abs() > 3.0 || (cy - y).abs() > 3.0 {
+            return None;
+        }
+        // A matched Gaussian weight halves the covariance it measures.
+        let next = [
+            2.0 * (sxx / sum - mx * mx),
+            2.0 * (sxy / sum - mx * my),
+            2.0 * (syy / sum - my * my),
+        ];
+        let change = (next[0] - weight[0]).abs() + (next[2] - weight[2]).abs();
+        weight = [
+            0.5 * (weight[0] + next[0]),
+            0.5 * (weight[1] + next[1]),
+            0.5 * (weight[2] + next[2]),
+        ];
+        if weight[0] <= 0.01 || weight[2] <= 0.01 || weight[0].max(weight[2]) > 100.0 {
+            return None;
+        }
+        if change < 1e-4 * (weight[0] + weight[2]) {
+            break;
+        }
+    }
+    let trace = weight[0] + weight[2];
+    let shape = ((weight[0] - weight[2]) / trace, 2.0 * weight[1] / trace);
+    (trace.is_finite() && trace > 0.0 && shape.0.hypot(shape.1) < 1.0).then_some(shape)
 }
 
 /// Scaled MAD of the medians of `block`-pixel blocks.
@@ -300,6 +471,53 @@ mod tests {
     }
 
     #[test]
+    fn trailed_stars_measure_elongated_and_spread_out() {
+        let field = crate::registration::test_star_field(false);
+        let score = |image: &LinearImage| reference_score(&frame(noisy(image, 2.0, 5))).unwrap();
+        let round = score(&field);
+        let trailed = score(&smeared(7));
+        let round_eccentricity = round.eccentricity.unwrap();
+        let trailed_eccentricity = trailed.eccentricity.unwrap();
+        assert!(round_eccentricity < 0.35, "{round:?}");
+        assert!(
+            trailed_eccentricity > round_eccentricity + 0.3,
+            "{round:?} against {trailed:?}"
+        );
+        assert!(
+            trailed.psf_area > 1.3 * round.psf_area,
+            "{round:?} against {trailed:?}"
+        );
+    }
+
+    #[test]
+    fn eccentricity_follows_a_stars_axis_ratio() {
+        // One Gaussian star, sigma 2.4 by 1.2 px at 30 degrees: e = sqrt(1 - 1/4).
+        let (width, height) = (64, 64);
+        let (cos, sin) = (30_f64.to_radians().cos(), 30_f64.to_radians().sin());
+        let samples = (0..width * height)
+            .map(|index| {
+                let (dx, dy) = ((index % width) as f64 - 31.3, (index / width) as f64 - 32.6);
+                let u = dx * cos + dy * sin;
+                let v = -dx * sin + dy * cos;
+                (10.0 + 1000.0 * (-0.5 * (u * u / 5.76 + v * v / 1.44)).exp()) as f32
+            })
+            .collect::<Vec<_>>();
+        let (one, two) = star_shape(&samples, width, height, 31.0, 33.0, 10.0).unwrap();
+        let eccentricity = eccentricity_of(one.hypot(two));
+        assert!(
+            (eccentricity - 0.75_f64.sqrt()).abs() < 0.02,
+            "{eccentricity}"
+        );
+        // The vector points at twice the star's angle: 60 degrees.
+        assert!(
+            (two.atan2(one).to_degrees() - 60.0).abs() < 1.0,
+            "{one} {two}"
+        );
+        // A star too near the edge for its reach is not measured.
+        assert_eq!(star_shape(&samples, width, height, 1.0, 1.0, 10.0), None);
+    }
+
+    #[test]
     fn references_rank_the_flattest_near_the_best_then_by_score() {
         let score = |score: f32, background_variation: f32| {
             Some(ReferenceScore {
@@ -308,6 +526,8 @@ mod tests {
                 background: 0.1,
                 background_variation,
                 score,
+                psf_area: 4.0,
+                eccentricity: Some(0.2),
             })
         };
         // The best score is 10, so 7.5 and 8 are near it and 6 is not.

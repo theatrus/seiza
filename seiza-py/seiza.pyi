@@ -749,6 +749,8 @@ class StackResult:
     channels: int
     reference_light: Path
     frames: list[FrameDisposition]
+    # Which lights select=True kept, or None without it.
+    selection: FrameSelection | None
 
 class ReferenceScore:
     stars: int
@@ -756,6 +758,33 @@ class ReferenceScore:
     background: float
     background_variation: float
     score: float
+    # Median flux over peak of the scored stars, in half-resolution pixels.
+    psf_area: float
+    # Of the scored stars' mean shape: the stretch they share.
+    eccentricity: float | None
+
+class FrameSelectionVerdict:
+    kept: bool
+    psf_area: float | None
+    # Against FrameSelection.reference, for a kept light.
+    weight_factor: float | None
+    # "unscored", "low-signal", "few-stars", "elongated" or "soft".
+    reason: str | None
+    value: float | None
+    limit: float | None
+
+class FrameSelection:
+    reference: int | None
+    frames: list[FrameSelectionVerdict]
+    median_score: float
+    median_stars: float
+    median_psf_area: float
+    median_eccentricity: float | None
+    score_limit: float
+    stars_limit: float
+    psf_area_limit: float
+    eccentricity_limit: float | None
+    expected_snr_gain: float
 
 class ReferenceChoice:
     reference_index: int
@@ -976,6 +1005,7 @@ class LiveStacker:
         tolerances: MatchTolerances | None = None,
     ) -> None: ...
     def match_tolerances(self) -> MatchTolerances: ...
+    def set_frame_weight_factors(self, factors: Sequence[tuple[str | Path, float]]) -> None: ...
     def set_match_tolerances(self, tolerances: MatchTolerances | None = None) -> None: ...
     def set_calibration_fits(
         self,
@@ -2138,6 +2168,7 @@ def stack_fits(
     reference_image: str | Path | None = None,
     reference: str = "first",
     defects: str = "auto",
+    select: bool = False,
 ) -> StackResult: ...
 def detect_defects(
     images: Sequence[str | Path],
@@ -2151,6 +2182,19 @@ def detect_defects(
     maximum_frames: int = 16,
     gpu: GpuOptions | None = None,
 ) -> DefectMap: ...
+def select_frames(
+    scores: Sequence[ReferenceScore | None],
+    *,
+    minimum_relative_score: float = 0.5,
+    minimum_relative_stars: float = 0.5,
+    eccentricity_sigma: float = 3.0,
+    minimum_eccentricity_margin: float = 0.03,
+    maximum_eccentricity: float | None = None,
+    psf_area_sigma: float = 3.0,
+    minimum_psf_area_margin: float = 0.1,
+    minimum_weight_factor: float = 0.25,
+    maximum_weight_factor: float = 4.0,
+) -> FrameSelection: ...
 def choose_reference(
     images: Sequence[str | Path],
     *,

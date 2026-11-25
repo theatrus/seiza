@@ -18,6 +18,13 @@ The defaults use quadratic registration, local background matching, inverse-nois
 weighting, and Lanczos-3 resampling. Seiza aligns cropped frames and frames
 rotated by a meridian flip to the reference grid.
 
+Add `--select` to pass every light and let Seiza choose. It turns away the
+lights that are outliers against the rest of the batch: too little starlight
+(cloud, haze), too few stars, stars too elongated (wind, a guiding error) or
+too spread out (lost focus, a burst of poor seeing). It stacks the rest against
+the best of them, weighting each by its noise and its stars' spread together,
+the weight that gives faint stars the most signal to noise.
+
 Three-plane inputs produce linear RGB stacks. Seiza calibrates raw Bayer frames
 before VNG demosaicing; MHC, bilinear, and Bayer drizzle are also available.
 The output is unstretched `float32` FITS, or XISF when the output path ends in
