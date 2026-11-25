@@ -578,6 +578,20 @@ print(found.object_catalog_error, found.minor_body_error)
 
 ## Read pixel values from a file
 
+`read_image` reads a whole FITS or XISF image of any size, compressed XISF
+included, with its header:
+
+```python
+image, header = seiza.read_image("masterLight.xisf", normalized_full_scale=65535.0)
+image.shape                    # (height, width), or (height, width, 3) for RGB
+header["headers"]["FILTER"]
+green, _ = seiza.read_image("rgb.fits", plane=1)
+```
+
+The array has the shape Seiza's other functions take. Its samples are in
+physical units and stored row order, a raw Bayer mosaic stays one plane, and
+the header is `read_image_header`'s. The scale is explained below.
+
 `read_image_window` reads a rectangle of a FITS or XISF image's samples
 without decoding the rest of the file, so a viewer can show the values under
 a cursor on an image of any size. Only the rows of the window are read. The
@@ -607,7 +621,7 @@ master = seiza.read_image_window(
 A rectangle that runs off the image is clipped to it, and one wholly off it
 gives an empty window. A side may be at most 1024 pixels. A compressed,
 CIELab or complex XISF image cannot be read this way, because its samples
-are decoded as a whole; open it instead.
+are decoded as a whole. `read_image` reads the first two.
 
 `read_image_header` reads a FITS or XISF file's header without decoding its
 pixels. `headers` maps each keyword to its value; an XISF file's PixInsight

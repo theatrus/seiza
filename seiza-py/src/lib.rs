@@ -1142,7 +1142,7 @@ impl PyImageWindow {
 /// Raises ``ValueError`` for a side longer than 1024, a scale that is not
 /// finite and positive, a file that cannot be read, or an XISF image whose
 /// samples cannot be reached without decoding it all: a compressed, CIELab
-/// or complex one.
+/// or complex one. :func:`read_image` reads the first two.
 #[pyfunction]
 #[pyo3(signature = (path, x, y, width, height, *, normalized_full_scale=None))]
 fn read_image_window(
@@ -1183,6 +1183,43 @@ fn read_image_header(py: Python<'_>, path: PathBuf) -> PyResult<Py<PyDict>> {
     let header = py
         .detach(|| seiza_image_io::read_header(&path))
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    header_dict(py, header)
+}
+
+/// Read the whole FITS or XISF image at ``path``, of any size and
+/// compression: ``(image, header)``. XISF when the extension says so, FITS
+/// otherwise.
+///
+/// ``image`` is a ``float32`` array shaped ``(height, width)``, or ``(height,
+/// width, 3)`` for RGB, as Seiza's other functions take it. Its samples are
+/// those :func:`read_image_window` gives, in physical units and stored row
+/// order; a raw Bayer mosaic stays ``(height, width)``. ``plane`` reads one
+/// plane, counted from 0. ``normalized_full_scale`` is as for
+/// :func:`read_image_window`. ``header`` is as :func:`read_image_header`
+/// gives it.
+///
+/// The GIL is released while the file is read. Raises ``ValueError`` when it
+/// cannot be, or has no such plane.
+#[pyfunction]
+#[pyo3(signature = (path, *, plane=None, normalized_full_scale=None))]
+fn read_image<'py>(
+    py: Python<'py>,
+    path: PathBuf,
+    plane: Option<usize>,
+    normalized_full_scale: Option<f32>,
+) -> PyResult<(Bound<'py, numpy::PyArrayDyn<f32>>, Py<PyDict>)> {
+    let options = seiza_image_io::ReadOptions {
+        plane,
+        normalized_full_scale,
+    };
+    let seiza_image_io::ImageFile { image, header } = py
+        .detach(|| seiza_image_io::read_image(&path, &options))
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let array = arrays::float_array(py, image.width, image.height, image.channels, image.samples)?;
+    Ok((array, header_dict(py, header)?))
+}
+
+fn header_dict(py: Python<'_>, header: seiza_image_io::FitsHeader) -> PyResult<Py<PyDict>> {
     let headers = PyDict::new(py);
     for (key, value) in &header.cards {
         match value {
@@ -1377,6 +1414,7 @@ fn seiza_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(read_capture_time, m)?)?;
     m.add_class::<PyImageWindow>()?;
     m.add_function(wrap_pyfunction!(read_image_window, m)?)?;
+    m.add_function(wrap_pyfunction!(read_image, m)?)?;
     m.add_function(wrap_pyfunction!(read_image_header, m)?)?;
     m.add_function(wrap_pyfunction!(read_solve_prior, m)?)?;
     m.add_function(wrap_pyfunction!(solve_with_prior, m)?)?;
