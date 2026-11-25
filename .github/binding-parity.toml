@@ -504,6 +504,7 @@ objects = [
 "seiza-xisf::*" = { none = "XISF reading and writing; hosts read and write files through seiza-image-io" }
 "seiza-fits::*" = { none = "FITS reading, writing, header editing and debayering; hosts read and write files through seiza-image-io, and the CLI edits headers" }
 "seiza-stats::*" = { none = "statistics building blocks for the other crates" }
+"seiza-image::*" = { none = "shared types and the region contract; the C and Python forms arrive with the first step that adopts them, when a host has an operation to apply to a region" }
 "seiza-sources::*" = { none = "building catalogs from raw survey data, which the CLI's build-data runs" }
 "seiza-draw::*" = { none = "text and shape drawing for the parallax overlays" }
 

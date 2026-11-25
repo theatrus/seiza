@@ -21,7 +21,7 @@ PyPI**. They are cut from a single "Release `<version>`" PR followed by two tags
 
   At the time of writing that is `seiza-analysis`, `seiza-background`, `seiza-calibration`,
   `seiza-core`, `seiza-deconvolution`, `seiza-download`, `seiza-draw`, `seiza-fits`,
-  `seiza-image-io`, `seiza-image-ser`, `seiza-imgproc`, `seiza-model`, `seiza-parallax`, `seiza-pipeline`,
+  `seiza-image`, `seiza-image-io`, `seiza-image-ser`, `seiza-imgproc`, `seiza-model`, `seiza-parallax`, `seiza-pipeline`,
   `seiza-satellites`, `seiza-sources`, `seiza-stacking`, `seiza-stars`,
   `seiza-stats`, `seiza-stretch`, and `seiza-xisf`. A list written down goes
   stale the first time a crate is added, which is how `seiza-calibration`,
@@ -99,7 +99,7 @@ in dependency order (a dependency must be indexed before its dependents; `cargo`
 waits for the index):
 
 ```
-seiza-stats  →  seiza-stretch  →  seiza-imgproc  →  seiza-fits  →  seiza-xisf
+seiza-image  →  seiza-stats  →  seiza-stretch  →  seiza-imgproc  →  seiza-fits  →  seiza-xisf
 →  seiza-image-ser  →  seiza-core  →  seiza-image-io  →  seiza-background
 →  seiza-calibration  →  seiza-sources  →  seiza-download  →  seiza
 →  seiza-satellites  →  seiza-stacking  →  seiza-pipeline  →  seiza-stars

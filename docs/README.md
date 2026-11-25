@@ -35,6 +35,7 @@ without the solver. See [dependency and release rules](../RELEASE.md).
 | [seiza-image-io](../seiza-image-io/README.md) | Extension-based image I/O, EXIF orientation and metadata |
 | [seiza-image-ser](../seiza-image-ser/README.md) | Seekable reading of raw SER planetary sequences |
 | [seiza-stats](../seiza-stats/README.md) | Shared robust image statistics |
+| [seiza-image](../seiza-image/README.md) | Regions, masks, sample domains, and the contract for applying a step to part of an image |
 | [seiza-imgproc](../seiza-imgproc/README.md) | Image-processing primitives |
 | [seiza-background](../seiza-background/README.md) | Robust background fitting and correction |
 | [seiza-calibration](../seiza-calibration/README.md) | Calibration responses, matching, grading, and dust analysis |

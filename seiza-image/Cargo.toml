@@ -1,0 +1,19 @@
+[package]
+name = "seiza-image"
+description = "What Seiza's image steps share: regions, masks, sample domains, and the contract for applying a step to part of an image"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "README.md"
+keywords = ["astronomy", "astrophotography", "image", "mask", "region"]
+categories = ["science", "multimedia::images"]
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

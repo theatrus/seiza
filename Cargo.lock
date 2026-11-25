@@ -3490,6 +3490,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "seiza-image"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "seiza-image-io"
 version = "0.13.1"
 dependencies = [

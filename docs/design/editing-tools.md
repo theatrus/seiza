@@ -31,6 +31,24 @@ each learned one.
    full image. Radii and wavelet scales are given in full-resolution pixels,
    and the plan converts them to the preview's scale. A test holds the
    downsampled full-resolution result to the preview within a tolerance.
+   A screen-sized preview misrepresents a step whose result depends on pixel
+   scale, such as deconvolution or noise reduction. For those a host shows a
+   full-resolution crop, and works through a mosaic in tiles. So the same
+   plan must also apply to a region: **the result for a region equals the
+   same pixels of the result for the whole image.** A plan therefore holds
+   every value the step measured from the image, such as a sample range, a
+   noise level or a fitted model, and applying it measures nothing from the
+   block it is given. Each step states its padding: how far a pixel's result
+   depends on its neighbors. `seiza_image::RegionOperation` is this
+   contract, and `seiza_image::region_mismatch` is the test each step will
+   run as it adopts the contract. A step whose influence falls off with
+   distance may declare less padding than its full reach; it then states and
+   tests the tolerance it keeps.
+   PSF Guard measured why this matters: deconvolution took its noise floor
+   from the samples it was handed, and a 1024-pixel crop differed from the
+   same pixels of the whole image by 13% of what the step changed. With the
+   whole image's noise floor and 8 pixels of padding the difference was
+   0.01%.
 3. **A recipe records the steps.** A step holds the operation, its options,
    its resolved plan and the report of what it measured. `StretchStack`
    already keeps ordered stages, float intermediates and resolved plans. A
@@ -53,10 +71,34 @@ each learned one.
    is the bright end of the object: a high percentile of the pixels that are
    not stars. Every tool's threshold uses this scale, so one slider means the
    same thing in every tool.
+7. **A cheap step has two forms and one definition.** An editor draws
+   stretches, curves, blends and masks on the GPU on every frame, and writes
+   the final image on the CPU. If the two are written separately, the image a
+   person approved and the image they export differ. Each such step is
+   defined once in Seiza with a CPU form and a shader form, and a test holds
+   them together within a tolerance.
+8. **Bands are records, not roles.** Composition names seven roles today:
+   L, R, G, B, H-alpha, OIII and SII. An editor also takes NII, H-beta, He II
+   and others, and treats each as a layer. A band is a name, a center
+   wavelength, a bandwidth and a kind (line, continuum or broadband). A
+   palette is a preset over band records. A one-shot-color image is three
+   broadband records that dual-band extraction can turn into line records.
 
 ## Where it lives
 
-A new crate, `seiza-edit`, holds the display tools, masks and recipes. It
+`seiza-image` holds what every step shares: `Region`, the linear or display
+`Domain` and its refusal, `Mask`, and the region contract. It has no Seiza
+dependencies, so `seiza-stretch`, `seiza-background` and
+`seiza-deconvolution` can depend on it. They cannot depend on `seiza-edit`,
+which sits above `seiza-stretch`, and they do not depend on `seiza-imgproc`.
+`seiza-core` is meant to change rarely. `seiza-image` adds no image type:
+steps keep taking a slice with its shape, as
+[the correction core](image-correction-core.md#target-crate-ownership) asks.
+Its `ImageShape` has the same fields as `seiza_stretch::ImageShape`, which
+becomes a re-export of it when `seiza-stretch` adopts the contract.
+
+A second new crate, `seiza-edit`, holds the display tools, the mask sources
+that need image processing (stars, feathering, a host's strokes) and recipes. It
 depends on `seiza-imgproc` for wavelets, blurs and morphology, on `seiza-stats`
 and on `seiza-stretch`. It has its own `OUTPUT_VERSION` and `output_version`
 test from its first PR, and follows the same rules as stacking and stretching,
@@ -238,8 +280,23 @@ by the plan. `StructureRemover` already implements this decomposition.
 
 ## Order of work
 
-1. **Foundations:** domain tags and the domain error, `Mask`, the shared
-   threshold scale, region statistics, and the recipe format with its schema.
+1. **Foundations.**
+   1. `seiza-image`: `Region`, `Domain`, `Mask` and the region contract with
+      its test. Built.
+   2. The existing linear steps on the contract, each with the region test:
+      deconvolution first, because it is the step with the measured fault.
+      Its noise floor and offset can be resolved once from the image. Its
+      flux scale is measured from the finished whole-image result, which a
+      crop cannot know, so that PR must replace or drop it and move
+      `ALGORITHM_VERSION`. Then background and stretch, which already
+      separate fitting from applying, then color calibration, continuum
+      subtraction and the learned models. Each gets its C export and Python
+      twin in its own PR.
+   3. The recipe format with its schema, shaped by the plans from the
+      previous step, the shared threshold scale and region statistics.
+   4. Masks and blends, each with a CPU and a shader form: star and stroke
+      masks, blend modes, and linear and screen recombination.
+   5. Band records in color composition.
 2. **Display adjustments:** SCNR, curves, saturation and temperature, then
    the three multiscale tools on one cached decomposition, and faint signal
    lift. These are cheap, and hosts need them first.
