@@ -1875,6 +1875,7 @@ struct ColorNarrowbandRequest {
     palette: Option<String>,
     foraxx_target_median: Option<f32>,
     foraxx_shadows_clip: Option<f32>,
+    foraxx_mask_smoothing: Option<f32>,
     normalization: Option<String>,
     black_percentile: Option<f32>,
     white_percentile: Option<f32>,
@@ -2220,9 +2221,13 @@ pub unsafe extern "C" fn seiza_color_combine_lrgb_json(
 /// `Foraxx-HOO` take no `sii`, and the rest need one. The Foraxx palettes
 /// stretch each channel first, setting its median to `foraxxTargetMedian`
 /// (0.2) and its black point `foraxxShadowsClip` (-2.8) normal-equivalent
-/// MADs below the median, so their output is display-referred. The other
-/// fields are those of [`seiza_color_combine_rgb_json`], and so are the
-/// returned JSON (with the palette's upper-case name as the label and
+/// MADs below the median, so their output is display-referred.
+/// `foraxxMaskSmoothing` (0, which applies none) is the standard deviation,
+/// in pixels and at most 64, of a Gaussian blur applied to the Foraxx blend
+/// factors before they mix the channels, which removes the speckle OIII
+/// noise gives them; pixels a channel does not cover carry no weight in it.
+/// The other fields are those of [`seiza_color_combine_rgb_json`], and so are
+/// the returned JSON (with the palette's upper-case name as the label and
 /// `"display"` as the Foraxx palettes' transfer) and `cancel`.
 ///
 /// # Safety
@@ -2251,6 +2256,9 @@ pub unsafe extern "C" fn seiza_color_combine_narrowband_json(
                 .foraxx_target_median
                 .unwrap_or(defaults.target_median),
             shadows_clip: request.foraxx_shadows_clip.unwrap_or(defaults.shadows_clip),
+            mask_smoothing: request
+                .foraxx_mask_smoothing
+                .unwrap_or(defaults.mask_smoothing),
         };
         let options = color_options(
             request.normalization.as_deref(),
@@ -12234,6 +12242,20 @@ mod tests {
         .unwrap();
         assert_eq!(report["label"], "FORAXX-HOO");
         assert_eq!(report["transfer"], "display");
+        let report = compose(
+            seiza_color_combine_narrowband_json,
+            &json!({"ha": ha, "oiii": oiii, "output": output, "palette": "Foraxx-HOO", "normalization": "none", "foraxxMaskSmoothing": 1.5}),
+            ptr::null(),
+        )
+        .unwrap();
+        assert_eq!(report["transfer"], "display");
+        let error = compose(
+            seiza_color_combine_narrowband_json,
+            &json!({"ha": ha, "oiii": oiii, "output": output, "palette": "Foraxx-HOO", "normalization": "none", "foraxxMaskSmoothing": -1.0}),
+            ptr::null(),
+        )
+        .unwrap_err();
+        assert!(error.contains("Foraxx mask smoothing"), "{error}");
 
         let output = directory.path().join("matrix.fits");
         let output = output.to_str().unwrap();

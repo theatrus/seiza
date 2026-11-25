@@ -57,6 +57,23 @@ pub struct ForaxxOptions {
     pub target_median: f32,
     /// Normal-equivalent MADs below the median used as the Foraxx black point.
     pub shadows_clip: f32,
+    /// Standard deviation, in pixels, of a Gaussian blur applied to each
+    /// Foraxx blend factor after it is computed and before it mixes the
+    /// channels.
+    ///
+    /// The factors come from single pixels, so OIII noise otherwise shows as
+    /// speckle in the mixed channels. `0.0`, the default, applies no blur and
+    /// leaves the output as it was before this option existed. The largest
+    /// accepted value is [`ForaxxOptions::MAX_MASK_SMOOTHING`]. Pixels that
+    /// any channel does not cover carry no weight in the blur and stay
+    /// non-finite in the output. Unlike the other fields, this one also
+    /// applies to display-referred inputs.
+    pub mask_smoothing: f32,
+}
+
+impl ForaxxOptions {
+    /// Largest accepted [`ForaxxOptions::mask_smoothing`], in pixels.
+    pub const MAX_MASK_SMOOTHING: f32 = 64.0;
 }
 
 impl Default for ForaxxOptions {
@@ -64,6 +81,7 @@ impl Default for ForaxxOptions {
         Self {
             target_median: 0.2,
             shadows_clip: -2.8,
+            mask_smoothing: 0.0,
         }
     }
 }
@@ -528,6 +546,7 @@ pub fn combine_narrowband(
         return combine_prepared_matrix(grid, h, o, s, matrix, options.input_transfer);
     }
 
+    validate_foraxx_mask_smoothing(foraxx)?;
     let (h_display, o_display, s_display) = match options.input_transfer {
         ColorTransfer::LinearLight => {
             validate_foraxx_options(foraxx)?;
@@ -545,27 +564,94 @@ pub fn combine_narrowband(
             s.map(|_| ResolvedCurve::Identity),
         ),
     };
+    let uses_o_factor = matches!(palette, NarrowbandPalette::ForaxxSho);
+    let covered = |source: usize| {
+        h.valid(source) && o.valid(source) && s.is_none_or(|channel| channel.valid(source))
+    };
+    let smoothed = (foraxx.mask_smoothing > 0.0).then(|| {
+        let region = window.region;
+        let mut green_factors = vec![0.0_f32; grid.pixel_count()];
+        let mut o_factors = vec![0.0_f32; if uses_o_factor { grid.pixel_count() } else { 0 }];
+        let mut weights = vec![0.0_f32; grid.pixel_count()];
+        green_factors
+            .par_iter_mut()
+            .zip(weights.par_iter_mut())
+            .enumerate()
+            .for_each(|(index, (green_factor, weight))| {
+                let source = window.source_index(index);
+                if covered(source) {
+                    let h = h_display.map(h.sample(source));
+                    let o = o_display.map(o.sample(source));
+                    *green_factor = foraxx_green_factor(h, o);
+                    *weight = 1.0;
+                }
+            });
+        o_factors
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(index, o_factor)| {
+                let source = window.source_index(index);
+                if covered(source) {
+                    *o_factor = foraxx_o_factor(o_display.map(o.sample(source)));
+                }
+            });
+        let any_uncovered = weights.par_iter().any(|weight| *weight == 0.0);
+        let blurred_weights = any_uncovered.then(|| {
+            blur_factor_plane(&weights, region.width, region.height, foraxx.mask_smoothing)
+        });
+        let smooth = |factors: Vec<f32>| {
+            if factors.is_empty() {
+                return factors;
+            }
+            let mut blurred =
+                blur_factor_plane(&factors, region.width, region.height, foraxx.mask_smoothing);
+            match &blurred_weights {
+                // Uncovered pixels entered the blur as zero with zero weight,
+                // so dividing by the blurred weights leaves the weighted mean
+                // of the covered neighbours.
+                Some(blurred_weights) => {
+                    blurred
+                        .par_iter_mut()
+                        .zip(blurred_weights)
+                        .for_each(|(factor, weight)| {
+                            *factor = if *weight > 0.0 {
+                                (*factor / *weight).clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            };
+                        })
+                }
+                None => blurred
+                    .par_iter_mut()
+                    .for_each(|factor| *factor = factor.clamp(0.0, 1.0)),
+            }
+            blurred
+        };
+        (smooth(green_factors), smooth(o_factors))
+    });
     let mut data = vec![0.0; grid.pixel_count() * 3];
     data.par_chunks_mut(3)
         .enumerate()
         .for_each(|(index, output)| {
             let source = window.source_index(index);
-            if !h.valid(source)
-                || !o.valid(source)
-                || s.is_some_and(|channel| !channel.valid(source))
-            {
+            if !covered(source) {
                 output.fill(f32::NAN);
                 return;
             }
             let h = h_display.map(h.sample(source));
             let o = o_display.map(o.sample(source));
-            let product = (o * h).clamp(0.0, 1.0);
-            let green_factor = product.powf(1.0 - product);
+            let green_factor = match &smoothed {
+                Some((green_factors, _)) => green_factors[index],
+                None => foraxx_green_factor(h, o),
+            };
             let green = green_factor.mul_add(h, (1.0 - green_factor) * o);
             let red = match palette {
                 NarrowbandPalette::ForaxxHoo => h,
                 NarrowbandPalette::ForaxxSho => {
-                    let o_factor = o.powf(1.0 - o);
+                    let o_factor = match &smoothed {
+                        Some((_, o_factors)) => o_factors[index],
+                        None => foraxx_o_factor(o),
+                    };
                     o_factor.mul_add(
                         s_display
                             .expect("SII was validated")
@@ -578,6 +664,34 @@ pub fn combine_narrowband(
             output.copy_from_slice(&[red, green, o]);
         });
     grid.compose(data, palette.transfer())
+}
+
+/// Foraxx's green blend factor for one pixel of display-referred H-alpha and
+/// OIII.
+fn foraxx_green_factor(h: f32, o: f32) -> f32 {
+    let product = (o * h).clamp(0.0, 1.0);
+    product.powf(1.0 - product)
+}
+
+/// Foraxx-SHO's red blend factor for one pixel of display-referred OIII.
+fn foraxx_o_factor(o: f32) -> f32 {
+    o.powf(1.0 - o)
+}
+
+/// Gaussian blur of one plane of blend factors or of their weights.
+///
+/// The kernel spans four standard deviations each way. Past the edges the
+/// plane is mirrored, so a constant plane stays constant.
+fn blur_factor_plane(plane: &[f32], width: usize, height: usize, sigma: f32) -> Vec<f32> {
+    let sigma = f64::from(sigma);
+    seiza_imgproc::blur::gaussian_blur_f32(
+        plane,
+        width,
+        height,
+        seiza_imgproc::blur::auto_ksize_f32(sigma),
+        sigma,
+        seiza_imgproc::BorderMode::Reflect,
+    )
 }
 
 /// Apply a custom linear narrowband mixing matrix.
@@ -892,6 +1006,18 @@ fn validate_foraxx_options(options: &ForaxxOptions) -> Result<()> {
     Ok(())
 }
 
+/// Checked apart from [`validate_foraxx_options`] because the smoothing also
+/// applies to display-referred inputs, which skip the stretch options.
+fn validate_foraxx_mask_smoothing(options: &ForaxxOptions) -> Result<()> {
+    if !(0.0..=ForaxxOptions::MAX_MASK_SMOOTHING).contains(&options.mask_smoothing) {
+        return Err(Error::Color(format!(
+            "Foraxx mask smoothing must be finite and between zero and {} pixels",
+            ForaxxOptions::MAX_MASK_SMOOTHING
+        )));
+    }
+    Ok(())
+}
+
 fn validate_normalization(normalization: ColorNormalization) -> Result<()> {
     if let ColorNormalization::Percentile {
         black_percentile,
@@ -1201,6 +1327,7 @@ mod tests {
             &ForaxxOptions {
                 target_median: f32::NAN,
                 shadows_clip: 1.0,
+                mask_smoothing: 0.0,
             },
         )
         .unwrap();
@@ -1211,6 +1338,269 @@ mod tests {
         assert!((result.image.data[1] - expected_green).abs() < 1.0e-6);
         assert_eq!(result.image.data[2], o);
         assert_eq!(result.transfer, ColorTransfer::DisplayReferred);
+    }
+
+    fn plane(width: usize, height: usize, value: impl Fn(usize) -> f32) -> LinearImage {
+        let data = (0..width * height).map(value).collect();
+        LinearImage::new(width, height, 1, data).unwrap()
+    }
+
+    /// Uniform values in `[0, 1)` that depend only on the index and the seed.
+    fn uniform(index: usize, seed: u64) -> f32 {
+        let mut state = (index as u64 ^ seed.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+            .wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        state ^= state >> 29;
+        state = state.wrapping_mul(0x94D0_49BB_1331_11EB);
+        state ^= state >> 32;
+        (state >> 40) as f32 / (1_u64 << 24) as f32
+    }
+
+    fn smoothed(mask_smoothing: f32) -> ForaxxOptions {
+        ForaxxOptions {
+            mask_smoothing,
+            ..ForaxxOptions::default()
+        }
+    }
+
+    fn variance(values: impl Iterator<Item = f32> + Clone) -> f64 {
+        let count = values.clone().count() as f64;
+        let mean = values.clone().map(f64::from).sum::<f64>() / count;
+        values
+            .map(|value| (f64::from(value) - mean).powi(2))
+            .sum::<f64>()
+            / count
+    }
+
+    #[test]
+    fn foraxx_without_mask_smoothing_is_bit_identical_to_the_per_pixel_formula() {
+        let (width, height) = (37, 23);
+        let h = plane(width, height, |index| 0.2 + 0.6 * uniform(index, 1));
+        let mut o = plane(width, height, |index| 0.1 + 0.7 * uniform(index, 2));
+        let s = plane(width, height, |index| 0.1 + 0.5 * uniform(index, 3));
+        o.data[40] = f32::NAN;
+        for palette in [NarrowbandPalette::ForaxxSho, NarrowbandPalette::ForaxxHoo] {
+            let sii = palette.requires_sii().then_some(&s);
+            let result =
+                combine_narrowband(&h, &o, sii, palette, &display_options(), &smoothed(0.0))
+                    .unwrap();
+            assert_eq!(ForaxxOptions::default().mask_smoothing, 0.0);
+            for (index, pixel) in result.image.data.as_chunks::<3>().0.iter().enumerate() {
+                if index == 40 {
+                    assert!(pixel.iter().all(|value| value.is_nan()));
+                    continue;
+                }
+                // The expressions this function used before mask smoothing
+                // existed, written out again.
+                let (h, o, s) = (h.data[index], o.data[index], s.data[index]);
+                let product = (o * h).clamp(0.0, 1.0);
+                let green_factor = product.powf(1.0 - product);
+                let green = green_factor.mul_add(h, (1.0 - green_factor) * o);
+                let red = if palette == NarrowbandPalette::ForaxxSho {
+                    let o_factor = o.powf(1.0 - o);
+                    o_factor.mul_add(s, (1.0 - o_factor) * h)
+                } else {
+                    h
+                };
+                assert_eq!(
+                    [pixel[0].to_bits(), pixel[1].to_bits(), pixel[2].to_bits()],
+                    [red.to_bits(), green.to_bits(), o.to_bits()]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn foraxx_mask_smoothing_reduces_the_speckle_from_oiii_noise() {
+        // 160 by 120 is above the size at which the blur runs in parallel.
+        let (width, height) = (160, 120);
+        let h = plane(width, height, |_| 0.7);
+        let s = plane(width, height, |_| 0.2);
+        let o = plane(width, height, |index| 0.2 + 0.3 * uniform(index, 7));
+        let compose = |mask_smoothing| {
+            combine_narrowband(
+                &h,
+                &o,
+                Some(&s),
+                NarrowbandPalette::ForaxxSho,
+                &display_options(),
+                &smoothed(mask_smoothing),
+            )
+            .unwrap()
+            .image
+            .data
+        };
+        let plain = compose(0.0);
+        let smooth = compose(3.0);
+        // H-alpha and SII are flat, so red varies only through the OIII
+        // factor.
+        let red = |data: &[f32]| variance(data.as_chunks::<3>().0.iter().map(|pixel| pixel[0]));
+        assert!(red(&plain) > 1.0e-4);
+        assert!(red(&smooth) < red(&plain) / 20.0);
+        // Green still carries OIII itself. What smoothing removes is the
+        // factor's share: the factor implied by each pixel varies less.
+        let green_factor = |data: &[f32]| {
+            variance(
+                data.as_chunks::<3>()
+                    .0
+                    .iter()
+                    .map(|pixel| (pixel[1] - pixel[2]) / (0.7 - pixel[2])),
+            )
+        };
+        assert!(green_factor(&smooth) < green_factor(&plain) / 20.0);
+        // Blue is OIII, which smoothing does not touch.
+        for (plain, smooth) in plain
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .zip(smooth.as_chunks::<3>().0.iter())
+        {
+            assert_eq!(plain[2].to_bits(), smooth[2].to_bits());
+        }
+    }
+
+    #[test]
+    fn foraxx_mask_smoothing_leaves_a_constant_image_unchanged() {
+        let (width, height) = (160, 120);
+        let h = plane(width, height, |_| 0.6);
+        let o = plane(width, height, |_| 0.4);
+        let s = plane(width, height, |_| 0.3);
+        // One with every pixel covered, one with a hole, which takes the
+        // weighted path.
+        for hole in [None, Some(width * 60 + 80)] {
+            let mut o = o.clone();
+            if let Some(hole) = hole {
+                o.data[hole] = f32::NAN;
+            }
+            let compose = |mask_smoothing| {
+                combine_narrowband(
+                    &h,
+                    &o,
+                    Some(&s),
+                    NarrowbandPalette::ForaxxSho,
+                    &display_options(),
+                    &smoothed(mask_smoothing),
+                )
+                .unwrap()
+                .image
+                .data
+            };
+            for (index, (plain, smooth)) in compose(0.0).iter().zip(compose(5.0)).enumerate() {
+                if Some(index / 3) == hole {
+                    assert!(plain.is_nan() && smooth.is_nan());
+                } else {
+                    assert!((plain - smooth).abs() < 1.0e-5, "sample {index}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn foraxx_mask_smoothing_ignores_uncovered_pixels_and_keeps_them_uncovered() {
+        // OIII is bright on the left half and faint on the right, and each
+        // channel in turn does not cover a block inside the left half.
+        let (width, height) = (64, 48);
+        let h = plane(width, height, |_| 0.7);
+        let s = plane(width, height, |_| 0.2);
+        let o = plane(
+            width,
+            height,
+            |index| if index % width < 32 { 0.8 } else { 0.1 },
+        );
+        let uncovered = |index: usize| {
+            let (x, y) = (index % width, index / width);
+            (8..20).contains(&x) && (10..30).contains(&y)
+        };
+        let punch = |image: &LinearImage| {
+            let mut image = image.clone();
+            for (index, value) in image.data.iter_mut().enumerate() {
+                if uncovered(index) {
+                    *value = f32::NAN;
+                }
+            }
+            image
+        };
+        let compose = |h: &LinearImage, o: &LinearImage, s: &LinearImage| {
+            combine_narrowband(
+                h,
+                o,
+                Some(s),
+                NarrowbandPalette::ForaxxSho,
+                &display_options(),
+                &smoothed(2.0),
+            )
+            .unwrap()
+            .image
+            .data
+        };
+        let whole = compose(&h, &o, &s);
+        for holed in [
+            compose(&punch(&h), &o, &s),
+            compose(&h, &punch(&o), &s),
+            compose(&h, &o, &punch(&s)),
+        ] {
+            for (index, (pixel, whole)) in holed
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .zip(whole.as_chunks::<3>().0.iter())
+                .enumerate()
+            {
+                if uncovered(index) {
+                    assert!(pixel.iter().all(|value| value.is_nan()), "pixel {index}");
+                    continue;
+                }
+                assert!(pixel.iter().all(|value| value.is_finite()), "pixel {index}");
+                // Left of column 24 the blur reaches only bright OIII, whose
+                // factors are all equal, so a hole that leaked zeros, or
+                // that took weight, would move these pixels.
+                if index % width < 24 {
+                    for (value, whole) in pixel.iter().zip(whole) {
+                        assert!((value - whole).abs() < 1.0e-5, "pixel {index}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn foraxx_mask_smoothing_must_be_finite_and_within_its_range() {
+        let compose = |options: &ColorOptions, mask_smoothing| {
+            combine_narrowband(
+                &mono(&[0.6, 0.5]),
+                &mono(&[0.4, 0.3]),
+                None,
+                NarrowbandPalette::ForaxxHoo,
+                options,
+                &smoothed(mask_smoothing),
+            )
+        };
+        for options in [raw_options(), display_options()] {
+            for invalid in [
+                -0.5,
+                f32::NAN,
+                f32::INFINITY,
+                ForaxxOptions::MAX_MASK_SMOOTHING + 0.5,
+            ] {
+                let error = compose(&options, invalid).unwrap_err();
+                assert!(
+                    error.to_string().contains("Foraxx mask smoothing"),
+                    "{invalid}: {error}"
+                );
+            }
+            for valid in [0.0, 0.5, ForaxxOptions::MAX_MASK_SMOOTHING] {
+                compose(&options, valid).unwrap();
+            }
+        }
+        // A static palette does not read the option.
+        combine_narrowband(
+            &mono(&[0.6]),
+            &mono(&[0.4]),
+            None,
+            NarrowbandPalette::Hoo,
+            &raw_options(),
+            &smoothed(f32::NAN),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1518,6 +1908,7 @@ mod tests {
         let invalid_foraxx = ForaxxOptions {
             target_median: f32::NAN,
             shadows_clip: 1.0,
+            mask_smoothing: 0.0,
         };
         let direct = combine_narrowband(
             &mono(&[0.2]),

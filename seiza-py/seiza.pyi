@@ -2173,6 +2173,7 @@ def combine_narrowband(
     normalization_samples: int = 1_000_000,
     foraxx_target_median: float = 0.2,
     foraxx_shadows_clip: float = -2.8,
+    foraxx_mask_smoothing: float = 0.0,
     crop: str = "none",
     output: str | Path | None = None,
     header: Mapping[str, Any] | None = None,

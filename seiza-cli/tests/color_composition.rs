@@ -268,6 +268,50 @@ fn foraxx_cli_marks_display_referred_output() {
 }
 
 #[test]
+fn foraxx_cli_smooths_the_blend_factors_and_checks_the_setting() {
+    let directory = tempfile::tempdir().unwrap();
+    let ha = directory.path().join("ha.fits");
+    let oiii = directory.path().join("oiii.fits");
+    let output = directory.path().join("foraxx-hoo.fits");
+    write_mono(&ha, &[0.1, 0.2, 0.3, 0.4]);
+    write_mono(&oiii, &[0.2, 0.3, 0.4, 0.5]);
+
+    let run = |smoothing: &str| {
+        Command::new(env!("CARGO_BIN_EXE_seiza"))
+            .args([
+                "color",
+                "narrowband",
+                "--ha",
+                ha.to_str().unwrap(),
+                "--oiii",
+                oiii.to_str().unwrap(),
+                "--palette",
+                "foraxx-hoo",
+                "--no-register",
+                "--foraxx-mask-smoothing",
+                smoothing,
+                "--output",
+                output.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap()
+    };
+    let result = run("1.5");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let result = run("65");
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("Foraxx mask smoothing"),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
 fn foraxx_cli_rejects_sensor_units_when_normalization_is_disabled() {
     let directory = tempfile::tempdir().unwrap();
     let ha = directory.path().join("ha.fits");

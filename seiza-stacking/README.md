@@ -354,7 +354,11 @@ referred. This lets an embedding application independently stretch each mono
 input before composition; Foraxx then skips its shared preparation pass rather
 than stretching those inputs twice. The separate `ForaxxOptions` controls the
 default display preparation used only when dynamic Foraxx palettes receive
-linear inputs.
+linear inputs. Its `mask_smoothing` field applies to linear and
+display-referred inputs alike: it is the standard deviation, in pixels, of a
+Gaussian blur applied to the Foraxx blend factors before they mix the
+channels, which removes the speckle that OIII noise gives factors computed
+from single pixels. The default, `0.0`, applies no blur.
 
 `ColorOptions::crop` trims a composition to the area every channel covers,
 which registration otherwise leaves ringed with `NaN`. `ColorCrop::Bounds`

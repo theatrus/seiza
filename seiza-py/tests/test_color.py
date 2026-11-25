@@ -150,6 +150,54 @@ def test_foraxx_without_normalization_rejects_sensor_units() -> None:
         )
 
 
+def test_foraxx_mask_smoothing_reduces_oiii_speckle() -> None:
+    rng = np.random.default_rng(7)
+    shape = (120, 160)
+    ha = np.full(shape, 0.7, dtype=np.float32)
+    sii = np.full(shape, 0.2, dtype=np.float32)
+    oiii = rng.uniform(0.2, 0.5, shape).astype(np.float32)
+
+    def compose(**keywords: float) -> np.ndarray:
+        return seiza.combine_narrowband(
+            ha, oiii, sii, palette="foraxx-sho", normalization="none", **keywords
+        )
+
+    plain = compose()
+    np.testing.assert_array_equal(plain, compose(foraxx_mask_smoothing=0.0))
+    smooth = compose(foraxx_mask_smoothing=3.0)
+    # H-alpha and SII are flat, so red varies only through the OIII factor.
+    assert smooth[..., 0].var() < plain[..., 0].var() / 20
+    np.testing.assert_array_equal(smooth[..., 2], plain[..., 2])
+
+
+def test_foraxx_mask_smoothing_skips_uncovered_pixels() -> None:
+    shape = (48, 64)
+    ha = np.full(shape, 0.7, dtype=np.float32)
+    oiii = np.full(shape, 0.4, dtype=np.float32)
+    whole = seiza.combine_narrowband(
+        ha, oiii, palette="foraxx-hoo", normalization="none", foraxx_mask_smoothing=2.0
+    )
+    oiii[10:30, 8:20] = np.nan
+    holed = seiza.combine_narrowband(
+        ha, oiii, palette="foraxx-hoo", normalization="none", foraxx_mask_smoothing=2.0
+    )
+    uncovered = np.isnan(oiii)
+    assert np.isnan(holed[uncovered]).all()
+    np.testing.assert_allclose(holed[~uncovered], whole[~uncovered], atol=1e-5)
+
+
+@pytest.mark.parametrize("smoothing", [-0.5, float("nan"), float("inf"), 64.5])
+def test_foraxx_mask_smoothing_is_validated(smoothing: float) -> None:
+    with pytest.raises(seiza.EngineError, match="Foraxx mask smoothing"):
+        seiza.combine_narrowband(
+            mono(0.6),
+            mono(0.4),
+            palette="foraxx-hoo",
+            normalization="none",
+            foraxx_mask_smoothing=smoothing,
+        )
+
+
 def bordered(blank_rows: int) -> np.ndarray:
     """A 128x128 frame blank across its top `blank_rows` rows."""
     values = np.full((128, 128), 0.25, dtype=np.float32)

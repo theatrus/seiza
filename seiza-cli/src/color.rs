@@ -279,6 +279,10 @@ struct NarrowbandArgs {
     /// Normal-equivalent MADs below the median used as the Foraxx black point
     #[arg(long, default_value_t = -2.8, allow_negative_numbers = true)]
     foraxx_shadows_clip: f32,
+    /// Standard deviation, in pixels, of the Gaussian blur applied to the
+    /// Foraxx blend factors; 0 applies none
+    #[arg(long, default_value_t = 0.0)]
+    foraxx_mask_smoothing: f32,
 }
 
 #[derive(Args)]
@@ -514,6 +518,7 @@ fn run_narrowband(args: NarrowbandArgs) -> Result<()> {
         &ForaxxOptions {
             target_median: args.foraxx_target_median,
             shadows_clip: args.foraxx_shadows_clip,
+            mask_smoothing: args.foraxx_mask_smoothing,
         },
     )?;
     report_crop(&composition);

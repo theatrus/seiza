@@ -188,6 +188,21 @@ Foraxx-HOO:
   B = OIII
 ```
 
+Each factor comes from one pixel, so OIII noise in the factor shows as speckle
+in red and green. `ForaxxOptions::mask_smoothing` blurs `fO` and `fG` with a
+Gaussian of that standard deviation, in pixels, after they are computed and
+before they mix the channels. The channels themselves are not blurred, so blue
+is unchanged and detail in H-alpha, SII and OIII stays. The blur is
+`seiza_imgproc::blur::gaussian_blur_f32`, with a kernel four standard
+deviations wide each way and the image mirrored past its edges. It is a
+normalized convolution: a pixel that any channel does not cover enters with
+zero weight, so a factor next to an uncovered region is the weighted mean of
+its covered neighbours, and uncovered pixels stay `NaN` in the output. The
+default, `0.0`, skips the pass and gives the same bits as before the option
+existed. Values up to `ForaxxOptions::MAX_MASK_SMOOTHING` (64) are accepted.
+Unlike the stretch settings, the smoothing also applies when the inputs are
+already display-referred.
+
 The FITS writer records `SEIZATRF='DISPLAY'` for Foraxx and for any composition
 whose inputs were explicitly marked display-referred. Linear inputs remain
 `SEIZATRF='LINEAR'` for RGB, LRGB, super-LRGB, super-RGB, direct palettes, and
