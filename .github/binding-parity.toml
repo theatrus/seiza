@@ -519,6 +519,7 @@ objects = [
 "seiza-background::BackgroundFit::correct_with_strength" = { none = "the C ABI uses correct_in_place_with_strength, which writes into the caller's buffer" }
 "seiza-background::BackgroundFit::render_model" = { none = "the C ABI uses render_model_into, which writes into the caller's buffer" }
 "seiza-background::BackgroundFit::value_at" = { none = "one point; the C ABI renders the whole model" }
+"seiza-background::BackgroundFit::correct_region_in_place_with_strength" = { none = "one rectangle, for a Rust caller that holds an image as tiles; C and Python hosts hold the whole image and correct it with correct_in_place_with_strength" }
 
 # calibration
 "seiza-calibration::coherent_subset_indices" = { none = "C hosts get it through the planner, seiza_calibration_plan_json" }
