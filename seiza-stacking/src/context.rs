@@ -1,6 +1,6 @@
 use crate::{
-    BayerLayout, CalibrationMasters, Error, FrameMetadata, LinearImage, ReferenceRegion, Result,
-    StackOptions,
+    Acquisition, BayerLayout, CalibrationMasters, Error, FrameMetadata, LinearImage,
+    ReferenceRegion, Result, StackOptions,
     replay::{FrameTolerances, FrameWeightRecord, Ledger},
     stack::FrameInputMode,
 };
@@ -129,6 +129,10 @@ struct ContextMetadata {
     /// refuse the field rather than replay frames under the wrong gate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     frame_tolerances: Option<FrameTolerances>,
+    /// How each admitted frame was taken, written when any frame's file
+    /// says. Readers that predate it refuse the field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    frame_acquisitions: Vec<Acquisition>,
     /// Superpixel offsets omitted by the compact ledger encoding.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     frame_channel_sites: Vec<Option<crate::registration::ChannelSites>>,
@@ -587,6 +591,11 @@ pub(crate) fn read(path: &Path) -> Result<RestoredContext> {
                 .attach_tolerances(tolerances)
                 .map_err(|message| context_read_error(path, message))?;
         }
+        if !metadata.frame_acquisitions.is_empty() {
+            ledger
+                .attach_acquisitions(metadata.frame_acquisitions.clone())
+                .map_err(|message| context_read_error(path, message))?;
+        }
         Some(ledger)
     } else {
         None
@@ -785,6 +794,11 @@ impl ContextMetadata {
                 state.ledger.tolerances()
             } else {
                 None
+            },
+            frame_acquisitions: if schema_version >= LEDGER_FORMAT_VERSION {
+                state.ledger.acquisitions()
+            } else {
+                Vec::new()
             },
             frame_channel_sites: if schema_version >= LEDGER_FORMAT_VERSION {
                 state.ledger.channel_sites()

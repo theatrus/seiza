@@ -263,6 +263,7 @@ mod stack_report_tests {
                     rejected_samples: vec![0, 1],
                     accepted_frames: 2,
                     rejected_frames: 0,
+                    acquisition: Default::default(),
                 },
                 final_samples: Some(vec![
                     seiza_stacking::BatchFrameDiagnostics {

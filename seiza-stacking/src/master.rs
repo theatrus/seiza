@@ -1704,6 +1704,7 @@ mod tests {
             image,
             accepted_frames: 1,
             rejected_frames: 0,
+            acquisition: Default::default(),
         };
         write_fits_f32(path, &snapshot, &[]).unwrap();
     }

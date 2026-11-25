@@ -274,6 +274,7 @@ fn finish(
                 rejected_samples: rejected,
                 accepted_frames: frame_count as u32,
                 rejected_frames: 0,
+                acquisition: Default::default(),
             },
             frames,
         },

@@ -74,6 +74,8 @@ pub struct DrizzleResult {
     pub weight: LinearImage,
     /// The output scale relative to the reference grid.
     pub scale: u32,
+    /// What the drizzled frames record of how they were taken.
+    pub acquisition: crate::Acquisition,
 }
 
 /// Output rows and columns handled together. A tile's source pixels are
@@ -232,6 +234,7 @@ impl DrizzleAccumulator {
             image: LinearImage::new(self.width, self.height, self.channels, image)?,
             weight: LinearImage::new(self.width, self.height, self.channels, self.weight)?,
             scale: self.options.scale,
+            acquisition: Default::default(),
         })
     }
 }

@@ -6392,6 +6392,43 @@ pub unsafe extern "C" fn seiza_drizzle_result_rejected_frames(
 }
 
 #[unsafe(no_mangle)]
+/// The sum of the accepted frames' exposures in seconds, which
+/// [`seiza_drizzle_result_write_fits`] writes as `LIVETIME`; NaN unless every frame's
+/// is known.
+///
+/// # Safety
+/// `drizzle` must be null or a live `SeizaDrizzleResult` pointer.
+pub unsafe extern "C" fn seiza_drizzle_result_total_exposure_seconds(
+    drizzle: *const SeizaDrizzleResult,
+) -> f64 {
+    unsafe {
+        drizzle
+            .as_ref()
+            .and_then(|value| value.result.acquisition.total_exposure_seconds)
+            .unwrap_or(f64::NAN)
+    }
+}
+
+#[unsafe(no_mangle)]
+/// The filter every accepted frame was taken through, which
+/// [`seiza_drizzle_result_write_fits`] writes as `FILTER`; null when the frames
+/// differ or any does not say. Free it with [`seiza_string_free`].
+///
+/// # Safety
+/// `drizzle` must be null or a live `SeizaDrizzleResult` pointer.
+pub unsafe extern "C" fn seiza_drizzle_result_filter(
+    drizzle: *const SeizaDrizzleResult,
+) -> *mut c_char {
+    unsafe {
+        drizzle
+            .as_ref()
+            .and_then(|value| value.result.acquisition.filter.as_deref())
+            .and_then(|filter| CString::new(filter).ok())
+            .map_or(ptr::null_mut(), CString::into_raw)
+    }
+}
+
+#[unsafe(no_mangle)]
 /// Borrows the interleaved drizzled mean until the result is freed. Output
 /// samples no drop reached are `NaN`.
 ///
@@ -6678,6 +6715,43 @@ pub unsafe extern "C" fn seiza_stack_snapshot_rejected_frames(
         snapshot
             .as_ref()
             .map_or(0, |value| value.snapshot.rejected_frames)
+    }
+}
+
+#[unsafe(no_mangle)]
+/// The sum of the accepted frames' exposures in seconds, which
+/// [`seiza_stack_snapshot_write_fits`] writes as `LIVETIME`; NaN unless every frame's
+/// is known.
+///
+/// # Safety
+/// `snapshot` must be null or a live `SeizaStackSnapshot` pointer.
+pub unsafe extern "C" fn seiza_stack_snapshot_total_exposure_seconds(
+    snapshot: *const SeizaStackSnapshot,
+) -> f64 {
+    unsafe {
+        snapshot
+            .as_ref()
+            .and_then(|value| value.snapshot.acquisition.total_exposure_seconds)
+            .unwrap_or(f64::NAN)
+    }
+}
+
+#[unsafe(no_mangle)]
+/// The filter every accepted frame was taken through, which
+/// [`seiza_stack_snapshot_write_fits`] writes as `FILTER`; null when the frames
+/// differ or any does not say. Free it with [`seiza_string_free`].
+///
+/// # Safety
+/// `snapshot` must be null or a live `SeizaStackSnapshot` pointer.
+pub unsafe extern "C" fn seiza_stack_snapshot_filter(
+    snapshot: *const SeizaStackSnapshot,
+) -> *mut c_char {
+    unsafe {
+        snapshot
+            .as_ref()
+            .and_then(|value| value.snapshot.acquisition.filter.as_deref())
+            .and_then(|filter| CString::new(filter).ok())
+            .map_or(ptr::null_mut(), CString::into_raw)
     }
 }
 
@@ -16006,10 +16080,14 @@ mod tests {
                 &path,
                 &LinearImage::new(width, height, 1, data).unwrap(),
                 &[],
-                &[seiza_fits::WriteHeaderCard::new(
-                    "OBJECT",
-                    HeaderValue::String(format!("frame {index}")),
-                )],
+                &[
+                    seiza_fits::WriteHeaderCard::new(
+                        "OBJECT",
+                        HeaderValue::String(format!("frame {index}")),
+                    ),
+                    seiza_fits::WriteHeaderCard::new("EXPTIME", HeaderValue::Float(60.0)),
+                    seiza_fits::WriteHeaderCard::new("FILTER", HeaderValue::String("Ha".into())),
+                ],
             )
             .unwrap();
             inputs.push(path);
@@ -16097,6 +16175,21 @@ mod tests {
             seiza_stack_snapshot_write_fits(snapshot, output_c.as_ptr(), &mut error)
         });
         assert_eq!(FitsFrame::open(&output).unwrap().image.width, width);
+        // It says how long its frames were and through what.
+        let written = FitsImage::open(&output).unwrap();
+        assert_eq!(written.header_f64("LIVETIME"), Some(300.0));
+        assert_eq!(written.header_str("FILTER"), Some("Ha"));
+        assert_eq!(
+            unsafe { seiza_stack_snapshot_total_exposure_seconds(snapshot) },
+            300.0
+        );
+        let filter = unsafe { seiza_stack_snapshot_filter(snapshot) };
+        assert_eq!(unsafe { CStr::from_ptr(filter) }.to_str(), Ok("Ha"));
+        unsafe { seiza_string_free(filter) };
+        assert!(unsafe { seiza_stack_snapshot_total_exposure_seconds(ptr::null()) }.is_nan());
+        assert!(unsafe { seiza_stack_snapshot_filter(ptr::null()) }.is_null());
+        assert!(unsafe { seiza_drizzle_result_total_exposure_seconds(ptr::null()) }.is_nan());
+        assert!(unsafe { seiza_drizzle_result_filter(ptr::null()) }.is_null());
         let input_c = CString::new(inputs[0].to_str().unwrap()).unwrap();
         assert!(!unsafe {
             seiza_stack_snapshot_write_fits(snapshot, input_c.as_ptr(), &mut error)
@@ -22909,11 +23002,13 @@ pub unsafe extern "C" fn seiza_stack_integrate_registered_json(
         }
         let count = paths.len();
         let mut reference_headers = None;
-        let result = seiza_stacking::integrate_registered_frames_banded(
+        let mut acquisitions = vec![seiza_stacking::Acquisition::default(); count];
+        let mut result = seiza_stacking::integrate_registered_frames_banded(
             count,
             &options,
             |index| {
                 let frame = FitsFrame::open(&paths[index])?;
+                acquisitions[index] = frame.acquisition();
                 if reference_headers.is_none() && index == 0 {
                     reference_headers = Some(frame.headers);
                 }
@@ -22931,6 +23026,7 @@ pub unsafe extern "C" fn seiza_stack_integrate_registered_json(
             },
         )
         .map_err(stacking_message)?;
+        result.snapshot.acquisition = seiza_stacking::Acquisition::combined(&acquisitions);
         if !report_out.is_null() {
             let report = RegisteredIntegrationResponse {
                 schema_version: 1,

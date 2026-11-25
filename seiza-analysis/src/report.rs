@@ -256,6 +256,7 @@ mod collection_tests {
                 rejected_samples: vec![0, 1],
                 accepted_frames: 2,
                 rejected_frames: 1,
+                acquisition: Default::default(),
             },
             None,
             None,

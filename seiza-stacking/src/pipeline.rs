@@ -1025,6 +1025,7 @@ fn prepare_decoded(
     }
     // Recorded after the rescale, which a replay repeats.
     let source = crate::replay::FrameSource::of(&frame);
+    let acquisition = frame.acquisition();
     let clipped = half
         .options
         .track_clipping
@@ -1063,7 +1064,7 @@ fn prepare_decoded(
         half.frame_cache.filter(|_| source.is_some()),
         crate::stack::developed_clip_mask(clipped, cfa, half.options),
     )?
-    .with_source(source);
+    .with_source(source, acquisition);
     #[cfg(feature = "gpu")]
     {
         trace.mark("register and normalize");

@@ -40,6 +40,7 @@
 //! this one, and [`RcAstroCli`] reads an external program's output on two.
 //! That program picks its own threads.
 
+mod acquisition;
 mod batch;
 mod binning;
 mod calibration;
@@ -99,6 +100,7 @@ mod star_stretch;
 pub use star_stretch::{screen_rgb_star_layer, stretch_rgb_stars};
 mod tasks;
 
+pub use acquisition::Acquisition;
 pub use batch::{
     BatchFrameDiagnostics, BatchStackOptions, BatchStackPass, BatchStackResult,
     integrate_registered_frames, integrate_registered_frames_banded,

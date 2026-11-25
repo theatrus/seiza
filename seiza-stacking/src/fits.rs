@@ -1,6 +1,6 @@
 use crate::{
-    BayerLayout, ColorComposition, Error, LinearImage, MasterFrame, Result, StackExportSnapshot,
-    StackSnapshot,
+    Acquisition, BayerLayout, ColorComposition, Error, LinearImage, MasterFrame, Result,
+    StackExportSnapshot, StackSnapshot,
 };
 use seiza_calibration::FrameSignature;
 use seiza_fits::{BayerPattern, F32ImageData, FitsImage, HeaderValue, RowOrder, WriteHeaderCard};
@@ -284,6 +284,12 @@ impl FitsFrame {
         )
     }
 
+    /// How the frame was taken, for a stack that takes it: its exposure, or
+    /// its `LIVETIME` when it is itself a stack, and its filter.
+    pub fn acquisition(&self) -> crate::Acquisition {
+        crate::Acquisition::of_frame(&self.headers, &self.metadata())
+    }
+
     /// Convert raw CFA sampling to the prepared RGB grid used by registration
     /// and stacking. Planar RGB and mono frames pass through unchanged. VNG
     /// runs on the GPU where the default [`crate::GpuOptions`] allow it; see
@@ -546,7 +552,9 @@ fn planar_to_interleaved(planar: &[f32], pixel_count: usize) -> Vec<f32> {
 }
 
 /// Write an unstretched stack as a primary-HDU 32-bit floating-point FITS,
-/// or as monolithic XISF when the path ends in `.xisf`.
+/// or as monolithic XISF when the path ends in `.xisf`, with its frame counts
+/// as `STACKCNT` and `STACKREJ` and its [`Acquisition`] as `LIVETIME`
+/// and `FILTER`.
 pub fn write_fits_f32(
     path: impl AsRef<Path>,
     snapshot: &StackSnapshot,
@@ -557,6 +565,7 @@ pub fn write_fits_f32(
         &snapshot.image,
         snapshot.accepted_frames,
         snapshot.rejected_frames,
+        &snapshot.acquisition,
         reference_headers,
     )
 }
@@ -572,7 +581,7 @@ pub fn write_drizzle_fits_f32(
     reference_headers: &[(String, HeaderValue)],
 ) -> Result<()> {
     let headers = drizzle_reference_headers(reference_headers, drizzle.scale);
-    let cards = [
+    let mut cards = vec![
         integer_card("STACKCNT", accepted_frames as i64, "accepted input frames"),
         integer_card("STACKREJ", rejected_frames as i64, "rejected input frames"),
         integer_card(
@@ -581,6 +590,7 @@ pub fn write_drizzle_fits_f32(
             "drizzle output pixels per reference pixel",
         ),
     ];
+    cards.extend(drizzle.acquisition.cards());
     write_linear_image_fits_f32(path, &drizzle.image, &headers, &cards)
 }
 
@@ -596,6 +606,7 @@ pub fn write_stack_export_fits_f32(
         &snapshot.image,
         snapshot.accepted_frames,
         snapshot.rejected_frames,
+        &snapshot.acquisition,
         reference_headers,
     )
 }
@@ -605,6 +616,7 @@ fn write_stack_image_fits_f32(
     image: &LinearImage,
     accepted_frames: u32,
     rejected_frames: u32,
+    acquisition: &Acquisition,
     reference_headers: &[(String, HeaderValue)],
 ) -> Result<()> {
     let mut cards = vec![integer_card(
@@ -617,6 +629,7 @@ fn write_stack_image_fits_f32(
         rejected_frames as i64,
         "rejected input frames",
     ));
+    cards.extend(acquisition.cards());
     // A stack of binned lights says so, as its reference does.
     if let Some(bin) = software_bin(reference_headers) {
         cards.push(integer_card(SOFTWARE_BIN_KEY, bin, SOFTWARE_BIN_COMMENT));
@@ -1134,11 +1147,11 @@ fn integer_card(key: &str, value: i64, comment: &str) -> WriteHeaderCard {
     WriteHeaderCard::new(key, HeaderValue::Integer(value)).with_comment(comment)
 }
 
-fn float_card(key: &str, value: f64, comment: &str) -> WriteHeaderCard {
+pub(crate) fn float_card(key: &str, value: f64, comment: &str) -> WriteHeaderCard {
     WriteHeaderCard::new(key, HeaderValue::Float(value)).with_comment(comment)
 }
 
-fn string_card(key: &str, value: &str, comment: &str) -> WriteHeaderCard {
+pub(crate) fn string_card(key: &str, value: &str, comment: &str) -> WriteHeaderCard {
     WriteHeaderCard::new(key, HeaderValue::String(value.into())).with_comment(comment)
 }
 
@@ -1273,6 +1286,7 @@ fn preserve_processed_key(key: &str) -> bool {
                 | "EXPTIME"
                 | "XPOSURE"
                 | "EXPOSURE"
+                | "LIVETIME"
                 | "BUNIT"
                 | "OBSGEO-X"
                 | "OBSGEO-Y"
@@ -1793,6 +1807,7 @@ mod tests {
             image,
             accepted_frames: 3,
             rejected_frames: 1,
+            acquisition: Default::default(),
         };
         write_fits_f32(&path, &snapshot, &[]).unwrap();
         let decoded = FitsImage::open(&path).unwrap();
