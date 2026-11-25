@@ -521,6 +521,15 @@ and 1.2e-5σ̄ RMS, in 23.0 s against 18.0 s at full size alone, and the CPU
 by 0.025σ̄ and 2.2e-5σ̄, in 281 s against 257 s. Its stars read 0.017 on
 the cos 4θ measure, as the sheet's do.
 
+Two later models of width 128 (167M parameters), their cards naming both
+structure removals and the scaled pass, agree as well on that whole image,
+which lists 287 point sources with both removals, asked 0.46 and 0.45. At f32
+the first differs from the harness by 0.025σ̄ at most and 2.4e-5σ̄ RMS on the
+Core ML GPU and by 0.045σ̄ and 2.9e-5σ̄ on the CPU; the second by 0.028σ̄ and
+2.2e-5σ̄, and by 0.025σ̄ and 2.3e-5σ̄. The scaled pass gives the same numbers,
+and with a roll-off of 1 the RMS is 1.3e-4σ̄ for the first and 3.2e-5σ̄ for the
+second (2026-11-25).
+
 **Half precision loses the stars' cores.** The residual is added in asinh,
 so an error in it is a relative error in the pixel: the f16 graph is right
 to 3.4e-4σ̄ on the sky, and wrong by 0.1 to 0.2% RMS, 0.6% at most, of every
