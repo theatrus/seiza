@@ -347,6 +347,18 @@ exposes the **superset** of what both apps need.
   `FOCALLEN`/`FOCALLENGTH`/`FOCAL` and `XPIXSZ`; explicit caller choices win.
   PSF directions are normalized ellipse major-axis orientations over `[0, π)`
   and are advertised by `majorAxisOrientationsNormalized: true`.
+  `seiza_stars_tilt_frames_json` judges tilt over many frames of one sensor,
+  such as a night's subs: pass each frame's detection response back unchanged
+  in `frames`. Each cell's and sector's HFR is divided by its frame's own
+  median HFR, so focus drift and seeing cancel, and those ratios are combined
+  by median with quartiles over frames. It returns the combined
+  parallelogram and (with `triangleAngleDegrees`) triangle verdicts in the
+  single-frame shapes, plus the spread of the frames' own tilt and how many
+  frames agree on the worst corner or sector. `focalPlane` splits the grid
+  into a tilted plane (`tiltPercent`, `tiltAngleDegrees`) and a radial bowl
+  (`radialPercent`, an upper bound on a backfocus error), with the share of
+  the variation each explains, and every cell reports
+  `elongationFromRadialDegrees`, the backfocus fingerprint.
   For focusing hosts, `seiza_stars_pixel_scale_arcsec` gives a rig's pixel
   scale from its focal length and pixel size, `seiza_stars_classify_pixel_scale`
   the `preset` for that scale, and `seiza_stars_recommend_detection_binning`

@@ -208,11 +208,19 @@ def test_fluxes_and_errors_agree_with_a_photutils_annulus_reduction():
     annuli = aperture.CircularAnnulus(
         POSITIONS, GEOMETRY["annulus_inner"], GEOMETRY["annulus_outer"])
     table = aperture.aperture_photometry(
-        image.astype(float), apertures, error=error.astype(float), method="exact")
+        image.astype(float), apertures, method="exact")
+    # Older photutils releases propagate variance with w instead of w**2.
+    # Use its independently calculated exact overlap masks to propagate the
+    # uncertainty of the weighted sum, independent of photutils version.
+    aperture_variances = [
+        np.sum(aper_mask.multiply(error.astype(float)) ** 2)
+        for aper_mask in apertures.to_mask(method="exact")
+    ]
     sky = aperture.ApertureStats(
         image.astype(float), annuli, sigma_clip=stats.SigmaClip(sigma=3.0, maxiters=10))
     results = seiza.aperture_photometry(image, POSITIONS, uncertainty=error, **GEOMETRY)
-    for result, row, background, scatter in zip(results, table, sky.median, sky.std):
+    for result, row, background, scatter, aperture_variance in zip(
+            results, table, sky.median, sky.std, aperture_variances):
         expected = row["aperture_sum"] - background * apertures.area
         # Two sky estimators on the same pixels: a clipped plane and a
         # clipped median. They differ by less than the error either reports.
@@ -223,17 +231,39 @@ def test_fluxes_and_errors_agree_with_a_photutils_annulus_reduction():
         assert result.background_noise == pytest.approx(sigma, rel=0.2)
         assert scatter > result.background_noise
         # On this nearly symmetric annulus the plane covariance reduces
-        # approximately to the mean-sky term. photutils supplies only the
-        # aperture error, each pixel's variance by its
-        # weight squared; Seiza adds the sky fit's.
+        # approximately to the mean-sky term. Add it to the independently
+        # propagated aperture variance; retain the same 1% sky approximation.
         sky_term = result.aperture_area**2 * result.background_noise**2 / result.annulus_pixels
         assert result.flux_error**2 == pytest.approx(
-            row["aperture_sum_err"] ** 2 + sky_term, rel=0.01)
+            aperture_variance + sky_term, rel=0.01)
     # Without a map, the annulus's own scatter stands in for it.
     plain = seiza.aperture_photometry(image, POSITIONS, **GEOMETRY)
     for result, mapped in zip(plain, results):
         assert result.flux == mapped.flux
         assert result.flux_error == pytest.approx(mapped.flux_error, rel=0.15)
+
+
+@pytest.mark.parametrize("position", [(40.3, 30.7), (1.3, 50.2)])
+@pytest.mark.parametrize("masked", [False, True])
+def test_uncertainty_map_uses_squared_exact_weights(position, masked):
+    aperture = photutils_aperture()
+    # A constant sky isolates the supplied pixel errors from sky-fit noise.
+    image = np.full((HEIGHT, WIDTH), 150.0, np.float32)
+    y, x = np.mgrid[:HEIGHT, :WIDTH]
+    error = (1.0 + x / WIDTH + 2.0 * y / HEIGHT).astype(np.float32)
+    mask = (x % 5 == 0) & (y % 3 == 0) if masked else None
+    weights = aperture.CircularAperture(position, GEOMETRY["aperture_radius"]).to_mask(
+        method="exact").to_image(image.shape)
+    if mask is not None:
+        weights[mask] = 0.0
+    expected_variance = np.sum((weights * error.astype(float)) ** 2)
+    linear_variance = np.sum(weights * error.astype(float) ** 2)
+    assert expected_variance < 0.99 * linear_variance  # Distinguish w**2 from w.
+    result = seiza.aperture_photometry(
+        image, [position], uncertainty=error, mask=mask, **GEOMETRY)[0]
+    assert not result.flags.unusable
+    assert result.background_noise == pytest.approx(0.0, abs=1e-10)
+    assert result.flux_error**2 == pytest.approx(expected_variance, rel=1e-10)
 
 
 def test_asymmetric_annulus_uncertainty_and_post_clip_coverage():

@@ -53,6 +53,26 @@ def test_manual_ghs_exposes_the_reference_parameters() -> None:
     assert stretched[0, 2] == 1.0
 
 
+def test_ht_rescales_where_mtf_shifts() -> None:
+    image = np.linspace(0.0, 1.0, 11, dtype=np.float32)[None]
+    levels = {"shadows": 0.2, "midtone": 0.25, "highlights": 0.8}
+    full = {"shadows": 0.0, "midtone": 0.25, "highlights": 1.0}
+
+    shifted = seiza.stretch(image, model="mtf", **levels)
+    unclipped = seiza.stretch(image, model="mtf", **full)
+    np.testing.assert_allclose(shifted, unclipped, atol=1.0e-6)
+
+    x = np.clip((image.astype(np.float64) - 0.2) / 0.6, 0.0, 1.0)
+    expected = 0.75 * x / (0.5 * x + 0.25)
+    rescaled = seiza.stretch(image, model="ht", **levels)
+    np.testing.assert_allclose(rescaled, expected, atol=1.0e-6)
+    np.testing.assert_allclose(
+        seiza.stretch(image, model="ht", **full), unclipped, atol=1.0e-6
+    )
+    with pytest.raises(seiza.EngineError, match="HT shadows and highlights"):
+        seiza.stretch(image, model="ht", shadows=0.8, highlights=0.2)
+
+
 def test_median_anchor_places_the_median_on_the_target() -> None:
     rng = np.random.default_rng(7)
     image = (0.05 + 0.01 * rng.standard_normal((64, 64))).astype(np.float32)

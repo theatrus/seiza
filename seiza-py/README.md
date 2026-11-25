@@ -230,6 +230,46 @@ and 240°. Per-sector medians remain available for sparse data, but `ready`,
 stars per sector. `overall_median_hfr` is the median of every selected annular
 star, not the median of the sector medians.
 
+One frame's tilt carries that frame's seeing, guiding and wind. To judge it
+over a night's subs, measure each and combine them:
+
+```python
+frames = [seiza.detect_measured_stars_file(path) for path in sub_paths]
+tilt = seiza.multi_frame_tilt_analysis(frames, triangle_angle_degrees=0)
+print(tilt.summary.tilt_percent, tilt.summary.worst_corner)
+print(tilt.worst_corner_frame_count, "of", len(tilt.frames), "frames agree")
+print(tilt.frame_tilt_percent.lower_quartile, tilt.frame_tilt_percent.upper_quartile)
+for cell in tilt.cells:
+    print(cell.row, cell.col, cell.relative_hfr and cell.relative_hfr.median)
+```
+
+Each cell's and sector's HFR is divided by its frame's own median HFR, so
+focus drift and changing seeing cancel, and those ratios are combined by
+median over the frames (`relative_hfr`, with quartiles). A cell or sector
+counts in a frame only with at least 3 stars there. `cells[i].median_hfr` is
+the ratio times `median_frame_hfr`, and `summary` and `triangle.summary` are
+the single-frame verdicts over those values. The frames need not be
+registered, but must share one size; elongation directions pool every star.
+
+`focal_plane` tells tilt from backfocus. It fits the nine cells as
+`constant + tilt_x*u + tilt_y*v + radial*(u**2 + v**2)`, where `(u, v)` is a
+pixel's offset from the sensor's middle over the middle-to-corner distance
+(`u` right, `v` down):
+
+```python
+plane = tilt.focal_plane
+print(plane.tilt_percent, plane.tilt_angle_degrees)  # across the diagonal; 0 up, clockwise
+print(plane.radial_percent)                          # corners vs middle
+print(plane.tilt_r_squared, plane.radial_r_squared, plane.r_squared)
+```
+
+Tilt softens one side and sharpens the other; a backfocus error softens every
+edge alike, and stretches every edge cell's stars the same way, which each
+cell's `elongation_from_radial_degrees` shows (0 toward the middle, 90
+around it). A tilted plane also softens both sides of its in-focus line, so
+`radial_percent` is an upper bound on a backfocus error. Removing the
+`tilt_x` and `tilt_y` terms gives what a spot would show with the tilt fixed.
+
 `detect_measured_stars_file(path, ...)` measures a FITS or XISF file
 directly: its linear 16-bit luminance, with a Bayer mosaic debayered first,
 and with the focal length (`FOCALLEN`, `FOCALLENGTH` or `FOCAL`) and pixel
@@ -304,7 +344,13 @@ target against a comparison ensemble across a series.
   photons, `flux / gain`, when you give `gain` in electrons per sample unit
   (the mean of `n` subs has `n` times one sub's gain). `uncertainty`, a
   float32 map of each pixel's total 1-sigma noise, replaces the first and
-  photon terms with `sum(w²·uncertainty²)`.
+  photon terms with `sum(w²·uncertainty²)`. The squared weights follow from
+  propagating independent pixel errors through the weighted flux sum: a
+  half-covered pixel contributes half its value and one quarter of its
+  variance. Older Photutils releases used linear overlap weights for
+  variance, so their reported aperture errors can be larger even when the
+  flux sums agree. The comparison tests use Photutils' exact overlap masks
+  to check the squared-weight propagation across versions.
 - **What the error is not.** It assumes pixel noise is independent from
   pixel to pixel. Debayered, registered or stacked pixels are correlated,
   and their true error is larger. Scintillation, flat-field error and
@@ -316,6 +362,45 @@ target against a comparison ensemble across a series.
 
 `magnitude` is `-2.5 log10(flux)` with no zero point, and `magnitude_error`
 `2.5 / ln(10) · flux_error / flux`.
+
+### Real-data performance and parity check
+
+[`examples/benchmark_aperture_real_data.py`](examples/benchmark_aperture_real_data.py)
+uses five 20-second Seestar S30 Pro FITS frames supplied by Kai Yung. The
+[`pinned manifest`](examples/v1337-cas-v1.json) records their public Spaces
+URLs, sizes, SHA-256 hashes and fixed pixel positions. The FITS files stay
+outside the repository and normal tests never download them.
+
+Run with an installed Seiza build and NumPy (Python 3.11 or newer):
+
+```sh
+python seiza-py/examples/benchmark_aperture_real_data.py \
+  --data-dir ./target/photometry-data --download --output before.json
+# Install the other revision, built with the same optimized profile.
+python seiza-py/examples/benchmark_aperture_real_data.py \
+  --data-dir ./target/photometry-data --output after.json --compare before.json
+```
+
+Use the same script and manifest for both revisions. Existing local files
+are verified every run; `--download` fetches only missing files (about 83 MB).
+A size or checksum mismatch stops the run. Each result contains every
+measurement field and flag, plus per-round timings and environment metadata.
+`--compare` fails on different inputs or any numerical/flag difference and
+records per-scenario speedups when parity passes. Timing is descriptive,
+not a pass/fail threshold. Use `--iterations 100 --rounds 5` for longer runs;
+the defaults are 20 calls per round and five rounds.
+
+The 60 scenarios cover 1, 8, 9 and 100 positions, with contiguous float32,
+strided RGB green views, and contiguous input with masks and uncertainty
+maps. FITS reads go through Seiza's image I/O; the two green samples in each
+GRBG cell are averaged into a 1080-by-1920 plane. Downloading, decoding and
+green extraction are excluded from timings. The first nine positions are
+distinct detected stars; the 100-position workload cycles the available
+isolated stars. The aperture and annulus radii are 6, 10 and 16 green pixels.
+These are performance and numerical-parity fixtures, not WCS-identified
+comparison stars or a reproduction of Kai's full-night ALP reduction.
+Desktop results do not establish Raspberry Pi performance; run the same
+command on the Pi to measure that host.
 
 ## Measure the PSF field
 
@@ -826,7 +911,9 @@ here.
 Under noise weighting, each accepted frame's `noise` and `weight` list one
 value per channel, and `LiveStacker.reference_noise` gives the reference
 frame's noise, the unit of the weights; under equal weighting they are empty.
-`seiza.frame_noise(image)` measures any linear array the same way. Each
+`seiza.frame_noise(image)` measures any linear array the same way, pixel by
+pixel; [comparing finished masters](#comparing-finished-masters) needs
+`seiza.noise_at_scale`. Each
 accepted frame's `mapping`, and `LiveStacker.reference_mapping` for the
 reference, is a dict of its registration and normalization, to keep beside
 the frame. Superpixel mappings include `channel_sites`, three `[x, y]`
@@ -1359,6 +1446,43 @@ Foraxx-SHO/HOO use a stretched working copy as required by the
 published dynamic formula, so those returned arrays are display-referred.
 Composition releases the GIL.
 
+### Comparing finished masters
+
+`seiza.frame_noise` reads neighbouring pixels, so noise that neighbours share,
+as after drizzle or resampling, reads low: a 2x drizzle's can read 2.7 times
+low. `seiza.noise_at_scale(image, block)` gives the standard deviation of the
+means of `block` by `block` pixels instead. Use blocks of one size on the sky,
+several times the resampling's reach:
+
+```python
+native_noise = seiza.noise_at_scale(native, 8)     # 6" at 0.75"/px
+drizzle_noise = seiza.noise_at_scale(drizzled, 16)  # 6" at 0.375"/px
+```
+
+For independent noise it is `frame_noise / block`. Stars pass, but structure
+that covers much of the image and curves within four blocks reads as noise:
+subtract a deeper image first, or measure a region of sky.
+
+`seiza.match_linear(image, reference)` fits the gain and offset that put a
+master on a registered reference's scale:
+
+```python
+(fit,) = seiza.match_linear(image, reference)
+matched = image * fit.gain + fit.offset
+```
+
+It weighs the noise it measures in both images. A plain regression pulls the
+gain toward 0 as the image's noise grows, and a regression the other way round
+pushes it up as the reference's does. It gives one `ChannelMatch` per channel, with
+`gain_error`, the gain's standard error from the noise, and how many `blocks`
+it used and `rejected`. `gain_error` takes the noise as independent from block
+to block and knows nothing of real differences, such as a gradient. The fit
+reads means of `bin` by `bin` pixels (default 4), leaves out blocks with a
+non-finite sample, a pixel the boolean `mask` excludes or one value in both
+images (an empty border), and clips blocks more than `clip_sigma` (default 3)
+from the line. It raises `StackError` when a channel has too few blocks left,
+or too little signal in common to measure a gain.
+
 ### Parameterized display stretching
 
 `seiza.stretch` applies the shared `seiza-stretch` model to mono `(H, W)` or
@@ -1375,6 +1499,8 @@ preview = seiza.stretch(linear_rgb, model="auto-mtf",
 preview = seiza.stretch(linear, model="ghs", stretch_factor=4,
                         local_intensity=-1, symmetry_point=0.35,
                         protect_shadows=0.1, protect_highlights=0.8)
+preview = seiza.stretch(linear, model="ht", shadows=0.02, midtone=0.1,
+                        highlights=0.8)
 preview = seiza.stretch(linear, model="median-anchor", target_median=0.25,
                         black_point_sigma=2.7, hdr_amount=0.3)
 preview = seiza.stretch(linear_rgb, model="layered", target_background=0.15,
@@ -1383,8 +1509,13 @@ preview = seiza.stretch(linear_rgb, model="layered", target_background=0.15,
 ```
 
 Available models are `identity`, `linear`, `asinh`, `percentile-asinh`, `mtf`,
-manual `ghs`, `auto-mtf`, `median-anchor`, and `layered`; color strategies are `linked`,
-`unlinked`, and `luminance-preserving`. `median-anchor` places the background
+`ht`, manual `ghs`, `auto-mtf`, `median-anchor`, and `layered`; color strategies are `linked`,
+`unlinked`, and `luminance-preserving`. `mtf` and `ht` both take `shadows`,
+`midtone` and `highlights`. `mtf` shifts samples as N.I.N.A. does, the MTF of
+`value - shadows + 1 - highlights`, so shadows 0.2 with highlights 0.8 gives
+the same output as 0 with 1. `ht` clips and rescales as PixInsight's
+HistogramTransformation does, the MTF of
+`(value - shadows) / (highlights - shadows)`, read from a 24-bit table. `median-anchor` places the background
 median exactly on `target_median` (default 0.25; `auto-mtf` defaults to 0.2),
 with the black point `black_point_sigma` robust sigmas below the median
 (`None` uses the image minimum), then optional `curves_boost`, `hdr_amount`

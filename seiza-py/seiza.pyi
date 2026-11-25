@@ -163,6 +163,71 @@ class TriangleTiltSummary:
     best_sector: int | None
     worst_sector: int | None
 
+class FrameSpread:
+    # Over the frames that measured the value.
+    median: float
+    lower_quartile: float
+    upper_quartile: float
+    frame_count: int
+
+class FrameTilt:
+    star_count: int
+    summary: TiltSummary
+    triangle: TriangleTiltSummary | None
+
+class MultiFrameTiltCell:
+    row: int
+    col: int
+    # Stars in the cell over every frame.
+    star_count: int
+    # The cell's HFR over its frame's median HFR, across frames.
+    relative_hfr: FrameSpread | None
+    # relative_hfr.median * MultiFrameTilt.median_frame_hfr, in pixels.
+    median_hfr: float | None
+    median_eccentricity: float | None
+    mean_theta: float | None
+    theta_coherence: float
+    # 0 when stars stretch toward the sensor's middle, 90 when around it.
+    elongation_from_radial_degrees: float | None
+
+class FocalPlaneFit:
+    # constant + tilt_x*u + tilt_y*v + radial*(u**2 + v**2); (u, v) is a pixel's
+    # offset from the sensor's middle over the middle-to-corner distance.
+    constant: float
+    tilt_x: float
+    tilt_y: float
+    radial: float
+    # Across the whole diagonal; the angle it softens toward is 0 up, clockwise.
+    tilt_percent: float
+    tilt_angle_degrees: float
+    # The bowl at a corner: an upper bound on a backfocus error.
+    radial_percent: float
+    tilt_r_squared: float
+    radial_r_squared: float
+    r_squared: float
+
+class MultiFrameTriangleTilt:
+    summary: TriangleTiltSummary
+    ready_frame_count: int
+    # Each sector's HFR over its frame's annulus median, over ready frames.
+    sector_relative_hfr: list[FrameSpread | None]
+    frame_tilt_percent: FrameSpread | None
+    worst_sector_frame_count: int
+
+class MultiFrameTilt:
+    width: int
+    height: int
+    frames: list[FrameTilt]
+    median_frame_hfr: float | None
+    cells: list[MultiFrameTiltCell]
+    summary: TiltSummary
+    frame_tilt_percent: FrameSpread | None
+    frame_curvature_percent: FrameSpread | None
+    # Frames whose own worst corner is summary.worst_corner.
+    worst_corner_frame_count: int
+    triangle: MultiFrameTriangleTilt | None
+    focal_plane: FocalPlaneFit | None
+
 class StarCatalog:
     @staticmethod
     def open(path: str | Path | None = None) -> StarCatalog: ...
@@ -720,6 +785,19 @@ class SnrSample:
     @property
     def snr(self) -> float: ...
 
+class ChannelMatch:
+    """One channel's fit by ``match_linear``: ``reference = gain * image + offset``."""
+    @property
+    def gain(self) -> float: ...
+    @property
+    def offset(self) -> float: ...
+    @property
+    def gain_error(self) -> float: ...
+    @property
+    def blocks(self) -> int: ...
+    @property
+    def rejected(self) -> int: ...
+
 class StackSnapshot:
     def report(self, context: Mapping[str, Any] | None = None) -> dict[str, Any]: ...
     width: int
@@ -1199,6 +1277,11 @@ def triangle_tilt_analysis(
     *,
     angle_degrees: float = 0.0,
 ) -> TriangleTiltSummary: ...
+def multi_frame_tilt_analysis(
+    results: Sequence[StarDetectionResult],
+    *,
+    triangle_angle_degrees: float | None = None,
+) -> MultiFrameTilt: ...
 
 class RcAstroParameter:
     name: str
@@ -2128,6 +2211,17 @@ def integrate_registered_frames(
     gpu: GpuOptions | None = None,
 ) -> tuple[StackSnapshot, list[IntegratedFrame]]: ...
 def frame_noise(image: npt.NDArray[np.float32]) -> list[float] | None: ...
+def noise_at_scale(
+    image: npt.NDArray[np.float32], block: int
+) -> list[float] | None: ...
+def match_linear(
+    image: npt.NDArray[np.float32],
+    reference: npt.NDArray[np.float32],
+    *,
+    mask: npt.NDArray[np.bool_] | None = None,
+    bin: int | None = None,
+    clip_sigma: float = 3.0,
+) -> list[ChannelMatch]: ...
 def probe_frame(path: str | Path) -> FrameProbe: ...
 def plan_calibration(
     kind: str,

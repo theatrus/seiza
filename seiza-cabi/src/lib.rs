@@ -2529,7 +2529,7 @@ pub unsafe extern "C" fn seiza_background_fit(
             ));
         }
         let data = unsafe { required_f32_slice(data, data_length, "background input")? };
-        let mask = unsafe { optional_mask(mask, mask_length)? };
+        let mask = unsafe { optional_mask(mask, mask_length, "background")? };
         let config = background_config(config_json)?;
         let fit = fit_background_masked(data, width, height, channels, mask.as_deref(), &config)
             .map_err(|error| error.to_string())?;
@@ -4797,6 +4797,138 @@ pub unsafe extern "C" fn seiza_frame_noise_json(
 }
 
 #[unsafe(no_mangle)]
+/// Measures a linear image's per-channel noise at the scale of `block` by
+/// `block` pixels: the standard deviation of those blocks' means in the
+/// image's own units. [`seiza_frame_noise_json`] reads neighbouring pixels,
+/// so it under-reads the noise they share after drizzle or resampling. Blocks
+/// several times the resampling's reach take it in, and blocks of one size
+/// on the sky compare images of different pixel scales.
+///
+/// For independent noise it is [`seiza_frame_noise_json`]'s divided by
+/// `block`, and that call's own at 1. Stars pass, but structure that covers
+/// much of the image and curves within four blocks reads as noise.
+///
+/// Returns an owned JSON array with one number per channel, or `null` when
+/// the image has too few whole blocks of finite samples, about 36 by 36.
+/// Free it, or an `error_out` string, with [`seiza_string_free`].
+///
+/// # Safety
+/// As [`seiza_frame_noise_json`].
+pub unsafe extern "C" fn seiza_noise_at_scale_json(
+    data: *const f32,
+    length: usize,
+    width: usize,
+    height: usize,
+    channels: usize,
+    block: usize,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let block = std::num::NonZeroUsize::new(block)
+            .ok_or_else(|| "block must be at least one pixel".to_string())?;
+        let image =
+            unsafe { linear_image_from_ffi(data, length, width, height, channels, "image")? };
+        owned_json(&seiza_stacking::noise_at_scale(&image, block))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+/// Optional camelCase settings of [`seiza_match_linear_json`].
+#[derive(Default, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+struct LinearMatchOptionsJson {
+    bin: Option<std::num::NonZeroUsize>,
+    clip_sigma: Option<f64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChannelMatchJson {
+    gain: f64,
+    offset: f64,
+    gain_error: f64,
+    blocks: usize,
+    rejected: usize,
+}
+
+#[unsafe(no_mangle)]
+/// Fits the gain and offset that put a linear image on a reference's scale,
+/// `reference = gain * image + offset`, for comparing finished masters.
+///
+/// The two images are registered to one grid and share their dimensions,
+/// `channels` being 1 for mono or 3 for interleaved RGB. The fit weighs the
+/// noise it measures in both, so it depends on neither's depth. It reads
+/// means of blocks of pixels and leaves out any block that holds a
+/// non-finite sample or an excluded pixel, or one value in both images, such
+/// as an empty border. Pass null `mask` with zero
+/// `mask_length` to exclude none, or `width * height` bytes where `1`
+/// excludes a pixel. `options_json` is null or
+/// `{"bin": 4, "clipSigma": 3.0}`, either field optional: the blocks' edge in
+/// pixels, and how many robust sigmas from the line a block may lie.
+///
+/// Returns an owned JSON array with one `{"gain", "offset", "gainError",
+/// "blocks", "rejected"}` per channel: `gainError` is the gain's standard
+/// error from the images' noise, taken as independent from block to block,
+/// `blocks` those the fit used and `rejected` those clipping left out. Fails
+/// when a channel has too few blocks after masking and clipping, or too
+/// little signal in common. Free the result, or an `error_out` string,
+/// with [`seiza_string_free`].
+///
+/// # Safety
+/// `image` and `reference` must each point to `length` readable floats,
+/// `width * height * channels` of them. A non-null `mask` must point to
+/// `mask_length` readable bytes containing only zero or one, and a non-null
+/// `options_json` must be a valid NUL-terminated UTF-8 string. When non-null,
+/// `error_out` must point to writable storage for one pointer.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn seiza_match_linear_json(
+    image: *const f32,
+    reference: *const f32,
+    length: usize,
+    width: usize,
+    height: usize,
+    channels: usize,
+    mask: *const u8,
+    mask_length: usize,
+    options_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let image =
+            unsafe { linear_image_from_ffi(image, length, width, height, channels, "image")? };
+        let reference = unsafe {
+            linear_image_from_ffi(reference, length, width, height, channels, "reference")?
+        };
+        let mask = unsafe { optional_mask(mask, mask_length, "match")? };
+        let request: LinearMatchOptionsJson = if options_json.is_null() {
+            Default::default()
+        } else {
+            parse_request(options_json, "linear match")?
+        };
+        let defaults = seiza_stacking::LinearMatchOptions::default();
+        let options = seiza_stacking::LinearMatchOptions {
+            bin: request.bin.unwrap_or(defaults.bin),
+            clip_sigma: request.clip_sigma.unwrap_or(defaults.clip_sigma),
+        };
+        let channels = seiza_stacking::match_linear(&image, &reference, mask.as_deref(), &options)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|channel| ChannelMatchJson {
+                gain: channel.gain,
+                offset: channel.offset,
+                gain_error: channel.gain_error,
+                blocks: channel.blocks,
+                rejected: channel.rejected,
+            })
+            .collect::<Vec<_>>();
+        owned_json(&channels)
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
 /// Load and atomically replace the masters used by later FITS/XISF pushes.
 ///
 /// Each master path is optional. Passing all null/empty paths clears the
@@ -6452,7 +6584,10 @@ pub unsafe extern "C" fn seiza_rendered_image_open_with_rgb_stretch(
 /// `StretchConfig` (the original schema), a non-empty array of configs, or an
 /// object with `stretch`, optional `background`, optional `deconvolution`,
 /// optional `sample_domain`, optional `interactive_preview` and optional
-/// `gpu` fields. `gpu` takes the fields of the `"gpu"` member of
+/// `gpu` fields. A config's `mtf` model shifts samples by its `shadows` and
+/// `highlights` as N.I.N.A. does; its `ht` model takes the same fields, and
+/// clips and rescales as PixInsight's HistogramTransformation does. `gpu`
+/// takes the fields of the `"gpu"` member of
 /// [`seiza_live_stacker_open_fits`]'s options, such as `{"enabled": false}`,
 /// and says whether a raw Bayer frame rendered in physical units is
 /// debayered on the GPU; by default it may be. Array
@@ -9625,7 +9760,59 @@ fn detect_stars_response(
         .map(|angle| seiza_stars::tilt::analyze_triangle(&tilt_stars, width, height, angle))
         .transpose()
         .map_err(|error| error.to_string())?
-        .map(|triangle| TriangleTiltJson {
+        .as_ref()
+        .map(TriangleTiltJson::from);
+    Ok(StarDetectResponse {
+        schema_version: 1,
+        width,
+        height,
+        major_axis_orientations_normalized: true,
+        average_hfr: result.average_hfr,
+        average_fwhm: result.average_fwhm,
+        noise_sigma: result.noise_sigma,
+        background_mean: result.background_mean,
+        stars,
+        cells: cells
+            .iter()
+            .map(|cell| TiltCellJson {
+                row: cell.row,
+                col: cell.col,
+                star_count: cell.star_count,
+                median_hfr: cell.median_hfr,
+                median_eccentricity: cell.median_eccentricity,
+                mean_theta: cell.mean_theta,
+                theta_coherence: cell.theta_coherence,
+            })
+            .collect(),
+        tilt: TiltSummaryJson::from(&summary),
+        triangle_tilt,
+    })
+}
+
+impl From<&seiza_stars::TiltSummary> for TiltSummaryJson {
+    fn from(summary: &seiza_stars::TiltSummary) -> Self {
+        Self {
+            center_hfr: summary.center_hfr,
+            corners: summary
+                .corners
+                .iter()
+                .map(|corner| TiltCornerJson {
+                    corner: corner.corner.as_str(),
+                    hfr: corner.hfr,
+                })
+                .collect(),
+            mean_hfr: summary.mean_hfr,
+            tilt_percent: summary.tilt_percent,
+            curvature_percent: summary.curvature_percent,
+            worst_corner: summary.worst_corner.map(seiza_stars::tilt::Corner::as_str),
+            best_corner: summary.best_corner.map(seiza_stars::tilt::Corner::as_str),
+        }
+    }
+}
+
+impl From<&seiza_stars::TriangleTiltSummary> for TriangleTiltJson {
+    fn from(triangle: &seiza_stars::TriangleTiltSummary) -> Self {
+        Self {
             angle_degrees: triangle.angle_degrees,
             inner_radius_pixels: triangle.inner_radius_pixels,
             outer_radius_pixels: triangle.outer_radius_pixels,
@@ -9649,47 +9836,230 @@ fn detect_stars_response(
             tilt_percent: triangle.tilt_percent,
             best_sector: triangle.best_sector,
             worst_sector: triangle.worst_sector,
-        });
-    Ok(StarDetectResponse {
-        schema_version: 1,
-        width,
-        height,
-        major_axis_orientations_normalized: true,
-        average_hfr: result.average_hfr,
-        average_fwhm: result.average_fwhm,
-        noise_sigma: result.noise_sigma,
-        background_mean: result.background_mean,
-        stars,
-        cells: cells
-            .iter()
-            .map(|cell| TiltCellJson {
-                row: cell.row,
-                col: cell.col,
-                star_count: cell.star_count,
-                median_hfr: cell.median_hfr,
-                median_eccentricity: cell.median_eccentricity,
-                mean_theta: cell.mean_theta,
-                theta_coherence: cell.theta_coherence,
-            })
-            .collect(),
-        tilt: TiltSummaryJson {
-            center_hfr: summary.center_hfr,
-            corners: summary
-                .corners
+        }
+    }
+}
+
+/// The request [`seiza_stars_tilt_frames_json`] takes.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TiltFramesRequest {
+    frames: Vec<TiltFrameRequest>,
+    /// First adjustment-screw axis for the triangle analysis; absent skips it.
+    triangle_angle_degrees: Option<f64>,
+}
+
+/// One frame of [`TiltFramesRequest`]. Other fields are ignored, so a
+/// `seiza_stars_detect_*_json` response passes as a frame unchanged.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TiltFrameRequest {
+    width: usize,
+    height: usize,
+    stars: Vec<TiltStarRequest>,
+}
+
+/// One star of [`TiltFrameRequest`], with the fields a detected star has.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TiltStarRequest {
+    x: f64,
+    y: f64,
+    hfr: f64,
+    eccentricity: Option<f64>,
+    theta: Option<f64>,
+}
+
+impl TiltStarRequest {
+    fn tilt_star(&self) -> seiza_stars::TiltStar {
+        seiza_stars::TiltStar {
+            x: self.x,
+            y: self.y,
+            hfr: self.hfr,
+            eccentricity: self.eccentricity.unwrap_or(0.0),
+            theta: self.theta,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FrameSpreadJson {
+    median: f64,
+    lower_quartile: f64,
+    upper_quartile: f64,
+    frame_count: usize,
+}
+
+impl From<seiza_stars::FrameSpread> for FrameSpreadJson {
+    fn from(spread: seiza_stars::FrameSpread) -> Self {
+        Self {
+            median: spread.median,
+            lower_quartile: spread.lower_quartile,
+            upper_quartile: spread.upper_quartile,
+            frame_count: spread.frame_count,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FrameTiltJson {
+    star_count: usize,
+    summary: TiltSummaryJson,
+    triangle: Option<TriangleTiltJson>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MultiFrameCellJson {
+    row: usize,
+    col: usize,
+    star_count: usize,
+    relative_hfr: Option<FrameSpreadJson>,
+    median_hfr: Option<f64>,
+    median_eccentricity: Option<f64>,
+    mean_theta: Option<f64>,
+    theta_coherence: f64,
+    elongation_from_radial_degrees: Option<f64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FocalPlaneFitJson {
+    constant: f64,
+    tilt_x: f64,
+    tilt_y: f64,
+    radial: f64,
+    tilt_percent: f64,
+    tilt_angle_degrees: f64,
+    radial_percent: f64,
+    tilt_r_squared: f64,
+    radial_r_squared: f64,
+    r_squared: f64,
+}
+
+impl From<&seiza_stars::FocalPlaneFit> for FocalPlaneFitJson {
+    fn from(fit: &seiza_stars::FocalPlaneFit) -> Self {
+        Self {
+            constant: fit.constant,
+            tilt_x: fit.tilt_x,
+            tilt_y: fit.tilt_y,
+            radial: fit.radial,
+            tilt_percent: fit.tilt_percent,
+            tilt_angle_degrees: fit.tilt_angle_degrees,
+            radial_percent: fit.radial_percent,
+            tilt_r_squared: fit.tilt_r_squared,
+            radial_r_squared: fit.radial_r_squared,
+            r_squared: fit.r_squared,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MultiFrameTriangleTiltJson {
+    summary: TriangleTiltJson,
+    ready_frame_count: usize,
+    sector_relative_hfr: Vec<Option<FrameSpreadJson>>,
+    frame_tilt_percent: Option<FrameSpreadJson>,
+    worst_sector_frame_count: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MultiFrameTiltResponse {
+    schema_version: u32,
+    width: usize,
+    height: usize,
+    frames: Vec<FrameTiltJson>,
+    median_frame_hfr: Option<f64>,
+    cells: Vec<MultiFrameCellJson>,
+    summary: TiltSummaryJson,
+    frame_tilt_percent: Option<FrameSpreadJson>,
+    frame_curvature_percent: Option<FrameSpreadJson>,
+    worst_corner_frame_count: usize,
+    triangle: Option<MultiFrameTriangleTiltJson>,
+    focal_plane: Option<FocalPlaneFitJson>,
+}
+
+impl From<&seiza_stars::MultiFrameTilt> for MultiFrameTiltResponse {
+    fn from(tilt: &seiza_stars::MultiFrameTilt) -> Self {
+        Self {
+            schema_version: 1,
+            width: tilt.width,
+            height: tilt.height,
+            frames: tilt
+                .frames
                 .iter()
-                .map(|corner| TiltCornerJson {
-                    corner: corner.corner.as_str(),
-                    hfr: corner.hfr,
+                .map(|frame| FrameTiltJson {
+                    star_count: frame.star_count,
+                    summary: TiltSummaryJson::from(&frame.summary),
+                    triangle: frame.triangle.as_ref().map(TriangleTiltJson::from),
                 })
                 .collect(),
-            mean_hfr: summary.mean_hfr,
-            tilt_percent: summary.tilt_percent,
-            curvature_percent: summary.curvature_percent,
-            worst_corner: summary.worst_corner.map(seiza_stars::tilt::Corner::as_str),
-            best_corner: summary.best_corner.map(seiza_stars::tilt::Corner::as_str),
-        },
-        triangle_tilt,
-    })
+            median_frame_hfr: tilt.median_frame_hfr,
+            cells: tilt
+                .cells
+                .iter()
+                .map(|cell| MultiFrameCellJson {
+                    row: cell.row,
+                    col: cell.col,
+                    star_count: cell.star_count,
+                    relative_hfr: cell.relative_hfr.map(FrameSpreadJson::from),
+                    median_hfr: cell.median_hfr,
+                    median_eccentricity: cell.median_eccentricity,
+                    mean_theta: cell.mean_theta,
+                    theta_coherence: cell.theta_coherence,
+                    elongation_from_radial_degrees: cell.elongation_from_radial_degrees,
+                })
+                .collect(),
+            summary: TiltSummaryJson::from(&tilt.summary),
+            frame_tilt_percent: tilt.frame_tilt_percent.map(FrameSpreadJson::from),
+            frame_curvature_percent: tilt.frame_curvature_percent.map(FrameSpreadJson::from),
+            worst_corner_frame_count: tilt.worst_corner_frame_count,
+            triangle: tilt
+                .triangle
+                .as_ref()
+                .map(|triangle| MultiFrameTriangleTiltJson {
+                    summary: TriangleTiltJson::from(&triangle.summary),
+                    ready_frame_count: triangle.ready_frame_count,
+                    sector_relative_hfr: triangle
+                        .sector_relative_hfr
+                        .iter()
+                        .map(|spread| spread.map(FrameSpreadJson::from))
+                        .collect(),
+                    frame_tilt_percent: triangle.frame_tilt_percent.map(FrameSpreadJson::from),
+                    worst_sector_frame_count: triangle.worst_sector_frame_count,
+                }),
+            focal_plane: tilt.focal_plane.as_ref().map(FocalPlaneFitJson::from),
+        }
+    }
+}
+
+/// Run [`seiza_stars::analyze_frames`] over a parsed request.
+fn tilt_frames_response(request: &TiltFramesRequest) -> Result<MultiFrameTiltResponse, String> {
+    let stars: Vec<Vec<seiza_stars::TiltStar>> = request
+        .frames
+        .iter()
+        .map(|frame| frame.stars.iter().map(TiltStarRequest::tilt_star).collect())
+        .collect();
+    let frames: Vec<seiza_stars::TiltFrame<'_>> = request
+        .frames
+        .iter()
+        .zip(&stars)
+        .map(|(frame, stars)| seiza_stars::TiltFrame {
+            width: frame.width,
+            height: frame.height,
+            stars,
+        })
+        .collect();
+    let options = seiza_stars::MultiFrameTiltOptions {
+        triangle_angle_degrees: request.triangle_angle_degrees,
+    };
+    seiza_stars::analyze_frames(&frames, &options)
+        .map(|tilt| MultiFrameTiltResponse::from(&tilt))
+        .map_err(|error| error.to_string())
 }
 
 fn owned_json(value: &impl Serialize) -> Result<*mut c_char, String> {
@@ -9727,17 +10097,21 @@ unsafe fn required_f32_slice_mut<'a>(
     Ok(unsafe { std::slice::from_raw_parts_mut(data, length) })
 }
 
-unsafe fn optional_mask(mask: *const u8, length: usize) -> Result<Option<Vec<bool>>, String> {
+unsafe fn optional_mask(
+    mask: *const u8,
+    length: usize,
+    name: &str,
+) -> Result<Option<Vec<bool>>, String> {
     if mask.is_null() {
         return if length == 0 {
             Ok(None)
         } else {
-            Err("background mask is null but mask_length is non-zero".into())
+            Err(format!("{name} mask is null but mask_length is non-zero"))
         };
     }
     let bytes = unsafe { std::slice::from_raw_parts(mask, length) };
     if bytes.iter().any(|value| *value > 1) {
-        return Err("background mask entries must be zero or one".into());
+        return Err(format!("{name} mask entries must be zero or one"));
     }
     Ok(Some(bytes.iter().map(|value| *value != 0).collect()))
 }
@@ -15692,6 +16066,87 @@ mod tests {
     }
 
     #[test]
+    fn tilt_over_many_frames_over_the_c_surface() {
+        // Four stars in each cell of a 300×300 frame; the top-left corner
+        // is 25% softer, and focus differs from frame to frame. The extra
+        // fields a detection response carries ride along and are ignored.
+        let frame = |focus: f64| {
+            let mut stars = Vec::new();
+            for row in 0..3 {
+                for col in 0..3 {
+                    for index in 0..4 {
+                        let offset = 20.0 + 15.0 * index as f64;
+                        let tilt = if (row, col) == (0, 0) { 1.25 } else { 1.0 };
+                        stars.push(json!({
+                            "x": col as f64 * 100.0 + offset,
+                            "y": row as f64 * 100.0 + offset,
+                            "hfr": focus * tilt,
+                            "fwhm": 2.0 * focus * tilt,
+                            "eccentricity": 0.3,
+                            "theta": 0.5,
+                        }));
+                    }
+                }
+            }
+            json!({"schemaVersion": 1, "width": 300, "height": 300, "stars": stars})
+        };
+        let request = json!({
+            "frames": [frame(2.0), frame(3.0), frame(4.0)],
+            "triangleAngleDegrees": 0,
+        });
+        let parsed = call_json(seiza_stars_tilt_frames_json, &request).unwrap();
+        assert_eq!(parsed["schemaVersion"], 1);
+        assert_eq!(parsed["width"], 300);
+        assert_eq!(parsed["frames"].as_array().unwrap().len(), 3);
+        assert_eq!(parsed["frames"][0]["starCount"], 36);
+        assert!(parsed["frames"][0]["triangle"].is_object());
+        assert_eq!(parsed["medianFrameHfr"], 3.0);
+        let cells = parsed["cells"].as_array().unwrap();
+        assert_eq!(cells.len(), 9);
+        assert_eq!(cells[0]["starCount"], 12);
+        assert_eq!(cells[0]["relativeHfr"]["frameCount"], 3);
+        let relative = cells[0]["relativeHfr"]["median"].as_f64().unwrap();
+        assert!(relative > 1.2 && relative <= 1.25, "{relative}");
+        assert!((cells[0]["meanTheta"].as_f64().unwrap() - 0.5).abs() < 1e-9);
+        assert_eq!(parsed["summary"]["worstCorner"], "top-left");
+        assert!(parsed["summary"]["tiltPercent"].as_f64().unwrap() > 20.0);
+        assert_eq!(parsed["worstCornerFrameCount"], 3);
+        assert_eq!(parsed["frameTiltPercent"]["frameCount"], 3);
+        let triangle = &parsed["triangle"];
+        assert!(triangle["summary"]["sectors"].is_array());
+        assert_eq!(triangle["sectorRelativeHfr"].as_array().unwrap().len(), 3);
+        // One soft corner: a plane softening toward the top left, plus some bowl.
+        let plane = &parsed["focalPlane"];
+        let angle = plane["tiltAngleDegrees"].as_f64().unwrap();
+        assert!((270.0..360.0).contains(&angle), "{angle}");
+        assert!(plane["tiltPercent"].as_f64().unwrap() > 0.0);
+        for field in [
+            "constant",
+            "tiltX",
+            "tiltY",
+            "radial",
+            "radialPercent",
+            "rSquared",
+        ] {
+            assert!(plane[field].is_number(), "{field}");
+        }
+        // Stars stretched at 0.5 rad, the top-left cell's middle at 45 degrees.
+        let from_radial = cells[0]["elongationFromRadialDegrees"].as_f64().unwrap();
+        assert!((from_radial - (45.0 - 0.5_f64.to_degrees())).abs() < 1e-9);
+        assert!(cells[4]["elongationFromRadialDegrees"].is_null());
+
+        let mismatched =
+            json!({"frames": [frame(2.0), {"width": 300, "height": 200, "stars": []}]});
+        let message = call_json(seiza_stars_tilt_frames_json, &mismatched).unwrap_err();
+        assert!(message.contains("frame 1 is 300x200"), "{message}");
+        let message = call_json(seiza_stars_tilt_frames_json, &json!({"frames": []})).unwrap_err();
+        assert!(message.contains("at least one frame"), "{message}");
+        let typo = json!({"frames": [frame(2.0)], "triangleAngle": 0});
+        let message = call_json(seiza_stars_tilt_frames_json, &typo).unwrap_err();
+        assert!(message.contains("unknown field"), "{message}");
+    }
+
+    #[test]
     fn star_detection_target_star_count_retries_toward_the_target() {
         // A grid of small faint stars that strict binned-and-blurred
         // detection misses: the adaptive ladder's native-resolution rung
@@ -16331,6 +16786,85 @@ mod tests {
     }
 
     #[test]
+    fn noise_at_scale_and_linear_matching_cross_the_abi() {
+        let (width, height) = (320_usize, 256_usize);
+        let mut state = 0x9e37_79b9_u32;
+        let mut unit = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) as f32 / (1 << 24) as f32 - 0.5
+        };
+        let reference = (0..width * height)
+            .map(|index| {
+                let (x, y) = ((index % width) as f32, (index / width) as f32);
+                100.0 + 20.0 * (x / 40.0).sin() * (y / 50.0).cos() + unit()
+            })
+            .collect::<Vec<_>>();
+        let image = reference
+            .iter()
+            .map(|value| (value - 30.0) / 2.0 + unit())
+            .collect::<Vec<_>>();
+        let mut error = ptr::null_mut();
+        let noise = |block, error: &mut *mut c_char| unsafe {
+            seiza_noise_at_scale_json(image.as_ptr(), image.len(), width, height, 1, block, error)
+        };
+        let one = owned_json_value(noise(1, &mut error));
+        let frame = owned_json_value(unsafe {
+            seiza_frame_noise_json(image.as_ptr(), image.len(), width, height, 1, &mut error)
+        });
+        assert_eq!(one, frame);
+        assert!(owned_json_value(noise(4, &mut error))[0].as_f64().unwrap() > 0.0);
+        assert_eq!(owned_json_value(noise(128, &mut error)), Value::Null);
+        assert!(noise(0, &mut error).is_null());
+        unsafe { seiza_string_free(error) };
+        error = ptr::null_mut();
+
+        let fit = |mask: &[u8], options: &str, error: &mut *mut c_char| {
+            let options = CString::new(options).unwrap();
+            let mask_pointer = if mask.is_empty() {
+                ptr::null()
+            } else {
+                mask.as_ptr()
+            };
+            unsafe {
+                seiza_match_linear_json(
+                    image.as_ptr(),
+                    reference.as_ptr(),
+                    image.len(),
+                    width,
+                    height,
+                    1,
+                    mask_pointer,
+                    mask.len(),
+                    options.as_ptr(),
+                    error,
+                )
+            }
+        };
+        let whole = owned_json_value(fit(&[], "{}", &mut error));
+        assert!((whole[0]["gain"].as_f64().unwrap() - 2.0).abs() < 0.02);
+        assert!((whole[0]["offset"].as_f64().unwrap() - 30.0).abs() < 1.0);
+        assert!(whole[0]["gainError"].as_f64().unwrap() > 0.0);
+        let total =
+            |fit: &Value| fit[0]["blocks"].as_u64().unwrap() + fit[0]["rejected"].as_u64().unwrap();
+        assert_eq!(total(&whole), 80 * 64);
+        let mut mask = vec![0_u8; width * height];
+        mask[..width * 16].fill(1);
+        let masked = owned_json_value(fit(&mask, r#"{"bin": 4, "clipSigma": 4.0}"#, &mut error));
+        assert_eq!(total(&masked), 80 * 60);
+        for (mask, options) in [
+            (&mask[..], r#"{"bin": 0}"#),
+            (&mask[..], r#"{"clipSigma": -1.0}"#),
+            (&mask[..], r#"{"clip_sigma": 3.0}"#),
+            (&mask[..10], "{}"),
+        ] {
+            assert!(fit(mask, options, &mut error).is_null());
+            assert!(!error.is_null());
+            unsafe { seiza_string_free(error) };
+            error = ptr::null_mut();
+        }
+    }
+
+    #[test]
     fn renders_a_fits_with_a_parameterized_stretch_config() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("test.fits");
@@ -16353,6 +16887,26 @@ mod tests {
         let metadata: Value = serde_json::from_str(image.metadata_json.to_str().unwrap()).unwrap();
         assert_eq!(metadata["format"], "FITS");
         assert!(metadata["displayHistogram"].is_object());
+    }
+
+    #[test]
+    fn renders_the_ht_stretch_clipped_and_rescaled() {
+        let fits = FitsImage {
+            width: 3,
+            height: 1,
+            planes: 1,
+            pixels: seiza_fits::Pixels::F32(vec![0.1, 0.5, 0.9]),
+            headers: Vec::new(),
+        };
+        let request: StretchConfigRequest = serde_json::from_value(json!({
+            "model": {"type": "ht", "shadows": 0.2, "midtone": 0.25, "highlights": 0.8},
+            "color_strategy": "linked",
+            "max_analysis_samples": 4096
+        }))
+        .unwrap();
+        let image = render_fits_with_stack(fits, &request.into_stack(), 0).unwrap();
+        let levels = image.rgba.iter().step_by(4).copied().collect::<Vec<_>>();
+        assert_eq!(levels, [0, 191, 255]);
     }
 
     #[test]
@@ -18734,6 +19288,70 @@ pub unsafe extern "C" fn seiza_stars_detect_path_json(
             options,
             frame_optics,
         )?)
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+/// Measure sensor tilt and field curvature over many frames of one sensor.
+///
+/// A single frame's tilt carries that frame's seeing, guiding and wind. This
+/// analyses each frame as [`seiza_stars_detect_luma_u16_json`] does, then
+/// combines them: each grid cell's (and triangle sector's) HFR is divided by
+/// its frame's own median HFR, so focus drift and changing seeing cancel,
+/// and those ratios are combined by median over the frames. Elongation
+/// directions pool every star of every frame.
+///
+/// `request_json` is
+/// `{"frames": [{"width", "height", "stars": [{"x", "y", "hfr",
+/// "eccentricity"?, "theta"?}]}], "triangleAngleDegrees"?}`. Other fields
+/// of a frame or star are ignored, so each frame may be a
+/// `seiza_stars_detect_*_json` response passed back unchanged. Every frame
+/// must have the first frame's size: the frames need not be registered, but
+/// they must come from one sensor at one binning. A cell or sector counts in
+/// a frame only with at least 3 stars there.
+///
+/// The returned schema-1 JSON has `width`, `height`, `medianFrameHfr` (the
+/// median over frames of each frame's median cell HFR), and:
+/// - `cells`: nine cells, row by row, each with `starCount` over all frames,
+///   `relativeHfr` (`median`, `lowerQuartile`, `upperQuartile`,
+///   `frameCount` of the cell's HFR over its frame's), `medianHfr`
+///   (`relativeHfr.median * medianFrameHfr`), and the pooled
+///   `medianEccentricity`, `meanTheta` and `thetaCoherence`.
+/// - `summary`: the parallelogram verdict, shaped as the detection
+///   response's `tilt`, over the cells' `medianHfr`.
+/// - `frameTiltPercent` and `frameCurvaturePercent`: the spread of the
+///   frames' own verdicts; `worstCornerFrameCount`: frames whose own worst
+///   corner is `summary.worstCorner`.
+/// - `frames`: each frame's `starCount`, `summary` and `triangle`.
+/// - `triangle`, when `triangleAngleDegrees` was given: `summary` (shaped as
+///   the detection response's `triangleTilt`, combined over the frames whose
+///   own triangle was ready), `readyFrameCount`, `sectorRelativeHfr`,
+///   `frameTiltPercent` and `worstSectorFrameCount`.
+/// - `focalPlane`, when all nine cells have a `relativeHfr`: the cells split
+///   into a tilted plane and a radial bowl, `constant + tiltX·u + tiltY·v +
+///   radial·(u² + v²)`, with `(u, v)` a pixel's offset from the sensor's
+///   middle over the middle-to-corner distance (`u` right, `v` down).
+///   `tiltPercent` is the plane's change across the whole diagonal and
+///   `tiltAngleDegrees` the direction it softens toward (0 up, clockwise);
+///   `radialPercent` is the bowl at a corner, an upper bound on a backfocus
+///   error. `tiltRSquared`, `radialRSquared` and `rSquared` are the shares of
+///   the cells' variation the plane, the bowl and both explain. Each cell
+///   also has `elongationFromRadialDegrees`, 0 when its stars stretch toward
+///   the middle and 90 when around it.
+///
+/// # Safety
+///
+/// `request_json` must be a NUL-terminated UTF-8 string. `error_out` must be
+/// null or point to writable storage for one pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_stars_tilt_frames_json(
+    request_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let request: TiltFramesRequest = parse_request(request_json, "tilt frames")?;
+        owned_json(&tilt_frames_response(&request)?)
     })
     .unwrap_or(ptr::null_mut())
 }

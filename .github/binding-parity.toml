@@ -241,6 +241,12 @@ transform = { none = "flattened into scale, rotation_degrees, translation_x and 
 [rust.RegionResponse]
 core = "seiza-stacking::ReferenceRegion"
 
+[rust.LinearMatchOptionsJson]
+core = "seiza-stacking::LinearMatchOptions"
+
+[rust.ChannelMatchJson]
+core = "seiza-stacking::ChannelMatch"
+
 [rust.SeizaSnrSample]
 core = "seiza-stacking::SnrSample"
 
@@ -337,6 +343,33 @@ core = "seiza-stars::TriangleSectorStats"
 
 [rust.TriangleTiltJson]
 core = "seiza-stars::TriangleTiltSummary"
+
+[rust.TiltFramesRequest]
+core = "seiza-stars::MultiFrameTiltOptions"
+
+[rust.TiltFrameRequest]
+core = "seiza-stars::TiltFrame"
+
+[rust.TiltStarRequest]
+core = "seiza-stars::TiltStar"
+
+[rust.FrameSpreadJson]
+core = "seiza-stars::FrameSpread"
+
+[rust.FrameTiltJson]
+core = "seiza-stars::FrameTilt"
+
+[rust.MultiFrameCellJson]
+core = "seiza-stars::MultiFrameCell"
+
+[rust.MultiFrameTriangleTiltJson]
+core = "seiza-stars::MultiFrameTriangleTilt"
+
+[rust.MultiFrameTiltResponse]
+core = "seiza-stars::MultiFrameTilt"
+
+[rust.FocalPlaneFitJson]
+core = "seiza-stars::FocalPlaneFit"
 
 [rust.PsfFieldOptionsRequest]
 core = "seiza-stars::PsfFieldOptions"
@@ -701,6 +734,8 @@ seiza_live_stacker_open_prepared_fits = "LiveStacker.open_prepared_fits"
 seiza_live_stacker_reference_noise_json = "LiveStacker.reference_noise"
 seiza_live_stacker_reference_mapping_json = "LiveStacker.reference_mapping"
 seiza_frame_noise_json = "frame_noise"
+seiza_noise_at_scale_json = "noise_at_scale"
+seiza_match_linear_json = "match_linear"
 seiza_live_stacker_save_context = "LiveStacker.save_context"
 seiza_live_stacker_push_linear_json = "LiveStacker.push"
 seiza_live_stacker_push_fits_json = "LiveStacker.push_fits"
@@ -884,6 +919,7 @@ seiza_catalog_status_json = { none = "catalog readiness for the apps' setup scre
 # --- stars ------------------------------------------------------------------
 seiza_stars_detect_luma_u16_json = "detect_measured_stars"
 seiza_stars_detect_path_json = "detect_measured_stars_file"
+seiza_stars_tilt_frames_json = "multi_frame_tilt_analysis"
 seiza_stars_pixel_scale_arcsec = "pixel_scale_arcsec"
 seiza_stars_classify_pixel_scale = "classify_pixel_scale"
 seiza_stars_recommend_detection_binning = "recommend_detection_binning"

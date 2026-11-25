@@ -194,8 +194,9 @@ impl PSFFunction for GaussianPSF {
         // d/dsigma_y
         grad[5] = a * exp_arg * yp * yp / (sy2 * sigma_y);
 
-        // d/dtheta
-        grad[6] = a * exp_arg * xp * yp * (1.0 / sx2 - 1.0 / sy2);
+        // d/dtheta: d(xp)/dθ = yp and d(yp)/dθ = −xp, so
+        // d(arg)/dθ = −xp·yp·(1/σx² − 1/σy²).
+        grad[6] = a * exp_arg * xp * yp * (1.0 / sy2 - 1.0 / sx2);
     }
 
     fn sigma_to_fwhm(&self, sigma: f64) -> f64 {
@@ -483,6 +484,72 @@ impl LevenbergMarquardt {
     }
 }
 
+/// Where the elliptical fit starts: centre offset, axes and rotation.
+#[derive(Debug, Clone, Copy)]
+struct InitialShape {
+    x0: f64,
+    y0: f64,
+    sigma_x: f64,
+    sigma_y: f64,
+    theta: f64,
+}
+
+impl InitialShape {
+    /// The star's shape from adaptive second moments, with the model's X
+    /// axis on the major axis.
+    ///
+    /// A round start leaves the fit no way to turn: at `sigma_x == sigma_y`
+    /// the residual's derivative in theta is exactly zero, and a star
+    /// elongated near 45° keeps both axis-aligned widths equal, so the fit
+    /// settles on a round star (#505). Starting from the moments puts it
+    /// on the right ellipse already.
+    #[allow(clippy::too_many_arguments)]
+    fn from_moments(
+        data: &[u16],
+        width: usize,
+        height: usize,
+        center_x: f64,
+        center_y: f64,
+        radius: f64,
+        background: f64,
+        initial_sigma: f64,
+        psf: &dyn PSFFunction,
+    ) -> Option<Self> {
+        let value = |x: isize, y: isize| {
+            if x < 0 || y < 0 || x as usize >= width || y as usize >= height {
+                background
+            } else {
+                data[y as usize * width + x as usize] as f64
+            }
+        };
+        let moments = crate::psf_field::adaptive_moments(
+            value,
+            center_x,
+            center_y,
+            radius,
+            background,
+            initial_sigma,
+        )?;
+        let half_trace = 0.5 * (moments.xx + moments.yy);
+        let spread = (0.25 * (moments.xx - moments.yy).powi(2) + moments.xy.powi(2)).sqrt();
+        let major = half_trace + spread;
+        let minor = half_trace - spread;
+        if !(major.is_finite() && minor > 0.0) {
+            return None;
+        }
+        // The moments give a Gaussian's sigma; match the model's FWHM to it.
+        let gaussian_fwhm = 2.0 * (2.0 * 2.0_f64.ln()).sqrt();
+        let scale = gaussian_fwhm / psf.sigma_to_fwhm(1.0);
+        Some(Self {
+            x0: moments.x - center_x,
+            y0: moments.y - center_y,
+            sigma_x: major.sqrt() * scale,
+            sigma_y: minor.sqrt() * scale,
+            theta: 0.5 * (2.0 * moments.xy).atan2(moments.xx - moments.yy),
+        })
+    }
+}
+
 /// Type alias for residual map data (observed, fitted, residuals)
 pub type ResidualMaps = (Vec<Vec<f64>>, Vec<Vec<f64>>, Vec<Vec<f64>>);
 
@@ -542,30 +609,51 @@ impl PSFFitter {
             PSFType::None => unreachable!(),
         };
 
-        // Initial parameters: [A, B, x0, y0, sigma_x, sigma_y, theta]
-        let initial_params = vec![
-            peak_brightness - background, // Amplitude
-            background,                   // Background
-            0.0,                          // x0 (centered)
-            0.0,                          // y0 (centered)
-            bbox_width / 3.0,             // sigma_x
-            bbox_height / 3.0,            // sigma_y
-            0.0,                          // theta
-        ];
-
         // Bounds
         let dx_limit = bbox_width / 8.0;
         let dy_limit = bbox_height / 8.0;
         let sigma_max = ((bbox_width * bbox_width + bbox_height * bbox_height).sqrt()) / 2.0;
 
+        // Initial parameters: [A, B, x0, y0, sigma_x, sigma_y, theta]
+        let start = InitialShape::from_moments(
+            data,
+            width,
+            height,
+            center_x,
+            center_y,
+            self.roi_size as f64 / 2.0,
+            background,
+            (bbox_width.max(bbox_height) / 3.0).max(1.0),
+            &*psf,
+        )
+        .unwrap_or(InitialShape {
+            x0: 0.0,
+            y0: 0.0,
+            sigma_x: bbox_width / 3.0,
+            sigma_y: bbox_height / 3.0,
+            theta: 0.0,
+        });
+        let initial_params = vec![
+            peak_brightness - background, // Amplitude
+            background,                   // Background
+            start.x0.clamp(-dx_limit, dx_limit),
+            start.y0.clamp(-dy_limit, dy_limit),
+            start.sigma_x.clamp(0.1, sigma_max.max(0.1)),
+            start.sigma_y.clamp(0.1, sigma_max.max(0.1)),
+            start.theta,
+        ];
+
+        // Theta is periodic, so its bounds sit a half turn beyond any start
+        // in (−π/2, π/2]: a star elongated near ±90° must be able to rotate
+        // past it rather than stop against a bound.
         let lower_bounds = vec![
-            0.0,       // A must be positive
-            0.0,       // B must be positive
-            -dx_limit, // x0
-            -dy_limit, // y0
-            0.1,       // sigma_x minimum
-            0.1,       // sigma_y minimum
-            -PI / 2.0, // theta
+            0.0,             // A must be positive
+            0.0,             // B must be positive
+            -dx_limit,       // x0
+            -dy_limit,       // y0
+            0.1,             // sigma_x minimum
+            0.1,             // sigma_y minimum
+            -3.0 * PI / 2.0, // theta
         ];
 
         let upper_bounds = vec![
@@ -575,7 +663,7 @@ impl PSFFitter {
             dy_limit,                             // y0
             sigma_max,                            // sigma_x max
             sigma_max,                            // sigma_y max
-            PI / 2.0,                             // theta
+            3.0 * PI / 2.0,                       // theta
         ];
 
         // Fit the model
@@ -616,7 +704,8 @@ impl PSFFitter {
                     y0: fitted_params[3],
                     sigma_x: fitted_params[4].abs(),
                     sigma_y: fitted_params[5].abs(),
-                    theta: fitted_params[6],
+                    // An ellipse repeats every half turn.
+                    theta: (fitted_params[6] + PI / 2.0).rem_euclid(PI) - PI / 2.0,
                     r_squared,
                     rmse,
                     fwhm: 0.0,
@@ -780,5 +869,93 @@ mod tests {
         let wrapped_negative = model(3.0, 1.0, -PI / 4.0);
         assert!((wrapped_negative.major_axis_theta() - 3.0 * PI / 4.0).abs() < 1e-12);
         assert!((0.0..PI).contains(&wrapped_negative.major_axis_theta()));
+    }
+
+    #[test]
+    fn gradients_match_finite_differences() {
+        let params = [900.0, 100.0, 0.3, -0.2, 3.0, 1.5, 0.6];
+        let psfs: [(&str, &dyn PSFFunction); 2] =
+            [("gaussian", &GaussianPSF), ("moffat4", &Moffat4PSF)];
+        for (name, psf) in psfs {
+            for &(x, y) in &[(1.0, 2.0), (-2.5, 0.7), (0.4, -3.1)] {
+                let mut grad = [0.0; 7];
+                psf.gradient(x, y, &params, &mut grad);
+                for i in 0..7 {
+                    let h = 1e-6 * params[i].abs().max(1.0);
+                    let (mut up, mut down) = (params, params);
+                    up[i] += h;
+                    down[i] -= h;
+                    let numeric = (psf.value(x, y, &up) - psf.value(x, y, &down)) / (2.0 * h);
+                    assert!(
+                        (grad[i] - numeric).abs() <= 1e-5 * numeric.abs().max(1.0),
+                        "{name} d/dp{i} at ({x}, {y}): analytic {} numeric {numeric}",
+                        grad[i]
+                    );
+                }
+            }
+        }
+    }
+
+    /// One elliptical Gaussian star, σ = 3.0 × 1.5 px, its major axis at
+    /// `angle`, on a flat sky with a little deterministic noise.
+    fn elongated_star(angle: f64) -> (Vec<u16>, usize, f64, f64) {
+        let size = 64;
+        let (cx, cy) = (31.3, 32.6);
+        let (cos, sin) = (angle.cos(), angle.sin());
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let data = (0..size * size)
+            .map(|i| {
+                let (dx, dy) = ((i % size) as f64 - cx, (i / size) as f64 - cy);
+                let u = dx * cos + dy * sin;
+                let v = -dx * sin + dy * cos;
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let noise = (state >> 11) as f64 / (1u64 << 53) as f64 - 0.5;
+                let star = 20_000.0 * (-0.5 * (u * u / 9.0 + v * v / 2.25)).exp();
+                (1000.0 + star + 20.0 * noise).round() as u16
+            })
+            .collect();
+        (data, size, cx, cy)
+    }
+
+    /// #505: the fit started round with theta 0, where the residual does not
+    /// change with theta, so stars elongated near 45° came back round.
+    #[test]
+    fn recovers_elongation_at_every_angle() {
+        let truth = (1.0_f64 - 0.25).sqrt();
+        for psf_type in [PSFType::Gaussian, PSFType::Moffat4] {
+            for degrees in [0.0_f64, 22.5, 45.0, 67.5, 90.0, 112.5, 135.0, 157.5] {
+                let angle = degrees.to_radians();
+                let (data, size, cx, cy) = elongated_star(angle);
+                // Detection hands over a rounded centroid and a square box.
+                let model = PSFFitter::new(psf_type)
+                    .fit_star(
+                        &data,
+                        size,
+                        size,
+                        cx.round(),
+                        cy.round(),
+                        16.0,
+                        16.0,
+                        1000.0,
+                        21_000.0,
+                    )
+                    .unwrap_or_else(|| panic!("{psf_type:?} at {degrees}° did not fit"));
+                assert!(
+                    (model.eccentricity - truth).abs() < 0.05,
+                    "{psf_type:?} at {degrees}°: eccentricity {} (truth {truth})",
+                    model.eccentricity
+                );
+                let fitted = model.major_axis_theta();
+                let error = (fitted - angle + PI / 2.0).rem_euclid(PI) - PI / 2.0;
+                assert!(
+                    error.abs() < 3.0_f64.to_radians(),
+                    "{psf_type:?} at {degrees}°: major axis at {}°",
+                    fitted.to_degrees()
+                );
+                assert!((-PI / 2.0..PI / 2.0).contains(&model.theta));
+            }
+        }
     }
 }

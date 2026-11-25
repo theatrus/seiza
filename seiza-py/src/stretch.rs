@@ -9,6 +9,12 @@ use seiza_stretch::{
 
 /// Stretch a linear image with the selected model and color strategy.
 ///
+/// ``shadows``, ``midtone`` and ``highlights`` set two models. ``"mtf"``
+/// shifts samples by the clipping points and does not rescale them, as
+/// N.I.N.A. does. ``"ht"`` clips to them and rescales that range to 0 to 1
+/// before the curve, as PixInsight's HistogramTransformation does, and reads
+/// the curve from a 24-bit table.
+///
 /// The input array is read in place while the GIL is released; do not mutate
 /// it from another thread until the call returns.
 #[pyfunction]
@@ -67,6 +73,11 @@ fn stretch<'py>(
             midtone,
             highlights,
         },
+        "ht" => StretchModel::Ht {
+            shadows,
+            midtone,
+            highlights,
+        },
         "ghs" => StretchModel::Ghs(GhsParams {
             stretch_factor,
             local_intensity,
@@ -100,7 +111,7 @@ fn stretch<'py>(
         }),
         _ => {
             return Err(PyValueError::new_err(
-                "model must be identity, linear, asinh, percentile-asinh, mtf, ghs, auto-mtf, median-anchor, or layered",
+                "model must be identity, linear, asinh, percentile-asinh, mtf, ht, ghs, auto-mtf, median-anchor, or layered",
             ));
         }
     };

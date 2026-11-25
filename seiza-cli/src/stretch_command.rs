@@ -164,13 +164,27 @@ enum StretchModelArgs {
         #[arg(long, default_value_t = 10.0)]
         strength: f64,
     },
-    /// Apply explicit PixInsight/N.I.N.A.-family MTF parameters
+    /// Apply an explicit MTF as N.I.N.A. does: the clipping points shift the
+    /// samples and do not rescale them
     Mtf {
         #[arg(long)]
         shadows: f64,
         #[arg(long)]
         midtone: f64,
         #[arg(long)]
+        highlights: f64,
+    },
+    /// Apply PixInsight's HistogramTransformation: clip, rescale to 0-1, then
+    /// apply the MTF
+    Ht {
+        /// Input level that maps to 0
+        #[arg(long, default_value_t = 0.0, allow_negative_numbers = true)]
+        shadows: f64,
+        /// Midtones balance, at least 0 and below 1; 0.5 is linear
+        #[arg(long, default_value_t = 0.5)]
+        midtone: f64,
+        /// Input level that maps to 1
+        #[arg(long, default_value_t = 1.0, allow_negative_numbers = true)]
         highlights: f64,
     },
     /// Apply a manual Generalized Hyperbolic Stretch
@@ -292,6 +306,15 @@ impl StretchModelArgs {
                 midtone,
                 highlights,
             },
+            Self::Ht {
+                shadows,
+                midtone,
+                highlights,
+            } => StretchModel::Ht {
+                shadows,
+                midtone,
+                highlights,
+            },
             Self::Ghs {
                 stretch_factor,
                 local_intensity,
@@ -375,6 +398,13 @@ impl StretchModelArgs {
                 midtone,
                 highlights,
             } => format!("MTF shadows {shadows}, midtone {midtone}, highlights {highlights}"),
+            Self::Ht {
+                shadows,
+                midtone,
+                highlights,
+            } => format!(
+                "histogram transformation shadows {shadows}, midtone {midtone}, highlights {highlights}"
+            ),
             Self::Ghs {
                 stretch_factor,
                 local_intensity,

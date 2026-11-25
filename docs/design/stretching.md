@@ -17,7 +17,7 @@ let plan = config.resolve(&analysis)?;
 let display_f32 = plan.apply_f32(samples, channels)?;
 ```
 
-Explicit identity, linear, asinh, MTF, and GHS requests can skip the first
+Explicit identity, linear, asinh, MTF, HT, and GHS requests can skip the first
 phase with `config.resolve_explicit(channels)`. Percentile-asinh, Auto-MTF,
 median anchor and layered require analysis. This keeps later informed auto modes separate from their
 deterministic application curves.
@@ -70,7 +70,21 @@ layered stage rather than guess the image's size.
 - `Asinh` applies a parameterized asinh curve after explicit range mapping.
 - `PercentileAsinh` resolves the black and white points from bounded robust
   percentiles before applying asinh. This is the former stack/color preview.
-- `Mtf` applies explicit shadows, midtone, and highlights parameters.
+- `Mtf` applies explicit shadows, midtone, and highlights parameters as
+  N.I.N.A. does, the MTF of `value - shadows + 1 - highlights`. The clipping
+  points shift the samples and do not rescale them, so shadows 0.2 with
+  highlights 0.8 gives the same output as 0 with 1. Auto-MTF resolves to it.
+- `Ht` takes the same parameters and applies them as PixInsight's
+  HistogramTransformation does: it clips, rescales, then takes the MTF of
+  `(value - shadows) / (highlights - shadows)`. The clipping points are in the
+  samples' own units. Seiza reads the MTF from a 24-bit lookup table: it takes
+  the rescaled sample to the nearest of 2²⁴ evenly spaced levels. A table is
+  64 MiB, so a call builds one for a midtone only when it will read it at least
+  2²⁶ times, and frees it on return; other calls work out the levels, to the
+  same bits. A steep curve shows the rounding: at midtone 0.001 it moves the
+  output by up to 3e-5, two 16-bit steps. `Mtf` and Auto-MTF have no table.
+  `Ht` is a model of its own rather than an option on `Mtf`
+  so that a build without it refuses the JSON instead of ignoring the option.
 - `Ghs` applies the documented Generalized Hyperbolic Stretch with explicit
   stretch factor, local intensity, symmetry point, shadow/highlight protection,
   and input black/white points. The equations and parameter ranges follow the
@@ -200,7 +214,7 @@ an explicit output-format decision, not an incidental refactor.
   maps a stack's ADU onto 0 to 1 before a model that takes its levels from
   the data (percentile asinh, Auto-MTF, median anchor, layered): their
   curves place highlights at 1, so ADU fed straight in come out black or
-  white. Explicit levels (linear, asinh, MTF, GHS) stay in the samples'
+  white. Explicit levels (linear, asinh, MTF, HT, GHS) stay in the samples'
   own units unless `--sample-domain physical` asks otherwise.
   `seiza color-calibrate --display` does the same for its display stretch.
 - The C ABI renders its stretch configuration through the shape-aware

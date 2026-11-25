@@ -90,7 +90,8 @@ pub(crate) struct PyTiltCell {
 /// Parallelogram corner-vs-center tilt and curvature verdict. Corner names
 /// are kebab-case: ``top-left``, ``top-right``, ``bottom-left``,
 /// ``bottom-right``.
-#[pyclass(name = "TiltSummary", module = "seiza", frozen)]
+#[pyclass(skip_from_py_object, name = "TiltSummary", module = "seiza", frozen)]
+#[derive(Clone)]
 pub(crate) struct PyTiltSummary {
     #[pyo3(get)]
     center_hfr: Option<f64>,
@@ -146,7 +147,13 @@ pub(crate) struct PyTriangleTiltSector {
 }
 
 /// Native triangle-sector tilt analysis and its confidence provenance.
-#[pyclass(name = "TriangleTiltSummary", module = "seiza", frozen)]
+#[pyclass(
+    skip_from_py_object,
+    name = "TriangleTiltSummary",
+    module = "seiza",
+    frozen
+)]
+#[derive(Clone)]
 pub(crate) struct PyTriangleTiltSummary {
     #[pyo3(get)]
     angle_degrees: f64,
@@ -432,6 +439,58 @@ fn tilt_stars(result: &PyStarDetectionResult) -> Vec<tilt::TiltStar> {
         .collect()
 }
 
+impl From<&tilt::TiltSummary> for PyTiltSummary {
+    fn from(summary: &tilt::TiltSummary) -> Self {
+        Self {
+            center_hfr: summary.center_hfr,
+            corners: summary
+                .corners
+                .iter()
+                .map(|corner| (corner.corner.as_str().to_string(), corner.hfr))
+                .collect(),
+            mean_hfr: summary.mean_hfr,
+            tilt_percent: summary.tilt_percent,
+            curvature_percent: summary.curvature_percent,
+            worst_corner: summary
+                .worst_corner
+                .map(|corner| corner.as_str().to_string()),
+            best_corner: summary
+                .best_corner
+                .map(|corner| corner.as_str().to_string()),
+        }
+    }
+}
+
+impl From<&tilt::TriangleTiltSummary> for PyTriangleTiltSummary {
+    fn from(summary: &tilt::TriangleTiltSummary) -> Self {
+        Self {
+            angle_degrees: summary.angle_degrees,
+            inner_radius_pixels: summary.inner_radius_pixels,
+            outer_radius_pixels: summary.outer_radius_pixels,
+            minimum_stars_per_region: summary.minimum_stars_per_region,
+            ready: summary.ready,
+            center: PyTriangleTiltCenter {
+                star_count: summary.center.star_count,
+                median_hfr: summary.center.median_hfr,
+            },
+            sectors: summary
+                .sectors
+                .iter()
+                .map(|sector| PyTriangleTiltSector {
+                    sector: sector.sector,
+                    axis_angle_degrees: sector.axis_angle_degrees,
+                    star_count: sector.star_count,
+                    median_hfr: sector.median_hfr,
+                })
+                .collect(),
+            overall_median_hfr: summary.overall_median_hfr,
+            tilt_percent: summary.tilt_percent,
+            best_sector: summary.best_sector,
+            worst_sector: summary.worst_sector,
+        }
+    }
+}
+
 /// Parallelogram sensor-tilt and field-curvature analysis over a detection
 /// result: the 3×3 grid's per-cell statistics and the corner-vs-center
 /// verdict. Stars without a fitted PSF contribute HFR but no direction.
@@ -453,23 +512,7 @@ fn tilt_analysis(result: &PyStarDetectionResult) -> PyResult<(Vec<PyTiltCell>, P
                 theta_coherence: cell.theta_coherence,
             })
             .collect(),
-        PyTiltSummary {
-            center_hfr: summary.center_hfr,
-            corners: summary
-                .corners
-                .iter()
-                .map(|corner| (corner.corner.as_str().to_string(), corner.hfr))
-                .collect(),
-            mean_hfr: summary.mean_hfr,
-            tilt_percent: summary.tilt_percent,
-            curvature_percent: summary.curvature_percent,
-            worst_corner: summary
-                .worst_corner
-                .map(|corner| corner.as_str().to_string()),
-            best_corner: summary
-                .best_corner
-                .map(|corner| corner.as_str().to_string()),
-        },
+        PyTiltSummary::from(&summary),
     ))
 }
 
@@ -492,31 +535,262 @@ fn triangle_tilt_analysis(
     let stars = tilt_stars(result);
     let summary = tilt::analyze_triangle(&stars, result.width, result.height, angle_degrees)
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
-    Ok(PyTriangleTiltSummary {
-        angle_degrees: summary.angle_degrees,
-        inner_radius_pixels: summary.inner_radius_pixels,
-        outer_radius_pixels: summary.outer_radius_pixels,
-        minimum_stars_per_region: summary.minimum_stars_per_region,
-        ready: summary.ready,
-        center: PyTriangleTiltCenter {
-            star_count: summary.center.star_count,
-            median_hfr: summary.center.median_hfr,
-        },
-        sectors: summary
-            .sectors
-            .iter()
-            .map(|sector| PyTriangleTiltSector {
-                sector: sector.sector,
-                axis_angle_degrees: sector.axis_angle_degrees,
-                star_count: sector.star_count,
-                median_hfr: sector.median_hfr,
-            })
-            .collect(),
-        overall_median_hfr: summary.overall_median_hfr,
-        tilt_percent: summary.tilt_percent,
-        best_sector: summary.best_sector,
-        worst_sector: summary.worst_sector,
-    })
+    Ok(PyTriangleTiltSummary::from(&summary))
+}
+
+/// How one value spread across the frames that measured it.
+#[pyclass(skip_from_py_object, name = "FrameSpread", module = "seiza", frozen)]
+#[derive(Clone)]
+pub(crate) struct PyFrameSpread {
+    #[pyo3(get)]
+    median: f64,
+    #[pyo3(get)]
+    lower_quartile: f64,
+    #[pyo3(get)]
+    upper_quartile: f64,
+    #[pyo3(get)]
+    frame_count: usize,
+}
+
+impl From<tilt::FrameSpread> for PyFrameSpread {
+    fn from(spread: tilt::FrameSpread) -> Self {
+        Self {
+            median: spread.median,
+            lower_quartile: spread.lower_quartile,
+            upper_quartile: spread.upper_quartile,
+            frame_count: spread.frame_count,
+        }
+    }
+}
+
+/// One frame's own verdicts within a multi-frame tilt analysis.
+#[pyclass(skip_from_py_object, name = "FrameTilt", module = "seiza", frozen)]
+#[derive(Clone)]
+pub(crate) struct PyFrameTilt {
+    #[pyo3(get)]
+    star_count: usize,
+    #[pyo3(get)]
+    summary: PyTiltSummary,
+    #[pyo3(get)]
+    triangle: Option<PyTriangleTiltSummary>,
+}
+
+/// One 3×3 grid cell over many frames.
+#[pyclass(
+    skip_from_py_object,
+    name = "MultiFrameTiltCell",
+    module = "seiza",
+    frozen
+)]
+#[derive(Clone)]
+pub(crate) struct PyMultiFrameTiltCell {
+    #[pyo3(get)]
+    row: usize,
+    #[pyo3(get)]
+    col: usize,
+    #[pyo3(get)]
+    star_count: usize,
+    #[pyo3(get)]
+    relative_hfr: Option<PyFrameSpread>,
+    #[pyo3(get)]
+    median_hfr: Option<f64>,
+    #[pyo3(get)]
+    median_eccentricity: Option<f64>,
+    #[pyo3(get)]
+    mean_theta: Option<f64>,
+    #[pyo3(get)]
+    theta_coherence: f64,
+    #[pyo3(get)]
+    elongation_from_radial_degrees: Option<f64>,
+}
+
+/// The grid split into a tilted plane and a radial bowl:
+/// ``constant + tilt_x*u + tilt_y*v + radial*(u**2 + v**2)``, with ``(u, v)`` a
+/// pixel's offset from the sensor's middle over the middle-to-corner
+/// distance (``u`` right, ``v`` down).
+#[pyclass(skip_from_py_object, name = "FocalPlaneFit", module = "seiza", frozen)]
+#[derive(Clone)]
+pub(crate) struct PyFocalPlaneFit {
+    #[pyo3(get)]
+    constant: f64,
+    #[pyo3(get)]
+    tilt_x: f64,
+    #[pyo3(get)]
+    tilt_y: f64,
+    #[pyo3(get)]
+    radial: f64,
+    #[pyo3(get)]
+    tilt_percent: f64,
+    #[pyo3(get)]
+    tilt_angle_degrees: f64,
+    #[pyo3(get)]
+    radial_percent: f64,
+    #[pyo3(get)]
+    tilt_r_squared: f64,
+    #[pyo3(get)]
+    radial_r_squared: f64,
+    #[pyo3(get)]
+    r_squared: f64,
+}
+
+impl From<&tilt::FocalPlaneFit> for PyFocalPlaneFit {
+    fn from(fit: &tilt::FocalPlaneFit) -> Self {
+        Self {
+            constant: fit.constant,
+            tilt_x: fit.tilt_x,
+            tilt_y: fit.tilt_y,
+            radial: fit.radial,
+            tilt_percent: fit.tilt_percent,
+            tilt_angle_degrees: fit.tilt_angle_degrees,
+            radial_percent: fit.radial_percent,
+            tilt_r_squared: fit.tilt_r_squared,
+            radial_r_squared: fit.radial_r_squared,
+            r_squared: fit.r_squared,
+        }
+    }
+}
+
+/// The triangle tilt analysis over many frames.
+#[pyclass(
+    skip_from_py_object,
+    name = "MultiFrameTriangleTilt",
+    module = "seiza",
+    frozen
+)]
+#[derive(Clone)]
+pub(crate) struct PyMultiFrameTriangleTilt {
+    #[pyo3(get)]
+    summary: PyTriangleTiltSummary,
+    #[pyo3(get)]
+    ready_frame_count: usize,
+    #[pyo3(get)]
+    sector_relative_hfr: Vec<Option<PyFrameSpread>>,
+    #[pyo3(get)]
+    frame_tilt_percent: Option<PyFrameSpread>,
+    #[pyo3(get)]
+    worst_sector_frame_count: usize,
+}
+
+/// Sensor tilt and field curvature measured over many frames.
+#[pyclass(name = "MultiFrameTilt", module = "seiza", frozen)]
+pub(crate) struct PyMultiFrameTilt {
+    #[pyo3(get)]
+    width: usize,
+    #[pyo3(get)]
+    height: usize,
+    #[pyo3(get)]
+    frames: Vec<PyFrameTilt>,
+    #[pyo3(get)]
+    median_frame_hfr: Option<f64>,
+    #[pyo3(get)]
+    cells: Vec<PyMultiFrameTiltCell>,
+    #[pyo3(get)]
+    summary: PyTiltSummary,
+    #[pyo3(get)]
+    frame_tilt_percent: Option<PyFrameSpread>,
+    #[pyo3(get)]
+    frame_curvature_percent: Option<PyFrameSpread>,
+    #[pyo3(get)]
+    worst_corner_frame_count: usize,
+    #[pyo3(get)]
+    triangle: Option<PyMultiFrameTriangleTilt>,
+    #[pyo3(get)]
+    focal_plane: Option<PyFocalPlaneFit>,
+}
+
+impl From<&tilt::MultiFrameTilt> for PyMultiFrameTilt {
+    fn from(result: &tilt::MultiFrameTilt) -> Self {
+        Self {
+            width: result.width,
+            height: result.height,
+            frames: result
+                .frames
+                .iter()
+                .map(|frame| PyFrameTilt {
+                    star_count: frame.star_count,
+                    summary: PyTiltSummary::from(&frame.summary),
+                    triangle: frame.triangle.as_ref().map(PyTriangleTiltSummary::from),
+                })
+                .collect(),
+            median_frame_hfr: result.median_frame_hfr,
+            cells: result
+                .cells
+                .iter()
+                .map(|cell| PyMultiFrameTiltCell {
+                    row: cell.row,
+                    col: cell.col,
+                    star_count: cell.star_count,
+                    relative_hfr: cell.relative_hfr.map(PyFrameSpread::from),
+                    median_hfr: cell.median_hfr,
+                    median_eccentricity: cell.median_eccentricity,
+                    mean_theta: cell.mean_theta,
+                    theta_coherence: cell.theta_coherence,
+                    elongation_from_radial_degrees: cell.elongation_from_radial_degrees,
+                })
+                .collect(),
+            summary: PyTiltSummary::from(&result.summary),
+            frame_tilt_percent: result.frame_tilt_percent.map(PyFrameSpread::from),
+            frame_curvature_percent: result.frame_curvature_percent.map(PyFrameSpread::from),
+            worst_corner_frame_count: result.worst_corner_frame_count,
+            triangle: result
+                .triangle
+                .as_ref()
+                .map(|triangle| PyMultiFrameTriangleTilt {
+                    summary: PyTriangleTiltSummary::from(&triangle.summary),
+                    ready_frame_count: triangle.ready_frame_count,
+                    sector_relative_hfr: triangle
+                        .sector_relative_hfr
+                        .iter()
+                        .map(|spread| spread.map(PyFrameSpread::from))
+                        .collect(),
+                    frame_tilt_percent: triangle.frame_tilt_percent.map(PyFrameSpread::from),
+                    worst_sector_frame_count: triangle.worst_sector_frame_count,
+                }),
+            focal_plane: result.focal_plane.as_ref().map(PyFocalPlaneFit::from),
+        }
+    }
+}
+
+/// Sensor tilt and field curvature over many detection results from one
+/// sensor, such as a night's subs.
+///
+/// Each frame is analysed as :func:`tilt_analysis` and
+/// :func:`triangle_tilt_analysis` do. Each cell's (and sector's) HFR is then
+/// divided by its frame's own median HFR, so focus drift and changing seeing
+/// cancel, and the ratios are combined by median over the frames; a cell or
+/// sector counts in a frame only with at least 3 stars there. Elongation
+/// directions pool every star. The frames need not be registered, but must
+/// share one size. ``triangle_angle_degrees`` adds the triangle analysis.
+#[pyfunction]
+#[pyo3(signature = (results, *, triangle_angle_degrees=None))]
+fn multi_frame_tilt_analysis(
+    py: Python<'_>,
+    results: Vec<PyRef<'_, PyStarDetectionResult>>,
+    triangle_angle_degrees: Option<f64>,
+) -> PyResult<PyMultiFrameTilt> {
+    let stars: Vec<Vec<tilt::TiltStar>> = results.iter().map(|result| tilt_stars(result)).collect();
+    let sizes: Vec<(usize, usize)> = results
+        .iter()
+        .map(|result| (result.width, result.height))
+        .collect();
+    let options = tilt::MultiFrameTiltOptions {
+        triangle_angle_degrees,
+    };
+    let result = py
+        .detach(|| {
+            let frames: Vec<tilt::TiltFrame<'_>> = sizes
+                .iter()
+                .zip(&stars)
+                .map(|(&(width, height), stars)| tilt::TiltFrame {
+                    width,
+                    height,
+                    stars,
+                })
+                .collect();
+            tilt::analyze_frames(&frames, &options)
+        })
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    Ok(PyMultiFrameTilt::from(&result))
 }
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -527,6 +801,12 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyTriangleTiltCenter>()?;
     module.add_class::<PyTriangleTiltSector>()?;
     module.add_class::<PyTriangleTiltSummary>()?;
+    module.add_class::<PyFrameSpread>()?;
+    module.add_class::<PyFrameTilt>()?;
+    module.add_class::<PyMultiFrameTiltCell>()?;
+    module.add_class::<PyMultiFrameTriangleTilt>()?;
+    module.add_class::<PyMultiFrameTilt>()?;
+    module.add_class::<PyFocalPlaneFit>()?;
     module.add_function(wrap_pyfunction!(detect_measured_stars, module)?)?;
     module.add_function(wrap_pyfunction!(detect_measured_stars_file, module)?)?;
     module.add_function(wrap_pyfunction!(pixel_scale_arcsec, module)?)?;
@@ -534,5 +814,6 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(recommend_detection_binning, module)?)?;
     module.add_function(wrap_pyfunction!(tilt_analysis, module)?)?;
     module.add_function(wrap_pyfunction!(triangle_tilt_analysis, module)?)?;
+    module.add_function(wrap_pyfunction!(multi_frame_tilt_analysis, module)?)?;
     Ok(())
 }
