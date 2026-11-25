@@ -399,6 +399,41 @@ impl PyWcs {
         self.wcs.world_to_pixel(ra, dec)
     }
 
+    /// :meth:`pixel_to_world` of every pixel in the arrays ``x`` and ``y``,
+    /// which share a shape: ``(ra_deg, dec_deg)`` as ``float64`` arrays of
+    /// that shape. The GIL is released while they are mapped.
+    fn pixel_to_world_array<'py>(
+        &self,
+        py: Python<'py>,
+        x: numpy::PyReadonlyArrayDyn<'py, f64>,
+        y: numpy::PyReadonlyArrayDyn<'py, f64>,
+    ) -> PyResult<CoordinateArrays<'py>> {
+        let pairs = coordinate_pairs(&x, &y)?;
+        let world = py.detach(|| self.wcs.pixel_to_world_many(&pairs));
+        coordinate_arrays(py, x.shape(), world.into_iter())
+    }
+
+    /// :meth:`world_to_pixel` of every position in the arrays ``ra`` and
+    /// ``dec`` (degrees), which share a shape: ``(x, y)`` as ``float64``
+    /// arrays of that shape, NaN for a position on the far hemisphere. The
+    /// GIL is released while they are mapped.
+    fn world_to_pixel_array<'py>(
+        &self,
+        py: Python<'py>,
+        ra: numpy::PyReadonlyArrayDyn<'py, f64>,
+        dec: numpy::PyReadonlyArrayDyn<'py, f64>,
+    ) -> PyResult<CoordinateArrays<'py>> {
+        let pairs = coordinate_pairs(&ra, &dec)?;
+        let pixels = py.detach(|| self.wcs.world_to_pixel_many(&pairs));
+        coordinate_arrays(
+            py,
+            ra.shape(),
+            pixels
+                .into_iter()
+                .map(|pixel| pixel.unwrap_or((f64::NAN, f64::NAN))),
+        )
+    }
+
     /// The sky positions of the four image corners for `(width, height)`.
     fn footprint(&self, width: u32, height: u32) -> Vec<(f64, f64)> {
         self.wcs.footprint(width, height).to_vec()
@@ -569,6 +604,47 @@ impl PySolution {
             self.rms_arcsec,
         )
     }
+}
+
+/// Two NumPy coordinate arrays of one shape: RA and Dec, or x and y.
+type CoordinateArrays<'py> = (
+    Bound<'py, numpy::PyArrayDyn<f64>>,
+    Bound<'py, numpy::PyArrayDyn<f64>>,
+);
+
+/// The pairs of two coordinate arrays of one shape, in C order.
+fn coordinate_pairs(
+    first: &numpy::PyReadonlyArrayDyn<'_, f64>,
+    second: &numpy::PyReadonlyArrayDyn<'_, f64>,
+) -> PyResult<Vec<(f64, f64)>> {
+    if first.shape() != second.shape() {
+        return Err(PyValueError::new_err(format!(
+            "coordinate arrays must share a shape, not {:?} and {:?}",
+            first.shape(),
+            second.shape()
+        )));
+    }
+    Ok(first
+        .as_array()
+        .iter()
+        .zip(second.as_array().iter())
+        .map(|(&a, &b)| (a, b))
+        .collect())
+}
+
+/// Two `float64` arrays of `shape` from coordinate pairs in C order.
+fn coordinate_arrays<'py>(
+    py: Python<'py>,
+    shape: &[usize],
+    pairs: impl Iterator<Item = (f64, f64)>,
+) -> PyResult<CoordinateArrays<'py>> {
+    let (first, second): (Vec<f64>, Vec<f64>) = pairs.unzip();
+    let array = |values: Vec<f64>| {
+        numpy::ndarray::ArrayD::from_shape_vec(numpy::ndarray::IxDyn(shape), values)
+            .map(|array| numpy::IntoPyArray::into_pyarray(array, py))
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))
+    };
+    Ok((array(first)?, array(second)?))
 }
 
 fn solution_to_py(solution: seiza::solve::Solution, dimensions: (u32, u32)) -> PySolution {

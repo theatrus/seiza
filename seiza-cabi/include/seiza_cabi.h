@@ -3098,6 +3098,94 @@ bool seiza_read_image_window(const char *path,
 double seiza_wcs_rotation_degrees(const char *wcs_json, char **error_out);
 
 /*
+ Map `count` pixel coordinates through a WCS to sky positions in one
+ call. `wcs_json` is a WCS as [`seiza_wcs_fits_header_json`] takes it.
+ `pixels` holds `count` pairs `x, y`, counting from 0 with centres on
+ whole numbers; `world_out` receives `count` pairs `ra, dec` in degrees.
+ The two may be the same buffer. Returns false with `error_out` set on an
+ invalid WCS or buffer; free that string with [`seiza_string_free`].
+
+ # Safety
+ `wcs_json` must be a valid NUL-terminated UTF-8 string. Unless `count`
+ is 0, `pixels` must point to `2 * count` readable doubles and
+ `world_out` to `2 * count` writable ones. When non-null, `error_out`
+ must point to writable storage for one pointer.
+ */
+bool seiza_wcs_pixel_to_world(const char *wcs_json,
+                              const double *pixels,
+                              size_t count,
+                              double *world_out,
+                              char **error_out);
+
+/*
+ Map `count` sky positions through a WCS to pixel coordinates in one
+ call, the inverse of [`seiza_wcs_pixel_to_world`]. `world` holds `count`
+ pairs `ra, dec` in degrees; `pixels_out` receives `count` pairs `x, y`,
+ NaN for a position on or behind the tangent-plane horizon. The two may
+ be the same buffer. Returns false with `error_out` set on an invalid
+ WCS or buffer; free that string with [`seiza_string_free`].
+
+ # Safety
+ `wcs_json` must be a valid NUL-terminated UTF-8 string. Unless `count`
+ is 0, `world` must point to `2 * count` readable doubles and
+ `pixels_out` to `2 * count` writable ones. When non-null, `error_out`
+ must point to writable storage for one pointer.
+ */
+bool seiza_wcs_world_to_pixel(const char *wcs_json,
+                              const double *world,
+                              size_t count,
+                              double *pixels_out,
+                              char **error_out);
+
+/*
+ Resample an image solved by `from_wcs_json` onto an `output_width` ×
+ `output_height` grid solved by `to_wcs_json`, as
+ `seiza_stacking::reproject` does: each output pixel's sky position
+ comes from the output WCS and its source pixel from the source WCS,
+ SIP included on both sides, so the two may differ in scale, rotation,
+ parity and distortion. For a north-up grid, give the output WCS a
+ rotation of 0. Both WCSs are as [`seiza_wcs_fits_header_json`] takes
+ them.
+
+ `samples` holds `width * height * channels` interleaved floats (1 or 3
+ channels), rows in stored order; a non-finite sample counts as
+ missing. `options_json`, when non-null, is `{"interpolation":
+ "bilinear" | "lanczos3", "antialias": bool}`: with `antialias` (the
+ default) an output coarser than the source averages
+ `ceil(output scale / source scale)` samples a side per pixel, up to 16,
+ rather than aliasing.
+
+ `image_out` receives `output_width * output_height * channels` floats,
+ NaN where nothing of the source lands, and `coverage_out`, when
+ non-null, `output_width * output_height` floats: the share of each
+ pixel's samples that landed on finite source samples. Returns false
+ with `error_out` set on invalid input; free that string with
+ [`seiza_string_free`].
+
+ # Safety
+ `samples` must point to `length` readable floats, and `image_out` to
+ `image_length` writable ones. A non-null `coverage_out` must point to
+ `coverage_length` writable floats. Both WCS arguments, and a non-null
+ `options_json`, must be valid NUL-terminated UTF-8 strings. When
+ non-null, `error_out` must point to writable storage for one pointer.
+ */
+bool seiza_reproject(const float *samples,
+                     size_t length,
+                     size_t width,
+                     size_t height,
+                     size_t channels,
+                     const char *from_wcs_json,
+                     const char *to_wcs_json,
+                     size_t output_width,
+                     size_t output_height,
+                     const char *options_json,
+                     float *image_out,
+                     size_t image_length,
+                     float *coverage_out,
+                     size_t coverage_length,
+                     char **error_out);
+
+/*
  A WCS as FITS header cards. `wcs_json` is a WCS as
  [`seiza_solve_image_json`] returns it: `crval`, `crpix`, `cd`, an
  optional `sip` and an optional `pixelOrigin` (0, the default, when

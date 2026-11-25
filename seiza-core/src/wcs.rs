@@ -225,6 +225,23 @@ impl Wcs {
         Some((self.crpix.0 + dx, self.crpix.1 + dy))
     }
 
+    /// [`Self::pixel_to_world`] of each pixel coordinate, in order.
+    pub fn pixel_to_world_many(&self, pixels: &[(f64, f64)]) -> Vec<(f64, f64)> {
+        pixels
+            .iter()
+            .map(|&(x, y)| self.pixel_to_world(x, y))
+            .collect()
+    }
+
+    /// [`Self::world_to_pixel`] of each sky position (RA, Dec, degrees), in
+    /// order: `None` for a position on or behind the tangent-plane horizon.
+    pub fn world_to_pixel_many(&self, positions: &[(f64, f64)]) -> Vec<Option<(f64, f64)>> {
+        positions
+            .iter()
+            .map(|&(ra, dec)| self.world_to_pixel(ra, dec))
+            .collect()
+    }
+
     /// FITS WCS keywords describing this solution: 1-indexed `CRPIX`, TAN
     /// or TAN-SIP `CTYPE`, the CD matrix, and the complete
     /// `A_p_q`/`B_p_q`/`AP_p_q`/`BP_p_q` set when distortion is present.
@@ -450,6 +467,28 @@ mod tests {
         let (x, y) = wcs.world_to_pixel(83.63, 22.01).unwrap();
         assert_close(x, 100.0, 1e-6);
         assert_close(y, 200.0, 1e-6);
+    }
+
+    #[test]
+    fn many_points_map_as_one_at_a_time() {
+        let wcs = Wcs::from_center_scale_rotation((83.63, 22.01), (100.0, 200.0), 1.5, 20.0, true);
+        let pixels = [(0.0, 0.0), (100.0, 200.0), (350.25, 17.5)];
+        let world = wcs.pixel_to_world_many(&pixels);
+        for (&(x, y), &sky) in pixels.iter().zip(&world) {
+            assert_eq!(wcs.pixel_to_world(x, y), sky);
+        }
+        let mut positions = world.clone();
+        // The far side of the sky has no pixel.
+        positions.push((263.63, -22.01));
+        let back = wcs.world_to_pixel_many(&positions);
+        assert_eq!(back.len(), 4);
+        for (&(x, y), pixel) in pixels.iter().zip(&back) {
+            let (bx, by) = pixel.unwrap();
+            assert_close(bx, x, 1e-6);
+            assert_close(by, y, 1e-6);
+        }
+        assert_eq!(back[3], None);
+        assert!(wcs.pixel_to_world_many(&[]).is_empty());
     }
 
     #[test]

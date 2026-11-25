@@ -7400,6 +7400,242 @@ pub unsafe extern "C" fn seiza_wcs_rotation_degrees(
     .unwrap_or(f64::NAN)
 }
 
+/// `count` coordinate pairs at `values`, checked for C callers.
+unsafe fn required_pairs<'a>(
+    values: *const f64,
+    count: usize,
+    name: &str,
+) -> Result<&'a [f64], String> {
+    let length = count
+        .checked_mul(2)
+        .ok_or_else(|| format!("{name} count overflows"))?;
+    if length == 0 {
+        return Ok(&[]);
+    }
+    if values.is_null() {
+        return Err(format!("{name} is required"));
+    }
+    if !(values as usize).is_multiple_of(std::mem::align_of::<f64>()) {
+        return Err(format!("{name} is not aligned for doubles"));
+    }
+    Ok(unsafe { std::slice::from_raw_parts(values, length) })
+}
+
+/// `count` writable coordinate pairs at `values`, checked for C callers.
+unsafe fn required_pairs_mut<'a>(
+    values: *mut f64,
+    count: usize,
+    name: &str,
+) -> Result<&'a mut [f64], String> {
+    let length = count
+        .checked_mul(2)
+        .ok_or_else(|| format!("{name} count overflows"))?;
+    if length == 0 {
+        return Ok(&mut []);
+    }
+    if values.is_null() {
+        return Err(format!("{name} is required"));
+    }
+    if !(values as usize).is_multiple_of(std::mem::align_of::<f64>()) {
+        return Err(format!("{name} is not aligned for doubles"));
+    }
+    Ok(unsafe { std::slice::from_raw_parts_mut(values, length) })
+}
+
+#[unsafe(no_mangle)]
+/// Map `count` pixel coordinates through a WCS to sky positions in one
+/// call. `wcs_json` is a WCS as [`seiza_wcs_fits_header_json`] takes it.
+/// `pixels` holds `count` pairs `x, y`, counting from 0 with centres on
+/// whole numbers; `world_out` receives `count` pairs `ra, dec` in degrees.
+/// The two may be the same buffer. Returns false with `error_out` set on an
+/// invalid WCS or buffer; free that string with [`seiza_string_free`].
+///
+/// # Safety
+/// `wcs_json` must be a valid NUL-terminated UTF-8 string. Unless `count`
+/// is 0, `pixels` must point to `2 * count` readable doubles and
+/// `world_out` to `2 * count` writable ones. When non-null, `error_out`
+/// must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_wcs_pixel_to_world(
+    wcs_json: *const c_char,
+    pixels: *const f64,
+    count: usize,
+    world_out: *mut f64,
+    error_out: *mut *mut c_char,
+) -> bool {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let request: parallax::WcsRequest = serde_json::from_str(&required_str(wcs_json, "WCS")?)
+            .map_err(|error| format!("invalid WCS: {error}"))?;
+        let wcs = request.wcs()?;
+        let pixels: Vec<(f64, f64)> = unsafe { required_pairs(pixels, count, "pixels")? }
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&[a, b]| (a, b))
+            .collect();
+        let world = wcs.pixel_to_world_many(&pixels);
+        let out = unsafe { required_pairs_mut(world_out, count, "world_out")? };
+        for (slot, (ra, dec)) in out.as_chunks_mut::<2>().0.iter_mut().zip(world) {
+            *slot = [ra, dec];
+        }
+        Ok(true)
+    })
+    .unwrap_or(false)
+}
+
+#[unsafe(no_mangle)]
+/// Map `count` sky positions through a WCS to pixel coordinates in one
+/// call, the inverse of [`seiza_wcs_pixel_to_world`]. `world` holds `count`
+/// pairs `ra, dec` in degrees; `pixels_out` receives `count` pairs `x, y`,
+/// NaN for a position on or behind the tangent-plane horizon. The two may
+/// be the same buffer. Returns false with `error_out` set on an invalid
+/// WCS or buffer; free that string with [`seiza_string_free`].
+///
+/// # Safety
+/// `wcs_json` must be a valid NUL-terminated UTF-8 string. Unless `count`
+/// is 0, `world` must point to `2 * count` readable doubles and
+/// `pixels_out` to `2 * count` writable ones. When non-null, `error_out`
+/// must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_wcs_world_to_pixel(
+    wcs_json: *const c_char,
+    world: *const f64,
+    count: usize,
+    pixels_out: *mut f64,
+    error_out: *mut *mut c_char,
+) -> bool {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let request: parallax::WcsRequest = serde_json::from_str(&required_str(wcs_json, "WCS")?)
+            .map_err(|error| format!("invalid WCS: {error}"))?;
+        let wcs = request.wcs()?;
+        let world: Vec<(f64, f64)> = unsafe { required_pairs(world, count, "world")? }
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&[a, b]| (a, b))
+            .collect();
+        let pixels = wcs.world_to_pixel_many(&world);
+        let out = unsafe { required_pairs_mut(pixels_out, count, "pixels_out")? };
+        for (slot, pixel) in out.as_chunks_mut::<2>().0.iter_mut().zip(pixels) {
+            let (x, y) = pixel.unwrap_or((f64::NAN, f64::NAN));
+            *slot = [x, y];
+        }
+        Ok(true)
+    })
+    .unwrap_or(false)
+}
+
+/// Optional camelCase settings of [`seiza_reproject`].
+#[derive(Default, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+struct ReprojectOptionsJson {
+    /// `"bilinear"` (the default) or `"lanczos3"`.
+    interpolation: Option<seiza_stacking::Interpolation>,
+    /// Average several samples per output pixel when the output is
+    /// coarser than the source; true by default.
+    antialias: Option<bool>,
+}
+
+#[unsafe(no_mangle)]
+/// Resample an image solved by `from_wcs_json` onto an `output_width` ×
+/// `output_height` grid solved by `to_wcs_json`, as
+/// `seiza_stacking::reproject` does: each output pixel's sky position
+/// comes from the output WCS and its source pixel from the source WCS,
+/// SIP included on both sides, so the two may differ in scale, rotation,
+/// parity and distortion. For a north-up grid, give the output WCS a
+/// rotation of 0. Both WCSs are as [`seiza_wcs_fits_header_json`] takes
+/// them.
+///
+/// `samples` holds `width * height * channels` interleaved floats (1 or 3
+/// channels), rows in stored order; a non-finite sample counts as
+/// missing. `options_json`, when non-null, is `{"interpolation":
+/// "bilinear" | "lanczos3", "antialias": bool}`: with `antialias` (the
+/// default) an output coarser than the source averages
+/// `ceil(output scale / source scale)` samples a side per pixel, up to 16,
+/// rather than aliasing.
+///
+/// `image_out` receives `output_width * output_height * channels` floats,
+/// NaN where nothing of the source lands, and `coverage_out`, when
+/// non-null, `output_width * output_height` floats: the share of each
+/// pixel's samples that landed on finite source samples. Returns false
+/// with `error_out` set on invalid input; free that string with
+/// [`seiza_string_free`].
+///
+/// # Safety
+/// `samples` must point to `length` readable floats, and `image_out` to
+/// `image_length` writable ones. A non-null `coverage_out` must point to
+/// `coverage_length` writable floats. Both WCS arguments, and a non-null
+/// `options_json`, must be valid NUL-terminated UTF-8 strings. When
+/// non-null, `error_out` must point to writable storage for one pointer.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn seiza_reproject(
+    samples: *const f32,
+    length: usize,
+    width: usize,
+    height: usize,
+    channels: usize,
+    from_wcs_json: *const c_char,
+    to_wcs_json: *const c_char,
+    output_width: usize,
+    output_height: usize,
+    options_json: *const c_char,
+    image_out: *mut f32,
+    image_length: usize,
+    coverage_out: *mut f32,
+    coverage_length: usize,
+    error_out: *mut *mut c_char,
+) -> bool {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let source =
+            unsafe { linear_image_from_ffi(samples, length, width, height, channels, "image")? };
+        let wcs = |json: *const c_char, name: &str| -> Result<seiza::Wcs, String> {
+            let request: parallax::WcsRequest = serde_json::from_str(&required_str(json, name)?)
+                .map_err(|error| format!("invalid {name}: {error}"))?;
+            request.wcs()
+        };
+        let from = wcs(from_wcs_json, "source WCS")?;
+        let to = wcs(to_wcs_json, "output WCS")?;
+        let request: ReprojectOptionsJson = if options_json.is_null() {
+            Default::default()
+        } else {
+            parse_request(options_json, "reprojection")?
+        };
+        let defaults = seiza_stacking::ReprojectOptions::default();
+        let options = seiza_stacking::ReprojectOptions {
+            interpolation: request.interpolation.unwrap_or(defaults.interpolation),
+            antialias: request.antialias.unwrap_or(defaults.antialias),
+        };
+        let pixels = output_width
+            .checked_mul(output_height)
+            .ok_or("output dimensions overflow")?;
+        let expected = pixels
+            .checked_mul(channels)
+            .ok_or("output dimensions overflow")?;
+        if image_length != expected {
+            return Err(format!(
+                "image_out has {image_length} floats; expected {expected}"
+            ));
+        }
+        if !coverage_out.is_null() && coverage_length != pixels {
+            return Err(format!(
+                "coverage_out has {coverage_length} floats; expected {pixels}"
+            ));
+        }
+        let result =
+            seiza_stacking::reproject(&source, &from, &to, output_width, output_height, &options)
+                .map_err(|error| error.to_string())?;
+        unsafe { required_f32_slice_mut(image_out, image_length, "image_out")? }
+            .copy_from_slice(&result.image.data);
+        if !coverage_out.is_null() {
+            unsafe { required_f32_slice_mut(coverage_out, coverage_length, "coverage_out")? }
+                .copy_from_slice(&result.coverage);
+        }
+        Ok(true)
+    })
+    .unwrap_or(false)
+}
+
 #[unsafe(no_mangle)]
 /// A WCS as FITS header cards. `wcs_json` is a WCS as
 /// [`seiza_solve_image_json`] returns it: `crval`, `crpix`, `cd`, an
@@ -18296,6 +18532,140 @@ mod tests {
             assert!(!error.is_null());
             unsafe { seiza_string_free(error) };
         }
+    }
+
+    #[test]
+    fn many_points_map_through_a_wcs_in_one_call() {
+        let wcs =
+            seiza::Wcs::from_center_scale_rotation((150.0, 35.0), (99.0, 49.0), 2.0, 15.0, false);
+        let request = CString::new(
+            json!({"crval": [150.0, 35.0], "crpix": [99.0, 49.0], "cd": wcs.cd}).to_string(),
+        )
+        .unwrap();
+        let pixels = [0.0, 0.0, 99.0, 49.0, 180.5, 20.25];
+        let mut world = [0.0; 6];
+        let mut error = ptr::null_mut();
+        assert!(unsafe {
+            seiza_wcs_pixel_to_world(
+                request.as_ptr(),
+                pixels.as_ptr(),
+                3,
+                world.as_mut_ptr(),
+                &mut error,
+            )
+        });
+        assert!(error.is_null());
+        for (pixel, sky) in pixels.chunks(2).zip(world.chunks(2)) {
+            assert_eq!(wcs.pixel_to_world(pixel[0], pixel[1]), (sky[0], sky[1]));
+        }
+        // Back again in place, with the far side of the sky as NaN.
+        let mut points = [world[0], world[1], world[2], world[3], 330.0, -35.0];
+        assert!(unsafe {
+            seiza_wcs_world_to_pixel(
+                request.as_ptr(),
+                points.as_ptr(),
+                3,
+                points.as_mut_ptr(),
+                &mut error,
+            )
+        });
+        assert!((points[0] - 0.0).abs() < 1e-6 && (points[1] - 0.0).abs() < 1e-6);
+        assert!((points[2] - 99.0).abs() < 1e-6 && (points[3] - 49.0).abs() < 1e-6);
+        assert!(points[4].is_nan() && points[5].is_nan());
+        // No points needs no buffers.
+        assert!(unsafe {
+            seiza_wcs_pixel_to_world(
+                request.as_ptr(),
+                ptr::null(),
+                0,
+                ptr::null_mut(),
+                &mut error,
+            )
+        });
+        assert!(!unsafe {
+            seiza_wcs_pixel_to_world(
+                request.as_ptr(),
+                ptr::null(),
+                1,
+                world.as_mut_ptr(),
+                &mut error,
+            )
+        });
+        assert!(!error.is_null());
+        unsafe { seiza_string_free(error) };
+    }
+
+    #[test]
+    fn an_image_is_reprojected_onto_another_wcs() {
+        let source_wcs =
+            seiza::Wcs::from_center_scale_rotation((150.0, 35.0), (31.5, 23.5), 2.0, 30.0, false);
+        let grid =
+            seiza::Wcs::from_center_scale_rotation((150.0, 35.0), (15.5, 11.5), 4.0, 0.0, false);
+        let as_json = |wcs: &seiza::Wcs| {
+            CString::new(
+                json!({"crval": [wcs.crval.0, wcs.crval.1],
+                       "crpix": [wcs.crpix.0, wcs.crpix.1], "cd": wcs.cd})
+                .to_string(),
+            )
+            .unwrap()
+        };
+        let (from, to) = (as_json(&source_wcs), as_json(&grid));
+        let samples = vec![5.0_f32; 64 * 48];
+        let options = CString::new(r#"{"interpolation":"lanczos3","antialias":true}"#).unwrap();
+        let mut image = vec![0.0_f32; 32 * 24];
+        let mut coverage = vec![0.0_f32; 32 * 24];
+        let mut error = ptr::null_mut();
+        let call = |options: *const c_char,
+                    image: &mut [f32],
+                    coverage: *mut f32,
+                    error: &mut *mut c_char| unsafe {
+            seiza_reproject(
+                samples.as_ptr(),
+                samples.len(),
+                64,
+                48,
+                1,
+                from.as_ptr(),
+                to.as_ptr(),
+                32,
+                24,
+                options,
+                image.as_mut_ptr(),
+                image.len(),
+                coverage,
+                32 * 24,
+                error,
+            )
+        };
+        assert!(call(
+            options.as_ptr(),
+            &mut image,
+            coverage.as_mut_ptr(),
+            &mut error
+        ));
+        assert!(error.is_null());
+        // The middle lies on the source; the grid's corners off the rotated
+        // source's.
+        let middle = 12 * 32 + 16;
+        assert_eq!(coverage[middle], 1.0);
+        assert!((image[middle] - 5.0).abs() < 1e-5);
+        assert_eq!(coverage[0], 0.0);
+        assert!(image[0].is_nan());
+        // Coverage is optional; an unknown option is refused.
+        assert!(call(ptr::null(), &mut image, ptr::null_mut(), &mut error));
+        let unknown = CString::new(r#"{"kernel":"cubic"}"#).unwrap();
+        assert!(!call(
+            unknown.as_ptr(),
+            &mut image,
+            ptr::null_mut(),
+            &mut error
+        ));
+        assert!(!error.is_null());
+        unsafe { seiza_string_free(error) };
+        let mut short = vec![0.0_f32; 3];
+        let mut error = ptr::null_mut();
+        assert!(!call(ptr::null(), &mut short, ptr::null_mut(), &mut error));
+        unsafe { seiza_string_free(error) };
     }
 
     #[test]

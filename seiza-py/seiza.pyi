@@ -277,6 +277,12 @@ class Wcs:
     ) -> dict[str, dict[tuple[int, int], float]] | None: ...
     def pixel_to_world(self, x: float, y: float) -> tuple[float, float]: ...
     def world_to_pixel(self, ra: float, dec: float) -> tuple[float, float] | None: ...
+    def pixel_to_world_array(
+        self, x: npt.NDArray[np.float64], y: npt.NDArray[np.float64]
+    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]: ...
+    def world_to_pixel_array(
+        self, ra: npt.NDArray[np.float64], dec: npt.NDArray[np.float64]
+    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]: ...
     def footprint(self, width: int, height: int) -> list[tuple[float, float]]: ...
     def transformed(
         self,
@@ -2222,6 +2228,16 @@ def match_linear(
     bin: int | None = None,
     clip_sigma: float = 3.0,
 ) -> list[ChannelMatch]: ...
+def reproject(
+    image: npt.NDArray[np.float32],
+    from_wcs: Wcs,
+    to_wcs: Wcs,
+    width: int,
+    height: int,
+    *,
+    interpolation: Literal["bilinear", "lanczos3"] = "bilinear",
+    antialias: bool = True,
+) -> tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]]: ...
 def probe_frame(path: str | Path) -> FrameProbe: ...
 def plan_calibration(
     kind: str,
