@@ -1573,6 +1573,10 @@ synthetic super-RGB (`R + G + B`), the six direct S/H/O permutations, and HOO
 are linear-light. Super-luminance output can exceed one.
 Foraxx-SHO/HOO use a stretched working copy as required by the
 published dynamic formula, so those returned arrays are display-referred.
+Foraxx computes its blend factors from single pixels, so OIII noise shows as
+speckle in the mixed channels. `foraxx_mask_smoothing` blurs the factors with
+a Gaussian of that standard deviation, in pixels and at most 64, before they
+mix the channels. The default, 0, applies no blur.
 Composition releases the GIL.
 
 ### Comparing finished masters

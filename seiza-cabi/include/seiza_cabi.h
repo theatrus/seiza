@@ -823,9 +823,13 @@ char *seiza_color_combine_lrgb_json(const char *request_json,
  `Foraxx-HOO` take no `sii`, and the rest need one. The Foraxx palettes
  stretch each channel first, setting its median to `foraxxTargetMedian`
  (0.2) and its black point `foraxxShadowsClip` (-2.8) normal-equivalent
- MADs below the median, so their output is display-referred. The other
- fields are those of [`seiza_color_combine_rgb_json`], and so are the
- returned JSON (with the palette's upper-case name as the label and
+ MADs below the median, so their output is display-referred.
+ `foraxxMaskSmoothing` (0, which applies none) is the standard deviation,
+ in pixels and at most 64, of a Gaussian blur applied to the Foraxx blend
+ factors before they mix the channels, which removes the speckle OIII
+ noise gives them; pixels a channel does not cover carry no weight in it.
+ The other fields are those of [`seiza_color_combine_rgb_json`], and so are
+ the returned JSON (with the palette's upper-case name as the label and
  `"display"` as the Foraxx palettes' transfer) and `cancel`.
 
  # Safety

@@ -229,8 +229,11 @@ fn combine_lrgb<'py>(
 /// Map narrowband stacks (Ha/OIII, optionally SII) onto an RGB palette.
 ///
 /// `output` and `header` (the H-alpha stack's) are those of `combine_rgb`.
+/// `foraxx_mask_smoothing` is the standard deviation, in pixels and at most
+/// 64, of a Gaussian blur applied to the Foraxx blend factors before they
+/// mix the channels; 0 applies none.
 #[pyfunction]
-#[pyo3(signature = (ha, oiii, sii=None, *, palette="sho", normalization="percentile", black_percentile=0.001, white_percentile=0.995, normalization_samples=1_000_000, foraxx_target_median=0.2, foraxx_shadows_clip=-2.8, crop="none", output=None, header=None))]
+#[pyo3(signature = (ha, oiii, sii=None, *, palette="sho", normalization="percentile", black_percentile=0.001, white_percentile=0.995, normalization_samples=1_000_000, foraxx_target_median=0.2, foraxx_shadows_clip=-2.8, foraxx_mask_smoothing=0.0, crop="none", output=None, header=None))]
 #[allow(clippy::too_many_arguments)]
 fn combine_narrowband<'py>(
     py: Python<'py>,
@@ -244,6 +247,7 @@ fn combine_narrowband<'py>(
     normalization_samples: usize,
     foraxx_target_median: f32,
     foraxx_shadows_clip: f32,
+    foraxx_mask_smoothing: f32,
     crop: &str,
     output: Option<PathBuf>,
     header: Option<&Bound<'_, PyAny>>,
@@ -261,6 +265,7 @@ fn combine_narrowband<'py>(
     let foraxx = ForaxxOptions {
         target_median: foraxx_target_median,
         shadows_clip: foraxx_shadows_clip,
+        mask_smoothing: foraxx_mask_smoothing,
     };
     let ha = linear_image(ha)?;
     let oiii = linear_image(oiii)?;

@@ -1304,7 +1304,11 @@ Dynamic palettes are `foraxx-sho` and `foraxx-hoo`. The default independent
 matched. Foraxx additionally requires those unnormalized samples to lie in
 `[0, 1]`; keep the default percentile mode for sensor-unit masters. Foraxx
 working channels use a median/MAD midtones transfer; tune it with
-`--foraxx-target-median` and `--foraxx-shadows-clip`.
+`--foraxx-target-median` and `--foraxx-shadows-clip`. Foraxx computes its
+blend factors from single pixels, so OIII noise shows as speckle in the mixed
+channels. `--foraxx-mask-smoothing <pixels>` blurs the factors with a Gaussian
+of that standard deviation, up to 64, before they mix the channels. The
+default, 0, applies no blur.
 
 LRGB defaults to linear luminance replacement. `--luminance-mode super`
 instead sets the target luminance to `L + R + G + B` after normalization while
