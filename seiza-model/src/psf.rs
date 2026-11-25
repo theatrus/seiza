@@ -5,11 +5,10 @@
 //! `detections`, `field_point_map`, `sampled_features`), because a model is
 //! trained on exactly what they make.
 
-use crate::bundle::{PointsReading, PsfReading, StampEncoder, StampPlane};
+use crate::bundle::{PointsReading, PsfReading, StampEncoder, StampPlane, StructureRemoval};
 use crate::error::ModelError;
 use crate::stats::{median_f32, median_f64};
 use rayon::prelude::*;
-use seiza_stars::hocus_focus_star_detection::StructureRemovalMethod;
 use seiza_stars::{
     MeasurementOptions, PSFType, PsfField, PsfFieldError, SparseFieldPolicy, TelescopeClass,
 };
@@ -30,14 +29,13 @@ const CLIP_CLUSTER: usize = 3;
 const CLIP_WITHIN: f64 = 0.98;
 const CLIP_BRIGHTEST: f64 = 0.9;
 const CLIP_LEVEL: f64 = 0.8;
-/// The point sources' detector, besides the card's noise reduction radius:
-/// the standard rig class's settings, stars fitted with a Moffat profile of
-/// β = 4, structure taken out by filtering, no binning, saturated stars left
-/// out, a sensitivity of 10 and one pass. The harness's detector ran with
-/// these, so they are named here rather than left to `seiza-stars`' defaults.
+/// The point sources' detector, besides the card's noise reduction radius
+/// and structure removals: the standard rig class's settings, stars fitted
+/// with a Moffat profile of β = 4, no binning, saturated stars left out, a
+/// sensitivity of 10 and one pass. The harness's detector ran with these, so
+/// they are named here rather than left to `seiza-stars`' defaults.
 const POINTS_CLASS: TelescopeClass = TelescopeClass::Standard;
 const POINTS_PSF: PSFType = PSFType::Moffat4;
-const POINTS_STRUCTURE: StructureRemovalMethod = StructureRemovalMethod::Filtered;
 const POINTS_BINNING: usize = 1;
 const POINTS_KEEP_SATURATED: bool = false;
 const POINTS_SENSITIVITY: f64 = 10.0;
@@ -490,18 +488,18 @@ fn clip_level(peaks: &[f64]) -> Option<f64> {
     None
 }
 
-/// The detector the point sources are found with, every setting it takes
-/// named. The rest of its settings are the rig class's in `seiza-stars`,
-/// which these options do not reach: a change there changes the detector,
-/// as a change to its code does.
-fn detector(reading: &PointsReading) -> MeasurementOptions {
+/// The detector the point sources are found with, taking structure out by
+/// `removal`, every setting it takes named. The rest of its settings are the
+/// rig class's in `seiza-stars`, which these options do not reach: a change
+/// there changes the detector, as a change to its code does.
+fn detector(reading: &PointsReading, removal: StructureRemoval) -> MeasurementOptions {
     MeasurementOptions {
         preset: Some(POINTS_CLASS),
         // A preset is the whole classification: the optics are not read.
         focal_length_mm: None,
         pixel_size_um: None,
         psf_type: POINTS_PSF,
-        structure_removal: Some(POINTS_STRUCTURE),
+        structure_removal: Some(removal.method()),
         detection_binning: Some(POINTS_BINNING),
         keep_saturated: Some(POINTS_KEEP_SATURATED),
         noise_reduction_radius: Some(reading.noise_reduction_radius),
@@ -511,9 +509,9 @@ fn detector(reading: &PointsReading) -> MeasurementOptions {
     }
 }
 
-/// Every star the measuring detector finds on the image, unsmoothed, and the
-/// clipped cores it turns away, each at its brightest pixel with its peak
-/// alone.
+/// Every star the measuring detector finds on the image, unsmoothed, with
+/// each of the card's structure removals in turn, and the clipped cores it
+/// turns away, each at its brightest pixel with its peak alone ([`union`]).
 pub(crate) fn detections(
     plane: &[f32],
     width: usize,
@@ -526,29 +524,65 @@ pub(crate) fn detections(
         .take(reading.clip_peaks)
         .map(|peak| peak.0)
         .collect();
-    let level = clip_level(&brightest);
+    let clipped = clip_level(&brightest).map_or(0, |level| {
+        peaks.iter().take_while(|peak| peak.0 >= level).count()
+    });
     let (counts, scale) = scaled_counts(plane, width, height);
-    let found = detector(reading).detect(&counts, width, height).stars;
-    let mut known: Vec<(f64, f64)> = found.iter().map(|star| star.position).collect();
-    let mut points: Vec<Point> = found
-        .iter()
-        .map(|star| {
-            let (x, y) = star.position;
-            Point {
-                x: x as f32,
-                y: y as f32,
-                flux: (star.flux * scale) as f32,
-                peak: raw_peak(plane, width, height, x, y) as f32,
+    let runs = reading.structure_removals.iter().map(|&removal| {
+        let found = detector(reading, removal).detect(&counts, width, height);
+        found
+            .stars
+            .iter()
+            .map(|star| {
+                let (x, y) = star.position;
+                let point = Point {
+                    x: x as f32,
+                    y: y as f32,
+                    flux: (star.flux * scale) as f32,
+                    peak: raw_peak(plane, width, height, x, y) as f32,
+                };
+                (star.position, point)
+            })
+            .collect()
+    });
+    union(runs, &peaks[..clipped], reading.core_radius)
+}
+
+/// The points of the detector's `runs`, in order, each star with its place,
+/// and of the clipped `cores`, brightest first, each its value and place.
+/// The first run's stars come first, then the cores beyond `core_radius` of
+/// those stars and of one another; a later run's star is added only beyond
+/// it of every point listed before that run, the cores among them. The first
+/// run's stars and the cores are so what they are with that run alone, and a
+/// later run's star beside a clipped core does not take the core's place.
+fn union(
+    runs: impl IntoIterator<Item = Vec<((f64, f64), Point)>>,
+    cores: &[(f64, f64, f64)],
+    core_radius: f64,
+) -> Vec<Point> {
+    let reach = core_radius * core_radius;
+    let near = |known: &[(f64, f64)], x: f64, y: f64| {
+        known
+            .iter()
+            .any(|&(kx, ky)| (kx - x).powi(2) + (ky - y).powi(2) <= reach)
+    };
+    let mut known: Vec<(f64, f64)> = Vec::new();
+    let mut points: Vec<Point> = Vec::new();
+    for (run, stars) in runs.into_iter().enumerate() {
+        // Against the points listed before this run, not each other.
+        let listed = known.len();
+        for ((x, y), point) in stars {
+            if run > 0 && near(&known[..listed], x, y) {
+                continue;
             }
-        })
-        .collect();
-    if let Some(level) = level {
-        let reach = reading.core_radius * reading.core_radius;
-        for &(value, x, y) in peaks.iter().take_while(|peak| peak.0 >= level) {
-            let near = known
-                .iter()
-                .any(|&(kx, ky)| (kx - x).powi(2) + (ky - y).powi(2) <= reach);
-            if !near {
+            known.push((x, y));
+            points.push(point);
+        }
+        if run > 0 {
+            continue;
+        }
+        for &(value, x, y) in cores {
+            if !near(&known, x, y) {
                 known.push((x, y));
                 points.push(Point {
                     x: x as f32,
@@ -888,6 +922,41 @@ mod tests {
     }
 
     #[test]
+    fn a_later_run_adds_only_stars_clear_of_the_first_s_and_of_the_cores() {
+        let star = |x: f64, y: f64| {
+            let point = Point {
+                x: x as f32,
+                y: y as f32,
+                flux: 100.0,
+                peak: 50.0,
+            };
+            ((x, y), point)
+        };
+        let first = vec![star(10.0, 10.0)];
+        // Beside a core; on the first run's star; and two of its own, near
+        // each other but clear of every point listed before them.
+        let later = vec![
+            star(60.0, 45.0),
+            star(12.0, 11.0),
+            star(120.0, 120.0),
+            star(125.0, 120.0),
+        ];
+        // The second core is the first run's star's own.
+        let cores = [(5000.0, 50.0, 40.0), (4990.0, 14.0, 10.0)];
+        let places = |runs: Vec<Vec<((f64, f64), Point)>>| -> Vec<(f32, f32, bool)> {
+            union(runs, &cores, 24.0)
+                .iter()
+                .map(|point| (point.x, point.y, point.flux.is_nan()))
+                .collect()
+        };
+        let alone = places(vec![first.clone()]);
+        assert_eq!(alone, [(10.0, 10.0, false), (50.0, 40.0, true)]);
+        let both = places(vec![first, later]);
+        assert_eq!(both[..2], alone, "as with the first run alone");
+        assert_eq!(both[2..], [(120.0, 120.0, false), (125.0, 120.0, false)]);
+    }
+
+    #[test]
     fn a_clipped_core_the_detector_turns_away_is_found_by_its_peak() {
         let (width, height) = (96, 64);
         let mut plane = vec![10.0_f32; width * height];
@@ -902,6 +971,7 @@ mod tests {
         assert!(peaks.len() >= 3 && peaks[0].0 == 5000.0);
         let reading = PointsReading {
             noise_reduction_radius: 0,
+            structure_removals: vec![StructureRemoval::Filtered, StructureRemoval::Atrous],
             clip_peaks: 300,
             peak_block: 16,
             core_radius: 24.0,

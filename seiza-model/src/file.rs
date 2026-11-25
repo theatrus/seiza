@@ -145,8 +145,8 @@ impl RestorationImage {
     }
 
     /// Sharpen the image. Its PSF, point sources and noise are measured from
-    /// the pixels read, so a center crop is measured as the small image it
-    /// is, and may hold too few stars.
+    /// the pixels read, so a center crop or a region is measured as the small
+    /// image it is, and may hold too few stars.
     pub fn sharpen(
         self,
         model: &mut SharpenModel,
@@ -162,7 +162,7 @@ impl RestorationImage {
     }
 }
 
-/// The result of sharpening a whole file or its center.
+/// The result of sharpening a whole file or a part of it.
 pub struct FileSharpening {
     headers: Option<Vec<(String, HeaderValue)>>,
     sharpened: Sharpened,

@@ -385,7 +385,7 @@ bundle's card names:
 | The noise map, `asinh(σ / σ̄)` | `image_sigma`, as the noise model reads it, with its raise for spread noise. |
 | The stars' ratio, FWHM(target) / FWHM(image) | The PSF field (`seiza-stars`' `PsfField`, with the card's settings; one PSF for the whole image when too few stars allow a field that varies) is sampled at a grid of nodes, both edges of each axis and at most 256 px apart. A node's width is a round Gaussian's, fitted to its stamp's core. Its ratio is the share asked, never under the card's floor in pixels over that width and never over 1, and the map is bilinear between nodes. |
 | The rest's ratio | The same, from the second share. A model trained with one strength has no such plane. |
-| The point sources, `asinh(p / σ̄)` | The stars the measuring detector finds on the image unsmoothed, with the clipped cores it turns away (found as the peaks of 16 px blocks at the image's clip level), each laid down at its flux and sub-pixel place as the stamp of the node nearest it. |
+| The point sources, `asinh(p / σ̄)` | The stars the measuring detector finds on the image unsmoothed, with each of the card's structure removals in turn, and the clipped cores it turns away (found as the peaks of 16 px blocks at the image's clip level), each laid down at its flux and sub-pixel place as the stamp of the node nearest it. |
 | The PSF, as a vector at every pixel of the coarsest grid | Each node's stamp, cut or padded to 129 px, is read as two planes (over its peak, and its asinh, which shows the wings) by the stamp encoder, once. The nodes' vectors are interpolated bilinearly to the middle of every coarsest pixel of each tile, so the output does not depend on where the tiles fall. |
 
 The residual is added to the asinh of the image in σ̄ and taken back through
@@ -417,6 +417,19 @@ trainer, which is not in the repository yet, will write the bundle with a
 PyTorch on a random input. No sharpening model is published, and
 `seiza model sharpen` fetches none: it runs a bundle named with `--model` or
 installed from its directory.
+
+`sharpen.points.structure_removals` names how the detector takes nebulosity
+and gradients away before it looks for stars, and it runs once with each, in
+order. One removal does not do: `filtered`, the detector's default, takes
+bright stars on bright, structured nebula away with the nebula, and a star
+missing from the point sources is sharpened as nebula and ringed dark;
+`atrous`, the à trous wavelet residual, keeps those stars. The first
+removal's stars come first, then the clipped cores, found against those
+stars alone; a star a later removal finds is added only where it lies beyond
+the card's core radius of every point before it, the cores among them, so it
+never stands in for a saturated star's core. A card that names none detects
+with `filtered` alone, as a card did before they were named, and its output
+is unchanged. A removal named twice, or an empty list, is refused.
 
 `SharpenOptions::rolloff` holds back the finest part of the change where it
 lies under the noise, after the model: the harness's `rolloff_step`. Its

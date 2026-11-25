@@ -1,6 +1,7 @@
 use crate::backend::{Backend, Precision};
 use crate::error::ModelError;
 use crate::tiles::Tiling;
+use seiza_stars::hocus_focus_star_detection::StructureRemovalMethod;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -306,20 +307,80 @@ pub struct PsfReading {
     pub width_core: f64,
 }
 
+/// How the point-source detector takes large-scale structure (nebulosity,
+/// gradients) away before it looks for stars.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StructureRemoval {
+    /// Gaussian and domain-transform layers subtracted: the detector's
+    /// default. It takes bright stars on bright, structured nebula away
+    /// with the nebula.
+    Filtered,
+    /// The à trous wavelet residual, which keeps those stars.
+    Atrous,
+}
+
+impl StructureRemoval {
+    /// The detector's own name for this removal.
+    pub(crate) fn method(self) -> StructureRemovalMethod {
+        match self {
+            Self::Filtered => StructureRemovalMethod::Filtered,
+            Self::Atrous => StructureRemovalMethod::Atrous,
+        }
+    }
+}
+
+impl fmt::Display for StructureRemoval {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Filtered => "filtered",
+            Self::Atrous => "atrous",
+        })
+    }
+}
+
+impl std::str::FromStr for StructureRemoval {
+    type Err = ModelError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text {
+            "filtered" => Ok(Self::Filtered),
+            "atrous" => Ok(Self::Atrous),
+            other => Err(ModelError::InvalidOption(format!(
+                "a structure removal is filtered or atrous, not {other:?}"
+            ))),
+        }
+    }
+}
+
+/// What a card that names no structure removals detects with: the filtered
+/// removal alone, as every card did before they were named.
+fn filtered_alone() -> Vec<StructureRemoval> {
+    vec![StructureRemoval::Filtered]
+}
+
 /// How the image's point sources are found.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PointsReading {
     /// The detector's noise reduction radius; 0 detects on the image
     /// unsmoothed.
     pub noise_reduction_radius: usize,
+    /// The detector runs once with each of these, in turn. The clipped
+    /// cores are found after the first run, against its stars alone, so
+    /// its list and cores are as with that removal alone. A star a later
+    /// run finds within `core_radius` of a point already listed, a core
+    /// among them, is the same star; the others are added after them.
+    #[serde(default = "filtered_alone")]
+    pub structure_removals: Vec<StructureRemoval>,
     /// The clip level is read from this many of the brightest objects' peaks.
     pub clip_peaks: usize,
     /// An object's peak is the largest value of a block of this side that
     /// is the largest of the 3 × 3 blocks about it.
     pub peak_block: usize,
-    /// A clipped core within this many pixels of a brighter one, or of a
-    /// detected star, is the same star.
+    /// A clipped core, or a star a later detector run finds, within this
+    /// many pixels of a brighter core or of a star already listed is the
+    /// same star.
     pub core_radius: f64,
 }
 
@@ -651,6 +712,18 @@ impl SharpenCard {
                 "finds clipped cores in blocks of no pixels or from no peaks".to_string(),
             );
         }
+        let removals = &self.points.structure_removals;
+        if removals.is_empty()
+            || removals
+                .iter()
+                .enumerate()
+                .any(|(index, removal)| removals[..index].contains(removal))
+        {
+            return refuse(format!(
+                "detects point sources with the structure removals {removals:?}, which must be \
+                 at least one, each once"
+            ));
+        }
         if !(self.points.core_radius >= 0.0 && self.points.core_radius.is_finite()) {
             return refuse(format!(
                 "merges clipped cores within {} pixels, which must be finite and not negative",
@@ -883,8 +956,8 @@ pub(crate) mod tests {
                 "psf": {{"components": 3, "minimum_stars": 30, "maximum_stars": 400,
                          "minimum_snr": 30.0, "detection_sigma": 5.0,
                          "isolation_magnitudes": 5.0, "grid_px": 256, "width_core": 0.05}},
-                "points": {{"noise_reduction_radius": 0, "clip_peaks": 300, "peak_block": 16,
-                            "core_radius": 24.0}}
+                "points": {{"noise_reduction_radius": 0, "structure_removals": ["filtered", "atrous"],
+                            "clip_peaks": 300, "peak_block": 16, "core_radius": 24.0}}
               }}
             }}"#
         );
@@ -909,6 +982,10 @@ pub(crate) mod tests {
         assert_eq!(
             sharpen.scaled, None,
             "a card without the scaled pass never bins"
+        );
+        assert_eq!(
+            sharpen.points.structure_removals,
+            [StructureRemoval::Filtered, StructureRemoval::Atrous]
         );
         bundle.verify().unwrap();
 
@@ -958,6 +1035,12 @@ pub(crate) mod tests {
             ("/sharpen/psf/grid_px", json("0")),
             ("/sharpen/psf/minimum_stars", json("1")),
             ("/sharpen/points/peak_block", json("0")),
+            ("/sharpen/points/structure_removals", json("[]")),
+            (
+                "/sharpen/points/structure_removals",
+                json(r#"["atrous", "atrous"]"#),
+            ),
+            ("/sharpen/points/structure_removals", json(r#"["median"]"#)),
             ("/sharpen/residual", json(r#""log""#)),
             ("/sharpen/stars", json("true")),
             ("/sharpen/scaled/stars_px", json("0")),
@@ -991,6 +1074,39 @@ pub(crate) mod tests {
                 "{pointer}"
             );
         }
+    }
+
+    #[test]
+    fn a_card_that_names_no_structure_removal_detects_as_cards_did_before() {
+        let temp = tempfile::tempdir().unwrap();
+        write_sharpen_bundle(temp.path(), "sharpen-test");
+        let path = temp.path().join(CARD_FILE);
+        let mut card: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        card.pointer_mut("/sharpen/points")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("structure_removals");
+        std::fs::write(&path, serde_json::to_vec(&card).unwrap()).unwrap();
+        let bundle = ModelBundle::open(temp.path()).unwrap();
+        let points = &bundle.card().sharpen.as_ref().unwrap().points;
+        assert_eq!(points.structure_removals, [StructureRemoval::Filtered]);
+    }
+
+    #[test]
+    fn a_structure_removal_reads_and_writes_as_a_word() {
+        for removal in [StructureRemoval::Filtered, StructureRemoval::Atrous] {
+            assert_eq!(
+                removal.to_string().parse::<StructureRemoval>().unwrap(),
+                removal
+            );
+            assert_eq!(
+                serde_json::to_string(&removal).unwrap(),
+                format!("\"{removal}\"")
+            );
+        }
+        assert!("median".parse::<StructureRemoval>().is_err());
     }
 
     #[test]

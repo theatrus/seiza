@@ -58,7 +58,7 @@ pub use bands::NoiseBands;
 pub use bundle::{
     GraphFile, GraphInput, HoleGuard, InputPlane, ModelBundle, ModelCard, NoiseInput, NoisePlane,
     PointsReading, PsfReading, Reading, ResidualMode, ScaledCard, SharpenCard, SkyInput,
-    StampEncoder, StampPlane, Strengths, Task, TilingCard, VectorInput,
+    StampEncoder, StampPlane, Strengths, StructureRemoval, Task, TilingCard, VectorInput,
 };
 pub use error::ModelError;
 #[cfg(feature = "files")]
