@@ -2264,7 +2264,7 @@ In order, each only if the one before leaves a gap at the rims:
          to the second place.
 
        So the point-source list is now the union of both removals, in
-       the harness and the runtime alike (e8c596e0). A card names its
+       the harness and the runtime alike. A card names its
        `structure_removals`, and the detector runs once with each in
        turn. A star a later run finds within the core radius (24 px) of
        one already listed is the same star. A card that names none
@@ -2297,7 +2297,7 @@ In order, each only if the one before leaves a gap at the rims:
        off, and the saturated star itself was no longer listed. The
        cores are now found after the first removal's stars, against
        them alone, and a later removal's star must lie beyond 24 px of
-       every point before it (ce098ce6, `DETECTION_VERSION` 2). The
+       every point before it (`DETECTION_VERSION` 2). The
        first removal's list is so kept whole, and the union only adds
        to it. The training banks keep each source's list in a file of
        its own, so their lists are refreshed in place, not cut again.

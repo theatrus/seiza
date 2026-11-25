@@ -4,10 +4,10 @@ with.
 
 It needs the sharpening trainer (`seiza_training.sharpen_model`,
 `psf_fields`, `sharpen_sheets`, `unet.SharpeningUNet` and the bundle writer's
-`sharpen_card` and `write_sharpen_bundle`), which is not in this branch yet:
-the fixtures beside it were recorded with it, and are committed so the tests
-run without it. Run it from a training environment that has the trainer and
-the `seiza` binding, built from the same source as the crate under test:
+`sharpen_card` and `write_sharpen_bundle`), under `training`. The fixtures
+beside it were recorded with it, and are committed so the tests run without
+it. Run it from a training environment that has the `seiza` binding, built
+from the same source as the crate under test:
 
     PYTHONPATH=training python seiza-model/tests/fixtures/make_sharpen_fixtures.py
 
