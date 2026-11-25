@@ -3,6 +3,18 @@ use std::path::PathBuf;
 /// Errors returned by catalog bundle installation and cache operations.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// No tested archive is pinned for this host.
+    #[error("no ONNX Runtime archive is pinned for {os}/{arch}; configure an installed library")]
+    RuntimePlatform { os: String, arch: String },
+    /// Every remote source failed verification or transfer.
+    #[error("no source served the pinned ONNX Runtime archive: {}", .0.join("; "))]
+    RuntimeSources(Vec<String>),
+    /// An archive or install receipt is incomplete or malformed.
+    #[error("invalid ONNX Runtime installation: {0}")]
+    RuntimeArchive(String),
+    /// Installation was cancelled before publication.
+    #[error("ONNX Runtime installation cancelled")]
+    Cancelled,
     #[error("could not determine a Seiza cache directory; configure one explicitly")]
     CacheDirectoryUnavailable,
 

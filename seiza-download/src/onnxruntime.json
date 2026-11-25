@@ -1,0 +1,57 @@
+{
+  "version": "1.31.1",
+  "sources": [
+    "https://github.com/theatrus/psf-guard/releases/download/onnxruntime-1.31.1",
+    "https://github.com/microsoft/onnxruntime/releases/download/v1.31.1"
+  ],
+  "archives": [
+    {
+      "os": "windows", "arch": "x86_64",
+      "name": "onnxruntime-win-x64-1.31.1.zip",
+      "bytes": 82929944,
+      "sha256": "5869e26bb25314375f2d5ef1877e3ea06b1543d6c710e6e4a1ec2f7177ab4b2c",
+      "library": "onnxruntime.dll",
+      "files": {
+        "onnxruntime-win-x64-1.31.1/lib/onnxruntime.dll": "onnxruntime.dll",
+        "onnxruntime-win-x64-1.31.1/lib/onnxruntime_providers_shared.dll": "onnxruntime_providers_shared.dll",
+        "onnxruntime-win-x64-1.31.1/LICENSE": "LICENSE-onnxruntime.txt",
+        "onnxruntime-win-x64-1.31.1/ThirdPartyNotices.txt": "ThirdPartyNotices-onnxruntime.txt"
+      },
+      "support": {
+        "name": "seiza-cli-0.54.0-windows-x86_64.zip",
+        "bytes": 39523389,
+        "sha256": "33a3e685dd4ad843dc34daf8cc2a7305e49df94037ccf7da57f9e2e5f4d8694e",
+        "sources": ["https://github.com/theatrus/seiza/releases/download/v0.54.0"],
+        "files": {
+          "msvcp140.dll": "msvcp140.dll",
+          "msvcp140_1.dll": "msvcp140_1.dll",
+          "vcruntime140.dll": "vcruntime140.dll",
+          "vcruntime140_1.dll": "vcruntime140_1.dll"
+        }
+      }
+    },
+    {
+      "os": "linux", "arch": "x86_64",
+      "name": "onnxruntime-linux-x64-1.31.1.tgz", "bytes": 11413655,
+      "sha256": "c849e36a1ef3e22d4ff217b9d1ce4a3cf5b9467b975610913ae959ad5b16bdc9",
+      "library": "libonnxruntime.so",
+      "files": {
+        "onnxruntime-linux-x64-1.31.1/lib/libonnxruntime.so.1.31.1": "libonnxruntime.so",
+        "onnxruntime-linux-x64-1.31.1/lib/libonnxruntime_providers_shared.so": "libonnxruntime_providers_shared.so",
+        "onnxruntime-linux-x64-1.31.1/LICENSE": "LICENSE-onnxruntime.txt",
+        "onnxruntime-linux-x64-1.31.1/ThirdPartyNotices.txt": "ThirdPartyNotices-onnxruntime.txt"
+      }
+    },
+    {
+      "os": "macos", "arch": "aarch64",
+      "name": "onnxruntime-osx-arm64-1.31.1.tgz", "bytes": 36936435,
+      "sha256": "2e1344a1926ee50eb25b38153cb6992c3567515aef0e677a1a520a1798896d6f",
+      "library": "libonnxruntime.dylib",
+      "files": {
+        "onnxruntime-osx-arm64-1.31.1/lib/libonnxruntime.1.31.1.dylib": "libonnxruntime.dylib",
+        "onnxruntime-osx-arm64-1.31.1/LICENSE": "LICENSE-onnxruntime.txt",
+        "onnxruntime-osx-arm64-1.31.1/ThirdPartyNotices.txt": "ThirdPartyNotices-onnxruntime.txt"
+      }
+    }
+  ]
+}

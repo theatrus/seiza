@@ -276,14 +276,14 @@ pub(super) fn find_peaks(
 
 /// A star's position and size from adaptive (matched Gaussian) moments.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct Moments {
-    pub(super) x: f64,
-    pub(super) y: f64,
+pub(crate) struct Moments {
+    pub(crate) x: f64,
+    pub(crate) y: f64,
     /// The star's covariance, deweighted: `2 ×` the weighted one at
     /// convergence, which is exact for a Gaussian star.
-    pub(super) xx: f64,
-    pub(super) xy: f64,
-    pub(super) yy: f64,
+    pub(crate) xx: f64,
+    pub(crate) xy: f64,
+    pub(crate) yy: f64,
 }
 
 impl Moments {
@@ -297,7 +297,7 @@ impl Moments {
 
 /// Adaptive moments of `value(x, y) − background` within `radius` of the
 /// start, or `None` when they do not converge to a positive shape.
-pub(super) fn adaptive_moments(
+pub(crate) fn adaptive_moments(
     value: impl Fn(isize, isize) -> f64,
     start_x: f64,
     start_y: f64,

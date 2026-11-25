@@ -17,7 +17,10 @@ The crate consolidates Seiza's existing behavior:
 
 - identity and explicit linear range mapping;
 - percentile range selection with an asinh transfer;
-- explicit PixInsight/N.I.N.A.-family midtones transfer functions;
+- explicit midtones transfer functions as N.I.N.A. applies them (`Mtf`), where
+  the clipping points shift the samples and do not rescale them;
+- the same as PixInsight's HistogramTransformation applies it (`Ht`), which
+  clips and rescales the samples first, and reads the curve from a 24-bit table;
 - manual Generalized Hyperbolic Stretch with symmetry and protection controls;
 - the existing median/MAD Auto-MTF model;
 - a median anchor stretch that places the background median exactly on a target

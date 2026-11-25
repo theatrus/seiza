@@ -241,6 +241,12 @@ transform = { none = "flattened into scale, rotation_degrees, translation_x and 
 [rust.RegionResponse]
 core = "seiza-stacking::ReferenceRegion"
 
+[rust.LinearMatchOptionsJson]
+core = "seiza-stacking::LinearMatchOptions"
+
+[rust.ChannelMatchJson]
+core = "seiza-stacking::ChannelMatch"
+
 [rust.SeizaSnrSample]
 core = "seiza-stacking::SnrSample"
 
@@ -338,6 +344,33 @@ core = "seiza-stars::TriangleSectorStats"
 [rust.TriangleTiltJson]
 core = "seiza-stars::TriangleTiltSummary"
 
+[rust.TiltFramesRequest]
+core = "seiza-stars::MultiFrameTiltOptions"
+
+[rust.TiltFrameRequest]
+core = "seiza-stars::TiltFrame"
+
+[rust.TiltStarRequest]
+core = "seiza-stars::TiltStar"
+
+[rust.FrameSpreadJson]
+core = "seiza-stars::FrameSpread"
+
+[rust.FrameTiltJson]
+core = "seiza-stars::FrameTilt"
+
+[rust.MultiFrameCellJson]
+core = "seiza-stars::MultiFrameCell"
+
+[rust.MultiFrameTriangleTiltJson]
+core = "seiza-stars::MultiFrameTriangleTilt"
+
+[rust.MultiFrameTiltResponse]
+core = "seiza-stars::MultiFrameTilt"
+
+[rust.FocalPlaneFitJson]
+core = "seiza-stars::FocalPlaneFit"
+
 [rust.PsfFieldOptionsRequest]
 core = "seiza-stars::PsfFieldOptions"
 
@@ -397,6 +430,7 @@ core = "seiza-satellites::PixelSegment"
 
 "seiza-stacking::measure_flat_stability" = { none = "C and Python offer both file and cached-image measurement; this native hybrid accepts a loaded master and streams file sources through the same algorithm" }
 objects = [
+    "seiza-download::OnnxRuntimeInstaller",
     "seiza-stacking::AperturePhotometry",
     "seiza-image-ser::SerReader",
     "seiza-image-ser::ColorLayout",
@@ -703,6 +737,8 @@ seiza_live_stacker_open_prepared_fits = "LiveStacker.open_prepared_fits"
 seiza_live_stacker_reference_noise_json = "LiveStacker.reference_noise"
 seiza_live_stacker_reference_mapping_json = "LiveStacker.reference_mapping"
 seiza_frame_noise_json = "frame_noise"
+seiza_noise_at_scale_json = "noise_at_scale"
+seiza_match_linear_json = "match_linear"
 seiza_live_stacker_save_context = "LiveStacker.save_context"
 seiza_live_stacker_push_linear_json = "LiveStacker.push"
 seiza_live_stacker_push_fits_json = "LiveStacker.push_fits"
@@ -835,6 +871,9 @@ seiza_noise_model_backend = "NoiseModel.backend"
 seiza_noise_model_tile = "NoiseModel.tile"
 seiza_noise_model_denoise = "NoiseModel.denoise"
 seiza_noise_model_denoise_file = "NoiseModel.denoise_file"
+seiza_noise_model_denoise_file_region = "NoiseModel.denoise_file"
+seiza_file_restoration_write_preview_linear = "FileRestoration.write_preview_linear"
+seiza_file_restoration_write_preview_in_context = "FileRestoration.write_preview_in_context"
 seiza_file_restoration_write = "FileRestoration.write_linear"
 seiza_file_restoration_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
 seiza_noise_model_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
@@ -850,6 +889,8 @@ seiza_sharpen_model_sharpen_file = "SharpenModel.sharpen_file"
 seiza_sharpen_model_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
 seiza_model_backends_json = "model_backends"
 seiza_model_catalog_json = "model_catalog"
+seiza_onnxruntime_installed_json = "installed_onnxruntime"
+seiza_onnxruntime_install_json = "install_onnxruntime"
 seiza_model_list_json = "installed_models"
 seiza_model_install_json = "install_model"
 seiza_model_download_json = "download_model"
@@ -887,6 +928,7 @@ seiza_catalog_status_json = { none = "catalog readiness for the apps' setup scre
 # --- stars ------------------------------------------------------------------
 seiza_stars_detect_luma_u16_json = "detect_measured_stars"
 seiza_stars_detect_path_json = "detect_measured_stars_file"
+seiza_stars_tilt_frames_json = "multi_frame_tilt_analysis"
 seiza_stars_pixel_scale_arcsec = "pixel_scale_arcsec"
 seiza_stars_classify_pixel_scale = "classify_pixel_scale"
 seiza_stars_recommend_detection_binning = "recommend_detection_binning"

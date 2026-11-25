@@ -1931,6 +1931,74 @@ char *seiza_frame_noise_json(const float *data,
                              char **error_out);
 
 /*
+ Measures a linear image's per-channel noise at the scale of `block` by
+ `block` pixels: the standard deviation of those blocks' means in the
+ image's own units. [`seiza_frame_noise_json`] reads neighbouring pixels,
+ so it under-reads the noise they share after drizzle or resampling. Blocks
+ several times the resampling's reach take it in, and blocks of one size
+ on the sky compare images of different pixel scales.
+
+ For independent noise it is [`seiza_frame_noise_json`]'s divided by
+ `block`, and that call's own at 1. Stars pass, but structure that covers
+ much of the image and curves within four blocks reads as noise.
+
+ Returns an owned JSON array with one number per channel, or `null` when
+ the image has too few whole blocks of finite samples, about 36 by 36.
+ Free it, or an `error_out` string, with [`seiza_string_free`].
+
+ # Safety
+ As [`seiza_frame_noise_json`].
+ */
+char *seiza_noise_at_scale_json(const float *data,
+                                size_t length,
+                                size_t width,
+                                size_t height,
+                                size_t channels,
+                                size_t block,
+                                char **error_out);
+
+/*
+ Fits the gain and offset that put a linear image on a reference's scale,
+ `reference = gain * image + offset`, for comparing finished masters.
+
+ The two images are registered to one grid and share their dimensions,
+ `channels` being 1 for mono or 3 for interleaved RGB. The fit weighs the
+ noise it measures in both, so it depends on neither's depth. It reads
+ means of blocks of pixels and leaves out any block that holds a
+ non-finite sample or an excluded pixel, or one value in both images, such
+ as an empty border. Pass null `mask` with zero
+ `mask_length` to exclude none, or `width * height` bytes where `1`
+ excludes a pixel. `options_json` is null or
+ `{"bin": 4, "clipSigma": 3.0}`, either field optional: the blocks' edge in
+ pixels, and how many robust sigmas from the line a block may lie.
+
+ Returns an owned JSON array with one `{"gain", "offset", "gainError",
+ "blocks", "rejected"}` per channel: `gainError` is the gain's standard
+ error from the images' noise, taken as independent from block to block,
+ `blocks` those the fit used and `rejected` those clipping left out. Fails
+ when a channel has too few blocks after masking and clipping, or too
+ little signal in common. Free the result, or an `error_out` string,
+ with [`seiza_string_free`].
+
+ # Safety
+ `image` and `reference` must each point to `length` readable floats,
+ `width * height * channels` of them. A non-null `mask` must point to
+ `mask_length` readable bytes containing only zero or one, and a non-null
+ `options_json` must be a valid NUL-terminated UTF-8 string. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_match_linear_json(const float *image,
+                              const float *reference,
+                              size_t length,
+                              size_t width,
+                              size_t height,
+                              size_t channels,
+                              const uint8_t *mask,
+                              size_t mask_length,
+                              const char *options_json,
+                              char **error_out);
+
+/*
  Load and atomically replace the masters used by later FITS/XISF pushes.
 
  Each master path is optional. Passing all null/empty paths clears the
@@ -2717,7 +2785,10 @@ SeizaRenderedImage *seiza_rendered_image_open_with_rgb_stretch(const char *path,
  `StretchConfig` (the original schema), a non-empty array of configs, or an
  object with `stretch`, optional `background`, optional `deconvolution`,
  optional `sample_domain`, optional `interactive_preview` and optional
- `gpu` fields. `gpu` takes the fields of the `"gpu"` member of
+ `gpu` fields. A config's `mtf` model shifts samples by its `shadows` and
+ `highlights` as N.I.N.A. does; its `ht` model takes the same fields, and
+ clips and rescales as PixInsight's HistogramTransformation does. `gpu`
+ takes the fields of the `"gpu"` member of
  [`seiza_live_stacker_open_fits`]'s options, such as `{"enabled": false}`,
  and says whether a raw Bayer frame rendered in physical units is
  debayered on the GPU; by default it may be. Array
@@ -3380,6 +3451,61 @@ char *seiza_stars_detect_luma_u16_json(const uint16_t *data,
  must be null or point to writable storage for one pointer.
  */
 char *seiza_stars_detect_path_json(const char *path, const char *options_json, char **error_out);
+
+/*
+ Measure sensor tilt and field curvature over many frames of one sensor.
+
+ A single frame's tilt carries that frame's seeing, guiding and wind. This
+ analyses each frame as [`seiza_stars_detect_luma_u16_json`] does, then
+ combines them: each grid cell's (and triangle sector's) HFR is divided by
+ its frame's own median HFR, so focus drift and changing seeing cancel,
+ and those ratios are combined by median over the frames. Elongation
+ directions pool every star of every frame.
+
+ `request_json` is
+ `{"frames": [{"width", "height", "stars": [{"x", "y", "hfr",
+ "eccentricity"?, "theta"?}]}], "triangleAngleDegrees"?}`. Other fields
+ of a frame or star are ignored, so each frame may be a
+ `seiza_stars_detect_*_json` response passed back unchanged. Every frame
+ must have the first frame's size: the frames need not be registered, but
+ they must come from one sensor at one binning. A cell or sector counts in
+ a frame only with at least 3 stars there.
+
+ The returned schema-1 JSON has `width`, `height`, `medianFrameHfr` (the
+ median over frames of each frame's median cell HFR), and:
+ - `cells`: nine cells, row by row, each with `starCount` over all frames,
+   `relativeHfr` (`median`, `lowerQuartile`, `upperQuartile`,
+   `frameCount` of the cell's HFR over its frame's), `medianHfr`
+   (`relativeHfr.median * medianFrameHfr`), and the pooled
+   `medianEccentricity`, `meanTheta` and `thetaCoherence`.
+ - `summary`: the parallelogram verdict, shaped as the detection
+   response's `tilt`, over the cells' `medianHfr`.
+ - `frameTiltPercent` and `frameCurvaturePercent`: the spread of the
+   frames' own verdicts; `worstCornerFrameCount`: frames whose own worst
+   corner is `summary.worstCorner`.
+ - `frames`: each frame's `starCount`, `summary` and `triangle`.
+ - `triangle`, when `triangleAngleDegrees` was given: `summary` (shaped as
+   the detection response's `triangleTilt`, combined over the frames whose
+   own triangle was ready), `readyFrameCount`, `sectorRelativeHfr`,
+   `frameTiltPercent` and `worstSectorFrameCount`.
+ - `focalPlane`, when all nine cells have a `relativeHfr`: the cells split
+   into a tilted plane and a radial bowl, `constant + tiltX·u + tiltY·v +
+   radial·(u² + v²)`, with `(u, v)` a pixel's offset from the sensor's
+   middle over the middle-to-corner distance (`u` right, `v` down).
+   `tiltPercent` is the plane's change across the whole diagonal and
+   `tiltAngleDegrees` the direction it softens toward (0 up, clockwise);
+   `radialPercent` is the bowl at a corner, an upper bound on a backfocus
+   error. `tiltRSquared`, `radialRSquared` and `rSquared` are the shares of
+   the cells' variation the plane, the bowl and both explain. Each cell
+   also has `elongationFromRadialDegrees`, 0 when its stars stretch toward
+   the middle and 90 when around it.
+
+ # Safety
+
+ `request_json` must be a NUL-terminated UTF-8 string. `error_out` must be
+ null or point to writable storage for one pointer.
+ */
+char *seiza_stars_tilt_frames_json(const char *request_json, char **error_out);
 
 /*
  The pixel scale, in arcseconds per pixel, of a camera with pixels
@@ -5047,6 +5173,51 @@ SeizaFileRestoration *seiza_noise_model_denoise_file(SeizaNoiseModel *model,
                                                      char **error_out);
 
 /*
+ Run a model on a bounded rectangle in source pixels; only that crop is inferred.
+
+ # Safety
+ The pointers and callback obey seiza_noise_model_denoise_file.
+ */
+SeizaFileRestoration *seiza_noise_model_denoise_file_region(SeizaNoiseModel *model,
+                                                            const char *input,
+                                                            size_t x,
+                                                            size_t y,
+                                                            size_t width,
+                                                            size_t height,
+                                                            SeizaModelProgressCallback progress,
+                                                            const SeizaCancelSignal *cancel,
+                                                            void *context,
+                                                            char **error_out);
+
+/*
+ Write a preview result as linear FITS for further processing, without full-frame WCS.
+
+ # Safety
+ The result is live, output is NUL-terminated, and error_out is null or writable.
+ */
+char *seiza_file_restoration_write_preview_linear(const SeizaFileRestoration *result,
+                                                  const char *output,
+                                                  float high,
+                                                  float low,
+                                                  float scale_px,
+                                                  char **error_out);
+
+/*
+ Write a full-sized preview by restoring only the selected source rectangle.
+ The source must be the unchanged file used for inference.
+
+ # Safety
+ The result is live, paths are NUL-terminated, error_out is null or writable.
+ */
+char *seiza_file_restoration_write_preview_in_context(const SeizaFileRestoration *result,
+                                                      const char *source,
+                                                      const char *output,
+                                                      float high,
+                                                      float low,
+                                                      float scale_px,
+                                                      char **error_out);
+
+/*
  Write the blended linear file, or two display images for a center run.
  On success returns a model report owned by the caller; free with seiza_string_free.
 
@@ -5305,6 +5476,34 @@ char *seiza_model_install_json(const char *source, const char *store, char **err
  The options are null or a NUL-terminated string; error_out is null or writable.
  */
 char *seiza_model_catalog_json(const char *options_json, char **error_out);
+
+/*
+ Return the verified installed CPU runtime as `{version, library}`, or JSON
+ null when missing or damaged. Does not download or load a library. The
+ returned JSON is released with `seiza_string_free`.
+
+ # Safety
+ `directory` is a NUL-terminated path; `error_out` is null or writable.
+ */
+char *seiza_onnxruntime_installed_json(const char *directory, char **error_out);
+
+/*
+ Download and install the pinned CPU runtime, including the Windows CRT.
+ Uses verified mirrors and atomic installation, and returns `{version,
+ library}`. Never loads the library or changes the selected backend.
+ Existing valid files work offline. Run off the UI thread, outside Tokio.
+ `progress` receives the same events as model downloads; `cancel` can stop
+ transfer and extraction before publication. Free JSON with seiza_string_free.
+
+ # Safety
+ `directory` is a NUL-terminated path. `cancel` is null or a live signal held
+ until return. `context` is passed to `progress`; `error_out` is null or writable.
+ */
+char *seiza_onnxruntime_install_json(const char *directory,
+                                     SeizaModelDownloadProgressCallback progress,
+                                     const SeizaCancelSignal *cancel,
+                                     void *context,
+                                     char **error_out);
 
 /*
  Download the model `name` that Seiza's hosted manifest offers, or with

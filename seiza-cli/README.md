@@ -1628,6 +1628,9 @@ seiza stretch color.fits --output preview.png \
   --color-strategy luminance-preserving asinh \
   --black 0 --white 1 --strength 8
 
+seiza stretch stack.fits --output preview.png ht \
+  --shadows 0.02 --midtone 0.1 --highlights 0.8
+
 seiza stretch stack.fits --output preview.png ghs \
   --stretch-factor 4 --local-intensity -1 --symmetry-point 0.35 \
   --protect-shadows 0.1 --protect-highlights 0.8
@@ -1646,7 +1649,11 @@ pixels, default 256) splits large structure from detail;
 `--saturation-amount` and `--saturation-boost` (both 0 to 1) lift colour,
 scaled by each pixel's value unless `--no-lightness-mask` is given. It carries
 colour by luminance, so it takes `linked` or `luminance-preserving`. Other
-model subcommands are `identity`, `linear`, and explicit `mtf`. The `ghs`
+model subcommands are `identity`, `linear`, explicit `mtf`, and `ht`. `mtf`
+shifts samples by its clipping points as N.I.N.A. does, so `--shadows 0.2
+--highlights 0.8` gives the same output as 0 and 1; `ht` clips to them and
+rescales, as PixInsight's HistogramTransformation does, and
+reads the curve from a 24-bit table. The `ghs`
 subcommand exposes the deterministic GHS parameters; informed automatic
 selection can be layered over it later. RGB may use `linked`, `unlinked`, or
 `luminance-preserving` analysis/application.

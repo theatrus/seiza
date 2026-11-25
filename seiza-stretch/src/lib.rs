@@ -386,10 +386,31 @@ pub enum StretchModel {
         white_percentile: f64,
         strength: f64,
     },
-    /// Apply an already resolved PixInsight/N.I.N.A.-family MTF curve.
+    /// Apply an explicit midtones transfer curve as N.I.N.A. does: the MTF of
+    /// `value - shadows + 1 - highlights`.
+    ///
+    /// The clipping points shift the samples and do not rescale them, so
+    /// shadows 0.2 with highlights 0.8 gives the same output as 0 with 1.
+    /// [`Self::Ht`] clips and rescales as PixInsight does.
     Mtf {
         shadows: f64,
         midtone: f64,
+        highlights: f64,
+    },
+    /// Apply PixInsight's HistogramTransformation: clip to `shadows` and
+    /// `highlights`, rescale that range to `[0, 1]`, then apply the MTF, so
+    /// the curve is the MTF of `(value - shadows) / (highlights - shadows)`.
+    ///
+    /// The clipping points are in the samples' own units and need not lie in
+    /// `[0, 1]`. The MTF is a 24-bit lookup table: it takes the rescaled
+    /// sample to the nearest of 2²⁴ evenly spaced levels.
+    Ht {
+        /// Input level that maps to 0; samples below it clip.
+        shadows: f64,
+        /// Midtones balance, at least 0 and below 1: the rescaled level that
+        /// maps to 0.5.
+        midtone: f64,
+        /// Input level that maps to 1; samples above it clip.
         highlights: f64,
     },
     /// Apply a manual Generalized Hyperbolic Stretch.
@@ -1053,10 +1074,19 @@ pub enum ResolvedCurve {
         white: f32,
         strength: f32,
     },
+    /// N.I.N.A.'s curve, whose clipping points shift; see
+    /// [`StretchModel::Mtf`].
     Mtf {
         shadows: f32,
         midtone: f64,
         highlights: f32,
+    },
+    /// PixInsight's curve, whose clipping points rescale; see
+    /// [`StretchModel::Ht`].
+    Ht {
+        shadows: f64,
+        midtone: f64,
+        highlights: f64,
     },
     Ghs(ResolvedGhs),
     MedianAnchor(ResolvedMedianAnchor),
@@ -1311,13 +1341,44 @@ impl ResolvedCurve {
 /// once instead of once per sample. It is the same value either way, so
 /// every sample maps to the same bits.
 #[derive(Clone, Copy, Debug)]
-struct CurveMapper {
+struct CurveMapper<'a> {
     curve: ResolvedCurve,
     /// `asinh(strength)` for an asinh curve, unused otherwise.
     asinh_strength: f32,
+    /// The output at every level of an HT curve, when one was built; without
+    /// it each sample's level is worked out, to the same bits.
+    ht_table: Option<&'a [f32]>,
 }
 
-impl CurveMapper {
+/// Levels in the HT curve's 24-bit midtones table.
+const HT_LEVELS: usize = 1 << 24;
+
+/// How often a call must read an HT table for building it to pay: from here
+/// up, reading the table beats working out each sample's level. Both give
+/// the same bits.
+const HT_TABLE_MIN_LOOKUPS: usize = 1 << 26;
+
+/// The HT table level nearest a rescaled sample.
+#[inline(always)]
+fn ht_level(input: f64) -> usize {
+    (input.clamp(0.0, 1.0) * (HT_LEVELS - 1) as f64 + 0.5) as usize
+}
+
+/// What the HT curve gives at one level of its table.
+#[inline(always)]
+fn ht_output(midtone: f64, level: usize) -> f32 {
+    midtones_transfer_function(midtone, level as f64 / (HT_LEVELS - 1) as f64) as f32
+}
+
+/// The HT curve's output at each of its levels, 64 MiB.
+fn ht_table(midtone: f64) -> Vec<f32> {
+    (0..HT_LEVELS)
+        .into_par_iter()
+        .map(|level| ht_output(midtone, level))
+        .collect()
+}
+
+impl<'a> CurveMapper<'a> {
     fn new(curve: ResolvedCurve) -> Self {
         let asinh_strength = match curve {
             ResolvedCurve::Asinh { strength, .. } => strength.asinh(),
@@ -1326,6 +1387,14 @@ impl CurveMapper {
         Self {
             curve,
             asinh_strength,
+            ht_table: None,
+        }
+    }
+
+    fn with_ht_table(self, table: Option<&'a [f32]>) -> Self {
+        Self {
+            ht_table: table,
+            ..self
         }
     }
 
@@ -1353,6 +1422,17 @@ impl CurveMapper {
                 let input = 1.0 - f64::from(highlights) + f64::from(value - shadows);
                 midtones_transfer_function(midtone, input)
             }
+            ResolvedCurve::Ht {
+                shadows,
+                midtone,
+                highlights,
+            } => {
+                let level = ht_level((f64::from(value) - shadows) / (highlights - shadows));
+                f64::from(match self.ht_table {
+                    Some(table) => table[level],
+                    None => ht_output(midtone, level),
+                })
+            }
             ResolvedCurve::Ghs(ghs) => ghs.map(f64::from(value)),
             ResolvedCurve::MedianAnchor(anchor) => anchor.map(f64::from(value)),
             ResolvedCurve::Layered(layered) => layered.curve.map(f64::from(value)),
@@ -1379,6 +1459,7 @@ impl CurveMapper {
             ResolvedCurve::Linear { .. } => run(input, output, |value| convert(self.map(value))),
             ResolvedCurve::Asinh { .. } => run(input, output, |value| convert(self.map(value))),
             ResolvedCurve::Mtf { .. } => run(input, output, |value| convert(self.map(value))),
+            ResolvedCurve::Ht { .. } => run(input, output, |value| convert(self.map(value))),
             ResolvedCurve::Ghs(_) => run(input, output, |value| convert(self.map(value))),
             ResolvedCurve::MedianAnchor(_) => run(input, output, |value| convert(self.map(value))),
             ResolvedCurve::Layered(_) => run(input, output, |value| convert(self.map(value))),
@@ -1481,11 +1562,30 @@ impl StretchPlan {
         if matches!(self.curves[0], ResolvedCurve::Layered(_)) {
             return Err(StretchError::Invalid(LAYERED_NEEDS_SHAPE.into()));
         }
+        let tables = self.ht_tables(data.len() / channel_count);
+        Ok(self.map_with_tables(data, channel_count, &tables, convert))
+    }
+
+    fn map_with_tables<T, F>(
+        &self,
+        data: &[f32],
+        channel_count: usize,
+        tables: &[(f64, Vec<f32>)],
+        convert: F,
+    ) -> Vec<T>
+    where
+        T: Copy + Default + Send,
+        F: Fn(f32) -> T + Copy + Send + Sync,
+    {
         let mappers = self
             .curves
             .iter()
-            .copied()
-            .map(CurveMapper::new)
+            .map(|&curve| {
+                let table = tables.iter().find(|(midtone, _)| {
+                    matches!(curve, ResolvedCurve::Ht { midtone: own, .. } if own == *midtone)
+                });
+                CurveMapper::new(curve).with_ht_table(table.map(|(_, table)| table.as_slice()))
+            })
             .collect::<Vec<_>>();
         let mut output = vec![T::default(); data.len()];
         // Whole pixels per task, so each chunk starts on a first channel.
@@ -1519,7 +1619,39 @@ impl StretchPlan {
                 }
             }),
         }
-        Ok(output)
+        output
+    }
+
+    /// A table for each midtone whose HT curves will read it often enough,
+    /// for `pixels` pixels.
+    fn ht_tables(&self, pixels: usize) -> Vec<(f64, Vec<f32>)> {
+        self.ht_table_midtones(pixels)
+            .into_iter()
+            .map(|midtone| (midtone, ht_table(midtone)))
+            .collect()
+    }
+
+    /// The midtones of this plan's HT curves that `pixels` pixels read at
+    /// least [`HT_TABLE_MIN_LOOKUPS`] times.
+    fn ht_table_midtones(&self, pixels: usize) -> Vec<f64> {
+        // A linked curve maps every channel of a pixel; the others map one
+        // value of it, a channel's sample or the luminance.
+        let lookups = match self.color_strategy {
+            ColorStrategy::Linked => pixels * self.channels,
+            ColorStrategy::Unlinked | ColorStrategy::LuminancePreserving => pixels,
+        };
+        let midtones = self.curves.iter().filter_map(|curve| match *curve {
+            ResolvedCurve::Ht { midtone, .. } => Some(midtone),
+            _ => None,
+        });
+        let mut worthwhile: Vec<f64> = Vec::new();
+        for midtone in midtones.clone() {
+            let curves = midtones.clone().filter(|&other| other == midtone).count();
+            if lookups * curves >= HT_TABLE_MIN_LOOKUPS && !worthwhile.contains(&midtone) {
+                worthwhile.push(midtone);
+            }
+        }
+        worthwhile
     }
 
     fn validate_input(&self, data: &[f32], channel_count: usize) -> Result<()> {
@@ -1540,7 +1672,7 @@ const MAP_CHUNK_PIXELS: usize = 1 << 14;
 
 /// Stretch an RGB pixel's Rec.709 luminance and scale its channels by the
 /// same factor, keeping them in gamut.
-fn map_luminance_pixel(curve: CurveMapper, pixel: &[f32]) -> [f32; 3] {
+fn map_luminance_pixel(curve: CurveMapper<'_>, pixel: &[f32]) -> [f32; 3] {
     if pixel.iter().any(|value| !value.is_finite()) {
         return [0.0; 3];
     }
@@ -1636,6 +1768,18 @@ impl StretchModel {
                     shadows: shadows as f32,
                     midtone,
                     highlights: highlights as f32,
+                }
+            }
+            Self::Ht {
+                shadows,
+                midtone,
+                highlights,
+            } => {
+                validate_ht(shadows, midtone, highlights)?;
+                ResolvedCurve::Ht {
+                    shadows,
+                    midtone,
+                    highlights,
                 }
             }
             Self::Ghs(params) => {
@@ -1814,6 +1958,20 @@ fn validate_mtf(shadows: f64, midtone: f64, highlights: f64) -> Result<()> {
     {
         return Err(StretchError::Invalid(
             "MTF shadows, midtone, and highlights must form a finite valid curve".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_ht(shadows: f64, midtone: f64, highlights: f64) -> Result<()> {
+    if !(highlights - shadows).is_finite()
+        || highlights <= shadows
+        || !(0.0..1.0).contains(&midtone)
+    {
+        return Err(StretchError::Invalid(
+            "HT shadows and highlights must be finite and increasing, and its midtone at least \
+             zero and below one"
+                .into(),
         ));
     }
     Ok(())
@@ -2383,6 +2541,7 @@ mod tests {
                 let input = 1.0 - f64::from(highlights) + f64::from(value - shadows);
                 midtones_transfer_function(midtone, input)
             }
+            ResolvedCurve::Ht { .. } => unreachable!("newer than this map"),
             ResolvedCurve::Ghs(ghs) => ghs.map(f64::from(value)),
             ResolvedCurve::MedianAnchor(anchor) => anchor.map(f64::from(value)),
             ResolvedCurve::Layered(layered) => layered.curve.map(f64::from(value)),
@@ -2793,6 +2952,207 @@ mod tests {
                     .windows(2)
                     .all(|pair| pair[0].is_finite() && pair[0] <= pair[1]),
                 "b={local_intensity}"
+            );
+        }
+    }
+
+    #[test]
+    fn ht_clips_and_rescales_where_mtf_shifts() {
+        let data = (0..=10).map(|step| step as f32 / 10.0).collect::<Vec<_>>();
+        let apply = |model: StretchModel| {
+            StretchConfig {
+                model,
+                color_strategy: ColorStrategy::Linked,
+                max_analysis_samples: 0,
+            }
+            .resolve_explicit(1)
+            .unwrap()
+            .apply_f32(&data, 1)
+            .unwrap()
+        };
+        let mtf = |shadows, highlights| {
+            apply(StretchModel::Mtf {
+                shadows,
+                midtone: 0.25,
+                highlights,
+            })
+        };
+        let ht = |shadows, highlights| {
+            apply(StretchModel::Ht {
+                shadows,
+                midtone: 0.25,
+                highlights,
+            })
+        };
+        // N.I.N.A.'s curve only shifts, so equal clips at both ends cancel.
+        for (clipped, full) in mtf(0.2, 0.8).iter().zip(mtf(0.0, 1.0)) {
+            assert!((clipped - full).abs() < 1.0e-6, "{clipped} {full}");
+        }
+        // With nothing clipped the two curves agree.
+        for (ht, mtf) in ht(0.0, 1.0).iter().zip(mtf(0.0, 1.0)) {
+            assert!((ht - mtf).abs() < 1.0e-6, "{ht} {mtf}");
+        }
+        // PixInsight's: x = (v - 0.2) / 0.6, then 0.75 x / (0.5 x + 0.25).
+        for (&value, mapped) in data.iter().zip(ht(0.2, 0.8)) {
+            let x = ((f64::from(value) - 0.2) / 0.6).clamp(0.0, 1.0);
+            let expected = 0.75 * x / (0.5 * x + 0.25);
+            assert!((f64::from(mapped) - expected).abs() < 1.0e-6, "{value}");
+        }
+    }
+
+    #[test]
+    fn ht_takes_levels_in_the_samples_units_and_refuses_invalid_ones() {
+        let model = |shadows, midtone, highlights| StretchModel::Ht {
+            shadows,
+            midtone,
+            highlights,
+        };
+        let curve = model(3_300.0, 0.5, 3_400.0).resolve_explicit().unwrap();
+        assert_eq!(curve.map(3_250.0), 0.0);
+        assert!((curve.map(3_350.0) - 0.5).abs() < 1.0e-7);
+        assert_eq!(curve.map(60_000.0), 1.0);
+        assert_eq!(curve.map(f32::NAN), 0.0);
+        for invalid in [
+            model(0.8, 0.25, 0.2),
+            model(0.2, 0.25, 0.2),
+            model(f64::NAN, 0.25, 1.0),
+            model(0.0, 0.25, f64::INFINITY),
+            model(-f64::MAX, 0.25, f64::MAX),
+            model(0.0, 1.0, 1.0),
+            model(0.0, -0.1, 1.0),
+            model(0.0, f64::NAN, 1.0),
+        ] {
+            assert!(invalid.resolve_explicit().is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn ht_rounds_the_rescaled_sample_to_24_bits() {
+        let top = 16_777_215.0_f64;
+        assert_eq!(ht_level(-1.0), 0);
+        assert_eq!(ht_level(0.0), 0);
+        assert_eq!(ht_level(0.49 / top), 0);
+        assert_eq!(ht_level(0.51 / top), 1);
+        assert_eq!(ht_level(1.0), 16_777_215);
+        assert_eq!(ht_level(2.0), 16_777_215);
+        // Neighbouring 24-bit levels stay apart where a 16-bit table, 256
+        // levels to a step, would merge them.
+        let curve = ResolvedCurve::Ht {
+            shadows: 0.0,
+            midtone: 0.01,
+            highlights: 1.0,
+        };
+        let outputs = (0..512_u32)
+            .map(|level| curve.map((f64::from(level) / top) as f32))
+            .collect::<Vec<_>>();
+        assert!(outputs.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn ht_table_gives_the_same_bits_as_working_out_each_level() {
+        let ht = |shadows, midtone| ResolvedCurve::Ht {
+            shadows,
+            midtone,
+            highlights: 0.9,
+        };
+        let data = (0..90_000)
+            .map(|index| (index as f32 / 90_000.0) * 1.2 - 0.1)
+            .collect::<Vec<_>>();
+        let tables = vec![(0.01, ht_table(0.01)), (0.25, ht_table(0.25))];
+        for (strategy, curves) in [
+            (ColorStrategy::Linked, vec![ht(0.1, 0.01)]),
+            (
+                ColorStrategy::Unlinked,
+                vec![ht(0.1, 0.01), ht(0.05, 0.25), ht(0.0, 0.01)],
+            ),
+            (ColorStrategy::LuminancePreserving, vec![ht(0.1, 0.01)]),
+        ] {
+            let plan = StretchPlan::from_resolved(3, strategy, curves).unwrap();
+            let read = plan.map_with_tables(&data, 3, &tables, f32::to_bits);
+            let worked_out = plan.map_with_tables(&data, 3, &[], f32::to_bits);
+            assert_eq!(read, worked_out, "{strategy:?}");
+            let between = read
+                .iter()
+                .map(|&bits| f32::from_bits(bits))
+                .filter(|value| (0.1..0.9).contains(value))
+                .count();
+            assert!(between > 100, "{strategy:?}: {between}");
+        }
+        // A wrong table shows, so the mapping reads the one it is given.
+        let plan =
+            StretchPlan::from_resolved(3, ColorStrategy::LuminancePreserving, vec![ht(0.1, 0.01)])
+                .unwrap();
+        let wrong = [(0.01, ht_table(0.9))];
+        assert_ne!(
+            plan.map_with_tables(&data, 3, &wrong, f32::to_bits),
+            plan.map_with_tables(&data, 3, &[], f32::to_bits)
+        );
+    }
+
+    #[test]
+    fn ht_builds_a_table_only_for_midtones_read_often_enough() {
+        let ht = |midtone| ResolvedCurve::Ht {
+            shadows: 0.0,
+            midtone,
+            highlights: 1.0,
+        };
+        let midtones = |strategy, curves, pixels| {
+            StretchPlan::from_resolved(3, strategy, curves)
+                .unwrap()
+                .ht_table_midtones(pixels)
+        };
+        let least = HT_TABLE_MIN_LOOKUPS;
+        let linked = |pixels| midtones(ColorStrategy::Linked, vec![ht(0.2)], pixels);
+        assert!(linked(least / 3).is_empty());
+        assert_eq!(linked(least / 3 + 1), [0.2]);
+        // Luminance reads one value a pixel.
+        let luminance =
+            |pixels| midtones(ColorStrategy::LuminancePreserving, vec![ht(0.2)], pixels);
+        assert!(luminance(least - 1).is_empty());
+        assert_eq!(luminance(least), [0.2]);
+        // Channels of one midtone share a table; one alone needs its own.
+        let unlinked = |pixels| {
+            midtones(
+                ColorStrategy::Unlinked,
+                vec![ht(0.2), ht(0.3), ht(0.2)],
+                pixels,
+            )
+        };
+        assert!(unlinked(least / 2 - 1).is_empty());
+        assert_eq!(unlinked(least / 2), [0.2]);
+        assert_eq!(unlinked(least), [0.2, 0.3]);
+        assert!(midtones(ColorStrategy::Linked, vec![ResolvedCurve::Identity], least).is_empty());
+    }
+
+    #[test]
+    fn ht_resolves_on_every_color_strategy_and_reports_its_levels() {
+        let pixel = [0.2_f32, 0.4, 0.1];
+        for strategy in [
+            ColorStrategy::Linked,
+            ColorStrategy::Unlinked,
+            ColorStrategy::LuminancePreserving,
+        ] {
+            let config: StretchConfig = serde_json::from_value(serde_json::json!({
+                "model": {"type": "ht", "shadows": 0.05, "midtone": 0.25, "highlights": 0.9},
+                "color_strategy": strategy,
+                "max_analysis_samples": 1,
+            }))
+            .unwrap();
+            let plan = config.resolve_for(&pixel, 3).unwrap();
+            let output = plan.apply_f32(&pixel, 3).unwrap();
+            if strategy == ColorStrategy::LuminancePreserving {
+                assert!((output[0] / output[1] - 0.5).abs() < 1.0e-6);
+                assert!((output[2] / output[1] - 0.25).abs() < 1.0e-6);
+            } else {
+                let expected = pixel.map(|value| plan.curves()[0].map(value));
+                assert_eq!(output, expected);
+            }
+            let json = serde_json::to_value(&plan).unwrap();
+            assert_eq!(
+                json["curves"][0],
+                serde_json::json!({
+                    "type": "ht", "shadows": 0.05, "midtone": 0.25, "highlights": 0.9
+                })
             );
         }
     }

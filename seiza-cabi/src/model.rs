@@ -12,7 +12,7 @@ use super::{
     SeizaCancelSignal, clear_error, ffi_result, optional_path, owned_json, required_f32_slice,
     required_f32_slice_mut, required_path, required_str,
 };
-use seiza::downloads::{CachePolicy, DownloadEvent, ModelManager};
+use seiza::downloads::{CachePolicy, DownloadEvent, ModelManager, OnnxRuntimeInstaller};
 use seiza_model::{
     Backend, BackendOptions, DenoiseOptions, DenoiseReport, Denoised, FileRestoration, HoleGuard,
     ImageView, ModelBundle, ModelStore, NoiseBands, NoiseModel, Precision, Progress, Published,
@@ -513,6 +513,116 @@ pub unsafe extern "C" fn seiza_noise_model_denoise_file(
         })
         .map_err(|error| error.to_string())?;
         Ok(Box::into_raw(Box::new(SeizaFileRestoration(result))))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+/// Run a model on a bounded rectangle in source pixels; only that crop is inferred.
+///
+/// # Safety
+/// The pointers and callback obey seiza_noise_model_denoise_file.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_noise_model_denoise_file_region(
+    model: *mut SeizaNoiseModel,
+    input: *const c_char,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+    progress: SeizaModelProgressCallback,
+    cancel: *const SeizaCancelSignal,
+    context: *mut c_void,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaFileRestoration {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let model = unsafe { model.as_mut() }.ok_or("model is required")?;
+        let input = required_path(input, "input path")?;
+        let image = RestorationImage::open(
+            &input,
+            RestorationArea::Region {
+                x,
+                y,
+                width,
+                height,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let result = with_inference_options(progress, cancel, context, |options| {
+            image.denoise(&mut model.model, options)
+        })
+        .map_err(|error| error.to_string())?;
+        Ok(Box::into_raw(Box::new(SeizaFileRestoration(result))))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+/// Write a preview result as linear FITS for further processing, without full-frame WCS.
+///
+/// # Safety
+/// The result is live, output is NUL-terminated, and error_out is null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_file_restoration_write_preview_linear(
+    result: *const SeizaFileRestoration,
+    output: *const c_char,
+    high: f32,
+    low: f32,
+    scale_px: f32,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let result = unsafe { result.as_ref() }.ok_or("a restoration result is required")?;
+        let output = required_path(output, "output path")?;
+        result
+            .0
+            .write_preview_linear(
+                &output,
+                &NoiseBands {
+                    high,
+                    low,
+                    scale_px,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        owned_json(&DenoiseReportResponse::from(result.0.report()))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+/// Write a full-sized preview by restoring only the selected source rectangle.
+/// The source must be the unchanged file used for inference.
+///
+/// # Safety
+/// The result is live, paths are NUL-terminated, error_out is null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_file_restoration_write_preview_in_context(
+    result: *const SeizaFileRestoration,
+    source: *const c_char,
+    output: *const c_char,
+    high: f32,
+    low: f32,
+    scale_px: f32,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let result = unsafe { result.as_ref() }.ok_or("a restoration result is required")?;
+        let source = required_path(source, "source path")?;
+        let output = required_path(output, "output path")?;
+        result
+            .0
+            .write_preview_in_context(
+                &source,
+                &output,
+                &NoiseBands {
+                    high,
+                    low,
+                    scale_px,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        owned_json(&DenoiseReportResponse::from(result.0.report()))
     })
     .unwrap_or(ptr::null_mut())
 }
@@ -1088,6 +1198,72 @@ pub unsafe extern "C" fn seiza_model_catalog_json(
 pub type SeizaModelDownloadProgressCallback =
     Option<unsafe extern "C" fn(*const c_char, *mut c_void)>;
 
+/// Return the verified installed CPU runtime as `{version, library}`, or JSON
+/// null when missing or damaged. Does not download or load a library. The
+/// returned JSON is released with `seiza_string_free`.
+///
+/// # Safety
+/// `directory` is a NUL-terminated path; `error_out` is null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_onnxruntime_installed_json(
+    directory: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let installer = OnnxRuntimeInstaller::new(required_path(directory, "runtime directory")?)
+            .map_err(|error| error.to_string())?;
+        owned_json(&installer.installed().map_err(|error| error.to_string())?)
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+/// Download and install the pinned CPU runtime, including the Windows CRT.
+/// Uses verified mirrors and atomic installation, and returns `{version,
+/// library}`. Never loads the library or changes the selected backend.
+/// Existing valid files work offline. Run off the UI thread, outside Tokio.
+/// `progress` receives the same events as model downloads; `cancel` can stop
+/// transfer and extraction before publication. Free JSON with seiza_string_free.
+///
+/// # Safety
+/// `directory` is a NUL-terminated path. `cancel` is null or a live signal held
+/// until return. `context` is passed to `progress`; `error_out` is null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_onnxruntime_install_json(
+    directory: *const c_char,
+    progress: SeizaModelDownloadProgressCallback,
+    cancel: *const SeizaCancelSignal,
+    context: *mut c_void,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let installer = OnnxRuntimeInstaller::new(required_path(directory, "runtime directory")?)
+            .map_err(|error| error.to_string())?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())?;
+        let report = |event: DownloadEvent| {
+            let Some(callback) = progress else { return };
+            let Ok(json) = serde_json::to_string(&event) else {
+                return;
+            };
+            let Ok(json) = CString::new(json) else { return };
+            unsafe { callback(json.as_ptr(), context) };
+        };
+        let stop = || {
+            unsafe { cancel.as_ref() }
+                .is_some_and(|signal| signal.cancelled.load(Ordering::Relaxed))
+        };
+        let installed = runtime
+            .block_on(installer.install(report, stop))
+            .map_err(|error| error.to_string())?;
+        owned_json(&installed)
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
 #[unsafe(no_mangle)]
 /// Download the model `name` that Seiza's hosted manifest offers, or with
 /// `name` null the latest noise model it names, and install it, replacing any
@@ -1231,6 +1407,33 @@ mod tests {
 
     fn fixtures() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../seiza-model/tests/fixtures")
+    }
+
+    #[test]
+    fn runtime_install_status_and_cancellation_do_not_download() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("runtime");
+        let path = text(&target);
+        let mut error = ptr::null_mut();
+        unsafe {
+            let status = seiza_onnxruntime_installed_json(path.as_ptr(), &mut error);
+            assert!(error.is_null());
+            assert!(!status.is_null());
+            assert_eq!(taken(status), "null");
+            let signal = crate::seiza_cancel_signal_create();
+            crate::seiza_cancel_signal_cancel(signal);
+            let result = seiza_onnxruntime_install_json(
+                path.as_ptr(),
+                None,
+                signal,
+                ptr::null_mut(),
+                &mut error,
+            );
+            assert!(result.is_null());
+            assert!(taken(error).contains("cancelled"));
+            crate::seiza_cancel_signal_free(signal);
+        }
+        assert!(!target.exists());
     }
 
     fn text(path: &Path) -> CString {

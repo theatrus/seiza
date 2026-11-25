@@ -12,7 +12,7 @@ use crate::stacking::{keep_first, python_cancel_signal};
 use numpy::{PyArrayDyn, PyReadonlyArrayDyn};
 use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use seiza::downloads::{CachePolicy, DownloadEvent, ModelManager};
+use seiza::downloads::{CachePolicy, DownloadEvent, ModelManager, OnnxRuntimeInstaller};
 use seiza_model::{
     Backend, BackendOptions, ChannelScales, DenoiseOptions, DenoiseReport, Denoised,
     FileRestoration, HoleGuard, ImageView, ModelBundle, ModelError, ModelStore, NoiseBands,
@@ -377,16 +377,28 @@ impl PyNoiseModel {
     }
 
     /// Restore a full linear file, or its center crop, without first constructing a Python array.
-    #[pyo3(signature = (path, *, center=false, progress=None, cancel=None))]
+    #[pyo3(signature = (path, *, center=false, region=None, progress=None, cancel=None))]
+    #[allow(clippy::too_many_arguments)]
     fn denoise_file(
         &self,
         py: Python<'_>,
         path: PathBuf,
         center: bool,
+        region: Option<(usize, usize, usize, usize)>,
         progress: Option<Py<PyAny>>,
         cancel: Option<Py<PyAny>>,
     ) -> PyResult<PyFileRestoration> {
-        let area = if center {
+        if center && region.is_some() {
+            return Err(PyValueError::new_err("choose center or region, not both"));
+        }
+        let area = if let Some((x, y, width, height)) = region {
+            RestorationArea::Region {
+                x,
+                y,
+                width,
+                height,
+            }
+        } else if center {
             RestorationArea::Center
         } else {
             RestorationArea::Full
@@ -477,6 +489,56 @@ impl PyFileRestoration {
         };
         py.detach(|| self.result.write_linear(&path, &bands))
             .map_err(|error| crate::EngineError::new_err(error.to_string()))?;
+        Ok(self.result.report().into())
+    }
+
+    /// Write the restored preview crop in linear samples, without full-frame WCS.
+    #[pyo3(signature = (path, *, high=1.0, low=1.0, scale_px=5.0))]
+    fn write_preview_linear(
+        &self,
+        py: Python<'_>,
+        path: PathBuf,
+        high: f32,
+        low: f32,
+        scale_px: f32,
+    ) -> PyResult<PyDenoiseReport> {
+        py.detach(|| {
+            self.result.write_preview_linear(
+                &path,
+                &NoiseBands {
+                    high,
+                    low,
+                    scale_px,
+                },
+            )
+        })
+        .map_err(|error| crate::EngineError::new_err(error.to_string()))?;
+        Ok(self.result.report().into())
+    }
+
+    /// Write the regional result within the unchanged full source image.
+    #[pyo3(signature = (source, output, *, high=1.0, low=1.0, scale_px=5.0))]
+    fn write_preview_in_context(
+        &self,
+        py: Python<'_>,
+        source: PathBuf,
+        output: PathBuf,
+        high: f32,
+        low: f32,
+        scale_px: f32,
+    ) -> PyResult<PyDenoiseReport> {
+        py.detach(|| {
+            self.result.write_preview_in_context(
+                &source,
+                &output,
+                &NoiseBands {
+                    high,
+                    low,
+                    scale_px,
+                },
+            )
+        })
+        .map_err(|error| crate::EngineError::new_err(error.to_string()))?;
         Ok(self.result.report().into())
     }
 
@@ -1187,7 +1249,76 @@ fn model_catalog(
     to_python(py, &catalog).map(Bound::unbind)
 }
 
+/// Verify the shared installed runtime without downloading or loading it.
+#[pyfunction]
+fn installed_onnxruntime(py: Python<'_>, directory: PathBuf) -> PyResult<Py<PyAny>> {
+    let installed = py
+        .detach(|| OnnxRuntimeInstaller::new(directory)?.installed())
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    to_python(py, &installed).map(Bound::unbind)
+}
+
+/// Install the pinned CPU runtime and its dependencies. Downloads are verified
+/// and installed atomically. Existing valid files work offline. Does not load
+/// the library. Progress receives dictionaries; cancel returns True to stop.
+#[pyfunction]
+#[pyo3(signature = (directory, *, progress=None, cancel=None))]
+fn install_onnxruntime(
+    py: Python<'_>,
+    directory: PathBuf,
+    progress: Option<Py<PyAny>>,
+    cancel: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    let installer = OnnxRuntimeInstaller::new(directory)
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    let raised = Mutex::new(None);
+    let report = |event: DownloadEvent| {
+        let Some(callback) = &progress else { return };
+        Python::attach(|py| {
+            if raised.lock().is_ok_and(|slot| slot.is_some()) {
+                return;
+            }
+            if let Err(error) = to_python(py, &event).and_then(|value| callback.call1(py, (value,)))
+            {
+                keep_first(&raised, error);
+            }
+        });
+    };
+    let stop = || {
+        if raised.lock().is_ok_and(|slot| slot.is_some()) {
+            return true;
+        }
+        let Some(callback) = &cancel else {
+            return false;
+        };
+        Python::attach(|py| {
+            match callback
+                .call0(py)
+                .and_then(|value| value.extract::<bool>(py))
+            {
+                Ok(cancelled) => cancelled,
+                Err(error) => {
+                    keep_first(&raised, error);
+                    true
+                }
+            }
+        })
+    };
+    let installed = py.detach(|| runtime.block_on(installer.install(report, stop)));
+    if let Some(error) = raised.lock().ok().and_then(|mut slot| slot.take()) {
+        return Err(error);
+    }
+    let installed = installed.map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    to_python(py, &installed).map(Bound::unbind)
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(installed_onnxruntime, m)?)?;
+    m.add_function(wrap_pyfunction!(install_onnxruntime, m)?)?;
     m.add_class::<PyFileRestoration>()?;
     m.add_class::<PyNoiseModel>()?;
     m.add_class::<PyDenoised>()?;
