@@ -1925,6 +1925,74 @@ char *seiza_frame_noise_json(const float *data,
                              char **error_out);
 
 /*
+ Measures a linear image's per-channel noise at the scale of `block` by
+ `block` pixels: the standard deviation of those blocks' means in the
+ image's own units. [`seiza_frame_noise_json`] reads neighbouring pixels,
+ so it under-reads the noise they share after drizzle or resampling. Blocks
+ several times the resampling's reach take it in, and blocks of one size
+ on the sky compare images of different pixel scales.
+
+ For independent noise it is [`seiza_frame_noise_json`]'s divided by
+ `block`, and that call's own at 1. Stars pass, but structure that covers
+ much of the image and curves within four blocks reads as noise.
+
+ Returns an owned JSON array with one number per channel, or `null` when
+ the image has too few whole blocks of finite samples, about 36 by 36.
+ Free it, or an `error_out` string, with [`seiza_string_free`].
+
+ # Safety
+ As [`seiza_frame_noise_json`].
+ */
+char *seiza_noise_at_scale_json(const float *data,
+                                size_t length,
+                                size_t width,
+                                size_t height,
+                                size_t channels,
+                                size_t block,
+                                char **error_out);
+
+/*
+ Fits the gain and offset that put a linear image on a reference's scale,
+ `reference = gain * image + offset`, for comparing finished masters.
+
+ The two images are registered to one grid and share their dimensions,
+ `channels` being 1 for mono or 3 for interleaved RGB. The fit weighs the
+ noise it measures in both, so it depends on neither's depth. It reads
+ means of blocks of pixels and leaves out any block that holds a
+ non-finite sample or an excluded pixel, or one value in both images, such
+ as an empty border. Pass null `mask` with zero
+ `mask_length` to exclude none, or `width * height` bytes where `1`
+ excludes a pixel. `options_json` is null or
+ `{"bin": 4, "clipSigma": 3.0}`, either field optional: the blocks' edge in
+ pixels, and how many robust sigmas from the line a block may lie.
+
+ Returns an owned JSON array with one `{"gain", "offset", "gainError",
+ "blocks", "rejected"}` per channel: `gainError` is the gain's standard
+ error from the images' noise, taken as independent from block to block,
+ `blocks` those the fit used and `rejected` those clipping left out. Fails
+ when a channel has too few blocks after masking and clipping, or too
+ little signal in common. Free the result, or an `error_out` string,
+ with [`seiza_string_free`].
+
+ # Safety
+ `image` and `reference` must each point to `length` readable floats,
+ `width * height * channels` of them. A non-null `mask` must point to
+ `mask_length` readable bytes containing only zero or one, and a non-null
+ `options_json` must be a valid NUL-terminated UTF-8 string. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_match_linear_json(const float *image,
+                              const float *reference,
+                              size_t length,
+                              size_t width,
+                              size_t height,
+                              size_t channels,
+                              const uint8_t *mask,
+                              size_t mask_length,
+                              const char *options_json,
+                              char **error_out);
+
+/*
  Load and atomically replace the masters used by later FITS/XISF pushes.
 
  Each master path is optional. Passing all null/empty paths clears the

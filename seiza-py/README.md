@@ -826,7 +826,9 @@ here.
 Under noise weighting, each accepted frame's `noise` and `weight` list one
 value per channel, and `LiveStacker.reference_noise` gives the reference
 frame's noise, the unit of the weights; under equal weighting they are empty.
-`seiza.frame_noise(image)` measures any linear array the same way. Each
+`seiza.frame_noise(image)` measures any linear array the same way, pixel by
+pixel; [comparing finished masters](#comparing-finished-masters) needs
+`seiza.noise_at_scale`. Each
 accepted frame's `mapping`, and `LiveStacker.reference_mapping` for the
 reference, is a dict of its registration and normalization, to keep beside
 the frame. Superpixel mappings include `channel_sites`, three `[x, y]`
@@ -1358,6 +1360,43 @@ are linear-light. Super-luminance output can exceed one.
 Foraxx-SHO/HOO use a stretched working copy as required by the
 published dynamic formula, so those returned arrays are display-referred.
 Composition releases the GIL.
+
+### Comparing finished masters
+
+`seiza.frame_noise` reads neighbouring pixels, so noise that neighbours share,
+as after drizzle or resampling, reads low: a 2x drizzle's can read 2.7 times
+low. `seiza.noise_at_scale(image, block)` gives the standard deviation of the
+means of `block` by `block` pixels instead. Use blocks of one size on the sky,
+several times the resampling's reach:
+
+```python
+native_noise = seiza.noise_at_scale(native, 8)     # 6" at 0.75"/px
+drizzle_noise = seiza.noise_at_scale(drizzled, 16)  # 6" at 0.375"/px
+```
+
+For independent noise it is `frame_noise / block`. Stars pass, but structure
+that covers much of the image and curves within four blocks reads as noise:
+subtract a deeper image first, or measure a region of sky.
+
+`seiza.match_linear(image, reference)` fits the gain and offset that put a
+master on a registered reference's scale:
+
+```python
+(fit,) = seiza.match_linear(image, reference)
+matched = image * fit.gain + fit.offset
+```
+
+It weighs the noise it measures in both images. A plain regression pulls the
+gain toward 0 as the image's noise grows, and a regression the other way round
+pushes it up as the reference's does. It gives one `ChannelMatch` per channel, with
+`gain_error`, the gain's standard error from the noise, and how many `blocks`
+it used and `rejected`. `gain_error` takes the noise as independent from block
+to block and knows nothing of real differences, such as a gradient. The fit
+reads means of `bin` by `bin` pixels (default 4), leaves out blocks with a
+non-finite sample, a pixel the boolean `mask` excludes or one value in both
+images (an empty border), and clips blocks more than `clip_sigma` (default 3)
+from the line. It raises `StackError` when a channel has too few blocks left,
+or too little signal in common to measure a gain.
 
 ### Parameterized display stretching
 

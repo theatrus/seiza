@@ -2529,7 +2529,7 @@ pub unsafe extern "C" fn seiza_background_fit(
             ));
         }
         let data = unsafe { required_f32_slice(data, data_length, "background input")? };
-        let mask = unsafe { optional_mask(mask, mask_length)? };
+        let mask = unsafe { optional_mask(mask, mask_length, "background")? };
         let config = background_config(config_json)?;
         let fit = fit_background_masked(data, width, height, channels, mask.as_deref(), &config)
             .map_err(|error| error.to_string())?;
@@ -4792,6 +4792,138 @@ pub unsafe extern "C" fn seiza_frame_noise_json(
         let image =
             unsafe { linear_image_from_ffi(data, length, width, height, channels, "image")? };
         owned_json(&seiza_stacking::frame_noise(&image))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+/// Measures a linear image's per-channel noise at the scale of `block` by
+/// `block` pixels: the standard deviation of those blocks' means in the
+/// image's own units. [`seiza_frame_noise_json`] reads neighbouring pixels,
+/// so it under-reads the noise they share after drizzle or resampling. Blocks
+/// several times the resampling's reach take it in, and blocks of one size
+/// on the sky compare images of different pixel scales.
+///
+/// For independent noise it is [`seiza_frame_noise_json`]'s divided by
+/// `block`, and that call's own at 1. Stars pass, but structure that covers
+/// much of the image and curves within four blocks reads as noise.
+///
+/// Returns an owned JSON array with one number per channel, or `null` when
+/// the image has too few whole blocks of finite samples, about 36 by 36.
+/// Free it, or an `error_out` string, with [`seiza_string_free`].
+///
+/// # Safety
+/// As [`seiza_frame_noise_json`].
+pub unsafe extern "C" fn seiza_noise_at_scale_json(
+    data: *const f32,
+    length: usize,
+    width: usize,
+    height: usize,
+    channels: usize,
+    block: usize,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let block = std::num::NonZeroUsize::new(block)
+            .ok_or_else(|| "block must be at least one pixel".to_string())?;
+        let image =
+            unsafe { linear_image_from_ffi(data, length, width, height, channels, "image")? };
+        owned_json(&seiza_stacking::noise_at_scale(&image, block))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+/// Optional camelCase settings of [`seiza_match_linear_json`].
+#[derive(Default, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+struct LinearMatchOptionsJson {
+    bin: Option<std::num::NonZeroUsize>,
+    clip_sigma: Option<f64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChannelMatchJson {
+    gain: f64,
+    offset: f64,
+    gain_error: f64,
+    blocks: usize,
+    rejected: usize,
+}
+
+#[unsafe(no_mangle)]
+/// Fits the gain and offset that put a linear image on a reference's scale,
+/// `reference = gain * image + offset`, for comparing finished masters.
+///
+/// The two images are registered to one grid and share their dimensions,
+/// `channels` being 1 for mono or 3 for interleaved RGB. The fit weighs the
+/// noise it measures in both, so it depends on neither's depth. It reads
+/// means of blocks of pixels and leaves out any block that holds a
+/// non-finite sample or an excluded pixel, or one value in both images, such
+/// as an empty border. Pass null `mask` with zero
+/// `mask_length` to exclude none, or `width * height` bytes where `1`
+/// excludes a pixel. `options_json` is null or
+/// `{"bin": 4, "clipSigma": 3.0}`, either field optional: the blocks' edge in
+/// pixels, and how many robust sigmas from the line a block may lie.
+///
+/// Returns an owned JSON array with one `{"gain", "offset", "gainError",
+/// "blocks", "rejected"}` per channel: `gainError` is the gain's standard
+/// error from the images' noise, taken as independent from block to block,
+/// `blocks` those the fit used and `rejected` those clipping left out. Fails
+/// when a channel has too few blocks after masking and clipping, or too
+/// little signal in common. Free the result, or an `error_out` string,
+/// with [`seiza_string_free`].
+///
+/// # Safety
+/// `image` and `reference` must each point to `length` readable floats,
+/// `width * height * channels` of them. A non-null `mask` must point to
+/// `mask_length` readable bytes containing only zero or one, and a non-null
+/// `options_json` must be a valid NUL-terminated UTF-8 string. When non-null,
+/// `error_out` must point to writable storage for one pointer.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn seiza_match_linear_json(
+    image: *const f32,
+    reference: *const f32,
+    length: usize,
+    width: usize,
+    height: usize,
+    channels: usize,
+    mask: *const u8,
+    mask_length: usize,
+    options_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let image =
+            unsafe { linear_image_from_ffi(image, length, width, height, channels, "image")? };
+        let reference = unsafe {
+            linear_image_from_ffi(reference, length, width, height, channels, "reference")?
+        };
+        let mask = unsafe { optional_mask(mask, mask_length, "match")? };
+        let request: LinearMatchOptionsJson = if options_json.is_null() {
+            Default::default()
+        } else {
+            parse_request(options_json, "linear match")?
+        };
+        let defaults = seiza_stacking::LinearMatchOptions::default();
+        let options = seiza_stacking::LinearMatchOptions {
+            bin: request.bin.unwrap_or(defaults.bin),
+            clip_sigma: request.clip_sigma.unwrap_or(defaults.clip_sigma),
+        };
+        let channels = seiza_stacking::match_linear(&image, &reference, mask.as_deref(), &options)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|channel| ChannelMatchJson {
+                gain: channel.gain,
+                offset: channel.offset,
+                gain_error: channel.gain_error,
+                blocks: channel.blocks,
+                rejected: channel.rejected,
+            })
+            .collect::<Vec<_>>();
+        owned_json(&channels)
     })
     .unwrap_or(ptr::null_mut())
 }
@@ -9730,17 +9862,21 @@ unsafe fn required_f32_slice_mut<'a>(
     Ok(unsafe { std::slice::from_raw_parts_mut(data, length) })
 }
 
-unsafe fn optional_mask(mask: *const u8, length: usize) -> Result<Option<Vec<bool>>, String> {
+unsafe fn optional_mask(
+    mask: *const u8,
+    length: usize,
+    name: &str,
+) -> Result<Option<Vec<bool>>, String> {
     if mask.is_null() {
         return if length == 0 {
             Ok(None)
         } else {
-            Err("background mask is null but mask_length is non-zero".into())
+            Err(format!("{name} mask is null but mask_length is non-zero"))
         };
     }
     let bytes = unsafe { std::slice::from_raw_parts(mask, length) };
     if bytes.iter().any(|value| *value > 1) {
-        return Err("background mask entries must be zero or one".into());
+        return Err(format!("{name} mask entries must be zero or one"));
     }
     Ok(Some(bytes.iter().map(|value| *value != 0).collect()))
 }
@@ -16331,6 +16467,85 @@ mod tests {
         }
         // The cached buffer is reused across calls.
         assert_eq!(image.bgra().as_ptr(), image.bgra().as_ptr());
+    }
+
+    #[test]
+    fn noise_at_scale_and_linear_matching_cross_the_abi() {
+        let (width, height) = (320_usize, 256_usize);
+        let mut state = 0x9e37_79b9_u32;
+        let mut unit = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) as f32 / (1 << 24) as f32 - 0.5
+        };
+        let reference = (0..width * height)
+            .map(|index| {
+                let (x, y) = ((index % width) as f32, (index / width) as f32);
+                100.0 + 20.0 * (x / 40.0).sin() * (y / 50.0).cos() + unit()
+            })
+            .collect::<Vec<_>>();
+        let image = reference
+            .iter()
+            .map(|value| (value - 30.0) / 2.0 + unit())
+            .collect::<Vec<_>>();
+        let mut error = ptr::null_mut();
+        let noise = |block, error: &mut *mut c_char| unsafe {
+            seiza_noise_at_scale_json(image.as_ptr(), image.len(), width, height, 1, block, error)
+        };
+        let one = owned_json_value(noise(1, &mut error));
+        let frame = owned_json_value(unsafe {
+            seiza_frame_noise_json(image.as_ptr(), image.len(), width, height, 1, &mut error)
+        });
+        assert_eq!(one, frame);
+        assert!(owned_json_value(noise(4, &mut error))[0].as_f64().unwrap() > 0.0);
+        assert_eq!(owned_json_value(noise(128, &mut error)), Value::Null);
+        assert!(noise(0, &mut error).is_null());
+        unsafe { seiza_string_free(error) };
+        error = ptr::null_mut();
+
+        let fit = |mask: &[u8], options: &str, error: &mut *mut c_char| {
+            let options = CString::new(options).unwrap();
+            let mask_pointer = if mask.is_empty() {
+                ptr::null()
+            } else {
+                mask.as_ptr()
+            };
+            unsafe {
+                seiza_match_linear_json(
+                    image.as_ptr(),
+                    reference.as_ptr(),
+                    image.len(),
+                    width,
+                    height,
+                    1,
+                    mask_pointer,
+                    mask.len(),
+                    options.as_ptr(),
+                    error,
+                )
+            }
+        };
+        let whole = owned_json_value(fit(&[], "{}", &mut error));
+        assert!((whole[0]["gain"].as_f64().unwrap() - 2.0).abs() < 0.02);
+        assert!((whole[0]["offset"].as_f64().unwrap() - 30.0).abs() < 1.0);
+        assert!(whole[0]["gainError"].as_f64().unwrap() > 0.0);
+        let total =
+            |fit: &Value| fit[0]["blocks"].as_u64().unwrap() + fit[0]["rejected"].as_u64().unwrap();
+        assert_eq!(total(&whole), 80 * 64);
+        let mut mask = vec![0_u8; width * height];
+        mask[..width * 16].fill(1);
+        let masked = owned_json_value(fit(&mask, r#"{"bin": 4, "clipSigma": 4.0}"#, &mut error));
+        assert_eq!(total(&masked), 80 * 60);
+        for (mask, options) in [
+            (&mask[..], r#"{"bin": 0}"#),
+            (&mask[..], r#"{"clipSigma": -1.0}"#),
+            (&mask[..], r#"{"clip_sigma": 3.0}"#),
+            (&mask[..10], "{}"),
+        ] {
+            assert!(fit(mask, options, &mut error).is_null());
+            assert!(!error.is_null());
+            unsafe { seiza_string_free(error) };
+            error = ptr::null_mut();
+        }
     }
 
     #[test]

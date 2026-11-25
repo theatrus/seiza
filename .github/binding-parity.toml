@@ -241,6 +241,12 @@ transform = { none = "flattened into scale, rotation_degrees, translation_x and 
 [rust.RegionResponse]
 core = "seiza-stacking::ReferenceRegion"
 
+[rust.LinearMatchOptionsJson]
+core = "seiza-stacking::LinearMatchOptions"
+
+[rust.ChannelMatchJson]
+core = "seiza-stacking::ChannelMatch"
+
 [rust.SeizaSnrSample]
 core = "seiza-stacking::SnrSample"
 
@@ -701,6 +707,8 @@ seiza_live_stacker_open_prepared_fits = "LiveStacker.open_prepared_fits"
 seiza_live_stacker_reference_noise_json = "LiveStacker.reference_noise"
 seiza_live_stacker_reference_mapping_json = "LiveStacker.reference_mapping"
 seiza_frame_noise_json = "frame_noise"
+seiza_noise_at_scale_json = "noise_at_scale"
+seiza_match_linear_json = "match_linear"
 seiza_live_stacker_save_context = "LiveStacker.save_context"
 seiza_live_stacker_push_linear_json = "LiveStacker.push"
 seiza_live_stacker_push_fits_json = "LiveStacker.push_fits"
