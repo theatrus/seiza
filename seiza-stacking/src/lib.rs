@@ -83,6 +83,7 @@ mod reference;
 mod registration;
 mod replay;
 mod report;
+mod reproject;
 pub use report::{
     PostStackReport, StackReportChannel, StackReportContext, StackReportFrame, StackReportMap,
     StackReportSamples, drizzle_report, stack_report,
@@ -190,6 +191,7 @@ pub use registration::{
     resample_to_reference_affine, resample_to_reference_affine_with_gpu,
     resample_to_reference_with_gpu,
 };
+pub use reproject::{MAX_SUPERSAMPLING, ReprojectOptions, Reprojection, reproject};
 pub use residual_flat::{
     RESIDUAL_FLAT_ALGORITHM_VERSION, ResidualFlatBuild, ResidualFlatDiagnostics,
     ResidualFlatOptions, ResidualFlatPatch, build_residual_flat_patch,

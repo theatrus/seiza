@@ -250,6 +250,9 @@ core = "seiza-stacking::ReferenceRegion"
 [rust.LinearMatchOptionsJson]
 core = "seiza-stacking::LinearMatchOptions"
 
+[rust.ReprojectOptionsJson]
+core = "seiza-stacking::ReprojectOptions"
+
 [rust.ChannelMatchJson]
 core = "seiza-stacking::ChannelMatch"
 
@@ -739,6 +742,9 @@ seiza_image_file_header_json = "read_image"
 seiza_image_file_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
 seiza_wcs_fits_header_json = "Wcs.fits_header_cards"
 seiza_wcs_rotation_degrees = "Wcs.rotation_deg"
+seiza_wcs_pixel_to_world = "Wcs.pixel_to_world_array"
+seiza_wcs_world_to_pixel = "Wcs.world_to_pixel_array"
+seiza_reproject = "reproject"
 
 # --- stacking ---------------------------------------------------------------
 seiza_live_stacker_create = "LiveStacker.from_array"

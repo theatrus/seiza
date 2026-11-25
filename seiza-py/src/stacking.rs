@@ -4131,6 +4131,59 @@ impl PyChannelMatch {
 /// more than ``clip_sigma`` robust sigmas from the line are clipped. Raises
 /// ``StackError`` when a channel has too few blocks after masking and
 /// clipping, or too little signal in common.
+/// A reprojected image and its coverage, as NumPy arrays.
+type ImageAndCoverage<'py> = (
+    Bound<'py, numpy::PyArrayDyn<f32>>,
+    Bound<'py, numpy::PyArrayDyn<f32>>,
+);
+
+/// Resample ``image``, solved by ``from_wcs``, onto a ``width`` ×
+/// ``height`` grid solved by ``to_wcs``: each output pixel's sky position
+/// comes from ``to_wcs`` and its source pixel from ``from_wcs``, SIP
+/// included on both sides, so the two may differ in scale, rotation,
+/// parity and distortion. For a north-up grid, build ``to_wcs`` with
+/// :meth:`Wcs.from_center_scale_rotation` at rotation 0.
+///
+/// ``image`` is ``float32``, shaped ``(height, width)`` or
+/// ``(height, width, 3)``; a non-finite sample counts as missing.
+/// ``interpolation`` is ``"bilinear"`` or ``"lanczos3"``, as stacking uses
+/// them. With ``antialias``, an output coarser than the source averages
+/// ``ceil(output scale / source scale)`` samples a side per pixel, up to
+/// 16, rather than aliasing.
+///
+/// Returns ``(image, coverage)``: the image on the output grid, NaN where
+/// nothing of the source lands, and a ``(height, width)`` array of the
+/// share of each pixel's samples that landed on finite source samples.
+/// The GIL is released while it resamples.
+#[pyfunction]
+#[pyo3(signature = (image, from_wcs, to_wcs, width, height, *, interpolation="bilinear", antialias=true))]
+#[allow(clippy::too_many_arguments)]
+fn reproject<'py>(
+    py: Python<'py>,
+    image: PyReadonlyArrayDyn<'py, f32>,
+    from_wcs: PyRef<'py, crate::PyWcs>,
+    to_wcs: PyRef<'py, crate::PyWcs>,
+    width: usize,
+    height: usize,
+    interpolation: &str,
+    antialias: bool,
+) -> PyResult<ImageAndCoverage<'py>> {
+    let interpolation: seiza_stacking::Interpolation = interpolation
+        .parse()
+        .map_err(|error: seiza_stacking::Error| PyValueError::new_err(error.to_string()))?;
+    let source = linear_image(image)?;
+    let options = seiza_stacking::ReprojectOptions {
+        interpolation,
+        antialias,
+    };
+    let (from, to) = (&from_wcs.wcs, &to_wcs.wcs);
+    let result = py
+        .detach(|| seiza_stacking::reproject(&source, from, to, width, height, &options))
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let coverage = crate::arrays::float_array(py, width, height, 1, result.coverage)?;
+    Ok((crate::arrays::into_image_array(py, result.image)?, coverage))
+}
+
 #[pyfunction]
 #[pyo3(signature = (image, reference, *, mask=None, bin=None, clip_sigma=3.0))]
 fn match_linear(
@@ -4205,6 +4258,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(noise_at_scale, module)?)?;
     module.add_class::<PyChannelMatch>()?;
     module.add_function(wrap_pyfunction!(match_linear, module)?)?;
+    module.add_function(wrap_pyfunction!(reproject, module)?)?;
     module.add_function(wrap_pyfunction!(stack_fits, module)?)?;
     module.add_function(wrap_pyfunction!(py_choose_reference, module)?)?;
     module.add_function(wrap_pyfunction!(select_frames, module)?)?;

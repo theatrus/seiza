@@ -559,6 +559,32 @@ The header text form is suitable for header-injection APIs — for example
 Siril's `sirilpy` scripting interface (`set_image_header`), which makes a
 seiza solve usable from a Siril Python script.
 
+## Reproject between plate solutions
+
+`Wcs.pixel_to_world_array(x, y)` and `Wcs.world_to_pixel_array(ra, dec)` map
+whole NumPy arrays of coordinates in one call, with the GIL released; a sky
+position on the far hemisphere maps to NaN.
+
+`seiza.reproject` resamples an image from one plate solution onto another,
+SIP distortion included on both sides: for blink comparison, consensus stacks
+or mosaics of finished masters from different rigs. Build the output grid
+with `Wcs.from_center_scale_rotation`; rotation 0 is north up.
+
+```python
+grid = seiza.Wcs.from_center_scale_rotation(
+    (305.2, 36.1), (799.5, 799.5), 3.0, 0.0, False,  # 1600 x 1600 at 3"/px
+)
+image, coverage = seiza.reproject(
+    master, solution.wcs, grid, 1600, 1600, interpolation="lanczos3",
+)
+```
+
+The output is NaN where nothing of the source lands, and `coverage` holds, per
+output pixel, the share of its samples that landed on finite source samples.
+When the output is coarser than the source, `antialias=True` (the default)
+averages `ceil(output scale / source scale)` samples a side per pixel, up to
+16, rather than aliasing. It runs on the CPU.
+
 ## Objects in a solved field
 
 `field_objects` lists the catalogued objects in a solved image: deep-sky
