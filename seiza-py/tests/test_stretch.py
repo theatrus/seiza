@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 
@@ -122,6 +124,57 @@ def test_layered_places_the_background_and_keeps_rgb_in_range() -> None:
         seiza.stretch(rgb, model="layered", color_strategy="unlinked")
     with pytest.raises(seiza.EngineError):
         seiza.stretch(mono, model="layered", scale_separation=4)
+
+
+def test_a_stretch_resolved_on_a_reference_applies_to_other_images() -> None:
+    rng = np.random.default_rng(13)
+    reference = (0.05 + 0.005 * rng.standard_normal((64, 80, 3))).astype(np.float32)
+    brighter = reference + np.float32(0.02)
+    for options in (
+        {"model": "auto-mtf"},
+        {"model": "percentile-asinh", "color_strategy": "unlinked"},
+        {"model": "median-anchor", "curves_boost": 0.4, "hdr_amount": 0.5},
+        {"model": "layered", "contrast_recovery": 0.5, "scale_separation": 16},
+        {"model": "ht", "shadows": 0.02, "midtone": 0.1, "highlights": 0.9},
+        {"model": "ghs", "stretch_factor": 3.0},
+    ):
+        resolved = seiza.resolve_stretch(reference, **options)
+        assert resolved.channels == 3
+        own = seiza.stretch(reference, **options)
+        np.testing.assert_array_equal(resolved.apply(reference), own)
+        stored = json.loads(json.dumps(resolved.to_dict()))
+        again = seiza.ResolvedStretch.from_dict(stored)
+        assert again.to_dict() == resolved.to_dict()
+        np.testing.assert_array_equal(again.apply(brighter), resolved.apply(brighter))
+    # The reference's curve shows the difference that each image's own hides.
+    resolved = seiza.resolve_stretch(reference, model="auto-mtf")
+    assert "ResolvedStretch(channels=3" in repr(resolved)
+    level = float(np.median(resolved.apply(reference)))
+    assert float(np.median(resolved.apply(brighter))) > level + 0.1
+    hidden = seiza.stretch(brighter, model="auto-mtf")
+    assert float(np.median(hidden)) == pytest.approx(level, abs=0.02)
+    # Another size is fine; another channel count is not.
+    assert resolved.apply(reference[:10, :20].copy()).shape == (10, 20, 3)
+    with pytest.raises(seiza.EngineError, match="channel layout"):
+        resolved.apply(reference[..., 0].copy())
+    with pytest.raises(ValueError, match="model must be"):
+        seiza.resolve_stretch(reference, model="future-auto")
+    with pytest.raises(ValueError, match="out of range"):
+        seiza.ResolvedStretch.from_dict(
+            {
+                "channels": 1,
+                "color_strategy": "linked",
+                "curves": [{"type": "linear", "black": 1.0, "white": float("nan")}],
+            }
+        )
+
+
+def test_a_plans_dict_says_what_its_curves_are() -> None:
+    plan = seiza.resolve_stretch(
+        np.linspace(0.0, 1.0, 100, dtype=np.float32).reshape(10, 10)
+    ).to_dict()
+    assert set(plan) == {"channels", "color_strategy", "curves"}
+    assert plan["curves"][0]["type"] == "asinh"
 
 
 def test_stretch_rejects_unknown_models() -> None:
