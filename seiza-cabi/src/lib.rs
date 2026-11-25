@@ -4860,7 +4860,8 @@ struct ChannelMatchJson {
 /// `channels` being 1 for mono or 3 for interleaved RGB. The fit weighs the
 /// noise it measures in both, so it depends on neither's depth. It reads
 /// means of blocks of pixels and leaves out any block that holds a
-/// non-finite sample or an excluded pixel. Pass null `mask` with zero
+/// non-finite sample or an excluded pixel, or one value in both images, such
+/// as an empty border. Pass null `mask` with zero
 /// `mask_length` to exclude none, or `width * height` bytes where `1`
 /// excludes a pixel. `options_json` is null or
 /// `{"bin": 4, "clipSigma": 3.0}`, either field optional: the blocks' edge in
@@ -4868,10 +4869,10 @@ struct ChannelMatchJson {
 ///
 /// Returns an owned JSON array with one `{"gain", "offset", "gainError",
 /// "blocks", "rejected"}` per channel: `gainError` is the gain's standard
-/// error from the images' noise (a third low where both are several times
-/// the signal), `blocks` those the fit used and `rejected`
-/// those clipping left out. Fails when a channel has too few whole blocks or
-/// too little signal in common. Free the result, or an `error_out` string,
+/// error from the images' noise, taken as independent from block to block,
+/// `blocks` those the fit used and `rejected` those clipping left out. Fails
+/// when a channel has too few blocks after masking and clipping, or too
+/// little signal in common. Free the result, or an `error_out` string,
 /// with [`seiza_string_free`].
 ///
 /// # Safety

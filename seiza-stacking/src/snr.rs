@@ -369,7 +369,7 @@ pub(crate) fn block_means(
     mask: Option<&[bool]>,
 ) -> Vec<f32> {
     let (columns, rows) = (image.width / block, image.height / block);
-    let area = (block * block) as f64;
+    let area = block as f64 * block as f64;
     let mut means = vec![f32::NAN; columns * rows];
     if columns == 0 {
         return means;
@@ -906,6 +906,7 @@ mod tests {
         let block = |block| NonZeroUsize::new(block).unwrap();
         assert_eq!(noise_at_scale(&image, block(64)), None);
         assert_eq!(noise_at_scale(&image, block(10_000)), None);
+        assert_eq!(noise_at_scale(&image, NonZeroUsize::MAX), None);
         let means = block_means(&image, 0, 4, None);
         assert_eq!(means.len(), 160 * 160);
         assert!(means[..160 * 25].iter().all(|mean| mean.is_nan()));

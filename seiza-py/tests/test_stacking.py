@@ -2257,6 +2257,8 @@ def test_match_linear_masks_and_refuses() -> None:
     assert fit.blocks + fit.rejected == 40 * 64
     with pytest.raises(ValueError, match="shape"):
         seiza.match_linear(image, reference, mask=mask[:10])
+    with pytest.raises(ValueError, match="C-contiguous"):
+        seiza.match_linear(image, reference, mask=np.asfortranarray(mask))
     with pytest.raises(ValueError, match="differ in size"):
         seiza.match_linear(image, reference[:100])
     with pytest.raises(ValueError, match="sigma"):

@@ -1389,13 +1389,14 @@ matched = image * fit.gain + fit.offset
 It weighs the noise it measures in both images. A plain regression pulls the
 gain toward 0 as the image's noise grows, and a regression the other way round
 pushes it up as the reference's does. It gives one `ChannelMatch` per channel, with
-`gain_error`, the gain's standard error from the noise (a third low where both
-images are several times noisier than the signal), and how many `blocks`
-it used and `rejected`. It reads means of `bin` by `bin` pixels (default 4),
-leaves out non-finite samples and pixels the boolean `mask` excludes, and
-clips blocks more than `clip_sigma` (default 3) from the line. It raises
-`StackError` when a channel has too few blocks, or too little signal in common
-to measure a gain.
+`gain_error`, the gain's standard error from the noise, and how many `blocks`
+it used and `rejected`. `gain_error` takes the noise as independent from block
+to block and knows nothing of real differences, such as a gradient. The fit
+reads means of `bin` by `bin` pixels (default 4), leaves out blocks with a
+non-finite sample, a pixel the boolean `mask` excludes or one value in both
+images (an empty border), and clips blocks more than `clip_sigma` (default 3)
+from the line. It raises `StackError` when a channel has too few blocks left,
+or too little signal in common to measure a gain.
 
 ### Parameterized display stretching
 

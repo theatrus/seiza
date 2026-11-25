@@ -3786,8 +3786,8 @@ impl PyChannelMatch {
         self.inner.offset
     }
 
-    /// Standard error of ``gain`` from the two images' noise, a third low
-    /// where both are several times the signal.
+    /// Standard error of ``gain`` from the two images' noise, taken as
+    /// independent from block to block.
     #[getter]
     fn gain_error(&self) -> f64 {
         self.inner.gain_error
@@ -3823,10 +3823,11 @@ impl PyChannelMatch {
 ///
 /// The fit weighs the noise it measures in both images, so it depends on
 /// neither's depth. It reads means of ``bin`` by ``bin`` blocks and leaves
-/// out any that holds a non-finite sample or a pixel ``mask``, a boolean
-/// ``(height, width)`` array, excludes. Blocks more than ``clip_sigma`` robust
-/// sigmas from the line are clipped. Raises ``StackError`` when a channel has
-/// too few whole blocks, or too little signal in common.
+/// out any that holds a non-finite sample, a pixel ``mask``, a boolean
+/// ``(height, width)`` array, excludes, or one value in both images. Blocks
+/// more than ``clip_sigma`` robust sigmas from the line are clipped. Raises
+/// ``StackError`` when a channel has too few blocks after masking and
+/// clipping, or too little signal in common.
 #[pyfunction]
 #[pyo3(signature = (image, reference, *, mask=None, bin=None, clip_sigma=3.0))]
 fn match_linear(
@@ -3846,10 +3847,12 @@ fn match_linear(
                     "match mask must have shape (height, width)",
                 ));
             }
-            Some(
-                mask.as_slice()
-                    .map_err(|_| PyValueError::new_err("match mask must be C-contiguous"))?,
-            )
+            // `as_slice` also takes a Fortran-ordered array, whose pixels are
+            // not in row order.
+            if !mask.is_c_contiguous() {
+                return Err(PyValueError::new_err("match mask must be C-contiguous"));
+            }
+            Some(mask.as_slice()?)
         }
         None => None,
     };

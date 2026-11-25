@@ -28,10 +28,15 @@ const MAXIMUM_PASSES: usize = 20;
 /// start the clipping: little, which keeps a compact target's signal, up to
 /// enough to pass over a crowded field's saturated stars.
 const FIRST_FIT_TRIMS: [f64; 4] = [0.0, 0.005, 0.05, 0.2];
-/// Residuals this far below the reference's level are its rounding.
-const EXACT: f64 = 1.0e-12;
+/// How many roundings of the largest sample a block may lie from the line
+/// and still count as on it.
+const ROUNDINGS: f64 = 4.0;
 /// How many times its own error a gain must be to count as measured.
 const MINIMUM_GAIN_SNR: f64 = 3.0;
+/// What the two noises' own errors add to the variance of the log of their
+/// ratio, times the number of blocks: 6 each from second differences by MAD
+/// (simulated), less 4 since they follow the noise that the blocks hold.
+const NOISE_RATIO_VARIANCE: f64 = 4.0;
 
 /// How [`match_linear`] samples and clips.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -61,10 +66,9 @@ pub struct ChannelMatch {
     pub gain: f64,
     /// What to add after that.
     pub offset: f64,
-    /// Standard error of `gain` from the two images' noise. It takes their
-    /// measured noises as exact, so where both are several times the signal
-    /// it reads up to a third low, and it knows nothing of real differences
-    /// between the images, such as a gradient.
+    /// Standard error of `gain` from the two images' noise, which it takes
+    /// as independent from block to block. It knows nothing of real
+    /// differences between the images, such as a gradient.
     pub gain_error: f64,
     /// Blocks the fit used.
     pub blocks: usize,
@@ -75,13 +79,15 @@ pub struct ChannelMatch {
 /// Why [`match_linear`] gave no fit.
 #[derive(Clone, Copy, Debug, Error, PartialEq)]
 pub enum LinearMatchError {
-    #[error("the image and the reference differ in size or channels")]
+    #[error(
+        "the image and the reference differ in size or channels, or a buffer does not match its size"
+    )]
     Shape,
     #[error("the mask must have one entry per pixel: {expected}, not {found}")]
     Mask { expected: usize, found: usize },
     #[error("the clipping sigma must be finite and greater than zero")]
     ClipSigma,
-    #[error("channel {channel} has too few whole blocks of shared pixels to fit")]
+    #[error("channel {channel} has too few blocks to fit after masking and clipping")]
     TooFewBlocks { channel: usize },
     #[error("channel {channel} of the two images shares too little signal to measure a gain")]
     NoCommonSignal { channel: usize },
@@ -93,8 +99,10 @@ pub enum LinearMatchError {
 /// The images must be registered to one grid. The fit reads means of blocks
 /// of [`LinearMatchOptions::bin`] pixels, leaving out any block that holds a
 /// non-finite sample in either image or a pixel `mask` excludes: `mask` has
-/// one entry per pixel, row by row, `true` where it excludes the pixel. Blocks
-/// far from the line, such as stars that saturate in one image, are clipped.
+/// one entry per pixel, row by row, `true` where it excludes the pixel. It also
+/// leaves out blocks that hold one value in both images, such as an empty
+/// border, and clips blocks far from the line, such as stars that saturate in
+/// one image.
 pub fn match_linear(
     image: &LinearImage,
     reference: &LinearImage,
@@ -102,8 +110,13 @@ pub fn match_linear(
     options: &LinearMatchOptions,
 ) -> Result<Vec<ChannelMatch>, LinearMatchError> {
     let (width, height, channels) = (image.width, image.height, image.channels);
+    let samples = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(channels));
     if (width, height, channels) != (reference.width, reference.height, reference.channels)
-        || image.data.len() != reference.data.len()
+        || channels == 0
+        || samples != Some(image.data.len())
+        || samples != Some(reference.data.len())
     {
         return Err(LinearMatchError::Shape);
     }
@@ -121,7 +134,24 @@ pub fn match_linear(
     (0..channels)
         .into_par_iter()
         .map(|channel| match_channel(image, reference, mask, options, channel))
+        // The lowest failing channel's error, not the first to come.
+        .collect::<Vec<_>>()
+        .into_iter()
         .collect()
+}
+
+/// Whether one channel of an image is a single value over the block, or over
+/// 2 by 2 pixels for a block of one.
+fn is_flat(image: &LinearImage, channel: usize, bin: usize, column: usize, row: usize) -> bool {
+    let edge = bin.max(2);
+    if image.width < edge || image.height < edge {
+        return false;
+    }
+    let left = (column * bin).min(image.width - edge);
+    let top = (row * bin).min(image.height - edge);
+    let sample = |x: usize, y: usize| image.data[(y * image.width + x) * image.channels + channel];
+    let first = sample(left, top);
+    (top..top + edge).all(|y| (left..left + edge).all(|x| sample(x, y) == first))
 }
 
 fn match_channel(
@@ -137,11 +167,17 @@ fn match_channel(
     let (columns, rows) = (image.width / bin, image.height / bin);
     let mut xs = block_means(image, channel, bin, mask);
     let mut rs = block_means(reference, channel, bin, mask);
-    for (x, r) in xs.iter_mut().zip(&mut rs) {
-        if !x.is_finite() || !r.is_finite() {
-            (*x, *r) = (f32::NAN, f32::NAN);
-        }
-    }
+    // Flat blocks would pass for a noise of zero.
+    xs.par_iter_mut()
+        .zip(&mut rs)
+        .enumerate()
+        .for_each(|(index, (x, r))| {
+            let (column, row) = (index % columns, index / columns);
+            let flat = |image| is_flat(image, channel, bin, column, row);
+            if !x.is_finite() || !r.is_finite() || (flat(image) && flat(reference)) {
+                (*x, *r) = (f32::NAN, f32::NAN);
+            }
+        });
     let noise = |means: &[f32]| grid_noise(means, columns, rows).ok_or(too_few);
     let noise = Noise {
         image: noise(&xs)?,
@@ -161,19 +197,23 @@ fn match_channel(
     // finds them, so several start it and the line nearest the blocks wins.
     let sorted = along_the_line(&pairs, noise);
     let mut best: Option<(f64, Line)> = None;
+    let mut error = no_signal;
     for trim in FIRST_FIT_TRIMS {
         let trim = (sorted.len() as f64 * trim) as usize;
-        let start = Line::fit(&sorted[trim..sorted.len() - trim], noise);
-        let Some(line) = start.and_then(|line| line.clipped(&pairs, noise, options.clip_sigma))
-        else {
-            continue;
-        };
-        let distance = line.distance(&pairs, noise);
-        if best.as_ref().is_none_or(|(least, _)| distance < *least) {
-            best = Some((distance, line));
+        let start = Line::fit(&sorted[trim..sorted.len() - trim], noise, None);
+        let Some(start) = start else { continue };
+        match start.clipped(&pairs, noise, options.clip_sigma) {
+            Ok(line) => {
+                let distance = line.distance(&pairs, noise);
+                if best.as_ref().is_none_or(|(least, _)| distance < *least) {
+                    best = Some((distance, line));
+                }
+            }
+            Err(Unclipped::TooFewBlocks) => error = too_few,
+            Err(Unclipped::NoLine) => {}
         }
     }
-    let (_, line) = best.ok_or(no_signal)?;
+    let (_, line) = best.ok_or(error)?;
     if line.gain < MINIMUM_GAIN_SNR * line.gain_error {
         return Err(no_signal);
     }
@@ -191,6 +231,44 @@ fn match_channel(
 struct Noise {
     image: f64,
     reference: f64,
+}
+
+/// Why clipping gave no line.
+enum Unclipped {
+    TooFewBlocks,
+    NoLine,
+}
+
+/// A clip that chose the blocks of a fit.
+#[derive(Clone, Copy)]
+struct Clip {
+    /// The gain of the line the clip measured from.
+    gain: f64,
+    /// The share of a normal residual's variance that the clip leaves.
+    variance: f64,
+}
+
+/// The variance of a unit normal deviate clipped at `limit` either side.
+fn clipped_variance(limit: f64) -> f64 {
+    const STEPS: usize = 64;
+    if limit >= 8.0 {
+        return 1.0;
+    }
+    // Simpson's rule for the two integrals.
+    let step = limit / STEPS as f64;
+    let (mut mass, mut square) = (0.0, 0.0);
+    for index in 0..=STEPS {
+        let weight = match index {
+            0 | STEPS => 1.0,
+            _ if index % 2 == 1 => 4.0,
+            _ => 2.0,
+        };
+        let x = index as f64 * step;
+        let density = weight * (-0.5 * x * x).exp();
+        mass += density;
+        square += density * x * x;
+    }
+    square / mass
 }
 
 /// The pairs in order along the line. Their places on it are weighed by the
@@ -237,23 +315,31 @@ impl Line {
             .collect()
     }
 
+    /// The rounding of `pairs`' residuals from this line.
+    fn rounding(&self, pairs: &[(f64, f64)]) -> f64 {
+        let level = pairs.iter().fold(0.0_f64, |level, (x, r)| {
+            level.max(r.abs()).max((self.gain * x).abs())
+        });
+        f64::from(f32::EPSILON) * level
+    }
+
     /// This line fitted again to the pairs within `clip_sigma` robust sigmas
     /// of it, until they no longer change.
-    fn clipped(mut self, pairs: &[(f64, f64)], noise: Noise, clip_sigma: f64) -> Option<Self> {
+    fn clipped(
+        mut self,
+        pairs: &[(f64, f64)],
+        noise: Noise,
+        clip_sigma: f64,
+    ) -> Result<Self, Unclipped> {
         let mut kept = Vec::new();
         for _ in 0..MAXIMUM_PASSES {
             let residuals = self.residuals(pairs);
-            let center = median_f64(&residuals)?;
-            let sigma = robust_sigma_f64(&residuals, center)?;
-            let level = pairs
-                .iter()
-                .fold(0.0_f64, |level, (_, r)| level.max(r.abs()));
-            if sigma <= EXACT * level {
-                break;
-            }
+            let center = median_f64(&residuals).ok_or(Unclipped::NoLine)?;
+            let sigma = robust_sigma_f64(&residuals, center).ok_or(Unclipped::NoLine)?;
+            let reach = (clip_sigma * sigma).max(ROUNDINGS * self.rounding(pairs));
             let keep = residuals
                 .iter()
-                .map(|residual| (residual - center).abs() <= clip_sigma * sigma)
+                .map(|residual| (residual - center).abs() <= reach)
                 .collect::<Vec<_>>();
             if keep == kept {
                 break;
@@ -264,19 +350,28 @@ impl Line {
                 .filter_map(|(&pair, &keep)| keep.then_some(pair))
                 .collect::<Vec<_>>();
             if used.len() < MINIMUM_BLOCKS {
-                return None;
+                return Err(Unclipped::TooFewBlocks);
             }
-            self = Self::fit(&used, noise)?;
+            let clip = Clip {
+                gain: self.gain,
+                variance: if sigma > 0.0 {
+                    clipped_variance(reach / sigma)
+                } else {
+                    1.0
+                },
+            };
+            self = Self::fit(&used, noise, Some(clip)).ok_or(Unclipped::NoLine)?;
             kept = keep;
         }
-        Some(self)
+        Ok(self)
     }
 
     /// How far all the pairs lie from this line, in units of their noise
     /// across it, on a scale where outliers count little.
     fn distance(&self, pairs: &[(f64, f64)], noise: Noise) -> f64 {
-        let variance =
-            (noise.reference.powi(2) + (self.gain * noise.image).powi(2)).max(f64::MIN_POSITIVE);
+        let variance = (noise.reference.powi(2) + (self.gain * noise.image).powi(2))
+            .max(self.rounding(pairs).powi(2))
+            .max(f64::MIN_POSITIVE);
         self.residuals(pairs)
             .iter()
             .map(|residual| (residual * residual / variance).ln_1p())
@@ -284,8 +379,9 @@ impl Line {
     }
 
     /// The line nearest `pairs`, each distance in units of its noise, or
-    /// `None` when they do not rise together.
-    fn fit(pairs: &[(f64, f64)], noise: Noise) -> Option<Self> {
+    /// `None` when they do not rise together. `clip` is the clip that chose
+    /// the pairs.
+    fn fit(pairs: &[(f64, f64)], noise: Noise, clip: Option<Clip>) -> Option<Self> {
         let count = pairs.len() as f64;
         let mean_x = pairs.iter().map(|pair| pair.0).sum::<f64>() / count;
         let mean_r = pairs.iter().map(|pair| pair.1).sum::<f64>() / count;
@@ -296,7 +392,24 @@ impl Line {
             rr += r * r;
             xr += x * r;
         }
-        let (xx, rr, xr) = (xx / count, rr / count, xr / count);
+        let (mut xx, mut rr, mut xr) = (xx / count, rr / count, xr / count);
+        // Blocks near a line agree with it, whatever line it is, and would
+        // hold the next fit to it. Undo that: choosing blocks by a residual
+        // leaves a regression on the residual as it was and shrinks the
+        // residual's variance by a known share (Pearson's and Lawley's
+        // correction).
+        let clipped = clip.map_or(1.0, |clip| clip.variance);
+        if let Some(Clip { gain, variance }) = clip {
+            let xe = xr - gain * xx;
+            let ee = rr - 2.0 * gain * xr + gain * gain * xx;
+            if ee > 0.0 && variance < 1.0 {
+                let slope = xe / ee;
+                let (wide_ee, wide_xe) = (ee / variance, xe / variance);
+                xx += slope * (wide_xe - xe);
+                xr = gain * xx + wide_xe;
+                rr = gain * gain * xx + 2.0 * gain * wide_xe + wide_ee;
+            }
+        }
         // Also refuses NaN.
         if !(xr > 0.0 && xx > 0.0 && rr > 0.0) {
             return None;
@@ -311,7 +424,13 @@ impl Line {
         } else {
             let ratio = reference / image;
             let difference = rr - ratio * xx;
-            (difference + (difference * difference + 4.0 * ratio * xr * xr).sqrt()) / (2.0 * xr)
+            let root = (difference * difference + 4.0 * ratio * xr * xr).sqrt();
+            // Two forms of one root: each is exact where the other cancels.
+            if difference < 0.0 {
+                2.0 * ratio * xr / (root - difference)
+            } else {
+                (difference + root) / (2.0 * xr)
+            }
         };
         if !(gain > 0.0 && gain.is_finite()) {
             return None;
@@ -320,7 +439,16 @@ impl Line {
         // signal variance `xr / gain` and independent noises.
         let signal = xr / gain;
         let residual = reference + gain * gain * image;
-        let variance = (signal * residual + image * reference) / (count * signal * signal);
+        // What the clipped blocks tell of the line's slope.
+        let weight = count * clipped;
+        let fitted = (signal * residual + image * reference) / (weight * signal * signal);
+        // How the gain moves with the log of the noises' ratio.
+        let by_ratio = if residual > 0.0 {
+            gain * image * reference / (signal * residual)
+        } else {
+            0.0
+        };
+        let variance = fitted + by_ratio * by_ratio * NOISE_RATIO_VARIANCE / count;
         Some(Self {
             gain,
             offset: mean_r - gain * mean_x,
@@ -423,6 +551,140 @@ mod tests {
         assert!((fit.gain - 1.0).abs() < 1.0e-9, "{fit:?}");
         assert!(fit.offset.abs() < 1.0e-6, "{fit:?}");
         assert_eq!(fit.rejected, 0);
+    }
+
+    /// Clipping across a line keeps the blocks that agree with it, so without
+    /// its correction half of these passed, with gains of any size.
+    #[test]
+    fn noise_alone_has_no_gain() {
+        for clip_sigma in [2.0, 3.0] {
+            let options = LinearMatchOptions {
+                bin: NonZeroUsize::MIN,
+                clip_sigma,
+            };
+            for seed in 0..8 {
+                let image = master(100.0, 0.0, 1.0, 1_000 + 2 * seed);
+                let reference = master(230.0, 0.0, 1.0, 1_001 + 2 * seed);
+                assert_eq!(
+                    match_linear(&image, &reference, None, &options),
+                    Err(LinearMatchError::NoCommonSignal { channel: 0 }),
+                    "seed {seed}, clip {clip_sigma}"
+                );
+            }
+        }
+    }
+
+    /// A tight clip tells less of the slope, and noise of four times the
+    /// signal in both makes the noise measurement's own error count.
+    #[test]
+    fn the_gain_error_is_the_gains_scatter() {
+        const TRIALS: u64 = 96;
+        for (clip_sigma, noise) in [(1.0, 1.0), (3.0, 4.0)] {
+            let options = LinearMatchOptions {
+                clip_sigma,
+                ..LinearMatchOptions::default()
+            };
+            let fits = (0..TRIALS)
+                .into_par_iter()
+                .map(|seed| {
+                    let image = master(100.0, 0.5, 2.0 * noise, 2_000 + 2 * seed);
+                    let reference = master(230.0, 1.0, 4.0 * noise, 2_001 + 2 * seed);
+                    match_linear(&image, &reference, None, &options).unwrap()[0]
+                })
+                .collect::<Vec<_>>();
+            let count = TRIALS as f64;
+            let mean = fits.iter().map(|fit| fit.gain).sum::<f64>() / count;
+            let squares = fits.iter().map(|fit| (fit.gain - mean).powi(2));
+            let scatter = (squares.sum::<f64>() / (count - 1.0)).sqrt();
+            let error = fits.iter().map(|fit| fit.gain_error).sum::<f64>() / count;
+            assert!((mean / 2.0 - 1.0).abs() < 0.04, "{mean}");
+            assert!(
+                (0.8..1.25).contains(&(scatter / error)),
+                "clip {clip_sigma}: scatter {scatter}, error {error}"
+            );
+        }
+    }
+
+    /// A model's noise reads as almost nothing beside the reference's.
+    #[test]
+    fn a_noiseless_model_matches_a_noisy_reference() {
+        let blob = |sigma: f64| {
+            let mut normal = Normal(20);
+            let data = (0..SIZE * SIZE)
+                .map(|index| {
+                    let (x, y) = ((index % SIZE) as f64 - 200.0, (index / SIZE) as f64 - 310.0);
+                    let signal = 10.0 * (-(x * x + y * y) / 800.0).exp();
+                    (signal + sigma * normal.next()) as f32
+                })
+                .collect();
+            LinearImage::new(SIZE, SIZE, 1, data).unwrap()
+        };
+        let there = fit(&blob(0.0), &blob(0.2));
+        let back = fit(&blob(0.2), &blob(0.0));
+        assert!((there.gain - 1.0).abs() < 0.01, "{there:?}");
+        assert!((back.gain - 1.0).abs() < 0.01, "{back:?}");
+    }
+
+    /// Most of both frames is one value, as where a sky was clipped, and
+    /// stars saturate in one.
+    #[test]
+    fn a_flat_sky_does_not_stop_the_clipping() {
+        for (sigma, bin) in [(0.0, 4), (0.3, 4), (0.0, 1), (0.3, 1)] {
+            let options = LinearMatchOptions {
+                bin: NonZeroUsize::new(bin).unwrap(),
+                ..LinearMatchOptions::default()
+            };
+            let mut image = master(100.0, 10.0, sigma, 21);
+            let mut reference = master(230.0, 20.0, sigma, 22);
+            for pixel in 0..SIZE * SIZE * 6 / 10 {
+                (image.data[pixel], reference.data[pixel]) = (100.0, 230.0);
+            }
+            for star in 0..100 {
+                let (cx, cy) = (11 + star * 67 % 490, 9 + star * 139 % 490);
+                for index in 0..64 {
+                    let pixel = (cy + index / 8) * SIZE + cx + index % 8;
+                    image.data[pixel] += 5_000.0;
+                    reference.data[pixel] += 900.0;
+                }
+            }
+            let fit = match_linear(&image, &reference, None, &options).unwrap()[0];
+            assert!((fit.gain / 2.0 - 1.0).abs() < 0.01, "{fit:?}");
+            assert!((fit.offset - 30.0).abs() < 1.0, "{fit:?}");
+        }
+    }
+
+    /// A ramp in whole numbers has no noise at all to measure lines by.
+    #[test]
+    fn a_noiseless_pair_still_passes_over_saturated_stars() {
+        let ramp = |level: f32, gain: f32| {
+            let data = (0..SIZE * SIZE)
+                .map(|index| level + gain * (index % SIZE + index / SIZE) as f32)
+                .collect();
+            LinearImage::new(SIZE, SIZE, 1, data).unwrap()
+        };
+        let (mut image, mut reference) = (ramp(100.0, 1.0), ramp(230.0, 2.0));
+        for star in 0..100 {
+            let (cx, cy) = (11 + star * 67 % 490, 9 + star * 139 % 490);
+            for index in 0..64 {
+                let pixel = (cy + index / 8) * SIZE + cx + index % 8;
+                image.data[pixel] += 50_000.0;
+                reference.data[pixel] += 9_000.0;
+            }
+        }
+        let fit = fit(&image, &reference);
+        assert!((fit.gain / 2.0 - 1.0).abs() < 1.0e-4, "{fit:?}");
+    }
+
+    #[test]
+    fn an_exact_pair_keeps_every_block() {
+        let image = master(0.05, 0.01, 0.0, 23);
+        let mut reference = image.clone();
+        for value in &mut reference.data {
+            *value = *value * 2.0 + 0.03;
+        }
+        let fit = fit(&image, &reference);
+        assert!((fit.gain - 2.0).abs() < 1.0e-5, "{fit:?}");
+        assert_eq!((fit.blocks, fit.rejected), (128 * 128, 0), "{fit:?}");
     }
 
     #[test]
@@ -544,6 +806,52 @@ mod tests {
             refused(&small, &small, None, &options),
             LinearMatchError::TooFewBlocks { channel: 0 }
         );
+        // A buffer shorter than its size, in both images.
+        let mut short = image.clone();
+        short.data.truncate(100);
+        assert_eq!(
+            refused(&short, &short, None, &options),
+            LinearMatchError::Shape
+        );
+        // A tight clip, and blocks larger than any image.
+        let tight = LinearMatchOptions {
+            clip_sigma: 0.01,
+            ..options
+        };
+        let other = master(100.0, 1.0, 1.0, 24);
+        assert_eq!(
+            refused(&image, &other, None, &tight),
+            LinearMatchError::TooFewBlocks { channel: 0 }
+        );
+        let huge = LinearMatchOptions {
+            bin: NonZeroUsize::MAX,
+            ..options
+        };
+        assert_eq!(
+            refused(&image, &image, None, &huge),
+            LinearMatchError::TooFewBlocks { channel: 0 }
+        );
+        // The first of the channels that fail.
+        let rgb = |planes: [&LinearImage; 3]| {
+            let data = (0..SIZE * SIZE)
+                .flat_map(|pixel| planes.map(|plane| plane.data[pixel]))
+                .collect();
+            LinearImage::new(SIZE, SIZE, 3, data).unwrap()
+        };
+        let negative = master(1.0, -1.0, 1.0, 25);
+        let mut empty = image.clone();
+        empty.data.fill(f32::NAN);
+        for _ in 0..16 {
+            assert_eq!(
+                refused(
+                    &rgb([&image, &image, &empty]),
+                    &rgb([&negative, &image, &empty]),
+                    None,
+                    &options
+                ),
+                LinearMatchError::NoCommonSignal { channel: 0 }
+            );
+        }
         // Noise alone, and a negative.
         assert_eq!(
             refused(
