@@ -104,6 +104,15 @@ CORE_RADIUS = 24.0
 # the removals its list was made with; `refresh_detections` makes a list
 # made with others again.
 STRUCTURE_REMOVALS = ("filtered", "atrous")
+# How a list is made from the removals' runs. 2: the clipped cores are
+# found after the first removal's stars, against them alone, and a later
+# removal's star must lie beyond `CORE_RADIUS` of every point before it,
+# the cores among them, so the first removal's list is kept whole. 1 (and
+# a record that names none): the cores after every removal's stars, where
+# 14 of the 160 cores the à trous run took on three corpus stacks went to a
+# fainter neighbour up to 15 px off, and the saturated star was no longer
+# listed (2026-11-20).
+DETECTION_VERSION = 2
 
 
 def eligible(
@@ -240,10 +249,11 @@ def block_peaks(image: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 def detections(image: np.ndarray) -> tuple[np.ndarray, float | None, str | None]:
     """Every star the measuring detector finds on a stack, unsmoothed, as
-    `stack_psf` measures one, with each of `STRUCTURE_REMOVALS` in turn,
-    and the clipped cores it turns away, in `DETECTION_COLUMNS`; the clip
-    level, from the image's peaks; and the detector's error where it
-    failed."""
+    `stack_psf` measures one, with the first of `STRUCTURE_REMOVALS`; the
+    clipped cores it turns away; then the stars each later removal finds
+    beyond `CORE_RADIUS` of every point listed before it (see
+    `DETECTION_VERSION`); in `DETECTION_COLUMNS`. Also the clip level, from
+    the image's peaks, and the detector's error where it failed."""
     import seiza
 
     from .multi_night import STACK_DETECTION, scaled_counts
@@ -251,38 +261,45 @@ def detections(image: np.ndarray) -> tuple[np.ndarray, float | None, str | None]
     peaks, peak_x, peak_y = block_peaks(image)
     level = clip_level(peaks[:CLIP_PEAKS])
     counts, low, high = scaled_counts(image)
+    # Counts above the 0.01st percentile, in the image's units.
+    scale = (high - low) / 65535
     error = None
-    found: list[Any] = []
+    width = len(DETECTION_COLUMNS)
+    table = np.zeros((0, width))
+
+    def rows(stars: list[Any]) -> np.ndarray:
+        found = np.array([[star.x, star.y, star.flux * scale, 0.0, star.fwhm, star.snr,
+                           np.nan if star.eccentricity is None else star.eccentricity, float(star.saturated), 0.0,
+                           1.0] for star in stars], dtype=np.float64).reshape(-1, width)
+        if len(found):
+            found[:, 3] = raw_peaks(image, found[:, 0], found[:, 1])
+            if level is not None:
+                found[:, 8] = found[:, 3] >= level
+        return found
+
+    def far(x: float, y: float, listed: np.ndarray) -> bool:
+        return not len(listed) or np.min((listed[:, 0] - x) ** 2 + (listed[:, 1] - y) ** 2) > CORE_RADIUS**2
+
     for index, removal in enumerate(STRUCTURE_REMOVALS):
         try:
             stars = seiza.detect_measured_stars(counts, **STACK_DETECTION, structure_removal=removal).stars
         except Exception as failure:  # noqa: BLE001 - recorded, not fatal
             error = error or str(failure)
-            continue
+            stars = []
         if index:
-            # Against the stars earlier removals listed, not each other.
-            listed = np.array([[star.x, star.y] for star in found], dtype=np.float64).reshape(-1, 2)
-            stars = [star for star in stars if not len(listed)
-                     or np.min((listed[:, 0] - star.x) ** 2 + (listed[:, 1] - star.y) ** 2) > CORE_RADIUS**2]
-        found.extend(stars)
-    # Counts above the 0.01st percentile, in the image's units.
-    scale = (high - low) / 65535
-    table = np.array([[star.x, star.y, star.flux * scale, 0.0, star.fwhm, star.snr,
-                       np.nan if star.eccentricity is None else star.eccentricity, float(star.saturated), 0.0, 1.0]
-                      for star in found], dtype=np.float64).reshape(-1, len(DETECTION_COLUMNS))
-    if len(table):
-        table[:, 3] = raw_peaks(image, table[:, 0], table[:, 1])
-    if level is not None:
-        table[:, 8] = table[:, 3] >= level
+            # Against the points listed before this removal, not each other.
+            listed = table[:, :2]
+            stars = [star for star in stars if far(star.x, star.y, listed)]
+        table = np.concatenate([table, rows(stars)])
+        if index or level is None:
+            continue
         cores: list[list[float]] = []
         for value, x, y in zip(peaks, peak_x, peak_y):
             if value < level:
                 break
-            known = np.concatenate([table[:, :2], np.array(cores).reshape(-1, len(DETECTION_COLUMNS))[:, :2]])
-            if not len(known) or np.min((known[:, 0] - x) ** 2 + (known[:, 1] - y) ** 2) > CORE_RADIUS**2:
+            if far(x, y, np.concatenate([table[:, :2], np.array(cores).reshape(-1, width)[:, :2]])):
                 cores.append([x, y, np.nan, value, np.nan, np.nan, np.nan, 1.0, 1.0, 0.0])
-        if cores:
-            table = np.concatenate([table, np.array(cores)])
+        table = np.concatenate([table, np.array(cores).reshape(-1, width)])
     return table.astype(np.float32), level, error
 
 
@@ -346,9 +363,12 @@ def keep(target: Path, record: dict[str, Any], arrays: dict[str, np.ndarray]) ->
 
 def stale_detections(record: dict[str, Any]) -> bool:
     """Whether a record's point sources were found with other structure
-    removals than `STRUCTURE_REMOVALS`; a record made before they were
-    named was made with the filtered removal alone."""
-    return tuple(record.get("structure_removals", ("filtered",))) != STRUCTURE_REMOVALS
+    removals than `STRUCTURE_REMOVALS`, or, with more than one, put
+    together otherwise than `DETECTION_VERSION` does; a record made before
+    they were named was made with the filtered removal alone."""
+    removals = tuple(record.get("structure_removals", ("filtered",)))
+    return removals != STRUCTURE_REMOVALS or (
+        len(removals) > 1 and record.get("detection_version", 1) != DETECTION_VERSION)
 
 
 def refresh_detections(store: Store, product: dict[str, Any]) -> dict[str, Any]:
@@ -368,7 +388,7 @@ def refresh_detections(store: Store, product: dict[str, Any]) -> dict[str, Any]:
         arrays = {name: kept[name] for name in kept.files}
     arrays["detections"] = table
     record.update({"detections": len(table), "detection_error": error, "clip_level": level,
-                   "structure_removals": list(STRUCTURE_REMOVALS)})
+                   "structure_removals": list(STRUCTURE_REMOVALS), "detection_version": DETECTION_VERSION})
     keep(target, record, arrays)
     return {**record, "status": "refreshed"}
 
@@ -393,6 +413,7 @@ def measured_arrays(image: np.ndarray) -> tuple[dict[str, Any], dict[str, np.nda
         "detections": len(table),
         "detection_error": detection_error,
         "structure_removals": list(STRUCTURE_REMOVALS),
+        "detection_version": DETECTION_VERSION,
         "clip_level": level,
         "versions": versions(),
     }
