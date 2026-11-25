@@ -283,6 +283,10 @@ def main(argv: list[str] | None = None) -> int:
                                     "the mix, shared among such banks by their weights (repeatable)")
     sharpen_train.add_argument("--validation-kernel-bank", type=Path)
     sharpen_train.add_argument("--validation-seeing-bank", type=Path, action="append", dest="validation_seeing_banks")
+    sharpen_train.add_argument("--validation-pairs-bank", type=weighted, action="append", dest="validation_pairs_banks",
+                               default=[], metavar="PATH[:WEIGHT]",
+                               help="pairs of fields the run does not train on, whose loss is logged apart from "
+                                    "the other validation banks' (repeatable)")
     sharpen_train.add_argument("--manifest", type=Path,
                                help="the manifest whose set names give each window's object, opened for reading "
                                     "alone (default: the store's, when it has one)")
@@ -940,7 +944,8 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
         left_out_kinds=tuple(kind for kind in arguments.leave_out_kinds.split(",") if kind),
         multi_night_share=arguments.multi_night_share,
         more_kernels=tuple((str(Path(path)), weight) for path, weight in arguments.more_kernels),
-        structure=arguments.structure)
+        structure=arguments.structure,
+        validation_pairs=tuple((str(Path(path)), weight) for path, weight in arguments.validation_pairs_banks))
     record = sharpen_model.train(
         store, name=arguments.name, choice=choice, steps=arguments.steps, width=arguments.width,
         levels=arguments.levels, attention=arguments.attention, oversample=arguments.oversample,

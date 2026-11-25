@@ -1708,6 +1708,39 @@ def test_a_run_can_start_from_another_runs_weights(tmp_path):
     assert "init_from" not in json.loads((sm.run_directory(store, "fresh") / "config.json").read_text())["call"]
 
 
+def test_a_run_logs_its_loss_on_held_out_pairs_apart_and_trains_as_without_them(tmp_path):
+    store = Store(tmp_path / "store", tmp_path / "scratch")
+    held = str(pair_bank(tmp_path, offset=(0.0, 0.0), name="sharpen-pairs-validation-0"))
+    banks = {"kernel": str(kernel_bank(tmp_path)), "seeing": (str(pair_bank(tmp_path)),), "validation_kernel": None,
+             "validation_seeing": (str(pair_bank(tmp_path, name="sharpen-seeing-validation-0")),)}
+    options = {"steps": 4, "width": 4, "levels": 2, "batch": 2, "log_every": 2, "checkpoint_every": 2,
+               "settings": sm.Settings(tile=32), "validation_batches": 1, "validation_windows": 0, "prefetch": 0,
+               "where": torch.device("cpu")}
+    choice = sm.BankChoice(**banks, validation_pairs=((held, 1.0),))
+    with_pairs = sm.train(store, name="held", choice=choice, **options)
+    plain = sm.train(store, name="plain", choice=sm.BankChoice(**banks), **options)
+    assert [entry["step"] for entry in with_pairs["history"]] == [2, 4]
+    for mine, other in zip(with_pairs["history"], plain["history"]):
+        assert mine["validation_pairs"]["total"] > 0 and "validation_pairs" not in other
+        # Drawn from the held-out pairs, not the seeing bank's other offset.
+        assert mine["validation_pairs"]["total"] != pytest.approx(mine["validation"]["total"], rel=1e-3)
+        # Held out, the pairs change nothing the run learns or its other
+        # validation loss.
+        assert mine["loss"] == other["loss"] and mine["validation"] == other["validation"]
+    recorded = json.loads((sm.run_directory(store, "held") / "config.json").read_text())
+    assert recorded["call"]["choice"]["validation_pairs"] == [[held, 1.0]]
+    assert recorded["validation_banks"]["pairs"][0]["directory"] == held
+    # A run without them records its choice as runs before them did, so
+    # those resume.
+    assert "validation_pairs" not in json.loads(
+        (sm.run_directory(store, "plain") / "config.json").read_text())["call"]["choice"]
+    sm.train(store, name="parts", choice=choice, stop_after=2, **options)
+    resumed = sm.resume_run(store, "parts", prefetch=0, where=torch.device("cpu"))
+    for entry in (*with_pairs["history"], *resumed["history"]):
+        entry.pop("seconds")
+    assert resumed["history"] == with_pairs["history"]
+
+
 def test_the_commands_train_stop_resume_and_evaluate_from_the_banks_they_find(tmp_path, capsys):
     from seiza_training.__main__ import main
 

@@ -244,6 +244,8 @@ APERTURE_FWHM = 3.0
 # Validation batches draw from generators seeded apart from the training
 # steps'.
 VALIDATION_STREAM = 1 << 20
+# The validation pairs banks' batches, apart from the others'.
+PAIRS_VALIDATION_STREAM = VALIDATION_STREAM + 1
 DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
@@ -997,6 +999,13 @@ class BankChoice:
     # Draw windows with more structure away from their stars more often,
     # up to `1 + structure` times (`Bank`).
     structure: float = 0.0
+    # Pairs banks of fields no run trains on, each with its weight: a run's
+    # loss on them is logged apart from the other validation banks', since
+    # those hold no pairs and cannot show how well a run takes the pairs'
+    # look to a field it has not seen. A run that learned the goal from one
+    # field's pairs raised its noise as it raised its structure on others,
+    # while its validation loss stood still (2026-11-25).
+    validation_pairs: tuple[tuple[str, float], ...] = ()
 
     def options(self) -> dict[str, Any]:
         names = set_names(Path(self.manifest) if self.manifest else None)
@@ -1027,6 +1036,12 @@ class BankChoice:
         if self.validation_seeing:
             found["seeing"] = [Bank(Path(path), settings, **options) for path in self.validation_seeing]
         return found
+
+    def held_out_pairs(self, settings: Settings) -> dict[str, list[Bank]]:
+        """The validation pairs banks, as the only kind of their mixture."""
+        options = self.options()
+        return {"pairs": [Bank(Path(path), settings, **options, weight=weight, same_stack=True)
+                          for path, weight in self.validation_pairs]} if self.validation_pairs else {}
 
     @classmethod
     def recorded(cls, values: dict[str, Any]) -> BankChoice:
@@ -3004,7 +3019,9 @@ def train(
         "seed": seed, "log_every": log_every, "checkpoint_every": checkpoint_every, "settings": asdict(settings),
         "loss": asdict(loss), "mix": list(mix), "clip_grad": clip_grad, "rewind": rewind, "precision": precision,
         "validation_batches": validation_batches, "validation_windows": validation_windows,
-        "choice": asdict(choice)}))
+        # Runs recorded before there were validation pairs resume as they were.
+        "choice": {key: value for key, value in asdict(choice).items()
+                   if key != "validation_pairs" or value}}))
     if resume:
         if not checkpoint_path.exists():
             raise FileNotFoundError(f"{name} has no checkpoint to go on from")
@@ -3015,10 +3032,11 @@ def train(
     elif checkpoint_path.exists() or (directory / "run.json").exists():
         raise FileExistsError(f"a run named {name} is already recorded: resume it, or name another")
     banks, validation_banks = choice.train(settings), choice.validation(settings)
+    held_out = choice.held_out_pairs(settings)
     config = {**call, "planes": list(settings.planes), "stamp_planes": list(STAMP_PLANES), "wings": WINGS,
               "banks": {kind: [bank.summary() for bank in group] for kind, group in banks.items()},
               "validation_banks": {kind: [bank.summary() for bank in group]
-                                   for kind, group in validation_banks.items()}}
+                                   for kind, group in {**validation_banks, **held_out}.items()}}
     if not resume:
         directory.mkdir(parents=True, exist_ok=True)
         (directory / "config.json").write_text(json.dumps({"call": call, **config}, indent=2))
@@ -3050,19 +3068,25 @@ def train(
         checked, checked_shares = mixture(validation_banks, mix)
         checks = [batch_from(checked, checked_shares, batch, np.random.default_rng([seed, VALIDATION_STREAM, index]),
                              settings) for index in range(validation_batches)]
+    pair_checks = []
+    if validation_batches and held_out:
+        held, held_shares = mixture(held_out, (0.0, 0.0, 1.0))
+        pair_checks = [batch_from(held, held_shares, batch,
+                                  np.random.default_rng([seed, PAIRS_VALIDATION_STREAM, index]), settings)
+                       for index in range(validation_batches)]
 
     def assemble(step: int) -> dict[str, torch.Tensor]:
         tensors = batch_from(sources, shares, batch, step_generator(seed, step), settings)
         return {key: value.pin_memory() for key, value in tensors.items()} if cuda else tensors
 
-    def validation_loss() -> dict[str, float]:
+    def validation_loss(batches: list[dict[str, torch.Tensor]]) -> dict[str, float]:
         totals: dict[str, float] = {}
         with torch.no_grad():
-            for tensors in checks:
+            for tensors in batches:
                 moved = {key: value.to(where) for key, value in tensors.items()}
                 terms = loss_terms(model(moved["planes"], moved["stamp"]), moved, loss, settings.residual)
                 for key, value in terms.items():
-                    totals[key] = totals.get(key, 0.0) + float(value) / len(checks)
+                    totals[key] = totals.get(key, 0.0) + float(value) / len(batches)
         return totals
 
     last = min(steps, stop_after) if stop_after else steps
@@ -3104,8 +3128,11 @@ def train(
                     noted = f" gradient {entry['grad_norm_mean']:.3g} (largest {entry['grad_norm_max']:.3g})"
                     norms.zero_()
                 if checks:
-                    entry["validation"] = validation_loss()
+                    entry["validation"] = validation_loss(checks)
                     noted += f", validation {entry['validation']['total']:.4f}"
+                if pair_checks:
+                    entry["validation_pairs"] = validation_loss(pair_checks)
+                    noted += f", pairs validation {entry['validation_pairs']['total']:.4f}"
                 back = guard.after(step, means[0]) if guard else None
                 if back is not None:
                     entry["rewound_to"] = back
