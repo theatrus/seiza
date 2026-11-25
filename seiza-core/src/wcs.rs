@@ -50,6 +50,27 @@ impl Sip {
         terms
     }
 
+    /// The same forward polynomials written at a higher `order`, whose new
+    /// terms are zero, and no inverse ones: those of a higher order follow a
+    /// strong distortion more closely.
+    pub fn raised_to(&self, order: u8) -> Self {
+        let mut raised = Self {
+            order,
+            a: Vec::new(),
+            b: Vec::new(),
+            ap: Vec::new(),
+            bp: Vec::new(),
+        };
+        let known = Self::forward_terms(self.order);
+        for term in Self::forward_terms(order) {
+            let index = known.iter().position(|&known| known == term);
+            let of = |values: &[f64]| index.and_then(|at| values.get(at)).copied().unwrap_or(0.0);
+            raised.a.push(of(&self.a));
+            raised.b.push(of(&self.b));
+        }
+        raised
+    }
+
     /// `(f(u, v), g(u, v))`: the forward distortion correction in pixels.
     pub fn forward(&self, u: f64, v: f64) -> (f64, f64) {
         Self::eval(&self.a, &self.b, self.order, 2, u, v)
@@ -63,20 +84,33 @@ impl Sip {
 
     /// The pixel offset `(u, v)` whose forward correction lands on `(U, V)`:
     /// the inverse polynomials' answer, refined until the forward ones
-    /// reproduce `(U, V)`. A polynomial of the same order cannot invert a
-    /// strong distortion exactly; this can, wherever the distortion changes
-    /// slowly enough to be inverted, which is everywhere in a sane frame.
-    /// Elsewhere, and without forward polynomials, it is the inverse
-    /// polynomials' answer.
-    pub fn undistort(&self, u: f64, v: f64) -> (f64, f64) {
-        const ITERATIONS: usize = 20;
-        /// Pixels, far below any centroid's error.
-        const CONVERGED: f64 = 1.0e-9;
+    /// reproduce `(U, V)`. A polynomial cannot invert a strong distortion
+    /// exactly; this can, wherever the distortion changes slowly enough to
+    /// be inverted, which is everywhere in a sane frame.
+    ///
+    /// `None` where it finds no such offset, as far outside the frame, where
+    /// the polynomials turn back on themselves. Without forward polynomials
+    /// there is nothing to refine against, and it is the inverse ones'
+    /// answer.
+    pub fn undistort(&self, u: f64, v: f64) -> Option<(f64, f64)> {
         let (f, g) = self.inverse(u, v);
         let start = (u + f, v + g);
         if self.a.is_empty() && self.b.is_empty() {
-            return start;
+            return Some(start);
         }
+        // Where the inverse polynomials stray too far to start from, the
+        // offset itself may not.
+        self.refined(u, v, start)
+            .or_else(|| self.refined(u, v, (u, v)))
+    }
+
+    /// [`Self::undistort`] refined from `start`.
+    fn refined(&self, u: f64, v: f64, start: (f64, f64)) -> Option<(f64, f64)> {
+        const ITERATIONS: usize = 40;
+        /// Pixels, far below any centroid's error: refining stops here.
+        const CONVERGED: f64 = 1.0e-9;
+        /// Pixels: an answer that misses by more is none.
+        const FOUND: f64 = 0.05;
         let miss = |at: (f64, f64)| {
             let (f, g) = self.forward(at.0, at.1);
             (u - at.0 - f, v - at.1 - g)
@@ -96,7 +130,7 @@ impl Sip {
             }
             (best, residual, error) = (next, next_residual, next_error);
         }
-        best
+        (error <= FOUND).then_some(best)
     }
 
     /// Allocation-free evaluation: transforms run per pixel in overlay and
@@ -236,6 +270,9 @@ impl Wcs {
 
     /// Map sky coordinates (RA, Dec, degrees) to a pixel coordinate.
     /// Returns `None` for points on or behind the tangent-plane horizon.
+    ///
+    /// Sky too far outside the frame for the SIP distortion to reach maps
+    /// through the linear solution alone, which keeps it outside.
     pub fn world_to_pixel(&self, ra: f64, dec: f64) -> Option<(f64, f64)> {
         let (ra0, dec0) = (self.crval.0.to_radians(), self.crval.1.to_radians());
         let (ra, dec) = (ra.to_radians(), dec.to_radians());
@@ -257,7 +294,7 @@ impl Wcs {
         let mut dx = (self.cd[1][1] * xi - self.cd[0][1] * eta) / det;
         let mut dy = (-self.cd[1][0] * xi + self.cd[0][0] * eta) / det;
         if let Some(sip) = &self.sip {
-            (dx, dy) = sip.undistort(dx, dy);
+            (dx, dy) = sip.undistort(dx, dy).unwrap_or((dx, dy));
         }
         Some((self.crpix.0 + dx, self.crpix.1 + dy))
     }
@@ -349,9 +386,9 @@ impl Wcs {
     /// The linear part may be a `CD` matrix, or `CDELT` with a `PC` matrix
     /// or a `CROTA2` angle. `None` when the projection is not TAN, a required
     /// card is missing, or the matrix is singular. SIP terms of the forward
-    /// and inverse polynomials are read up to their own `*_ORDER`; a header
-    /// with forward terms but no inverse ones maps world to pixel without
-    /// the distortion correction.
+    /// and inverse polynomials are read up to their own `*_ORDER`. A header
+    /// with forward terms but no inverse ones needs none: mapping world to
+    /// pixel inverts the forward terms ([`Sip::undistort`]).
     pub fn from_fits_values(
         number: impl Fn(&str) -> Option<f64>,
         text: impl Fn(&str) -> Option<String>,
@@ -620,10 +657,10 @@ mod tests {
         }
     }
 
-    /// A distortion that folds the plane has no inverse to find: the answer
-    /// stays finite and no worse than the inverse polynomials'.
+    /// A distortion that folds the plane has an inverse on one side of the
+    /// fold, and none past it.
     #[test]
-    fn a_folded_distortion_stays_finite() {
+    fn a_folded_distortion_has_no_inverse_past_the_fold() {
         let sip = Sip {
             order: 2,
             a: vec![0.0, 0.0, -1.0e-3],
@@ -631,14 +668,14 @@ mod tests {
             ap: vec![0.0; 6],
             bp: vec![0.0; 6],
         };
-        for u in [-9_000.0, -10.0, 0.0, 10.0, 249.0, 251.0, 9_000.0] {
-            let (x, y) = sip.undistort(u, 5.0);
-            assert!(x.is_finite() && y.is_finite(), "{u}: {x} {y}");
-            let error = |x: f64, y: f64| {
-                let (f, g) = sip.forward(x, y);
-                (x + f - u).hypot(y + g - 5.0)
-            };
-            assert!(error(x, y) <= error(u, 5.0), "{u}: {x} {y}");
+        // The forward map's u - u²/1000 is largest, 250, at u = 500.
+        for u in [-300.0, -10.0, 0.0, 10.0, 200.0] {
+            let (x, y) = sip.undistort(u, 5.0).unwrap();
+            let (f, g) = sip.forward(x, y);
+            assert!((x + f - u).hypot(y + g - 5.0) < 0.05, "{u}: {x} {y}");
+        }
+        for u in [251.0, 9_000.0, f64::NAN] {
+            assert_eq!(sip.undistort(u, 5.0), None, "{u}");
         }
         // Inverse polynomials alone still answer.
         let inverse_only = Sip {
@@ -647,7 +684,61 @@ mod tests {
             ap: vec![2.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             ..sip
         };
-        assert_eq!(inverse_only.undistort(10.0, 5.0), (12.0, 5.0));
+        assert_eq!(inverse_only.undistort(10.0, 5.0), Some((12.0, 5.0)));
+    }
+
+    /// Sky tens of degrees away, where a strong cubic and the polynomials
+    /// that invert it have folded back, never lands in the frame.
+    #[test]
+    fn sky_far_outside_a_distorted_frame_stays_outside() {
+        let (width, height) = (9576.0_f64, 6388.0_f64);
+        for corner in [-200.0, -40.0, 40.0, 200.0] {
+            let k = corner / (0.5_f64 * width.hypot(height)).powi(3);
+            let mut wcs = Wcs::from_center_scale_rotation(
+                (305.0, 38.0),
+                (width / 2.0, height / 2.0),
+                1.47,
+                15.0,
+                false,
+            );
+            let cubic = |sign: f64, terms: &[(u8, u8)]| -> (Vec<f64>, Vec<f64>) {
+                let pick = |wanted: [(u8, u8); 2]| {
+                    terms
+                        .iter()
+                        .map(|term| if wanted.contains(term) { sign * k } else { 0.0 })
+                        .collect()
+                };
+                (pick([(3, 0), (1, 2)]), pick([(0, 3), (2, 1)]))
+            };
+            let (a, b) = cubic(1.0, &Sip::forward_terms(3));
+            let (ap, bp) = cubic(-1.0, &Sip::inverse_terms(3));
+            wcs.sip = Some(Sip {
+                order: 3,
+                a,
+                b,
+                ap,
+                bp,
+            });
+            let mut plain = wcs.clone();
+            plain.sip = None;
+            for ring in 2..40 {
+                for step in 0..72 {
+                    let angle = f64::from(step) * 5.0_f64.to_radians();
+                    let reach = f64::from(ring) * 4_000.0;
+                    let (ra, dec) = plain.pixel_to_world(
+                        width / 2.0 + reach * angle.cos(),
+                        height / 2.0 + reach * angle.sin(),
+                    );
+                    let Some((x, y)) = wcs.world_to_pixel(ra, dec) else {
+                        continue;
+                    };
+                    assert!(
+                        x < 0.0 || y < 0.0 || x >= width || y >= height,
+                        "{corner} px of distortion put sky {reach} px out at {x}, {y}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
