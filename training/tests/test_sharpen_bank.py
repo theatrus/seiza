@@ -6,6 +6,7 @@ the same bank."""
 import json
 import math
 import sqlite3
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -121,6 +122,56 @@ def test_a_field_is_recorded_on_a_grid_and_read_back_between_its_nodes(store):
     assert held.record["clip_level"] == record["clip_level"]
     assert np.array_equal(held.arrays["stamps"], loaded.arrays["stamps"])
     assert np.array_equal(held.points(), points, equal_nan=True)
+
+
+def test_a_later_structure_removal_lists_only_the_stars_the_earlier_missed(monkeypatch):
+    # A stand-in detector: what each removal finds.
+    def star(x: float, y: float) -> SimpleNamespace:
+        return SimpleNamespace(x=x, y=y, flux=1000.0, fwhm=3.0, snr=50.0, eccentricity=0.1, saturated=False)
+
+    found = {"filtered": [star(100, 100), star(300, 300)],
+             "atrous": [star(101, 99), star(200, 200), star(210, 200), star(300, 330)]}
+    asked = []
+
+    def detect(counts, *, structure_removal, **options):
+        asked.append(structure_removal)
+        return SimpleNamespace(stars=found[structure_removal])
+
+    monkeypatch.setattr(seiza, "detect_measured_stars", detect)
+    # An empty image, which has no clip level and so no clipped cores.
+    table, level, error = psf_fields.detections(np.zeros((SIDE, SIDE), dtype=np.float32))
+    assert asked == list(psf_fields.STRUCTURE_REMOVALS) and error is None and level is None
+    # The à trous star 1.4 px from a filtered one is the same star; the
+    # others are added after the filtered list, in the detector's order,
+    # two of them closer together than the core radius, as it found them.
+    assert table[:, :2].tolist() == [[100, 100], [300, 300], [200, 200], [210, 200], [300, 330]]
+    assert table[:, psf_fields.DETECTION_COLUMNS.index("detected")].tolist() == [1.0] * 5
+
+
+def test_a_record_found_with_other_structure_removals_is_refreshed_and_keeps_its_field(store):
+    row = product(store, "a/deep", field(1.5, seed=1, clip=30_000.0))
+    record = psf_fields.measure(store, row)
+    assert record["structure_removals"] == list(psf_fields.STRUCTURE_REMOVALS)
+    assert psf_fields.refresh_detections(store, row)["status"] == "current"
+    # A record made before the removals were named listed the filtered
+    # removal's stars alone.
+    target = psf_fields.directory(store, "a/deep")
+    old = json.loads((target / "field.json").read_text())
+    del old["structure_removals"]
+    with np.load(target / "field.npz") as kept:
+        arrays = {name: kept[name] for name in kept.files}
+    stamps = arrays["stamps"].copy()
+    arrays["detections"] = arrays["detections"][:3]
+    psf_fields.keep(target, old, arrays)
+    assert psf_fields.stale_detections(psf_fields.recorded(store, "a/deep"))
+    summary = psf_fields.refresh(store, [row], workers=1)
+    assert summary["stale"] == 1 and summary["status"] == {"refreshed": 1}
+    refreshed = psf_fields.Field(store, "a/deep")
+    assert refreshed.record["structure_removals"] == list(psf_fields.STRUCTURE_REMOVALS)
+    assert np.array_equal(refreshed.arrays["stamps"], stamps)
+    table, _, _ = psf_fields.detections(np.load(store.products / "a/deep" / "image.npy"))
+    assert np.array_equal(refreshed.points(), table, equal_nan=True)
+    assert refreshed.record["detections"] == len(table)
 
 
 def test_a_field_with_too_few_stars_is_one_psf_or_refused(store):
