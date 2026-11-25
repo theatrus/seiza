@@ -752,6 +752,13 @@ impl BackgroundFit {
     /// rectangle only. Correcting the whole image refuses a fit whose divisor
     /// is unusable anywhere; correcting a rectangle refuses it when the
     /// rectangle reaches such a pixel.
+    /// A caller that corrects an image tile by tile has therefore
+    /// already corrected the earlier tiles when a later one is refused: the
+    /// tiles equal the whole-image result only where the whole-image
+    /// correction succeeds. A refused rectangle is left unchanged.
+    ///
+    /// An empty rectangle, like a strength of zero, returns before the fit's
+    /// reference levels are checked.
     #[allow(clippy::too_many_arguments)]
     pub fn correct_region_in_place_with_strength(
         &self,
@@ -764,7 +771,6 @@ impl BackgroundFit {
         strength: f64,
     ) -> Result<()> {
         self.validate()?;
-        validate_strength(strength)?;
         let inside = x
             .checked_add(width)
             .is_some_and(|right| right <= self.width)
@@ -783,6 +789,7 @@ impl BackgroundFit {
                 data.len()
             )));
         }
+        validate_strength(strength)?;
         self.correct_region_validated(data, x, y, width, height, mode, strength)
     }
 
@@ -2886,7 +2893,12 @@ mod tests {
                 sample_radius: Some(2),
                 ..BackgroundConfig::default()
             };
+            let wants_radial_basis = matches!(config.model, ModelConfig::RadialBasis { .. });
             let fit = fit_background(&image, width, height, channels, &config).unwrap();
+            assert_eq!(
+                matches!(fit.model, FittedModel::RadialBasis { .. }),
+                wants_radial_basis
+            );
             for (mode, strength) in [
                 (CorrectionMode::Subtract, 1.0),
                 (CorrectionMode::Subtract, 0.4),
@@ -2902,6 +2914,122 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A fit made by hand, with no samples behind it.
+    fn bare_fit(
+        width: usize,
+        height: usize,
+        model: FittedModel,
+        reference: Vec<f64>,
+    ) -> BackgroundFit {
+        BackgroundFit {
+            width,
+            height,
+            channels: reference.len(),
+            model,
+            reference,
+            samples: Vec::new(),
+            diagnostics: FitDiagnostics {
+                candidate_samples: 0,
+                accepted_samples: 0,
+                rejected_noise: 0,
+                rejected_residual: 0,
+                rejection_iterations: 0,
+                sample_radius: 1,
+                protected_regions: 0,
+                model_selection: None,
+            },
+        }
+    }
+
+    #[test]
+    fn odd_rectangles_with_non_finite_samples_equal_the_whole_image() {
+        // Odd sizes and offsets reach the tail of a vectorized row.
+        let (width, height, channels) = (53, 31, 2);
+        let mut image = plane(width, height, channels);
+        image[7] = f32::NAN;
+        image[400] = f32::INFINITY;
+        image[1201] = f32::NEG_INFINITY;
+        let fit = bare_fit(
+            width,
+            height,
+            FittedModel::Polynomial {
+                degree: 2,
+                coefficients: vec![
+                    vec![0.3, 0.05, -0.02, 0.01, 0.004, -0.006],
+                    vec![0.25, -0.03, 0.04, -0.008, 0.002, 0.005],
+                ],
+            },
+            vec![0.3, 0.25],
+        );
+        for (mode, strength) in [
+            (CorrectionMode::Subtract, 0.37),
+            (CorrectionMode::Divide, 1.0),
+            (CorrectionMode::Divide, 0.37),
+        ] {
+            let whole = fit.correct_with_strength(&image, mode, strength).unwrap();
+            for (x, y, w, h) in [(0, 0, 1, 1), (3, 0, 7, 5), (17, 9, 13, 11), (46, 28, 7, 3)] {
+                let mut block = Vec::new();
+                let mut expected = Vec::new();
+                for row in y..y + h {
+                    let start = (row * width + x) * channels;
+                    block.extend_from_slice(&image[start..start + w * channels]);
+                    expected.extend_from_slice(&whole[start..start + w * channels]);
+                }
+                fit.correct_region_in_place_with_strength(&mut block, x, y, w, h, mode, strength)
+                    .unwrap();
+                assert_eq!(
+                    block.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    "{mode:?} at {strength}, rectangle ({x}, {y}, {w}, {h})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn divide_checks_the_divisor_inside_the_rectangle_only() {
+        // The model falls through zero near the right edge.
+        let fit = bare_fit(
+            64,
+            16,
+            FittedModel::Polynomial {
+                degree: 1,
+                coefficients: vec![vec![1.0, -1.2, 0.0]],
+            },
+            vec![2.9],
+        );
+        let mode = CorrectionMode::Divide;
+        let Err(Error::InvalidDivisor {
+            x: bad,
+            y: 0,
+            channel: 0,
+        }) = fit.correct(&vec![1.0; 64 * 16], mode)
+        else {
+            panic!("the whole image must be refused");
+        };
+        assert!(bad >= 32, "the bad divisor is at column {bad}");
+
+        // A rectangle left of the bad columns is corrected.
+        let mut left = vec![1.0; 32 * 16];
+        fit.correct_region_in_place_with_strength(&mut left, 0, 0, 32, 16, mode, 1.0)
+            .unwrap();
+        assert!(left.iter().all(|value| *value != 1.0));
+
+        // One that reaches them is refused, with the pixel's place in the
+        // whole image, and is left unchanged.
+        let (x, y) = (bad - 2, 3);
+        let mut reaching = vec![1.0; 8 * 4];
+        assert_eq!(
+            fit.correct_region_in_place_with_strength(&mut reaching, x, y, 8, 4, mode, 1.0),
+            Err(Error::InvalidDivisor {
+                x: bad,
+                y,
+                channel: 0
+            })
+        );
+        assert_eq!(reaching, vec![1.0; 8 * 4]);
     }
 
     #[test]
