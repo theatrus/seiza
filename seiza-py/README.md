@@ -251,6 +251,25 @@ the ratio times `median_frame_hfr`, and `summary` and `triangle.summary` are
 the single-frame verdicts over those values. The frames need not be
 registered, but must share one size; elongation directions pool every star.
 
+`focal_plane` tells tilt from backfocus. It fits the nine cells as
+`constant + tilt_x*u + tilt_y*v + radial*(u**2 + v**2)`, where `(u, v)` is a
+pixel's offset from the sensor's middle over the middle-to-corner distance
+(`u` right, `v` down):
+
+```python
+plane = tilt.focal_plane
+print(plane.tilt_percent, plane.tilt_angle_degrees)  # across the diagonal; 0 up, clockwise
+print(plane.radial_percent)                          # corners vs middle
+print(plane.tilt_r_squared, plane.radial_r_squared, plane.r_squared)
+```
+
+Tilt softens one side and sharpens the other; a backfocus error softens every
+edge alike, and stretches every edge cell's stars the same way, which each
+cell's `elongation_from_radial_degrees` shows (0 toward the middle, 90
+around it). A tilted plane also softens both sides of its in-focus line, so
+`radial_percent` is an upper bound on a backfocus error. Removing the
+`tilt_x` and `tilt_y` terms gives what a spot would show with the tilt fixed.
+
 `detect_measured_stars_file(path, ...)` measures a FITS or XISF file
 directly: its linear 16-bit luminance, with a Bayer mosaic debayered first,
 and with the focal length (`FOCALLEN`, `FOCALLENGTH` or `FOCAL`) and pixel

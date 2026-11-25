@@ -121,6 +121,17 @@ def test_multi_frame_tilt_combines_the_frames():
     assert len(tilt.triangle.sector_relative_hfr) == 3
     assert tilt.frames[0].triangle is not None
 
+    # The soft top-left corner is a plane softening toward the top left.
+    plane = tilt.focal_plane
+    assert 270.0 <= plane.tilt_angle_degrees < 360.0
+    assert plane.tilt_percent > 0
+    assert 0.0 <= plane.tilt_r_squared <= plane.r_squared <= 1.0
+    assert plane.radial_percent == pytest.approx(100 * plane.radial)
+    assert tilt.cells[4].elongation_from_radial_degrees is None
+    for cell in tilt.cells:
+        angle = cell.elongation_from_radial_degrees
+        assert angle is None or 0.0 <= angle <= 90.0
+
 
 def test_multi_frame_tilt_refuses_mixed_sensors_and_no_frames():
     small = seiza.detect_measured_stars(

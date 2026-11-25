@@ -554,6 +554,13 @@ pub struct MultiFrameCell {
     /// Agreement of every star's elongation direction, as
     /// [`CellStats::theta_coherence`].
     pub theta_coherence: f64,
+    /// The angle in degrees, 0 to 90, between [`Self::mean_theta`] and the
+    /// line from the sensor's middle to the cell's: 0 when stars stretch
+    /// toward the middle, 90 when they stretch around it. `None` for the
+    /// middle cell and a cell without a direction. A backfocus error
+    /// stretches every edge cell the same way; tilt stretches opposite
+    /// sides differently.
+    pub elongation_from_radial_degrees: Option<f64>,
 }
 
 /// The triangle analysis over many frames.
@@ -604,6 +611,171 @@ pub struct MultiFrameTilt {
     pub worst_corner_frame_count: usize,
     /// The triangle analysis, when the options asked for one.
     pub triangle: Option<MultiFrameTriangleTilt>,
+    /// The cells' [`MultiFrameCell::relative_hfr`] medians split into tilt
+    /// and a radial bowl, or `None` unless all nine cells have one.
+    pub focal_plane: Option<FocalPlaneFit>,
+}
+
+/// The grid's relative HFR as a tilted plane plus a radial bowl.
+///
+/// Tilt softens one side of the sensor and sharpens the other; a backfocus
+/// error, and the field curvature of the optics, soften every edge alike.
+/// This fits `constant + tilt_x·u + tilt_y·v + radial·(u² + v²)` to the
+/// nine cells by least squares, where `(u, v)` is a pixel's offset from the
+/// sensor's middle, `((width − 1) / 2, (height − 1) / 2)`, over the distance
+/// from the middle to a corner pixel: `u` grows to the right and `v` down,
+/// and a corner has `u² + v² = 1`. Each cell counts at its middle.
+///
+/// A tilted plane also softens both sides of the line where it is in
+/// focus, so a little of that shows up as a bowl: [`Self::radial_percent`]
+/// is an upper bound on a backfocus error, not a measure of it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FocalPlaneFit {
+    /// The fitted relative HFR at the sensor's middle.
+    pub constant: f64,
+    /// Change in relative HFR per unit `u`, rightward.
+    pub tilt_x: f64,
+    /// Change in relative HFR per unit `v`, downward.
+    pub tilt_y: f64,
+    /// The bowl's change in relative HFR at `u² + v² = 1`, a corner.
+    pub radial: f64,
+    /// The tilt across the sensor's whole diagonal, along the direction it
+    /// softens, as a percentage of a frame's median HFR.
+    pub tilt_percent: f64,
+    /// The direction the plane softens toward, in the image degrees
+    /// [`analyze_triangle`] uses: 0 points to the top of the image and
+    /// positive angles turn clockwise, so 135 is toward the bottom right.
+    pub tilt_angle_degrees: f64,
+    /// The bowl at a corner against the middle, as a percentage of a
+    /// frame's median HFR: positive when the corners are softer.
+    pub radial_percent: f64,
+    /// The share of the cells' variation a plane alone explains, 0 to 1.
+    pub tilt_r_squared: f64,
+    /// The share a bowl alone explains, 0 to 1.
+    pub radial_r_squared: f64,
+    /// The share the plane and bowl together explain, 0 to 1.
+    pub r_squared: f64,
+    centre_x: f64,
+    centre_y: f64,
+    half_diagonal: f64,
+}
+
+type FitTerm = fn(f64, f64) -> f64;
+
+impl FocalPlaneFit {
+    /// Fit the nine cells' relative HFR medians, or `None` unless every
+    /// cell has one.
+    fn of(cells: &[MultiFrameCell], width: usize, height: usize) -> Option<Self> {
+        let centre_x = (width as f64 - 1.0) / 2.0;
+        let centre_y = (height as f64 - 1.0) / 2.0;
+        let half_diagonal = centre_x.hypot(centre_y).max(0.5);
+        let points = cells
+            .iter()
+            .map(|cell| {
+                Some((
+                    (cell.col as f64 - 1.0) * width as f64 / 3.0 / half_diagonal,
+                    (cell.row as f64 - 1.0) * height as f64 / 3.0 / half_diagonal,
+                    cell.relative_hfr?.median,
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        if points.len() != 9 {
+            return None;
+        }
+        let solve = |terms: &[FitTerm]| -> Option<(Vec<f64>, f64)> {
+            let design = nalgebra::DMatrix::from_fn(points.len(), terms.len(), |row, col| {
+                terms[col](points[row].0, points[row].1)
+            });
+            let values =
+                nalgebra::DVector::from_iterator(points.len(), points.iter().map(|point| point.2));
+            let coefficients = design.clone().svd(true, true).solve(&values, 1e-12).ok()?;
+            let residual = (&design * &coefficients - &values).norm_squared();
+            Some((coefficients.iter().copied().collect(), residual))
+        };
+        let one: FitTerm = |_, _| 1.0;
+        let across: FitTerm = |u, _| u;
+        let down: FitTerm = |_, v| v;
+        let bowl: FitTerm = |u, v| u * u + v * v;
+        let (both, both_residual) = solve(&[one, across, down, bowl])?;
+        let (_, plane_residual) = solve(&[one, across, down])?;
+        let (_, bowl_residual) = solve(&[one, bowl])?;
+        let mean = points.iter().map(|point| point.2).sum::<f64>() / points.len() as f64;
+        let total: f64 = points.iter().map(|point| (point.2 - mean).powi(2)).sum();
+        let share = |residual: f64| {
+            if total > 0.0 {
+                (1.0 - residual / total).clamp(0.0, 1.0)
+            } else {
+                1.0
+            }
+        };
+        let (tilt_x, tilt_y) = (both[1], both[2]);
+        // A rounding error left of straight up would otherwise read 359.99…
+        let tilt_angle_degrees = match normalize_degrees(tilt_x.atan2(-tilt_y).to_degrees()) {
+            angle if 360.0 - angle < 1e-9 => 0.0,
+            angle => angle,
+        };
+        Some(Self {
+            constant: both[0],
+            tilt_x,
+            tilt_y,
+            radial: both[3],
+            tilt_percent: 200.0 * tilt_x.hypot(tilt_y),
+            tilt_angle_degrees,
+            radial_percent: 100.0 * both[3],
+            tilt_r_squared: share(plane_residual),
+            radial_r_squared: share(bowl_residual),
+            r_squared: share(both_residual),
+            centre_x,
+            centre_y,
+            half_diagonal,
+        })
+    }
+
+    fn offsets(&self, x: f64, y: f64) -> (f64, f64) {
+        (
+            (x - self.centre_x) / self.half_diagonal,
+            (y - self.centre_y) / self.half_diagonal,
+        )
+    }
+
+    /// The fitted relative HFR at pixel `(x, y)`: 1 is as sharp as a
+    /// frame's median.
+    pub fn relative_hfr_at(&self, x: f64, y: f64) -> f64 {
+        let (u, v) = self.offsets(x, y);
+        self.constant + self.tilt_x * u + self.tilt_y * v + self.radial * (u * u + v * v)
+    }
+
+    /// [`Self::relative_hfr_at`] without the tilt: what pixel `(x, y)`
+    /// would show with the sensor square to the optical axis and the bowl
+    /// left as it is.
+    pub fn untilted_relative_hfr_at(&self, x: f64, y: f64) -> f64 {
+        let (u, v) = self.offsets(x, y);
+        self.constant + self.radial * (u * u + v * v)
+    }
+}
+
+/// The angle in degrees, 0 to 90, between an elongation direction and the
+/// line from the sensor's middle to a cell's, or `None` for the middle cell.
+fn elongation_from_radial(
+    row: usize,
+    col: usize,
+    width: usize,
+    height: usize,
+    theta: f64,
+) -> Option<f64> {
+    let (dx, dy) = (
+        (col as f64 - 1.0) * width as f64,
+        (row as f64 - 1.0) * height as f64,
+    );
+    if dx == 0.0 && dy == 0.0 {
+        return None;
+    }
+    let difference = (theta - dy.atan2(dx)).rem_euclid(std::f64::consts::PI);
+    Some(
+        difference
+            .min(std::f64::consts::PI - difference)
+            .to_degrees(),
+    )
 }
 
 /// Why [`analyze_frames`] refused its frames.
@@ -753,6 +925,9 @@ pub fn analyze_frames(
                 median_eccentricity: cell.median_eccentricity,
                 mean_theta: cell.mean_theta,
                 theta_coherence: cell.theta_coherence,
+                elongation_from_radial_degrees: cell.mean_theta.and_then(|theta| {
+                    elongation_from_radial(cell.row, cell.col, width, height, theta)
+                }),
             }
         })
         .collect();
@@ -798,6 +973,7 @@ pub fn analyze_frames(
                 .collect(),
         ),
         worst_corner_frame_count,
+        focal_plane: FocalPlaneFit::of(&cells, width, height),
         cells,
         summary,
         frames: frame_tilts,
@@ -1413,5 +1589,129 @@ mod tests {
         assert_close(spread.lower_quartile, 1.75);
         assert_close(spread.upper_quartile, 3.25);
         assert_eq!(FrameSpread::of(Vec::new()), None);
+    }
+
+    /// Nine cells of a 300×200 frame with relative HFR from `relative(u, v)`,
+    /// `(u, v)` being the cell middle's offset over the half diagonal.
+    fn plane_cells(relative: impl Fn(f64, f64) -> f64) -> Vec<MultiFrameCell> {
+        let half_diagonal = (299.0_f64 / 2.0).hypot(199.0 / 2.0);
+        (0..9)
+            .map(|index| {
+                let (row, col) = (index / 3, index % 3);
+                let u = (col as f64 - 1.0) * 100.0 / half_diagonal;
+                let v = (row as f64 - 1.0) * 200.0 / 3.0 / half_diagonal;
+                let value = relative(u, v);
+                MultiFrameCell {
+                    row,
+                    col,
+                    star_count: 10,
+                    relative_hfr: Some(FrameSpread {
+                        median: value,
+                        lower_quartile: value,
+                        upper_quartile: value,
+                        frame_count: 5,
+                    }),
+                    median_hfr: Some(2.0 * value),
+                    median_eccentricity: None,
+                    mean_theta: None,
+                    theta_coherence: 0.0,
+                    elongation_from_radial_degrees: None,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn focal_plane_separates_tilt_from_a_bowl() {
+        // Softer toward the bottom right only.
+        let tilted =
+            FocalPlaneFit::of(&plane_cells(|u, v| 1.0 + 0.03 * u + 0.03 * v), 300, 200).unwrap();
+        assert_close(tilted.constant, 1.0);
+        assert_close(tilted.tilt_x, 0.03);
+        assert_close(tilted.tilt_y, 0.03);
+        assert!(tilted.radial.abs() < 1e-9);
+        assert_close(tilted.tilt_percent, 200.0 * 0.03 * std::f64::consts::SQRT_2);
+        assert_close(tilted.tilt_angle_degrees, 135.0);
+        assert_close(tilted.tilt_r_squared, 1.0);
+        assert!(tilted.radial_r_squared < 0.01);
+        assert_close(tilted.r_squared, 1.0);
+        // The far corner, then without the tilt back at the middle's value.
+        let half_diagonal = 149.5_f64.hypot(99.5);
+        assert_close(
+            tilted.relative_hfr_at(299.0, 199.0),
+            1.0 + 0.03 * (149.5 + 99.5) / half_diagonal,
+        );
+        assert_close(tilted.untilted_relative_hfr_at(299.0, 199.0), 1.0);
+        assert_close(tilted.relative_hfr_at(149.5, 99.5), 1.0);
+
+        // Every edge softer alike: a bowl, no tilt.
+        let bowl =
+            FocalPlaneFit::of(&plane_cells(|u, v| 1.0 + 0.05 * (u * u + v * v)), 300, 200).unwrap();
+        assert!(bowl.tilt_percent < 1e-9, "{bowl:?}");
+        assert_close(bowl.radial_percent, 5.0);
+        assert!(bowl.tilt_r_squared < 0.01);
+        assert_close(bowl.radial_r_squared, 1.0);
+        assert_close(
+            bowl.untilted_relative_hfr_at(0.0, 0.0),
+            bowl.relative_hfr_at(0.0, 0.0),
+        );
+
+        // Softer toward the top: zero degrees.
+        let up = FocalPlaneFit::of(&plane_cells(|_, v| 1.0 - 0.04 * v), 300, 200).unwrap();
+        assert_close(up.tilt_angle_degrees, 0.0);
+
+        // A cell with no data leaves nothing to fit.
+        let mut sparse = plane_cells(|_, _| 1.0);
+        sparse[3].relative_hfr = None;
+        assert_eq!(FocalPlaneFit::of(&sparse, 300, 200), None);
+    }
+
+    #[test]
+    fn elongation_is_measured_against_the_line_to_the_middle() {
+        use std::f64::consts::PI;
+        // The right-middle cell: stretched along x is radial, along y tangential.
+        assert_close(elongation_from_radial(1, 2, 300, 300, 0.0).unwrap(), 0.0);
+        assert_close(
+            elongation_from_radial(1, 2, 300, 300, PI / 2.0).unwrap(),
+            90.0,
+        );
+        // The bottom-right cell of a square frame points at 45 degrees.
+        assert_close(
+            elongation_from_radial(2, 2, 300, 300, PI / 4.0).unwrap(),
+            0.0,
+        );
+        assert_close(
+            elongation_from_radial(2, 2, 300, 300, 3.0 * PI / 4.0).unwrap(),
+            90.0,
+        );
+        // Axial: 170 degrees is 10 from the x axis.
+        assert_close(
+            elongation_from_radial(1, 0, 300, 300, 170_f64.to_radians()).unwrap(),
+            10.0,
+        );
+        assert_eq!(elongation_from_radial(1, 1, 300, 300, 0.3), None);
+    }
+
+    #[test]
+    fn multi_frame_tilt_carries_the_focal_plane() {
+        let stars: Vec<Vec<TiltStar>> = (0..4)
+            .map(|frame| {
+                frame_stars(4, |row, col, _| {
+                    (2.0 + frame as f64) * (1.0 + 0.05 * (row + col) as f64 / 4.0)
+                })
+            })
+            .collect();
+        let result = analyze_frames(&frames_of(&stars), &MultiFrameTiltOptions::default()).unwrap();
+        let plane = result.focal_plane.unwrap();
+        assert_close(plane.tilt_angle_degrees, 135.0);
+        assert!(plane.tilt_r_squared > 0.99, "{plane:?}");
+        assert!(plane.tilt_percent > 5.0);
+        // Star elongation directions are absent in these frames.
+        assert!(
+            result
+                .cells
+                .iter()
+                .all(|cell| cell.elongation_from_radial_degrees.is_none())
+        );
     }
 }

@@ -362,6 +362,9 @@ core = "seiza-stars::MultiFrameTriangleTilt"
 [rust.MultiFrameTiltResponse]
 core = "seiza-stars::MultiFrameTilt"
 
+[rust.FocalPlaneFitJson]
+core = "seiza-stars::FocalPlaneFit"
+
 [rust.PsfFieldOptionsRequest]
 core = "seiza-stars::PsfFieldOptions"
 

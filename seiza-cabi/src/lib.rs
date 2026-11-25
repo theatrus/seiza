@@ -9789,6 +9789,39 @@ struct MultiFrameCellJson {
     median_eccentricity: Option<f64>,
     mean_theta: Option<f64>,
     theta_coherence: f64,
+    elongation_from_radial_degrees: Option<f64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FocalPlaneFitJson {
+    constant: f64,
+    tilt_x: f64,
+    tilt_y: f64,
+    radial: f64,
+    tilt_percent: f64,
+    tilt_angle_degrees: f64,
+    radial_percent: f64,
+    tilt_r_squared: f64,
+    radial_r_squared: f64,
+    r_squared: f64,
+}
+
+impl From<&seiza_stars::FocalPlaneFit> for FocalPlaneFitJson {
+    fn from(fit: &seiza_stars::FocalPlaneFit) -> Self {
+        Self {
+            constant: fit.constant,
+            tilt_x: fit.tilt_x,
+            tilt_y: fit.tilt_y,
+            radial: fit.radial,
+            tilt_percent: fit.tilt_percent,
+            tilt_angle_degrees: fit.tilt_angle_degrees,
+            radial_percent: fit.radial_percent,
+            tilt_r_squared: fit.tilt_r_squared,
+            radial_r_squared: fit.radial_r_squared,
+            r_squared: fit.r_squared,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -9815,6 +9848,7 @@ struct MultiFrameTiltResponse {
     frame_curvature_percent: Option<FrameSpreadJson>,
     worst_corner_frame_count: usize,
     triangle: Option<MultiFrameTriangleTiltJson>,
+    focal_plane: Option<FocalPlaneFitJson>,
 }
 
 impl From<&seiza_stars::MultiFrameTilt> for MultiFrameTiltResponse {
@@ -9845,6 +9879,7 @@ impl From<&seiza_stars::MultiFrameTilt> for MultiFrameTiltResponse {
                     median_eccentricity: cell.median_eccentricity,
                     mean_theta: cell.mean_theta,
                     theta_coherence: cell.theta_coherence,
+                    elongation_from_radial_degrees: cell.elongation_from_radial_degrees,
                 })
                 .collect(),
             summary: TiltSummaryJson::from(&tilt.summary),
@@ -9865,6 +9900,7 @@ impl From<&seiza_stars::MultiFrameTilt> for MultiFrameTiltResponse {
                     frame_tilt_percent: triangle.frame_tilt_percent.map(FrameSpreadJson::from),
                     worst_sector_frame_count: triangle.worst_sector_frame_count,
                 }),
+            focal_plane: tilt.focal_plane.as_ref().map(FocalPlaneFitJson::from),
         }
     }
 }
@@ -15943,6 +15979,25 @@ mod tests {
         let triangle = &parsed["triangle"];
         assert!(triangle["summary"]["sectors"].is_array());
         assert_eq!(triangle["sectorRelativeHfr"].as_array().unwrap().len(), 3);
+        // One soft corner: a plane softening toward the top left, plus some bowl.
+        let plane = &parsed["focalPlane"];
+        let angle = plane["tiltAngleDegrees"].as_f64().unwrap();
+        assert!((270.0..360.0).contains(&angle), "{angle}");
+        assert!(plane["tiltPercent"].as_f64().unwrap() > 0.0);
+        for field in [
+            "constant",
+            "tiltX",
+            "tiltY",
+            "radial",
+            "radialPercent",
+            "rSquared",
+        ] {
+            assert!(plane[field].is_number(), "{field}");
+        }
+        // Stars stretched at 0.5 rad, the top-left cell's middle at 45 degrees.
+        let from_radial = cells[0]["elongationFromRadialDegrees"].as_f64().unwrap();
+        assert!((from_radial - (45.0 - 0.5_f64.to_degrees())).abs() < 1e-9);
+        assert!(cells[4]["elongationFromRadialDegrees"].is_null());
 
         let mismatched =
             json!({"frames": [frame(2.0), {"width": 300, "height": 200, "stars": []}]});
@@ -19057,6 +19112,17 @@ pub unsafe extern "C" fn seiza_stars_detect_path_json(
 ///   the detection response's `triangleTilt`, combined over the frames whose
 ///   own triangle was ready), `readyFrameCount`, `sectorRelativeHfr`,
 ///   `frameTiltPercent` and `worstSectorFrameCount`.
+/// - `focalPlane`, when all nine cells have a `relativeHfr`: the cells split
+///   into a tilted plane and a radial bowl, `constant + tiltX·u + tiltY·v +
+///   radial·(u² + v²)`, with `(u, v)` a pixel's offset from the sensor's
+///   middle over the middle-to-corner distance (`u` right, `v` down).
+///   `tiltPercent` is the plane's change across the whole diagonal and
+///   `tiltAngleDegrees` the direction it softens toward (0 up, clockwise);
+///   `radialPercent` is the bowl at a corner, an upper bound on a backfocus
+///   error. `tiltRSquared`, `radialRSquared` and `rSquared` are the shares of
+///   the cells' variation the plane, the bowl and both explain. Each cell
+///   also has `elongationFromRadialDegrees`, 0 when its stars stretch toward
+///   the middle and 90 when around it.
 ///
 /// # Safety
 ///

@@ -187,6 +187,24 @@ class MultiFrameTiltCell:
     median_eccentricity: float | None
     mean_theta: float | None
     theta_coherence: float
+    # 0 when stars stretch toward the sensor's middle, 90 when around it.
+    elongation_from_radial_degrees: float | None
+
+class FocalPlaneFit:
+    # constant + tilt_x*u + tilt_y*v + radial*(u**2 + v**2); (u, v) is a pixel's
+    # offset from the sensor's middle over the middle-to-corner distance.
+    constant: float
+    tilt_x: float
+    tilt_y: float
+    radial: float
+    # Across the whole diagonal; the angle it softens toward is 0 up, clockwise.
+    tilt_percent: float
+    tilt_angle_degrees: float
+    # The bowl at a corner: an upper bound on a backfocus error.
+    radial_percent: float
+    tilt_r_squared: float
+    radial_r_squared: float
+    r_squared: float
 
 class MultiFrameTriangleTilt:
     summary: TriangleTiltSummary
@@ -208,6 +226,7 @@ class MultiFrameTilt:
     # Frames whose own worst corner is summary.worst_corner.
     worst_corner_frame_count: int
     triangle: MultiFrameTriangleTilt | None
+    focal_plane: FocalPlaneFit | None
 
 class StarCatalog:
     @staticmethod

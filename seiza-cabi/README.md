@@ -354,7 +354,11 @@ exposes the **superset** of what both apps need.
   by median with quartiles over frames. It returns the combined
   parallelogram and (with `triangleAngleDegrees`) triangle verdicts in the
   single-frame shapes, plus the spread of the frames' own tilt and how many
-  frames agree on the worst corner or sector.
+  frames agree on the worst corner or sector. `focalPlane` splits the grid
+  into a tilted plane (`tiltPercent`, `tiltAngleDegrees`) and a radial bowl
+  (`radialPercent`, an upper bound on a backfocus error), with the share of
+  the variation each explains, and every cell reports
+  `elongationFromRadialDegrees`, the backfocus fingerprint.
   For focusing hosts, `seiza_stars_pixel_scale_arcsec` gives a rig's pixel
   scale from its focal length and pixel size, `seiza_stars_classify_pixel_scale`
   the `preset` for that scale, and `seiza_stars_recommend_detection_binning`

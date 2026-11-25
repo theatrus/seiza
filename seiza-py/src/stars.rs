@@ -600,6 +600,54 @@ pub(crate) struct PyMultiFrameTiltCell {
     mean_theta: Option<f64>,
     #[pyo3(get)]
     theta_coherence: f64,
+    #[pyo3(get)]
+    elongation_from_radial_degrees: Option<f64>,
+}
+
+/// The grid split into a tilted plane and a radial bowl:
+/// ``constant + tilt_x*u + tilt_y*v + radial*(u**2 + v**2)``, with ``(u, v)`` a
+/// pixel's offset from the sensor's middle over the middle-to-corner
+/// distance (``u`` right, ``v`` down).
+#[pyclass(skip_from_py_object, name = "FocalPlaneFit", module = "seiza", frozen)]
+#[derive(Clone)]
+pub(crate) struct PyFocalPlaneFit {
+    #[pyo3(get)]
+    constant: f64,
+    #[pyo3(get)]
+    tilt_x: f64,
+    #[pyo3(get)]
+    tilt_y: f64,
+    #[pyo3(get)]
+    radial: f64,
+    #[pyo3(get)]
+    tilt_percent: f64,
+    #[pyo3(get)]
+    tilt_angle_degrees: f64,
+    #[pyo3(get)]
+    radial_percent: f64,
+    #[pyo3(get)]
+    tilt_r_squared: f64,
+    #[pyo3(get)]
+    radial_r_squared: f64,
+    #[pyo3(get)]
+    r_squared: f64,
+}
+
+impl From<&tilt::FocalPlaneFit> for PyFocalPlaneFit {
+    fn from(fit: &tilt::FocalPlaneFit) -> Self {
+        Self {
+            constant: fit.constant,
+            tilt_x: fit.tilt_x,
+            tilt_y: fit.tilt_y,
+            radial: fit.radial,
+            tilt_percent: fit.tilt_percent,
+            tilt_angle_degrees: fit.tilt_angle_degrees,
+            radial_percent: fit.radial_percent,
+            tilt_r_squared: fit.tilt_r_squared,
+            radial_r_squared: fit.radial_r_squared,
+            r_squared: fit.r_squared,
+        }
+    }
 }
 
 /// The triangle tilt analysis over many frames.
@@ -646,6 +694,8 @@ pub(crate) struct PyMultiFrameTilt {
     worst_corner_frame_count: usize,
     #[pyo3(get)]
     triangle: Option<PyMultiFrameTriangleTilt>,
+    #[pyo3(get)]
+    focal_plane: Option<PyFocalPlaneFit>,
 }
 
 impl From<&tilt::MultiFrameTilt> for PyMultiFrameTilt {
@@ -675,6 +725,7 @@ impl From<&tilt::MultiFrameTilt> for PyMultiFrameTilt {
                     median_eccentricity: cell.median_eccentricity,
                     mean_theta: cell.mean_theta,
                     theta_coherence: cell.theta_coherence,
+                    elongation_from_radial_degrees: cell.elongation_from_radial_degrees,
                 })
                 .collect(),
             summary: PyTiltSummary::from(&result.summary),
@@ -695,6 +746,7 @@ impl From<&tilt::MultiFrameTilt> for PyMultiFrameTilt {
                     frame_tilt_percent: triangle.frame_tilt_percent.map(PyFrameSpread::from),
                     worst_sector_frame_count: triangle.worst_sector_frame_count,
                 }),
+            focal_plane: result.focal_plane.as_ref().map(PyFocalPlaneFit::from),
         }
     }
 }
@@ -754,6 +806,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyMultiFrameTiltCell>()?;
     module.add_class::<PyMultiFrameTriangleTilt>()?;
     module.add_class::<PyMultiFrameTilt>()?;
+    module.add_class::<PyFocalPlaneFit>()?;
     module.add_function(wrap_pyfunction!(detect_measured_stars, module)?)?;
     module.add_function(wrap_pyfunction!(detect_measured_stars_file, module)?)?;
     module.add_function(wrap_pyfunction!(pixel_scale_arcsec, module)?)?;

@@ -65,8 +65,8 @@ pub use psf_field::{
 };
 pub use psf_fitting::{PSFModel, PSFType};
 pub use tilt::{
-    CellStats, Corner, CornerHfr, FRAME_MINIMUM_STARS_PER_REGION, FrameSpread, FrameTilt,
-    MultiFrameCell, MultiFrameTilt, MultiFrameTiltError, MultiFrameTiltOptions,
+    CellStats, Corner, CornerHfr, FRAME_MINIMUM_STARS_PER_REGION, FocalPlaneFit, FrameSpread,
+    FrameTilt, MultiFrameCell, MultiFrameTilt, MultiFrameTiltError, MultiFrameTiltOptions,
     MultiFrameTriangleTilt, TRIANGLE_INNER_RADIUS_FRACTION, TRIANGLE_MINIMUM_STARS_PER_REGION,
     TRIANGLE_OUTER_RADIUS_FRACTION, TiltFrame, TiltStar, TiltSummary, TriangleCenterStats,
     TriangleSectorStats, TriangleTiltError, TriangleTiltSummary, analyze_cells, analyze_frames,

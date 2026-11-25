@@ -3414,6 +3414,17 @@ char *seiza_stars_detect_path_json(const char *path, const char *options_json, c
    the detection response's `triangleTilt`, combined over the frames whose
    own triangle was ready), `readyFrameCount`, `sectorRelativeHfr`,
    `frameTiltPercent` and `worstSectorFrameCount`.
+ - `focalPlane`, when all nine cells have a `relativeHfr`: the cells split
+   into a tilted plane and a radial bowl, `constant + tiltX·u + tiltY·v +
+   radial·(u² + v²)`, with `(u, v)` a pixel's offset from the sensor's
+   middle over the middle-to-corner distance (`u` right, `v` down).
+   `tiltPercent` is the plane's change across the whole diagonal and
+   `tiltAngleDegrees` the direction it softens toward (0 up, clockwise);
+   `radialPercent` is the bowl at a corner, an upper bound on a backfocus
+   error. `tiltRSquared`, `radialRSquared` and `rSquared` are the shares of
+   the cells' variation the plane, the bowl and both explain. Each cell
+   also has `elongationFromRadialDegrees`, 0 when its stars stretch toward
+   the middle and 90 when around it.
 
  # Safety
 
