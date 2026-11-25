@@ -80,6 +80,11 @@ For an irregular gradient, choose a smoothed thin-plate radial-basis model
 manually or allow automatic selection with `--auto-rbf`. Inspect the model
 before applying it: a flexible surface can fit real extended emission.
 
+A library caller can correct one rectangle of the image at a time with
+`BackgroundFit::correct_region_in_place_with_strength`. Each sample gets the
+value it gets when the whole image is corrected, so a tiled viewer or a
+mosaic too large for memory can apply one fit tile by tile.
+
 ```text
 seiza background stack.fits --output corrected.fits \
   --model-output background.fits --diagnostics background.json
