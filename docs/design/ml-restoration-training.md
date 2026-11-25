@@ -2804,6 +2804,35 @@ In order, each only if the one before leaves a gap at the rims:
        their targets keep. S100 is S99 with both, `--pairs-noise 2`; made
        together, its result will not tell them apart.
 
+       Along an edge the runs vary more than the goal does. S99 draws the
+       lit edge of row 2's overlap in pieces, with a kink and a blob where
+       the goal has one thin line, and its knots along the Trunk's rims,
+       between 1.5 and 4 px, are 2.72% of the rim zone (the goal 1.93%);
+       across the rim its profile is the goal's. So a step after the model
+       was tried, with nothing trained: the change the run made is averaged
+       along the edge, by a Gaussian of 4 px along the direction of the
+       input's structure tensor (the input smoothed by 4 px, the tensor over
+       6), where the input holds a coherent edge over its noise, off stars
+       and nowhere else. Plain, it brings the Trunk's knots to 1.84%, its
+       lit side from 5.30 to 5.20 and its slope from 2.10 to 2.09 times the
+       input's. But part of what varies along the edges is in both halves
+       of a stack: the step takes 4 to 5% of that on the Trunk and 10 to
+       13% on NGC 6820 (held out), and it passes the goal on the deeper
+       stacks (the Trunk's six nights 3.62%, the goal 5.41%). Holding what
+       varies along the edge back only under the noise (kept by its local
+       power over that and the square of 0.4 times the noise) keeps 98 to
+       99% of what the halves share and lowers the noise along the edge by
+       2 to 6%; their agreement rises between 4 and 8 px, 0.44 to 0.47 and
+       0.63 to 0.65, and holds between 2.5 and 6 (0.16 and 0.34). The knots
+       come to 2.07% on the Trunk (the goal 1.93%), 1.47% on NGC 6820's
+       night (S99 1.80%, the goal 1.30%), 1.99% on its multi-night stack
+       (2.82% and 2.03%), 4.69% on the Trunk's six nights (5.90% and 5.41%)
+       and 3.77% on the California (4.19%, the goal 4.45%: further under
+       it). The rims stand as they were, 5.26 and 6.34 on the lit side, the
+       slope 2.10. By eye the row 2 edge is smoother and its blob smaller,
+       and the goal's thin line is still not there: that is the network's
+       to learn. The step is not in the renderer or the runtime.
+
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
    taught that clarity is asked for at a ratio of 0, read from the
