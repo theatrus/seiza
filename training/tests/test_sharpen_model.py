@@ -732,6 +732,99 @@ def test_the_edge_step_deepens_a_rim_both_ways_and_rings_no_star(monkeypatch):
     assert np.allclose(made[60:100, 100:140], image[60:100, 100:140] + change[60:100, 100:140], atol=1e-3)
 
 
+def test_smoothing_a_change_along_an_edge_leaves_the_edge_s_profile_and_the_rest(monkeypatch):
+    side, width = 260, 11.5
+    ys, xs = np.mgrid[:side, :side].astype(np.float32)
+    # A rim 30 high at column 130, 5 px soft; the change sharpens it (a
+    # function of the column alone) and varies along it every 8 px.
+    rim = 15.0 * (1.0 + np.tanh((xs - 130.0) / 5.0))
+    image = (140.0 + rim).astype(np.float32)
+    sigma = np.ones((side, side), np.float32)
+    none = np.zeros((0, len(COLUMNS)))
+    sharpened = 4.0 * np.exp(-0.5 * ((xs - 130.0) / 4.0) ** 2) * np.tanh((xs - 130.0) / 6.0)
+    waves = np.sin(2 * np.pi * ys / 8.0) * np.exp(-0.5 * ((xs - 130.0) / 5.0) ** 2)
+    # And a change where there is no edge at all, to be left as it is.
+    elsewhere = 0.1 * np.sin(2 * np.pi * ys / 8.0) * (xs < 50)
+
+    def made(size: float, amount: float, points=none, noise=sigma, where=width):
+        output = (image + sharpened + size * waves + elsewhere).astype(np.float32)
+        return sm.smooth_edges_step(output, image, amount, where, points, noise), output
+
+    inner = (slice(60, 200), slice(128, 133))
+    # None asked, or stars so narrow a line is under a pixel: the output itself.
+    kept, output = made(1.0, 0.0)
+    assert kept is output
+    assert made(1.0, 0.4, where=sm.ALONG_LEAST / sm.ALONG_LENGTH - 0.1)[0] is not None
+    narrow = made(1.0, 0.4, where=2.3)
+    assert narrow[0] is narrow[1]
+    # Waves under the noise go, waves far over it stay; what is across the
+    # rim, the rows' mean, is the output's either way.
+    def left(size: float, amount: float) -> float:
+        result, output = made(size, amount)
+        change = (result - output + size * waves)[inner]
+        return float((change * waves[inner]).sum() / (size * (waves[inner] ** 2).sum()))
+
+    assert left(0.1, 0.4) < 0.25
+    assert left(4.0, 0.4) > 0.9
+    # With no noise to hold back under, nothing is.
+    result, output = made(0.1, 0.4, noise=np.zeros_like(sigma))
+    np.testing.assert_allclose(result, output, atol=1e-4)
+    result, output = made(0.1, 0.4)
+    np.testing.assert_allclose((result - image)[60:200].mean(axis=0), sharpened[60:200].mean(axis=0), atol=0.06)
+    # Twice as much held back under twice the amount; a pixel never moves by
+    # more than its own wave; the sky far from the rim is as it was.
+    assert left(0.4, 1.0) < left(0.4, 0.3)
+    assert np.abs(result - output).max() < 0.15
+    far = np.abs(xs - 130.0) > 60
+    np.testing.assert_allclose(result[far], output[far], atol=2e-3)
+    assert elsewhere[far].max() > 0.05
+    # A listed star on the rim keeps its change, and the rim elsewhere does not.
+    points = np.zeros((1, len(COLUMNS)))
+    points[0, :2] = (130.0, 100.0)
+    points[0, COLUMNS.index("detected")] = 1
+    starred, output = made(0.1, 0.4, points=points)
+    np.testing.assert_allclose(starred[94:107, 125:136], output[94:107, 125:136], atol=1e-4)
+    assert np.abs((starred - output)[140:200, 128:133]).max() > 0.02
+    # It follows an edge as it turns: round a small disc, the waves go and a
+    # narrow line along the rim, the same at every angle, stays; averaged
+    # along a straight line it would not.
+    radius = np.hypot(xs - 130.0, ys - 130.0)
+    disc = (140.0 + 15.0 * (1.0 - np.tanh((radius - 30.0) / 5.0))).astype(np.float32)
+    around = np.sin(24 * np.arctan2(ys - 130.0, xs - 130.0)) * np.exp(-0.5 * ((radius - 30.0) / 4.0) ** 2)
+    ring = np.abs(radius - 30.0) < 1.5
+    output = (disc + 0.1 * around).astype(np.float32)
+    turned = sm.smooth_edges_step(output, disc, 0.4, width, none, sigma)
+    remaining = float(((turned - disc) * around)[ring].sum() / (0.1 * (around[ring] ** 2).sum()))
+    assert remaining < 0.35
+    line = 0.1 * np.exp(-0.5 * ((radius - 30.0) / 1.5) ** 2)
+    along = sm.smooth_edges_step((disc + line).astype(np.float32), disc, 0.4, width, none, sigma) - disc
+    assert float(along[ring].mean() / line[ring].mean()) > 0.85
+    # NaN stays NaN, and where it was not the output is what it was elsewhere.
+    holed = (image + sharpened + 0.1 * waves).astype(np.float32)
+    holed[10:14, 20:24] = np.nan
+    step = sm.smooth_edges_step(holed, image, 0.4, width, none, sigma)
+    assert np.isnan(step[10:14, 20:24]).all() and np.isfinite(step).sum() == side * side - 16
+    plain, _ = made(0.1, 0.4)
+    np.testing.assert_allclose(step[120:200, 120:140], plain[120:200, 120:140], atol=1e-3)
+
+
+def test_averaging_along_lines_turns_with_them():
+    # A thin ring 16 px out stays a ring; along straight lines it would not.
+    ys, xs = np.mgrid[:120, :120].astype(np.float32)
+    radius, theta = np.hypot(xs - 60.0, ys - 60.0), np.arctan2(ys - 60.0, xs - 60.0)
+    ring = np.exp(-0.5 * ((radius - 16.0) / 1.5) ** 2).astype(np.float32)
+    on = np.abs(radius - 16.0) < 1.0
+    made = sm.averaged_along(ring, (-np.sin(theta)).astype(np.float32), np.cos(theta).astype(np.float32), 6.0)
+    assert made[on].mean() / ring[on].mean() > 0.9
+    # Constant along a line, and a wave along it gone.
+    flat = np.full((60, 60), 7.0, np.float32)
+    up = np.ones((60, 60), np.float32)
+    np.testing.assert_allclose(sm.averaged_along(flat, 0 * up, up, 4.0), 7.0, rtol=1e-5)
+    wave = np.sin(2 * np.pi * np.arange(60, dtype=np.float32)[:, None] / 8.0) * np.ones((1, 60), np.float32)
+    assert np.abs(sm.averaged_along(wave, 0 * up, up, 4.0)[20:40]).max() < 0.1
+    assert np.allclose(sm.averaged_along(wave, up, 0 * up, 4.0)[20:40], wave[20:40], atol=1e-4)
+
+
 def test_shade_darkens_the_dark_side_of_a_rim_alone(tmp_path):
     side = 200
     ys, xs = np.mgrid[:side, :side].astype(np.float32)

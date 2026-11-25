@@ -1698,6 +1698,110 @@ def rolloff_step(output: np.ndarray, image: np.ndarray, amount: float, noise_map
     return np.where(finite, made, output).astype(np.float32)
 
 
+# The smoothing of a change along an edge (`smooth_edges_step`): its change
+# less its average along the edge's line is kept by its local power over that
+# and the square of so many times the noise, so a rim's knots of a size the
+# noise could make go and a deep stack's own stay. The line is the structure
+# tensor's: of the image smoothed by `ALONG_PRE` input widths, averaged over
+# `ALONG_AREA` of them, followed as far as a Gaussian of `ALONG_LENGTH` of
+# them reaches. It acts where the tensor is coherent and its gradient stands
+# over the noise, and stays `ALONG_CLEAR` widths off a listed star. An image
+# whose stars are so narrow that a line is under `ALONG_LEAST` px is left as
+# it is. On the Trunk (stars 11.5 px across), as a step on a run's output at
+# 0.4 of the noise: the knots along the rims fell from 2.72% to 2.06% (the
+# goal 1.93%) with the rims' profile across as it was, and on NGC 6820's
+# night (8.4 px) from 1.80% to 1.55% (1.30%); of what two independent halves
+# of a stack share along their edges, with the lines 4 px long, 98 to 99%
+# stayed (2026-11-25).
+ALONG_LENGTH = 0.35
+ALONG_PRE = 0.35
+ALONG_AREA = 0.5
+ALONG_CLEAR = 1.5
+ALONG_LEAST = 1.0
+
+
+def edge_lines(image: np.ndarray, width: float, noise: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The direction along an edge at each pixel of `image`, as its cosine
+    and sine, and how far it stands as an edge, from 0 to 1 (see
+    `ALONG_LENGTH`), for a PSF `width` px across and noise `noise`."""
+    pre, area = ALONG_PRE * width, ALONG_AREA * width
+    seen = blurred_images(image, [pre**2 * np.eye(2)])[0]
+    down, across = np.gradient(seen.astype(np.float64))
+    xx, yy, xy = (blurred_images(part.astype(np.float32), [area**2 * np.eye(2)])[0]
+                  for part in (across * across, down * down, across * down))
+    half, root = 0.5 * (xx + yy), np.sqrt((0.5 * (xx - yy)) ** 2 + xy**2)
+    # A smoothed white noise's gradient: its σ over the square root of
+    # 8π times the smoothing's fourth power.
+    of_noise = np.nan_to_num(noise) / math.sqrt(8.0 * math.pi * pre**4)
+    strong = np.maximum(half + root - of_noise**2, 0.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        coherent = np.nan_to_num((root / half) ** 2)
+        over = np.nan_to_num(strong / (strong + (3.0 * of_noise) ** 2))
+    angle = 0.5 * np.arctan2(2.0 * xy, xx - yy) + np.pi / 2.0
+    return np.cos(angle).astype(np.float32), np.sin(angle).astype(np.float32), (coherent * over).astype(np.float32)
+
+
+def averaged_along(plane: np.ndarray, along_x: np.ndarray, along_y: np.ndarray, length: float) -> np.ndarray:
+    """`plane` averaged along the lines that `along_x` and `along_y` give at
+    each pixel, by a Gaussian of `length` px, following them as they turn."""
+    height, width = plane.shape
+    values = torch.from_numpy(np.ascontiguousarray(plane, dtype=np.float32))[None, None]
+    along = torch.from_numpy(np.stack([along_x, along_y]))[None]
+    grid_y, grid_x = torch.meshgrid(torch.arange(height, dtype=torch.float32),
+                                    torch.arange(width, dtype=torch.float32), indexing="ij")
+
+    def sampled(source: torch.Tensor, x: torch.Tensor, y: torch.Tensor, mode: str) -> torch.Tensor:
+        grid = torch.stack([2.0 * x / max(width - 1, 1) - 1.0, 2.0 * y / max(height - 1, 1) - 1.0], dim=-1)[None]
+        return torch.nn.functional.grid_sample(source, grid, mode=mode, padding_mode="border", align_corners=True)[0]
+
+    with torch.no_grad():
+        total, mass = values[0, 0].clone(), 1.0
+        for sign in (1.0, -1.0):
+            x, y = grid_x.clone(), grid_y.clone()
+            dx, dy = sign * along[0, 0], sign * along[0, 1]
+            for step in range(1, int(math.ceil(2.5 * length)) + 1):
+                x, y = x + dx, y + dy
+                weight = math.exp(-0.5 * (step / length) ** 2)
+                total += weight * sampled(values, x, y, "bilinear")[0]
+                mass += weight
+                there = sampled(along, x, y, "nearest")
+                # A line has no front: turned to run on as it was going.
+                turn = torch.where(there[0] * dx + there[1] * dy < 0, -1.0, 1.0)
+                dx, dy = there[0] * turn, there[1] * turn
+    return (total / mass).numpy()
+
+
+def smooth_edges_step(output: np.ndarray, image: np.ndarray, amount: float, width: float, points: np.ndarray,
+                      noise_map: np.ndarray) -> np.ndarray:
+    """A sharpened image with what a run's change from `image`, its input,
+    varies by along an edge held back under `amount` times `noise_map`, the
+    input's noise, as a fixed step the user sets (see `ALONG_LENGTH`): an
+    edge's profile across and the input's noise are as they were. `width` is
+    the input PSF's, in px, and `points` the image's point sources, which the
+    step keeps clear of. NaN stays NaN."""
+    length = ALONG_LENGTH * width
+    if not amount > 0 or length < ALONG_LEAST:
+        return output
+    finite = np.isfinite(output) & np.isfinite(image)
+    level = np.float32(np.median(output[finite][::17]))
+    made = np.where(finite, output, level).astype(np.float32)
+    base = np.where(finite, image, level).astype(np.float32)
+    noise = np.nan_to_num(noise_map)
+    change = made - base
+    along_x, along_y, weight = edge_lines(base, width, noise)
+    lined = averaged_along(change, along_x, along_y, length)
+    varies = change - lined
+    power = np.clip(blurred_images(varies * varies, [length**2 * np.eye(2)])[0], 0.0, None)
+    floor = (amount * noise) ** 2
+    with np.errstate(divide="ignore", invalid="ignore"):
+        kept = np.nan_to_num(power / (power + floor), nan=1.0)
+    near = source_mask(points, output.shape, ALONG_CLEAR * width).astype(np.float32)
+    near = blurred_images(near, [CONTRAST_FEATHER**2 * np.eye(2)], pad=16)[0]
+    weight = weight * np.clip(1.0 - 1.5 * near, 0.0, 1.0)
+    result = base + change - weight * (1.0 - kept) * varies
+    return np.where(finite, result, output).astype(np.float32)
+
+
 # The shade a known-kernel target is given on the dark side of a strong
 # edge (`Settings.shade`): `SHADE_LIFT` times what falls, in the target
 # smoothed by `CLARITY_FINE` input widths, below its mean over squares

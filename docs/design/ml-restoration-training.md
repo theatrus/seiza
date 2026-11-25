@@ -2847,7 +2847,12 @@ In order, each only if the one before leaves a gap at the rims:
        it). The rims stand as they were, 5.26 and 6.34 on the lit side, the
        slope 2.10. By eye the row 2 edge is smoother and its blob smaller,
        and the goal's thin line is still not there: that is the network's
-       to learn. The step is not in the renderer or the runtime.
+       to learn. The step is in the renderer (`sheet-sharpen --smooth-edges`,
+       its lines a share of the image's stars' width, so a sharp image gets
+       next to none: the California, 2.3 px, is left as it was), an amount
+       the user sets; at 0.4 of the noise it reads 2.06% on the Trunk,
+       1.55% on NGC 6820's night, 2.17% on its multi-night stack and 4.84%
+       on the Trunk's six nights. It is not in the runtime.
 
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run

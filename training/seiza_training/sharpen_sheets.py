@@ -52,7 +52,8 @@ from .sharpen_bank import fitted_stamp, saturation, stamp_width
 from .sharpen_model import (LIGHT_RADIUS, RING_PEAK, clarity_step, cubic_taps, edge_band, edge_step, empirical_stamp,
                             light_centre, load_run, FWHM_PER_SIGMA, blurred_images, field_point_map, measured_stars,
                             measured_width, peak_centre,
-                            ring_and_flux, rolloff_step, run_directory, settings_from, sharpen)
+                            ring_and_flux, rolloff_step, run_directory, settings_from, sharpen,
+                            smooth_edges_step)
 from .sheets import typeface, stretch
 from .store import Store, write_png
 
@@ -181,7 +182,7 @@ def star_share(point_plane: np.ndarray, noise_map: np.ndarray, least: float) -> 
 def render_saved(store: Store, manifest: Manifest, name: str, *, only: set[str] | None = None,
                  clarity: float = 0.0, rolloff: float = 0.0, scale_to: float = 0.0,
                  scale_blend: float = SCALE_BLEND, full_ask: Any = None, scale_rest: float = 0.0,
-                 scale_stars: float = SCALE_STARS, edge: float = 0.0) -> dict[str, Any]:
+                 scale_stars: float = SCALE_STARS, edge: float = 0.0, smooth_edges: float = 0.0) -> dict[str, Any]:
     """Make a recorded run's sheets, those named in `only` or all, and list
     them in its record. Without a sheet list, or without Pillow, nothing is
     made and the answer says why; a sheet whose input is not built is
@@ -199,7 +200,10 @@ def render_saved(store: Store, manifest: Manifest, name: str, *, only: set[str] 
     and the rest), the full-size images and their measures are at it, in
     directories named `-full-<ask>`. With `edge`, every output is given that
     much contrast at its strong edges after the model (`edge_step`), in
-    directories named `-edge-<amount>`."""
+    directories named `-edge-<amount>`. With `smooth_edges`, what every
+    output's change varies by along an edge is held back under that much of
+    its input's noise (`smooth_edges_step`), in directories named
+    `-smooth-edges-<amount>`."""
     spec = store.root / SPEC
     if not spec.exists():
         return {"skipped": f"no sheet list at {spec}"}
@@ -219,12 +223,13 @@ def render_saved(store: Store, manifest: Manifest, name: str, *, only: set[str] 
                   + (f"-stars-{scale_stars:g}" if scale_to > 0 and scale_stars != SCALE_STARS else "")
                   + (f"-rolloff-{rolloff:g}" if rolloff > 0 else "") + (f"-clarity-{clarity:g}" if clarity > 0 else "")
                   + (f"-edge-{edge:g}" if edge > 0 else "")
+                  + (f"-smooth-edges-{smooth_edges:g}" if smooth_edges > 0 else "")
                   + ("" if full_ask is None else "-full-" + "-".join(f"{value:g}" for value in np.atleast_1d(full_ask))))
         path = directory / f"sheets{suffix}" / f"{sheet['name']}.png"
         whole = directory / f"full{suffix}" / sheet["name"] if sheet.get("full") else None
         drawn = render(store, manifest, record, model, sheet, path, whole, clarity=clarity, rolloff=rolloff,
                        scale_to=scale_to, scale_blend=scale_blend, full_ask=full_ask, scale_rest=scale_rest,
-                       scale_stars=scale_stars, edge=edge)
+                       scale_stars=scale_stars, edge=edge, smooth_edges=smooth_edges)
         if drawn is None:
             missing.append(sheet["name"])
             continue
@@ -232,7 +237,7 @@ def render_saved(store: Store, manifest: Manifest, name: str, *, only: set[str] 
         if drawn:
             full[sheet["name"]] = {key: str(value.relative_to(store.root)) if isinstance(value, Path) else value
                                    for key, value in drawn.items()}
-    if not (clarity > 0 or rolloff > 0 or scale_to > 0 or full_ask is not None or edge > 0):
+    if not (clarity > 0 or rolloff > 0 or scale_to > 0 or full_ask is not None or edge > 0 or smooth_edges > 0):
         record = json.loads((directory / "run.json").read_text())
         record["sheets"] = {**record.get("sheets", {}), **made}
         record["full"] = {**record.get("full", {}), **full}
@@ -349,6 +354,9 @@ class Sharpener:
         # The fine part of the change held back after the model, before
         # any clarity (`rolloff_step`). 0: none.
         self.rolloff = 0.0
+        # What the change varies by along an edge held back after that,
+        # before any contrast (`smooth_edges_step`). 0: none.
+        self.smooth_edges = 0.0
         # The stars' width the image is also sharpened at, binned, where
         # its own are far wider (`SCALE_BLEND`). 0: never.
         self.scale_to = 0.0
@@ -471,6 +479,7 @@ class Sharpener:
             output = self.scaled(output, ratio, top, left, bottom, right)
         output = rolloff_step(output, image, self.rolloff, noise_map)
         width = float(np.nanmedian(self.widths))
+        output = smooth_edges_step(output, image, self.smooth_edges, width, points, noise_map)
         output = edge_step(output, self.edge, width, points, noise_map)
         return clarity_step(output, self.clarity, width, points, noise_map)
 
@@ -478,7 +487,7 @@ class Sharpener:
 def render(store: Store, manifest: Manifest, record: dict[str, Any], model: Any, sheet: dict[str, Any], path: Path,
            whole: Path | None = None, clarity: float = 0.0, rolloff: float = 0.0, scale_to: float = 0.0,
            scale_blend: float = SCALE_BLEND, full_ask: Any = None, scale_rest: float = 0.0,
-           scale_stars: float = SCALE_STARS, edge: float = 0.0) -> dict[str, Any] | None:
+           scale_stars: float = SCALE_STARS, edge: float = 0.0, smooth_edges: float = 0.0) -> dict[str, Any] | None:
     """Draw one sheet to `path`, and with `whole`, the stem of its full-size
     files, write them and measure them. None when its input is not built."""
     from PIL import Image, ImageDraw, ImageFont
@@ -498,6 +507,7 @@ def render(store: Store, manifest: Manifest, record: dict[str, Any], model: Any,
     runner.clarity = clarity
     runner.edge = edge
     runner.rolloff = rolloff
+    runner.smooth_edges = smooth_edges
     runner.scale_to, runner.scale_blend, runner.full_ask = scale_to, scale_blend, full_ask
     runner.scale_rest, runner.scale_stars = scale_rest, scale_stars
     if sheet.get("denoise"):
