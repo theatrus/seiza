@@ -2566,6 +2566,31 @@ In order, each only if the one before leaves a gap at the rims:
        The next lever is the loss: blocks of 16 and 32 px at the same
        weight a scale.
 
+       S96 is that: S94 with the gradient term's blocks doubled up to 16
+       and 32 px (0.75 over six scales, S94's 0.5 over four), its bank
+       and the rest S94's. It is the first run to move row 2 since S89,
+       although no window of it is trained on: the overlap reads 1.18
+       and 1.05 between 8 and 16 and 16 and 32 px (S94 1.13 and 1.02,
+       the goal 1.32 and 1.21), the whole crop 1.18 and 1.08 (S94 1.13
+       and 1.07, the goal 1.21 and 1.20). On two of its six trained
+       windows it reaches the goal between 8 and 16 px (1.11 and 1.15),
+       and comes about half of the way between 16 and 32 px. On NGC
+       6820's dark-lane crop (held out), the right half reads 1.13 and
+       1.08 (S94 1.12 and 1.06, the goal 1.13 and 1.11): level with the
+       goal between 8 and 16 px, two fifths of the gap closed between
+       16 and 32. Asked 0.35 it reads 1.09 and 1.05 there (S94 1.07
+       and 1.02). The rims are softer: the Trunk's lit side is 4.06 and
+       4.96 over the input at 4 and 6 px (S94 4.52 and 5.51, the goal
+       5.41 and 6.46), NGC 6820's 5.04 at 4 px (S94 5.27, the goal
+       7.18). Stars are about level: ellipticity 0.029 on NGC 6820 (S94
+       0.026, the goal 0.028), 0.046 on the Trunk (S94 0.052), 0.065 on
+       the California (S94 0.062). On NGC 6820 the light about the
+       brightest stars is 0.07 of the image's noise higher along the
+       axes than along the diagonals (S94 0.06, the goal 0.01), too
+       little to see, and the squares' test is level. Dots and grain are level. By eye the row is close to
+       S94's, and the goal's thin rim lines still sit sharper. The loss
+       was part of it; the windows still have row 2 to give.
+
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
    taught that clarity is asked for at a ratio of 0, read from the
