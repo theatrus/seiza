@@ -7341,18 +7341,139 @@ pub unsafe extern "C" fn seiza_read_image_header_json(
     ffi_result(error_out, || {
         let path = required_path(path, "image path")?;
         let header = seiza_image_io::read_header(&path).map_err(|error| error.to_string())?;
-        let headers: Map<String, Value> = header
-            .cards
-            .iter()
-            .map(|(key, value)| (key.clone(), header_json(value)))
-            .collect();
-        owned_json(&json!({
-            "headers": headers,
-            "history": header.history,
-            "comments": header.comments,
-        }))
+        owned_json(&header_report(&header))
     })
     .unwrap_or(ptr::null_mut())
+}
+
+/// A whole image and its header, read by [`seiza_read_image`].
+pub struct SeizaImageFile {
+    image: seiza_image_io::FloatImage,
+    header_json: CString,
+}
+
+/// The size of an image [`seiza_read_image`] read.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SeizaImageFileInfo {
+    pub width: usize,
+    pub height: usize,
+    /// 1, or 3 for RGB.
+    pub channels: usize,
+}
+
+/// A header as the header calls give it.
+fn header_report(header: &seiza_image_io::FitsHeader) -> Value {
+    let headers: Map<String, Value> = header
+        .cards
+        .iter()
+        .map(|(key, value)| (key.clone(), header_json(value)))
+        .collect();
+    json!({
+        "headers": headers,
+        "history": header.history,
+        "comments": header.comments,
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Read the whole FITS or XISF image at `path`, of any size and compression,
+/// with its header: XISF when the extension says so, FITS otherwise.
+///
+/// The samples are those [`seiza_read_image_window`] gives, in physical units
+/// and stored row order, but interleaved when there are three channels, as
+/// this library's other calls take an image. A raw Bayer mosaic stays one
+/// channel. `plane` reads one plane, counted from 0, as a one-channel image;
+/// a negative value reads them all. `normalized_full_scale` is as for
+/// [`seiza_read_image_window`]: 0 leaves every sample as stored.
+///
+/// Returns null with `error_out` set when the file cannot be read. Release
+/// the result with [`seiza_image_file_free`], and an `error_out` string with
+/// [`seiza_string_free`].
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated string. When non-null, `error_out`
+/// must point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_read_image(
+    path: *const c_char,
+    plane: i64,
+    normalized_full_scale: f32,
+    error_out: *mut *mut c_char,
+) -> *mut SeizaImageFile {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let path = required_path(path, "image path")?;
+        let options = seiza_image_io::ReadOptions {
+            // A plane too large to count is one the file does not have.
+            plane: (plane >= 0).then(|| usize::try_from(plane).unwrap_or(usize::MAX)),
+            normalized_full_scale: (normalized_full_scale != 0.0).then_some(normalized_full_scale),
+        };
+        let read =
+            seiza_image_io::read_image(&path, &options).map_err(|error| error.to_string())?;
+        let header = serde_json::to_string(&header_report(&read.header))
+            .map_err(|error| error.to_string())?;
+        Ok(Box::into_raw(Box::new(SeizaImageFile {
+            image: read.image,
+            header_json: CString::new(header).map_err(|error| error.to_string())?,
+        })))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+/// The size of an image [`seiza_read_image`] read; zeros for null.
+///
+/// # Safety
+/// `image` must be null or a live [`SeizaImageFile`].
+pub unsafe extern "C" fn seiza_image_file_info(image: *const SeizaImageFile) -> SeizaImageFileInfo {
+    unsafe { image.as_ref() }.map_or_else(SeizaImageFileInfo::default, |file| SeizaImageFileInfo {
+        width: file.image.width,
+        height: file.image.height,
+        channels: file.image.channels,
+    })
+}
+
+#[unsafe(no_mangle)]
+/// The samples of an image [`seiza_read_image`] read, row by row, `width *
+/// height * channels` of them, lent until the image is freed. Null for null.
+///
+/// # Safety
+/// `image` must be null or a live [`SeizaImageFile`]. When non-null,
+/// `length_out` must point to writable storage for one `size_t`.
+pub unsafe extern "C" fn seiza_image_file_samples(
+    image: *const SeizaImageFile,
+    length_out: *mut usize,
+) -> *const f32 {
+    let samples = unsafe { image.as_ref() }.map(|file| file.image.samples.as_slice());
+    if !length_out.is_null() {
+        unsafe { *length_out = samples.map_or(0, <[f32]>::len) };
+    }
+    samples.map_or(ptr::null(), <[f32]>::as_ptr)
+}
+
+#[unsafe(no_mangle)]
+/// The header of an image [`seiza_read_image`] read, as
+/// [`seiza_read_image_header_json`] gives it, lent until the image is freed.
+/// Null for null.
+///
+/// # Safety
+/// `image` must be null or a live [`SeizaImageFile`].
+pub unsafe extern "C" fn seiza_image_file_header_json(
+    image: *const SeizaImageFile,
+) -> *const c_char {
+    unsafe { image.as_ref() }.map_or(ptr::null(), |file| file.header_json.as_ptr())
+}
+
+#[unsafe(no_mangle)]
+/// Release an image [`seiza_read_image`] read.
+///
+/// # Safety
+/// `image` must be null or a pointer from [`seiza_read_image`] that has not
+/// already been freed.
+pub unsafe extern "C" fn seiza_image_file_free(image: *mut SeizaImageFile) {
+    if !image.is_null() {
+        unsafe { drop(Box::from_raw(image)) };
+    }
 }
 
 /// Where a window [`seiza_read_image_window`] read lies, and the image it
@@ -7399,9 +7520,9 @@ pub struct SeizaImageWindow {
 /// rectangle is clipped to the image, and a side longer than 1024 is
 /// refused. Returns false with `error_out` set when the file cannot be read,
 /// when its samples cannot be reached without decoding it all (a compressed,
-/// CIELab or complex XISF image), or when `values` is too short; in that
-/// last case `window_out` still holds the window, so a caller can size the
-/// buffer and call again.
+/// CIELab or complex XISF image; [`seiza_read_image`] reads the first two),
+/// or when `values` is too short; in that last case `window_out` still holds
+/// the window, so a caller can size the buffer and call again.
 ///
 /// # Safety
 /// `path` must be a valid NUL-terminated string, `values` must be null or
@@ -18263,6 +18384,76 @@ mod tests {
         let json = unsafe { seiza_read_image_header_json(missing.as_ptr(), &mut error) };
         assert!(json.is_null() && !error.is_null());
         unsafe { seiza_string_free(error) };
+    }
+
+    #[test]
+    fn reads_a_whole_compressed_image_with_its_header() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("master.xisf");
+        let (width, height) = (1100_usize, 3_usize);
+        let samples: Vec<f32> = (0..width * height * 3)
+            .map(|index| (index % 251) as f32 / 250.0)
+            .collect();
+        seiza_xisf::write_f32_image_with_options(
+            &path,
+            width,
+            height,
+            seiza_fits::F32ImageData::RgbInterleaved(&samples),
+            &[seiza_fits::WriteHeaderCard::new(
+                "FILTER",
+                HeaderValue::String("Ha".into()),
+            )],
+            &seiza_xisf::WriteOptions {
+                compression: Some(seiza_xisf::WriteCompression::recommended()),
+                bounds: Some((0.0, 1.0)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let c_path = CString::new(path.to_str().unwrap()).unwrap();
+        let mut error = ptr::null_mut();
+        let read = |plane: i64, scale: f32, error: &mut *mut c_char| unsafe {
+            let image = seiza_read_image(c_path.as_ptr(), plane, scale, error);
+            if image.is_null() {
+                return None;
+            }
+            let info = seiza_image_file_info(image);
+            let mut length = 0;
+            let data = seiza_image_file_samples(image, &mut length);
+            let samples = std::slice::from_raw_parts(data, length).to_vec();
+            let header: Value = serde_json::from_str(
+                CStr::from_ptr(seiza_image_file_header_json(image))
+                    .to_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            seiza_image_file_free(image);
+            Some((info, samples, header))
+        };
+        let (info, all, header) = read(-1, 0.0, &mut error).unwrap();
+        assert_eq!((info.width, info.height, info.channels), (width, height, 3));
+        assert_eq!(all, samples);
+        assert_eq!(header["headers"]["FILTER"], "Ha");
+        let same = unsafe { seiza_read_image_header_json(c_path.as_ptr(), &mut error) };
+        assert_eq!(owned_json_value(same), header);
+
+        let (info, green, _) = read(1, 65535.0, &mut error).unwrap();
+        assert_eq!(info.channels, 1);
+        assert_eq!(green[7], samples[7 * 3 + 1] * 65535.0);
+        let (info, red, _) = read(0, 0.0, &mut error).unwrap();
+        assert_eq!((info.channels, red[7]), (1, samples[7 * 3]));
+        for (plane, scale) in [(3, 0.0), (i64::MAX, 0.0), (-1, f32::NAN)] {
+            assert!(read(plane, scale, &mut error).is_none(), "{plane} {scale}");
+            assert!(!error.is_null());
+            unsafe { seiza_string_free(error) };
+            error = ptr::null_mut();
+        }
+        unsafe {
+            assert!(seiza_image_file_samples(ptr::null(), ptr::null_mut()).is_null());
+            assert!(seiza_image_file_header_json(ptr::null()).is_null());
+            assert_eq!(seiza_image_file_info(ptr::null()).width, 0);
+            seiza_image_file_free(ptr::null_mut());
+        }
     }
 
     #[test]

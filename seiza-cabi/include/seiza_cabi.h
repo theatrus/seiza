@@ -24,6 +24,8 @@
  *     functions -> release with seiza_rendered_image16_free().
  *   - SeizaBackgroundModel* returned by seiza_background_fit
  *       -> release with seiza_background_model_free().
+ *   - SeizaImageFile* returned by seiza_read_image
+ *       -> release with seiza_image_file_free().
  *   - SeizaLiveStacker* returned by seiza_live_stacker_create / _open_fits /
  *     _open_context
  *       -> release with seiza_live_stacker_free(), or consume with
@@ -266,6 +268,11 @@ typedef struct SeizaFileRestoration SeizaFileRestoration;
 typedef struct SeizaFlatGroups SeizaFlatGroups;
 
 /*
+ A whole image and its header, read by [`seiza_read_image`].
+ */
+typedef struct SeizaImageFile SeizaImageFile;
+
+/*
  An opaque incremental stacker. Release it with
  [`seiza_live_stacker_free`], or consume it with
  [`seiza_live_stacker_finish`].
@@ -475,6 +482,18 @@ typedef struct {
 typedef void (*SeizaStackReintegrateProgressCallback)(uint32_t, size_t, size_t, void*);
 
 typedef void (*SeizaCatalogSetupProgressCallback)(const char*, void*);
+
+/*
+ The size of an image [`seiza_read_image`] read.
+ */
+typedef struct {
+  size_t width;
+  size_t height;
+  /*
+   1, or 3 for RGB.
+   */
+  size_t channels;
+} SeizaImageFileInfo;
 
 /*
  Where a window [`seiza_read_image_window`] read lies, and the image it
@@ -3092,6 +3111,67 @@ char *seiza_read_capture_time_json(const char *path, char **error_out);
 char *seiza_read_image_header_json(const char *path, char **error_out);
 
 /*
+ Read the whole FITS or XISF image at `path`, of any size and compression,
+ with its header: XISF when the extension says so, FITS otherwise.
+
+ The samples are those [`seiza_read_image_window`] gives, in physical units
+ and stored row order, but interleaved when there are three channels, as
+ this library's other calls take an image. A raw Bayer mosaic stays one
+ channel. `plane` reads one plane, counted from 0, as a one-channel image;
+ a negative value reads them all. `normalized_full_scale` is as for
+ [`seiza_read_image_window`]: 0 leaves every sample as stored.
+
+ Returns null with `error_out` set when the file cannot be read. Release
+ the result with [`seiza_image_file_free`], and an `error_out` string with
+ [`seiza_string_free`].
+
+ # Safety
+ `path` must be a valid NUL-terminated string. When non-null, `error_out`
+ must point to writable storage for one pointer.
+ */
+SeizaImageFile *seiza_read_image(const char *path,
+                                 int64_t plane,
+                                 float normalized_full_scale,
+                                 char **error_out);
+
+/*
+ The size of an image [`seiza_read_image`] read; zeros for null.
+
+ # Safety
+ `image` must be null or a live [`SeizaImageFile`].
+ */
+SeizaImageFileInfo seiza_image_file_info(const SeizaImageFile *image);
+
+/*
+ The samples of an image [`seiza_read_image`] read, row by row, `width *
+ height * channels` of them, lent until the image is freed. Null for null.
+
+ # Safety
+ `image` must be null or a live [`SeizaImageFile`]. When non-null,
+ `length_out` must point to writable storage for one `size_t`.
+ */
+const float *seiza_image_file_samples(const SeizaImageFile *image, size_t *length_out);
+
+/*
+ The header of an image [`seiza_read_image`] read, as
+ [`seiza_read_image_header_json`] gives it, lent until the image is freed.
+ Null for null.
+
+ # Safety
+ `image` must be null or a live [`SeizaImageFile`].
+ */
+const char *seiza_image_file_header_json(const SeizaImageFile *image);
+
+/*
+ Release an image [`seiza_read_image`] read.
+
+ # Safety
+ `image` must be null or a pointer from [`seiza_read_image`] that has not
+ already been freed.
+ */
+void seiza_image_file_free(SeizaImageFile *image);
+
+/*
  Read the samples of the rectangle at (`x`, `y`), `width` × `height`
  pixels, of every plane of the FITS or XISF image at `path`, without
  decoding the rest of it: XISF when the extension says so, FITS
@@ -3117,9 +3197,9 @@ char *seiza_read_image_header_json(const char *path, char **error_out);
  rectangle is clipped to the image, and a side longer than 1024 is
  refused. Returns false with `error_out` set when the file cannot be read,
  when its samples cannot be reached without decoding it all (a compressed,
- CIELab or complex XISF image), or when `values` is too short; in that
- last case `window_out` still holds the window, so a caller can size the
- buffer and call again.
+ CIELab or complex XISF image; [`seiza_read_image`] reads the first two),
+ or when `values` is too short; in that last case `window_out` still holds
+ the window, so a caller can size the buffer and call again.
 
  # Safety
  `path` must be a valid NUL-terminated string, `values` must be null or

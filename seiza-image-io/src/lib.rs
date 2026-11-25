@@ -353,6 +353,103 @@ fn read_astronomy_decoding(
     })
 }
 
+/// Which of a file's samples [`read_image`] gives, and on what scale.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ReadOptions {
+    /// One plane, counted from 0, as a gray image. `None` reads them all.
+    pub plane: Option<usize>,
+    /// The scale to put an XISF image on that the file declares as
+    /// normalized, as [`read_window`] does. `None` leaves every sample as
+    /// stored.
+    pub normalized_full_scale: Option<f32>,
+}
+
+/// A FITS or XISF file's samples and header, as [`read_image`] reads them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImageFile {
+    pub image: FloatImage,
+    pub header: FitsHeader,
+}
+
+/// Read a whole FITS or XISF image, of any size and compression, with its
+/// header: XISF when the extension says so, FITS otherwise, as
+/// [`read_astronomy`] chooses.
+///
+/// The samples are in physical units, as [`read_window`] reads them: FITS
+/// samples with `BZERO`, `BSCALE` and `BLANK` applied, XISF samples as
+/// stored. [`open`] scales integers to 0 to 1 instead. Rows count in stored
+/// order, and a raw Bayer mosaic stays one gray plane. The header is
+/// [`read_header`]'s.
+///
+/// [`read_astronomy`] gives the image in its stored sample type.
+pub fn read_image(path: &Path, options: &ReadOptions) -> Result<ImageFile, Error> {
+    check_full_scale(path, options.normalized_full_scale)?;
+    let mut read = read_astronomy_with(path, Vec::with_capacity)?;
+    if let Some(scale) = options.normalized_full_scale {
+        read.rescale_normalized_to(scale);
+    }
+    let (width, height, planes) = (read.image.width, read.image.height, read.image.planes);
+    if let Some(plane) = options.plane
+        && plane >= planes
+    {
+        return Err(Error::open(
+            path,
+            format!("it has no plane {plane}; it has {planes}, counted from 0"),
+        ));
+    }
+    if options.plane.is_none() && !matches!(planes, 1 | 3) {
+        return Err(Error::open(path, unsupported_planes(planes)));
+    }
+    let mut planar = read.image.into_physical_f32();
+    let image = match options.plane {
+        Some(plane) => {
+            let pixels = width * height;
+            planar.truncate((plane + 1) * pixels);
+            planar.drain(..plane * pixels);
+            // The other planes' memory, which the result need not hold.
+            planar.shrink_to_fit();
+            FloatImage::gray(width, height, planar)
+        }
+        None => FloatImage {
+            width,
+            height,
+            channels: planes,
+            samples: interleaved(planar, planes),
+        },
+    };
+    Ok(ImageFile {
+        image,
+        header: read_header(path)?,
+    })
+}
+
+/// Refuse a `normalized_full_scale` that is not finite and positive.
+fn check_full_scale(path: &Path, scale: Option<f32>) -> Result<(), Error> {
+    if scale.is_some_and(|scale| !scale.is_finite() || scale <= 0.0) {
+        return Err(Error::open(
+            path,
+            "normalized_full_scale must be finite and positive",
+        ));
+    }
+    Ok(())
+}
+
+fn unsupported_planes(planes: usize) -> String {
+    format!("it has {planes} planes; gray and RGB images have 1 or 3")
+}
+
+/// Planar samples as interleaved ones.
+fn interleaved(planar: Vec<f32>, planes: usize) -> Vec<f32> {
+    if planes == 1 {
+        return planar;
+    }
+    let pixels = planar.len() / planes;
+    (0..pixels)
+        .flat_map(|pixel| (0..planes).map(move |plane| plane * pixels + pixel))
+        .map(|index| planar[index])
+        .collect()
+}
+
 /// Read the samples of the rectangle at `(x, y)`, `width` × `height`
 /// pixels, of every plane of a FITS or XISF image, without decoding the
 /// rest: XISF when the extension says so, FITS otherwise, as
@@ -380,12 +477,7 @@ pub fn read_window(
     height: usize,
     normalized_full_scale: Option<f32>,
 ) -> Result<ImageWindow, Error> {
-    if normalized_full_scale.is_some_and(|scale| !scale.is_finite() || scale <= 0.0) {
-        return Err(Error::open(
-            path,
-            "normalized_full_scale must be finite and positive",
-        ));
-    }
+    check_full_scale(path, normalized_full_scale)?;
     if Format::astronomy(path) == Format::Xisf {
         let mut read = seiza_xisf::read_window(path, x, y, width, height)
             .map_err(|error| Error::open(path, error))?;
@@ -694,9 +786,7 @@ pub fn open(path: &Path) -> Result<FloatImage, Error> {
 fn from_fits(image: FitsImage) -> Result<FloatImage, String> {
     let (width, height, planes) = (image.width, image.height, image.planes);
     if !matches!(planes, 1 | 3) {
-        return Err(format!(
-            "it has {planes} planes; gray and RGB images have 1 or 3"
-        ));
+        return Err(unsupported_planes(planes));
     }
     let planar: Vec<f32> = match image.pixels {
         Pixels::U8(samples) => samples
@@ -709,25 +799,11 @@ fn from_fits(image: FitsImage) -> Result<FloatImage, String> {
             .collect(),
         _ => image.into_physical_f32(),
     };
-    let samples = if planes == 1 {
-        planar
-    } else {
-        let plane = width * height;
-        (0..plane)
-            .flat_map(|index| {
-                [
-                    planar[index],
-                    planar[plane + index],
-                    planar[2 * plane + index],
-                ]
-            })
-            .collect()
-    };
     Ok(FloatImage {
         width,
         height,
         channels: planes,
-        samples,
+        samples: interleaved(planar, planes),
     })
 }
 
@@ -1296,6 +1372,143 @@ mod tests {
                 .unwrap()
                 .rescale_normalized_to(65535.0)
         );
+    }
+
+    /// Every codec, with and without byte shuffling, larger than a window.
+    #[test]
+    fn a_whole_image_reads_whatever_its_container_and_compression() {
+        use seiza_xisf::{CompressionCodec, WriteCompression, WriteOptions};
+        let directory = tempfile::tempdir().unwrap();
+        let (width, height) = (MAX_WINDOW_EDGE + 3, 5);
+        for channels in [1, 3] {
+            let image = FloatImage {
+                width,
+                height,
+                channels,
+                samples: (0..width * height * channels)
+                    .map(|index| (index % 977) as f32 - 12.5)
+                    .collect(),
+            };
+            let mut paths = Vec::new();
+            for extension in ["fits", "xisf"] {
+                let path = directory.path().join(format!("{channels}.{extension}"));
+                save(&path, &image).unwrap();
+                paths.push(path);
+            }
+            for (codec, name) in [
+                (CompressionCodec::Zlib, "zlib"),
+                (CompressionCodec::Lz4, "lz4"),
+                (CompressionCodec::Zstd, "zstd"),
+            ] {
+                for byte_shuffle in [false, true] {
+                    let path = directory
+                        .path()
+                        .join(format!("{channels}-{name}-{byte_shuffle}.xisf"));
+                    let options = WriteOptions {
+                        compression: Some(WriteCompression {
+                            codec,
+                            byte_shuffle,
+                            level: None,
+                        }),
+                        ..WriteOptions::default()
+                    };
+                    seiza_xisf::write_f32_image_with_options(
+                        &path,
+                        width,
+                        height,
+                        image.data(),
+                        &[],
+                        &options,
+                    )
+                    .unwrap();
+                    assert!(read_window(&path, 0, 0, 2, 2, None).is_err());
+                    paths.push(path);
+                }
+            }
+            for path in paths {
+                let read = read_image(&path, &ReadOptions::default()).unwrap();
+                assert_eq!(read.image, image, "{}", path.display());
+                assert_eq!(read.header, read_header(&path).unwrap());
+                for plane in 0..channels {
+                    let options = ReadOptions {
+                        plane: Some(plane),
+                        ..ReadOptions::default()
+                    };
+                    let one = read_image(&path, &options).unwrap().image;
+                    assert_eq!((one.channels, one.samples.len()), (1, width * height));
+                    assert!(one.samples.capacity() < 2 * width * height);
+                    for (index, &sample) in one.samples.iter().enumerate() {
+                        assert_eq!(sample, image.samples[index * channels + plane]);
+                    }
+                }
+                let options = ReadOptions {
+                    plane: Some(channels),
+                    ..ReadOptions::default()
+                };
+                let error = read_image(&path, &options).unwrap_err();
+                assert!(error.to_string().contains("no plane"), "{error}");
+            }
+        }
+        let missing = directory.path().join("missing.xisf");
+        let error = read_image(&missing, &ReadOptions::default()).unwrap_err();
+        assert_eq!(error.path(), missing);
+    }
+
+    /// The samples and scale of a whole image are the window's.
+    #[test]
+    fn a_whole_image_is_in_physical_units_on_the_scale_asked_for() {
+        let directory = tempfile::tempdir().unwrap();
+        let counts = directory.path().join("counts.fits");
+        let stored = [0_i16, 1, -32768, 32767];
+        let mut file = Vec::new();
+        for card in [
+            "SIMPLE  =                    T",
+            "BITPIX  =                   16",
+            "NAXIS   =                    2",
+            "NAXIS1  =                    2",
+            "NAXIS2  =                    2",
+            "BZERO   =                32768",
+            "BLANK   =                    1",
+            "EXPTIME =                 30.0",
+            "HISTORY Calibrated with a master dark",
+            "END",
+        ] {
+            file.extend_from_slice(format!("{card:<80}").as_bytes());
+        }
+        file.resize(2880, b' ');
+        for value in stored {
+            file.extend_from_slice(&value.to_be_bytes());
+        }
+        file.resize(2 * 2880, 0);
+        std::fs::write(&counts, file).unwrap();
+        let read = read_image(&counts, &ReadOptions::default()).unwrap();
+        let window = read_window(&counts, 0, 0, 2, 2, None).unwrap();
+        let bits = |values: &[f32]| values.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&read.image.samples), bits(&window.values));
+        assert_eq!(read.image.samples[3], 65535.0);
+        assert_eq!(read.header.history, ["Calibrated with a master dark"]);
+
+        let normalized = directory.path().join("normalized.xisf");
+        xisf_file(&normalized, [0.0, 0.25, 0.5, 1.0], "bounds=\"0:1\"", "");
+        let at = |path: &Path, scale| {
+            let options = ReadOptions {
+                normalized_full_scale: scale,
+                ..ReadOptions::default()
+            };
+            read_image(path, &options).map(|read| read.image.samples)
+        };
+        assert_eq!(at(&normalized, None).unwrap(), [0.0, 0.25, 0.5, 1.0]);
+        assert_eq!(
+            at(&normalized, Some(65535.0)).unwrap(),
+            [0.0, 16383.75, 32767.5, 65535.0]
+        );
+        assert_eq!(
+            bits(&at(&counts, Some(65535.0)).unwrap()),
+            bits(&window.values)
+        );
+        for scale in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert!(at(&normalized, Some(scale)).is_err(), "{scale}");
+        }
     }
 
     #[test]
