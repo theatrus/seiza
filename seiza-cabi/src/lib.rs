@@ -45,7 +45,8 @@ use seiza_stacking::{
     write_fits_f32, write_master_fits_f32, write_stack_export_fits_f32,
 };
 use seiza_stretch::{
-    ImageShape, ResolvedSampleDomain, SampleDomain, StretchAnalysis, StretchConfig, StretchStack,
+    ImageShape, ResolvedSampleDomain, SampleDomain, StretchAnalysis, StretchConfig, StretchPlan,
+    StretchStack,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -4762,6 +4763,106 @@ pub unsafe extern "C" fn seiza_live_stacker_open_prepared_fits(
         Ok(SeizaLiveStacker { stacker })
     })
     .map_or(ptr::null_mut(), |stacker| Box::into_raw(Box::new(stacker)))
+}
+
+/// The samples of a mono or RGB image of `length` floats, and its shape.
+unsafe fn stretch_input_from_ffi<'a>(
+    data: *const f32,
+    length: usize,
+    width: usize,
+    height: usize,
+    channels: usize,
+) -> Result<(&'a [f32], ImageShape), String> {
+    if !matches!(channels, 1 | 3) {
+        return Err("image channels must be one or three".into());
+    }
+    let expected = display_length(width, height, channels)?;
+    if length != expected {
+        return Err(format!("image has {length} floats; expected {expected}"));
+    }
+    let data = unsafe { required_f32_slice(data, length, "image")? };
+    Ok((data, ImageShape::new(width, height, channels)))
+}
+
+#[unsafe(no_mangle)]
+/// Resolves a display stretch on a reference image, without stretching it,
+/// so that [`seiza_stretch_apply_plan`] can give other images the same curve.
+/// Automatic stretches such as Auto-MTF otherwise take their curve from each
+/// image, which hides the differences between them.
+///
+/// `channels` is 1 for mono or 3 for interleaved RGB. `stretch_json` is one
+/// stretch configuration, as
+/// [`seiza_rendered_image_open_with_stretch_config`] takes its `stretch`.
+/// Returns the plan as owned JSON, `{"channels", "color_strategy",
+/// "curves"}`, each curve an object whose `type` says which it is. Free it,
+/// or an `error_out` string, with [`seiza_string_free`].
+///
+/// # Safety
+/// `data` must point to `length` readable floats, `width * height *
+/// channels` of them, and `stretch_json` must be a valid NUL-terminated UTF-8
+/// string. When non-null, `error_out` must point to writable storage for one
+/// pointer.
+pub unsafe extern "C" fn seiza_stretch_resolve_json(
+    data: *const f32,
+    length: usize,
+    width: usize,
+    height: usize,
+    channels: usize,
+    stretch_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let (data, shape) =
+            unsafe { stretch_input_from_ffi(data, length, width, height, channels)? };
+        let config: StretchConfig = serde_json::from_str(&required_str(stretch_json, "stretch")?)
+            .map_err(|error| format!("invalid stretch: {error}"))?;
+        let plan = config
+            .resolve_for(data, shape.channels)
+            .map_err(|error| error.to_string())?;
+        owned_json(&plan)
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+/// Stretches an image with a plan and writes the result over `data`. The
+/// plan is one [`seiza_stretch_resolve_json`] returned, or one of the
+/// `stretchPlans` of [`seiza_color_calibrate_and_stretch_json`], for an image
+/// of as many channels. Put images on one brightness scale first
+/// ([`seiza_match_linear_json`]) when they are to be compared.
+///
+/// Returns false and leaves `data` as it was on an error. Free an
+/// `error_out` string with [`seiza_string_free`].
+///
+/// # Safety
+/// `data` must point to `length` writable floats, `width * height *
+/// channels` of them, and `plan_json` must be a valid NUL-terminated UTF-8
+/// string. When non-null, `error_out` must point to writable storage for one
+/// pointer.
+pub unsafe extern "C" fn seiza_stretch_apply_plan(
+    data: *mut f32,
+    length: usize,
+    width: usize,
+    height: usize,
+    channels: usize,
+    plan_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> bool {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let plan: StretchPlan = serde_json::from_str(&required_str(plan_json, "stretch plan")?)
+            .map_err(|error| format!("invalid stretch plan: {error}"))?;
+        let stretched = {
+            let (input, shape) =
+                unsafe { stretch_input_from_ffi(data, length, width, height, channels)? };
+            plan.apply_f32_image(input, shape)
+                .map_err(|error| error.to_string())?
+        };
+        unsafe { required_f32_slice_mut(data, length, "image")? }.copy_from_slice(&stretched);
+        Ok(())
+    })
+    .is_some()
 }
 
 #[unsafe(no_mangle)]
@@ -16783,6 +16884,81 @@ mod tests {
         }
         // The cached buffer is reused across calls.
         assert_eq!(image.bgra().as_ptr(), image.bgra().as_ptr());
+    }
+
+    #[test]
+    fn a_stretch_resolved_on_one_image_applies_to_another() {
+        let (width, height) = (32_usize, 24_usize);
+        let reference = (0..width * height * 3)
+            .map(|index| 0.02 + 0.001 * ((index * 37) % 101) as f32)
+            .collect::<Vec<_>>();
+        let image = reference
+            .iter()
+            .map(|value| value + 0.05)
+            .collect::<Vec<_>>();
+        let mut error = ptr::null_mut();
+        let resolve = |channels: usize, stretch: &str, error: &mut *mut c_char| {
+            let stretch = CString::new(stretch).unwrap();
+            unsafe {
+                seiza_stretch_resolve_json(
+                    reference.as_ptr(),
+                    reference.len(),
+                    width,
+                    height,
+                    channels,
+                    stretch.as_ptr(),
+                    error,
+                )
+            }
+        };
+        let apply = |data: &mut [f32], plan: &str, error: &mut *mut c_char| {
+            let plan = CString::new(plan).unwrap();
+            unsafe {
+                seiza_stretch_apply_plan(
+                    data.as_mut_ptr(),
+                    data.len(),
+                    width,
+                    height,
+                    3,
+                    plan.as_ptr(),
+                    error,
+                )
+            }
+        };
+        for model in [
+            r#"{"type":"auto-mtf","target_median":0.2,"shadows_clip":-2.8}"#,
+            r#"{"type":"layered","contrast_recovery":0.5,"scale_separation":16}"#,
+        ] {
+            let stretch = format!(
+                r#"{{"model":{model},"color_strategy":"linked","max_analysis_samples":10000}}"#
+            );
+            let config: StretchConfig = serde_json::from_str(&stretch).unwrap();
+            let plan = config.resolve_for(&reference, 3).unwrap();
+            let written = owned_json_value(resolve(3, &stretch, &mut error));
+            let read: StretchPlan = serde_json::from_value(written.clone()).unwrap();
+            assert_eq!(read, plan);
+            let mut stretched = image.clone();
+            assert!(apply(&mut stretched, &written.to_string(), &mut error));
+            let shape = ImageShape::new(width, height, 3);
+            assert_eq!(stretched, plan.apply_f32_image(&image, shape).unwrap());
+
+            assert!(resolve(1, &stretch, &mut error).is_null());
+            assert!(!error.is_null());
+            unsafe { seiza_string_free(error) };
+            error = ptr::null_mut();
+        }
+        // A plan for another channel count, and one with a value out of range.
+        for plan in [
+            r#"{"channels":1,"color_strategy":"linked","curves":[{"type":"identity"}]}"#,
+            r#"{"channels":3,"color_strategy":"linked","curves":[{"type":"linear","black":1.0,"white":0.0}]}"#,
+        ] {
+            let mut untouched = image.clone();
+            assert!(!apply(&mut untouched, plan, &mut error));
+            assert_eq!(untouched, image);
+            assert!(!error.is_null());
+            unsafe { seiza_string_free(error) };
+            error = ptr::null_mut();
+        }
     }
 
     #[test]

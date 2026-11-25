@@ -736,6 +736,8 @@ seiza_live_stacker_reference_mapping_json = "LiveStacker.reference_mapping"
 seiza_frame_noise_json = "frame_noise"
 seiza_noise_at_scale_json = "noise_at_scale"
 seiza_match_linear_json = "match_linear"
+seiza_stretch_resolve_json = "resolve_stretch"
+seiza_stretch_apply_plan = "ResolvedStretch.apply"
 seiza_live_stacker_save_context = "LiveStacker.save_context"
 seiza_live_stacker_push_linear_json = "LiveStacker.push"
 seiza_live_stacker_push_fits_json = "LiveStacker.push_fits"
@@ -1161,7 +1163,9 @@ CalibrationRecord = { c = "seiza_calibration_plan_json" }
 
 # background and display
 "BackgroundModel.samples" = { c = "seiza_background_model_diagnostics_json" }
-stretch = { none = "C stretches as it renders a file for display (seiza_rendered_image*_open_with_stretch_config); Python stretches an array" }
+stretch = { c = "seiza_stretch_resolve_json" }
+"ResolvedStretch.to_dict" = { none = "C plans are JSON already" }
+"ResolvedStretch.from_dict" = { none = "C plans are JSON already" }
 
 # image processing: seiza-imgproc's primitives for Python callers; the C ABI's calls use them inside
 gaussian_blur = { none = "an image-processing primitive for Python callers" }

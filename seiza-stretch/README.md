@@ -37,8 +37,10 @@ The crate consolidates Seiza's existing behavior:
 Analysis and application are intentionally separate. A caller can analyze an
 image once, resolve several parameter choices against the same statistics, and
 apply a selected `StretchPlan` to a downsampled interactive preview or the
-full-resolution image. Deterministic models also resolve directly without an
-analysis pass. Future informed automatic modes can select one of these models
+full-resolution image. A plan also applies to other images: to compare stacks,
+put them on one brightness scale, resolve on a reference, and apply that plan to
+all. It can be written with serde and read back. Deterministic models also
+resolve directly without an analysis pass. Future informed automatic modes can select one of these models
 without embedding policy in the transfer implementation.
 
 `SampleDomain` keeps numeric scale separate from those transfer curves. A

@@ -1530,6 +1530,22 @@ lift colour. It reads the array's height and width, and carries colour by
 luminance, so it takes `linked` or `luminance-preserving`. Analysis and
 application release the GIL.
 
+Automatic models take their curve from the image they stretch, which hides the
+differences between images. To compare some, put them on one brightness scale
+(`match_linear`), resolve the stretch on a reference, and give all of them its
+curve:
+
+```python
+resolved = seiza.resolve_stretch(reference, model="auto-mtf")
+shown = [resolved.apply(image) for image in matched]
+stored = resolved.to_dict()  # seiza.ResolvedStretch.from_dict(stored) later
+```
+
+`resolve_stretch` takes `stretch`'s keywords. The images may differ in size but
+not in channels. `to_dict` gives `channels`, `color_strategy` and `curves`, in
+the form of `calibrate_and_stretch`'s `stretch_plans`, which `from_dict` also
+takes.
+
 Calibration masters share the native bounded-memory builder:
 
 ```python

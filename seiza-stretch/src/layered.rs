@@ -78,7 +78,7 @@ const DRC_KNEE: f64 = 0.5;
 const COLOUR_EPSILON: f64 = 1.0e-6;
 
 /// A layered stretch with its image-dependent values resolved.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ResolvedLayered {
     /// The requested parameters.
     pub params: LayeredParams,
@@ -115,6 +115,14 @@ impl ResolvedLayered {
             median: statistics.median,
             noise,
         })
+    }
+
+    pub(crate) fn is_valid(&self) -> bool {
+        validate(self.params).is_ok()
+            && self.curve.is_valid()
+            && self.median.is_finite()
+            && self.noise.is_finite()
+            && self.noise >= 0.0
     }
 
     /// The global curve's slope `S'(x)`, from its rational form. Outside the

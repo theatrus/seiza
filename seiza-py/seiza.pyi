@@ -2076,6 +2076,51 @@ def stretch(
     saturation_boost: float = 0.5,
     lightness_mask: bool = True,
 ) -> npt.NDArray[np.float32]: ...
+def resolve_stretch(
+    image: npt.NDArray[np.float32],
+    *,
+    model: str = "percentile-asinh",
+    color_strategy: str = "linked",
+    max_analysis_samples: int = 200_000,
+    black: float = 0.0,
+    white: float = 1.0,
+    strength: float = 10.0,
+    black_percentile: float = 0.01,
+    white_percentile: float = 0.995,
+    shadows: float = 0.0,
+    midtone: float = 0.5,
+    highlights: float = 1.0,
+    stretch_factor: float = 1.0,
+    local_intensity: float = 0.0,
+    symmetry_point: float = 0.0,
+    protect_shadows: float = 0.0,
+    protect_highlights: float = 1.0,
+    target_median: float | None = None,
+    shadows_clip: float = -2.8,
+    black_point_sigma: float | None = 2.7,
+    curves_boost: float = 0.0,
+    hdr_amount: float = 0.0,
+    hdr_knee: float = 0.75,
+    normalize: bool = False,
+    target_background: float = 0.15,
+    aggressiveness: float = 0.5,
+    dynamic_range_compression: float = 0.0,
+    scale_separation: int = 256,
+    contrast_recovery: float = 0.0,
+    saturation_amount: float = 0.0,
+    saturation_boost: float = 0.5,
+    lightness_mask: bool = True,
+) -> ResolvedStretch: ...
+
+class ResolvedStretch:
+    """A stretch with its curves resolved by ``resolve_stretch``."""
+    @staticmethod
+    def from_dict(plan: Mapping[str, Any]) -> ResolvedStretch: ...
+    def to_dict(self) -> dict[str, Any]: ...
+    @property
+    def channels(self) -> int: ...
+    def apply(self, image: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]: ...
+
 def checkpoint_depths(total: int) -> list[int]: ...
 
 class PartialStack:

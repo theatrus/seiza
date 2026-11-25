@@ -1902,6 +1902,57 @@ SeizaLiveStacker *seiza_live_stacker_open_prepared_fits(const char *prepared_pat
                                                         char **error_out);
 
 /*
+ Resolves a display stretch on a reference image, without stretching it,
+ so that [`seiza_stretch_apply_plan`] can give other images the same curve.
+ Automatic stretches such as Auto-MTF otherwise take their curve from each
+ image, which hides the differences between them.
+
+ `channels` is 1 for mono or 3 for interleaved RGB. `stretch_json` is one
+ stretch configuration, as
+ [`seiza_rendered_image_open_with_stretch_config`] takes its `stretch`.
+ Returns the plan as owned JSON, `{"channels", "color_strategy",
+ "curves"}`, each curve an object whose `type` says which it is. Free it,
+ or an `error_out` string, with [`seiza_string_free`].
+
+ # Safety
+ `data` must point to `length` readable floats, `width * height *
+ channels` of them, and `stretch_json` must be a valid NUL-terminated UTF-8
+ string. When non-null, `error_out` must point to writable storage for one
+ pointer.
+ */
+char *seiza_stretch_resolve_json(const float *data,
+                                 size_t length,
+                                 size_t width,
+                                 size_t height,
+                                 size_t channels,
+                                 const char *stretch_json,
+                                 char **error_out);
+
+/*
+ Stretches an image with a plan and writes the result over `data`. The
+ plan is one [`seiza_stretch_resolve_json`] returned, or one of the
+ `stretchPlans` of [`seiza_color_calibrate_and_stretch_json`], for an image
+ of as many channels. Put images on one brightness scale first
+ ([`seiza_match_linear_json`]) when they are to be compared.
+
+ Returns false and leaves `data` as it was on an error. Free an
+ `error_out` string with [`seiza_string_free`].
+
+ # Safety
+ `data` must point to `length` writable floats, `width * height *
+ channels` of them, and `plan_json` must be a valid NUL-terminated UTF-8
+ string. When non-null, `error_out` must point to writable storage for one
+ pointer.
+ */
+bool seiza_stretch_apply_plan(float *data,
+                              size_t length,
+                              size_t width,
+                              size_t height,
+                              size_t channels,
+                              const char *plan_json,
+                              char **error_out);
+
+/*
  Measures a linear image's per-channel pixel noise, the estimator behind
  frame weights: the median absolute deviation of second differences along
  each axis, as a Gaussian standard deviation in the image's own units,

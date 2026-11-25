@@ -1061,7 +1061,7 @@ impl StretchAnalysis {
 }
 
 /// A concrete transfer curve with no unresolved image-dependent parameters.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum ResolvedCurve {
     Identity,
@@ -1097,7 +1097,7 @@ pub enum ResolvedCurve {
 }
 
 /// A median anchor stretch with its image-dependent values resolved.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ResolvedMedianAnchor {
     /// Input black point.
     pub black: f32,
@@ -1157,6 +1157,24 @@ impl ResolvedMedianAnchor {
             }
         }
         Ok(resolved)
+    }
+
+    fn is_valid(&self) -> bool {
+        let unit = |value: f64| (0.0..=1.0).contains(&value);
+        let open_unit = |value: f64| value > 0.0 && value < 1.0;
+        self.black.is_finite()
+            && self.black < 1.0
+            && open_unit(self.median)
+            && open_unit(self.target)
+            && self.boost.is_none_or(|knots| {
+                knots.iter().all(|&(x, y)| unit(x) && unit(y))
+                    && knots.is_sorted_by(|a, b| a.0 <= b.0)
+            })
+            && self.highlights.is_none_or(|(knee, end_slope)| {
+                open_unit(knee) && (1.0..=1.0 + HDR_MAX_EXTRA_SLOPE).contains(&end_slope)
+            })
+            && self.scale.is_finite()
+            && self.scale > 0.0
     }
 
     fn map(&self, value: f64) -> f64 {
@@ -1251,7 +1269,8 @@ fn validate_median_anchor(params: MedianAnchorParams) -> Result<()> {
 }
 
 /// Precomputed GHS transfer state used by a resolved plan.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "ResolvedGhsFields")]
 pub struct ResolvedGhs {
     params: GhsParams,
     #[serde(skip)]
@@ -1268,6 +1287,20 @@ pub struct ResolvedGhs {
     normalization_min: f64,
     #[serde(skip)]
     normalization_span: f64,
+}
+
+/// What a written [`ResolvedGhs`] holds; the rest follows from it.
+#[derive(Deserialize)]
+struct ResolvedGhsFields {
+    params: GhsParams,
+}
+
+impl TryFrom<ResolvedGhsFields> for ResolvedGhs {
+    type Error = StretchError;
+
+    fn try_from(fields: ResolvedGhsFields) -> Result<Self> {
+        Self::new(fields.params)
+    }
 }
 
 impl ResolvedGhs {
@@ -1333,6 +1366,34 @@ impl ResolvedGhs {
 impl ResolvedCurve {
     pub fn map(self, value: f32) -> f32 {
         CurveMapper::new(self).map(value)
+    }
+
+    /// Whether this could be a resolved curve. It is looser than the models'
+    /// own checks, which a curve resolved from an image of one value fails.
+    fn is_valid(self) -> bool {
+        let range = |low: f64, high: f64| low.is_finite() && high.is_finite() && low <= high;
+        match self {
+            // A GHS curve checks its parameters as it is made.
+            Self::Identity | Self::Ghs(_) => true,
+            Self::Linear { black, white } => range(black, white),
+            Self::Asinh {
+                black,
+                white,
+                strength,
+            } => range(black.into(), white.into()) && strength.is_finite() && strength > 0.0,
+            Self::Mtf {
+                shadows,
+                midtone,
+                highlights,
+            } => range(shadows.into(), highlights.into()) && midtone.is_finite(),
+            Self::Ht {
+                shadows,
+                midtone,
+                highlights,
+            } => range(shadows, highlights) && (0.0..1.0).contains(&midtone),
+            Self::MedianAnchor(curve) => curve.is_valid(),
+            Self::Layered(layered) => layered.is_valid(),
+        }
     }
 }
 
@@ -1468,11 +1529,44 @@ impl<'a> CurveMapper<'a> {
 }
 
 /// Resolved, reusable stretch curves for a fixed channel strategy.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+///
+/// A plan depends on no image: [`StretchConfig::resolve_for`] resolves it on
+/// one, and it applies to any other with as many channels. To compare images
+/// fairly, put them on one brightness scale, resolve on a reference, and
+/// apply that plan to all. Written as JSON and read back, a plan gives the
+/// same bits.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "StretchPlanFields")]
 pub struct StretchPlan {
     channels: usize,
     color_strategy: ColorStrategy,
     curves: Vec<ResolvedCurve>,
+}
+
+/// A written [`StretchPlan`], not yet checked.
+#[derive(Deserialize)]
+struct StretchPlanFields {
+    channels: usize,
+    color_strategy: ColorStrategy,
+    curves: Vec<ResolvedCurve>,
+}
+
+impl TryFrom<StretchPlanFields> for StretchPlan {
+    type Error = StretchError;
+
+    fn try_from(fields: StretchPlanFields) -> Result<Self> {
+        let StretchPlanFields {
+            channels,
+            color_strategy,
+            curves,
+        } = fields;
+        if let Some(index) = curves.iter().position(|curve| !curve.is_valid()) {
+            return Err(StretchError::Invalid(format!(
+                "resolved curve {index} has a value out of range"
+            )));
+        }
+        Self::from_resolved(channels, color_strategy, curves)
+    }
 }
 
 impl StretchPlan {
@@ -4292,5 +4386,176 @@ mod tests {
             .unwrap();
         let resolved = serde_json::to_value(&plan).unwrap();
         assert_eq!(resolved["curves"][0]["type"], "layered");
+    }
+
+    fn every_model() -> Vec<StretchModel> {
+        vec![
+            StretchModel::Identity,
+            StretchModel::Linear {
+                black: 0.1,
+                white: 0.7,
+            },
+            StretchModel::Asinh {
+                black: 0.1,
+                white: 0.7,
+                strength: 10.0,
+            },
+            StretchModel::PercentileAsinh {
+                black_percentile: 0.01,
+                white_percentile: 0.995,
+                strength: 10.0,
+            },
+            StretchModel::Mtf {
+                shadows: 0.1,
+                midtone: 0.3,
+                highlights: 0.9,
+            },
+            StretchModel::Ht {
+                shadows: 0.1,
+                midtone: 0.3,
+                highlights: 0.9,
+            },
+            StretchModel::Ghs(GhsParams {
+                stretch_factor: 3.3,
+                local_intensity: 1.7,
+                symmetry_point: 0.2,
+                protect_shadows: 0.05,
+                protect_highlights: 0.9,
+                black: 0.0,
+                white: 1.0,
+            }),
+            StretchModel::AutoMtf(StretchParams::default()),
+            StretchModel::MedianAnchor(MedianAnchorParams {
+                curves_boost: 0.4,
+                hdr_amount: 0.6,
+                normalize: true,
+                ..MedianAnchorParams::default()
+            }),
+            StretchModel::Layered(LayeredParams {
+                contrast_recovery: 0.5,
+                dynamic_range_compression: 0.5,
+                saturation_amount: 0.3,
+                scale_separation: 16,
+                ..LayeredParams::default()
+            }),
+        ]
+    }
+
+    /// Images of 16 by 16 RGB pixels: a faint sky, one value, physical units,
+    /// one value in them, and samples below zero.
+    fn references() -> [Vec<f32>; 5] {
+        let ramp = |level: f32, step: f32| {
+            (0..16 * 16 * 3)
+                .map(|index| level + step * ((index * 37) % 101) as f32)
+                .collect::<Vec<_>>()
+        };
+        [
+            ramp(0.02, 0.001),
+            vec![0.25; 16 * 16 * 3],
+            ramp(900.0, 31.0),
+            vec![900.0; 16 * 16 * 3],
+            ramp(-0.05, 0.003),
+        ]
+    }
+
+    #[test]
+    fn a_plan_written_and_read_back_gives_the_same_bits() {
+        let shape = ImageShape::new(16, 16, 3);
+        let other = references()[0]
+            .iter()
+            .map(|value| value * 1.3 + 0.01)
+            .collect::<Vec<_>>();
+        let mut read_back = 0;
+        for model in every_model() {
+            for color_strategy in [
+                ColorStrategy::Linked,
+                ColorStrategy::Unlinked,
+                ColorStrategy::LuminancePreserving,
+            ] {
+                let config = StretchConfig {
+                    model: model.clone(),
+                    color_strategy,
+                    max_analysis_samples: 10_000,
+                };
+                for reference in references() {
+                    // The layered stretch refuses the unlinked strategy.
+                    let Ok(plan) = config.resolve_for(&reference, 3) else {
+                        assert!(matches!(
+                            (&model, color_strategy),
+                            (StretchModel::Layered(_), ColorStrategy::Unlinked)
+                        ));
+                        continue;
+                    };
+                    let written = serde_json::to_string(&plan).unwrap();
+                    let read: StretchPlan = serde_json::from_str(&written)
+                        .unwrap_or_else(|error| panic!("{error}: {written}"));
+                    assert_eq!(read, plan, "{written}");
+                    let bits = |plan: &StretchPlan| {
+                        let output = plan.apply_f32_image(&other, shape).unwrap();
+                        output.into_iter().map(f32::to_bits).collect::<Vec<_>>()
+                    };
+                    assert_eq!(bits(&read), bits(&plan), "{written}");
+                    read_back += 1;
+                }
+            }
+        }
+        assert_eq!(read_back, (10 * 3 - 1) * 5);
+    }
+
+    /// The curve comes from the reference, whatever it is applied to.
+    #[test]
+    fn a_reference_plan_keeps_the_difference_between_images() {
+        let [reference, ..] = references();
+        let brighter = reference
+            .iter()
+            .map(|value| value + 0.05)
+            .collect::<Vec<_>>();
+        let config = StretchConfig::auto_mtf(StretchParams::default(), 10_000);
+        let median = |data: &[f32]| {
+            let mut values = data.to_vec();
+            values.sort_by(f32::total_cmp);
+            values[values.len() / 2]
+        };
+        let plan = config.resolve_for(&reference, 3).unwrap();
+        let same = median(&plan.apply_f32(&reference, 3).unwrap());
+        let shifted = median(&plan.apply_f32(&brighter, 3).unwrap());
+        assert!(shifted > same + 0.05, "{same} {shifted}");
+        // Its own stretch hides it.
+        let own = config.resolve_for(&brighter, 3).unwrap();
+        let own = median(&own.apply_f32(&brighter, 3).unwrap());
+        assert!((own - same).abs() < 0.02, "{same} {own}");
+    }
+
+    #[test]
+    fn a_plan_that_could_not_be_resolved_is_refused() {
+        let read = |curve: &str| {
+            let written =
+                format!(r#"{{"channels":1,"color_strategy":"linked","curves":[{curve}]}}"#);
+            serde_json::from_str::<StretchPlan>(&written)
+        };
+        read(r#"{"type":"identity"}"#).unwrap();
+        for curve in [
+            r#"{"type":"linear","black":1.0,"white":0.0}"#,
+            r#"{"type":"linear","black":null,"white":0.0}"#,
+            r#"{"type":"asinh","black":0.0,"white":1.0,"strength":0.0}"#,
+            r#"{"type":"mtf","shadows":1.0,"midtone":0.5,"highlights":0.0}"#,
+            r#"{"type":"ht","shadows":0.0,"midtone":1.0,"highlights":1.0}"#,
+            r#"{"type":"ghs","params":{"stretch_factor":99.0,"local_intensity":0.0,"symmetry_point":0.0,"protect_shadows":0.0,"protect_highlights":1.0,"black":0.0,"white":1.0}}"#,
+            r#"{"type":"median-anchor","black":0.0,"median":0.0,"target":0.25,"boost":null,"highlights":null,"scale":1.0}"#,
+            r#"{"type":"median-anchor","black":0.0,"median":0.1,"target":0.25,"boost":[[0.5,0.5],[0.4,0.4],[0.9,0.9]],"highlights":null,"scale":1.0}"#,
+            r#"{"type":"median-anchor","black":0.0,"median":0.1,"target":0.25,"boost":null,"highlights":[1.0,1.0],"scale":1.0}"#,
+            r#"{"type":"layered","params":{"scale_separation":4000000000},"curve":{"black":0.0,"median":0.1,"target":0.25,"boost":null,"highlights":null,"scale":1.0},"median":0.1,"noise":0.01}"#,
+            r#"{"type":"wavelet"}"#,
+        ] {
+            assert!(read(curve).is_err(), "{curve}");
+        }
+        for plan in [
+            r#"{"channels":0,"color_strategy":"linked","curves":[{"type":"identity"}]}"#,
+            r#"{"channels":1,"color_strategy":"linked","curves":[]}"#,
+            r#"{"channels":3,"color_strategy":"unlinked","curves":[{"type":"identity"}]}"#,
+            r#"{"channels":1,"color_strategy":"luminance-preserving","curves":[{"type":"identity"}]}"#,
+        ] {
+            assert!(serde_json::from_str::<StretchPlan>(plan).is_err(), "{plan}");
+        }
     }
 }
