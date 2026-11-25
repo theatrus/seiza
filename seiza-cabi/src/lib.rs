@@ -9628,7 +9628,59 @@ fn detect_stars_response(
         .map(|angle| seiza_stars::tilt::analyze_triangle(&tilt_stars, width, height, angle))
         .transpose()
         .map_err(|error| error.to_string())?
-        .map(|triangle| TriangleTiltJson {
+        .as_ref()
+        .map(TriangleTiltJson::from);
+    Ok(StarDetectResponse {
+        schema_version: 1,
+        width,
+        height,
+        major_axis_orientations_normalized: true,
+        average_hfr: result.average_hfr,
+        average_fwhm: result.average_fwhm,
+        noise_sigma: result.noise_sigma,
+        background_mean: result.background_mean,
+        stars,
+        cells: cells
+            .iter()
+            .map(|cell| TiltCellJson {
+                row: cell.row,
+                col: cell.col,
+                star_count: cell.star_count,
+                median_hfr: cell.median_hfr,
+                median_eccentricity: cell.median_eccentricity,
+                mean_theta: cell.mean_theta,
+                theta_coherence: cell.theta_coherence,
+            })
+            .collect(),
+        tilt: TiltSummaryJson::from(&summary),
+        triangle_tilt,
+    })
+}
+
+impl From<&seiza_stars::TiltSummary> for TiltSummaryJson {
+    fn from(summary: &seiza_stars::TiltSummary) -> Self {
+        Self {
+            center_hfr: summary.center_hfr,
+            corners: summary
+                .corners
+                .iter()
+                .map(|corner| TiltCornerJson {
+                    corner: corner.corner.as_str(),
+                    hfr: corner.hfr,
+                })
+                .collect(),
+            mean_hfr: summary.mean_hfr,
+            tilt_percent: summary.tilt_percent,
+            curvature_percent: summary.curvature_percent,
+            worst_corner: summary.worst_corner.map(seiza_stars::tilt::Corner::as_str),
+            best_corner: summary.best_corner.map(seiza_stars::tilt::Corner::as_str),
+        }
+    }
+}
+
+impl From<&seiza_stars::TriangleTiltSummary> for TriangleTiltJson {
+    fn from(triangle: &seiza_stars::TriangleTiltSummary) -> Self {
+        Self {
             angle_degrees: triangle.angle_degrees,
             inner_radius_pixels: triangle.inner_radius_pixels,
             outer_radius_pixels: triangle.outer_radius_pixels,
@@ -9652,47 +9704,194 @@ fn detect_stars_response(
             tilt_percent: triangle.tilt_percent,
             best_sector: triangle.best_sector,
             worst_sector: triangle.worst_sector,
-        });
-    Ok(StarDetectResponse {
-        schema_version: 1,
-        width,
-        height,
-        major_axis_orientations_normalized: true,
-        average_hfr: result.average_hfr,
-        average_fwhm: result.average_fwhm,
-        noise_sigma: result.noise_sigma,
-        background_mean: result.background_mean,
-        stars,
-        cells: cells
-            .iter()
-            .map(|cell| TiltCellJson {
-                row: cell.row,
-                col: cell.col,
-                star_count: cell.star_count,
-                median_hfr: cell.median_hfr,
-                median_eccentricity: cell.median_eccentricity,
-                mean_theta: cell.mean_theta,
-                theta_coherence: cell.theta_coherence,
-            })
-            .collect(),
-        tilt: TiltSummaryJson {
-            center_hfr: summary.center_hfr,
-            corners: summary
-                .corners
+        }
+    }
+}
+
+/// The request [`seiza_stars_tilt_frames_json`] takes.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TiltFramesRequest {
+    frames: Vec<TiltFrameRequest>,
+    /// First adjustment-screw axis for the triangle analysis; absent skips it.
+    triangle_angle_degrees: Option<f64>,
+}
+
+/// One frame of [`TiltFramesRequest`]. Other fields are ignored, so a
+/// `seiza_stars_detect_*_json` response passes as a frame unchanged.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TiltFrameRequest {
+    width: usize,
+    height: usize,
+    stars: Vec<TiltStarRequest>,
+}
+
+/// One star of [`TiltFrameRequest`], with the fields a detected star has.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TiltStarRequest {
+    x: f64,
+    y: f64,
+    hfr: f64,
+    eccentricity: Option<f64>,
+    theta: Option<f64>,
+}
+
+impl TiltStarRequest {
+    fn tilt_star(&self) -> seiza_stars::TiltStar {
+        seiza_stars::TiltStar {
+            x: self.x,
+            y: self.y,
+            hfr: self.hfr,
+            eccentricity: self.eccentricity.unwrap_or(0.0),
+            theta: self.theta,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FrameSpreadJson {
+    median: f64,
+    lower_quartile: f64,
+    upper_quartile: f64,
+    frame_count: usize,
+}
+
+impl From<seiza_stars::FrameSpread> for FrameSpreadJson {
+    fn from(spread: seiza_stars::FrameSpread) -> Self {
+        Self {
+            median: spread.median,
+            lower_quartile: spread.lower_quartile,
+            upper_quartile: spread.upper_quartile,
+            frame_count: spread.frame_count,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FrameTiltJson {
+    star_count: usize,
+    summary: TiltSummaryJson,
+    triangle: Option<TriangleTiltJson>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MultiFrameCellJson {
+    row: usize,
+    col: usize,
+    star_count: usize,
+    relative_hfr: Option<FrameSpreadJson>,
+    median_hfr: Option<f64>,
+    median_eccentricity: Option<f64>,
+    mean_theta: Option<f64>,
+    theta_coherence: f64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MultiFrameTriangleTiltJson {
+    summary: TriangleTiltJson,
+    ready_frame_count: usize,
+    sector_relative_hfr: Vec<Option<FrameSpreadJson>>,
+    frame_tilt_percent: Option<FrameSpreadJson>,
+    worst_sector_frame_count: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MultiFrameTiltResponse {
+    schema_version: u32,
+    width: usize,
+    height: usize,
+    frames: Vec<FrameTiltJson>,
+    median_frame_hfr: Option<f64>,
+    cells: Vec<MultiFrameCellJson>,
+    summary: TiltSummaryJson,
+    frame_tilt_percent: Option<FrameSpreadJson>,
+    frame_curvature_percent: Option<FrameSpreadJson>,
+    worst_corner_frame_count: usize,
+    triangle: Option<MultiFrameTriangleTiltJson>,
+}
+
+impl From<&seiza_stars::MultiFrameTilt> for MultiFrameTiltResponse {
+    fn from(tilt: &seiza_stars::MultiFrameTilt) -> Self {
+        Self {
+            schema_version: 1,
+            width: tilt.width,
+            height: tilt.height,
+            frames: tilt
+                .frames
                 .iter()
-                .map(|corner| TiltCornerJson {
-                    corner: corner.corner.as_str(),
-                    hfr: corner.hfr,
+                .map(|frame| FrameTiltJson {
+                    star_count: frame.star_count,
+                    summary: TiltSummaryJson::from(&frame.summary),
+                    triangle: frame.triangle.as_ref().map(TriangleTiltJson::from),
                 })
                 .collect(),
-            mean_hfr: summary.mean_hfr,
-            tilt_percent: summary.tilt_percent,
-            curvature_percent: summary.curvature_percent,
-            worst_corner: summary.worst_corner.map(seiza_stars::tilt::Corner::as_str),
-            best_corner: summary.best_corner.map(seiza_stars::tilt::Corner::as_str),
-        },
-        triangle_tilt,
-    })
+            median_frame_hfr: tilt.median_frame_hfr,
+            cells: tilt
+                .cells
+                .iter()
+                .map(|cell| MultiFrameCellJson {
+                    row: cell.row,
+                    col: cell.col,
+                    star_count: cell.star_count,
+                    relative_hfr: cell.relative_hfr.map(FrameSpreadJson::from),
+                    median_hfr: cell.median_hfr,
+                    median_eccentricity: cell.median_eccentricity,
+                    mean_theta: cell.mean_theta,
+                    theta_coherence: cell.theta_coherence,
+                })
+                .collect(),
+            summary: TiltSummaryJson::from(&tilt.summary),
+            frame_tilt_percent: tilt.frame_tilt_percent.map(FrameSpreadJson::from),
+            frame_curvature_percent: tilt.frame_curvature_percent.map(FrameSpreadJson::from),
+            worst_corner_frame_count: tilt.worst_corner_frame_count,
+            triangle: tilt
+                .triangle
+                .as_ref()
+                .map(|triangle| MultiFrameTriangleTiltJson {
+                    summary: TriangleTiltJson::from(&triangle.summary),
+                    ready_frame_count: triangle.ready_frame_count,
+                    sector_relative_hfr: triangle
+                        .sector_relative_hfr
+                        .iter()
+                        .map(|spread| spread.map(FrameSpreadJson::from))
+                        .collect(),
+                    frame_tilt_percent: triangle.frame_tilt_percent.map(FrameSpreadJson::from),
+                    worst_sector_frame_count: triangle.worst_sector_frame_count,
+                }),
+        }
+    }
+}
+
+/// Run [`seiza_stars::analyze_frames`] over a parsed request.
+fn tilt_frames_response(request: &TiltFramesRequest) -> Result<MultiFrameTiltResponse, String> {
+    let stars: Vec<Vec<seiza_stars::TiltStar>> = request
+        .frames
+        .iter()
+        .map(|frame| frame.stars.iter().map(TiltStarRequest::tilt_star).collect())
+        .collect();
+    let frames: Vec<seiza_stars::TiltFrame<'_>> = request
+        .frames
+        .iter()
+        .zip(&stars)
+        .map(|(frame, stars)| seiza_stars::TiltFrame {
+            width: frame.width,
+            height: frame.height,
+            stars,
+        })
+        .collect();
+    let options = seiza_stars::MultiFrameTiltOptions {
+        triangle_angle_degrees: request.triangle_angle_degrees,
+    };
+    seiza_stars::analyze_frames(&frames, &options)
+        .map(|tilt| MultiFrameTiltResponse::from(&tilt))
+        .map_err(|error| error.to_string())
 }
 
 fn owned_json(value: &impl Serialize) -> Result<*mut c_char, String> {
@@ -15695,6 +15894,68 @@ mod tests {
     }
 
     #[test]
+    fn tilt_over_many_frames_over_the_c_surface() {
+        // Four stars in each cell of a 300×300 frame; the top-left corner
+        // is 25% softer, and focus differs from frame to frame. The extra
+        // fields a detection response carries ride along and are ignored.
+        let frame = |focus: f64| {
+            let mut stars = Vec::new();
+            for row in 0..3 {
+                for col in 0..3 {
+                    for index in 0..4 {
+                        let offset = 20.0 + 15.0 * index as f64;
+                        let tilt = if (row, col) == (0, 0) { 1.25 } else { 1.0 };
+                        stars.push(json!({
+                            "x": col as f64 * 100.0 + offset,
+                            "y": row as f64 * 100.0 + offset,
+                            "hfr": focus * tilt,
+                            "fwhm": 2.0 * focus * tilt,
+                            "eccentricity": 0.3,
+                            "theta": 0.5,
+                        }));
+                    }
+                }
+            }
+            json!({"schemaVersion": 1, "width": 300, "height": 300, "stars": stars})
+        };
+        let request = json!({
+            "frames": [frame(2.0), frame(3.0), frame(4.0)],
+            "triangleAngleDegrees": 0,
+        });
+        let parsed = call_json(seiza_stars_tilt_frames_json, &request).unwrap();
+        assert_eq!(parsed["schemaVersion"], 1);
+        assert_eq!(parsed["width"], 300);
+        assert_eq!(parsed["frames"].as_array().unwrap().len(), 3);
+        assert_eq!(parsed["frames"][0]["starCount"], 36);
+        assert!(parsed["frames"][0]["triangle"].is_object());
+        assert_eq!(parsed["medianFrameHfr"], 3.0);
+        let cells = parsed["cells"].as_array().unwrap();
+        assert_eq!(cells.len(), 9);
+        assert_eq!(cells[0]["starCount"], 12);
+        assert_eq!(cells[0]["relativeHfr"]["frameCount"], 3);
+        let relative = cells[0]["relativeHfr"]["median"].as_f64().unwrap();
+        assert!(relative > 1.2 && relative <= 1.25, "{relative}");
+        assert!((cells[0]["meanTheta"].as_f64().unwrap() - 0.5).abs() < 1e-9);
+        assert_eq!(parsed["summary"]["worstCorner"], "top-left");
+        assert!(parsed["summary"]["tiltPercent"].as_f64().unwrap() > 20.0);
+        assert_eq!(parsed["worstCornerFrameCount"], 3);
+        assert_eq!(parsed["frameTiltPercent"]["frameCount"], 3);
+        let triangle = &parsed["triangle"];
+        assert!(triangle["summary"]["sectors"].is_array());
+        assert_eq!(triangle["sectorRelativeHfr"].as_array().unwrap().len(), 3);
+
+        let mismatched =
+            json!({"frames": [frame(2.0), {"width": 300, "height": 200, "stars": []}]});
+        let message = call_json(seiza_stars_tilt_frames_json, &mismatched).unwrap_err();
+        assert!(message.contains("frame 1 is 300x200"), "{message}");
+        let message = call_json(seiza_stars_tilt_frames_json, &json!({"frames": []})).unwrap_err();
+        assert!(message.contains("at least one frame"), "{message}");
+        let typo = json!({"frames": [frame(2.0)], "triangleAngle": 0});
+        let message = call_json(seiza_stars_tilt_frames_json, &typo).unwrap_err();
+        assert!(message.contains("unknown field"), "{message}");
+    }
+
+    #[test]
     fn star_detection_target_star_count_retries_toward_the_target() {
         // A grid of small faint stars that strict binned-and-blurred
         // detection misses: the adaptive ladder's native-resolution rung
@@ -18757,6 +19018,59 @@ pub unsafe extern "C" fn seiza_stars_detect_path_json(
             options,
             frame_optics,
         )?)
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+/// Measure sensor tilt and field curvature over many frames of one sensor.
+///
+/// A single frame's tilt carries that frame's seeing, guiding and wind. This
+/// analyses each frame as [`seiza_stars_detect_luma_u16_json`] does, then
+/// combines them: each grid cell's (and triangle sector's) HFR is divided by
+/// its frame's own median HFR, so focus drift and changing seeing cancel,
+/// and those ratios are combined by median over the frames. Elongation
+/// directions pool every star of every frame.
+///
+/// `request_json` is
+/// `{"frames": [{"width", "height", "stars": [{"x", "y", "hfr",
+/// "eccentricity"?, "theta"?}]}], "triangleAngleDegrees"?}`. Other fields
+/// of a frame or star are ignored, so each frame may be a
+/// `seiza_stars_detect_*_json` response passed back unchanged. Every frame
+/// must have the first frame's size: the frames need not be registered, but
+/// they must come from one sensor at one binning. A cell or sector counts in
+/// a frame only with at least 3 stars there.
+///
+/// The returned schema-1 JSON has `width`, `height`, `medianFrameHfr` (the
+/// median over frames of each frame's median cell HFR), and:
+/// - `cells`: nine cells, row by row, each with `starCount` over all frames,
+///   `relativeHfr` (`median`, `lowerQuartile`, `upperQuartile`,
+///   `frameCount` of the cell's HFR over its frame's), `medianHfr`
+///   (`relativeHfr.median * medianFrameHfr`), and the pooled
+///   `medianEccentricity`, `meanTheta` and `thetaCoherence`.
+/// - `summary`: the parallelogram verdict, shaped as the detection
+///   response's `tilt`, over the cells' `medianHfr`.
+/// - `frameTiltPercent` and `frameCurvaturePercent`: the spread of the
+///   frames' own verdicts; `worstCornerFrameCount`: frames whose own worst
+///   corner is `summary.worstCorner`.
+/// - `frames`: each frame's `starCount`, `summary` and `triangle`.
+/// - `triangle`, when `triangleAngleDegrees` was given: `summary` (shaped as
+///   the detection response's `triangleTilt`, combined over the frames whose
+///   own triangle was ready), `readyFrameCount`, `sectorRelativeHfr`,
+///   `frameTiltPercent` and `worstSectorFrameCount`.
+///
+/// # Safety
+///
+/// `request_json` must be a NUL-terminated UTF-8 string. `error_out` must be
+/// null or point to writable storage for one pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_stars_tilt_frames_json(
+    request_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let request: TiltFramesRequest = parse_request(request_json, "tilt frames")?;
+        owned_json(&tilt_frames_response(&request)?)
     })
     .unwrap_or(ptr::null_mut())
 }

@@ -338,6 +338,30 @@ core = "seiza-stars::TriangleSectorStats"
 [rust.TriangleTiltJson]
 core = "seiza-stars::TriangleTiltSummary"
 
+[rust.TiltFramesRequest]
+core = "seiza-stars::MultiFrameTiltOptions"
+
+[rust.TiltFrameRequest]
+core = "seiza-stars::TiltFrame"
+
+[rust.TiltStarRequest]
+core = "seiza-stars::TiltStar"
+
+[rust.FrameSpreadJson]
+core = "seiza-stars::FrameSpread"
+
+[rust.FrameTiltJson]
+core = "seiza-stars::FrameTilt"
+
+[rust.MultiFrameCellJson]
+core = "seiza-stars::MultiFrameCell"
+
+[rust.MultiFrameTriangleTiltJson]
+core = "seiza-stars::MultiFrameTriangleTilt"
+
+[rust.MultiFrameTiltResponse]
+core = "seiza-stars::MultiFrameTilt"
+
 [rust.PsfFieldOptionsRequest]
 core = "seiza-stars::PsfFieldOptions"
 
@@ -884,6 +908,7 @@ seiza_catalog_status_json = { none = "catalog readiness for the apps' setup scre
 # --- stars ------------------------------------------------------------------
 seiza_stars_detect_luma_u16_json = "detect_measured_stars"
 seiza_stars_detect_path_json = "detect_measured_stars_file"
+seiza_stars_tilt_frames_json = "multi_frame_tilt_analysis"
 seiza_stars_pixel_scale_arcsec = "pixel_scale_arcsec"
 seiza_stars_classify_pixel_scale = "classify_pixel_scale"
 seiza_stars_recommend_detection_binning = "recommend_detection_binning"

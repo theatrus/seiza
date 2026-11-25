@@ -3379,6 +3379,50 @@ char *seiza_stars_detect_luma_u16_json(const uint16_t *data,
 char *seiza_stars_detect_path_json(const char *path, const char *options_json, char **error_out);
 
 /*
+ Measure sensor tilt and field curvature over many frames of one sensor.
+
+ A single frame's tilt carries that frame's seeing, guiding and wind. This
+ analyses each frame as [`seiza_stars_detect_luma_u16_json`] does, then
+ combines them: each grid cell's (and triangle sector's) HFR is divided by
+ its frame's own median HFR, so focus drift and changing seeing cancel,
+ and those ratios are combined by median over the frames. Elongation
+ directions pool every star of every frame.
+
+ `request_json` is
+ `{"frames": [{"width", "height", "stars": [{"x", "y", "hfr",
+ "eccentricity"?, "theta"?}]}], "triangleAngleDegrees"?}`. Other fields
+ of a frame or star are ignored, so each frame may be a
+ `seiza_stars_detect_*_json` response passed back unchanged. Every frame
+ must have the first frame's size: the frames need not be registered, but
+ they must come from one sensor at one binning. A cell or sector counts in
+ a frame only with at least 3 stars there.
+
+ The returned schema-1 JSON has `width`, `height`, `medianFrameHfr` (the
+ median over frames of each frame's median cell HFR), and:
+ - `cells`: nine cells, row by row, each with `starCount` over all frames,
+   `relativeHfr` (`median`, `lowerQuartile`, `upperQuartile`,
+   `frameCount` of the cell's HFR over its frame's), `medianHfr`
+   (`relativeHfr.median * medianFrameHfr`), and the pooled
+   `medianEccentricity`, `meanTheta` and `thetaCoherence`.
+ - `summary`: the parallelogram verdict, shaped as the detection
+   response's `tilt`, over the cells' `medianHfr`.
+ - `frameTiltPercent` and `frameCurvaturePercent`: the spread of the
+   frames' own verdicts; `worstCornerFrameCount`: frames whose own worst
+   corner is `summary.worstCorner`.
+ - `frames`: each frame's `starCount`, `summary` and `triangle`.
+ - `triangle`, when `triangleAngleDegrees` was given: `summary` (shaped as
+   the detection response's `triangleTilt`, combined over the frames whose
+   own triangle was ready), `readyFrameCount`, `sectorRelativeHfr`,
+   `frameTiltPercent` and `worstSectorFrameCount`.
+
+ # Safety
+
+ `request_json` must be a NUL-terminated UTF-8 string. `error_out` must be
+ null or point to writable storage for one pointer.
+ */
+char *seiza_stars_tilt_frames_json(const char *request_json, char **error_out);
+
+/*
  The pixel scale, in arcseconds per pixel, of a camera with pixels
  `pixel_size_um` micrometres across (binning included) behind a
  telescope of focal length `focal_length_mm` millimetres; NaN unless

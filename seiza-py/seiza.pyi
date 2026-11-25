@@ -163,6 +163,52 @@ class TriangleTiltSummary:
     best_sector: int | None
     worst_sector: int | None
 
+class FrameSpread:
+    # Over the frames that measured the value.
+    median: float
+    lower_quartile: float
+    upper_quartile: float
+    frame_count: int
+
+class FrameTilt:
+    star_count: int
+    summary: TiltSummary
+    triangle: TriangleTiltSummary | None
+
+class MultiFrameTiltCell:
+    row: int
+    col: int
+    # Stars in the cell over every frame.
+    star_count: int
+    # The cell's HFR over its frame's median HFR, across frames.
+    relative_hfr: FrameSpread | None
+    # relative_hfr.median * MultiFrameTilt.median_frame_hfr, in pixels.
+    median_hfr: float | None
+    median_eccentricity: float | None
+    mean_theta: float | None
+    theta_coherence: float
+
+class MultiFrameTriangleTilt:
+    summary: TriangleTiltSummary
+    ready_frame_count: int
+    # Each sector's HFR over its frame's annulus median, over ready frames.
+    sector_relative_hfr: list[FrameSpread | None]
+    frame_tilt_percent: FrameSpread | None
+    worst_sector_frame_count: int
+
+class MultiFrameTilt:
+    width: int
+    height: int
+    frames: list[FrameTilt]
+    median_frame_hfr: float | None
+    cells: list[MultiFrameTiltCell]
+    summary: TiltSummary
+    frame_tilt_percent: FrameSpread | None
+    frame_curvature_percent: FrameSpread | None
+    # Frames whose own worst corner is summary.worst_corner.
+    worst_corner_frame_count: int
+    triangle: MultiFrameTriangleTilt | None
+
 class StarCatalog:
     @staticmethod
     def open(path: str | Path | None = None) -> StarCatalog: ...
@@ -1199,6 +1245,11 @@ def triangle_tilt_analysis(
     *,
     angle_degrees: float = 0.0,
 ) -> TriangleTiltSummary: ...
+def multi_frame_tilt_analysis(
+    results: Sequence[StarDetectionResult],
+    *,
+    triangle_angle_degrees: float | None = None,
+) -> MultiFrameTilt: ...
 
 class RcAstroParameter:
     name: str
