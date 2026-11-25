@@ -2634,6 +2634,62 @@ In order, each only if the one before leaves a gap at the rims:
        next lever is the overlap itself, shown whole at the deep
        stack's strength.
 
+       The user, 2026-11-24: the model "seems to introduce more noise at
+       more sharpening, but also smooths the image at less". Both are so,
+       and the second is a fault of the trainer's. A pairs bank's target
+       is made from its input's own stack: its nebula and its noise lie on
+       the input's to the pixel (spread, slope and correlation 1.00 under
+       4 px, at every ask, on row 2's eleven pairs), and only its stars
+       sit elsewhere, at a lopsided PSF's peak and not at its light's
+       centre. The trainer moved the whole target back by its stars'
+       offset, as a pair of two stacks needs: by a median 0.64 px on the
+       Trunk's pairs (90% under 1.00 px, the largest 1.75), with a spread
+       of 0.29 and 0.25 px from source to source. The network is not told
+       the offset, and the likeliest noise moved by an unknown amount is
+       the mean of its moved copies: 0.67 to 0.75 of it at a period of
+       2 px, 0.90 to 0.93 at 4. On eight of that bank's windows the
+       target's noise followed the input's with a slope of 0.09 to 0.89
+       between neighbouring pixels.
+
+       What that taught, measured: the grain at the pixel on the Trunk's
+       sky is 0.99 of the input's for S71 and S72, which saw no pairs,
+       0.95 for S73, the first that did, 0.86 for S84, 0.74 for S85, the
+       first with the Trunk's pairs, and 0.78 for S98 (the goal 1.00); the
+       overshoot term is not it (S89 0.81, S90 without it 0.82). And the
+       cloud moves: fitted to the input's and its slopes band by band
+       (clear of stars), S72's and S77's light between 3 and 6 px lies
+       within 0.02 px of the input's on row 2's crop, the goal's on it to
+       0.002, S84's 0.05 px off, S86's 0.40, S97's 0.50 and S98's 0.57; on
+       NGC 6820's dark lanes (held out) S86's 0.80 and S97's 0.78, where
+       the goal's is on it to 0.007. The sense follows the image's own PSF:
+       the model reads the stars' offset from the stamp and moves the
+       cloud by it. S85 to S95 other than S86 are not measured.
+
+       `--pairs-offset stars`, now the default, moves such a target where
+       its stars' own light is (a known-kernel window's mask) and leaves
+       the rest; the slope above is then 1.00 on every window, and the
+       stars' light centres stay within 0.1 px of the input's. A pair of
+       two stacks is moved whole as before: its noise is added after the
+       move. S99 is S98 with that alone.
+
+       The first half of the complaint, on independent halves of one stack
+       sharpened alike (the halves' difference is noise alone, what they
+       share is in the sky): asked for nothing, every run gives the image
+       back to 1.00 in every band. Asked for the rest at 0.75 to 0.25, S98
+       leaves 0.87 to 0.95 of the noise between 1 and 2 px on the Trunk's
+       row 2 and raises it between 8 and 16 px, 1.15 to 1.28 at 0.75 and
+       1.19 to 1.41 at 0.35, more where the cloud is brighter; what the
+       halves share rises as much, 1.10 to 1.32 and 1.13 to 1.45. NGC
+       6820's halves read alike (noise 1.15 to 1.19 and 1.25 to 1.36,
+       structure 1.20 to 1.27 and 1.25 to 1.41). The bands' lift raises
+       whatever they hold, as the goal's does: on the Trunk's faintest
+       third, mostly noise there, the goal's targets read 1.08 to 1.19 of
+       the input's. And S86 asked under its pairs' asks smooths what
+       it is shown: 0.71 of the noise between 1 and 2 px and 0.84 between
+       8 and 16 on NGC 6820's faintest third at 0.45, where at 0.55 it
+       left 0.89 and raised 1.13. The sheets' usual ask, 0.5, is between
+       the two.
+
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
    taught that clarity is asked for at a ratio of 0, read from the
