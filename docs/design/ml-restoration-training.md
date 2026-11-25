@@ -2764,6 +2764,46 @@ In order, each only if the one before leaves a gap at the rims:
        fine scales was this fault, and numbers of theirs under 6 px are
        not to be compared with later runs'.
 
+       How far a run raises noise is read against the goal itself too,
+       on the two independent halves of the Trunk's night and of NGC
+       6820's nights: what the halves' outputs do not share is their
+       noise, what they share their structure. Under 4 px both leave the
+       noise as it came (1.00 to 1.03). Between 8 and 16 px, in the
+       faintest, the middle and the brightest third of the Trunk's cloud,
+       the strong goal raises the noise by 1.07, 1.10 and 1.18 for
+       structure raised by 1.19, 1.31 and 1.47; S99 asked 0.35 raises it
+       by 1.13, 1.22 and 1.37 for 1.13, 1.32 and 1.46. Between 4 and 8 px
+       the goal's noise is at 1.01, 1.01 and 1.04 and S99's at 1.03, 1.06
+       and 1.11; between 16 and 32 px the two are nearer, 1.19, 1.21 and
+       1.29 against 1.16, 1.25 and 1.40. On NGC 6820 (held out), between 8
+       and 16 px, the goal raises noise by 1.17, 1.18 and 1.16 for
+       structure at 1.32, 1.34 and 1.17, and S99 asked 0.55 by 1.20, 1.31
+       and 1.35 for 1.31, 1.38 and 1.24. So for the same structure
+       S99 raises the noise about twice as far as the goal does on the
+       Trunk, and 1.2 to 2.2 times as far on NGC 6820. The noise itself is
+       nearly white: over white noise of the same pixel spread it is 1.01
+       to 1.14 in the five bands from 1 to 32 px on the Trunk and 1.00 to
+       1.30 on NGC 6820.
+
+       Two parts of the trainer ask for that, or let it be. A known-kernel
+       window's clarity and shade read its target under the noise it is met
+       under, so they raised the noise with the cloud: on white noise alone
+       by 1.25 between 8 and 16 px and 1.40 between 16 and 32, for stars
+       11 px across asked 0.35, and by 1.38 and 1.36 for stars 7 px across.
+       That is not all of it: where the stars and the rest are asked
+       nearly alike, as a known-kernel window's often are, S99 raises the
+       faint noise less (1.06 against 1.13 and 1.14 either side), and S86,
+       with the same clarity and few of the Trunk's pairs, left the
+       Trunk's noise between 8 and 16 px at 0.95 to 1.01 asked 0.35. A pair
+       shows its structure and its noise raised together, at one noise,
+       and nothing in it says which is which. So
+       `--clarity-reads structure`, now the default, has the clarity and
+       the shade read the target before its noise, which is then passed on
+       as it came, and `--pairs-noise` meets half of the pairs banks'
+       windows under fresh noise, up to that many times their stack's, that
+       their targets keep. S100 is S99 with both, `--pairs-noise 2`; made
+       together, its result will not tell them apart.
+
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
    taught that clarity is asked for at a ratio of 0, read from the
