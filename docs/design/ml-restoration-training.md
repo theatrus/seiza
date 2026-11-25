@@ -2546,8 +2546,9 @@ In order, each only if the one before leaves a gap at the rims:
        457-object bank whose targets lift 8–32 px by 4% or more, mostly
        fields of 6–12 px stars, at 24 windows a pair (1,848). Both carry
        S94's ask of 0.35 and share the pairs' 70% evenly; all else is
-       S94's. Each Trunk window is drawn about once, S94's about nine
-       times. With row 2 partly trained on (its windows are counted in
+       S94's. The 8-frame halves' windows are left out, as in S94, S96
+       and S97 too, and each Trunk window kept (4,152) is drawn 1.7 times, S94's
+       13.5 (1,038). With row 2 partly trained on (its windows are counted in
        S97's paragraph), the held-out test is NGC 6820's
        dark-lane crop, whose right half the goal lifts 1.13 and 1.11
        between 8 and 32 px (S94 1.12 and 1.06). S95 reads 1.11 and 1.05
@@ -2561,7 +2562,7 @@ In order, each only if the one before leaves a gap at the rims:
        −0.25, the goal −0.65).
 
        So the broad band stays where the input has it, though the
-       windows show row 2 only in part and were drawn about once
+       windows show row 2 only in part and were drawn 1.7 times
        each. The loss's gradient term averages the error
        over blocks of 1 to 8 px; a lift 16 to 32 px wide is weighed by
        the pixel term alone, where it is a small share of the noise.
@@ -2596,7 +2597,7 @@ In order, each only if the one before leaves a gap at the rims:
 
        S97 is S96 with the Trunk's bank cut at 24 windows a pair at the
        0.35 ask in place of its six-window one, and 10,000 steps, twice
-       as many: 4.4 draws a window, where S95 made about one. Two
+       as many: 6.7 draws a kept window, where S95 made 1.7. Two
        changes, the bank and the steps, not separated. On NGC 6820's
        dark-lane crop (held out) the right half reads 1.16 and 1.08
        between 8 and 16 and 16 and 32 px (S96 1.13 and 1.08, the goal
@@ -2620,11 +2621,12 @@ In order, each only if the one before leaves a gap at the rims:
 
        A count of the windows made for S97 corrects what the paragraphs
        above said about row 2. In the 24-window bank the deep stack's
-       own windows hold 27% of the overlap, its 8-frame half's all of
-       it and the six-night stack's windows the whole in two, 68% and
-       32%; in the six-window bank they hold none, 13% and 68%. So row
-       2 has been partly trained on since S94, neither out of the
-       windows nor in them at the deep stack's strength. Where the
+       own windows hold 27% of the overlap, the six-night stack's
+       windows the whole of it in two, 68% and 32%, and the 8-frame
+       half's all of it, though these runs leave the halves' windows
+       out; in the six-window bank the deep stack's hold none
+       and the six-night stack's 68%. So row 2 has been barely shown
+       since S94, and never whole at the deep stack's strength. Where the
        deep stack's windows are, S97 asked 0.35 lifts them 1.10 to
        1.16 between 8 and 16 px and 1.07 to 1.11 between 16 and 32
        (the goal 1.04 to 1.15 and 1.05 to 1.15): nearly one lift for
