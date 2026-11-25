@@ -141,7 +141,7 @@ jobs:
         run: |
           library=$(cargo run -p seiza-download --example install_onnxruntime -- "$RUNNER_TEMP/seiza-onnxruntime")
           echo "SEIZA_ONNXRUNTIME=$library" >> "$GITHUB_ENV"
-      - run: cargo test -p seiza-model --test runtime -- --nocapture
+      - run: cargo test -p seiza-model --test runtime --test sharpen -- --nocapture
       - run: cargo test -p seiza-cabi --lib model::tests
 
   # Verify the workspace still compiles on its declared MSRV

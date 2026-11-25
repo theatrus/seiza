@@ -14,10 +14,10 @@ use std::path::PathBuf;
 /// nothing covers a pixel.
 #[derive(Clone, Copy, Debug)]
 pub struct ImageView<'a> {
-    data: &'a [f32],
-    width: usize,
-    height: usize,
-    channels: usize,
+    pub(crate) data: &'a [f32],
+    pub(crate) width: usize,
+    pub(crate) height: usize,
+    pub(crate) channels: usize,
 }
 
 impl<'a> ImageView<'a> {
@@ -47,7 +47,7 @@ impl<'a> ImageView<'a> {
         })
     }
 
-    fn plane(&self, channel: usize) -> Vec<f32> {
+    pub(crate) fn plane(&self, channel: usize) -> Vec<f32> {
         if self.channels == 1 {
             return self.data.to_vec();
         }
@@ -399,7 +399,7 @@ fn denoise_plane(
 /// Core ML always gets a folder. Without one, ONNX Runtime compiles in the
 /// temp folder, and a process killed with a session open leaves two entries
 /// there, the size of the model, every time.
-fn compile_cache(
+pub(crate) fn compile_cache(
     options: &BackendOptions,
     sha256: &str,
     tile: usize,

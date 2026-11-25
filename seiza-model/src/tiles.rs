@@ -184,6 +184,38 @@ pub(crate) fn infer(
     report: &mut dyn FnMut(usize, usize),
 ) -> Result<Vec<f32>, ModelError> {
     let tile = tiling.tile;
+    infer_at(
+        &mut |planes, _, residual| runner.run(planes, tile, residual),
+        planes,
+        channels,
+        width,
+        height,
+        tiling,
+        scale,
+        stop,
+        report,
+    )
+}
+
+/// Fills a tile's residual from its planes and its corner, (left, top).
+pub(crate) type RunAt<'a> =
+    dyn FnMut(&[f32], (usize, usize), &mut [f32]) -> Result<(), ModelError> + 'a;
+
+/// [`infer`], for a runner that reads what belongs to a tile alone: `run` is
+/// also given the tile's corner, (left, top), in the image's pixels.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn infer_at(
+    run: &mut RunAt<'_>,
+    planes: &[f32],
+    channels: usize,
+    width: usize,
+    height: usize,
+    tiling: &Tiling,
+    scale: f32,
+    stop: &dyn Fn() -> bool,
+    report: &mut dyn FnMut(usize, usize),
+) -> Result<Vec<f32>, ModelError> {
+    let tile = tiling.tile;
     let overlap = tiling.grid_overlap()?;
     let count = tiling.tiles(width, height)?;
     let full_width = padded_length(width, tile, tiling.multiple)?;
@@ -220,7 +252,7 @@ pub(crate) fn infer(
                         *value = source[x];
                     }
                 });
-            runner.run(&input, tile, &mut residual)?;
+            run(&input, (left, top), &mut residual)?;
             if residual.iter().any(|value| !value.is_finite()) {
                 return Err(ModelError::NonFiniteOutput { x: left, y: top });
             }

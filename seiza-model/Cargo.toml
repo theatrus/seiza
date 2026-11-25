@@ -33,6 +33,7 @@ seiza-fits = { workspace = true, optional = true }
 seiza-image-io = { workspace = true, optional = true }
 seiza-stacking = { workspace = true, optional = true }
 seiza-stretch = { workspace = true, optional = true }
+seiza-stars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

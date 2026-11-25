@@ -446,12 +446,15 @@ objects = [
     "seiza-stars::StarFit",
     "seiza-model::NoiseModel",
     "seiza-model::Denoised",
+    "seiza-model::SharpenModel",
+    "seiza-model::Sharpened",
     "seiza-model::ModelBundle",
     "seiza-model::ModelStore",
 ]
 
 # learned models
 "seiza-model::ModelBundle::graph" = { none = "NoiseModel::open chooses the graph a backend runs; a host reads the precisions a model has from seiza_model_list_json" }
+"seiza-model::Sharpened::into_image" = { none = "takes the image out of a result a Rust host owns; the C ABI copies Sharpened::image into the caller's buffer, and Python hands it out as an array" }
 
 # distributed stacking
 "seiza-pipeline::carried_cards" = { none = "the reference cards every stack file keeps; hosts read them from the files the pipeline writes" }
@@ -880,6 +883,12 @@ seiza_denoised_blend = "Denoised.blend"
 seiza_denoised_residual = "Denoised.residual"
 seiza_denoised_report_json = "Denoised.report"
 seiza_denoised_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
+seiza_sharpen_model_open = "SharpenModel"
+seiza_sharpen_model_backend = "SharpenModel.backend"
+seiza_sharpen_model_tile = "SharpenModel.tile"
+seiza_sharpen_model_sharpen = "SharpenModel.sharpen"
+seiza_sharpen_model_sharpen_file = "SharpenModel.sharpen_file"
+seiza_sharpen_model_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
 seiza_model_backends_json = "model_backends"
 seiza_model_catalog_json = "model_catalog"
 seiza_onnxruntime_installed_json = "installed_onnxruntime"

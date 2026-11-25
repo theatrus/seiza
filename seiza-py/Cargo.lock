@@ -2562,6 +2562,7 @@ dependencies = [
  "seiza-fits",
  "seiza-image-io",
  "seiza-stacking",
+ "seiza-stars",
  "seiza-stretch",
  "serde",
  "serde_json",

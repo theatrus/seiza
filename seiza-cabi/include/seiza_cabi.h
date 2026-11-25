@@ -327,6 +327,12 @@ typedef struct SeizaRenderedImage16 SeizaRenderedImage16;
 typedef struct SeizaSatelliteCatalog SeizaSatelliteCatalog;
 
 /*
+ An opaque sharpening model, open on a backend. Release it with
+ [`seiza_sharpen_model_free`]. One thread may run it at a time.
+ */
+typedef struct SeizaSharpenModel SeizaSharpenModel;
+
+/*
  A compact immutable live-stack result for non-destructive output. It owns
  only the finalized mean, reference headers, scalar frame counts, and the
  small source-path ledger. Release it with
@@ -5350,6 +5356,126 @@ void seiza_denoised_free(SeizaDenoised *denoised);
 void seiza_noise_model_free(SeizaNoiseModel *model);
 
 /*
+ Open a sharpening model.
+
+ `model` names an installed model or a bundle's directory; null means the one
+ installed sharpening model. `options_json` is as [`seiza_noise_model_open`]
+ takes it. Release the result with [`seiza_sharpen_model_free`].
+
+ # Safety
+ `model` and `options_json` must be null or NUL-terminated strings. When
+ non-null, `error_out` must point to writable storage for one pointer.
+ */
+SeizaSharpenModel *seiza_sharpen_model_open(const char *model,
+                                            const char *options_json,
+                                            char **error_out);
+
+/*
+ The backend an open sharpening model's body runs on, as a string the caller
+ frees with `seiza_string_free`.
+
+ # Safety
+ `model` must be a live [`SeizaSharpenModel`]. When non-null, `error_out`
+ must point to writable storage for one pointer.
+ */
+char *seiza_sharpen_model_backend(const SeizaSharpenModel *model, char **error_out);
+
+/*
+ The side of the tiles an open sharpening model runs.
+
+ # Safety
+ `model` must be null or a live [`SeizaSharpenModel`].
+ */
+size_t seiza_sharpen_model_tile(const SeizaSharpenModel *model);
+
+/*
+ Sharpen an image, which is all the model needs: a linear stack from any
+ stacker, NaN where nothing covers a pixel. Its PSF and how that changes over
+ the field, its point sources and its noise are measured from it. Samples are
+ row-major with channels interleaved, and each channel is measured and run
+ alone. The sharpened image is written to `out`, laid out as `data` is.
+
+ `options_json` may be null, or hold `stars`, the share of its width every
+ star is brought to, `rest`, the share asked of everything that is not a
+ star, and `rolloff`, how hard the finest part of the change is held back
+ where it lies under the noise. A share is above 0 and at most 1, which
+ leaves things as they are; left out, it is the model's own. No star is asked
+ to be narrower than the model's floor. Where the model's card has a scaled
+ pass, an image whose stars are far wider than the model was trained on is
+ also sharpened binned, toward the width the card names, and the two runs
+ are put together by scale: `binnedRest` is the share asked of everything
+ that is not a star there (left out, the card's), and `fullSizeOnly`, true,
+ keeps a run at full size.
+
+ Returns what ran, as JSON the caller frees with `seiza_string_free`:
+ `model`, `sha256` (the body graph's), `cardSha256`, `backend`, `precision`,
+ `tile`, `stars`, `rest`, `rolloff`, `binnedRest` (null where the card has
+ no scaled pass or the run was held to full size), `fullSizeOnly`, and
+ `channels`, each with its `background`, `noise`, `psfRows` and
+ `psfColumns` (the nodes its PSF field was sampled at), `psfStars`,
+ `psfGlobal` (too few stars left one PSF for the whole image), `psfWidthPx`,
+ `points` and `binned`, how many pixels a side it was also sharpened binned
+ by (1: not at all). A host keys cached results on `cardSha256`, `backend`,
+ `precision`, `stars`, `rest`, `rolloff`, `binnedRest`, `fullSizeOnly` and
+ [`seiza_model_output_version`]. An image with too few stars to measure a
+ PSF from is refused, and so is an `out` that overlaps `data`. Where only
+ the binned image has too few, the channel is sharpened at full size alone.
+
+ # Safety
+ `model` must be a live [`SeizaSharpenModel`] no other thread is using,
+ `data` must point to `data_length` floats and `out` to `out_length` writable
+ floats, and the two must not overlap. `options_json` must be null or a
+ NUL-terminated string. `progress` may be null, and is passed `context`.
+ `cancel` must be null or a live [`SeizaCancelSignal`] retained until this
+ call returns. When non-null, `error_out` must point to writable storage for
+ one pointer.
+ */
+char *seiza_sharpen_model_sharpen(SeizaSharpenModel *model,
+                                  const float *data,
+                                  size_t data_length,
+                                  size_t width,
+                                  size_t height,
+                                  size_t channels,
+                                  const char *options_json,
+                                  float *out,
+                                  size_t out_length,
+                                  SeizaModelProgressCallback progress,
+                                  const SeizaCancelSignal *cancel,
+                                  void *context,
+                                  char **error_out);
+
+/*
+ Sharpen a full linear FITS or XISF file and write the result as linear
+ 32-bit FITS, with the input's geometry and cards that say what ran.
+ `options_json` and the report returned, which the caller frees with
+ `seiza_string_free`, are as [`seiza_sharpen_model_sharpen`] takes and gives
+ them.
+
+ # Safety
+ `model` must be a live [`SeizaSharpenModel`] no other thread is using.
+ `input` and `output` must be NUL-terminated paths, and `options_json` null
+ or a NUL-terminated string. `progress`, `cancel`, `context` and `error_out`
+ follow [`seiza_sharpen_model_sharpen`].
+ */
+char *seiza_sharpen_model_sharpen_file(SeizaSharpenModel *model,
+                                       const char *input,
+                                       const char *output,
+                                       const char *options_json,
+                                       SeizaModelProgressCallback progress,
+                                       const SeizaCancelSignal *cancel,
+                                       void *context,
+                                       char **error_out);
+
+/*
+ Release an open sharpening model.
+
+ # Safety
+ `model` must be null or a pointer from [`seiza_sharpen_model_open`] that has
+ not already been freed.
+ */
+void seiza_sharpen_model_free(SeizaSharpenModel *model);
+
+/*
  Which ONNX Runtime this process loaded and which backends run here, as JSON
  the caller frees with `seiza_string_free`: `runtime`, with its `path` and
  `version`, or null when no library was found; and `backends`, each with
@@ -5365,9 +5491,16 @@ char *seiza_model_backends_json(const char *options_json, char **error_out);
 
 /*
  The installed models, as a JSON array the caller frees with
- `seiza_string_free`, each with `name`, `path`, `task`, `cardSha256`,
- `noiseMap`, `holes` (as [`seiza_denoised_report_json`] gives them) and
- `precisions`. `store` may be null for the default store.
+ `seiza_string_free`, each with `name`, `path`, `task` (`denoise` or
+ `sharpen`), `cardSha256`, `noiseMap`, `holes` (as
+ [`seiza_denoised_report_json`] gives them), `sharpen` and `precisions`.
+ `sharpen` is null for a noise model; for a sharpening model it holds
+ `stars` and `rest`, the shares a run takes when told none, `floorPx`, the
+ narrowest in pixels a star is asked to be, `sharpest`, the sharpest share
+ the model was trained to be asked for, and, for a card with a scaled pass,
+ `scaledPx`, the stars' width an image is binned toward, and `binnedRest`,
+ the share asked of the rest there when told none (both null without one).
+ `store` may be null for the default store.
 
  # Safety
  `store` must be null or a NUL-terminated string. When non-null, `error_out`
@@ -5451,8 +5584,11 @@ char *seiza_model_download_json(const char *name,
                                 char **error_out);
 
 /*
- Check a model's graphs against its card. `model` is as for
- [`seiza_noise_model_open`]; `store` may be null for the default store.
+ Check models' graphs, and a sharpening model's encoder, against their
+ cards. `model` names an installed model or a bundle's directory; null
+ checks every installed model, noise and sharpening alike, and is true when
+ none is installed. The first that does not match is the error. `store` may
+ be null for the default store.
 
  # Safety
  `model` and `store` must be null or NUL-terminated strings. When non-null,
