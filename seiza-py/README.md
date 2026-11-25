@@ -635,6 +635,23 @@ header["headers"]["EXPTIME"]   # 300.0
 header["history"]              # ["Calibrated with a master dark", ...]
 ```
 
+`read_master_info` reads what a stacked image records of its integration, from
+PixInsight, Siril, Astro Pixel Processor and Seiza files:
+
+```python
+info = seiza.read_master_info("masterLight.xisf")
+info.frames.value                   # 38
+info.frames.source                  # "ImageIntegration.numberOfImages"
+info.total_exposure_seconds.value   # 11400.0
+info.total_exposure_seconds.source  # "EXPTIME × frames"
+info.notes                          # what to know before relying on the values
+```
+
+The others are `sub_exposure_seconds`, `filter`, `integrator` and
+`drizzle_scale`. Programs record these in different places, and some in ways
+that contradict each other, so each has its `source`, and one that cannot be
+told is `None`. Seiza's own stacks record a frame count but no exposure.
+
 ## Background extraction
 
 Fit a compact background model to a C-contiguous mono `(H, W)` or RGB
