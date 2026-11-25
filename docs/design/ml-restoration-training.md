@@ -2634,6 +2634,35 @@ In order, each only if the one before leaves a gap at the rims:
        next lever is the overlap itself, shown whole at the deep
        stack's strength.
 
+       S98 is S97 with that: a second pairs bank of 132 windows of 640 px
+       about the overlap, every one holding it whole, of the deep stack's
+       pairs and the six-night stack's, at a sixth of the pairs' draws,
+       about 35 a window. Row 2's overlap reads 1.35 between 8 and 16 px
+       and 1.14 between 16 and 32 (S97 1.20 and 1.07, the goal 1.32 and
+       1.21), asked 0.35 1.33 and 1.14; the whole crop 1.32 and 1.17 (the
+       goal 1.21 and 1.20). So the windows were what held the 8 to 16 px
+       band, and half of what held the 16 to 32. But the lift is not held
+       to row 2: the six other Trunk windows, asked 0.35, read 1.15 to
+       1.28 and 1.13 to 1.20 (S97 1.10 to 1.16 and 1.07 to 1.11, the goal
+       1.04 to 1.15 and 1.05 to 1.15), past the goal in all six. NGC
+       6820's dark lanes (held out) read 1.20 and 1.10 in the right half
+       (S97 1.16 and 1.08, the goal 1.13 and 1.11) and 1.22 and 1.12 over
+       the crop (the goal 1.10 and 1.09): the broad band moves at last and
+       the one below it passes the goal by more. Its other two crops read
+       1.27 and 1.11 (the goal 1.09 and 1.07) and 1.13 and 1.06 (1.05 and
+       1.07). The rims near the goal's: the Trunk's lit side 4.75 and 5.71
+       at 4 and 6 px (S97 4.26 and 5.18, the goal 5.41 and 6.46), its dark
+       side -0.98 and -0.83 at -4 and -2 (the goal -1.00 and -0.99); NGC
+       6820's lit side 5.31 (S97 5.27, the goal 7.18). Stars hold:
+       ellipticity 0.043 on the Trunk with 17% longer than they came (S97
+       0.041 and 21%), 0.059 on the California (S97 0.064), 0.024 on NGC
+       6820 (S97 0.028). What it costs: detail inside the Trunk's cloud
+       1.20 between 4 and 8 px (S97 1.09, the goal 1.13), knots along the
+       rims 2.82% between 1.5 and 4 px (S97 2.63%, the goal 1.93%), dots
+       101 per Mpx above 4 on the Trunk (S97 93, the goal 103) and 212 on
+       NGC 6820 (S97 194, the goal 161). Grain is S97's or a little more
+       kept (0.78 on the Trunk's sky, S97 0.75).
+
        The user, 2026-11-24: the model "seems to introduce more noise at
        more sharpening, but also smooths the image at less". Both are so,
        and the second is a fault of the trainer's. A pairs bank's target
