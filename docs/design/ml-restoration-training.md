@@ -2719,6 +2719,50 @@ In order, each only if the one before leaves a gap at the rims:
        left 0.89 and raised 1.13. The sheets' usual ask, 0.5, is between
        the two.
 
+       S99 is S98 with the pairs moved at their stars alone, and nothing
+       else. The grain is the input's, 1.00 at the pixel on the Trunk's
+       sky and nebula and on NGC 6820's (S98 0.78 and 0.76), as the
+       goal's, and the cloud stays where it is: within 0.003 px of the
+       input's under 6 px on both fields (S98 0.57 and 0.78). On halves
+       the noise between 1 and 2 px is 1.00 at every ask, and the dip near
+       equal asks is a third of S98's (1.06 between 8 and 16 px on the
+       Trunk's faintest third at 0.45, 1.14 at 0.55 and 1.13 at 0.35). The
+       rims come to the goal's: the Trunk's lit side 5.30 and 6.38 at 4
+       and 6 px (S98 4.75 and 5.71, the goal 5.41 and 6.46), its dark side
+       -0.97 and -0.91 at -4 and -2 (-1.00 and -0.99), its steepest slope
+       2.10 times the input's (S98 1.95, the goal 2.21) over 3.88 px (4.11
+       and 3.74); NGC 6820's lit side 5.86 at 4 px (S98 5.31, the goal
+       7.18), asked 0.35 5.96, its dark side the goal's. Row 2's overlap
+       reads 1.32 between 8 and 16 px and 1.15 between 16 and 32 (the goal
+       1.32 and 1.21), the whole crop 1.26 and 1.17 (1.21 and 1.20), and
+       the detail between 2 and 4 px, which no run had kept at the usual
+       ask, 1.03 (S98 0.99, the goal 1.01). Stars hold: ellipticity 0.038
+       on the Trunk (S98 0.043, the goal 0.030) with 19% longer than they
+       came (21% of the goal's), 0.058 on the California, 0.022 on NGC
+       6820; the squares' test is level.
+
+       The overshoots shrink but stay. NGC 6820's dark lanes (held out)
+       read 1.16 and 1.10 over the crop at 8 to 16 and 16 to 32 px (S98
+       1.22 and 1.12, the goal 1.10 and 1.09) and 1.14 and 1.08 in the
+       right half (1.13 and 1.11); the first crop 1.18 and 1.09 (the goal
+       1.09 and 1.07), the third 1.05 and 1.03 (1.05 and 1.07). The six
+       other Trunk windows, asked 0.35, read 1.07 to 1.24 and 1.08 to 1.19
+       (the goal 1.04 to 1.15 and 1.05 to 1.15). Inside the cloud 4 to
+       8 px is 1.19 on the Trunk (the goal 1.13) and 1.13 on NGC 6820
+       (1.09). Knots along the rims are 2.72% between 1.5 and 4 px on the
+       Trunk (S98 2.82%, the goal 1.93%) and 1.80% on NGC 6820 (2.14% and
+       1.30%). Dots inside the Trunk's cloud rise to 125 per Mpx above 4
+       at the usual ask, now that its noise is kept (S98 101, the goal
+       103), and fall at 0.35 to 130 (S98 182); NGC 6820 has 191 and 196
+       (S98 212 and 243, the goal 161). And the bands' lift still raises
+       the noise in them with the structure, 1.10 at an ask of 0.75 to 1.17 at
+       0.25 between 8 and 16 px on the Trunk's faintest third and 1.25 to
+       1.39 on its brightest.
+
+       So most of what the runs since S73 read as a limit of the model at
+       fine scales was this fault, and numbers of theirs under 6 px are
+       not to be compared with later runs'.
+
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
    taught that clarity is asked for at a ratio of 0, read from the
