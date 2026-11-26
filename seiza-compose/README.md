@@ -4,7 +4,7 @@ Color composition for astrophotography: registered mono stacks combined into
 a color picture, Gaia color calibration, narrowband balance, and star layers.
 The channels are `seiza_stacking::LinearImage`s, as stacking makes them.
 
-These routines were part of `seiza-stacking` through Seiza 0.57; their behavior did not
+These routines were in `seiza-stacking` up to its 0.65 release; their behavior did not
 change when they moved. `OUTPUT_VERSION` names the release of this crate
 whose output a build reproduces, so a host that caches compositions keys
 them on it.
@@ -34,7 +34,7 @@ uncalibrated. `transform_wcs` carries a reference frame's solution through
 registration, a turn and a crop to a composed image. See the [colour
 calibration design](../docs/design/color-calibration.md).
 The composition functions themselves require aligned inputs. File-oriented
-callers can use `Registrar` plus `resample_to_reference`; the CLI does this
+callers can use `seiza-stacking`'s `Registrar` and `resample_to_reference`; the CLI does this
 automatically for every non-reference filter stack. `ColorOptions` controls
 normalization and declares whether inputs are linear or already display-
 referred. This lets an embedding application independently stretch each mono

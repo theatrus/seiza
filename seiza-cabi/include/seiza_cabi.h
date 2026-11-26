@@ -74,8 +74,9 @@
  *     state and remain valid only until its next mutable call, finish, or free.
  *   - const float* / uint32_t* from seiza_stack_snapshot_* point INTO the
  *     immutable SeizaStackSnapshot and dangle when the snapshot is freed.
- *   - const char* from seiza_core_version, seiza_stacking_output_version and
- *     seiza_stretch_output_version is static and is never freed.
+ *   - const char* from seiza_core_version, seiza_stacking_output_version,
+ *     seiza_compose_output_version and seiza_stretch_output_version is static
+ *     and is never freed.
  *   - the `json` argument to a SeizaCatalogSetupProgressCallback is valid only
  *     for the duration of that one callback; copy it if you need it afterward.
  *   - the pixels a SeizaParallaxFrameCallback receives, and the JSON a
@@ -680,6 +681,15 @@ const char *seiza_core_version(void);
  `seiza_core_version`: it moves only when that output changes. The string is static and is never freed.
  */
 const char *seiza_stacking_output_version(void);
+
+/*
+ The `seiza-compose` crate version, not the Seiza release, whose color
+ composition, color calibration, narrowband balance and star layer output
+ this library reproduces. Key cached color pictures on it as well as on
+ `seiza_stacking_output_version`; it moves only when that output changes.
+ The string is static and is never freed.
+ */
+const char *seiza_compose_output_version(void);
 
 /*
  The `seiza-stretch` crate version, not the Seiza release, whose stretch

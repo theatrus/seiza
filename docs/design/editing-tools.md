@@ -63,7 +63,7 @@ test from its first PR, and follows the same rules as stacking and stretching,
 because hosts will cache its previews. Keeping it out of `seiza-stretch` means
 a change to a curve tool does not invalidate cached stretches.
 
-The star-layer tools stay in `seiza-stacking`, next to `star_stretch` and
+The star-layer tools go in `seiza-compose`, next to `star_stretch` and
 `narrowband_balance`, which already handle star layers. The measurements go
 in `seiza-analysis`, which owns the stack reports. HDR and comet stacking go
 in `seiza-stacking`.
@@ -160,7 +160,7 @@ by the plan. `StructureRemover` already implements this decomposition.
   pixel updated. Crops already update `CRPIX` in colour composition; this
   makes that a general operation.
 
-### Star tools (`seiza-stacking`)
+### Star tools (`seiza-compose`)
 
 - **Linear star reduction.** The display path already erodes a screened star
   layer. In the linear domain, each detected star can instead be re-rendered

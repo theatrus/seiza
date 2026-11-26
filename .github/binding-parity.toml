@@ -603,8 +603,11 @@ objects = [
 "seiza-parallax::parse_label" = { none = "the CLI's text form of a label; the C ABI takes labels as JSON" }
 "seiza-parallax::parse_frame_size" = { none = "the C ABI reads sizes through parse_frame_size_or_shape" }
 
-# stacking
+# compose
 "seiza-compose::ColorCalibration::apply" = { none = "C hosts keep only the gains and offsets, so seiza_color_calibration_apply calls apply_color_gains, which apply uses, on the caller's buffer" }
+"seiza-compose::covered_region" = { none = "crop_report gives the region and more; the C ABI calls crop_report" }
+
+# stacking
 "seiza-stacking::LiveStacker::effective_maximum_drift_pixels" = { none = "part of registration" }
 "seiza-stacking::LiveStacker::with_expanding_reference" = { none = "the C ABI opens from paths (open_fits_expanding)" }
 "seiza-stacking::LiveStacker::open_fits_with_reference_image" = { none = "the C ABI's call uses open_fits_with_reference_image_candidates, with one candidate" }
@@ -619,7 +622,6 @@ objects = [
 "seiza-stacking::drizzle_reference_headers" = { none = "the C drizzle result carries its reference headers already" }
 "seiza-stacking::rescaled_reference_headers" = { none = "binned stacks and full-resolution reintegrations carry their reference headers already rescaled" }
 "seiza-stacking::integrate_registered_frames" = { none = "integrate_registered_frames_banded, which both bindings call, falls back to it when the system temporary directory cannot hold the frames" }
-"seiza-compose::covered_region" = { none = "crop_report gives the region and more; the C ABI calls crop_report" }
 "seiza-stacking::reference_score" = { none = "choose_reference scores each frame; the C ABI calls choose_reference" }
 "seiza-stacking::resample_to_reference" = { none = "a registration building block the stacker uses" }
 "seiza-stacking::resample_to_reference_affine" = { none = "a registration building block the stacker uses" }
@@ -1045,6 +1047,7 @@ seiza_cancel_signal_free = { none = "frees a C handle; Python's garbage collecto
 seiza_string_free = { none = "frees a string the C ABI returned; Python manages its own memory" }
 seiza_core_version = "__version__"
 seiza_stacking_output_version = "STACKING_OUTPUT_VERSION"
+seiza_compose_output_version = "COMPOSE_OUTPUT_VERSION"
 seiza_stretch_output_version = "STRETCH_OUTPUT_VERSION"
 seiza_external_exchange_version = "EXTERNAL_EXCHANGE_VERSION"
 

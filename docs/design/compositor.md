@@ -10,7 +10,7 @@ A color picture is made in two places today. PSF Guard's color previews call
 `combine_rgb`, `combine_lrgb` and `combine_narrowband`, which are fixed
 recipes over whole channels. PSF Studio, its color editor, blends stretched
 inputs as layers, with masks, groups, heals and finishing steps, on the GPU,
-and has its own CPU copy of those passes for exports. Two renderers drift:
+and has its own CPU copy of those passes for exports. With two renderers,
 the same setup gives two different pictures, and every fix is made twice.
 
 So Seiza gets one authoritative renderer: a compositor that takes a
@@ -47,7 +47,7 @@ A `Picture` lists:
   plans), Tone and color, curves and saturation, heals.
 
 A pixel any layer's input does not cover is not covered in the output: it
-is `NaN`, as `combine_*` give today.
+is `NaN`, as `combine_*` return today.
 
 ## The recipes as pictures
 

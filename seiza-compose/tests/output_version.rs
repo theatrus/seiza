@@ -7,8 +7,9 @@
 //! the version, and never loosen `TOLERANCE`.
 
 use seiza_compose::{
-    ColorComposition, ColorCrop, ColorNormalization, ColorOptions, ForaxxOptions,
-    NarrowbandPalette, combine_lrgb, combine_narrowband, combine_rgb, combine_super_rgb,
+    ColorComposition, ColorCrop, ColorNormalization, ColorOptions, ColorTransfer, ForaxxOptions,
+    NarrowbandMatrix, NarrowbandMix, NarrowbandPalette, combine_lrgb, combine_narrowband,
+    combine_narrowband_matrix, combine_rgb, combine_super_lrgb, combine_super_rgb,
 };
 use seiza_stacking::LinearImage;
 
@@ -41,8 +42,32 @@ fn the_output_version_is_a_release() {
     assert_eq!(parts.len(), 3, "{}", seiza_compose::OUTPUT_VERSION);
 }
 
-#[path = "../../seiza-stacking/tests/common/continuum.rs"]
-mod continuum_measurement_fixture;
+/// A narrowband and a broadband field of 32 stars on a flat sky, as the
+/// continuum fits in `seiza-stacking` measure them.
+fn star_fields() -> (LinearImage, LinearImage) {
+    let (width, height) = (400, 240);
+    let mut n = vec![10.0_f32; width * height];
+    let mut b = n.clone();
+    for i in 0..32 {
+        let p = [30.0 + (i % 8) as f64 * 45.0, 30.0 + (i / 8) as f64 * 50.0];
+        for y in (p[1] as usize - 12)..=(p[1] as usize + 12) {
+            for x in (p[0] as usize - 12)..=(p[0] as usize + 12) {
+                let r2 = (x as f64 - p[0]).powi(2) + (y as f64 - p[1]).powi(2);
+                let flux = 1500.0 + 50.0 * i as f64;
+                n[y * width + x] += (flux / (2.0 * std::f64::consts::PI * 1.6_f64.powi(2))
+                    * (-r2 / (2.0 * 1.6_f64.powi(2))).exp())
+                    as f32;
+                b[y * width + x] += (flux / (0.35 * 2.0 * std::f64::consts::PI * 1.4_f64.powi(2))
+                    * (-r2 / (2.0 * 1.4_f64.powi(2))).exp())
+                    as f32;
+            }
+        }
+    }
+    (
+        LinearImage::new(width, height, 1, n).unwrap(),
+        LinearImage::new(width, height, 1, b).unwrap(),
+    )
+}
 
 /// A mono channel of a faint sky with structure and a few bright stars, the
 /// same for every run. `gap` leaves one pixel uncovered.
@@ -241,6 +266,91 @@ const COMBINE_FORAXX_SHO: &[f64] = &[
     2.0267820e-1,
     2.0416515e-1,
 ];
+const COMBINE_RGB_BOUNDS: &[f64] = &[
+    8.2225182e1,
+    9.4104822e1,
+    9.5219168e1,
+    1.0000000e0,
+    2.4000000e1,
+    1.8000000e1,
+    3.6044863e-1,
+    4.9007085e-1,
+    4.2288914e-1,
+    1.0000000e0,
+    1.0000000e0,
+    1.0000000e0,
+    1.0187767e-1,
+    5.1039554e-2,
+    2.7958962e-1,
+];
+const COMBINE_RGB_DISPLAY: &[f64] = &[
+    1.0211423e2,
+    8.5419818e1,
+    6.5073843e1,
+    1.0000000e0,
+    2.4000000e1,
+    1.8000000e1,
+    3.8643578e-1,
+    3.9349329e-1,
+    2.5960705e-1,
+    9.4999999e-1,
+    7.5999999e-1,
+    5.6999999e-1,
+    1.5858643e-1,
+    7.7943780e-2,
+    1.8253492e-1,
+];
+const COMBINE_SUPER_LRGB: &[f64] = &[
+    3.1058643e2,
+    3.2691467e2,
+    4.6069357e2,
+    1.0000000e0,
+    2.4000000e1,
+    1.8000000e1,
+    1.1611513e0,
+    1.5787170e0,
+    1.3622975e0,
+    4.0000000e0,
+    4.0000000e0,
+    4.0000000e0,
+    6.9363832e-1,
+    3.4750491e-1,
+    1.9035975e0,
+];
+const COMBINE_MATRIX: &[f64] = &[
+    8.9230120e1,
+    9.1511547e1,
+    9.6464717e1,
+    1.0000000e0,
+    2.4000000e1,
+    1.8000000e1,
+    2.7156457e-1,
+    1.9999333e-1,
+    2.3369338e-1,
+    1.0000000e0,
+    1.0000000e0,
+    1.0000000e0,
+    1.4194140e-1,
+    1.6832203e-1,
+    1.8975976e-1,
+];
+const COMBINE_FORAXX_SHO_DISPLAY: &[f64] = &[
+    8.6211399e1,
+    4.7538344e1,
+    4.4591856e1,
+    1.0000000e0,
+    2.4000000e1,
+    1.8000000e1,
+    1.9564444e-1,
+    1.0221745e-1,
+    9.9926628e-2,
+    5.8500451e-1,
+    6.7725003e-1,
+    3.8000000e-1,
+    1.4591879e-1,
+    9.3089581e-2,
+    9.2139825e-2,
+];
 const COMBINE_FORAXX_HOO: &[f64] = &[
     1.0246217e2,
     1.0357173e2,
@@ -300,6 +410,73 @@ fn rgb_compositions_keep_their_output() {
         "COMBINE_SUPER_RGB",
         &summary(&combine_super_rgb(&r, &g, &b, &options).unwrap()),
         COMBINE_SUPER_RGB,
+    );
+    check(
+        "COMBINE_SUPER_LRGB",
+        &summary(&combine_super_lrgb(&l, &r, &g, &b, &options).unwrap()),
+        COMBINE_SUPER_LRGB,
+    );
+    let bounds = ColorOptions {
+        crop: ColorCrop::Bounds,
+        ..ColorOptions::default()
+    };
+    check(
+        "COMBINE_RGB_BOUNDS",
+        &summary(&combine_rgb(&r, &g, &b, &bounds).unwrap()),
+        COMBINE_RGB_BOUNDS,
+    );
+    let display = ColorOptions {
+        normalization: ColorNormalization::None,
+        input_transfer: ColorTransfer::DisplayReferred,
+        ..ColorOptions::default()
+    };
+    check(
+        "COMBINE_RGB_DISPLAY",
+        &summary(&combine_rgb(&r, &g, &b, &display).unwrap()),
+        COMBINE_RGB_DISPLAY,
+    );
+}
+
+#[test]
+fn custom_and_display_narrowband_compositions_keep_their_output() {
+    let (ha, oiii, sii) = (
+        channel(5, 1.0, false),
+        channel(6, 0.4, false),
+        channel(7, 0.3, true),
+    );
+    let mix = |ha: f32, oiii: f32, sii: f32| NarrowbandMix { ha, oiii, sii };
+    let matrix = NarrowbandMatrix {
+        red: mix(0.6, 0.0, 0.4),
+        green: mix(0.3, 0.7, 0.0),
+        blue: mix(0.0, 0.9, 0.1),
+    };
+    check(
+        "COMBINE_MATRIX",
+        &summary(
+            &combine_narrowband_matrix(&ha, &oiii, Some(&sii), matrix, &ColorOptions::default())
+                .unwrap(),
+        ),
+        COMBINE_MATRIX,
+    );
+    let display = ColorOptions {
+        normalization: ColorNormalization::None,
+        input_transfer: ColorTransfer::DisplayReferred,
+        ..ColorOptions::default()
+    };
+    check(
+        "COMBINE_FORAXX_SHO_DISPLAY",
+        &summary(
+            &combine_narrowband(
+                &ha,
+                &oiii,
+                Some(&sii),
+                NarrowbandPalette::ForaxxSho,
+                &display,
+                &ForaxxOptions::default(),
+            )
+            .unwrap(),
+        ),
+        COMBINE_FORAXX_SHO_DISPLAY,
     );
 }
 
@@ -395,7 +572,7 @@ fn narrowband_display_modes_keep_their_output() {
 #[test]
 fn star_excluded_balance_statistics_keep_their_output() {
     use seiza_compose::{NarrowbandBalanceOptions, balance_narrowband};
-    let (n, b, _, _, _) = continuum_measurement_fixture::profile_field();
+    let (n, b) = star_fields();
     let mut data = Vec::new();
     for (n, b) in n.data.iter().zip(&b.data) {
         data.extend_from_slice(&[*n / 1000.0, *b / 2500.0, *n / 2000.0]);

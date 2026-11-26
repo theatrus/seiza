@@ -385,7 +385,7 @@ and call it with `s = 1/b`:
   `B_DMAX` scale by `s`.
 - Drizzling a binned stack at scale `b` composes back to the native WCS.
 
-`seiza_stacking::transform_wcs` (`color_calibration.rs:530`, exported as
+`seiza_compose::transform_wcs` (`seiza-compose/src/color_calibration.rs`, exported as
 `seiza_wcs_transform_json`) refuses SIP under anything but a translation.
 The header rewrite above handles SIP, so the stack never needs it.
 

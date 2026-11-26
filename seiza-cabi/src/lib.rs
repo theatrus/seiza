@@ -1667,6 +1667,17 @@ pub extern "C" fn seiza_stacking_output_version() -> *const c_char {
     static_c_string(&TEXT, seiza_stacking::OUTPUT_VERSION)
 }
 
+/// The `seiza-compose` crate version, not the Seiza release, whose color
+/// composition, color calibration, narrowband balance and star layer output
+/// this library reproduces. Key cached color pictures on it as well as on
+/// `seiza_stacking_output_version`; it moves only when that output changes.
+/// The string is static and is never freed.
+#[unsafe(no_mangle)]
+pub extern "C" fn seiza_compose_output_version() -> *const c_char {
+    static TEXT: OnceLock<CString> = OnceLock::new();
+    static_c_string(&TEXT, seiza_compose::OUTPUT_VERSION)
+}
+
 /// The `seiza-stretch` crate version, not the Seiza release, whose stretch
 /// output this library reproduces. Key cached stretched images on it; it
 /// moves only when that output changes.
@@ -11131,6 +11142,10 @@ mod tests {
         assert_eq!(
             read(seiza_stretch_output_version()),
             seiza_stretch::OUTPUT_VERSION
+        );
+        assert_eq!(
+            read(seiza_compose_output_version()),
+            seiza_compose::OUTPUT_VERSION
         );
         assert_eq!(
             seiza_external_exchange_version(),

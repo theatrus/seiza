@@ -218,9 +218,9 @@ pub const EXTERNAL_EXCHANGE_VERSION: u32 = 4;
 /// or registration produces for the same inputs and options, in any mode and
 /// not only the defaults, sets it to this crate's next minor version, whether
 /// the change is in this crate or in a crate it calls. A new option whose
-/// default leaves the output alone does not move it. Colour calibration
-/// ([`calibrate_color_image`], [`calibrate_and_stretch`]) is outside it: no
-/// fixture holds that output yet. `tests/output_version.rs` fails when its
+/// default leaves the output alone does not move it. Color composition,
+/// color calibration and star layers are in `seiza-compose`, whose own
+/// `OUTPUT_VERSION` covers them. `tests/output_version.rs` fails when its
 /// fixtures' output changes, and `AGENTS.md` gives the steps.
 ///
 /// One known difference: on an expanded canvas with a lens or quadratic

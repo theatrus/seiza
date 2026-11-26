@@ -24,6 +24,11 @@ STACKING_OUTPUT_VERSION: str
 """The ``seiza-stacking`` crate version, not the Seiza release, whose stacking,
 master building and registration output this build reproduces. Key cached stacks and masters on it rather than on
 ``__version__``: it moves only when that output changes."""
+COMPOSE_OUTPUT_VERSION: str
+"""The ``seiza-compose`` crate version, not the Seiza release, whose color
+composition, color calibration, narrowband balance and star layer output this
+build reproduces. Key cached color pictures on it as well as on
+``STACKING_OUTPUT_VERSION``: it moves only when that output changes."""
 STRETCH_OUTPUT_VERSION: str
 """The ``seiza-stretch`` crate version, not the Seiza release, whose stretch
 output this build reproduces. Key cached stretched images on it; it moves only
