@@ -2888,6 +2888,49 @@ In order, each only if the one before leaves a gap at the rims:
        new multi-night stacks, 27% from the broad pairs bank and 14% from
        the stacks whose goal lifts most.
 
+       S102 is the first run to move the noise. Its loss on the held-out
+       pairs fell from 0.636 to 0.516 over its 30,000 steps, its other
+       validation loss as S99's (1.888), its training loss higher and
+       noisier than S101's (0.95) for the many fields it draws. On NGC
+       6820's halves asked 0.35 it raises the noise between 8 and 16 px by
+       1.17, 1.24 and 1.27 for structure 1.31, 1.37 and 1.20, where S101
+       raised 1.20, 1.30 and 1.34 for 1.32, 1.39 and 1.22 (the goal 1.17,
+       1.18 and 1.16 for 1.32, 1.34 and 1.17): in the faintest third the
+       goal's own trade. On the Trunk's halves, 1.08, 1.15 and 1.30 for
+       1.09, 1.28 and 1.45 (S101 1.18, 1.25 and 1.36 for 1.20, 1.34 and
+       1.47): its faintest third holds back more than the goal (1.19). At
+       the usual ask the Trunk's knots and dots are S101's (2.46%, 105 per
+       Mpx), its interior a little under S101's (1.30 between 4 and 8 px,
+       the goal 1.41) and its lit rim +5.07 (+5.41). On SNR G132 its rim
+       now follows the goal's (lit +0.46 and +0.93, the goal +0.49 and
+       +0.73) where S101's sat 0.3 under the input throughout, with knots
+       of 9.69% (the goal 9.85%). The Question Mark Galaxy's stars, 8 to 9
+       px across, are S101's and the goal's (ellipticity 0.025). Narrow
+       stars come tighter than the goal's and less round: on the
+       California, 2.3 px, width 0.616 (the goal 0.650) and ellipticity
+       0.066 from 0.092 (the goal 0.045), 11% of its stars less round than
+       they came in (3%); on SNR G132 0.598, 0.076 and 34% (0.634, 0.052
+       and 22%).
+       Tighter stars at the strong ask are wanted; the roundness is
+       recorded, the likeliest source the multi-night and lift stacks' wide
+       stars.
+
+       What noise S102 still adds between 8 and 16 px can be held back
+       after the model (`sheet-sharpen --hold-noise`, `noise_hold_step`;
+       in the runtime as `SharpenOptions::hold_noise`): the run's change
+       between 4 and 16 px is kept by its power over 8 px, over that and
+       the square of so many times the noise the input's would have in
+       that band were it white. At 0.5, on NGC 6820's halves asked 0.35,
+       the noise comes to 1.11, 1.16 and 1.17 and the shared structure to
+       1.29, 1.35 and 1.20: the goal's trade in every third. On the Trunk
+       it costs more of the structure (the middle third 1.28 to 1.23).
+
+       S102 is published as `sharpen-v1-s102`, the latest sharpening model,
+       its default ask 0.46 for stars and 0.35 for the rest: the runs since
+       S99 give less at 0.45 than at 0.55 or 0.35 (S102's faintest third on
+       the Trunk 0.99 at 0.45), so the scaled pass's 0.45 is not the
+       default.
+
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
    taught that clarity is asked for at a ratio of 0, read from the
