@@ -3,16 +3,16 @@ use numpy::{PyArrayDyn, PyReadonlyArrayDyn};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyList};
-use seiza_fits::HeaderValue;
-use seiza_stacking::{
+use seiza_compose::{
     ChannelSamples, ColorComposition, ColorCrop, ColorNormalization, ColorOptions, CropReport,
-    ForaxxOptions, LrgbLuminance, NarrowbandMatrix, NarrowbandMix, NarrowbandPalette,
-    ReferenceRegion, RgbLuminance, combine_lrgb as compose_lrgb,
-    combine_narrowband as compose_narrowband,
+    ForaxxOptions, LrgbLuminance, NarrowbandMatrix, NarrowbandMix, NarrowbandPalette, RgbLuminance,
+    combine_lrgb as compose_lrgb, combine_narrowband as compose_narrowband,
     combine_narrowband_matrix as compose_narrowband_matrix, combine_rgb as compose_rgb,
     combine_super_lrgb as compose_super_lrgb, combine_super_rgb as compose_super_rgb,
     crop_report as report_crop, write_color_fits_f32,
 };
+use seiza_fits::HeaderValue;
+use seiza_stacking::ReferenceRegion;
 use std::path::PathBuf;
 
 fn color_error(error: seiza_stacking::Error) -> PyErr {
@@ -443,7 +443,7 @@ fn balance_narrowband<'py>(
     star_mask_radius: Option<f64>,
 ) -> PyResult<(Bound<'py, PyArrayDyn<f32>>, Bound<'py, PyDict>)> {
     let mut image = linear_image(image)?;
-    let options = seiza_stacking::NarrowbandBalanceOptions {
+    let options = seiza_compose::NarrowbandBalanceOptions {
         shadow_protection,
         oiii_boost,
         sii_boost,
@@ -452,7 +452,7 @@ fn balance_narrowband<'py>(
         star_mask_radius,
     };
     let report = py
-        .detach(|| seiza_stacking::balance_narrowband(&mut image, &options))
+        .detach(|| seiza_compose::balance_narrowband(&mut image, &options))
         .map_err(invalid)?;
     let report = crate::convert::to_python(py, &report)?.cast_into::<PyDict>()?;
     Ok((into_image_array(py, image)?, report))
@@ -469,7 +469,7 @@ fn screen_rgb_stars<'py>(
     let mut nebula = linear_image(nebula)?;
     let original = linear_image(original)?;
     let starless = linear_image(starless)?;
-    py.detach(|| seiza_stacking::screen_rgb_stars(&mut nebula, &original, &starless))
+    py.detach(|| seiza_compose::screen_rgb_stars(&mut nebula, &original, &starless))
         .map_err(invalid)?;
     into_image_array(py, nebula)
 }
@@ -487,7 +487,7 @@ fn screen_rgb_stars_reduced<'py>(
     let original = linear_image(original)?;
     let starless = linear_image(starless)?;
     py.detach(|| {
-        seiza_stacking::screen_rgb_stars_reduced(&mut nebula, &original, &starless, reduction)
+        seiza_compose::screen_rgb_stars_reduced(&mut nebula, &original, &starless, reduction)
     })
     .map_err(invalid)?;
     into_image_array(py, nebula)
@@ -505,7 +505,7 @@ fn stretch_rgb_stars<'py>(
     let original = linear_image(original)?;
     let starless = linear_image(starless)?;
     let image = py
-        .detach(|| seiza_stacking::stretch_rgb_stars(&original, &starless, amount))
+        .detach(|| seiza_compose::stretch_rgb_stars(&original, &starless, amount))
         .map_err(invalid)?;
     into_image_array(py, image)
 }
@@ -521,7 +521,7 @@ fn screen_rgb_star_layer<'py>(
 ) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
     let mut nebula = linear_image(nebula)?;
     let stars = linear_image(stars)?;
-    py.detach(|| seiza_stacking::screen_rgb_star_layer(&mut nebula, &stars, reduction))
+    py.detach(|| seiza_compose::screen_rgb_star_layer(&mut nebula, &stars, reduction))
         .map_err(invalid)?;
     into_image_array(py, nebula)
 }

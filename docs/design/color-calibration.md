@@ -1,6 +1,6 @@
 # Photometric colour calibration
 
-`seiza-stacking::color_calibration` sets an RGB image's channel gains from
+`seiza-compose`'s color calibration sets an RGB image's channel gains from
 Gaia DR3 star colours. Each isolated, unsaturated Gaia star is measured in R,
 G and B by aperture photometry; its instrumental colours, `−2.5 log10(R/G)`
 and `−2.5 log10(B/G)`, are fitted against Gaia BP−RP; and the fits, evaluated

@@ -3344,6 +3344,7 @@ dependencies = [
  "seiza-analysis",
  "seiza-background",
  "seiza-calibration",
+ "seiza-compose",
  "seiza-deconvolution",
  "seiza-fits",
  "seiza-image-io",
@@ -3399,6 +3400,7 @@ dependencies = [
  "seiza-analysis",
  "seiza-background",
  "seiza-calibration",
+ "seiza-compose",
  "seiza-deconvolution",
  "seiza-download",
  "seiza-draw",
@@ -3423,6 +3425,22 @@ dependencies = [
  "windows-sys 0.61.2",
  "winresource",
  "zstd",
+]
+
+[[package]]
+name = "seiza-compose"
+version = "0.1.0"
+dependencies = [
+ "rayon",
+ "seiza",
+ "seiza-fits",
+ "seiza-imgproc",
+ "seiza-stacking",
+ "seiza-stats",
+ "seiza-stretch",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

@@ -42,6 +42,7 @@ seiza-satellites = { path = "../seiza-satellites" }
 seiza-sources = { path = "../seiza-sources" }
 seiza-parallax = { path = "../seiza-parallax" }
 seiza-pipeline = { path = "../seiza-pipeline" }
+seiza-compose = { path = "../seiza-compose" }
 seiza-stacking = { path = "../seiza-stacking" }
 seiza-stars = { path = "../seiza-stars" }
 seiza-stretch = { path = "../seiza-stretch" }

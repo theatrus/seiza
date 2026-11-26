@@ -501,7 +501,7 @@ fn combine_lrgb_with_target(
             let r = rgb[0].sample(source);
             let g = rgb[1].sample(source);
             let b = rgb[2].sample(source);
-            let rgb_luminance = crate::image::rec709_luma(r, g, b);
+            let rgb_luminance = rec709_luma(r, g, b);
             let target_luminance = match (target, &l) {
                 (LrgbTarget::Replace { luminance_weight }, Some(l)) => (1.0 - luminance_weight)
                     .mul_add(rgb_luminance, luminance_weight * l.sample(source)),
@@ -1101,6 +1101,11 @@ fn validate_mono_set(images: &[(&str, &LinearImage)]) -> Result<()> {
     Ok(())
 }
 
+/// Rec.709 luma from linear RGB samples.
+fn rec709_luma(red: f32, green: f32, blue: f32) -> f32 {
+    0.2126_f32.mul_add(red, 0.7152_f32.mul_add(green, 0.0722 * blue))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1270,7 +1275,7 @@ mod tests {
         let result =
             combine_super_rgb(&mono(&[r]), &mono(&[g]), &mono(&[b]), &raw_options()).unwrap();
         let pixel = &result.image.data;
-        let output_luminance = crate::image::rec709_luma(pixel[0], pixel[1], pixel[2]);
+        let output_luminance = rec709_luma(pixel[0], pixel[1], pixel[2]);
         assert!((output_luminance - (r + g + b)).abs() < 1.0e-6);
         assert!((pixel[0] / pixel[1] - r / g).abs() < 1.0e-6);
         assert!((pixel[2] / pixel[1] - b / g).abs() < 1.0e-6);

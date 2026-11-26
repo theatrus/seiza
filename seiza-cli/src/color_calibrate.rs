@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
 use clap::Args;
-use seiza_fits::{HeaderValue, WriteHeaderCard};
-use seiza_stacking::{
+use seiza_compose::{
     ColorCalibration, ColorCalibrationOptions, ColorCalibrationOutcome, ColorCalibrationSkip,
     ColorCalibrationSkipReason, GaiaColorSource, GaiaColors, SOLAR_BP_RP, calibrate_and_stretch,
-    calibrate_color_image, neutralize_clipped, write_processed_image_fits_f32,
+    calibrate_color_image, neutralize_clipped,
 };
+use seiza_fits::{HeaderValue, WriteHeaderCard};
+use seiza_stacking::write_processed_image_fits_f32;
 use seiza_stretch::{ImageShape, StretchConfig, StretchParams, StretchStack};
 use std::path::{Path, PathBuf};
 

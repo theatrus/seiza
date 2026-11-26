@@ -458,7 +458,7 @@ impl PyWcs {
         translation_y: f64,
     ) -> PyResult<Self> {
         let ((a, b), (c, d)) = matrix;
-        seiza_stacking::transform_wcs(
+        seiza_compose::transform_wcs(
             &self.wcs,
             seiza_stacking::AffineTransform {
                 matrix: [[a, b], [c, d]],

@@ -102,12 +102,15 @@ waits for the index):
 seiza-stats  →  seiza-stretch  →  seiza-imgproc  →  seiza-fits  →  seiza-xisf
 →  seiza-image-ser  →  seiza-core  →  seiza-image-io  →  seiza-background
 →  seiza-calibration  →  seiza-sources  →  seiza-download  →  seiza
-→  seiza-satellites  →  seiza-stacking  →  seiza-pipeline  →  seiza-stars
+→  seiza-satellites  →  seiza-stacking  →  seiza-compose  →  seiza-pipeline  →  seiza-stars
 →  seiza-deconvolution  →  seiza-draw  →  seiza-parallax  →  seiza-analysis
 →  seiza-model  →  seiza-cabi  →  seiza-cli
 ```
 
 `seiza-model` sits before `seiza-cabi` and `seiza-cli`, which run its models.
+
+`seiza-compose` sits after `seiza-stacking`, whose `LinearImage` it composes, and
+before `seiza-cabi` and `seiza-cli`, which call it.
 
 `seiza-deconvolution` sits after `seiza-stars`, whose `PsfField` its
 field-varying deconvolution takes.

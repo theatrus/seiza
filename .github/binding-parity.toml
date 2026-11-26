@@ -260,18 +260,18 @@ core = "seiza-stacking::ChannelMatch"
 core = "seiza-stacking::SnrSample"
 
 [rust.ChannelCoverageResponse]
-core = "seiza-stacking::ChannelCoverage"
+core = "seiza-compose::ChannelCoverage"
 
 [rust.CropReportResponse]
-core = "seiza-stacking::CropReport"
+core = "seiza-compose::CropReport"
 grid_width = { c = "grid" }
 grid_height = { c = "grid" }
 
 [rust.NarrowbandMatrixRequest]
-core = "seiza-stacking::NarrowbandMatrix"
+core = "seiza-compose::NarrowbandMatrix"
 
 [rust.NarrowbandMixRequest]
-core = "seiza-stacking::NarrowbandMix"
+core = "seiza-compose::NarrowbandMix"
 
 [rust.ExpandedLensResponse]
 core = "seiza-stacking::ExpandedLens"
@@ -280,16 +280,16 @@ core = "seiza-stacking::ExpandedLens"
 core = "seiza-stacking::PoolPipelineMemory"
 
 [rust.ColorFitJson]
-core = "seiza-stacking::ColorFit"
+core = "seiza-compose::ColorFit"
 
 [rust.ColorCalibrationJson]
-core = "seiza-stacking::ColorCalibration"
+core = "seiza-compose::ColorCalibration"
 
 [rust.ColorStarMeasurementJson]
-core = "seiza-stacking::ColorStarMeasurement"
+core = "seiza-compose::ColorStarMeasurement"
 
 [rust.ColorCalibrationOptionsJson]
-core = "seiza-stacking::ColorCalibrationOptions"
+core = "seiza-compose::ColorCalibrationOptions"
 
 [rust.GaiaSourceJson]
 core = "seiza-sources::GaiaPhotometry"
@@ -454,7 +454,7 @@ objects = [
     "seiza-parallax::Parallax",
     "seiza-stacking::LiveStacker",
     "seiza-background::BackgroundFit",
-    "seiza-stacking::ColorCalibration",
+    "seiza-compose::ColorCalibration",
     "seiza-pipeline::PartialStack",
     "seiza-pipeline::SessionStep",
     "seiza-stars::PsfField",
@@ -604,7 +604,7 @@ objects = [
 "seiza-parallax::parse_frame_size" = { none = "the C ABI reads sizes through parse_frame_size_or_shape" }
 
 # stacking
-"seiza-stacking::ColorCalibration::apply" = { none = "C hosts keep only the gains and offsets, so seiza_color_calibration_apply calls apply_color_gains, which apply uses, on the caller's buffer" }
+"seiza-compose::ColorCalibration::apply" = { none = "C hosts keep only the gains and offsets, so seiza_color_calibration_apply calls apply_color_gains, which apply uses, on the caller's buffer" }
 "seiza-stacking::LiveStacker::effective_maximum_drift_pixels" = { none = "part of registration" }
 "seiza-stacking::LiveStacker::with_expanding_reference" = { none = "the C ABI opens from paths (open_fits_expanding)" }
 "seiza-stacking::LiveStacker::open_fits_with_reference_image" = { none = "the C ABI's call uses open_fits_with_reference_image_candidates, with one candidate" }
@@ -619,7 +619,7 @@ objects = [
 "seiza-stacking::drizzle_reference_headers" = { none = "the C drizzle result carries its reference headers already" }
 "seiza-stacking::rescaled_reference_headers" = { none = "binned stacks and full-resolution reintegrations carry their reference headers already rescaled" }
 "seiza-stacking::integrate_registered_frames" = { none = "integrate_registered_frames_banded, which both bindings call, falls back to it when the system temporary directory cannot hold the frames" }
-"seiza-stacking::covered_region" = { none = "crop_report gives the region and more; the C ABI calls crop_report" }
+"seiza-compose::covered_region" = { none = "crop_report gives the region and more; the C ABI calls crop_report" }
 "seiza-stacking::reference_score" = { none = "choose_reference scores each frame; the C ABI calls choose_reference" }
 "seiza-stacking::resample_to_reference" = { none = "a registration building block the stacker uses" }
 "seiza-stacking::resample_to_reference_affine" = { none = "a registration building block the stacker uses" }

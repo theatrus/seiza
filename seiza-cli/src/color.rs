@@ -2,11 +2,13 @@ use crate::preview::{PreviewTransfer, write_preview};
 use crate::provenance::validate_path_roles;
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand, ValueEnum};
+use seiza_compose::{
+    ColorComposition, ColorCrop, ColorNormalization, ColorOptions, ColorTransfer, ForaxxOptions,
+    LrgbLuminance, NarrowbandPalette, RgbLuminance, combine_lrgb, combine_narrowband, combine_rgb,
+    combine_super_lrgb, combine_super_rgb, write_color_fits_f32,
+};
 use seiza_stacking::{
-    ColorComposition, ColorCrop, ColorNormalization, ColorOptions, ColorTransfer, FitsFrame,
-    ForaxxOptions, LinearImage, LrgbLuminance, NarrowbandPalette, Registrar, RegistrationOptions,
-    RgbLuminance, combine_lrgb, combine_narrowband, combine_rgb, combine_super_lrgb,
-    combine_super_rgb, resample_to_reference_with_gpu, write_color_fits_f32,
+    FitsFrame, LinearImage, Registrar, RegistrationOptions, resample_to_reference_with_gpu,
 };
 use std::path::{Path, PathBuf};
 
@@ -132,7 +134,7 @@ fn run_star_stretch(args: StarStretchArgs) -> Result<()> {
         if frame.headers.iter().any(|(k,v)| k.eq_ignore_ascii_case("SEIZATRF") && matches!(v,seiza_fits::HeaderValue::String(tag) if tag.trim().eq_ignore_ascii_case("DISPLAY"))) { anyhow::bail!("Star stretching requires linear RGB before any display stretch"); }
     }
     original.image =
-        seiza_stacking::stretch_rgb_stars(&original.image, &starless.image, args.amount)?;
+        seiza_compose::stretch_rgb_stars(&original.image, &starless.image, args.amount)?;
     write_display(&args.output, &original)
 }
 fn run_screen_star_layer(args: ScreenStarLayerArgs) -> Result<()> {
@@ -146,7 +148,7 @@ fn run_screen_star_layer(args: ScreenStarLayerArgs) -> Result<()> {
     for frame in [&nebula, &stars] {
         if !frame.headers.iter().any(|(k,v)| k.eq_ignore_ascii_case("SEIZATRF") && matches!(v,seiza_fits::HeaderValue::String(tag) if tag.trim().eq_ignore_ascii_case("DISPLAY"))) { anyhow::bail!("Star screening requires SEIZATRF=DISPLAY on both inputs"); }
     }
-    seiza_stacking::screen_rgb_star_layer(&mut nebula.image, &stars.image, args.reduction)?;
+    seiza_compose::screen_rgb_star_layer(&mut nebula.image, &stars.image, args.reduction)?;
     write_display(&args.output, &nebula)
 }
 
@@ -160,7 +162,7 @@ fn run_balance(args: DisplayBalanceArgs) -> Result<()> {
     }
     validate_path_roles(paths)?;
     let mut frame = FitsFrame::open(&args.input)?;
-    let options = seiza_stacking::NarrowbandBalanceOptions {
+    let options = seiza_compose::NarrowbandBalanceOptions {
         has_sii: !args.hoo,
         shadow_protection: args.shadow_protection,
         oiii_boost: args.oiii_boost,
@@ -168,7 +170,7 @@ fn run_balance(args: DisplayBalanceArgs) -> Result<()> {
         star_mask_radius: args.star_mask_radius,
         ..Default::default()
     };
-    let report = seiza_stacking::balance_narrowband(&mut frame.image, &options)?;
+    let report = seiza_compose::balance_narrowband(&mut frame.image, &options)?;
     write_display(&args.output, &frame)?;
     if let Some(path) = args.report {
         crate::provenance::write_json_atomic(&path, &report)?;
@@ -186,7 +188,7 @@ fn run_screen_stars(args: ScreenStarsArgs) -> Result<()> {
     let mut nebula = FitsFrame::open(&args.nebula)?;
     let original = FitsFrame::open(&args.original_rgb)?;
     let starless = FitsFrame::open(&args.starless_rgb)?;
-    seiza_stacking::screen_rgb_stars_reduced(
+    seiza_compose::screen_rgb_stars_reduced(
         &mut nebula.image,
         &original.image,
         &starless.image,
