@@ -642,11 +642,13 @@ impl RcAstroCli {
     /// processed file keeps its provenance.
     ///
     /// The tools clamp float samples to `[0, 1]` (the PixInsight
-    /// convention). An image within 0 to 1 keeps its scale; any other is
-    /// offset by its most negative sample, if it has one, and divided by
-    /// 65535 or its span, whichever is larger, and mapped back. A difference
-    /// sidecar (the stars image) is restored with the scale alone, so
-    /// `starless + stars` still reconstructs the original. Samples that are
+    /// convention). An image on 0 to 1 keeps its scale: one with no sample
+    /// below -1 and at most one in a thousand above 1, which go to the tool
+    /// at 1. Any other is offset by its most negative sample, if it has one,
+    /// and divided by 65535 or its span, whichever is larger, and mapped
+    /// back. A difference sidecar (the stars image) is restored with the
+    /// scale alone, plus what a sample above 1 lost, so `starless + stars`
+    /// still reconstructs the original. Samples that are
     /// not finite, such as a stack's uncovered edges, go to the tool as
     /// their channel's background and come back unchanged in both images.
     /// So do samples more than 30 robust sigmas below their channel's
@@ -2168,5 +2170,44 @@ cp "$input" "$out"
             )
             .unwrap_err();
         assert!(matches!(error, Error::Cancelled));
+    }
+
+    #[test]
+    #[ignore = "needs a licensed rc-astro CLI on PATH"]
+    fn a_normalized_stack_with_overshooting_cores_survives_a_real_blurxterminator() {
+        // A 0 to 1 stack: its sky at 0.013 and stars whose saturated cores
+        // overshoot to 1.023, as a stack's resampling leaves them. Through
+        // version 3 of the map it went out divided by 65535 and
+        // BlurXTerminator 2.6.11 returned zeros.
+        let cli = RcAstroCli::locate().expect("rc-astro on PATH");
+        let schema = cli.tool_schema("bxt").unwrap();
+        let (width, height) = (256, 256);
+        let mut data: Vec<f32> = (0..width * height)
+            .map(|i| 0.013 + 0.0005 * crate::exchange::tests_noise(i as u64))
+            .collect();
+        for (cx, cy) in [(64.0, 64.0), (180.0, 90.0), (120.0, 200.0)] {
+            for y in 0..height {
+                for x in 0..width {
+                    let r2: f32 = (x as f32 - cx).powi(2) + (y as f32 - cy).powi(2);
+                    let sample = &mut data[y * width + x];
+                    *sample = (*sample + 1.5 * (-r2 / 8.0).exp()).min(1.023);
+                }
+            }
+        }
+        let image = LinearImage::new(width, height, 1, data.clone()).unwrap();
+        let request = ExternalToolRequest {
+            tool: "bxt".into(),
+            parameters: vec![],
+            device: None,
+        };
+        let processed = cli
+            .process_image(&schema, &request, &image, &[], None, &mut |_| {})
+            .unwrap();
+        let mut sky: Vec<f32> = processed.image.data.clone();
+        let middle = sky.len() / 2;
+        let median = *sky.select_nth_unstable_by(middle, f32::total_cmp).1;
+        assert!((median - 0.013).abs() < 0.002, "sky came back at {median}");
+        let peak = processed.image.data.iter().copied().fold(0.0, f32::max);
+        assert!(peak > 0.5, "stars came back at {peak}");
     }
 }

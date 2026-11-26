@@ -39,12 +39,23 @@ verified against rc-astro 2.6.6. `process_image` therefore maps the image
 onto that range for the exchange FITS and maps the results back, with the
 same map PixInsight MLDenoise uses (`seiza-stacking`'s `exchange` module):
 
-- An image within 0 to 1 keeps its scale. Any other is offset by its most
-  negative sample, if it has one, and divided by 65535 or its span,
+- An image on 0 to 1 keeps its scale: one with no sample below -1 and at
+  most one sample in a thousand above 1. It is offset by its most negative
+  sample, if it has one, and divided by 1 minus that offset, so 1 stays 1.
+  Any other is offset the same way and divided by 65535 or its span,
   whichever is larger, the scale PixInsight gives a 16-bit camera frame.
   Before `EXTERNAL_EXCHANGE_VERSION` 2 it was divided by its span alone,
   so a dim image or crop sat near the top of the range, where the tools see
   something other than what PixInsight would give them for the same data.
+- Samples above 1 in an image on 0 to 1, such as a normalized stack's
+  saturated star cores, which resampling and rejection overshoot a little,
+  go to the tool at 1, as PixInsight would clamp them, and take the tool's
+  result back like any other sample; the stars image adds what they lost,
+  so `starless + stars` still gives them back. Through version 3 an image
+  on 0 to 1 had to lie wholly within it: a stack of 88 normalized Hα subs
+  with its sky at 0.013 and 191 star-core samples at 1.023 was taken for a
+  camera frame, its sky reached the tool at 2e-7, and BlurXTerminator
+  2.6.11 returned an image of zeros.
 - Samples that are not finite, such as a stack's uncovered edges, go to the
   tool as their channel's median plus noise of the channel's robust sigma,
   and come back unchanged in the result and in the stars image. Before,
@@ -199,10 +210,10 @@ Seiza's own processed-image writer declares bounds 0:65535, and PixInsight
 divides samples by the declared range when it opens a file, so the
 exchange file is written with bounds 0:1 directly.
 
-- **Scale.** An image whose samples lie within 0 to 1 keeps its scale. Any
-  other image is offset by its most negative sample, if it has one, and
-  divided by 65535 or its span, whichever is larger: the scale PixInsight
-  gives a 16-bit camera frame. Dividing by the span alone made the result
+- **Scale.** An image on 0 to 1 keeps its scale, its few samples above 1
+  going out at 1 (see Sample scale). Any other image is offset by its most
+  negative sample, if it has one, and divided by 65535 or its span,
+  whichever is larger: the scale PixInsight gives a 16-bit camera frame. Dividing by the span alone made the result
   depend on the brightest sample; a dim crop then sat near the top of the
   range and came back with its background biased by about 10 ADU.
 - **Samples that are not finite.** NaN marks a stack's uncovered pixels.

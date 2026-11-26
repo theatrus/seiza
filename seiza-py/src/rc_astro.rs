@@ -378,7 +378,8 @@ pub(crate) struct PyRcAstroProcessed {
 
 /// Run one RC-Astro tool on an image in memory: a float32 array of shape
 /// (height, width) or (height, width, channels). The tools clamp samples to
-/// 0..1: an image within 0..1 keeps its scale, and any other is offset by
+/// 0..1: an image on 0..1 (none below -1, at most one sample in a thousand
+/// above 1, which go out at 1) keeps its scale, and any other is offset by
 /// its most negative sample and divided by 65535 or its span, whichever is
 /// larger, then mapped back on the way in. A stars image comes back with
 /// the scale alone, so the processed image plus the stars gives back the

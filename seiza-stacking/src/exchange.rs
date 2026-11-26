@@ -2,12 +2,19 @@
 //! taking their result back.
 //!
 //! PixInsight and the tools that follow its conventions, such as RC-Astro's,
-//! work on samples from 0 to 1 and clamp anything outside. An image whose
-//! samples already lie within 0 to 1 keeps its scale. Any other image is
-//! offset by its most negative sample, if it has one, and divided by 65535
-//! or its span, whichever is larger: how PixInsight opens a 16-bit camera
-//! frame. Dividing by the span alone made a result depend on the image's
-//! brightest sample; a dim crop then sat near the top of the range.
+//! work on samples from 0 to 1 and clamp anything outside. An image already
+//! on 0 to 1 keeps its scale: one with no sample below -1 and at most one
+//! sample in a thousand ([`OVERSHOOT_SHARE`]) above 1, such as a normalized
+//! stack whose saturated star cores overshoot a little through resampling
+//! and rejection. It is offset by its most negative sample, if it has one,
+//! and divided by 1 minus that offset, so 1 stays 1; the samples above 1 go
+//! to the tool at 1, as PixInsight would clamp them. Any other image is
+//! offset the same way and divided by 65535 or its span, whichever is
+//! larger: how PixInsight opens a 16-bit camera frame. Dividing by the span
+//! alone made a result depend on the image's brightest sample; a dim crop
+//! then sat near the top of the range. Taking a 0 to 1 stack with 191
+//! star-core samples at 1.023 for a camera frame put its sky at 2e-7, and
+//! BlurXTerminator 2.6.11 returned an image of zeros.
 //!
 //! Samples that are not finite, such as the uncovered edges of a stack, are
 //! given their channel's median plus noise of the channel's robust sigma on
@@ -32,6 +39,11 @@ pub(crate) const CAMERA_FULL_SCALE: f32 = 65535.0;
 /// sample is taken for an artifact and kept out of the map, as a sample
 /// that is not finite is. A sky, even an image's darkest, lies within a few.
 pub(crate) const ARTIFACT_SIGMAS: f32 = 30.0;
+
+/// The largest share of an image's kept samples that may lie above 1 with
+/// the image still taken as on 0 to 1: one in a thousand, so its 99.9th
+/// percentile is within the range. A camera frame's sky alone lies above 1.
+pub(crate) const OVERSHOOT_SHARE: f64 = 0.001;
 
 /// How an image is put on 0 to 1 and taken back.
 #[derive(Debug, PartialEq)]
@@ -70,20 +82,24 @@ impl Exchange {
             .collect();
         let mut peak = f32::NEG_INFINITY;
         let mut floor = f32::INFINITY;
+        let (mut kept, mut above_one) = (0usize, 0usize);
         for (index, sample) in image.data.iter().enumerate() {
             if fill[index % channels].keeps(*sample) {
                 peak = peak.max(*sample);
                 floor = floor.min(*sample);
+                kept += 1;
+                above_one += usize::from(*sample > 1.0);
             }
         }
         if !peak.is_finite() || !floor.is_finite() {
             return None;
         }
-        let (offset, scale) = if floor >= 0.0 && peak <= 1.0 {
-            (0.0, 1.0)
+        let offset = floor.min(0.0);
+        let on_unit_range = floor >= -1.0 && above_one as f64 <= OVERSHOOT_SHARE * kept as f64;
+        let scale = if on_unit_range {
+            1.0 - offset
         } else {
-            let offset = floor.min(0.0);
-            (offset, (peak - offset).max(CAMERA_FULL_SCALE))
+            (peak - offset).max(CAMERA_FULL_SCALE)
         };
         Some(Self {
             offset,
@@ -93,7 +109,8 @@ impl Exchange {
     }
 
     /// The image's samples on 0 to 1, with every sample the map does not
-    /// keep replaced by its channel's background and noise. The noise
+    /// keep replaced by its channel's background and noise, and a sample
+    /// above the range (an image on 0 to 1's overshoot) at 1. The noise
     /// depends only on the sample's position, so the same image gives the
     /// same exchange.
     pub(crate) fn normalize(&self, image: &LinearImage) -> Vec<f32> {
@@ -109,13 +126,20 @@ impl Exchange {
                 } else {
                     background.median + background.sigma * standard_normal(index as u64)
                 };
-                (sample - self.offset) / self.scale
+                ((sample - self.offset) / self.scale).min(1.0)
             })
             .collect()
     }
 
+    /// The original sample that 1 on the tool's scale stands for.
+    fn top(&self) -> f32 {
+        self.scale + self.offset
+    }
+
     /// Put an image the tool returned back on the original's scale, and the
-    /// original's samples the map did not keep back in place.
+    /// original's samples the map did not keep back in place. A sample that
+    /// went out at 1 takes the tool's result, as any kept sample does: the
+    /// tool saw a star core there, and a starless image must not keep it.
     pub(crate) fn restore(&self, processed: &mut [f32], original: &[f32]) {
         let channels = self.fill.len();
         for (index, (sample, original)) in processed.iter_mut().zip(original).enumerate() {
@@ -131,14 +155,17 @@ impl Exchange {
     /// StarXTerminator's stars image (the original minus the starless
     /// result): the offset cancels out of a difference, so only the scale
     /// is restored. A sample that is not finite stays a gap; an artifact,
-    /// which the result keeps as it was, differs by nothing.
+    /// which the result keeps as it was, differs by nothing. A sample that
+    /// went out at 1 adds what it lost there, so the result plus the
+    /// difference still gives back the original.
     pub(crate) fn restore_difference(&self, processed: &mut [f32], original: &[f32]) {
         let channels = self.fill.len();
+        let top = self.top();
         for (index, (sample, original)) in processed.iter_mut().zip(original).enumerate() {
             *sample = if !original.is_finite() {
                 *original
             } else if self.fill[index % channels].keeps(*original) {
-                *sample * self.scale
+                *sample * self.scale + (*original - top).max(0.0)
             } else {
                 0.0
             };
@@ -188,16 +215,22 @@ fn standard_normal(position: u64) -> f32 {
     ((-2.0 * u.ln()).sqrt() * (std::f64::consts::TAU * v).cos()) as f32
 }
 
+/// [`standard_normal`] for other modules' tests.
+#[cfg(test)]
+pub(crate) fn tests_noise(position: u64) -> f32 {
+    standard_normal(position)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The map as [`crate::EXTERNAL_EXCHANGE_VERSION`] 3 defines it. A change
+    /// The map as [`crate::EXTERNAL_EXCHANGE_VERSION`] 4 defines it. A change
     /// that fails this test changes external tools' results for the same
     /// input: move the version, then record the new values.
     #[test]
     fn the_map_matches_its_version() {
-        assert_eq!(crate::EXTERNAL_EXCHANGE_VERSION, 3);
+        assert_eq!(crate::EXTERNAL_EXCHANGE_VERSION, 4);
         let image = LinearImage::new(2, 2, 1, vec![f32::NAN, 1_000.0, 1_100.0, -20.0]).unwrap();
         let exchange = Exchange::of(&image).unwrap();
         assert_eq!((exchange.offset, exchange.scale), (-20.0, 65535.0));
@@ -217,6 +250,17 @@ mod tests {
                 sigma: 1.4826 * 1_020.0
             }]
         );
+        // A 0 to 1 image with one sample in a thousand above 1 keeps its
+        // scale, and a slight negative offsets it on that scale (version 3
+        // took it for a camera frame and divided by 65535).
+        let mut unit: Vec<f32> = (0..1_000).map(|i| 0.01 + i as f32 * 1e-4).collect();
+        unit[0] = -0.002;
+        unit[1] = 1.023;
+        let unit = LinearImage::new(1_000, 1, 1, unit).unwrap();
+        let exchange = Exchange::of(&unit).unwrap();
+        assert_eq!((exchange.offset, exchange.scale), (-0.002, 1.0 + 0.002));
+        let normalized = exchange.normalize(&unit);
+        assert_eq!((normalized[0], normalized[1]), (0.0, 1.0));
         // The fill's noise at the first two positions. A tolerance, since
         // platforms' logarithm and cosine can differ in the last bit.
         assert!((standard_normal(0) - -0.455_219).abs() < 1e-6);
@@ -285,6 +329,59 @@ mod tests {
         assert!(
             mean.abs() < 0.03 && (variance - 1.0).abs() < 0.05,
             "{mean} {variance}"
+        );
+    }
+
+    #[test]
+    fn a_normalized_stack_whose_star_cores_overshoot_keeps_its_scale() {
+        // A 0 to 1 stack's sky at 0.013, and 191 saturated star-core samples
+        // that resampling and rejection left at 1.023.
+        let mut data: Vec<f32> = (0..200_000)
+            .map(|i| 0.013 + 0.0005 * standard_normal(i + 11))
+            .collect();
+        for core in 0..191 {
+            data[997 * core + 500] = 1.023;
+        }
+        let image = LinearImage::new(1_000, 200, 1, data.clone()).unwrap();
+        let exchange = Exchange::of(&image).unwrap();
+        assert_eq!((exchange.offset, exchange.scale), (0.0, 1.0));
+        // The sky reaches the tool where it is, not at 2e-7, and the cores
+        // at 1, as PixInsight would clamp them.
+        let normalized = exchange.normalize(&image);
+        assert_eq!(normalized[0], data[0]);
+        assert_eq!(normalized[500], 1.0);
+        // The tool's result comes back as it is, cores included: a starless
+        // image has no core left to put back.
+        let mut processed = normalized.clone();
+        processed[500] = 0.013;
+        exchange.restore(&mut processed, &data);
+        assert_eq!((processed[0], processed[500]), (data[0], 0.013));
+        // The stars image takes what the cores lost, so starless plus stars
+        // still gives back the stack.
+        let mut stars: Vec<f32> = normalized
+            .iter()
+            .zip(&processed)
+            .map(|(n, p)| n - p)
+            .collect();
+        exchange.restore_difference(&mut stars, &data);
+        assert!((processed[500] + stars[500] - 1.023).abs() < 1e-6);
+        assert_eq!(stars[0], 0.0);
+
+        // More than one sample in a thousand above 1 is a camera frame's,
+        // and so is a single sample below -1.
+        for core in 191..201 {
+            data[997 * core + 500] = 1.023;
+        }
+        let image = LinearImage::new(1_000, 200, 1, data.clone()).unwrap();
+        assert_eq!(Exchange::of(&image).unwrap().scale, CAMERA_FULL_SCALE);
+        let below = LinearImage::new(2, 2, 1, vec![-1.5, 0.1, 0.2, 0.3]).unwrap();
+        assert_eq!(
+            Exchange::of(&below).unwrap(),
+            Exchange {
+                offset: -1.5,
+                scale: CAMERA_FULL_SCALE,
+                fill: vec![channel_background(&below.data, 0, 1)],
+            }
         );
     }
 

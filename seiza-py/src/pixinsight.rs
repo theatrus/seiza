@@ -284,7 +284,8 @@ pub(crate) fn pixinsight_ml_denoise_file(
 
 /// Denoise an image in memory with PixInsight's MLDenoise: a float32 array
 /// of shape (height, width) or (height, width, 3). PixInsight works on
-/// 0..1: an image within 0..1 keeps its scale, and any other is offset by
+/// 0..1: an image on 0..1 (none below -1, at most one sample in a thousand
+/// above 1, which go out at 1) keeps its scale, and any other is offset by
 /// its most negative sample and divided by 65535 or its span, whichever is
 /// larger, as PixInsight opens a 16-bit camera frame. The result is mapped
 /// back, so it returns in the input's units and shape. NaN and infinite

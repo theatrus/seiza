@@ -545,8 +545,9 @@ impl PixInsight {
 
     /// Denoise a linear image with MLDenoise.
     ///
-    /// PixInsight works on 0 to 1. An image whose samples lie within 0 to 1
-    /// keeps its scale. Any other image is offset by its most negative
+    /// PixInsight works on 0 to 1. An image on 0 to 1 keeps its scale: one
+    /// with no sample below -1 and at most one in a thousand above 1, which
+    /// go to PixInsight at 1. Any other image is offset by its most negative
     /// sample, if it has one, and divided by its span or by 65535,
     /// whichever is larger, which is how PixInsight opens a 16-bit camera
     /// frame; the result is mapped back. Samples that are not finite, such
