@@ -122,6 +122,16 @@ layers:
    Windows are cut only where 80% of the pixels are valid, so those fields
    give few windows: the first banks under-represent the densest
    undersampled fields until their fit is better.
+
+   The validation bank's windows show the masks covering the dipoles and
+   the clipped cores. They do not cover a clipped star's halo. A masked
+   disc is sized by the star's peak over the noise, and a clipped star's
+   peak is the clip level, far below its true peak. So its glow past the
+   65 px stamp stays in the truth unmasked, and the network is taught to
+   keep the halos of the brightest real stars. The next clean-sky version
+   will size a clipped star's disc from its catalogue magnitude on the
+   stack's own magnitude scale, out to where its light, wing included,
+   falls below the noise.
 2. **Stars put back** (`starless_bank`). Stars are drawn into a clean sky at
    random places, between half and one and a half times as many as the
    clean-sky pass took out of it, their magnitudes drawn from those it took
