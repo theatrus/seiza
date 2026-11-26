@@ -30,6 +30,7 @@ batches of a validation bank, with the baseline's alone beside it.
 from __future__ import annotations
 
 import json
+import math
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -262,6 +263,116 @@ def load_run(store: Store, name: str, where: torch.device | None = None) -> tupl
     return model.to(where or device()).eval(), settings
 
 
+# Where a star buried the sky's noise, a network trained to the median gives
+# a smooth fill. After it, noise to match is drawn there (`filled`). A
+# starless image's grain is read as its variance about a 3 px box mean over a
+# `FILL_WINDOW` px box, against that variance's median over `FILL_BLOCK` px
+# blocks of the same image: where it falls short by `FILL_START` of it or more
+# (fully from `FILL_FULL`), what it lacks of the image's own noise (read the
+# same way, about a `FILL_BLUR` px box mean) is drawn, shaped to its grain
+# (its neighbouring pixels' correlation, read where nothing is lacking), and
+# the same is taken out of the stars layer, so the layers still add to the
+# image. Nothing but the image is read: a noise map is raised about a bright
+# star by the star itself (23 times the sky's at one core), and a network's
+# fill keeps blotches of 5 to 10 px that a wider box reads as noise, though
+# its grain is gone.
+FILL_BLUR = 9
+FILL_WINDOW = 15
+FILL_BLOCK = 96
+FILL_START = 0.3
+FILL_FULL = 0.5
+
+
+def box_mean(plane: np.ndarray, size: int) -> np.ndarray:
+    """Each pixel's mean over the `size` × `size` box about it (size odd),
+    over the part of the box within the plane."""
+    half = size // 2
+    padded = np.pad(np.asarray(plane, dtype=np.float64), ((half + 1, half), (half + 1, half)))
+    ones = np.pad(np.ones(plane.shape), ((half + 1, half), (half + 1, half)))
+    sums = padded.cumsum(0).cumsum(1)
+    counts = ones.cumsum(0).cumsum(1)
+
+    def boxed(table: np.ndarray) -> np.ndarray:
+        return (table[size:, size:] - table[:-size, size:] - table[size:, :-size] + table[:-size, :-size])
+
+    return boxed(sums) / boxed(counts)
+
+
+def local_noise(plane: np.ndarray, blur: int = FILL_BLUR) -> np.ndarray:
+    """A plane's local noise variance: its variance about a `blur` box mean
+    over a `FILL_WINDOW` box, scaled for what the box mean takes of white
+    noise."""
+    away = plane - box_mean(plane, blur)
+    return box_mean(away**2, FILL_WINDOW) / (1.0 - 1.0 / blur**2)
+
+
+def block_median(plane: np.ndarray, where: np.ndarray | None = None, block: int = FILL_BLOCK) -> np.ndarray:
+    """Each pixel's block's median over the pixels `where` marks (all when
+    None), the blocks `block` px a side (the last of each row and column
+    taking what is left), smoothed over a block; a block with under a
+    quarter of its pixels marked takes the median of the others."""
+    height, width = plane.shape
+    rows = list(range(0, height, block))
+    columns = list(range(0, width, block))
+    found = np.empty(plane.shape)
+    for top in rows:
+        for left in columns:
+            part = plane[top:top + block, left:left + block]
+            marked = np.isfinite(part) if where is None else np.isfinite(part) & where[top:top + block,
+                                                                                       left:left + block]
+            values = part[marked]
+            found[top:top + block, left:left + block] = np.median(values) if values.size >= part.size / 4 \
+                else np.nan
+    found = np.where(np.isfinite(found), found, np.nanmedian(found) if np.isfinite(found).any() else 0.0)
+    return box_mean(found, block | 1)
+
+
+def grain(plane: np.ndarray, where: np.ndarray) -> tuple[float, float]:
+    """The correlation of neighbouring pixels of a plane's noise, across and
+    down, read where `where` marks, about a `FILL_BLUR` box mean."""
+    away = plane - box_mean(plane, FILL_BLUR)
+    found = []
+    for axis in (1, 0):
+        a, b = (away[:, :-1], away[:, 1:]) if axis == 1 else (away[:-1, :], away[1:, :])
+        both = (where[:, :-1] & where[:, 1:]) if axis == 1 else (where[:-1, :] & where[1:, :])
+        if both.sum() < 100:
+            found.append(0.0)
+            continue
+        found.append(float(np.clip(np.corrcoef(a[both], b[both])[0, 1], 0.0, 0.45)))
+    return found[0], found[1]
+
+
+def grained(shape: tuple[int, int], across: float, down: float, rng: np.random.Generator) -> np.ndarray:
+    """Noise of unit variance whose neighbouring pixels correlate by `across`
+    and `down`: white noise through a [c, 1, c] kernel each way."""
+    noise = rng.standard_normal((shape[0] + 2, shape[1] + 2))
+    for axis, rho in ((1, across), (0, down)):
+        c = (1.0 - np.sqrt(1.0 - 2.0 * rho**2)) / (2.0 * rho) if rho > 1e-6 else 0.0
+        noise = (noise + c * (np.roll(noise, 1, axis) + np.roll(noise, -1, axis))) / np.sqrt(1.0 + 2.0 * c**2)
+    return noise[1:-1, 1:-1]
+
+
+def filled(image: np.ndarray, starless: np.ndarray, seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
+    """A starless image with noise drawn where it lacks it (`FILL_*`), and
+    the stars layer that adds back to `image` with it."""
+    starless64 = np.nan_to_num(np.asarray(starless, dtype=np.float64))
+    fine = local_noise(starless64, 3)
+    # The image's own grain, read twice: the second time away from where the
+    # first found it lacking, so a wide fill does not lower its own measure.
+    quiet = None
+    for _ in range(2):
+        lacking = np.clip(1.0 - fine / np.maximum(block_median(fine, quiet), 1e-30), 0.0, 1.0)
+        lacking = box_mean(lacking, FILL_WINDOW)
+        quiet = lacking < FILL_START / 2
+    ramp = np.clip((lacking - FILL_START) / (FILL_FULL - FILL_START), 0.0, 1.0)
+    variance = block_median(local_noise(starless64), quiet)
+    across, down = grain(starless64, lacking < 0.2)
+    drawn = grained(starless64.shape, across, down, np.random.default_rng(seed))
+    out = starless64 + drawn * np.sqrt(ramp * lacking * np.maximum(variance, 0.0))
+    out = np.where(np.isfinite(starless), out, starless).astype(np.float32)
+    return out, (np.asarray(image, dtype=np.float64) - out).astype(np.float32)
+
+
 def measures(estimate: np.ndarray, planes: dict[str, np.ndarray]) -> dict[str, float | None]:
     """How an estimate of a window's starless image meets its truth, over
     its valid pixels and in units of its noise map's median: the error's
@@ -272,7 +383,8 @@ def measures(estimate: np.ndarray, planes: dict[str, np.ndarray]) -> dict[str, f
     bright core's error is thousands of times the noise, so beside these,
     the mean absolute error as the trainer reads images (`network_reads`'
     asinh, closer to a stretched image's eye) where stars were and on the
-    sky."""
+    sky; and how much of the truth's noise the estimate keeps where stars
+    were (its local noise over the truth's: under 1 a smooth fill)."""
     scale = float(np.median(planes["noise"])) or 1.0
     level = float(np.nanmedian(planes["input"]))
     valid = planes["valid"] > 0
@@ -290,10 +402,16 @@ def measures(estimate: np.ndarray, planes: dict[str, np.ndarray]) -> dict[str, f
         return float(np.mean(seen[where])) if where.any() else None
 
     total = float(light[stars].sum())
+    kept = None
+    if stars.any():
+        truth_noise = float(np.mean(local_noise(np.asarray(planes["starless"], dtype=np.float64), 3)[stars]))
+        if truth_noise > 0:
+            kept = math.sqrt(float(np.mean(local_noise(np.nan_to_num(estimate.astype(np.float64)), 3)[stars]))
+                             / truth_noise)
     return {"stars_rms": rms(stars), "sky_rms": rms(sky),
             "cores_mean": float(error[cores].mean()) if cores.any() else None,
             "light_left": float((error[stars] * scale).sum()) / total if total > 0 else None,
-            "stars_stretched": stretched(stars), "sky_stretched": stretched(sky)}
+            "stars_stretched": stretched(stars), "sky_stretched": stretched(sky), "noise_kept": kept}
 
 
 def mean_of(found: list[dict[str, float | None]]) -> dict[str, dict[str, float | None]]:
@@ -310,10 +428,11 @@ def mean_of(found: list[dict[str, float | None]]) -> dict[str, dict[str, float |
 def evaluate(store: Store, name: str, bank: Path, *, count: int = 64, sheet_rows: int = 6,
              where: torch.device | None = None) -> dict[str, Any]:
     """A run's `measures` on `count` windows of a bank, evenly spread, beside
-    its baseline's, over all and by telescope kind; and a sheet of the first
-    `sheet_rows` of them: the input, the baseline, the network, the truth
-    and the network's stars layer, stretched alike. Both are kept under the
-    run's `evaluation/`, named for the bank."""
+    its baseline's and those of its output with noise drawn where it lacks
+    it (`filled`), over all and by telescope kind; and a sheet of the first
+    `sheet_rows` of them: the input, the baseline, the network, the network
+    filled, the truth and the filled output's stars layer, stretched alike.
+    Both are kept under the run's `evaluation/`, named for the bank."""
     model, settings = load_run(store, name, where)
     held = Bank(bank)
     indices = np.unique(np.linspace(0, held.count - 1, min(count, held.count)).round().astype(int))
@@ -323,13 +442,15 @@ def evaluate(store: Store, name: str, bank: Path, *, count: int = 64, sheet_rows
         planes = {plane: np.asarray(held.planes[plane][index], dtype=np.float32) for plane in held.planes}
         estimate = starless(model, planes, settings)
         baseline = planes[BASELINE[settings.way]]
+        fill, stars = filled(planes["input"], estimate, seed=int(index))
         kind = held.records[index].get("telescope_kind", "all")
         for group in ("all", kind):
             results.setdefault(f"{group}/run", []).append(measures(estimate, planes))
+            results.setdefault(f"{group}/filled", []).append(measures(fill, planes))
             results.setdefault(f"{group}/baseline", []).append(measures(baseline, planes))
         if len(rows) < sheet_rows:
-            rows.append((held.records[index], [planes["input"], baseline, estimate, planes["starless"],
-                                                planes["input"] - estimate]))
+            rows.append((held.records[index], [planes["input"], baseline, estimate, fill, planes["starless"],
+                                                stars]))
     summary = {"run": name, "bank": str(bank), "windows": int(len(indices)),
                "measures": {key: mean_of(found) for key, found in sorted(results.items())}}
     directory = run_directory(store, name) / "evaluation"
@@ -342,21 +463,22 @@ def evaluate(store: Store, name: str, bank: Path, *, count: int = 64, sheet_rows
 
 
 def write_sheet(path: Path, rows: list[tuple[dict[str, Any], list[np.ndarray]]], way: str) -> None:
-    """A starless sheet: a row a window, each stretched on its truth's
-    levels, the stars layer from the truth's floor."""
+    """A starless sheet: a row a window (input, baseline, network, network
+    filled, truth, stars layer), each stretched on its truth's levels, the
+    stars layer from the truth's floor."""
     from PIL import Image, ImageDraw
 
-    titles = ["input", "fit's starless" if way == "fit" else "input (baseline)", "network", "truth",
-              "network's stars"]
+    titles = ["input", "fit's starless" if way == "fit" else "input (baseline)", "network", "network, noise filled",
+              "truth", "stars"]
     strips = []
     for record, tiles in rows:
-        low, high = np.percentile(np.nan_to_num(tiles[3]), (1.0, 99.5))
+        low, high = np.percentile(np.nan_to_num(tiles[-2]), (1.0, 99.5))
 
         def look(plane: np.ndarray, low: float = low, high: float = high) -> np.ndarray:
             t = np.clip((np.nan_to_num(plane) - low) / max(high - low, 1e-12), 0.0, 1.0)
             return (np.arcsinh(t * 30.0) / np.arcsinh(30.0) * 255.0).astype(np.uint8)
 
-        shown = [look(tile) for tile in tiles[:4]] + [look(tiles[4] + low)]
+        shown = [look(tile) for tile in tiles[:-1]] + [look(tiles[-1] + low)]
         gap = np.full((shown[0].shape[0], 6), 40, np.uint8)
         strip = np.concatenate([part for tile in shown for part in (tile, gap)][:-1], axis=1)
         strips.append((f"{record.get('product', '')} draw {record.get('draw', '')}: {record.get('telescope', '')}",

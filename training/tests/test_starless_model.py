@@ -128,3 +128,51 @@ def test_the_measures_read_the_truth_as_perfect_and_the_input_as_all_the_stars_l
     # A hole: the truth less the stars' light reads as a negative core.
     holed = sm.measures(planes["starless"] - (planes["input"] - planes["starless"]), planes)
     assert holed["cores_mean"] < -10.0 and holed["light_left"] == pytest.approx(-1.0)
+    # The truth keeps all its noise where stars were; a smooth fill none.
+    assert perfect["noise_kept"] == pytest.approx(1.0)
+    smooth = sm.box_mean(planes["starless"], 15)
+    assert sm.measures(smooth, planes)["noise_kept"] < 0.4
+
+
+def test_a_box_mean_is_the_mean_over_the_box_within_the_plane():
+    plane = np.random.default_rng(3).standard_normal((20, 30))
+    found = sm.box_mean(plane, 5)
+    for row, column in ((0, 0), (10, 15), (19, 29), (2, 27)):
+        box = plane[max(0, row - 2):row + 3, max(0, column - 2):column + 3]
+        assert found[row, column] == pytest.approx(box.mean())
+
+
+def sky_with_a_smooth_fill(rng, rho=0.2):
+    """A sky of correlated noise (neighbours correlating by `rho`), 2 a
+    pixel, on a slope, with a disc of 40 px smoothed over as a network fills
+    a star."""
+    size = (300, 300)
+    noise = sm.grained(size, rho, rho, rng) * 2.0
+    yy, xx = np.mgrid[0:size[0], 0:size[1]]
+    sky = 100.0 + 0.01 * xx + noise
+    disc = np.hypot(xx - 150, yy - 150) < 40
+    smooth = np.where(disc, 100.0 + 0.01 * xx, sky)
+    return sky.astype(np.float32), smooth.astype(np.float32), disc, np.full(size, 2.0, np.float32)
+
+
+def test_a_smooth_fill_gets_noise_of_the_image_s_grain_and_the_layers_still_add_back():
+    rng = np.random.default_rng(4)
+    sky, smooth, disc, noise = sky_with_a_smooth_fill(rng)
+    image = sky + 50.0 * np.exp(-((np.mgrid[0:300, 0:300][1] - 150) ** 2
+                                  + (np.mgrid[0:300, 0:300][0] - 150) ** 2) / (2 * 6.0**2))
+    out, stars = sm.filled(image, smooth, seed=1)
+    np.testing.assert_allclose(out + stars, image, atol=1e-3)
+    # Within the disc, noise as the sky's, of its grain...
+    inner = np.hypot(*(np.mgrid[0:300, 0:300] - 150)) < 30
+    drawn = (out - smooth).astype(np.float64)
+    assert np.std(drawn[inner]) == pytest.approx(2.0, rel=0.15)
+    across = np.corrcoef(drawn[inner][:-1], drawn[inner][1:])[0, 1]
+    assert across == pytest.approx(0.2, abs=0.08)
+    # ...and away from it, where nothing is lacking, nothing drawn.
+    away = np.hypot(*(np.mgrid[0:300, 0:300] - 150)) > 60
+    np.testing.assert_array_equal(out[away], smooth[away])
+    # The same each time for one seed.
+    np.testing.assert_array_equal(sm.filled(image, smooth, seed=1)[0], out)
+    # A grain read from white noise is near none.
+    white = rng.standard_normal((200, 200))
+    assert max(sm.grain(white, np.ones(white.shape, bool))) < 0.05

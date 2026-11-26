@@ -322,9 +322,19 @@ Next (under way, 2026-11-26):
 - X3 (`fit`) and X4 (`image`), as X1 and X2 on the new banks, with X1 and
   X2 measured again on the new validation bank beside them.
 - Where a star buries the sky's noise, the starless image is given noise
-  to match after the network, drawn from the noise map, and the same taken
-  out of the stars layer, so the layers still add back to the input; the
-  measures are of the network's own output, before that noise.
+  to match after the network, and the same taken out of the stars layer,
+  so the layers still add back to the input (`starless_model.filled`;
+  built). It reads only the image: its grain (variance about a 3 px mean)
+  against that grain's median over 96 px blocks, read again away from
+  where the first reading found it lacking, so a wide fill does not lower
+  its own measure; noise of the image's level and neighbour correlation
+  (0.18 on our stacks) is drawn where 30% of the grain or more is
+  missing, fully from 50%. A noise map will not do: it is raised about a
+  bright star by the star (23 times the sky's at one core). X1's fills keep
+  60 to 70% of the grain's spread in blotches, and lack it only within 10
+  to 15 px of the core, where the fill now draws it. The measures are of
+  the network's own output; `noise_kept` gives the grain kept where stars
+  were, beside the filled output's.
 - Later: a halo layer and a spikes layer from the network, for halo
   reduction as a setting and spikes as their own image; then the wider
   network.
