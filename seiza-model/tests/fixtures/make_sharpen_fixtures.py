@@ -15,7 +15,8 @@ the `seiza` binding, built from the same source as the crate under test:
 `sharpen/tiny` is a bundle of random weights, small enough to commit.
 `sharpen/expected.json` holds what the harness makes of the image at sampled
 pixels: its PSF field's nodes and their widths, its point sources, the maps
-the network reads, and the tiny model's output, as it is and rolled off. Its
+the network reads, and the tiny model's output, as it is and rolled off,
+and a known change rolled off and held under the noise (`edged`). Its
 `scaled` holds the same for `sharpen/scaled.f32`, an image of wider stars,
 with a scaled pass (`SCALED`) that the committed card leaves out and a test
 adds: the factor it is binned by, the binned image's reading and ratio
@@ -55,7 +56,10 @@ TINY_WIDTH, TINY_LEVELS, TINY_RAMP, TINY_TILE = 4, 3, 8, 128
 TINY_STAMP_WIDTH, TINY_FEATURES = 4, 8
 STRENGTHS = (0.46, 0.5)
 ROLLOFF = 1.0
-SETTINGS = {"nonstellar": True, "kernel_ratios": [1.1, 4.0], "floor_px": 1.5, "residual": "asinh"}
+# The noise hold on the fixture's `edged` change: hard enough that about a
+# sixth of its pixels move by more than 0.1.
+HOLD_NOISE = 3.0
+SETTINGS ={"nonstellar": True, "kernel_ratios": [1.1, 4.0], "floor_px": 1.5, "residual": "asinh"}
 # The scaled pass a bundle's card has, which bins `scaled_image`'s stars,
 # about 7 px across, 2 × 2. That image is larger than `image`, so that its
 # binned half still holds stars enough for one PSF; the floor holds the
@@ -159,6 +163,7 @@ def answers(record: dict, model: torch.nn.Module, plane: np.ndarray, stride: int
         "stride": stride,
         "strengths": list(strengths),
         "rolloff": ROLLOFF,
+        "hold_noise": HOLD_NOISE,
         "background": runner.background,
         "noise": runner.noise,
         "status": field.status,
@@ -180,6 +185,8 @@ def answers(record: dict, model: torch.nn.Module, plane: np.ndarray, stride: int
         "vector_map": sharpen_model.sampled_features(features, runner.ys, runner.xs, corner[0], corner[1], tile,
                                                      multiple).astype(np.float64).ravel().tolist(),
         "edged_rolled": sampled(sharpen_model.rolloff_step(edged(plane), plane, ROLLOFF, runner.noise_map), stride),
+        "edged_held": sampled(sharpen_model.noise_hold_step(edged(plane), plane, HOLD_NOISE, runner.noise_map),
+                              stride),
         "output": sampled(output, stride),
         "rolled": sampled(rolled, stride),
     }
@@ -298,7 +305,7 @@ def trained(arguments: argparse.Namespace) -> None:
             arguments.out / f"{name}.f32")
 
     expected = answers(record, model, plane, 1, strengths)
-    for name in ("output", "rolled", "edged_rolled", "point_map", "ratio_stars", "ratio_rest"):
+    for name in ("output", "rolled", "edged_rolled", "edged_held", "point_map", "ratio_stars", "ratio_rest"):
         kept(expected.pop(name), name)
     if arguments.scaled:
         card = json.loads((bundle / "card.json").read_text())

@@ -432,8 +432,18 @@ with `filtered` alone, as a card did before they were named, and its output
 is unchanged. A removal named twice, or an empty list, is refused.
 
 `SharpenOptions::rolloff` holds back the finest part of the change where it
-lies under the noise, after the model: the harness's `rolloff_step`. Its
-`clarity_step` is not ported.
+lies under the noise, after the model: the harness's `rolloff_step`.
+`SharpenOptions::hold_noise` then holds back its broad part, between 4 and
+16 px, where that lies under so many times the noise the image's noise has in
+the band were it white: the harness's `noise_hold_step`. A run trained on
+pairs of many fields, asked 0.35, still raised the noise between 8 and 16 px on
+the independent halves of NGC 6820 (held out) by 1.17, 1.24 and 1.27 in the
+faintest, middle and brightest thirds of its cloud, for shared structure 1.31,
+1.37 and 1.20, where the goal raises it by 1.17, 1.18 and 1.16 for 1.32, 1.34
+and 1.17; held at 0.5, the noise there is 1.11, 1.16 and 1.17 and the structure
+1.29, 1.35 and 1.20. The fixture holds both steps to the harness's arithmetic
+on a known change. Both are 0 unless asked, and with both 0 the output is the
+model's. The harness's `clarity_step` is not ported.
 
 **The scaled pass.** A model trained mostly on stars 2 to 5 px across does
 not narrow the rims of an image whose stars are 11.5 px across, whatever it
@@ -584,8 +594,8 @@ it reads apart from the classical commands: `seiza deconvolve` beside
 
 `--high-amount` and `--low-amount` are the harness's names, so sheets and the
 CLI speak alike. `seiza model sharpen` takes `--stars` and `--rest`, the two
-shares, each the model's own when left out, `--rolloff`, and, for a card with
-a scaled pass, `--binned-rest` and `--full-size-only`. Its C twin is
+shares, each the model's own when left out, `--rolloff`, `--hold-noise`, and,
+for a card with a scaled pass, `--binned-rest` and `--full-size-only`. Its C twin is
 `seiza_sharpen_model_sharpen`, which writes into the caller's buffer and
 answers with what ran, and its Python twin `SharpenModel.sharpen`. From a
 file to a file, as the CLI runs it, they are `RestorationImage::sharpen` and

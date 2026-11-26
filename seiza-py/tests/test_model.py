@@ -372,6 +372,14 @@ def test_a_tiny_sharpening_model_matches_the_harness() -> None:
     want = np.array([np.nan if value is None else value for value in expected["rolled"]], dtype=np.float32)
     assert np.nanmax(np.abs(rolled.image[::stride, ::stride].ravel() - want)) < 2e-3 * expected["noise"]
 
+    held = model.sharpen(image, hold_noise=expected["hold_noise"])
+    assert (held.report.hold_noise, own.report.hold_noise) == (expected["hold_noise"], 0.0)
+    moved = np.abs(held.image - own.image)
+    assert np.nanmax(moved) > 0.1, "the broad change is held back somewhere"
+    assert np.isnan(held.image[-1, 0]), "a pixel with no data stays without"
+    with pytest.raises(ValueError, match="noise hold"):
+        model.sharpen(image, hold_noise=-1.0)
+
 
 @needs_runtime
 def test_a_scaled_pass_bins_a_wide_starred_image_as_the_harness_does(tmp_path: Path) -> None:
@@ -420,13 +428,14 @@ def test_a_file_is_sharpened_to_a_file_that_says_what_ran(tmp_path: Path) -> Non
     source, output = tmp_path / "stars.fits", tmp_path / "sharp.fits"
     write_fits(source, image)
     model = seiza.SharpenModel(str(SHARPEN / "tiny"), "cpu")
-    report = model.sharpen_file(source, output, 0.6, rolloff=0.5)
+    report = model.sharpen_file(source, output, 0.6, rolloff=0.5, hold_noise=0.5)
     assert (report.model, report.stars, report.rest, report.rolloff) == ("sharpen-tiny", pytest.approx(0.6), 0.5, 0.5)
+    assert report.hold_noise == 0.5
     header = output.read_bytes()[:5760].decode("ascii", "replace")
-    assert "SEIZAMDL" in header and "MDSTARS" in header and "MDREST" in header
+    assert "SEIZAMDL" in header and "MDSTARS" in header and "MDREST" in header and "MDHOLD" in header
     written = np.frombuffer(output.read_bytes(), dtype=">f4", offset=header.index("END     ") // 2880 * 2880 + 2880,
                             count=image.size).reshape(image.shape)
-    direct = model.sharpen(image, 0.6, rolloff=0.5).image
+    direct = model.sharpen(image, 0.6, rolloff=0.5, hold_noise=0.5).image
     assert np.array_equal(written, direct, equal_nan=True)
     with pytest.raises(seiza.EngineError):
         model.sharpen_file(tmp_path / "missing.fits", output)

@@ -5742,8 +5742,10 @@ size_t seiza_sharpen_model_tile(const SeizaSharpenModel *model);
 
  `options_json` may be null, or hold `stars`, the share of its width every
  star is brought to, `rest`, the share asked of everything that is not a
- star, and `rolloff`, how hard the finest part of the change is held back
- where it lies under the noise. A share is above 0 and at most 1, which
+ star, `rolloff`, how hard the finest part of the change is held back
+ where it lies under the noise, and `holdNoise`, how hard its broad part,
+ between 4 and 16 px, is held back where it lies under that band's share of
+ the noise. A share is above 0 and at most 1, which
  leaves things as they are; left out, it is the model's own. No star is asked
  to be narrower than the model's floor. Where the model's card has a scaled
  pass, an image whose stars are far wider than the model was trained on is
@@ -5754,14 +5756,14 @@ size_t seiza_sharpen_model_tile(const SeizaSharpenModel *model);
 
  Returns what ran, as JSON the caller frees with `seiza_string_free`:
  `model`, `sha256` (the body graph's), `cardSha256`, `backend`, `precision`,
- `tile`, `stars`, `rest`, `rolloff`, `binnedRest` (null where the card has
+ `tile`, `stars`, `rest`, `rolloff`, `holdNoise`, `binnedRest` (null where the card has
  no scaled pass or the run was held to full size), `fullSizeOnly`, and
  `channels`, each with its `background`, `noise`, `psfRows` and
  `psfColumns` (the nodes its PSF field was sampled at), `psfStars`,
  `psfGlobal` (too few stars left one PSF for the whole image), `psfWidthPx`,
  `points` and `binned`, how many pixels a side it was also sharpened binned
  by (1: not at all). A host keys cached results on `cardSha256`, `backend`,
- `precision`, `stars`, `rest`, `rolloff`, `binnedRest`, `fullSizeOnly` and
+ `precision`, `stars`, `rest`, `rolloff`, `holdNoise`, `binnedRest`, `fullSizeOnly` and
  [`seiza_model_output_version`]. An image with too few stars to measure a
  PSF from is refused, and so is an `out` that overlaps `data`. Where only
  the binned image has too few, the channel is sharpened at full size alone.

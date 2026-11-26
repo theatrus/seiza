@@ -38,6 +38,15 @@ use rayon::prelude::*;
 /// [`FINE_AREA`] pixels.
 const FINE_SPLIT: f64 = 2.0;
 const FINE_AREA: f64 = 4.0;
+/// The broad part of a sharpening's change that the noise hold reads lies
+/// between Gaussians [`HOLD_LOW`] and [`HOLD_HIGH`] pixels wide at half
+/// height, and its local power is taken over a Gaussian of [`HOLD_AREA`]
+/// pixels.
+const HOLD_LOW: f64 = 4.0;
+const HOLD_HIGH: f64 = 16.0;
+const HOLD_AREA: f64 = 8.0;
+/// A Gaussian's width at half height over its σ.
+const HALF_HEIGHT: f64 = 2.354_820_045_030_949_3;
 /// A blur reads this many of its σ either way.
 const BLUR_REACH: f64 = 8.0;
 /// The scales' and the roll-off's medians read every 17th pixel.
@@ -61,6 +70,13 @@ pub struct SharpenOptions<'a> {
     /// the share its local power is of that power and the square of this
     /// times the image's noise. 0 keeps all of it.
     pub rolloff: f32,
+    /// How hard the broad part of the change is held back under noise,
+    /// after the model and the roll-off: of the change's detail between 4
+    /// and 16 px, each pixel keeps the share its local power is of that
+    /// power and the square of this times the noise the image's noise would
+    /// have in that band were it white. Structure stands over it and stays;
+    /// what the model made of the noise there goes. 0 keeps all of it.
+    pub hold_noise: f32,
     /// The share asked of everything that is not a star on the binned image,
     /// where the card's scaled pass bins it ([`ScaledCard`]): above 0 and at
     /// most 1, and never below the model's floor in the binned image's
@@ -100,7 +116,7 @@ pub struct SharpenedChannel {
 
 /// What ran, for a file's provenance and a host's cache key: a host keys
 /// cached results on `card_sha256`, `backend`, `precision`, `stars`, `rest`,
-/// `rolloff`, `binned_rest`, `full_size_only` and
+/// `rolloff`, `hold_noise`, `binned_rest`, `full_size_only` and
 /// [`OUTPUT_VERSION`](crate::OUTPUT_VERSION).
 #[derive(Clone, Debug, PartialEq)]
 pub struct SharpenReport {
@@ -122,6 +138,8 @@ pub struct SharpenReport {
     pub rest: f32,
     /// How hard the change's finest part was held back.
     pub rolloff: f32,
+    /// How hard the change's broad part was held back.
+    pub hold_noise: f32,
     /// The share asked of everything else on a binned image, for the scaled
     /// pass; None where the card has none or the run was held to full size.
     pub binned_rest: Option<f32>,
@@ -391,6 +409,7 @@ impl SharpenModel {
                 stars: asked.stars,
                 rest: asked.rest,
                 rolloff: asked.rolloff,
+                hold_noise: asked.hold_noise,
                 binned_rest: asked.scaled.map(|scaled| scaled.rest),
                 full_size_only: options.full_size_only,
                 channels,
@@ -405,6 +424,7 @@ pub(crate) struct Asked {
     stars: f32,
     rest: f32,
     rolloff: f32,
+    hold_noise: f32,
     /// The scaled pass, where the card has one and the run is not held to
     /// full size.
     scaled: Option<Scaled>,
@@ -443,6 +463,12 @@ impl Asked {
                 options.rolloff
             )));
         }
+        if !(options.hold_noise >= 0.0 && options.hold_noise.is_finite()) {
+            return Err(ModelError::InvalidOption(format!(
+                "a noise hold is 0 or more, not {}",
+                options.hold_noise
+            )));
+        }
         // A binned ask is checked even where nothing reads it.
         let binned_rest = options
             .binned_rest
@@ -466,6 +492,7 @@ impl Asked {
             stars: share("stars", options.stars, card.strengths.stars)?,
             rest: share("what is not a star", options.rest, card.strengths.rest)?,
             rolloff: options.rolloff,
+            hold_noise: options.hold_noise,
             scaled,
         })
     }
@@ -582,6 +609,9 @@ fn sharpen_plane(
     }
     if asked.rolloff > 0.0 {
         output = rolloff_step(&output, plane, width, height, asked.rolloff, &read.sigma);
+    }
+    if asked.hold_noise > 0.0 {
+        output = noise_hold_step(&output, plane, width, height, asked.hold_noise, &read.sigma);
     }
     let channel = SharpenedChannel {
         background: read.background,
@@ -1126,6 +1156,78 @@ pub(crate) fn rolloff_step(
         .collect()
 }
 
+/// The spread white noise of spread 1 has through the difference of
+/// Gaussians `low` and `high` pixels wide at half height.
+pub(crate) fn band_noise(low: f64, high: f64) -> f64 {
+    let (a, b) = (low / HALF_HEIGHT, high / HALF_HEIGHT);
+    ((1.0 / (a * a) + 1.0 / (b * b) - 4.0 / (a * a + b * b)) / (4.0 * std::f64::consts::PI)).sqrt()
+}
+
+/// A sharpened image with the broad part of its change from `image`, its
+/// input, held back where it lies under `amount` times that band's share of
+/// `sigma`, the input's noise map: the harness's function of the same name.
+/// The change between [`HOLD_LOW`] and [`HOLD_HIGH`] px is kept by its local
+/// power over that power and the square of `amount` times the noise white
+/// noise of `sigma` would have in the band ([`band_noise`]). NaN stays NaN.
+pub(crate) fn noise_hold_step(
+    output: &[f32],
+    image: &[f32],
+    width: usize,
+    height: usize,
+    amount: f32,
+    sigma: &[f32],
+) -> Vec<f32> {
+    let finite = |index: usize| output[index].is_finite() && image[index].is_finite();
+    let mut sample: Vec<f32> = (0..output.len())
+        .filter(|&index| finite(index))
+        .step_by(LEVEL_STRIDE)
+        .map(|index| output[index])
+        .collect();
+    let Some(level) = median_f32(&mut sample) else {
+        return output.to_vec();
+    };
+    let filled = |plane: &[f32]| -> Vec<f32> {
+        (0..plane.len())
+            .into_par_iter()
+            .map(|index| if finite(index) { plane[index] } else { level })
+            .collect()
+    };
+    let (sharp, soft) = (filled(output), filled(image));
+    let change: Vec<f32> = sharp
+        .iter()
+        .zip(&soft)
+        .map(|(sharp, soft)| sharp - soft)
+        .collect();
+    let narrow = blurred(&change, width, height, HOLD_LOW / HALF_HEIGHT);
+    let wide = blurred(&change, width, height, HOLD_HIGH / HALF_HEIGHT);
+    let part: Vec<f32> = narrow
+        .iter()
+        .zip(&wide)
+        .map(|(narrow, wide)| narrow - wide)
+        .collect();
+    let squared: Vec<f32> = part.iter().map(|part| part * part).collect();
+    let power = blurred(&squared, width, height, HOLD_AREA);
+    let share = (f64::from(amount) * band_noise(HOLD_LOW, HOLD_HIGH)) as f32;
+    (0..output.len())
+        .into_par_iter()
+        .map(|index| {
+            if !finite(index) {
+                return output[index];
+            }
+            let power = power[index].max(0.0);
+            let noise = if sigma[index].is_nan() {
+                0.0
+            } else {
+                sigma[index]
+            };
+            let floor = (share * noise) * (share * noise);
+            let kept = power / (power + floor);
+            let kept = if kept.is_nan() { 1.0 } else { kept };
+            sharp[index] - (1.0 - kept) * part[index]
+        })
+        .collect()
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1180,6 +1282,131 @@ pub(crate) mod tests {
         );
     }
 
+    /// Normal deviates from a fixed seed (xorshift and Box-Muller).
+    fn normals(count: usize, mut state: u64) -> Vec<f32> {
+        let mut uniform = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            ((state >> 11) as f64 + 0.5) / (1_u64 << 53) as f64
+        };
+        (0..count)
+            .map(|_| {
+                let (u, v) = (uniform(), uniform());
+                ((-2.0 * u.ln()).sqrt() * (2.0 * std::f64::consts::PI * v).cos()) as f32
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_noise_hold_keeps_broad_structure_and_fine_change_and_holds_the_noise_s() {
+        let band = |plane: &[f32], width: usize, height: usize| -> Vec<f32> {
+            let narrow = blurred(plane, width, height, HOLD_LOW / HALF_HEIGHT);
+            let wide = blurred(plane, width, height, HOLD_HIGH / HALF_HEIGHT);
+            narrow.iter().zip(&wide).map(|(a, b)| a - b).collect()
+        };
+        let spread = |values: &[f32]| {
+            let mean = values.iter().map(|&v| f64::from(v)).sum::<f64>() / values.len() as f64;
+            (values
+                .iter()
+                .map(|&v| (f64::from(v) - mean).powi(2))
+                .sum::<f64>()
+                / values.len() as f64)
+                .sqrt()
+        };
+        let inside =
+            |plane: &[f32], width: usize, (x0, x1): (usize, usize), (y0, y1): (usize, usize)| {
+                (y0..y1)
+                    .flat_map(|y| (x0..x1).map(move |x| y * width + x))
+                    .map(|index| plane[index])
+                    .collect::<Vec<f32>>()
+            };
+        // The band's share of white noise is what white noise shows through it.
+        let side = 384;
+        let white = band(&normals(side * side, 7), side, side);
+        let read = spread(&inside(&white, side, (64, side - 64), (64, side - 64)));
+        let want = band_noise(HOLD_LOW, HOLD_HIGH);
+        assert!((read / want - 1.0).abs() < 0.05, "{read} against {want}");
+
+        let (width, height) = (256, 256);
+        let soft = vec![10.0_f32; width * height];
+        // A broad change of structure on the left (a ridge, as a rim's), one
+        // the noise could make on the right, and a fine one (a 2 px
+        // checkerboard) everywhere.
+        let noise = normals(width * height, 11);
+        let at = |index: usize| (index % width, index / width);
+        let strong: Vec<f32> = (0..width * height)
+            .map(|index| {
+                let x = at(index).0 as f32;
+                2.0 * (-((x - 64.0) * (x - 64.0)) / (2.0 * 9.0)).exp()
+            })
+            .collect();
+        let weak: Vec<f32> = (0..width * height)
+            .map(|index| {
+                if at(index).0 >= 160 {
+                    0.5 * noise[index]
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let sign = |index: usize| {
+            let (x, y) = at(index);
+            if (x + y) % 2 == 0 { 1.0_f32 } else { -1.0 }
+        };
+        let sharp: Vec<f32> = (0..width * height)
+            .map(|index| soft[index] + strong[index] + weak[index] + 0.3 * sign(index))
+            .collect();
+        let sigma = vec![1.0_f32; width * height];
+        let held = noise_hold_step(&sharp, &soft, width, height, 1.0, &sigma);
+        let change: Vec<f32> = held.iter().zip(&soft).map(|(a, b)| a - b).collect();
+        let kept = band(&change, width, height);
+        let ridge = band(&strong, width, height);
+        let centre = |plane: &[f32]| {
+            inside(plane, width, (52, 77), (32, 224))
+                .iter()
+                .map(|v| v.abs())
+                .sum::<f32>()
+        };
+        assert!(
+            centre(&kept) > 0.9 * centre(&ridge),
+            "the ridge is kept: {} of {}",
+            centre(&kept),
+            centre(&ridge)
+        );
+        // The noise's goes, as far as the band reads it (a difference of
+        // Gaussians read through again passes only part of it).
+        let right = |plane: &[f32]| spread(&inside(plane, width, (176, 224), (32, 224)));
+        let weak_band = band(&weak, width, height);
+        assert!(
+            right(&kept) < 0.7 * right(&weak_band),
+            "the noise's is held: {} of {}",
+            right(&kept),
+            right(&weak_band)
+        );
+        // Nothing outside the band moves: the checkerboard is as it was.
+        let checker = (16..height - 16)
+            .flat_map(|y| (16..width - 16).map(move |x| y * width + x))
+            .map(|index| f64::from((held[index] - sharp[index]) * sign(index)))
+            .sum::<f64>()
+            / ((width - 32) * (height - 32)) as f64;
+        assert!(
+            checker.abs() < 0.01 * 0.3,
+            "the checkerboard moved by {checker}"
+        );
+        assert_eq!(
+            noise_hold_step(&sharp, &soft, width, height, 0.0, &sigma),
+            sharp,
+            "0 holds nothing"
+        );
+        // NaN stays NaN and spreads nowhere.
+        let mut gappy = sharp.clone();
+        gappy[10 * width + 200] = f32::NAN;
+        let stepped = noise_hold_step(&gappy, &soft, width, height, 1.0, &sigma);
+        assert!(stepped[10 * width + 200].is_nan());
+        assert_eq!(stepped.iter().filter(|value| value.is_nan()).count(), 1);
+    }
+
     #[test]
     fn a_strength_must_be_a_share() {
         let temp = tempfile::tempdir().unwrap();
@@ -1187,11 +1414,22 @@ pub(crate) mod tests {
         let bundle = ModelBundle::open(temp.path()).unwrap();
         let card = bundle.card().sharpen.as_ref().unwrap();
         let own = Asked::from(&SharpenOptions::default(), card).unwrap();
-        assert_eq!((own.stars, own.rest, own.rolloff), (0.46, 0.5, 0.0));
-        for (stars, rolloff) in [(0.0, 0.0), (1.5, 0.0), (f32::NAN, 0.0), (0.5, -1.0)] {
+        assert_eq!(
+            (own.stars, own.rest, own.rolloff, own.hold_noise),
+            (0.46, 0.5, 0.0, 0.0)
+        );
+        for (stars, rolloff, hold_noise) in [
+            (0.0, 0.0, 0.0),
+            (1.5, 0.0, 0.0),
+            (f32::NAN, 0.0, 0.0),
+            (0.5, -1.0, 0.0),
+            (0.5, 0.0, -1.0),
+            (0.5, 0.0, f32::INFINITY),
+        ] {
             let options = SharpenOptions {
                 stars: Some(stars),
                 rolloff,
+                hold_noise,
                 ..Default::default()
             };
             assert!(matches!(

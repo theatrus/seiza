@@ -811,8 +811,11 @@ a bundle's directory, or install that directory with `install_model`.
 sharper. No star is asked to be narrower than the model's floor in pixels, and a
 share left out is the model's own, which `installed_models()` lists under
 `sharpen`. `rolloff` holds back the finest part of the change where it lies
-under that many times the image's noise. An image with too few stars to measure
-a PSF from raises `TooFewStarsError`.
+under that many times the image's noise, and `hold_noise` its broad part,
+between 4 and 16 px, where it lies under that many times the noise the image's
+noise has in that band: structure stands over it and stays, and what the model
+made of the noise there goes. An image with too few stars to measure a PSF from
+raises `TooFewStarsError`.
 
 Where a model's card has a scaled pass (`installed_models()` lists its
 `scaled_px` under `sharpen`), an image whose stars are far wider than the model
@@ -825,8 +828,8 @@ card's own when left out), and `full_size_only=True` keeps a run at full size.
 `report.channels[0].binned` says how many pixels a side a channel was binned by,
 1 where it was not, as when the binned image has too few stars for a PSF. A
 cache of results keys on `report.card_sha256`, the backend, the precision,
-`stars`, `rest`, `rolloff`, `binned_rest`, `full_size_only` and
-`MODEL_OUTPUT_VERSION`.
+`stars`, `rest`, `rolloff`, `hold_noise`, `binned_rest`, `full_size_only`
+and `MODEL_OUTPUT_VERSION`.
 
 `seiza.model_backends()` says which backends run here and why the others do not,
 and `install_model`, `installed_models`, `verify_model` and `remove_model` manage

@@ -627,7 +627,8 @@ impl PySharpenedChannel {
 
 /// What ran in a sharpening, for a file's provenance and a cache key: key
 /// cached results on `card_sha256`, `backend`, `precision`, `stars`, `rest`,
-/// `rolloff`, `binned_rest`, `full_size_only` and `MODEL_OUTPUT_VERSION`.
+/// `rolloff`, `hold_noise`, `binned_rest`, `full_size_only` and
+/// `MODEL_OUTPUT_VERSION`.
 /// `sha256` is the body graph's. `binned_rest` is the share asked of the
 /// rest on a binned image, None where the card has no scaled pass or the
 /// run was held to full size.
@@ -653,6 +654,8 @@ pub(crate) struct PySharpenReport {
     #[pyo3(get)]
     rolloff: f32,
     #[pyo3(get)]
+    hold_noise: f32,
+    #[pyo3(get)]
     binned_rest: Option<f32>,
     #[pyo3(get)]
     full_size_only: bool,
@@ -672,6 +675,7 @@ impl From<&SharpenReport> for PySharpenReport {
             stars: report.stars,
             rest: report.rest,
             rolloff: report.rolloff,
+            hold_noise: report.hold_noise,
             binned_rest: report.binned_rest,
             full_size_only: report.full_size_only,
             channels: report.channels.iter().map(Into::into).collect(),
@@ -757,6 +761,7 @@ struct Asked {
     stars: Option<f32>,
     rest: Option<f32>,
     rolloff: f32,
+    hold_noise: f32,
     binned_rest: Option<f32>,
     full_size_only: bool,
 }
@@ -789,6 +794,7 @@ impl PySharpenModel {
             stars: asked.stars,
             rest: asked.rest,
             rolloff: asked.rolloff,
+            hold_noise: asked.hold_noise,
             binned_rest: asked.binned_rest,
             full_size_only: asked.full_size_only,
             progress: Some(&report),
@@ -880,7 +886,9 @@ impl PySharpenModel {
     /// not a star: above 0 and at most 1, which leaves things as they are,
     /// and the model's own when `None`. No star is asked to be narrower than
     /// the model's floor. `rolloff` holds back the finest part of the change
-    /// where it lies under that many times the image's noise. Where the
+    /// where it lies under that many times the image's noise, and
+    /// `hold_noise` its broad part, between 4 and 16 px, where it lies under
+    /// that many times the noise the image's noise has in that band. Where the
     /// model's card has a scaled pass, an image whose stars are far wider
     /// than the model was trained on is also sharpened binned, toward the
     /// width the card names, and the two runs put together by scale:
@@ -891,7 +899,7 @@ impl PySharpenModel {
     /// true, stops the run. An image with too few stars to measure a PSF from
     /// raises `TooFewStarsError`. Where only the binned image has too few, the
     /// channel is sharpened at full size alone.
-    #[pyo3(signature = (image, stars=None, rest=None, *, rolloff=0.0, binned_rest=None, full_size_only=false, progress=None, cancel=None))]
+    #[pyo3(signature = (image, stars=None, rest=None, *, rolloff=0.0, hold_noise=0.0, binned_rest=None, full_size_only=false, progress=None, cancel=None))]
     #[allow(clippy::too_many_arguments)]
     fn sharpen(
         &self,
@@ -900,6 +908,7 @@ impl PySharpenModel {
         stars: Option<f32>,
         rest: Option<f32>,
         rolloff: f32,
+        hold_noise: f32,
         binned_rest: Option<f32>,
         full_size_only: bool,
         progress: Option<Py<PyAny>>,
@@ -912,6 +921,7 @@ impl PySharpenModel {
             stars,
             rest,
             rolloff,
+            hold_noise,
             binned_rest,
             full_size_only,
         };
@@ -925,7 +935,7 @@ impl PySharpenModel {
     /// result to `output` as linear 32-bit FITS, with the input's geometry
     /// and cards that say what ran, without first constructing a Python
     /// array. The other arguments are `sharpen`'s.
-    #[pyo3(signature = (path, output, stars=None, rest=None, *, rolloff=0.0, binned_rest=None, full_size_only=false, progress=None, cancel=None))]
+    #[pyo3(signature = (path, output, stars=None, rest=None, *, rolloff=0.0, hold_noise=0.0, binned_rest=None, full_size_only=false, progress=None, cancel=None))]
     #[allow(clippy::too_many_arguments)]
     fn sharpen_file(
         &self,
@@ -935,6 +945,7 @@ impl PySharpenModel {
         stars: Option<f32>,
         rest: Option<f32>,
         rolloff: f32,
+        hold_noise: f32,
         binned_rest: Option<f32>,
         full_size_only: bool,
         progress: Option<Py<PyAny>>,
@@ -948,6 +959,7 @@ impl PySharpenModel {
             stars,
             rest,
             rolloff,
+            hold_noise,
             binned_rest,
             full_size_only,
         };
