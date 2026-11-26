@@ -1973,9 +1973,11 @@ print(run.primary, run.sidecars, run.device)
 
 A linear stack is far outside the tools' 0..1 range, and they clamp it.
 `rc_astro_process_image` runs a tool on an array and returns the result in
-the input's units. An array within 0..1 keeps its scale; any other is offset
-by its most negative sample and divided by 65535 or its span, whichever is
-larger, as PixInsight opens a 16-bit camera frame. NaN and infinite samples,
+the input's units. An array on 0..1 keeps its scale: one with no sample
+below -1 and at most one in a thousand above 1, such as a normalized
+stack's overshooting star cores, which go to the tool at 1. Any other is
+offset by its most negative sample and divided by 65535 or its span,
+whichever is larger, as PixInsight opens a 16-bit camera frame. NaN and infinite samples,
 such as a stack's uncovered edges, come back unchanged, and so do samples
 more than 30 robust sigmas below their channel's median, such as a stack's
 resampling ringing beside a saturated star, which take no part in the offset.
@@ -2021,8 +2023,9 @@ seiza.pixinsight_ml_denoise_file(
 )
 ```
 
-PixInsight works on 0 to 1. An array whose samples lie within 0 to 1 keeps
-its scale. Any other array is offset by its most negative sample and
+PixInsight works on 0 to 1. An array on 0 to 1 keeps its scale: one with
+no sample below -1 and at most one in a thousand above 1, which go to
+PixInsight at 1. Any other array is offset by its most negative sample and
 divided by 65535 or its span, whichever is larger, which is how PixInsight
 opens a 16-bit camera frame; the result is mapped back. NaN and infinite
 samples, such as a stack's uncovered edges, come back unchanged, and so do

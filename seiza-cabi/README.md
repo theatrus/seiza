@@ -406,8 +406,9 @@ exposes the **superset** of what both apps need.
   `output` and `model`, and optionally `amount` (0 to 1), `overlapPercent`
   (12 to 50), `precision` (`"fast"` or `"high"`), `localSupport`
   (`clipLow`, `background`, `smoothness`), `timeoutSeconds` and
-  `executable`. An image on 0 to 1 keeps its scale; any other is mapped
-  from 65535 or its span, whichever is larger, and back. NaN and infinite
+  `executable`. An image on 0 to 1 keeps its scale (none below -1, at most
+  one sample in a thousand above 1, which go out at 1); any other is
+  mapped from 65535 or its span, whichever is larger, and back. NaN and infinite
   samples come back unchanged. The output holds 32-bit floats on the
   input's scale with the input's headers. PixInsight reports no progress;
   the run accepts a `SeizaCancelSignal`, which closes PixInsight, as does

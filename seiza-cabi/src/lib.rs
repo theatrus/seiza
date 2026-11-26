@@ -21395,8 +21395,10 @@ pub unsafe extern "C" fn seiza_pixinsight_ml_denoise_model_json(
 /// extension) and `model` (the `.xmlm` file), and optionally `amount`,
 /// `overlapPercent`, `precision` ("fast" or "high"), `localSupport`
 /// (`clipLow`, `background`, `smoothness`), `timeoutSeconds` and the
-/// PixInsight `executable`. An image on 0 to 1 keeps its scale; any other
-/// is mapped from 16-bit counts or its span, whichever is larger, and back.
+/// PixInsight `executable`. An image on 0 to 1 (none below -1, at most one
+/// sample in a thousand above 1, which go out at 1) keeps its scale; any
+/// other is mapped from 16-bit counts or its span, whichever is larger, and
+/// back.
 /// Samples that are not finite come back unchanged. The output holds
 /// 32-bit floats on the input's scale with the input's headers. PixInsight
 /// reports no progress; `cancel` stops the run within a quarter of a second
