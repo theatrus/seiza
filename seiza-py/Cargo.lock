@@ -2473,6 +2473,9 @@ dependencies = [
 name = "seiza-compose"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
+ "half",
+ "pollster",
  "rayon",
  "seiza",
  "seiza-fits",
@@ -2481,6 +2484,7 @@ dependencies = [
  "seiza-stats",
  "seiza-stretch",
  "serde",
+ "wgpu",
 ]
 
 [[package]]
