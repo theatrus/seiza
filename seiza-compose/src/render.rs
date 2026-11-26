@@ -247,15 +247,25 @@ impl Padded {
     }
 }
 
+/// A tile's inputs with their margin: each input's plane, and the padded
+/// area's left and top in the picture's pixels, its width and its height.
+#[cfg_attr(not(feature = "gpu"), allow(dead_code))]
+pub(crate) struct PaddedPlanes {
+    pub(crate) planes: Vec<Vec<f32>>,
+    pub(crate) origin: [i64; 2],
+    pub(crate) width: usize,
+    pub(crate) height: usize,
+}
+
 /// What a picture needs worked out once: its inputs, and how far a tile's
 /// pixels can read beyond it.
-struct Plan {
-    inputs: Vec<usize>,
-    margin: usize,
+pub(crate) struct Plan {
+    pub(crate) inputs: Vec<usize>,
+    pub(crate) margin: usize,
 }
 
 impl Plan {
-    fn new(picture: &Picture) -> Self {
+    pub(crate) fn new(picture: &Picture) -> Self {
         let blur = picture
             .computed
             .iter()
@@ -374,6 +384,32 @@ impl Plan {
             }
         }
         Ok(out)
+    }
+
+    /// Each input over `tile` and the margin around it, in the order of
+    /// [`Self::inputs`]: the part inside the picture's region read from the
+    /// source, the rest reflected from it.
+    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
+    pub(crate) fn padded_planes(
+        &self,
+        source: &dyn Source,
+        region: ReferenceRegion,
+        tile: ReferenceRegion,
+    ) -> Result<PaddedPlanes> {
+        let margin = self.margin as i64;
+        let padded = Padded {
+            x: tile.x as i64 - margin,
+            y: tile.y as i64 - margin,
+            width: tile.width + 2 * self.margin,
+            height: tile.height + 2 * self.margin,
+        };
+        let planes = self.read_planes(source, region, &padded)?;
+        Ok(PaddedPlanes {
+            planes,
+            origin: [padded.x, padded.y],
+            width: padded.width,
+            height: padded.height,
+        })
     }
 
     /// Each input over the padded area: the part inside the picture's region

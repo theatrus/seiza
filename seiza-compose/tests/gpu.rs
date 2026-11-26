@@ -1,0 +1,101 @@
+//! The GPU compositor draws what the CPU compositor draws, within the
+//! precision of its half-float inputs and tables. The CPU render is the
+//! reference. Without a GPU wgpu can use, these tests pass without checking.
+
+#![cfg(feature = "gpu")]
+
+mod common;
+
+use common::{everything, plane, whole};
+use seiza_compose::gpu::{GpuContext, render_gpu};
+use seiza_compose::picture::Picture;
+use seiza_compose::render::{ImageSink, ImageSource, RenderOptions, render_image};
+use seiza_stacking::LinearImage;
+
+/// How far apart two renders are over pixels both cover: the mean, the
+/// 99th percentile and the largest difference of any channel.
+fn gap(cpu: &[f32], gpu: &[f32]) -> (f64, f32, f32) {
+    let mut differences: Vec<f32> = cpu
+        .iter()
+        .zip(gpu)
+        .filter(|(a, b)| a.is_finite() && b.is_finite())
+        .map(|(a, b)| (a - b).abs())
+        .collect();
+    differences.sort_by(f32::total_cmp);
+    let mean = differences
+        .iter()
+        .map(|value| f64::from(*value))
+        .sum::<f64>()
+        / differences.len().max(1) as f64;
+    let at = |share: f64| differences[((differences.len() - 1) as f64 * share) as usize];
+    (mean, at(0.99), at(1.0))
+}
+
+/// The CPU and GPU renders of `picture`, or `None` without a GPU.
+fn both(picture: &Picture, images: &[&LinearImage]) -> Option<(Vec<f32>, Vec<f32>)> {
+    let context = GpuContext::new()?;
+    let source = ImageSource::new(images.to_vec()).unwrap();
+    let region = whole(images[0]);
+    let options = RenderOptions {
+        tile: 256,
+        ..RenderOptions::default()
+    };
+    let cpu = render_image(picture, &source, region, &options)
+        .unwrap()
+        .data;
+    let sink = ImageSink::new(region);
+    render_gpu(picture, &source, region, &sink, &context, &options).unwrap();
+    let gpu = sink.into_image().unwrap().data;
+    for (a, b) in cpu.iter().zip(&gpu) {
+        assert_eq!(
+            a.is_nan(),
+            b.is_nan(),
+            "a pixel is covered in one render only"
+        );
+    }
+    Some((cpu, gpu))
+}
+
+fn inputs() -> [LinearImage; 3] {
+    let (width, height) = (520, 390);
+    [
+        plane(width, height, 1, true),
+        plane(width, height, 2, false),
+        plane(width, height, 3, false),
+    ]
+}
+
+#[test]
+fn layers_masks_heals_and_finishing_match_the_cpu() {
+    let inputs = inputs();
+    let images: Vec<&LinearImage> = inputs.iter().collect();
+    let mut picture = everything();
+    // Smoothing is the GPU's own approximation; the next test covers it.
+    picture.computed[0].smoothing = 0.0;
+    let Some((cpu, gpu)) = both(&picture, &images) else {
+        eprintln!("no GPU: the GPU compositor was not checked");
+        return;
+    };
+    let (mean, p99, largest) = gap(&cpu, &gpu);
+    eprintln!("unsmoothed: mean {mean:e}, p99 {p99:e}, max {largest:e}");
+    assert!(
+        mean < 1e-3 && p99 < 5e-3,
+        "mean {mean:e}, p99 {p99:e}, max {largest:e}"
+    );
+}
+
+#[test]
+fn smoothed_masks_stay_close_to_the_cpu() {
+    let inputs = inputs();
+    let images: Vec<&LinearImage> = inputs.iter().collect();
+    let Some((cpu, gpu)) = both(&everything(), &images) else {
+        eprintln!("no GPU: the GPU compositor was not checked");
+        return;
+    };
+    let (mean, p99, largest) = gap(&cpu, &gpu);
+    eprintln!("smoothed: mean {mean:e}, p99 {p99:e}, max {largest:e}");
+    assert!(
+        mean < 5e-3 && p99 < 3e-2,
+        "mean {mean:e}, p99 {p99:e}, max {largest:e}"
+    );
+}

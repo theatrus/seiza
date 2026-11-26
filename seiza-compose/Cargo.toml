@@ -11,7 +11,18 @@ readme = "README.md"
 keywords = ["astronomy", "astrophotography", "color", "image"]
 categories = ["science", "multimedia::images"]
 
+[features]
+default = ["gpu"]
+# The compositor on the GPU, through wgpu: a fast render of a picture for a
+# canvas, held to the CPU render by tests. Without it only the CPU render is
+# built.
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck", "dep:half"]
+
 [dependencies]
+wgpu = { workspace = true, optional = true }
+pollster = { workspace = true, optional = true }
+bytemuck = { workspace = true, optional = true }
+half = { version = "2", optional = true }
 rayon.workspace = true
 # Gaia photometry and plate geometry for color calibration.
 seiza.workspace = true
@@ -23,5 +34,7 @@ seiza-stats.workspace = true
 seiza-stretch.workspace = true
 
 [dev-dependencies]
+# Checks the GPU shaders in tests, as wgpu does when a canvas starts.
+naga = { version = "30", features = ["wgsl-in"] }
 serde_json.workspace = true
 tempfile = "3"

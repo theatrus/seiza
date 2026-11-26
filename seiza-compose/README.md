@@ -20,8 +20,13 @@ finishing steps (Seiza stretch plans, Tone and color, curves, saturation).
 32-bit floats, in the caller's Rayon pool; `render::render_image` keeps the
 result in memory. Each tile reads a margin for mask smoothing and heals,
 reflected at the picture's edge, so any tiling gives the same pixels. Every
-`combine_*` call below builds a picture and renders it here. See the
-[compositor design](../docs/design/compositor.md).
+`combine_*` call below builds a picture and renders it here.
+
+With the default `gpu` feature, `gpu::GpuCompositor` draws the same picture
+with wgpu for a canvas, and `gpu::render_gpu` renders one on the GPU from a
+`Source` into a `Sink`. The CPU render is the reference; `tests/gpu.rs`
+holds the GPU's half-float approximation to it. See the [compositor
+design](../docs/design/compositor.md).
 
 ## Composition
 

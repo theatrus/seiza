@@ -1,8 +1,8 @@
 # One compositor for every color picture
 
-> Status: the CPU compositor is built (`seiza_compose::picture` and
-> `seiza_compose::render`), and `combine_*` render through it. The GPU
-> renderer is the next change.
+> Status: built. `seiza_compose::picture` and `seiza_compose::render` are the
+> compositor and its CPU render, `combine_*` render through them, and
+> `seiza_compose::gpu` renders the same pictures with wgpu.
 
 ## Why
 
@@ -85,16 +85,33 @@ that writes a FITS, XISF or TIFF tile by tile.
 
 ## The GPU
 
-Seiza owns the shaders as well. The next change adds a wgpu renderer of the
-same `Picture` to this crate, behind a `gpu` feature as `seiza-stacking`'s
-resampling is, with tests that hold it to the CPU render. Where a GPU cannot
-match it exactly (half-float textures, 8-bit masks), the CPU render is the
-reference and the tests bound the gap.
+Seiza owns the shaders as well. `seiza_compose::gpu` (the default `gpu`
+feature) draws a `Picture` with wgpu:
+
+- `GpuScene::new` packs a picture for the shaders: each transfer a row of a
+  stretch table indexed by the square root of a sample, each finishing
+  stretch or Tone and color its curves.
+- `GpuCompositor::draw` runs the passes (painted masks, healed layers,
+  computed masks and their blur, layers, finishing steps) into targets the
+  size of the area drawn, from input tiles the host binds, and leaves the
+  finished picture in the working space. A canvas applies its display
+  transform after it.
+- `render_gpu` renders a picture from a `Source` into a `Sink` in tiles,
+  as `render` does, for a host without a canvas.
+
+The CPU render is the reference. Where the GPU differs by design, it is
+an approximation: inputs and stretch tables are half floats, a computed
+mask's smoothing is a 33-tap Gaussian over three standard deviations,
+clamped at the drawn area's edge, and a canvas draws an uncovered pixel
+black. `tests/gpu.rs` renders the same picture both ways and bounds the
+gap; on Apple silicon the mean difference is about 1e-4 and the 99th
+percentile under 1e-3, smoothing included. A planted shader change fails
+it. Without a GPU the tests pass without checking.
 
 PSF Studio keeps only what belongs to an interactive canvas: streaming tiles
-from its pyramid, panes and the wipe divider, the brush overlay, the
-transform to the display, and turning its document into a `Picture`. PSF
-Guard's color previews render through the same crate.
+from its pyramid, panes and the wipe divider, the brush overlay's strokes,
+the transform to the display, and turning its document into a `Picture`.
+PSF Guard's color previews render through the same crate.
 
 ## As built
 

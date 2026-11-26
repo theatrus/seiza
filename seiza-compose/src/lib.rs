@@ -27,6 +27,8 @@ mod color;
 mod color_calibration;
 mod crop;
 mod fits;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 mod narrowband_balance;
 pub mod picture;
 pub mod render;
