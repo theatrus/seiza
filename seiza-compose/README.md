@@ -9,6 +9,20 @@ change when they moved. `OUTPUT_VERSION` names the release of this crate
 whose output a build reproduces, so a host that caches compositions keys
 them on it.
 
+## The compositor
+
+`picture::Picture` describes a color picture as layers, bottom first: an
+input through its `Transfer` (Seiza stretch curves, a sample domain,
+normalization) in a color, solid colors, groups, adjustments, and LRGB's
+luminance layers, limited by painted and computed masks, with heals and
+finishing steps (Seiza stretch plans, Tone and color, curves, saturation).
+`render::render` renders one in tiles from a `Source` into a `Sink`, in
+32-bit floats, in the caller's Rayon pool; `render::render_image` keeps the
+result in memory. Each tile reads a margin for mask smoothing and heals,
+reflected at the picture's edge, so any tiling gives the same pixels. Every
+`combine_*` call below builds a picture and renders it here. See the
+[compositor design](../docs/design/compositor.md).
+
 ## Composition
 
 After integration, `combine_rgb`, `combine_lrgb`, `combine_super_lrgb`,

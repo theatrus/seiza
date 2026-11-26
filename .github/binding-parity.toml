@@ -606,6 +606,7 @@ objects = [
 # compose
 "seiza-compose::ColorCalibration::apply" = { none = "C hosts keep only the gains and offsets, so seiza_color_calibration_apply calls apply_color_gains, which apply uses, on the caller's buffer" }
 "seiza-compose::covered_region" = { none = "crop_report gives the region and more; the C ABI calls crop_report" }
+"seiza-compose::render::render" = { none = "the C ABI and Python reach the compositor through the combine_* exports, which build their pictures in the core; a picture-level C and Python API comes with the compositor's GPU renderer" }
 
 # stacking
 "seiza-stacking::LiveStacker::effective_maximum_drift_pixels" = { none = "part of registration" }

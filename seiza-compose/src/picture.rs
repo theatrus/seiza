@@ -1,0 +1,360 @@
+//! The description of a color picture that [`crate::render`] renders.
+//!
+//! A [`Picture`] lists layers, bottom first, each showing one of the
+//! picture's inputs through its own [`Transfer`], in a color, blended over
+//! the layers beneath. Masks limit where a layer applies, heals copy pixels
+//! from elsewhere, and [`FinishStep`]s change the combined picture. The
+//! `combine_*` functions build pictures of this kind; a host with a document
+//! of its own, such as PSF Studio, builds its own.
+
+use seiza_stretch::{ResolvedCurve, ResolvedSampleDomain, StretchPlan};
+
+/// One stage of a [`Transfer`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum TransferStage {
+    /// Multiplies the sample.
+    Scale(f32),
+    /// Keeps the sample within `low` to `high`.
+    Clamp { low: f32, high: f32 },
+    /// Maps `black` to 0 and `black + 1 / reciprocal_range` to 1, and keeps
+    /// the result within 0 to 1: percentile normalization, as
+    /// [`crate::ColorNormalization::Percentile`] resolves it.
+    Normalize { black: f32, reciprocal_range: f32 },
+    /// Seiza's mapping of physical samples onto the unit range a stretch
+    /// works on.
+    Domain(ResolvedSampleDomain),
+    /// One of Seiza's resolved stretch curves.
+    Curve(ResolvedCurve),
+}
+
+/// How an input's samples become a layer's values: its stages, in order. No
+/// stage leaves the samples as they are.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Transfer {
+    pub stages: Vec<TransferStage>,
+}
+
+impl Transfer {
+    /// The transfer that leaves samples as they are.
+    pub fn identity() -> Self {
+        Self::default()
+    }
+
+    /// A transfer of these stages.
+    pub fn of(stages: impl IntoIterator<Item = TransferStage>) -> Self {
+        Self {
+            stages: stages.into_iter().collect(),
+        }
+    }
+
+    /// Applies the transfer to every sample of `samples`. A non-finite
+    /// sample stays non-finite.
+    pub fn apply(&self, samples: &mut [f32]) {
+        for stage in &self.stages {
+            match stage {
+                TransferStage::Scale(factor) => {
+                    samples.iter_mut().for_each(|sample| *sample *= factor)
+                }
+                TransferStage::Clamp { low, high } => samples.iter_mut().for_each(|sample| {
+                    if sample.is_finite() {
+                        *sample = sample.clamp(*low, *high);
+                    }
+                }),
+                TransferStage::Normalize {
+                    black,
+                    reciprocal_range,
+                } => samples.iter_mut().for_each(|sample| {
+                    if sample.is_finite() {
+                        *sample = ((*sample - black) * reciprocal_range).clamp(0.0, 1.0);
+                    }
+                }),
+                TransferStage::Domain(domain) => {
+                    // A mono plane cannot be refused for its channel count.
+                    let _ = domain.apply_in_place(samples, 1);
+                }
+                TransferStage::Curve(curve) => samples.iter_mut().for_each(|sample| {
+                    if sample.is_finite() {
+                        *sample = curve.map(*sample);
+                    }
+                }),
+            }
+        }
+    }
+
+    /// The transfer of one sample.
+    pub fn map(&self, sample: f32) -> f32 {
+        let mut one = [sample];
+        self.apply(&mut one);
+        one[0]
+    }
+}
+
+/// An input a layer or a computed mask reads: an input of the picture, with
+/// a second input blended into it before the transfer, and how much of it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InputRead {
+    pub input: usize,
+    /// A second input and its share, from 0 to 1. A host uses it for a
+    /// correction whose strength a person moves: the input uncorrected and
+    /// corrected in full.
+    pub blended: Option<(usize, f32)>,
+    pub transfer: Transfer,
+}
+
+impl InputRead {
+    /// `input` read through `transfer`, with nothing blended in.
+    pub fn new(input: usize, transfer: Transfer) -> Self {
+        Self {
+            input,
+            blended: None,
+            transfer,
+        }
+    }
+}
+
+/// How a layer combines with the layers beneath it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Blend {
+    #[default]
+    Normal,
+    Screen,
+    Add,
+    Multiply,
+    Lighten,
+    Darken,
+    /// The layer's Rec. 709 luminance added to the colors beneath, less
+    /// theirs: a display-space luminance swap.
+    Luminance,
+}
+
+/// The luminance a [`LayerKind::Luminance`] layer gives the picture beneath
+/// it, keeping each pixel's chromaticity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LuminanceTarget {
+    /// The input's samples, weighted by the layer's cover against the
+    /// picture's own luminance: LRGB's replacement.
+    Replace,
+    /// The input plus `R + G + B`; with no input, `R + G + B` alone.
+    Super,
+}
+
+/// What an adjustment layer does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Adjustment {
+    /// Brightens or darkens by this many stops.
+    Exposure(f32),
+    /// A contrast curve, from -1 to 1.
+    Curves(f32),
+    /// Saturation; 1 leaves the color as it is.
+    Saturation(f32),
+}
+
+/// What one entry in a picture's list of layers is.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LayerKind {
+    /// An input in a color. `curve` is the layer's own contrast curve, from
+    /// -1 to 1, applied after the transfer.
+    Input {
+        read: InputRead,
+        color: [f32; 3],
+        curve: f32,
+    },
+    /// One color everywhere.
+    Solid { color: [f32; 3] },
+    /// The start of a group: the entries up to its end blend together on
+    /// their own, starting from black.
+    GroupBegin,
+    /// The end of a group: the members' blend becomes one layer with this
+    /// entry's opacity, blend and masks.
+    GroupEnd,
+    /// A change to what is beneath. With [`Layer::own`], to the layer or
+    /// group just before it only, before it is blended.
+    Adjustment(Adjustment),
+    /// A new luminance for the picture beneath, with its chromaticity kept,
+    /// as LRGB combines.
+    Luminance {
+        read: Option<InputRead>,
+        target: LuminanceTarget,
+    },
+}
+
+/// One layer of a picture.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Layer {
+    pub kind: LayerKind,
+    /// From 0 to 1. A hidden layer has 0.
+    pub opacity: f32,
+    pub blend: Blend,
+    /// A painted mask that limits the layer, as an index into
+    /// [`Picture::masks`].
+    pub mask: Option<usize>,
+    /// The painted mask of the layer it is clipped to.
+    pub clip: Option<usize>,
+    /// A computed mask that limits the layer, as an index into
+    /// [`Picture::computed`].
+    pub computed: Option<usize>,
+    /// For an adjustment: whether it changes only the layer or group just
+    /// before it.
+    pub own: bool,
+}
+
+impl Layer {
+    /// A layer of this kind, fully opaque, blended normally, unmasked.
+    pub fn new(kind: LayerKind) -> Self {
+        Self {
+            kind,
+            opacity: 1.0,
+            blend: Blend::Normal,
+            mask: None,
+            clip: None,
+            computed: None,
+            own: false,
+        }
+    }
+
+    /// `read` in `color`, added to what is beneath.
+    pub fn added(read: InputRead, color: [f32; 3]) -> Self {
+        Self {
+            blend: Blend::Add,
+            ..Self::new(LayerKind::Input {
+                read,
+                color,
+                curve: 0.0,
+            })
+        }
+    }
+}
+
+/// A mask computed at each pixel from one or two inputs: the product of
+/// their transferred samples, kept within 0 to 1, shaped, smoothed, with
+/// painted strokes added or taken away.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ComputedMask {
+    pub reads: Vec<InputRead>,
+    /// Whether the product `p` becomes `p^(1-p)`, as Foraxx's blend factors
+    /// are.
+    pub power_of_inverse: bool,
+    /// The power the shaped product is raised to. 1 leaves it as it is.
+    pub reach: f32,
+    /// The standard deviation, in pixels, of the Gaussian blur the mask is
+    /// smoothed with before the strokes, weighted by where its inputs cover
+    /// the picture and reflected at the picture's edge, as Foraxx's
+    /// smoothing is. 0 is not smoothed.
+    pub smoothing: f32,
+    /// Painted strokes that set the mask to 1 under them.
+    pub added: Option<usize>,
+    /// Painted strokes that set the mask to 0 under them.
+    pub removed: Option<usize>,
+    /// Whether the mask is 1 minus all of the above.
+    pub inverted: bool,
+}
+
+impl ComputedMask {
+    /// The mask of `reads`, shaped as Foraxx shapes a blend factor.
+    pub fn foraxx(reads: Vec<InputRead>, smoothing: f32) -> Self {
+        Self {
+            reads,
+            power_of_inverse: true,
+            reach: 1.0,
+            smoothing,
+            added: None,
+            removed: None,
+            inverted: false,
+        }
+    }
+}
+
+/// One segment of a brush stroke, in the picture's pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Segment {
+    pub from: [f32; 2],
+    pub to: [f32; 2],
+    pub radius: f32,
+    /// Where the stroke's edge starts to soften, as a share of `radius`.
+    pub hardness: f32,
+    /// 1 adds to the mask, 0 takes away from it.
+    pub value: f32,
+}
+
+/// A heal of one layer: where its mask is painted, the layer takes its own
+/// samples from `offset` pixels away.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LayerHeal {
+    /// The layer healed, as an index into [`Picture::layers`].
+    pub layer: usize,
+    /// Whether the heal copies the input's samples before the transfer, as
+    /// a heal of an input does, or the layer's values after it.
+    pub before_transfer: bool,
+    pub offset: [i64; 2],
+    /// The brightness added to what is copied.
+    pub shift: f32,
+    /// The heal's stroke, as an index into [`Picture::masks`].
+    pub mask: usize,
+}
+
+/// What a step of the finished picture does.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FinishKind {
+    /// One of Seiza's stretches of the combined picture.
+    Stretch(StretchPlan),
+    /// Tone and color: a curve of the luminance applied with each pixel's
+    /// color kept, then vibrance and saturation.
+    Tone(crate::tone::Tone),
+    /// A contrast curve, from -1 to 1.
+    Curves(f32),
+    /// Saturation; 1 leaves the color as it is.
+    Saturation(f32),
+    /// Where the step's mask is painted, the picture from `offset` pixels
+    /// away, with `shift` added.
+    Heal { offset: [i64; 2], shift: [f32; 3] },
+}
+
+/// One step of the finished picture.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FinishStep {
+    pub kind: FinishKind,
+    /// How strongly the step applies, from 0 to 1.
+    pub opacity: f32,
+    /// A painted mask that limits the step. A heal's is its stroke.
+    pub mask: Option<usize>,
+}
+
+/// A color picture: what [`crate::render`] renders.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Picture {
+    /// The layers, bottom first.
+    pub layers: Vec<Layer>,
+    pub computed: Vec<ComputedMask>,
+    /// Painted masks: each a stroke's segments, in the order painted.
+    pub masks: Vec<Vec<Segment>>,
+    pub heals: Vec<LayerHeal>,
+    pub finish: Vec<FinishStep>,
+}
+
+impl Picture {
+    /// The inputs the picture reads, each once, in no particular order.
+    pub fn inputs(&self) -> Vec<usize> {
+        let mut inputs = Vec::new();
+        let mut note = |read: &InputRead| {
+            inputs.push(read.input);
+            if let Some((other, _)) = read.blended {
+                inputs.push(other);
+            }
+        };
+        for layer in &self.layers {
+            match &layer.kind {
+                LayerKind::Input { read, .. } => note(read),
+                LayerKind::Luminance {
+                    read: Some(read), ..
+                } => note(read),
+                _ => {}
+            }
+        }
+        for mask in &self.computed {
+            mask.reads.iter().for_each(&mut note);
+        }
+        inputs.sort_unstable();
+        inputs.dedup();
+        inputs
+    }
+}

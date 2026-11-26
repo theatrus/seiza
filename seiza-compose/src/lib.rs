@@ -11,6 +11,9 @@
 //!   [`stretch_rgb_stars`] and [`screen_rgb_stars`] put stars back over a
 //!   starless picture.
 //! - [`write_color_fits_f32`] writes a composition as FITS.
+//! - [`picture::Picture`] describes any color picture as layers, masks and
+//!   finishing steps, and [`render::render`] renders one in tiles: the one
+//!   compositor every composition and every host draws through.
 //!
 //! The channels are [`seiza_stacking::LinearImage`]s, as stacking makes
 //! them, and calls return [`seiza_stacking::Error`].
@@ -25,7 +28,10 @@ mod color_calibration;
 mod crop;
 mod fits;
 mod narrowband_balance;
+pub mod picture;
+pub mod render;
 mod star_stretch;
+pub mod tone;
 
 pub(crate) use seiza_stacking::{AffineTransform, Error, LinearImage, ReferenceRegion, Result};
 

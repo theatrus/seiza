@@ -1,8 +1,8 @@
 # One compositor for every color picture
 
-> Status: proposed. `seiza-compose` holds Seiza's color routines (moved out of
-> `seiza-stacking` unchanged); this note describes the compositor that the
-> next change adds to it, and that `combine_*` will be built on.
+> Status: the CPU compositor is built (`seiza_compose::picture` and
+> `seiza_compose::render`), and `combine_*` render through it. The GPU
+> renderer is the next change.
 
 ## Why
 
@@ -85,8 +85,27 @@ that writes a FITS, XISF or TIFF tile by tile.
 
 ## The GPU
 
-PSF Studio's canvas draws a `Picture` with shaders that follow this renderer.
-Where a GPU cannot match it exactly (half-float textures, 8-bit masks, a
-blur sampled in fewer taps), the canvas is the approximation and this
-renderer the reference; `psf-studio --parity-report` measures the gap on a
-real picture.
+Seiza owns the shaders as well. The next change adds a wgpu renderer of the
+same `Picture` to this crate, behind a `gpu` feature as `seiza-stacking`'s
+resampling is, with tests that hold it to the CPU render. Where a GPU cannot
+match it exactly (half-float textures, 8-bit masks), the CPU render is the
+reference and the tests bound the gap.
+
+PSF Studio keeps only what belongs to an interactive canvas: streaming tiles
+from its pyramid, panes and the wipe divider, the brush overlay, the
+transform to the display, and turning its document into a `Picture`. PSF
+Guard's color previews render through the same crate.
+
+## As built
+
+- An added input layer is one fused multiply-add per channel
+  (`tint·value + below`, or `(tint·value)·cover + below` under a mask), in
+  the order each recipe always summed its terms, so `combine_rgb`, the
+  matrix palettes, LRGB and unsmoothed Foraxx give the same bits as before.
+- A smoothed computed mask is the coverage-weighted mean of its
+  neighbours everywhere. Before, Foraxx divided by the blurred coverage only
+  when some pixel of the region was uncovered; a tile cannot know that, and
+  where every pixel is covered the blurred coverage is 1 within a few float
+  steps. The recorded cases pass unchanged.
+- A pixel any input of the picture does not cover is `NaN`, and has no
+  weight in a computed mask's smoothing.
