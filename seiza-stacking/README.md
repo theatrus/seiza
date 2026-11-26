@@ -1179,6 +1179,19 @@ therefore reports no pixel validation; manual plans also make no such claim.
 Explicit `None` disables the pixel gate for research callers, not PSF Guard's
 automatic mode.
 
+The gate guards against cores and halos left on stars, so it applies to a plan
+that will be subtracted from images that still have their stars, the default
+`ContinuumPhotometryOptions.target`, `ContinuumTarget::WithStars`. A host that
+subtracts the plan from starless images, such as a star removal tool's output,
+sets `ContinuumTarget::Starless`. The fit is still measured on the images with
+their stars, and the pixel check still runs, but its report
+(`ContinuumPixelValidation.target`) is advisory: a failed check does not
+refuse the fit, and the photometric checks alone decide. On real Sh2-157
+stacks the remaining residual of bright held-out stars came mostly from
+sub-pixel registration offsets and non-Gaussian profile differences between
+the narrowband and broadband stacks, which a starless subtraction never
+shows.
+
 Set `photometry.psf_matching = Some(ContinuumPsfOptions { target_fwhm: None })`
 to broaden copies before measurement and subtraction. Common unsaturated stars
 supply Gaussian-equivalent widths. The default target is 1.05 times the largest

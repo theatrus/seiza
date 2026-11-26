@@ -117,6 +117,12 @@ def test_pixel_profiles_reject_rings_and_matching_is_replayed():
     context = sources(400, 240)
     out = seiza.measure_and_fit_continuum(planes[0], [planes[1]], context, positions=positions)
     assert out['status'] == 'skipped' and out['reason'] == 'pixel_residual', out
+    # For a starless target the same check is reported and does not refuse.
+    starless = seiza.measure_and_fit_continuum(planes[0], [planes[1]], context, positions=positions,
+        photometry_options={'target': 'starless'})
+    assert starless['status'] == 'fitted', starless
+    report = starless['plan']['diagnostics']['pixelValidation']
+    assert not report['accepted'] and report['target'] == 'starless'
     out = seiza.measure_and_fit_continuum(planes[0], [planes[1]], context, positions=positions,
         photometry_options={'psf_matching': {'target_fwhm': 5.0}})
     assert out['status'] == 'fitted', out

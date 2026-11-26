@@ -127,7 +127,7 @@ pub use continuum::{
     ContinuumDiagnostics, ContinuumFitOptions, ContinuumFitOutcome, ContinuumOrigin,
     ContinuumPhotometry, ContinuumPhotometryOptions, ContinuumPixelValidation, ContinuumPlan,
     ContinuumPsfMatch, ContinuumPsfOptions, ContinuumSkipReason, ContinuumSource, ContinuumSources,
-    ContinuumStar, ContinuumStarDiagnostic, ContinuumTransfer, fit_continuum,
+    ContinuumStar, ContinuumStarDiagnostic, ContinuumTarget, ContinuumTransfer, fit_continuum,
     measure_and_fit_continuum, measure_and_fit_continuum_masked, subtract_continuum,
 };
 pub use cosmetic::{ImpulseFilterOptions, suppress_impulses};

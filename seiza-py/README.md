@@ -2342,9 +2342,14 @@ broadening on copies. Omit `target_fwhm` to choose 1.05 times the broadest measu
 profile. The plan records raw/prepared revisions and kernels;
 `subtract_continuum` replays them on the original arrays. Saturation evidence
 is still required for every original input. Held-out pixel validation defaults
-to `max_pixel_residual=0.15` and remains mandatory for automatic host use.
+to `max_pixel_residual=0.15` and remains mandatory for automatic host use when
+the plan is subtracted from images that still have their stars.
 The result's `pixelValidation` report distinguishes cores/halos from aperture
-flux error. Gaussian matching can still fail this check.
+flux error. Gaussian matching can still fail this check. When the plan will be
+subtracted from starless images, pass `photometry_options={"target": "starless"}`:
+the check still runs and its report (with `target: "starless"`) is kept, but a
+failed check does not refuse the fit, since a starless image has no stars to
+leave cores or halos. The weights are still fitted on the images with stars.
 
 `balance_narrowband(..., star_mask_radius=8)` excludes star circles from curve
 statistics while preserving image coverage. `None` includes stars.
