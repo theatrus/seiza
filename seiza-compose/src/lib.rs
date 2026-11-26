@@ -35,7 +35,10 @@ pub mod render;
 mod star_stretch;
 pub mod tone;
 
-pub(crate) use seiza_stacking::{AffineTransform, Error, LinearImage, ReferenceRegion, Result};
+pub(crate) use seiza_stacking::{AffineTransform, Result};
+/// The types this crate's functions take and give, so a caller needs no
+/// other crate to name them.
+pub use seiza_stacking::{Error, LinearImage, ReferenceRegion};
 
 /// The release of this crate whose composition output a build reproduces.
 /// It moves to the next minor version when a change alters any output, and
