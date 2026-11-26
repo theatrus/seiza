@@ -160,37 +160,41 @@ pub fn neighborhoods(rgb: &[f32], width: usize, height: usize) -> Vec<Neighborho
 
 /// The mean of `plane` over the square of `2 × radius + 1` pixels around
 /// each pixel, the square cut at the plane's edges: a mean across, then a
-/// mean down, each with running sums in 64 bits.
+/// mean down. Each window is summed afresh in 64 bits, in order, so a
+/// pixel's mean depends only on its window, wherever a tile starts.
 fn box_mean(plane: &[f32], width: usize, height: usize, radius: usize) -> Vec<f32> {
-    let pass = |source: &[f32], count: usize, stride: usize, lines: usize, step: usize| {
-        let mut out = vec![0.0_f32; source.len()];
-        for line in 0..lines {
-            let at = |index: usize| line * step + index * stride;
-            let mut sum = 0.0_f64;
-            // The window of index 0 holds 0..=radius.
-            for index in 0..=radius.min(count - 1) {
-                sum += f64::from(source[at(index)]);
-            }
-            for index in 0..count {
-                let low = index.saturating_sub(radius);
-                let high = (index + radius).min(count - 1);
-                out[at(index)] = (sum / (high - low + 1) as f64) as f32;
-                // Slide: add the pixel entering, take away the one leaving.
-                if index + radius + 1 < count {
-                    sum += f64::from(source[at(index + radius + 1)]);
-                }
-                if index >= radius {
-                    sum -= f64::from(source[at(index - radius)]);
-                }
-            }
-        }
-        out
-    };
+    use rayon::prelude::*;
     if plane.is_empty() {
         return Vec::new();
     }
-    let across = pass(plane, width, 1, height, width);
-    pass(&across, height, width, width, 1)
+    let window = |index: usize, count: usize| {
+        (
+            index.saturating_sub(radius),
+            (index + radius).min(count - 1),
+        )
+    };
+    let mut across = vec![0.0_f32; plane.len()];
+    across
+        .par_chunks_mut(width)
+        .zip(plane.par_chunks(width))
+        .for_each(|(out, row)| {
+            for (x, mean) in out.iter_mut().enumerate() {
+                let (low, high) = window(x, width);
+                let sum: f64 = row[low..=high].iter().map(|value| f64::from(*value)).sum();
+                *mean = (sum / (high - low + 1) as f64) as f32;
+            }
+        });
+    let mut down = vec![0.0_f32; plane.len()];
+    down.par_chunks_mut(width).enumerate().for_each(|(y, out)| {
+        let (low, high) = window(y, height);
+        for (x, mean) in out.iter_mut().enumerate() {
+            let sum: f64 = (low..=high)
+                .map(|row| f64::from(across[row * width + x]))
+                .sum();
+            *mean = (sum / (high - low + 1) as f64) as f32;
+        }
+    });
+    down
 }
 
 impl Tone {
@@ -254,7 +258,11 @@ impl Tone {
         let edge = variance / (variance + LOCAL_EDGE);
         let mut base = mean + edge * (luminance - mean);
         let guided = (mean_product - mean * dark) / (variance + LOCAL_EDGE);
-        let veil = (dark + guided * (luminance - mean)).clamp(0.0, 1.0);
+        // No brighter than the window's darkest channel on average: a large
+        // bright area, such as a galaxy's core, is not a veil.
+        let veil = (dark + guided * (luminance - mean))
+            .min(dark)
+            .clamp(0.0, 1.0);
         let [fine_mean, fine_squared] = around.detail;
         let fine_variance = (fine_squared - fine_mean * fine_mean).max(0.0);
         let detailed = fine_variance / (fine_variance + DETAIL_EDGE);
@@ -292,10 +300,11 @@ impl Tone {
         let toned = local.clamp(0.0, 1.0);
         // Shadows and Highlights move the base's tones a third and two
         // thirds of the way up most, keeping the detail around it; 6.75
-        // makes each bump 1 at its peak.
-        let mut value = pixel
-            + SHIFT * tone.shadows * 6.75 * toned * (1.0 - toned) * (1.0 - toned)
-            + SHIFT * tone.highlights * 6.75 * toned * toned * (1.0 - toned);
+        // makes each bump 1 at its peak. Highlights moves the tone Shadows
+        // left.
+        let lifted = toned + SHIFT * tone.shadows * 6.75 * toned * (1.0 - toned) * (1.0 - toned);
+        let moved = lifted + SHIFT * tone.highlights * 6.75 * lifted * lifted * (1.0 - lifted);
+        let mut value = pixel + (moved - toned);
         // Clarity scales the detail around the local base, most in the
         // midtones; Texture the detail around the fine base, where there is
         // more of it than noise.
@@ -470,6 +479,61 @@ mod tests {
             assert!((tone.curve(x) - plain.curve(x)).abs() < 1e-6, "{x}");
         }
         assert!(tone.curve(0.3) > 0.32);
+    }
+
+    /// The per-pixel curve before neighborhoods, as it was written.
+    fn earlier_curve(tone: &Tone, x: f32) -> f32 {
+        let mut y = x.max(0.0) * tone.exposure.exp2();
+        let white = 1.0 - WHITE_REACH * tone.whites;
+        let black = -BLACK_REACH * tone.blacks;
+        y = ((y - black) / (white - black)).clamp(0.0, 1.0);
+        y += SHIFT * tone.shadows * 6.75 * y * (1.0 - y) * (1.0 - y);
+        y += SHIFT * tone.highlights * 6.75 * y * y * (1.0 - y);
+        contrast_curve(y.clamp(0.0, 1.0), tone.contrast)
+    }
+
+    #[test]
+    fn a_pixel_alone_follows_the_earlier_curve() {
+        for (shadows, highlights) in [(1.0, 1.0), (-1.0, 1.0), (0.4, -0.3), (1.0, -1.0)] {
+            let tone = Tone {
+                exposure: 0.5,
+                contrast: 0.3,
+                shadows,
+                highlights,
+                whites: 0.2,
+                blacks: -0.2,
+                ..Tone::default()
+            };
+            for index in 0..=200 {
+                let x = index as f32 / 160.0;
+                let (now, before) = (tone.curve(x), earlier_curve(&tone, x));
+                assert!(
+                    (now - before).abs() < 1e-6,
+                    "{shadows} {highlights} at {x}: {now} {before}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dehaze_keeps_a_large_bright_area() {
+        // A gray square of 0.9, 41 pixels across, in a sky of 0.1.
+        let (width, height) = (121, 121);
+        let (rgb, around) = gray(width, height, |x, y| {
+            if (40..81).contains(&x) && (40..81).contains(&y) {
+                0.9
+            } else {
+                0.1
+            }
+        });
+        let dehaze = Tone {
+            dehaze: 1.0,
+            ..Tone::default()
+        };
+        let core = at(&dehaze, &rgb, &around, 60 * width + 60)[0];
+        assert!(core > 0.8, "the core stays bright: {core}");
+        let sky = at(&dehaze, &rgb, &around, 5 * width + 5)[0];
+        assert!(sky < 0.02, "the sky's veil goes: {sky}");
     }
 
     #[test]

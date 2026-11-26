@@ -93,15 +93,29 @@ fn a_tone_step_s_neighborhoods_do_not_depend_on_tiling() {
         }],
         ..Picture::default()
     };
-    let one = render(&picture, &[&input], whole(&input), 4096);
-    for tile in [32, 100] {
-        let tiled = render(&picture, &[&input], whole(&input), tile);
-        assert!(
-            one.iter()
-                .zip(&tiled)
-                .all(|(a, b)| a.to_bits() == b.to_bits()),
-            "tiles of {tile} differ from one tile"
-        );
+    let mut twice = picture.clone();
+    // A second such step reads around a picture the first read around.
+    twice.finish.push(FinishStep {
+        kind: FinishKind::Tone(Tone {
+            clarity: -0.5,
+            highlights: 0.4,
+            ..Tone::default()
+        }),
+        opacity: 1.0,
+        mask: None,
+    });
+    for picture in [&picture, &twice] {
+        let one = render(picture, &[&input], whole(&input), 4096);
+        for tile in [32, 100] {
+            let tiled = render(picture, &[&input], whole(&input), tile);
+            assert!(
+                one.iter()
+                    .zip(&tiled)
+                    .all(|(a, b)| a.to_bits() == b.to_bits()),
+                "tiles of {tile} differ from one tile with {} steps",
+                picture.finish.len()
+            );
+        }
     }
 }
 

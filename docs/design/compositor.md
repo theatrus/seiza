@@ -67,7 +67,11 @@ the pixel where the window's variance is large, as a guided filter does, so
 an edge, such as a star's, is its own base and gets no halo. The veil is the
 darkest channel's base, guided by the luminance. A pixel's neighborhood is
 of the picture as the steps before Tone left it, heals left out, the
-picture a heal copies from. With none of these controls set, the step is a
+picture a heal copies from. The veil is never brighter than the window's
+darkest channel on average, so a large bright area, such as a galaxy's
+core, is not taken for one. Each Tone step that reads neighborhoods adds
+its window to a tile's margin, since it reads around a picture an earlier
+one already read around. With none of these controls set, the step is a
 curve of each pixel's luminance, as before.
 
 A pixel any layer's input does not cover is not covered in the output: it
@@ -128,11 +132,12 @@ The CPU render is the reference. Where the GPU differs by design, it is
 an approximation: inputs and stretch tables are half floats, a computed
 mask's smoothing is a 33-tap Gaussian over three standard deviations,
 clamped at the drawn area's edge, and a canvas draws an uncovered pixel
-black. A Tone step's windows are cut at the drawn area's edge too, and are
-measured in drawn pixels: zoomed out, a window covers the same part of the
-picture at the canvas's resolution. One Tone step per draw reads
-neighborhoods; another is drawn with each pixel alone and named in
-`left_out`. `tests/gpu.rs` renders the same picture both ways and bounds the
+black. A Tone step's windows are cut at the edge of the picture drawn,
+within the scissor, and are measured in drawn pixels: zoomed out, a window
+covers the same part of the picture at the canvas's resolution; zoomed in
+past about five times, a window is capped at 256 drawn pixels either side.
+One Tone step per draw reads neighborhoods; another is drawn with each pixel
+alone, without Dehaze, and named in `left_out`. `tests/gpu.rs` renders the same picture both ways and bounds the
 gap; on Apple silicon the mean difference is about 1e-4 and the 99th
 percentile under 1e-3, smoothing included. A planted shader change fails
 it. Without a GPU the tests pass without checking.

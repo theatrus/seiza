@@ -102,6 +102,16 @@ pub fn everything() -> Picture {
         opacity: 1.0,
         mask: None,
     });
+    // A heal after the Tone step copies the toned picture, each source
+    // pixel toned with its own neighborhood.
+    finish.push(FinishStep {
+        kind: FinishKind::Heal {
+            offset: [-23, 11],
+            shift: [0.0; 3],
+        },
+        opacity: 1.0,
+        mask: Some(1),
+    });
     Picture {
         layers: vec![
             Layer::added(stretched(0), [1.0, 0.2, 0.1]),

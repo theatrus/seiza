@@ -297,16 +297,14 @@ impl Plan {
             })
             .max()
             .unwrap_or(0);
-        // A Tone step that reads neighborhoods reads that far around.
-        let local = if picture
+        // A Tone step that reads neighborhoods reads that far around, in
+        // a picture an earlier such step already read around.
+        let local = picture
             .finish
             .iter()
-            .any(|step| matches!(&step.kind, FinishKind::Tone(tone) if tone.is_local()))
-        {
-            crate::tone::LOCAL_RADIUS
-        } else {
-            0
-        };
+            .filter(|step| matches!(&step.kind, FinishKind::Tone(tone) if tone.is_local()))
+            .count()
+            * crate::tone::LOCAL_RADIUS;
         Self {
             inputs: picture.inputs(),
             margin: blur + (layer_heals + finish_heals) as usize + local,

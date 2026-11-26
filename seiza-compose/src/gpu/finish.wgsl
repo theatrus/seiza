@@ -119,7 +119,7 @@ fn tone(start: vec3f, measured: f32, local: vec4f, detail: vec2f, step: FinishSt
     let edge = variance / (variance + LOCAL_EDGE);
     var base = mean + edge * (measured - mean);
     let guided = (local.w - mean * local.z) / (variance + LOCAL_EDGE);
-    let veil = clamp(local.z + guided * (measured - mean), 0.0, 1.0);
+    let veil = clamp(min(local.z + guided * (measured - mean), local.z), 0.0, 1.0);
     let fine_variance = max(detail.y - detail.x * detail.x, 0.0);
     let detailed = fine_variance / (fine_variance + DETAIL_EDGE);
     var fine = detail.x + detailed * (measured - detail.x);
@@ -151,9 +151,9 @@ fn tone(start: vec3f, measured: f32, local: vec4f, detail: vec2f, step: FinishSt
     let around = (max(base, 0.0) * gain - black) / (white - black);
     let small = (max(fine, 0.0) * gain - black) / (white - black);
     let toned = clamp(around, 0.0, 1.0);
-    var value = pixel
-        + SHIFT * shadows * 6.75 * toned * (1.0 - toned) * (1.0 - toned)
-        + SHIFT * highlights * 6.75 * toned * toned * (1.0 - toned);
+    let lifted = toned + SHIFT * shadows * 6.75 * toned * (1.0 - toned) * (1.0 - toned);
+    let moved = lifted + SHIFT * highlights * 6.75 * lifted * lifted * (1.0 - lifted);
+    var value = pixel + (moved - toned);
     value += clarity * CLARITY_GAIN * (pixel - around) * 4.0 * toned * (1.0 - toned);
     value += texture * TEXTURE_GAIN * detailed * (pixel - small);
     let mapped = contrast_curve(clamp(value, 0.0, 1.0), contrast);
@@ -234,7 +234,7 @@ fn local_measure_fragment(@builtin(position) position: vec4f) -> @location(0) ve
 }
 
 // The mean of `local_source` over `radius` pixels either side of `pixel`,
-// across or down, the window cut at the drawn area's edge.
+// across or down, the window cut at the edge of the picture drawn.
 fn window_mean(pixel: vec2i, across: bool, radius: i32) -> vec4f {
     let low = vec2i(globals.area.xy);
     let high = low + vec2i(globals.area.zw) - vec2i(1);

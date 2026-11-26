@@ -409,6 +409,9 @@ impl GpuScene {
                             scene.local = Some(scene.finish.len());
                             slot[14] = 1.0;
                         } else {
+                            // Drawn with each pixel alone, where a veil is the
+                            // pixel's own darkest channel: Dehaze is left out.
+                            slot[11] = 0.0;
                             scene.left_out.push(format!(
                                 "the neighborhoods of finishing step {index}, past the GPU's one"
                             ));
@@ -1124,7 +1127,8 @@ impl GpuCompositor {
     ) {
         let rect = within(area.viewport, targets.size());
         let scissor = within(area.scissor, targets.size());
-        self.write_globals(scene, targets, view, (rect, scissor), overlay_strength);
+        let area = picture_area(tiles, view, rect, scissor);
+        self.write_globals(scene, targets, view, (rect, area), overlay_strength);
         if version.is_none() || self.tables_version != version {
             self.upload_tables(scene);
             self.tables_version = version;
@@ -1172,7 +1176,7 @@ impl GpuCompositor {
         scene: &GpuScene,
         targets: &GpuTargets,
         view: GpuView,
-        (rect, scissor): ([u32; 4], [u32; 4]),
+        (rect, area): ([u32; 4], [u32; 4]),
         overlay_strength: f32,
     ) {
         let window =
@@ -1211,7 +1215,7 @@ impl GpuCompositor {
                 window(crate::tone::DETAIL_RADIUS),
                 0.0,
             ],
-            area: scissor.map(|value| value as f32),
+            area: area.map(|value| value as f32),
         };
         for (slot, layer) in globals.layers.iter_mut().zip(&scene.layers) {
             *slot = *layer;
@@ -1516,6 +1520,50 @@ impl GpuCompositor {
         );
         pass.draw(0..3, 0..1);
     }
+}
+
+/// The part of the targets a local window reads: the scissor, within the
+/// viewport, within the picture the tiles draw, so a window never counts
+/// pixels outside the picture or pixels this draw does not fill.
+fn picture_area(
+    tiles: &[TileDraw<'_>],
+    view: GpuView,
+    rect: [u32; 4],
+    scissor: [u32; 4],
+) -> [u32; 4] {
+    let mut low = [scissor[0].max(rect[0]), scissor[1].max(rect[1])];
+    let mut high = [
+        (scissor[0] + scissor[2]).min(rect[0] + rect[2]),
+        (scissor[1] + scissor[3]).min(rect[1] + rect[3]),
+    ];
+    if let Some(drawn) = tiles.iter().map(|tile| tile.rect).reduce(|a, b| {
+        [
+            a[0].min(b[0]),
+            a[1].min(b[1]),
+            a[2].max(b[2]),
+            a[3].max(b[3]),
+        ]
+    }) {
+        // Picture pixels to target pixels: the view's center is at the
+        // viewport's middle.
+        let to_target = |value: f32, axis: usize| {
+            f64::from(rect[axis])
+                + f64::from(rect[axis + 2]) / 2.0
+                + (f64::from(value) - view.center[axis]) * view.zoom
+        };
+        for axis in 0..2 {
+            let start = to_target(drawn[axis], axis).floor().max(0.0) as u32;
+            let end = to_target(drawn[axis + 2], axis).ceil().max(0.0) as u32;
+            low[axis] = low[axis].max(start);
+            high[axis] = high[axis].min(end);
+        }
+    }
+    [
+        low[0],
+        low[1],
+        high[0].saturating_sub(low[0]).max(1),
+        high[1].saturating_sub(low[1]).max(1),
+    ]
 }
 
 /// Finish's bind group of the local passes' measurements and means.
