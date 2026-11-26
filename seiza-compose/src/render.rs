@@ -2,7 +2,8 @@
 //!
 //! The output is red, green and blue in 32-bit floats. Each tile reads its
 //! inputs over the tile and a margin wide enough for everything that reads
-//! beyond a pixel: a computed mask's blur and the heals. Within the margin,
+//! beyond a pixel: a computed mask's blur, the heals, and a Tone step's
+//! neighborhoods. Within the margin,
 //! pixels outside the picture's region are its pixels reflected at its edge,
 //! as Foraxx's smoothing always reflected them, so a tile gives the same
 //! pixels as the whole picture would. Tiles render in parallel in the
@@ -296,9 +297,19 @@ impl Plan {
             })
             .max()
             .unwrap_or(0);
+        // A Tone step that reads neighborhoods reads that far around.
+        let local = if picture
+            .finish
+            .iter()
+            .any(|step| matches!(&step.kind, FinishKind::Tone(tone) if tone.is_local()))
+        {
+            crate::tone::LOCAL_RADIUS
+        } else {
+            0
+        };
         Self {
             inputs: picture.inputs(),
-            margin: blur + (layer_heals + finish_heals) as usize,
+            margin: blur + (layer_heals + finish_heals) as usize + local,
         }
     }
 
@@ -809,6 +820,34 @@ fn finish(picture: &Picture, padded: &Padded, masks: &[Vec<f32>], combined: Vec<
                             }
                         }
                     }
+                }
+            }
+            FinishKind::Tone(tone) if tone.is_local() => {
+                // The neighborhoods are of the picture as the steps before
+                // left it, heals left out, as a heal's source is.
+                let around = crate::tone::neighborhoods(&plain, padded.width, padded.height);
+                let measured: Vec<f32> = plain
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .map(|pixel| {
+                        if pixel.iter().all(|channel| channel.is_finite()) {
+                            luma(*pixel)
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect();
+                for buffer in [&mut out, &mut plain] {
+                    buffer
+                        .as_chunks_mut::<3>()
+                        .0
+                        .par_iter_mut()
+                        .enumerate()
+                        .for_each(|(at, pixel)| {
+                            let toned = tone.apply_around(*pixel, measured[at], &around[at]);
+                            *pixel = cover_mix(*pixel, toned, cover(at));
+                        });
                 }
             }
             kind => {

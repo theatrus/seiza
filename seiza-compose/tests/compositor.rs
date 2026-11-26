@@ -63,6 +63,48 @@ fn any_tiling_gives_the_same_pixels() {
     );
 }
 
+/// A Tone step that reads neighborhoods gives the same pixels in any
+/// tiling: each tile reads far enough around it. Nothing else in this
+/// picture reads beyond a pixel, so its margin is the Tone step's alone.
+#[test]
+fn a_tone_step_s_neighborhoods_do_not_depend_on_tiling() {
+    use seiza_compose::picture::{FinishKind, FinishStep};
+    use seiza_compose::tone::Tone;
+    let (width, height) = (300, 220);
+    let input = plane(width, height, 4, false);
+    let picture = Picture {
+        layers: vec![Layer::added(
+            InputRead::new(
+                0,
+                Transfer::of([seiza_compose::picture::TransferStage::Scale(20.0)]),
+            ),
+            [1.0, 0.9, 0.8],
+        )],
+        finish: vec![FinishStep {
+            kind: FinishKind::Tone(Tone {
+                shadows: 0.6,
+                clarity: 0.8,
+                texture: 0.5,
+                dehaze: 0.4,
+                ..Tone::default()
+            }),
+            opacity: 1.0,
+            mask: None,
+        }],
+        ..Picture::default()
+    };
+    let one = render(&picture, &[&input], whole(&input), 4096);
+    for tile in [32, 100] {
+        let tiled = render(&picture, &[&input], whole(&input), tile);
+        assert!(
+            one.iter()
+                .zip(&tiled)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "tiles of {tile} differ from one tile"
+        );
+    }
+}
+
 #[test]
 fn an_uncovered_input_leaves_its_pixel_uncovered() {
     let (width, height) = (40, 30);

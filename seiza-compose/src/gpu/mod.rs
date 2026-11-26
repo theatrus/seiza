@@ -54,6 +54,12 @@ const HEALED_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
 /// The combined picture, before the Finish steps. Float, so a sum is not
 /// clipped before a step that brings it back into range.
 const COMBINED_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// The local passes' measurements and means. Full floats: a window's
+/// variance is the difference of two means, which half floats would lose.
+const LOCAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
+/// The widest a local window is drawn, in drawn pixels either side, however
+/// far the view is zoomed in.
+const MAX_WINDOW_RADIUS: f64 = 256.0;
 /// The most input tiles one draw reads.
 const MAX_TILE_INSTANCES: u64 = 4096;
 
@@ -106,7 +112,9 @@ impl From<&Segment> for GpuSegment {
 pub struct GpuScene {
     layers: Vec<[f32; 20]>,
     computed: Vec<([f32; 16], f32)>,
-    finish: Vec<([f32; 12], Option<[i64; 2]>)>,
+    finish: Vec<([f32; 16], Option<[i64; 2]>)>,
+    /// The Finish step whose neighborhoods the local passes measure.
+    local: Option<usize>,
     healed: Vec<[f32; 4]>,
     heals: Vec<([f32; 8], [i64; 2])>,
     rows: Vec<Vec<f32>>,
@@ -340,7 +348,7 @@ impl GpuScene {
                 ));
                 continue;
             }
-            let mut slot = [0.0_f32; 12];
+            let mut slot = [0.0_f32; 16];
             slot[2] = mask_index(step.mask);
             slot[3] = step.opacity.clamp(0.0, 1.0);
             let first_row = (MAX_LAYERS + 3 * scene.finish_rows.len()) as f32;
@@ -377,14 +385,35 @@ impl GpuScene {
                     scene.finish_rows.push(rows);
                 }
                 FinishKind::Tone(tone) => {
-                    let row = tone.curve_row(STRETCH_TABLE_WIDTH);
                     let held = tone.held();
                     slot[0] = 5.0;
-                    slot[6] = first_row;
-                    slot[7] = 1.0;
-                    slot[8] = held.vibrance;
-                    slot[9] = held.saturation;
-                    scene.finish_rows.push([row.clone(), row.clone(), row]);
+                    slot[1] = held.exposure;
+                    slot[4..8].copy_from_slice(&[
+                        held.contrast,
+                        held.highlights,
+                        held.shadows,
+                        held.whites,
+                    ]);
+                    slot[8..12].copy_from_slice(&[
+                        held.blacks,
+                        held.texture,
+                        held.clarity,
+                        held.dehaze,
+                    ]);
+                    slot[12] = held.vibrance;
+                    slot[13] = held.saturation;
+                    // One Tone step a draw reads neighborhoods for; another
+                    // is drawn with each pixel alone.
+                    if tone.is_local() {
+                        if scene.local.is_none() {
+                            scene.local = Some(scene.finish.len());
+                            slot[14] = 1.0;
+                        } else {
+                            scene.left_out.push(format!(
+                                "the neighborhoods of finishing step {index}, past the GPU's one"
+                            ));
+                        }
+                    }
                 }
             }
             scene.finish.push((slot, offset));
@@ -418,10 +447,12 @@ struct Globals {
     screen: [f32; 4],
     counts: [f32; 4],
     layers: [[f32; 20]; MAX_LAYERS],
-    finish: [[f32; 12]; MAX_FINISH_STEPS],
+    finish: [[f32; 16]; MAX_FINISH_STEPS],
     healed: [[f32; 4]; MAX_HEALED_LAYERS],
     heals: [[f32; 8]; MAX_HEALS],
     computed: [[f32; 16]; MAX_COMPUTED_MASKS],
+    local: [f32; 4],
+    area: [f32; 4],
 }
 
 /// Where the picture sits in the area drawn.
@@ -496,6 +527,22 @@ pub struct GpuTargets {
     /// The finished picture, in the picture's working space.
     pub finished: wgpu::Texture,
     finished_view: wgpu::TextureView,
+    /// The local passes' textures, made the first time a draw has a Tone
+    /// step that reads neighborhoods.
+    local: std::sync::OnceLock<LocalTargets>,
+}
+
+/// What the local passes draw into, the size of the targets: the
+/// measurements, a mean across, and the local and detail means. Each is
+/// bound as a window pass reads it, and all three as Finish reads them.
+struct LocalTargets {
+    measured: wgpu::TextureView,
+    across: wgpu::TextureView,
+    local_means: wgpu::TextureView,
+    detail_means: wgpu::TextureView,
+    from_measured: wgpu::BindGroup,
+    from_across: wgpu::BindGroup,
+    finish_inputs: wgpu::BindGroup,
 }
 
 impl GpuTargets {
@@ -521,6 +568,16 @@ pub struct GpuCompositor {
     tile_layout: wgpu::BindGroupLayout,
     masks_layout: wgpu::BindGroupLayout,
     finish_layout: wgpu::BindGroupLayout,
+    /// What a local window pass reads: one texture of full floats.
+    window_layout: wgpu::BindGroupLayout,
+    /// What Finish reads of the local passes.
+    local_layout: wgpu::BindGroupLayout,
+    /// Finish's local inputs when a draw has none: one texel of zeros.
+    no_local: wgpu::BindGroup,
+    local_measure_pipeline: wgpu::RenderPipeline,
+    /// The local window across and down, then the detail window across
+    /// and down.
+    window_pipelines: [wgpu::RenderPipeline; 4],
     tile_pipeline: wgpu::RenderPipeline,
     healed_pipeline: wgpu::RenderPipeline,
     smoothed_pipeline: wgpu::RenderPipeline,
@@ -609,6 +666,26 @@ impl GpuCompositor {
                 texture_entry(0, wgpu::TextureViewDimension::D2),
                 texture_entry(1, wgpu::TextureViewDimension::D2Array),
             ],
+        });
+        // Full floats cannot be filtered on every GPU; the local passes only
+        // load them.
+        let unfiltered = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let window_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("compose local window source"),
+            entries: &[unfiltered(0)],
+        });
+        let local_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("compose local finish inputs"),
+            entries: &[unfiltered(1), unfiltered(2), unfiltered(3)],
         });
         const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
             wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4];
@@ -721,11 +798,58 @@ impl GpuCompositor {
             "compose finish",
             &finish_shader,
             Some(&finish_layout),
-            None,
+            Some(&local_layout),
             ("finish_vertex", "finish_fragment"),
             false,
             &[Some(finished_format.into())],
         );
+        // The measurements run the Finish steps before the local one, whose
+        // code can read the local inputs: they are bound, empty.
+        let local_measure_pipeline = pipeline(
+            "compose local measurements",
+            &finish_shader,
+            Some(&finish_layout),
+            Some(&local_layout),
+            ("finish_vertex", "local_measure_fragment"),
+            false,
+            &[Some(LOCAL_FORMAT.into())],
+        );
+        let window_pipelines = [
+            "local_across_fragment",
+            "local_down_fragment",
+            "detail_across_fragment",
+            "detail_down_fragment",
+        ]
+        .map(|fragment| {
+            pipeline(
+                "compose local window",
+                &finish_shader,
+                None,
+                Some(&window_layout),
+                ("finish_vertex", fragment),
+                false,
+                &[Some(LOCAL_FORMAT.into())],
+            )
+        });
+        let no_local = {
+            let zero = device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some("compose no local inputs"),
+                    size: wgpu::Extent3d {
+                        width: 1,
+                        height: 1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: LOCAL_FORMAT,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&wgpu::TextureViewDescriptor::default());
+            local_finish_inputs(device, &local_layout, [&zero, &zero, &zero])
+        };
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("compose linear"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -783,6 +907,11 @@ impl GpuCompositor {
             tile_layout,
             masks_layout,
             finish_layout,
+            window_layout,
+            local_layout,
+            no_local,
+            local_measure_pipeline,
+            window_pipelines,
             tile_pipeline,
             healed_pipeline,
             smoothed_pipeline,
@@ -918,6 +1047,60 @@ impl GpuCompositor {
             smoothed_sources,
             finished,
             finished_view,
+            local: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// The local passes' textures for targets of `width` by `height`.
+    fn local_targets(&self, width: u32, height: u32) -> LocalTargets {
+        let view = |label: &str| {
+            self.device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: LOCAL_FORMAT,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&wgpu::TextureViewDescriptor::default())
+        };
+        let measured = view("compose local measurements");
+        let across = view("compose local means across");
+        let local_means = view("compose local means");
+        let detail_means = view("compose detail means");
+        let source = |view: &wgpu::TextureView| {
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("compose local window source"),
+                layout: &self.window_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(view),
+                }],
+            })
+        };
+        let from_measured = source(&measured);
+        let from_across = source(&across);
+        let finish_inputs = local_finish_inputs(
+            &self.device,
+            &self.local_layout,
+            [&measured, &local_means, &detail_means],
+        );
+        LocalTargets {
+            measured,
+            across,
+            local_means,
+            detail_means,
+            from_measured,
+            from_across,
+            finish_inputs,
         }
     }
 
@@ -941,7 +1124,7 @@ impl GpuCompositor {
     ) {
         let rect = within(area.viewport, targets.size());
         let scissor = within(area.scissor, targets.size());
-        self.write_globals(scene, targets, view, rect, overlay_strength);
+        self.write_globals(scene, targets, view, (rect, scissor), overlay_strength);
         if version.is_none() || self.tables_version != version {
             self.upload_tables(scene);
             self.tables_version = version;
@@ -989,9 +1172,11 @@ impl GpuCompositor {
         scene: &GpuScene,
         targets: &GpuTargets,
         view: GpuView,
-        rect: [u32; 4],
+        (rect, scissor): ([u32; 4], [u32; 4]),
         overlay_strength: f32,
     ) {
+        let window =
+            |radius: usize| (radius as f64 * view.zoom).round().min(MAX_WINDOW_RADIUS) as f32;
         let (width, height) = (f64::from(rect[2]), f64::from(rect[3]));
         let scale = [2.0 * view.zoom / width, -2.0 * view.zoom / height];
         let mut globals = Globals {
@@ -1016,10 +1201,17 @@ impl GpuCompositor {
                 0.0,
             ],
             layers: [[0.0; 20]; MAX_LAYERS],
-            finish: [[0.0; 12]; MAX_FINISH_STEPS],
+            finish: [[0.0; 16]; MAX_FINISH_STEPS],
             healed: [[-1.0, -1.0, 0.0, 0.0]; MAX_HEALED_LAYERS],
             heals: [[0.0; 8]; MAX_HEALS],
             computed: [[0.0; 16]; MAX_COMPUTED_MASKS],
+            local: [
+                scene.local.map_or(-1.0, |step| step as f32),
+                window(crate::tone::LOCAL_RADIUS),
+                window(crate::tone::DETAIL_RADIUS),
+                0.0,
+            ],
+            area: scissor.map(|value| value as f32),
         };
         for (slot, layer) in globals.layers.iter_mut().zip(&scene.layers) {
             *slot = *layer;
@@ -1236,6 +1428,66 @@ impl GpuCompositor {
             pass.set_bind_group(2, &targets.layer_masks, &[]);
             draw_tiles(&mut pass);
         }
+        // The local passes: the measurements of the picture before the
+        // local Tone step, then their means over the local window and over
+        // the detail window, each across then down.
+        let local = scene.local.map(|_| {
+            targets
+                .local
+                .get_or_init(|| self.local_targets(targets.width, targets.height))
+        });
+        if let Some(local) = local {
+            let mut pass_into =
+                |label: &str,
+                 target: &wgpu::TextureView,
+                 pipeline: &wgpu::RenderPipeline,
+                 groups: &[(u32, &wgpu::BindGroup)]| {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some(label),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: target,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        ..Default::default()
+                    });
+                    within(&mut pass);
+                    pass.set_pipeline(pipeline);
+                    pass.set_bind_group(0, &self.common, &[]);
+                    for (index, group) in groups {
+                        pass.set_bind_group(*index, *group, &[]);
+                    }
+                    pass.draw(0..3, 0..1);
+                };
+            pass_into(
+                "compose local measurements",
+                &local.measured,
+                &self.local_measure_pipeline,
+                &[(1, &targets.finish_inputs), (2, &self.no_local)],
+            );
+            let [local_across, local_down, detail_across, detail_down] = &self.window_pipelines;
+            for (across, down, means) in [
+                (local_across, local_down, &local.local_means),
+                (detail_across, detail_down, &local.detail_means),
+            ] {
+                pass_into(
+                    "compose local window",
+                    &local.across,
+                    across,
+                    &[(2, &local.from_measured)],
+                );
+                pass_into(
+                    "compose local window",
+                    means,
+                    down,
+                    &[(2, &local.from_across)],
+                );
+            }
+        }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("compose finish"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1257,8 +1509,34 @@ impl GpuCompositor {
         pass.set_pipeline(&self.finish_pipeline);
         pass.set_bind_group(0, &self.common, &[]);
         pass.set_bind_group(1, &targets.finish_inputs, &[]);
+        pass.set_bind_group(
+            2,
+            local.map_or(&self.no_local, |local| &local.finish_inputs),
+            &[],
+        );
         pass.draw(0..3, 0..1);
     }
+}
+
+/// Finish's bind group of the local passes' measurements and means.
+fn local_finish_inputs(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    views: [&wgpu::TextureView; 3],
+) -> wgpu::BindGroup {
+    let entries: Vec<wgpu::BindGroupEntry> = views
+        .iter()
+        .enumerate()
+        .map(|(index, view)| wgpu::BindGroupEntry {
+            binding: index as u32 + 1,
+            resource: wgpu::BindingResource::TextureView(view),
+        })
+        .collect();
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("compose local finish inputs"),
+        layout,
+        entries: &entries,
+    })
 }
 
 /// A rectangle kept inside targets of `size`.

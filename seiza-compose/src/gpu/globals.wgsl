@@ -26,16 +26,20 @@ struct Layer {
 // One step of the Finish stage.
 struct FinishStep {
     // x: 1 curves, 2 saturation, 3 heal, 4 stretch, 5 tone and color.
-    // y: amount. z: the mask layer that limits the step, or -1 for
-    // everywhere. w: the step's opacity.
+    // y: amount; for tone and color, exposure. z: the mask layer that
+    // limits the step, or -1 for everywhere. w: the step's opacity.
     kind: vec4f,
     // xy: for a heal, where the replacement comes from, in surface pixels.
     // z: for a stretch, the first of its three rows of the stretch table.
-    // w: for a stretch, 1 when it maps luminance.
+    // w: for a stretch, 1 when it maps luminance. For tone and color:
+    // contrast, highlights, shadows, whites.
     heal: vec4f,
     // rgb: for a heal, the brightness added to the copied color. For tone
-    // and color, x: vibrance, y: saturation.
+    // and color: blacks, texture, clarity, dehaze.
     shift: vec4f,
+    // For tone and color, x: vibrance, y: saturation, z: 1 when the step
+    // reads the neighborhoods the local passes measured.
+    local: vec4f,
 }
 
 // A heal of one layer.
@@ -81,6 +85,13 @@ struct Globals {
     healed: array<vec4f, 4>,
     heals: array<LayerHeal, 16>,
     computed: array<ComputedMask, 8>,
+    // x: the Finish step whose neighborhoods the local passes measure, or
+    // -1. y: the half-width of the local window, z: of the detail window,
+    // both in surface pixels.
+    local: vec4f,
+    // The part of the targets this draw fills: x, y, width and height. A
+    // window reads only pixels inside it.
+    area: vec4f,
 }
 
 @group(0) @binding(0) var<uniform> globals: Globals;

@@ -16,10 +16,14 @@ input through its `Transfer` (Seiza stretch curves, a sample domain,
 normalization) in a color, solid colors, groups, adjustments, and LRGB's
 luminance layers, limited by painted and computed masks, with heals and
 finishing steps (Seiza stretch plans, Tone and color, curves, saturation).
+Tone and color is Camera Raw's Basic panel: Highlights, Shadows, Texture,
+Clarity and Dehaze read each pixel's neighborhood, through an
+edge-preserving base, so stars get no halos.
 `render::render` renders one in tiles from a `Source` into a `Sink`, in
 32-bit floats, in the caller's Rayon pool; `render::render_image` keeps the
-result in memory. Each tile reads a margin for mask smoothing and heals,
-reflected at the picture's edge, so any tiling gives the same pixels. Every
+result in memory. Each tile reads a margin for mask smoothing, heals and
+Tone's neighborhoods, reflected at the picture's edge, so any tiling gives
+the same pixels. Every
 `combine_*` call below builds a picture and renders it here.
 
 With the default `gpu` feature, `gpu::GpuCompositor` draws the same picture

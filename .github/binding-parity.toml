@@ -608,6 +608,7 @@ objects = [
 "seiza-compose::covered_region" = { none = "crop_report gives the region and more; the C ABI calls crop_report" }
 "seiza-compose::render::render" = { none = "the hosts that build pictures of their own, PSF Guard and PSF Studio, are Rust hosts; C and Python hosts reach the compositor through the combine_* exports, which build their pictures in the core. A picture-level C and Python API waits for a host that needs one" }
 "seiza-compose::gpu::render_gpu" = { none = "the hosts that build pictures of their own, PSF Guard and PSF Studio, are Rust hosts; C and Python hosts reach the compositor through the combine_* exports, which build their pictures in the core. A picture-level C and Python API waits for a host that needs one" }
+"seiza-compose::tone::neighborhoods" = { none = "a step of the compositor's Tone, which C and Python hosts reach as the compositor itself: through the Rust hosts that build pictures" }
 
 # stacking
 "seiza-stacking::LiveStacker::effective_maximum_drift_pixels" = { none = "part of registration" }

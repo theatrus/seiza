@@ -46,6 +46,30 @@ A `Picture` lists:
 - **Finish steps** on the combined picture: output stretches (Seiza stretch
   plans), Tone and color, curves and saturation, heals.
 
+## Tone and color
+
+Tone and color has Camera Raw's Basic controls. Exposure, Whites and Blacks
+set the luminance's range; Contrast, Vibrance and Saturation follow. The
+rest read each pixel's neighborhood, so they change what is around a pixel
+rather than every pixel of one brightness alike:
+
+| Control | What it does |
+|---|---|
+| Highlights, Shadows | Move the tones of the local base, a pixel's surroundings, and keep the detail above it. A star in a lifted field stays as far above the field. |
+| Clarity | Raises or lowers the detail around the local base, most in the midtones. |
+| Texture | Raises or lowers the detail around a base of a few pixels, where there is more of it than noise. |
+| Dehaze | Takes away a veil estimated from the darkest channel nearby, so a gray sky glow goes and a colored nebula stays. Negative adds a veil. |
+
+A neighborhood is the means of the luminance, its square, the darkest
+channel and their product over a square window: 97 pixels across for the
+local base, 7 for the fine one. A base is the window's mean drawn toward
+the pixel where the window's variance is large, as a guided filter does, so
+an edge, such as a star's, is its own base and gets no halo. The veil is the
+darkest channel's base, guided by the luminance. A pixel's neighborhood is
+of the picture as the steps before Tone left it, heals left out, the
+picture a heal copies from. With none of these controls set, the step is a
+curve of each pixel's luminance, as before.
+
 A pixel any layer's input does not cover is not covered in the output: it
 is `NaN`, as `combine_*` return today.
 
@@ -69,7 +93,7 @@ The compositor never holds a whole picture. It renders the output in square
 tiles. Each tile reads its inputs over the tile and a margin wide enough for
 everything that reads beyond a pixel: the largest mask smoothing (its blur
 reaches four standard deviations, as Foraxx's does), plus the largest heal
-offsets. Inputs come from a `Source`, which reads a rectangle of the named
+offsets, plus the local window of a Tone step that reads neighborhoods. Inputs come from a `Source`, which reads a rectangle of the named
 planes; outputs go to a `Sink`, which takes finished tiles in any order.
 
 What needs the whole picture is measured before rendering, once, from
@@ -90,9 +114,10 @@ feature) draws a `Picture` with wgpu:
 
 - `GpuScene::new` packs a picture for the shaders: each transfer a row of a
   stretch table indexed by the square root of a sample, each finishing
-  stretch or Tone and color its curves.
+  stretch its curves. Tone and color is computed in the shader.
 - `GpuCompositor::draw` runs the passes (painted masks, healed layers,
-  computed masks and their blur, layers, finishing steps) into targets the
+  computed masks and their blur, layers, a Tone step's neighborhoods,
+  finishing steps) into targets the
   size of the area drawn, from input tiles the host binds, and leaves the
   finished picture in the working space. A canvas applies its display
   transform after it.
@@ -103,7 +128,11 @@ The CPU render is the reference. Where the GPU differs by design, it is
 an approximation: inputs and stretch tables are half floats, a computed
 mask's smoothing is a 33-tap Gaussian over three standard deviations,
 clamped at the drawn area's edge, and a canvas draws an uncovered pixel
-black. `tests/gpu.rs` renders the same picture both ways and bounds the
+black. A Tone step's windows are cut at the drawn area's edge too, and are
+measured in drawn pixels: zoomed out, a window covers the same part of the
+picture at the canvas's resolution. One Tone step per draw reads
+neighborhoods; another is drawn with each pixel alone and named in
+`left_out`. `tests/gpu.rs` renders the same picture both ways and bounds the
 gap; on Apple silicon the mean difference is about 1e-4 and the 99th
 percentile under 1e-3, smoothing included. A planted shader change fails
 it. Without a GPU the tests pass without checking.

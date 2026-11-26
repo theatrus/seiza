@@ -92,6 +92,10 @@ pub fn everything() -> Picture {
         kind: FinishKind::Tone(Tone {
             contrast: 0.3,
             shadows: 0.4,
+            highlights: -0.3,
+            texture: 0.5,
+            clarity: 0.4,
+            dehaze: 0.3,
             vibrance: 0.3,
             ..Tone::default()
         }),
