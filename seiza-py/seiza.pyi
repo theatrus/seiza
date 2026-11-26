@@ -1905,6 +1905,7 @@ class SharpenReport:
     stars: float
     rest: float
     rolloff: float
+    hold_noise: float
     binned_rest: float | None
     full_size_only: bool
     channels: list[SharpenedChannel]
@@ -1939,6 +1940,7 @@ class SharpenModel:
         rest: float | None = None,
         *,
         rolloff: float = 0.0,
+        hold_noise: float = 0.0,
         binned_rest: float | None = None,
         full_size_only: bool = False,
         progress: Callable[[int, int, int, int], object] | None = None,
@@ -1952,6 +1954,7 @@ class SharpenModel:
         rest: float | None = None,
         *,
         rolloff: float = 0.0,
+        hold_noise: float = 0.0,
         binned_rest: float | None = None,
         full_size_only: bool = False,
         progress: Callable[[int, int, int, int], object] | None = None,

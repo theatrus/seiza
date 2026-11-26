@@ -8,8 +8,8 @@ use crate::bundle::{ModelBundle, ScaledCard, SharpenCard};
 use crate::noise::image_map;
 use crate::psf::{Field, Point, detections, field_point_map};
 use crate::sharpen::{
-    Asked, Binned, Read, SharpenOptions, block_mean, brought_up, rolloff_step, scale_blended,
-    scale_factor, star_share,
+    Asked, Binned, Read, SharpenOptions, block_mean, brought_up, noise_hold_step, rolloff_step,
+    scale_blended, scale_factor, star_share,
 };
 use crate::sky::scales;
 use serde::Deserialize;
@@ -37,7 +37,9 @@ struct Expected {
     corner: (usize, usize),
     vector_map: Vec<f32>,
     rolloff: f32,
+    hold_noise: f32,
     edged_rolled: Vec<Option<f32>>,
+    edged_held: Vec<Option<f32>>,
 }
 
 struct Fixture {
@@ -282,6 +284,34 @@ fn the_roll_off_matches_the_harness() {
     assert!(
         moved > width * height / 4,
         "the fixture's change is held back: {moved}"
+    );
+}
+
+#[test]
+fn the_noise_hold_matches_the_harness() {
+    let fixture = fixture();
+    let want = &fixture.expected;
+    let (width, height) = (want.width, want.height);
+    let reading = &fixture.bundle.card().reading;
+    let sigma = image_map(&fixture.image, width, height, reading);
+    // The roll-off's change again: each pixel moved from its left neighbour
+    // by half as much again.
+    let mut edged = fixture.image.clone();
+    for (line, source) in edged.chunks_mut(width).zip(fixture.image.chunks(width)) {
+        for x in 1..width {
+            line[x] += 0.5 * (source[x] - source[x - 1]);
+        }
+    }
+    let held = noise_hold_step(&edged, &fixture.image, width, height, want.hold_noise, &sigma);
+    fixture.check("the noise hold", &held, &want.edged_held, 2e-6);
+    let moved = held
+        .iter()
+        .zip(&edged)
+        .filter(|(held, edged)| (*held - *edged).abs() > 0.1)
+        .count();
+    assert!(
+        moved > width * height / 10,
+        "the fixture's broad change is held back: {moved}"
     );
 }
 

@@ -456,6 +456,11 @@ fn sharpen_cards(report: &SharpenReport) -> Vec<WriteHeaderCard> {
             report.rolloff,
             "fine change held back under this noise",
         ),
+        number(
+            "MDHOLD",
+            report.hold_noise,
+            "broad change held back under this noise",
+        ),
         WriteHeaderCard::new(
             "MDBIN",
             HeaderValue::Integer(
@@ -686,6 +691,7 @@ mod tests {
             stars: 0.46,
             rest: 0.5,
             rolloff: 0.0,
+            hold_noise: 0.5,
             binned_rest: None,
             full_size_only: true,
             channels: Vec::new(),
@@ -707,6 +713,7 @@ mod tests {
         );
         assert_eq!(value("MDREST"), Some(HeaderValue::Float(0.5)));
         assert!(value("MDSTARS").is_some() && value("MDROLL").is_some());
+        assert_eq!(value("MDHOLD"), Some(HeaderValue::Float(0.5)));
         assert!(value("MDHIGH").is_none(), "no noise bands in a sharpening");
         assert!(cards.iter().all(|card| card.keyword().len() <= 8));
         assert_eq!(value("MDBIN"), Some(HeaderValue::Integer(1)));

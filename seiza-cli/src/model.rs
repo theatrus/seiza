@@ -134,6 +134,11 @@ struct SharpenArgs {
     /// under the noise, in multiples of the image's noise; 0 keeps all of it
     #[arg(long, default_value_t = 0.0)]
     rolloff: f32,
+    /// How hard the broad part of the change, between 4 and 16 px, is held
+    /// back where it lies under the noise, in multiples of the noise the
+    /// image's noise has in that band; 0 keeps all of it
+    #[arg(long, default_value_t = 0.0, value_name = "AMOUNT")]
+    hold_noise: f32,
     /// The share asked of everything that is not a star on the binned image,
     /// where the model's card has a scaled pass and the image's stars are far
     /// wider than the model was trained on (default: the card's)
@@ -295,6 +300,7 @@ fn sharpen(args: SharpenArgs) -> Result<()> {
             stars: args.stars,
             rest: args.rest,
             rolloff: args.rolloff,
+            hold_noise: args.hold_noise,
             binned_rest: args.binned_rest,
             full_size_only: args.full_size_only,
             progress: Some(&progress),
@@ -597,6 +603,8 @@ mod tests {
             "0.46",
             "--rolloff",
             "1",
+            "--hold-noise",
+            "0.5",
             "--backend",
             "coreml-gpu",
         ])
@@ -607,6 +615,7 @@ mod tests {
         assert_eq!(args.stars, Some(0.46));
         assert_eq!(args.rest, None, "the model's own share, unless told");
         assert_eq!(args.rolloff, 1.0);
+        assert_eq!(args.hold_noise, 0.5);
         assert_eq!(args.backend.unwrap().to_string(), "coreml-gpu");
         assert_eq!(
             args.binned_rest, None,

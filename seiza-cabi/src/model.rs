@@ -94,14 +94,15 @@ impl ModelOpenRequest {
 
 /// What a sharpening is asked for. Every field may be left out: `stars`,
 /// `rest` and `binnedRest` are then the model's own shares, nothing is
-/// rolled off, and an image whose stars are far wider than the model's is
-/// also sharpened binned where its card says so.
+/// rolled off or held, and an image whose stars are far wider than the
+/// model's is also sharpened binned where its card says so.
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields, default)]
 struct SharpenRequest {
     stars: Option<f32>,
     rest: Option<f32>,
     rolloff: f32,
+    hold_noise: f32,
     binned_rest: Option<f32>,
     full_size_only: bool,
 }
@@ -238,6 +239,7 @@ struct SharpenReportResponse {
     stars: f32,
     rest: f32,
     rolloff: f32,
+    hold_noise: f32,
     binned_rest: Option<f32>,
     full_size_only: bool,
     channels: Vec<SharpenedChannelResponse>,
@@ -255,6 +257,7 @@ impl From<&SharpenReport> for SharpenReportResponse {
             stars: report.stars,
             rest: report.rest,
             rolloff: report.rolloff,
+            hold_noise: report.hold_noise,
             binned_rest: report.binned_rest,
             full_size_only: report.full_size_only,
             channels: report
@@ -854,8 +857,10 @@ pub unsafe extern "C" fn seiza_sharpen_model_tile(model: *const SeizaSharpenMode
 ///
 /// `options_json` may be null, or hold `stars`, the share of its width every
 /// star is brought to, `rest`, the share asked of everything that is not a
-/// star, and `rolloff`, how hard the finest part of the change is held back
-/// where it lies under the noise. A share is above 0 and at most 1, which
+/// star, `rolloff`, how hard the finest part of the change is held back
+/// where it lies under the noise, and `holdNoise`, how hard its broad part,
+/// between 4 and 16 px, is held back where it lies under that band's share of
+/// the noise. A share is above 0 and at most 1, which
 /// leaves things as they are; left out, it is the model's own. No star is asked
 /// to be narrower than the model's floor. Where the model's card has a scaled
 /// pass, an image whose stars are far wider than the model was trained on is
@@ -866,14 +871,14 @@ pub unsafe extern "C" fn seiza_sharpen_model_tile(model: *const SeizaSharpenMode
 ///
 /// Returns what ran, as JSON the caller frees with `seiza_string_free`:
 /// `model`, `sha256` (the body graph's), `cardSha256`, `backend`, `precision`,
-/// `tile`, `stars`, `rest`, `rolloff`, `binnedRest` (null where the card has
+/// `tile`, `stars`, `rest`, `rolloff`, `holdNoise`, `binnedRest` (null where the card has
 /// no scaled pass or the run was held to full size), `fullSizeOnly`, and
 /// `channels`, each with its `background`, `noise`, `psfRows` and
 /// `psfColumns` (the nodes its PSF field was sampled at), `psfStars`,
 /// `psfGlobal` (too few stars left one PSF for the whole image), `psfWidthPx`,
 /// `points` and `binned`, how many pixels a side it was also sharpened binned
 /// by (1: not at all). A host keys cached results on `cardSha256`, `backend`,
-/// `precision`, `stars`, `rest`, `rolloff`, `binnedRest`, `fullSizeOnly` and
+/// `precision`, `stars`, `rest`, `rolloff`, `holdNoise`, `binnedRest`, `fullSizeOnly` and
 /// [`seiza_model_output_version`]. An image with too few stars to measure a
 /// PSF from is refused, and so is an `out` that overlaps `data`. Where only
 /// the binned image has too few, the channel is sharpened at full size alone.
@@ -978,6 +983,7 @@ fn with_sharpen_options<T>(
         stars: request.stars,
         rest: request.rest,
         rolloff: request.rolloff,
+        hold_noise: request.hold_noise,
         binned_rest: request.binned_rest,
         full_size_only: request.full_size_only,
         progress: Some(&report),
@@ -1915,7 +1921,7 @@ mod tests {
             .collect();
         let source = text(&fixtures().join("sharpen/tiny"));
         let options = CString::new(r#"{"backend": "cpu"}"#).unwrap();
-        let asked = CString::new(r#"{"stars": 0.6, "rolloff": 0.5}"#).unwrap();
+        let asked = CString::new(r#"{"stars": 0.6, "rolloff": 0.5, "holdNoise": 0.5}"#).unwrap();
         let mut error = ptr::null_mut();
         let mut tiles = 0_usize;
         let mut out = vec![0.0_f32; pixels.len()];
@@ -1953,6 +1959,7 @@ mod tests {
             assert!((report["stars"].as_f64().unwrap() - 0.6).abs() < 1e-6);
             assert_eq!(report["rest"], 0.5, "the model's own, left out");
             assert_eq!(report["rolloff"], 0.5);
+            assert_eq!(report["holdNoise"], 0.5);
             let read = &report["channels"][0];
             assert_eq!(
                 (read["psfRows"].as_u64(), read["psfColumns"].as_u64()),
