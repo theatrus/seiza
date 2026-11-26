@@ -2854,6 +2854,40 @@ In order, each only if the one before leaves a gap at the rims:
        1.55% on NGC 6820's night, 2.17% on its multi-night stack and 4.84%
        on the Trunk's six nights. It is not in the runtime.
 
+       S101 is S99's recipe from S99's weights for 30,000 steps more,
+       nothing else changed. Its training loss falls from 0.78 to 0.75 and
+       its validation loss from 1.886 to 1.877. At the usual ask it moves
+       the texture toward the goal on the held-out field as well as on the
+       trained one: on NGC 6820 the knots are 1.65% (S99 1.80%, the goal
+       1.30%), 2.42% on its multi-night stack (2.82% and 2.03%), the dots
+       inside the cloud 179 per Mpx (191 and 161) and the interior between
+       4 and 8 px 1.24 (1.28 and 1.23); on the Trunk the knots are 2.46%,
+       the dots 105 per Mpx (the goal 103) and the interior 1.34 between 4
+       and 8 px (S99 1.43, the goal 1.41: a little lift lost). The stars
+       come rounder: ellipticity 0.049 on the California (S99 0.058, the
+       goal 0.045) and 0.060 on SNR G132 (0.069 and 0.052). On the halves
+       asked 0.35 the noise between 8 and 16 px is as S99 raised it: 1.20,
+       1.30 and 1.34 on NGC 6820 for structure 1.32, 1.39 and 1.22. Row 2
+       looks as S99 left it. S101 is the candidate.
+
+       Every pair S99 and S101 drew came from the Trunk: three objects
+       through one telescope, 70% of their examples. Their validation banks
+       hold no pairs, so what the runs learn of the pairs and fail to take
+       to other fields does not show in their validation loss.
+       `--validation-pairs-bank` names pairs banks of fields a run does not
+       train on, whose loss is logged as the pairs validation, apart from
+       the rest. More corpus pairs were made from 44 multi-night stacks of
+       13 objects through three telescopes, the corpus's deepest stacks,
+       and 8 multi-night stacks of the validation split hold the held-out
+       pairs. The goal raises their bands between 8 and 32 px from 1.00 to
+       1.21 and 1.17, by field: most on bright emission nebulae of wide
+       stars, as on the Trunk's six nights (1.21 and 1.13), and next to
+       nothing on galaxies and faint fields. The pairs of fields the
+       sheets show are left out of every pairs bank by their targets. S102
+       is S101's recipe with pairs drawn 32% from the Trunk, 27% from the
+       new multi-night stacks, 27% from the broad pairs bank and 14% from
+       the stacks whose goal lifts most.
+
    The clarity is also a step after the model, an amount the user sets
    (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
    taught that clarity is asked for at a ratio of 0, read from the
