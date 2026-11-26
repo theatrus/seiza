@@ -108,6 +108,20 @@ layers:
    dense field of 2.3 px stars the masked share goes from 3.7% to 11.7%,
    and from refining at a signal to noise of 50 to refining at 5 alone it
    had gone from 6.0% to 3.7%.
+
+   The pass over all 655 stacks of the corpus took 5.2 hours on two
+   workers (2026-11-26) and gave 645 clean skies. Nine stacks had too few
+   isolated stars for a PSF field that varies. Measured again with one PSF
+   for all, seven of them gave clean skies, so 652 in all. The other two
+   had no usable star at all, and one stack would not solve. The masked
+   share's median is 4.6%,
+   its quartiles 2.3% and 10.1%, and a tenth of the stacks are over 20%.
+   The 34 over 30% are nearly all dense fields of undersampled stars, with
+   FWHM about 2 px and 100,000 to 900,000 stars. There the PSF's shape
+   miss is 10 to 30%, a pixel's phase changing the shape the field gives.
+   Windows are cut only where 80% of the pixels are valid, so those fields
+   give few windows: the first banks under-represent the densest
+   undersampled fields until their fit is better.
 2. **Stars put back** (`starless_bank`). Stars are drawn into a clean sky at
    random places, between half and one and a half times as many as the
    clean-sky pass took out of it, their magnitudes drawn from those it took
