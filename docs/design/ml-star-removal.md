@@ -45,12 +45,25 @@ and on.
   place: the holes and remnants of bright and clipped cores, spikes, and
   above all the gaps, healed with the nebula or background that runs under
   them, so that nothing shows where a star was.
+- **After sharpening too.** A common order is to sharpen an image and then
+  take its stars out, so the model must take stars out of a sharpened image
+  as well as a raw one: tighter cores, and whatever a sharpening leaves
+  about them. The training composites are also met sharpened, by Seiza's
+  sharpening model and as the sharpening goal sharpens, with the truth made
+  alike: the starless truth is the clean sky sharpened, and the stars layer
+  what sharpening the composite adds to it, so the two still add back to
+  the sharpened input.
 - **Halos are stars.** A bright star's halo (its wide wings, and the rings
   a filter's or a corrector's reflections throw) reaches far past any PSF
   stamp, tens to hundreds of pixels, and belongs in the stars layer with
   the star. On a deep stack of 8.6 px stars, the stars brighter than G 13
   leave light after the fit that the stack's two independent halves agree
-  on, 13 times the noise of the mean at their cores (2026-11-25).
+  on, 13 times the noise of the mean at their cores; past 20 px the
+  brightest leave about 3% of their light, and on a refractor's deep stack
+  of 2.1 px stars the clipped stars of G 3 to 8 leave 9 to 13% of theirs,
+  out past 300 px. A stack holds too few bright isolated stars to read a
+  halo's shape cleanly over its nebula: the halos are read over many stacks
+  of each telescope (2026-11-25).
 
 ## The data
 
