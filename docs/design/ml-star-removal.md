@@ -77,12 +77,14 @@ layers:
    from the deep Gaia catalogue to G 20 with the detector's stars the
    catalogue lacks, and those a first fit at their catalogue places
    measures at a signal to noise of 3 or more fitted with the stack's own
-   PSF field (bright ones' places refined, faint ones' kept) and taken out;
-   the field's systematic miss, read from bright isolated stars' leftovers,
-   is taken out with them. What is left is the stack's sky and nebula with
-   its noise. About each star that is clipped, fits poorly, or leaves its
-   core far over or under its noise (judged with its photon noise), a disc
-   is masked and kept out of the loss rather than patched. Around 1,100
+   PSF field (places refined from a signal to noise of 5, the faintest
+   kept at the catalogue's) and taken out; the field's systematic miss,
+   read from bright isolated stars' leftovers, is taken out with them.
+   What is left is the stack's sky and nebula with its noise. About each
+   star that is clipped, fits poorly, leaves its core far over or under its
+   noise, or leaves it leaning to one side (a dipole: a star fitted a
+   fraction of a pixel off), a disc is masked and kept out of the loss
+   rather than patched. Around 1,100
    deep and multi-night stacks of seven telescopes give these, and the
    Hubble and JWST fields give sharper skies of other telescopes. On a deep
    stack of 8.6 px stars, with G 17: a tenth of a percent of each star's
@@ -93,11 +95,27 @@ layers:
    finds: it found 3 the G 17 list lacked), the fainter ones leaving small
    remnants the halves share, for the network to heal, and 3.9% of the
    image masked (2026-11-25).
-2. **Stars put back.** Stars are drawn into a clean sky at random places, with
-   the brightness counts of a real field (from Gaia's counts at the field's
-   latitude), each the shape of a PSF:
-   - a real one, a stamp of another field's PSF, its wings and its
-     asymmetry included;
+
+   The first bank's windows showed the clean skies keeping bright stars'
+   leftovers, dipoles and cores 30 to 100 times the sky's noise over or
+   under. They passed because each was judged against a photon noise that
+   had soaked up the PSF's shape miss. The leftovers' variance is now read
+   as two terms, the stars' photon noise, growing with their light m as
+   g·m, and the shape's miss, growing as (f·m)², and leftovers are judged
+   against the photon noise alone. Deep stacks read g near 0 (many frames
+   make a star's own photon noise small) and f of 8 to 13%, so a bright
+   star's leftover is masked wherever it shows above the sky's noise. On a
+   dense field of 2.3 px stars the masked share goes from 3.7% to 11.7%,
+   and from refining at a signal to noise of 50 to refining at 5 alone it
+   had gone from 6.0% to 3.7%.
+2. **Stars put back** (`starless_bank`). Stars are drawn into a clean sky at
+   random places, between half and one and a half times as many as the
+   clean-sky pass took out of it, their magnitudes drawn from those it took
+   out and their light from the stack's own magnitude scale, so the field's
+   crowding and brightnesses are its own. Each is the shape of a PSF:
+   - the stack's own, its field's stamps with their wings and asymmetry,
+     carried on past the stamps' edge (65 px) by a Moffat wing matched to
+     their light where they end;
    - or one made from a pupil: a central obstruction of a given share, 0,
      2, 3 or 4 vanes of given width at any angle, or JWST's segments, its
      diffraction pattern summed over the filter's wavelengths and blurred by
@@ -108,11 +126,24 @@ layers:
      profiles past the stamp, by brightness and telescope) and made ones of
      other radii and widths, so the network learns to take a halo out and
      heal what it covered.
-3. **Noise.** The stars' own photon noise is added to the input only, with
-   the clean sky's noise already there. The target stars layer has none.
-4. **Saturation.** Some stars are clipped at a level, as real cores are, with
-   their bleed where the camera would bleed; the target keeps the star's
-   unclipped light, so the network learns to take a clipped core out whole.
+
+   A star's stamp reaches as far as its light stays over a twentieth of the
+   noise and fades out in a circle past that, so no star, halo or ring ends
+   in a square edge, however bright: the first bank cut stamps at 31 or
+   255 px, and wide stars ended in squares.
+3. **Noise.** The stars' own photon noise, at the stack's photon term, is
+   added to the input, with the clean sky's noise already there.
+4. **Saturation.** Cores are clipped where the stack clips.
+
+   The truth: the starless image is the clean sky, with its noise; the
+   stars layer is the input less it, the stars as the image shows them,
+   clipped and with their photon noise, so the two add back to the input
+   exactly.
+5. **The fit.** Each composite is also fitted as the runtime will fit an
+   image: its stars listed at the places they were put, as a catalogue
+   lists them, with the PSF field measured on the composite itself. Its
+   starless estimate and stars model are kept beside the truth, so both
+   designs train from one bank.
 
 ### Pairs of real images
 
@@ -147,9 +178,24 @@ on sheets, beside the goal:
 
 ## The model
 
-A U-Net as the other two (width 96 to 128, five levels), reading the image,
-its noise map and its point sources, with the PSF stamp encoder the sharpening
-model has, so it knows the stars' shape at each tile. Big stars' halos and
+The two designs are trained on one bank and compared (`train-starless`):
+
+- `fit`: a residual U-Net reads the image, the catalogue fit's starless
+  estimate and stars model, the noise map and the stars' places, and
+  corrects the estimate: it heals the holes, remnants, spikes and halos
+  the fit leaves.
+- `image`: the same network reads the image, the noise map and the stars'
+  places alone, and corrects the image.
+
+Each starts as its baseline, the fit's estimate or the image, and its loss
+is logged beside the baseline's. A tile is read in units of its own noise,
+its sky taken off, through asinh, so a bright core and the sky's noise both
+count; the loss is a Charbonnier penalty over the valid pixels, ten times
+over where stars were.
+
+Later, a U-Net as the other two (width 96 to 128, five levels), with the PSF
+stamp encoder the sharpening model has, so it knows the stars' shape at each
+tile. Big stars' halos and
 spikes reach hundreds of pixels: tiles of 1024 and a binned pass for the
 widest (`scale_to`), as sharpening does. The stars layer is given through the
 asinh residual the sharpening model uses, so faint and bright stars weigh
@@ -158,9 +204,9 @@ alike.
 ## Order of work
 
 1. The clean skies: Gaia fits with the PSF field, and checks that what is
-   subtracted is the stars (the halves agree on what is left).
+   subtracted is the stars (the halves agree on what is left). Built.
 2. The pupil PSF maker and the star-injection bank, with tests that put back
-   known stars and find them.
+   known stars and find them. Built, and the trainer for both designs.
 3. The corpus pairs on the train split.
 4. The measures and the sheets.
 5. First runs.
