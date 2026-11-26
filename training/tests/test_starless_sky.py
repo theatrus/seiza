@@ -173,3 +173,16 @@ def test_a_star_held_off_its_place_leaves_a_dipole_the_mask_covers():
     assert all(reasons[index] & poor for index in range(len(table)) if index not in held and reasons[index] & dipole)
     for x, y, _ in listed[:10]:
         assert made["mask"][int(round(y)), int(round(x))]
+
+
+def test_a_sparse_field_is_measured_with_one_psf_for_all():
+    rng = np.random.default_rng(17)
+    size = (300, 300)
+    image = 100.0 + rng.standard_normal(size) * 2.0
+    for x, y in ((60.3, 70.1), (220.6, 90.4), (150.2, 230.7), (80.9, 200.2), (240.1, 240.5)):
+        image += 5000.0 * moffat(size, x, y, 4.0)
+    image = image.astype(np.float32)
+    with pytest.raises(seiza.TooFewStarsError):
+        seiza.PsfField.measure(image, saturation=60000.0)
+    field = ss.measured_field(image, 60000.0)
+    assert field.shape_at(150.0, 150.0).fwhm == pytest.approx(4.0, rel=0.15)

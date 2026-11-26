@@ -312,6 +312,18 @@ def core_dipole(plane: np.ndarray, noise: np.ndarray, x: float, y: float, fwhm: 
     return value if np.isfinite(value) else None
 
 
+def measured_field(image: np.ndarray, clip: float | None) -> Any:
+    """The image's PSF field, varying over it; one PSF for all where too
+    few isolated stars give one that varies."""
+    import seiza
+
+    image = np.ascontiguousarray(image, dtype=np.float32)
+    try:
+        return seiza.PsfField.measure(image, saturation=clip)
+    except seiza.TooFewStarsError:
+        return seiza.PsfField.measure(image, saturation=clip, sparse="global")
+
+
 def clean_sky(image: np.ndarray, stars: Sequence[tuple[float, float, float]], *, noise: np.ndarray,
               clip: float | None = None, refine: Sequence[bool] | None = None) -> dict[str, Any]:
     """`image` with `stars`, (x, y, magnitude), fitted with the PSF field
@@ -325,11 +337,7 @@ def clean_sky(image: np.ndarray, stars: Sequence[tuple[float, float, float]], *,
     image = np.ascontiguousarray(image, dtype=np.float32)
     noise = np.ascontiguousarray(noise, dtype=np.float32)
     height, width = image.shape
-    try:
-        field = seiza.PsfField.measure(image, saturation=clip)
-    except seiza.TooFewStarsError:
-        # Too few isolated stars for a field that varies: one PSF for all.
-        field = seiza.PsfField.measure(image, saturation=clip, sparse="global")
+    field = measured_field(image, clip)
     refine = [True] * len(stars) if refine is None else list(refine)
     groups = [([star for star, moved in zip(stars, refine) if moved], "refined"),
               ([star for star, moved in zip(stars, refine) if not moved], "fixed")]
@@ -479,7 +487,7 @@ def measure(store: Store, product: dict[str, Any], catalog_path: str | None = No
     extra = faint_detections(found, psf_fields.DETECTION_COLUMNS, listed)
     # A first fit at the catalogue's places: which stars the stack shows, and
     # the flux scale for the detector's stars.
-    first = seiza.StarFit.fit(np.ascontiguousarray(image), seiza.PsfField.measure(image, saturation=clip), listed,
+    first = seiza.StarFit.fit(np.ascontiguousarray(image), measured_field(image, clip), listed,
                               noise=noise, saturation=clip, positions="fixed")
     measured_snr = {star: (np.inf if st.saturated else st.flux[0] / st.flux_error[0])
                     for star, st in zip(listed, first.stars)
