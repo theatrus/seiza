@@ -1,6 +1,8 @@
 """The starless model's known-truth composites: stars put back into a clean
 sky, their truth, and the catalogue fit of them."""
 
+import math
+
 import numpy as np
 import pytest
 
@@ -30,7 +32,7 @@ def clean_sky_case(rng, size=(400, 400), count=150, faintest=19.0):
 def test_a_composite_s_layers_add_back_and_its_stars_are_the_stack_s_kind():
     rng = np.random.default_rng(5)
     sky, table, summary, noise = clean_sky_case(rng)
-    telescope = bank.Telescope(stamp=stars.moffat_stamp(bank.WIDE_STAMP, 4.0, 3.0))
+    telescope = bank.Telescope(stamp=stars.moffat_stamp(bank.WIDE_STAMP, 4.0, 3.0), fwhm=4.0)
     made = bank.composite(sky, table, summary, telescope, rng, noise)
     # The truths add back to the input, and the starless one is the sky.
     np.testing.assert_allclose(made["starless"] + made["stars"], made["input"], atol=1e-3)
@@ -43,12 +45,13 @@ def test_a_composite_s_layers_add_back_and_its_stars_are_the_stack_s_kind():
     # All of a star far from the edges is drawn; the light is the stars'
     # (less what falls off the edges, plus the few halos).
     star = int(np.argmin(np.abs(made["placed"][:, 0] - 200) + np.abs(made["placed"][:, 1] - 200)))
-    lone = bank.Telescope(stamp=stars.moffat_stamp(bank.WIDE_STAMP, 4.0, 3.0))
+    lone = bank.Telescope(stamp=stars.moffat_stamp(bank.WIDE_STAMP, 4.0, 3.0), fwhm=4.0)
     alone = np.zeros_like(made["light"], dtype=np.float64)
     x, y, _, flux = made["placed"][star]
-    bank.add_star(alone, lone.stamp_at(x, y, bank.NARROW_STAMP), x, y, flux)
+    stamp = lone.stamp_for(x, y, flux, float(np.median(noise)))
+    bank.add_star(alone, stamp, x, y, flux)
     # (the shift by a fraction of a pixel loses a sliver of the stamp's edge)
-    assert alone.sum() == pytest.approx(flux * lone.stamp_at(x, y, bank.NARROW_STAMP).sum(), rel=1e-3)
+    assert alone.sum() == pytest.approx(flux * stamp.sum(), rel=1e-3)
     assert 0.8 * put.sum() < made["light"].sum() < 1.2 * put.sum()
     # Nothing over the clip level, and the stars' photon noise where they
     # are bright.
@@ -79,22 +82,21 @@ def annulus(made, star, inner, outer):
     return float(made["light"][(distance >= inner) & (distance < outer)].mean())
 
 
-def redrawn(made, telescope, noise, *, narrow_only=False):
+def redrawn(made, telescope, noise, *, without=()):
     """The composite's stars drawn again from its own list, with their
-    plain profiles alone (no halos), each on the stamp `composite` picks, or
-    all on the narrow one."""
+    plain profiles alone (no halos), each on the stamp `composite` picks,
+    leaving out those `without` lists."""
     light = np.zeros(made["light"].shape, dtype=np.float64)
     floor = float(np.nanmedian(noise))
-    for x, y, _, flux in made["placed"]:
-        narrow = telescope.stamp_at(x, y, bank.NARROW_STAMP)
-        wide = flux * float(narrow.max()) > bank.WIDE_PEAK * floor and not narrow_only
-        bank.add_star(light, telescope.stamp_at(x, y, bank.WIDE_STAMP) if wide else narrow, x, y, flux)
+    for index, (x, y, _, flux) in enumerate(made["placed"]):
+        if index not in without:
+            bank.add_star(light, telescope.stamp_for(x, y, flux, floor), x, y, flux)
     return light
 
 
 def test_the_brightest_stars_carry_halos_wider_than_their_stamps():
     plain = stars.moffat_stamp(bank.WIDE_STAMP, 4.0, 3.0)
-    telescope = bank.Telescope(stamp=plain)
+    telescope = bank.Telescope(stamp=plain, fwhm=4.0)
     sky, table, summary, noise = one_bright_star_case(np.random.default_rng(6))
     made = bank.composite(sky, table, summary, telescope, np.random.default_rng(16), noise)
     halos = made["light"] - redrawn(made, telescope, noise)
@@ -108,26 +110,83 @@ def test_the_brightest_stars_carry_halos_wider_than_their_stamps():
     assert annulus({"light": halos}, bright, 30, 40) > 20 * own
 
 
-def test_a_bright_star_is_drawn_on_the_wide_stamp_past_the_narrow_one(monkeypatch):
+def test_a_bright_star_is_drawn_as_far_as_its_light_reaches(monkeypatch):
     monkeypatch.setattr(bank, "HALO_STARS", 0.0)
     plain = stars.moffat_stamp(bank.WIDE_STAMP, 4.0, 1.5)
-    telescope = bank.Telescope(stamp=plain)
+    telescope = bank.Telescope(stamp=plain, fwhm=4.0)
     sky, table, summary, noise = one_bright_star_case(np.random.default_rng(9))
     made = bank.composite(sky, table, summary, telescope, np.random.default_rng(19), noise)
     np.testing.assert_allclose(made["light"], redrawn(made, telescope, noise), atol=1e-2)
-    beyond = made["light"] - redrawn(made, telescope, noise, narrow_only=True)
-    bright = made["placed"][np.argmin(made["placed"][:, 2])]
-    # Its wings reach past the narrow stamp's half-width, as the profile has
-    # them there.
+    bright = made["placed"][int(np.argmin(made["placed"][:, 2]))]
+    others = redrawn(made, telescope, noise, without={index for index in range(len(made["placed"]))
+                                                      if made["placed"][index, 2] <= bright[2] + 0.5})
+    # Its wings reach 20 to 26 px out (5 to 6.5 FWHM) as the profile has them
+    # there, far past where a faint star's stamp ends.
     expected = bright[3] * float(np.mean([plain[bank.WIDE_STAMP // 2, bank.WIDE_STAMP // 2 + r] for r in range(20, 26)]))
-    assert annulus({"light": beyond}, bright, 20, 26) == pytest.approx(expected, rel=0.3)
+    assert annulus({"light": made["light"] - others}, bright, 20, 26) == pytest.approx(expected, rel=0.3)
+    faint = telescope.stamp_for(0.0, 0.0, 0.1, float(np.median(noise)))
+    assert faint.shape[0] < 2 * 20 + 1
+
+
+def test_a_star_s_stamp_reaches_as_far_as_its_light_and_ends_round():
+    plain = stars.moffat_stamp(bank.WIDE_STAMP, 4.0, 1.5)
+    telescope = bank.Telescope(stamp=plain, fwhm=4.0)
+    floor = 2.0
+    for flux in (10.0, 1e4, 1e7):
+        stamp = telescope.stamp_for(10.0, 10.0, flux, floor)
+        reach = telescope.reach(flux, floor)
+        half = stamp.shape[0] // 2
+        distance = bank.radii(stamp.shape[0])
+        # Out to its reach the stamp is the profile's, untouched...
+        inside = distance <= min(reach, half / bank.FADE_BAND) - 1
+        np.testing.assert_allclose(stamp[inside], bank.cropped(plain, stamp.shape[0])[inside])
+        # ...past its reach the profile's light is under the fade...
+        if half < bank.WIDE_STAMP // 2:
+            middle = bank.WIDE_STAMP // 2
+            assert flux * plain[middle, middle + int(math.ceil(reach)) + 1] < bank.FADE * floor
+        # ...and it ends in a circle: nothing at its half side or past it.
+        assert np.all(stamp[distance >= half] == 0.0)
+        assert stamp[half, 0] == 0.0 and stamp[0, 0] == 0.0
+    # The brighter, the further.
+    assert telescope.reach(1e3, floor) < telescope.reach(1e6, floor)
+    assert telescope.reach(1e-3, floor) == bank.CORE_REACH * 4.0
+
+
+class StampField:
+    """A stand-in for a PSF field: one stamp everywhere."""
+
+    def __init__(self, stamp):
+        self.stamp = stamp
+        self.arrays = {"stamps": stamp[None, None]}
+
+    def stamp_at(self, x, y):
+        return self.stamp
+
+
+def test_a_field_s_stamp_is_carried_on_by_a_wing_matched_where_it_ends():
+    rng = np.random.default_rng(21)
+    truth = stars.moffat_stamp(bank.WIDE_STAMP, 6.0, 2.5)
+    # The field's stamp: the middle 65 px, with noise near its edges.
+    small = bank.cropped(truth, 65) + rng.normal(0.0, 2e-6, (65, 65)) * (bank.radii(65) > 20)
+    telescope = bank.Telescope(field=StampField(small), fwhm=6.0, wing_beta=2.5)
+    stamp = telescope.stamp_for(0.0, 0.0, 1e8, 1.0)
+    assert stamp.shape[0] > 65
+    middle = stamp.shape[0] // 2
+    along = stamp[middle, middle:]
+    profile = truth[bank.WIDE_STAMP // 2, bank.WIDE_STAMP // 2:]
+    # The field's own stamp in its trusted middle; past its edge a wing with
+    # the profile's light, carried on smoothly.
+    np.testing.assert_allclose(along[:15], profile[:15], rtol=1e-3)
+    np.testing.assert_allclose(along[35:60], profile[35:60], rtol=0.15)
+    # A faint star's stamp stays inside the field's own.
+    assert telescope.stamp_for(0.0, 0.0, 1.0, 1.0).shape[0] <= 65
 
 
 def test_bright_cores_clip_where_the_stack_clips():
     rng = np.random.default_rng(10)
     sky, table, summary, noise = one_bright_star_case(rng)
     summary = {**summary, "clip_level": 2000.0}
-    made = bank.composite(sky, table, summary, bank.Telescope(stamp=stars.moffat_stamp(bank.WIDE_STAMP, 4.0, 3.0)),
+    made = bank.composite(sky, table, summary, bank.Telescope(stamp=stars.moffat_stamp(bank.WIDE_STAMP, 4.0, 3.0), fwhm=4.0),
                           rng, noise)
     assert np.nanmax(made["input"]) == pytest.approx(2000.0)
     assert np.sum(made["input"] == np.float32(2000.0)) >= 4
@@ -138,7 +197,7 @@ def test_bright_cores_clip_where_the_stack_clips():
 def test_a_composite_is_fitted_at_the_places_its_stars_were_put():
     rng = np.random.default_rng(7)
     sky, table, summary, noise = clean_sky_case(rng, size=(500, 500), count=260, faintest=17.0)
-    telescope = bank.Telescope(stamp=stars.moffat_stamp(bank.WIDE_STAMP, 4.0, 3.0))
+    telescope = bank.Telescope(stamp=stars.moffat_stamp(bank.WIDE_STAMP, 4.0, 3.0), fwhm=4.0)
     made = bank.composite(sky, table, summary, telescope, rng, noise)
     fit = bank.fitted(made, noise, summary["clip_level"], 4.0)
     assert fit["stars"].shape[0] == len(made["placed"])

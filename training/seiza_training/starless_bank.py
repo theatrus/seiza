@@ -49,7 +49,7 @@ from . import starless_stars as stars
 from .store import Store
 
 # Raised with the bank's layout, so a bank of another is cut anew.
-BANK_VERSION = 1
+BANK_VERSION = 2
 # A bank's planes, a window each: the composite; its starless truth; the
 # catalogue fit's starless estimate and its stars' model; the noise map a
 # network reads, made from the input alone (`image_sigma`); where the loss
@@ -67,11 +67,22 @@ PUPIL_SHARE = 0.5
 # A pupil composite's vanes, as `starless_stars.Pupil.vanes` counts them
 # (radial bars: 4 is two crossed vanes), and how often each is drawn.
 VANES = (0, 2, 3, 4)
-# Stars brighter than this many times the noise at their peak are drawn on
-# a stamp `WIDE_STAMP` px across; the rest on `NARROW_STAMP`.
-WIDE_PEAK = 200.0
+# A star's stamp reaches as far as its light stays above `FADE` of the
+# noise (`Telescope.reach`), and fades out in a circle from there to
+# `FADE_BAND` times as far, so no star ends in a square edge however bright;
+# it reaches `CORE_REACH` star widths at least and is at most `WIDE_STAMP`
+# px across.
+FADE = 0.05
+FADE_BAND = 1.33
+CORE_REACH = 2.0
 WIDE_STAMP = 255
-NARROW_STAMP = 31
+# A field's stamps end a few star widths out, their edges noisy: past
+# `FIELD_TRUSTED` of a stamp's half side it gives way to a Moffat wing
+# (`winged`), its β drawn from `WING_BETA` for each composite and its level
+# matched to the stamp's light there, which runs on as far as the star's
+# light reaches.
+FIELD_TRUSTED = 0.6
+WING_BETA = (1.8, 3.0)
 # The brightest share of stars carry halos: wings holding between these
 # shares of their light, wide `HALO_WIDTH` star widths, and a reflection
 # ring for `RING_SHARE` of them.
@@ -83,25 +94,110 @@ RING_LIGHT = (0.005, 0.03)
 RING_RADIUS = (6.0, 20.0)
 
 
+def radii(size: int) -> np.ndarray:
+    """Each pixel's distance from a size × size grid's middle."""
+    half = (size - 1) / 2.0
+    yy, xx = np.mgrid[0:size, 0:size].astype(np.float64) - half
+    return np.hypot(xx, yy)
+
+
+def rounded(stamp: np.ndarray, inner: float = 1.0 / FADE_BAND) -> np.ndarray:
+    """`stamp` faded by a raised cosine from `inner` of its half side to
+    nothing at its half side, so that it ends in a circle."""
+    half = (stamp.shape[0] - 1) / 2.0
+    if half <= 0:
+        return stamp
+    t = np.clip((radii(stamp.shape[0]) / half - inner) / (1.0 - inner), 0.0, 1.0)
+    return stamp * (0.5 * (1.0 + np.cos(np.pi * t)))
+
+
+def cropped(stamp: np.ndarray, size: int) -> np.ndarray:
+    """The middle size × size of `stamp` (both odd), padded with zeros where
+    `stamp` is smaller."""
+    full = stamp.shape[0]
+    if size == full:
+        return stamp
+    if size < full:
+        start = (full - size) // 2
+        return stamp[start:start + size, start:start + size]
+    out = np.zeros((size, size), dtype=stamp.dtype)
+    start = (size - full) // 2
+    out[start:start + full, start:start + full] = stamp
+    return out
+
+
+def outer_light(stamp: np.ndarray) -> np.ndarray:
+    """For each whole radius R from a stamp's middle, the most light (by
+    size) of any of its pixels R px out or further."""
+    ring = np.floor(radii(stamp.shape[0])).astype(int)
+    most = np.zeros(ring.max() + 1)
+    np.maximum.at(most, ring.ravel(), np.abs(stamp).ravel())
+    return np.maximum.accumulate(most[::-1])[::-1]
+
+
+def winged(source: np.ndarray, size: int, fwhm: float, beta: float) -> np.ndarray:
+    """A field's stamp on a size × size grid, carried on by a Moffat wing of
+    `fwhm` and `beta`: the stamp to `FIELD_TRUSTED` of its half side, the
+    wing from nine tenths of it, blended between, the wing's level matched
+    to the stamp's mean light in a ring where the blend starts (none where
+    that is not above zero)."""
+    half = source.shape[0] // 2
+    placed = cropped(np.asarray(source, dtype=np.float64), size)
+    distance = radii(size)
+    start, end = FIELD_TRUSTED * half, 0.9 * half
+    alpha = fwhm / (2.0 * math.sqrt(2.0 ** (1.0 / beta) - 1.0))
+    moffat = (1.0 + (distance / alpha) ** 2) ** -beta
+    ring = np.abs(distance - start) <= 1.0
+    level = max(0.0, float(placed[ring].mean())) / float(moffat[ring].mean()) if ring.any() else 0.0
+    t = np.clip((distance - start) / (end - start), 0.0, 1.0)
+    keep = 0.5 * (1.0 + np.cos(np.pi * t))
+    return keep * placed + (1.0 - keep) * level * moffat
+
+
 @dataclass
 class Telescope:
     """The shape every star of a composite takes: the stack's own field
-    (`field`), or a pupil's PSF (`stamp`, wide) at the stack's width."""
+    (`field`), carried on by a wing of `wing_beta`, or a pupil's PSF
+    (`stamp`, `WIDE_STAMP` across), at the stack's star width `fwhm`."""
 
     field: Any | None = None
     stamp: np.ndarray | None = None
     description: str = ""
+    fwhm: float = 3.0
+    wing_beta: float = 2.5
 
-    def stamp_at(self, x: float, y: float, size: int) -> np.ndarray:
-        """A stamp of `size` (odd) for a star at (x, y), summing to what of
-        the star's light it holds."""
-        source = self.field.stamp_at(x, y) if self.field is not None else self.stamp
-        source = np.asarray(source, dtype=np.float64)
-        full = source.shape[0]
-        if size >= full:
-            return source
-        start = (full - size) // 2
-        return source[start:start + size, start:start + size]
+    def __post_init__(self) -> None:
+        if self.field is None:
+            envelope = np.asarray(self.stamp, dtype=np.float64)
+        else:
+            stamps = getattr(self.field, "arrays", {}).get("stamps")
+            # The most light any of the field's stamps holds, carried on: a
+            # star's reach is judged by the widest of them.
+            envelope = winged(np.abs(np.asarray(stamps, dtype=np.float64)).max(axis=(0, 1)) if stamps is not None
+                              else np.asarray(self.field.stamp_at(0.0, 0.0), dtype=np.float64),
+                              WIDE_STAMP, self.fwhm, self.wing_beta)
+        self.outer = outer_light(envelope)
+
+    def reach(self, flux: float, floor: float) -> float:
+        """How far out, in px, a star of `flux` stays above `FADE` × `floor`
+        (the noise): `CORE_REACH` star widths at least."""
+        above = np.nonzero(flux * self.outer >= FADE * floor)[0]
+        found = float(above[-1] + 1) if above.size else 0.0
+        return max(found, CORE_REACH * self.fwhm)
+
+    def stamp_for(self, x: float, y: float, flux: float, floor: float) -> np.ndarray:
+        """The stamp a star of `flux` at (x, y) is drawn on over the noise
+        `floor`: as far as it reaches and `FADE_BAND` times on, faded out in
+        a circle (`rounded`), its light per unit of `flux`."""
+        outer = min(WIDE_STAMP // 2, int(math.ceil(self.reach(flux, floor) * FADE_BAND)))
+        size = 2 * outer + 1
+        if self.field is None:
+            source = np.asarray(self.stamp, dtype=np.float64)
+        else:
+            source = np.asarray(self.field.stamp_at(x, y), dtype=np.float64)
+            if outer > FIELD_TRUSTED * (source.shape[0] // 2):
+                source = winged(source, size, self.fwhm, self.wing_beta)
+        return rounded(cropped(source, size))
 
 
 def magnitude_light(table: np.ndarray) -> tuple[float, float] | None:
@@ -129,8 +225,8 @@ def pupil_telescope(rng: np.random.Generator, fwhm: float) -> Telescope:
     optics = stars.Optics(diffraction_px=diffraction, broad=bool(rng.random() < 0.5), seeing_fwhm=seeing,
                           pupil=pupil)
     stamp = stars.pupil_psf(optics, WIDE_STAMP)
-    return Telescope(stamp=stamp, description=f"pupil vanes {vanes} obstruction {pupil.obstruction:.2f} "
-                                              f"diffraction {diffraction:.2f} px seeing {seeing:.2f} px")
+    return Telescope(stamp=stamp, fwhm=fwhm, description=f"pupil vanes {vanes} obstruction {pupil.obstruction:.2f} "
+                                                         f"diffraction {diffraction:.2f} px seeing {seeing:.2f} px")
 
 
 def add_star(light: np.ndarray, stamp: np.ndarray, x: float, y: float, flux: float) -> None:
@@ -175,21 +271,18 @@ def composite(sky: np.ndarray, table: np.ndarray, summary: dict[str, Any], teles
         if not finite[int(round(y)), int(round(x))]:
             continue
         flux = 10 ** (-0.4 * (slope * magnitude + zero))
-        narrow = telescope.stamp_at(x, y, NARROW_STAMP)
-        peak = flux * float(narrow.max())
-        stamp = telescope.stamp_at(x, y, WIDE_STAMP) if peak > WIDE_PEAK * floor else narrow
-        add_star(light, stamp, x, y, flux)
+        add_star(light, telescope.stamp_for(x, y, flux, floor), x, y, flux)
         if magnitude <= halo_cut:
             size = 2 * int(min(height, width, 6 * HALO_WIDTH[1] * fwhm) // 2) - 1
             share = rng.uniform(*HALO_LIGHT)
-            add_star(light, stars.halo_wings(size, rng.uniform(*HALO_WIDTH) * fwhm, rng.uniform(1.2, 2.0)),
+            add_star(light, rounded(stars.halo_wings(size, rng.uniform(*HALO_WIDTH) * fwhm, rng.uniform(1.2, 2.0))),
                      x, y, flux * share)
             if rng.random() < RING_SHARE:
                 radius = rng.uniform(*RING_RADIUS) * fwhm
                 ring_size = 2 * int(min(height, width, 2.6 * radius + 20) // 2) - 1
                 ring = stars.reflection_ring(ring_size, radius, radius / rng.uniform(4.0, 8.0),
                                              x=rng.normal(0, 0.05 * radius), y=rng.normal(0, 0.05 * radius))
-                add_star(light, ring, x, y, flux * rng.uniform(*RING_LIGHT))
+                add_star(light, rounded(ring), x, y, flux * rng.uniform(*RING_LIGHT))
         placed.append((x, y, float(magnitude), flux))
     photon = float(summary.get("photon_term") or 0.0)
     shot = rng.standard_normal((height, width)) * np.sqrt(photon * np.clip(light, 0, None))
@@ -257,7 +350,8 @@ def source_telescope(store: Store, product: dict[str, Any], rng: np.random.Gener
             raise FileNotFoundError(product["id"])
     except (FileNotFoundError, KeyError):
         field = psf_fields.Field.measured_from(psf_fields.load_image(store, product))
-    return Telescope(field=field, description="the stack's own PSF field")
+    beta = float(rng.uniform(*WING_BETA))
+    return Telescope(field=field, fwhm=fwhm, wing_beta=beta, description=f"the stack's own PSF field, wing β {beta:.2f}")
 
 
 def prepared(store_root: str, scratch: str | None, product: dict[str, Any], *, draws: int, windows: int,

@@ -61,8 +61,25 @@ def test_the_photon_term_is_how_the_leftovers_scatter_grows_with_the_stars_light
     model[50:150, 50:150] = np.linspace(100, 1000, 100)[None, :]
     noise = np.ones(shape)
     sky = rng.standard_normal(shape) * np.sqrt(1.0 + 0.3 * model)
-    assert ss.photon_term(sky, model, noise) == pytest.approx(0.3, rel=0.1)
-    assert ss.photon_term(sky, np.zeros(shape), noise) == 0.0
+    g, f = ss.photon_terms(sky, model, noise)
+    assert g == pytest.approx(0.3, rel=0.15) and f < 0.01
+    assert ss.photon_terms(sky, np.zeros(shape), noise) == (0.0, 0.0)
+
+
+def test_the_shape_s_miss_grows_with_the_light_and_is_not_taken_for_photon_noise():
+    rng = np.random.default_rng(12)
+    shape = (300, 300)
+    model = np.zeros(shape)
+    model[20:280, 20:280] = np.geomspace(100, 30000, 260)[None, :]
+    noise = np.ones(shape)
+    # Photon noise of 0.3 a unit of light, and a miss of 2% of it.
+    sky = rng.standard_normal(shape) * np.sqrt(1.0 + 0.3 * model + (0.02 * model) ** 2)
+    g, f = ss.photon_terms(sky, model, noise)
+    assert g == pytest.approx(0.3, rel=0.3)
+    assert f == pytest.approx(0.02, rel=0.1)
+    # The miss alone is not read as photon noise.
+    g, f = ss.photon_terms(rng.standard_normal(shape) * np.sqrt(1.0 + (0.02 * model) ** 2), model, noise)
+    assert g < 0.05 and f == pytest.approx(0.02, rel=0.1)
 
 
 def test_a_core_left_reads_light_and_holes_in_units_of_the_mean_s_noise():
@@ -75,6 +92,25 @@ def test_a_core_left_reads_light_and_holes_in_units_of_the_mean_s_noise():
     hole = plane - moffat((100, 100), 50.0, 50.0, 4.0) * 400.0
     assert ss.core_left(hole, noise, 50.0, 50.0, 4.0) < -10.0
     assert ss.core_left(plane, noise, 2.0, 50.0, 4.0) is None
+
+
+def test_a_dipole_reads_a_star_taken_out_a_fraction_of_a_pixel_off_its_place():
+    rng = np.random.default_rng(31)
+    noise = np.ones((100, 100))
+    plane = rng.standard_normal((100, 100))
+    star = moffat((100, 100), 50.3, 49.8, 3.0) * 1000.0
+    # Taken out where it is, nothing leans; taken out 0.3 px off, in x or in
+    # y, the core leans far past the limit, though its mean barely moves.
+    assert ss.core_dipole(plane + star - moffat((100, 100), 50.3, 49.8, 3.0) * 1000.0, noise, 50.3, 49.8, 3.0) < 4.0
+    for dx, dy in ((0.3, 0.0), (0.0, 0.3)):
+        off = plane + star - moffat((100, 100), 50.3 + dx, 49.8 + dy, 3.0) * 1000.0
+        assert ss.core_dipole(off, noise, 50.3, 49.8, 3.0) > 3 * ss.CORE_LIMIT
+        assert abs(ss.core_left(off, noise, 50.3, 49.8, 3.0)) < ss.CORE_LIMIT
+    # On noise alone it is the length of two unit normals: its square's mean
+    # is 2.
+    values = [ss.core_dipole(rng.standard_normal((30, 30)), np.ones((30, 30)), 15.0, 15.0, 3.0) for _ in range(400)]
+    assert np.mean(np.square(values)) == pytest.approx(2.0, rel=0.2)
+    assert ss.core_dipole(plane, noise, 1.0, 50.0, 3.0) is None
 
 
 def test_a_clean_sky_takes_out_the_stars_and_leaves_the_nebula_and_its_noise():
@@ -106,3 +142,34 @@ def test_a_clean_sky_takes_out_the_stars_and_leaves_the_nebula_and_its_noise():
     table = made["stars"]
     assert np.median(np.hypot(table[:, 0] - np.array([s[0] for s in stars]),
                               table[:, 1] - np.array([s[1] for s in stars]))) < 0.3
+
+
+def test_a_star_held_off_its_place_leaves_a_dipole_the_mask_covers():
+    rng = np.random.default_rng(14)
+    size = (400, 400)
+    noise_level = 2.0
+    places, light = [], np.zeros(size)
+    for _ in range(60):
+        x, y = rng.uniform(30, 370, 2)
+        flux = 10 ** rng.uniform(3.0, 3.6)
+        light += flux * moffat(size, x, y, 4.0)
+        places.append((x, y, 25.0 - 2.5 * np.log10(flux)))
+    image = (100.0 + light + rng.standard_normal(size) * noise_level).astype(np.float32)
+    # The first ten are listed 0.6 px off and held there, as a catalogue's
+    # places are where they are not refined; the rest are refined.
+    listed = [(x + 0.6, y, m) if index < 10 else (x, y, m) for index, (x, y, m) in enumerate(places)]
+    made = ss.clean_sky(image, listed, noise=np.full(size, noise_level, np.float32),
+                        refine=[index >= 10 for index in range(60)])
+    # (The table holds the refined stars first, then those held.)
+    table = made["stars"]
+    dipole = 1 << ss.REASONS.index("dipole")
+    held = np.array([int(np.argmin(np.hypot(table[:, 0] - x, table[:, 1] - y))) for x, y, _ in listed[:10]])
+    assert np.allclose(table[held, 0], [x for x, _, _ in listed[:10]], atol=1e-3)
+    reasons = table[:, ss.STAR_COLUMNS.index("reasons")].astype(int)
+    assert all(reasons[held] & dipole)
+    # A star fitted well is not taken for a dipole: those the rest lean are
+    # blends, poor fits too.
+    poor = 1 << ss.REASONS.index("poor fit")
+    assert all(reasons[index] & poor for index in range(len(table)) if index not in held and reasons[index] & dipole)
+    for x, y, _ in listed[:10]:
+        assert made["mask"][int(round(y)), int(round(x))]

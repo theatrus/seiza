@@ -57,7 +57,7 @@ from .store import Store, versions
 
 # Raised with the records' layout or what they hold, so older ones are made
 # again.
-CLEAN_SKY_VERSION = 1
+CLEAN_SKY_VERSION = 2
 
 # The products the pass cleans, as the sharpening bank's known-kernel
 # windows come from.
@@ -70,7 +70,7 @@ SPLITS = ("train", "validation")
 # (`REASONS`, a bit each; 0 for a star kept).
 STAR_COLUMNS = ("x", "y", "magnitude", "flux", "flux_error", "background", "chi2", "clipped", "core_left",
                 "reasons")
-REASONS = ("clipped", "poor fit", "hole", "left")
+REASONS = ("clipped", "poor fit", "hole", "left", "dipole")
 
 # A detector's star within this many pixels of a catalogue star is that star.
 SAME_STAR_PX = 3.0
@@ -82,8 +82,9 @@ SAME_STAR_PX = 3.0
 # are part of the sky's noise to a model, as to the detector.
 TAKE_OUT_SNR = 3.0
 # Stars measured at this signal to noise or more have their places refined;
-# fainter ones are fitted at the catalogue's.
-REFINE_SNR = 50.0
+# fainter ones are fitted at the catalogue's. (From 50, a dense field kept
+# hundreds of dipoles: stars a fraction of a pixel off the catalogue.)
+REFINE_SNR = 5.0
 # The detector's stars are given magnitudes from the catalogue's stars
 # measured at more than this signal to noise, of which at least
 # `SCALE_STARS` are needed.
@@ -99,9 +100,13 @@ PSF_MISS_CUT = 3.0
 PSF_MISS_STARS = 10
 
 # The photon term is read from pixels where the stars' model is over this
-# many times the sky's noise, from `PHOTON_PIXELS` of them at least.
+# many times the sky's noise, from `PHOTON_PIXELS` of them at least, in
+# `PHOTON_BINS` bins of the model's light of `PHOTON_BIN_PIXELS` each at
+# least.
 PHOTON_MODEL = 50.0
 PHOTON_PIXELS = 1000
+PHOTON_BINS = 12
+PHOTON_BIN_PIXELS = 50
 # The median of a chi-squared variable of one degree of freedom.
 CHI2_MEDIAN = 0.454936
 
@@ -217,19 +222,49 @@ def without_miss(sky: np.ndarray, fitted: Sequence[Any], miss: np.ndarray) -> np
     return corrected.astype(np.float32)
 
 
-def photon_term(sky: np.ndarray, model: np.ndarray, noise: np.ndarray) -> float:
-    """How much the leftovers' variance grows for each unit of the stars'
-    light in a pixel: a stack's star photon noise, as an inverse gain; 0
-    where too few bright pixels give it."""
+def photon_terms(sky: np.ndarray, model: np.ndarray, noise: np.ndarray) -> tuple[float, float]:
+    """How the leftovers' variance grows with the stars' light m in a pixel:
+    as g·m, the stars' photon noise (an inverse gain), and as (f·m)², the
+    share f of their light the field's shape misses, which grows with the
+    light itself. Fitted, both at least 0, to the variance in bins of m;
+    (0, 0) where too few bright pixels give them. A leftover is judged
+    against the photon noise alone: the shape's miss is what the mask is
+    for."""
     level = float(np.nanmedian(sky))
-    bright = np.isfinite(sky) & np.isfinite(noise) & (model > PHOTON_MODEL * float(np.nanmedian(noise)))
+    floor = float(np.nanmedian(noise))
+    bright = np.isfinite(sky) & np.isfinite(noise) & (model > PHOTON_MODEL * floor)
     if bright.sum() < PHOTON_PIXELS:
-        return 0.0
-    # A squared normal deviate's median is `CHI2_MEDIAN` of its mean, so the
-    # median square is scaled to a variance before the sky's is taken off.
-    squares = (sky[bright].astype(np.float64) - level) ** 2 / CHI2_MEDIAN
-    excess = (squares - noise[bright].astype(np.float64) ** 2) / model[bright]
-    return max(float(np.median(excess)), 0.0)
+        return 0.0, 0.0
+    light = model[bright].astype(np.float64)
+    squares = (sky[bright].astype(np.float64) - level) ** 2
+    floors = noise[bright].astype(np.float64) ** 2
+    edges = np.geomspace(light.min(), light.max() * (1 + 1e-9), PHOTON_BINS + 1)
+    found = []
+    for low, high in zip(edges[:-1], edges[1:]):
+        inside = (light >= low) & (light < high)
+        if inside.sum() >= PHOTON_BIN_PIXELS:
+            # A squared normal deviate's median is `CHI2_MEDIAN` of its mean,
+            # so a bin's median square is scaled to a variance before the
+            # sky's is taken off.
+            variance = float(np.median(squares[inside])) / CHI2_MEDIAN - float(np.median(floors[inside]))
+            found.append((float(np.median(light[inside])), variance))
+    if not found:
+        return 0.0, 0.0
+    m, v = (np.array(column) for column in zip(*found))
+    # Each bin weighs by its variance's own size, so the faint bins, where
+    # the photon noise shows, count as much as the bright.
+    weight = 1.0 / np.maximum(np.abs(v), floor**2)
+
+    def fitted(columns: list[np.ndarray]) -> np.ndarray:
+        design = np.stack(columns, axis=1) * weight[:, None]
+        return np.linalg.lstsq(design, v * weight, rcond=None)[0]
+
+    g, f2 = fitted([m, m**2])
+    if g < 0:
+        g, f2 = 0.0, max(float(fitted([m**2])[0]), 0.0)
+    elif f2 < 0:
+        g, f2 = max(float(fitted([m])[0]), 0.0), 0.0
+    return float(g), math.sqrt(float(f2))
 
 
 def core_left(plane: np.ndarray, noise: np.ndarray, x: float, y: float, fwhm: float) -> float | None:
@@ -250,6 +285,31 @@ def core_left(plane: np.ndarray, noise: np.ndarray, x: float, y: float, fwhm: fl
     spread = np.nanmean(noise[row - reach:row + reach + 1, column - reach:column + reach + 1][core])
     value = np.nanmean(part[core] - level) / (spread / math.sqrt(core.sum()))
     return float(value) if np.isfinite(value) else None
+
+
+def core_dipole(plane: np.ndarray, noise: np.ndarray, x: float, y: float, fwhm: float) -> float | None:
+    """How far what is left within a FWHM of (x, y) leans to one side: its
+    first moment about the star in units of that moment's noise. A star
+    fitted a fraction of a pixel off its place leaves a dipole, light on one
+    side and a dip on the other, which a core's mean does not see."""
+    reach = int(math.ceil(fwhm + 2))
+    column, row = int(round(x)), int(round(y))
+    height, width = plane.shape
+    if not (reach <= column < width - reach and reach <= row < height - reach):
+        return None
+    yy, xx = np.mgrid[-reach:reach + 1, -reach:reach + 1].astype(np.float64)
+    dx, dy = xx - (x - column), yy - (y - row)
+    distance = np.hypot(dx, dy)
+    inside = (distance <= fwhm) & (distance > 0)
+    part = plane[row - reach:row + reach + 1, column - reach:column + reach + 1].astype(np.float64)
+    spread = float(np.nanmean(noise[row - reach:row + reach + 1, column - reach:column + reach + 1][inside]))
+    level = float(np.nanmedian(part[inside]))
+    found = []
+    for weight in (dx / np.where(distance > 0, distance, 1.0), dy / np.where(distance > 0, distance, 1.0)):
+        w = weight[inside]
+        found.append(float(np.nansum((part[inside] - level) * w)) / (spread * math.sqrt(float(np.sum(w * w)))))
+    value = math.hypot(*found)
+    return value if np.isfinite(value) else None
 
 
 def clean_sky(image: np.ndarray, stars: Sequence[tuple[float, float, float]], *, noise: np.ndarray,
@@ -288,7 +348,7 @@ def clean_sky(image: np.ndarray, stars: Sequence[tuple[float, float, float]], *,
     miss = psf_miss(sky, fitted, noise, fwhm) if np.isfinite(fwhm) else None
     if miss is not None:
         sky = without_miss(sky, fitted, miss)
-    inverse_gain = photon_term(sky, model, noise)
+    inverse_gain, shape_error = photon_terms(sky, model, noise)
     judged = np.sqrt(noise.astype(np.float64) ** 2 + inverse_gain * np.clip(model, 0, None))
 
     mask = np.zeros((height, width), dtype=bool)
@@ -309,6 +369,9 @@ def clean_sky(image: np.ndarray, stars: Sequence[tuple[float, float, float]], *,
             why |= 4
         if left is not None and left > CORE_LIMIT:
             why |= 8
+        lean = core_dipole(sky, judged, st.x, st.y, fwhm) if np.isfinite(fwhm) and flux > 0 else None
+        if lean is not None and lean > CORE_LIMIT:
+            why |= 16
         if why:
             for bit, reason in enumerate(REASONS):
                 if why & (1 << bit):
@@ -328,6 +391,7 @@ def clean_sky(image: np.ndarray, stars: Sequence[tuple[float, float, float]], *,
         "stars": len(rows), "fitted": len(fitted), "masked_stars": int((~kept).sum()), "reasons": dict(reasons),
         "masked_share": round(float(mask.mean()), 4), "fwhm_px": round(fwhm, 3),
         "psf_miss": None if miss is None else round(float(miss.sum()), 5), "photon_term": round(inverse_gain, 5),
+        "shape_error": round(shape_error, 5),
         "clip_level": clip,
     }
     return {"sky": sky, "model": model, "mask": mask, "stars": table, "summary": summary}
