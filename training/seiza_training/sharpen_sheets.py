@@ -183,7 +183,7 @@ def render_saved(store: Store, manifest: Manifest, name: str, *, only: set[str] 
                  clarity: float = 0.0, rolloff: float = 0.0, scale_to: float = 0.0,
                  scale_blend: float = SCALE_BLEND, full_ask: Any = None, scale_rest: float = 0.0,
                  scale_stars: float = SCALE_STARS, edge: float = 0.0, smooth_edges: float = 0.0,
-                 hold_noise: float = 0.0) -> dict[str, Any]:
+                 hold_noise: float = 0.0, labels: str = "label") -> dict[str, Any]:
     """Make a recorded run's sheets, those named in `only` or all, and list
     them in its record. Without a sheet list, or without Pillow, nothing is
     made and the answer says why; a sheet whose input is not built is
@@ -207,7 +207,9 @@ def render_saved(store: Store, manifest: Manifest, name: str, *, only: set[str] 
     `-smooth-edges-<amount>`. With `hold_noise`, every output's change
     between 4 and 16 px is held back where it lies under that much of its
     band's share of the input's noise (`noise_hold_step`), in directories
-    named `-hold-noise-<amount>`."""
+    named `-hold-noise-<amount>`. With `labels`, a key other than `label`,
+    every baseline is labelled by that key of its entry and a sheet whose
+    baseline has none is refused, in directories named `-labels-<key>`."""
     spec = store.root / SPEC
     if not spec.exists():
         return {"skipped": f"no sheet list at {spec}"}
@@ -230,12 +232,14 @@ def render_saved(store: Store, manifest: Manifest, name: str, *, only: set[str] 
                   + (f"-clarity-{clarity:g}" if clarity > 0 else "")
                   + (f"-edge-{edge:g}" if edge > 0 else "")
                   + (f"-smooth-edges-{smooth_edges:g}" if smooth_edges > 0 else "")
-                  + ("" if full_ask is None else "-full-" + "-".join(f"{value:g}" for value in np.atleast_1d(full_ask))))
+                  + ("" if full_ask is None else "-full-" + "-".join(f"{value:g}" for value in np.atleast_1d(full_ask)))
+                  + (f"-labels-{labels}" if labels != "label" else ""))
         path = directory / f"sheets{suffix}" / f"{sheet['name']}.png"
         whole = directory / f"full{suffix}" / sheet["name"] if sheet.get("full") else None
         drawn = render(store, manifest, record, model, sheet, path, whole, clarity=clarity, rolloff=rolloff,
                        scale_to=scale_to, scale_blend=scale_blend, full_ask=full_ask, scale_rest=scale_rest,
-                       scale_stars=scale_stars, edge=edge, smooth_edges=smooth_edges, hold_noise=hold_noise)
+                       scale_stars=scale_stars, edge=edge, smooth_edges=smooth_edges, hold_noise=hold_noise,
+                       labels=labels)
         if drawn is None:
             missing.append(sheet["name"])
             continue
@@ -244,7 +248,7 @@ def render_saved(store: Store, manifest: Manifest, name: str, *, only: set[str] 
             full[sheet["name"]] = {key: str(value.relative_to(store.root)) if isinstance(value, Path) else value
                                    for key, value in drawn.items()}
     if not (clarity > 0 or rolloff > 0 or scale_to > 0 or full_ask is not None or edge > 0 or smooth_edges > 0
-            or hold_noise > 0):
+            or hold_noise > 0 or labels != "label"):
         record = json.loads((directory / "run.json").read_text())
         record["sheets"] = {**record.get("sheets", {}), **made}
         record["full"] = {**record.get("full", {}), **full}
@@ -265,6 +269,14 @@ def built(manifest: Manifest, product_id: str | None) -> dict[str, Any] | None:
     rows = manifest.rows("SELECT p.*, s.split, s.telescope, s.pixel_scale_arcsec FROM products p "
                          "JOIN sets s ON s.id = p.set_id WHERE p.id = ? AND p.status = 'built'", (product_id,))
     return dict(rows[0]) if rows else None
+
+
+def panel_label(entry: dict[str, Any], key: str = "label") -> str:
+    """A baseline's panel label: its entry's `key`, which the list must
+    give, `label` unless another set of labels is asked for."""
+    if not entry.get(key):
+        raise ValueError(f"baseline {entry['name']} has no {key}: every panel of these sheets is labelled by it")
+    return entry[key]
 
 
 def baseline_image(store: Store, manifest: Manifest, entry: dict[str, Any]) -> np.ndarray | None:
@@ -500,9 +512,10 @@ def render(store: Store, manifest: Manifest, record: dict[str, Any], model: Any,
            whole: Path | None = None, clarity: float = 0.0, rolloff: float = 0.0, scale_to: float = 0.0,
            scale_blend: float = SCALE_BLEND, full_ask: Any = None, scale_rest: float = 0.0,
            scale_stars: float = SCALE_STARS, edge: float = 0.0, smooth_edges: float = 0.0,
-           hold_noise: float = 0.0) -> dict[str, Any] | None:
+           hold_noise: float = 0.0, labels: str = "label") -> dict[str, Any] | None:
     """Draw one sheet to `path`, and with `whole`, the stem of its full-size
-    files, write them and measure them. None when its input is not built."""
+    files, write them and measure them. None when its input is not built.
+    Each baseline is labelled by its entry's `labels` (`panel_label`)."""
     from PIL import Image, ImageDraw, ImageFont
 
     source = built(manifest, sheet["input"])
@@ -544,7 +557,8 @@ def render(store: Store, manifest: Manifest, record: dict[str, Any], model: Any,
     inference = record["inference"]
     pad = inference["margin"] + 16
     grid = inference.get("multiple", 1)
-    labels = ["Input", *(label for label, _ in runner.strengths), *(entry["label"] for entry, _, _ in baselines)]
+    labels = ["Input", *(label for label, _ in runner.strengths),
+              *(panel_label(entry, labels) for entry, _, _ in baselines)]
     rows = []
     for crop in sheet["crops"]:
         x, y = min(crop["x"], width - side), min(crop["y"], height - side)

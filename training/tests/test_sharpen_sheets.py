@@ -26,6 +26,17 @@ def test_the_ratio_brings_each_star_to_its_share_never_below_the_floor_nor_above
     assert ratio.shape == (100, 100) and ratio.dtype == np.float32
 
 
+def test_a_sheet_labels_each_baseline_by_the_key_asked_and_refuses_one_without():
+    entry = {"name": "other", "label": "Another way, its own settings", "short": "Another way"}
+    assert sharpen_sheets.panel_label(entry) == "Another way, its own settings"
+    assert sharpen_sheets.panel_label(entry, "short") == "Another way"
+    for missing in ({"name": "bare", "label": "Another way, its own settings"},
+                    {"name": "empty", "label": "Another way, its own settings", "short": ""}):
+        assert sharpen_sheets.panel_label(missing) == "Another way, its own settings"
+        with pytest.raises(ValueError, match="short"):
+            sharpen_sheets.panel_label(missing, "short")
+
+
 def test_an_image_is_binned_only_where_its_stars_are_far_wider_than_asked():
     assert sharpen_sheets.scale_factor(11.5, 3.5) == 3
     assert sharpen_sheets.scale_factor(7.0, 3.5) == 2
