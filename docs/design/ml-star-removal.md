@@ -145,6 +145,17 @@ layers:
    noise and fades out in a circle past that, so no star, halo or ring ends
    in a square edge, however bright: the first bank cut stamps at 31 or
    255 px, and wide stars ended in squares.
+
+   Pooled over the 652 clean skies (2026-11-26), the light that bright,
+   isolated stars leave past 20 px is small. On an SCT of 7.4 px stars
+   (254 stacks), G 3 to 8 leave 2.5% of their light there and G 10 to 12
+   leave 1.4%, fading out by about 100 px. On fast astrographs of 2.2 px
+   stars (391 stacks), G 3 to 8 leave 0.8 to 2.4%. Those stacks show a
+   reflection ring at 16 to 24 px (7 to 10 FWHM) holding about 0.3% of the
+   star's light. The SCT shows a shelf at 24 to 37 px (3 to 5 FWHM). The
+   first banks' made halos, 3 to 15% of a star's light, and rings, 0.5 to
+   3%, are stronger than these. The next bank draws them from about 0.5%
+   up, so that faint halos, the common kind, are among those learned.
 3. **Noise.** The stars' own photon noise, at the stack's photon term, is
    added to the input, with the clean sky's noise already there.
 4. **Saturation.** Cores are clipped where the stack clips.
