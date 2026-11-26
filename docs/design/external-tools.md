@@ -83,6 +83,31 @@ finite samples to 0 to 1 first; the map then leaves the image as it is, and
 a sample just outside the range no longer moves the whole image onto the
 camera scale.
 
+## Many images at once
+
+Each start of the CLI loads the tool's model before it works; on images a
+few hundred pixels across that is most of the run. The CLI has no server
+mode that keeps a model loaded between starts, but one start takes many
+input files, with `-o` naming a directory. It writes each output there as
+`<input stem>-<tool>.<input extension>` (sidecars as
+`<stem>-<tool>-stars.<extension>`), reports each input's outputs in turn,
+primary first, and gives `progress` over the whole batch.
+
+`RcAstroCli::run_on_files` runs a batch of files that way, and
+`process_images` and `split_stars_batch` do the same for images in memory,
+each mapped onto 0 to 1 and back on its own exactly as `process_image` maps
+it. On an RTX 4090 with rc-astro 2.6.11, four 320x240 images took 1.2 s as
+one batch and 4.4 s as four runs, with the same output.
+
+The CLI expands wildcards in its inputs, and an input it cannot open is
+only a warning to it: the run still exits 0. So a batch refuses, before
+the CLI starts, a name holding `*` or `?`, two inputs with the same stem
+(their outputs would share a name), and an output that would overwrite an
+input; and after the run it checks that every input's output exists,
+failing the batch with the CLI's warnings when one does not. Outputs are
+matched to inputs by the order the CLI reports them in: whatever follows an
+input's primary output, up to the next primary, is its sidecars.
+
 ## Cache keys
 
 A host caching results must include `cliVersion` and `mlVersion` from the
@@ -98,13 +123,16 @@ results for the same tool and parameters.
 The C ABI exposes the same surface as two JSON functions:
 `seiza_rc_astro_tool_schema_json` (the live contract as schema-1 JSON) and
 `seiza_rc_astro_process_file_json` (a file-level run taking the request as
-JSON and an optional `SeizaCancelSignal`). Python mirrors it with
-`seiza.rc_astro_locate`, `seiza.rc_astro_tool_schema`, and
-`seiza.rc_astro_process_file`, which releases the GIL for the run and
-reports progress through an optional callback. Both work at the file
-level and pass files to the tool as they are. Python also runs a tool on an
-array (`seiza.rc_astro_process_image`, `seiza.rc_astro_split_stars`) through
-`process_image` and its map.
+JSON and an optional `SeizaCancelSignal`), with
+`seiza_rc_astro_process_files_json` for a batch of files. Python mirrors it
+with `seiza.rc_astro_locate`, `seiza.rc_astro_tool_schema`,
+`seiza.rc_astro_process_file` and `seiza.rc_astro_process_files`, which
+release the GIL for the run and report progress through an optional
+callback. Both work at the file level and pass files to the tool as they
+are. Python also runs a tool on an array (`seiza.rc_astro_process_image`,
+`seiza.rc_astro_split_stars`) through `process_image` and its map, and on
+many arrays at once (`seiza.rc_astro_process_images`,
+`seiza.rc_astro_split_stars_batch`).
 
 ## Validation
 

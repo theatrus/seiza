@@ -1986,6 +1986,25 @@ processed.image                            # same shape and units as stack
 print(processed.cli_version, processed.ml_version, processed.device)
 ```
 
+Each call starts the CLI, which loads the tool's model before it works, so
+on small images most of a run is start-up. To process many images with the
+same tool and parameters, hand them over together: `rc_astro_process_files`,
+`rc_astro_process_images` and `rc_astro_split_stars_batch` run them all in
+one start of the CLI, and return one result per input, in order. Progress
+is over the whole batch.
+
+```python
+starless = seiza.rc_astro_process_images("sxt", [m1, m2, m3])
+runs = seiza.rc_astro_process_files("nxt", paths, "denoised/")
+runs[0].primary                            # denoised/<stem>-nxt.<extension>
+pairs = seiza.rc_astro_split_stars_batch(stretched_images)
+```
+
+`rc_astro_process_files` names each output as the CLI does,
+`<input stem>-<tool>.<input extension>`, so it refuses two inputs with the
+same stem, and an output that would overwrite an input, with `ValueError`
+before the CLI starts.
+
 Ctrl-C cancels a running tool within half a second, as does an optional
 `cancel=lambda: ...` predicate returning true. A `False` switch emits the
 CLI's `--no-` negation, overriding a true default. A child completely

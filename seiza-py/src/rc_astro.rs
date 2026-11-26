@@ -7,16 +7,18 @@
 //! should be built from the schema), and [`rc_astro_process_file`] runs a
 //! tool on an image file, returning every written file — StarXTerminator's
 //! stars sidecar included. [`rc_astro_process_image`] runs one on an array
-//! in linear units, mapped onto the tools' 0..1 range and back.
+//! in linear units, mapped onto the tools' 0..1 range and back. The
+//! `_files`, `_images` and `_batch` calls run many of each in one start of
+//! the CLI, which loads the tool's model once for all of them.
 
 use pyo3::exceptions::{PyFileNotFoundError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use seiza_stacking::{
     CancelSignal, ExternalParameterKind, ExternalParameterValue, ExternalToolRequest,
-    ExternalToolSchema, RcAstroCli,
+    ExternalToolSchema, LinearImage, RcAstroCli,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 /// One schema parameter: its request name, CLI flag (absent for GUI-only
@@ -139,6 +141,9 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(rc_astro_process_file, module)?)?;
     module.add_function(wrap_pyfunction!(rc_astro_process_image, module)?)?;
     module.add_function(wrap_pyfunction!(rc_astro_split_stars, module)?)?;
+    module.add_function(wrap_pyfunction!(rc_astro_process_files, module)?)?;
+    module.add_function(wrap_pyfunction!(rc_astro_process_images, module)?)?;
+    module.add_function(wrap_pyfunction!(rc_astro_split_stars_batch, module)?)?;
     Ok(())
 }
 
@@ -500,4 +505,226 @@ pub(crate) fn rc_astro_split_stars<'py>(
         crate::arrays::into_image_array(py, starless)?,
         crate::arrays::into_image_array(py, stars)?,
     ))
+}
+
+/// A progress reporter that calls the Python `progress` callback and keeps
+/// the first exception it raises in `raised`, which stops the run at the
+/// next cancel check.
+fn progress_reporter<'a>(
+    progress: &'a Option<Py<PyAny>>,
+    raised: &'a Arc<Mutex<Option<PyErr>>>,
+) -> impl FnMut(f32) + 'a {
+    move |fraction: f32| {
+        if let Some(callback) = progress {
+            Python::attach(|py| {
+                if let Err(error) = callback.call1(py, (fraction,))
+                    && let Ok(mut slot) = raised.lock()
+                    && slot.is_none()
+                {
+                    *slot = Some(error);
+                }
+            });
+        }
+    }
+}
+
+/// Re-raise an exception a callback raised during a run, if one did.
+fn raise_kept(raised: &Arc<Mutex<Option<PyErr>>>) -> PyResult<()> {
+    if let Ok(mut slot) = raised.lock()
+        && let Some(error) = slot.take()
+    {
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Run one RC-Astro tool on many image files in one start of the CLI,
+/// which loads the tool's model once for all of them: far quicker than one
+/// `rc_astro_process_file` per file when there are many small images. Each
+/// output goes into `output_directory` (created if missing) as
+/// `<input stem>-<tool>.<input extension>`, with its sidecars beside it,
+/// and the runs come back in the order of `inputs`. Two inputs with the
+/// same file stem, a name holding `*` or `?`, and an output that would
+/// overwrite an input are refused before the CLI starts; an input the CLI
+/// wrote nothing for fails the call. `parameters` apply to every input,
+/// and they, `device`, `progress` (over the whole batch) and `cancel` work
+/// as for `rc_astro_process_file`.
+#[pyfunction]
+#[pyo3(signature = (tool, inputs, output_directory, *, parameters=None, device=None, executable=None, host=None, progress=None, cancel=None))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn rc_astro_process_files(
+    py: Python<'_>,
+    tool: &str,
+    inputs: Vec<PathBuf>,
+    output_directory: PathBuf,
+    parameters: Option<&Bound<'_, PyDict>>,
+    device: Option<String>,
+    executable: Option<PathBuf>,
+    host: Option<String>,
+    progress: Option<Py<PyAny>>,
+    cancel: Option<Py<PyAny>>,
+) -> PyResult<Vec<PyRcAstroRun>> {
+    let cli = cli(executable, host)?;
+    let request = ExternalToolRequest {
+        tool: tool.to_string(),
+        parameters: parameter_values(parameters)?,
+        device,
+    };
+    let raised: Arc<Mutex<Option<PyErr>>> = Arc::new(Mutex::new(None));
+    let signal = cancel_signal(&raised, cancel);
+    let outcome = py.detach(|| {
+        let schema = cli.tool_schema(&request.tool)?;
+        let inputs: Vec<&Path> = inputs.iter().map(PathBuf::as_path).collect();
+        let runs = cli.run_on_files(
+            &schema,
+            &request,
+            &inputs,
+            &output_directory,
+            Some(&signal),
+            &mut progress_reporter(&progress, &raised),
+        )?;
+        Ok::<_, seiza_stacking::Error>((schema, runs))
+    });
+    raise_kept(&raised)?;
+    let (schema, runs) = outcome.map_err(run_error)?;
+    Ok(runs
+        .into_iter()
+        .map(|run| PyRcAstroRun {
+            primary: run.primary,
+            sidecars: run.sidecars,
+            device: run.device,
+            warnings: run.warnings,
+            cli_version: schema.cli_version.clone(),
+            ml_version: schema.ml_version,
+        })
+        .collect())
+}
+
+/// Run one RC-Astro tool on many images in memory in one start of the CLI,
+/// which loads the tool's model once for all of them: far quicker than one
+/// `rc_astro_process_image` per image when there are many small images.
+/// Each image is a float32 array of shape (height, width) or (height,
+/// width, channels), mapped onto 0..1 and back on its own exactly as
+/// `rc_astro_process_image` maps it; the results come back in the order of
+/// `images`. `parameters` apply to every image, and they, `device`,
+/// `progress` (over the whole batch) and `cancel` work as for
+/// `rc_astro_process_file`; no file is left behind.
+#[pyfunction]
+#[pyo3(signature = (tool, images, *, parameters=None, device=None, executable=None, host=None, progress=None, cancel=None))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn rc_astro_process_images<'py>(
+    py: Python<'py>,
+    tool: &str,
+    images: Vec<numpy::PyReadonlyArrayDyn<'py, f32>>,
+    parameters: Option<&Bound<'_, PyDict>>,
+    device: Option<String>,
+    executable: Option<PathBuf>,
+    host: Option<String>,
+    progress: Option<Py<PyAny>>,
+    cancel: Option<Py<PyAny>>,
+) -> PyResult<Vec<PyRcAstroProcessed>> {
+    let linear = images
+        .into_iter()
+        .map(crate::arrays::linear_image)
+        .collect::<PyResult<Vec<_>>>()?;
+    let cli = cli(executable, host)?;
+    let request = ExternalToolRequest {
+        tool: tool.to_string(),
+        parameters: parameter_values(parameters)?,
+        device,
+    };
+    let raised: Arc<Mutex<Option<PyErr>>> = Arc::new(Mutex::new(None));
+    let signal = cancel_signal(&raised, cancel);
+    let outcome = py.detach(|| {
+        let schema = cli.tool_schema(&request.tool)?;
+        let references: Vec<&LinearImage> = linear.iter().collect();
+        let processed = cli.process_images(
+            &schema,
+            &request,
+            &references,
+            Some(&signal),
+            &mut progress_reporter(&progress, &raised),
+        )?;
+        Ok::<_, seiza_stacking::Error>((schema, processed))
+    });
+    raise_kept(&raised)?;
+    let (schema, processed) = outcome.map_err(run_error)?;
+    processed
+        .into_iter()
+        .map(|processed| {
+            Ok(PyRcAstroProcessed {
+                image: crate::arrays::into_image_array(py, processed.image)?.unbind(),
+                stars: processed
+                    .stars
+                    .map(|stars| crate::arrays::into_image_array(py, stars).map(Bound::unbind))
+                    .transpose()?,
+                device: processed.device,
+                warnings: processed.warnings,
+                cli_version: schema.cli_version.clone(),
+                ml_version: schema.ml_version,
+            })
+        })
+        .collect()
+}
+
+/// Split many stretched images with StarXTerminator in one start of the
+/// CLI, which loads its model once for all of them, as
+/// `rc_astro_split_stars` splits one. Each image is a float32 array of
+/// shape (height, width, 3) from 0 to 1; the (starless, stars) pairs come
+/// back in the order of `images`. `progress` (over the whole batch) and
+/// `cancel` work as for `rc_astro_process_file`.
+#[pyfunction]
+#[pyo3(signature = (images, *, executable=None, host=None, progress=None, cancel=None))]
+pub(crate) fn rc_astro_split_stars_batch<'py>(
+    py: Python<'py>,
+    images: Vec<numpy::PyReadonlyArrayDyn<'py, f32>>,
+    executable: Option<PathBuf>,
+    host: Option<String>,
+    progress: Option<Py<PyAny>>,
+    cancel: Option<Py<PyAny>>,
+) -> PyResult<Vec<SplitArrays<'py>>> {
+    let linear = images
+        .into_iter()
+        .map(crate::arrays::linear_image)
+        .collect::<PyResult<Vec<_>>>()?;
+    if let Some(index) = linear.iter().position(|image| image.channels != 3) {
+        return Err(PyValueError::new_err(format!(
+            "image {index} must have shape (height, width, 3)"
+        )));
+    }
+    let cli = cli(executable, host)?;
+    let raised: Arc<Mutex<Option<PyErr>>> = Arc::new(Mutex::new(None));
+    let signal = cancel_signal(&raised, cancel);
+    let split = py.detach(|| {
+        let schema = cli.tool_schema("sxt")?;
+        let references: Vec<&LinearImage> = linear.iter().collect();
+        cli.split_stars_batch(
+            &schema,
+            &references,
+            Some(&signal),
+            &mut progress_reporter(&progress, &raised),
+        )
+    });
+    raise_kept(&raised)?;
+    split
+        .map_err(run_error)?
+        .into_iter()
+        .map(|(starless, stars)| {
+            Ok((
+                crate::arrays::into_image_array(py, starless)?,
+                crate::arrays::into_image_array(py, stars)?,
+            ))
+        })
+        .collect()
+}
+
+/// A failed run as a Python exception: a request refused before the CLI
+/// started is a ValueError, anything else a RuntimeError.
+fn run_error(error: seiza_stacking::Error) -> PyErr {
+    match error {
+        seiza_stacking::Error::ExternalToolRefused { .. } => {
+            PyValueError::new_err(error.to_string())
+        }
+        error => PyRuntimeError::new_err(error.to_string()),
+    }
 }

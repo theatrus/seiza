@@ -278,27 +278,181 @@ impl RcAstroCli {
         cancel: Option<&CancelSignal>,
         progress: &mut dyn FnMut(f32),
     ) -> Result<ExternalToolRun> {
-        if !schema.licensed {
-            let detail = schema
-                .license_message
-                .as_deref()
-                .unwrap_or("the schema reports no valid license");
-            return Err(external_error(
-                &request.tool,
-                format!("not licensed: {detail}"),
-            ));
-        }
+        require_license(schema, &request.tool)?;
         // The child runs from the executable's directory (the layout some
         // builds expect for finding models), so both paths must be absolute.
         let input = std::path::absolute(input)
             .map_err(|error| external_error(&request.tool, format!("input path: {error}")))?;
         let output = std::path::absolute(output)
             .map_err(|error| external_error(&request.tool, format!("output path: {error}")))?;
-        let arguments = build_arguments(schema, request, &self.host, &input, &output)?;
+        let arguments = build_arguments(schema, request, &self.host, &[input.as_path()], &output)?;
+        let events = self.run_tool(&request.tool, &arguments, cancel, progress)?;
+        if !output.is_file() {
+            return Err(external_error(
+                &request.tool,
+                format!("reported success but wrote no {}", output.display()),
+            ));
+        }
 
+        let sidecars = sidecars_beside(&output, &events.outputs);
+        Ok(ExternalToolRun {
+            primary: output,
+            sidecars,
+            device: events.device,
+            warnings: events.warnings,
+        })
+    }
+
+    /// Run a tool on many files in one start of the CLI, which loads its
+    /// model once for all of them: far quicker than one
+    /// [`Self::run_on_file`] per file when there are many small images.
+    ///
+    /// Each output goes into `output_directory` (created if missing) under
+    /// the CLI's own name, `<input stem>-<tool>.<input extension>`, with its
+    /// sidecars beside it. The runs come back in the order of `inputs`.
+    /// Progress is over the whole batch. Two inputs with the same file
+    /// stem, a name holding a wildcard (`*` or `?`, which the CLI would
+    /// expand), and an output that would overwrite an input are refused
+    /// before the CLI starts; an input the CLI wrote nothing for fails the
+    /// batch.
+    pub fn run_on_files(
+        &self,
+        schema: &ExternalToolSchema,
+        request: &ExternalToolRequest,
+        inputs: &[&Path],
+        output_directory: &Path,
+        cancel: Option<&CancelSignal>,
+        progress: &mut dyn FnMut(f32),
+    ) -> Result<Vec<ExternalToolRun>> {
+        require_license(schema, &request.tool)?;
+        if inputs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let refuse = |message: String| Error::ExternalToolRefused {
+            tool: request.tool.clone(),
+            message,
+        };
+        let mut absolute_inputs: Vec<PathBuf> = Vec::with_capacity(inputs.len());
+        let mut stems: Vec<String> = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            let input = std::path::absolute(input)
+                .map_err(|error| external_error(&request.tool, format!("input path: {error}")))?;
+            let name = input
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| refuse(format!("{} has no file name", input.display())))?;
+            if name.contains(['*', '?']) {
+                return Err(refuse(format!(
+                    "{name} holds a wildcard, which rc-astro would expand"
+                )));
+            }
+            let stem = input
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or(name);
+            // Outputs are named by stem alone, so two inputs sharing one
+            // would write the same file. Case is folded for Windows and macOS.
+            let folded = stem.to_lowercase();
+            if stems.contains(&folded) {
+                return Err(refuse(format!(
+                    "two inputs are named {stem}, and their outputs would share one name"
+                )));
+            }
+            stems.push(folded);
+            absolute_inputs.push(input);
+        }
+        std::fs::create_dir_all(output_directory).map_err(|error| {
+            external_error(
+                &request.tool,
+                format!("could not create {}: {error}", output_directory.display()),
+            )
+        })?;
+        let output_directory = std::path::absolute(output_directory)
+            .map_err(|error| external_error(&request.tool, format!("output directory: {error}")))?;
+        let primaries: Vec<PathBuf> = absolute_inputs
+            .iter()
+            .map(|input| output_directory.join(batch_output_name(input, &request.tool)))
+            .collect();
+        for primary in &primaries {
+            if let Some(input) = absolute_inputs
+                .iter()
+                .find(|input| crate::paths::paths_refer_to_same_file(input, primary))
+            {
+                return Err(refuse(format!(
+                    "the output {} would overwrite the input {}",
+                    primary.display(),
+                    input.display()
+                )));
+            }
+        }
+
+        let input_paths: Vec<&Path> = absolute_inputs.iter().map(PathBuf::as_path).collect();
+        let arguments =
+            build_arguments(schema, request, &self.host, &input_paths, &output_directory)?;
+        let events = self.run_tool(&request.tool, &arguments, cancel, progress)?;
+
+        // The CLI reports each input's outputs in turn, its primary first:
+        // whatever follows a primary, up to the next one, is its sidecars.
+        let mut reported: Vec<Vec<PathBuf>> = vec![Vec::new(); primaries.len()];
+        let mut written = vec![false; primaries.len()];
+        let mut current: Option<usize> = None;
+        for output in &events.outputs {
+            let resolved = resolve_reported(output, &output_directory);
+            if let Some(index) = primaries
+                .iter()
+                .position(|primary| crate::paths::paths_refer_to_same_file(primary, &resolved))
+            {
+                written[index] = true;
+                current = Some(index);
+            } else if let Some(index) = current {
+                reported[index].push(resolved);
+            }
+        }
+        // A build that reports outputs reports every one, so an output it
+        // left out is one it did not write, even when an earlier run left a
+        // file of that name behind.
+        let reports_outputs = !events.outputs.is_empty();
+        let mut runs = Vec::with_capacity(primaries.len());
+        for (((primary, input), reported), written) in primaries
+            .into_iter()
+            .zip(&absolute_inputs)
+            .zip(reported)
+            .zip(written)
+        {
+            // A file the CLI could not open is only a warning to it, and the
+            // run still exits 0: the missing output is the failure.
+            if !primary.is_file() || (reports_outputs && !written) {
+                let mut message = format!("wrote no {} for {}", primary.display(), input.display());
+                if !events.warnings.is_empty() {
+                    message = format!("{message}: {}", events.warnings.join("; "));
+                }
+                return Err(external_error(&request.tool, message));
+            }
+            let sidecars = sidecars_beside(&primary, &reported);
+            runs.push(ExternalToolRun {
+                primary,
+                sidecars,
+                device: events.device.clone(),
+                warnings: events.warnings.clone(),
+            });
+        }
+        Ok(runs)
+    }
+
+    /// Spawn the tool with `arguments`, follow its event stream until it
+    /// exits, and return the events of a successful run. Every failure,
+    /// cancellation and silence timeout becomes an error, and the child is
+    /// killed on every path that does not see it exit.
+    fn run_tool(
+        &self,
+        tool: &str,
+        arguments: &[std::ffi::OsString],
+        cancel: Option<&CancelSignal>,
+        progress: &mut dyn FnMut(f32),
+    ) -> Result<RunEvents> {
         let mut command = tool_command(&self.executable);
         command
-            .args(&arguments)
+            .args(arguments)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -309,7 +463,7 @@ impl RcAstroCli {
         }
         let child = command
             .spawn()
-            .map_err(|error| external_error(&request.tool, format!("could not spawn: {error}")))?;
+            .map_err(|error| external_error(tool, format!("could not spawn: {error}")))?;
         // The guard kills the child on every early return and on unwind (a
         // panicking progress callback included), so a cancelled or failed
         // run never leaves the tool computing in the background.
@@ -379,7 +533,7 @@ impl RcAstroCli {
             }
             if last_activity.elapsed() > SILENCE_TIMEOUT {
                 break Err(external_error(
-                    &request.tool,
+                    tool,
                     format!(
                         "produced no output for {} seconds; killed. A first run \
                          downloads ML models: run 'rc-astro download-models' once",
@@ -401,7 +555,7 @@ impl RcAstroCli {
         let status = child
             .take()
             .wait()
-            .map_err(|error| external_error(&request.tool, format!("wait failed: {error}")))?;
+            .map_err(|error| external_error(tool, format!("wait failed: {error}")))?;
         let stderr_tail = stderr_tail.join().unwrap_or_default();
         if let Some(cancel) = cancel
             && cancel.is_cancelled()
@@ -420,59 +574,9 @@ impl RcAstroCli {
             } else if !stderr_tail.trim().is_empty() {
                 message = format!("{message}: {}", stderr_tail.trim());
             }
-            return Err(external_error(&request.tool, message));
+            return Err(external_error(tool, message));
         }
-        if !output.is_file() {
-            return Err(external_error(
-                &request.tool,
-                format!("reported success but wrote no {}", output.display()),
-            ));
-        }
-
-        // The primary is excluded by file identity, not path spelling: the
-        // tool may report the same file under a different form (case,
-        // separators, a Windows verbatim prefix).
-        let mut sidecars: Vec<PathBuf> = Vec::new();
-        for reported in &events.outputs {
-            // Event paths mirror what we passed for -o (absolute), but a
-            // build that reports relative names resolves beside the output.
-            let resolved = if reported.is_absolute() {
-                reported.clone()
-            } else {
-                output
-                    .parent()
-                    .map(|parent| parent.join(reported))
-                    .unwrap_or_else(|| reported.clone())
-            };
-            if !resolved.is_file()
-                || crate::paths::paths_refer_to_same_file(&resolved, &output)
-                || sidecars
-                    .iter()
-                    .any(|seen| crate::paths::paths_refer_to_same_file(seen, &resolved))
-            {
-                continue;
-            }
-            sidecars.push(resolved);
-        }
-        // Fallback for a build that never reports the sidecar in its event
-        // stream: the well-known name suffixes beside the output.
-        if sidecars.is_empty()
-            && let Some(stem) = output.file_stem().and_then(|stem| stem.to_str())
-        {
-            for suffix in ["-stars", "-difference"] {
-                let candidate = output.with_file_name(format!("{stem}{suffix}.fits"));
-                if candidate.is_file() {
-                    sidecars.push(candidate);
-                    break;
-                }
-            }
-        }
-        Ok(ExternalToolRun {
-            primary: output,
-            sidecars,
-            device: events.device,
-            warnings: events.warnings,
-        })
+        Ok(events)
     }
 
     /// Split a stretched image with StarXTerminator into its starless image
@@ -497,51 +601,39 @@ impl RcAstroCli {
         cancel: Option<&CancelSignal>,
         progress: &mut dyn FnMut(f32),
     ) -> Result<(LinearImage, LinearImage)> {
-        if !schema.licensed {
-            return Err(external_error(
-                "sxt",
-                format!(
-                    "StarXTerminator is not licensed on this machine ({})",
-                    schema
-                        .license_message
-                        .as_deref()
-                        .unwrap_or("no license message")
-                ),
-            ));
-        }
-        let request = ExternalToolRequest {
-            tool: "sxt".into(),
-            parameters: vec![
-                ("stars".into(), ExternalParameterValue::Bool(true)),
-                ("unscreen".into(), ExternalParameterValue::Bool(true)),
-            ],
-            device: None,
-        };
-        // Unscreened stars restore exactly only on the image's own 0 to 1,
-        // so a stretched image goes to the tool as it is: a sample just
-        // outside that range would otherwise move the whole image onto the
-        // camera scale.
-        let clamped = LinearImage::new(
-            image.width,
-            image.height,
-            image.channels,
-            image
-                .data
-                .iter()
-                .map(|sample| {
-                    if sample.is_finite() {
-                        sample.clamp(0.0, 1.0)
-                    } else {
-                        *sample
-                    }
-                })
-                .collect(),
+        require_star_split_license(schema)?;
+        let clamped = clamp_for_star_split(image)?;
+        let processed = self.process_image(
+            schema,
+            &star_split_request(),
+            &clamped,
+            &[],
+            cancel,
+            progress,
         )?;
-        let processed = self.process_image(schema, &request, &clamped, &[], cancel, progress)?;
-        let stars = processed
-            .stars
-            .ok_or_else(|| external_error("sxt", "StarXTerminator wrote no stars image"))?;
-        Ok((processed.image, stars))
+        star_split_result(processed)
+    }
+
+    /// [`Self::split_stars_with`] for many images in one start of the CLI,
+    /// which loads StarXTerminator's model once for all of them. The
+    /// starless and stars pairs come back in the order of `images`.
+    pub fn split_stars_batch(
+        &self,
+        schema: &ExternalToolSchema,
+        images: &[&LinearImage],
+        cancel: Option<&CancelSignal>,
+        progress: &mut dyn FnMut(f32),
+    ) -> Result<Vec<(LinearImage, LinearImage)>> {
+        require_star_split_license(schema)?;
+        let clamped = images
+            .iter()
+            .map(|image| clamp_for_star_split(image))
+            .collect::<Result<Vec<_>>>()?;
+        let clamped: Vec<&LinearImage> = clamped.iter().collect();
+        self.process_images(schema, &star_split_request(), &clamped, cancel, progress)?
+            .into_iter()
+            .map(star_split_result)
+            .collect()
     }
 
     /// Round-trip a [`LinearImage`] through a tool: write it as 32-bit-float
@@ -588,58 +680,261 @@ impl RcAstroCli {
         drop(normalized);
 
         let run = self.run_on_file(schema, request, &input, &output, cancel, progress)?;
+        restore_run(request, image, &exchange, run)
+    }
 
-        let read_back = |path: &Path| -> Result<LinearImage> {
-            let frame = FitsFrame::open(path)?;
-            if frame.image.width != image.width
-                || frame.image.height != image.height
-                || frame.image.channels != image.channels
-            {
-                return Err(external_error(
+    /// [`Self::process_image`] for many images in one start of the CLI,
+    /// which loads the tool's model once for all of them: far quicker than
+    /// one call per image when there are many small images. Each image is
+    /// mapped to 0 to 1 and back on its own, exactly as
+    /// [`Self::process_image`] maps it, and the results come back in the
+    /// order of `images`. Progress is over the whole batch.
+    pub fn process_images(
+        &self,
+        schema: &ExternalToolSchema,
+        request: &ExternalToolRequest,
+        images: &[&LinearImage],
+        cancel: Option<&CancelSignal>,
+        progress: &mut dyn FnMut(f32),
+    ) -> Result<Vec<ProcessedStackImage>> {
+        if images.is_empty() {
+            return Ok(Vec::new());
+        }
+        let workdir = tempfile::tempdir()
+            .map_err(|error| external_error(&request.tool, format!("tempdir: {error}")))?;
+        let input_directory = workdir.path().join("in");
+        let output_directory = workdir.path().join("out");
+        std::fs::create_dir_all(&input_directory)
+            .map_err(|error| external_error(&request.tool, format!("tempdir: {error}")))?;
+        let mut inputs = Vec::with_capacity(images.len());
+        let mut exchanges = Vec::with_capacity(images.len());
+        for (index, image) in images.iter().enumerate() {
+            let exchange = Exchange::of(image).ok_or_else(|| {
+                external_error(
                     &request.tool,
-                    format!(
-                        "output geometry {}x{}x{} does not match input {}x{}x{}",
-                        frame.image.width,
-                        frame.image.height,
-                        frame.image.channels,
-                        image.width,
-                        image.height,
-                        image.channels
-                    ),
-                ));
-            }
-            Ok(frame.image)
-        };
+                    format!("image {index} has no finite samples to process"),
+                )
+            })?;
+            let normalized = LinearImage::new(
+                image.width,
+                image.height,
+                image.channels,
+                exchange.normalize(image),
+            )?;
+            let input = input_directory.join(format!("image{index:05}.fits"));
+            write_processed_image_fits_f32(&input, &normalized, &[], &[])?;
+            inputs.push(input);
+            exchanges.push(exchange);
+        }
+        let input_paths: Vec<&Path> = inputs.iter().map(PathBuf::as_path).collect();
+        let runs = self.run_on_files(
+            schema,
+            request,
+            &input_paths,
+            &output_directory,
+            cancel,
+            progress,
+        )?;
+        runs.into_iter()
+            .zip(images)
+            .zip(&exchanges)
+            .map(|((run, image), exchange)| restore_run(request, image, exchange, run))
+            .collect()
+    }
+}
 
-        let mut processed = read_back(&run.primary)?;
-        exchange.restore(&mut processed.data, &image.data);
-        let stars = match run.sidecars.first() {
-            Some(sidecar) => {
-                let mut stars = read_back(sidecar)?;
-                exchange.restore_difference(&mut stars.data, &image.data);
-                Some(stars)
-            }
-            None => None,
-        };
-        // Asking for the stars image and not getting one is a failure, not
-        // a quiet omission: the caller will store and serve that file.
-        let stars_requested = request.parameters.iter().any(|(name, value)| {
-            matches!(value, ExternalParameterValue::Bool(true))
-                && (name == "stars" || name == "difference")
-        });
-        if stars_requested && stars.is_none() {
+/// Refuse a run the schema says is not licensed, before starting the CLI.
+fn require_license(schema: &ExternalToolSchema, tool: &str) -> Result<()> {
+    if schema.licensed {
+        return Ok(());
+    }
+    let detail = schema
+        .license_message
+        .as_deref()
+        .unwrap_or("the schema reports no valid license");
+    Err(external_error(tool, format!("not licensed: {detail}")))
+}
+
+/// [`require_license`] for StarXTerminator, saying which product it is.
+fn require_star_split_license(schema: &ExternalToolSchema) -> Result<()> {
+    if schema.licensed {
+        return Ok(());
+    }
+    Err(external_error(
+        "sxt",
+        format!(
+            "StarXTerminator is not licensed on this machine ({})",
+            schema
+                .license_message
+                .as_deref()
+                .unwrap_or("no license message")
+        ),
+    ))
+}
+
+/// StarXTerminator with an unscreened stars image beside the starless one.
+fn star_split_request() -> ExternalToolRequest {
+    ExternalToolRequest {
+        tool: "sxt".into(),
+        parameters: vec![
+            ("stars".into(), ExternalParameterValue::Bool(true)),
+            ("unscreen".into(), ExternalParameterValue::Bool(true)),
+        ],
+        device: None,
+    }
+}
+
+/// A stretched image clamped to its own 0 to 1. Unscreened stars restore
+/// exactly only on that scale, so the image goes to the tool as it is: a
+/// sample just outside that range would otherwise move the whole image onto
+/// the camera scale.
+fn clamp_for_star_split(image: &LinearImage) -> Result<LinearImage> {
+    LinearImage::new(
+        image.width,
+        image.height,
+        image.channels,
+        image
+            .data
+            .iter()
+            .map(|sample| {
+                if sample.is_finite() {
+                    sample.clamp(0.0, 1.0)
+                } else {
+                    *sample
+                }
+            })
+            .collect(),
+    )
+}
+
+/// The starless and stars images of a StarXTerminator run.
+fn star_split_result(processed: ProcessedStackImage) -> Result<(LinearImage, LinearImage)> {
+    let stars = processed
+        .stars
+        .ok_or_else(|| external_error("sxt", "StarXTerminator wrote no stars image"))?;
+    Ok((processed.image, stars))
+}
+
+/// Read a run's outputs back and map them onto `image`'s scale.
+fn restore_run(
+    request: &ExternalToolRequest,
+    image: &LinearImage,
+    exchange: &Exchange,
+    run: ExternalToolRun,
+) -> Result<ProcessedStackImage> {
+    let read_back = |path: &Path| -> Result<LinearImage> {
+        let frame = FitsFrame::open(path)?;
+        if frame.image.width != image.width
+            || frame.image.height != image.height
+            || frame.image.channels != image.channels
+        {
             return Err(external_error(
                 &request.tool,
-                "the stars image was requested but the tool wrote none",
+                format!(
+                    "output geometry {}x{}x{} does not match input {}x{}x{}",
+                    frame.image.width,
+                    frame.image.height,
+                    frame.image.channels,
+                    image.width,
+                    image.height,
+                    image.channels
+                ),
             ));
         }
-        Ok(ProcessedStackImage {
-            image: processed,
-            stars,
-            device: run.device,
-            warnings: run.warnings,
-        })
+        Ok(frame.image)
+    };
+
+    let mut processed = read_back(&run.primary)?;
+    exchange.restore(&mut processed.data, &image.data);
+    let stars = match run.sidecars.first() {
+        Some(sidecar) => {
+            let mut stars = read_back(sidecar)?;
+            exchange.restore_difference(&mut stars.data, &image.data);
+            Some(stars)
+        }
+        None => None,
+    };
+    // Asking for the stars image and not getting one is a failure, not
+    // a quiet omission: the caller will store and serve that file.
+    let stars_requested = request.parameters.iter().any(|(name, value)| {
+        matches!(value, ExternalParameterValue::Bool(true))
+            && (name == "stars" || name == "difference")
+    });
+    if stars_requested && stars.is_none() {
+        return Err(external_error(
+            &request.tool,
+            "the stars image was requested but the tool wrote none",
+        ));
     }
+    Ok(ProcessedStackImage {
+        image: processed,
+        stars,
+        device: run.device,
+        warnings: run.warnings,
+    })
+}
+
+/// The name the CLI gives an input's output when `-o` is a directory:
+/// `<stem>-<tool>.<extension>`.
+fn batch_output_name(input: &Path, tool: &str) -> String {
+    let stem = input
+        .file_stem()
+        .map(|stem| stem.to_string_lossy())
+        .unwrap_or_default();
+    match input.extension() {
+        Some(extension) => format!("{stem}-{tool}.{}", extension.to_string_lossy()),
+        None => format!("{stem}-{tool}"),
+    }
+}
+
+/// An output path the CLI reported. Event paths mirror what was passed for
+/// `-o` (absolute), but a build that reports relative names resolves them
+/// in `directory`.
+fn resolve_reported(reported: &Path, directory: &Path) -> PathBuf {
+    if reported.is_absolute() {
+        reported.to_path_buf()
+    } else {
+        directory.join(reported)
+    }
+}
+
+/// The sidecars of `primary` among the outputs the CLI reported for it.
+/// The primary is excluded by file identity, not path spelling: the tool
+/// may report the same file under a different form (case, separators, a
+/// Windows verbatim prefix).
+fn sidecars_beside(primary: &Path, reported: &[PathBuf]) -> Vec<PathBuf> {
+    let directory = primary.parent().unwrap_or(Path::new(""));
+    let mut sidecars: Vec<PathBuf> = Vec::new();
+    for reported in reported {
+        let resolved = resolve_reported(reported, directory);
+        if !resolved.is_file()
+            || crate::paths::paths_refer_to_same_file(&resolved, primary)
+            || sidecars
+                .iter()
+                .any(|seen| crate::paths::paths_refer_to_same_file(seen, &resolved))
+        {
+            continue;
+        }
+        sidecars.push(resolved);
+    }
+    // Fallback for a build that never reports the sidecar in its event
+    // stream: the well-known name suffixes beside the output.
+    if sidecars.is_empty()
+        && let Some(stem) = primary.file_stem().and_then(|stem| stem.to_str())
+    {
+        let extension = primary
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("fits");
+        for suffix in ["-stars", "-difference"] {
+            let candidate = primary.with_file_name(format!("{stem}{suffix}.{extension}"));
+            if candidate.is_file() {
+                sidecars.push(candidate);
+                break;
+            }
+        }
+    }
+    sidecars
 }
 
 /// Read a schema document into [`ExternalToolSchema`], tolerating the
@@ -750,13 +1045,14 @@ fn integer(entry: &serde_json::Value, field: &str) -> Option<i64> {
     entry.get(field).and_then(serde_json::Value::as_i64)
 }
 
-/// Build the argv (after the executable) for one run. Pure so tests can
-/// check it without spawning anything.
+/// Build the argv (after the executable) for one run. `output` is a file
+/// for one input, or a directory for many. Pure so tests can check it
+/// without spawning anything.
 fn build_arguments(
     schema: &ExternalToolSchema,
     request: &ExternalToolRequest,
     host: &str,
-    input: &Path,
+    inputs: &[&Path],
     output: &Path,
 ) -> Result<Vec<std::ffi::OsString>> {
     if request.tool != schema.key {
@@ -879,7 +1175,7 @@ fn build_arguments(
             }
         }
     }
-    arguments.push(input.into());
+    arguments.extend(inputs.iter().map(|input| input.as_os_str().to_os_string()));
     Ok(arguments)
 }
 
@@ -1060,7 +1356,7 @@ mod tests {
                 ("overlap", ExternalParameterValue::Float(0.3)),
             ]),
             "psf-guard-test",
-            Path::new("/work/in.fits"),
+            &[Path::new("/work/in.fits")],
             Path::new("/work/out.fits"),
         )
         .unwrap();
@@ -1094,7 +1390,7 @@ mod tests {
             &schema,
             &request(vec![("stars", ExternalParameterValue::Bool(false))]),
             "psf-guard-test",
-            Path::new("/work/in.fits"),
+            &[Path::new("/work/in.fits")],
             Path::new("/work/out.fits"),
         )
         .unwrap();
@@ -1127,7 +1423,7 @@ mod tests {
             &schema,
             &request(vec![("it", ExternalParameterValue::Float(3.0))]),
             "h",
-            Path::new("/i"),
+            &[Path::new("/i")],
             Path::new("/o"),
         )
         .unwrap();
@@ -1144,7 +1440,7 @@ mod tests {
                     &schema,
                     &request(vec![("it", value)]),
                     "h",
-                    Path::new("/i"),
+                    &[Path::new("/i")],
                     Path::new("/o"),
                 )
                 .is_err()
@@ -1160,7 +1456,7 @@ mod tests {
             &schema,
             &request(vec![]),
             "h",
-            Path::new("/i"),
+            &[Path::new("/i")],
             Path::new("/o"),
         )
         .unwrap();
@@ -1182,7 +1478,7 @@ mod tests {
                 &schema,
                 &request(parameters),
                 "h",
-                Path::new("/i"),
+                &[Path::new("/i")],
                 Path::new("/o"),
             );
             assert!(result.is_err());
@@ -1226,39 +1522,333 @@ mod tests {
         assert!(error.to_string().contains("not licensed"));
     }
 
-    /// A stand-in for rc-astro: emits the real event stream, copies the
-    /// input to the output, and writes a stars sidecar when asked.
+    /// A stand-in for rc-astro: emits the real event stream, copies each
+    /// input to its output (the file `-o` names for one input, or the CLI's
+    /// own name in the directory it names), and writes a stars sidecar when
+    /// asked. Each start appends a line to `runs`; an input that does not
+    /// exist is only a warning, as it is to the real CLI.
     #[cfg(unix)]
     fn fake_rc_astro(directory: &Path) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let path = directory.join("rc-astro");
         let script = r#"#!/bin/sh
+here="$(dirname "$0")"
+echo run >> "$here/runs"
 out=""
-input=""
+tool=""
 stars=0
+list="$here/inputs.list"
+: > "$list"
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift 2 ;;
     --stars) stars=1; shift ;;
     --host|--depth|--device) shift 2 ;;
-    --*|sxt|bxt|nxt) shift ;;
-    *) input="$1"; shift ;;
+    sxt|bxt|nxt) tool="$1"; shift ;;
+    --*) shift ;;
+    *) printf '%s\n' "$1" >> "$list"; shift ;;
   esac
 done
-cp "$input" "$out"
-cp "$input" "$(dirname "$0")/seen-input.fits"
 echo '{"event":"info","topic":"device","device":"cpu"}'
 echo '{"event":"progress","done":100.0}'
-echo "{\"event\":\"status\",\"phase\":\"complete\",\"output\":\"$out\"}"
-if [ "$stars" = 1 ]; then
-  sidecar="${out%.fits}-stars.fits"
-  cp "$input" "$sidecar"
-  echo "{\"event\":\"status\",\"phase\":\"complete\",\"output\":\"$sidecar\"}"
-fi
+while IFS= read -r input; do
+  if [ ! -f "$input" ]; then
+    echo "{\"event\":\"warning\",\"message\":\"no files matched '$input'\"}"
+    continue
+  fi
+  if [ -d "$out" ]; then
+    name="$(basename "$input")"
+    target="$out/${name%.*}-$tool.${name##*.}"
+  else
+    target="$out"
+  fi
+  cp "$input" "$target"
+  cp "$input" "$here/seen-input.fits"
+  echo "{\"event\":\"status\",\"phase\":\"complete\",\"output\":\"$target\"}"
+  if [ "$stars" = 1 ]; then
+    sidecar="${target%.fits}-stars.fits"
+    cp "$input" "$sidecar"
+    echo "{\"event\":\"status\",\"phase\":\"complete\",\"output\":\"$sidecar\"}"
+  fi
+done < "$list"
 "#;
         std::fs::write(&path, script).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path
+    }
+
+    /// How many times the fake CLI was started.
+    #[cfg(unix)]
+    fn starts(directory: &Path) -> usize {
+        std::fs::read_to_string(directory.join("runs"))
+            .map(|runs| runs.lines().count())
+            .unwrap_or(0)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn many_images_go_through_one_start_and_come_back_in_order_on_their_own_scales() {
+        let directory = tempfile::tempdir().unwrap();
+        let cli = RcAstroCli::with_executable(fake_rc_astro(directory.path()));
+        let stretched = LinearImage::new(2, 1, 1, vec![0.1, 0.9]).unwrap();
+        let camera = LinearImage::new(2, 1, 1, vec![512.0, 40_000.0]).unwrap();
+        let negative = LinearImage::new(2, 1, 1, vec![-50.0, 100.0]).unwrap();
+        let mut fractions = Vec::new();
+        let processed = cli
+            .process_images(
+                &sxt_schema(),
+                &request(vec![("stars", ExternalParameterValue::Bool(true))]),
+                &[&stretched, &camera, &negative],
+                None,
+                &mut |fraction| fractions.push(fraction),
+            )
+            .unwrap();
+        assert_eq!(starts(directory.path()), 1);
+        assert_eq!(processed.len(), 3);
+        for (result, original) in processed.iter().zip([&stretched, &camera, &negative]) {
+            for (restored, expected) in result.image.data.iter().zip(&original.data) {
+                assert!(
+                    (restored - expected).abs() < expected.abs() * 1e-6 + 1e-3,
+                    "{restored} != {expected}"
+                );
+            }
+            assert!(result.stars.is_some());
+            assert_eq!(result.device.as_deref(), Some("cpu"));
+        }
+        assert_eq!(fractions, vec![1.0]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn many_stretched_images_split_into_starless_and_stars_pairs() {
+        let directory = tempfile::tempdir().unwrap();
+        let cli = RcAstroCli::with_executable(fake_rc_astro(directory.path()));
+        let first = LinearImage::new(1, 1, 3, vec![0.1, 0.2, 0.3]).unwrap();
+        let second = LinearImage::new(1, 1, 3, vec![0.4, 0.5, 1.2]).unwrap();
+        let pairs = cli
+            .split_stars_batch(&sxt_schema(), &[&first, &second], None, &mut |_| {})
+            .unwrap();
+        assert_eq!(starts(directory.path()), 1);
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0].0.data, first.data);
+        assert_eq!(pairs[0].1.data, first.data);
+        // Clamped to its own 0 to 1, as one split clamps it.
+        assert_eq!(pairs[1].0.data, vec![0.4, 0.5, 1.0]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn files_run_together_with_outputs_named_by_the_cli_and_sidecars_kept_apart() {
+        let directory = tempfile::tempdir().unwrap();
+        let cli = RcAstroCli::with_executable(fake_rc_astro(directory.path()));
+        let inputs = directory.path().join("lights");
+        std::fs::create_dir(&inputs).unwrap();
+        let image = LinearImage::new(1, 1, 1, vec![0.5]).unwrap();
+        let first = inputs.join("m31.fits");
+        let second = inputs.join("m31b.fits");
+        write_processed_image_fits_f32(&first, &image, &[], &[]).unwrap();
+        write_processed_image_fits_f32(&second, &image, &[], &[]).unwrap();
+        let output = directory.path().join("processed");
+        let runs = cli
+            .run_on_files(
+                &sxt_schema(),
+                &request(vec![("stars", ExternalParameterValue::Bool(true))]),
+                &[&first, &second],
+                &output,
+                None,
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!(starts(directory.path()), 1);
+        assert_eq!(runs[0].primary, output.join("m31-sxt.fits"));
+        assert_eq!(runs[0].sidecars, vec![output.join("m31-sxt-stars.fits")]);
+        assert_eq!(runs[1].primary, output.join("m31b-sxt.fits"));
+        assert_eq!(runs[1].sidecars, vec![output.join("m31b-sxt-stars.fits")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_input_the_cli_wrote_nothing_for_fails_the_batch() {
+        let directory = tempfile::tempdir().unwrap();
+        let cli = RcAstroCli::with_executable(fake_rc_astro(directory.path()));
+        let image = LinearImage::new(1, 1, 1, vec![0.5]).unwrap();
+        let present = directory.path().join("present.fits");
+        write_processed_image_fits_f32(&present, &image, &[], &[]).unwrap();
+        let missing = directory.path().join("missing.fits");
+        // An earlier run's output of the same name is not this run's.
+        let output = directory.path().join("out");
+        std::fs::create_dir(&output).unwrap();
+        write_processed_image_fits_f32(output.join("missing-sxt.fits"), &image, &[], &[]).unwrap();
+        let error = cli
+            .run_on_files(
+                &sxt_schema(),
+                &request(vec![]),
+                &[&present, &missing],
+                &output,
+                None,
+                &mut |_| {},
+            )
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("missing.fits"), "{message}");
+        assert!(message.contains("no files matched"), "{message}");
+    }
+
+    #[test]
+    fn a_batch_whose_outputs_would_collide_is_refused_before_the_cli_starts() {
+        let cli = RcAstroCli::with_executable("/nonexistent/rc-astro");
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("out");
+        let refused = |inputs: &[&Path], output: &Path| {
+            cli.run_on_files(
+                &sxt_schema(),
+                &request(vec![]),
+                inputs,
+                output,
+                None,
+                &mut |_| {},
+            )
+            .unwrap_err()
+        };
+
+        let error = refused(
+            &[Path::new("/a/m31.fits"), Path::new("/b/M31.xisf")],
+            &output,
+        );
+        assert!(
+            matches!(&error, Error::ExternalToolRefused { message, .. } if message.contains("M31")),
+            "{error}"
+        );
+
+        let error = refused(&[Path::new("/a/m*.fits")], &output);
+        assert!(
+            matches!(&error, Error::ExternalToolRefused { message, .. } if message.contains("wildcard")),
+            "{error}"
+        );
+
+        // m31.fits's output, m31-sxt.fits, is the batch's other input.
+        let image = LinearImage::new(1, 1, 1, vec![0.5]).unwrap();
+        let first = directory.path().join("m31.fits");
+        let second = directory.path().join("m31-sxt.fits");
+        write_processed_image_fits_f32(&first, &image, &[], &[]).unwrap();
+        write_processed_image_fits_f32(&second, &image, &[], &[]).unwrap();
+        let error = refused(&[&first, &second], directory.path());
+        assert!(
+            matches!(&error, Error::ExternalToolRefused { message, .. } if message.contains("overwrite")),
+            "{error}"
+        );
+
+        assert!(
+            cli.run_on_files(
+                &sxt_schema(),
+                &request(vec![]),
+                &[],
+                &output,
+                None,
+                &mut |_| {}
+            )
+            .unwrap()
+            .is_empty()
+        );
+    }
+
+    /// Against the real CLI: a batch gives each image what a run of its own
+    /// gives it, in less time.
+    #[test]
+    #[ignore = "needs rc-astro on PATH and a NoiseXTerminator license"]
+    fn a_real_batch_matches_one_run_per_image() {
+        let cli = RcAstroCli::locate().expect("rc-astro on PATH");
+        let schema = cli.tool_schema("nxt").unwrap();
+        let images: Vec<LinearImage> = (0..4)
+            .map(|seed| {
+                let (width, height) = (320, 240);
+                let mut state = 0x9e37_79b9_u32.wrapping_mul(seed + 1);
+                let data = (0..width * height)
+                    .map(|index| {
+                        state ^= state << 13;
+                        state ^= state >> 17;
+                        state ^= state << 5;
+                        let (x, y) = ((index % width) as f32, (index / width) as f32);
+                        let star = (-((x - 100.0 - seed as f32 * 30.0).powi(2)
+                            + (y - 120.0).powi(2))
+                            / 6.0)
+                            .exp();
+                        1_000.0 + 3_000.0 * star + (state % 200) as f32
+                    })
+                    .collect();
+                LinearImage::new(width, height, 1, data).unwrap()
+            })
+            .collect();
+        let request = ExternalToolRequest {
+            tool: "nxt".into(),
+            parameters: vec![],
+            device: None,
+        };
+        let started = std::time::Instant::now();
+        let singles: Vec<ProcessedStackImage> = images
+            .iter()
+            .map(|image| {
+                cli.process_image(&schema, &request, image, &[], None, &mut |_| {})
+                    .unwrap()
+            })
+            .collect();
+        let one_each = started.elapsed();
+        let started = std::time::Instant::now();
+        let references: Vec<&LinearImage> = images.iter().collect();
+        let batch = cli
+            .process_images(&schema, &request, &references, None, &mut |_| {})
+            .unwrap();
+        let together = started.elapsed();
+        eprintln!("one run each: {one_each:?}; one batch: {together:?}");
+        for (single, batched) in singles.iter().zip(&batch) {
+            let largest = single
+                .image
+                .data
+                .iter()
+                .zip(&batched.image.data)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0_f32, f32::max);
+            assert!(largest < 1.0, "batched output differs by {largest} ADU");
+        }
+
+        // StarXTerminator's stars images, matched to their inputs from the
+        // real event stream.
+        let sxt = cli.tool_schema("sxt").unwrap();
+        let stretched: Vec<LinearImage> = images
+            .iter()
+            .map(|image| {
+                let data = image.data.iter().map(|sample| sample / 5_000.0).collect();
+                LinearImage::new(image.width, image.height, 1, data).unwrap()
+            })
+            .collect();
+        let references: Vec<&LinearImage> = stretched.iter().collect();
+        let pairs = cli
+            .split_stars_batch(&sxt, &references, None, &mut |_| {})
+            .unwrap();
+        assert_eq!(pairs.len(), stretched.len());
+        for (seed, (_, stars)) in pairs.iter().enumerate() {
+            // Each stars image holds its own input's star, which moves 30
+            // pixels right per seed.
+            let x = 100 + seed * 30;
+            let at = |column: usize| stars.data[120 * stars.width + column];
+            assert!(at(x) > at((x + 60) % stars.width) + 0.05, "image {seed}");
+        }
+    }
+
+    #[test]
+    fn a_batch_passes_every_input_after_the_options_and_a_directory_for_output() {
+        let arguments = build_arguments(
+            &sxt_schema(),
+            &request(vec![]),
+            "h",
+            &[Path::new("/w/a.fits"), Path::new("/w/b.fits")],
+            Path::new("/w/out"),
+        )
+        .unwrap();
+        let rendered = strings(&arguments);
+        let output = rendered.iter().position(|value| value == "-o").unwrap();
+        assert_eq!(rendered[output + 1], "/w/out");
+        assert_eq!(&rendered[rendered.len() - 2..], ["/w/a.fits", "/w/b.fits"]);
     }
 
     #[cfg(unix)]
@@ -1410,7 +2000,7 @@ fi
             &schema,
             &request(vec![("overlap", ExternalParameterValue::Int(1))]),
             "h",
-            Path::new("/i"),
+            &[Path::new("/i")],
             Path::new("/o"),
         )
         .unwrap();
