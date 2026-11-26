@@ -28,7 +28,7 @@ READ_ONLY = ("psf-fields", "clean-sky", "cut-starless", "cut-sharpen", "sheet-sh
 # The commands that read the sharpening banks, and the manifest, if at
 # all, only for the sets' names.
 BANKS_ONLY = ("train-sharpen", "evaluate-sharpen", "clean-sharpen", "cut-external", "bundle-sharpen",
-              "train-starless")
+              "train-starless", "evaluate-starless")
 
 
 def numbers(text: str) -> tuple[float, ...]:
@@ -239,6 +239,13 @@ def main(argv: list[str] | None = None) -> int:
     trains.add_argument("--learning-rate", type=float, default=3e-4)
     trains.add_argument("--seed", type=int, default=0)
     trains.add_argument("--init-from", help="start from this starless run's weights")
+
+    judges = commands.add_parser("evaluate-starless", help="measure a starless run beside its baseline on a "
+                                                           "bank's windows, and draw a sheet of them")
+    judges.add_argument("--name", required=True, help="the run, under STORE/models/starless/")
+    judges.add_argument("--bank", type=Path, required=True, help="a starless bank's directory")
+    judges.add_argument("--count", type=int, default=64, help="windows to measure, spread over the bank")
+    judges.add_argument("--sheet-rows", type=int, default=6, help="windows drawn on the sheet")
 
     starless = commands.add_parser("cut-starless", help="cut a bank of known-truth composites for the starless "
                                                         "model from the stacks the clean-sky pass has cleaned "
@@ -950,6 +957,12 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
                                       learning_rate=arguments.learning_rate, seed=arguments.seed,
                                       init_from=arguments.init_from)
         return {"name": arguments.name, "last": record["history"][-1] if record["history"] else None}
+
+    if arguments.command == "evaluate-starless":
+        from . import starless_model
+
+        return starless_model.evaluate(store, arguments.name, arguments.bank, count=arguments.count,
+                                       sheet_rows=arguments.sheet_rows)
 
     if arguments.command == "bundle-sharpen":
         from .bundle import write_sharpen_bundle

@@ -46,6 +46,8 @@ from .unet import ResidualUNet
 READS = {"fit": ("input", "fit_starless", "fit_model", "noise", "points"),
          "image": ("input", "noise", "points")}
 BASELINE = {"fit": "fit_starless", "image": "input"}
+# Planes that hold no sky, read about zero rather than the sky's level.
+SKYLESS = ("fit_model",)
 # The compression: planes in units of the noise, through asinh(x / ASINH).
 ASINH = 5.0
 # Where the image and its truth differ by over the noise, the loss weighs
@@ -92,6 +94,24 @@ def released(plane: np.ndarray, level: float, scale: float) -> np.ndarray:
     return (np.sinh(plane) * scale * ASINH + level).astype(np.float32)
 
 
+def network_reads(planes: dict[str, np.ndarray], way: str) -> tuple[list[np.ndarray], float, float]:
+    """The planes a way's network reads, and the level and scale they are
+    read on: the input's median, as a runtime knows it with no mask, and
+    the noise map's median. A plane with sky is read less the level, a
+    plane without (`SKYLESS`) as it is, both compressed."""
+    level = float(np.nanmedian(planes["input"]))
+    scale = float(np.median(planes["noise"])) or 1.0
+    read = []
+    for name in READS[way]:
+        if name == "noise":
+            read.append(planes["noise"] / scale)
+        elif name == "points":
+            read.append(planes["points"])
+        else:
+            read.append(compressed(planes[name], 0.0 if name in SKYLESS else level, scale))
+    return read, level, scale
+
+
 def example(bank: Bank, index: int, settings: Settings, rng: np.random.Generator) -> dict[str, np.ndarray]:
     """A tile of window `index`: the network's planes, the baseline and the
     truth compressed, and the loss's weights; flipped and turned at random."""
@@ -101,16 +121,7 @@ def example(bank: Bank, index: int, settings: Settings, rng: np.random.Generator
     cut = (index, slice(top, top + tile), slice(left, left + tile))
     planes = {name: np.asarray(bank.planes[name][cut], dtype=np.float32) for name in bank.planes}
     valid = planes["valid"] > 0
-    level = float(np.median(planes["input"][valid])) if valid.any() else float(np.median(planes["input"]))
-    scale = float(np.median(planes["noise"])) or 1.0
-    read = []
-    for name in READS[settings.way]:
-        if name == "noise":
-            read.append(planes["noise"] / scale)
-        elif name == "points":
-            read.append(planes["points"])
-        else:
-            read.append(compressed(planes[name], level, scale))
+    read, level, scale = network_reads(planes, settings.way)
     baseline = compressed(planes[BASELINE[settings.way]], level, scale)
     truth = compressed(planes["starless"], level, scale)
     weight = valid.astype(np.float32) * (1.0 + (STAR_WEIGHT - 1.0)
@@ -234,24 +245,117 @@ def starless(model: torch.nn.Module, planes: dict[str, np.ndarray], settings: Se
     bank keeps them, read as one tile (its side a multiple of the network's
     `multiple`)."""
     where = where or next(model.parameters()).device
-    valid = planes.get("valid", np.ones_like(planes["input"])) > 0
-    level = float(np.median(planes["input"][valid]))
-    scale = float(np.median(planes["noise"])) or 1.0
-    read = []
-    for name in READS[settings.way]:
-        if name == "noise":
-            read.append(planes["noise"] / scale)
-        elif name == "points":
-            read.append(planes["points"])
-        else:
-            read.append(compressed(planes[name], level, scale))
+    read, level, scale = network_reads(planes, settings.way)
     baseline = compressed(planes[BASELINE[settings.way]], level, scale)
     with torch.no_grad():
         residual = model(torch.from_numpy(np.stack(read)[None].astype(np.float32)).to(where))[0, 0].cpu().numpy()
     return released(baseline + residual, level, scale)
 
 
-def charbonnier_mean(estimate: np.ndarray, truth: np.ndarray, valid: np.ndarray, scale: float) -> float:
-    """The mean Charbonnier distance of two images in units of `scale`."""
-    difference = (estimate - truth)[valid] / scale
-    return float(np.mean(np.sqrt(difference**2 + CHARBONNIER**2)))
+def load_run(store: Store, name: str, where: torch.device | None = None) -> tuple[ResidualUNet, Settings]:
+    """A starless run's network, with its weights, and its settings."""
+    directory = run_directory(store, name)
+    config = json.loads((directory / "config.json").read_text())
+    settings = Settings(**config["settings"])
+    model = ResidualUNet(inputs=len(READS[settings.way]), outputs=1, width=settings.width, levels=settings.levels)
+    model.load_state_dict(torch.load(directory / "weights.pt", map_location="cpu"))
+    return model.to(where or device()).eval(), settings
+
+
+def measures(estimate: np.ndarray, planes: dict[str, np.ndarray]) -> dict[str, float | None]:
+    """How an estimate of a window's starless image meets its truth, over
+    its valid pixels and in units of its noise map's median: the error's
+    root mean square where stars were (where the input and the truth differ
+    by more than the noise) and on the sky elsewhere; its mean on the stars'
+    cores (their light over ten times the noise: below 0 a hole, above a
+    remnant); and the share of the stars' light left in the estimate."""
+    scale = float(np.median(planes["noise"])) or 1.0
+    valid = planes["valid"] > 0
+    light = planes["input"].astype(np.float64) - planes["starless"]
+    stars = valid & (np.abs(light) > planes["noise"])
+    cores = valid & (light > 10.0 * planes["noise"])
+    sky = valid & ~stars
+    error = (estimate.astype(np.float64) - planes["starless"]) / scale
+
+    def rms(where: np.ndarray) -> float | None:
+        return float(np.sqrt(np.mean(error[where] ** 2))) if where.any() else None
+
+    total = float(light[stars].sum())
+    return {"stars_rms": rms(stars), "sky_rms": rms(sky),
+            "cores_mean": float(error[cores].mean()) if cores.any() else None,
+            "light_left": float((error[stars] * scale).sum()) / total if total > 0 else None}
+
+
+def mean_of(found: list[dict[str, float | None]]) -> dict[str, float | None]:
+    """Each measure's mean over the windows that have it."""
+    out: dict[str, float | None] = {}
+    for key in (found[0] if found else {}):
+        values = [entry[key] for entry in found if entry[key] is not None]
+        out[key] = float(np.mean(values)) if values else None
+    return out
+
+
+def evaluate(store: Store, name: str, bank: Path, *, count: int = 64, sheet_rows: int = 6,
+             where: torch.device | None = None) -> dict[str, Any]:
+    """A run's `measures` on `count` windows of a bank, evenly spread, beside
+    its baseline's, over all and by telescope kind; and a sheet of the first
+    `sheet_rows` of them: the input, the baseline, the network, the truth
+    and the network's stars layer, stretched alike. Both are kept under the
+    run's `evaluation/`, named for the bank."""
+    model, settings = load_run(store, name, where)
+    held = Bank(bank)
+    indices = np.unique(np.linspace(0, held.count - 1, min(count, held.count)).round().astype(int))
+    results: dict[str, list[dict[str, float | None]]] = {}
+    rows = []
+    for index in indices:
+        planes = {plane: np.asarray(held.planes[plane][index], dtype=np.float32) for plane in held.planes}
+        estimate = starless(model, planes, settings)
+        baseline = planes[BASELINE[settings.way]]
+        kind = held.records[index].get("telescope_kind", "all")
+        for group in ("all", kind):
+            results.setdefault(f"{group}/run", []).append(measures(estimate, planes))
+            results.setdefault(f"{group}/baseline", []).append(measures(baseline, planes))
+        if len(rows) < sheet_rows:
+            rows.append((held.records[index], [planes["input"], baseline, estimate, planes["starless"],
+                                                planes["input"] - estimate]))
+    summary = {"run": name, "bank": str(bank), "windows": int(len(indices)),
+               "measures": {key: mean_of(found) for key, found in sorted(results.items())}}
+    directory = run_directory(store, name) / "evaluation"
+    directory.mkdir(parents=True, exist_ok=True)
+    label = Path(bank).name
+    (directory / f"{label}.json").write_text(json.dumps(summary, indent=2))
+    if rows:
+        write_sheet(directory / f"{label}.png", rows, settings.way)
+    return summary
+
+
+def write_sheet(path: Path, rows: list[tuple[dict[str, Any], list[np.ndarray]]], way: str) -> None:
+    """A starless sheet: a row a window, each stretched on its truth's
+    levels, the stars layer from the truth's floor."""
+    from PIL import Image, ImageDraw
+
+    titles = ["input", "fit's starless" if way == "fit" else "input (baseline)", "network", "truth",
+              "network's stars"]
+    strips = []
+    for record, tiles in rows:
+        low, high = np.percentile(np.nan_to_num(tiles[3]), (1.0, 99.5))
+
+        def look(plane: np.ndarray, low: float = low, high: float = high) -> np.ndarray:
+            t = np.clip((np.nan_to_num(plane) - low) / max(high - low, 1e-12), 0.0, 1.0)
+            return (np.arcsinh(t * 30.0) / np.arcsinh(30.0) * 255.0).astype(np.uint8)
+
+        shown = [look(tile) for tile in tiles[:4]] + [look(tiles[4] + low)]
+        gap = np.full((shown[0].shape[0], 6), 40, np.uint8)
+        strip = np.concatenate([part for tile in shown for part in (tile, gap)][:-1], axis=1)
+        strips.append((f"{record.get('product', '')} draw {record.get('draw', '')}: {record.get('telescope', '')}",
+                       strip))
+    width = max(strip.shape[1] for _, strip in strips)
+    canvas = Image.new("L", (width, 18 + sum(strip.shape[0] + 18 for _, strip in strips)), 20)
+    draw = ImageDraw.Draw(canvas)
+    draw.text((4, 2), " | ".join(titles), fill=230)
+    top = 18
+    for label, strip in strips:
+        draw.text((4, top + 2), label, fill=200)
+        canvas.paste(Image.fromarray(strip), (0, top + 18))
+        top += strip.shape[0] + 18
+    canvas.save(path)

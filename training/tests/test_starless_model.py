@@ -71,6 +71,20 @@ def test_a_run_starts_as_its_baseline(small_bank, way, start):
     np.testing.assert_allclose(sm.starless(model, planes, settings), planes[start], rtol=1e-4, atol=1e-2)
 
 
+def test_the_stars_model_is_read_about_zero_and_the_images_about_the_sky(small_bank):
+    _, directory = small_bank
+    found = sm.Bank(directory)
+    planes = {name: np.asarray(found.planes[name][0]) for name in found.planes}
+    read, level, scale = sm.network_reads(planes, "fit")
+    by_name = dict(zip(sm.READS["fit"], read))
+    starless = np.abs(planes["input"] - planes["starless"]) < planes["noise"]
+    # Where no star is, the image and the fit's estimate read near zero, and
+    # so does the stars model, which holds no sky.
+    for name in ("input", "fit_starless", "fit_model"):
+        assert abs(float(np.median(by_name[name][starless]))) < 0.2, name
+    assert level > 50.0 * scale / sm.ASINH
+
+
 def test_the_loss_weighs_where_stars_were_and_skips_what_is_not_valid(small_bank):
     _, directory = small_bank
     found = sm.Bank(directory)
@@ -91,3 +105,24 @@ def test_a_short_run_beats_its_baseline(small_bank, tmp_path):
     assert (sm.run_directory(store, "tiny") / "weights.pt").exists()
     with pytest.raises(ValueError):
         sm.Settings(way="both")
+    # Its evaluation: closer to the truth than its baseline where stars
+    # were, and a sheet beside the numbers.
+    found = sm.evaluate(store, "tiny", directory, count=8, sheet_rows=2, where=torch.device("cpu"))
+    run, base = found["measures"]["all/run"], found["measures"]["all/baseline"]
+    assert run["stars_rms"] < base["stars_rms"] and run["light_left"] < base["light_left"]
+    assert found["measures"]["pupil/run"] and "field/run" not in found["measures"]
+    evaluation = sm.run_directory(store, "tiny") / "evaluation"
+    assert (evaluation / f"{directory.name}.json").exists() and (evaluation / f"{directory.name}.png").exists()
+
+
+def test_the_measures_read_the_truth_as_perfect_and_the_input_as_all_the_stars_left(small_bank):
+    _, directory = small_bank
+    found = sm.Bank(directory)
+    planes = {name: np.asarray(found.planes[name][1]) for name in found.planes}
+    perfect = sm.measures(planes["starless"], planes)
+    assert perfect["stars_rms"] == 0.0 and perfect["sky_rms"] == 0.0 and perfect["light_left"] == 0.0
+    untouched = sm.measures(planes["input"], planes)
+    assert untouched["light_left"] == pytest.approx(1.0) and untouched["cores_mean"] > 10.0
+    # A hole: the truth less the stars' light reads as a negative core.
+    holed = sm.measures(planes["starless"] - (planes["input"] - planes["starless"]), planes)
+    assert holed["cores_mean"] < -10.0 and holed["light_left"] == pytest.approx(-1.0)
