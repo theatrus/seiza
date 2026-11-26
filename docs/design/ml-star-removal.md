@@ -35,9 +35,22 @@ and on.
   catadioptrics, four from two crossed vanes, six from three, the 6 + 2 of
   JWST's hexagonal segments and its strut, and they may be thin, thick,
   chromatic or curved. Nothing in the model assumes one pattern.
-- **The image alone.** As every final model, it reads only the image: its
-  noise map, PSF field and point sources from fixed operations on it, as the
-  sharpening model does. No catalog is needed at run time.
+- **The catalogue and a network.** Seiza is a plate solver, so the model
+  need not work from the image alone. The image is solved, its stars listed
+  from Seiza's deep Gaia catalogue (to G 20), fitted with its own PSF field
+  and taken out (`seiza.StarFit`), as the clean skies below are made; the
+  network then does what fitting cannot. An image that will not solve falls
+  back to the stars the detector finds on it.
+- **Healing is the work.** What a fit leaves is where the network earns its
+  place: the holes and remnants of bright and clipped cores, spikes, and
+  above all the gaps, healed with the nebula or background that runs under
+  them, so that nothing shows where a star was.
+- **Halos are stars.** A bright star's halo (its wide wings, and the rings
+  a filter's or a corrector's reflections throw) reaches far past any PSF
+  stamp, tens to hundreds of pixels, and belongs in the stars layer with
+  the star. On a deep stack of 8.6 px stars, the stars brighter than G 13
+  leave light after the fit that the stack's two independent halves agree
+  on, 13 times the noise of the mean at their cores (2026-11-25).
 
 ## The data
 
@@ -47,14 +60,26 @@ A star removal network trained on what another method removes learns that
 method's mistakes. So the first data has its truth known exactly, both
 layers:
 
-1. **Clean skies.** Each plate-solved stack's stars are fitted at their Gaia
-   positions with the image's own PSF field (`psf_fields`), and subtracted;
-   faint stars under the detection limit and the field's point sources the
-   catalog lacks with them. What is left is the stack's sky and nebula with
-   its noise, near starless. Where a star is clipped or too bright to fit, a
-   window around it is left out of the bank rather than patched. Around 1,100
+1. **Clean skies** (`starless_sky`). Each stack is solved, its stars listed
+   from the deep Gaia catalogue to G 20 with the detector's stars the
+   catalogue lacks, and those a first fit at their catalogue places
+   measures at a signal to noise of 3 or more fitted with the stack's own
+   PSF field (bright ones' places refined, faint ones' kept) and taken out;
+   the field's systematic miss, read from bright isolated stars' leftovers,
+   is taken out with them. What is left is the stack's sky and nebula with
+   its noise. About each star that is clipped, fits poorly, or leaves its
+   core far over or under its noise (judged with its photon noise), a disc
+   is masked and kept out of the loss rather than patched. Around 1,100
    deep and multi-night stacks of seven telescopes give these, and the
-   Hubble and JWST fields give sharper skies of other telescopes.
+   Hubble and JWST fields give sharper skies of other telescopes. On a deep
+   stack of 8.6 px stars, with G 17: a tenth of a percent of each star's
+   light left after the correction, and the stars between G 13 and G 17
+   leaving nothing the stack's halves agree on more than on the sky beside
+   them; with G 20, 7,968 stars taken out where G 17 listed 1,796 (a fit at
+   the catalogue's places measures far fainter stars than the detector
+   finds: it found 3 the G 17 list lacked), the fainter ones leaving small
+   remnants the halves share, for the network to heal, and 3.9% of the
+   image masked (2026-11-25).
 2. **Stars put back.** Stars are drawn into a clean sky at random places, with
    the brightness counts of a real field (from Gaia's counts at the field's
    latitude), each the shape of a PSF:
@@ -64,7 +89,12 @@ layers:
      2, 3 or 4 vanes of given width at any angle, or JWST's segments, its
      diffraction pattern summed over the filter's wavelengths and blurred by
      seeing. These give every spike pattern, and spikes long enough to cross
-     a whole tile for the brightest stars.
+     a whole tile for the brightest stars;
+   - with a halo for the bright ones: wide wings and reflection rings, from
+     the halos measured about our own stacks' bright stars (their mean
+     profiles past the stamp, by brightness and telescope) and made ones of
+     other radii and widths, so the network learns to take a halo out and
+     heal what it covered.
 3. **Noise.** The stars' own photon noise is added to the input only, with
    the clean sky's noise already there. The target stars layer has none.
 4. **Saturation.** Some stars are clipped at a level, as real cores are, with

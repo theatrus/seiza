@@ -8,8 +8,9 @@ builds one set at a time, which reads each frame over the network once.
 `cut-sharpen` cuts the sharpening banks from them; both only read the
 manifest. `train-sharpen` trains the PSF model on those banks and
 `evaluate-sharpen` measures one, reading the manifest, when there is
-one, only for the sets' names. `status` prints what the manifest holds;
-`decide` records a review decision.
+one, only for the sets' names. `clean-sky` takes each stack's stars out at
+their catalogue places for the starless model, reading the manifest only.
+`status` prints what the manifest holds; `decide` records a review decision.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from .manifest import Manifest
 from .store import Store, versions
 
 # The commands that only read the manifest and record no pass in it.
-READ_ONLY = ("psf-fields", "cut-sharpen", "sheet-sharpen")
+READ_ONLY = ("psf-fields", "clean-sky", "cut-sharpen", "sheet-sharpen")
 # The commands that read the sharpening banks, and the manifest, if at
 # all, only for the sets' names.
 BANKS_ONLY = ("train-sharpen", "evaluate-sharpen", "clean-sharpen", "cut-external", "bundle-sharpen")
@@ -205,6 +206,22 @@ def main(argv: list[str] | None = None) -> int:
                        help="add this many dark spots (clusters 30 to 5,000 times the typical noise deep) per "
                             "256 × 256 pixels to both halves of every tile alike, so the model keeps them, as a "
                             "stack's over-subtracted hot or dead pixels, and does not fill or ring them")
+
+    sky = commands.add_parser("clean-sky", help="take each stack's stars out with its own PSF field at their "
+                                                "catalogue places, for the starless model, and keep the clean sky, "
+                                                "its mask and the stars under starless/ (reads the manifest only)")
+    sky.add_argument("--set", action="append", dest="sets", help="only this set id")
+    sky.add_argument("--kind", action="append", dest="kinds", choices=("deep", "multi-night"),
+                     help="only products of this kind (default: both)")
+    sky.add_argument("--split", action="append", dest="splits", choices=("train", "validation", "test", "held-out"),
+                     help="only sets of this split (default: train and validation)")
+    sky.add_argument("--product", action="append", dest="products",
+                     help="only this product id, of any kind or split (in place of --set, --kind and --split)")
+    sky.add_argument("--catalog", help="the star catalogue to list stars from, such as Seiza's deep Gaia "
+                                       "catalogue to G 20 (default: the installed one)")
+    sky.add_argument("--workers", type=int, default=2, help="clean this many products at once")
+    sky.add_argument("--limit", type=int, help="at most this many products not yet cleaned")
+    sky.add_argument("--again", action="store_true", help="clean products already cleaned")
 
     psf = commands.add_parser("psf-fields", help="measure each sharpening source's PSF field once and keep it in "
                                                  "the store, under psf/ (reads the manifest only)")
@@ -761,6 +778,16 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
             weight_map=arguments.weight_map, holes=arguments.holes, bank_workers=arguments.bank_workers, **extra,
         )
         return {**record, "sheets": render_saved(store, manifest, arguments.name)}
+    if command == "clean-sky":
+        from . import starless_sky
+
+        if arguments.products:
+            products = starless_sky.annotated(manifest, arguments.products)
+        else:
+            products = starless_sky.eligible(manifest, kinds=arguments.kinds or starless_sky.SOURCE_KINDS,
+                                             splits=arguments.splits or starless_sky.SPLITS, sets=only)
+        return starless_sky.run(store, products, catalog_path=arguments.catalog, workers=arguments.workers,
+                                again=arguments.again, limit=arguments.limit)
     if command == "psf-fields":
         from . import psf_fields
 
