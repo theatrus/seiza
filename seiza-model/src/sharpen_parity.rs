@@ -302,7 +302,14 @@ fn the_noise_hold_matches_the_harness() {
             line[x] += 0.5 * (source[x] - source[x - 1]);
         }
     }
-    let held = noise_hold_step(&edged, &fixture.image, width, height, want.hold_noise, &sigma);
+    let held = noise_hold_step(
+        &edged,
+        &fixture.image,
+        width,
+        height,
+        want.hold_noise,
+        &sigma,
+    );
     fixture.check("the noise hold", &held, &want.edged_held, 2e-6);
     let moved = held
         .iter()

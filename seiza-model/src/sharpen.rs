@@ -1314,12 +1314,13 @@ pub(crate) mod tests {
                 / values.len() as f64)
                 .sqrt()
         };
-        let inside = |plane: &[f32], width: usize, (x0, x1): (usize, usize), (y0, y1): (usize, usize)| {
-            (y0..y1)
-                .flat_map(|y| (x0..x1).map(move |x| y * width + x))
-                .map(|index| plane[index])
-                .collect::<Vec<f32>>()
-        };
+        let inside =
+            |plane: &[f32], width: usize, (x0, x1): (usize, usize), (y0, y1): (usize, usize)| {
+                (y0..y1)
+                    .flat_map(|y| (x0..x1).map(move |x| y * width + x))
+                    .map(|index| plane[index])
+                    .collect::<Vec<f32>>()
+            };
         // The band's share of white noise is what white noise shows through it.
         let side = 384;
         let white = band(&normals(side * side, 7), side, side);
@@ -1341,7 +1342,13 @@ pub(crate) mod tests {
             })
             .collect();
         let weak: Vec<f32> = (0..width * height)
-            .map(|index| if at(index).0 >= 160 { 0.5 * noise[index] } else { 0.0 })
+            .map(|index| {
+                if at(index).0 >= 160 {
+                    0.5 * noise[index]
+                } else {
+                    0.0
+                }
+            })
             .collect();
         let sign = |index: usize| {
             let (x, y) = at(index);
@@ -1383,7 +1390,10 @@ pub(crate) mod tests {
             .map(|index| f64::from((held[index] - sharp[index]) * sign(index)))
             .sum::<f64>()
             / ((width - 32) * (height - 32)) as f64;
-        assert!(checker.abs() < 0.01 * 0.3, "the checkerboard moved by {checker}");
+        assert!(
+            checker.abs() < 0.01 * 0.3,
+            "the checkerboard moved by {checker}"
+        );
         assert_eq!(
             noise_hold_step(&sharp, &soft, width, height, 0.0, &sigma),
             sharp,
