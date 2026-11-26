@@ -99,3 +99,39 @@ fn smoothed_masks_stay_close_to_the_cpu() {
         "mean {mean:e}, p99 {p99:e}, max {largest:e}"
     );
 }
+
+/// Reads through one transfer of one input share a stretch-table row, so
+/// a mask that reads what its layers show takes no row of its own. A read
+/// that finds no row left is named, not dropped without a word.
+#[test]
+fn reads_share_stretch_rows_and_one_without_a_row_is_named() {
+    use seiza_compose::gpu::{GpuInput, GpuScene, MAX_LAYERS};
+    use seiza_compose::picture::{ComputedMask, InputRead, Layer, Transfer, TransferStage};
+    let read = |row: usize| InputRead::new(0, Transfer::of([TransferStage::Scale(row as f32)]));
+    let place = [GpuInput {
+        layer: 0,
+        scale: 1.0,
+    }];
+    let mut picture = Picture {
+        layers: (0..MAX_LAYERS)
+            .map(|row| Layer::added(read(row), [1.0; 3]))
+            .collect(),
+        ..Picture::default()
+    };
+    // Every row is taken by a layer; a mask that reads two of them fits.
+    picture
+        .computed
+        .push(ComputedMask::foraxx(vec![read(0), read(5)], 0.0));
+    picture.layers[0].computed = Some(0);
+    assert_eq!(
+        GpuScene::new(&picture, &place).left_out,
+        Vec::<String>::new()
+    );
+    // A mask through a transfer no layer uses needs a row of its own.
+    picture
+        .computed
+        .push(ComputedMask::foraxx(vec![read(MAX_LAYERS)], 0.0));
+    let left_out = GpuScene::new(&picture, &place).left_out;
+    assert_eq!(left_out.len(), 1, "{left_out:?}");
+    assert!(left_out[0].contains("computed mask 1"), "{left_out:?}");
+}

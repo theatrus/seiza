@@ -22,6 +22,7 @@ pub use headless::{GpuContext, render_gpu};
 
 use crate::picture::{
     Adjustment, Blend, FinishKind, InputRead, LayerKind, LuminanceTarget, Picture, Segment,
+    Transfer,
 };
 use bytemuck::{Pod, Zeroable};
 use seiza_stretch::{ColorStrategy, ResolvedCurve};
@@ -147,12 +148,24 @@ impl GpuScene {
             mask.filter(|mask| *mask < picture.masks.len().min(MAX_MASKS))
                 .map_or(-1.0, |mask| mask as f32)
         };
-        // Each read through its transfer is a row of the stretch table.
-        let row_of = |scene: &mut Self, read: &InputRead| -> Option<usize> {
+        // Each read through its transfer is a row of the stretch table. A
+        // row depends only on the transfer and the input's scale, so reads
+        // that share both share a row, as a layer and a mask that reads
+        // its input do.
+        let mut row_keys: Vec<(u32, Transfer)> = Vec::new();
+        let mut row_of = |scene: &mut Self, read: &InputRead| -> Option<usize> {
             let place = input(read)?;
+            let scale = place.scale.to_bits();
+            if let Some(row) = row_keys
+                .iter()
+                .position(|(known, transfer)| *known == scale && *transfer == read.transfer)
+            {
+                return Some(row);
+            }
             if scene.rows.len() == MAX_LAYERS {
                 return None;
             }
+            row_keys.push((scale, read.transfer.clone()));
             scene.rows.push(transfer_row(read, place.scale));
             Some(scene.rows.len() - 1)
         };
@@ -263,7 +276,12 @@ impl GpuScene {
                             let [layer_band, blended, amount] = band(read);
                             [layer_band, blended, amount, row as f32]
                         }
-                        None => [-1.0, -1.0, 0.0, 0.0],
+                        None => {
+                            scene.left_out.push(format!(
+                                "an input of computed mask {index}, with no stretch row left"
+                            ));
+                            [-1.0, -1.0, 0.0, 0.0]
+                        }
                     },
                     None => [-1.0, -1.0, 0.0, 0.0],
                 };
