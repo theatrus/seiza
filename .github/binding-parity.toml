@@ -1015,6 +1015,7 @@ seiza_emission_flux_json = "solve_emission_flux"
 seiza_rc_astro_locate = "rc_astro_locate"
 seiza_rc_astro_tool_schema_json = "rc_astro_tool_schema"
 seiza_rc_astro_process_file_json = "rc_astro_process_file"
+seiza_rc_astro_process_files_json = "rc_astro_process_files"
 seiza_pixinsight_locate = "pixinsight_locate"
 seiza_pixinsight_ml_denoise_model_json = "pixinsight_ml_denoise_model"
 seiza_pixinsight_ml_denoise_file_json = "pixinsight_ml_denoise_file"
@@ -1220,6 +1221,8 @@ remove_structures = { none = "an image-processing primitive for Python callers" 
 # rc-astro
 rc_astro_split_stars = { c = "seiza_rc_astro_process_file_json" }
 rc_astro_process_image = { c = "seiza_rc_astro_process_file_json" }
+rc_astro_process_images = { c = "seiza_rc_astro_process_files_json" }
+rc_astro_split_stars_batch = { c = "seiza_rc_astro_process_files_json" }
 pixinsight_ml_denoise_image = { c = "seiza_pixinsight_ml_denoise_file_json" }
 MlDenoiseLocalSupport = { none = "MLDenoise's mask options; C requests carry the same fields as localSupport" }
 
@@ -1259,6 +1262,9 @@ CatalogSetupProgressResponse = { none = "download progress for the apps' setup s
 
 # parallax: Python splits with rc_astro_split_stars and solves before ParallaxVideo
 "SceneRequest.rc_astro_executable" = { python = "executable" }
+
+# rc-astro: Python's rc_astro_process_files returns the list of runs itself
+"RcAstroProcessFilesResponse.runs" = { none = "rc_astro_process_files returns the list of RcAstroRun itself, in the order of inputs" }
 "SceneRequest.rc_astro_host" = { python = "host" }
 "SceneRequest.catalog_directory" = { none = "Python takes each catalog's path itself: objects=, star_distances=, and StarCatalog.open and BlindIndex.open for the solve" }
 "SceneRequest.minimum_scale_arcsec_per_pixel" = { python = "min_scale_arcsec_px" }

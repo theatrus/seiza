@@ -20794,7 +20794,8 @@ pub unsafe extern "C" fn seiza_calibration_fit_flat_pedestal(
 // RC-Astro external tools (BlurXTerminator, StarXTerminator, NoiseXTerminator)
 // ---------------------------------------------------------------------------
 
-/// Progress callback for [`seiza_rc_astro_process_file_json`]: the fraction
+/// Progress callback for [`seiza_rc_astro_process_file_json`] and
+/// [`seiza_rc_astro_process_files_json`]: the fraction
 /// complete in `[0, 1]` as the tool reports it, plus the caller's context
 /// pointer. Called on the thread that made the call.
 pub type SeizaRcAstroProgressCallback = Option<unsafe extern "C" fn(f32, *mut c_void)>;
@@ -21078,6 +21079,136 @@ pub unsafe extern "C" fn seiza_rc_astro_process_file_json(
     .unwrap_or(ptr::null_mut())
 }
 
+/// A batch of files for one RC-Astro tool, for
+/// [`seiza_rc_astro_process_files_json`]. Unknown fields are an error so a
+/// typo cannot silently run the defaults.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RcAstroProcessFilesRequest {
+    /// "bxt", "sxt", or "nxt".
+    tool: String,
+    /// The image files, each with its own file stem.
+    inputs: Vec<PathBuf>,
+    /// Where the outputs go, created if missing.
+    output_directory: PathBuf,
+    /// Parameter values keyed by schema name, for every input.
+    #[serde(default)]
+    parameters: serde_json::Map<String, serde_json::Value>,
+    /// "auto", "cpu", "gpu", or "gpuN"; absent uses the tool's saved default.
+    #[serde(default)]
+    device: Option<String>,
+    /// Executable path; absent searches PATH.
+    #[serde(default)]
+    executable: Option<PathBuf>,
+    /// Integrator identification for RC-Astro support, e.g. "MyApp-1.2".
+    #[serde(default)]
+    host: Option<String>,
+}
+
+/// What one input of a batch produced.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RcAstroFileRunResponse {
+    primary: PathBuf,
+    /// Extra files written beside the output — StarXTerminator's stars
+    /// image when the "stars" parameter was on.
+    sidecars: Vec<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    device: Option<String>,
+    warnings: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RcAstroProcessFilesResponse {
+    schema_version: u32,
+    /// One entry per input, in the request's order.
+    runs: Vec<RcAstroFileRunResponse>,
+    cli_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ml_version: Option<i64>,
+}
+
+/// Run one RC-Astro tool on many image files in one start of the CLI, which
+/// loads the tool's model once for all of them: far quicker than one
+/// [`seiza_rc_astro_process_file_json`] per file when there are many small
+/// images. Each output goes into `outputDirectory` as
+/// `<input stem>-<tool>.<input extension>`, with its sidecars beside it.
+/// Two inputs with the same file stem, a name holding `*` or `?`, and an
+/// output that would overwrite an input are refused before the CLI starts;
+/// an input the CLI wrote nothing for fails the call. The response's `runs`
+/// follow the request's `inputs`. `progress` and `cancel` work as for
+/// [`seiza_rc_astro_process_file_json`], with progress over the whole
+/// batch. Returns a string released with [`seiza_string_free`], or null
+/// with `error_out` set.
+///
+/// # Safety
+///
+/// `request_json` must be a NUL-terminated UTF-8 string. `cancel` must be
+/// null or a live [`SeizaCancelSignal`] retained until this call returns.
+/// `context` is passed through untouched to `progress`. When non-null,
+/// `error_out` must point to writable storage for one pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn seiza_rc_astro_process_files_json(
+    request_json: *const c_char,
+    cancel: *const SeizaCancelSignal,
+    progress: SeizaRcAstroProgressCallback,
+    context: *mut c_void,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    // As in seiza_rc_astro_process_file_json: the context crosses the
+    // catch_unwind boundary as a plain integer.
+    let context = context as usize;
+    ffi_result(error_out, || {
+        let request_json = required_str(request_json, "rc-astro request JSON")?;
+        let request: RcAstroProcessFilesRequest = serde_json::from_str(&request_json)
+            .map_err(|error| format!("invalid rc-astro request JSON: {error}"))?;
+        let cli = rc_astro_cli(request.executable.clone(), request.host.clone())?;
+        let schema = cli
+            .tool_schema(&request.tool)
+            .map_err(|error| error.to_string())?;
+        let tool_request = ExternalToolRequest {
+            tool: request.tool.clone(),
+            parameters: rc_astro_parameter_values(&request.parameters)?,
+            device: request.device.clone(),
+        };
+        let cancellation = unsafe { cancel.as_ref() }
+            .map(|signal| CancelSignal::from(Arc::clone(&signal.cancelled)));
+        let mut report = |fraction: f32| {
+            if let Some(callback) = progress {
+                unsafe { callback(fraction, context as *mut c_void) };
+            }
+        };
+        let inputs: Vec<&std::path::Path> = request.inputs.iter().map(PathBuf::as_path).collect();
+        let runs = cli
+            .run_on_files(
+                &schema,
+                &tool_request,
+                &inputs,
+                &request.output_directory,
+                cancellation.as_ref(),
+                &mut report,
+            )
+            .map_err(|error| error.to_string())?;
+        owned_json(&RcAstroProcessFilesResponse {
+            schema_version: 1,
+            runs: runs
+                .into_iter()
+                .map(|run| RcAstroFileRunResponse {
+                    primary: run.primary,
+                    sidecars: run.sidecars,
+                    device: run.device,
+                    warnings: run.warnings,
+                })
+                .collect(),
+            cli_version: schema.cli_version.clone(),
+            ml_version: schema.ml_version,
+        })
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
 fn pixinsight(executable: Option<PathBuf>) -> Result<PixInsight, String> {
     match executable {
         Some(path) => Ok(PixInsight::with_executable(path)),
@@ -21342,8 +21473,9 @@ mod rc_astro_tests {
     use super::*;
 
     /// A stand-in rc-astro: answers `<tool> --json` with a schema document
-    /// and otherwise copies the input to the output (with a stars sidecar
-    /// when asked), emitting the real event-stream shape.
+    /// and otherwise copies each input to its output (the file `-o` names,
+    /// or the CLI's own name in the directory it names), with a stars
+    /// sidecar when asked, emitting the real event-stream shape.
     #[cfg(unix)]
     fn fake_rc_astro(directory: &std::path::Path) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
@@ -21369,27 +21501,38 @@ SCHEMA
   exit 0
 fi
 out=""
-input=""
+tool=""
 stars=0
+list="$(dirname "$0")/inputs.list"
+: > "$list"
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift 2 ;;
     --stars) stars=1; shift ;;
     --host|--depth|--device) shift 2 ;;
-    --*|sxt|bxt|nxt) shift ;;
-    *) input="$1"; shift ;;
+    sxt|bxt|nxt) tool="$1"; shift ;;
+    --*) shift ;;
+    *) printf '%s\n' "$1" >> "$list"; shift ;;
   esac
 done
-cp "$input" "$out"
 echo '{"event":"info","topic":"device","device":"cpu"}'
 echo '{"event":"progress","done":50.0}'
 echo '{"event":"progress","done":100.0}'
-echo "{\"event\":\"status\",\"phase\":\"complete\",\"output\":\"$out\"}"
-if [ "$stars" = 1 ]; then
-  sidecar="${out%.fits}-stars.fits"
-  cp "$input" "$sidecar"
-  echo "{\"event\":\"status\",\"phase\":\"complete\",\"output\":\"$sidecar\"}"
-fi
+while IFS= read -r input; do
+  if [ -d "$out" ]; then
+    name="$(basename "$input")"
+    target="$out/${name%.*}-$tool.${name##*.}"
+  else
+    target="$out"
+  fi
+  cp "$input" "$target"
+  echo "{\"event\":\"status\",\"phase\":\"complete\",\"output\":\"$target\"}"
+  if [ "$stars" = 1 ]; then
+    sidecar="${target%.fits}-stars.fits"
+    cp "$input" "$sidecar"
+    echo "{\"event\":\"status\",\"phase\":\"complete\",\"output\":\"$sidecar\"}"
+  fi
+done < "$list"
 "#;
         std::fs::write(&path, script).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -21471,6 +21614,49 @@ fi
         assert_eq!(response["device"], "cpu");
         assert_eq!(response["cliVersion"], "2.6.6");
         assert!(output.is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_batch_of_files_runs_through_the_abi_in_one_call() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = fake_rc_astro(directory.path());
+        let first = directory.path().join("m31.fits");
+        let second = directory.path().join("m33.fits");
+        std::fs::write(&first, b"fake fits").unwrap();
+        std::fs::write(&second, b"fake fits").unwrap();
+        let output = directory.path().join("processed");
+        let request = serde_json::json!({
+            "tool": "sxt",
+            "inputs": [first, second],
+            "outputDirectory": output,
+            "parameters": {"stars": true},
+            "executable": executable,
+        });
+        let request_c = CString::new(request.to_string()).unwrap();
+        let mut error: *mut c_char = ptr::null_mut();
+        let response = unsafe {
+            seiza_rc_astro_process_files_json(
+                request_c.as_ptr(),
+                ptr::null(),
+                None,
+                ptr::null_mut(),
+                &mut error,
+            )
+        };
+        let response = call_json(response, error).unwrap();
+        let runs = response["runs"].as_array().unwrap();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(
+            runs[0]["primary"],
+            output.join("m31-sxt.fits").to_str().unwrap()
+        );
+        assert_eq!(
+            runs[1]["sidecars"][0],
+            output.join("m33-sxt-stars.fits").to_str().unwrap()
+        );
+        assert_eq!(runs[1]["device"], "cpu");
+        assert_eq!(response["cliVersion"], "2.6.6");
     }
 
     #[test]

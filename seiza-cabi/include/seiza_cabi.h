@@ -563,7 +563,8 @@ typedef struct {
 } SeizaSnrSample;
 
 /*
- Progress callback for [`seiza_rc_astro_process_file_json`]: the fraction
+ Progress callback for [`seiza_rc_astro_process_file_json`] and
+ [`seiza_rc_astro_process_files_json`]: the fraction
  complete in `[0, 1]` as the tool reports it, plus the caller's context
  pointer. Called on the thread that made the call.
  */
@@ -3961,6 +3962,33 @@ char *seiza_rc_astro_process_file_json(const char *request_json,
                                        SeizaRcAstroProgressCallback progress,
                                        void *context,
                                        char **error_out);
+
+/*
+ Run one RC-Astro tool on many image files in one start of the CLI, which
+ loads the tool's model once for all of them: far quicker than one
+ [`seiza_rc_astro_process_file_json`] per file when there are many small
+ images. Each output goes into `outputDirectory` as
+ `<input stem>-<tool>.<input extension>`, with its sidecars beside it.
+ Two inputs with the same file stem, a name holding `*` or `?`, and an
+ output that would overwrite an input are refused before the CLI starts;
+ an input the CLI wrote nothing for fails the call. The response's `runs`
+ follow the request's `inputs`. `progress` and `cancel` work as for
+ [`seiza_rc_astro_process_file_json`], with progress over the whole
+ batch. Returns a string released with [`seiza_string_free`], or null
+ with `error_out` set.
+
+ # Safety
+
+ `request_json` must be a NUL-terminated UTF-8 string. `cancel` must be
+ null or a live [`SeizaCancelSignal`] retained until this call returns.
+ `context` is passed through untouched to `progress`. When non-null,
+ `error_out` must point to writable storage for one pointer.
+ */
+char *seiza_rc_astro_process_files_json(const char *request_json,
+                                        const SeizaCancelSignal *cancel,
+                                        SeizaRcAstroProgressCallback progress,
+                                        void *context,
+                                        char **error_out);
 
 /*
  The path of the PixInsight executable in its standard install location,

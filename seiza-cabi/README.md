@@ -389,6 +389,13 @@ exposes the **superset** of what both apps need.
   and reports every written file, StarXTerminator's stars sidecar included.
   Include the schema's `cliVersion`/`mlVersion` in any cache key: a tool
   upgrade changes the output for identical inputs.
+  `seiza_rc_astro_process_files_json` runs one tool on many files in one
+  start of the CLI, which loads the tool's model once for all of them, so
+  many small images take a fraction of the time of one call each. It takes
+  `inputs` and an `outputDirectory`, writes each output there as
+  `<input stem>-<tool>.<input extension>`, and answers `runs` in the order
+  of `inputs`; it refuses two inputs with the same stem, and an output that
+  would overwrite an input, before the CLI starts.
 - **PixInsight MLDenoise** — `seiza_pixinsight_locate` finds PixInsight in
   its standard install location or on `PATH` (null without an error when
   absent). `seiza_pixinsight_ml_denoise_model_json` reads an MLDenoise model

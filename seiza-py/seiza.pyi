@@ -1395,6 +1395,37 @@ def rc_astro_split_stars(
     progress: Callable[[float], None] | None = None,
     cancel: Callable[[], bool] | None = None,
 ) -> tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]]: ...
+def rc_astro_process_files(
+    tool: str,
+    inputs: Sequence[str | Path],
+    output_directory: str | Path,
+    *,
+    parameters: dict[str, float | bool | int] | None = None,
+    device: str | None = None,
+    executable: str | Path | None = None,
+    host: str | None = None,
+    progress: Callable[[float], None] | None = None,
+    cancel: Callable[[], bool] | None = None,
+) -> list[RcAstroRun]: ...
+def rc_astro_process_images(
+    tool: str,
+    images: Sequence[npt.NDArray[np.float32]],
+    *,
+    parameters: dict[str, float | bool | int] | None = None,
+    device: str | None = None,
+    executable: str | Path | None = None,
+    host: str | None = None,
+    progress: Callable[[float], None] | None = None,
+    cancel: Callable[[], bool] | None = None,
+) -> list[RcAstroProcessed]: ...
+def rc_astro_split_stars_batch(
+    images: Sequence[npt.NDArray[np.float32]],
+    *,
+    executable: str | Path | None = None,
+    host: str | None = None,
+    progress: Callable[[float], None] | None = None,
+    cancel: Callable[[], bool] | None = None,
+) -> list[tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]]]: ...
 
 class MlDenoiseLocalSupport:
     """MLDenoise's brightness mask, which protects bright structures."""
