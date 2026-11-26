@@ -27,7 +27,8 @@ from .store import Store, versions
 READ_ONLY = ("psf-fields", "clean-sky", "cut-starless", "cut-sharpen", "sheet-sharpen")
 # The commands that read the sharpening banks, and the manifest, if at
 # all, only for the sets' names.
-BANKS_ONLY = ("train-sharpen", "evaluate-sharpen", "clean-sharpen", "cut-external", "bundle-sharpen")
+BANKS_ONLY = ("train-sharpen", "evaluate-sharpen", "clean-sharpen", "cut-external", "bundle-sharpen",
+              "train-starless")
 
 
 def numbers(text: str) -> tuple[float, ...]:
@@ -222,6 +223,22 @@ def main(argv: list[str] | None = None) -> int:
     sky.add_argument("--workers", type=int, default=2, help="clean this many products at once")
     sky.add_argument("--limit", type=int, help="at most this many products not yet cleaned")
     sky.add_argument("--again", action="store_true", help="clean products already cleaned")
+
+    trains = commands.add_parser("train-starless", help="train the starless model on a starless bank, by one of "
+                                                        "its ways: healing the catalogue fit's estimate, or from "
+                                                        "the image alone")
+    trains.add_argument("--name", required=True, help="the run, under STORE/models/starless/")
+    trains.add_argument("--bank", type=Path, required=True, help="the train bank's directory")
+    trains.add_argument("--validation-bank", type=Path, help="a validation bank's directory")
+    trains.add_argument("--way", choices=("fit", "image"), default="fit")
+    trains.add_argument("--tile", type=int, default=256)
+    trains.add_argument("--width", type=int, default=32)
+    trains.add_argument("--levels", type=int, default=5)
+    trains.add_argument("--steps", type=int, default=10_000)
+    trains.add_argument("--batch", type=int, default=8)
+    trains.add_argument("--learning-rate", type=float, default=3e-4)
+    trains.add_argument("--seed", type=int, default=0)
+    trains.add_argument("--init-from", help="start from this starless run's weights")
 
     starless = commands.add_parser("cut-starless", help="cut a bank of known-truth composites for the starless "
                                                         "model from the stacks the clean-sky pass has cleaned "
@@ -921,6 +938,18 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
 def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
     """`train-sharpen` and `evaluate-sharpen`."""
     from . import sharpen_model
+
+    if arguments.command == "train-starless":
+        from . import starless_model
+
+        settings = starless_model.Settings(way=arguments.way, tile=arguments.tile, width=arguments.width,
+                                           levels=arguments.levels)
+        record = starless_model.train(store, name=arguments.name, bank=arguments.bank,
+                                      validation_bank=arguments.validation_bank, settings=settings,
+                                      steps=arguments.steps, batch=arguments.batch,
+                                      learning_rate=arguments.learning_rate, seed=arguments.seed,
+                                      init_from=arguments.init_from)
+        return {"name": arguments.name, "last": record["history"][-1] if record["history"] else None}
 
     if arguments.command == "bundle-sharpen":
         from .bundle import write_sharpen_bundle
