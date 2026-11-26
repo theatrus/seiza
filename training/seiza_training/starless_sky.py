@@ -265,7 +265,11 @@ def clean_sky(image: np.ndarray, stars: Sequence[tuple[float, float, float]], *,
     image = np.ascontiguousarray(image, dtype=np.float32)
     noise = np.ascontiguousarray(noise, dtype=np.float32)
     height, width = image.shape
-    field = seiza.PsfField.measure(image, saturation=clip)
+    try:
+        field = seiza.PsfField.measure(image, saturation=clip)
+    except seiza.TooFewStarsError:
+        # Too few isolated stars for a field that varies: one PSF for all.
+        field = seiza.PsfField.measure(image, saturation=clip, sparse="global")
     refine = [True] * len(stars) if refine is None else list(refine)
     groups = [([star for star, moved in zip(stars, refine) if moved], "refined"),
               ([star for star, moved in zip(stars, refine) if not moved], "fixed")]
