@@ -453,6 +453,81 @@ fn candidate_search_reaches_valid_fainter_stars_independently_of_usable_budget()
 use measurement_fixture as profile_fixture;
 
 #[test]
+fn a_starless_target_reports_the_profile_check_without_refusing_the_fit() {
+    let (n, b, positions, sources, options) = profile_fixture::profile_field();
+    let with_stars = measure_and_fit_continuum(
+        &n,
+        &[&b],
+        &sources,
+        &positions,
+        &options,
+        &Default::default(),
+    )
+    .unwrap();
+    let ContinuumFitOutcome::Skipped {
+        reason: ContinuumSkipReason::PixelResidual,
+        diagnostics: refused,
+        ..
+    } = with_stars
+    else {
+        panic!("the fixture's profiles fail the check: {with_stars:?}");
+    };
+    assert_eq!(
+        refused.pixel_validation.as_ref().unwrap().target,
+        ContinuumTarget::WithStars
+    );
+
+    let starless = ContinuumPhotometryOptions {
+        target: ContinuumTarget::Starless,
+        ..Default::default()
+    };
+    let fitted = plan(
+        measure_and_fit_continuum(&n, &[&b], &sources, &positions, &options, &starless).unwrap(),
+    );
+    let report = fitted
+        .diagnostics
+        .as_ref()
+        .unwrap()
+        .pixel_validation
+        .clone()
+        .unwrap();
+    // The same measurement, reported and not enforced.
+    assert!(!report.accepted, "{report:?}");
+    assert_eq!(report.target, ContinuumTarget::Starless);
+    let before = refused.pixel_validation.unwrap();
+    assert_eq!(report.p90_absolute_fraction, before.p90_absolute_fraction);
+    // The weights are the ones the gate would have refused, not new ones.
+    let ungated = ContinuumPhotometryOptions {
+        max_pixel_residual: None,
+        ..Default::default()
+    };
+    let reference = plan(
+        measure_and_fit_continuum(&n, &[&b], &sources, &positions, &options, &ungated).unwrap(),
+    );
+    assert_eq!(fitted.coefficients, reference.coefficients);
+
+    // The target is a word in JSON and in text, and is optional.
+    let json = serde_json::to_value(&starless).unwrap();
+    assert_eq!(json["target"], "starless");
+    let parsed: ContinuumPhotometryOptions =
+        serde_json::from_value(serde_json::json!({ "target": "starless" })).unwrap();
+    assert_eq!(parsed.target, ContinuumTarget::Starless);
+    let defaulted: ContinuumPhotometryOptions = serde_json::from_str("{}").unwrap();
+    assert_eq!(defaulted.target, ContinuumTarget::WithStars);
+    assert_eq!(
+        "starless".parse::<ContinuumTarget>().unwrap(),
+        ContinuumTarget::Starless
+    );
+    assert_eq!(ContinuumTarget::WithStars.to_string(), "with_stars");
+    assert!("stars".parse::<ContinuumTarget>().is_err());
+    // A report written before the target existed reads as with stars.
+    let mut old = serde_json::to_value(&before).unwrap();
+    old.as_object_mut().unwrap().remove("target");
+    let old: ContinuumPixelValidation = serde_json::from_value(old).unwrap();
+    assert_eq!(old.target, ContinuumTarget::WithStars);
+}
+
+#[test]
 fn profile_gate_rejects_aperture_success_and_matching_replays_exactly() {
     let (n, b, positions, sources, options) = profile_fixture::profile_field();
     let outcome = measure_and_fit_continuum(

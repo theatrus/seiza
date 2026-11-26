@@ -254,6 +254,17 @@ pub(crate) fn run(args: ContinuumArgs) -> Result<()> {
                 .map(read_json)
                 .transpose()?
                 .unwrap_or_default();
+            // --output subtracts the plan from these inputs, which still have
+            // their stars, so the pixel check must be able to refuse it.
+            if photometry.target == seiza_stacking::ContinuumTarget::Starless
+                && args.output.is_some()
+            {
+                bail!(
+                    "a starless target is for a plan subtracted from starless images; \
+                     --output subtracts it from these inputs, which have their stars. \
+                     Save the plan with --save-plan and subtract it from the starless images"
+                );
+            }
             if masks.is_empty() {
                 seiza_stacking::measure_and_fit_continuum(
                     &narrowband.image,

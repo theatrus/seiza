@@ -132,6 +132,55 @@ pub struct ContinuumPhotometryOptions {
     /// Explicit Gaussian broadening on copies, before measurement/subtraction.
     #[serde(alias = "psf_matching")]
     pub psf_matching: Option<ContinuumPsfOptions>,
+    /// What the fitted plan will be subtracted from. With
+    /// [`ContinuumTarget::Starless`] the pixel check still runs and is
+    /// reported, but does not refuse the fit.
+    pub target: ContinuumTarget,
+}
+
+/// What a continuum plan will be subtracted from.
+///
+/// The pixel check refuses a fit whose held-out stars would keep cores or
+/// halos after subtraction. Stars that are no longer in the image leave no
+/// such residual, so for a starless target the check is advisory and the
+/// photometric checks alone decide. The weights are fitted on the images
+/// with their stars either way.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuumTarget {
+    /// Images that still have their stars. A failed pixel check refuses the
+    /// fit.
+    #[default]
+    WithStars,
+    /// Starless images, such as a star removal tool's output. A failed
+    /// pixel check is reported, and the fit stands.
+    Starless,
+}
+
+impl ContinuumTarget {
+    fn as_word(self) -> &'static str {
+        match self {
+            Self::WithStars => "with_stars",
+            Self::Starless => "starless",
+        }
+    }
+}
+
+impl std::fmt::Display for ContinuumTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_word())
+    }
+}
+
+impl std::str::FromStr for ContinuumTarget {
+    type Err = Error;
+
+    fn from_str(word: &str) -> Result<Self> {
+        [Self::WithStars, Self::Starless]
+            .into_iter()
+            .find(|target| target.as_word() == word)
+            .ok_or_else(|| invalid("Continuum target must be with_stars or starless"))
+    }
 }
 impl Default for ContinuumPhotometryOptions {
     fn default() -> Self {
@@ -141,6 +190,7 @@ impl Default for ContinuumPhotometryOptions {
             annulus_outer: 20.0,
             max_pixel_residual: Some(0.15),
             psf_matching: None,
+            target: ContinuumTarget::WithStars,
         }
     }
 }
@@ -252,6 +302,11 @@ pub struct ContinuumPixelValidation {
     pub median_halo_fraction: f64,
     pub limit: f64,
     pub accepted: bool,
+    /// The target the profiles were checked for. For
+    /// [`ContinuumTarget::Starless`], `accepted: false` did not refuse the
+    /// fit.
+    #[serde(default)]
+    pub target: ContinuumTarget,
 }
 
 /// How the coefficients were obtained. Manual plans have no fit diagnostics.
@@ -1360,9 +1415,10 @@ fn measure_and_fit_inner(
             report.accepted &= clipped.stars == clipped_positions.len()
                 && clipped.maximum_absolute_fraction <= limit;
         }
-        let accepted = report.accepted;
+        // Stars absent from the target leave no core or halo to refuse.
+        let refuses = !report.accepted && photometry.target == ContinuumTarget::WithStars;
         plan.diagnostics.as_mut().unwrap().pixel_validation = Some(report);
-        if !accepted {
+        if refuses {
             outcome = skipped(
                 ContinuumSkipReason::PixelResidual,
                 "Held-out or clipped stellar pixel profiles retain excessive cores or halos; match the PSFs or inspect the residual before using manual weights",
@@ -1635,6 +1691,7 @@ fn validate_pixel_profiles(
             median(&halos)
         },
         limit,
+        target: geometry.target,
         accepted: absolute.len() >= (options.minimum_stars / 4).max(3)
             && absolute.len() as f64 >= expected_stars as f64 * options.minimum_inlier_fraction
             && p90 <= limit,

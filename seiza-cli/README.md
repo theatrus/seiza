@@ -1718,6 +1718,11 @@ The target must be at least every measured width, at most 32 pixels. Held-out
 pixel validation still checks core/halo cancellation. A reused saved plan
 replays the exact preparation.
 
+Add `"target":"starless"` when the saved plan will be subtracted from starless
+images: the pixel check is then reported and does not refuse the fit. Such a
+plan cannot be written with `--output`, which subtracts it from the inputs
+given, and those still have their stars; save it with `--save-plan` instead.
+
 `seiza color balance --star-mask-radius 8` excludes detected stars from display
 balance statistics. `seiza color reduce-green --input mapped.fits --output
 reduced.fits --amount 0.5` reduces green excess on DISPLAY RGB before RGB stars

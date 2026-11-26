@@ -335,3 +335,41 @@ fn signed_xisf_output_and_raw_bayer_refusal_use_the_shared_image_contract() {
     assert!(String::from_utf8_lossy(&bad.stderr).contains("prepared mono"));
     assert!(!dir.join("bayer.fits").exists());
 }
+
+#[test]
+fn a_starless_target_is_refused_where_the_inputs_with_stars_are_subtracted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    for name in ["ha.fits", "r.fits"] {
+        write(&dir.join(name), 64, 64, &vec![0.0; 64 * 64], Some("LINEAR"));
+    }
+    std::fs::write(dir.join("starless.json"), r#"{"target":"starless"}"#).unwrap();
+    let refused = run(
+        dir,
+        &[
+            "--photometry-options",
+            "starless.json",
+            "--output",
+            "out.fits",
+        ],
+    );
+    assert!(!refused.status.success());
+    let message = String::from_utf8_lossy(&refused.stderr);
+    assert!(message.contains("--save-plan"), "{message}");
+    assert!(!dir.join("out.fits").exists());
+    // Without --output the fit runs and reports why it stopped here: the
+    // flat images have no stars.
+    let report = run(
+        dir,
+        &[
+            "--photometry-options",
+            "starless.json",
+            "--report",
+            "report.json",
+        ],
+    );
+    assert!(!report.status.success());
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("report.json")).unwrap()).unwrap();
+    assert_eq!(report["reason"], "no_stars");
+}
