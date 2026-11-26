@@ -48,13 +48,21 @@ from . import starless_sky
 from . import starless_stars as stars
 from .store import Store
 
-# Raised with the bank's layout, so a bank of another is cut anew.
-BANK_VERSION = 2
+# Raised with the bank's layout or what it holds, so a bank of another is cut
+# anew. 3: the fit's estimate carries bright stars past their stamps, fainter
+# made halos and rings, the halos' and spikes' own light, on clean skies of
+# version 3.
+BANK_VERSION = 3
 # A bank's planes, a window each: the composite; its starless truth; the
 # catalogue fit's starless estimate and its stars' model; the noise map a
 # network reads, made from the input alone (`image_sigma`); where the loss
-# may look (finite, and outside the clean sky's mask); and the stars' places.
-PLANES = ("input", "starless", "fit_starless", "fit_model", "noise", "valid", "points")
+# may look (finite, and outside the clean sky's mask); the stars' places; and
+# of the stars' light, noise-free, what their halos and rings hold and what
+# their diffraction spikes do (a pupil's PSF less the same optics' without
+# vanes or hexagon; 0 for a stack's own field, of refractors and SCTs with no
+# spider), so that halos can be kept in part and spikes given a layer of
+# their own: the stars layer less these is the stars' cores and wings.
+PLANES = ("input", "starless", "fit_starless", "fit_model", "noise", "valid", "points", "halos", "spikes")
 # A window is kept where at least this share of it is valid.
 VALID_SHARE = 0.8
 
@@ -84,14 +92,22 @@ WIDE_STAMP = 255
 FIELD_TRUSTED = 0.6
 WING_BETA = (1.8, 3.0)
 # The brightest share of stars carry halos: wings holding between these
-# shares of their light, wide `HALO_WIDTH` star widths, and a reflection
-# ring for `RING_SHARE` of them.
+# shares of their light, drawn evenly in their logarithm, wide `HALO_WIDTH`
+# star widths, and a reflection ring for `RING_SHARE` of them. Bright stars
+# on our stacks leave 1 to 2.5% of their light past 20 px (2026-11-26), so
+# halos are drawn from a half percent up, the faint ones as common as the
+# strong.
 HALO_STARS = 0.005
-HALO_LIGHT = (0.03, 0.15)
+HALO_LIGHT = (0.005, 0.15)
 HALO_WIDTH = (3.0, 8.0)
 RING_SHARE = 0.3
-RING_LIGHT = (0.005, 0.03)
+RING_LIGHT = (0.002, 0.02)
 RING_RADIUS = (6.0, 20.0)
+
+
+def log_uniform(rng: np.random.Generator, bounds: tuple[float, float]) -> float:
+    """A draw between `bounds`, even in its logarithm."""
+    return float(math.exp(rng.uniform(math.log(bounds[0]), math.log(bounds[1]))))
 
 
 def radii(size: int) -> np.ndarray:
@@ -165,6 +181,9 @@ class Telescope:
     description: str = ""
     fwhm: float = 3.0
     wing_beta: float = 2.5
+    # A pupil's PSF without its vanes or hexagon, where it has them: the
+    # stamp less this is the spikes.
+    plain: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         if self.field is None:
@@ -189,6 +208,11 @@ class Telescope:
         """The stamp a star of `flux` at (x, y) is drawn on over the noise
         `floor`: as far as it reaches and `FADE_BAND` times on, faded out in
         a circle (`rounded`), its light per unit of `flux`."""
+        return self.stamps_for(x, y, flux, floor)[0]
+
+    def stamps_for(self, x: float, y: float, flux: float, floor: float) -> tuple[np.ndarray, np.ndarray | None]:
+        """`stamp_for`'s stamp, and its diffraction spikes drawn alike (the
+        stamp less `plain`), None where the telescope throws none."""
         outer = min(WIDE_STAMP // 2, int(math.ceil(self.reach(flux, floor) * FADE_BAND)))
         size = 2 * outer + 1
         if self.field is None:
@@ -197,7 +221,10 @@ class Telescope:
             source = np.asarray(self.field.stamp_at(x, y), dtype=np.float64)
             if outer > FIELD_TRUSTED * (source.shape[0] // 2):
                 source = winged(source, size, self.fwhm, self.wing_beta)
-        return rounded(cropped(source, size))
+        drawn = rounded(cropped(source, size))
+        if self.plain is None:
+            return drawn, None
+        return drawn, rounded(cropped(source - np.asarray(self.plain, dtype=np.float64), size))
 
 
 def magnitude_light(table: np.ndarray) -> tuple[float, float] | None:
@@ -225,8 +252,15 @@ def pupil_telescope(rng: np.random.Generator, fwhm: float) -> Telescope:
     optics = stars.Optics(diffraction_px=diffraction, broad=bool(rng.random() < 0.5), seeing_fwhm=seeing,
                           pupil=pupil)
     stamp = stars.pupil_psf(optics, WIDE_STAMP)
-    return Telescope(stamp=stamp, fwhm=fwhm, description=f"pupil vanes {vanes} obstruction {pupil.obstruction:.2f} "
-                                                         f"diffraction {diffraction:.2f} px seeing {seeing:.2f} px")
+    plain = None
+    if pupil.vanes or pupil.hexagon:
+        bare = stars.Pupil(obstruction=pupil.obstruction)
+        plain = stars.pupil_psf(stars.Optics(diffraction_px=optics.diffraction_px, broad=optics.broad,
+                                             seeing_fwhm=optics.seeing_fwhm, seeing_beta=optics.seeing_beta,
+                                             pupil=bare), WIDE_STAMP)
+    return Telescope(stamp=stamp, fwhm=fwhm, plain=plain,
+                     description=f"pupil vanes {vanes} obstruction {pupil.obstruction:.2f} "
+                                 f"diffraction {diffraction:.2f} px seeing {seeing:.2f} px")
 
 
 def add_star(light: np.ndarray, stamp: np.ndarray, x: float, y: float, flux: float) -> None:
@@ -247,8 +281,9 @@ def add_star(light: np.ndarray, stamp: np.ndarray, x: float, y: float, flux: flo
 def composite(sky: np.ndarray, table: np.ndarray, summary: dict[str, Any], telescope: Telescope,
               rng: np.random.Generator, noise: np.ndarray) -> dict[str, Any]:
     """`sky` with stars put back (the module's list): the input, both
-    truths, the stars' noise-free light, and the stars as (x, y, magnitude,
-    flux) in the order they were put."""
+    truths, the stars' noise-free light and, of it, the halos' and rings'
+    (`halos`) and the diffraction spikes' (`spikes`), and the stars as (x, y,
+    magnitude, flux) in the order they were put."""
     height, width = sky.shape
     col = {name: index for index, name in enumerate(starless_sky.STAR_COLUMNS)}
     scale = magnitude_light(table)
@@ -260,6 +295,9 @@ def composite(sky: np.ndarray, table: np.ndarray, summary: dict[str, Any], teles
     drawn = rng.choice(magnitudes, size=count) + rng.normal(0.0, 0.15, size=count)
     finite = np.isfinite(sky)
     light = np.zeros((height, width), dtype=np.float64)
+    # Of that light, the halos' and rings', and the spikes'.
+    halo_light = np.zeros((height, width), dtype=np.float64)
+    spike_light = np.zeros((height, width), dtype=np.float64)
     fwhm = float(summary.get("fwhm_px") or 3.0)
     floor = float(np.nanmedian(noise))
     placed = []
@@ -271,18 +309,24 @@ def composite(sky: np.ndarray, table: np.ndarray, summary: dict[str, Any], teles
         if not finite[int(round(y)), int(round(x))]:
             continue
         flux = 10 ** (-0.4 * (slope * magnitude + zero))
-        add_star(light, telescope.stamp_for(x, y, flux, floor), x, y, flux)
+        stamp, spikes = telescope.stamps_for(x, y, flux, floor)
+        add_star(light, stamp, x, y, flux)
+        if spikes is not None:
+            add_star(spike_light, spikes, x, y, flux)
         if magnitude <= halo_cut:
             size = 2 * int(min(height, width, 6 * HALO_WIDTH[1] * fwhm) // 2) - 1
-            share = rng.uniform(*HALO_LIGHT)
-            add_star(light, rounded(stars.halo_wings(size, rng.uniform(*HALO_WIDTH) * fwhm, rng.uniform(1.2, 2.0))),
-                     x, y, flux * share)
+            share = log_uniform(rng, HALO_LIGHT)
+            halo = rounded(stars.halo_wings(size, rng.uniform(*HALO_WIDTH) * fwhm, rng.uniform(1.2, 2.0)))
+            for target in (light, halo_light):
+                add_star(target, halo, x, y, flux * share)
             if rng.random() < RING_SHARE:
                 radius = rng.uniform(*RING_RADIUS) * fwhm
                 ring_size = 2 * int(min(height, width, 2.6 * radius + 20) // 2) - 1
-                ring = stars.reflection_ring(ring_size, radius, radius / rng.uniform(4.0, 8.0),
-                                             x=rng.normal(0, 0.05 * radius), y=rng.normal(0, 0.05 * radius))
-                add_star(light, rounded(ring), x, y, flux * rng.uniform(*RING_LIGHT))
+                ring = rounded(stars.reflection_ring(ring_size, radius, radius / rng.uniform(4.0, 8.0),
+                                                     x=rng.normal(0, 0.05 * radius), y=rng.normal(0, 0.05 * radius)))
+                ring_flux = flux * log_uniform(rng, RING_LIGHT)
+                for target in (light, halo_light):
+                    add_star(target, ring, x, y, ring_flux)
         placed.append((x, y, float(magnitude), flux))
     photon = float(summary.get("photon_term") or 0.0)
     shot = rng.standard_normal((height, width)) * np.sqrt(photon * np.clip(light, 0, None))
@@ -293,7 +337,8 @@ def composite(sky: np.ndarray, table: np.ndarray, summary: dict[str, Any], teles
     image = np.where(finite, image, np.nan).astype(np.float32)
     starless = sky.astype(np.float32)
     return {"input": image, "starless": starless, "stars": (image - starless).astype(np.float32),
-            "light": light.astype(np.float32), "placed": np.array(placed, dtype=np.float64).reshape(-1, 4)}
+            "light": light.astype(np.float32), "halos": halo_light.astype(np.float32),
+            "spikes": spike_light.astype(np.float32), "placed": np.array(placed, dtype=np.float64).reshape(-1, 4)}
 
 
 def fitted(made: dict[str, Any], noise: np.ndarray, clip: float | None, fwhm: float) -> dict[str, Any]:
@@ -301,12 +346,14 @@ def fitted(made: dict[str, Any], noise: np.ndarray, clip: float | None, fwhm: fl
     stars at the places they were put, with their places refined where their
     signal to noise reaches `starless_sky.REFINE_SNR` (a star's light over
     the noise of a Gaussian's effective area, 4π σ², for its `fwhm`), with
-    the field measured on it (`starless_sky.clean_sky`)."""
+    the field measured on it and bright stars carried on past its stamps,
+    so no square edge is left in the estimate (`starless_sky.clean_sky`,
+    `wings`)."""
     listed = [(float(x), float(y), float(m)) for x, y, m, _ in made["placed"]]
     fluxes = made["placed"][:, 3] if listed else np.zeros(0)
     footprint = float(np.nanmedian(noise)) * math.sqrt(4.0 * math.pi) * fwhm / 2.3548
     refine = [bool(flux >= starless_sky.REFINE_SNR * footprint) for flux in fluxes]
-    return starless_sky.clean_sky(made["input"], listed, noise=noise, clip=clip, refine=refine)
+    return starless_sky.clean_sky(made["input"], listed, noise=noise, clip=clip, refine=refine, wings=True)
 
 
 def points_plane(placed: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
@@ -384,7 +431,8 @@ def prepared(store_root: str, scratch: str | None, product: dict[str, Any], *, d
             valid = np.isfinite(made["input"]) & np.isfinite(sky) & ~mask
             plane = points_plane(made["placed"], sky.shape)
             full = {"input": made["input"], "starless": made["starless"], "fit_starless": fit["sky"],
-                    "fit_model": fit["model"], "noise": noise, "valid": valid.astype(np.uint8), "points": plane}
+                    "fit_model": fit["model"], "noise": noise, "valid": valid.astype(np.uint8), "points": plane,
+                    "halos": made["halos"], "spikes": made["spikes"]}
             for top, left in window_corners(valid, side, windows, rng):
                 cut = (slice(top, top + side), slice(left, left + side))
                 found.append({"planes": {name: np.nan_to_num(full[name][cut]) for name in PLANES},

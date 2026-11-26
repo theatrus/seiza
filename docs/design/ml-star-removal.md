@@ -29,12 +29,17 @@ and on.
   common: a colour image's stars are removed from its three channels
   together, from the same positions and the same shapes, so no channel keeps
   a star another lost and no coloured rim is left.
-- **Spikes are stars.** A star's diffraction spikes go into the stars layer
-  and leave the starless image clean. How many there are and where they point
-  depends on the telescope's obstructions: none for a refractor or most
-  catadioptrics, four from two crossed vanes, six from three, the 6 + 2 of
-  JWST's hexagonal segments and its strut, and they may be thin, thick,
-  chromatic or curved. Nothing in the model assumes one pattern.
+- **Spikes are stars, with a layer of their own.** A star's diffraction
+  spikes leave the starless image clean, and can be given as a spikes image
+  apart from the stars layer, so a user may keep stars without spikes, or
+  spikes alone to restyle them; starless + stars + spikes is still the
+  input. How many there are and where they point depends on the telescope's
+  obstructions: none for a refractor or most catadioptrics, four from two
+  crossed vanes, six from three, the 6 + 2 of JWST's hexagonal segments and
+  its strut, and they may be thin, thick, chromatic or curved. Nothing in
+  the model assumes one pattern. The bank keeps each composite's spikes'
+  light apart for this: a made pupil's PSF less the same optics' without
+  its vanes or hexagon, so the obstruction's rings stay with the star.
 - **The catalogue and a network.** Seiza is a plate solver, so the model
   need not work from the image alone. The image is solved, its stars listed
   from Seiza's deep Gaia catalogue (to G 20), fitted with its own PSF field
@@ -64,6 +69,13 @@ and on.
   out past 300 px. A stack holds too few bright isolated stars to read a
   halo's shape cleanly over its nebula: the halos are read over many stacks
   of each telescope (2026-11-25).
+- **Halo reduction is a setting.** How much of a halo leaves with its star
+  is the user's to choose, from none (the halo stays in the starless image)
+  to all of it, in either design. So the halos' light is given apart too: a
+  halo layer, of which a chosen share goes back into the starless image and
+  the rest with the stars, the layers still adding back to the input. The
+  bank keeps each composite's halos' and rings' light apart for this, as it
+  does the spikes'.
 
 ## The data
 
@@ -124,14 +136,35 @@ layers:
    undersampled fields until their fit is better.
 
    The validation bank's windows show the masks covering the dipoles and
-   the clipped cores. They do not cover a clipped star's halo. A masked
-   disc is sized by the star's peak over the noise, and a clipped star's
-   peak is the clip level, far below its true peak. So its glow past the
-   65 px stamp stays in the truth unmasked, and the network is taught to
-   keep the halos of the brightest real stars. The next clean-sky version
-   will size a clipped star's disc from its catalogue magnitude on the
-   stack's own magnitude scale, out to where its light, wing included,
-   falls below the noise.
+   the clipped cores. They do not cover a bright star's halo. The fit's
+   stamps are 33 px, or 7 FWHM where that is wider, so a star's light past
+   them is never taken out. A masked disc grows with the logarithm of the
+   star's peak over the noise, and even a clipped star's disc reaches only
+   13 to 15 FWHM, about 30 px on 2.3 px stars. Its glow past that stays in
+   the truth unmasked, and the network is taught to keep the halos of the
+   brightest real stars. (Clipped stars' fitted fluxes are not capped by the
+   clip: fitted from their wings, they read one to two times their
+   catalogue brightness.)
+
+   Taking that light out does not work on a stack. On 2.3 px stars, 129 px
+   stamps leave nothing past 9 px. But on 8.3 px stars, every stamp size
+   took out a flat 1 to 4 millionths of a star's light a pixel too much
+   (5 to 8% of it), because a stamp measured from clipped stars reads its
+   background far from the star. Reading what the fit leaves as a profile
+   by flux, inside and outside the stamp, and taking that out, fails too,
+   because what is left grows with a star's brightness. In a crowded field
+   the faint stars on a bright one's wing take some of it for their own
+   light: on a dense stack such a profile held −15% of a star's light, and
+   would have added light about every bright star. A truth must hold only
+   what was measured, so version 3 of the clean skies takes nothing more
+   out and masks instead. About each clipped or very bright star, what is
+   left is read ring by ring in eight sectors. A ring glows where, in seven
+   of its sectors at least, the median stands over 0.3 of the noise above
+   the same sector 1.55 times further out. A star's glow is round; a nebula
+   about it slopes and passes on one side only. The star's disc reaches on
+   while its rings glow (the reason "glow"): 10 to 16 stars on deep stacks
+   of 2.3 px stars, with the masked share unchanged to a tenth of a
+   percent.
 2. **Stars put back** (`starless_bank`). Stars are drawn into a clean sky at
    random places, between half and one and a half times as many as the
    clean-sky pass took out of it, their magnitudes drawn from those it took
@@ -160,12 +193,23 @@ layers:
    isolated stars leave past 20 px is small. On an SCT of 7.4 px stars
    (254 stacks), G 3 to 8 leave 2.5% of their light there and G 10 to 12
    leave 1.4%, fading out by about 100 px. On fast astrographs of 2.2 px
-   stars (391 stacks), G 3 to 8 leave 0.8 to 2.4%. Those stacks show a
-   reflection ring at 16 to 24 px (7 to 10 FWHM) holding about 0.3% of the
-   star's light. The SCT shows a shelf at 24 to 37 px (3 to 5 FWHM). The
-   first banks' made halos, 3 to 15% of a star's light, and rings, 0.5 to
-   3%, are stronger than these. The next bank draws them from about 0.5%
-   up, so that faint halos, the common kind, are among those learned.
+   stars (391 stacks), G 3 to 8 leave 0.8 to 2.4%. What looked like a
+   reflection ring at 16 to 24 px on those, and a shelf at 24 to 37 px on
+   the SCT, is the light past the fit's stamps (33 and 53 px): with
+   stamps of 129 px the ring is gone. The first banks' made halos, 3 to 15%
+   of a star's light, and rings, 0.5 to 3%, are stronger than these. Bank
+   version 3 draws halos from 0.5% and rings from 0.2%, evenly in the
+   logarithm, so that faint halos, the common kind, are among those
+   learned.
+
+   The fit's estimate in the bank (not the truth) draws each bright star's
+   stamp out to 0.6 of its half side and blends it from there into a
+   Moffat wing of the field's FWHM and β, matched on that ring, carried
+   past the stamp and faded round. A measured stamp's outer part holds the
+   field's noise and any pedestal, which a bright star's flux raises into a
+   square of noise; X1 learned that square. On a test field of β 2.5
+   stars, the estimate's model follows the stars' own wings to within 20%
+   from 18 to 25 px, where the fit's alone falls to under a third of them.
 3. **Noise.** The stars' own photon noise, at the stack's photon term, is
    added to the input, with the clean sky's noise already there.
 4. **Saturation.** Cores are clipped where the stack clips.
@@ -259,8 +303,9 @@ estimate) and ends at 0.035, behind X1's 0.028. Its sky error is twice X1's,
 because it takes some of the sky's noise out with the stars.
 
 The sheets show what the numbers miss. The fit's star models end in square
-65 px stamps: inside, the star is taken out, and outside, its wing and
-halo are left. X1 learned that edge. About bright stars it leaves a
+stamps (33 to 65 px), whose outer parts hold the field's measured noise:
+inside, the star is taken out with that noise raised by its flux, and
+outside, its wing and halo are left. X1 learned that edge. About bright stars it leaves a
 square-edged patch, and in the stars layer the sky's noise shows in a square
 about each star. X2 has no squares, and over a bright star on nebula its
 fill carries the nebula through where X1 leaves a flat blob. Both fill the
@@ -268,15 +313,21 @@ widest halos with a smooth patch a little darker than the sky about it, and
 put the sky's noise there into the stars layer: where a star buries the
 sky's noise, a network trained to the median gives none back.
 
-Next:
+Next (under way, 2026-11-26):
 
-- The fit's models drawn like the bank's stars: each star's stamp carried on
-  by its wing and faded round, so no fit leaves an edge (the bank's
-  `fit_model` and the runtime's fit alike).
-- Clipped stars' discs sized from their catalogue brightness (clean-sky
-  version 3), and made halos and rings drawn from the faint ones measured
-  up.
-- X1 and X2 again on that bank, then the wider network.
+- Clean skies of version 3 (bright stars' glows masked) and banks of
+  version 3: the fit's estimate drawn with smooth wings past a trusted ring
+  (the runtime's fit to do the same), halos and rings from the faint ones
+  measured up, and each composite's halos' and spikes' light kept apart.
+- X3 (`fit`) and X4 (`image`), as X1 and X2 on the new banks, with X1 and
+  X2 measured again on the new validation bank beside them.
+- Where a star buries the sky's noise, the starless image is given noise
+  to match after the network, drawn from the noise map, and the same taken
+  out of the stars layer, so the layers still add back to the input; the
+  measures are of the network's own output, before that noise.
+- Later: a halo layer and a spikes layer from the network, for halo
+  reduction as a setting and spikes as their own image; then the wider
+  network.
 
 ## Order of work
 

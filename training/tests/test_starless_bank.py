@@ -263,3 +263,65 @@ def test_a_pupil_telescope_has_the_stack_s_width():
         row = stamp[middle]
         above = np.nonzero(row >= row.max() / 2)[0]
         assert 2.5 <= above[-1] - above[0] + 1 <= 6.5
+
+
+def vaned_telescope(vanes=4, hexagon=False):
+    """A pupil telescope of known vanes, and its PSF without them."""
+    pupil = stars.Pupil(obstruction=0.3, vanes=vanes, vane_width=0.02, angle=20.0, hexagon=hexagon)
+    optics = stars.Optics(diffraction_px=1.5, seeing_fwhm=2.5, pupil=pupil)
+    bare = stars.Optics(diffraction_px=1.5, seeing_fwhm=2.5, pupil=stars.Pupil(obstruction=0.3))
+    return (bank.Telescope(stamp=stars.pupil_psf(optics, bank.WIDE_STAMP), fwhm=3.0,
+                           plain=stars.pupil_psf(bare, bank.WIDE_STAMP)), pupil)
+
+
+def test_a_pupil_s_spikes_are_its_stamp_less_the_same_optics_without_vanes():
+    telescope, pupil = vaned_telescope()
+    drawn, spikes = telescope.stamps_for(0.0, 0.0, 1e7, 1.0)
+    assert spikes.shape == drawn.shape
+    directions = stars.spike_directions(pupil)
+    # The spikes hold the light along the spikes and next to none between...
+    seen = stars.spikes_seen(spikes, directions, 15.0, 60.0)
+    assert seen["on"] > 20 * abs(seen["between"])
+    # ...and the stamp less them throws none.
+    rest = stars.spikes_seen(drawn - spikes, directions, 15.0, 60.0)
+    assert rest["on"] < 1.5 * rest["between"]
+    # The spikes are the vanes' alone: the obstruction's rings stay with the
+    # star (4 to 12 px out, the spikes hold 1% of the light; with the
+    # obstruction's rings, 17%).
+    middle = drawn.shape[0] // 2
+    yy, xx = np.mgrid[0:drawn.shape[0], 0:drawn.shape[1]]
+    near = (np.hypot(xx - middle, yy - middle) >= 4) & (np.hypot(xx - middle, yy - middle) < 12)
+    assert abs(spikes[near].sum()) < 0.05 * drawn[near].sum()
+    # A telescope without vanes, as the stack's own field, throws none.
+    assert bank.Telescope(stamp=telescope.stamp, fwhm=3.0).stamps_for(0.0, 0.0, 1e7, 1.0)[1] is None
+    # And a drawn pupil telescope keeps its PSF without vanes where it has vanes.
+    rng = np.random.default_rng(31)
+    for _ in range(6):
+        drawn_telescope = bank.pupil_telescope(rng, 3.0)
+        has_vanes = not drawn_telescope.description.startswith("pupil vanes 0 ")
+        assert (drawn_telescope.plain is not None) == has_vanes
+        if has_vanes:
+            thrown = drawn_telescope.stamp - drawn_telescope.plain
+            assert abs(thrown[near].sum()) < 0.05 * drawn_telescope.stamp[near].sum()
+
+
+def test_a_composite_keeps_its_halos_and_spikes_light_apart():
+    telescope, pupil = vaned_telescope()
+    sky, table, summary, noise = one_bright_star_case(np.random.default_rng(6))
+    made = bank.composite(sky, table, summary, telescope, np.random.default_rng(16), noise)
+    # The halos' light is what the stars hold past their own profiles.
+    np.testing.assert_allclose(made["halos"], made["light"] - redrawn(made, telescope, noise),
+                               atol=1e-6 * float(made["light"].max()))
+    assert made["halos"].sum() > 0
+    # The spikes' light runs along the brightest star's spikes.
+    bright = made["placed"][np.argmin(made["placed"][:, 2])]
+    half = 80
+    row, column = int(round(bright[1])), int(round(bright[0]))
+    if half <= row < sky.shape[0] - half and half <= column < sky.shape[1] - half:
+        cut = made["spikes"][row - half:row + half + 1, column - half:column + half + 1]
+        seen = stars.spikes_seen(cut, stars.spike_directions(pupil), 15.0, 60.0)
+        assert seen["on"] > 10 * abs(seen["between"])
+    assert np.abs(made["spikes"]).sum() > 0
+    # A telescope without vanes leaves the spikes' plane empty.
+    plain = bank.Telescope(stamp=stars.moffat_stamp(bank.WIDE_STAMP, 4.0, 3.0), fwhm=4.0)
+    assert not bank.composite(sky, table, summary, plain, np.random.default_rng(16), noise)["spikes"].any()

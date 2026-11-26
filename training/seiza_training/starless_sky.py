@@ -19,14 +19,26 @@ For a product:
    measured from the image, so they miss a little of every star's light. What
    bright, unclipped, isolated stars leave, each moved to its own centre and
    over its flux, is averaged and taken out of every star in proportion to
-   its flux (`PSF_MISS_*`).
+   its flux (`PSF_MISS_*`). Past that cut nothing more is taken out of a
+   clean sky: what the stars leave past the stamps (33 px, or 7 FWHM) grows
+   with their brightness and, in a crowded field, the faint stars on a
+   bright one's wing take some of it for their own light, so no one profile
+   by flux reads it (2026-11-26: on a dense stack of 2.3 px stars, such a
+   profile held -15% of a star's light). Bright stars' glows are masked
+   instead (step 5). Where the fit's estimate is wanted rather than a
+   truth, as the bank's fit planes are and a runtime's fit is, each bright
+   star is carried on past its stamp by a Moffat wing (`WING_*`), so its
+   square edge is not left in the estimate.
 4. The noise each star is judged by: the image's noise map, with the star's
    own photon noise, whose scale is found from how the leftovers' scatter
    grows with the stars' light (`photon_term`). Judged by the sky's noise
    alone, a well taken out bright star fails by its photon noise.
 5. The mask: about each star that is clipped, fitted poorly, or left far
    over or under its noise at its core, a disc that grows with the star's
-   brightness (`MASK_*`). On a deep stack of 8.6 px stars, a tenth of a
+   brightness (`MASK_*`); and about a clipped or very bright star, as far
+   as what it leaves, read ring by ring, stays over half the noise
+   (`GLOW_*`): what a stack's stars leave past the stamps grows with their
+   brightness, which no one profile by flux takes out. On a deep stack of 8.6 px stars, a tenth of a
    percent of each star's light is left after the correction; the stars
    fainter than G 13 leave nothing the stack's two independent halves agree
    on more than they agree on the sky beside them, and the brighter ones
@@ -56,8 +68,8 @@ from .manifest import Manifest
 from .store import Store, versions
 
 # Raised with the records' layout or what they hold, so older ones are made
-# again.
-CLEAN_SKY_VERSION = 2
+# again. 3: bright stars' glows masked (`GLOW_*`).
+CLEAN_SKY_VERSION = 3
 
 # The products the pass cleans, as the sharpening bank's known-kernel
 # windows come from.
@@ -70,7 +82,7 @@ SPLITS = ("train", "validation")
 # (`REASONS`, a bit each; 0 for a star kept).
 STAR_COLUMNS = ("x", "y", "magnitude", "flux", "flux_error", "background", "chi2", "clipped", "core_left",
                 "reasons")
-REASONS = ("clipped", "poor fit", "hole", "left", "dipole")
+REASONS = ("clipped", "poor fit", "hole", "left", "dipole", "glow")
 
 # A detector's star within this many pixels of a catalogue star is that star.
 SAME_STAR_PX = 3.0
@@ -98,6 +110,40 @@ PSF_MISS_FLUX = 2000.0
 PSF_MISS_ISOLATION = 4.0
 PSF_MISS_CUT = 3.0
 PSF_MISS_STARS = 10
+
+# About a clipped star, or one over `GLOW_FLUX` times its noise in flux, what
+# the fit leaves is read in rings from its disc's edge out to `GLOW_REACH` px,
+# `GLOW_BINS` of them evenly spread in the logarithm of the radius, each cut
+# into `GLOW_SECTORS` sectors. A ring glows where, in all but one of its
+# sectors at most, the median stands over `GLOW_LIMIT` of the noise above the
+# same sector's median `GLOW_AHEAD` rings further out (or under it, for a
+# hole): a star's glow is round, but a nebula about it slopes, and stands over
+# the ring further out on one side only. While its rings glow, one after the
+# other, its disc reaches on, the reason "glow" where it had none. On a stack
+# of 2.3 px stars, the light bright stars leave past the 33 px stamps read 2
+# to 3 millionths of their flux a pixel at 16 to 24 px, tens of times the
+# noise for the brightest.
+GLOW_FLUX = 20000.0
+GLOW_LIMIT = 0.3
+GLOW_BINS = 16
+GLOW_SECTORS = 8
+GLOW_AHEAD = 3
+GLOW_REACH = 256
+
+# For the fit's estimate (`wings=True`), each bright star's stamp is kept to
+# `WING_TRUSTED` of its half side and blended, by a raised cosine to
+# `WING_BLENDED` of it, into a Moffat wing of the field's FWHM and β there (β
+# held within `WING_BETA`), matched to the stamp's mean light on the ring where
+# the blend starts; the wing carries on past the stamp's square as far as its
+# light stays over `WING_FADE` of the noise (`WING_REACH` px at most), faded
+# round over the last quarter of that. A field's stamps are measured, so their
+# outer parts hold its noise and any pedestal, which a bright star's flux
+# raises into a square of noise about it; the wing has neither, nor an edge.
+WING_TRUSTED = 0.6
+WING_BLENDED = 0.9
+WING_FADE = 0.05
+WING_BETA = (1.5, 4.0)
+WING_REACH = 512
 
 # The photon term is read from pixels where the stars' model is over this
 # many times the sky's noise, from `PHOTON_PIXELS` of them at least, in
@@ -222,6 +268,156 @@ def without_miss(sky: np.ndarray, fitted: Sequence[Any], miss: np.ndarray) -> np
     return corrected.astype(np.float32)
 
 
+def moffat_alpha(fwhm: float, beta: float) -> float:
+    """A Moffat profile's α for its FWHM and β."""
+    return fwhm / (2.0 * math.sqrt(2.0 ** (1.0 / beta) - 1.0))
+
+
+def lanczos_shifted(stamp: np.ndarray, dx: float, dy: float) -> np.ndarray:
+    """`stamp` (odd, centred) moved by (`dx`, `dy`) of a pixel, each within
+    half a pixel, by Lanczos-3, zero past its edge: as `seiza.StarFit` draws
+    a star (an output sample u is the stamp at u − dx)."""
+    size = stamp.shape[0]
+
+    def weights(t: float) -> np.ndarray:
+        taps = t - (np.arange(6) - 2.0)
+        found = np.where(np.abs(taps) < 3.0, np.sinc(taps) * np.sinc(taps / 3.0), 0.0)
+        return found / found.sum()
+
+    offset_x, tx = (-1, 1.0 - dx) if dx > 0 else (0, -dx)
+    offset_y, ty = (-1, 1.0 - dy) if dy > 0 else (0, -dy)
+    wx, wy = weights(tx), weights(ty)
+    padded = np.pad(np.asarray(stamp, dtype=np.float64), 3)
+    rows = sum(wx[k] * padded[:, offset_x + k + 1:offset_x + k + 1 + size] for k in range(6))
+    return sum(wy[k] * rows[offset_y + k + 1:offset_y + k + 1 + size, :] for k in range(6))
+
+
+def fit_stamp(field: Any, x: float, y: float) -> tuple[int, int, np.ndarray]:
+    """A star's stamp at (x, y) as `seiza.StarFit` draws it, of unit flux:
+    the pixel its middle lands on, (column, row), and its samples, its first
+    channel's for a colour field."""
+    column, row = int(round(x)), int(round(y))
+    stamp = np.asarray(field.stamp_at(x, y), dtype=np.float64)
+    stamp = stamp[..., 0] if stamp.ndim == 3 else stamp
+    return column, row, lanczos_shifted(stamp, x - column, y - row)
+
+
+def winged(sky: np.ndarray, model: np.ndarray, fitted: Sequence[Any], field: Any,
+           noise: np.ndarray) -> tuple[np.ndarray, np.ndarray, int]:
+    """`sky` with each bright star of `fitted` drawn with a smooth wing from
+    its stamp's trusted ring out (`WING_*`) in place of the stamp's outer
+    part, and taken out to where that wing fades; `model` with the change put
+    in; and how many stars were."""
+    sky = sky.astype(np.float64)
+    model = model.astype(np.float64)
+    height, width = sky.shape
+    half = field.stamp_size // 2
+    start, end = WING_TRUSTED * half, WING_BLENDED * half
+    offsets = np.arange(-half, half + 1)
+
+    def mono(stamp: Any) -> np.ndarray:
+        stamp = np.asarray(stamp, dtype=np.float64)
+        return stamp[..., 0] if stamp.ndim == 3 else stamp
+
+    # Stars too faint for their stamp's outer part to show anywhere are passed
+    # over before their own stamps are read.
+    centre = mono(field.stamp_at((width - 1) / 2, (height - 1) / 2))
+    ring_at_middle = np.abs(np.hypot(offsets[None, :], offsets[:, None]) - start) <= 1.0
+    typical = max(float(np.max(np.abs(centre[ring_at_middle]))), 1e-12)
+    count = 0
+    for st in fitted:
+        flux = st.flux[0]
+        floor = WING_FADE * local_noise(noise, st.x, st.y)
+        if not (flux > 0) or not (flux * 4.0 * typical > floor):
+            continue
+        shape = field.shape_at(st.x, st.y)
+        if shape is None or not np.isfinite(shape.fwhm) or not np.isfinite(shape.beta):
+            continue
+        beta = float(np.clip(shape.beta, *WING_BETA))
+        alpha = moffat_alpha(float(shape.fwhm), beta)
+        column, row, stamp = fit_stamp(field, st.x, st.y)
+        local = np.hypot(offsets[None, :] + column - st.x, offsets[:, None] + row - st.y)
+        moffat_local = (1.0 + local**2 / alpha**2) ** -beta
+        ring = np.abs(local - start) <= 1.0
+        level = max(0.0, float(stamp[ring].mean())) / float(moffat_local[ring].mean())
+        if not (level > 0):
+            continue
+        over = flux * level / floor
+        if over <= 1.0:
+            continue
+        reach = min(alpha * math.sqrt(over ** (1.0 / beta) - 1.0), WING_REACH)
+        if reach <= start:
+            continue
+        span = max(int(math.ceil(reach)), half)
+        top, bottom = max(0, row - span), min(height, row + span + 1)
+        left, right = max(0, column - span), min(width, column + span + 1)
+        if top >= bottom or left >= right:
+            continue
+        rows = np.arange(top, bottom)[:, None]
+        columns = np.arange(left, right)[None, :]
+        distance = np.hypot(columns - st.x, rows - st.y)
+        fade = np.clip((reach - distance) / (0.25 * reach), 0.0, 1.0)
+        wing = level * (1.0 + distance**2 / alpha**2) ** -beta * (0.5 - 0.5 * np.cos(np.pi * fade))
+        blend = np.clip((distance - start) / (end - start), 0.0, 1.0)
+        keep = 0.5 * (1.0 + np.cos(np.pi * blend))
+        # The stamp on the patch, nothing past its square.
+        drawn = np.zeros(distance.shape)
+        a0, b0 = max(top, row - half), max(left, column - half)
+        a1, b1 = min(bottom, row + half + 1), min(right, column + half + 1)
+        drawn[a0 - top:a1 - top, b0 - left:b1 - left] = stamp[a0 - row + half:a1 - row + half,
+                                                              b0 - column + half:b1 - column + half]
+        change = flux * ((keep * drawn + (1.0 - keep) * wing) - drawn)
+        sky[top:bottom, left:right] -= change
+        model[top:bottom, left:right] += change
+        count += 1
+    return sky.astype(np.float32), model.astype(np.float32), count
+
+
+def glow_reach(sky: np.ndarray, x: float, y: float, floor: float, start: float) -> float:
+    """How far what is left about (x, y) glows (`GLOW_*`): the outer edge of
+    the last of the rings from `start` px on that glow, each after the one
+    before; 0 where the first does not."""
+    if not (start > 0) or start >= GLOW_REACH:
+        return 0.0
+    ratio = (GLOW_REACH / start) ** (1.0 / GLOW_BINS)
+    edges = start * ratio ** np.arange(GLOW_BINS + GLOW_AHEAD + 1)
+    height, width = sky.shape
+    column, row = int(round(x)), int(round(y))
+    found = 0.0
+    # The first ring alone is read first, on a small cut: most stars stop
+    # there.
+    for rings in (1, GLOW_BINS):
+        span = int(math.ceil(edges[rings + GLOW_AHEAD]))
+        top, bottom = max(0, row - span), min(height, row + span + 1)
+        left, right = max(0, column - span), min(width, column + span + 1)
+        if top >= bottom or left >= right:
+            return 0.0
+        part = np.asarray(sky[top:bottom, left:right], dtype=np.float64)
+        dx = np.arange(left, right)[None, :] - x
+        dy = np.arange(top, bottom)[:, None] - y
+        ring = np.digitize(np.hypot(dx, dy), edges) - 1
+        sector = ((np.arctan2(dy, dx) + np.pi) / (2 * np.pi) * GLOW_SECTORS).astype(int) % GLOW_SECTORS
+        inside = (ring >= 0) & (ring < rings + GLOW_AHEAD) & np.isfinite(part)
+        keys = ring[inside] * GLOW_SECTORS + sector[inside]
+        values = part[inside]
+        order = np.argsort(keys, kind="stable")
+        keys, values = keys[order], values[order]
+        medians = np.full((rings + GLOW_AHEAD) * GLOW_SECTORS, np.nan)
+        bounds = np.searchsorted(keys, np.arange(medians.size + 1))
+        for key in range(medians.size):
+            if bounds[key + 1] > bounds[key]:
+                medians[key] = np.median(values[bounds[key]:bounds[key + 1]])
+        medians = medians.reshape(rings + GLOW_AHEAD, GLOW_SECTORS)
+        found = 0.0
+        for index in range(rings):
+            excess = medians[index] - medians[index + GLOW_AHEAD]
+            over, under = np.sum(excess > floor), np.sum(excess < -floor)
+            if max(over, under) < GLOW_SECTORS - 1:
+                return found
+            found = float(edges[index + 1])
+    return found
+
+
 def photon_terms(sky: np.ndarray, model: np.ndarray, noise: np.ndarray) -> tuple[float, float]:
     """How the leftovers' variance grows with the stars' light m in a pixel:
     as g·m, the stars' photon noise (an inverse gain), and as (f·m)², the
@@ -325,13 +521,15 @@ def measured_field(image: np.ndarray, clip: float | None) -> Any:
 
 
 def clean_sky(image: np.ndarray, stars: Sequence[tuple[float, float, float]], *, noise: np.ndarray,
-              clip: float | None = None, refine: Sequence[bool] | None = None) -> dict[str, Any]:
+              clip: float | None = None, refine: Sequence[bool] | None = None,
+              wings: bool = False) -> dict[str, Any]:
     """`image` with `stars`, (x, y, magnitude), fitted with the PSF field
     measured on it and taken out (steps 2 to 5 of the module's): the clean
     sky, the stars' model, the mask, the stars' table (`STAR_COLUMNS`) and a
     summary. With `refine`, only the stars it marks have their positions
     refined, first, and the rest are fitted where they are listed, on what
-    the first leave."""
+    the first leave. With `wings`, for the fit's estimate rather than a
+    truth, bright stars are carried on past their stamps (`WING_*`)."""
     import seiza
 
     image = np.ascontiguousarray(image, dtype=np.float32)
@@ -356,6 +554,9 @@ def clean_sky(image: np.ndarray, stars: Sequence[tuple[float, float, float]], *,
     miss = psf_miss(sky, fitted, noise, fwhm) if np.isfinite(fwhm) else None
     if miss is not None:
         sky = without_miss(sky, fitted, miss)
+    carried = 0
+    if wings:
+        sky, model, carried = winged(sky, model, fitted, field, noise)
     inverse_gain, shape_error = photon_terms(sky, model, noise)
     judged = np.sqrt(noise.astype(np.float64) ** 2 + inverse_gain * np.clip(model, 0, None))
 
@@ -380,12 +581,17 @@ def clean_sky(image: np.ndarray, stars: Sequence[tuple[float, float, float]], *,
         lean = core_dipole(sky, judged, st.x, st.y, fwhm) if np.isfinite(fwhm) and flux > 0 else None
         if lean is not None and lean > CORE_LIMIT:
             why |= 16
+        over = max(peak / max(local_noise(judged, st.x, st.y), 1e-12), 1.0)
+        reach = (MASK_BASE + MASK_PER_DECADE * math.log10(over)) * fwhm if np.isfinite(fwhm) else 0.0
+        if np.isfinite(fwhm) and (clipped or flux >= GLOW_FLUX * local_noise(noise, st.x, st.y)):
+            glow = glow_reach(sky, st.x, st.y, GLOW_LIMIT * local_noise(noise, st.x, st.y), reach)
+            if glow > reach:
+                why |= 32
+                reach = glow
         if why:
             for bit, reason in enumerate(REASONS):
                 if why & (1 << bit):
                     reasons[reason] += 1
-            over = max(peak / max(local_noise(judged, st.x, st.y), 1e-12), 1.0)
-            reach = (MASK_BASE + MASK_PER_DECADE * math.log10(over)) * fwhm
             top, bottom = max(0, int(st.y - reach)), min(height, int(st.y + reach) + 1)
             left_edge, right_edge = max(0, int(st.x - reach)), min(width, int(st.x + reach) + 1)
             yy, xx = np.ogrid[top:bottom, left_edge:right_edge]
@@ -398,7 +604,10 @@ def clean_sky(image: np.ndarray, stars: Sequence[tuple[float, float, float]], *,
     summary = {
         "stars": len(rows), "fitted": len(fitted), "masked_stars": int((~kept).sum()), "reasons": dict(reasons),
         "masked_share": round(float(mask.mean()), 4), "fwhm_px": round(fwhm, 3),
-        "psf_miss": None if miss is None else round(float(miss.sum()), 5), "photon_term": round(inverse_gain, 5),
+        "psf_miss": None if miss is None else round(float(miss.sum()), 5),
+        "stamp_px": int(field.stamp_size),
+        "winged": carried,
+        "photon_term": round(inverse_gain, 5),
         "shape_error": round(shape_error, 5),
         "clip_level": clip,
     }
