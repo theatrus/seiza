@@ -32,14 +32,31 @@ estimate, and one that reads the image and the places alone.
 
 from __future__ import annotations
 
+import functools
+import hashlib
+import json
 import math
+import sys
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from . import starless_sky
 from . import starless_stars as stars
+from .store import Store
+
+# Raised with the bank's layout, so a bank of another is cut anew.
+BANK_VERSION = 1
+# A bank's planes, a window each: the composite; its starless truth; the
+# catalogue fit's starless estimate and its stars' model; the noise map a
+# network reads, made from the input alone (`image_sigma`); where the loss
+# may look (finite, and outside the clean sky's mask); and the stars' places.
+PLANES = ("input", "starless", "fit_starless", "fit_model", "noise", "valid", "points")
+# A window is kept where at least this share of it is valid.
+VALID_SHARE = 0.8
 
 # A composite holds between these shares of the stars the clean-sky pass
 # took out of its stack.
@@ -212,3 +229,123 @@ def points_plane(placed: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
         if 0 <= row < shape[0] and 0 <= column < shape[1]:
             plane[row, column] = max(plane[row, column], 10 ** (-0.4 * (magnitude - brightest)))
     return plane
+
+
+def window_corners(valid: np.ndarray, side: int, count: int, rng: np.random.Generator) -> list[tuple[int, int]]:
+    """Up to `count` windows' top left corners, drawn from a grid half a
+    window apart, each `VALID_SHARE` valid at least."""
+    height, width = valid.shape
+    corners = [(top, left) for top in range(0, height - side + 1, side // 2)
+               for left in range(0, width - side + 1, side // 2)
+               if valid[top:top + side, left:left + side].mean() >= VALID_SHARE]
+    if not corners:
+        return []
+    chosen = rng.choice(len(corners), size=min(count, len(corners)), replace=False)
+    return [corners[index] for index in sorted(chosen)]
+
+
+def source_telescope(store: Store, product: dict[str, Any], rng: np.random.Generator, fwhm: float) -> Telescope:
+    """A composite's telescope: a pupil's (`PUPIL_SHARE` of the time) or the
+    stack's own PSF field, recorded or measured on the stack."""
+    if rng.random() < PUPIL_SHARE:
+        return pupil_telescope(rng, fwhm)
+    from . import psf_fields
+
+    try:
+        field = psf_fields.Field(store, product["id"])
+        if not field.usable:
+            raise FileNotFoundError(product["id"])
+    except (FileNotFoundError, KeyError):
+        field = psf_fields.Field.measured_from(psf_fields.load_image(store, product))
+    return Telescope(field=field, description="the stack's own PSF field")
+
+
+def prepared(store_root: str, scratch: str | None, product: dict[str, Any], *, draws: int, windows: int,
+             side: int, seed: int) -> dict[str, Any]:
+    """`draws` composites of one cleaned product, each fitted, and up to
+    `windows` windows of each: their planes (`PLANES`) and records. In a
+    process of its own; an error comes back as the product's record."""
+    from .noise_model import image_sigma
+
+    store = Store(store_root, scratch)
+    try:
+        here = starless_sky.directory(store, product["id"])
+        sky = np.load(here / "sky.npy")
+        mask = np.load(here / "mask.npy")
+        table = np.load(here / "stars.npz")["stars"]
+        summary = json.loads((here / "sky.json").read_text())
+        fwhm = float(summary.get("fwhm_px") or 3.0)
+        clip = summary.get("clip_level")
+        found = []
+        for draw in range(draws):
+            rng = np.random.default_rng([seed, int(hashlib.sha256(product["id"].encode()).hexdigest()[:8], 16), draw])
+            telescope = source_telescope(store, product, rng, fwhm)
+            noise_sky = image_sigma(sky).astype(np.float32)
+            made = composite(sky, table, summary, telescope, rng, noise_sky)
+            noise = image_sigma(made["input"]).astype(np.float32)
+            fit = fitted(made, noise, clip, fwhm)
+            # Only the clean sky's own mask is kept out of the loss, where its
+            # truth is not to be trusted; where the fit fails is where healing
+            # is learned.
+            valid = np.isfinite(made["input"]) & np.isfinite(sky) & ~mask
+            plane = points_plane(made["placed"], sky.shape)
+            full = {"input": made["input"], "starless": made["starless"], "fit_starless": fit["sky"],
+                    "fit_model": fit["model"], "noise": noise, "valid": valid.astype(np.uint8), "points": plane}
+            for top, left in window_corners(valid, side, windows, rng):
+                cut = (slice(top, top + side), slice(left, left + side))
+                found.append({"planes": {name: np.nan_to_num(full[name][cut]) for name in PLANES},
+                              "record": {"product": product["id"], "draw": draw, "top": top, "left": left,
+                                         "telescope": telescope.description, "fwhm_px": fwhm,
+                                         "stars": int(len(made["placed"])), "telescope_kind":
+                                             "pupil" if telescope.field is None else "field"}})
+        return {"status": "cut", "product": product["id"], "windows": found}
+    except Exception as error:  # noqa: BLE001 - reported in the summary
+        return {"status": "dropped", "product": product["id"], "error": f"{type(error).__name__}: {error}",
+                "windows": []}
+
+
+def cut(store: Store, products: list[dict[str, Any]], *, work: Path, draws: int = 2, windows: int = 8,
+        side: int = 512, seed: int = 0, workers: int = 2) -> dict[str, Any]:
+    """Cut a bank of composites of `products` (cleaned by the clean-sky
+    pass) under `work`, named by a hash of what went into it: `draws`
+    composites a product, up to `windows` windows of `side` a composite.
+    Windows go into memory-mapped planes; `sources.json` names each
+    window's product, draw, place and telescope, and `done.json`, written
+    last, the count. A finished bank is not cut again."""
+    parts = [BANK_VERSION, seed, draws, windows, side, [product["id"] for product in products]]
+    name = "starless-" + hashlib.sha256(json.dumps(parts).encode()).hexdigest()[:16]
+    directory = work / name
+    if (directory / "done.json").exists():
+        return json.loads((directory / "done.json").read_text())
+    directory.mkdir(parents=True, exist_ok=True)
+    capacity = max(1, len(products) * draws * windows)
+    arrays = {plane: np.lib.format.open_memmap(directory / f"{plane}.npy", mode="w+",
+                                               dtype=np.uint8 if plane == "valid" else np.float32,
+                                               shape=(capacity, side, side)) for plane in PLANES}
+    records, dropped, count = [], [], 0
+    task = functools.partial(prepared, str(store.root), str(store.scratch), draws=draws, windows=windows, side=side,
+                             seed=seed)
+    from .noise_model import in_order
+
+    began = time.monotonic()
+    for done, result in enumerate(in_order(task, products, workers), start=1):
+        if result["status"] != "cut":
+            dropped.append({"product": result["product"], "error": result.get("error")})
+        for window in result["windows"]:
+            for plane in PLANES:
+                arrays[plane][count] = window["planes"][plane]
+            records.append(window["record"])
+            count += 1
+        print(json.dumps({"bank": name, "done": done, "of": len(products), "product": result["product"],
+                          "status": result["status"], "windows": count, "error": result.get("error"),
+                          "elapsed": round(time.monotonic() - began)}), file=sys.stderr, flush=True)
+    for array in arrays.values():
+        array.flush()
+    (directory / "sources.json").write_text(json.dumps(records))
+    summary = {"version": BANK_VERSION, "name": name, "windows": count, "capacity": capacity, "side": side,
+               "draws": draws, "per_draw": windows, "seed": seed, "products": len(products), "dropped": dropped,
+               "planes": list(PLANES),
+               "telescopes": {kind: sum(1 for record in records if record["telescope_kind"] == kind)
+                              for kind in ("field", "pupil")}}
+    (directory / "done.json").write_text(json.dumps(summary, indent=2))
+    return summary

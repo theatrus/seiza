@@ -24,7 +24,7 @@ from .manifest import Manifest
 from .store import Store, versions
 
 # The commands that only read the manifest and record no pass in it.
-READ_ONLY = ("psf-fields", "clean-sky", "cut-sharpen", "sheet-sharpen")
+READ_ONLY = ("psf-fields", "clean-sky", "cut-starless", "cut-sharpen", "sheet-sharpen")
 # The commands that read the sharpening banks, and the manifest, if at
 # all, only for the sets' names.
 BANKS_ONLY = ("train-sharpen", "evaluate-sharpen", "clean-sharpen", "cut-external", "bundle-sharpen")
@@ -222,6 +222,20 @@ def main(argv: list[str] | None = None) -> int:
     sky.add_argument("--workers", type=int, default=2, help="clean this many products at once")
     sky.add_argument("--limit", type=int, help="at most this many products not yet cleaned")
     sky.add_argument("--again", action="store_true", help="clean products already cleaned")
+
+    starless = commands.add_parser("cut-starless", help="cut a bank of known-truth composites for the starless "
+                                                        "model from the stacks the clean-sky pass has cleaned "
+                                                        "(reads the manifest only)")
+    starless.add_argument("--work", type=Path, required=True, help="the directory the bank goes under")
+    starless.add_argument("--product", action="append", dest="products", help="only this product id")
+    starless.add_argument("--split", action="append", dest="splits", choices=("train", "validation"),
+                          help="only stacks of this split (default: train)")
+    starless.add_argument("--draws", type=int, default=2, help="composites of each stack")
+    starless.add_argument("--windows", type=int, default=8, help="windows of each composite")
+    starless.add_argument("--side", type=int, default=512, help="a window's side in pixels")
+    starless.add_argument("--seed", type=int, default=0)
+    starless.add_argument("--workers", type=int, default=2, help="prepare this many stacks at once")
+    starless.add_argument("--limit", type=int, help="at most this many stacks")
 
     psf = commands.add_parser("psf-fields", help="measure each sharpening source's PSF field once and keep it in "
                                                  "the store, under psf/ (reads the manifest only)")
@@ -778,6 +792,18 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
             weight_map=arguments.weight_map, holes=arguments.holes, bank_workers=arguments.bank_workers, **extra,
         )
         return {**record, "sheets": render_saved(store, manifest, arguments.name)}
+    if command == "cut-starless":
+        from . import starless_bank, starless_sky
+
+        if arguments.products:
+            products = starless_sky.annotated(manifest, arguments.products)
+        else:
+            products = starless_sky.eligible(manifest, splits=arguments.splits or ("train",), sets=only)
+        products = [product for product in products if starless_sky.recorded(store, product["id"])]
+        products = products[:arguments.limit] if arguments.limit else products
+        return starless_bank.cut(store, products, work=arguments.work, draws=arguments.draws,
+                                 windows=arguments.windows, side=arguments.side, seed=arguments.seed,
+                                 workers=arguments.workers)
     if command == "clean-sky":
         from . import starless_sky
 

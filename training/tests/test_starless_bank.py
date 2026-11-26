@@ -157,6 +157,43 @@ def test_a_points_plane_marks_each_star_by_its_light_share():
     assert np.count_nonzero(plane) == 2
 
 
+def test_a_bank_holds_windows_whose_truth_adds_back_and_whose_mask_is_the_clean_sky_s(tmp_path, monkeypatch):
+    import json
+
+    from seiza_training.store import Store
+
+    monkeypatch.setattr(bank, "PUPIL_SHARE", 1.0)
+    rng = np.random.default_rng(11)
+    sky, table, summary, noise = clean_sky_case(rng, size=(500, 500), count=260, faintest=17.0)
+    mask = np.zeros(sky.shape, bool)
+    mask[0:120, 0:120] = True
+    store = Store(tmp_path / "store", tmp_path / "scratch")
+    here = ss.directory(store, "abc/deep")
+    here.mkdir(parents=True)
+    np.save(here / "sky.npy", sky)
+    np.save(here / "mask.npy", mask)
+    np.savez_compressed(here / "stars.npz", stars=table, columns=np.array(ss.STAR_COLUMNS))
+    (here / "sky.json").write_text(json.dumps({**summary, "version": ss.CLEAN_SKY_VERSION}))
+    done = bank.cut(store, [{"id": "abc/deep"}], work=tmp_path / "banks", draws=2, windows=3, side=128, seed=4,
+                    workers=1)
+    assert done["windows"] == 6 and done["telescopes"] == {"field": 0, "pupil": 6} and not done["dropped"]
+    directory = tmp_path / "banks" / done["name"]
+    planes = {name: np.load(directory / f"{name}.npy", mmap_mode="r")[:done["windows"]] for name in bank.PLANES}
+    records = json.loads((directory / "sources.json").read_text())
+    for index, record in enumerate(records):
+        top, left = record["top"], record["left"]
+        # The starless truth is the clean sky there, and the window's valid
+        # plane is the clean sky's mask's complement.
+        np.testing.assert_allclose(planes["starless"][index], sky[top:top + 128, left:left + 128], atol=1e-4)
+        np.testing.assert_array_equal(planes["valid"][index].astype(bool), ~mask[top:top + 128, left:left + 128])
+        assert planes["valid"][index].mean() >= bank.VALID_SHARE
+    # The two draws are different composites of one sky.
+    assert not np.array_equal(planes["input"][0], planes["input"][3])
+    # A finished bank is opened, not cut again.
+    assert bank.cut(store, [{"id": "abc/deep"}], work=tmp_path / "banks", draws=2, windows=3, side=128, seed=4,
+                    workers=1) == done
+
+
 def test_a_pupil_telescope_has_the_stack_s_width():
     rng = np.random.default_rng(8)
     for _ in range(3):
