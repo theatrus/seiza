@@ -1188,17 +1188,19 @@ def batch_from(
 
 
 class Prefetch:
-    """`make(step)` for steps 1, 2, …, built up to `depth` ahead on `threads`
-    threads and handed out in step order. A batch depends only on its step,
-    so the batches are those calling `make` in the loop would give, whatever
-    the threads. NumPy releases the interpreter lock for the copies and the
-    arithmetic, which is most of a batch."""
+    """`make(step)` for steps `start` + 1, `start` + 2, …, built up to
+    `depth` ahead on `threads` threads and handed out in step order. A batch
+    depends only on its step, so the batches are those calling `make` in
+    the loop would give, whatever the threads, and a run resumed after
+    `start` meets the batches it would have met. NumPy releases the
+    interpreter lock for the copies and the arithmetic, which is most of a
+    batch."""
 
-    def __init__(self, make: Callable[[int], Any], depth: int, threads: int = 1) -> None:
+    def __init__(self, make: Callable[[int], Any], depth: int, threads: int = 1, start: int = 0) -> None:
         self.make = make
         self.pool = ThreadPoolExecutor(max_workers=threads, thread_name_prefix="batch")
         self.pending: deque[Future] = deque()
-        self.step = 0
+        self.step = start
         for _ in range(max(depth, threads)):
             self.submit()
 
@@ -1351,6 +1353,17 @@ class Rewind:
         self.optimizer.load_state_dict(offloaded(optimizer_state))
         self.saved = self.saved[:1]
         return back
+
+    def state(self) -> dict[str, Any]:
+        """What a run's checkpoint keeps of the guard, so a resumed run
+        rewinds as the run it continues would have."""
+        return {"lowest": self.lowest, "count": self.count, "rate": self.rate, "recent": list(self.recent),
+                "saved": list(self.saved)}
+
+    def restore(self, state: dict[str, Any]) -> None:
+        """Put the guard back as `state` recorded it."""
+        self.lowest, self.count, self.rate = state["lowest"], state["count"], state["rate"]
+        self.recent, self.saved = list(state["recent"]), [tuple(entry) for entry in state["saved"]]
 
 
 def offloaded(state: Any) -> Any:
@@ -2249,12 +2262,23 @@ def load_run(store: Store, name: str) -> tuple[dict[str, Any], ResidualUNet]:
     return record, model.eval()
 
 
-def tiling(levels: int) -> dict[str, int]:
+# The most of a 512 px tile its overlap may take (`tiling`).
+TILE_OVERLAP = 0.6
+
+
+def tiling(levels: int, oversample: int = 1) -> dict[str, int]:
     """How a model of `levels` runs over an image: tiles of 512, a margin of
     its reach, which reproduces whole-image inference, a cosine over 32 more
-    pixels, and every tile starting on its grid."""
-    margin = reach(levels)
-    return {"tile": 512, "overlap": 2 * margin + 32, "margin": margin, "multiple": 2 ** (levels - 1)}
+    pixels, and every tile starting on its grid. A model deep enough that
+    the overlap would take over `TILE_OVERLAP` of such a tile (six levels
+    and more: its overlap is 532 px) runs on tiles twice its overlap, up to
+    the next multiple of 256. A model that works `oversample` times finer
+    than the image has that much less reach and that much finer a grid in
+    the image's pixels."""
+    margin = reach(levels, oversample)
+    overlap = 2 * margin + 32
+    tile = 512 if overlap <= TILE_OVERLAP * 512 else -(-2 * overlap // 256) * 256
+    return {"tile": tile, "overlap": overlap, "margin": margin, "multiple": 2 ** (levels - 1) // oversample}
 
 
 def evaluate_saved(

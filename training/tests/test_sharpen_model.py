@@ -1,0 +1,2000 @@
+"""The PSF model's trainer: the known-kernel maths, the pairs' offsets,
+ratios and exclusions, augmentation that turns the stamp with the image,
+the network and its graph, tiled inference with each tile's own stamp,
+the loss, and a resumed run that is the run it continues."""
+
+import json
+import math
+
+import numpy as np
+import pytest
+
+torch = pytest.importorskip("torch")
+pytest.importorskip("onnxruntime")
+
+from seiza_training import psf_fields, sharpen_bank  # noqa: E402
+from seiza_training import sharpen_model as sm  # noqa: E402
+from seiza_training.store import Store  # noqa: E402
+from seiza_training.unet import SharpeningUNet, reach  # noqa: E402
+
+SIDE = 64
+COLUMNS = psf_fields.DETECTION_COLUMNS
+
+
+def gaussian(side: int, covariance, centre=None) -> np.ndarray:
+    """A Gaussian of `covariance` (x, y) sampled on `side` pixels about
+    `centre` (default the middle), summing to one."""
+    middle = (side - 1) / 2
+    x0, y0 = centre if centre is not None else (middle, middle)
+    down, across = np.mgrid[0:side, 0:side].astype(np.float64)
+    offsets = np.stack([across - x0, down - y0], axis=-1)
+    inverse = np.linalg.inv(np.asarray(covariance, dtype=np.float64))
+    values = np.exp(-0.5 * np.einsum("...i,ij,...j->...", offsets, inverse, offsets))
+    return (values / values.sum()).astype(np.float32)
+
+
+def moffat(side: int, fwhm: float, beta: float = 3.5, stretch: float = 1.0, angle: float = 0.0) -> np.ndarray:
+    """An elliptical Moffat stamp, `stretch` times as wide along `angle` as
+    across it, summing to one: wings that weigh in its second moments."""
+    middle = (side - 1) / 2
+    down, across = np.mgrid[0:side, 0:side].astype(np.float64) - middle
+    along = across * math.cos(angle) + down * math.sin(angle)
+    athwart = -across * math.sin(angle) + down * math.cos(angle)
+    alpha = fwhm / (2 * math.sqrt(2 ** (1 / beta) - 1))
+    values = (1 + ((along / stretch) ** 2 + (athwart * stretch) ** 2) / alpha**2) ** -beta
+    return (values / values.sum()).astype(np.float32)
+
+
+def stars_image(positions, fluxes, covariance, side: int = SIDE, sky: float = 100.0) -> np.ndarray:
+    image = np.full((side, side), sky, dtype=np.float64)
+    for (x, y), flux in zip(positions, fluxes):
+        image += flux * gaussian(side, covariance, (x, y))
+    return image.astype(np.float32)
+
+
+def detections(positions, fluxes, *, snr: float = 200.0) -> np.ndarray:
+    rows = [[x, y, flux, flux / 10, 3.0, snr, 0.1, 0.0, 0.0, 1.0] for (x, y), flux in zip(positions, fluxes)]
+    return np.array(rows, dtype=np.float32).reshape(-1, len(COLUMNS))
+
+
+def write_bank(directory, *, pairs: bool, windows: list[dict], sources: list[dict], label: str):
+    """A bank as `sharpen_bank.cut` leaves it: memory-mapped planes, stamps
+    and info, the sources' records and points, and `done.json`."""
+    planes, stamps, info = sharpen_bank.layout(pairs)
+    directory.mkdir(parents=True)
+    for name, dtype in planes.items():
+        np.save(directory / f"{name}.npy", np.stack([window[name] for window in windows]).astype(dtype))
+    for name in stamps:
+        np.save(directory / f"{name}.npy", np.stack([window[name] for window in windows]).astype(np.float32))
+    np.save(directory / "info.npy", np.array([[window["info"].get(column, 0.0) for column in info]
+                                              for window in windows], dtype=np.float32))
+    (directory / "points").mkdir()
+    for index, source in enumerate(sources):
+        np.save(directory / "points" / f"{index}.npy", source.pop("points"))
+    (directory / "sources.json").write_text(json.dumps(sources))
+    (directory / "done.json").write_text(json.dumps({
+        "bank_version": sharpen_bank.BANK_VERSION, "windows": len(windows), "sources": len(sources),
+        "pairs": pairs, "planes": list(planes), "stamps": list(stamps), "info": list(info),
+        "window": SIDE, "stamp": sharpen_bank.STAMP, "label": label, "split": "train"}))
+    return directory
+
+
+POSITIONS = [(20.3, 22.6), (44.8, 40.2), (30.1, 50.7)]
+FLUXES = [40_000.0, 20_000.0, 10_000.0]
+
+
+def kernel_bank(tmp_path, *, count: int = 4, name: str = "sharpen-deep-train-0"):
+    """A known-kernel bank of `count` windows of one stack: three Gaussian
+    stars 1.3 px across on a sky of 100, noise 1."""
+    covariance = np.diag([1.3**2, 1.3**2])
+    rng = np.random.default_rng(5)
+    windows = []
+    for index in range(count):
+        image = stars_image(POSITIONS, FLUXES, covariance) + rng.normal(0, 1, (SIDE, SIDE)).astype(np.float32)
+        stamp = gaussian(sharpen_bank.STAMP, covariance)
+        windows.append({"image": image, "sigma": np.ones((SIDE, SIDE)), "saturated": np.zeros((SIDE, SIDE)),
+                        "stamp": stamp, "info": {"source": 0, "background": 100.0, "noise": 1.0,
+                                                 "width": sharpen_bank.stamp_width(stamp)}})
+    sources = [{"input": "a/deep", "set": "a", "telescope": "Test Scope", "record": {}, "windows": [0, count],
+                "points": detections(POSITIONS, FLUXES)}]
+    return write_bank(tmp_path / name, pairs=False, windows=windows, sources=sources, label="deep")
+
+
+def pair_bank(tmp_path, *, offset=(0.6, -0.4), ratios=None, name: str = "sharpen-seeing-train-0"):
+    """A seeing bank of two pairs, each of `len(ratios) // 2` windows: the
+    input's stars 2 px across, the target's 1.4 px and moved by `offset`."""
+    ratios = ratios or [0.7, 0.7, 0.7, 0.7]
+    wide, sharp = np.diag([2.0**2] * 2), np.diag([1.4**2] * 2)
+    moved = [(x + offset[0], y + offset[1]) for x, y in POSITIONS]
+    rng = np.random.default_rng(6)
+    windows = []
+    for index, ratio in enumerate(ratios):
+        image = stars_image(POSITIONS, FLUXES, wide) + rng.normal(0, 1, (SIDE, SIDE)).astype(np.float32)
+        target = stars_image(moved, FLUXES, sharp) + rng.normal(0, 0.7, (SIDE, SIDE)).astype(np.float32)
+        windows.append({"input": image, "target": target, "input_sigma": np.ones((SIDE, SIDE)),
+                        "input_map": np.ones((SIDE, SIDE)), "target_sigma": np.full((SIDE, SIDE), 0.7),
+                        "saturated": np.zeros((SIDE, SIDE)),
+                        "input_stamp": gaussian(sharpen_bank.STAMP, wide),
+                        "target_stamp": gaussian(sharpen_bank.STAMP, sharp),
+                        "info": {"source": index * 2 // len(ratios), "background": 100.0, "noise": 1.0,
+                                 "ratio": np.nan if ratio is None else ratio + 0.12,
+                                 "width_ratio": np.nan if ratio is None else ratio,
+                                 "input_width": 2.3548 * 2.0, "target_width": 2.3548 * 1.4}})
+    sources = [{"input": f"{pair}/seeing/worst", "target": f"{pair}/seeing/best", "set": pair,
+                "telescope": "Test Scope", "record": {"pair": f"{pair}/seeing", "object": f"Scope/{pair}/Ha"},
+                "alignment": {"matched": 3, "offset_px": list(offset)}, "windows": [], "points": detections(
+                    POSITIONS, FLUXES)} for pair in ("p", "q")]
+    return write_bank(tmp_path / name, pairs=True, windows=windows, sources=sources, label="seeing")
+
+
+def test_the_known_kernel_target_is_round_in_second_moments():
+    # Elliptical, with wings: its second moments are its wings' as much as
+    # its core's.
+    stamp = moffat(sharpen_bank.STAMP, 4.0, stretch=1.25, angle=0.6)
+    _, covariance = sm.moments(stamp)
+    delta, target, width = sm.rounded(stamp, 1.5)
+    _, rounded = sm.moments(target)
+    largest = np.linalg.eigvalsh(covariance)[-1]
+    # Round at the stamp's largest eigenvalue: the blur adds its covariance.
+    assert rounded == pytest.approx(largest * np.eye(2), abs=2e-3 * largest)
+    assert np.allclose(rounded, covariance + delta, atol=2e-3 * largest)
+    assert width > sharpen_bank.stamp_width(stamp)
+    # A stamp sharper than the floor is brought up to it.
+    sharp = gaussian(sharpen_bank.STAMP, np.diag([0.45**2, 0.4**2]))
+    assert sm.rounded(sharp, 1.5)[2] >= 1.5
+
+
+def test_the_known_kernel_widens_the_input_by_the_ratio_asked():
+    stamp = moffat(sharpen_bank.STAMP, 3.0, stretch=1.1, angle=0.3)
+    settings = sm.Settings()
+    rng = np.random.default_rng(3)
+    for _ in range(12):
+        kernel = sm.known_kernel(stamp, rng, settings)
+        widths = kernel.widths
+        assert settings.kernel_ratios[0] <= kernel.asked <= settings.kernel_ratios[1]
+        assert widths["input"] / widths["reference"] == pytest.approx(kernel.asked, rel=sm.RATIO_TOLERANCE)
+        assert kernel.ratio == pytest.approx(widths["target"] / widths["input"])
+        assert kernel.ratio <= settings.max_ratio
+        # The network reads P_in, the stamp blurred by K, never P_ref.
+        assert sharpen_bank.stamp_width(kernel.stamp) == pytest.approx(widths["input"])
+        assert float(kernel.stamp.sum()) == pytest.approx(1.0, abs=1e-5)
+    # The stars of a window blurred by K are as wide as P_in's stamp says.
+    covariance = np.diag([1.3**2, 1.3**2])
+    stamp = gaussian(sharpen_bank.STAMP, covariance)
+    kernel = sm.known_kernel(stamp, np.random.default_rng(4), settings)
+    image = stars_image([(64.2, 63.7)], [1e5], covariance, side=128, sky=0.0)
+    blurred, target = sm.blurred_images(image, [kernel.covariance, kernel.target])
+    star = np.array([[64.2, 63.7]])
+    assert sharpen_bank.stamp_width(sm.empirical_stamp(blurred, star, 41)) == pytest.approx(
+        kernel.widths["input"], rel=0.02)
+    assert sharpen_bank.stamp_width(sm.empirical_stamp(target, star, 41)) == pytest.approx(
+        kernel.widths["target"], rel=0.02)
+    # An identity window asks for nothing.
+    identity = sm.known_kernel(stamp, np.random.default_rng(4), settings, identity=True)
+    assert identity.identity and identity.ratio == 1.0 and np.array_equal(identity.stamp, stamp)
+
+
+def test_a_wide_target_raises_the_widening_so_no_window_asks_to_blur():
+    # A stamp whose wings are far more elliptical than its core: rounded in
+    # second moments, its target is much wider than it.
+    stamp = 0.7 * moffat(sharpen_bank.STAMP, 2.5) + 0.3 * moffat(sharpen_bank.STAMP, 9.0, stretch=1.6)
+    stamp /= stamp.sum()
+    settings = sm.Settings()
+    _, _, target_width = sm.rounded(stamp, settings.floor_px)
+    assert target_width / sharpen_bank.stamp_width(stamp) > settings.kernel_ratios[0]
+    for seed in range(6):
+        assert sm.known_kernel(stamp, np.random.default_rng(seed), settings).ratio <= settings.max_ratio + 0.02
+
+
+def test_known_kernel_examples_keep_the_window_s_noise_low_and_mask_the_band_the_blur_reads(tmp_path):
+    bank = sm.Bank(kernel_bank(tmp_path), sm.Settings(tile=32))
+    rng = np.random.default_rng(1)
+    example = sm.kernel_example(bank, 0, rng, sm.Settings(tile=32, exposure=1.0), identity=False)
+    assert not example.valid[0].any() and not example.valid[:, -1].any() and example.valid[SIDE // 2, SIDE // 2]
+    assert example.ratio < 1 and example.kind == "kernel"
+    # The input's noise is the stack's own, blurred by K, and fresh noise
+    # at a share of it no more than `kernel_noise`.
+    clean = stars_image(POSITIONS, FLUXES, np.diag([1.3**2, 1.3**2]))
+    noise = (example.image - sm.blurred_images(clean, [np.array(example.details["kernel"])])[0])[example.valid]
+    share = example.details["noise_share"]
+    assert share <= 0.5
+    assert share * 0.9 < np.std(noise) < math.hypot(share, 0.6)
+    identity = sm.kernel_example(bank, 0, rng, sm.Settings(tile=32), identity=True)
+    assert identity.kind == "identity" and identity.ratio == 1.0 and np.array_equal(identity.image, identity.target)
+
+
+def test_stars_and_the_rest_are_each_brought_to_the_ratio_asked_of_them(tmp_path):
+    bank = sm.Bank(kernel_bank(tmp_path), sm.Settings(tile=32))
+    stars = np.array(POSITIONS)
+
+    def width(image):
+        return sharpen_bank.stamp_width(sm.empirical_stamp(image, stars, 15))
+
+    alike = sm.Settings(tile=32, exposure=1.0, kernel_noise=0.0, nonstellar=True, equal_share=1.0)
+    for seed in range(4):
+        example = sm.kernel_example(bank, 0, np.random.default_rng(seed), alike, identity=False)
+        sharpest = example.details["sharpest"]
+        assert sharpest <= example.ratio <= 1.0 and example.nonstellar_ratio == example.ratio
+        assert width(example.target) / width(example.image) == pytest.approx(example.ratio, rel=0.05)
+        planes = sm.arrays_of(example, None, alike)["planes"]
+        assert planes.shape[0] == len(sm.PLANES_NONSTELLAR)
+        assert np.all(planes[2] == np.float32(example.ratio)) and np.all(planes[3] == np.float32(example.ratio))
+    # Asked apart, the stars, which stand far above the noise, follow
+    # their own ratio, not the rest's.
+    apart = sm.Settings(tile=32, exposure=1.0, kernel_noise=0.0, nonstellar=True, equal_share=0.0)
+    seen = 0
+    for seed in range(40):
+        example = sm.kernel_example(bank, 0, np.random.default_rng(seed), apart, identity=False)
+        if abs(example.nonstellar_ratio - example.ratio) < 0.15:
+            continue
+        assert width(example.target) / width(example.image) == pytest.approx(example.ratio, rel=0.06)
+        seen += 1
+    assert seen >= 3
+    # With a floor, the rest is never asked for less, whatever its stars
+    # are; the stars still follow their own.
+    floored = sm.Settings(tile=32, exposure=1.0, kernel_noise=0.0, nonstellar=True, equal_share=1.0,
+                          kernel_ratios=(2.5, 3.0), rest_floor=0.7)
+    for seed in range(4):
+        example = sm.kernel_example(bank, 0, np.random.default_rng(seed), floored, identity=False)
+        assert example.nonstellar_ratio >= 0.7 and example.ratio >= example.details["sharpest"]
+        if example.ratio < 0.6:
+            assert example.nonstellar_ratio == 0.7
+            assert width(example.target) / width(example.image) == pytest.approx(example.ratio, rel=0.06)
+    # One ratio for a run without them, as before.
+    single = sm.kernel_example(bank, 0, np.random.default_rng(0), sm.Settings(tile=32), identity=False)
+    assert single.nonstellar_ratio is None and single.ratios(sm.Settings()) == single.ratio
+    assert sm.arrays_of(single, None, sm.Settings(tile=32))["planes"].shape[0] == len(sm.PLANES)
+
+
+def test_a_known_kernel_window_may_hold_a_halo_that_its_target_gives_up_as_it_is_asked(tmp_path):
+    bank = sm.Bank(kernel_bank(tmp_path), sm.Settings(tile=32))
+    clean = stars_image(POSITIONS, FLUXES, np.diag([1.3**2, 1.3**2]))
+    settings = sm.Settings(tile=32, exposure=1.0, kernel_noise=0.0, kernel_halo=0.3)
+    seen = 0
+    for seed in range(6):
+        example = sm.kernel_example(bank, 0, np.random.default_rng(seed), settings, identity=False)
+        share, width = example.details["halo"]
+        widths = example.details["widths"]
+        assert 0.0 <= share <= 0.3 and sm.HALO_WIDTHS[0] <= width <= sm.HALO_WIDTHS[1]
+        # The input is the window through K, less the halo's share, and
+        # that share through a round Gaussian `width` cores wide.
+        sigma = width * widths["core"] / sm.FWHM_PER_SIGMA
+        core, wide = sm.blurred_images(clean, [np.array(example.details["kernel"]), sigma**2 * np.eye(2)])
+        assert np.std(example.image - ((1 - share) * core + share * wide)) < 0.6
+        # The stamp the network reads holds the halo, and the widths and
+        # the sharpest ratio are the two together's.
+        assert example.stamp.sum() == pytest.approx(1.0, abs=1e-4)
+        assert widths["input"] >= widths["core"] and example.width == widths["input"]
+        assert example.details["sharpest"] == pytest.approx(widths["target"] / widths["input"])
+        # One ratio, the sharpest: none of the halo is left in the target.
+        assert np.std(example.target - sm.blurred_images(clean, [np.zeros((2, 2))])[0]) < 1.5
+        if share > 0.1:
+            assert np.std(example.image - core) > 2 * np.std(example.image - ((1 - share) * core + share * wide))
+            seen += 1
+    assert seen >= 2
+    # Asked for less, a target keeps of the halo what its ask leaves.
+    kernel = sm.known_kernel(np.asarray(bank.arrays["stamp"][0], dtype=np.float32), np.random.default_rng(0), settings)
+    halo = sm.Halo.drawn(np.asarray(bank.arrays["stamp"][0], dtype=np.float32), kernel, np.random.default_rng(0), settings)
+    assert halo.kept(halo.kernel.ratio, halo.kernel) == 0.0 and halo.kept(1.0, halo.kernel) == 1.0
+    assert halo.kept((1 + halo.kernel.ratio) / 2, halo.kernel) == pytest.approx(0.5)
+    ones, twos = np.ones((4, 4), np.float32), np.full((4, 4), 2.0, np.float32)
+    assert np.allclose(halo.mixed(ones, twos, 0.0), 1.0) and np.allclose(halo.mixed(ones, twos, 1.0), 1.0 + halo.share)
+    # With two ratios, each part keeps its own share.
+    both = sm.Settings(tile=32, exposure=1.0, kernel_noise=0.0, kernel_halo=0.3, nonstellar=True, equal_share=1.0)
+    example = sm.kernel_example(bank, 0, np.random.default_rng(1), both, identity=False)
+    assert example.details["halo"] is not None and example.nonstellar_ratio == example.ratio
+    assert sm.kernel_example(bank, 0, np.random.default_rng(1), sm.Settings(tile=32), identity=False).details["halo"] is None
+
+
+def test_contrast_darkens_the_dark_side_of_a_rim_on_nebula_and_leaves_sky_and_stars(tmp_path):
+    side = 160
+    xs = np.mgrid[:side, :side][1].astype(np.float32)
+    # Nebula of 40 over a sky of 100 on the left, of 100 on the right of a
+    # rim at column 80; sky alone in the bottom rows; a star on the nebula.
+    rest = np.where(xs < 80, 140.0, 200.0).astype(np.float32)
+    rest[130:] = 100.0
+    points = np.zeros((1, len(COLUMNS)))
+    points[0, :2] = (40.0, 40.0)
+    points[0, COLUMNS.index("detected")] = 1
+    sigma = np.ones((side, side), np.float32)
+    made, reach = sm.contrasted(rest, 1.0, 9.0, points, 100.0, sigma)
+    change = made - rest
+    wide = sm.CONTRAST_WIDE * 9.0
+    assert reach == sm.blur_reach(wide**2 * np.eye(2))
+    # Darker on the dark side by the rim, lifted less on the lit side.
+    assert change[80, 72] < -3.0 and 0.0 < change[80, 87] < -change[80, 72] * 0.6
+    assert abs(change[80, 20]) < 0.2 and abs(change[80, 140]) < 0.2
+    # Not on sky, and not about the star.
+    assert np.abs(change[145:, :]).max() < 0.05
+    assert np.abs(change[35:46, 35:46]).max() < 1e-3
+    lone = sm.contrasted(rest, 1.0, 9.0, points[:0], 100.0, sigma)[0] - rest
+    assert np.abs(lone[40, 60:78]).max() > 1.0 > np.abs(change[40, 60:64]).max()
+    # Masked by what is there: a rim a hundredth as high, under the same
+    # noise, is given under half of a hundredth of the change.
+    faint = np.where(xs < 80, 140.0, 140.6).astype(np.float32)
+    slight = sm.contrasted(faint, 1.0, 9.0, points[:0], 100.0, sigma)[0] - faint
+    assert 0.0 < -slight[80, 72] < -lone[80, 72] / 200
+    # A bright star the points do not list is kept clear all the same: no
+    # dark ring about it.
+    ys = np.mgrid[:side, :side][0].astype(np.float32)
+    star = 3000.0 * np.exp(-0.5 * ((xs - 40.0) ** 2 + (ys - 30.0) ** 2) / 3.8**2)
+    ringed = sm.contrasted(rest + star, 1.0, 9.0, points[:0], 100.0, sigma)[0] - (rest + star)
+    assert np.abs(ringed[15:46, 25:56]).max() < 1e-3 and ringed[110, 72] < -3.0
+    # None of it for stars at the sampling limit.
+    same, none = sm.contrasted(rest, 1.0, sm.CONTRAST_WIDTHS[0], points, 100.0, sigma)
+    assert same is rest and none == 0
+    # In a window: more the more is asked of the rest.
+    bank = sm.Bank(kernel_bank(tmp_path), sm.Settings(tile=32))
+    plain = sm.Settings(tile=32, exposure=1.0, kernel_noise=0.0, nonstellar=True)
+    asked = sm.Settings(tile=32, exposure=1.0, kernel_noise=0.0, nonstellar=True, contrast=2.0)
+    for seed in range(3):
+        without = sm.kernel_example(bank, 0, np.random.default_rng(seed), plain, identity=False)
+        example = sm.kernel_example(bank, 0, np.random.default_rng(seed), asked, identity=False)
+        assert without.details["contrast"] == 0.0
+        assert example.details["contrast"] == pytest.approx(2.0 * (1.0 - example.nonstellar_ratio))
+        assert example.ratio == without.ratio and np.array_equal(example.image, without.image)
+
+
+def test_clarity_raises_faint_detail_and_leaves_rims_and_stars_alone(tmp_path):
+    side = 200
+    ys, xs = np.mgrid[:side, :side].astype(np.float32)
+    # Faint ripples 12 px apart over a level of 140, left of a rim 60 high
+    # at column 120; a star on the ripples.
+    ripple = 0.3 * np.sin(2 * np.pi * xs / 12.0) * (xs < 90)
+    target = (np.where(xs < 120, 140.0, 200.0) + ripple).astype(np.float32)
+    points = np.zeros((1, len(COLUMNS)))
+    points[0, :2] = (40.0, 150.0)
+    points[0, COLUMNS.index("detected")] = 1
+    sigma = np.ones((side, side), np.float32)
+    made, reach = sm.clarified(target, 1.0, 9.0, points[:0], sigma)
+    change = made - target
+    fine = sm.CLARITY_FINE * 9.0
+    box = int(round(np.sqrt(3.0) * sm.CLARITY_WIDE * 9.0))
+    assert reach == 2 * box + sm.blur_reach(fine**2 * np.eye(2))
+    # The ripples stand higher, crest and trough alike, by the lift less
+    # what the fine smoothing takes of them.
+    rows = slice(60, 100)
+    gain = float((change[rows, 30:66] * ripple[rows, 30:66]).sum() / (ripple[rows, 30:66] ** 2).sum())
+    kept = float(np.exp(-0.5 * (2 * np.pi * fine / 12.0) ** 2))
+    assert gain == pytest.approx(sm.CLARITY_LIFT * kept, rel=0.15)
+    # No halo either side of the rim, where an unsharp mask of the same
+    # reach and amount would add a tenth of its height.
+    smooth = sm.blurred_images(target, [fine**2 * np.eye(2)])[0]
+    plain = sm.CLARITY_LIFT * (smooth - sm.box_means(smooth, box))
+    assert np.abs(plain[80, 108:132]).max() > 6.0
+    assert np.abs(change[80, 100:160]).max() < 0.3
+    # Twice the amount, twice the change; a rim as high as the noise is
+    # detail like any other.
+    assert np.allclose(sm.clarified(target, 2.0, 9.0, points[:0], sigma)[0] - target, 2 * change, atol=1e-3)
+    faint = np.where(xs < 120, 140.0, 140.5).astype(np.float32)
+    slight = sm.clarified(faint, 1.0, 9.0, points[:0], sigma)[0] - faint
+    assert slight[80, 112] < -0.03 and slight[80, 128] > 0.03
+    # A window with no noise of its own is judged by its range of light.
+    clean = sm.clarified(target, 1.0, 9.0, points[:0], np.zeros_like(sigma))[0] - target
+    assert np.abs(clean[80, 100:160]).max() < 0.3 and np.abs(clean[rows, 30:66]).max() > 0.02
+    # Kept clear of a listed star, and no ring about a bright one unlisted.
+    star = 3000.0 * np.exp(-0.5 * ((xs - 40.0) ** 2 + (ys - 150.0) ** 2) / 3.8**2)
+    listed = sm.clarified(target + star, 1.0, 9.0, points, sigma)[0] - (target + star)
+    assert np.abs(listed[140:161, 30:51]).max() < 1e-3
+    ringed = sm.clarified(target + star, 1.0, 9.0, points[:0], sigma)[0] - (target + star)
+    assert np.abs(ringed[120:181, 10:71]).max() < 1.0
+    # None of it for stars at the sampling limit.
+    same, none = sm.clarified(target, 1.0, sm.CONTRAST_WIDTHS[0], points, sigma)
+    assert same is target and none == 0
+    # A square's mean, reflected past the edges.
+    plane = np.arange(30, dtype=np.float32).reshape(5, 6)
+    padded = np.pad(plane, 2, mode="reflect")
+    assert sm.box_means(plane, 2)[3, 4] == pytest.approx(padded[3:8, 4:9].mean())
+    assert sm.box_means(plane, 2)[0, 0] == pytest.approx(padded[0:5, 0:5].mean())
+    # In a window: more the more is asked of the rest, on the target alone
+    # and after its noise.
+    bank = sm.Bank(kernel_bank(tmp_path), sm.Settings(tile=32))
+    plain = sm.Settings(tile=32, exposure=1.0, kernel_noise=1.0, nonstellar=True, pass_noise=True)
+    asked = sm.Settings(tile=32, exposure=1.0, kernel_noise=1.0, nonstellar=True, pass_noise=True, clarity=1.5)
+    for seed in range(3):
+        without = sm.kernel_example(bank, 0, np.random.default_rng(seed), plain, identity=False)
+        example = sm.kernel_example(bank, 0, np.random.default_rng(seed), asked, identity=False)
+        assert without.details["clarity"] == 0.0
+        assert example.details["clarity"] == pytest.approx(1.5 * (1.0 - example.nonstellar_ratio))
+        assert example.ratio == without.ratio and np.array_equal(example.image, without.image)
+        expected = sm.clarified(without.target, example.details["clarity"], example.width, example.points,
+                                np.asarray(bank.arrays["sigma"][0], dtype=np.float32))[0]
+        assert np.allclose(example.target, expected, atol=1e-3)
+        assert np.abs(example.target - without.target).max() > 0.01
+    identity = sm.kernel_example(bank, 0, np.random.default_rng(0), asked, identity=True)
+    assert identity.details["clarity"] == 0.0 and np.array_equal(identity.target, identity.image)
+
+
+class OtherNoise:
+    """`seed`'s generator, with its planes of noise drawn from another's."""
+
+    def __init__(self, seed: int, other: int) -> None:
+        self.base, self.other = np.random.default_rng(seed), np.random.default_rng(other)
+
+    def standard_normal(self, size=None):
+        return (self.other if isinstance(size, tuple) and len(size) == 2 else self.base).standard_normal(size)
+
+    def __getattr__(self, name):
+        return getattr(self.base, name)
+
+
+def test_clarity_and_shade_leave_the_noise_they_do_not_read(tmp_path):
+    # A faint cloud under a wide PSF, which the two act on, with no star to
+    # keep clear of.
+    down, across = np.mgrid[:SIDE, :SIDE]
+    stamp = gaussian(sharpen_bank.STAMP, np.diag([3.2**2] * 2))
+    windows = [{"image": (100.0 + 3.0 * np.sin(across / 4.0) * np.sin(down / 5.0)).astype(np.float32),
+                "sigma": np.ones((SIDE, SIDE)), "saturated": np.zeros((SIDE, SIDE)), "stamp": stamp,
+                "info": {"source": 0, "background": 100.0, "noise": 1.0, "width": sharpen_bank.stamp_width(stamp)}}]
+    sources = [{"input": "a/deep", "set": "a", "telescope": "Test Scope", "record": {}, "windows": [0, 1],
+                "points": detections(POSITIONS, FLUXES)[:0]}]
+    bank = sm.Bank(write_bank(tmp_path / "sharpen-deep-train-0", pairs=False, windows=windows, sources=sources,
+                              label="deep"), sm.Settings(tile=32), focus_check=False)
+    base = dict(tile=32, exposure=1.0, kernel_noise=1.0, nonstellar=True, pass_noise=True, fine_snr=0.0)
+
+    def noise_kept(seed: int, **settings) -> tuple[float, float]:
+        """The slope of the target's noise on the input's and the most it
+        departs from it, for one window met under two noises."""
+        first, second = (sm.kernel_example(bank, 0, OtherNoise(seed, other), sm.Settings(**base, **settings),
+                                           identity=False) for other in (1, 2))
+        shown, asked = first.image - second.image, first.target - second.target
+        return float((asked * shown).sum() / (shown * shown).sum()), float(np.abs(asked - shown).max())
+
+    lifted = []
+    for seed in range(4):
+        raised, _ = noise_kept(seed, clarity=1.5, shade=1.5, clarity_reads="shown")
+        lifted.append(raised)
+        kept, most = noise_kept(seed, clarity=1.5, shade=1.5, clarity_reads="structure")
+        assert kept == pytest.approx(1.0, abs=1e-3) and most < 1e-2
+    # Read as shown, as a run's record from before reads, noise is raised
+    # with the cloud in the clarity's band, and the shade moves it too.
+    assert max(lifted) > 1.005
+    assert sm.settings_from({"clarity": 1.5}).clarity_reads == "shown"
+    # The structure is raised as before: without noise the two are one.
+    quiet = dict(base, kernel_noise=0.0, clarity=1.5, shade=1.5)
+    one, two = (sm.kernel_example(bank, 0, np.random.default_rng(3), sm.Settings(**quiet, clarity_reads=reads),
+                                  identity=False) for reads in sm.CLARITY_READS)
+    assert one.details["clarity"] > 0
+    np.testing.assert_allclose(one.target, two.target, atol=1e-3)
+    with pytest.raises(ValueError, match="clarity_reads"):
+        sm.Settings(clarity_reads="noise")
+
+
+def test_a_pairs_bank_s_windows_are_met_under_noise_their_targets_keep(tmp_path):
+    directory = pair_bank(tmp_path, offset=(0.0, 0.0))
+    saturated = np.load(directory / "saturated.npy")
+    saturated[:, 30:33, 30:33] = 1
+    np.save(directory / "saturated.npy", saturated)
+    settings = sm.Settings(centroid_offset="none", pairs_noise=2.0, pairs_noise_share=1.0)
+    bank = sm.Bank(directory, settings, same_stack=True)
+    plain = sm.pair_example(bank, 0, sm.Settings(centroid_offset="none"), np.random.default_rng(4))
+    noisy = sm.pair_example(bank, 0, settings, np.random.default_rng(4))
+    share = noisy.details["noise_share"]
+    assert 0.0 < share <= 2.0 and plain.details["noise_share"] == 0.0
+    added = noisy.image - plain.image
+    # The same noise on both, as wide as its share of the stack's, and none
+    # on a clipped core.
+    np.testing.assert_allclose(noisy.target - plain.target, added, atol=2e-3)
+    clipped = saturated[0].astype(bool)
+    assert not added[clipped].any()
+    sigma = np.asarray(bank.arrays["input_sigma"][0], dtype=np.float32)
+    assert np.std((added / sigma)[~clipped]) == pytest.approx(share, rel=0.05)
+    # The network is told the noise it meets, and the loss still weighs by
+    # the stack's.
+    np.testing.assert_array_equal(noisy.noise_map, sm.image_sigma(noisy.image))
+    assert noisy.noise > plain.noise
+    np.testing.assert_array_equal(noisy.sigma, plain.sigma)
+    np.testing.assert_array_equal(noisy.valid, plain.valid)
+    # A pair of two stacks, one drawn without a generator (validation) and
+    # a record that names none are as they were.
+    two = sm.pair_example(sm.Bank(directory, settings), 0, settings, np.random.default_rng(4))
+    still = sm.pair_example(bank, 0, settings)
+    for other in (two, still):
+        assert np.array_equal(other.image, plain.image) and np.array_equal(other.target, plain.target)
+    assert sm.settings_from({"centroid_offset": "light"}).pairs_noise == 0.0
+    # About half of them, unless told.
+    half = sm.Settings(centroid_offset="none", pairs_noise=2.0)
+    rng = np.random.default_rng(5)
+    met = [sm.pair_example(bank, 0, half, rng).details["noise_share"] > 0 for _ in range(60)]
+    assert 18 <= sum(met) <= 42
+    with pytest.raises(ValueError, match="under noise"):
+        sm.Settings(pairs_noise=-1.0)
+
+
+
+def test_the_clarity_step_is_the_taught_clarity_on_a_whole_image():
+    side = 200
+    ys, xs = np.mgrid[:side, :side].astype(np.float32)
+    ripple = 0.3 * np.sin(2 * np.pi * xs / 12.0) * (xs < 90)
+    image = (np.where(xs < 120, 140.0, 200.0) + ripple).astype(np.float32)
+    sigma = np.ones((side, side), np.float32)
+    none = np.zeros((0, len(COLUMNS)))
+    # None asked: the image itself.
+    assert sm.clarity_step(image, 0.0, 9.0, none, sigma) is image
+    made = sm.clarity_step(image, 0.5, 9.0, none, sigma)
+    # The ripples stand higher and the rim has no halo, as taught.
+    rows = slice(60, 100)
+    change = made - image
+    gain = float((change[rows, 30:66] * ripple[rows, 30:66]).sum() / (ripple[rows, 30:66] ** 2).sum())
+    kept = float(np.exp(-0.5 * (2 * np.pi * sm.CLARITY_FINE * 9.0 / 12.0) ** 2))
+    assert gain == pytest.approx(0.5 * sm.CLARITY_LIFT * kept, rel=0.15)
+    assert np.abs(change[80, 100:160]).max() < 0.3
+    # Judged by the noise alone, where a window is judged by its range too.
+    assert np.allclose(made, sm.clarified(image, 0.5, 9.0, none, sigma, ranged=False)[0])
+    # NaN stays NaN, and what is far from it is as it was.
+    holed = image.copy()
+    holed[10:14, 180:184] = np.nan
+    kept = sm.clarity_step(holed, 0.5, 9.0, none, sigma)
+    assert np.isnan(kept[10:14, 180:184]).all() and np.isfinite(kept).sum() == side * side - 16
+    assert np.allclose(kept[rows, 30:66], made[rows, 30:66], atol=1e-3)
+
+
+def test_the_fine_part_of_a_change_is_held_back_under_noise(tmp_path):
+    side = 200
+    ys, xs = np.mgrid[:side, :side].astype(np.float32)
+    # A soft rim, sharpened; faint ripples 4 px long added far to its left.
+    soft = (140.0 + 30.0 * (1.0 + np.tanh((xs - 120.0) / 4.0))).astype(np.float32)
+    ripple = (0.2 * np.sin(2 * np.pi * xs / 4.0) * (xs < 60)).astype(np.float32)
+    sharp = (140.0 + 30.0 * (1.0 + np.tanh((xs - 120.0) / 1.5)) + ripple).astype(np.float32)
+    noise = np.ones((side, side), np.float32)
+    # None asked, or no noise: as it was.
+    assert sm.rolled_off(sharp, soft, 0.0, noise) == (sharp, 0)
+    assert np.allclose(sm.rolled_off(sharp, soft, 1.0, 0.0)[0], sharp, atol=1e-4)
+    made, reach = sm.rolled_off(sharp, soft, 1.0, noise)
+    assert reach == sm.blur_reach(sm.FINE_SPLIT**2 * np.eye(2)) + sm.blur_reach(sm.FINE_AREA**2 * np.eye(2))
+
+    def kept(columns):
+        asked, given = (sharp - soft)[80, columns], (made - soft)[80, columns]
+        return float((asked * given).sum() / (asked**2).sum())
+
+    # The ripples under the noise go, and the rim's sharpening stays.
+    assert kept(slice(10, 50)) < 0.1
+    assert kept(slice(112, 129)) > 0.9
+    # Twice the noise, less kept.
+    harder = sm.rolled_off(sharp, soft, 2.0, noise)[0]
+    assert np.abs(harder - soft)[80, 10:50].max() < np.abs(made - soft)[80, 10:50].max()
+    # As a step on a whole image: the same, and NaN stays NaN.
+    assert sm.rolloff_step(sharp, soft, 0.0, noise) is sharp
+    assert np.allclose(sm.rolloff_step(sharp, soft, 1.0, noise), made)
+    holed = sharp.copy()
+    holed[10:14, 180:184] = np.nan
+    step = sm.rolloff_step(holed, soft, 1.0, noise)
+    assert np.isnan(step[10:14, 180:184]).all() and np.isfinite(step).sum() == side * side - 16
+    assert np.allclose(step[60:100, 10:130], made[60:100, 10:130], atol=1e-3)
+    # In a window: on the target alone, and none without noise.
+    bank = sm.Bank(kernel_bank(tmp_path), sm.Settings(tile=32))
+    plain = sm.Settings(tile=32, exposure=1.0, kernel_noise=1.0, nonstellar=True, pass_noise=True)
+    asked = sm.Settings(tile=32, exposure=1.0, kernel_noise=1.0, nonstellar=True, pass_noise=True, fine_snr=1.0)
+    for seed in range(3):
+        without = sm.kernel_example(bank, 0, np.random.default_rng(seed), plain, identity=False)
+        example = sm.kernel_example(bank, 0, np.random.default_rng(seed), asked, identity=False)
+        assert example.ratio == without.ratio and np.array_equal(example.image, without.image)
+        assert np.abs(example.target - without.target).max() > 1e-4
+    quiet = sm.Settings(tile=32, exposure=1.0, kernel_noise=0.0, nonstellar=True, pass_noise=True, fine_snr=1.0)
+    still = sm.Settings(tile=32, exposure=1.0, kernel_noise=0.0, nonstellar=True, pass_noise=True)
+    assert np.allclose(sm.kernel_example(bank, 0, np.random.default_rng(0), quiet, identity=False).target,
+                       sm.kernel_example(bank, 0, np.random.default_rng(0), still, identity=False).target, atol=1e-4)
+    identity = sm.kernel_example(bank, 0, np.random.default_rng(0), asked, identity=True)
+    assert np.array_equal(identity.target, identity.image)
+
+
+def test_the_roll_off_split_and_the_clarity_band_can_be_moved(tmp_path):
+    rng = np.random.default_rng(3)
+    noise = rng.standard_normal((256, 256)).astype(np.float32)
+    flat = np.full((256, 256), 100.0, np.float32)
+    sigma = np.ones((256, 256), np.float32)
+    none = np.zeros((0, len(COLUMNS)))
+
+    def band(plane, low, high):
+        return blurred_images_band(plane, low) - blurred_images_band(plane, high)
+
+    def blurred_images_band(plane, px):
+        return sm.blurred_images(plane, [px**2 * np.eye(2)])[0]
+
+    # The clarity, moved up an octave, raises less of the noise's finest
+    # part, and the rest of its gain lies further out than before.
+    inner = (slice(64, 192), slice(64, 192))
+    raised = {}
+    for scale in (1.0, 2.0):
+        made, reach = sm.clarified(flat + noise, 1.0, 6.0, none, sigma, ranged=False, scale=scale)
+        change = made - (flat + noise)
+        raised[scale] = [float(band(change, low, high)[inner].std()) for low, high in ((1.0, 2.0), (4.0, 8.0))]
+        assert reach > 0
+    assert raised[2.0][0] < 0.7 * raised[1.0][0]
+    assert raised[2.0][1] / raised[1.0][1] > 1.5 * raised[2.0][0] / raised[1.0][0]
+    # At a scale of 1 it is as it was.
+    assert np.array_equal(sm.clarified(flat + noise, 1.0, 6.0, none, sigma, ranged=False)[0],
+                          sm.clarified(flat + noise, 1.0, 6.0, none, sigma, ranged=False, scale=1.0)[0])
+    # The roll-off's split: at its default, as before; wider, it holds
+    # back a coarser part of a change that lies under the noise.
+    soft = flat + noise
+    ripple = (0.3 * np.sin(2 * np.pi * np.arange(256) / 10.0)).astype(np.float32)[None, :] + 0 * flat
+    sharp = soft + ripple
+    as_before = sm.rolled_off(sharp, soft, 1.0, sigma)
+    assert np.array_equal(as_before[0], sm.rolled_off(sharp, soft, 1.0, sigma, sm.FINE_SPLIT)[0])
+    wide, wide_reach = sm.rolled_off(sharp, soft, 1.0, sigma, 4.0)
+    assert wide_reach > as_before[1]
+    kept = float(((wide - soft)[inner] * ripple[inner]).sum() / (ripple[inner] ** 2).sum())
+    kept_before = float(((as_before[0] - soft)[inner] * ripple[inner]).sum() / (ripple[inner] ** 2).sum())
+    assert kept < 0.5 * kept_before
+    # In a window: the settings reach the target.
+    bank = sm.Bank(kernel_bank(tmp_path), sm.Settings(tile=32))
+    base = dict(tile=32, exposure=1.0, kernel_noise=1.0, nonstellar=True, pass_noise=True, clarity=1.0, fine_snr=1.0)
+    plain = sm.kernel_example(bank, 0, np.random.default_rng(0), sm.Settings(**base), identity=False)
+    moved = sm.kernel_example(bank, 0, np.random.default_rng(0),
+                              sm.Settings(**base, clarity_scale=2.0, fine_split=3.0), identity=False)
+    assert np.array_equal(moved.image, plain.image)
+    assert not np.allclose(moved.target, plain.target)
+
+
+def test_a_magnified_window_s_stars_are_wider_and_where_its_points_say(tmp_path):
+    covariance = np.diag([1.3**2, 1.3**2])
+    # The resampler: twice as wide, about the middle, summing to one.
+    stamp = gaussian(sharpen_bank.STAMP, covariance)
+    wide = sm.magnified_stamp(stamp, 2.0)
+    assert wide.sum() == pytest.approx(1.0, abs=1e-5)
+    assert sharpen_bank.stamp_width(wide) / sharpen_bank.stamp_width(stamp) == pytest.approx(2.0, rel=0.03)
+    offset, _ = sm.moments(wide)
+    np.testing.assert_allclose(offset, 0.0, atol=0.02)
+    # A part of an image, its stars four times the flux where their points
+    # say, and its holes where they were.
+    image = stars_image(POSITIONS, FLUXES, covariance, sky=0.0).astype(np.float32)
+    corner = (6.0, 10.0)
+    made = sm.magnified(image, 2.0, corner)
+    moved = sm.magnified_points(detections(POSITIONS, FLUXES), 2.0, corner)
+    x, y = moved[0, :2]
+    assert (x, y) == pytest.approx(((POSITIONS[0][0] - 10.0 + 0.5) * 2 - 0.5, (POSITIONS[0][1] - 6.0 + 0.5) * 2 - 0.5))
+    assert moved[0, COLUMNS.index("flux")] == pytest.approx(4 * FLUXES[0])
+    ys, xs = np.mgrid[:SIDE, :SIDE]
+    near = np.hypot(xs - x, ys - y) < 10
+    assert made[near].sum() == pytest.approx(4 * FLUXES[0], rel=0.01)
+    assert float((made[near] * xs[near]).sum() / made[near].sum()) == pytest.approx(x, abs=0.05)
+    holed = image.copy()
+    holed[30:34, 30:34] = np.nan
+    assert np.isnan(sm.magnified(holed, 2.0, (0.0, 0.0))[61:67, 61:67]).all()
+    # The draws: within the range, none past the widest stars.
+    settings = sm.Settings(zoom=1.0, zoom_most=3.0, zoom_widest=6.0)
+    rng = np.random.default_rng(0)
+    draws = np.array([sm.zoom_drawn(2.0, rng, settings) for _ in range(200)])
+    assert draws.min() >= sm.ZOOM_LEAST and draws.max() <= 3.0 and draws.max() > 2.5
+    assert max(sm.zoom_drawn(4.0, rng, settings) for _ in range(50)) <= 1.5
+    assert sm.zoom_drawn(5.5, rng, settings) == 1.0
+    with pytest.raises(ValueError):
+        sm.Settings(zoom=0.5, zoom_most=1.1)
+    # In a window with a clean truth: its stars as wide as the draw makes
+    # them, and its input the magnified truth through the window's blur.
+    directory = kernel_bank(tmp_path)
+    clean = stars_image(POSITIONS, FLUXES, covariance).astype(np.float32)
+    np.save(directory / "image_clean.npy", np.stack([clean] * 4))
+    (directory / "clean.json").write_text(json.dumps({"noise_run": "n"}))
+    bank = sm.Bank(directory, sm.Settings(tile=32))
+    base = dict(tile=32, exposure=1.0, kernel_noise=1.0, clean_truth=1.0)
+    plain = sm.kernel_example(bank, 0, np.random.default_rng(0), sm.Settings(**base), identity=False)
+    assert plain.details["zoom"] == 1.0
+    zoomed = sm.kernel_example(bank, 0, np.random.default_rng(0), sm.Settings(**base, zoom=1.0), identity=False)
+    zoom = zoomed.details["zoom"]
+    assert sm.ZOOM_LEAST <= zoom <= 6.0 / plain.details["widths"]["reference"]
+    assert zoomed.details["widths"]["reference"] / plain.details["widths"]["reference"] == pytest.approx(zoom, rel=0.05)
+    corner = tuple(zoomed.details["zoom_corner"])
+    expected = sm.blurred_images(sm.magnified(clean, zoom, corner), [np.array(zoomed.details["kernel"])])[0]
+    assert np.std((zoomed.image - expected)[zoomed.valid]) < 1.05 * zoomed.details["noise_share"]
+    np.testing.assert_allclose(zoomed.points, sm.magnified_points(sm.window_points(bank, 0, bank.row(0)), zoom, corner),
+                               rtol=1e-5)
+    # Off, the draws are as they were.
+    off = sm.kernel_example(bank, 0, np.random.default_rng(0), sm.Settings(**base, zoom=0.0), identity=False)
+    assert np.array_equal(off.image, plain.image)
+
+
+def test_the_edge_step_deepens_a_rim_both_ways_and_rings_no_star(monkeypatch):
+    side = 200
+    ys, xs = np.mgrid[:side, :side].astype(np.float32)
+    # A rim 60 high at column 120, 4 px soft, with faint ripples far to
+    # its left; a bright star the detector did not list, on the rim's
+    # dark side.
+    ripple = 0.3 * np.sin(2 * np.pi * xs / 12.0) * (xs < 60)
+    rim = 30.0 * (1.0 + np.tanh((xs - 120.0) / 4.0))
+    image = (140.0 + rim + ripple).astype(np.float32)
+    sigma = np.ones((side, side), np.float32)
+    none = np.zeros((0, len(COLUMNS)))
+    # None asked: the image itself; none for stars at the sampling limit.
+    assert sm.edge_step(image, 0.0, 9.0, none, sigma) is image
+    assert np.array_equal(sm.edge_step(image, 1.0, sm.CONTRAST_WIDTHS[0], none, sigma), image)
+    change = sm.edge_step(image, 1.0, 9.0, none, sigma) - image
+    # Darker on the dark side and brighter on the lit side, the dark side
+    # by more; the ripples far from the rim left alone.
+    assert change[80, 106:120].min() < -2.0
+    assert change[80, 121:136].max() > 0.5
+    assert -change[80, 100:120].min() > 2 * change[80, 120:140].max()
+    assert np.abs(change[60:100, 10:40]).max() < 0.05
+    # Twice the amount, twice the change.
+    assert np.allclose(sm.edge_step(image, 2.0, 9.0, none, sigma) - image, 2 * change, atol=1e-3)
+    # The unlisted star is found as a blob and kept clear; without that,
+    # the step would ring it.
+    star = 3000.0 * np.exp(-0.5 * ((xs - 95.0) ** 2 + (ys - 150.0) ** 2) / 3.8**2)
+    starred = (image + star).astype(np.float32)
+    dist = np.hypot(xs - 95.0, ys - 150.0)
+    ring = (dist > 0.7 * 9.0) & (dist < 1.7 * 9.0)
+    kept = sm.edge_step(starred, 1.0, 9.0, none, sigma) - starred
+    monkeypatch.setattr(sm, "EDGE_BLOB", np.inf)
+    ringed = sm.edge_step(starred, 1.0, 9.0, none, sigma) - starred
+    monkeypatch.undo()
+    assert ringed[ring].min() < -20.0
+    assert np.abs(kept[ring]).max() < 0.05 * np.abs(ringed[ring]).max()
+    # A ridge bends one way only: not a star.
+    ridge = (140.0 + 60.0 * np.exp(-0.5 * ((xs - 100.0) / 4.0) ** 2)).astype(np.float32)
+    assert not sm.star_blobs(ridge, 9.0, sigma)[20:-20].any()
+    assert sm.star_blobs(starred, 9.0, sigma)[150, 95]
+    # NaN stays NaN, and what is far from it is as it was.
+    holed = image.copy()
+    holed[10:14, 180:184] = np.nan
+    made = sm.edge_step(holed, 1.0, 9.0, none, sigma)
+    assert np.isnan(made[10:14, 180:184]).all() and np.isfinite(made).sum() == side * side - 16
+    assert np.allclose(made[60:100, 100:140], image[60:100, 100:140] + change[60:100, 100:140], atol=1e-3)
+
+
+def test_holding_the_broad_change_under_its_noise_keeps_structure_and_the_fine_change():
+    def band(image):
+        a, b = sm.HOLD_LOW / sm.HALF_HEIGHT, sm.HOLD_HIGH / sm.HALF_HEIGHT
+        narrow, wide = sm.blurred_images(image.astype(np.float32), [a**2 * np.eye(2), b**2 * np.eye(2)])
+        return narrow - wide
+
+    rng = np.random.default_rng(1)
+    # The band's share of white noise is what white noise shows through it.
+    white = band(rng.standard_normal((512, 512)).astype(np.float32))[64:-64, 64:-64]
+    assert np.std(white) == pytest.approx(sm.band_noise(sm.HOLD_LOW, sm.HOLD_HIGH), rel=0.05)
+    side = 256
+    yy, xx = np.mgrid[0:side, 0:side].astype(np.float32)
+    soft = np.full((side, side), 10.0, np.float32)
+    # A broad change of structure on the left (a ridge, as a rim's), one the
+    # noise could make on the right, and a fine one (a 2 px checkerboard)
+    # everywhere.
+    strong = (2.0 * np.exp(-((xx - 64) ** 2) / (2 * 3.0**2))).astype(np.float32)
+    weak = np.where(xx >= 160, 0.5 * rng.standard_normal((side, side)), 0.0)
+    fine = 0.3 * np.where((xx + yy) % 2 == 0, 1.0, -1.0)
+    sharp = (soft + strong + weak + fine).astype(np.float32)
+    held = sm.held_broad(sharp, soft, 1.0, 1.0)
+    centre = (slice(116, 141), slice(52, 77))
+    assert np.abs(band(held - soft)[centre]).sum() > 0.9 * np.abs(band(strong)[centre]).sum()
+    # The noise's goes, as far as the band reads it (a difference of
+    # Gaussians read through again passes only part of it).
+    right = (slice(32, -32), slice(176, -32))
+    assert np.std(band(held - soft)[right]) < 0.7 * np.std(band(weak)[right])
+    # Nothing outside the band moves: the checkerboard is as it was.
+    sign = np.where((xx + yy) % 2 == 0, 1.0, -1.0)
+    assert abs(float(np.mean(((held - sharp) * sign)[16:-16, 16:-16]))) < 0.01 * 0.3
+    np.testing.assert_array_equal(sm.held_broad(sharp, soft, 0.0, 1.0), sharp)
+    # As a step on an output, NaN stays NaN and spreads nowhere.
+    gappy = sharp.copy()
+    gappy[10, 200] = np.nan
+    stepped = sm.noise_hold_step(gappy, soft, 1.0, np.ones_like(soft))
+    assert np.isnan(stepped[10, 200]) and np.isfinite(np.delete(stepped.ravel(), 10 * side + 200)).all()
+
+
+def test_smoothing_a_change_along_an_edge_leaves_the_edge_s_profile_and_the_rest(monkeypatch):
+    side, width = 260, 11.5
+    ys, xs = np.mgrid[:side, :side].astype(np.float32)
+    # A rim 30 high at column 130, 5 px soft; the change sharpens it (a
+    # function of the column alone) and varies along it every 8 px.
+    rim = 15.0 * (1.0 + np.tanh((xs - 130.0) / 5.0))
+    image = (140.0 + rim).astype(np.float32)
+    sigma = np.ones((side, side), np.float32)
+    none = np.zeros((0, len(COLUMNS)))
+    sharpened = 4.0 * np.exp(-0.5 * ((xs - 130.0) / 4.0) ** 2) * np.tanh((xs - 130.0) / 6.0)
+    waves = np.sin(2 * np.pi * ys / 8.0) * np.exp(-0.5 * ((xs - 130.0) / 5.0) ** 2)
+    # And a change where there is no edge at all, to be left as it is.
+    elsewhere = 0.1 * np.sin(2 * np.pi * ys / 8.0) * (xs < 50)
+
+    def made(size: float, amount: float, points=none, noise=sigma, where=width):
+        output = (image + sharpened + size * waves + elsewhere).astype(np.float32)
+        return sm.smooth_edges_step(output, image, amount, where, points, noise), output
+
+    inner = (slice(60, 200), slice(128, 133))
+    # None asked, or stars so narrow a line is under a pixel: the output itself.
+    kept, output = made(1.0, 0.0)
+    assert kept is output
+    assert made(1.0, 0.4, where=sm.ALONG_LEAST / sm.ALONG_LENGTH - 0.1)[0] is not None
+    narrow = made(1.0, 0.4, where=2.3)
+    assert narrow[0] is narrow[1]
+    # Waves under the noise go, waves far over it stay; what is across the
+    # rim, the rows' mean, is the output's either way.
+    def left(size: float, amount: float) -> float:
+        result, output = made(size, amount)
+        change = (result - output + size * waves)[inner]
+        return float((change * waves[inner]).sum() / (size * (waves[inner] ** 2).sum()))
+
+    assert left(0.1, 0.4) < 0.25
+    assert left(4.0, 0.4) > 0.9
+    # With no noise to hold back under, nothing is.
+    result, output = made(0.1, 0.4, noise=np.zeros_like(sigma))
+    np.testing.assert_allclose(result, output, atol=1e-4)
+    result, output = made(0.1, 0.4)
+    np.testing.assert_allclose((result - image)[60:200].mean(axis=0), sharpened[60:200].mean(axis=0), atol=0.06)
+    # Twice as much held back under twice the amount; a pixel never moves by
+    # more than its own wave; the sky far from the rim is as it was.
+    assert left(0.4, 1.0) < left(0.4, 0.3)
+    assert np.abs(result - output).max() < 0.15
+    far = np.abs(xs - 130.0) > 60
+    np.testing.assert_allclose(result[far], output[far], atol=2e-3)
+    assert elsewhere[far].max() > 0.05
+    # A listed star on the rim keeps its change, and the rim elsewhere does not.
+    points = np.zeros((1, len(COLUMNS)))
+    points[0, :2] = (130.0, 100.0)
+    points[0, COLUMNS.index("detected")] = 1
+    starred, output = made(0.1, 0.4, points=points)
+    np.testing.assert_allclose(starred[94:107, 125:136], output[94:107, 125:136], atol=1e-4)
+    assert np.abs((starred - output)[140:200, 128:133]).max() > 0.02
+    # It follows an edge as it turns: round a small disc, the waves go and a
+    # narrow line along the rim, the same at every angle, stays; averaged
+    # along a straight line it would not.
+    radius = np.hypot(xs - 130.0, ys - 130.0)
+    disc = (140.0 + 15.0 * (1.0 - np.tanh((radius - 30.0) / 5.0))).astype(np.float32)
+    around = np.sin(24 * np.arctan2(ys - 130.0, xs - 130.0)) * np.exp(-0.5 * ((radius - 30.0) / 4.0) ** 2)
+    ring = np.abs(radius - 30.0) < 1.5
+    output = (disc + 0.1 * around).astype(np.float32)
+    turned = sm.smooth_edges_step(output, disc, 0.4, width, none, sigma)
+    remaining = float(((turned - disc) * around)[ring].sum() / (0.1 * (around[ring] ** 2).sum()))
+    assert remaining < 0.35
+    line = 0.1 * np.exp(-0.5 * ((radius - 30.0) / 1.5) ** 2)
+    along = sm.smooth_edges_step((disc + line).astype(np.float32), disc, 0.4, width, none, sigma) - disc
+    assert float(along[ring].mean() / line[ring].mean()) > 0.85
+    # NaN stays NaN, and where it was not the output is what it was elsewhere.
+    holed = (image + sharpened + 0.1 * waves).astype(np.float32)
+    holed[10:14, 20:24] = np.nan
+    step = sm.smooth_edges_step(holed, image, 0.4, width, none, sigma)
+    assert np.isnan(step[10:14, 20:24]).all() and np.isfinite(step).sum() == side * side - 16
+    plain, _ = made(0.1, 0.4)
+    np.testing.assert_allclose(step[120:200, 120:140], plain[120:200, 120:140], atol=1e-3)
+
+
+def test_averaging_along_lines_turns_with_them():
+    # A thin ring 16 px out stays a ring; along straight lines it would not.
+    ys, xs = np.mgrid[:120, :120].astype(np.float32)
+    radius, theta = np.hypot(xs - 60.0, ys - 60.0), np.arctan2(ys - 60.0, xs - 60.0)
+    ring = np.exp(-0.5 * ((radius - 16.0) / 1.5) ** 2).astype(np.float32)
+    on = np.abs(radius - 16.0) < 1.0
+    made = sm.averaged_along(ring, (-np.sin(theta)).astype(np.float32), np.cos(theta).astype(np.float32), 6.0)
+    assert made[on].mean() / ring[on].mean() > 0.9
+    # Constant along a line, and a wave along it gone.
+    flat = np.full((60, 60), 7.0, np.float32)
+    up = np.ones((60, 60), np.float32)
+    np.testing.assert_allclose(sm.averaged_along(flat, 0 * up, up, 4.0), 7.0, rtol=1e-5)
+    wave = np.sin(2 * np.pi * np.arange(60, dtype=np.float32)[:, None] / 8.0) * np.ones((1, 60), np.float32)
+    assert np.abs(sm.averaged_along(wave, 0 * up, up, 4.0)[20:40]).max() < 0.1
+    assert np.allclose(sm.averaged_along(wave, up, 0 * up, 4.0)[20:40], wave[20:40], atol=1e-4)
+
+
+def test_shade_darkens_the_dark_side_of_a_rim_alone(tmp_path):
+    side = 200
+    ys, xs = np.mgrid[:side, :side].astype(np.float32)
+    # A rim 60 high at column 120, 4 px soft, with faint ripples far to
+    # its left; a star on the ripples.
+    ripple = 0.3 * np.sin(2 * np.pi * xs / 12.0) * (xs < 60)
+    rim = 30.0 * (1.0 + np.tanh((xs - 120.0) / 4.0))
+    target = (140.0 + rim + ripple).astype(np.float32)
+    points = np.zeros((1, len(COLUMNS)))
+    points[0, :2] = (30.0, 150.0)
+    points[0, COLUMNS.index("detected")] = 1
+    sigma = np.ones((side, side), np.float32)
+    made, reach = sm.shaded(target, 1.0, 9.0, points[:0], sigma)
+    change = made - target
+    fine = sm.CLARITY_FINE * 9.0
+    box = int(round(np.sqrt(3.0) * sm.CLARITY_WIDE * 9.0))
+    assert reach == 2 * box + sm.blur_reach(fine**2 * np.eye(2))
+    # Darker on the dark side, by more than the noise; nothing brighter
+    # anywhere, and the lit side as it was.
+    assert change[80, 104:118].min() < -2.0
+    assert change.max() <= 1e-4
+    assert np.abs(change[80, 126:160]).max() < 0.05
+    # Far from the rim the ripples are left alone.
+    assert np.abs(change[60:100, 10:40]).max() < 0.05
+    # Twice the amount, twice the change.
+    assert np.allclose(sm.shaded(target, 2.0, 9.0, points[:0], sigma)[0] - target, 2 * change, atol=1e-3)
+    # Kept clear of a listed star.
+    star = 3000.0 * np.exp(-0.5 * ((xs - 30.0) ** 2 + (ys - 150.0) ** 2) / 3.8**2)
+    listed = sm.shaded(target + star, 1.0, 9.0, points, sigma)[0] - (target + star)
+    assert np.abs(listed[140:161, 20:41]).max() < 1e-3
+    # None of it for stars at the sampling limit.
+    same, none = sm.shaded(target, 1.0, sm.CONTRAST_WIDTHS[0], points, sigma)
+    assert same is target and none == 0
+    # In a window: more the more is asked of the rest, after its noise.
+    bank = sm.Bank(kernel_bank(tmp_path), sm.Settings(tile=32))
+    plain = sm.Settings(tile=32, exposure=1.0, kernel_noise=1.0, nonstellar=True, pass_noise=True)
+    asked = sm.Settings(tile=32, exposure=1.0, kernel_noise=1.0, nonstellar=True, pass_noise=True, shade=1.5)
+    for seed in range(3):
+        without = sm.kernel_example(bank, 0, np.random.default_rng(seed), plain, identity=False)
+        example = sm.kernel_example(bank, 0, np.random.default_rng(seed), asked, identity=False)
+        assert without.details["shade"] == 0.0
+        assert example.details["shade"] == pytest.approx(1.5 * (1.0 - example.nonstellar_ratio))
+        assert np.array_equal(example.image, without.image)
+        expected = sm.shaded(without.target, example.details["shade"], example.width, example.points,
+                             np.asarray(bank.arrays["sigma"][0], dtype=np.float32))[0]
+        assert np.allclose(example.target, expected, atol=1e-3)
+        assert (example.target <= without.target + 1e-4).all()
+    identity = sm.kernel_example(bank, 0, np.random.default_rng(0), asked, identity=True)
+    assert identity.details["shade"] == 0.0 and np.array_equal(identity.target, identity.image)
+
+
+def clipped_bank(tmp_path, level: float = 2_000.0):
+    """A known-kernel bank of one window holding a bright star clipped at
+    `level`, with fainter ones about it."""
+    covariance = np.diag([1.5**2] * 2)
+    positions, fluxes = [(32.3, 31.6), *POSITIONS[1:]], [400_000.0, *FLUXES[1:]]
+    true = stars_image(positions, fluxes, covariance)
+    image = np.minimum(true, level)
+    saturated = sharpen_bank.saturation(image, level)
+    stamp = gaussian(sharpen_bank.STAMP, covariance)
+    points = detections(positions, fluxes)
+    points[0, COLUMNS.index("clipped")] = 1.0
+    windows = [{"image": image, "sigma": np.ones((SIDE, SIDE)), "saturated": saturated, "stamp": stamp,
+                "info": {"source": 0, "background": 100.0, "noise": 1.0, "width": sharpen_bank.stamp_width(stamp)}}]
+    sources = [{"input": "a/deep", "set": "a", "record": {}, "input_psf": {"clip_level": level}, "points": points}]
+    directory = write_bank(tmp_path / "sharpen-deep-train-0", pairs=False, windows=windows, sources=sources,
+                           label="deep")
+    return directory, true, points, stamp
+
+
+def test_a_clipped_core_is_filled_with_the_stamp_scaled_to_its_wings(tmp_path):
+    _, true, points, stamp = clipped_bank(tmp_path)
+    image = np.minimum(true, 2_000.0)
+    saturated = sharpen_bank.saturation(image, 2_000.0)
+    back = sm.filled(image, saturated, points, stamp, sharpen_bank.stamp_width(stamp), 100.0)
+    core = image >= 2_000.0
+    np.testing.assert_allclose(back[core], true[core], rtol=0.05)
+    assert np.array_equal(back[~saturated], image[~saturated])
+
+
+def test_a_known_kernel_window_is_clipped_after_its_blur_as_a_camera_clips(tmp_path):
+    directory, _, _, _ = clipped_bank(tmp_path)
+    bank = sm.Bank(directory, sm.Settings(tile=32))
+    settings = sm.Settings(tile=32, exposure=1.0, kernel_noise=0.0, fill_clipped=True)
+    example = sm.kernel_example(bank, 0, np.random.default_rng(3), settings, identity=False)
+    clipped = example.image >= 2_000.0
+    # The filled core blurred is far above the clip: both are clipped flat
+    # there, and those pixels alone (and two about them) are left out.
+    assert clipped.sum() > 4 and example.image.max() == pytest.approx(2_000.0)
+    assert example.target.max() == pytest.approx(2_000.0)
+    assert not example.valid[clipped].any()
+    down, across = np.mgrid[0:SIDE, 0:SIDE]
+    ring = (np.hypot(across - 32.3, down - 31.6) > 8) & (np.hypot(across - 32.3, down - 31.6) < 12)
+    assert example.valid[ring].mean() > 0.9
+    # Unfilled, the clipped plateau blurs to a soft bump under the clip.
+    soft = sm.kernel_example(bank, 0, np.random.default_rng(3), sm.Settings(tile=32, exposure=1.0, kernel_noise=0.0),
+                             identity=False)
+    assert soft.image.max() < 2_000.0
+
+
+def test_targets_carry_their_input_s_noise_when_it_is_passed_on(tmp_path):
+    bank = sm.Bank(kernel_bank(tmp_path), sm.Settings(tile=32))
+    sky = (slice(2, 12), slice(2, 12))
+    passing = sm.Settings(tile=32, exposure=1.0, kernel_noise=3.0, pass_noise=True)
+    kept = sm.kernel_example(bank, 0, np.random.default_rng(1), passing, identity=False)
+    plain = sm.kernel_example(bank, 0, np.random.default_rng(1), sm.Settings(tile=32, exposure=1.0, kernel_noise=3.0),
+                              identity=False)
+    share = kept.details["noise_share"]
+    # Passed on, target and input differ on the sky by the stack's own
+    # noise alone; otherwise by the fresh noise too.
+    assert np.std((kept.target - kept.image)[sky]) < 1.2
+    assert np.std((plain.target - plain.image)[sky]) > 0.8 * share > 1.2
+    # A pair bank with denoised planes: its target's denoised, moved, plus
+    # the noise found in its input.
+    directory = pair_bank(tmp_path, offset=(0.0, 0.0))
+    inputs, targets = np.load(directory / "input.npy"), np.load(directory / "target.npy")
+    np.save(directory / "input_clean.npy", inputs - 0.25)
+    np.save(directory / "target_clean.npy", targets * 0 + 7.0)
+    (directory / "clean.json").write_text(json.dumps({"noise_run": "n"}))
+    pairs = sm.Bank(directory, sm.Settings(centroid_offset="none"))
+    assert pairs.summary()["clean"] == {"noise_run": "n"}
+    example = sm.pair_example(pairs, 0, sm.Settings(centroid_offset="none", pass_noise=True))
+    np.testing.assert_allclose(example.target, 7.25, atol=1e-5)
+    left = sm.pair_example(pairs, 0, sm.Settings(centroid_offset="none"))
+    assert np.array_equal(left.target, targets[0])
+
+
+def test_a_bank_s_windows_are_denoised_beside_it(tmp_path):
+    from seiza_training import sharpen_clean
+    from seiza_training.unet import ResidualUNet
+
+    store = Store(tmp_path / "store", tmp_path / "scratch")
+    run = store.root / "models" / "noise" / "n"
+    run.mkdir(parents=True)
+    model = ResidualUNet(width=4, levels=3)
+    torch.save(model.state_dict(), run / "weights.pt")
+    (run / "run.json").write_text(json.dumps({"name": "n", "config": {"width": 4, "levels": 3,
+                                                                       "noise_map": "constant", "holes": True}}))
+    directory = pair_bank(tmp_path)
+    found = sharpen_clean.clean(store, "n", directory)
+    assert found["windows"] == 4
+    # A new network finds nothing: the planes are the windows.
+    np.testing.assert_allclose(np.load(directory / "input_clean.npy"), np.load(directory / "input.npy"), atol=1e-4)
+    np.testing.assert_allclose(np.load(directory / "target_clean.npy"), np.load(directory / "target.npy"), atol=1e-4)
+    assert sharpen_clean.clean(store, "n", directory)["kept"]
+    # A known-kernel bank's image likewise.
+    deep = kernel_bank(tmp_path)
+    assert sharpen_clean.clean(store, "n", deep)["windows"] == 4
+    np.testing.assert_allclose(np.load(deep / "image_clean.npy"), np.load(deep / "image.npy"), atol=1e-4)
+    # Met denoised, a window is blurred from its denoised plane, at a share
+    # of its noise; a pair's denoised input is asked for its denoised target.
+    np.save(deep / "image_clean.npy", np.load(deep / "image.npy") * 0 + 100.0)
+    bank = sm.Bank(deep, sm.Settings(tile=32))
+    settings = sm.Settings(tile=32, denoised=1.0, exposure=1.0)
+    example = sm.kernel_example(bank, 0, np.random.default_rng(0), settings, identity=False)
+    assert example.details["denoised"] and np.abs(example.target - 100.0).max() < 1e-3
+    assert float(example.sigma.max()) == pytest.approx(sm.DENOISED_NOISE)
+    # A clean-truth window is the denoised plane too, met under fresh noise
+    # of half to all of its stack's own, which its target carries as well.
+    settings = sm.Settings(tile=32, clean_truth=1.0, exposure=1.0, pass_noise=True, kernel_noise=0.2)
+    example = sm.kernel_example(bank, 0, np.random.default_rng(0), settings, identity=False)
+    assert example.details["clean_truth"] and not example.details["denoised"]
+    assert sm.CLEAN_TRUTH_NOISE <= example.details["noise_share"] <= 1.0
+    assert float(example.sigma.max()) == pytest.approx(1.0)
+    assert np.abs(example.target - example.image).max() < 1e-3
+    assert np.std(example.image - 100.0) == pytest.approx(example.details["noise_share"], rel=0.1)
+    assert not sm.kernel_example(bank, 0, np.random.default_rng(0), sm.Settings(tile=32),
+                                 identity=False).details["clean_truth"]
+    np.save(directory / "input_clean.npy", np.load(directory / "input.npy") * 0 + 3.0)
+    np.save(directory / "target_clean.npy", np.load(directory / "target.npy") * 0 + 5.0)
+    pairs = sm.Bank(directory, sm.Settings(centroid_offset="none"))
+    met = sm.pair_example(pairs, 0, sm.Settings(centroid_offset="none", denoised=1.0), np.random.default_rng(0))
+    assert met.details["denoised"] and np.all(met.image == 3.0) and np.allclose(met.target, 5.0)
+    assert not sm.pair_example(pairs, 0, sm.Settings(centroid_offset="none", denoised=1.0)).details["denoised"]
+
+
+def test_windows_with_structure_are_drawn_more_often_and_a_pair_may_ask_the_rest_its_own(tmp_path):
+    directory = kernel_bank(tmp_path, count=6)
+    images = np.load(directory / "image.npy")
+    # One window holds a nebula's edge away from its stars.
+    images[4, :, 4:12] += 40.0
+    np.save(directory / "image.npy", images)
+    plain = sm.Bank(directory, sm.Settings(tile=32))
+    weighed = sm.Bank(directory, sm.Settings(tile=32), structure=4.0)
+    scores = sm.structure_scores(weighed)
+    assert int(np.argmax(scores)) == 4 and (directory / f"structure-{sm.STRUCTURE_VERSION}.npy").exists()
+    assert weighed.odds[4] == pytest.approx(5 * weighed.odds.min(), rel=1e-6) and np.ptp(plain.odds) < 1e-12
+    assert weighed.odds.sum() == pytest.approx(1.0)
+    # A banked pair's record may carry the ratio asked of what is not a star.
+    pairs = pair_bank(tmp_path)
+    sources = json.loads((pairs / "sources.json").read_text())
+    sources[0]["record"]["nonstellar_ratio"] = 0.55
+    (pairs / "sources.json").write_text(json.dumps(sources))
+    bank = sm.Bank(pairs, sm.Settings())
+    two = sm.Settings(nonstellar=True)
+    assert sm.pair_example(bank, 0, two).ratios(two) == (pytest.approx(0.7), 0.55)
+    assert sm.pair_example(bank, 3, two).ratios(two) == (pytest.approx(0.7), pytest.approx(0.7))
+
+
+@pytest.mark.parametrize("factor", [2, 3, 4])
+def test_a_brought_down_stamp_is_the_star_a_brought_down_image_holds(factor):
+    from seiza_training.sharpen_external import brought_down
+
+    covariance = np.diag([3.0**2] * 2)
+    stamp = gaussian(33, covariance)
+    small = sharpen_bank.brought_down_stamp(stamp, factor)
+    assert small.shape[0] % 2 == 1 and float(small.sum()) == pytest.approx(1.0, abs=1e-5)
+    # A star at one of the pixels taken, brought down: the same profile.
+    side, at = 48 * factor, 24
+    middle = at * factor + factor // 2
+    image = brought_down(gaussian(side, covariance, (middle, middle)), factor)
+    half = small.shape[0] // 2
+    cut = image[at - half:at + half + 1, at - half:at + half + 1]
+    np.testing.assert_allclose(small, cut / cut.sum(), atol=2e-4)
+    assert sharpen_bank.stamp_width(small) == pytest.approx(sharpen_bank.down_width(2.3548 * 3.0, factor), rel=0.12)
+    # It stays round: as wide along the diagonals as along the axes, where
+    # block means square a star.
+    centre = half
+    assert float(small[centre, centre + 1]) == pytest.approx(float(small[centre + 1, centre]), rel=1e-4)
+    along, across = float(small[centre, centre + 2]), float(small[centre + 1, centre + 1])
+    assert across / along == pytest.approx(math.exp((4 - 2) / (2 * (sharpen_bank.down_width(2.3548 * 3.0, factor)
+                                                                    / 2.3548) ** 2)), rel=0.02)
+
+
+def test_stacks_are_brought_down_to_the_floor_a_star_is_asked_to():
+    assert [sharpen_bank.down_factor(width) for width in (2.0, 2.4, 3.0, 11.0)] == [2, 3, 3, 6]
+    for width in (2.0, 2.4, 3.0, 4.5):
+        assert sharpen_bank.down_width(width, sharpen_bank.down_factor(width)) == pytest.approx(
+            sharpen_bank.BINNED_PX, abs=0.12)
+
+
+def test_a_brought_down_field_puts_stars_among_the_pixels_taken():
+    factor = 3
+
+    class Stack:
+        record, usable = {"status": "measured"}, True
+
+        def points(self):
+            rows = np.zeros((1, len(COLUMNS)), dtype=np.float32)
+            rows[0, COLUMNS.index("x")], rows[0, COLUMNS.index("y")] = 10 * factor + factor // 2, 7 * factor + 1.5
+            rows[0, COLUMNS.index("flux")], rows[0, COLUMNS.index("fwhm")] = 900.0, 6.0
+            return rows
+
+        def shape_at(self, x, y):
+            return {"fwhm": 6.0, "e1": 0.2, "e2": 0.0, "beta": 3.0}
+
+    image = np.zeros((16, 16), dtype=np.float32)
+    image[7, 10] = 5.0
+    field = sharpen_bank.BroughtDownField(Stack(), factor, image)
+    star = dict(zip(COLUMNS, field.points()[0].tolist()))
+    assert (star["x"], star["y"]) == (pytest.approx(10.0), pytest.approx(7 + 0.5 / factor))
+    assert star["flux"] == pytest.approx(100.0) and star["peak"] == pytest.approx(5.0)
+    wide = math.hypot(6.0, 2.3548 * 0.5 * factor) / factor
+    assert star["fwhm"] == pytest.approx(wide)
+    assert field.full(10) == 10 * factor + factor // 2 and field.down(field.full(4.25)) == pytest.approx(4.25)
+    shape = field.shape_at(3.0, 3.0)
+    assert shape["fwhm"] == pytest.approx(wide)
+    assert shape["e1"] == pytest.approx(0.2 * (6.0 / (wide * factor)) ** 2) and shape["beta"] == 3.0
+
+
+def test_a_real_psf_blurs_a_window_as_its_stamp_says(tmp_path):
+    settings = sm.Settings(kernel_ratios=(1.1, 3.0))
+    sharp = gaussian(sharpen_bank.STAMP, np.diag([1.3**2] * 2))
+    donor = 0.8 * moffat(sharpen_bank.STAMP, 3.0, stretch=1.3, angle=0.5) + 0.2 * gaussian(
+        sharpen_bank.STAMP, np.diag([4.0**2] * 2), (66.0, 64.0))
+    kernel = sm.donor_kernel(sharp, donor, settings)
+    assert kernel is not None and not kernel.identity and kernel.donor is donor
+    assert kernel.asked == pytest.approx(kernel.widths["input"] / kernel.widths["reference"])
+    # A window's stars, blurred by the donor, are as wide as P_in's stamp.
+    image = stars_image([(64.2, 63.7)], [1e5], np.diag([1.3**2] * 2), side=128, sky=0.0)
+    blurred = sm.blurred_images(image, [kernel.blur])[0]
+    assert float(blurred.sum()) == pytest.approx(float(image.sum()), rel=1e-3)
+    assert sharpen_bank.stamp_width(sm.empirical_stamp(blurred, np.array([[64.2, 63.7]]), 41)) == pytest.approx(
+        kernel.widths["input"], rel=0.03)
+    # A donor that widens too little or too much gives way.
+    assert sm.donor_kernel(sharp, gaussian(sharpen_bank.STAMP, np.diag([0.2**2] * 2)), settings) is None
+    assert sm.donor_kernel(sharp, gaussian(sharpen_bank.STAMP, np.diag([9.0**2] * 2)), settings) is None
+    # In a bank, by the settings' share; without it, the batches of before.
+    bank = sm.Bank(kernel_bank(tmp_path), sm.Settings(tile=32))
+    real = sm.Settings(tile=32, real_kernels=1.0, kernel_ratios=(1.1, 3.0))
+    example = sm.kernel_example(bank, 0, np.random.default_rng(2), real, identity=False)
+    assert example.details["real"] and example.ratio < 1
+    plain = sm.kernel_example(bank, 0, np.random.default_rng(2), sm.Settings(tile=32), identity=False)
+    assert not plain.details["real"]
+
+
+def crossed(side: int, centre=None) -> np.ndarray:
+    """A round star with a cross of four arms along the axes, as a stamp."""
+    middle = (side - 1) / 2
+    core = gaussian(side, np.diag([1.6**2] * 2), centre)
+    arms = gaussian(side, np.diag([6.0**2, 0.8**2]), centre) + gaussian(side, np.diag([0.8**2, 6.0**2]), centre)
+    del middle
+    return (0.8 * core + 0.1 * arms).astype(np.float32)
+
+
+def arms_over_diagonals(stamp: np.ndarray) -> float:
+    middle = (stamp.shape[0] - 1) // 2
+    step = np.arange(6, 10)
+    between = np.mean([stamp[middle + step, middle + step], stamp[middle - step, middle - step],
+                       stamp[middle + step, middle - step], stamp[middle - step, middle + step]], axis=0)
+    # Along the axes at the diagonals' own radii, between whole pixels.
+    whole = np.arange(0, 18)
+    arm = np.mean([stamp[middle, middle + whole], stamp[middle, middle - whole], stamp[middle + whole, middle],
+                   stamp[middle - whole, middle]], axis=0)
+    along = np.exp(np.interp(step * math.sqrt(2), whole, np.log(np.maximum(arm, 1e-30))))
+    return float(np.mean(along / between))
+
+
+def test_a_round_target_takes_a_psf_s_cross_off(tmp_path):
+    stamp = crossed(sharpen_bank.STAMP)
+    assert arms_over_diagonals(stamp) > 5
+    # Round in its second moments already: a blur leaves the cross.
+    _, plain, _ = sm.rounded(stamp, 1.5)
+    assert arms_over_diagonals(plain) > 5
+    made, round_stamp = sm.rounding(plain)
+    assert arms_over_diagonals(round_stamp) == pytest.approx(1.0, abs=0.15)
+    assert float(made.sum()) == pytest.approx(1.0, abs=1e-5)
+    # A star of that PSF in an image, through the filter, is the round one.
+    star = 1e5 * crossed(97)
+    out = sm.blurred_images(star, [made])[0]
+    assert float(out.sum()) == pytest.approx(float(star.sum()), rel=1e-3)
+    assert arms_over_diagonals(out) < 1.6
+    # The settings carry it to the kernel and the example.
+    kernel = sm.known_kernel(stamp, np.random.default_rng(0), sm.Settings(round_target=True))
+    assert kernel.rounding is not None and sm.known_kernel(stamp, np.random.default_rng(0),
+                                                           sm.Settings()).rounding is None
+    bank = sm.Bank(kernel_bank(tmp_path), sm.Settings(tile=32))
+    example = sm.kernel_example(bank, 0, np.random.default_rng(1), sm.Settings(tile=32, round_target=True),
+                                identity=False)
+    assert example.ratio < 1 and not example.valid[:sm.ROUNDING_BAND].any()
+
+
+def test_a_reblur_window_is_held_to_give_itself_back_when_blurred_again(tmp_path):
+    deep = kernel_bank(tmp_path)
+    np.save(deep / "image_clean.npy", np.load(deep / "image.npy"))
+    (deep / "clean.json").write_text(json.dumps({"noise_run": "n"}))
+    bank = sm.Bank(deep, sm.Settings(tile=32))
+    settings = sm.Settings(tile=32, reblur=1.0)
+    example = sm.kernel_example(bank, 0, np.random.default_rng(0), settings)
+    assert example.kind == "reblur" and example.reblur > 0 and np.array_equal(example.image, example.target)
+    assert sm.REBLUR_RATIOS[0] <= example.ratio <= sm.REBLUR_RATIOS[1]
+    # Evaluation's windows, asked for a kernel or an identity, are never these.
+    assert sm.kernel_example(bank, 0, np.random.default_rng(0), settings, identity=False).kind == "kernel"
+    arrays = sm.arrays_of(example, np.random.default_rng(1), settings)
+    assert arrays["reblur"] == np.float32(example.reblur) and not arrays["labels"].any()
+    assert not arrays["valid"][0, 0].any()
+    # The loss: an output that is the input sharpened by the very blur
+    # asked back is right, and the input itself, blurred again, is wrong.
+    covariance = np.diag([1.3**2] * 2)
+    sharp = stars_image(POSITIONS, FLUXES, covariance) - 100.0
+    variance = 1.5
+    wide = sm.blurred_images(sharp, [variance * np.eye(2)], pad=0)[0]
+
+    def loss(output):
+        batch = {"reference": torch.from_numpy(wide)[None, None], "target": torch.from_numpy(wide)[None, None],
+                 "sigma": torch.ones(1, 1, SIDE, SIDE), "valid": torch.from_numpy(
+                     sm.edge_band((SIDE, SIDE), 8).astype(np.float32))[None, None],
+                 "labels": torch.zeros(1, SIDE, SIDE, dtype=torch.int64), "reblur": torch.tensor([variance])}
+        residual = torch.from_numpy(output - wide)[None, None]
+        return float(sm.loss_terms(residual, batch, sm.LossSettings(), "linear")["total"])
+
+    assert loss(sharp) < 0.05 * loss(wide)
+
+
+def test_a_model_with_two_ratios_reads_five_planes_and_sharpens_with_a_pair():
+    model = sm.build_model(4, 3, sm.PLANES_NONSTELLAR)
+    assert model.first[0].in_channels == 5
+    image = stars_image(POSITIONS, FLUXES, np.diag([2.0, 2.0]))
+    stamp = gaussian(sharpen_bank.STAMP, np.diag([2.0, 2.0]))
+    inference = {"tile": 64, "overlap": 2 * reach(3) + 4, "margin": reach(3), "multiple": model.multiple}
+    output = sm.sharpen(model, image, lambda x, y: stamp, ratio=(0.6, 0.5), points=detections(POSITIONS, FLUXES),
+                        noise_map=np.ones_like(image), background=100.0, noise=1.0, inference=inference)
+    # A new model is the identity.
+    np.testing.assert_allclose(output, image, atol=1e-3)
+
+
+def test_where_one_frame_covers_the_sky_the_image_s_own_map_weighs_the_loss():
+    image = np.random.default_rng(0).normal(100.0, 2.0, (SIDE, SIDE)).astype(np.float32)
+    sigma = np.full((SIDE, SIDE), 2.0, np.float32)
+    sigma[:, :20] = 0.0
+    found = sm.stack_noise(sigma, image)
+    assert np.array_equal(found[:, 20:], sigma[:, 20:])
+    assert np.median(found[:, :20]) == pytest.approx(2.0, rel=0.3)
+    assert np.array_equal(sm.stack_noise(sigma, image, np.full_like(sigma, 7.0))[:, :20], np.full((SIDE, 20), 7.0))
+
+
+def test_a_pair_s_target_is_moved_by_its_centroid_offset(tmp_path):
+    bank = sm.Bank(pair_bank(tmp_path, offset=(0.6, -0.4)), sm.Settings())
+    stars = np.array(POSITIONS)
+
+    def centroids(image):
+        found = []
+        for x, y in stars:
+            column, row = int(round(x)), int(round(y))
+            box = image[row - 6:row + 7, column - 6:column + 7].astype(np.float64) - 100.0
+            down, across = np.mgrid[row - 6:row + 7, column - 6:column + 7]
+            found.append([(box * across).sum() / box.sum(), (box * down).sum() / box.sum()])
+        return np.array(found)
+
+    moved = sm.pair_example(bank, 0, sm.Settings(centroid_offset="detection"))
+    left = sm.pair_example(bank, 0, sm.Settings(centroid_offset="none"))
+    assert np.abs(centroids(left.target) - stars - [0.6, -0.4]).max() < 0.05
+    assert np.abs(centroids(moved.target) - stars).max() < 0.05
+    assert np.abs(centroids(moved.image) - stars).max() < 0.05
+    # The few pixels the shift reads past the edge are out of the loss.
+    assert not moved.valid[0].any() and left.valid[0].all()
+    # A run recorded before the light offset named the detections' "shift".
+    assert sm.Settings(centroid_offset="shift").centroid_offset == "detection"
+
+
+def test_a_pairs_bank_s_target_is_moved_at_its_stars_alone(tmp_path):
+    # A target made from its input's own stack: the input's noise and a
+    # faint cloud where the input has them, its stars sharper and moved.
+    offset = (0.6, -0.4)
+    directory = pair_bank(tmp_path, offset=offset)
+    wide, sharp = np.diag([2.0**2] * 2), np.diag([1.4**2] * 2)
+    moved = [(x + offset[0], y + offset[1]) for x, y in POSITIONS]
+    rng = np.random.default_rng(8)
+    down, across = np.mgrid[:SIDE, :SIDE]
+    sky = rng.normal(0, 1, (SIDE, SIDE)) + 8.0 * np.sin(across / 5.0) * np.sin(down / 7.0)
+    image = (stars_image(POSITIONS, FLUXES, wide) + sky).astype(np.float32)
+    target = (stars_image(moved, FLUXES, sharp) + sky).astype(np.float32)
+    for name, plane in (("input", image), ("target", target)):
+        kept = np.load(directory / f"{name}.npy")
+        kept[:] = plane
+        np.save(directory / f"{name}.npy", kept)
+    settings = sm.Settings(centroid_offset="detection", pairs_offset="stars")
+    own = sm.Bank(directory, settings, same_stack=True)
+    example = sm.pair_example(own, 0, settings)
+    far = np.ones((SIDE, SIDE), bool)
+    for x, y in POSITIONS:
+        far &= (across - x) ** 2 + (down - y) ** 2 > 14**2
+    assert far.sum() > 200
+    # Away from the stars it is the bank's target, its noise and its cloud
+    # on the input's; at the stars it is the moved one.
+    assert np.abs(example.target - target)[far].max() < 0.05
+    assert np.abs(example.target - example.image)[far].max() < 0.05
+    whole = sm.pair_example(own, 0, sm.Settings(centroid_offset="detection"))
+    assert np.abs(whole.target - target)[far].max() > 0.5
+    for x, y in POSITIONS:
+        row, column = int(round(y)), int(round(x))
+        core = (slice(row - 2, row + 3), slice(column - 2, column + 3))
+        assert np.abs(example.target - whole.target)[core].max() < 0.01 * target[core].max()
+    # A pair of two stacks is moved whole whatever the setting, and an
+    # older run's record, which names none, was.
+    two = sm.pair_example(sm.Bank(directory, settings), 0, settings)
+    assert np.array_equal(two.target, whole.target)
+    assert sm.settings_from({"centroid_offset": "light"}).pairs_offset == "whole"
+    with pytest.raises(ValueError, match="pairs_offset"):
+        sm.Settings(pairs_offset="nebula")
+
+
+def lopsided_bank(tmp_path, *, windows: int = 10, wing=(2.0, 0.0), detection=(0.1, 0.0)):
+    """A seeing bank of one pair whose windows each hold one star at their
+    middle: the input's lopsided, a fifth of its light in a wing `wing` px
+    off its core, the target's round about the core. Its detections'
+    offset is recorded as `detection`."""
+    wide, sharp = np.diag([2.0**2] * 2), np.diag([1.4**2] * 2)
+    middle = (SIDE - 1) / 2 + 0.3
+    rng = np.random.default_rng(7)
+    rows = []
+    for index in range(windows):
+        core = gaussian(SIDE, wide, (middle, middle))
+        wing_light = gaussian(SIDE, wide, (middle + wing[0], middle + wing[1]))
+        image = 100.0 + 30_000.0 * (0.8 * core + 0.2 * wing_light) + rng.normal(0, 1, (SIDE, SIDE))
+        target = 100.0 + 30_000.0 * gaussian(SIDE, sharp, (middle, middle)) + rng.normal(0, 0.7, (SIDE, SIDE))
+        rows.append({"input": image.astype(np.float32), "target": target.astype(np.float32),
+                     "input_sigma": np.ones((SIDE, SIDE)), "input_map": np.ones((SIDE, SIDE)),
+                     "target_sigma": np.full((SIDE, SIDE), 0.7), "saturated": np.zeros((SIDE, SIDE)),
+                     "input_stamp": gaussian(sharpen_bank.STAMP, wide),
+                     "target_stamp": gaussian(sharpen_bank.STAMP, sharp),
+                     # Each window at its own place, as a bank's are.
+                     "info": {"source": 0, "x": 400.0 * index, "y": 300.0 * (index % 3), "background": 100.0,
+                              "noise": 1.0, "ratio": 0.82, "width_ratio": 0.7, "input_width": 2.3548 * 2.0,
+                              "target_width": 2.3548 * 1.4}})
+    points = detections([(middle + 400.0 * index, middle + 300.0 * (index % 3)) for index in range(windows)],
+                        [30_000.0] * windows)
+    sources = [{"input": "p/seeing/worst", "target": "p/seeing/best", "set": "p", "telescope": "Test Scope",
+                "record": {"pair": "p/seeing"}, "alignment": {"matched": windows, "offset_px": list(detection)},
+                "windows": [0, windows], "points": points}]
+    return write_bank(tmp_path / "sharpen-seeing-train-0", pairs=True, windows=rows, sources=sources, label="seeing")
+
+
+def test_a_pair_s_target_is_moved_so_its_stars_light_meets_the_input_s(tmp_path):
+    directory = lopsided_bank(tmp_path)
+    bank = sm.Bank(directory, sm.Settings())
+    # The wing pulls the input's light 0.4 px from the core the target is
+    # round about: the target moves by -0.4 px, by the light's measure.
+    assert bank.light[0]["kind"] == "median" and bank.light[0]["stars"] == 10
+    assert bank.target_offset(0, "light") == pytest.approx((-0.4, 0.0), abs=0.03)
+    assert bank.target_offset(0, "detection") == (0.1, 0.0)
+    assert bank.summary()["light_offsets"] == {"median": 1, "detection": 0}
+    example = sm.pair_example(bank, 0, sm.Settings())
+    star = (SIDE - 1) / 2 + 0.3
+    before = sm.light_centre(example.image, star, star, sm.LIGHT_RADIUS * example.width)
+    after = sm.light_centre(example.target, star, star, sm.LIGHT_RADIUS * example.width)
+    assert after == pytest.approx(before, abs=0.03)
+    # Measured once, then read from beside the bank.
+    assert (directory / f"light-offsets-{sm.LIGHT_VERSION}.json").exists()
+    assert sm.Bank(directory, sm.Settings()).light == bank.light
+    # Too few stars for a light offset: the detections' stands in.
+    few = sm.Bank(lopsided_bank(tmp_path / "few", windows=sm.LIGHT_LEAST - 1), sm.Settings())
+    assert few.light == {} and few.target_offset(0, "light") == (0.1, 0.0)
+
+
+def test_a_light_offset_over_enough_stars_is_a_plane_over_the_field():
+    rng = np.random.default_rng(2)
+    x, y = rng.uniform(0, 6000, 200), rng.uniform(0, 4000, 200)
+    dx = 0.1 + 0.2 * (x - 3000) / 1000 + rng.normal(0, 0.05, 200)
+    dy = -0.5 + 0.1 * (y - 2000) / 1000 + rng.normal(0, 0.05, 200)
+    dy[:10] = 5.0
+    fit = sm.fitted_offsets(np.column_stack([x, y, dx, dy]))
+    assert fit["kind"] == "plane"
+    at = lambda c, px, py: c[0] + c[1] * (px - fit["centre"][0]) / 1000 + c[2] * (py - fit["centre"][1]) / 1000  # noqa: E731
+    assert at(fit["dx"], 5000, 1000) == pytest.approx(0.5, abs=0.03)
+    # The stray stars are clipped.
+    assert at(fit["dy"], 3000, 4000) == pytest.approx(-0.3, abs=0.03)
+
+
+def test_stamps_out_of_focus_are_found_by_their_rings_and_flat_tops():
+    side = sharpen_bank.STAMP
+    middle = (side - 1) / 2
+    down, across = np.mgrid[0:side, 0:side] - middle
+    distance = np.hypot(across, down)
+    ring = np.exp(-0.5 * ((distance - 5.0) / 1.5) ** 2)
+    disc = 1.0 / (1.0 + np.exp((distance - 7.0) / 0.4))
+    stamps = [ring, disc, np.zeros((side, side))]
+    stamps += [gaussian(side, np.diag([s**2, s**2])) for s in (0.6, 1.0, 2.0, 5.0)]
+    stamps += [moffat(side, fwhm, beta) for fwhm in (1.5, 3.0, 13.0) for beta in (2.5, 4.0)]
+    stamps = np.stack([stamp / max(stamp.sum(), 1e-12) for stamp in stamps]).astype(np.float32)
+    widths = np.array([sharpen_bank.stamp_width(stamp) for stamp in stamps])
+    found = sm.out_of_focus(stamps, widths)
+    assert list(found[:3]) == [True, True, True]
+    assert not found[3:].any()
+
+
+def test_a_bank_leaves_out_windows_out_of_focus_and_sources_mostly_so(tmp_path):
+    directory = pair_bank(tmp_path, ratios=[0.7] * 8)
+    side = sharpen_bank.STAMP
+    down, across = np.mgrid[0:side, 0:side] - (side - 1) / 2
+    ring = np.exp(-0.5 * ((np.hypot(across, down) - 5.0) / 1.5) ** 2).astype(np.float32)
+    stamps = np.load(directory / "input_stamp.npy")
+    # One of pair p's four windows, and three of pair q's.
+    for window in (1, 4, 5, 6):
+        stamps[window] = ring / ring.sum()
+    np.save(directory / "input_stamp.npy", stamps)
+    bank = sm.Bank(directory, sm.Settings())
+    assert list(bank.kept) == [0, 2, 3]
+    assert bank.left == {"out-of-focus-source": 4, "out-of-focus": 1}
+    assert len(sm.Bank(directory, sm.Settings(), focus_check=False).kept) == 8
+
+
+def test_windows_are_kept_by_their_ratio_and_pairs_left_out_by_id(tmp_path):
+    directory = pair_bank(tmp_path, ratios=[0.5, 1.05, None, 0.9, 0.95, 0.7])
+    kept = sm.Bank(directory, sm.Settings())
+    assert list(kept.kept) == [0, 3, 4, 5]
+    assert kept.left == {"ratio-above": 1, "ratio-unknown": 1}
+    narrow = sm.Bank(directory, sm.Settings(max_ratio=0.92, min_ratio=0.6))
+    assert list(narrow.kept) == [3, 5] and narrow.left["ratio-below"] == 1
+    # The fit's ratio reads its own column, 0.12 above the stamps'.
+    assert list(sm.Bank(directory, sm.Settings(ratio_source="fit")).kept) == [0, 5]
+    # A pair is left out by its id, its input's or its target's.
+    for name in ("q/seeing", "q/seeing/worst", "q/seeing/best"):
+        bank = sm.Bank(directory, sm.Settings(), excluded=(name,))
+        assert list(bank.kept) == [0] and bank.left["excluded"] == 3
+    with pytest.raises(ValueError, match="keeps no window"):
+        sm.Bank(directory, sm.Settings(), excluded=("p/seeing", "q/seeing"))
+    # No pair is left out by name unless asked: focus is measured.
+    assert sm.BankChoice("k", (), None, ()).excluded == ()
+
+
+def test_a_bank_leaves_out_kinds_and_gives_the_stacks_of_many_nights_their_share(tmp_path):
+    covariance = np.diag([1.3**2] * 2)
+    stamp = gaussian(sharpen_bank.STAMP, covariance)
+    windows = [{"image": stars_image(POSITIONS, FLUXES, covariance), "sigma": np.ones((SIDE, SIDE)),
+                "saturated": np.zeros((SIDE, SIDE)), "stamp": stamp,
+                "info": {"source": index // 3, "background": 100.0, "noise": 1.0,
+                         "width": sharpen_bank.stamp_width(stamp)}} for index in range(6)]
+    sources = [{"input": name, "input_kind": kind, "set": name.split("/")[0], "record": {},
+                "points": detections(POSITIONS, FLUXES)}
+               for name, kind in (("a/deep", "deep"), ("multi-night/b/stack", "multi-night"))]
+    directory = write_bank(tmp_path / "sharpen-deep-train-0", pairs=False, windows=windows, sources=sources,
+                           label="deep")
+    assert sm.Bank(directory, sm.Settings()).multi_night_share == pytest.approx(0.5)
+    weighted = sm.Bank(directory, sm.Settings(), multi_night_share=0.8)
+    assert weighted.multi_night_share == pytest.approx(0.8) and weighted.odds[3:].sum() == pytest.approx(0.8)
+    assert weighted.summary()["multi_night_share"] == pytest.approx(0.8)
+    left = sm.Bank(directory, sm.Settings(), left_out_kinds=("deep",))
+    assert list(left.kept) == [3, 4, 5] and left.left == {"kind:deep": 3}
+
+
+def test_worker_processes_hand_out_the_batches_the_loop_would_build(tmp_path):
+    choice = sm.BankChoice(kernel=str(kernel_bank(tmp_path)), seeing=(str(pair_bank(tmp_path)),),
+                           validation_kernel=None, validation_seeing=())
+    settings = sm.Settings(tile=32)
+    mix = (0.6, 0.4, 0.0)
+    sources, shares = sm.mixture(choice.train(settings), mix)
+    workers = sm.Workers(choice, settings, mix, 3, 7, depth=2, processes=2, start=4)
+    try:
+        for step in (5, 6, 7):
+            built = workers.get()
+            expected = sm.batch_from(sources, shares, 3, sm.step_generator(7, step), settings)
+            assert set(built) == set(expected)
+            for name, value in expected.items():
+                assert built[name].dtype == value.dtype, name
+                assert torch.equal(built[name], value), name
+    finally:
+        workers.close()
+
+
+def test_no_object_takes_more_than_its_cap_of_the_draws():
+    groups = np.array(["a"] * 60 + ["b"] * 20 + ["c"] * 10 + ["d"] * 10)
+    odds = sm.capped_odds(groups, 0.4)
+    share = {name: float(odds[groups == name].sum()) for name in "abcd"}
+    assert share["a"] == pytest.approx(0.4)
+    # The rest go to the others by their windows.
+    assert share["b"] == pytest.approx(0.3) and share["c"] == pytest.approx(0.15)
+    assert odds.sum() == pytest.approx(1.0)
+    # Within an object its windows are alike.
+    assert np.ptp(odds[groups == "a"]) == 0
+    # Fewer objects than the cap allows: as even as they can be.
+    assert sm.capped_odds(groups, 0.1)[groups == "a"].sum() == pytest.approx(0.25)
+    assert np.allclose(sm.capped_odds(groups, 0.0), 1 / len(groups))
+    assert sm.object_name("Scope/M 27/2026-07-06/HA-300s-g100-bin1") == "Scope/M 27/HA-300s-g100-bin1"
+
+
+def test_flips_and_turns_move_the_stamp_maps_and_apertures_with_the_image():
+    # An elongated star, tilted, and a stamp of the same shape: whatever the
+    # flip and turn, the star in the image and the stamp agree.
+    covariance = np.array([[4.0, 1.5], [1.5, 2.0]])
+    image = stars_image([(31.0, 30.0)], [1e5], covariance)
+    stamp = gaussian(sharpen_bank.STAMP, covariance)
+    valid = np.ones((SIDE, SIDE), dtype=bool)
+    valid[:3] = False
+    # The target is the input plus 1, plus 2 where the loss may not look.
+    target = image + np.where(valid, 1.0, 2.0).astype(np.float32)
+    example = sm.Example(image, target, np.ones((SIDE, SIDE), np.float32), np.ones((SIDE, SIDE), np.float32),
+                         valid, stamp, 0.7, detections([(31.0, 30.0)], [1e5]), 100.0, 1.0, 2.0, "kernel", 0, 0)
+    settings = sm.Settings(tile=SIDE, points_empty=0.0)
+    seen = set()
+    for seed in range(40):
+        arrays = sm.arrays_of(example, np.random.default_rng(seed), settings)
+        star = np.clip(arrays["reference"][0], 0, None)
+        _, star_covariance = sm.moments(np.pad(star, ((0, 1), (0, 1))))
+        _, stamp_covariance = sm.moments(arrays["stamp"][0])
+        assert star_covariance == pytest.approx(stamp_covariance, rel=0.02, abs=0.02)
+        seen.add((round(star_covariance[0, 0], 1), round(star_covariance[0, 1], 1)))
+        # The point-source map, the target, the masks and the apertures
+        # turn with it.
+        assert np.unravel_index(np.argmax(arrays["planes"][3]), star.shape) == np.unravel_index(np.argmax(star),
+                                                                                                star.shape)
+        assert np.allclose(arrays["target"] - arrays["reference"], 2.0 - arrays["valid"], atol=1e-4)
+        assert arrays["labels"][np.unravel_index(np.argmax(star), star.shape)] == 1
+        assert arrays["valid"][0].sum() == valid.sum()
+    # All four shapes a turn or flip gives were met.
+    assert len(seen) == 4
+
+
+def test_the_network_reads_planes_and_a_stamp_and_exports_only_the_allowed_operations(tmp_path):
+    import onnx
+    import onnxruntime
+
+    torch.manual_seed(0)
+    model = SharpeningUNet(width=8, levels=3).eval()
+    # Weights as a trained model's, so no two layers share theirs.
+    for layer in model.modules():
+        if isinstance(layer, torch.nn.Conv2d):
+            torch.nn.init.normal_(layer.weight, std=0.1)
+            torch.nn.init.normal_(layer.bias, std=0.1)
+    planes = torch.randn(2, len(sm.PLANES), 48, 64)
+    stamps = torch.rand(2, len(sm.STAMP_PLANES), sharpen_bank.STAMP, sharpen_bank.STAMP)
+    with torch.no_grad():
+        out = model(planes, stamps)
+        assert out.shape == (2, 1, 48, 64)
+        assert model.encoder(stamps).shape == (2, 64, 1, 1)
+        # The stamp changes the output: FiLM reads it.
+        assert not torch.allclose(out, model(planes, stamps.flip(-1)))
+    path = tmp_path / "model.onnx"
+    exported = sm.export(model, path, tile=64)
+    assert exported["max_relative_error"] < 1e-4
+    operations = {node.op_type for node in onnx.load(str(path)).graph.node}
+    assert operations <= {"Conv", "Sigmoid", "Mul", "Add", "Concat", "Resize", "Constant"}
+    session = onnxruntime.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+    assert [tensor.name for tensor in session.get_inputs()] == ["planes", "stamp"]
+    # An untrained model is the identity: its residual is zero.
+    assert not SharpeningUNet(width=4, levels=2)(planes, stamps).any()
+
+
+def test_tiles_with_their_own_stamp_and_points_reproduce_the_whole_image():
+    torch.manual_seed(1)
+    model = SharpeningUNet(width=4, levels=3).eval()
+    for layer in model.modules():
+        if isinstance(layer, torch.nn.Conv2d):
+            torch.nn.init.normal_(layer.weight, std=0.3)
+    # Sides whose last tile starts on the model's grid: nothing is padded.
+    image = stars_image([(40.5, 60.2), (150.3, 90.8), (100.0, 190.4), (65.7, 128.1)], [5e4, 3e4, 2e4, 1e4],
+                        np.diag([2.0, 2.0]), side=200)[:, :]
+    image = np.concatenate([image, image[:, :32]], axis=1)
+    noise_map = np.ones_like(image)
+    stamp = gaussian(sharpen_bank.STAMP, np.diag([2.0, 2.0]))
+    points = detections([(40.5, 60.2), (150.3, 90.8), (100.0, 190.4), (65.7, 128.1)], [5e4, 3e4, 2e4, 1e4])
+    inference = {"tile": 64, "overlap": 2 * reach(3) + 4, "margin": reach(3), "multiple": model.multiple}
+    tiled = sm.sharpen(model, image, lambda x, y: stamp, ratio=0.6, points=points, noise_map=noise_map,
+                       background=100.0, noise=1.0, inference=inference, residual="linear")
+    rendered = sm.point_map(points, stamp, image.shape, 100.0)
+    planes = sm.network_planes(image, noise_map, 0.6, rendered, 100.0, 1.0)
+    with torch.no_grad():
+        whole = model(torch.from_numpy(planes)[None], torch.from_numpy(sm.stamp_planes(stamp))[None]).numpy()[0, 0]
+    np.testing.assert_allclose(tiled - image, whole, atol=1e-4 * np.abs(whole).max())
+    # Through asinh, the blended residual is added to the image's asinh.
+    curved = sm.sharpen(model, image, lambda x, y: stamp, ratio=0.6, points=points, noise_map=noise_map,
+                        background=100.0, noise=1.0, inference=inference)
+    np.testing.assert_allclose(curved, 100.0 + np.sinh(planes[0] + whole), rtol=1e-4, atol=1e-3)
+    # A stamp that changes across the field changes each tile's output.
+    other = gaussian(sharpen_bank.STAMP, np.diag([6.0, 3.0]))
+    varied = sm.sharpen(model, image, lambda x, y: stamp if x < 100 else other, ratio=0.6, points=points,
+                        noise_map=noise_map, background=100.0, noise=1.0, inference=inference, residual="linear")
+    assert np.abs(varied - tiled)[:, :40].max() < 1e-4 * np.abs(whole).max()
+    assert np.abs(varied - tiled)[:, -40:].max() > 1e-2 * np.abs(whole).max()
+
+
+def test_an_oversampled_network_keeps_the_image_s_size_and_its_tiles_reproduce_the_whole_image(tmp_path):
+    import onnx
+
+    torch.manual_seed(3)
+    model = SharpeningUNet(width=4, levels=3, oversample=2).eval()
+    # Its grid and its reach are halved in the image's pixels.
+    assert model.multiple == 2
+    assert reach(3, 2) == math.ceil(reach(3) / 2)
+    assert sm.tiling(6, 2) == {"tile": 512, "overlap": 2 * reach(6, 2) + 32, "margin": reach(6, 2), "multiple": 16}
+    planes = torch.randn(2, len(sm.PLANES), 48, 64)
+    stamps = torch.rand(2, len(sm.STAMP_PLANES), sharpen_bank.STAMP, sharpen_bank.STAMP)
+    # Untrained it is the identity, as the network at the image's grid is.
+    assert not model(planes, stamps).any()
+    for layer in model.modules():
+        if isinstance(layer, torch.nn.Conv2d):
+            torch.nn.init.normal_(layer.weight, std=0.3)
+    with torch.no_grad():
+        assert model(planes, stamps).shape == (2, 1, 48, 64)
+    path = tmp_path / "model.onnx"
+    assert sm.export(model, path, tile=64)["max_relative_error"] < 1e-4
+    operations = {node.op_type for node in onnx.load(str(path)).graph.node}
+    assert operations <= {"Conv", "Sigmoid", "Mul", "Add", "Concat", "Resize", "Constant"}
+    stars = [(40.5, 60.2), (150.3, 90.8), (100.0, 190.4), (65.7, 128.1)]
+    image = stars_image(stars, [5e4, 3e4, 2e4, 1e4], np.diag([2.0, 2.0]), side=200)[:, :]
+    image = np.concatenate([image, image[:, :32]], axis=1)
+    noise_map = np.ones_like(image)
+    stamp = gaussian(sharpen_bank.STAMP, np.diag([2.0, 2.0]))
+    points = detections(stars, [5e4, 3e4, 2e4, 1e4])
+    inference = {"tile": 64, "overlap": 2 * reach(3, 2) + 4, "margin": reach(3, 2), "multiple": model.multiple}
+    tiled = sm.sharpen(model.eval(), image, lambda x, y: stamp, ratio=0.6, points=points, noise_map=noise_map,
+                       background=100.0, noise=1.0, inference=inference, residual="linear")
+    rendered = sm.point_map(points, stamp, image.shape, 100.0)
+    planes = sm.network_planes(image, noise_map, 0.6, rendered, 100.0, 1.0)
+    with torch.no_grad():
+        whole = model(torch.from_numpy(planes)[None], torch.from_numpy(sm.stamp_planes(stamp))[None]).numpy()[0, 0]
+    assert np.abs(whole).max() > 0
+    np.testing.assert_allclose(tiled - image, whole, atol=1e-4 * np.abs(whole).max())
+    # Only powers of two the network's levels can hold.
+    for refused in (0, 3, 8):
+        with pytest.raises(ValueError, match="power of two"):
+            SharpeningUNet(width=4, levels=3, oversample=refused)
+    # A recorded run says how it was built, and is loaded as that.
+    assert sm.build_model(4, 3, sm.PLANES, 0, 2).oversample == 2
+
+
+def test_a_field_s_vectors_over_every_pixel_leave_the_output_where_the_tiles_fall():
+    torch.manual_seed(2)
+    model = SharpeningUNet(width=4, levels=3).eval()
+    for layer in model.modules():
+        if isinstance(layer, torch.nn.Conv2d):
+            torch.nn.init.normal_(layer.weight, std=0.3)
+    stars = [(40.5, 60.2), (150.3, 90.8), (100.0, 190.4), (65.7, 128.1), (200.2, 40.6)]
+    image = stars_image(stars, [5e4, 3e4, 2e4, 1e4, 4e4], np.diag([2.0, 2.0]), side=232)
+    noise_map = np.ones_like(image)
+    points = detections(stars, [5e4, 3e4, 2e4, 1e4, 4e4])
+    inference = {"tile": 64, "overlap": 2 * reach(3) + 4, "margin": reach(3), "multiple": model.multiple}
+    ys = xs = np.array([0.0, 115.5, 231.0])
+    stamps = np.stack([np.stack([gaussian(sharpen_bank.STAMP, np.diag([1.5 + row + column, 2.0 + row]))
+                                 for column in range(3)]) for row in range(3)])
+    common = dict(ratio=0.6, points=points, noise_map=noise_map, background=100.0, noise=1.0,
+                  inference=inference, residual="linear")
+    whole = sm.sharpen(model, image, None, grid=(ys, xs, stamps), **common)
+    # The same image from a corner 24 px in, on the model's grid: its tiles
+    # fall elsewhere, and inside the network's reach of the cut, its output
+    # is the whole image's.
+    shift = 24
+    part = sm.sharpen(model, np.ascontiguousarray(image[shift:, shift:]), None,
+                      grid=(ys - shift, xs - shift, stamps),
+                      **{**common, "points": points - np.array([shift, shift] + [0] * (points.shape[1] - 2),
+                                                               dtype=np.float32),
+                         "noise_map": noise_map[shift:, shift:]})
+    inner = (slice(inference["margin"], None), slice(inference["margin"], None))
+    change = np.abs(whole - image).max()
+    assert np.abs(part[inner] - whole[shift:, shift:][inner]).max() < 1e-4 * change
+    # The field changes the output: one stamp everywhere is another image.
+    flat = sm.sharpen(model, image, None, grid=(ys, xs, np.broadcast_to(stamps[0, 0], stamps.shape)), **common)
+    assert np.abs(flat - whole).max() > 1e-2 * change
+    # One stamp everywhere is what tiles conditioned on that stamp give.
+    tiled = sm.sharpen(model, image, lambda x, y: stamps[0, 0], **common)
+    np.testing.assert_allclose(flat, tiled, atol=1e-4 * change)
+
+
+def test_the_loss_is_zero_on_the_target_and_blind_where_it_may_not_look():
+    rng = np.random.default_rng(0)
+    batch = {"reference": torch.from_numpy(rng.normal(size=(2, 1, 32, 32)).astype(np.float32)),
+             "target": torch.from_numpy(rng.normal(size=(2, 1, 32, 32)).astype(np.float32)),
+             "sigma": torch.ones(2, 1, 32, 32), "valid": torch.ones(2, 1, 32, 32),
+             "labels": torch.zeros(2, 32, 32, dtype=torch.int64)}
+    batch["labels"][0, 10:15, 10:15] = 1
+    exact = batch["target"] - batch["reference"]
+    terms = sm.loss_terms(exact, batch, sm.LossSettings(), "linear")
+    assert float(terms["total"]) == pytest.approx(0.0, abs=1e-6)
+    # Through asinh, the residual that reaches the target is the difference
+    # of the two asinh.
+    curved = torch.asinh(batch["target"]) - torch.asinh(batch["reference"])
+    assert float(sm.loss_terms(curved, batch, sm.LossSettings())["total"]) == pytest.approx(0.0, abs=1e-5)
+    # An error where the loss may not look costs nothing.
+    batch["valid"][:, :, :4] = 0
+    off = exact.clone()
+    off[:, :, :4] += 1000.0
+    assert float(sm.loss_terms(off, batch, sm.LossSettings(), "linear")["total"]) == pytest.approx(0.0, abs=1e-6)
+    # Flux taken from inside an aperture costs the flux term.
+    dimmed = exact.clone()
+    dimmed[0, 0, 10:15, 10:15] -= 0.5
+    terms = sm.loss_terms(dimmed, batch, sm.LossSettings(), "linear")
+    # The star's error counts once for each of its aperture's 25 pixels, out
+    # of the valid pixels, as a pixel's error does.
+    valid = float(batch["valid"].sum())
+    assert float(terms["flux"]) == pytest.approx((math.sqrt(2.5**2 + 0.1**2) - 0.1) * 25 / valid, rel=1e-4)
+    assert float(terms["gradient"]) > 0
+
+
+def test_a_resumed_run_is_the_run_it_continues(tmp_path):
+    store = Store(tmp_path / "store", tmp_path / "scratch")
+    choice = sm.BankChoice(kernel=str(kernel_bank(tmp_path)), seeing=(str(pair_bank(tmp_path)),),
+                           validation_kernel=None, validation_seeing=(str(pair_bank(
+                               tmp_path, name="sharpen-seeing-validation-0")),), excluded=())
+    options = {"choice": choice, "steps": 6, "width": 4, "levels": 2, "batch": 2, "log_every": 2,
+               "checkpoint_every": 2, "settings": sm.Settings(tile=32), "validation_batches": 1,
+               "validation_windows": 2, "prefetch": 2, "batch_threads": 2, "where": torch.device("cpu")}
+    whole = sm.train(store, name="whole", **options)
+    stopped = sm.train(store, name="parts", stop_after=4, **options)
+    assert stopped["stopped_after"] == 4 and len(stopped["history"]) == 2
+    assert not (sm.run_directory(store, "parts") / "run.json").exists()
+    with pytest.raises(FileExistsError):
+        sm.train(store, name="parts", **options)
+    resumed = sm.resume_run(store, "parts", prefetch=2, batch_threads=2, where=torch.device("cpu"))
+    for entry in (*whole["history"], *resumed["history"]):
+        entry.pop("seconds")
+    assert resumed["history"] == whole["history"]
+    first = torch.load(sm.run_directory(store, "whole") / "weights.pt")
+    second = torch.load(sm.run_directory(store, "parts") / "weights.pt")
+    assert all(torch.equal(first[key], second[key]) for key in first)
+    # The run is recorded with its measures, and its checkpoint is gone.
+    record = json.loads((sm.run_directory(store, "parts") / "run.json").read_text())
+    assert record["validation"]["seeing:seeing"]["windows"] == 2
+    assert record["config"]["choice"]["kernel"] == choice.kernel
+    assert not (sm.run_directory(store, "parts") / "checkpoint.pt").exists()
+    _, model = sm.load_run(store, "parts")
+    assert isinstance(model, SharpeningUNet)
+
+
+def test_a_run_can_start_from_another_runs_weights(tmp_path):
+    store = Store(tmp_path / "store", tmp_path / "scratch")
+    choice = sm.BankChoice(kernel=str(kernel_bank(tmp_path)), seeing=(str(pair_bank(tmp_path)),),
+                           validation_kernel=None, validation_seeing=(), excluded=())
+    options = {"choice": choice, "steps": 2, "width": 4, "levels": 2, "batch": 2, "log_every": 2,
+               "checkpoint_every": 2, "settings": sm.Settings(tile=32), "validation_batches": 0,
+               "validation_windows": 0, "prefetch": 0, "where": torch.device("cpu")}
+    sm.train(store, name="first", **options)
+    # At next to no learning rate the second run stays where it started.
+    sm.train(store, name="second", init_from="first", learning_rate=1e-12, seed=7, **options)
+    sm.train(store, name="fresh", learning_rate=1e-12, seed=7, **options)
+    first, second, fresh = (torch.load(sm.run_directory(store, name) / "weights.pt")
+                            for name in ("first", "second", "fresh"))
+    assert all(torch.allclose(first[key], second[key], atol=1e-6) for key in first)
+    assert not all(torch.allclose(first[key], fresh[key], atol=1e-6) for key in first)
+    recorded = json.loads((sm.run_directory(store, "second") / "config.json").read_text())["call"]
+    assert recorded["init_from"] == "first"
+    assert "init_from" not in json.loads((sm.run_directory(store, "fresh") / "config.json").read_text())["call"]
+
+
+def test_a_run_logs_its_loss_on_held_out_pairs_apart_and_trains_as_without_them(tmp_path):
+    store = Store(tmp_path / "store", tmp_path / "scratch")
+    held = str(pair_bank(tmp_path, offset=(0.0, 0.0), name="sharpen-pairs-validation-0"))
+    banks = {"kernel": str(kernel_bank(tmp_path)), "seeing": (str(pair_bank(tmp_path)),), "validation_kernel": None,
+             "validation_seeing": (str(pair_bank(tmp_path, name="sharpen-seeing-validation-0")),)}
+    options = {"steps": 4, "width": 4, "levels": 2, "batch": 2, "log_every": 2, "checkpoint_every": 2,
+               "settings": sm.Settings(tile=32), "validation_batches": 1, "validation_windows": 0, "prefetch": 0,
+               "where": torch.device("cpu")}
+    choice = sm.BankChoice(**banks, validation_pairs=((held, 1.0),))
+    with_pairs = sm.train(store, name="held", choice=choice, **options)
+    plain = sm.train(store, name="plain", choice=sm.BankChoice(**banks), **options)
+    assert [entry["step"] for entry in with_pairs["history"]] == [2, 4]
+    for mine, other in zip(with_pairs["history"], plain["history"]):
+        assert mine["validation_pairs"]["total"] > 0 and "validation_pairs" not in other
+        # Drawn from the held-out pairs, not the seeing bank's other offset.
+        assert mine["validation_pairs"]["total"] != pytest.approx(mine["validation"]["total"], rel=1e-3)
+        # Held out, the pairs change nothing the run learns or its other
+        # validation loss.
+        assert mine["loss"] == other["loss"] and mine["validation"] == other["validation"]
+    recorded = json.loads((sm.run_directory(store, "held") / "config.json").read_text())
+    assert recorded["call"]["choice"]["validation_pairs"] == [[held, 1.0]]
+    assert recorded["validation_banks"]["pairs"][0]["directory"] == held
+    # A run without them records its choice as runs before them did, so
+    # those resume.
+    assert "validation_pairs" not in json.loads(
+        (sm.run_directory(store, "plain") / "config.json").read_text())["call"]["choice"]
+    sm.train(store, name="parts", choice=choice, stop_after=2, **options)
+    resumed = sm.resume_run(store, "parts", prefetch=0, where=torch.device("cpu"))
+    for entry in (*with_pairs["history"], *resumed["history"]):
+        entry.pop("seconds")
+    assert resumed["history"] == with_pairs["history"]
+
+
+def test_the_commands_train_stop_resume_and_evaluate_from_the_banks_they_find(tmp_path, capsys):
+    from seiza_training.__main__ import main
+
+    work = tmp_path / "banks"
+    work.mkdir()
+    kernel_bank(work)
+    kernel_bank(work, name="sharpen-deep-validation-0")
+    pair_bank(work)
+    pair_bank(work, name="sharpen-seeing-validation-0")
+    common = ["--store", str(tmp_path / "store"), "--scratch", str(tmp_path / "scratch")]
+
+    def run(*arguments):
+        capsys.readouterr()
+        assert main([*common, *arguments]) == 0
+        # Training logs its windows first; the record follows.
+        out = capsys.readouterr().out
+        return json.loads(out if out.startswith("{") else out[out.index("\n{") + 1:])
+
+    stopped = run("train-sharpen", "--name", "cli", "--work", str(work), "--steps", "4", "--width", "4",
+                  "--levels", "2", "--tile", "32", "--batch", "2", "--log-every", "2", "--checkpoint-every", "2",
+                  "--stop-after", "2", "--exclude-pairs", "", "--validation-windows", "2", "--validation-batches", "1",
+                  "--prefetch", "0")
+    assert stopped["stopped_after"] == 2
+    record = run("train-sharpen", "--name", "cli", "--resume", "--prefetch", "0")
+    assert [entry["step"] for entry in record["history"]] == [2, 4]
+    assert record["config"]["choice"]["kernel"] == str(work / "sharpen-deep-train-0")
+    assert record["config"]["choice"]["excluded"] == []
+    assert "windows_detail" not in record["validation"]["kernel:deep"]
+    measured = run("evaluate-sharpen", "--name", "cli", "--work", str(work), "--limit", "3")
+    assert measured["kernel:deep"]["windows"] == 3 and measured["kernel:deep"]["identity"]["windows"] == 1
+    saved = json.loads((tmp_path / "store" / "models" / "sharpen" / "cli" / "run.json").read_text())
+    assert list(saved["evaluations"]) == ["kernel:deep, seeing:seeing, limit 3"]
+
+
+def test_the_edge_term_counts_falling_short_only():
+    import torch
+
+    from seiza_training.sharpen_model import edge_shortfall
+
+    ramp = torch.linspace(0.0, 64.0, 64).view(1, 1, 1, 64).expand(1, 1, 64, 64).contiguous()
+    where = torch.ones_like(ramp)
+    assert float(edge_shortfall(ramp, ramp, where)) < 1e-6
+    assert float(edge_shortfall(1.5 * ramp, ramp, where)) < 1e-6
+    assert abs(float(edge_shortfall(0.5 * ramp, ramp, where)) - 0.5) < 0.02
+
+
+def test_the_overshoot_term_counts_going_past_where_the_target_is_flat():
+    import torch
+
+    from seiza_training.sharpen_model import edge_overshoot
+
+    torch.manual_seed(0)
+    grain = 0.3 * torch.randn(1, 1, 96, 96)
+    where = torch.ones_like(grain)
+    assert float(edge_overshoot(grain, grain, where)) < 1e-6
+    assert float(edge_overshoot(0.5 * grain, grain, where)) < 1e-6
+    doubled = float(edge_overshoot(2.0 * grain, grain, where))
+    assert doubled > 0.1
+    assert float(edge_overshoot(3.0 * grain, grain, where)) > 1.8 * doubled
+    # Going past a rim's target, in a tile that is flat elsewhere, is all
+    # but free, as the edge term has it.
+    rim = torch.zeros_like(grain)
+    rim[..., 40:56] = 4.0 * torch.arange(16.0)
+    rim[..., 56:] = 60.0
+    assert float(edge_overshoot(grain + 1.5 * rim, grain + rim, where)) < 0.03
+    assert float(edge_overshoot(2.0 * grain + rim, grain + rim, where)) > 0.05
+    # In the loss by its weight alone.
+    batch = {"reference": torch.zeros_like(grain), "target": grain, "valid": where, "sigma": torch.ones_like(grain),
+             "labels": torch.zeros(1, 1, 96, 96, dtype=torch.int64)}
+    plain = sm.loss_terms(2.0 * grain, batch, sm.LossSettings(), "linear")
+    asked = sm.loss_terms(2.0 * grain, batch, sm.LossSettings(overshoot_weight=2.0), "linear")
+    assert "overshoot" not in plain
+    assert float(asked["overshoot"]) == pytest.approx(doubled, rel=1e-5)
+    assert float(asked["total"]) == pytest.approx(float(plain["total"]) + 2.0 * doubled, rel=1e-5)
+
+
+def test_the_edge_term_can_keep_clear_of_stars_the_loss_does_not_list():
+    import torch
+
+    from seiza_training import psf_fields
+    from seiza_training.sharpen_model import LossSettings, loss_terms, source_mask
+
+    columns = psf_fields.DETECTION_COLUMNS
+    points = np.zeros((3, len(columns)))
+    points[:, columns.index("detected")] = (1, 1, 0)
+    points[:, :2] = ((32.2, 31.7), (2.0, 60.0), (50.0, 12.0))
+    mask = source_mask(points, (64, 64), 6.0)
+    # Both detections, the one at the edge cut off there; not the point
+    # that was not detected.
+    assert mask[32, 32] == 1 and mask[32, 38] == 1 and mask[32, 39] == 0 and mask[63, 0] == 1 and mask[12, 50] == 0
+    assert mask.dtype == np.uint8 and mask.sum() < 2 * 113 + 1
+
+    ys, xs = torch.meshgrid(torch.arange(64.0), torch.arange(64.0), indexing="ij")
+    star = (100 * torch.exp(-0.5 * ((xs - 32.2) ** 2 + (ys - 31.7) ** 2) / 1.5**2)).view(1, 1, 64, 64)
+    # A star the tile does not list, half as bright as its target, then
+    # twice as bright.
+    batch = {"reference": torch.zeros(1, 1, 64, 64), "target": star, "valid": torch.ones(1, 1, 64, 64),
+             "sigma": torch.ones(1, 1, 64, 64), "labels": torch.zeros(1, 64, 64, dtype=torch.int64),
+             "sources": torch.from_numpy(mask)[None, None]}
+    listed_only, clear = LossSettings(edge_weight=2.0), LossSettings(edge_weight=2.0, edge_clear=True)
+    assert float(loss_terms(0.5 * star, batch, listed_only, "linear")["edge"]) > 0.3
+    assert float(loss_terms(2.0 * star, batch, listed_only, "linear")["edge"]) < 1e-6
+    # What is left is the star's wing past the mask, next to no edge.
+    assert float(loss_terms(0.5 * star, batch, clear, "linear")["edge"]) < 0.05
+
+
+def test_the_roundness_term_is_a_stars_ellipticity():
+    import torch
+
+    from seiza_training.sharpen_model import star_ellipticity
+
+    ys, xs = torch.meshgrid(torch.arange(64.0), torch.arange(64.0), indexing="ij")
+    labels = (((ys - 32) ** 2 + (xs - 32) ** 2) <= 15**2).long().view(1, 64, 64)
+
+    def star(sx, sy):
+        return (100 * torch.exp(-0.5 * (((xs - 32) / sx) ** 2 + ((ys - 32) / sy) ** 2))).view(1, 1, 64, 64)
+
+    assert float(star_ellipticity(star(3.0, 3.0), labels)) < 0.01
+    assert float(star_ellipticity(star(4.0, 3.0), labels)) > 0.15
+    assert float(star_ellipticity(0.001 * star(4.0, 3.0), labels)) == 0.0
+
+
+def test_the_shape_term_reads_a_stars_error_of_shape_and_no_other():
+    import math
+
+    import torch
+
+    from seiza_training.sharpen_model import LossSettings, loss_terms, star_quadrupoles
+
+    ys, xs = torch.meshgrid(torch.arange(64.0), torch.arange(64.0), indexing="ij")
+    labels = (((ys - 32) ** 2 + (xs - 32) ** 2) <= 15**2).long().view(1, 64, 64)
+    sigma = torch.ones(1, 1, 64, 64)
+
+    def star(sx, sy, turn=0.0, x=32.0, y=32.0):
+        across = (xs - x) * math.cos(turn) + (ys - y) * math.sin(turn)
+        along = -(xs - x) * math.sin(turn) + (ys - y) * math.cos(turn)
+        light = 100 * torch.exp(-0.5 * ((across / sx) ** 2 + (along / sy) ** 2))
+        return (light / (sx * sy)).view(1, 1, 64, 64)
+
+    def read(error):
+        plus, cross, area = star_quadrupoles(error, sigma, labels)
+        return float(plus[0, 1]), float(cross[0, 1]), float(area[0, 1])
+
+    target = star(2.0, 2.0)
+    # Longer across than its target, then down, then along a diagonal.
+    plus, cross, area = read(star(2.6, 2.0) - target)
+    assert plus > 5 and abs(cross) < 1e-3 and area == float(labels.sum())
+    assert read(star(2.0, 2.6) - target)[0] < -5
+    plus, cross, _ = read(star(2.6, 2.0, math.pi / 4) - target)
+    assert abs(plus) < 1e-3 and cross > 5
+    # A wrong level, a slope of nebula, a brighter or a wider round star:
+    # no quadrupole. A star half a pixel off has a little.
+    ramp = (3.0 + 0.5 * xs - 0.2 * ys).view(1, 1, 64, 64)
+    assert max(abs(value) for value in read(ramp)[:2]) < 1e-3
+    assert max(abs(value) for value in read(0.3 * target)[:2]) < 1e-3
+    assert max(abs(value) for value in read(star(2.6, 2.6) - target)[:2]) < 1e-3
+    assert max(abs(value) for value in read(star(2.0, 2.0, x=32.5) - target)[:2]) < 2.0
+    # In the loss: nothing where the output is its target, whatever lies
+    # under the star; something where the star is long.
+    nebula = (20.0 * (xs > 36).float()).view(1, 1, 64, 64)
+    batch = {"reference": torch.zeros(1, 1, 64, 64), "target": target + nebula, "valid": torch.ones(1, 1, 64, 64),
+             "sigma": sigma, "labels": labels}
+    settings = LossSettings(shape_weight=1.0)
+    assert float(loss_terms(target + nebula, batch, settings, "linear")["shape"]) == 0.0
+    assert float(loss_terms(star(2.6, 2.0) + nebula, batch, settings, "linear")["shape"]) > 1.0
+
+
+def test_the_square_term_reads_a_square_star_and_no_other_error():
+    import math
+
+    import torch
+
+    from seiza_training.sharpen_model import LossSettings, loss_terms, star_four_folds
+
+    ys, xs = torch.meshgrid(torch.arange(64.0), torch.arange(64.0), indexing="ij")
+    labels = (((ys - 32) ** 2 + (xs - 32) ** 2) <= 15**2).long().view(1, 64, 64)
+    sigma = torch.ones(1, 1, 64, 64)
+
+    def star(size, power=2.0, turn=0.0, x=32.0, y=32.0):
+        # A superellipse's profile: round at a power of 2, a square along
+        # its axes above it.
+        across = (xs - x) * math.cos(turn) + (ys - y) * math.sin(turn)
+        along = -(xs - x) * math.sin(turn) + (ys - y) * math.cos(turn)
+        reach = (across.abs() ** power + along.abs() ** power) ** (2.0 / power)
+        return (1000 * torch.exp(-0.5 * reach / size**2)).view(1, 1, 64, 64)
+
+    def read(error):
+        aligned, turned, area = star_four_folds(error, sigma, labels)
+        return float(aligned[0, 1]), float(turned[0, 1]), float(area[0, 1])
+
+    target = star(2.0)
+    # A square along the pixels, a diamond, and a square turned 22.5°.
+    aligned, turned, area = read(star(2.0, 3.0) - target)
+    assert aligned < -100 and abs(turned) < 1e-3 and area == float(labels.sum())
+    assert read(star(2.0, 2.2) - target)[0] < -20
+    assert read(star(2.0, 3.0, math.pi / 4) - target)[0] > 100
+    aligned, turned, _ = read(star(2.0, 3.0, math.pi / 8) - target)
+    assert abs(aligned) < 0.01 * abs(turned) and turned < -100
+    # A wrong level, a slope of nebula, a brighter or a wider round star:
+    # next to nothing. A star half a pixel off its middle has a little.
+    ramp = (3.0 + 0.5 * xs - 0.2 * ys).view(1, 1, 64, 64)
+    assert max(abs(value) for value in read(ramp)[:2]) < 1e-2
+    assert max(abs(value) for value in read(0.3 * target)[:2]) < 0.1
+    assert max(abs(value) for value in read(star(2.6) - target)[:2]) < 0.2
+    assert max(abs(value) for value in read(star(2.0, x=32.5) - target)[:2]) < 0.5
+    # The second moments of a square star are a round one's: the shape
+    # term does not see it.
+    from seiza_training.sharpen_model import star_quadrupoles
+
+    plus, cross, _ = star_quadrupoles(star(2.0, 3.0) - target, sigma, labels)
+    assert abs(float(plus[0, 1])) < 1e-3 and abs(float(cross[0, 1])) < 1e-3
+    # In the loss: nothing where the output is its target, whatever lies
+    # under the star; something where the star is square.
+    nebula = (20.0 * (xs > 36).float()).view(1, 1, 64, 64)
+    batch = {"reference": torch.zeros(1, 1, 64, 64), "target": target + nebula, "valid": torch.ones(1, 1, 64, 64),
+             "sigma": sigma, "labels": labels}
+    settings = LossSettings(square_weight=1.0)
+    assert float(loss_terms(target + nebula, batch, settings, "linear")["square"]) == 0.0
+    assert float(loss_terms(star(2.0, 3.0) + nebula, batch, settings, "linear")["square"]) > 1.0

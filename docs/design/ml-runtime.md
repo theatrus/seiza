@@ -412,8 +412,8 @@ a width is fitted to; the detector's settings and the clipped cores'; and,
 where the model has one, the scaled pass below.
 The other options `seiza-stars` takes for the two are set in `seiza-model`,
 none left to its defaults. The sharpening
-trainer, which is not in the repository yet, will write the bundle with a
-`bundle-sharpen` command of its own, and hold each single-precision graph to
+trainer's `bundle-sharpen` writes the bundle, and holds each
+single-precision graph to
 PyTorch on a random input. No sharpening model is published, and
 `seiza model sharpen` fetches none: it runs a bundle named with `--model` or
 installed from its directory.
@@ -484,8 +484,8 @@ full size unless told (`--no-scaled` leaves it out). A card without it runs as b
 the runtime's output for such a card is unchanged.
 
 **Against the harness.** The harness here is the sharpening trainer's
-Python inference, which is not in the repository yet; the fixtures recorded
-with it are. The port is held to it piece by
+Python inference, under `training`, and the fixtures are recorded with it.
+The port is held to it piece by
 piece on a synthetic star field with no runtime (the field's nodes, stamps
 and widths, the point sources, both ratio maps, the point-source map, a
 tile's vector map and the roll-off, and with a scaled pass, on a second field
@@ -530,6 +530,15 @@ Core ML GPU at f32 differs from the sheet's own output by 0.018σ̄ at most
 and 1.2e-5σ̄ RMS, in 23.0 s against 18.0 s at full size alone, and the CPU
 by 0.025σ̄ and 2.2e-5σ̄, in 281 s against 257 s. Its stars read 0.017 on
 the cos 4θ measure, as the sheet's do.
+
+Two later models of width 128 (167M parameters), their cards naming both
+structure removals and the scaled pass, agree as well on that whole image,
+which lists 287 point sources with both removals, asked 0.46 and 0.45. At f32
+the first differs from the harness by 0.025σ̄ at most and 2.4e-5σ̄ RMS on the
+Core ML GPU and by 0.045σ̄ and 2.9e-5σ̄ on the CPU; the second by 0.028σ̄ and
+2.2e-5σ̄, and by 0.025σ̄ and 2.3e-5σ̄. The scaled pass gives the same numbers,
+and with a roll-off of 1 the RMS is 1.3e-4σ̄ for the first and 3.2e-5σ̄ for the
+second (2026-11-25).
 
 **Half precision loses the stars' cores.** The residual is added in asinh,
 so an error in it is a relative error in the pixel: the f16 graph is right

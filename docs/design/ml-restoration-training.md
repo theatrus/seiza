@@ -869,6 +869,2136 @@ halves, rather than with 1. The C ABI has `seiza_remaining_kernel_new` and
 `seiza_reblur_consistency_json`, and Python `seiza.RemainingKernel` and
 `seiza.reblur_consistency`.
 
+### Training data
+
+Two passes make the PSF model's real data. Both only read the manifest.
+
+- **`psf-fields`** measures each source product's `PsfField` once, with
+  no catalogue: the deep stacks, a night's and many nights', and both
+  halves of every seeing pair, of the train and validation sets calibrated
+  with a flat (never `ready:no-flat`). A field too sparse to vary is
+  measured again as one global PSF; one too sparse for that is refused. A
+  field cannot be saved, so its stamps and shapes are sampled on nodes at
+  most 256 px apart and read back bilinearly. Each record, under
+  `STORE/psf/<product id>/`, also keeps the stars the field used, every
+  star the measuring detector finds unsmoothed (the seeing check's
+  stars), the clipped cores the detector turns away, and the clip level,
+  from the image's own peaks as `PsfField` finds it.
+- **`cut-sharpen`** cuts 320 px windows onto local disk, each split's
+  bank apart, as the noise bank is cut: memory-mapped, the same for a
+  seed however many processes prepare it, and resumable to the same bank.
+  The known-kernel bank holds deep stacks' windows with the stack's noise
+  map, a mask of clipped cores, and the PSF stamp (129 px) and shape at
+  the centre; the trainer blurs them. The seeing bank holds each pair's
+  worst half as input and best half as target: the input's noise map
+  made from its image alone, both stacks' own maps for the loss, a mask
+  of either's clipped cores, both PSFs' stamps and shapes at the centre,
+  and their FWHM ratio there, as the field's Moffat fit has it and as the
+  stamps' own widths do (the fit fails on stamps sharper than about
+  2 px). The target is put on the input's flux and sky by the check's
+  gain and planes, and each pair keeps its stars' median centroid offset. A pair made before the check, every
+  night's split among them, is judged by the cut with the same check, its
+  verdict kept with the bank. The point sources are each input's
+  detections until the Gaia pass. The cut also takes corpus pairs, each with a record kept beside its windows.
+
+The windows are raw. The sharpener is to train on the noise model's
+output; those windows will be cut from the denoised stacks beside these.
+
+First run (2026-11-08), 4 processes, 52 minutes for the fields and 7 for
+the banks:
+
+- **Fields.** Of 773 products, 755 vary, 8 sparse C925 stacks, most of
+  them narrowband, take one global PSF from 5–24 stars, and 4 are
+  refused. The deep stacks' centre FWHM runs 1.8–10.5 px on the
+  astrographs (median 2.2: Ultracat, RedCat61, Askar107PHQ) and
+  4.7–15.6 px on the C925 (median 7.5). The frames' smoothed
+  measurements read about 5.7 px where the astrographs' stacks read 2.2.
+- **Seeing pairs.** On the C925 the fields' centre ratio, best over
+  worst, agrees with the multi-night checks' star medians (0.48–0.75
+  against 0.50–0.78). On the undersampled astrographs it is far smaller
+  (0.34 against 0.53, 0.55 against 0.66): the detector reads 2 px stars
+  wide. One Ultracat object's worst halves (its night's split, and its
+  many nights') carry a focus gradient as well as seeing, 2.7 px at one
+  corner to 8.9 px at the other, with ring-shaped stamps; they pass the
+  check, which asks for a round blur, wider everywhere.
+- **Centroids.** On 17 C925 seeing pairs the halves' star centroids sit
+  0.35–0.98 px apart, nearly all along one axis, though both halves share
+  one grid. The C925's PSF is lopsided, its centroid pulled from its peak
+  by a tail, and a sharper PSF pulls it less. A first cut that dropped
+  pairs past 0.25 px lost them all; they are kept, with their offsets,
+  and only a move past 1.5 px is taken for a fault. A stamp centred on
+  its centroid cannot show the offset, so the trainer must shift the
+  target or the stamp by it, until stamps are centred on Gaia positions.
+- **Banks.** The known-kernel banks hold 20,480 train windows from 512
+  stacks and 5,600 validation windows from 140 (19 and 5 GB). The seeing
+  banks hold 31 train pairs (4,960 windows, 11 GB: 28 C925, 2 Ultracat,
+  1 RedCat61) and 18 validation pairs (2,880, 6 GB, all C925), with
+  ratios 0.24–1.13: 1.2% of train windows above 0.8, and 0.04% above 1,
+  at field corners where the best half is the wider. Of the 59 pairs, six
+  fail the shape check, one is too close in seeing, one worst half has
+  too few stars for a field, and two fail the frames' screen. A night's
+  split is judged by the cut: 20 of 27 pass.
+
+Open: how the trainer uses the centroid offsets, whether to train on
+focus pairs, and which window ratios to keep. The trainer's first
+version answers each with a default, below, that the runs have still to
+confirm.
+
+### Trainer
+
+`train-sharpen` trains the PSF model on these banks and `evaluate-sharpen`
+measures a trained one. Runs are recorded under `STORE/models/sharpen/`
+as noise runs are: the configuration, the history of each log window
+with the loss on a few fixed validation batches, the weights, the ONNX
+graph and the measures. A run is saved whole every thousand steps, and
+one stopped goes on from there to the same weights it would have
+reached unstopped, since each batch is drawn from its step alone.
+
+- **Network.** The four-level residual U-Net, 32 wide (2.8 M
+  parameters), with the stamp encoder: a 3×3 convolution, then stride-2
+  3×3 convolutions from 129 px down to one, giving 64 numbers that scale
+  and shift the channels at the bottleneck and after each decoder level.
+  Its graph holds only convolutions, nearest upsampling, concatenation,
+  addition, multiplication and the sigmoid of SiLU. It reads four
+  planes: the image and the noise map as the noise model reads them, the
+  ratio, and a point-source map, the input's detections rendered with
+  the local stamp in `asinh`, left empty a tenth of the time. The noise
+  map is made from the image alone. The stamp is read as two planes, over
+  its peak and through `asinh`, which shows its wings. The output is a
+  residual added to the image's `asinh` plane and taken back through
+  `sinh`: on the sky a residual in σ̄, as the noise model's, and at a
+  star's core nearly a log. A sharpened core differs from its input by
+  hundreds to thousands of σ̄, and a residual in σ̄ that starts from zero
+  never reached it: two smoke runs gave cores residuals under 1σ̄ where
+  their targets asked 700σ̄ at the median, and narrowed no star.
+- **Known-kernel pairs**, 60% of a batch. An elliptical Gaussian `K`, of
+  ellipticity up to 0.3 at a random angle, is drawn so that
+  `FWHM(P_in) / FWHM(P_ref)` is 1.1 to 2, both measured as the bank
+  measures stamp widths. The input is the window blurred by `K`, with
+  fresh white noise up to half the stack's own, as the sharpener will
+  read the noise model's output. The target is the window blurred by the
+  Gaussian of covariance `Σ_T − Σ_ref`, with `Σ_T` round at `Σ_ref`'s
+  largest eigenvalue: second moments add under convolution, so the
+  target's PSF is round in them. A stamp's second moments are its wings'
+  as much as its core's, and rounded this way the train bank's targets
+  are 1% to 42% wider than `P_ref`, 9% at the median. The widening is
+  therefore drawn from no less than keeps the target narrower than the
+  input. The network reads `P_in`'s stamp, never `P_ref`'s. A tenth are
+  identity windows: `K` a point, the ratio 1, the target the input.
+  Measured on the validation stacks' own stars, the targets come to 0.98
+  to 1.06 of the ratio asked (5th to 95th percentile).
+- **Seeing pairs**, 25%, and corpus pairs in the seeing
+  bank's format, 15%; without those, seeing pairs take their share. The
+  target is moved by its pair's median centroid offset, through its
+  transform, so the model is not taught to move stars. The ratio is the
+  stamps' widths', which every window has. Windows whose target is wider
+  than their input are left out, as are both pairs of the Ultracat field
+  whose focus changes across it. On the validation pairs the targets'
+  own stars come to the stamps' ratio, 1.00 at the median.
+- **Sampling.** No object, a telescope, target and filter over all its
+  nights, takes more than 3% of its bank's draws, or an even share in a
+  bank of fewer than 34 objects: an object stacked over many nights is
+  in the deep bank once for each night and again as their stack, all of
+  one sky.
+- **Loss.** Charbonnier error in units of the target stack's own noise,
+  read no higher than ten times its tile's median, with clipped cores,
+  and the band a blur or a shift reads past a window's edge, masked out.
+  At a star's core a stack's noise map holds its frames' scatter with the
+  seeing, thousands of σ̄: read in it uncapped, a blurred star cost all
+  but nothing, and the first smoke run learnt to denoise its pairs and
+  never to sharpen. The loss adds the same error on the error's
+  gradient, averaged over 1, 2 and 4 px blocks and each times its side,
+  and the Charbonnier error of each point source's flux within three
+  times the input's FWHM, in units of that flux's noise, counted once for
+  each pixel of its aperture, as a pixel's error is; each at a tenth.
+  Those weights come from fitting one batch of known-kernel tiles. The
+  stars are a two-hundredth of a tile's pixels and the targets' own noise
+  fills the rest, so terms that add noise drown them: with the gradient
+  term at half weight, or the flux term a mean over the stars, which
+  pulled each aperture's pixels a hundred times as hard as the pixel
+  term pulls its own, the cores never moved; with both at a tenth, as
+  set, they reached four fifths of their targets in 300 steps.
+- **Augmentation.** The eight flips and turns, alike for the image, every
+  map, the apertures and the stamp. Exposure scaling scales a
+  known-kernel window's signal by up to two either way before its noise
+  is added; a pair's noise is its stacks' own, which a scale would move
+  off its maps, so pairs are not scaled.
+- **Evaluation** runs the validation banks' windows whole through the
+  tiled inference that ships, each tile conditioned on its own stamp,
+  and measures inside the network's reach of a window's edge: the error
+  against the target before and after, in the target's noise; the width
+  ratio, output over input, of the stars' own stamps, stacked from
+  isolated detections and measured as the bank measures a field's,
+  against the ratio asked; the flux kept within three times the FWHM;
+  the deepest ring one to three FWHM out, as the lowest azimuthal mean
+  and the lowest pixel, in σ̄; and the change on identity windows. The
+  C925's validation windows hold about one detection each, so their
+  star measures rest on few windows; whole images will give many more.
+
+The first smoke runs (2026-11-09, PyTorch's Metal backend, 2,000 steps
+of 8 tiles 192 px, 3 minutes each) proved the trainer, not a model. The first
+three narrowed no star, which led to the asinh residual, the cap on the
+target's noise and the light gradient and flux terms above. With them,
+the training loss fell from 0.94 to 0.83 and the validation batches'
+from 0.96 to 0.80. On 200 windows of each validation bank, the seeing
+pairs' error against their targets fell to 0.72 of the input's, mostly
+noise taken out; the known-kernel windows' stars narrowed by 2% where
+30% was asked, so it has only begun to sharpen. Flux in the apertures
+was kept within 0.5% at the median, no bright star but one in 177 had a
+ring deeper than 1σ̄, and identity windows changed by 0.03σ̄ at the
+median. Resumed from a checkpoint, a run gives the same weights as one
+never stopped.
+
+Left for later: reblur consistency on images without a target and a
+centroid-shift loss, which join the loss's terms; perturbing the
+conditioning stamp and the gate on a wrong PSF; random smooth ratio maps,
+and the halo and bloom controls; composites with re-rendered stars and
+Gaia's point-source maps; windows cut from the denoised stacks; and
+contact sheets, whole-image evaluation and the bundle, which will call
+the same inference.
+
+### Space-telescope pairs
+
+A stack's own windows, blurred, teach a model to give the stack back:
+nothing in them is sharper than the stack's seeing. Hubble and JWST
+mosaics are real sky whose nebulae, dust and galaxies are sharp to the
+pixel, so a pair made from one has a truth sharper than any ground-based
+stack holds.
+
+**The source.** Drizzled mosaics from the public MAST archive, each a
+science image with its weight map: 71 Hubble mosaics (156 GB) and 88
+JWST mosaics, kept in the store under `external/`.
+
+**The cut** (`cut-external`, `sharpen_external.py`):
+
+1. A pixel counts where the mosaic's weight is at least half of its deep
+   parts' (the 90th percentile). Where few exposures overlap, cosmic
+   rays survive the drizzle and would be taught as sky. Those left are
+   found by their sharpness and dropped.
+2. The mosaic is brought down by a factor (`--bins`): smoothed by a
+   round Gaussian of σ half the factor, then every factor-th pixel. A
+   block mean in its place gave square stars. A pixel is kept where a
+   quarter of its weight fell on pixels the mosaic holds.
+3. The result is measured as a stack is: its PSF field and point
+   sources by the PSF pass's code, its noise map from the image alone.
+   A mosaic with too few stars for a field takes a round Gaussian, 2.4
+   of its own pixels wide before the factor.
+4. Windows (`--window`, 320 px or 1024 px) are cut where the mosaic
+   covers. A window may miss 2% of its pixels, which are filled from
+   about them and kept out of the loss.
+
+The bank has the known-kernel banks' layout, and the trainer draws from
+it beside the native deep bank (`--more-kernel-bank PATH:WEIGHT`).
+
+| Bank | Factors | Window | Windows |
+| --- | --- | --- | --- |
+| Hubble, windows required whole | 2, 3 | 320 px | 842 |
+| Hubble | 2, 3 | 320 px | 10,694 |
+| Hubble | 2, 3 | 1024 px | 364 |
+| JWST | 1, 2 | 1024 px | 1,173 |
+
+Brought down two and three times, most Hubble mosaics hold no clean
+window 1024 px across; that bank is being cut again at factors 1 and 2.
+
+**The blur** (`kernel_example`, the same for native deep windows). Each
+window carries its PSF stamp `P_ref`, measured where it was cut.
+
+- **The kernel.** A widening is drawn evenly from `--kernel-ratios`
+  (1.1 to 2.0 at first, now 1.1 to 3.0), with an ellipticity up to 0.3
+  at any angle. `K` is the elliptical Gaussian that makes `P_ref ∗ K`
+  that many times as wide as `P_ref`: sized from widths adding in
+  quadrature, then refined on the stamp itself until the ratio is within
+  1%. The input is the window blurred by `K`, and the network reads
+  `P_in = P_ref ∗ K`.
+- **The target** is the window blurred only as far as makes `P_ref`
+  round in its second moments and no narrower than 1.5 px. With two
+  strengths, a ratio is drawn for stars and one for the rest, each
+  between the sharpest the window allows and 1 and nearer the sharpest;
+  the target is the window at those two widths, joined by a mask
+  rendered from the listed stars.
+- **Exposure.** The signal above the background is scaled by up to 2
+  either way.
+- **Noise.** Fresh noise is added to the input, up to half the window's
+  own (`--kernel-noise`), shared with its neighbours by a blur of up to
+  0.6 px. With `--pass-noise` the same noise is added to the target, so
+  the network is asked to carry it through and not to remove it. A
+  space-telescope window has next to no noise of its own, so with
+  `--external-snr LOW,HIGH` it is given noise of its contrast (the range
+  of its 8 px means from the 10th to the 90th percentile) over a ratio
+  drawn between the two.
+- **Identity.** One window in ten is left as it is, asked for a ratio
+  of 1, with itself as the target.
+- **A real PSF for `K`** (`--real-kernels`): a stamp drawn from the
+  native bank blurs the window where it widens `P_ref` within the
+  ratios. Tried at ratios up to 4 with reblur windows, it cost round
+  stars and is off.
+
+Open: ten to twenty mosaics fail in the cut with a division by zero,
+not yet traced.
+
+### Survey frames from the ground
+
+No space telescope has imaged the Elephant's Trunk (IC 1396A). The
+IPHAS/IGAPS survey has: the Isaac Newton Telescope's wide-field camera,
+120 s Hα exposures at 0.333″ a pixel, the C925 stacks' own scale, in
+seeing near 0.8″ (stars 2.4 to 3 px, against the deep Trunk stack's
+11.5). Its frames are public, each with a confidence map.
+
+**As truth for the Trunk.** The deep stack is plate-solved, each frame
+brought onto its grid through both WCSs and fitted to it (a gain and an
+offset at the stack's blur, stars masked). An output's added detail
+(output less input, at a scale `b`) is then compared with the detail
+the sky holds there and the input lacks (the frame at `b` less the frame
+blurred to the input's stars): their correlation, and the slope of one
+on the other. On the ridges of the Trunk sheet's second row, at `b` = 3,
+4 and 6 px:
+
+| Output | Correlation / slope |
+| --- | --- |
+| The goal, strong | 0.79 / 0.46, 0.81 / 0.57, 0.84 / 0.86 |
+| The goal, mild | 0.74 / 0.20, 0.78 / 0.25, 0.82 / 0.40 |
+| S77 | 0.80 / 0.44, 0.83 / 0.54, 0.85 / 0.81 |
+| S77 with the scaled pass | 0.83 / 0.49, 0.86 / 0.61, 0.89 / 0.93 |
+| S80 (halo kernels) | 0.79 / 0.44, 0.82 / 0.55, 0.85 / 0.84 |
+| S80 with the scaled pass | 0.81 / 0.48, 0.84 / 0.61, 0.87 / 0.94 |
+| S81 (the survey bank) | 0.80 / 0.44, 0.82 / 0.54, 0.85 / 0.81 |
+| S81 with the scaled pass | 0.83 / 0.46, 0.86 / 0.58, 0.89 / 0.88 |
+
+More of the scaled pass's added detail is the sky's than the
+goal's. Every output recovers about half of the real 3 to 4 px
+detail the input lacks. Frames within 1.5° of IC 1396A are kept for
+this test alone.
+
+From S85 on the Trunk is no longer held out of training (below), and
+NGC 6820 (Sh2 86) is tested the same way: a C925 Hα field of the
+validation split, with a pillar, a bright rim and dark ridged lanes. The
+four frames over its sheet's crops (seeing 1.2″) are kept for this test
+alone. Two frames in the survey bank cover the field's right edge, not
+its crops.
+
+**As a bank.** `cut-external` reads such frames as it reads mosaics:
+an index entry may name a separate weight file (`weight`, the
+confidence map) and its extension (`weight_hdu`, the frame's CCD), and
+compressed, unsigned frames are read whole. A frame is noisy as a stack
+is, so its bank takes a label of its own (`--label survey`):
+`--external-snr`, which gives a nearly noiseless mosaic noise of its
+contrast, leaves it alone, and the noise model's denoised planes
+(`clean-sharpen`) give it clean truth as the native bank has.
+
+**Choosing frames.** Most survey frames are star fields. A frame's
+diffuse structure is measured from the frame itself: the median of each
+32 px block, less a quadratic surface (twilight, moon, vignetting), its
+spread from the 10th to the 90th percentile in the frame's pixel noise.
+At 1 and above a frame holds visible nebula; 30% of the first 1,750
+fetched did. The frame's background over its night's median, the first
+fetch's proxy, does not predict it (rank correlation +0.04: it picked
+twilight and moonlit frames). Its background over the darkest CCD of
+the same exposure does (+0.51; 76% of its top quarter hold nebula).
+
+### What the sharpening runs showed
+
+Runs since (2026-11-09, width 32, four levels, 20,000 steps of 8 tiles
+unless said; about 8 minutes each) are judged on whole images: contact
+sheets beside a mild and a strong goal, star
+width, flux, rings, cross and roundness, noise gain, and the rims of
+nebulae.
+
+- **Stars.** Runs reach the width asked. Moving each pair's target by
+  its light's offset keeps stars in place. Passing the input's noise
+  through to the target (`--pass-noise`, with the known-kernel noise up
+  to the stack's own) ended the rings and leaves the sky's noise at 0.99
+  of the input's. A bank binned by block means put a cross on stars and
+  was dropped (see "Narrow stars gain flux" below for its successor).
+- **Two strengths.** With `--nonstellar` the network reads one ratio for
+  stars and one for the rest, and a known-kernel window's target is the
+  two blurs of the window, each where its part of the light is.
+- **Length.** 20,000 steps is short. On held-out known-kernel windows
+  such runs give 0.6 to 0.75 of the target's edge gain at asks of 0.4 to
+  0.85; at 100,000 steps, 0.92 to 0.94. A wider and deeper network
+  (64, five levels) at 30,000 steps gave no more than the small one.
+  Asks under 0.4 are next to untrained with kernel ratios up to 2.0.
+- **Space-telescope windows.** Drizzled Hubble and JWST mosaics from the
+  public archive, brought down two and three times (JWST one and two),
+  are a known-kernel bank whose truth holds edges sharper than any
+  seeing, blurred in training by the native bank's PSFs
+  (`cut-external`, `--more-kernel-bank`). Required whole, a window was
+  lost to one cosmic ray's pixels, and over half the mosaics gave none;
+  a window may now miss 2% of its pixels, filled from about them and
+  kept out of the loss, and the Hubble bank went from 842 windows to
+  10,694. The larger bank made stars rounder and edges no sharper.
+  Blurring by real PSFs at ratios up to 4 with reblur windows cost round
+  stars and is set aside.
+- **The edge term** (`--edge-weight`) is the share of the target's
+  smoothed gradient the output falls short of along the target's own
+  direction, away from the listed stars; going past the target costs
+  nothing in it. At 2 a 20,000-step run gives 0.77 to 0.87 of the
+  target's edge gain and stars as round as before. At 5 it goes past
+  the truth at mild asks, up to twice, and leaves a dotted texture in
+  dark nebula on denoised inputs.
+- **The measure that misled.** A whole-image edge gain (smoothed
+  gradient at the strongest edges, output over input) put such a run
+  level with the strong goal, which the sheets did not
+  bear out: its rims of dark nebula were barely crisper than the
+  input's. The measure used now averages thousands of profiles taken
+  across the rims, which leaves the rim and averages the noise away,
+  and gives the rise from 20% to 80% in pixels. On the Elephant's Trunk
+  the input's is 5.7 px, the runs' 4.1 to 4.5, the goal's 4.6
+  (mild) and 3.7 (strong).
+- **Why the rims stay soft.** On the same image denoised first, the
+  runs do draw crisp rims. The space-telescope windows, which alone
+  hold edges sharper than the seeing, were met with their own noise,
+  next to none. A native stack's own noise is in its target, where no
+  run can follow it, so under noise the native windows teach caution.
+  `--external-snr LOW,HIGH` gives each external window noise of its
+  contrast over a ratio drawn between the two. Runs with it showed no
+  change at the rims by eye.
+- **The trained range.** With kernel ratios up to 2.0 a run never meets
+  an ask much under 0.5. Asked for 0.3, the longer and the wider runs
+  smooth the image and lose faint stars, while the same runs are sharp
+  at asks they were trained on. Runs now draw ratios from 1.1 to 3.0
+  (`--kernel-ratios`), the sheets compare at asks inside the range, and
+  a panel asked for less is marked as below it.
+- **Small tiles.** At four levels and 320 px windows the network sees
+  little beyond a rim's own width. The smaller and shorter runs leave
+  speckle along the lit edges of dark nebula; a 100,000-step run leaves
+  less.
+- **More context** (2026-11-10). Banks cut again with 1024 px windows
+  (`--window`), the Hubble bank brought down one and two times where it
+  was two and three; six levels at width 32 (42M parameters), 768 px
+  tiles in batches of 4, 30,000 steps at half the learning rate, kernel
+  ratios 1.1 to 3.0, the edge term at 2; about 70 minutes. Whole images
+  at stars 0.46 and the rest 0.5:
+  - On the Elephant's Trunk the rims rise from 20% to 80% in 3.76 px
+    (input 5.72; the small runs 3.94 to 4.18; the strong goal 3.74,
+    the mild 4.64), their steepest slope 2.17 times
+    the input's (the goal 2.21). What the run changes follows what
+    the goal changes: a correlation of 0.71 at the pixel scale
+    (the small run 0.61) and 0.88 to 0.91 from 1 to 8 px.
+  - Stars there come to 0.47 of their width with their flux kept
+    (1.002), and the sky's noise passes at 0.99 (pixel) and 1.00 (4 px).
+  - By eye the rims are crisper than the small runs' and still carry a
+    grain along the lit edge that the goal's do not.
+  - About the 40 brightest stars on bright nebula in the California
+    there is no dark surround (the lowest ring 16 to 56 px out is at
+    +0.05σ at the median, the input's +0.03), where two of the small
+    runs dipped to −0.2 and −0.3σ.
+  - A network of six levels has an overlap of 532 px, more than a
+    512 px tile: such models run on tiles twice their overlap (1280 px).
+- **Attention bought nothing.** The same run with two transformer
+  blocks at its bottleneck (`--attention 2`, 59M parameters; a 768 px
+  tile is 24 × 24 positions there) ended at a validation loss of 0.849
+  against 0.841. With the blocks taken out of the trained network its
+  output on a rim's crop moves by 0.007σ rms, where the run itself
+  changes that crop by 1.5σ; over the whole image, by 0.3σ against
+  26σ. Its output is the same on 768 px and 1280 px tiles to 0.003σ
+  rms. So the
+  two runs are two draws of one recipe, and their difference is the
+  spread between runs: rims of 3.76 and 3.59 px on the Trunk, median
+  star ellipticity 0.021 and 0.034 there, 0.074 and 0.065 on the
+  California. Attention is not kept.
+- **Narrow stars gain flux.** On every sheet whose stars are 2.3 to
+  2.5 px across (five of six) the larger run adds 6 to 15% to a star's
+  flux; the small run up to 7%; the goal stays within 3%. Stars 8
+  and 11 px across keep theirs to 2%. On the California the gain is
+  10% out to eight widths, so it is not light moved in from the wings;
+  the faint third of the stars gains twice what the bright third does,
+  and a denoised input half as much.
+  - It grows as the ask nears the 1.5 px floor. On the California
+    (2.33 px): 0.4% at an ask of 1.0, 3% at 0.8, 5% at 0.75, 8% at 0.7,
+    12.5% at the floor (0.65). The stars' width follows the ask only so
+    far: 0.87, 0.68, 0.66, 0.64, 0.62 of the input's. At the goal's
+    width (0.65) the run is 5% high.
+  - The known-kernel banks hold next to no star under 2 px (3% of the
+    native windows, 7% of the Hubble bank's), so an ask that takes a
+    2.3 px star to 1.5 px is one the runs hardly met.
+  - `cut-sharpen --bank binned` now brings each stack down as the
+    mosaics are, through a round Gaussian and then every `bin`-th pixel,
+    by the factor that leaves its stars nearest 1.5 px. At 1024 px
+    windows that is 2,334 windows of 322 stacks, their stars 1.45 to
+    1.78 px across; the 190 stacks of wide stars, brought down five and
+    six times, are smaller than a window.
+  - Its stars are rounder than the block means' and may not be round.
+    Of stars that fall on a pixel's middle, the four diagonal
+    neighbours hold 0.87 of what a round star's would, read from the
+    pixels one and two out along the axes (block means, at the same
+    width: 0.78). The unbinned stacks' stars read 0.90 and the Hubble
+    bank's 0.94, but at 2.3 px, which is not like for like.
+  - A run with the bank at half the native bank's weight puts no cross
+    on the California's stars (0.10; without it 0.13 and 0.06) and
+    takes the flux gain from 12.5% to 9.1%: at the floor only, and at
+    the goal's width it is 5% high as before. Narrow stars in the
+    known-kernel banks were not what was missing: on the new bank's own
+    windows the run without it leaves stars 7% *short* of their targets.
+  - **The gain is there in training, and the edge term is a small part
+    of it.** On the
+    corpus pairs with targets under 1.8 px the larger run's stars hold
+    9% more flux than their inputs, where their targets hold 2% and
+    wider targets' stars 1.5%. A tile lists 32 stars at most for the
+    flux term and keeps the edge term off those; on tiles of narrow
+    stars two in three are not listed, and the edge term, which counts
+    falling short and never going past, asks each of them for a steeper
+    star. Along "every star a little brighter" its slope at the stars
+    not listed is -2.0 and the other terms' together +0.16; at the
+    listed stars the others' is +1.07, the edge term's none. The
+    network cannot tell which stars a tile lists, and settles between.
+    Wide-starred native windows list most of their stars and show no
+    gain (1.004 against their targets, listed or not).
+  - `--edge-clear` keeps the edge term two input widths clear of every
+    detected point source. With it the slope at the stars not listed is
+    +0.16. A run with it took the California's gain from 12.5% to 10.8%
+    only, and with the brought-down bank as well to 7.1%: the slope said
+    which way the term pulled, not how far the stars had been pulled by
+    it. What holds the rest of the gain is not found.
+- **Roundness is the run's, not the ask's.** The larger run leaves the
+  California's stars at a median ellipticity of 0.074 (input 0.092) at
+  every ask from 0.85 to the floor; a small run and the goal leave
+  0.044 and 0.046.
+  - On held-out known-kernel tiles, whose inputs are blurred up to 0.3
+    elliptical and whose targets are round, the larger run's stars are
+    as far from their targets' shape as its inputs are: the quadrupoles
+    of a star's error about its middle, over their noise, have a median
+    of 5.3 after it and 7.6 before, and weighed as the loss weighs them
+    come to the same sum. The pixel and gradient terms do not ask for a
+    star's shape hard enough to get it.
+  - **The roundness term (`--round-weight`) is not the way to ask.** At
+    weight 5 it gives the sheets round stars (California 0.009, Trunk
+    0.021) and a flux within 2% of the input's, but the stars stop at
+    0.70 of the input's width where they were asked for 0.65 (flux
+    against width lies on the same curve as without the term: it did
+    not mend the gain, it kept the stars from the widths that have it),
+    the California's rims steepen ×1.29 where they steepened ×1.66, and
+    the change the run shares with the goal at the finest scale
+    falls from 0.87 to 0.65 of the goal's. On held-out tiles its
+    edge term is up a tenth and its flux term doubled. At weight 20 all
+    of it goes further: stars at 0.88 of the input's width on the
+    California, the Trunk's rims rising over 4.44 px where they rose
+    over 3.76, the shared change at 0.48.
+  - The term reads what is not a star's shape. It takes the moments of
+    all the light above an aperture's mean, and an aperture three
+    widths out is mostly noise and nebula: the *targets* of held-out
+    tiles read 0.15 to 0.32 by it. Pushed toward none, the run's output
+    read 0.04 to 0.09: its stars did come nearer their targets' shape
+    (quadrupoles of 4.4 at the median), but by the term's own measure
+    taken against the targets' its apertures ended further from them
+    than its inputs' were (0.18 against 0.16 on known-kernel tiles).
+  - The shape term (`--shape-weight`) asks through the error instead:
+    each listed star's two quadrupoles of output less target, in a
+    Gaussian window of about a sharpened star's width, each over its
+    noise, weighed as the flux term weighs its sums. It is linear in
+    the error, so noise and nebula the output shares with its target
+    cancel, a wrong level or place has no quadrupole, and a star is
+    asked to be as round as its target's and no rounder.
+  - At 0.1, the flux term's weight, it leaves the California's stars at
+    0.048 (the goal 0.046) and the Trunk's at 0.020, and costs the
+    rims nothing: the Trunk's steepen ×2.61 (without it ×2.17), the
+    California's ×1.67, and the change shared with the goal is
+    0.82 to 1.10 of the goal's at every scale to 8 px. At 0.3 the
+    California's stars are less round (0.057) and its rims steepen
+    ×1.36. It is kept at 0.1.
+- **The goal's contrast is broader than a Gaussian's.** Across the
+  Trunk's rims, out to 32 px either side, the strong goal
+  darkens the dark side 8 to 16 px out about twice as much as the larger
+  run does (0.68 against 0.30 at 8 px, 0.42 against 0.17 at 12, in the
+  image's own units, in which a pixel's noise is 1.4 there and 0.5 on
+  the multi-night Trunk; so are the rims' levels below) and lifts the
+  lit ridge a quarter more. Asking the run for
+  more of the rest (0.5 down to 0.25) makes the rim far steeper than the
+  goal's (×4.7 against ×2.2) and the ridge too tall, and leaves
+  the dark side short still (0.49 at 8 px at an ask of 0.33). A Gaussian
+  K changes nothing further than about its own width from an edge, so no
+  known-kernel window asks for more; a real PSF has wings. (The change
+  by band beyond 8 px, which reads the same at every ask, is the stars'
+  halos and says nothing of nebula.)
+  - `--kernel-halo MAX` gives each known-kernel window's input PSF a
+    halo: a share drawn up to MAX of the window's light goes through a
+    round Gaussian two to four times as wide as K's core. The target
+    keeps of the halo what its ask leaves between the sharpest its stack
+    allows (none) and 1 (all), stars and the rest each by their own. The
+    stamp the network reads holds the halo, as a measured PSF's does.
+    Taking a halo of share h back is, to first order, an unsharp mask of
+    the halo's width and amount h / (1 - h); but a run taught this way
+    takes back the halo it finds, and a real image's may be slight.
+  - **A masked unsharp mask gives the dark side.** Applied to a run's
+    Trunk output (stars 11.5 px): what stands above a 12 px Gaussian in
+    the output smoothed by 4 px, at amount 1, on nebula and off stars,
+    with what stands above added at a quarter of what lies below. The
+    rims' dark side is then 0.64 under the input
+    8 px out (the output as it was: 0.33) and 0.41 at 12 (0.17), the lit
+    crest a tenth higher, and the knots along the rims are as they were.
+    Read from the output itself at 1.5 px it roughens the rim (knots
+    from 2.1% to 3.6%), and weighed alike both ways it lifts the lit
+    side by two thirds. On the same field at 7.9 px the same amount
+    does as much; at 2.3 px (the California) a tenth of it already
+    roughens the rim.
+  - `--contrast AMOUNT` asks for it in the target: a known-kernel
+    window's rest is given AMOUNT times one less its ratio of that
+    unsharp mask, read from the truth before any noise is added, its
+    widths in input PSF widths, none of it for stars 2 px across and all
+    of it from 7 px up. The target is then no longer the truth: it is an
+    enhancement, and it follows the ask.
+  - It is masked three ways. By place: on nebula, and clear of every
+    listed point source and of any compact peak far above its
+    surroundings (a field lists a few hundred stars, and a bright one
+    left out was given a dark ring). By scale: the detail is read from a
+    third of an input width up, which is what keeps a rim's knots as
+    they were; read from 1.5 px with every other mask in place, the
+    knots still rose from 2.1% to 2.4%. By what is there: detail counts
+    as it stands over the noise of its own band, half at three times
+    it, so a truth's faint mottle is not raised.
+- **Speckle along lit rims.** Runs break a lit rim into knots a few
+  pixels across where the goal draws a line. The measure: within
+  8 px of the steepest edges, off stars, the share of pixels where a
+  blob filter (1 px less 2.5, and 1.5 less 4) stands more than three
+  times the sky's noise above the rim's own mean along itself. On the
+  Trunk at 1 to 2.5 px: input 0.4%, the runs 1.7 to 3.1%, the goal
+  1.0%; two draws of one recipe gave 1.8 and 3.1, so a run counts as
+  better only well under 1.7. With stars 11.5 px across nothing real is
+  1 to 4 px wide there. On the California the runs and the goal
+  are level (2.7%).
+  - It comes with the larger model. The small runs (four levels, tiles
+    of 256 in eights, blurred up to twice) read 0.8 to 1.2%, the
+    goal's 1.0%; every larger run (six levels 32 wide, tiles of 768
+    in fours, half the steps) reads 1.7 to 3.3%.
+    - Not the widest blur. The larger run blurred up to 2 in place of 3
+      reads 2.0% (3.2% on the multi-night Trunk, the goal 2.3%)
+      with the goal's rims: ×2.31 and a rise over 3.67 px against
+      ×2.21 and 3.74. Two small runs alike but for the widest blur had
+      read 0.95 and 2.0%, but both were rendered past what the first was
+      taught.
+    - Not the bank. The small recipe, 64 wide for 60,000 steps, read
+      0.8% from the banks of 256 px windows and reads 0.9% from those of
+      1024 (the multi-night Trunk 2.2% against the goal's 2.3, the
+      California 2.8 against 2.7).
+    - Not how much is asked. The larger run blurred up to 2 reads 1.6 to
+      2.0% at every ask of the rest from 0.2 to 0.7, while its rims'
+      rise goes from 3.30 to 4.24 px; at the small run's sharpness (4.24
+      against 4.17 px) it reads 1.65% against 0.92%. Blurred up to 3 it
+      had followed the ask: 1.0% at 0.7, 1.3% at 0.6, 1.8% at 0.5, 2.5%
+      at 0.4.
+    - The small run is not the answer as it stands. Its rims rise over
+      4.17 px at an ask of 0.5, the least it was taught, and the dark
+      side 8 px out is a third of the goal's (0.22 against 0.68);
+      asked for less than 0.5 it stops sharpening the rest at all (a
+      rise over 5.6 px at 0.4, the input's 5.7).
+    - Blurred up to 3, the small run can be asked for less, and at an
+      ask of 0.4 its rims are the goal's on the lit side: ×2.92
+      against ×2.21, a rise over 3.86 px against 3.74, the ridge 5.3 and
+      6.7 over the input 4 and 6 px in against 5.4 and 6.5. Its knots
+      read 1.3% there (1.1% at 0.5; on the multi-night Trunk 1.4% against
+      the goal's 2.3). Under 0.4 the ridge overshoots. The dark
+      side stays near 0.3 at every ask.
+    - Six levels 32 wide, the small recipe otherwise, are not the
+      speckle on the deep Trunk (1.1%) and are on the multi-night one
+      (3.6%), and by eye it leaves bright dots along a lit ridge's
+      outer side; its California stars are less round (0.067 against
+      0.043).
+      The depth deepens the dark side to 0.47 with nothing asked.
+    - Blurred up to 3 as well, six levels are the four-level run with
+      more speckle. The rims are the same (×1.93 and a rise over 4.08 px
+      against ×1.92 and 4.18) and the dark side is back at 0.27; knots
+      read 1.3% against 1.1, on the multi-night Trunk 2.6% against 1.4
+      (3.6 blurred up to 2), and the California's stars gain 12% of
+      their flux against 7. Depth is left out of the small recipe.
+    - Tiles of 768 in fours for 30,000 steps, the small recipe
+      otherwise, are not the speckle either: 1.1%, and 1.5% on the
+      multi-night Trunk (the California 3.1% against 2.8). They buy
+      nothing at the rims (×1.95 and a rise over 4.26 px, the dark side
+      at 0.18) and leave the California's stars less round (0.063
+      against 0.053). So neither the depth nor the tile speckles the
+      deep Trunk alone, the two together do, and the small recipe keeps
+      its four levels and its tiles of 256.
+  - Clean truth does not mend it (3.1%), nor the halo (3.3%), nor the
+    edge term kept off stars (2.9%).
+  - Contrast in the target is learned and makes it worse. A larger run
+    taught a contrast of 2 on clean truth, with the gradient term out to
+    16 px and before the mask by what is there, darkens the Trunk's dark
+    side 8 px out by 0.38 (0.25 to 0.30 without, the goal 0.68) and the
+    multi-night Trunk's by 0.40, the goal's own; its knots read
+    2.9% and, on the multi-night Trunk, 6.5%. On the small run blurred up
+    to 3, a contrast of 2 with every mask is learned on the multi-night
+    Trunk (0.33 against 0.12 without) and hardly on the deep one (0.28
+    against 0.26), for knots of 2.1% against 1.4 and 1.2% against 1.1.
+    Finding the compact peaks took 2 to 17 s a 1024 px window (a square
+    maximum), and that run 5.3 hours against 1.5; taken a row and a
+    column at a time it is the same mask in under half a second.
+  - A blur of 3 is there for the stars, which are asked for under half
+    their width; it also asks what is not a star for a third of its
+    width. `--rest-floor RATIO` keeps the rest's ask at RATIO or above
+    in known-kernel windows whatever their stars are asked.
+- **Detail inside a cloud.** By eye the strong goal
+  draws more structure inside a dark cloud than any run does. The
+  measure: on a sheet's crops, further than 24 px from the steepest
+  edges and 12 px from stars, the image's spread in a band (a Gaussian
+  of 4 px less one of 8, and one of 8 less one of 16) over the input's.
+
+  | | Trunk, stars 11.5 px | multi-night Trunk, 7.9 px | Trunk denoised first |
+  |---|---|---|---|
+  | The goal, strong | 1.13, 1.11 | 1.22, 1.11 | 1.48, 1.14 |
+  | Small run, blurred up to 2 | 0.81, 0.87 | | |
+  | The same on tiles of 768 | 0.96, 0.99 | 0.97, 1.00 | 1.05, 1.03 |
+  | Small run, blurred up to 3 | 0.99, 0.99 | 1.06, 1.02 | 1.14, 1.07 |
+  | The same with a contrast of 2 | 0.99, 0.98 | 1.07, 1.03 | 1.10, 1.06 |
+  | The same with a clarity of 1 | 0.97, 0.98 | 1.19, 1.07 | 1.21, 1.10 |
+  | Small run, blurred up to 4 | 1.00, 0.98 | 1.06, 1.02 | 1.15, 1.07 |
+  | The same with a clarity of 1 | 1.03, 1.00 | 1.18, 1.08 | 1.18, 1.09 |
+  | The same with clean truth and noisy space-telescope windows | 1.09, 1.05 | 1.24, 1.11 | 1.28, 1.13 |
+  | Six levels 32 wide, blurred up to 2 | 0.92, 0.96 | 0.91, 0.98 | 1.06, 1.05 |
+  | Six levels 32 wide, blurred up to 3 | 0.96, 0.98 | 1.00, 1.01 | 1.20, 1.07 |
+
+  - It goes with the PSF's width. On the California (stars 2.3 px) the
+    runs and the goal are level in every band from 1 to 32 px (1.02
+    to 1.07), so what the goal adds on the Trunk lies between about
+    a third of the stars' width and one and a half of them, and no
+    contrast of a fixed size is it.
+  - The widest blur moves it: 0.81 to 0.99 between 4 and 8 px, blurred
+    up to 3 in place of 2. Tiles of 768 in place of 256 move it as far
+    (0.96) with the blur left at 2. Blurred up to 4 it goes no further
+    (1.00), and the rims are those of 3: ×2.02 and a rise over 4.20 px
+    at an ask of 0.5, the goal's lit side at 0.4 with knots of
+    1.15% (1.27 blurred up to 3), the ridge overshooting under 0.4 as
+    before. The California's stars gain 10% of their flux against 7.
+  - What is raised there is not more of the sky, as far as a deeper
+    stack can say. Inside the cloud the deep Trunk's bands match the
+    multi-night stack of the same field by 0.09 between 4 and 8 px,
+    0.60 between 8 and 16 and 0.86 between 16 and 32; the strong
+    goal by 0.04, 0.57 and 0.87, and the runs by 0.03, 0.57
+    and 0.86. The goal's bands follow the input's own (0.95 to
+    0.99) at 1.2 to 1.4 times their size: it raises what the input
+    holds there, noise and all, by the PSF's width. On the Trunk
+    denoised first it doubles the light between 2 and 4 px, and that
+    matches the deeper stack no better (−0.04). So the look is
+    enhancement and a clarity is its like, and no wider blur will find
+    structure there that the input does not hold. (The multi-night
+    stack's own noise lowers what any match can reach, and the zone is
+    the faintest of the image; rims are another matter.)
+  - `--contrast` does not: it is masked by what is there and to nebula
+    standing over the noise, and inside a dark cloud neither holds.
+  - **Local contrast that keeps strong edges gives it.** Applied to the
+    small run's Trunk output: what stands, in the output smoothed by a
+    third of the stars' width, above a guided filter of it over squares
+    2.8 widths across, 0.3 of it. The base follows the image wherever a
+    square's variance stands over the pixel noise squared, so a rim or
+    a star fills the squares it lies in and the detail beside it is read
+    from the squares that miss it. Inside the cloud the two bands then
+    read 1.13 and 1.12 (the multi-night Trunk 1.21 and 1.09), and 1.05
+    from 16 to 32 px against the goal's 1.04. The rims hardly move:
+    the dark side 8 px out 0.32 from 0.26, the lit side 12 px in 0.39
+    from 0.15 (the goal 0.37; a plain unsharp mask of a like reach,
+    masked to nebula, puts it at 0.9 and the cloud's detail at 1.04),
+    knots 1.14% from 1.11%. The California is unchanged.
+  - `--clarity AMOUNT` asks for it in the target: a known-kernel
+    window's target is given AMOUNT times one less the rest's ratio of
+    it, 0.6 of the detail at an amount of 1, with `--contrast`'s limits
+    on the stars' width and its clearing of listed point sources. It is
+    added after the noise the target passes. Read from the truth, as
+    `--contrast` is, it would ask a run to know from a noisy, blurred
+    window what faint structure lay under it, which is where the runs
+    hold back; read from the target with its noise, what is to be raised
+    is in the input's own band, whatever it is. A window with next to no
+    noise of its own (a space-telescope one) is judged by a twentieth of
+    its range of light in the noise's place, and a denoised one by its
+    stack's noise.
+  - A run taught a clarity of 1 learns it where stars are 7.9 px across:
+    1.19 and 1.07 on the multi-night Trunk, against the step's 1.21 and
+    1.09. Where they are 11.5 px it does not at an ask of 0.5 (0.97 and
+    0.98; denoised first 1.21 and 1.10, against the step's 1.33 and
+    1.20), and does as more is asked: 1.04 and 1.01 at 0.4, 1.12 and
+    1.03 at 0.33, where the run without reads 1.01, 0.99 and 1.03, 0.99.
+    Its rims and knots are the run's without it: knots 1.1%, and 1.6%
+    against 1.4 on the multi-night Trunk; at an ask of 0.4, ×2.98 and a
+    rise over 3.95 px with knots of 1.3%, and the dark side 8 px out at
+    0.41 against 0.3.
+  - Wide inputs are seldom asked for much. A window is asked for no more
+    than its blur took, and an input 9 to 12 px across is mostly wide
+    truth blurred a little: those are 6% of the known-kernel windows
+    drawn, three in ten of them asked for 0.58 or less, and their lift
+    is 0.017 of a pixel's noise where windows 7 to 9 px across are given
+    0.057. Blurred up to 4, the bank's median truth (2.9 px) is 11.8 px
+    across.
+  - Blurred up to 4 they are asked as narrower inputs are: windows 9 to
+    12 px across are a tenth of those drawn, 0.63 of them asked for 0.58
+    or less, and their lift is 0.054 of a pixel's noise against 0.063
+    for 7 to 9 px. The run taught so learns the clarity on the 11.5 px
+    Trunk as more is asked: 1.03 and 1.00 at an ask of 0.5, 1.18 and
+    1.06 at 0.4 (blurred up to 3, 1.04 and 1.01; blurred up to 4 without
+    it, 1.06 and 1.00), 1.34 and 1.12 at 0.33. Its rims are those of
+    the run without: ×1.99 and a rise over 4.29 px at 0.5 with knots of
+    1.05% (the goal 0.98), and 1.5% on the multi-night Trunk; the
+    goal's lit side at 0.4 (×3.14, 4.11 px, knots 1.16%), the ridge
+    overshooting below that. The dark side 8 px out reads 0.39 at 0.5
+    and 0.45 at 0.4, against 0.26 without it and the goal's 0.68.
+    The California's stars keep their 9% of flux.
+  - Its lift sits finer than the goal's. At an ask of 0.4 inside
+    the Trunk's cloud, from 2 to 4, 4 to 8, 8 to 16 and 16 to 32 px:
+    1.16, 1.18, 1.06 and 1.00, against the goal's 1.04, 1.13, 1.11
+    and 1.04, and 1.12, 1.06, 1.00 and 1.00 for the run without clarity.
+    So the clarity lands between 4 and 8 px, half of it between 8 and
+    16 and none beyond, and under 4 px the sharper ask raises the noise
+    whether clarity is taught or not. By eye it is the input's mottle
+    raised with its grain, where the goal draws broader dark lanes
+    on a darker cloud. Against the deeper stack it holds what every
+    other output does (0.02, 0.57 and 0.86).
+  - The step's shape is not what is missing. The same step on this
+    run's output at an ask of 0.5 (0.3 of the detail) reads 1.09, 1.18,
+    1.13 and 1.04 in those four bands, the goal's but for the
+    second, with knots of 1.08% and the rims where they were. Read
+    broader (the output smoothed by 0.7 widths, over squares twice as
+    wide, 0.2 of it) it reads 1.07, 1.10 and 1.07 from 4 px up: short
+    under 8 px and over past 16.
+  - The run gives the lift to structure and not to noise. On held-out
+    known-kernel windows drawn as it was taught (23 of them), its
+    output holds the taught lift whole over the run without: 0.9 to
+    1.3 of it in each band for inputs under 9 px across, 1.2 falling to
+    0.8 from 9 px up. On made images under the Trunk's PSF, with no
+    stars, between 4 and 8 px and between 8 and 16:
+    - white noise alone comes out lower, 0.89 and 0.83 of the input's
+      spread, where the step asks 1.06 and 1.09 (the run without: 0.93
+      and 0.91);
+    - a PSF-blurred texture as large as the pixel noise comes out with
+      the step's lift, 1.41 and 1.17 against 1.39 and 1.20 (the run
+      without: 1.23 and 1.06);
+    - at half the noise its gain is 1.28 and 1.10 against the step's
+      1.33 and 1.20;
+    - at a quarter of the noise it is not raised (0.97 and 0.92 against
+      1.20 and 1.13), and the run without no longer sharpens it either
+      (1.01 and 0.97, where the texture as large as the noise gains
+      1.22 and 1.07), though it is 0.65 and 0.90 of the input's
+      variance in those bands.
+
+    So one thing holds the runs back inside a faint cloud, for
+    sharpening and clarity alike: structure under about half the pixel
+    noise is left as it was found, however plainly it stands in its own
+    band. The goal raises those bands whatever is in them. A
+    likely cause, not yet tested: in a noisy known-kernel window a faint
+    blob of the input is as often the stack's own noise blurred, whose
+    sharp form cannot be known, and no window of this mix holds faint
+    structure under noise with its truth known. Clean truth and noisy
+    space-telescope windows do.
+  - Windows that hold it lower the gate. The same run with clean truth
+    for 0.7 of the native windows (`--clean-truth 0.7`) and the
+    space-telescope windows under noise of their contrast over 1 to 60
+    (`--external-snr 1,60`) raises the made texture, between 4 and 8 px
+    and between 8 and 16, by 1.54 and 1.19 where it is as large as the
+    pixel noise, 1.55 and 1.22 at half, 1.31 and 1.16 at a quarter and
+    1.04 and 1.03 at a tenth, where the run before gave 1.40 and 1.16,
+    1.28 and 1.10, 0.97 and 0.92, and 0.89 and 0.88. What is left of
+    the noise at a tenth is the input's (1.01 and 0.99).
+    - Inside the Trunk's cloud at an ask of 0.5, from 2 to 4 px up:
+      1.07, 1.09, 1.05 and 1.03, from 1.05, 1.03, 1.00 and 1.00, to the
+      goal's 1.04, 1.13, 1.11 and 1.04. At 0.4 it passes it: 1.14,
+      1.24, 1.14 and 1.04. By eye the cloud's dark lanes are drawn at
+      0.5, with small bright dots inside the cloud that grow at 0.4.
+      The dots are the input's noise peaks made brighter, and no more
+      of them than the goal makes: per megapixel of cloud, 42
+      stand above 6 of the input's spread at that size (the input 1,
+      the goal 44, an ask of 0.4 50), over places where the input
+      stood at 2.4, and the deeper stack shows something under 3% of
+      them, as under any place.
+    - The rims are a little softer at 0.5 (×1.86, a rise over 4.31 px,
+      knots 1.00%; the lit side 4 and 6 px in +3.99 and +4.88) and past
+      the goal's lit side at 0.4 (×2.84, 4.00 px, knots 1.07%,
+      +5.74 and +7.35 against +5.41 and +6.46). The dark side 8 px out
+      is no nearer: 0.31, and 0.36 at 0.4, against 0.68.
+    - On an image denoised first its sky grain is 1.06, 1.08 and 1.03
+      of the input's at 1, 2 and 4 px (the run before 1.02, 1.01 and
+      0.93; the goal 1.22, 1.37 and 1.69). The California's stars
+      keep 8% of flux.
+    - Against the deeper stack the raised detail holds what every
+      output's does (0.03, 0.57 and 0.86): between 4 and 8 px what is
+      raised in this stack is still mostly its noise, as the
+      goal's is.
+- **Grain on images denoised first.** On noisy images the runs' grain is
+  the goal's, in sky, nebula, bright nebula and along rims. On
+  images denoised first it is not: along the California's rims the
+  goal leaves 0.58 of the input's pixel-to-pixel spread and the
+  larger run 0.85; in the Iris's bright nebula 0.41 and 0.61, along its
+  rims 0.35 and 0.59. A native known-kernel window holds its stack's
+  noise blurred in its input and sharp in its target, which asks a run
+  to sharpen every soft blob of noise into grain.
+  - `--clean-truth SHARE` takes that share of a bank's known-kernel
+    windows from its denoised plane and meets them as noisy windows are
+    met, under fresh noise of half to all of the stack's own, passed to
+    the target: nothing in the target is noise made sharp.
+- **Denoised sheets hold the goal too**: run on the same denoised
+  input, and listed as a file (`"file"`), since an input denoised by a
+  run is no product.
+
+### What is next for sharpening
+
+In order, each only if the one before leaves a gap at the rims:
+
+1. **Detail inside a cloud on the run that is clean at the rims.** The
+   small recipe blurred up to 4 with a clarity of 1 (four levels 64
+   wide, tiles of 256 in eights, 60,000 steps, the banks of 1024 px
+   windows), with clean truth for 0.7 of the native windows and the
+   space-telescope windows under noise, reads clean and raises a
+   cloud's detail in every band from 2 to 32 px: short of the
+   goal's from 4 to 16 px at an ask of 0.5 and past it at 0.4,
+   where it also passes the goal's lit side. It lacks the dark
+   side beside a rim, half the goal's, and draws small bright
+   dots inside a cloud. On it:
+
+   - an ask between 0.4 and 0.5 read against the goal, by eye and
+     by the measures above;
+   - the dark side beside a rim, which no change to the windows has
+     moved;
+   - the dots inside a cloud: whether they are the stack's or made.
+
+   - `--shade AMOUNT` asks for the dark side in the target: what dips
+     below the local mean beside a strong edge, and only the dip, so
+     the sky side of a ridge is given no bright line. As a step on this
+     run's output at an ask of 0.5, an amount of 1 darkens the Trunk's
+     rims 8, 6, 4 and 2 px out to 0.72, 0.84, 0.83 and 0.62 (the
+     goal 0.68, 0.85, 1.00 and 0.99), with the lit side, the
+     knots and the cloud's detail where they were.
+   - A run taught it (`--shade 1`, the rest as the run above; 60,000
+     steps, validation 0.792, not comparable since the target moved)
+     learns most of it and loses nothing. At an ask of 0.5 the Trunk's
+     rims 8, 6, 4, 2 and 0 px out darken by 0.53, 0.65, 0.70, 0.57 and
+     0.15, from 0.31, 0.39, 0.45, 0.41 and 0.07, to the goal's
+     0.68, 0.85, 1.00, 0.99 and 0.44; the multi-night Trunk's by 0.35,
+     0.48, 0.58, 0.52 and 0.22 to the goal's 0.40, 0.52, 0.66,
+     0.74 and 0.41. The lit side (+4.05 and +4.98), the slope (×1.87
+     over 4.33 px), the knots (0.98%, 1.91% and 3.03% on the Trunk,
+     the multi-night Trunk and the California) and the cloud's detail
+     (1.06, 1.09, 1.05 and 1.02) are the run's before. No star dips
+     below its surround, and the star beside the Trunk's rim that the
+     step gave a dark crescent has none. At an ask of 0.4 the dark
+     side is the goal's (0.72, 0.89, 0.97, 0.83 and 0.39) with
+     the lit side past it (+5.75 and +7.43), the cloud's detail past
+     it (1.16, 1.28, 1.16 and 1.03) and knots of 1.04%. What is left
+     at 0.5 is the lit side's height and the rim's rise (4.33 px
+     against 3.74). The California's stars keep 9% of flux and are a
+     little less round (0.057 from 0.044; the goal 0.046).
+   - A larger network does not give them. The same recipe at five
+     levels 96 wide (nine times the weights; the same steps, batch,
+     tile and learning rate, and the same hours, validation 0.850
+     against 0.792) is that run a little weaker: the same slope
+     (×1.87, over 4.42 px), the lit side +3.71 and +4.57, the dark
+     side 0.40, 0.51, 0.55 and 0.48, the cloud's detail 1.03, 1.05,
+     1.04 and 1.02, knots of 0.82%, 2.28% and 3.12%. At an ask of 0.4
+     it is where the smaller run is at 0.45 or so (×2.71, 4.22 px, lit
+     +4.99 and +6.38). It does hold the California's flux (1.020 from
+     1.089) and leaves its stars less round (0.070). The rim's
+     steepness is the target's, not the network's size.
+   - Nor do larger tiles and twice the steps. That network on 512 px
+     tiles for 120,000 steps (batch 4, six hours; validation 0.684 on
+     16 batches of those tiles, not comparable) is the smaller run
+     turned up by a fifteenth at every scale, the noise's with the
+     rest: slope ×1.97 over 4.30 px, the lit side +4.34 and +5.34, the
+     dark side 0.51, 0.63, 0.68 and 0.57, knots of 1.11%, the cloud's
+     detail 1.04 between 1 and 2 px and then 1.09, 1.12, 1.06 and 1.03
+     (the goal 1.00, 1.04, 1.13, 1.11 and 1.04), and 150 bright
+     dots a megapixel inside the cloud above 4 of the input's spread
+     against the smaller run's 129 and the goal's 103, one in
+     thirty of them in the multi-night stack, which is chance. On open
+     sky all three leave the grain as it was. The Trunk's stars hold
+     their flux (0.999); the California's hold 1.049 and are no rounder
+     (0.067). The goal's gain lies between 4 and 16 px and falls
+     to nothing under 2; a deconvolution's rises toward the pixel, and
+     more of it brings the noise up first.
+   - The fine part of the change, held back under the noise
+     (`rolled_off`): the change is split at a Gaussian of 2 px, and its
+     fine part kept by its local power over that and the square of the
+     noise. A star's or a rim's stands far over the noise and stays;
+     what lies under it goes. As a step on that run's output at half
+     the input's noise (`sheet-sharpen --rolloff 0.5`), the dots fall to
+     105 a megapixel and the knots to 0.91%, the cloud's detail to 1.01
+     and 1.06 under 4 px and stays 1.11, 1.06 and 1.03 above, and the
+     rims keep 96% of their lit side (+4.16 and +5.11) and nine tenths
+     of their dark side (0.50, 0.59, 0.61 and 0.49). A plain blur of
+     the change at 1 px takes a seventh of the dots and, wide enough
+     to take more, a sixth of the lit side. As a target
+     (`--fine-snr`), it is asked of what is not a star under the noise
+     each window is shown under; an overshoot term
+     (`--overshoot-weight`) charges a run for more gradient than its
+     target's where the target is flat, which the edge term never did;
+     and a run can start from another's weights (`--init-from`) to be
+     taught these without its hours again.
+   - Taught them (that run's weights, `--fine-snr 1 --overshoot-weight
+     0.5`, 30,000 steps at a learning rate of 3e-5, an hour and a
+     half; validation 0.650 on the moved target), the run holds the
+     fine part back by itself, and a little of everything else with
+     it. At an ask of 0.5 on the Trunk: 113 dots a megapixel (150
+     before, the step 105, the goal 103), knots of 0.96% (1.11%;
+     the multi-night Trunk 1.27% from 1.94%, the California 2.81% from
+     2.89%), the cloud's detail 1.02, 1.05, 1.08, 1.05 and 1.03 (from
+     1.04, 1.09, 1.12, 1.06 and 1.03), slope ×1.88 over 4.40 px, the
+     lit side +4.08 and +4.98, the dark side 0.47, 0.57, 0.59 and
+     0.47. The stars are where they were (the Trunk's flux 1.002, the
+     California's 1.045 and 0.068). That is the step's cleaning at a
+     slightly higher price in the rims (the step kept +4.16 and
+     +5.11), and it leaves the larger run where the smaller one was
+     with a sixth fewer dots: taught or applied, the roll-off takes the
+     noise out and does not put the gain between 4 and 16 px that the
+     goal has.
+   - More corpus pairs give some of it. The same run again with a
+     bank of them nine times as large (1,325 pairs of 457 objects,
+     most of them fields of narrow stars; the earlier bank kept at a
+     quarter of the draws for its wide ones) at 0.30 of the mix, from
+     0.15, is the best at an ask of 0.5 so far: slope ×2.05 over
+     4.36 px (×1.88 without, the goal ×2.21 over 3.74), the lit
+     side +4.50 and +5.58 (+4.08 and +4.98; the goal +5.41 and
+     +6.46), the dark side 0.53, 0.62, 0.65 and 0.52, the cloud's
+     detail 1.02, 1.07, 1.11, 1.05 and 1.02, with 123 dots a megapixel
+     and knots of 0.97%, 1.33% and 2.94%. The California's stars are
+     rounder (0.056 from 0.068; the goal 0.046) and hold 1.038 of
+     their flux. It also takes a little of the Trunk's noise out at the
+     pixel, which no run before it did: the grain at 1 px is 0.95 on
+     sky, 0.93 on nebula and 0.89 on bright nebula, and as it was at
+     4 px (the California's is unchanged). The dark side and the
+     detail from 8 px are still short. At an ask of 0.4 it is at the
+     goal's rims with the goal's knots: the lit side +5.49
+     and +7.03, the dark side 0.70, 0.84, 0.88 and 0.71, knots of
+     1.00%, the cloud's detail 1.03, 1.13, 1.28, 1.16 and 1.03. On the
+     Trunk denoised first it smooths what grain is left, to 0.65 of it
+     on sky and 0.61 on nebula at the pixel (the run before the
+     roll-off 0.93 and 0.86; the goal raises it to 1.22 and
+     1.06); on the California and the Iris denoised first it does as
+     the runs before it.
+   - More of the mix for them gives no more. At 0.45 of the mix
+     (known-kernel 0.4, seeing 0.15) the run is the one at 0.30 to
+     the second figure: slope ×2.05 over 4.31 px, the lit side +4.53
+     and +5.61, the dark side 0.52, 0.63, 0.67 and 0.55, knots of
+     0.96%, 1.37% and 2.96%, 119 dots, the cloud's detail 1.02, 1.06,
+     1.10, 1.05 and 1.02, the same grain on the Trunk and on the Trunk
+     denoised first. Only the California's stars move, a little: 0.053
+     and 1.031 of their flux. What the pairs teach is taught by 0.30.
+   - The clarity and the shade at 1.5, from 1, on the run at 0.30 (the
+     same start, steps and rate) move what they were meant to and
+     nothing else. At an ask of 0.5 the dark side is the goal's
+     from 8 px out (0.65, 0.42 and 0.27 at 8, 12 and 16 px; the
+     goal 0.68, 0.42 and 0.26) and nearer it than before closer
+     in (0.75, 0.77 and 0.58 at 6, 4 and 2 px, from 0.62, 0.65 and
+     0.52; the goal 0.85, 1.00 and 0.99); the cloud's detail
+     between 4 and 8 px is the goal's (1.14 against 1.13) and
+     between 8 and 16 px nearer it (1.07, from 1.05; the goal
+     1.11). The lit side (+4.59 and +5.67), the slope (×2.02 over
+     4.38 px), the dots (123), the knots on the Trunk and the
+     California (0.98% and 2.93%), the grain and the stars are as they
+     were; the multi-night Trunk's knots rise to 1.54% from 1.33% (the
+     goal 2.31%). What is left at 0.5 is the dark side within
+     4 px of a rim, the lit side's height and the rim's rise. At an
+     ask of 0.4 it goes past the goal everywhere but the rim's
+     foot and its rise, with the goal's knots: the dark side
+     0.95, 1.12, 1.12, 0.83 and 0.25 at 8, 6, 4, 2 and 0 px, the lit
+     side +5.63 and +7.17, the cloud's detail 1.03, 1.17, 1.39, 1.23
+     and 1.04, knots of 1.03%, the slope ×2.68 over 4.35 px. The
+     strong goal lies between the two asks.
+
+     By eye the cloud behind the Trunk's upper right ridges is noisy,
+     mottled and not well defined where the goal's is clean. A
+     deeper stack of the field says why: inside the cloud this stack's
+     detail correlates with the deeper one's by 0.60 between 8 and
+     16 px, 0.09 between 4 and 8 and none below, so all it shows under
+     8 px is noise. This run raises the detail between 2 and 4 px by
+     8% and between 8 and 16 px by 7%; the goal by 4% and 11%.
+     The roll-off splits at 2 px, and the clarity's band, set in input
+     widths, starts at 4 px on this stack (its stars are 11.5 px
+     across). Held back as a step out to 4 px, the change loses its
+     mottle (90 dots a megapixel, the detail between 2 and 4 px 1.03)
+     and a tenth of the rims' lit side, which a step cannot tell from
+     noise; so the split (`--fine-split`) and the clarity's band
+     (`--clarity-scale`, the band's smoothing and squares that many
+     times as wide) can now be moved, for a run to learn it.
+   - Both moved at once (that run's weights, `--fine-split 3
+     --clarity-scale 1.5`, 30,000 steps at 3e-5) take the mottle out
+     and some of the cloud's structure with it. Under 8 px the cloud's
+     detail is the goal's or less (1.01, 1.05 and 1.10 from 1–2
+     to 4–8 px; the run before 1.02, 1.08 and 1.14; the goal
+     1.00, 1.04 and 1.13), the dots fall to 112 a megapixel, and the
+     knots to 0.93% on the Trunk and 1.22% on the multi-night Trunk,
+     from 1.54%. But between 8 and 16 px the detail falls too, to 1.05
+     (the goal 1.11), the dark side within 8 px of a rim is
+     weaker (0.56, 0.65, 0.66 and 0.51 at 8, 6, 4 and 2 px, from 0.65,
+     0.75, 0.77 and 0.58), and the run takes more of the grain at the
+     pixel (0.90 on sky and 0.79 on bright nebula, from 0.95 and 0.90).
+     The lit side (+4.63 and +5.72), the slope (×2.02 over 4.38 px) and
+     the stars hold; the edge gain is the goal's, 1.51. Which of
+     the two did which is not yet known: the clarity moved out is
+     weaker, not further out.
+   - The split alone (the same fine-tune with `--fine-split 3` and the
+     clarity's band where it was; validation 0.716) does nearly all of
+     it. The dots (113 a megapixel), the knots (0.94% on the Trunk,
+     1.28% on the multi-night Trunk), the grain at the pixel (0.90 on
+     sky, 0.81 on bright nebula), the fall between 8 and 16 px (1.05)
+     and the weaker dark side (0.55, 0.64, 0.66 and 0.51 at 8, 6, 4
+     and 2 px) are the split's: the two runs agree on them to 0.01.
+     Moving the clarity's band out only took a further 0.02 from the
+     2–4 and 4–8 px bands (1.07 and 1.12 with the split alone, 1.05 and
+     1.10 with both) and added nothing between 8 and 16 px, where it
+     was meant to. So the clarity's scale stays at 1. The split at 3 px
+     is what takes the mottle out; what it costs, the cloud's 8–16 px
+     detail and the dark side near a rim, is what is left to win back,
+     with the lit side (+4.64 and +5.73, the goal +5.41 and +6.46)
+     and the rise (4.35 px, the goal 3.74). Neither run had a
+     control, so part of the change may be the further 30,000 steps
+     rather than the split.
+   - What is particular to the Trunk's ridges, looked at on that run:
+     - Not the PSF. The field runs smoothly from 11.3 to 11.8 px over
+       the frame; the ridges' corner reads 11.56 px at an ellipticity of
+       0.11, as any other.
+     - Not the noise's texture. The stack's noise is shared between
+       neighbouring pixels no more than the California's (a correlation
+       of 0.11 at 1 px and none past 2 px, white noise blurred by about
+       0.25 px), well inside the fresh noise's blur in training (up to
+       0.6 px). The stars are wide because the telescope's focal length
+       oversamples the seeing, not from drizzle.
+     - Its scale. Inputs as wide as 11–13 px are about 5% of the
+       known-kernel windows once widened, and the space-telescope truth
+       (stamps of 2–4.5 px) never reaches 11.5 px at a ratio of 0.5: it
+       shows that width only at ratios of 0.4 and under. Run on the
+       image binned 3 × 3 (its stars 3.5 px, where most of training
+       is), the same model's change, brought back up, makes the
+       goal's rise (3.81 px, the goal 3.74, at full size 4.35)
+       and its rim's foot (0.70 and 0.48 below the input at 2 and 0 px,
+       the goal 0.99 and 0.44, at full size 0.51 and 0.10), with no
+       mottle (1.00 between 2 and 4 px). It lifts the lit side less
+       (+3.92 and +4.85). Binned 2 × 2 it raises the cloud's 8–16 px
+       detail to 1.20 but softens the rim (rise 4.74 px). The binned
+       change above 2 px with the full-size change below it gives a rise
+       of 4.00 px and a slope of ×2.11, the 2–4 px detail at 1.03 and
+       fewer knots, the lit side at +4.24 and +5.38. No version lifts
+       the cloud's 8–16 px detail past 1.05 but the 2 × 2, and by eye
+       the goal still draws the ridges' finger harder than any.
+       The network sharpens a rim better at the widths it was mostly
+       trained at: what is missing at the Trunk's width is training
+       there, real structure seen through an 11 px PSF.
+     - Sharpening both Trunk stacks and comparing the changes (their
+       noise is independent, so detail drawn from the sky is drawn on
+       both) does not tell real detail from noise under 8 px: there no
+       sharpener's changes agree, the goal's included, and at
+       4–8 px they disagree a little, likely as each sharpens the
+       deeper stack where it smooths the shallower.
+     - So a run can now be shown such windows (`--zoom SHARE`): that
+       share of the known-kernel windows with a clean truth (the
+       clean-truth and denoised windows, and the space-telescope bank's)
+       is magnified before its blur and its fresh noise. A part of the
+       window `z` times smaller is resampled up to its size by Keys'
+       cubic, with its noise map, its saturation, its stamp and its point
+       sources; `z` is log-uniform from 1.2 up to `--zoom-most` (3), or as
+       far as takes the stack's stars to `--zoom-widest` (6 px). Drawn
+       from the real banks, 15 of 24 deep windows and 23 of 24
+       space-telescope windows were magnified (1.2 to 2.7 times), their
+       stars then up to 6 px and their inputs up to 29 px, at a tenth of
+       a second more a window and no NaN. The first run with it continues
+       the split's run with `--zoom 0.3` and nothing else changed. Its
+       validation draws zoomed windows too, so its validation loss is not
+       that run's.
+   - The clarity and the shade at 2, from 1.5, on the split's run (a
+     further 30,000 steps from its weights, the rest the same;
+     validation 0.722, on targets of its own) change next to nothing.
+     The rise is 4.32 px (4.35 before), the slope ×2.05 (×2.03), the lit
+     side +4.75 and +5.85 (+4.64 and +5.73). The dark side it was asked
+     for more of is a little weaker: 0.52, 0.61, 0.63 and 0.50 below the
+     input at 8, 6, 4 and 2 px (0.55, 0.64, 0.66 and 0.51). Inside the
+     cloud it reads 1.05, 1.10 and 1.05 between 2–4, 4–8 and 8–16 px
+     (1.07, 1.12 and 1.05), with 114 dots a megapixel (113) and knots of
+     0.93% on the Trunk (0.94%), but 1.42% on the multi-night Trunk
+     (1.28%). It keeps a little more of the grain on bright nebula (0.87
+     at the pixel, from 0.81) and takes a little more on sky (0.87, from
+     0.90). By eye the two cannot be told apart. Asking more of the
+     targets at the widths the model already knows does not reach the
+     Trunk's ridges, as their scale suggested.
+   - The zoom (`--zoom 0.3`, a further 30,000 steps from the split's
+     run, the rest the same; validation 0.727 on zoomed windows too)
+     changes next to nothing either. The rise is 4.39 px (4.35 before),
+     the slope ×2.00 (×2.03), the lit side +4.51 and +5.56 (+4.64 and
+     +5.73), the dark side 0.57, 0.65, 0.66 and 0.52 at 8, 6, 4 and 2
+     px (0.55, 0.64, 0.66 and 0.51). Inside the cloud 1.06, 1.12 and
+     1.06 between 2–4, 4–8 and 8–16 px, 114 dots a megapixel, knots of
+     0.93% on the Trunk and 1.36% on the multi-night Trunk (1.28%). It
+     keeps more of the grain (0.93 on sky and 0.91 on bright nebula at
+     the pixel, from 0.90 and 0.81), and the California's stars have a
+     little less of the cross (arms 7.01, from 7.42). By eye it is the
+     run it started from. The run before it already scored 0.710 on
+     these zoomed windows, under its own 0.716, and the 30,000 steps
+     left them at 0.727: magnified windows are not ones the model gets
+     wrong, so what it does on a wide PSF is what its targets there ask
+     for, and the zoom cannot ask for more.
+   - Asking more of the split's run, on the Trunk at full size, makes a
+     rim taller, not narrower. At a rest ask of 0.4 the lit side is the
+     goal's (+5.40 and +6.85 at 4 and 6 px, the goal +5.41 and
+     +6.46) and the dark side 4–8 px out too (0.85, 0.97 and 0.95 below
+     the input at 8, 6 and 4 px), but the rise stays 4.42 px, with the
+     foot by the edge still shallow (0.69 and 0.18 at 2 and 0 px, the
+     goal 0.99 and 0.44); and the mottle is back (1.14 between 2
+     and 4 px, 1.34 between 4 and 8). At 0.35 the slope is ×3.13 over
+     the same 4.42 px.
+   - Binned 3 × 3 and asked 0.4, the same run makes a rim narrower than
+     the goal's: a rise of 3.57 px, the foot 0.82 and 0.69 below
+     the input at 2 and 0 px, with no mottle (1.00 between 2 and 4 px)
+     and the knots under the goal's (0.95%, the goal 0.98%).
+     It lifts the lit side less (+4.36 and +5.49), and the cloud's
+     4–8 and 8–16 px detail stays at 1.05 (the goal 1.13 and
+     1.11). 0.35 binned is much the same (3.53 px).
+   - Put together by scale, the binned run's change under a Gaussian of
+     6 px with the full-size run's above it (both at 0.4) comes nearest
+     the goal of anything yet: a rise of 3.86 px and a slope of
+     ×1.95, no mottle (1.02 between 2 and 4 px), the cloud at 1.17
+     between 4 and 8 px and between 8 and 16 px (a little over the
+     goal's 1.13 and 1.11), the lit side +4.68 and +5.85, knots
+     0.95%. At 4 px the rise is 4.01. By eye the goal still draws
+     the ridges' finger hardest.
+   - So the renderer can now do it (`sheet-sharpen --scale-to PX`):
+     where an image's stars are at least twice that wide, the run is also
+     given the image binned to bring them near it (its PSF field, points
+     and noise measured from the binned image, as any image's are), and
+     the binned change, brought back up by Keys' cubic, stands in for the
+     full-size change below a Gaussian of half the stars' width
+     (`--scale-blend`). `--scale-rest` asks the binned rest for its own
+     share. On the Trunk at 3.5 px (binned 3 × 3), with the full size
+     asked 0.45 for the rest and the binned image 0.35:
+     - The cloud is the goal's in every band (0.99, 1.02, 1.12, 1.10
+       and 1.04 between 1–2 and 16–32 px; the goal 1.00, 1.04,
+       1.13, 1.11 and 1.04), with no mottle.
+     - The rim rises over 3.90 px (the goal 3.74, the split's run
+       alone 4.35), slope ×1.94, its foot 0.68 and 0.44 below the input
+       at 2 and 0 px (the goal 0.99 and 0.44). The lit side is +4.62
+       and +5.77 (the goal +5.41 and +6.46), and the dark side 4–8
+       px out is weaker than the goal's (0.45, 0.51 and 0.59 at 8, 6
+       and 4 px; the goal 0.68, 0.85 and 1.00).
+     - Knots 0.94% on the Trunk and 1.01% on the multi-night Trunk (the
+       run alone 1.28%, the goal 2.31%; its stars are 7.9 px, so it
+       is binned 2 × 2).
+     - The stars hold: width 0.455 of the input's (the goal 0.463),
+       flux 1.010, ellipticity 0.023 (the input 0.033, the goal
+       0.029), 95th percentile 0.352 (the goal 0.360). The
+       California (stars 2.3 px) is not binned and reads as before.
+     - The binned image's ask is held at the run's floor (1.5 px, so 0.38
+       of stars 3.9 px across): 0.35 and 0.4 there read alike. Binned 2
+       × 2 instead (stars 5.8 px), asked down to 0.3, the rims grow
+       taller (+7.35 and +8.65 at 4 and 6 px) but no narrower (4.36 and
+       4.23 px) and the mottle comes back (1.07 between 2 and 4 px).
+     - The binned image's dark side is not the shade's: its targets get
+       a third of the shade at 3.9 px (`CONTRAST_WIDTHS`), but given the
+       rest as a step after the model, the dark side 4–8 px out reaches
+       the goal's while the foot by the edge falls back (0.32 below
+       the input at 0 px) and the rise widens to 4.22 px. The goal's
+       dip lies 2–4 px from the edge; the binned run's has its shape, at
+       three quarters of its depth.
+     - Halo kernels for the dark side (S80: S77's run continued 30,000
+       steps with `--kernel-halo 0.3`). The Trunk's measured PSF puts
+       about 6% of a rim's step, 4 to 8 px out, into the dark side beyond
+       what a Gaussian of its width does, about the dark side's shortfall
+       against the goal, and a Gaussian known kernel never asks for
+       that light back. With halos, the dark side 6 to 8 px out reaches
+       the goal's (0.77 and 0.85 below the input at 8 and 6 px at
+       full size; S77 0.55 and 0.64), nearer the edge it stays short
+       (0.54 at 2 px, the goal 0.99), and the step grows to the
+       goal's (9.95 against 9.96). With the scaled pass the foot
+       reaches it too (0.77 and 0.42 at 2 and 0 px). But the rim widens
+       (4.48 px at full size, S77 4.35; scaled 4.10, S77 3.90), the cloud
+       overshoots from 8 px up (1.21 between 8 and 16 px scaled, the
+       goal 1.11), knots on the multi-night Trunk rise (5.08%
+       between 1.5 and 4 px at full size, S77 4.05%), and against the
+       survey frames (below) its added detail is a little less the sky's
+       (0.79 at 3 px on the ridges, S77 0.80). It keeps more of the grain
+       (0.97 of the input's on the sky at 1 px, S77 0.90). Asked 0.35 for
+       both, its stars carry a deep dark ring, S77's a faint one. S77
+       stays.
+     - **Square stars.** The scaled pass's stars came out square, with a
+       dark moat: the binned run's star, a pixel and a half across on the
+       3 × 3 grid, brought back up by a separable cubic whose negative
+       lobes fall in a square about it. Second moments cannot see a
+       square, so the ellipticity read as before; the share of a star's
+       half-peak ring that follows cos 4θ can (`star_squares.py`): 0.017
+       at full size, 0.037 to 0.040 with the scaled pass. Now a star keeps
+       the full-size change whole where its rendered light (the network's
+       point plane) is at least twice the pixel noise, and the blend fades
+       in below that (`SCALE_STARS`, the card's `scaled.stars`). Its
+       stars read 0.017 again (width 0.459, ellipticity 0.027, as S77 at
+       full size), and the rims, the knots and the cloud are where the
+       scaled pass had them.
+     - The survey bank (S81: S77's run continued 30,000 steps with it
+       beside the native and Hubble banks, at the native bank's weight).
+       Of 3,588 survey frames measured, 1,285 hold nebula (structure of
+       1 or more; 435 of 3 or more); six 1024 px windows each, 7,706 in
+       all, stars 2.3 to 4.7 px (median 3.4), cleaned as the native bank
+       is. S81 lands on S77: the rim 5.84 above the input at 6 px (S77
+       5.73, the goal 6.46) and 0.62 below it at −4 px (0.66, the
+       goal 1.00), the rise 4.25 px (4.35, the goal 3.74), the
+       cloud's detail between 4 and 8 px 1.35 times the input's (1.38),
+       knots on the deep Trunk the same and on the multi-night Trunk a
+       little more (4.42% between 1.5 and 4 px, S77 4.05%), its stars as
+       round (cos 4θ 0.018 at full size and scaled). Against the survey
+       frames its added detail is the sky's as S77's is. It keeps more of
+       the grain in the cloud (0.94 of the input's on nebula at 1 px, S77
+       0.90; on bright nebula 0.92, S77 0.81) and smooths the sky a
+       little more (0.87, S77 0.90). Asked 0.35 for both, the dark notch
+       S77 leaves beside a star is fainter. On the deep validation
+       windows its error falls to 0.271 of the input's (S77 0.277).
+       Frames at the stars' own scale do not move the rims. On the ridges
+       the model already adds as much of the sky's detail as the
+       goal does, and the goal's further contrast there is not
+       the sky's: blurred to its best match, the goal is the further
+       from the survey frames (a residual of 1.64 of their noise, S77
+       1.55, S81 1.59).
+     - **Contrast at the rims, after the model** (`sheet-sharpen --edge
+       AMOUNT`, `edge_step`). After the scaled pass the cloud is the
+       goal's and the rise nearly so, but not the rim's two sides:
+       the goal's dark side is 0.2 to 0.4 of the noise deeper from
+       2 to 8 px out, and its lit side 0.7 to 0.8 higher 4 and 6 px in.
+       The shade darkens the dark side alone and the clarity keeps off
+       strong edges, so neither reaches it. The step adds an unsharp mask
+       of the output (smoothed by 0.25 star widths, less its mean over a
+       box of 0.3) where a strong edge lies near, by the clarity's test,
+       its dip at 1.4 and its rise at 0.5. Kept off the listed point
+       sources alone, a star beside a rim that the detector had not
+       listed took a dark ring: the field lists 278 of the deep Trunk's
+       stars, a search for blobs finds 1,462, and one in nine was ringed
+       past 0.3 of the noise. So every blob whose two curvatures, at a
+       star's σ, bend down by more than 45 times what the noise alone
+       gives is kept clear too, out to 1.2 widths; a rim or a ridge bends
+       one way only. A lower bar takes the rims' knots for stars and the
+       rims' contrast with them: at a sixth of it, 16% of the image was
+       cleared and the dark side 4 px out came back from 1.00 to 0.76.
+       At an amount of 1 on the deep Trunk:
+
+       | Measure | Scaled pass | Edge 0.5 | Edge 1 | The goal |
+       | --- | --- | --- | --- | --- |
+       | Dark side 8, 6, 4, 2 px out | 0.45, 0.51, 0.59, 0.68 | 0.55, 0.65, 0.77, 0.82 | 0.65, 0.80, 0.94, 0.96 | 0.68, 0.85, 1.00, 0.99 |
+       | Lit side 4, 6 px in | 4.62, 5.77 | 4.82, 6.00 | 5.02, 6.23 | 5.41, 6.46 |
+       | Rise, 20% to 80% | 3.90 px | 3.82 px | 3.74 px | 3.74 px |
+       | Knots along rims | 0.94% | 0.98% | 1.03% | 0.98% |
+       | Ring at a star's 1st percentile | | 0.09 | 0.18 | |
+
+       The cloud's detail stays the goal's (1.04, 1.13, 1.10 and
+       1.03 of the input's from 2–4 to 16–32 px at 1) and the stars are as they were in width, flux and
+       shape. On the multi-night Trunk (stars 7.9 px) the dark side 4 px
+       out goes from 0.46 to 0.71 (the goal 0.66) and the rise from
+       5.13 to 4.64 px (4.03), with 1.4% of stars ringed past 0.3 of its
+       lower noise at 1 and none at 0.5. The amount is the user's: it
+       gives the goal's look, which the survey frames say is more
+       contrast than the sky's.
+     - **From the first step, wider** (S82: S77's settings from the first
+       step instead of through a run and its continuations, the survey
+       bank beside the Hubble one, width 128, 167M parameters against
+       S77's 94M, 150,000 steps in about 10.6 hours on one GPU). Its
+       validation error ends at 0.751 (S81 0.722). On the deep Trunk at
+       full size, the rim is sharper and the cloud softer:
+       - The rim rises over 3.98 px (S77 4.35, the goal 3.74), and
+         its dark side near the edge is deeper: 0.75 and 0.79 below the
+         input at 4 and 2 px (S77 0.66 and 0.51, the goal 1.00 and
+         0.99). The lit side is S77's (+4.42 and +5.61 at 4 and 6 px).
+         There are more knots along the rims: 2.21% between 1.5 and 4 px
+         (S77 1.74%, the goal 1.93%).
+       - The cloud's detail is below the input's: 0.90, 0.91 and 0.97 of
+         it between 2–4, 4–8 and 8–16 px (S77 1.07, 1.12 and 1.05; the
+         goal 1.04, 1.13 and 1.11), and 0.98, 0.96 and 0.96 with the
+         scaled pass.
+       - It smooths the sky more (0.86 of the input's grain at 1 px, S77
+         0.90) and keeps more on bright nebula (0.89, S77 0.81).
+       - Its stars are less round. On the deep Trunk the ellipticity is
+         0.037 (the input 0.033, S77 0.028). On the California it is
+         0.078 (S77 0.056), and 21% of the stars come out more elongated
+         than the input's by 0.05 (S77 7%).
+       - Its stars are also squarer. The cos 4θ share is 0.021 at full
+         size and 0.022 scaled (S77 0.017, the input 0.014). Its mean
+         cos 4θ is −0.0070 ± 0.0007 (S77 and the input −0.0020), so the
+         square lies along the pixel grid.
+       - Against the survey frames, the ridges are level (a residual of
+         1.56 of their noise at the best blur, S77 1.55). On the trunk's
+         head the frames are nearer S82 (1.03; S77 1.15, the input 1.08),
+         but less of what it adds there is the sky's (a correlation of
+         0.59 at 3 px, S77 0.68).
+
+       Round stars come first, so S77 stays the card's model.
+
+       S77's line was never square: S71, the run it was continued from,
+       reads 0.017 (mean −0.0013). The banks' own stars at 2.5 to 3.5 px
+       read a mean cos 4θ of +0.007 in the native bank and −0.020 in the
+       survey and Hubble banks: squares on the pixel grid. S82 learned
+       from the survey bank at full weight from its first step. S83, S82
+       continued 30,000 steps at 3e-5 with S77's banks alone, moved little:
+       - Its validation error is 0.750.
+       - Squares: the mean cos 4θ goes from −0.0070 to −0.0052, but the
+         share stays 0.021.
+       - Ellipticity: as S82's, 0.037 on the deep Trunk and 0.078 on the
+         California.
+       - The cloud: 0.93 and 0.94 of the input's detail between 2–4 and
+         4–8 px (S82 0.90 and 0.91).
+       - The rims: S82's (rise 3.97 px, 0.77 and 0.80 below the input 4
+         and 2 px out).
+
+       A short run at a low rate keeps what the first run learned.
+
+       Unless the loss can see it. S84, S83 continued 30,000 steps at
+       3e-5 with a term on the four-fold part of each star's error
+       (`--square-weight 0.3`, `star_four_folds`) and the shape term at
+       0.1, is round again:
+       - Squares: the mean cos 4θ is −0.0010 ± 0.0007, the share 0.016
+         (S77 −0.0020 and 0.017).
+       - The rest is S83's: a rise of 3.98 px, 0.92 and 0.95 of the
+         input's cloud detail between 2–4 and 4–8 px, the ridges level
+         against the survey frames (1.54).
+       - The California's stars stay elongated: 0.083, with 23% worse
+         than the input's by 0.05 (S77 0.056 and 7%).
+
+       What is left of S82's line is its softer cloud and the
+       California's stars. The cloud's look is what the Trunk sheet's
+       second row asks for, and few training pairs hold that case: wide
+       stars on bright, structured nebula. So from S85 pairs of the
+       Trunk's own sets train, in a bank of their own beside the
+       457-object bank,
+       and the Trunk's sheets stay as sheets but are no longer held out.
+       NGC 6820 takes their place (`ngc-6820-ha-deep`, one night of 22
+       frames, and `ngc-6820-ha-multi-night`, five nights of 94, on one
+       grid): crops of the pillar's head and bright rim, the dark lanes
+       and ridges in the upper right, and the rims of the lower cloud.
+
+       NGC 6820's first sheets showed dark rings about bright stars on
+       the nebula by the pillar, which the Trunk's crops never had:
+       - At the card's setting S77 puts the darkest 30° sector beside
+         them 26.7, 15.7, 10.4 and 6.0 times the noise below the sky;
+         the plan's limit is 1. S84 leaves them within 1.3.
+       - None of them is in the point-source list. The detector's
+         default structure removal takes them with the nebula (445
+         stars listed); its à trous removal finds all of them. The
+         sheets' ring measure reads listed stars alone, so it read none.
+       - Listed, they ring no more: with the à trous stars added to the
+         list (beyond 24 px of a listed one), S77's darkest sectors 8 px
+         out are 2 to 18 times the noise above the sky at the card's
+         setting,
+         and its rims, knots, cloud and dots on the Trunk are unchanged
+         to the second place.
+
+       So the point-source list is now the union of both removals, in
+       the harness and the runtime alike. A card names its
+       `structure_removals`, and the detector runs once with each in
+       turn. A star a later run finds within the core radius (24 px) of
+       one already listed is the same star. A card that names none
+       detects with the filtered removal alone, as cards did before.
+       Each PSF record names the removals its list was made with, and
+       `psf-fields --detections` finds a stale record's point sources
+       again without measuring its field again. The sheets' twelve
+       inputs were refreshed so: the deep Trunk lists 287 points (278
+       before), NGC 6820's night 476 (445).
+
+       S77's sheets, rendered again with the union, change only at the
+       newly listed stars. On NGC 6820 the black rings about the pillar
+       are gone, and they are plain stars now. The rims, knots and
+       interior of the Trunk and NGC 6820 agree to the second place.
+       But the sheets' edge gain was being read at stars. `edges`
+       keeps clear of each listed point and takes the steepest 2% of
+       the rest, and the unlisted bright stars' halos were the
+       steepest. The same S77 image reads 1.59 with the old list and
+       0.95 with the union on NGC 6820's night, and 1.38 against 0.78
+       on the Trunk's multi-night stack. Read with one list, the
+       renders before and after agree within 0.09. So edge gains from
+       before the union measured how hard a run rang unlisted stars
+       as much as how it steepened rims. Runs are compared under one
+       list only.
+
+       On the corpus the union first listed the clipped cores after
+       every removal's stars, so an à trous star within 24 px of a core
+       took its place. On three stacks it took 160: 146 were the same
+       star, now measured, but 14 were a fainter neighbour up to 15 px
+       off, and the saturated star itself was no longer listed. The
+       cores are now found after the first removal's stars, against
+       them alone, and a later removal's star must lie beyond 24 px of
+       every point before it (`DETECTION_VERSION` 2). The
+       first removal's list is so kept whole, and the union only adds
+       to it. The training banks keep each source's list in a file of
+       its own, so their lists are refreshed in place, not cut again.
+
+       S85, S84 continued 30,000 steps at 3e-5 with the Trunk's
+       pairs as a bank of their own (6% of examples), moved toward the
+       goal everywhere
+       but in the stars, which stay as round as S84's. All of it is
+       read with the union lists:
+       - On the Trunk, now partly in training: the rim's lit side is
+         4.90 and 6.10 over the input 4 and 6 px in (S84 4.68 and 5.88,
+         the goal 5.41 and 6.46). The cloud between 4 and 8 px
+         holds 1.06 of the input's detail, against S84's 0.95, S77's
+         1.12 and the goal's 1.13. But the deep stack's grain is
+         smoothed more: 0.74 of the input's on the sky (S84 0.86).
+       - On NGC 6820, held out: the cloud between 4 and 8 px holds 1.15
+         of the input's detail, at or over the goal's (1.09). The
+         rims are still short of it: the lit side 5.34 over the input
+         4 px in, against 7.18.
+       - Against the survey frames S85 is the closest of the three
+         runs on the Trunk's ridges.
+
+       The training banks' lists are then the union's. Every corpus
+       source keeps its old list as its first rows and gains 5–10% more
+       points. The Hubble sources gain 3.5 times as many, most of them
+       in the galaxies' disks (up to 23 times): clusters and resolved
+       stars, as compact as the old points, that the filtered removal
+       took as background. The runtime lists them too on such an image.
+       S82–S85 had also drawn from an earlier bank whose pairs are all
+       in the 457-object one, so those pairs were drawn about four
+       times as often as the rest. S86 is S85's recipe from S84 on the
+       refreshed banks without that bank: the corpus pairs' 30% goes
+       3:1 to the 457-object bank and the Trunk's (7.5% of examples).
+
+       S86 is S85 a step further almost everywhere, and the two changes
+       are not separated:
+       - On the Trunk the rim's lit side is 5.08 and 6.36 over the input
+         4 and 6 px in (S85 4.90 and 6.10, the goal 5.41 and 6.46);
+         the cloud between 4 and 8 px holds 1.07 of the input's detail
+         (S85 1.06, the goal 1.13); the grain is as S85 left it.
+       - The California's stars are rounder: ellipticity 0.070, against
+         S85's 0.082 and the goal's 0.045, the first run since S77
+         to move it back. The Trunk's stars are as round as S85's.
+       - On NGC 6820, held out, the rims are still short of the
+         goal's (the lit side 5.45 over the input 4 px in, against
+         7.18). The cloud holds 1.16 of the input's detail between 4 and
+         8 px, and it shows more dots than the goal (182 per Mpx
+         against 161), fewer of them also in the deeper stack.
+       - Its validation score is not comparable with S85's: the
+         validation banks' lists changed too, and the model reads them.
+
+       The Trunk's second crop, ridges where two cloud layers overlap,
+       is where S86 is furthest from the goal by eye. Each band's
+       robust spread over the input's, stars masked: over the crop,
+       S86 holds 1.10 and 1.07
+       between 8–16 and 16–32 px against the goal's 1.21 and 1.20;
+       where the layers overlap, 1.09 and 1.01 against 1.32 and 1.21.
+       The same shortfall shows in the deep Trunk's own training windows:
+       S86 adds about half of the goal's 8–32 px detail there too.
+       So more of the same pairs would not close it, and the larger model
+       (S82) did not move this band. A clarity step after the model does
+       not close it either. At 0.5 it brings the crop as a whole to the
+       goal's bands, but takes the rest of the cloud past them
+       (1.23 against 1.13 at 8–16 px) and still leaves the overlap short
+       (1.23 against 1.32). The overlapping layers' edges stay as wide as
+       S86's: clarity raises their contrast where the goal narrows
+       them.
+
+       What is left is the loss. The pixel term's error at these scales
+       is mostly noise, and the gradient term's blocks stop at 8 px.
+       S87 is S86 with them out to 32 (`--gradient-scales
+       1,2,4,8,16,32`), its one change. Each block's mean error is
+       scaled by its side, so noise reads the same at every block size
+       while a missing step across an edge reads its side times larger.
+
+       S87 buys a little and is not kept over S86:
+       - Over the second crop, 8–16 px detail rises from 1.10 to 1.17 of
+         the input's (the goal 1.21), and where the layers overlap
+         from 1.09 to 1.17 (1.32). Between 16 and 32 px it hardly moves
+         (1.07 to 1.09, against 1.20). By eye S87 is S86: the layers'
+         edges stay soft where the goal draws thin lines.
+       - The Trunk's knots move toward the goal's, but the rim's lit
+         side falls back (4.78 over the input 4 px in, S86 5.08, the
+         goal 5.41) and its rise widens (4.08 px, S86 3.98).
+       - On NGC 6820, held out, the cloud between 4 and 8 px goes further
+         past the goal (1.20 against 1.09) and shows more dots (192
+         per Mpx, S86 182, the goal 161), fewer of them real.
+       - The stars are as S86 left them.
+
+       Why the loss alone does not reach it: a known-kernel target's
+       clarity adds nothing where a square's variance stands over the
+       noise, so at a strong edge that target is the truth, by design,
+       and its band ends at 0.8 input widths. The corpus pairs ask for
+       lift and narrower edges from 8 to 32 px; the 70% of examples drawn
+       from the known-kernel and seeing banks ask for neither. That S86
+       gets half of the goal's lift even on the Trunk's own windows
+       reads as a compromise between the two, not a gap in coverage. The
+       direct test is the share: the corpus pairs at 50% of examples in
+       place of 30%, with the same split between their two banks.
+
+       S88 is that test, and it rules the compromise out. The second
+       crop's 8–32 px detail is S86's (1.07 and 1.06 of the input's), and
+       so is the deep Trunk's own training windows' (1.02–1.06 between 8
+       and 16 px). What S88 does move: it keeps more of the input's grain
+       (0.87 of it on the Trunk's sky, S86 0.74, the goal 1.00), its
+       knots are the goal's, and NGC 6820, held out, shows 132 dots
+       per Mpx with 57% of them in the deeper stack (S86 182 and 44%, the
+       goal 161 and 52%). It costs the rims: the Trunk's lit side
+       4.57 over the input 4 px in (S86 5.08). The stars are level.
+
+       Nor is it the ask. S86 asked harder (the rest at 0.3 and 0.15)
+       takes the cloud's 4–32 px detail down to the input's; asked softer
+       (0.55 to 0.75) it peaks near the usual ask, at 1.10 between 8 and
+       16 px, against the goal's 1.21.
+
+       The Trunk's own targets on those windows hold 1.08–1.17 of the
+       input's detail between 8 and 16 px where they ask 0.55 of the
+       rest's width, nearly as much where they ask 0.75, and none where
+       they ask 1. So the model is shown the lift on the very windows it
+       trains on, at both asks, and reaches about half of it whatever the
+       loss's blocks, the banks' shares or the ask. It underfits a smooth, linear change.
+       The next question is whether it can fit it at all, trained on that
+       bank alone.
+
+       S89 and S90 are that test, not candidates: S86 trained 5,000 more
+       steps on the Trunk's pairs alone, and the same without the
+       overshoot term. It can fit the lift. On its own training windows S89
+       reaches the goal between 8 and 32 px (1.10–1.15 of the input's
+       between 8 and 16, the goal 1.04–1.15; 1.07–1.10 between 16
+       and 32, the goal 1.05–1.15) and passes it between 4 and 8
+       (1.07–1.12, the goal 1.01–1.04). So it is not the loss that
+       holds S86 at half the lift, and the overshoot term is little of it:
+       S90 adds 0.01–0.03 in each band. In the full mix it is the other
+       data.
+
+       On the second crop, which no training window covers, the bands
+       part. Between 8 and 16 px S89 reaches 1.16 (the goal 1.21,
+       S86 1.10); between 16 and 32 px it stays at 1.08 (the goal
+       1.20, S86 1.07), and S90 is the same within 0.02. In the zoom S89
+       adds fine texture and grain, but not the goal's broad contrast
+       across the ridges, the darker shadows beside brighter lit faces.
+       The crop asks for more of that band than any of the training
+       windows does (1.05–1.15). So the 16–32 px gap is one of
+       generalization: the model fits the lift where it is shown it and
+       does not carry it to new ridges. More pairs whose targets carry
+       that broad lift on other images is the lever, not a larger share of
+       the same pairs or a change to the loss.
+
+       Trained on the Trunk alone, the model also over-sharpens fine
+       scales. Between 4 and 8 px it gives 1.15 on the crop (the goal
+       1.07), its dots inside the Trunk's cloud double (217 per Mpx above
+       4σ, S86 90, the goal 103), and its knots reach 5.29% (the
+       goal 4.05%). It keeps more grain (0.81 on the sky, S86 0.74).
+       The stars are level, the California's at 0.069.
+
+       The two corpus-pair banks disagree. On the 457-object bank's 606
+       inputs, the targets asking 0.55 add next to nothing between 8 and 32 px
+       (a median of 1.00 of the input's, 1.01–1.02 at the 90th
+       percentile); the Trunk's bank adds up to 1.13–1.17 on its windows
+       of strongest structure. Nor is it the stars' width: measured in each
+       window's own FWHM, at matched width and structure, the 457-object
+       bank asks for a third to a half of the Trunk bank's lift, and S86
+       drew three quarters of its corpus-pair windows from it.
+
+       S91 tests that: S86 with the split flipped, the Trunk's bank three
+       times the other, the two still 30% of examples. It gains nothing.
+       Row 2 reads 1.07 and 1.06 between 8 and 32 px (S86 1.10 and 1.07),
+       and on the Trunk's own training windows, drawn three times as often
+       as in S86, 0.98–1.05 between 8 and 16 px (S86 1.02–1.07, S89
+       1.10–1.15). Like S88 it keeps more grain (0.90 on the Trunk's sky)
+       and gives up rim (the lit side 4.56 over the input 4 px in, S86
+       5.08); on NGC 6820 its dots fall to 140 per Mpx with 55% in the
+       deeper stack (S86 182 and 44%, the goal 161 and 52%). In S86's
+       mix the Trunk pairs' lift is not learned however often they are
+       drawn; only on its own, in S89, is it fit.
+
+       Nor do the known-kernel targets withhold it. Their clarity, added
+       to S86's output over row 2 at the amount training gives at this ask
+       (1.5 × (1 − 0.5)), reads 1.30 and 1.18 between 8 and 32 px in the
+       overlap (the goal 1.32 and 1.21), with the strong-edge test
+       at 1 to 1,000 times the noise alike and the window's range of light
+       under the noise. So such a target asks for the lift there. As a
+       step after the model it over-lifts the rest of the cloud and
+       leaves the layer edges wide, as at 0.5 after S86.
+
+       S92 asks how large a share the lift needs: S89's 5,000 steps from
+       S86, with the corpus pairs at 70% of draws (the Trunk's bank
+       three times the other, so the Trunk 52.5%) beside 20% known-kernel
+       and 10% seeing windows. The lift is all gone. Row 2 reads 1.11
+       and 1.06 between 8 and 32 px (S86 1.10 and 1.07, S89 1.16 and
+       1.08, the goal 1.21 and 1.20), and the Trunk's own training
+       windows 1.01–1.08 between 8 and 16 px (S86 1.02–1.07, S89
+       1.10–1.15). Its dots fall from S89's 217 per Mpx to 140 on the
+       Trunk (S86 90, the goal 103) but rise on NGC 6820, 229 with
+       40% in the deeper stack (S86 182 and 44%, the goal 161 and
+       52%). The stars are level. So it is not a dose: at half the draws
+       the Trunk pairs' lift is not fit, where on their own it is.
+       Something in the rest of the mix cancels it. S93 keeps S92's
+       known-kernel and seeing windows and drops the 457-object bank,
+       to tell which.
+
+       It is mostly the known-kernel and seeing windows. With the Trunk's
+       pairs as the whole 70%, S93 keeps about a third of S89's gain over
+       S86 on the Trunk's training windows (1.04–1.10 between 8 and 16
+       px) and reads 1.12 and 1.06 on row 2. Its dots on NGC 6820 rise
+       to 239 per Mpx, and its rim there gains a little (the lit side
+       5.69 over the input, S86 5.45, the goal 7.18). The stars stay
+       level. Across S91, S92, S93 and S89 the lift follows the
+       Trunk pairs' share of draws: none at 22.5%, a sixth at 52.5%
+       beside the 457-object bank, a third at 70%, all of it at 100%. No mix fits
+       the lift and keeps the hold the known-kernel windows give on dots
+       and fine scales. At one ask the two kinds of target disagree, and
+       the model splits the difference.
+
+       S94 takes the disagreement away: S93 with the Trunk's pairs
+       that asked 0.55 of the rest's width labelled with a stronger
+       ask, 0.35, the arrays the same. The ask then
+       carries the look on the windows it was shown. Asked 0.35, S94
+       lifts all six of the deep Trunk's training windows to 1.08–1.10
+       between 8 and 16 px (S89 1.10–1.15, S93 at the same ask
+       1.01–1.11); asked 0.5, it falls below S93 on two of them. But
+       the second crop of row 2 reads 1.13 and 1.07 between 8 and 32 px
+       at either ask (the goal 1.21 and 1.20), and its overlap 1.12
+       and 1.02 (the goal 1.32 and 1.21). At 0.35 the dots come
+       with it, as in S89: 199 per Mpx on the Trunk, 256 on NGC 6820
+       with 38% in the deeper stack (the goal 161 and 52%). At 0.5
+       its dots on the Trunk are 111 per Mpx (the goal 103), and its
+       stars are level.
+
+       S86 asked 0.35 does the reverse of what the Trunk's pairs teach:
+       smoother inside the cloud than at 0.5 (row 2 1.01 between 8 and
+       16 px), with sharper rims (6.62 over the input 4 px in on NGC
+       6820, the goal 7.18) and fewer dots, 103 per Mpx with 71% in
+       the deeper stack.
+
+       So with the conflict gone the Trunk targets' look is learned where
+       it is shown and not carried to ridges no window covers, at either
+       ask. The broad lift on row 2 is a matter of generalization, and
+       the lever left is windows that show it: more windows per Trunk
+       pair over the cloud's ridges, and the other bank's images whose
+       targets carry the broad lift, labelled the same way.
+
+       S95 shows them: the Trunk's 263 pairs at 24 windows a pair
+       (6,312, the six before among them), about three quarters of the
+       deep stack's field covered; and beside them the 28 images of the
+       457-object bank whose targets lift 8–32 px by 4% or more, mostly
+       fields of 6–12 px stars, at 24 windows a pair (1,848). Both carry
+       S94's ask of 0.35 and share the pairs' 70% evenly; all else is
+       S94's. The 8-frame halves' windows are left out, as in S94, S96
+       and S97 too, and each Trunk window kept (4,152) is drawn 1.7 times, S94's
+       13.5 (1,038). With row 2 partly trained on (its windows are counted in
+       S97's paragraph), the held-out test is NGC 6820's
+       dark-lane crop, whose right half the goal lifts 1.13 and 1.11
+       between 8 and 32 px (S94 1.12 and 1.06). S95 reads 1.11 and 1.05
+       there, 1.07 and 1.02 asked 0.35: nothing gained. Row 2's overlap
+       reads as S94's (1.12 and 1.02, the goal 1.32 and 1.21). Its
+       stars are level on NGC 6820 and the Trunk, but on the
+       California's wide stars it undoes S94's rounding:
+       ellipticity 0.093 from the input's 0.092 (S94 0.062, the goal
+       0.045), a third of them longer than they came. On NGC 6820 the
+       rim's dark side deepens toward the goal's, −0.48 at −4 px (S94
+       −0.25, the goal −0.65).
+
+       So the broad band stays where the input has it, though the
+       windows show row 2 only in part and were drawn 1.7 times
+       each. The loss's gradient term averages the error
+       over blocks of 1 to 8 px; a lift 16 to 32 px wide is weighed by
+       the pixel term alone, where it is a small share of the noise.
+       The next lever is the loss: blocks of 16 and 32 px at the same
+       weight a scale.
+
+       S96 is that: S94 with the gradient term's blocks doubled up to 16
+       and 32 px (0.75 over six scales, S94's 0.5 over four), its bank
+       and the rest S94's. It is the first run to move row 2 since S89,
+       though the deep stack's windows hold none of the overlap (the
+       six-night stack's hold 68% of it): it reads 1.18
+       and 1.05 between 8 and 16 and 16 and 32 px (S94 1.13 and 1.02,
+       the goal 1.32 and 1.21), the whole crop 1.18 and 1.08 (S94 1.13
+       and 1.07, the goal 1.21 and 1.20). On two of its six trained
+       windows it reaches the goal between 8 and 16 px (1.11 and 1.15),
+       and comes about half of the way between 16 and 32 px. On NGC
+       6820's dark-lane crop (held out), the right half reads 1.13 and
+       1.08 (S94 1.12 and 1.06, the goal 1.13 and 1.11): level with the
+       goal between 8 and 16 px, two fifths of the gap closed between
+       16 and 32. Asked 0.35 it reads 1.09 and 1.05 there (S94 1.07
+       and 1.02). The rims are softer: the Trunk's lit side is 4.06 and
+       4.96 over the input at 4 and 6 px (S94 4.52 and 5.51, the goal
+       5.41 and 6.46), NGC 6820's 5.04 at 4 px (S94 5.27, the goal
+       7.18). Stars are about level: ellipticity 0.029 on NGC 6820 (S94
+       0.026, the goal 0.028), 0.046 on the Trunk (S94 0.052), 0.065 on
+       the California (S94 0.062). On NGC 6820 the light about the
+       brightest stars is 0.07 of the image's noise higher along the
+       axes than along the diagonals (S94 0.06, the goal 0.01), too
+       little to see, and the squares' test is level. Dots and grain are level. By eye the row is close to
+       S94's, and the goal's thin rim lines still sit sharper. The loss
+       was part of it; the windows still have row 2 to give.
+
+       S97 is S96 with the Trunk's bank cut at 24 windows a pair at the
+       0.35 ask in place of its six-window one, and 10,000 steps, twice
+       as many: 6.7 draws a kept window, where S95 made 1.7. Two
+       changes, the bank and the steps, not separated. On NGC 6820's
+       dark-lane crop (held out) the right half reads 1.16 and 1.08
+       between 8 and 16 and 16 and 32 px (S96 1.13 and 1.08, the goal
+       1.13 and 1.11); asked 0.35, 1.13 and 1.06 (S96 1.09 and 1.05).
+       So the 16 to 32 px band does not move at the usual ask, and at
+       0.35 by 0.01; between 8 and 16 px it passes the goal, by 0.03
+       here and by 0.08 on the whole crop (1.18, the goal 1.10). The
+       third crop falls between 16 and 32 px, 1.02 from S96's 1.04 (the
+       goal 1.07). Row 2's overlap reads 1.20 and 1.07 (S96 1.18 and
+       1.05, the goal 1.32 and 1.21), and asked 0.35 as S96 (1.18 and
+       1.05); its whole crop 1.19 and 1.10 (S96 1.18 and 1.08, the goal
+       1.21 and 1.20). The rims win back part of what S96 gave up: the
+       Trunk's lit side 4.26 and 5.18 over the input at 4 and 6 px (S96
+       4.06 and 4.96, S94 4.52 and 5.51, the goal 5.41 and 6.46), NGC
+       6820's 5.27 at 4 px, S94's, though asked 0.35 they are 5.40 to
+       S96's 5.53. Stars are level or better: ellipticity 0.028 on NGC
+       6820 (S96 0.029), 0.041 on the Trunk (S96 0.046, the goal 0.030),
+       0.064 on the California (S96 0.065). Dots inside the Trunk's
+       cloud fall to 93 per Mpx above 4 (S96 104, the goal 103). On the
+       squares' test and grain it is level.
+
+       A count of the windows made for S97 corrects what the paragraphs
+       above said about row 2. In the 24-window bank the deep stack's
+       own windows hold 27% of the overlap, the six-night stack's
+       windows the whole of it in two, 68% and 32%, and the 8-frame
+       half's all of it, though these runs leave the halves' windows
+       out; in the six-window bank the deep stack's hold none
+       and the six-night stack's 68%. So row 2 has been barely shown
+       since S94, and never whole at the deep stack's strength. Where the
+       deep stack's windows are, S97 asked 0.35 lifts them 1.10 to
+       1.16 between 8 and 16 px and 1.07 to 1.11 between 16 and 32
+       (the goal 1.04 to 1.15 and 1.05 to 1.15): nearly one lift for
+       all of them, where the goal's differs with the window. The
+       next lever is the overlap itself, shown whole at the deep
+       stack's strength.
+
+       S98 is S97 with that: a second pairs bank of 132 windows of 640 px
+       about the overlap, every one holding it whole, of the deep stack's
+       pairs and the six-night stack's, at a sixth of the pairs' draws,
+       about 35 a window. Row 2's overlap reads 1.35 between 8 and 16 px
+       and 1.14 between 16 and 32 (S97 1.20 and 1.07, the goal 1.32 and
+       1.21), asked 0.35 1.33 and 1.14; the whole crop 1.32 and 1.17 (the
+       goal 1.21 and 1.20). So the windows were what held the 8 to 16 px
+       band, and half of what held the 16 to 32. But the lift is not held
+       to row 2: the six other Trunk windows, asked 0.35, read 1.15 to
+       1.28 and 1.13 to 1.20 (S97 1.10 to 1.16 and 1.07 to 1.11, the goal
+       1.04 to 1.15 and 1.05 to 1.15), past the goal in all six. NGC
+       6820's dark lanes (held out) read 1.20 and 1.10 in the right half
+       (S97 1.16 and 1.08, the goal 1.13 and 1.11) and 1.22 and 1.12 over
+       the crop (the goal 1.10 and 1.09): the broad band moves at last and
+       the one below it passes the goal by more. Its other two crops read
+       1.27 and 1.11 (the goal 1.09 and 1.07) and 1.13 and 1.06 (1.05 and
+       1.07). The rims near the goal's: the Trunk's lit side 4.75 and 5.71
+       at 4 and 6 px (S97 4.26 and 5.18, the goal 5.41 and 6.46), its dark
+       side -0.98 and -0.83 at -4 and -2 (the goal -1.00 and -0.99); NGC
+       6820's lit side 5.31 (S97 5.27, the goal 7.18). Stars hold:
+       ellipticity 0.043 on the Trunk with 17% longer than they came (S97
+       0.041 and 21%), 0.059 on the California (S97 0.064), 0.024 on NGC
+       6820 (S97 0.028). What it costs: detail inside the Trunk's cloud
+       1.20 between 4 and 8 px (S97 1.09, the goal 1.13), knots along the
+       rims 2.82% between 1.5 and 4 px (S97 2.63%, the goal 1.93%), dots
+       101 per Mpx above 4 on the Trunk (S97 93, the goal 103) and 212 on
+       NGC 6820 (S97 194, the goal 161). Grain is S97's or a little more
+       kept (0.78 on the Trunk's sky, S97 0.75).
+
+       The user, 2026-11-24: the model "seems to introduce more noise at
+       more sharpening, but also smooths the image at less". Both are so,
+       and the second is a fault of the trainer's. A pairs bank's target
+       is made from its input's own stack: its nebula and its noise lie on
+       the input's to the pixel (spread, slope and correlation 1.00 under
+       4 px, at every ask, on row 2's eleven pairs), and only its stars
+       sit elsewhere, at a lopsided PSF's peak and not at its light's
+       centre. The trainer moved the whole target back by its stars'
+       offset, as a pair of two stacks needs: by a median 0.64 px on the
+       Trunk's pairs (90% under 1.00 px, the largest 1.75), with a spread
+       of 0.29 and 0.25 px from source to source. The network is not told
+       the offset, and the likeliest noise moved by an unknown amount is
+       the mean of its moved copies: 0.67 to 0.75 of it at a period of
+       2 px, 0.90 to 0.93 at 4. On eight of that bank's windows the
+       target's noise followed the input's with a slope of 0.09 to 0.89
+       between neighbouring pixels.
+
+       What that taught, measured: the grain at the pixel on the Trunk's
+       sky is 0.99 of the input's for S71 and S72, which saw no pairs,
+       0.95 for S73, the first that did, 0.86 for S84, 0.74 for S85, the
+       first with the Trunk's pairs, and 0.78 for S98 (the goal 1.00); the
+       overshoot term is not it (S89 0.81, S90 without it 0.82). And the
+       cloud moves: fitted to the input's and its slopes band by band
+       (clear of stars), S72's and S77's light between 3 and 6 px lies
+       within 0.02 px of the input's on row 2's crop, the goal's on it to
+       0.002, S84's 0.05 px off, S86's 0.40, S97's 0.50 and S98's 0.57; on
+       NGC 6820's dark lanes (held out) S86's 0.80 and S97's 0.78, where
+       the goal's is on it to 0.007. The sense follows the image's own PSF:
+       the model reads the stars' offset from the stamp and moves the
+       cloud by it. S85 to S95 other than S86 are not measured.
+
+       `--pairs-offset stars`, now the default, moves such a target where
+       its stars' own light is (a known-kernel window's mask) and leaves
+       the rest; the slope above is then 1.00 on every window, and the
+       stars' light centres stay within 0.1 px of the input's. A pair of
+       two stacks is moved whole as before: its noise is added after the
+       move. S99 is S98 with that alone.
+
+       The first half of the complaint, on independent halves of one stack
+       sharpened alike (the halves' difference is noise alone, what they
+       share is in the sky): asked for nothing, every run gives the image
+       back to 1.00 in every band. Asked for the rest at 0.75 to 0.25, S98
+       leaves 0.87 to 0.95 of the noise between 1 and 2 px on the Trunk's
+       row 2 and raises it between 8 and 16 px, 1.15 to 1.28 at 0.75 and
+       1.19 to 1.41 at 0.35, more where the cloud is brighter; what the
+       halves share rises as much, 1.10 to 1.32 and 1.13 to 1.45. NGC
+       6820's halves read alike (noise 1.15 to 1.19 and 1.25 to 1.36,
+       structure 1.20 to 1.27 and 1.25 to 1.41). The bands' lift raises
+       whatever they hold, as the goal's does: on the Trunk's faintest
+       third, mostly noise there, the goal's targets read 1.08 to 1.19 of
+       the input's. And S86 asked under its pairs' asks smooths what
+       it is shown: 0.71 of the noise between 1 and 2 px and 0.84 between
+       8 and 16 on NGC 6820's faintest third at 0.45, where at 0.55 it
+       left 0.89 and raised 1.13. The sheets' usual ask, 0.5, is between
+       the two.
+
+       S99 is S98 with the pairs moved at their stars alone, and nothing
+       else. The grain is the input's, 1.00 at the pixel on the Trunk's
+       sky and nebula and on NGC 6820's (S98 0.78 and 0.76), as the
+       goal's, and the cloud stays where it is: within 0.003 px of the
+       input's under 6 px on both fields (S98 0.57 and 0.78). On halves
+       the noise between 1 and 2 px is 1.00 at every ask, and the dip near
+       equal asks is two fifths of S98's (1.06 between 8 and 16 px on the
+       Trunk's faintest third at 0.45, 1.14 at 0.55 and 1.13 at 0.35; S98
+       0.99, 1.17 and 1.19). The
+       rims come to the goal's: the Trunk's lit side 5.30 and 6.38 at 4
+       and 6 px (S98 4.75 and 5.71, the goal 5.41 and 6.46), its dark side
+       -0.97 and -0.91 at -4 and -2 (-1.00 and -0.99), its steepest slope
+       2.10 times the input's (S98 1.95, the goal 2.21) over 3.88 px (4.11
+       and 3.74); NGC 6820's lit side 5.86 at 4 px (S98 5.31, the goal
+       7.18), asked 0.35 5.96, its dark side the goal's. Row 2's overlap
+       reads 1.32 between 8 and 16 px and 1.15 between 16 and 32 (the goal
+       1.32 and 1.21), the whole crop 1.26 and 1.17 (1.21 and 1.20), and
+       the detail between 2 and 4 px, which no run had kept at the usual
+       ask, 1.03 (S98 0.99, the goal 1.01). Stars hold: ellipticity 0.038
+       on the Trunk (S98 0.043, the goal 0.030) with 19% longer than they
+       came (21% of the goal's), 0.058 on the California, 0.022 on NGC
+       6820; the squares' test is level.
+
+       The overshoots shrink but stay. NGC 6820's dark lanes (held out)
+       read 1.16 and 1.10 over the crop at 8 to 16 and 16 to 32 px (S98
+       1.22 and 1.12, the goal 1.10 and 1.09) and 1.14 and 1.08 in the
+       right half (1.13 and 1.11); the first crop 1.18 and 1.09 (the goal
+       1.09 and 1.07), the third 1.05 and 1.03 (1.05 and 1.07). The six
+       other Trunk windows, asked 0.35, read 1.07 to 1.24 and 1.08 to 1.19
+       (the goal 1.04 to 1.15 and 1.05 to 1.15). Inside the cloud 4 to
+       8 px is 1.19 on the Trunk (the goal 1.13) and 1.13 on NGC 6820
+       (1.09). Knots along the rims are 2.72% between 1.5 and 4 px on the
+       Trunk (S98 2.82%, the goal 1.93%) and 1.80% on NGC 6820 (2.14% and
+       1.30%). Dots inside the Trunk's cloud rise to 125 per Mpx above 4
+       at the usual ask, now that its noise is kept (S98 101, the goal
+       103), and fall at 0.35 to 130 (S98 182); NGC 6820 has 191 and 196
+       (S98 212 and 243, the goal 161). And the bands' lift still raises
+       the noise in them with the structure, 1.10 at an ask of 0.75 to 1.17 at
+       0.25 between 8 and 16 px on the Trunk's faintest third and 1.25 to
+       1.39 on its brightest.
+
+       So most of what the runs since S73 read as a limit of the model at
+       fine scales was this fault, and numbers of theirs under 6 px are
+       not to be compared with later runs'.
+
+       How far a run raises noise is read against the goal itself too,
+       on the two independent halves of the Trunk's night and of NGC
+       6820's nights: what the halves' outputs do not share is their
+       noise, what they share their structure. Under 4 px both leave the
+       noise as it came (1.00 to 1.03). Between 8 and 16 px, in the
+       faintest, the middle and the brightest third of the Trunk's cloud,
+       the strong goal raises the noise by 1.07, 1.10 and 1.18 for
+       structure raised by 1.19, 1.31 and 1.47; S99 asked 0.35 raises it
+       by 1.13, 1.22 and 1.37 for 1.13, 1.32 and 1.46. Between 4 and 8 px
+       the goal's noise is at 1.01, 1.01 and 1.04 and S99's at 1.03, 1.06
+       and 1.11; between 16 and 32 px the two are nearer, 1.19, 1.21 and
+       1.29 against 1.16, 1.25 and 1.40. On NGC 6820 (held out), between 8
+       and 16 px, the goal raises noise by 1.17, 1.18 and 1.16 for
+       structure at 1.32, 1.34 and 1.17, and S99 asked 0.55 by 1.20, 1.31
+       and 1.35 for 1.31, 1.38 and 1.24. So for the same structure
+       S99 raises the noise about twice as far as the goal does on the
+       Trunk, and 1.2 to 2.2 times as far on NGC 6820. The noise itself is
+       nearly white: over white noise of the same pixel spread it is 1.01
+       to 1.14 in the five bands from 1 to 32 px on the Trunk and 1.00 to
+       1.30 on NGC 6820.
+
+       Two parts of the trainer ask for that, or let it be. A known-kernel
+       window's clarity and shade read its target under the noise it is met
+       under, so they raised the noise with the cloud: on white noise alone
+       by 1.25 between 8 and 16 px and 1.40 between 16 and 32, for stars
+       11 px across asked 0.35, and by 1.38 and 1.36 for stars 7 px across.
+       That is not all of it: where the stars and the rest are asked
+       nearly alike, as a known-kernel window's often are, S99 raises the
+       faint noise less (1.06 against 1.13 and 1.14 either side), and S86,
+       with the same clarity and few of the Trunk's pairs, left the
+       Trunk's noise between 8 and 16 px at 0.95 to 1.01 asked 0.35. A pair
+       shows its structure and its noise raised together, at one noise,
+       and nothing in it says which is which. So
+       `--clarity-reads structure`, now the default, has the clarity and
+       the shade read the target before its noise, which is then passed on
+       as it came, and `--pairs-noise` meets half of the pairs banks'
+       windows under fresh noise, up to that many times their stack's, that
+       their targets keep. S100 is S99 with both, `--pairs-noise 2`; made
+       together, its result will not tell them apart.
+
+       S100's result is S99's to within a few hundredths. On the halves,
+       asked 0.35, it raises the noise between 8 and 16 px by 1.11, 1.20
+       and 1.36 in the three thirds of the Trunk's cloud (S99 1.13, 1.22
+       and 1.37) for structure raised by 1.12, 1.31 and 1.46, and by 1.21,
+       1.31 and 1.34 on NGC 6820 (S99 1.22, 1.34 and 1.37) for 1.34, 1.41
+       and 1.24. The Trunk's lit side is 5.30 and 6.40 at 4 and 6 px, its
+       slope 2.08 times the input's and its knots 2.69%; NGC 6820's lit
+       side 5.85 and its knots 1.81%; row 2's overlap 1.32 and 1.15 between
+       8 and 16 px and 16 and 32; the dots inside the Trunk's cloud 125 per
+       Mpx at the usual ask and 127 at 0.35; ellipticity 0.037, 0.059 and
+       0.021 on the Trunk, the California and NGC 6820. So the two parts
+       named above are not what raises the noise, or 10,000 steps from
+       S86's weights cannot undo it. The training loss of S98, S99 and S100
+       was still falling over their last 2,000 steps (S99 0.98 to 0.83),
+       some of it the learning rate easing off. S99 stays the candidate.
+
+       Along an edge the runs vary more than the goal does. S99 draws the
+       lit edge of row 2's overlap in pieces, with a kink and a blob where
+       the goal has one thin line, and its knots along the Trunk's rims,
+       between 1.5 and 4 px, are 2.72% of the rim zone (the goal 1.93%);
+       across the rim its profile is the goal's. So a step after the model
+       was tried, with nothing trained: the change the run made is averaged
+       along the edge, by a Gaussian of 4 px along the direction of the
+       input's structure tensor (the input smoothed by 4 px, the tensor over
+       6), where the input holds a coherent edge over its noise, off stars
+       and nowhere else. Plain, it brings the Trunk's knots to 1.84%, its
+       lit side from 5.30 to 5.20 and its slope from 2.10 to 2.09 times the
+       input's. But part of what varies along the edges is in both halves
+       of a stack: the step takes 4 to 5% of that on the Trunk and 10 to
+       13% on NGC 6820 (held out), and it passes the goal on the deeper
+       stacks (the Trunk's six nights 3.62%, the goal 5.41%). Holding what
+       varies along the edge back only under the noise (kept by its local
+       power over that and the square of 0.4 times the noise) keeps 98 to
+       99% of what the halves share and lowers the noise along the edge by
+       2 to 6%; their agreement rises between 4 and 8 px, 0.44 to 0.47 and
+       0.63 to 0.65, and holds between 2.5 and 6 (0.16 and 0.34). The knots
+       come to 2.07% on the Trunk (the goal 1.93%), 1.47% on NGC 6820's
+       night (S99 1.80%, the goal 1.30%), 1.99% on its multi-night stack
+       (2.82% and 2.03%), 4.69% on the Trunk's six nights (5.90% and 5.41%)
+       and 3.77% on the California (4.19%, the goal 4.45%: further under
+       it). The rims stand as they were, 5.26 and 6.34 on the lit side, the
+       slope 2.10. By eye the row 2 edge is smoother and its blob smaller,
+       and the goal's thin line is still not there: that is the network's
+       to learn. The step is in the renderer (`sheet-sharpen --smooth-edges`,
+       its lines a share of the image's stars' width, so a sharp image gets
+       next to none: the California, 2.3 px, is left as it was), an amount
+       the user sets; at 0.4 of the noise it reads 2.06% on the Trunk,
+       1.55% on NGC 6820's night, 2.17% on its multi-night stack and 4.84%
+       on the Trunk's six nights. It is not in the runtime.
+
+       S101 is S99's recipe from S99's weights for 30,000 steps more,
+       nothing else changed. Its training loss falls from 0.78 to 0.75 and
+       its validation loss from 1.886 to 1.877. At the usual ask it moves
+       the texture toward the goal on the held-out field as well as on the
+       trained one: on NGC 6820 the knots are 1.65% (S99 1.80%, the goal
+       1.30%), 2.42% on its multi-night stack (2.82% and 2.03%), the dots
+       inside the cloud 179 per Mpx (191 and 161) and the interior between
+       4 and 8 px 1.24 (1.28 and 1.23); on the Trunk the knots are 2.46%,
+       the dots 105 per Mpx (the goal 103) and the interior 1.34 between 4
+       and 8 px (S99 1.43, the goal 1.41: a little lift lost). The stars
+       come rounder: ellipticity 0.049 on the California (S99 0.058, the
+       goal 0.045) and 0.060 on SNR G132 (0.069 and 0.052). On the halves
+       asked 0.35 the noise between 8 and 16 px is as S99 raised it: 1.20,
+       1.30 and 1.34 on NGC 6820 for structure 1.32, 1.39 and 1.22. Row 2
+       looks as S99 left it. S101 is the candidate.
+
+       Every pair S99 and S101 drew came from the Trunk: three objects
+       through one telescope, 70% of their examples. Their validation banks
+       hold no pairs, so what the runs learn of the pairs and fail to take
+       to other fields does not show in their validation loss.
+       `--validation-pairs-bank` names pairs banks of fields a run does not
+       train on, whose loss is logged as the pairs validation, apart from
+       the rest. More corpus pairs were made from 44 multi-night stacks of
+       13 objects through three telescopes, the corpus's deepest stacks,
+       and 8 multi-night stacks of the validation split hold the held-out
+       pairs. The goal raises their bands between 8 and 32 px from 1.00 to
+       1.21 and 1.17, by field: most on bright emission nebulae of wide
+       stars, as on the Trunk's six nights (1.21 and 1.13), and next to
+       nothing on galaxies and faint fields. The pairs of fields the
+       sheets show are left out of every pairs bank by their targets. S102
+       is S101's recipe with pairs drawn 32% from the Trunk, 27% from the
+       new multi-night stacks, 27% from the broad pairs bank and 14% from
+       the stacks whose goal lifts most.
+
+       S102 is the first run to move the noise. Its loss on the held-out
+       pairs fell from 0.636 to 0.516 over its 30,000 steps, its other
+       validation loss as S99's (1.888), its training loss higher and
+       noisier than S101's (0.95) for the many fields it draws. On NGC
+       6820's halves asked 0.35 it raises the noise between 8 and 16 px by
+       1.17, 1.24 and 1.27 for structure 1.31, 1.37 and 1.20, where S101
+       raised 1.20, 1.30 and 1.34 for 1.32, 1.39 and 1.22 (the goal 1.17,
+       1.18 and 1.16 for 1.32, 1.34 and 1.17): in the faintest third the
+       goal's own trade. On the Trunk's halves, 1.08, 1.15 and 1.30 for
+       1.09, 1.28 and 1.45 (S101 1.18, 1.25 and 1.36 for 1.20, 1.34 and
+       1.47): its faintest third holds back more than the goal (1.19). At
+       the usual ask the Trunk's knots and dots are S101's (2.46%, 105 per
+       Mpx), its interior a little under S101's (1.30 between 4 and 8 px,
+       the goal 1.41) and its lit rim +5.07 (+5.41). On SNR G132 its rim
+       now follows the goal's (lit +0.46 and +0.93, the goal +0.49 and
+       +0.73) where S101's sat 0.3 under the input throughout, with knots
+       of 9.69% (the goal 9.85%). The Question Mark Galaxy's stars, 8 to 9
+       px across, are S101's and the goal's (ellipticity 0.025). Narrow
+       stars come tighter than the goal's and less round: on the
+       California, 2.3 px, width 0.616 (the goal 0.650) and ellipticity
+       0.066 from 0.092 (the goal 0.045), 11% of its stars less round than
+       they came in (3%); on SNR G132 0.598, 0.076 and 34% (0.634, 0.052
+       and 22%).
+       Tighter stars at the strong ask are wanted; the roundness is
+       recorded, the likeliest source the multi-night and lift stacks' wide
+       stars.
+
+       What noise S102 still adds between 8 and 16 px can be held back
+       after the model (`sheet-sharpen --hold-noise`, `noise_hold_step`;
+       in the runtime as `SharpenOptions::hold_noise`): the run's change
+       between 4 and 16 px is kept by its power over 8 px, over that and
+       the square of so many times the noise the input's would have in
+       that band were it white. At 0.5, on NGC 6820's halves asked 0.35,
+       the noise comes to 1.11, 1.16 and 1.17 and the shared structure to
+       1.29, 1.35 and 1.20: the goal's trade in every third. On the Trunk
+       it costs more of the structure (the middle third 1.28 to 1.23).
+
+       S102 is published as `sharpen-v1-s102`, the latest sharpening model,
+       its default ask 0.46 for stars and 0.35 for the rest: the runs since
+       S99 give less at 0.45 than at 0.55 or 0.35 (S102's faintest third on
+       the Trunk 0.99 at 0.45), so the scaled pass's 0.45 is not the
+       default.
+
+   The clarity is also a step after the model, an amount the user sets
+   (`sheet-sharpen --clarity AMOUNT`, `clarity_step`): what a run
+   taught that clarity is asked for at a ratio of 0, read from the
+   output alone, so it raises the noise of its bands with the detail,
+   as the goal does. On this run's Trunk at an ask of 0.5, 0.5 of
+   it reads 1.11, 1.25, 1.19 and 1.07 inside the cloud, past the
+   goal's, with knots of 1.01%; 0.25 of it reads 1.09, 1.17, 1.12
+   and 1.05, on the goal's 1.04, 1.13, 1.11 and 1.04 from 4 px
+   up, with the knots and the rims where the run left them. Its sheets
+   go beside the run's own (`sheets-clarity-<amount>`).
+
+   Tried on it and left out: six levels 32 wide for the dark side,
+   which gave none of it, and the blur up to 4 alone, which moved
+   nothing.
+
+   Then the stars' halos: a sharpened core keeps its wings, which show
+   as a glow on an image denoised first and are there on a noisy one
+   (`--kernel-halo`, which has only been tried on the larger recipe).
+   Then clean truth for 0.7 of the native windows, and the bank of
+   brought-down stacks, which took a third of the narrow stars' flux
+   gain off.
+2. **Noisy space-telescope windows** (`--external-snr`) at more weight,
+   blurred up to four times, on the run above.
+3. **A classical deconvolution as an input plane.** A few
+   Richardson–Lucy iterations with the measured PSF, read by the network
+   beside the image: the network then cleans a sharp, ringing estimate
+   in place of inventing the sharpening. Computed from the image and
+   its PSF alone, so the model still needs nothing but the image.
+4. **A feature loss and a critic, held by reblur consistency.**
+   - Features from a network trained on photographs do not fit linear,
+     single-channel data that is mostly sky. The feature network is the
+     encoder of a trained noise model, which already reads this data in
+     units of its noise; features are compared with stars masked out,
+     as the edge term is, so the loss cannot pinch a star.
+   - The critic is a few layers over 64 px patches, told the PSF and the
+     ratios asked, scoring a patch as truth (the target, the
+     space-telescope windows) or output. It is trained beside the
+     sharpener, from a converged run and at a small weight.
+   - Reblur consistency is the leash: the output blurred by the input's
+     PSF must give the input back, weighted so that sharpness cannot be
+     bought with detail the data does not hold.
+   - The passed-through noise must be neither removed nor sharpened for
+     either loss's sake: both read a lightly smoothed residual, or the
+     denoised windows alone.
+   - Invented sharpness shows on the known-truth probe as a share of
+     the target's edge gain above 1.
+5. **An unrolled deconvolution**: the network as several deconvolution
+   steps with a learned correction between them and the PSF used at
+   each. Closer to the physics and likely steadier across PSFs; a
+   larger rewrite, and a follow-on to the above.
+
+Beside these, for images whose stars are a pixel or two wide: **a
+network that works finer than the image** (`--oversample 2`). Each pixel
+of the planes is repeated over a 2 by 2 square going in, the U-Net runs
+on that grid, and its last convolution takes each square back to one
+pixel, so what goes in and comes out is the image's size and the
+exported graph, the tiling and the runtime are as they were. The first
+level can then place what falls between pixels, where the runs' narrow
+stars come out less round than the goal's (the California: 0.07
+against 0.046) and gain flux. A tile costs four times as much; its reach
+and grid are halved in the image's pixels, so a six-level model tiles at
+512 with a margin of 125. First run: the larger run's recipe on tiles of
+384, which costs what a tile of 768 does now.
+
+Also open: applying a mild model twice with the PSF measured again
+between; a stricter best-seeing cut for the seeing pairs' targets; and
+the grain along lit rims.
+
 ## Star model
 
 ### Star policy
@@ -1929,8 +4059,7 @@ A model is promoted only when all of these pass:
   input;
 - blind review by people at identical display stretches, using the
   [corpus note](../benchmarks/2026-07-deconvolution-corpus.md) convention;
-- a measurable advantage over its classical baseline and a no-op, with an
-  external learned tool as a reference only.
+- a measurable advantage over its classical baseline and a no-op.
 
 Each model also has gates of its own.
 
