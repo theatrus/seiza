@@ -1678,7 +1678,7 @@ done < "$list"
         // An earlier run's output of the same name is not this run's.
         let output = directory.path().join("out");
         std::fs::create_dir(&output).unwrap();
-        write_processed_image_fits_f32(&output.join("missing-sxt.fits"), &image, &[], &[]).unwrap();
+        write_processed_image_fits_f32(output.join("missing-sxt.fits"), &image, &[], &[]).unwrap();
         let error = cli
             .run_on_files(
                 &sxt_schema(),

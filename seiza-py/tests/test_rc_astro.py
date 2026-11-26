@@ -27,6 +27,8 @@ if [ "$2" = "--json" ] && [ $# -eq 2 ]; then
     "default": 0.2, "min": 0.0, "max": 0.5},
    {"label": "Generate Star Image", "name": "stars", "flag": "--stars",
     "description": "Also write a stars-only image", "type": "bool", "default": false},
+   {"label": "Unscreen Stars", "name": "unscreen", "flag": "--unscreen",
+    "description": "Write an unscreened stars image", "type": "bool", "default": false},
    {"label": "Iterations", "name": "it", "flag": "--it",
     "description": "Passes", "type": "int", "default": 2, "min": 1, "max": 5},
    {"label": "Color Separation", "name": "csep",
@@ -46,15 +48,14 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift 2 ;;
     --stars) stars=1; shift ;;
-    --host|--depth|--device) shift 2 ;;
+    --host|--depth|--device|--overlap|--it) shift 2 ;;
     sxt|bxt|nxt) tool="$1"; shift ;;
     --*) shift ;;
     *) printf '%s\n' "$1" >> "$list"; shift ;;
   esac
 done
-echo '{"event":"info","topic":"device","device":"cpu"}'
-echo '{"event":"progress","done":50.0}'
-echo '{"event":"progress","done":100.0}'
+events="$here/events.ndjson"
+: > "$events"
 while IFS= read -r input; do
   if [ -d "$out" ]; then
     name="$(basename "$input")"
@@ -63,13 +64,19 @@ while IFS= read -r input; do
     target="$out"
   fi
   cp "$input" "$target"
-  echo "{\"event\":\"status\",\"phase\":\"complete\",\"output\":\"$target\"}"
+  echo "{\"event\":\"status\",\"phase\":\"complete\",\"output\":\"$target\"}" >> "$events"
   if [ "$stars" = 1 ]; then
     sidecar="${target%.fits}-stars.fits"
     cp "$input" "$sidecar"
-    echo "{\"event\":\"status\",\"phase\":\"complete\",\"output\":\"$sidecar\"}"
+    echo "{\"event\":\"status\",\"phase\":\"complete\",\"output\":\"$sidecar\"}" >> "$events"
   fi
 done < "$list"
+# Every file is written before the first event, so a run stopped at an
+# event (a raising progress callback stops it) has still written them.
+echo '{"event":"info","topic":"device","device":"cpu"}'
+echo '{"event":"progress","done":50.0}'
+echo '{"event":"progress","done":100.0}'
+cat "$events"
 """
 
 pytestmark = pytest.mark.skipif(
@@ -93,7 +100,7 @@ def test_tool_schema_reads_the_live_contract(fake_rc_astro):
     assert schema.licensed
     assert schema.ml_version == 11
     names = [parameter.name for parameter in schema.parameters]
-    assert names == ["overlap", "stars", "it", "csep"]
+    assert names == ["overlap", "stars", "unscreen", "it", "csep"]
     overlap = schema.parameters[0]
     assert overlap.type == "float"
     assert overlap.default == pytest.approx(0.2)
@@ -101,12 +108,12 @@ def test_tool_schema_reads_the_live_contract(fake_rc_astro):
     stars = schema.parameters[1]
     assert stars.type == "bool"
     assert stars.default is False
-    iterations = schema.parameters[2]
+    iterations = schema.parameters[3]
     assert iterations.type == "int"
     assert iterations.default == 2
     assert iterations.min == 1.0 and iterations.max == 5.0
     # A GUI-only parameter has no CLI flag and cannot be requested.
-    assert schema.parameters[3].flag is None
+    assert schema.parameters[4].flag is None
 
 
 def test_a_run_returns_the_stars_sidecar_and_progress(fake_rc_astro, tmp_path):
