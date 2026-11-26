@@ -732,6 +732,44 @@ def test_the_edge_step_deepens_a_rim_both_ways_and_rings_no_star(monkeypatch):
     assert np.allclose(made[60:100, 100:140], image[60:100, 100:140] + change[60:100, 100:140], atol=1e-3)
 
 
+def test_holding_the_broad_change_under_its_noise_keeps_structure_and_the_fine_change():
+    def band(image):
+        a, b = sm.HOLD_LOW / sm.HALF_HEIGHT, sm.HOLD_HIGH / sm.HALF_HEIGHT
+        narrow, wide = sm.blurred_images(image.astype(np.float32), [a**2 * np.eye(2), b**2 * np.eye(2)])
+        return narrow - wide
+
+    rng = np.random.default_rng(1)
+    # The band's share of white noise is what white noise shows through it.
+    white = band(rng.standard_normal((512, 512)).astype(np.float32))[64:-64, 64:-64]
+    assert np.std(white) == pytest.approx(sm.band_noise(sm.HOLD_LOW, sm.HOLD_HIGH), rel=0.05)
+    side = 256
+    yy, xx = np.mgrid[0:side, 0:side].astype(np.float32)
+    soft = np.full((side, side), 10.0, np.float32)
+    # A broad change of structure on the left (a ridge, as a rim's), one the
+    # noise could make on the right, and a fine one (a 2 px checkerboard)
+    # everywhere.
+    strong = (2.0 * np.exp(-((xx - 64) ** 2) / (2 * 3.0**2))).astype(np.float32)
+    weak = np.where(xx >= 160, 0.5 * rng.standard_normal((side, side)), 0.0)
+    fine = 0.3 * np.where((xx + yy) % 2 == 0, 1.0, -1.0)
+    sharp = (soft + strong + weak + fine).astype(np.float32)
+    held = sm.held_broad(sharp, soft, 1.0, 1.0)
+    centre = (slice(116, 141), slice(52, 77))
+    assert np.abs(band(held - soft)[centre]).sum() > 0.9 * np.abs(band(strong)[centre]).sum()
+    # The noise's goes, as far as the band reads it (a difference of
+    # Gaussians read through again passes only part of it).
+    right = (slice(32, -32), slice(176, -32))
+    assert np.std(band(held - soft)[right]) < 0.7 * np.std(band(weak)[right])
+    # Nothing outside the band moves: the checkerboard is as it was.
+    sign = np.where((xx + yy) % 2 == 0, 1.0, -1.0)
+    assert abs(float(np.mean(((held - sharp) * sign)[16:-16, 16:-16]))) < 0.01 * 0.3
+    np.testing.assert_array_equal(sm.held_broad(sharp, soft, 0.0, 1.0), sharp)
+    # As a step on an output, NaN stays NaN and spreads nowhere.
+    gappy = sharp.copy()
+    gappy[10, 200] = np.nan
+    stepped = sm.noise_hold_step(gappy, soft, 1.0, np.ones_like(soft))
+    assert np.isnan(stepped[10, 200]) and np.isfinite(np.delete(stepped.ravel(), 10 * side + 200)).all()
+
+
 def test_smoothing_a_change_along_an_edge_leaves_the_edge_s_profile_and_the_rest(monkeypatch):
     side, width = 260, 11.5
     ys, xs = np.mgrid[:side, :side].astype(np.float32)

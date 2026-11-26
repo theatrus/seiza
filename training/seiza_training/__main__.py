@@ -525,6 +525,10 @@ def main(argv: list[str] | None = None) -> int:
                                     "where it lies under this times the input's noise, after the model and before "
                                     "any contrast; stars are kept clear of, and its sheets go beside the run's own "
                                     "(0: none)")
+    sharpen_sheet.add_argument("--hold-noise", type=float, default=0.0,
+                               help="hold back every output's change from its input between 4 and 16 px where it "
+                                    "lies under this times that band's share of the input's noise, after the model "
+                                    "and the roll-off; its sheets go beside the run's own (0: none)")
     sharpen_sheet.add_argument("--scale-to", type=float, default=0.0,
                                help="where an image's stars are at least twice this wide (px), also sharpen it "
                                     "binned to bring them near it, and put the two together by scale; its sheets "
@@ -808,7 +812,7 @@ def run(arguments: argparse.Namespace, manifest: Manifest, store: Store, only: s
         stars = sharpen_sheets.SCALE_STARS if arguments.scale_stars is None else arguments.scale_stars
         return sharpen_sheets.render_saved(store, manifest, arguments.name, only=named, clarity=arguments.clarity,
                                            rolloff=arguments.rolloff, scale_to=arguments.scale_to,
-                                           smooth_edges=arguments.smooth_edges,
+                                           smooth_edges=arguments.smooth_edges, hold_noise=arguments.hold_noise,
                                            scale_blend=blend, full_ask=full, scale_rest=arguments.scale_rest,
                                            scale_stars=stars, edge=arguments.edge)
     if command == "evaluate-noise":

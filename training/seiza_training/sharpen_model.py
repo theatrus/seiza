@@ -1698,6 +1698,63 @@ def rolled_off(sharp: np.ndarray, soft: np.ndarray, amount: float, noise: np.nda
     return (sharp - (1.0 - kept) * fine).astype(np.float32), reach
 
 
+# The broad part of a change held back under noise (`noise_hold_step`): the
+# change between `HOLD_LOW` and `HOLD_HIGH` px (a difference of Gaussians, by
+# their widths at half height, as the halves' bands are read) kept by its
+# power, its square smoothed over `HOLD_AREA` px (σ), over that power and the
+# square of so many times the noise the input's noise would have in that band
+# were it white (`band_noise`). Structure stands over its band's noise and
+# stays; what a run made of the noise there goes, as `rolled_off` does under
+# 2 px. A run trained on pairs of many fields, asked 0.35, raised the noise
+# between 8 and 16 px on the independent halves of a field it had not seen by
+# 1.17, 1.24 and 1.27 in the faintest, middle and brightest thirds of its
+# cloud, for structure both halves share raised by 1.31, 1.37 and 1.20 (the
+# goal 1.17, 1.18 and 1.16, for 1.32, 1.34 and 1.17); at 0.5 the step brought
+# the noise to 1.11, 1.16 and 1.17 and the structure to 1.29, 1.35 and 1.20
+# (2026-11-25).
+HOLD_LOW = 4.0
+HOLD_HIGH = 16.0
+HOLD_AREA = 8.0
+HALF_HEIGHT = 2.0 * math.sqrt(2.0 * math.log(2.0))
+
+
+def band_noise(low: float, high: float) -> float:
+    """The spread of white noise of spread 1 through the difference of
+    Gaussians `low` and `high` px wide at half height."""
+    a, b = low / HALF_HEIGHT, high / HALF_HEIGHT
+    return math.sqrt((1.0 / a**2 + 1.0 / b**2 - 4.0 / (a**2 + b**2)) / (4.0 * math.pi))
+
+
+def held_broad(sharp: np.ndarray, soft: np.ndarray, amount: float, noise: np.ndarray | float) -> np.ndarray:
+    """`sharp`, a sharpening of `soft`, with its change between `HOLD_LOW`
+    and `HOLD_HIGH` px held back where it lies under `amount` times that
+    band's share of `noise` (see `HOLD_LOW`)."""
+    if not amount > 0:
+        return sharp
+    a, b = HOLD_LOW / HALF_HEIGHT, HOLD_HIGH / HALF_HEIGHT
+    change = (sharp - soft).astype(np.float32)
+    narrow, wide = blurred_images(change, [a**2 * np.eye(2), b**2 * np.eye(2)])
+    part = narrow - wide
+    power = np.clip(blurred_images(part * part, [HOLD_AREA**2 * np.eye(2)])[0], 0.0, None)
+    floor = (amount * band_noise(HOLD_LOW, HOLD_HIGH) * np.nan_to_num(noise)) ** 2
+    with np.errstate(divide="ignore", invalid="ignore"):
+        kept = np.nan_to_num(power / (power + floor), nan=1.0)
+    return (sharp - (1.0 - kept) * part).astype(np.float32)
+
+
+def noise_hold_step(output: np.ndarray, image: np.ndarray, amount: float, noise_map: np.ndarray) -> np.ndarray:
+    """A sharpened image with the broad part of its change from `image`, its
+    input, held back under `amount` times `noise_map`'s share of that band
+    (`held_broad`), as a fixed step after the model. NaN stays NaN."""
+    if not amount > 0:
+        return output
+    finite = np.isfinite(output) & np.isfinite(image)
+    level = np.float32(np.median(output[finite][::17]))
+    made = held_broad(np.where(finite, output, level).astype(np.float32),
+                      np.where(finite, image, level).astype(np.float32), amount, noise_map)
+    return np.where(finite, made, output).astype(np.float32)
+
+
 def rolloff_step(output: np.ndarray, image: np.ndarray, amount: float, noise_map: np.ndarray) -> np.ndarray:
     """A sharpened image with the fine part of its change from `image`,
     its input, held back under `amount` times `noise_map`, the input's
