@@ -108,8 +108,9 @@ def test_a_short_run_beats_its_baseline(small_bank, tmp_path):
     # Its evaluation: closer to the truth than its baseline where stars
     # were, and a sheet beside the numbers.
     found = sm.evaluate(store, "tiny", directory, count=8, sheet_rows=2, where=torch.device("cpu"))
-    run, base = found["measures"]["all/run"], found["measures"]["all/baseline"]
+    run, base = found["measures"]["all/run"]["median"], found["measures"]["all/baseline"]["median"]
     assert run["stars_rms"] < base["stars_rms"] and run["light_left"] < base["light_left"]
+    assert run["stars_stretched"] < base["stars_stretched"]
     assert found["measures"]["pupil/run"] and "field/run" not in found["measures"]
     evaluation = sm.run_directory(store, "tiny") / "evaluation"
     assert (evaluation / f"{directory.name}.json").exists() and (evaluation / f"{directory.name}.png").exists()
@@ -121,6 +122,7 @@ def test_the_measures_read_the_truth_as_perfect_and_the_input_as_all_the_stars_l
     planes = {name: np.asarray(found.planes[name][1]) for name in found.planes}
     perfect = sm.measures(planes["starless"], planes)
     assert perfect["stars_rms"] == 0.0 and perfect["sky_rms"] == 0.0 and perfect["light_left"] == 0.0
+    assert perfect["stars_stretched"] == 0.0 and perfect["sky_stretched"] == 0.0
     untouched = sm.measures(planes["input"], planes)
     assert untouched["light_left"] == pytest.approx(1.0) and untouched["cores_mean"] > 10.0
     # A hole: the truth less the stars' light reads as a negative core.

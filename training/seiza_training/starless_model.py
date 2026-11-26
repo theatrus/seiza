@@ -268,30 +268,42 @@ def measures(estimate: np.ndarray, planes: dict[str, np.ndarray]) -> dict[str, f
     root mean square where stars were (where the input and the truth differ
     by more than the noise) and on the sky elsewhere; its mean on the stars'
     cores (their light over ten times the noise: below 0 a hole, above a
-    remnant); and the share of the stars' light left in the estimate."""
+    remnant); and the share of the stars' light left in the estimate. A
+    bright core's error is thousands of times the noise, so beside these,
+    the mean absolute error as the trainer reads images (`network_reads`'
+    asinh, closer to a stretched image's eye) where stars were and on the
+    sky."""
     scale = float(np.median(planes["noise"])) or 1.0
+    level = float(np.nanmedian(planes["input"]))
     valid = planes["valid"] > 0
     light = planes["input"].astype(np.float64) - planes["starless"]
     stars = valid & (np.abs(light) > planes["noise"])
     cores = valid & (light > 10.0 * planes["noise"])
     sky = valid & ~stars
     error = (estimate.astype(np.float64) - planes["starless"]) / scale
+    seen = np.abs(compressed(estimate, level, scale) - compressed(planes["starless"], level, scale))
 
     def rms(where: np.ndarray) -> float | None:
         return float(np.sqrt(np.mean(error[where] ** 2))) if where.any() else None
 
+    def stretched(where: np.ndarray) -> float | None:
+        return float(np.mean(seen[where])) if where.any() else None
+
     total = float(light[stars].sum())
     return {"stars_rms": rms(stars), "sky_rms": rms(sky),
             "cores_mean": float(error[cores].mean()) if cores.any() else None,
-            "light_left": float((error[stars] * scale).sum()) / total if total > 0 else None}
+            "light_left": float((error[stars] * scale).sum()) / total if total > 0 else None,
+            "stars_stretched": stretched(stars), "sky_stretched": stretched(sky)}
 
 
-def mean_of(found: list[dict[str, float | None]]) -> dict[str, float | None]:
-    """Each measure's mean over the windows that have it."""
-    out: dict[str, float | None] = {}
+def mean_of(found: list[dict[str, float | None]]) -> dict[str, dict[str, float | None]]:
+    """Each measure's median and mean over the windows that have it: the
+    median, as a few windows' bright cores can carry the mean."""
+    out: dict[str, dict[str, float | None]] = {"median": {}, "mean": {}}
     for key in (found[0] if found else {}):
         values = [entry[key] for entry in found if entry[key] is not None]
-        out[key] = float(np.mean(values)) if values else None
+        out["median"][key] = float(np.median(values)) if values else None
+        out["mean"][key] = float(np.mean(values)) if values else None
     return out
 
 
