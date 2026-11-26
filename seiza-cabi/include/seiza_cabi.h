@@ -1061,6 +1061,36 @@ bool seiza_background_model_correct_in_place_with_strength(const SeizaBackground
                                                            char **error_out);
 
 /*
+ Corrects one rectangle of the fitted image in place. `data` is the
+ interleaved linear float samples of the `width` by `height` rectangle whose
+ top-left pixel is (`x`, `y`) in the fitted image, so `data_length` is
+ `width * height * channels`. Each sample gets the value
+ [`seiza_background_model_correct_in_place_with_strength`] gives it in the
+ whole image, so an image corrected tile by tile equals one corrected whole.
+
+ Returns false with an error, and leaves `data` unchanged, when the
+ rectangle reaches outside the fitted image, when `data_length` does not
+ match the rectangle, or when division is asked for and the divisor is
+ unusable at a pixel inside the rectangle. Tiles corrected before a refused
+ tile stay corrected.
+
+ # Safety
+ `model` must be a live pointer returned by [`seiza_background_fit`]. `data`
+ must point to `data_length` writable floats. When non-null, `error_out` must
+ point to writable storage for one pointer.
+ */
+bool seiza_background_model_correct_region_in_place_with_strength(const SeizaBackgroundModel *model,
+                                                                  float *data,
+                                                                  size_t data_length,
+                                                                  size_t x,
+                                                                  size_t y,
+                                                                  size_t width,
+                                                                  size_t height,
+                                                                  uint32_t mode,
+                                                                  double strength,
+                                                                  char **error_out);
+
+/*
  # Safety
  `model` must be null or a pointer returned by [`seiza_background_fit`] that
  has not already been freed.

@@ -1148,6 +1148,15 @@ class BackgroundModel:
         mode: str = "subtract",
         strength: float = 1.0,
     ) -> npt.NDArray[np.float32]: ...
+    def correct_region(
+        self,
+        image: npt.NDArray[np.float32],
+        x: int,
+        y: int,
+        *,
+        mode: str = "subtract",
+        strength: float = 1.0,
+    ) -> npt.NDArray[np.float32]: ...
 
 class PsfShape:
     """A PSF's shape at one point, from an elliptical Moffat with free beta.

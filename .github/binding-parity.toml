@@ -888,6 +888,7 @@ seiza_background_model_diagnostics_json = "BackgroundModel.diagnostics"
 seiza_background_model_render = "BackgroundModel.render"
 seiza_background_model_correct_in_place = "BackgroundModel.correct"
 seiza_background_model_correct_in_place_with_strength = "BackgroundModel.correct"
+seiza_background_model_correct_region_in_place_with_strength = "BackgroundModel.correct_region"
 seiza_background_model_free = { none = "frees a C handle; Python's garbage collector frees its objects" }
 seiza_background_select_shared_model_json = "select_shared_model"
 seiza_deconvolve_in_place = "deconvolve"

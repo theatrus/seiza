@@ -2813,6 +2813,49 @@ pub unsafe extern "C" fn seiza_background_model_correct_in_place_with_strength(
 }
 
 #[unsafe(no_mangle)]
+/// Corrects one rectangle of the fitted image in place. `data` is the
+/// interleaved linear float samples of the `width` by `height` rectangle whose
+/// top-left pixel is (`x`, `y`) in the fitted image, so `data_length` is
+/// `width * height * channels`. Each sample gets the value
+/// [`seiza_background_model_correct_in_place_with_strength`] gives it in the
+/// whole image, so an image corrected tile by tile equals one corrected whole.
+///
+/// Returns false with an error, and leaves `data` unchanged, when the
+/// rectangle reaches outside the fitted image, when `data_length` does not
+/// match the rectangle, or when division is asked for and the divisor is
+/// unusable at a pixel inside the rectangle. Tiles corrected before a refused
+/// tile stay corrected.
+///
+/// # Safety
+/// `model` must be a live pointer returned by [`seiza_background_fit`]. `data`
+/// must point to `data_length` writable floats. When non-null, `error_out` must
+/// point to writable storage for one pointer.
+pub unsafe extern "C" fn seiza_background_model_correct_region_in_place_with_strength(
+    model: *const SeizaBackgroundModel,
+    data: *mut f32,
+    data_length: usize,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+    mode: u32,
+    strength: f64,
+    error_out: *mut *mut c_char,
+) -> bool {
+    clear_error(error_out);
+    ffi_result(error_out, || {
+        let model = unsafe { required_background_model(model)? };
+        let data = unsafe { required_f32_slice_mut(data, data_length, "background input")? };
+        let mode = background_correction_mode(mode)?;
+        model
+            .fit
+            .correct_region_in_place_with_strength(data, x, y, width, height, mode, strength)
+            .map_err(|error| error.to_string())
+    })
+    .is_some()
+}
+
+#[unsafe(no_mangle)]
 /// # Safety
 /// `model` must be null or a pointer returned by [`seiza_background_fit`] that
 /// has not already been freed.
@@ -12940,6 +12983,88 @@ mod tests {
             )
         });
         assert!((corrected[left] - corrected[right]).abs() < 0.003);
+        unsafe { seiza_background_model_free(model) };
+    }
+
+    #[test]
+    fn background_cabi_corrects_a_rectangle_like_the_whole_image() {
+        let (width, height) = (96, 72);
+        let image = background_plane(width, height);
+        let config = CString::new(
+            r#"{"model":{"kind":"polynomial","degree":1,"ridge":0.0},"sample_radius":2}"#,
+        )
+        .unwrap();
+        let mut error = ptr::null_mut();
+        let model = unsafe {
+            seiza_background_fit(
+                image.as_ptr(),
+                image.len(),
+                width,
+                height,
+                1,
+                ptr::null(),
+                0,
+                config.as_ptr(),
+                &mut error,
+            )
+        };
+        assert!(!model.is_null());
+
+        let mut whole = image.clone();
+        assert!(unsafe {
+            seiza_background_model_correct_in_place_with_strength(
+                model,
+                whole.as_mut_ptr(),
+                whole.len(),
+                SEIZA_BACKGROUND_CORRECTION_SUBTRACT,
+                0.7,
+                &mut error,
+            )
+        });
+
+        let (x, y, w, h) = (17, 9, 40, 23);
+        let rows = |source: &[f32]| -> Vec<f32> {
+            (y..y + h)
+                .flat_map(|row| source[row * width + x..row * width + x + w].to_vec())
+                .collect()
+        };
+        let mut tile = rows(&image);
+        assert!(unsafe {
+            seiza_background_model_correct_region_in_place_with_strength(
+                model,
+                tile.as_mut_ptr(),
+                tile.len(),
+                x,
+                y,
+                w,
+                h,
+                SEIZA_BACKGROUND_CORRECTION_SUBTRACT,
+                0.7,
+                &mut error,
+            )
+        });
+        assert!(error.is_null());
+        assert_eq!(tile, rows(&whole));
+
+        let before = tile.clone();
+        assert!(!unsafe {
+            seiza_background_model_correct_region_in_place_with_strength(
+                model,
+                tile.as_mut_ptr(),
+                tile.len(),
+                width - w + 1,
+                y,
+                w,
+                h,
+                SEIZA_BACKGROUND_CORRECTION_SUBTRACT,
+                0.7,
+                &mut error,
+            )
+        });
+        let message = unsafe { CStr::from_ptr(error) }.to_str().unwrap();
+        assert!(message.contains("outside the fitted"), "{message}");
+        unsafe { seiza_string_free(error) };
+        assert_eq!(tile, before);
         unsafe { seiza_background_model_free(model) };
     }
 
