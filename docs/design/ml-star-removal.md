@@ -236,6 +236,48 @@ widest (`scale_to`), as sharpening does. The stars layer is given through the
 asinh residual the sharpening model uses, so faint and bright stars weigh
 alike.
 
+### First runs (2026-11-26)
+
+X1 (`fit`) and X2 (`image`) were trained for 10,000 steps of 16 tiles of
+256 px, at width 32 and five levels, on the first full bank: 8,028 windows
+of 512 px from 511 stacks, half with the stack's own stars and half with
+made ones. Each took 11 minutes on one GPU. They were measured on 128
+windows of the validation bank's 560, from 140 held-out stacks. Errors
+below are in noise units, as medians over windows:
+
+| | stars, rms | sky, rms | cores, mean | stars, stretched | sky, stretched |
+|---|---|---|---|---|---|
+| the fit's estimate alone | 0.884 | 0.067 | 0.049 | 0.081 | 0.0044 |
+| X1, fit-first | 0.446 | 0.072 | 0.034 | 0.059 | 0.0039 |
+| X2, image only | 0.556 | 0.125 | 0.048 | 0.079 | 0.0065 |
+
+X1 halves the fit's error where stars were and leaves the sky as it found
+it. Its mean error over windows falls from 8.6 to 0.51, because the bright
+stars the fit leaves holes and remnants about are healed. X2 starts from the
+image with its stars in (validation loss 0.245, against 0.045 for the fit's
+estimate) and ends at 0.035, behind X1's 0.028. Its sky error is twice X1's,
+because it takes some of the sky's noise out with the stars.
+
+The sheets show what the numbers miss. The fit's star models end in square
+65 px stamps: inside, the star is taken out, and outside, its wing and
+halo are left. X1 learned that edge. About bright stars it leaves a
+square-edged patch, and in the stars layer the sky's noise shows in a square
+about each star. X2 has no squares, and over a bright star on nebula its
+fill carries the nebula through where X1 leaves a flat blob. Both fill the
+widest halos with a smooth patch a little darker than the sky about it, and
+put the sky's noise there into the stars layer: where a star buries the
+sky's noise, a network trained to the median gives none back.
+
+Next:
+
+- The fit's models drawn like the bank's stars: each star's stamp carried on
+  by its wing and faded round, so no fit leaves an edge (the bank's
+  `fit_model` and the runtime's fit alike).
+- Clipped stars' discs sized from their catalogue brightness (clean-sky
+  version 3), and made halos and rings drawn from the faint ones measured
+  up.
+- X1 and X2 again on that bank, then the wider network.
+
 ## Order of work
 
 1. The clean skies: Gaia fits with the PSF field, and checks that what is
@@ -244,7 +286,7 @@ alike.
    known stars and find them. Built, and the trainer for both designs.
 3. The corpus pairs on the train split.
 4. The measures and the sheets.
-5. First runs.
+5. First runs: X1 and X2, above.
 6. A `star-removal` task in `seiza-model` beside `denoise` and `sharpen`,
    mono and RGB: the starless image and the stars layer, written as files
    `seiza color star-stretch` and `screen-star-layer` take, through the C
