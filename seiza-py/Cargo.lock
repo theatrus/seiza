@@ -2407,7 +2407,7 @@ dependencies = [
 
 [[package]]
 name = "seiza"
-version = "0.56.0"
+version = "0.57.0"
 dependencies = [
  "directories",
  "image",
@@ -2430,7 +2430,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-analysis"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "seiza-fits",
  "seiza-image-io",
@@ -2445,7 +2445,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-background"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "multiversion",
  "rayon",
@@ -2471,11 +2471,11 @@ dependencies = [
 
 [[package]]
 name = "seiza-core"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "seiza-deconvolution"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "multiversion",
  "rayon",
@@ -2516,7 +2516,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-fits"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "flate2",
  "memmap2",
@@ -2529,7 +2529,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-image-io"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "chrono",
  "image",
@@ -2551,7 +2551,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-model"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "directories",
  "half",
@@ -2573,7 +2573,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-parallax"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "ab_glyph",
  "image",
@@ -2590,7 +2590,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-pipeline"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "rayon",
  "seiza-calibration",
@@ -2607,7 +2607,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-py"
-version = "0.56.0"
+version = "0.57.0"
 dependencies = [
  "image",
  "numpy",
@@ -2664,7 +2664,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-stacking"
-version = "0.64.0"
+version = "0.65.0"
 dependencies = [
  "bytemuck",
  "fs2",
@@ -2699,7 +2699,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-stars"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "nalgebra",
  "rayon",
@@ -2716,7 +2716,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-stretch"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "rayon",
  "seiza-stats",
@@ -2726,7 +2726,7 @@ dependencies = [
 
 [[package]]
 name = "seiza-xisf"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "flate2",
  "lz4_flex",
