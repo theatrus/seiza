@@ -842,6 +842,8 @@ class StackSnapshot:
     channels: int
     accepted_frames: int
     rejected_frames: int
+    total_exposure_seconds: float | None
+    filter: str | None
     image: npt.NDArray[np.float32]
     variance: npt.NDArray[np.float32]
     coverage: npt.NDArray[np.uint32]
@@ -856,6 +858,8 @@ class DrizzleResult:
     scale: int
     accepted_frames: int
     rejected_frames: int
+    total_exposure_seconds: float | None
+    filter: str | None
     image: npt.NDArray[np.float32]
     weight: npt.NDArray[np.float32]
     def write_fits(self, path: str | Path) -> None: ...

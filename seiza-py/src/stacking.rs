@@ -1375,6 +1375,22 @@ impl PyStackSnapshot {
         self.inner.rejected_frames
     }
 
+    /// The sum of the accepted frames' exposures in seconds, which
+    /// ``write_fits`` writes as ``LIVETIME``; None unless every frame's is
+    /// known.
+    #[getter]
+    fn total_exposure_seconds(&self) -> Option<f64> {
+        self.inner.acquisition.total_exposure_seconds
+    }
+
+    /// The filter every accepted frame was taken through, which
+    /// ``write_fits`` writes as ``FILTER``; None when the frames differ or
+    /// any does not say.
+    #[getter]
+    fn filter(&self) -> Option<&str> {
+        self.inner.acquisition.filter.as_deref()
+    }
+
     /// Return a copy of the current linear mean as a 2D mono or HWC RGB array.
     #[getter]
     fn image<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
@@ -1495,6 +1511,22 @@ impl PyDrizzleResult {
     #[getter]
     fn rejected_frames(&self) -> u32 {
         self.rejected_frames
+    }
+
+    /// The sum of the accepted frames' exposures in seconds, which
+    /// ``write_fits`` writes as ``LIVETIME``; None unless every frame's is
+    /// known.
+    #[getter]
+    fn total_exposure_seconds(&self) -> Option<f64> {
+        self.inner.acquisition.total_exposure_seconds
+    }
+
+    /// The filter every accepted frame was taken through, which
+    /// ``write_fits`` writes as ``FILTER``; None when the frames differ or
+    /// any does not say.
+    #[getter]
+    fn filter(&self) -> Option<&str> {
+        self.inner.acquisition.filter.as_deref()
     }
 
     /// Return a copy of the drizzled linear mean as a 2D mono or HWC RGB
@@ -3750,11 +3782,13 @@ fn integrate_registered_frames(
     let paths = images.clone();
     let integrated = py.detach(move || {
         let mut reference_headers = None;
-        let result = seiza_stacking::integrate_registered_frames_banded(
+        let mut acquisitions = vec![seiza_stacking::Acquisition::default(); paths.len()];
+        let mut result = seiza_stacking::integrate_registered_frames_banded(
             paths.len(),
             &options,
             |index| {
                 let frame = FitsFrame::open(&paths[index])?;
+                acquisitions[index] = frame.acquisition();
                 if reference_headers.is_none() && index == 0 {
                     reference_headers = Some(frame.headers);
                 }
@@ -3762,6 +3796,7 @@ fn integrate_registered_frames(
             },
             |_, _, _| {},
         )?;
+        result.snapshot.acquisition = seiza_stacking::Acquisition::combined(&acquisitions);
         Ok::<_, seiza_stacking::Error>((result, reference_headers.unwrap_or_default()))
     });
     if let Some(error) = raised.lock().unwrap().take() {

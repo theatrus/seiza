@@ -1230,6 +1230,12 @@ including one from `reintegrate()`. Both write linear `float32` FITS (XISF for
 a `.xisf` path) with the reference frame's WCS, and refuse a path that is one
 of the stack's inputs or masters.
 
+Both also write the frames' summed exposure as `LIVETIME` and the filter they
+share as `FILTER`, which a snapshot has as `total_exposure_seconds` and
+`filter`. Each is left out, and `None`, unless every accepted frame's file
+gives it, and the filter when they differ; frames pushed as arrays give
+neither. A drizzled stack and a saved context keep them too.
+
 `stacker.state()` describes the stack: its size and counts, a
 `configuration_fingerprint` of its options, masters and input mode (to check
 that a resumed stack is the one you meant), its `input_mode`, the

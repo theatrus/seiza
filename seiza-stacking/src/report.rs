@@ -359,6 +359,7 @@ mod tests {
             rejected_samples: vec![1, 0, 2, 3],
             accepted_frames: 6,
             rejected_frames: 1,
+            acquisition: Default::default(),
         }
     }
     #[test]
@@ -412,6 +413,7 @@ mod tests {
                 data: vec![0.0, 0.25, 1.5, 2.0],
             },
             scale: 2,
+            acquisition: Default::default(),
         };
         let report = drizzle_report(&result, 6, 0, None, None).unwrap();
         assert_eq!(report.support_map.quantity, "drop_area_times_frame_weight");

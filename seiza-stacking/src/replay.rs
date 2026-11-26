@@ -13,6 +13,7 @@
 //! each frame's registered image from the live pass instead, so the replay
 //! prepares nothing.
 
+use crate::Acquisition;
 use crate::CancelSignal;
 use crate::batch::PackedFates;
 use crate::calibration::LightGate;
@@ -31,9 +32,6 @@ use std::path::{Path, PathBuf};
 /// calibration.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct FrameSource {
-    /// Reporting only; absent after restoring a saved context.
-    #[serde(skip)]
-    exposure_seconds: Option<f64>,
     path: PathBuf,
     /// The full scale a declared `0:1` range was mapped onto before
     /// calibration, when the source declared one.
@@ -61,7 +59,6 @@ impl FrameSource {
             .filter(|(low, high)| *low == 0.0 && high.is_finite() && *high > 0.0)
             .map(|(_, high)| high as f32);
         Some(Self {
-            exposure_seconds: frame.exposure_seconds.filter(|v| v.is_finite() && *v > 0.0),
             stamp: SourceStamp::of(&path),
             path,
             rescale_to,
@@ -166,6 +163,10 @@ pub(crate) struct AdmittedFrame {
     /// transform carries. A context does not keep it.
     #[serde(skip)]
     registration_rms_pixels: Option<f64>,
+    /// How the frame was taken. Skipped by serde as `weighting` is; a
+    /// context keeps it in its metadata (see [`Ledger::acquisitions`]).
+    #[serde(skip)]
+    acquisition: Acquisition,
 }
 
 /// The tolerances each admitted frame was judged under: each distinct gate
@@ -200,7 +201,7 @@ impl Ledger {
             .iter()
             .map(|f| crate::StackReportFrame {
                 source: f.source.as_ref().map(|s| s.path.clone()),
-                exposure_seconds: f.source.as_ref().and_then(|s| s.exposure_seconds),
+                exposure_seconds: f.acquisition.total_exposure_seconds,
                 calibration_index: f.calibration,
                 registration_rms_pixels: f.registration_rms_pixels,
                 weight: f.weighting.weight.clone(),
@@ -230,6 +231,7 @@ impl Ledger {
                 weighting: FrameWeightRecord::default(),
                 tolerances,
                 registration_rms_pixels: None,
+                acquisition: Acquisition::default(),
             }],
             calibrations: vec![CalibrationRecord::default()],
         }
@@ -342,7 +344,60 @@ impl Ledger {
             weighting,
             tolerances,
             registration_rms_pixels: None,
+            acquisition: Acquisition::default(),
         });
+    }
+
+    /// Record how the frame admitted last was taken.
+    pub(crate) fn record_acquisition(&mut self, acquisition: Acquisition) {
+        if let Some(frame) = self.frames.last_mut() {
+            frame.acquisition = acquisition;
+        }
+    }
+
+    /// What every admitted frame records together, when this ledger lists
+    /// all `accepted_frames` of them.
+    pub(crate) fn acquisition(&self, accepted_frames: u32) -> Acquisition {
+        if self.frames.len() != accepted_frames as usize {
+            return Acquisition::default();
+        }
+        Acquisition::combined(self.frames.iter().map(|frame| &frame.acquisition))
+    }
+
+    /// Each admitted frame's acquisition, for a context to keep; empty when
+    /// none of them recorded any.
+    pub(crate) fn acquisitions(&self) -> Vec<Acquisition> {
+        if !self.frames.iter().any(|frame| frame.acquisition.is_known()) {
+            return Vec::new();
+        }
+        self.frames
+            .iter()
+            .map(|frame| frame.acquisition.clone())
+            .collect()
+    }
+
+    /// Restore the acquisitions a context saved for its admitted frames.
+    pub(crate) fn attach_acquisitions(
+        &mut self,
+        acquisitions: Vec<Acquisition>,
+    ) -> std::result::Result<(), String> {
+        if acquisitions.len() != self.frames.len() {
+            return Err(format!(
+                "context holds acquisitions for {} frames but {} were admitted",
+                acquisitions.len(),
+                self.frames.len()
+            ));
+        }
+        for (frame, acquisition) in self.frames.iter_mut().zip(acquisitions) {
+            if acquisition
+                .total_exposure_seconds
+                .is_some_and(|seconds| !(seconds.is_finite() && seconds > 0.0))
+            {
+                return Err("context holds an exposure that is not a positive number".into());
+            }
+            frame.acquisition = acquisition;
+        }
+        Ok(())
     }
 
     /// Record the registration RMS, in the sensor's pixels, of the frame
@@ -2980,7 +3035,7 @@ impl LiveStacker {
             Some(cache) => replay.bands(cache, drizzle, &mut progress)?,
             None => None,
         };
-        let (mut result, drizzled) = match banded_result {
+        let (mut result, mut drizzled) = match banded_result {
             Some(result) => result,
             None => {
                 if banded && let Some(cache) = cache.filter(|cache| cache.required) {
@@ -2993,6 +3048,14 @@ impl LiveStacker {
             }
         };
         result.snapshot.rejected_frames = self.rejected_frames;
+        result.snapshot.acquisition = Acquisition::combined(
+            selected
+                .iter()
+                .map(|&index| &ledger.frames[index].acquisition),
+        );
+        if let Some(drizzled) = &mut drizzled {
+            drizzled.acquisition = result.snapshot.acquisition.clone();
+        }
         self.fill_photosite_gaps(&mut result.snapshot.image.data, &result.snapshot.coverage);
         Ok((result, drizzled))
     }
@@ -3834,7 +3897,6 @@ mod tests {
                 .unwrap();
                 AdmittedFrame {
                     source: Some(FrameSource {
-                        exposure_seconds: None,
                         path: paths[source].clone(),
                         rescale_to: None,
                         stamp: SourceStamp::of(&paths[source]),
@@ -3963,7 +4025,6 @@ mod tests {
                 });
                 AdmittedFrame {
                     source: Some(FrameSource {
-                        exposure_seconds: None,
                         stamp: SourceStamp::of(&path),
                         path,
                         rescale_to: None,

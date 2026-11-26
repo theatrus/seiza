@@ -2644,6 +2644,26 @@ uint32_t seiza_drizzle_result_accepted_frames(const SeizaDrizzleResult *drizzle)
 uint32_t seiza_drizzle_result_rejected_frames(const SeizaDrizzleResult *drizzle);
 
 /*
+ The sum of the accepted frames' exposures in seconds, which
+ [`seiza_drizzle_result_write_fits`] writes as `LIVETIME`; NaN unless every frame's
+ is known.
+
+ # Safety
+ `drizzle` must be null or a live `SeizaDrizzleResult` pointer.
+ */
+double seiza_drizzle_result_total_exposure_seconds(const SeizaDrizzleResult *drizzle);
+
+/*
+ The filter every accepted frame was taken through, which
+ [`seiza_drizzle_result_write_fits`] writes as `FILTER`; null when the frames
+ differ or any does not say. Free it with [`seiza_string_free`].
+
+ # Safety
+ `drizzle` must be null or a live `SeizaDrizzleResult` pointer.
+ */
+char *seiza_drizzle_result_filter(const SeizaDrizzleResult *drizzle);
+
+/*
  Borrows the interleaved drizzled mean until the result is freed. Output
  samples no drop reached are `NaN`.
 
@@ -2764,6 +2784,26 @@ uint32_t seiza_stack_snapshot_accepted_frames(const SeizaStackSnapshot *snapshot
  `snapshot` must be null or a live `SeizaStackSnapshot` pointer.
  */
 uint32_t seiza_stack_snapshot_rejected_frames(const SeizaStackSnapshot *snapshot);
+
+/*
+ The sum of the accepted frames' exposures in seconds, which
+ [`seiza_stack_snapshot_write_fits`] writes as `LIVETIME`; NaN unless every frame's
+ is known.
+
+ # Safety
+ `snapshot` must be null or a live `SeizaStackSnapshot` pointer.
+ */
+double seiza_stack_snapshot_total_exposure_seconds(const SeizaStackSnapshot *snapshot);
+
+/*
+ The filter every accepted frame was taken through, which
+ [`seiza_stack_snapshot_write_fits`] writes as `FILTER`; null when the frames
+ differ or any does not say. Free it with [`seiza_string_free`].
+
+ # Safety
+ `snapshot` must be null or a live `SeizaStackSnapshot` pointer.
+ */
+char *seiza_stack_snapshot_filter(const SeizaStackSnapshot *snapshot);
 
 /*
  Borrows the immutable interleaved linear mean until the snapshot is freed.

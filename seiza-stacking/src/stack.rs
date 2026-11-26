@@ -699,6 +699,8 @@ pub struct StackSnapshot {
     pub accepted_frames: u32,
     /// Number of frames turned away so far.
     pub rejected_frames: u32,
+    /// What the accepted frames record of how they were taken.
+    pub acquisition: crate::Acquisition,
 }
 
 /// A compact immutable copy of the current stack for non-destructive output.
@@ -715,6 +717,8 @@ pub struct StackExportSnapshot {
     pub accepted_frames: u32,
     /// Number of frames turned away when the export snapshot was captured.
     pub rejected_frames: u32,
+    /// What the accepted frames record of how they were taken.
+    pub acquisition: crate::Acquisition,
 }
 
 /// Zero-copy access to the current online estimate. Samples with zero
@@ -1582,6 +1586,12 @@ impl LiveStacker {
             crate::replay::Ledger::empty()
         };
         ledger.set_bin_factor(options.bin_factor);
+        if reference_is_integrated {
+            ledger.record_acquisition(crate::Acquisition::of_frame(
+                &reference_headers,
+                &reference_metadata,
+            ));
+        }
         ledger.set_reference_channel_sites(options.channel_sites(reference_cfa));
         if !reference_noise.is_empty() {
             ledger.set_reference_weighting(&reference_noise);
@@ -2159,6 +2169,7 @@ impl LiveStacker {
             frame.rescale_declared_unit_bounds(scale);
         }
         let source = crate::replay::FrameSource::of(&frame);
+        let acquisition = frame.acquisition();
         let clipped = self
             .options
             .track_clipping
@@ -2191,7 +2202,7 @@ impl LiveStacker {
             cache,
             developed_clip_mask(clipped, cfa, &self.options),
         )?
-        .with_source(source);
+        .with_source(source, acquisition);
         Ok(self.integrate_prepared(prepared))
     }
 
@@ -2426,6 +2437,7 @@ impl LiveStacker {
             rejected_samples: moments.rejected.to_vec(),
             accepted_frames: self.accepted_frames,
             rejected_frames: self.rejected_frames,
+            acquisition: self.acquisition(),
         })
     }
 
@@ -2447,6 +2459,7 @@ impl LiveStacker {
             )?,
             accepted_frames: self.accepted_frames,
             rejected_frames: self.rejected_frames,
+            acquisition: self.acquisition(),
         })
     }
 
@@ -2520,6 +2533,7 @@ impl LiveStacker {
     /// snapshot. Batch callers should prefer this to avoid snapshot copies.
     pub fn into_snapshot(self) -> Result<StackSnapshot> {
         self.accumulator.check_kept()?;
+        let acquisition = self.acquisition();
         let (mut mean, variance, coverage, weight_sum, rejected_samples) =
             self.accumulator.into_snapshot();
         if self.options.cfa_integration == CfaIntegration::BayerDrizzle {
@@ -2548,7 +2562,15 @@ impl LiveStacker {
             rejected_samples,
             accepted_frames: self.accepted_frames,
             rejected_frames: self.rejected_frames,
+            acquisition,
         })
+    }
+
+    /// What the frames accepted so far record of how they were taken. Frames
+    /// supplied as pixels record nothing, nor do those of a context saved
+    /// before stacks kept these records.
+    pub(crate) fn acquisition(&self) -> crate::Acquisition {
+        self.ledger.acquisition(self.accepted_frames)
     }
 
     /// Header cards carried from the reference frame, for writing outputs.
@@ -3025,6 +3047,7 @@ pub(crate) struct ReadyFrame {
     overlap_fraction: f32,
     /// The file the frame came from, for a later reintegration.
     source: Option<crate::replay::FrameSource>,
+    acquisition: crate::Acquisition,
     /// Per-channel normalized noise; empty for equal weighting.
     noise: Vec<f32>,
     /// Per-channel weight; empty for equal weighting.
@@ -3052,10 +3075,15 @@ pub(crate) struct ReadyFrame {
 }
 
 impl PreparedFrame {
-    /// Attach the file a ready frame came from.
-    pub(crate) fn with_source(mut self, source: Option<crate::replay::FrameSource>) -> Self {
+    /// Attach the file a ready frame came from, and how it was taken.
+    pub(crate) fn with_source(
+        mut self,
+        source: Option<crate::replay::FrameSource>,
+        acquisition: crate::Acquisition,
+    ) -> Self {
         if let Self::Ready(ready) = &mut self {
             ready.source = source;
+            ready.acquisition = acquisition;
         }
         self
     }
@@ -3594,6 +3622,7 @@ pub(crate) fn prepare_frame(
         mapping: Box::new(mapping),
         overlap_fraction,
         source: None,
+        acquisition: Default::default(),
         noise,
         weight,
         photosites: photosites.is_some(),
@@ -3721,6 +3750,7 @@ impl IntegrationHalf<'_> {
             mapping,
             overlap_fraction,
             source,
+            acquisition,
             noise,
             weight,
             photosites,
@@ -3850,6 +3880,7 @@ impl IntegrationHalf<'_> {
             },
             self.options.match_tolerances,
         );
+        self.ledger.record_acquisition(acquisition);
         self.ledger.record_registration_rms(registration_rms_pixels);
         if let Some(cache) = &mut self.frame_cache {
             cache.admit(staged);

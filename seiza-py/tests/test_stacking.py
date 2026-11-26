@@ -1563,6 +1563,50 @@ def lights_with_a_header(tmp_path, count=3):
     return image, paths
 
 
+def test_stacks_record_their_exposure_and_filter(tmp_path):
+    image, _ = lights_with_a_header(tmp_path)
+
+    def light(name, seconds, band):
+        path = tmp_path / name
+        header = fits.Header()
+        if seconds is not None:
+            header["EXPTIME"] = seconds
+        header["FILTER"] = band
+        fits.writeto(path, image, header)
+        return path
+
+    paths = [light("a.fits", 300.0, "Ha"), light("b.fits", 60.0, "Ha")]
+    stacker = seiza.LiveStacker(paths[0], options=no_adjustment_options())
+    assert stacker.push_fits(paths[1]).accepted
+    snapshot = stacker.snapshot()
+    assert snapshot.total_exposure_seconds == 360.0
+    assert snapshot.filter == "Ha"
+    _, drizzled = stacker.reintegrate_drizzled(scale=2)
+    assert drizzled.total_exposure_seconds == 360.0
+    assert drizzled.filter == "Ha"
+    registered, _ = seiza.integrate_registered_frames(paths)
+    assert (registered.total_exposure_seconds, registered.filter) == (360.0, "Ha")
+    for name, stack in (
+        ("stack.fits", snapshot),
+        ("running.fits", stacker),
+        ("drizzled.fits", drizzled),
+        ("registered.fits", registered),
+    ):
+        stack.write_fits(tmp_path / name)
+        header = fits.getheader(tmp_path / name)
+        assert header["LIVETIME"] == 360.0
+        assert header["FILTER"] == "Ha"
+        assert "EXPTIME" not in header
+
+    assert stacker.push_fits(light("c.fits", None, "OIII")).accepted
+    snapshot = stacker.snapshot()
+    assert snapshot.total_exposure_seconds is None
+    assert snapshot.filter is None
+    snapshot.write_fits(tmp_path / "mixed.fits")
+    header = fits.getheader(tmp_path / "mixed.fits")
+    assert "LIVETIME" not in header and "FILTER" not in header
+
+
 def test_snapshots_write_with_the_reference_headers(tmp_path):
     image, paths = lights_with_a_header(tmp_path)
     stacker = seiza.LiveStacker(paths[0], options=no_adjustment_options())

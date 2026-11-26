@@ -5,7 +5,7 @@ use crate::digest::KeyHasher;
 use crate::{Digest, Error, Estimator, Identity, Result, StackKind, WeightSource};
 use rayon::prelude::*;
 use seiza_fits::{HeaderValue, ImagePart, ImageSamples, Pixels, WriteHeaderCard};
-use seiza_stacking::{LinearImage, StackSnapshot};
+use seiza_stacking::{Acquisition, LinearImage, StackSnapshot};
 use std::path::Path;
 
 /// The names of a stack file's images after the mean, which is the image
@@ -46,7 +46,8 @@ pub struct PartialStack {
     /// reached.
     pub variance: Option<Vec<f32>>,
     /// Cards carried from the reference frame: its WCS, and the few that
-    /// describe the instrument and filter ([`carried_cards`]).
+    /// describe the instrument ([`carried_cards`]). `FILTER` and `LIVETIME`
+    /// are the stack's own frames', as [`Acquisition`] records them.
     pub headers: Vec<(String, HeaderValue)>,
 }
 
@@ -73,7 +74,7 @@ impl PartialStack {
             coverage: snapshot.coverage,
             rejected: Some(snapshot.rejected_samples),
             variance: Some(snapshot.variance.data),
-            headers: carried_cards(reference_headers),
+            headers: with_acquisition(carried_cards(reference_headers), &snapshot.acquisition),
         };
         stack.check_shape()?;
         Ok(stack)
@@ -322,6 +323,8 @@ struct Combiner {
     /// Whether every stack added so far holds its variance.
     pooled: bool,
     headers: Vec<(String, HeaderValue)>,
+    /// `None` until a stack is added.
+    acquisition: Option<Acquisition>,
 }
 
 impl Combiner {
@@ -338,6 +341,7 @@ impl Combiner {
             rejected: Some(vec![0; samples]),
             pooled: true,
             headers: first.headers.clone(),
+            acquisition: None,
         })
     }
 
@@ -352,6 +356,11 @@ impl Combiner {
             )));
         }
         self.pooled &= stack.variance.is_some();
+        let acquisition = Acquisition::from_cards(&stack.headers);
+        self.acquisition = Some(match &self.acquisition {
+            None => acquisition,
+            Some(sum) => Acquisition::combined([sum, &acquisition]),
+        });
         let variance = stack.variance.as_deref();
         self.weight
             .par_iter_mut()
@@ -422,7 +431,7 @@ impl Combiner {
             coverage: self.coverage,
             rejected: self.rejected,
             variance,
-            headers: self.headers,
+            headers: with_acquisition(self.headers, &self.acquisition.unwrap_or_default()),
         }
     }
 }
@@ -505,6 +514,22 @@ pub fn carried_cards(headers: &[(String, HeaderValue)]) -> Vec<(String, HeaderVa
         .collect()
 }
 
+/// `headers` with the `FILTER` and `LIVETIME` cards of `acquisition` in place
+/// of their own, which describe the reference frame alone.
+fn with_acquisition(
+    mut headers: Vec<(String, HeaderValue)>,
+    acquisition: &Acquisition,
+) -> Vec<(String, HeaderValue)> {
+    headers.retain(|(key, _)| !matches!(key.as_str(), "FILTER" | "LIVETIME"));
+    headers.extend(
+        acquisition
+            .cards()
+            .into_iter()
+            .map(|card| (card.keyword().to_owned(), card.value().clone())),
+    );
+    headers
+}
+
 fn is_carried(key: &str) -> bool {
     let indexed = |prefixes: &[&str]| {
         prefixes.iter().any(|prefix| {
@@ -526,6 +551,7 @@ fn is_carried(key: &str) -> bool {
                 | "AP_ORDER"
                 | "BP_ORDER"
                 | "FILTER"
+                | "LIVETIME"
                 | "INSTRUME"
                 | "TELESCOP"
                 | "XBINNING"
@@ -916,6 +942,47 @@ pub(crate) mod tests {
 
     /// Combining files, one read at a time, gives what combining the same
     /// stacks in memory gives, to the bit.
+    /// A partial stack's filter and total exposure are its own frames', not
+    /// its reference's, and a tile's are its parts'.
+    #[test]
+    fn a_tile_sums_its_parts_exposures_and_keeps_a_filter_they_share() {
+        let directory = tempfile::tempdir().unwrap();
+        let part = |name: &str, seconds: Option<f64>, filter: &str| {
+            let mut stack = stack(1, 1);
+            stack.identity.step_key = crate::Digest::of_bytes(name.as_bytes());
+            let mut acquisition = Acquisition::default();
+            acquisition.total_exposure_seconds = seconds;
+            acquisition.filter = Some(filter.into());
+            // The reference is a luminance light of another length.
+            let reference = [
+                ("FILTER".to_owned(), HeaderValue::String("L".into())),
+                ("LIVETIME".to_owned(), HeaderValue::Float(5.0)),
+            ];
+            stack.headers = with_acquisition(carried_cards(&reference), &acquisition);
+            let path = directory.path().join(format!("{name}.fits"));
+            stack.write(&path).unwrap();
+            path
+        };
+        let summary = |paths: &[&std::path::PathBuf]| {
+            let tile = PartialStack::combine_files(paths).unwrap();
+            let path = directory.path().join("tile.fits");
+            tile.write(&path).unwrap();
+            let read = PartialStack::open(&path).unwrap();
+            let acquisition = Acquisition::from_cards(&read.headers);
+            (acquisition.total_exposure_seconds, acquisition.filter)
+        };
+        let a = part("a", Some(300.0), "Ha");
+        let b = part("b", Some(60.0), "HA");
+        let other = part("other", Some(60.0), "OIII");
+        let unknown = part("unknown", None, "Ha");
+        assert_eq!(summary(&[&a]), (Some(300.0), Some("Ha".into())));
+        let (total, filter) = summary(&[&a, &b]);
+        assert_eq!(total, Some(360.0));
+        assert!(filter.unwrap().eq_ignore_ascii_case("Ha"));
+        assert_eq!(summary(&[&a, &other]), (Some(360.0), None));
+        assert_eq!(summary(&[&a, &unknown]), (None, Some("Ha".into())));
+    }
+
     #[test]
     fn combining_files_matches_combining_in_memory() {
         let directory = tempfile::tempdir().unwrap();

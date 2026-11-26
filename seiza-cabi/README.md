@@ -196,6 +196,10 @@ exposes the **superset** of what both apps need.
   and returns a `SeizaDrizzleResult` (image, weight, scale, and
   `seiza_drizzle_result_write_fits` with the WCS scaled to the grid) along
   with the reintegrated snapshot.
+  Every stack file carries its frames' summed exposure as `LIVETIME` and the
+  filter they share as `FILTER`. `seiza_stack_snapshot_total_exposure_seconds`,
+  `seiza_stack_snapshot_filter` and their `seiza_drizzle_result_` twins give
+  the same values, NaN or null unless every accepted frame's file gives one.
   `seiza_stack_integrate_registered_json` gives the same three-pass
   rejection to FITS or XISF frames calibrated, registered and normalized
   elsewhere, onto one grid: it reads each file once into scratch and takes
