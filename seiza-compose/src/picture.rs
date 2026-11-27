@@ -274,6 +274,8 @@ impl InputRead {
 pub enum Blend {
     #[default]
     Normal,
+    /// `1 − (1 − a)(1 − b)`, over the range 0 to the picture's peak, so a
+    /// layer screened over values above SDR white keeps them in order.
     Screen,
     Add,
     Multiply,

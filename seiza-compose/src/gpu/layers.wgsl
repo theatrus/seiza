@@ -208,7 +208,12 @@ fn blend(mode: f32, below: vec3f, layer: vec3f) -> vec3f {
     if mode < 0.5 {
         return layer;
     } else if mode < 1.5 {
-        return 1.0 - (1.0 - clamp(below, vec3f(0.0), vec3f(1.0))) * (1.0 - clamp(layer, vec3f(0.0), vec3f(1.0)));
+        // Screen over the range 0 to the picture's peak, as the CPU's
+        // `screen`: values above SDR white keep their order.
+        let peak = max(globals.luma.w, 1.0);
+        let a = clamp(below, vec3f(0.0), vec3f(peak));
+        let b = clamp(layer, vec3f(0.0), vec3f(peak));
+        return peak - (peak - a) * (peak - b) / peak;
     } else if mode < 2.5 {
         return below + layer;
     } else if mode < 3.5 {

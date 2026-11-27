@@ -393,3 +393,74 @@ fn a_layered_stretch_with_guides_matches_the_cpu() {
         "mean {mean:e}, p99 {p99:e}, max {largest:e}"
     );
 }
+
+/// A screened layer over a picture brighter than SDR white keeps what is
+/// beneath in order, up to the picture's peak, on the GPU as on the CPU:
+/// stars screened over an HDR core leave the core's detail.
+#[test]
+fn screen_keeps_values_above_sdr_white_in_order() {
+    use seiza_compose::picture::{Blend, InputRead, Layer, LayerKind, Transfer, TransferStage};
+    use seiza_stretch::ResolvedCurve;
+    let inputs = inputs();
+    let images: Vec<&LinearImage> = inputs.iter().collect();
+    let curve = ResolvedCurve::Mtf {
+        shadows: 0.0,
+        midtone: 0.3,
+        highlights: 1.0,
+    };
+    let read = |input: usize| InputRead::new(input, Transfer::of([TransferStage::Curve(curve)]));
+    // A bright layer, three times SDR white at most, then a dim one screened
+    // over it.
+    let mut bright = Layer::new(LayerKind::Input {
+        read: read(0),
+        color: [3.0, 3.0, 3.0],
+        curve: 0.0,
+    });
+    bright.blend = Blend::Add;
+    let mut stars = Layer::new(LayerKind::Input {
+        read: read(1),
+        color: [0.5, 0.5, 0.5],
+        curve: 0.0,
+    });
+    stars.blend = Blend::Screen;
+    let mut picture = Picture {
+        layers: vec![bright.clone()],
+        headroom: 2.0,
+        ..Picture::default()
+    };
+    let peak = picture.peak();
+    let source = seiza_compose::render::ImageSource::new(images.clone()).unwrap();
+    let region = whole(images[0]);
+    let alone = render_image(&picture, &source, region, &RenderOptions::default())
+        .unwrap()
+        .data;
+    picture.layers.push(stars);
+    let Some((cpu, gpu)) = both(&picture, &images) else {
+        eprintln!("no GPU: the GPU compositor was not checked");
+        return;
+    };
+    // Where the layer beneath is above SDR white and below the peak, the
+    // screened picture is above it too, and never below what was beneath.
+    let mut above = 0;
+    for (before, after) in alone.iter().zip(&cpu) {
+        if before.is_nan() {
+            continue;
+        }
+        let before = before.min(peak);
+        assert!(
+            *after >= before - 1e-4,
+            "screen darkened {before} to {after}"
+        );
+        if before > 1.05 && before < peak - 0.05 {
+            above += 1;
+            assert!(*after > 1.0, "{before} above SDR white became {after}");
+        }
+    }
+    assert!(above > 100, "the picture reaches above SDR white: {above}");
+    let (mean, p99, largest) = gap(&cpu, &gpu);
+    eprintln!("hdr screen: mean {mean:e}, p99 {p99:e}, max {largest:e}");
+    assert!(
+        mean < 2e-3 && p99 < 1e-2,
+        "mean {mean:e}, p99 {p99:e}, max {largest:e}"
+    );
+}

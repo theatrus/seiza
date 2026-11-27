@@ -693,6 +693,7 @@ fn combine(
     at: usize,
 ) -> [f32; 3] {
     let space = picture.space;
+    let peak = picture.peak();
     let painted = |mask: Option<usize>| {
         mask.and_then(|mask| masks.get(mask))
             .map_or(1.0, |mask| mask[at])
@@ -720,7 +721,7 @@ fn combine(
                     [0, 1, 2].map(|channel| (tint[channel] * value).mul_add(cover, color[channel]))
                 }
             }
-            _ => cover_mix(color, blend(mode, color, own, space), cover),
+            _ => cover_mix(color, blend(mode, color, own, space, peak), cover),
         }
     };
     for (index, layer) in picture.layers.iter().enumerate() {
@@ -937,17 +938,21 @@ fn saturated(color: [f32; 3], amount: f32, space: WorkingSpace) -> [f32; 3] {
     color.map(|channel| mix(luminance, channel, amount).max(0.0))
 }
 
-fn blend(mode: Blend, below: [f32; 3], layer: [f32; 3], space: WorkingSpace) -> [f32; 3] {
+/// How a layer's color combines with what is beneath it, before opacity.
+/// `peak` is the brightest value the picture shows: screen works up to it,
+/// so values above SDR white keep their order under a screened layer.
+fn blend(
+    mode: Blend,
+    below: [f32; 3],
+    layer: [f32; 3],
+    space: WorkingSpace,
+    peak: f32,
+) -> [f32; 3] {
     match mode {
         Blend::Normal => layer,
         Blend::Screen => {
-            let mut out = [0.0; 3];
-            for channel in 0..3 {
-                out[channel] = 1.0
-                    - (1.0 - below[channel].clamp(0.0, 1.0))
-                        * (1.0 - layer[channel].clamp(0.0, 1.0));
-            }
-            out
+            let peak = peak.max(1.0);
+            [0, 1, 2].map(|channel| screen(below[channel], layer[channel], peak))
         }
         Blend::Add => [
             below[0] + layer[0],
@@ -974,6 +979,16 @@ fn blend(mode: Blend, below: [f32; 3], layer: [f32; 3], space: WorkingSpace) -> 
             below.map(|channel| (channel + shift).max(0.0))
         }
     }
+}
+
+/// Screen over the range 0 to `peak`: `peak · (1 − (1 − a/peak)(1 − b/peak))`.
+/// At a peak of 1 it is the usual screen. Above SDR white it keeps what is
+/// beneath: a bright core under a star layer stays brighter where it was
+/// brighter, rather than every value meeting at 1.
+pub(crate) fn screen(below: f32, layer: f32, peak: f32) -> f32 {
+    let below = below.clamp(0.0, peak);
+    let layer = layer.clamp(0.0, peak);
+    peak - (peak - below) * (peak - layer) / peak
 }
 
 fn adjusted(color: [f32; 3], adjustment: Adjustment, space: WorkingSpace) -> [f32; 3] {
@@ -1067,4 +1082,23 @@ fn mix(a: f32, b: f32, t: f32) -> f32 {
 fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::screen;
+
+    #[test]
+    fn screen_works_up_to_the_peak_and_is_the_usual_screen_at_one() {
+        // At a peak of 1 it is 1 - (1 - a)(1 - b).
+        assert!((screen(0.5, 0.5, 1.0) - 0.75).abs() < 1e-6);
+        assert_eq!(screen(1.0, 0.3, 1.0), 1.0);
+        // Above SDR white, a brighter value beneath stays brighter, and a
+        // layer of 0 leaves it as it is.
+        let peak = 2.45;
+        assert!((screen(2.0, 0.0, peak) - 2.0).abs() < 1e-6);
+        assert!(screen(2.0, 1.0, peak) > screen(1.5, 1.0, peak));
+        assert!(screen(2.0, 1.0, peak) > 2.0 && screen(2.0, 1.0, peak) <= peak);
+        assert_eq!(screen(peak, 1.0, peak), peak);
+    }
 }

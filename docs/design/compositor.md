@@ -104,6 +104,11 @@ HDR one with that headroom. A host shows every view of the picture, before
 or after any step, up to that peak. Without it, an HDR Tone step alone
 lifts the picture above SDR white from that step on.
 
+Screen blends over the range 0 to the peak, `peak · (1 − (1 − a/peak)(1 −
+b/peak))`, the usual screen when the peak is 1. Clamping both sides to 1
+would flatten everything above SDR white wherever a screened layer is
+drawn: stars screened over an HDR core turned its inner detail to white.
+
 ## HDR stretches
 
 A stretch curve flattens toward 1, so the brightest part of an image, such

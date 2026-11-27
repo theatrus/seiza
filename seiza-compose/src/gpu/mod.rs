@@ -133,6 +133,8 @@ pub struct GpuScene {
     masks: Vec<Vec<GpuSegment>>,
     /// The weights of the picture's luminance, from its working space.
     luma: [f32; 3],
+    /// The brightest value the picture shows, which screen works up to.
+    peak: f32,
     /// Each layered stretch the layers read: its constants as the shader
     /// reads them, and its maps.
     layered: Vec<([f32; 32], Arc<LayeredMaps>)>,
@@ -303,6 +305,7 @@ impl GpuScene {
     pub fn new(picture: &Picture, inputs: &[GpuInput]) -> Self {
         let mut scene = Self {
             luma: picture.space.luma_weights(),
+            peak: picture.peak(),
             ..Self::default()
         };
         let input = |read: &InputRead| inputs.get(read.input).copied();
@@ -1457,7 +1460,7 @@ impl GpuCompositor {
                 0.0,
             ],
             area: area.map(|value| value as f32),
-            luma: [scene.luma[0], scene.luma[1], scene.luma[2], 0.0],
+            luma: [scene.luma[0], scene.luma[1], scene.luma[2], scene.peak],
             layered: [[0.0; 32]; MAX_LAYERED],
         };
         for (slot, (constants, _)) in globals.layered.iter_mut().zip(&scene.layered) {
