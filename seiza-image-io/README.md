@@ -9,6 +9,13 @@ Open and save images by their file extension, the same way across Seiza.
 - `save` writes PNG and TIFF at 16 bits, and FITS and XISF as 32-bit
   floats. FITS files say their rows run top-down (`ROWORDER`), and XISF
   files declare the 0 to 1 range when the samples lie in it.
+- `save_f32_with_profile` saves as `save_f32` does, with an ICC profile in
+  a PNG or TIFF naming the color space its samples are in.
+- With the `avif` feature, `save_hdr_avif` writes linear Rec. 2020 samples,
+  where 1 is SDR reference white (203 cd/m²), as a 10-bit HDR AVIF: the PQ
+  transfer, Rec. 2020 primaries and matrix, full range, full-resolution
+  chroma, and the brightest and mean light recorded as content light
+  levels. It encodes through rav1e, built without assembly.
 - `open_astronomy` reads a FITS or XISF file as Seiza's `FitsImage`, for
   callers that need its headers or stored sample type.
 - `read_header` reads a FITS or XISF file's header without its pixels: the

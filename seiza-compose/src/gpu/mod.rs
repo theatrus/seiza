@@ -115,7 +115,7 @@ impl From<&Segment> for GpuSegment {
 pub struct GpuScene {
     layers: Vec<[f32; 20]>,
     computed: Vec<([f32; 16], f32)>,
-    finish: Vec<([f32; 16], Option<[i64; 2]>)>,
+    finish: Vec<([f32; 20], Option<[i64; 2]>)>,
     /// The Finish steps whose neighborhoods the local passes measure, in
     /// order: each one's layer in the local textures is its place here.
     local: Vec<usize>,
@@ -352,7 +352,7 @@ impl GpuScene {
                 ));
                 continue;
             }
-            let mut slot = [0.0_f32; 16];
+            let mut slot = [0.0_f32; 20];
             slot[2] = mask_index(step.mask);
             slot[3] = step.opacity.clamp(0.0, 1.0);
             let first_row = (MAX_LAYERS + 3 * scene.finish_rows.len()) as f32;
@@ -407,6 +407,7 @@ impl GpuScene {
                     slot[12] = held.vibrance;
                     slot[13] = held.saturation;
                     slot[15] = tone.detail_edge();
+                    slot[16] = tone.peak();
                     // Up to MAX_LOCAL_TONES steps a draw reads
                     // neighborhoods for, each with its own layer, counted
                     // from 1; another is drawn with each pixel alone.
@@ -456,7 +457,7 @@ struct Globals {
     screen: [f32; 4],
     counts: [f32; 4],
     layers: [[f32; 20]; MAX_LAYERS],
-    finish: [[f32; 16]; MAX_FINISH_STEPS],
+    finish: [[f32; 20]; MAX_FINISH_STEPS],
     healed: [[f32; 4]; MAX_HEALED_LAYERS],
     heals: [[f32; 8]; MAX_HEALS],
     computed: [[f32; 16]; MAX_COMPUTED_MASKS],
@@ -1255,7 +1256,7 @@ impl GpuCompositor {
                 0.0,
             ],
             layers: [[0.0; 20]; MAX_LAYERS],
-            finish: [[0.0; 16]; MAX_FINISH_STEPS],
+            finish: [[0.0; 20]; MAX_FINISH_STEPS],
             healed: [[-1.0, -1.0, 0.0, 0.0]; MAX_HEALED_LAYERS],
             heals: [[0.0; 8]; MAX_HEALS],
             computed: [[0.0; 16]; MAX_COMPUTED_MASKS],
@@ -1290,6 +1291,12 @@ impl GpuCompositor {
         }
         for (slot, (step, offset)) in globals.finish.iter_mut().zip(&scene.finish) {
             *slot = *step;
+            // Zoomed out, a detail window holds pixels the canvas averaged,
+            // whose noise varies less by the square of the zoom: Texture's
+            // edge follows, so it treats the same noise as noise.
+            if slot[0] == 5.0 && view.zoom < 1.0 {
+                slot[15] *= (view.zoom * view.zoom) as f32;
+            }
             if let Some(offset) = offset {
                 slot[4..6].copy_from_slice(&pixels(*offset));
             }

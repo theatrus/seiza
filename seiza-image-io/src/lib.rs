@@ -26,8 +26,13 @@
 //! them. [`save`] writes them top-down with a `ROWORDER` card saying so,
 //! which PixInsight and Siril follow.
 
+#[cfg(feature = "avif")]
+mod hdr_avif;
 mod master;
 pub mod raster;
+
+#[cfg(feature = "avif")]
+pub use hdr_avif::{HdrAvifOptions, SDR_WHITE_NITS, pq_encode, save_hdr_avif};
 
 pub use master::{MasterInfo, Recorded, master_info, read_master_info};
 
@@ -1063,6 +1068,14 @@ fn save_raster_with_profile(
                 .map_err(unsupported)?;
             image.write_with_encoder(encoder)
         }
+    })
+}
+
+/// Writes `bytes` to `path` atomically.
+#[cfg_attr(not(feature = "avif"), allow(dead_code))]
+fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<(), Error> {
+    write_raster_atomic(path, |writer| {
+        std::io::Write::write_all(writer, bytes).map_err(image::ImageError::IoError)
     })
 }
 

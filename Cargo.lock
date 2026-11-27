@@ -3511,9 +3511,11 @@ dependencies = [
 name = "seiza-image-io"
 version = "0.14.0"
 dependencies = [
+ "avif-serialize",
  "chrono",
  "image",
  "kamadak-exif",
+ "rav1e",
  "seiza-core",
  "seiza-fits",
  "seiza-xisf",

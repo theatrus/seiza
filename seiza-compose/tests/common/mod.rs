@@ -97,6 +97,9 @@ pub fn everything() -> Picture {
             clarity: 0.4,
             dehaze: 0.3,
             vibrance: 0.3,
+            // A measured noise, so the GPU's Texture edge is the measured
+            // one, not the fixed floor.
+            noise: 0.02,
             ..Tone::default()
         }),
         opacity: 1.0,

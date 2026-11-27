@@ -174,3 +174,33 @@ fn two_local_tone_steps_match_the_cpu() {
         "mean {mean:e}, p99 {p99:e}, max {largest:e}"
     );
 }
+
+/// An HDR Tone step's highlights above SDR white are drawn on the GPU as
+/// the CPU renders them.
+#[test]
+fn an_hdr_tone_step_matches_the_cpu() {
+    use seiza_compose::picture::FinishKind;
+    let inputs = inputs();
+    let images: Vec<&LinearImage> = inputs.iter().collect();
+    let mut picture = everything();
+    picture.computed[0].smoothing = 0.0;
+    for step in &mut picture.finish {
+        if let FinishKind::Tone(tone) = &mut step.kind {
+            tone.hdr = true;
+            tone.headroom = 2.0;
+            tone.exposure = 1.5;
+        }
+    }
+    let Some((cpu, gpu)) = both(&picture, &images) else {
+        eprintln!("no GPU: the GPU compositor was not checked");
+        return;
+    };
+    let above = cpu.iter().filter(|value| **value > 1.0).count();
+    assert!(above > 100, "the picture reaches above SDR white: {above}");
+    let (mean, p99, largest) = gap(&cpu, &gpu);
+    eprintln!("hdr: mean {mean:e}, p99 {p99:e}, max {largest:e}");
+    assert!(
+        mean < 2e-3 && p99 < 1e-2,
+        "mean {mean:e}, p99 {p99:e}, max {largest:e}"
+    );
+}

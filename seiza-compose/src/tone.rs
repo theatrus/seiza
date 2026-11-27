@@ -47,7 +47,16 @@ pub struct Tone {
     /// is what Texture leaves alone. Not a control; a host measures it. 0
     /// is not measured.
     pub noise: f32,
+    /// Whether the picture is HDR: its brightest areas rise above SDR
+    /// white, 1, up to [`Self::peak`], instead of clipping at it.
+    pub hdr: bool,
+    /// How far above SDR white an HDR picture reaches, in stops, from 0 to
+    /// [`MAX_HEADROOM`]. Not used for an SDR picture.
+    pub headroom: f32,
 }
+
+/// The most stops of HDR headroom a picture may have: 16 times SDR white.
+pub const MAX_HEADROOM: f32 = 4.0;
 
 /// Each control: its field name, its label, and its range, in Camera Raw's
 /// order. [`Tone::held`] keeps a value within its range.
@@ -145,13 +154,19 @@ pub fn luminance_noise(rgb: &[f32], width: usize, height: usize) -> f32 {
     if width == 0 || height == 0 || rgb.len() < width * height * 3 {
         return 0.0;
     }
-    let around = neighborhoods(&rgb[..width * height * 3], width, height);
-    let mut deviations: Vec<f32> = around
+    let luminance: Vec<f32> = rgb[..width * height * 3]
+        .as_chunks::<3>()
+        .0
         .iter()
-        .map(|neighborhood| {
-            let [mean, squared] = neighborhood.detail;
-            (squared - mean * mean).max(0.0).sqrt()
-        })
+        .map(|pixel| sample(*pixel)[0])
+        .collect();
+    let squared: Vec<f32> = luminance.iter().map(|value| value * value).collect();
+    let means = box_mean(&luminance, width, height, DETAIL_RADIUS);
+    let squares = box_mean(&squared, width, height, DETAIL_RADIUS);
+    let mut deviations: Vec<f32> = means
+        .iter()
+        .zip(&squares)
+        .map(|(mean, squared)| (squared - mean * mean).max(0.0).sqrt())
         .collect();
     let middle = deviations.len() / 2;
     let (_, median, _) = deviations.select_nth_unstable_by(middle, f32::total_cmp);
@@ -258,7 +273,20 @@ impl Tone {
             } else {
                 0.0
             },
+            hdr: self.hdr,
+            headroom: if self.headroom.is_finite() {
+                self.headroom.clamp(0.0, MAX_HEADROOM)
+            } else {
+                0.0
+            },
         }
+    }
+
+    /// The brightest value the step gives, as a multiple of SDR white: 1
+    /// for an SDR picture, 2 to the headroom for an HDR one.
+    pub fn peak(&self) -> f32 {
+        let tone = self.held();
+        if tone.hdr { tone.headroom.exp2() } else { 1.0 }
     }
 
     /// The variance of fine detail Texture treats as half noise: the
@@ -358,7 +386,12 @@ impl Tone {
         // more of it than noise.
         value += tone.clarity * CLARITY_GAIN * (pixel - local) * 4.0 * toned * (1.0 - toned);
         value += tone.texture * TEXTURE_GAIN * detailed * (pixel - range(fine));
-        let mapped = contrast_curve(value.clamp(0.0, 1.0), tone.contrast);
+        let peak = tone.peak();
+        let mapped = hdr_shoulder(
+            contrast_curve(value.clamp(0.0, 1.0), tone.contrast),
+            value,
+            peak,
+        );
 
         let luminance = luma(color);
         let scaled = if luminance <= 1.0e-8 {
@@ -366,10 +399,10 @@ impl Tone {
         } else {
             let mut scale = mapped / luminance;
             let maximum = color[0].max(color[1]).max(color[2]).max(0.0);
-            if maximum * scale > 1.0 {
-                scale = 1.0 / maximum;
+            if maximum * scale > peak {
+                scale = peak / maximum;
             }
-            color.map(|channel| (channel * scale).clamp(0.0, 1.0))
+            color.map(|channel| (channel * scale).clamp(0.0, peak))
         };
         colorfulness(scaled, tone.vibrance, tone.saturation)
     }
@@ -379,6 +412,18 @@ impl Tone {
         let gray = x.max(0.0);
         luma(self.apply([gray; 3]))
     }
+}
+
+/// The luminance above SDR white in an HDR picture: `sdr`, the curve's
+/// value within 0 to 1, plus a shoulder for the part of `value` above 1
+/// that rises with slope 1 and flattens toward `peak`. With a peak of 1,
+/// `sdr` alone.
+fn hdr_shoulder(sdr: f32, value: f32, peak: f32) -> f32 {
+    let room = peak - 1.0;
+    if room <= 0.0 || value <= 1.0 {
+        return sdr;
+    }
+    sdr + room * (1.0 - (-(value - 1.0) / room).exp())
 }
 
 /// Vibrance and saturation, each from -1 to 1. Vibrance changes a muted
@@ -648,6 +693,40 @@ mod tests {
             change(&texture(noise), 205..235) > 0.03,
             "the ripple is still raised"
         );
+    }
+
+    #[test]
+    fn hdr_lifts_highlights_toward_the_peak_and_leaves_the_rest() {
+        let sdr = Tone {
+            exposure: 1.5,
+            whites: 0.5,
+            ..Tone::default()
+        };
+        let hdr = Tone {
+            hdr: true,
+            headroom: 2.0,
+            ..sdr
+        };
+        assert_eq!(sdr.peak(), 1.0);
+        assert_eq!(hdr.peak(), 4.0);
+        // Below SDR white the two agree.
+        for x in [0.0_f32, 0.02, 0.05, 0.1] {
+            assert!((sdr.curve(x) - hdr.curve(x)).abs() < 1e-6, "{x}");
+        }
+        // Above it SDR clips at 1; HDR rises, never past its peak, and
+        // keeps rising with the input.
+        let mut last = 1.0;
+        for x in [0.4_f32, 0.6, 0.8, 1.0, 2.0] {
+            assert!(sdr.curve(x) <= 1.0, "{x}");
+            let lifted = hdr.curve(x);
+            assert!(lifted > last && lifted < 4.0, "{x}: {lifted}");
+            last = lifted;
+        }
+        // A colored highlight keeps its color, within the peak.
+        let color = hdr.apply([0.9, 0.5, 0.2]);
+        assert!(color.iter().all(|channel| *channel <= 4.0));
+        assert!(color[0] > color[1] && color[1] > color[2], "{color:?}");
+        assert!(luma(color) > 1.0, "{color:?}");
     }
 
     #[test]

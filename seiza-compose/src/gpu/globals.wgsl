@@ -42,6 +42,9 @@ struct FinishStep {
     // w: the variance of
     // fine detail Texture treats as half noise.
     local: vec4f,
+    // For tone and color, x: the brightest value it gives, as a multiple
+    // of SDR white: 1 for SDR.
+    range: vec4f,
 }
 
 // A heal of one layer.

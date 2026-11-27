@@ -156,17 +156,23 @@ fn tone(start: vec3f, measured: f32, local: vec4f, detail: vec2f, step: FinishSt
     var value = pixel + (moved - toned);
     value += clarity * CLARITY_GAIN * (pixel - around) * 4.0 * toned * (1.0 - toned);
     value += texture * TEXTURE_GAIN * detailed * (pixel - small);
-    let mapped = contrast_curve(clamp(value, 0.0, 1.0), contrast);
+    let peak = step.range.x;
+    var mapped = contrast_curve(clamp(value, 0.0, 1.0), contrast);
+    // An HDR picture's shoulder above SDR white, as `hdr_shoulder`.
+    let room = peak - 1.0;
+    if room > 0.0 && value > 1.0 {
+        mapped += room * (1.0 - exp(-(value - 1.0) / room));
+    }
 
     let luminance = dot(color, LUMA);
     var scaled = vec3f(mapped);
     if luminance > 1.0e-8 {
         var factor = mapped / luminance;
         let maximum = max(max(color.r, color.g), max(color.b, 0.0));
-        if maximum * factor > 1.0 {
-            factor = 1.0 / maximum;
+        if maximum * factor > peak {
+            factor = peak / maximum;
         }
-        scaled = clamp(color * factor, vec3f(0.0), vec3f(1.0));
+        scaled = clamp(color * factor, vec3f(0.0), vec3f(peak));
     }
     return colorfulness(scaled, step.local.x, step.local.y);
 }
