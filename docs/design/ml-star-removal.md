@@ -272,6 +272,19 @@ its sky taken off, through asinh, so a bright core and the sky's noise both
 count; the loss is a Charbonnier penalty over the valid pixels, ten times
 over where stars were.
 
+Either design may also give the halos and the spikes (`--layers`): two
+planes more from the same network, each the light the bank keeps apart
+for it, read about zero through the same asinh and penalised alike beside
+the starless image. The input is then four layers that add back to it: the
+starless image, the halos and rings, the spikes, and the stars' cores and
+wings, which is what is left and carries the stars' photon noise. Of the
+halos a chosen share goes back into the starless image and the rest with
+the stars (`starless_model.kept`), so halo reduction is a setting from 0 to
+1, and the spikes are their own image. A spike's light is signed: the
+vanes take from the core the light they throw out along the spikes, so the
+spikes layer holds a small dip at each core, and a star without its spikes
+has the core of the same telescope with no vanes.
+
 Later, a U-Net as the other two (width 96 to 128, five levels), with the PSF
 stamp encoder the sharpening model has, so it knows the stars' shape at each
 tile. Big stars' halos and
@@ -381,6 +394,18 @@ Medians over windows, in noise units:
 - All four runs' validation losses flatten by 7,750 steps, as the one-cycle
   learning rate falls away; whether more steps or a wider network buy more
   is still to be seen.
+
+### Third runs (under way, 2026-11-27)
+
+X5 (`fit`) and X6 (`image`) are X3 and X4 with the halo and spike layers,
+on the same banks, width and steps, so the starless image can be set
+beside theirs like for like: whether being told where the halos and spikes
+are helps the network take them out, above all the fit-first design, which
+left the spikes past the trusted ring. Beside the starless measures, each
+layer is measured where its truth tops the noise: the error's rms, how much
+of the truth it holds (the scale of the truth that best meets it, 1 all, 0
+none), and the error where the truth holds under a tenth of the noise,
+light put in the layer that is not its own.
 
 ## Order of work
 

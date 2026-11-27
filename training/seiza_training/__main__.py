@@ -234,6 +234,8 @@ def main(argv: list[str] | None = None) -> int:
     trains.add_argument("--tile", type=int, default=256)
     trains.add_argument("--width", type=int, default=32)
     trains.add_argument("--levels", type=int, default=5)
+    trains.add_argument("--layers", action="store_true", help="also give the stars' halos and their "
+                        "diffraction spikes as layers of their own")
     trains.add_argument("--steps", type=int, default=10_000)
     trains.add_argument("--batch", type=int, default=8)
     trains.add_argument("--learning-rate", type=float, default=3e-4)
@@ -950,7 +952,7 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
         from . import starless_model
 
         settings = starless_model.Settings(way=arguments.way, tile=arguments.tile, width=arguments.width,
-                                           levels=arguments.levels)
+                                           levels=arguments.levels, layers=arguments.layers)
         record = starless_model.train(store, name=arguments.name, bank=arguments.bank,
                                       validation_bank=arguments.validation_bank, settings=settings,
                                       steps=arguments.steps, batch=arguments.batch,

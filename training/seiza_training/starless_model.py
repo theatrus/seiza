@@ -25,6 +25,15 @@ its truth, over the window's valid pixels, weighted `STAR_WEIGHT` times
 where the image and its truth differ by more than the noise (where stars
 were), where the healing is learned. Validation is the same loss over fixed
 batches of a validation bank, with the baseline's alone beside it.
+
+A run with `layers` gives two planes more: the stars' halos and rings, and
+their diffraction spikes, each the light the bank keeps apart for it, read
+about zero through the same compression and penalised alike beside the
+starless image (`LAYER_WEIGHT`). The input is then four layers that add back
+to it (`layers`): the starless image, the halos, the spikes, and the stars'
+cores and wings, which is what is left and carries their photon noise. Of
+the halos, a chosen share goes back into the starless image and the rest
+with the stars (`kept`), so halo reduction is a setting.
 """
 
 from __future__ import annotations
@@ -56,17 +65,30 @@ ASINH = 5.0
 STAR_WEIGHT = 10.0
 CHARBONNIER = 0.01
 VALIDATION_STREAM = 1 << 20
+# The planes of the stars' light a run with `layers` gives beside the
+# starless image, as a starless bank keeps them, and how much each one's
+# penalty weighs against the starless image's.
+LAYERS = ("halos", "spikes")
+LAYER_WEIGHT = 1.0
 
 
 @dataclass(frozen=True)
 class Settings:
     """What a run reads and how: `way` (`READS`), the tile's side, the
-    network's width and levels."""
+    network's width and levels, and whether it gives the halos and spikes
+    as layers of their own (`LAYERS`)."""
 
     way: str = "fit"
     tile: int = 256
     width: int = 32
     levels: int = 5
+    layers: bool = False
+
+    @property
+    def outputs(self) -> int:
+        """The planes the network gives: the starless image's residual, and
+        each of `LAYERS` with `layers`."""
+        return 1 + (len(LAYERS) if self.layers else 0)
 
     def __post_init__(self) -> None:
         if self.way not in READS:
@@ -115,7 +137,8 @@ def network_reads(planes: dict[str, np.ndarray], way: str) -> tuple[list[np.ndar
 
 def example(bank: Bank, index: int, settings: Settings, rng: np.random.Generator) -> dict[str, np.ndarray]:
     """A tile of window `index`: the network's planes, the baseline and the
-    truth compressed, and the loss's weights; flipped and turned at random."""
+    truth compressed, the loss's weights, and with `layers` each of `LAYERS`
+    compressed about zero; flipped and turned at random."""
     side = bank.planes["input"].shape[1]
     tile = settings.tile
     top, left = (int(rng.integers(0, side - tile + 1)) for _ in range(2))
@@ -127,13 +150,18 @@ def example(bank: Bank, index: int, settings: Settings, rng: np.random.Generator
     truth = compressed(planes["starless"], level, scale)
     weight = valid.astype(np.float32) * (1.0 + (STAR_WEIGHT - 1.0)
                                          * (np.abs(planes["input"] - planes["starless"]) > planes["noise"]))
-    stacked = np.stack(read + [baseline, truth, weight])
+    extras = {"baseline": baseline, "truth": truth, "weight": weight}
+    if settings.layers:
+        extras.update({name: compressed(planes[name], 0.0, scale) for name in LAYERS})
+    stacked = np.stack(read + list(extras.values()))
     turns = int(rng.integers(0, 4))
     stacked = np.rot90(stacked, turns, axes=(1, 2))
     if rng.random() < 0.5:
         stacked = stacked[:, :, ::-1]
     stacked = np.ascontiguousarray(stacked, dtype=np.float32)
-    return {"planes": stacked[:-3], "baseline": stacked[-3], "truth": stacked[-2], "weight": stacked[-1]}
+    found = {"planes": stacked[:len(read)]}
+    found.update({key: stacked[len(read) + offset] for offset, key in enumerate(extras)})
+    return found
 
 
 def batch_from(bank: Bank, indices: np.ndarray, settings: Settings, rng: np.random.Generator) -> dict[str, torch.Tensor]:
@@ -141,16 +169,29 @@ def batch_from(bank: Bank, indices: np.ndarray, settings: Settings, rng: np.rand
     return {key: torch.from_numpy(np.stack([found[key] for found in examples])) for key in examples[0]}
 
 
-def loss_of(model: torch.nn.Module, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
-    """The run's loss on `batch`, and its baseline's (the residual 0)."""
-    residual = model(batch["planes"])[:, 0]
+def loss_of(model: torch.nn.Module, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor,
+                                                                              dict[str, torch.Tensor]]:
+    """The run's loss on `batch`, its baseline's (the residual 0, and no
+    halos or spikes), and their parts, detached: the starless image's
+    penalty and, with layers, each of `LAYERS`' (before `LAYER_WEIGHT`),
+    each beside its baseline's (`<part>_baseline`)."""
+    out = model(batch["planes"])
     weight = batch["weight"]
     total = weight.sum().clamp_min(1.0)
 
-    def penalty(estimate: torch.Tensor) -> torch.Tensor:
-        return (weight * torch.sqrt((estimate - batch["truth"]) ** 2 + CHARBONNIER**2)).sum() / total
+    def penalty(estimate: torch.Tensor, truth: torch.Tensor) -> torch.Tensor:
+        return (weight * torch.sqrt((estimate - truth) ** 2 + CHARBONNIER**2)).sum() / total
 
-    return penalty(batch["baseline"] + residual), penalty(batch["baseline"]).detach()
+    run = penalty(batch["baseline"] + out[:, 0], batch["truth"])
+    base = penalty(batch["baseline"], batch["truth"]).detach()
+    parts = {"starless": run.detach(), "starless_baseline": base}
+    for channel, name in enumerate(LAYERS[:out.shape[1] - 1], start=1):
+        part = penalty(out[:, channel], batch[name])
+        part_base = penalty(torch.zeros_like(batch[name]), batch[name]).detach()
+        parts[name], parts[f"{name}_baseline"] = part.detach(), part_base
+        run = run + LAYER_WEIGHT * part
+        base = base + LAYER_WEIGHT * part_base
+    return run, base, parts
 
 
 def device() -> torch.device:
@@ -176,7 +217,7 @@ def train(store: Store, *, name: str, bank: Path, validation_bank: Path | None, 
     torch.manual_seed(seed)
     train_bank = Bank(bank)
     held = Bank(validation_bank) if validation_bank else None
-    model = ResidualUNet(inputs=len(READS[settings.way]), outputs=1, width=settings.width,
+    model = ResidualUNet(inputs=len(READS[settings.way]), outputs=settings.outputs, width=settings.width,
                          levels=settings.levels).to(where)
     directory = run_directory(store, name)
     directory.mkdir(parents=True, exist_ok=True)
@@ -189,6 +230,7 @@ def train(store: Store, *, name: str, bank: Path, validation_bank: Path | None, 
               "validation_bank": str(validation_bank) if validation_bank else None, "steps": steps, "batch": batch,
               "learning_rate": learning_rate, "seed": seed, "init_from": init_from, "reads": READS[settings.way],
               "asinh": ASINH, "star_weight": STAR_WEIGHT, "windows": train_bank.count,
+              "layers": list(LAYERS) if settings.layers else [], "layer_weight": LAYER_WEIGHT,
               "parameters": sum(p.numel() for p in model.parameters())}
     (directory / "config.json").write_text(json.dumps(config, indent=2))
     checks = []
@@ -198,39 +240,45 @@ def train(store: Store, *, name: str, bank: Path, validation_bank: Path | None, 
             checks.append(batch_from(held, rng.integers(0, held.count, batch), settings, rng))
 
     def validation() -> dict[str, float]:
-        totals = [0.0, 0.0]
+        totals: dict[str, float] = {}
         with torch.no_grad():
             for found in checks:
                 moved = {key: value.to(where) for key, value in found.items()}
-                run_loss, base_loss = loss_of(model, moved)
-                totals[0] += float(run_loss) / len(checks)
-                totals[1] += float(base_loss) / len(checks)
-        return {"validation": totals[0], "validation_baseline": totals[1]}
+                run_loss, base_loss, parts = loss_of(model, moved)
+                for key, value in [("validation", float(run_loss)), ("validation_baseline", float(base_loss))] \
+                        + [(f"validation_{part}", float(value)) for part, value in parts.items()]:
+                    totals[key] = totals.get(key, 0.0) + value / len(checks)
+        return totals
 
-    history, running, began = [], [0.0, 0.0], time.monotonic()
+    history, began = [], time.monotonic()
+    running: dict[str, float] = {}
     for step in range(1, steps + 1):
         rng = np.random.default_rng([seed, step])
         found = batch_from(train_bank, rng.integers(0, train_bank.count, batch), settings, rng)
         moved = {key: value.to(where) for key, value in found.items()}
-        run_loss, base_loss = loss_of(model, moved)
+        run_loss, base_loss, parts = loss_of(model, moved)
         optimizer.zero_grad(set_to_none=True)
         run_loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         schedule.step()
-        running[0] += float(run_loss)
-        running[1] += float(base_loss)
+        for key, value in [("loss", float(run_loss)), ("baseline", float(base_loss))] \
+                + [(f"loss_{part}", float(value)) for part, value in parts.items()]:
+            running[key] = running.get(key, 0.0) + value
         if step % log_every == 0 or step == steps:
             window = log_every if step % log_every == 0 else step % log_every
-            entry = {"step": step, "loss": running[0] / window, "baseline": running[1] / window,
-                     "seconds": round(time.monotonic() - began, 1)}
+            entry: dict[str, float] = {"step": step}
+            entry.update({key: value / window for key, value in running.items()})
+            entry["seconds"] = round(time.monotonic() - began, 1)
             if checks:
                 entry.update(validation())
             history.append(entry)
+            shown = "".join(f", {part} {entry[f'validation_{part}']:.4f} ({entry[f'validation_{part}_baseline']:.4f})"
+                            for part in ("starless", *LAYERS)) if settings.layers and checks else ""
             print(f"starless {name}: step {step} loss {entry['loss']:.4f} (baseline {entry['baseline']:.4f})"
                   + (f", validation {entry['validation']:.4f} (baseline {entry['validation_baseline']:.4f})"
-                     if checks else "") + f" ({entry['seconds']:.0f} s)", flush=True)
-            running = [0.0, 0.0]
+                     if checks else "") + shown + f" ({entry['seconds']:.0f} s)", flush=True)
+            running = {}
         if step % checkpoint_every == 0 or step == steps:
             torch.save({key: value.detach().cpu() for key, value in model.state_dict().items()},
                        directory / "weights.tmp")
@@ -245,12 +293,38 @@ def starless(model: torch.nn.Module, planes: dict[str, np.ndarray], settings: Se
     """A window's starless image from a trained `model`, its planes as a
     bank keeps them, read as one tile (its side a multiple of the network's
     `multiple`)."""
+    return layers(model, planes, settings, where)["starless"]
+
+
+def layers(model: torch.nn.Module, planes: dict[str, np.ndarray], settings: Settings,
+           where: torch.device | None = None) -> dict[str, np.ndarray]:
+    """A window's four layers from a trained `model`, which add back to its
+    input: the starless image, the halos and rings, the diffraction spikes
+    (both none from a run without `layers`), and the stars' cores and wings
+    (`stars`, what is left, with the stars' photon noise)."""
     where = where or next(model.parameters()).device
     read, level, scale = network_reads(planes, settings.way)
     baseline = compressed(planes[BASELINE[settings.way]], level, scale)
     with torch.no_grad():
-        residual = model(torch.from_numpy(np.stack(read)[None].astype(np.float32)).to(where))[0, 0].cpu().numpy()
-    return released(baseline + residual, level, scale)
+        out = model(torch.from_numpy(np.stack(read)[None].astype(np.float32)).to(where))[0].cpu().numpy()
+    found = {"starless": released(baseline + out[0], level, scale)}
+    for channel, name in enumerate(LAYERS, start=1):
+        found[name] = (released(out[channel], 0.0, scale) if channel < out.shape[0]
+                       else np.zeros_like(found["starless"]))
+    found["stars"] = (planes["input"] - found["starless"] - sum(found[name] for name in LAYERS)).astype(np.float32)
+    return found
+
+
+def kept(found: dict[str, np.ndarray], halo_kept: float) -> dict[str, np.ndarray]:
+    """`layers`' four as a user takes them, with `halo_kept` (0 to 1) of
+    the halos left in the starless image and the rest with the stars: the
+    starless image, the stars (cores, wings and the halos' other share) and
+    the spikes, which still add back to the input."""
+    if not 0.0 <= halo_kept <= 1.0:
+        raise ValueError(f"the share of the halos kept is between 0 and 1, not {halo_kept}")
+    return {"starless": (found["starless"] + halo_kept * found["halos"]).astype(np.float32),
+            "stars": (found["stars"] + (1.0 - halo_kept) * found["halos"]).astype(np.float32),
+            "spikes": found["spikes"]}
 
 
 def load_run(store: Store, name: str, where: torch.device | None = None) -> tuple[ResidualUNet, Settings]:
@@ -258,7 +332,8 @@ def load_run(store: Store, name: str, where: torch.device | None = None) -> tupl
     directory = run_directory(store, name)
     config = json.loads((directory / "config.json").read_text())
     settings = Settings(**config["settings"])
-    model = ResidualUNet(inputs=len(READS[settings.way]), outputs=1, width=settings.width, levels=settings.levels)
+    model = ResidualUNet(inputs=len(READS[settings.way]), outputs=settings.outputs, width=settings.width,
+                         levels=settings.levels)
     model.load_state_dict(torch.load(directory / "weights.pt", map_location="cpu"))
     return model.to(where or device()).eval(), settings
 
@@ -414,6 +489,34 @@ def measures(estimate: np.ndarray, planes: dict[str, np.ndarray]) -> dict[str, f
             "stars_stretched": stretched(stars), "sky_stretched": stretched(sky), "noise_kept": kept}
 
 
+def layer_measures(found: dict[str, np.ndarray], planes: dict[str, np.ndarray]) -> dict[str, float | None]:
+    """How a run's halos and spikes (`layers`) meet the bank's, in units of
+    the noise map's median, over the valid pixels: for each, the error's
+    root mean square where the truth's light tops the noise; how much of
+    the truth the layer holds there, as the scale of the truth that best
+    meets it (1 all, 0 none); and the error's root mean square where the
+    truth holds under a tenth of the noise (light put in the layer that is
+    not its own: the sky, the nebula or the stars'). A spike's light is
+    signed, as the vanes take from the core the light they throw out along
+    the spikes; the dip at the core is not what shows, and is read by
+    neither."""
+    scale = float(np.median(planes["noise"])) or 1.0
+    valid = planes["valid"] > 0
+    out: dict[str, float | None] = {}
+    for name in LAYERS:
+        truth = planes[name].astype(np.float64)
+        estimate = found[name].astype(np.float64)
+        inside = valid & (truth > planes["noise"])
+        outside = valid & (np.abs(truth) < 0.1 * planes["noise"])
+        power = float((truth[inside] ** 2).sum())
+        out[f"{name}_rms"] = float(np.sqrt(np.mean(((estimate - truth)[inside] / scale) ** 2))) \
+            if inside.any() else None
+        out[f"{name}_found"] = float((estimate[inside] * truth[inside]).sum()) / power if inside.any() else None
+        out[f"{name}_stray"] = float(np.sqrt(np.mean(((estimate - truth)[outside] / scale) ** 2))) \
+            if outside.any() else None
+    return out
+
+
 def mean_of(found: list[dict[str, float | None]]) -> dict[str, dict[str, float | None]]:
     """Each measure's median and mean over the windows that have it: the
     median, as a few windows' bright cores can carry the mean."""
@@ -432,7 +535,10 @@ def evaluate(store: Store, name: str, bank: Path, *, count: int = 64, sheet_rows
     it (`filled`), over all and by telescope kind; and a sheet of the first
     `sheet_rows` of them: the input, the baseline, the network, the network
     filled, the truth and the filled output's stars layer, stretched alike.
-    Both are kept under the run's `evaluation/`, named for the bank."""
+    A run with `layers` is measured on its halos and spikes too
+    (`layer_measures`), and its sheet shows them beside the bank's, its
+    stars layer then the cores and wings alone. Both are kept under the
+    run's `evaluation/`, named for the bank."""
     model, settings = load_run(store, name, where)
     held = Bank(bank)
     indices = np.unique(np.linspace(0, held.count - 1, min(count, held.count)).round().astype(int))
@@ -440,17 +546,24 @@ def evaluate(store: Store, name: str, bank: Path, *, count: int = 64, sheet_rows
     rows = []
     for index in indices:
         planes = {plane: np.asarray(held.planes[plane][index], dtype=np.float32) for plane in held.planes}
-        estimate = starless(model, planes, settings)
+        found = layers(model, planes, settings)
+        estimate = found["starless"]
         baseline = planes[BASELINE[settings.way]]
         fill, stars = filled(planes["input"], estimate, seed=int(index))
+        stars = stars - found["halos"] - found["spikes"]
+        measured = measures(estimate, planes)
+        if settings.layers:
+            measured.update(layer_measures(found, planes))
         kind = held.records[index].get("telescope_kind", "all")
         for group in ("all", kind):
-            results.setdefault(f"{group}/run", []).append(measures(estimate, planes))
+            results.setdefault(f"{group}/run", []).append(measured)
             results.setdefault(f"{group}/filled", []).append(measures(fill, planes))
             results.setdefault(f"{group}/baseline", []).append(measures(baseline, planes))
         if len(rows) < sheet_rows:
-            rows.append((held.records[index], [planes["input"], baseline, estimate, fill, planes["starless"],
-                                                stars]))
+            tiles = [planes["input"], baseline, estimate, fill, planes["starless"], stars]
+            if settings.layers:
+                tiles += [found["halos"], planes["halos"], found["spikes"], planes["spikes"]]
+            rows.append((held.records[index], tiles))
     summary = {"run": name, "bank": str(bank), "windows": int(len(indices)),
                "measures": {key: mean_of(found) for key, found in sorted(results.items())}}
     directory = run_directory(store, name) / "evaluation"
@@ -462,23 +575,33 @@ def evaluate(store: Store, name: str, bank: Path, *, count: int = 64, sheet_rows
     return summary
 
 
+# A sheet's columns: the starless images, then the layers of the stars'
+# light, which a layered run adds.
+SHEET_IMAGES = ("input", "baseline", "network", "network, noise filled", "truth")
+SHEET_LAYERS = ("stars", "halos", "halos, truth", "spikes", "spikes, truth")
+
+
 def write_sheet(path: Path, rows: list[tuple[dict[str, Any], list[np.ndarray]]], way: str) -> None:
     """A starless sheet: a row a window (input, baseline, network, network
-    filled, truth, stars layer), each stretched on its truth's levels, the
-    stars layer from the truth's floor."""
+    filled, truth, stars layer, and a layered run's halos and spikes beside
+    the bank's), each stretched on its truth's levels, the layers of the
+    stars' light from the truth's floor."""
     from PIL import Image, ImageDraw
 
-    titles = ["input", "fit's starless" if way == "fit" else "input (baseline)", "network", "network, noise filled",
-              "truth", "stars"]
+    images = len(SHEET_IMAGES)
+    titles = list(SHEET_IMAGES + SHEET_LAYERS)[:len(rows[0][1])]
+    titles[1] = "fit's starless" if way == "fit" else "input (baseline)"
+    if len(titles) > images + 1:
+        titles[images] = "stars, cores and wings"
     strips = []
     for record, tiles in rows:
-        low, high = np.percentile(np.nan_to_num(tiles[-2]), (1.0, 99.5))
+        low, high = np.percentile(np.nan_to_num(tiles[images - 1]), (1.0, 99.5))
 
         def look(plane: np.ndarray, low: float = low, high: float = high) -> np.ndarray:
             t = np.clip((np.nan_to_num(plane) - low) / max(high - low, 1e-12), 0.0, 1.0)
             return (np.arcsinh(t * 30.0) / np.arcsinh(30.0) * 255.0).astype(np.uint8)
 
-        shown = [look(tile) for tile in tiles[:-1]] + [look(tiles[-1] + low)]
+        shown = [look(tile) for tile in tiles[:images]] + [look(tile + low) for tile in tiles[images:]]
         gap = np.full((shown[0].shape[0], 6), 40, np.uint8)
         strip = np.concatenate([part for tile in shown for part in (tile, gap)][:-1], axis=1)
         strips.append((f"{record.get('product', '')} draw {record.get('draw', '')}: {record.get('telescope', '')}",

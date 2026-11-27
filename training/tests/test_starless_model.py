@@ -63,7 +63,7 @@ def test_a_run_starts_as_its_baseline(small_bank, way, start):
     model = ResidualUNet(inputs=len(sm.READS[way]), outputs=1, width=8, levels=3)
     batch = sm.batch_from(found, np.array([0, 1]), settings, np.random.default_rng(2))
     assert batch["planes"].shape == (2, len(sm.READS[way]), 64, 64)
-    run_loss, base_loss = sm.loss_of(model, batch)
+    run_loss, base_loss, _ = sm.loss_of(model, batch)
     assert float(run_loss) == pytest.approx(float(base_loss))
     planes = {name: np.asarray(found.planes[name][0, :64, :64]) for name in found.planes}
     # The fit way starts at the fit's starless estimate, the image way at the
@@ -114,6 +114,87 @@ def test_a_short_run_beats_its_baseline(small_bank, tmp_path):
     assert found["measures"]["pupil/run"] and "field/run" not in found["measures"]
     evaluation = sm.run_directory(store, "tiny") / "evaluation"
     assert (evaluation / f"{directory.name}.json").exists() and (evaluation / f"{directory.name}.png").exists()
+
+
+def with_a_halo(planes):
+    """A window's planes with a halo of 20 times the noise at its middle
+    added to its input and its halos."""
+    planes = dict(planes)
+    side = planes["input"].shape[0]
+    yy, xx = np.mgrid[0:side, 0:side] - (side - 1) / 2.0
+    halo = (20.0 * float(np.median(planes["noise"])) * np.exp(-(xx**2 + yy**2) / (2 * 12.0**2))).astype(np.float32)
+    planes["input"] = planes["input"] + halo
+    planes["halos"] = planes["halos"] + halo
+    return planes
+
+
+def test_a_layered_run_starts_with_no_halos_or_spikes_and_its_layers_add_back(small_bank):
+    _, directory = small_bank
+    found = sm.Bank(directory)
+    settings = sm.Settings(way="fit", tile=64, width=8, levels=3, layers=True)
+    assert settings.outputs == 1 + len(sm.LAYERS) and sm.Settings().outputs == 1
+    model = ResidualUNet(inputs=len(sm.READS["fit"]), outputs=settings.outputs, width=8, levels=3)
+    batch = sm.batch_from(found, np.array([0, 1]), settings, np.random.default_rng(2))
+    assert batch["spikes"].shape == batch["halos"].shape == (2, 64, 64)
+    run_loss, base_loss, parts = sm.loss_of(model, batch)
+    assert float(run_loss) == pytest.approx(float(base_loss))
+    assert set(parts) == {f"{name}{part}" for name in ("starless", *sm.LAYERS) for part in ("", "_baseline")}
+    planes = with_a_halo({name: np.asarray(found.planes[name][0, :64, :64]) for name in found.planes})
+    layers = sm.layers(model, planes, settings)
+    assert not layers["halos"].any() and not layers["spikes"].any()
+    np.testing.assert_allclose(layers["starless"], planes["fit_starless"], rtol=1e-4, atol=1e-2)
+    # Given the halo, the four add back to the input, and the share of it
+    # kept moves it from the stars to the starless image, the three a user
+    # takes still adding back.
+    layers["halos"] = planes["halos"]
+    layers["stars"] = planes["input"] - layers["starless"] - layers["halos"] - layers["spikes"]
+    for share in (0.0, 0.3, 1.0):
+        taken = sm.kept(layers, share)
+        np.testing.assert_allclose(taken["starless"] + taken["stars"] + taken["spikes"], planes["input"], atol=1e-2)
+        np.testing.assert_allclose(taken["starless"] - layers["starless"], share * planes["halos"], atol=1e-3)
+    with pytest.raises(ValueError):
+        sm.kept(layers, 1.5)
+
+
+def test_a_short_layered_run_finds_the_spikes(small_bank):
+    store, directory = small_bank
+    record = sm.train(store, name="tiny-layers", bank=directory, validation_bank=directory,
+                      settings=sm.Settings(way="image", tile=64, width=8, levels=3, layers=True), steps=300,
+                      batch=8, learning_rate=3e-3, log_every=100, checkpoint_every=300, validation_batches=2,
+                      where=torch.device("cpu"))
+    last = record["history"][-1]
+    assert last["validation"] < 0.8 * last["validation_baseline"]
+    assert last["validation_spikes"] < 0.9 * last["validation_spikes_baseline"]
+    assert record["config"]["layers"] == list(sm.LAYERS)
+    found = sm.evaluate(store, "tiny-layers", directory, count=8, sheet_rows=2, where=torch.device("cpu"))
+    run = found["measures"]["all/run"]["median"]
+    assert run["spikes_found"] > 0.0 and "halos_rms" in run
+    assert "spikes_rms" not in found["measures"]["all/baseline"]["median"]
+    # Its sheet shows the halos and spikes beside the bank's: ten columns.
+    from PIL import Image
+
+    with Image.open(sm.run_directory(store, "tiny-layers") / "evaluation" / f"{directory.name}.png") as sheet:
+        assert sheet.width == 10 * 128 + 9 * 6
+
+
+def test_the_layer_measures_read_the_truth_as_perfect_and_none_as_nothing_found(small_bank):
+    _, directory = small_bank
+    found = sm.Bank(directory)
+    # A window whose spikes top the noise somewhere.
+    index = next(index for index in range(found.count)
+                 if (found.planes["spikes"][index] > found.planes["noise"][index]).any())
+    planes = with_a_halo({name: np.asarray(found.planes[name][index]) for name in found.planes})
+    perfect = sm.layer_measures({name: planes[name] for name in sm.LAYERS}, planes)
+    for name in sm.LAYERS:
+        assert perfect[f"{name}_rms"] == 0.0 and perfect[f"{name}_stray"] == 0.0
+        assert perfect[f"{name}_found"] == pytest.approx(1.0)
+    none = sm.layer_measures({name: np.zeros_like(planes[name]) for name in sm.LAYERS}, planes)
+    assert none["halos_found"] == 0.0 and none["halos_rms"] > 1.0 and none["halos_stray"] < 0.1
+    # The halo given as spikes is found by neither, and strays from the
+    # spikes.
+    swapped = sm.layer_measures({"halos": np.zeros_like(planes["halos"]),
+                                 "spikes": planes["spikes"] + planes["halos"]}, planes)
+    assert swapped["halos_found"] == 0.0 and swapped["spikes_stray"] > 0.1
 
 
 def test_the_measures_read_the_truth_as_perfect_and_the_input_as_all_the_stars_left(small_bank):
