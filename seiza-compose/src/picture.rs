@@ -344,15 +344,28 @@ pub struct Picture {
     /// combined picture and every Finish step's result. Luminance is
     /// measured with its weights. sRGB unless a host chooses a wider one.
     pub space: crate::space::WorkingSpace,
+    /// How far above SDR white the picture reaches, in stops, from 0 (an SDR
+    /// picture) to [`crate::tone::MAX_HEADROOM`]. With headroom the picture
+    /// is HDR all the way through: every layer and step may give values up
+    /// to [`Self::peak`], and every Tone step is an HDR one with this
+    /// headroom.
+    pub headroom: f32,
 }
 
 impl Picture {
-    /// The brightest value the finished picture shows: 1, SDR white, unless
-    /// an HDR Tone step lifts it (see [`crate::tone::Tone::peak`]). A host
-    /// presents and saves values only up to it. A later Curves or Stretch
-    /// step over the whole picture brings it back to 1; one limited by a
-    /// mask or opacity leaves the brighter areas outside it as they were.
+    /// The brightest value the picture shows. With [`Self::headroom`], the
+    /// value on the extended sRGB curve of 2 to the headroom, for the
+    /// combined picture and every step alike. Otherwise 1, SDR white, unless
+    /// an HDR Tone step lifts it (see [`crate::tone::Tone::peak`]): then a
+    /// later Curves or Stretch step over the whole picture brings it back to
+    /// 1, and one limited by a mask or opacity leaves the brighter areas
+    /// outside it as they were. A host presents and saves values only up to
+    /// it.
     pub fn peak(&self) -> f32 {
+        if self.headroom > 0.0 {
+            let stops = self.headroom.min(crate::tone::MAX_HEADROOM);
+            return crate::tone::extended_srgb_encode(stops.exp2());
+        }
         let mut peak = 1.0_f32;
         for step in &self.finish {
             let whole = step.mask.is_none() && step.opacity >= 1.0;
@@ -364,6 +377,30 @@ impl Picture {
             }
         }
         peak
+    }
+
+    /// The Finish steps as the picture renders them: with headroom, each
+    /// Tone step is an HDR one with the picture's headroom.
+    pub(crate) fn finish_steps(&self) -> std::borrow::Cow<'_, [FinishStep]> {
+        if self.headroom <= 0.0 {
+            return std::borrow::Cow::Borrowed(&self.finish);
+        }
+        std::borrow::Cow::Owned(
+            self.finish
+                .iter()
+                .map(|step| match &step.kind {
+                    FinishKind::Tone(tone) => FinishStep {
+                        kind: FinishKind::Tone(crate::tone::Tone {
+                            hdr: true,
+                            headroom: self.headroom,
+                            ..*tone
+                        }),
+                        ..step.clone()
+                    },
+                    _ => step.clone(),
+                })
+                .collect(),
+        )
     }
 
     /// The inputs the picture reads, each once, in no particular order.
@@ -438,6 +475,18 @@ mod tests {
         assert_eq!(picture.peak(), 1.0);
         // An HDR step at half opacity lifts the peak.
         picture.finish.push(step(hdr, 0.5, None));
+        assert_eq!(picture.peak(), lifted);
+        // A picture with headroom of its own reaches it all the way through,
+        // whatever its steps.
+        let own = Picture {
+            headroom: 2.0,
+            ..Picture::default()
+        };
+        assert_eq!(own.peak(), lifted);
+        picture.headroom = 2.0;
+        picture
+            .finish
+            .push(step(FinishKind::Curves(0.3), 1.0, None));
         assert_eq!(picture.peak(), lifted);
     }
 }

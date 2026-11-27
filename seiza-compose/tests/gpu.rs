@@ -175,6 +175,36 @@ fn two_local_tone_steps_match_the_cpu() {
     );
 }
 
+/// A picture with headroom of its own makes its Tone steps HDR ones, on the
+/// GPU as on the CPU.
+#[test]
+fn a_picture_s_headroom_makes_its_tone_hdr() {
+    use seiza_compose::picture::FinishKind;
+    let inputs = inputs();
+    let images: Vec<&LinearImage> = inputs.iter().collect();
+    let mut picture = everything();
+    picture.computed[0].smoothing = 0.0;
+    picture.headroom = 2.0;
+    for step in &mut picture.finish {
+        if let FinishKind::Tone(tone) = &mut step.kind {
+            tone.hdr = false;
+            tone.exposure = 1.5;
+        }
+    }
+    let Some((cpu, gpu)) = both(&picture, &images) else {
+        eprintln!("no GPU: the GPU compositor was not checked");
+        return;
+    };
+    let above = cpu.iter().filter(|value| **value > 1.0).count();
+    assert!(above > 100, "the picture reaches above SDR white: {above}");
+    let (mean, p99, largest) = gap(&cpu, &gpu);
+    eprintln!("picture headroom: mean {mean:e}, p99 {p99:e}, max {largest:e}");
+    assert!(
+        mean < 2e-3 && p99 < 1e-2,
+        "mean {mean:e}, p99 {p99:e}, max {largest:e}"
+    );
+}
+
 /// An HDR Tone step's highlights above SDR white are drawn on the GPU as
 /// the CPU renders them.
 #[test]

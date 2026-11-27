@@ -814,7 +814,7 @@ fn finish(picture: &Picture, padded: &Padded, masks: &[Vec<f32>], combined: Vec<
     }
     let mut out = combined.clone();
     let mut plain = combined;
-    for step in &picture.finish {
+    for step in picture.finish_steps().iter() {
         let cover = |at: usize| {
             step.opacity.clamp(0.0, 1.0)
                 * step

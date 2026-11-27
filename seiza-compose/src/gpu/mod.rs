@@ -352,7 +352,7 @@ impl GpuScene {
                 heal.offset,
             ));
         }
-        for (index, step) in picture.finish.iter().enumerate() {
+        for (index, step) in picture.finish_steps().iter().enumerate() {
             if scene.finish.len() == MAX_FINISH_STEPS {
                 scene.left_out.push(format!(
                     "finishing step {index}, past the GPU's {MAX_FINISH_STEPS}"

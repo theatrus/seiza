@@ -176,5 +176,6 @@ pub fn everything() -> Picture {
         // A wide space, so the GPU is checked with weights that are not
         // sRGB's.
         space: seiza_compose::space::WorkingSpace::Rec2020,
+        headroom: 0.0,
     }
 }

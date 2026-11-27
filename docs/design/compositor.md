@@ -95,6 +95,15 @@ color the display cannot show inside its gamut by desaturating it toward
 the gray of its own luminance until no channel is negative. That keeps the
 color's luminance and hue. Values above 1, HDR's highlights, are kept.
 
+## HDR pictures
+
+A picture's `headroom`, in stops, makes it HDR all the way through: the
+combined picture and every Finish step may reach `Picture::peak`, the value
+on the extended sRGB curve of 2 to the headroom, and every Tone step is an
+HDR one with that headroom. A host shows every view of the picture, before
+or after any step, up to that peak. Without it, an HDR Tone step alone
+lifts the picture above SDR white from that step on.
+
 ## HDR stretches
 
 A stretch curve flattens toward 1, so the brightest part of an image, such
