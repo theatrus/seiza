@@ -332,6 +332,25 @@ pub struct Picture {
 }
 
 impl Picture {
+    /// The brightest value the finished picture shows: 1, SDR white, unless
+    /// an HDR Tone step lifts it (see [`crate::tone::Tone::peak`]). A host
+    /// presents and saves values only up to it. A later Curves or Stretch
+    /// step over the whole picture brings it back to 1; one limited by a
+    /// mask or opacity leaves the brighter areas outside it as they were.
+    pub fn peak(&self) -> f32 {
+        let mut peak = 1.0_f32;
+        for step in &self.finish {
+            let whole = step.mask.is_none() && step.opacity >= 1.0;
+            match &step.kind {
+                FinishKind::Tone(tone) if whole => peak = tone.peak(),
+                FinishKind::Tone(tone) => peak = peak.max(tone.peak()),
+                FinishKind::Curves(_) | FinishKind::Stretch(_) if whole => peak = 1.0,
+                _ => {}
+            }
+        }
+        peak
+    }
+
     /// The inputs the picture reads, each once, in no particular order.
     pub fn inputs(&self) -> Vec<usize> {
         let mut inputs = Vec::new();
@@ -356,5 +375,54 @@ impl Picture {
         inputs.sort_unstable();
         inputs.dedup();
         inputs
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tone::{Tone, extended_srgb_encode};
+
+    fn step(kind: FinishKind, opacity: f32, mask: Option<usize>) -> FinishStep {
+        FinishStep {
+            kind,
+            opacity,
+            mask,
+        }
+    }
+
+    #[test]
+    fn the_peak_follows_the_last_step_that_sets_the_range() {
+        let hdr = FinishKind::Tone(Tone {
+            hdr: true,
+            headroom: 2.0,
+            ..Tone::default()
+        });
+        let lifted = extended_srgb_encode(4.0);
+        let mut picture = Picture::default();
+        assert_eq!(picture.peak(), 1.0);
+        picture.finish.push(step(hdr.clone(), 1.0, None));
+        assert_eq!(picture.peak(), lifted);
+        // A heal or a saturation step leaves the range as it is.
+        picture
+            .finish
+            .push(step(FinishKind::Saturation(1.2), 1.0, None));
+        assert_eq!(picture.peak(), lifted);
+        // Curves under a mask leaves the bright areas outside it.
+        picture
+            .finish
+            .push(step(FinishKind::Curves(0.3), 1.0, Some(0)));
+        assert_eq!(picture.peak(), lifted);
+        // Curves over the whole picture clips it at SDR white.
+        picture
+            .finish
+            .push(step(FinishKind::Curves(0.3), 1.0, None));
+        assert_eq!(picture.peak(), 1.0);
+        // An SDR Tone step over the whole picture does too.
+        picture.finish[3] = step(FinishKind::Tone(Tone::default()), 1.0, None);
+        assert_eq!(picture.peak(), 1.0);
+        // An HDR step at half opacity lifts the peak.
+        picture.finish.push(step(hdr, 0.5, None));
+        assert_eq!(picture.peak(), lifted);
     }
 }
