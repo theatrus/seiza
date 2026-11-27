@@ -444,6 +444,7 @@ core = "seiza-satellites::PixelSegment"
 "seiza-stacking::calibration_files::verify_sources" = { none = "source verification reached through the C calibration-files workflow and Python CalibrationFiles.verify" }
 "seiza-stacking::FileCalibration::*" = { none = "native coordinator methods are reached through seiza_calibration_files_json and bound directly by Python CalibrationFiles" }
 
+"seiza-compose::cross_erosion" = { none = "the erosion step of screen_rgb_stars_reduced, which C and Python reach through their reduced RGB star exports; public for Rust hosts that reduce stars on a canvas" }
 "seiza-stacking::measure_flat_stability" = { none = "C and Python offer both file and cached-image measurement; this native hybrid accepts a loaded master and streams file sources through the same algorithm" }
 objects = [
     "seiza-download::OnnxRuntimeInstaller",
