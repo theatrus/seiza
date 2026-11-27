@@ -133,48 +133,29 @@ fn sample(color: [f32; 3]) -> [f32; 2] {
     }
 }
 
-/// The standard deviation of the noise in the luminance of a picture of
-/// `width` by `height` pixels, red, green and blue interleaved, by
-/// Immerkær's method: the mean absolute response to a Laplacian difference
-/// that cancels smooth structure, scaled to a standard deviation. A pixel
-/// whose 3 × 3 square is not covered is left out. 0 for a picture smaller
-/// than 3 × 3.
+/// The noise in the luminance of a picture of `width` by `height` pixels,
+/// red, green and blue interleaved, as Texture sees it: the median, over
+/// the picture, of the luminance's standard deviation within each window
+/// of [`DETAIL_RADIUS`]. Most of an astronomical picture is sky, so the
+/// median window holds noise and little else. Measured over the window
+/// Texture reads, it counts noise that registration made smooth over a few
+/// pixels, which a measure of single-pixel differences misses. An uncovered
+/// pixel counts as 0. 0 for an empty picture.
 pub fn luminance_noise(rgb: &[f32], width: usize, height: usize) -> f32 {
-    if width < 3 || height < 3 || rgb.len() < width * height * 3 {
+    if width == 0 || height == 0 || rgb.len() < width * height * 3 {
         return 0.0;
     }
-    let luminance: Vec<f32> = rgb
-        .as_chunks::<3>()
-        .0
+    let around = neighborhoods(&rgb[..width * height * 3], width, height);
+    let mut deviations: Vec<f32> = around
         .iter()
-        .map(|pixel| {
-            if pixel.iter().all(|channel| channel.is_finite()) {
-                luma(*pixel)
-            } else {
-                f32::NAN
-            }
+        .map(|neighborhood| {
+            let [mean, squared] = neighborhood.detail;
+            (squared - mean * mean).max(0.0).sqrt()
         })
         .collect();
-    const KERNEL: [[f64; 3]; 3] = [[1.0, -2.0, 1.0], [-2.0, 4.0, -2.0], [1.0, -2.0, 1.0]];
-    let (mut sum, mut count) = (0.0_f64, 0_usize);
-    for y in 1..height - 1 {
-        for x in 1..width - 1 {
-            let mut response = 0.0_f64;
-            for (dy, row) in KERNEL.iter().enumerate() {
-                for (dx, weight) in row.iter().enumerate() {
-                    response += weight * f64::from(luminance[(y + dy - 1) * width + x + dx - 1]);
-                }
-            }
-            if response.is_finite() {
-                sum += response.abs();
-                count += 1;
-            }
-        }
-    }
-    if count == 0 {
-        return 0.0;
-    }
-    ((std::f64::consts::FRAC_PI_2).sqrt() * sum / (6.0 * count as f64)) as f32
+    let middle = deviations.len() / 2;
+    let (_, median, _) = deviations.select_nth_unstable_by(middle, f32::total_cmp);
+    *median
 }
 
 /// Each pixel's [`Neighborhood`] in a picture of `width` by `height`
@@ -607,15 +588,39 @@ mod tests {
         let noise = luminance_noise(&rgb, width, height);
         assert!((noise - 0.02).abs() < 0.002, "{noise}");
         let (smooth, _) = gray(width, height, |x, y| 0.2 + 0.3 * (x + y) as f32 / 350.0);
-        assert!(luminance_noise(&smooth, width, height) < 1e-4);
+        assert!(luminance_noise(&smooth, width, height) < 0.003);
+        // Noise smoothed over a few pixels, as registration leaves it: its
+        // standard deviation, not only the part that differs pixel to pixel.
+        let white: Vec<f32> = (0..width * height).map(|at| noise_at(at, 0.03)).collect();
+        let smoothed = |x: usize, y: usize| {
+            let (mut sum, mut count) = (0.0, 0.0);
+            for v in y.saturating_sub(1)..=(y + 1).min(height - 1) {
+                for u in x.saturating_sub(1)..=(x + 1).min(width - 1) {
+                    sum += white[v * width + u];
+                    count += 1.0;
+                }
+            }
+            0.3 + sum / count
+        };
+        let (blurred, _) = gray(width, height, smoothed);
+        let values: Vec<f32> = blurred.iter().step_by(3).copied().collect();
+        let mean = values.iter().sum::<f32>() / values.len() as f32;
+        let deviation =
+            (values.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / values.len() as f32).sqrt();
+        let noise = luminance_noise(&blurred, width, height);
+        assert!(
+            (noise / deviation - 1.0).abs() < 0.2,
+            "{noise} against {deviation}"
+        );
     }
 
     #[test]
     fn texture_leaves_measured_noise_alone_and_raises_detail() {
-        // A noisy flat sky on the left, a sharp ripple on the right.
-        let (width, height) = (160, 40);
+        // A noisy flat sky, with a sharp ripple in its right sixth: most of
+        // the picture is sky, as in an astronomical picture.
+        let (width, height) = (240, 40);
         let (rgb, around) = gray(width, height, |x, y| {
-            let ripple = if x >= 80 && x % 4 < 2 { 0.15 } else { 0.0 };
+            let ripple = if x >= 200 && x % 4 < 2 { 0.15 } else { 0.0 };
             0.3 + ripple + noise_at(y * width + x, 0.04)
         });
         let noise = luminance_noise(&rgb[..], width, height);
@@ -640,7 +645,7 @@ mod tests {
             "the sky's noise: {measured} against {unmeasured}"
         );
         assert!(
-            change(&texture(noise), 90..150) > 0.03,
+            change(&texture(noise), 205..235) > 0.03,
             "the ripple is still raised"
         );
     }
