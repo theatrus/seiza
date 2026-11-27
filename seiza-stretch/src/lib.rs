@@ -28,6 +28,17 @@ pub use layered::{
     fine_luminance, reduce_luminance,
 };
 
+/// The luminance the stretches read from red, green and blue, as Rec.709
+/// weights them. NaN when any channel is not finite.
+pub fn rgb_luminance(red: f32, green: f32, blue: f32) -> f32 {
+    if red.is_finite() && green.is_finite() && blue.is_finite() {
+        (LUMA_RED * f64::from(red) + LUMA_GREEN * f64::from(green) + LUMA_BLUE * f64::from(blue))
+            as f32
+    } else {
+        f32::NAN
+    }
+}
+
 const LUMA_RED: f64 = 0.2126;
 const LUMA_GREEN: f64 = 0.7152;
 const LUMA_BLUE: f64 = 0.0722;
