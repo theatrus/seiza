@@ -32,6 +32,7 @@ pub mod gpu;
 mod narrowband_balance;
 pub mod picture;
 pub mod render;
+pub mod space;
 mod star_stretch;
 pub mod tone;
 

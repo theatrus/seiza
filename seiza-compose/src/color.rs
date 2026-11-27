@@ -1224,7 +1224,8 @@ mod tests {
         let result =
             combine_super_rgb(&mono(&[r]), &mono(&[g]), &mono(&[b]), &raw_options()).unwrap();
         let pixel = &result.image.data;
-        let output_luminance = crate::render::luma([pixel[0], pixel[1], pixel[2]]);
+        let output_luminance =
+            crate::space::WorkingSpace::Srgb.luma([pixel[0], pixel[1], pixel[2]]);
         assert!((output_luminance - (r + g + b)).abs() < 1.0e-6);
         assert!((pixel[0] / pixel[1] - r / g).abs() < 1.0e-6);
         assert!((pixel[2] / pixel[1] - b / g).abs() < 1.0e-6);

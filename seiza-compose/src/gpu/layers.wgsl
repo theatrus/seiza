@@ -56,7 +56,7 @@ fn blend(mode: f32, below: vec3f, layer: vec3f) -> vec3f {
         return min(below, layer);
     }
     // Luminance: the layer's brightness with the color beneath it.
-    let weights = vec3f(0.2126, 0.7152, 0.0722);
+    let weights = globals.luma.xyz;
     return max(below + dot(layer, weights) - dot(below, weights), vec3f(0.0));
 }
 
@@ -71,7 +71,7 @@ fn adjusted(color: vec3f, adjust: vec4f) -> vec3f {
             contrast_curve(color.b, adjust.y),
         );
     }
-    let luminance = dot(color, vec3f(0.2126, 0.7152, 0.0722));
+    let luminance = dot(color, globals.luma.xyz);
     return max(mix(vec3f(luminance), color, adjust.y), vec3f(0.0));
 }
 
@@ -283,7 +283,7 @@ fn flush(color: vec3f, own: vec3f, cover: f32, mode: f32, band: bool, tint: vec3
 // weighs the input's value against the color's own luminance by `cover`;
 // otherwise the target is the input plus R + G + B, or that sum alone.
 fn luminance_target(color: vec3f, value: f32, has: bool, replace: bool, cover: f32) -> vec3f {
-    let own = fma(0.2126, color.r, fma(0.7152, color.g, 0.0722 * color.b));
+    let own = dot(color, globals.luma.xyz);
     var wanted = own;
     if replace {
         if has {

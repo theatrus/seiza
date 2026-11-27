@@ -329,6 +329,10 @@ pub struct Picture {
     pub masks: Vec<Vec<Segment>>,
     pub heals: Vec<LayerHeal>,
     pub finish: Vec<FinishStep>,
+    /// The primaries of the picture's colors: its layers' colors, the
+    /// combined picture and every Finish step's result. Luminance is
+    /// measured with its weights. sRGB unless a host chooses a wider one.
+    pub space: crate::space::WorkingSpace,
 }
 
 impl Picture {

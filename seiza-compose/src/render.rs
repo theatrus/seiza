@@ -17,6 +17,7 @@ use crate::picture::{
     Adjustment, Blend, ComputedMask, FinishKind, InputRead, LayerKind, LuminanceTarget, Picture,
     Segment,
 };
+use crate::space::WorkingSpace;
 use crate::{Error, LinearImage, ReferenceRegion, Result};
 use rayon::prelude::*;
 use seiza_imgproc::BorderMode;
@@ -223,11 +224,6 @@ impl Sink for ImageSink {
         }
         Ok(())
     }
-}
-
-/// Rec. 709 luminance.
-pub(crate) fn luma(color: [f32; 3]) -> f32 {
-    0.2126_f32.mul_add(color[0], 0.7152_f32.mul_add(color[1], 0.0722 * color[2]))
 }
 
 /// A contrast curve: an S-curve for a positive amount, a flattening one
@@ -686,6 +682,7 @@ fn combine(
     computed: &[Vec<f32>],
     at: usize,
 ) -> [f32; 3] {
+    let space = picture.space;
     let painted = |mask: Option<usize>| {
         mask.and_then(|mask| masks.get(mask))
             .map_or(1.0, |mask| mask[at])
@@ -713,7 +710,7 @@ fn combine(
                     [0, 1, 2].map(|channel| (tint[channel] * value).mul_add(cover, color[channel]))
                 }
             }
-            _ => cover_mix(color, blend(mode, color, own), cover),
+            _ => cover_mix(color, blend(mode, color, own, space), cover),
         }
     };
     for (index, layer) in picture.layers.iter().enumerate() {
@@ -725,7 +722,7 @@ fn combine(
             && layer.own
         {
             if waiting {
-                own = cover_mix(own, adjusted(own, adjustment), cover);
+                own = cover_mix(own, adjusted(own, adjustment, space), cover);
                 own_parts = None;
             }
             continue;
@@ -753,14 +750,14 @@ fn combine(
                 color = [0.0; 3];
             }
             LayerKind::Adjustment(adjustment) => {
-                color = cover_mix(color, adjusted(color, *adjustment), cover);
+                color = cover_mix(color, adjusted(color, *adjustment, space), cover);
             }
             LayerKind::Luminance { read, target } => {
                 let value = read
                     .as_ref()
                     .and_then(|_| layers.values[index].as_ref())
                     .map(|values| values[at]);
-                color = luminance(color, value, *target, cover);
+                color = luminance(color, value, *target, cover, space);
             }
             LayerKind::Input { color: tint, .. } => {
                 let value = layers.values[index]
@@ -781,8 +778,14 @@ fn combine(
 }
 
 /// A new luminance for `color`, its chromaticity kept, as LRGB composes.
-fn luminance(color: [f32; 3], value: Option<f32>, target: LuminanceTarget, cover: f32) -> [f32; 3] {
-    let own = luma(color);
+fn luminance(
+    color: [f32; 3],
+    value: Option<f32>,
+    target: LuminanceTarget,
+    cover: f32,
+    space: WorkingSpace,
+) -> [f32; 3] {
+    let own = space.luma(color);
     let sum = color[0] + color[1] + color[2];
     let wanted = match (target, value) {
         (LuminanceTarget::Replace, Some(value)) => (1.0 - cover).mul_add(own, cover * value),
@@ -841,14 +844,15 @@ fn finish(picture: &Picture, padded: &Padded, masks: &[Vec<f32>], combined: Vec<
             FinishKind::Tone(tone) if tone.is_local() => {
                 // The neighborhoods are of the picture as the steps before
                 // left it, heals left out, as a heal's source is.
-                let around = crate::tone::neighborhoods(&plain, padded.width, padded.height);
+                let around =
+                    crate::tone::neighborhoods(&plain, padded.width, padded.height, picture.space);
                 let measured: Vec<f32> = plain
                     .as_chunks::<3>()
                     .0
                     .iter()
                     .map(|pixel| {
                         if pixel.iter().all(|channel| channel.is_finite()) {
-                            luma(*pixel)
+                            picture.space.luma(*pixel)
                         } else {
                             0.0
                         }
@@ -861,14 +865,15 @@ fn finish(picture: &Picture, padded: &Padded, masks: &[Vec<f32>], combined: Vec<
                         .par_iter_mut()
                         .enumerate()
                         .for_each(|(at, pixel)| {
-                            let toned = tone.apply_around(*pixel, measured[at], &around[at]);
+                            let toned =
+                                tone.apply_around(*pixel, measured[at], &around[at], picture.space);
                             *pixel = cover_mix(*pixel, toned, cover(at));
                         });
                 }
             }
             kind => {
                 for buffer in [&mut out, &mut plain] {
-                    let adjusted = adjust_finish(kind, buffer);
+                    let adjusted = adjust_finish(kind, buffer, picture.space);
                     for (at, (pixel, new)) in buffer
                         .as_chunks_mut::<3>()
                         .0
@@ -886,7 +891,7 @@ fn finish(picture: &Picture, padded: &Padded, masks: &[Vec<f32>], combined: Vec<
 }
 
 /// A Finish step that maps each pixel alone, over interleaved RGB.
-fn adjust_finish(kind: &FinishKind, rgb: &[f32]) -> Vec<f32> {
+fn adjust_finish(kind: &FinishKind, rgb: &[f32], space: WorkingSpace) -> Vec<f32> {
     match kind {
         FinishKind::Stretch(plan) => {
             // Uncovered pixels are NaN in the output whatever a stretch
@@ -901,7 +906,7 @@ fn adjust_finish(kind: &FinishKind, rgb: &[f32]) -> Vec<f32> {
             .as_chunks::<3>()
             .0
             .iter()
-            .flat_map(|pixel| tone.apply(*pixel))
+            .flat_map(|pixel| tone.apply(*pixel, space))
             .collect(),
         FinishKind::Curves(amount) => rgb
             .iter()
@@ -911,18 +916,18 @@ fn adjust_finish(kind: &FinishKind, rgb: &[f32]) -> Vec<f32> {
             .as_chunks::<3>()
             .0
             .iter()
-            .flat_map(|pixel| saturated(*pixel, *amount))
+            .flat_map(|pixel| saturated(*pixel, *amount, space))
             .collect(),
         FinishKind::Heal { .. } => rgb.to_vec(),
     }
 }
 
-fn saturated(color: [f32; 3], amount: f32) -> [f32; 3] {
-    let luminance = luma(color);
+fn saturated(color: [f32; 3], amount: f32, space: WorkingSpace) -> [f32; 3] {
+    let luminance = space.luma(color);
     color.map(|channel| mix(luminance, channel, amount).max(0.0))
 }
 
-fn blend(mode: Blend, below: [f32; 3], layer: [f32; 3]) -> [f32; 3] {
+fn blend(mode: Blend, below: [f32; 3], layer: [f32; 3], space: WorkingSpace) -> [f32; 3] {
     match mode {
         Blend::Normal => layer,
         Blend::Screen => {
@@ -955,17 +960,17 @@ fn blend(mode: Blend, below: [f32; 3], layer: [f32; 3]) -> [f32; 3] {
             below[2].min(layer[2]),
         ],
         Blend::Luminance => {
-            let shift = luma(layer) - luma(below);
+            let shift = space.luma(layer) - space.luma(below);
             below.map(|channel| (channel + shift).max(0.0))
         }
     }
 }
 
-fn adjusted(color: [f32; 3], adjustment: Adjustment) -> [f32; 3] {
+fn adjusted(color: [f32; 3], adjustment: Adjustment, space: WorkingSpace) -> [f32; 3] {
     match adjustment {
         Adjustment::Exposure(stops) => color.map(|channel| channel * stops.exp2()),
         Adjustment::Curves(amount) => color.map(|channel| contrast_curve(channel, amount)),
-        Adjustment::Saturation(amount) => saturated(color, amount),
+        Adjustment::Saturation(amount) => saturated(color, amount, space),
     }
 }
 

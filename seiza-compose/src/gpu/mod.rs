@@ -16,8 +16,10 @@
 //! display transform when it presents it. [`render_gpu`] does all of that
 //! for a picture read from a [`crate::render::Source`].
 
+mod display;
 mod headless;
 
+pub use display::{DISPLAY_SHADER, DisplayMapping};
 pub use headless::{GpuContext, render_gpu};
 
 use crate::picture::{
@@ -124,6 +126,8 @@ pub struct GpuScene {
     rows: Vec<Vec<f32>>,
     finish_rows: Vec<[Vec<f32>; 3]>,
     masks: Vec<Vec<GpuSegment>>,
+    /// The weights of the picture's luminance, from its working space.
+    luma: [f32; 3],
     /// What the GPU cannot draw of the picture, by name.
     pub left_out: Vec<String>,
 }
@@ -154,7 +158,10 @@ impl GpuScene {
     /// mask of more than two inputs) is left out and named in
     /// [`Self::left_out`].
     pub fn new(picture: &Picture, inputs: &[GpuInput]) -> Self {
-        let mut scene = Self::default();
+        let mut scene = Self {
+            luma: picture.space.luma_weights(),
+            ..Self::default()
+        };
         let input = |read: &InputRead| inputs.get(read.input).copied();
         let mask_index = |mask: Option<usize>| {
             mask.filter(|mask| *mask < picture.masks.len().min(MAX_MASKS))
@@ -463,6 +470,7 @@ struct Globals {
     computed: [[f32; 16]; MAX_COMPUTED_MASKS],
     local: [f32; 4],
     area: [f32; 4],
+    luma: [f32; 4],
 }
 
 /// Where the picture sits in the area drawn.
@@ -1267,6 +1275,7 @@ impl GpuCompositor {
                 0.0,
             ],
             area: area.map(|value| value as f32),
+            luma: [scene.luma[0], scene.luma[1], scene.luma[2], 0.0],
         };
         for (slot, layer) in globals.layers.iter_mut().zip(&scene.layers) {
             *slot = *layer;

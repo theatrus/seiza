@@ -78,6 +78,23 @@ curve of each pixel's luminance, as before.
 A pixel any layer's input does not cover is not covered in the output: it
 is `NaN`, as `combine_*` return today.
 
+## Working space
+
+A picture's `space` sets the primaries its colors are in: sRGB (the
+default, so the recipes render as before), Display P3 or Rec. 2020. Every
+space has D65 white and the sRGB transfer curve, extended past 1 for HDR,
+as Apple's `ITUR_2020_sRGBGamma` pairs Rec. 2020 with that curve. The
+space sets the luminance weights that Tone, Saturation, the Luminance
+blend and LRGB use: BT.709's for sRGB, BT.2020's for Rec. 2020, and the
+XYZ row for Display P3. The GPU reads them from the globals.
+
+A host shows the picture on a display through
+`WorkingSpace::map_to_display`, or its GPU twin `DISPLAY_SHADER` with a
+`DisplayMapping`: decode, convert the light with a matrix, then bring a
+color the display cannot show inside its gamut by desaturating it toward
+the gray of its own luminance until no channel is negative. That keeps the
+color's luminance and hue. Values above 1, HDR's highlights, are kept.
+
 ## The recipes as pictures
 
 | Recipe | Picture |

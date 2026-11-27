@@ -40,6 +40,12 @@ impl GpuContext {
         })
     }
 
+    /// The device and queue, for this crate's own GPU checks.
+    #[cfg(test)]
+    pub(crate) fn parts(&self) -> (&wgpu::Device, &wgpu::Queue) {
+        (&self.device, &self.queue)
+    }
+
     /// A context on a device and queue the host already has.
     pub fn from_device(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         Self {

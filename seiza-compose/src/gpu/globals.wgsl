@@ -97,6 +97,8 @@ struct Globals {
     // The part of the targets this draw fills: x, y, width and height. A
     // window reads only pixels inside it.
     area: vec4f,
+    // xyz: the weights of the luminance, from the picture's working space.
+    luma: vec4f,
 }
 
 @group(0) @binding(0) var<uniform> globals: Globals;

@@ -18,7 +18,8 @@
 //! step with a neighborhood of the pixel alone, which no local control
 //! changes: a curve of the pixel's luminance, [`Tone::curve`].
 
-use crate::render::{contrast_curve, luma};
+use crate::render::contrast_curve;
+use crate::space::WorkingSpace;
 use serde::{Deserialize, Serialize};
 
 /// The settings of a Tone and color step. Every control at 0 leaves the
@@ -121,8 +122,8 @@ pub struct Neighborhood {
 
 impl Neighborhood {
     /// The neighborhood of a pixel alone.
-    pub fn of_pixel(color: [f32; 3]) -> Self {
-        let [luminance, darkest] = sample(color);
+    pub fn of_pixel(color: [f32; 3], space: WorkingSpace) -> Self {
+        let [luminance, darkest] = sample(color, space);
         Self {
             local: [
                 luminance,
@@ -137,9 +138,9 @@ impl Neighborhood {
 
 /// The luminance and the darkest channel of a pixel, 0 where it is not
 /// covered.
-fn sample(color: [f32; 3]) -> [f32; 2] {
+fn sample(color: [f32; 3], space: WorkingSpace) -> [f32; 2] {
     if color.iter().all(|channel| channel.is_finite()) {
-        [luma(color), color[0].min(color[1]).min(color[2])]
+        [space.luma(color), color[0].min(color[1]).min(color[2])]
     } else {
         [0.0; 2]
     }
@@ -153,7 +154,7 @@ fn sample(color: [f32; 3]) -> [f32; 2] {
 /// Texture reads, it counts noise that registration made smooth over a few
 /// pixels, which a measure of single-pixel differences misses. An uncovered
 /// pixel counts as 0. 0 for an empty picture.
-pub fn luminance_noise(rgb: &[f32], width: usize, height: usize) -> f32 {
+pub fn luminance_noise(rgb: &[f32], width: usize, height: usize, space: WorkingSpace) -> f32 {
     if width == 0 || height == 0 || rgb.len() < width * height * 3 {
         return 0.0;
     }
@@ -161,7 +162,7 @@ pub fn luminance_noise(rgb: &[f32], width: usize, height: usize) -> f32 {
         .as_chunks::<3>()
         .0
         .iter()
-        .map(|pixel| sample(*pixel)[0])
+        .map(|pixel| sample(*pixel, space)[0])
         .collect();
     let squared: Vec<f32> = luminance.iter().map(|value| value * value).collect();
     let means = box_mean(&luminance, width, height, DETAIL_RADIUS);
@@ -179,12 +180,17 @@ pub fn luminance_noise(rgb: &[f32], width: usize, height: usize) -> f32 {
 /// Each pixel's [`Neighborhood`] in a picture of `width` by `height`
 /// pixels, red, green and blue interleaved. A window near the picture's
 /// edge holds only the pixels inside it.
-pub fn neighborhoods(rgb: &[f32], width: usize, height: usize) -> Vec<Neighborhood> {
+pub fn neighborhoods(
+    rgb: &[f32],
+    width: usize,
+    height: usize,
+    space: WorkingSpace,
+) -> Vec<Neighborhood> {
     let samples: Vec<[f32; 2]> = rgb
         .as_chunks::<3>()
         .0
         .iter()
-        .map(|pixel| sample(*pixel))
+        .map(|pixel| sample(*pixel, space))
         .collect();
     let plane = |value: &dyn Fn([f32; 2]) -> f32| -> Vec<f32> {
         samples.iter().map(|sample| value(*sample)).collect()
@@ -322,16 +328,27 @@ impl Tone {
 
     /// The step applied to one pixel with a neighborhood of the pixel
     /// alone.
-    pub fn apply(&self, color: [f32; 3]) -> [f32; 3] {
-        let [luminance, _] = sample(color);
-        self.apply_around(color, luminance, &Neighborhood::of_pixel(color))
+    pub fn apply(&self, color: [f32; 3], space: WorkingSpace) -> [f32; 3] {
+        let [luminance, _] = sample(color, space);
+        self.apply_around(
+            color,
+            luminance,
+            &Neighborhood::of_pixel(color, space),
+            space,
+        )
     }
 
     /// The step applied to one pixel, `color`, whose neighborhood is
     /// `around`. `luminance` is the luminance the neighborhood was measured
     /// with at this pixel; it differs from `color`'s where a heal changed
     /// the pixel after the neighborhood was measured.
-    pub fn apply_around(&self, color: [f32; 3], luminance: f32, around: &Neighborhood) -> [f32; 3] {
+    pub fn apply_around(
+        &self,
+        color: [f32; 3],
+        luminance: f32,
+        around: &Neighborhood,
+        space: WorkingSpace,
+    ) -> [f32; 3] {
         let tone = self.held();
         let [mean, mean_squared, dark, mean_product] = around.local;
         // The edge-preserving bases, and the veil: the darkest channel's
@@ -353,7 +370,7 @@ impl Tone {
         let mut fine = fine_mean;
 
         let mut color = color;
-        let mut own = luma(color);
+        let mut own = space.luma(color);
         // Dehaze changes each channel by one line, so the luminance and its
         // bases follow it by the same line.
         let line = if tone.dehaze > 0.0 {
@@ -401,7 +418,7 @@ impl Tone {
             peak,
         );
 
-        let luminance = luma(color);
+        let luminance = space.luma(color);
         let scaled = if luminance <= 1.0e-8 {
             [mapped; 3]
         } else {
@@ -414,13 +431,15 @@ impl Tone {
         };
         // Vibrance and Saturation may push a channel up; none goes past
         // the peak.
-        colorfulness(scaled, tone.vibrance, tone.saturation).map(|channel| channel.min(peak))
+        colorfulness(scaled, tone.vibrance, tone.saturation, space).map(|channel| channel.min(peak))
     }
 
-    /// The luminance curve of a pixel on its own at `x`, from 0 to 1.
+    /// The luminance curve of a pixel on its own at `x`, from 0 to 1. A
+    /// gray's curve is the same in every space.
     pub fn curve(&self, x: f32) -> f32 {
         let gray = x.max(0.0);
-        luma(self.apply([gray; 3]))
+        let space = WorkingSpace::default();
+        space.luma(self.apply([gray; 3], space))
     }
 }
 
@@ -458,8 +477,13 @@ fn hdr_shoulder(sdr: f32, value: f32, peak: f32) -> f32 {
 
 /// Vibrance and saturation, each from -1 to 1. Vibrance changes a muted
 /// color more than a vivid one.
-pub(crate) fn colorfulness(color: [f32; 3], vibrance: f32, saturation: f32) -> [f32; 3] {
-    let luminance = luma(color);
+pub(crate) fn colorfulness(
+    color: [f32; 3],
+    vibrance: f32,
+    saturation: f32,
+    space: WorkingSpace,
+) -> [f32; 3] {
+    let luminance = space.luma(color);
     let high = color[0].max(color[1]).max(color[2]);
     let low = color[0].min(color[1]).min(color[2]);
     let vivid = if high > 1.0e-6 {
@@ -475,6 +499,8 @@ pub(crate) fn colorfulness(color: [f32; 3], vibrance: f32, saturation: f32) -> [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SRGB: WorkingSpace = WorkingSpace::Srgb;
     use serde_json::json;
 
     #[test]
@@ -550,13 +576,13 @@ mod tests {
         let rgb: Vec<f32> = (0..width * height)
             .flat_map(|at| [value(at % width, at / width); 3])
             .collect();
-        let around = neighborhoods(&rgb, width, height);
+        let around = neighborhoods(&rgb, width, height, SRGB);
         (rgb, around)
     }
 
     fn at(tone: &Tone, rgb: &[f32], around: &[Neighborhood], index: usize) -> [f32; 3] {
         let color = [rgb[index * 3], rgb[index * 3 + 1], rgb[index * 3 + 2]];
-        tone.apply_around(color, luma(color), &around[index])
+        tone.apply_around(color, SRGB.luma(color), &around[index], SRGB)
     }
 
     #[test]
@@ -660,10 +686,10 @@ mod tests {
         let (rgb, _) = gray(width, height, |x, y| {
             0.2 + 0.4 * x as f32 / 200.0 + noise_at(y * width + x, 0.02)
         });
-        let noise = luminance_noise(&rgb, width, height);
+        let noise = luminance_noise(&rgb, width, height, SRGB);
         assert!((noise - 0.02).abs() < 0.002, "{noise}");
         let (smooth, _) = gray(width, height, |x, y| 0.2 + 0.3 * (x + y) as f32 / 350.0);
-        assert!(luminance_noise(&smooth, width, height) < 0.003);
+        assert!(luminance_noise(&smooth, width, height, SRGB) < 0.003);
         // Noise smoothed over a few pixels, as registration leaves it: its
         // standard deviation, not only the part that differs pixel to pixel.
         let white: Vec<f32> = (0..width * height).map(|at| noise_at(at, 0.03)).collect();
@@ -682,7 +708,7 @@ mod tests {
         let mean = values.iter().sum::<f32>() / values.len() as f32;
         let deviation =
             (values.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / values.len() as f32).sqrt();
-        let noise = luminance_noise(&blurred, width, height);
+        let noise = luminance_noise(&blurred, width, height, SRGB);
         assert!(
             (noise / deviation - 1.0).abs() < 0.2,
             "{noise} against {deviation}"
@@ -698,7 +724,7 @@ mod tests {
             let ripple = if x >= 200 && x % 4 < 2 { 0.15 } else { 0.0 };
             0.3 + ripple + noise_at(y * width + x, 0.04)
         });
-        let noise = luminance_noise(&rgb[..], width, height);
+        let noise = luminance_noise(&rgb[..], width, height, SRGB);
         let texture = |noise: f32| Tone {
             texture: 1.0,
             noise,
@@ -755,16 +781,16 @@ mod tests {
             last = lifted;
         }
         // A colored highlight keeps its color, within the peak.
-        let color = hdr.apply([0.9, 0.5, 0.2]);
+        let color = hdr.apply([0.9, 0.5, 0.2], SRGB);
         assert!(color.iter().all(|channel| *channel <= peak));
         assert!(color[0] > color[1] && color[1] > color[2], "{color:?}");
-        assert!(luma(color) > 1.0, "{color:?}");
+        assert!(SRGB.luma(color) > 1.0, "{color:?}");
         // Saturation pushes no channel past the peak.
         let saturated = Tone {
             saturation: 1.0,
             ..hdr
         }
-        .apply([0.95, 0.2, 0.1]);
+        .apply([0.95, 0.2, 0.1], SRGB);
         assert!(
             saturated.iter().all(|channel| *channel <= peak + 1e-6),
             "{saturated:?}"
@@ -864,7 +890,7 @@ mod tests {
                 }
             })
             .collect();
-        let around = neighborhoods(&rgb, width, height);
+        let around = neighborhoods(&rgb, width, height, SRGB);
         let dehaze = Tone {
             dehaze: 1.0,
             ..Tone::default()
@@ -882,6 +908,6 @@ mod tests {
         };
         let sky = at(&haze, &rgb, &around, 4 * width + 25);
         let glow = at(&haze, &rgb, &around, 4 * width + 35);
-        assert!(luma(glow) - luma(sky) < 0.8 * (luma([0.6, 0.2, 0.2]) - 0.2));
+        assert!(SRGB.luma(glow) - SRGB.luma(sky) < 0.8 * (SRGB.luma([0.6, 0.2, 0.2]) - 0.2));
     }
 }

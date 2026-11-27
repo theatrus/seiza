@@ -15,7 +15,6 @@
 @group(2) @binding(2) var local_means: texture_2d_array<f32>;
 @group(2) @binding(3) var detail_means: texture_2d_array<f32>;
 
-const LUMA: vec3f = vec3f(0.2126, 0.7152, 0.0722);
 // The constants of `seiza_compose::tone`, which says what each one is.
 const SHIFT: f32 = 0.14;
 const WHITE_REACH: f32 = 0.3;
@@ -69,7 +68,7 @@ fn stretch_picture(color: vec3f, step: FinishStep) -> vec3f {
             table_value(color.b, row + 2.0),
         );
     }
-    let luminance = dot(color, LUMA);
+    let luminance = dot(color, globals.luma.xyz);
     let mapped = table_value(luminance, row);
     if luminance <= 1.0e-8 {
         return vec3f(mapped);
@@ -90,7 +89,7 @@ fn maps_pixels(step: FinishStep) -> bool {
 // Vibrance and saturation, each from -1 to 1. Vibrance changes a muted
 // color more than a vivid one. The CPU render's `colorfulness` is the same.
 fn colorfulness(color: vec3f, vibrance: f32, saturation: f32) -> vec3f {
-    let luminance = dot(color, LUMA);
+    let luminance = dot(color, globals.luma.xyz);
     let high = max(max(color.r, color.g), color.b);
     let low = min(min(color.r, color.g), color.b);
     var vivid = 0.0;
@@ -125,7 +124,7 @@ fn tone(start: vec3f, measured: f32, local: vec4f, detail: vec2f, step: FinishSt
     var fine = detail.x;
 
     var color = start;
-    var own = dot(color, LUMA);
+    var own = dot(color, globals.luma.xyz);
     var scale = 1.0;
     var offset = 0.0;
     if dehaze > 0.0 {
@@ -164,7 +163,7 @@ fn tone(start: vec3f, measured: f32, local: vec4f, detail: vec2f, step: FinishSt
         mapped += room * (1.0 - exp(-(value - 1.0) / room));
     }
 
-    let luminance = dot(color, LUMA);
+    let luminance = dot(color, globals.luma.xyz);
     var scaled = vec3f(mapped);
     if luminance > 1.0e-8 {
         var factor = mapped / luminance;
@@ -179,7 +178,7 @@ fn tone(start: vec3f, measured: f32, local: vec4f, detail: vec2f, step: FinishSt
 
 // The local and detail means of a pixel alone.
 fn alone(color: vec3f) -> array<vec4f, 2> {
-    let luminance = dot(color, LUMA);
+    let luminance = dot(color, globals.luma.xyz);
     let darkest = min(min(color.r, color.g), color.b);
     return array<vec4f, 2>(
         vec4f(luminance, luminance * luminance, darkest, luminance * darkest),
@@ -214,7 +213,7 @@ fn adjust(color: vec3f, step: FinishStep, pixel: vec2i) -> vec3f {
             contrast_curve(color.b, step.kind.y),
         );
     }
-    let luminance = dot(color, LUMA);
+    let luminance = dot(color, globals.luma.xyz);
     return max(mix(vec3f(luminance), color, step.kind.y), vec3f(0.0));
 }
 
