@@ -11,6 +11,9 @@
 // The picture a step in the stack made of the layers beneath it, which a
 // later stage of the layers starts from.
 @group(2) @binding(3) var staged: texture_2d<f32>;
+// What was beneath the group the step is in, at the step, which a later
+// stage restores when its group ends.
+@group(2) @binding(4) var staged_beneath: texture_2d<f32>;
 
 struct TileVertex {
     @builtin(position) position: vec4f,
@@ -518,18 +521,37 @@ fn healed_value(index: i32, pixel: vec2i, doc: vec2f, uv: vec2f) -> f32 {
     return value;
 }
 
+// The layers of one stage blended: the picture so far, and what is beneath
+// the group the last of them is in.
+struct Stacked {
+    @location(0) color: vec4f,
+    @location(1) beneath: vec4f,
+}
+
 @fragment
 fn tile_fragment(in: TileVertex) -> @location(0) vec4f {
+    return blend_stack(in).color;
+}
+
+// A stage that ends at a step inside a group also keeps what is beneath the
+// group, for the stage after the step.
+@fragment
+fn staged_tile_fragment(in: TileVertex) -> Stacked {
+    return blend_stack(in);
+}
+
+fn blend_stack(in: TileVertex) -> Stacked {
     let pixel = vec2i(in.position.xy);
     // The layers blended so far: from black, or from what a step in the
     // stack made of the layers beneath this stage.
     var color = vec3f(0.0);
-    if globals.stage.z > 0.5 {
-        color = textureLoad(staged, pixel, 0).rgb;
-    }
     // The layers beneath a group, kept while the group's members blend on
     // their own.
     var beneath = vec3f(0.0);
+    if globals.stage.z > 0.5 {
+        color = textureLoad(staged, pixel, 0).rgb;
+        beneath = textureLoad(staged_beneath, pixel, 0).rgb;
+    }
     // The last band layer or group, which waits to be blended until its own
     // adjustments have been applied to it.
     var waiting = false;
@@ -639,7 +661,10 @@ fn tile_fragment(in: TileVertex) -> @location(0) vec4f {
     if waiting {
         color = flush(color, own, own_cover, own_mode, own_band, own_tint, own_value);
     }
-    return vec4f(color, 1.0);
+    var stacked: Stacked;
+    stacked.color = vec4f(color, 1.0);
+    stacked.beneath = vec4f(beneath, 1.0);
+    return stacked;
 }
 
 struct StrokeVertex {

@@ -238,17 +238,18 @@ own layer of the local textures after the steps before it; a fifth is
 drawn with each pixel alone, without Dehaze, and named in `left_out`.
 A step in the stack that maps each pixel alone is drawn by the layers
 pass itself, from its entry after the Finish steps in their table. One
-that reads neighbors, a heal or a Tone step with local controls, outside
-any group, ends a stage: the layers pass draws the layers beneath it into
-the combined texture, the step pass (`step_fragment`, with the local passes
+that reads neighbors, a heal or a Tone step with local controls, ends a
+stage: the layers pass draws the layers beneath it into the combined
+texture, and what is beneath the step's group into a second texture, the step pass (`step_fragment`, with the local passes
 first for a Tone step) reads that texture around each pixel into the staged
-texture, and the next layers pass starts from the staged texture. A pass
+texture, and the next layers pass starts from the staged texture and the
+picture beneath the group, so a step inside a group works on the group's
+members alone, as on the CPU. A pass
 reads the globals as they are at the next submit, so each stage's range
 (`stage`) and the step's place in the Finish table (`counts.y` and
-`counts.w`) are written after the passes before it are submitted. Inside
-a group, a local Tone step is drawn with each pixel alone, without Dehaze,
-and a heal is left out, both named in `left_out`; so is a staged heal with
-a clip or a computed mask. The combined and staged textures are full
+`counts.w`) are written after the passes before it are submitted. A heal
+with a clip or a computed mask is left out and named in `left_out`, and a
+local Tone step with one is drawn with each pixel alone. The combined and staged textures are full
 floats: with half floats, a heal and two local Tone steps in the stack were
 three times further from the CPU, from the extra rounding at each stage.
 `tests/gpu.rs` renders the same picture both ways and bounds the gap; on

@@ -717,11 +717,9 @@ fn screen_keeps_values_above_sdr_white_in_order() {
 }
 
 /// Steps in the stack that map each pixel alone are drawn by the layers
-/// pass, as the CPU draws them. One that reads neighbors is drawn with each
-/// pixel alone on the GPU, and named.
+/// pass, as the CPU draws them.
 #[test]
 fn steps_in_the_stack_match_the_cpu() {
-    use seiza_compose::gpu::{GpuInput, GpuScene};
     use seiza_compose::picture::{
         FinishKind, InputRead, Layer, LayerKind, Transfer, TransferStage,
     };
@@ -770,32 +768,13 @@ fn steps_in_the_stack_match_the_cpu() {
         mean < 1e-3 && p99 < 5e-3,
         "mean {mean:e}, p99 {p99:e}, max {largest:e}"
     );
-    // Inside a group, a Tone step that reads neighborhoods is drawn with
-    // each pixel alone, and named.
-    let places: Vec<GpuInput> = (0..3).map(|layer| GpuInput { layer, scale: 1.0 }).collect();
-    let mut local = picture.clone();
-    local.layers.insert(
-        6,
-        step(FinishKind::Tone(Tone {
-            clarity: 0.5,
-            ..Tone::default()
-        })),
-    );
-    let scene = GpuScene::new(&local, &places);
-    assert!(
-        scene
-            .left_out
-            .iter()
-            .any(|what| what.contains("drawn with each pixel alone")),
-        "{:?}",
-        scene.left_out
-    );
 }
 
-/// Steps in the stack that read neighbors, a heal and Tone steps with
-/// local controls, are drawn in stages: the layers beneath each first, the
-/// step on what they made, and the layers above from there. The GPU then
-/// matches the CPU, which works the same way.
+/// Steps in the stack that read neighbors, heals and Tone steps with local
+/// controls, are drawn in stages: the layers beneath each first, the step on
+/// what they made, and the layers above from there; inside a group, on what
+/// its members made, with the picture beneath the group kept for its end.
+/// The GPU then matches the CPU, which works the same way.
 #[test]
 fn steps_that_read_neighbors_match_the_cpu_in_the_stack() {
     use seiza_compose::gpu::{GpuInput, GpuScene};
@@ -840,8 +819,32 @@ fn steps_that_read_neighbors_match_the_cpu_in_the_stack() {
                 }))
             },
             step(FinishKind::Curves(0.3)),
+            // Inside a group the steps work on its members alone, and the
+            // group is then screened over what is beneath it.
+            Layer::new(LayerKind::GroupBegin),
+            Layer::added(read(1), [0.6, 0.6, 0.6]),
+            Layer {
+                mask: Some(1),
+                ..step(FinishKind::Heal {
+                    offset: [-17, 24],
+                    shift: [0.0; 3],
+                })
+            },
+            step(FinishKind::Tone(Tone {
+                clarity: 0.5,
+                ..Tone::default()
+            })),
+            Layer::added(read(0), [0.2, 0.2, 0.2]),
+            Layer {
+                blend: seiza_compose::picture::Blend::Screen,
+                opacity: 0.8,
+                ..Layer::new(LayerKind::GroupEnd)
+            },
         ],
-        masks: vec![common::stroke([60.0, 50.0], [150.0, 120.0], 18.0)],
+        masks: vec![
+            common::stroke([60.0, 50.0], [150.0, 120.0], 18.0),
+            common::stroke([300.0, 200.0], [380.0, 260.0], 22.0),
+        ],
         ..Picture::default()
     };
     let places: Vec<GpuInput> = (0..3).map(|layer| GpuInput { layer, scale: 1.0 }).collect();

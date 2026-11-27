@@ -611,41 +611,27 @@ impl GpuScene {
         }
         scene.finish_count = scene.finish.len();
         // The steps in the stack follow the Finish steps in their table: a
-        // layer points at its step there. A step outside any group that
-        // reads neighbors ends a stage of the layers: the layers beneath it
-        // are drawn first, and the step reads what they made. Inside a
-        // group, a Tone step is drawn with each pixel alone and a heal is
-        // left out.
-        let mut depth = 0_usize;
+        // layer points at its step there. A step that reads neighbors ends a
+        // stage of the layers: the layers beneath it are drawn first, and
+        // the step reads what they made, in a group what its members made.
         for at in 0..scene.layers.len() {
             let Some(layer) = picture.layers.get(at) else {
                 continue;
             };
-            let kind = match &layer.kind {
-                LayerKind::GroupBegin => {
-                    depth += 1;
-                    continue;
-                }
-                LayerKind::GroupEnd => {
-                    depth = depth.saturating_sub(1);
-                    continue;
-                }
-                LayerKind::Step(kind) => picture.rendered_kind(kind),
-                _ => continue,
+            let LayerKind::Step(kind) = &layer.kind else {
+                continue;
             };
+            let kind = picture.rendered_kind(kind);
             let heal = matches!(kind, FinishKind::Heal { .. });
             let local = matches!(&kind, FinishKind::Tone(tone) if tone.is_local());
             // A staged step is limited by its painted mask and opacity; a
             // clip or a computed mask is not drawn for one.
-            let staged =
-                (heal || local) && depth == 0 && layer.clip.is_none() && layer.computed.is_none();
+            let staged = (heal || local) && layer.clip.is_none() && layer.computed.is_none();
             if scene.finish.len() == MAX_FINISH_STEPS || (heal && !staged) {
                 scene
                     .left_out
                     .push(if scene.finish.len() == MAX_FINISH_STEPS {
                         format!("layer {at}, a step past the GPU's {MAX_FINISH_STEPS}")
-                    } else if depth > 0 {
-                        format!("layer {at}, a heal inside a group")
                     } else {
                         format!("layer {at}, a heal with a clip or a computed mask")
                     });
@@ -869,6 +855,11 @@ pub struct GpuTargets {
     combined: wgpu::TextureView,
     /// What a step in the stack made of the layers beneath it.
     staged: wgpu::TextureView,
+    /// What is beneath the group the last layer of a stage is in, as the
+    /// layers pass leaves it, and as the next stage reads it.
+    combined_beneath: wgpu::Texture,
+    combined_beneath_view: wgpu::TextureView,
+    staged_beneath: wgpu::Texture,
     mask_layers: Vec<wgpu::TextureView>,
     finish_inputs: wgpu::BindGroup,
     layer_masks: wgpu::BindGroup,
@@ -947,6 +938,7 @@ pub struct GpuCompositor {
     /// and down.
     window_pipelines: [wgpu::RenderPipeline; 4],
     tile_pipeline: wgpu::RenderPipeline,
+    staged_tile_pipeline: wgpu::RenderPipeline,
     healed_pipeline: wgpu::RenderPipeline,
     smoothed_pipeline: wgpu::RenderPipeline,
     blur_pipelines: [wgpu::RenderPipeline; 2],
@@ -1037,9 +1029,20 @@ impl GpuCompositor {
                 texture_entry(0, wgpu::TextureViewDimension::D2Array),
                 texture_entry(1, wgpu::TextureViewDimension::D2Array),
                 texture_entry(2, wgpu::TextureViewDimension::D2Array),
-                // The staged picture, which is only loaded.
+                // The staged picture and what is beneath its group, which
+                // are only loaded.
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: false },
@@ -1154,6 +1157,17 @@ impl GpuCompositor {
             ("tile_vertex", "tile_fragment"),
             true,
             &[Some(COMBINED_FORMAT.into())],
+        );
+        // A stage of the layers that ends at a step also keeps what is
+        // beneath the step's group.
+        let staged_tile_pipeline = pipeline(
+            "compose layers in stages",
+            &layers_shader,
+            Some(&tile_layout),
+            Some(&masks_layout),
+            ("tile_vertex", "staged_tile_fragment"),
+            true,
+            &[Some(COMBINED_FORMAT.into()), Some(COMBINED_FORMAT.into())],
         );
         let healed_pipeline = pipeline(
             "compose healed layers",
@@ -1328,6 +1342,7 @@ impl GpuCompositor {
             local_measure_pipeline,
             window_pipelines,
             tile_pipeline,
+            staged_tile_pipeline,
             healed_pipeline,
             smoothed_pipeline,
             blur_pipelines,
@@ -1391,6 +1406,25 @@ impl GpuCompositor {
             .create_view(&wgpu::TextureViewDescriptor::default());
         let staged = texture("compose staged", COMBINED_FORMAT, 1)
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let combined_beneath = texture("compose beneath the group", COMBINED_FORMAT, 1);
+        let combined_beneath_view =
+            combined_beneath.create_view(&wgpu::TextureViewDescriptor::default());
+        let staged_beneath = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("compose staged beneath the group"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: COMBINED_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let staged_beneath_view =
+            staged_beneath.create_view(&wgpu::TextureViewDescriptor::default());
         let masks = texture("compose masks", MASK_FORMAT, MAX_MASKS as u32 + 1);
         let mask_layers = layers_of(&masks, MAX_MASKS as u32 + 1);
         let all_masks = array_of(&masks);
@@ -1452,6 +1486,10 @@ impl GpuCompositor {
                     binding: 3,
                     resource: wgpu::BindingResource::TextureView(&staged),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&staged_beneath_view),
+                },
             ],
         });
         let finished = texture("compose finished", self.finished_format, 1);
@@ -1462,6 +1500,9 @@ impl GpuCompositor {
             height,
             combined,
             staged,
+            combined_beneath,
+            combined_beneath_view,
+            staged_beneath,
             mask_layers,
             finish_inputs,
             layer_masks,
@@ -2087,21 +2128,36 @@ impl GpuCompositor {
                 );
             }
             {
+                let black = |view| wgpu::RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                };
+                // A stage that ends at a step keeps what is beneath its
+                // group too.
+                let attachments = [
+                    Some(black(&targets.combined)),
+                    stage.map(|_| black(&targets.combined_beneath_view)),
+                ];
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("compose layers"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &targets.combined,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
+                    color_attachments: if stage.is_some() {
+                        &attachments
+                    } else {
+                        &attachments[..1]
+                    },
                     ..Default::default()
                 });
                 within(&mut pass);
-                pass.set_pipeline(&self.tile_pipeline);
+                pass.set_pipeline(if stage.is_some() {
+                    &self.staged_tile_pipeline
+                } else {
+                    &self.tile_pipeline
+                });
                 pass.set_bind_group(0, &self.common, &[]);
                 pass.set_bind_group(2, &targets.layer_masks, &[]);
                 draw_tiles(&mut pass);
@@ -2109,6 +2165,11 @@ impl GpuCompositor {
             let Some(stage) = stage else {
                 break;
             };
+            encoder.copy_texture_to_texture(
+                targets.combined_beneath.as_image_copy(),
+                targets.staged_beneath.as_image_copy(),
+                targets.combined_beneath.size(),
+            );
             // The step alone: the Finish steps from it to it.
             set(
                 encoder,
