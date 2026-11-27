@@ -48,7 +48,9 @@ pub struct Tone {
     /// is not measured.
     pub noise: f32,
     /// Whether the picture is HDR: its brightest areas rise above SDR
-    /// white, 1, up to [`Self::peak`], instead of clipping at it.
+    /// white, 1, up to [`Self::peak`], instead of clipping at it. Above 1 a
+    /// value is linear light, a multiple of SDR white's, so each stop of
+    /// headroom doubles it; a host presents and saves it so.
     pub hdr: bool,
     /// How far above SDR white an HDR picture reaches, in stops, from 0 to
     /// [`MAX_HEADROOM`]. Not used for an SDR picture.
