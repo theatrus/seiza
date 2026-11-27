@@ -82,8 +82,9 @@ pub fn save_hdr_avif(
         let blue = (b - luma) / 1.8814;
         let red = (r - luma) / 1.4746;
         planes[0][at] = (luma * maximum).round().clamp(0.0, maximum) as u16;
-        planes[1][at] = ((blue + 0.5) * maximum).round().clamp(0.0, maximum) as u16;
-        planes[2][at] = ((red + 0.5) * maximum).round().clamp(0.0, maximum) as u16;
+        // Full range, as ITU-T H.273 gives it: 1023 × E' + 512.
+        planes[1][at] = (blue * maximum + 512.0).round().clamp(0.0, maximum) as u16;
+        planes[2][at] = (red * maximum + 512.0).round().clamp(0.0, maximum) as u16;
     }
     let average = (total / (width * height) as f64) as f32;
     let light_levels = (

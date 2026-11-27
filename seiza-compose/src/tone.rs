@@ -49,8 +49,9 @@ pub struct Tone {
     pub noise: f32,
     /// Whether the picture is HDR: its brightest areas rise above SDR
     /// white, 1, up to [`Self::peak`], instead of clipping at it. Above 1 a
-    /// value is linear light, a multiple of SDR white's, so each stop of
-    /// headroom doubles it; a host presents and saves it so.
+    /// value continues on the extended sRGB curve, as macOS's extended color
+    /// spaces read it, so every channel of a pixel is on one curve whether
+    /// it is above 1 or not; a host presents and saves it so.
     pub hdr: bool,
     /// How far above SDR white an HDR picture reaches, in stops, from 0 to
     /// [`MAX_HEADROOM`]. Not used for an SDR picture.
@@ -284,11 +285,16 @@ impl Tone {
         }
     }
 
-    /// The brightest value the step gives, as a multiple of SDR white: 1
-    /// for an SDR picture, 2 to the headroom for an HDR one.
+    /// The brightest value the step gives: 1 for an SDR picture; for an
+    /// HDR one, the value on the extended sRGB curve whose light is 2 to the
+    /// headroom times SDR white's (about 1.82 for two stops).
     pub fn peak(&self) -> f32 {
         let tone = self.held();
-        if tone.hdr { tone.headroom.exp2() } else { 1.0 }
+        if tone.hdr {
+            extended_srgb_encode(tone.headroom.exp2())
+        } else {
+            1.0
+        }
     }
 
     /// The variance of fine detail Texture treats as half noise: the
@@ -406,13 +412,35 @@ impl Tone {
             }
             color.map(|channel| (channel * scale).clamp(0.0, peak))
         };
-        colorfulness(scaled, tone.vibrance, tone.saturation)
+        // Vibrance and Saturation may push a channel up; none goes past
+        // the peak.
+        colorfulness(scaled, tone.vibrance, tone.saturation).map(|channel| channel.min(peak))
     }
 
     /// The luminance curve of a pixel on its own at `x`, from 0 to 1.
     pub fn curve(&self, x: f32) -> f32 {
         let gray = x.max(0.0);
         luma(self.apply([gray; 3]))
+    }
+}
+
+/// The value on the extended sRGB curve of `light`, linear light as a
+/// multiple of SDR white's: the sRGB curve, continued past 1.
+pub fn extended_srgb_encode(light: f32) -> f32 {
+    if light <= 0.003_130_8 {
+        12.92 * light.max(0.0)
+    } else {
+        1.055 * light.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// The light of `value` on the extended sRGB curve: the inverse of
+/// [`extended_srgb_encode`].
+pub fn extended_srgb_decode(value: f32) -> f32 {
+    if value <= 0.040_45 {
+        value.max(0.0) / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
     }
 }
 
@@ -710,7 +738,9 @@ mod tests {
             ..sdr
         };
         assert_eq!(sdr.peak(), 1.0);
-        assert_eq!(hdr.peak(), 4.0);
+        // Two stops: four times SDR white's light, on the extended curve.
+        assert!((extended_srgb_decode(hdr.peak()) - 4.0).abs() < 1e-4);
+        let peak = hdr.peak();
         // Below SDR white the two agree.
         for x in [0.0_f32, 0.02, 0.05, 0.1] {
             assert!((sdr.curve(x) - hdr.curve(x)).abs() < 1e-6, "{x}");
@@ -721,14 +751,24 @@ mod tests {
         for x in [0.4_f32, 0.6, 0.8, 1.0, 2.0] {
             assert!(sdr.curve(x) <= 1.0, "{x}");
             let lifted = hdr.curve(x);
-            assert!(lifted > last && lifted < 4.0, "{x}: {lifted}");
+            assert!(lifted > last && lifted < peak, "{x}: {lifted}");
             last = lifted;
         }
         // A colored highlight keeps its color, within the peak.
         let color = hdr.apply([0.9, 0.5, 0.2]);
-        assert!(color.iter().all(|channel| *channel <= 4.0));
+        assert!(color.iter().all(|channel| *channel <= peak));
         assert!(color[0] > color[1] && color[1] > color[2], "{color:?}");
         assert!(luma(color) > 1.0, "{color:?}");
+        // Saturation pushes no channel past the peak.
+        let saturated = Tone {
+            saturation: 1.0,
+            ..hdr
+        }
+        .apply([0.95, 0.2, 0.1]);
+        assert!(
+            saturated.iter().all(|channel| *channel <= peak + 1e-6),
+            "{saturated:?}"
+        );
     }
 
     #[test]

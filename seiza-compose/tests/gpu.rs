@@ -196,6 +196,15 @@ fn an_hdr_tone_step_matches_the_cpu() {
         return;
     };
     let above = cpu.iter().filter(|value| **value > 1.0).count();
+    // The picture keeps within its peak, on both; NaN marks a pixel the
+    // picture does not cover.
+    let peak = seiza_compose::tone::extended_srgb_encode(4.0);
+    assert!(
+        cpu.iter()
+            .chain(&gpu)
+            .filter(|value| !value.is_nan())
+            .all(|value| *value <= peak + 1e-3)
+    );
     assert!(above > 100, "the picture reaches above SDR white: {above}");
     let (mean, p99, largest) = gap(&cpu, &gpu);
     eprintln!("hdr: mean {mean:e}, p99 {p99:e}, max {largest:e}");

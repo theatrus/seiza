@@ -174,7 +174,7 @@ fn tone(start: vec3f, measured: f32, local: vec4f, detail: vec2f, step: FinishSt
         }
         scaled = clamp(color * factor, vec3f(0.0), vec3f(peak));
     }
-    return colorfulness(scaled, step.local.x, step.local.y);
+    return min(colorfulness(scaled, step.local.x, step.local.y), vec3f(peak));
 }
 
 // The local and detail means of a pixel alone.

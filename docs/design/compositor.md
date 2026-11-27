@@ -59,7 +59,7 @@ rather than every pixel of one brightness alike:
 | Clarity | Raises or lowers the detail around the local base, most in the midtones. |
 | Texture | Raises or lowers the detail around the mean of a few pixels, as far as the window holds more than noise. A host measures the picture's noise with `tone::luminance_noise` and gives it to the step; unmeasured, a fixed level stands in. |
 | Dehaze | Takes away a veil estimated from the darkest channel nearby, so a gray sky glow goes and a colored nebula stays. Negative adds a veil. |
-| HDR, headroom | With HDR on, the brightest areas rise above SDR white, 1, toward 2 to the headroom (up to four stops) on a shoulder that starts with slope 1, instead of clipping at it. Exposure and Whites push areas there. Below SDR white nothing changes. |
+| HDR, headroom | With HDR on, the brightest areas rise above SDR white, 1, instead of clipping at it, on a shoulder that starts with slope 1. Values above 1 continue on the extended sRGB curve that macOS's extended color spaces use, so the peak is the encoded value of 2 to the headroom (up to four stops) times SDR white's light: about 1.82 for two stops. Exposure and Whites push areas there; Vibrance and Saturation never push a channel past the peak. Below SDR white nothing changes. |
 
 A neighborhood is the means of the luminance, its square, the darkest
 channel and their product over a square window: 97 pixels across for the

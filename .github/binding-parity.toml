@@ -614,6 +614,8 @@ objects = [
 "seiza-compose::gpu::render_gpu" = { none = "the hosts that build pictures of their own, PSF Guard and PSF Studio, are Rust hosts; C and Python hosts reach the compositor through the combine_* exports, which build their pictures in the core. A picture-level C and Python API waits for a host that needs one" }
 "seiza-compose::render::paint_mask" = { none = "a painted mask belongs to a picture, which only Rust hosts build; C and Python hosts reach the compositor through the combine_* exports" }
 "seiza-compose::tone::neighborhoods" = { none = "a step of the compositor's Tone, which C and Python hosts reach as the compositor itself: through the Rust hosts that build pictures" }
+"seiza-compose::tone::extended_srgb_encode" = { none = "the curve Tone's HDR values are on, for Rust hosts that present and save them; C and Python hosts reach Tone only through the compositor, which Rust hosts drive" }
+"seiza-compose::tone::extended_srgb_decode" = { none = "the inverse of extended_srgb_encode, for Rust hosts that present and save HDR values; C and Python hosts reach Tone only through the compositor, which Rust hosts drive" }
 "seiza-compose::tone::luminance_noise" = { none = "the measurement a host gives Tone for Texture; C and Python hosts reach Tone only through the compositor, which Rust hosts drive" }
 
 # stacking
