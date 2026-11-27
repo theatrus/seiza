@@ -317,6 +317,35 @@ pub fn screen_rgb_stars(
     screen_rgb_stars_reduced(nebula, original, starless, 0.0)
 }
 
+/// The one-pixel cross erosion star reduction blends toward: each sample
+/// the least of itself and its four neighbours. A sample on the border, or
+/// beside a missing (non-finite) neighbour, keeps its value, and a missing
+/// sample stays missing. `values` is a plane `width` by `height`, row by row.
+pub fn cross_erosion(values: &[f32], width: usize, height: usize) -> Vec<f32> {
+    assert_eq!(values.len(), width * height, "a plane of width by height");
+    values
+        .par_iter()
+        .enumerate()
+        .map(|(i, &value)| {
+            let (x, y) = (i % width, i / width);
+            if !value.is_finite() || x == 0 || y == 0 || x + 1 == width || y + 1 == height {
+                return value;
+            }
+            let neighbours = [
+                values[i - 1],
+                values[i + 1],
+                values[i - width],
+                values[i + width],
+            ];
+            if neighbours.iter().all(|v| v.is_finite()) {
+                neighbours.into_iter().fold(value, f32::min)
+            } else {
+                value
+            }
+        })
+        .collect()
+}
+
 /// Screen RGB stars with optional linked star-layer reduction. Reduction in
 /// [0,1] blends its maximum-channel intensity toward a one-pixel cross erosion.
 /// A shared per-pixel gain preserves star-layer RGB ratios; the starless nebula
@@ -361,7 +390,7 @@ pub fn screen_rgb_stars_reduced(
                 }
             })
             .collect();
-        let (width, height) = (nebula.width, nebula.height);
+        let eroded = cross_erosion(&intensity, nebula.width, nebula.height);
         nebula
             .data
             .par_chunks_mut(3)
@@ -372,22 +401,7 @@ pub fn screen_rgb_stars_reduced(
                     pixel.fill(f32::NAN);
                     return;
                 }
-                let (x, y) = (i % width, i / width);
-                let minimum = if x == 0 || y == 0 || x + 1 == width || y + 1 == height {
-                    value
-                } else {
-                    let neighbours = [
-                        intensity[i - 1],
-                        intensity[i + 1],
-                        intensity[i - width],
-                        intensity[i + width],
-                    ];
-                    if neighbours.iter().all(|v| v.is_finite()) {
-                        neighbours.into_iter().fold(value, f32::min)
-                    } else {
-                        value
-                    }
-                };
+                let minimum = eroded[i];
                 let reduced = value + (minimum - value) * reduction as f32;
                 let gain = if value > 0.0 { reduced / value } else { 0.0 };
                 for (channel, output) in pixel.iter_mut().enumerate() {
@@ -434,6 +448,33 @@ mod tests {
     fn rgb(values: Vec<f32>) -> LinearImage {
         LinearImage::new(values.len() / 3, 1, 3, values).unwrap()
     }
+    #[test]
+    fn cross_erosion_takes_the_least_of_a_sample_and_its_four_neighbours() {
+        // A 4 by 3 plane: the two inner samples have a full cross.
+        let plane = [
+            9.0,
+            1.0,
+            9.0,
+            9.0, //
+            2.0,
+            5.0,
+            6.0,
+            0.5, //
+            9.0,
+            9.0,
+            f32::NAN,
+            9.0,
+        ];
+        let eroded = cross_erosion(&plane, 4, 3);
+        assert_eq!(eroded[5], 1.0);
+        // Beside a missing neighbour a sample keeps its value.
+        assert_eq!(eroded[6], 6.0);
+        // The border keeps its values, and a missing sample stays missing.
+        assert_eq!(eroded[0], 9.0);
+        assert_eq!(eroded[7], 0.5);
+        assert!(eroded[10].is_nan());
+    }
+
     #[test]
     fn stars_reconstruct_original_and_mask_missing_coverage() {
         let original = rgb(vec![0.3, 0.6, 0.9, 0.4, 0.5, f32::NAN]);

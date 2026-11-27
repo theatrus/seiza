@@ -65,6 +65,6 @@ pub use crop::{
 pub use fits::write_color_fits_f32;
 pub use narrowband_balance::{
     NarrowbandBalanceOptions, NarrowbandBalanceReport, NarrowbandChannelBalance,
-    balance_narrowband, screen_rgb_stars, screen_rgb_stars_reduced,
+    balance_narrowband, cross_erosion, screen_rgb_stars, screen_rgb_stars_reduced,
 };
 pub use star_stretch::{screen_rgb_star_layer, stretch_rgb_stars};
