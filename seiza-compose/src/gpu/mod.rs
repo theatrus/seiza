@@ -137,7 +137,7 @@ pub struct GpuScene {
     peak: f32,
     /// Each layered stretch the layers read: its constants as the shader
     /// reads them, and its maps.
-    layered: Vec<([f32; 32], Arc<LayeredMaps>)>,
+    layered: Vec<([f32; LAYERED_CONSTANTS], Arc<LayeredMaps>)>,
     /// What the GPU cannot draw of the picture, by name.
     pub left_out: Vec<String>,
 }
@@ -177,12 +177,16 @@ fn layered_stage(read: &InputRead) -> Option<&LayeredStage> {
 
 /// A layered stage's constants as the shader reads them; see `LayeredStep`
 /// in `globals.wgsl`.
-fn layered_constants(stage: &LayeredStage, map_layer: usize, inputs: &[GpuInput]) -> [f32; 32] {
+fn layered_constants(
+    stage: &LayeredStage,
+    map_layer: usize,
+    inputs: &[GpuInput],
+) -> [f32; LAYERED_CONSTANTS] {
     let layered = &stage.layered;
     let curve = layered.curve;
     let maps = &stage.maps;
     let hdr = layered.hdr.unwrap_or_default();
-    let mut constants = [0.0_f32; 32];
+    let mut constants = [0.0_f32; LAYERED_CONSTANTS];
     constants[0] = curve.black;
     constants[1] = curve.median as f32;
     constants[2] = curve.target as f32;
@@ -229,8 +233,13 @@ fn layered_constants(stage: &LayeredStage, map_layer: usize, inputs: &[GpuInput]
     constants[29] = seiza_stretch::STAR_CORE_END_SLOPE as f32;
     constants[30] = curve.black;
     constants[31] = seiza_stretch::DRC_KNEE as f32;
+    constants[32] = layered.params.sky_floor.clamp(0.0, 0.5) as f32;
     constants
 }
+
+/// The constants of one layered stretch, as `LayeredStep` in
+/// `globals.wgsl` holds them: nine vectors of four.
+const LAYERED_CONSTANTS: usize = 36;
 
 /// A texture of `width` by `height` texels with a layer for each layered
 /// stretch's maps.
@@ -642,7 +651,7 @@ struct Globals {
     local: [f32; 4],
     area: [f32; 4],
     luma: [f32; 4],
-    layered: [[f32; 32]; MAX_LAYERED],
+    layered: [[f32; LAYERED_CONSTANTS]; MAX_LAYERED],
 }
 
 /// Where the picture sits in the area drawn.
@@ -1461,7 +1470,7 @@ impl GpuCompositor {
             ],
             area: area.map(|value| value as f32),
             luma: [scene.luma[0], scene.luma[1], scene.luma[2], scene.peak],
-            layered: [[0.0; 32]; MAX_LAYERED],
+            layered: [[0.0; LAYERED_CONSTANTS]; MAX_LAYERED],
         };
         for (slot, (constants, _)) in globals.layered.iter_mut().zip(&scene.layered) {
             *slot = *constants;

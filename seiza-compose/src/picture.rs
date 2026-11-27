@@ -109,6 +109,7 @@ impl LayeredStage {
             stretched = self.layered.star_cores(stretched, read, fine);
         }
         let peak = f64::from(self.peak());
+        let stretched = self.layered.sky_floor(stretched, peak);
         let out = match luminance {
             Some(luminance) => self
                 .layered

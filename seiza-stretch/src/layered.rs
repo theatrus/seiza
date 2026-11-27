@@ -54,6 +54,11 @@ pub struct LayeredParams {
     /// How much of the background's slope detail on bright structure keeps,
     /// in `[0, 1]` (default 0).
     pub contrast_recovery: f64,
+    /// The stretched level, from 0 to 0.5, that becomes black, with the
+    /// range above it stretched to fill again up to the brightest value
+    /// (default 0, none). Sky a background model could not flatten, such
+    /// as faint blobs left in narrowband, goes to black with it.
+    pub sky_floor: f64,
     /// Saturation lift, in `[0, 1]` (default 0).
     pub saturation_amount: f64,
     /// How much the lift favours weakly coloured pixels, in `[0, 1]`
@@ -72,6 +77,7 @@ impl Default for LayeredParams {
             dynamic_range_compression: 0.0,
             scale_separation: 256,
             contrast_recovery: 0.0,
+            sky_floor: 0.0,
             saturation_amount: 0.0,
             saturation_boost: 0.5,
             lightness_mask: true,
@@ -241,6 +247,7 @@ fn validate(params: LayeredParams) -> Result<()> {
             "dynamic range compression",
         ),
         (params.contrast_recovery, "contrast recovery"),
+        (params.sky_floor * 2.0, "twice the sky floor"),
         (params.saturation_amount, "saturation amount"),
         (params.saturation_boost, "saturation boost"),
     ] {
@@ -556,6 +563,17 @@ impl ResolvedLayered {
         (ratio.max(0.0) * stretched).clamp(0.0, peak)
     }
 
+    /// `stretched` with the sky floor taken to black and the range above it
+    /// stretched to reach `peak` again: `(stretched − floor) · peak / (peak −
+    /// floor)`, never below 0. Without a floor it is `stretched`.
+    pub fn sky_floor(&self, stretched: f64, peak: f64) -> f64 {
+        let floor = self.params.sky_floor.clamp(0.0, 0.5);
+        if floor <= 0.0 || peak <= floor {
+            return stretched;
+        }
+        ((stretched - floor) * peak / (peak - floor)).max(0.0)
+    }
+
     /// The least a pixel's luminance above the black point divides a
     /// channel's difference from it by, when its colour follows the stretch:
     /// one noise sigma. Below it a pixel is mostly noise, and dividing by
@@ -630,6 +648,11 @@ pub(crate) fn apply(layered: &ResolvedLayered, data: &[f32], shape: ImageShape) 
                     *out = layered.star_cores(*out, value, smooth);
                 }
             });
+    }
+    if layered.params.sky_floor > 0.0 {
+        stretched
+            .par_iter_mut()
+            .for_each(|out| *out = layered.sky_floor(*out, peak));
     }
 
     if channels == 1 {
@@ -904,6 +927,43 @@ fn transpose(values: &[f32], width: usize, height: usize) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sky_floor_goes_to_black_and_the_peak_stays_the_peak() {
+        let finite: Vec<f32> = (0..4096).map(|i| 0.01 + (i % 97) as f32 * 1e-4).collect();
+        let plan = crate::StretchConfig {
+            model: crate::StretchModel::Layered(LayeredParams {
+                sky_floor: 0.1,
+                ..LayeredParams::default()
+            }),
+            color_strategy: crate::ColorStrategy::Linked,
+            max_analysis_samples: 10_000,
+        }
+        .resolve_for(&finite, 1)
+        .unwrap();
+        let ResolvedCurve::Layered(layered) = plan.curves()[0] else {
+            panic!("not a layered curve");
+        };
+        assert_eq!(layered.sky_floor(0.05, 1.0), 0.0);
+        assert_eq!(layered.sky_floor(0.1, 1.0), 0.0);
+        assert!((layered.sky_floor(1.0, 1.0) - 1.0).abs() < 1e-12);
+        assert!((layered.sky_floor(1.8, 1.8) - 1.8).abs() < 1e-12);
+        assert!((layered.sky_floor(0.55, 1.0) - 0.5).abs() < 1e-12);
+        // No floor leaves the stretch as it was.
+        let mut plain = layered;
+        plain.params.sky_floor = 0.0;
+        assert_eq!(plain.sky_floor(0.05, 1.0), 0.05);
+        // A floor past half the range is refused.
+        let config = crate::StretchConfig {
+            model: crate::StretchModel::Layered(LayeredParams {
+                sky_floor: 0.6,
+                ..LayeredParams::default()
+            }),
+            color_strategy: crate::ColorStrategy::Linked,
+            max_analysis_samples: 10_000,
+        };
+        assert!(config.resolve_for(&finite, 1).is_err());
+    }
 
     #[test]
     fn box_radii_approximate_the_requested_gaussian() {

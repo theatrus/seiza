@@ -140,7 +140,11 @@ four layers per draw take a layered stretch; another is drawn with its
 curve alone and named in `left_out`, as is a layered stretch a computed
 mask or a luminance layer reads. A host measures the maps again only when
 a setting that moves them changes (the core compression's scale, or the
-stretch's background statistics), so a slider redraws at once. The plain
+stretch's background statistics), so a slider redraws at once. Its sky
+floor, a stretched level from 0 to 0.5, goes to black after the star
+cores, with the range above it stretched to reach the peak again, so sky a
+background model left uneven, such as narrowband blobs, can be taken to
+black without clipping the bright end. The plain
 layered stage can also read guide inputs at the same pixel: `luminance`, a
 plane of the luminance of red, green and blue stretched together, which
 the channel then follows as the whole-image stretch's colour does, and

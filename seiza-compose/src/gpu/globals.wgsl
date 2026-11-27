@@ -52,6 +52,8 @@ struct LayeredStep {
     // curve they are pulled toward, w its knee. z: the curve's black, for
     // a channel that follows a luminance.
     cores: vec4f,
+    // x: the sky floor, the stretched level that becomes black.
+    floor: vec4f,
 }
 
 // One step of the Finish stage.

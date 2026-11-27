@@ -322,6 +322,90 @@ fn a_layered_stretch_matches_the_cpu() {
     );
 }
 
+/// The same stretch with a sky floor: the sky goes to black on the GPU as
+/// on the CPU, and the range above fills to the peak again.
+#[test]
+fn a_layered_stretch_with_a_sky_floor_matches_the_cpu() {
+    use seiza_compose::picture::{
+        InputRead, Layer, LayerKind, LayeredStage, Transfer, TransferStage,
+    };
+    use seiza_stretch::{
+        ColorStrategy, LayeredHdr, LayeredHdrParams, LayeredParams, ResolvedCurve, StretchConfig,
+        StretchModel, reduce_luminance,
+    };
+    use std::sync::Arc;
+    let inputs = inputs();
+    let images: Vec<&LinearImage> = inputs.iter().collect();
+    let image = &inputs[0];
+    let config = StretchConfig {
+        model: StretchModel::LayeredHdr(LayeredHdrParams {
+            layered: LayeredParams {
+                contrast_recovery: 0.6,
+                scale_separation: 64,
+                sky_floor: 0.15,
+                ..LayeredParams::default()
+            },
+            hdr: LayeredHdr {
+                headroom: 2.0,
+                core_threshold: 60.0,
+                core_compression: 0.3,
+                core_scale: 8.0,
+                ..LayeredHdr::default()
+            },
+        }),
+        color_strategy: ColorStrategy::Linked,
+        max_analysis_samples: 200_000,
+    };
+    let finite: Vec<f32> = image
+        .data
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .collect();
+    let plan = config.resolve_for(&finite, 1).unwrap();
+    let ResolvedCurve::Layered(layered) = plan.curves()[0] else {
+        panic!("not a layered curve");
+    };
+    let (reduced, width, height) = reduce_luminance(&image.data, image.width, image.height);
+    let maps = Arc::new(layered.measure(&reduced, width, height));
+    assert!(!maps.core.is_empty() && !maps.large.is_empty());
+    let stage = LayeredStage::new(layered, maps);
+    let picture = Picture {
+        layers: vec![Layer::new(LayerKind::Input {
+            read: InputRead::new(0, Transfer::of([TransferStage::Layered(stage)])),
+            color: [1.0, 0.8, 0.6],
+            curve: 0.0,
+        })],
+        headroom: 2.0,
+        ..Picture::default()
+    };
+    let place: Vec<seiza_compose::gpu::GpuInput> = (0..3)
+        .map(|layer| seiza_compose::gpu::GpuInput { layer, scale: 1.0 })
+        .collect();
+    assert_eq!(
+        seiza_compose::gpu::GpuScene::new(&picture, &place).left_out,
+        Vec::<String>::new()
+    );
+    let Some((cpu, gpu)) = both(&picture, &images) else {
+        eprintln!("no GPU: the GPU compositor was not checked");
+        return;
+    };
+    let above = cpu.iter().filter(|value| **value > 1.0).count();
+    assert!(above > 50, "the stretch reaches above SDR white: {above}");
+    // The sky goes to black under the floor.
+    let black = cpu.iter().filter(|value| **value == 0.0).count();
+    assert!(
+        black > cpu.len() / 10,
+        "the floor takes the sky to black: {black}"
+    );
+    let (mean, p99, largest) = gap(&cpu, &gpu);
+    eprintln!("layered with a sky floor: mean {mean:e}, p99 {p99:e}, max {largest:e}");
+    assert!(
+        mean < 2e-3 && p99 < 1e-2,
+        "mean {mean:e}, p99 {p99:e}, max {largest:e}"
+    );
+}
+
 /// A layered stretch that follows another input's luminance and compresses
 /// star cores against that luminance's fine blur draws on the GPU as the
 /// CPU renders it.

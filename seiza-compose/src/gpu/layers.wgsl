@@ -176,6 +176,11 @@ fn layered(value: f32, index: i32, doc: vec2f, uv: vec2f) -> f32 {
         let mask = smoothstep(0.0, 1.0, clamp((luminance - fine - 3.0 * noise) / (12.0 * noise), 0.0, 1.0));
         out += step.cores.x * mask * (star_core_curve(out, step.cores.w, step.cores.y) - out);
     }
+    // The sky floor goes to black, and the range above it fills to the
+    // peak again, as `ResolvedLayered::sky_floor` does.
+    if step.floor.x > 0.0 && step.turn.w > step.floor.x {
+        out = max(out - step.floor.x, 0.0) * step.turn.w / (step.turn.w - step.floor.x);
+    }
     // A channel that follows a luminance: its own value less the black,
     // scaled as the luminance was.
     if step.guides.x >= 0.0 {
