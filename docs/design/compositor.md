@@ -118,6 +118,29 @@ HdrTail` resolves and maps it; a host sets the headroom to its HDR Tone
 step's. On the Cat's Eye (NGC 6543) the tail alone keeps about a quarter of
 the core's fine contrast at 3 stops, where the plain curve and Tone keep 1 %.
 
+## Layered stretches
+
+Seiza's layered stretch, plain or HDR, reads more than each pixel: the
+HDR core compression blurs the log of luminance, and contrast recovery
+blurs luminance into a large-scale layer. Both are smooth, so
+`ResolvedLayered::measure` measures them once from the whole picture at a
+quarter of its resolution (`reduce_luminance`, `MAP_REDUCTION`), along
+with the HDR tail's white, the brightest large-scale luminance after the
+compression. `seiza_stretch` itself stretches a whole image the same way.
+`TransferStage::Layered` carries the stretch and its maps; the CPU render
+reads the maps at each sample's place, and the GPU reads them from a
+texture array, interpolating between map pixels as the CPU does, and works
+out the curve, core gain, HDR tail and detail gain in the shader. Up to
+four layers per draw take a layered stretch; another is drawn with its
+curve alone and named in `left_out`, as is a layered stretch a computed
+mask or a luminance layer reads. A host measures the maps again only when
+a setting that moves them changes (the core compression's scale, or the
+stretch's background statistics), so a slider redraws at once. The plain
+layered stretch's star-core compression needs full resolution and is not
+drawn by the compositor. When the core compression leaves the white below
+the knee, the knee comes down to 80 % of the white's curve value, so the
+brightest structure still reaches the top of the headroom.
+
 ## The recipes as pictures
 
 | Recipe | Picture |

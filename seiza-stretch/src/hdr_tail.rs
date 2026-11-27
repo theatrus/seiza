@@ -64,18 +64,19 @@ impl Default for HdrTailParams {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HdrTail {
     /// The curve's black: the largest input it maps to 0.
-    black: f64,
+    pub black: f64,
     /// The input above the black where the tail starts.
-    knee_input: f64,
+    pub knee_input: f64,
     /// The natural log of the display light at the knee.
-    knee_light: f64,
+    pub knee_light: f64,
     /// The curve's slope at the knee, in log light per log input.
-    slope: f64,
+    pub slope: f64,
     /// The tail's own slope, in the same units.
-    power: f64,
-    relax: f64,
+    pub power: f64,
+    /// How quickly the tail turns from the curve's slope to its own.
+    pub relax: f64,
     /// The brightest value the tail gives.
-    peak: f32,
+    pub peak: f32,
 }
 
 impl HdrTail {

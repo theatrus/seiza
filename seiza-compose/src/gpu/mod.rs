@@ -23,11 +23,13 @@ pub use display::{DISPLAY_SHADER, DisplayMapping};
 pub use headless::{GpuContext, render_gpu};
 
 use crate::picture::{
-    Adjustment, Blend, FinishKind, InputRead, LayerKind, LuminanceTarget, Picture, Segment,
-    Transfer,
+    Adjustment, Blend, FinishKind, InputRead, LayerKind, LayeredStage, LuminanceTarget, Picture,
+    Segment, Transfer, TransferStage,
 };
 use bytemuck::{Pod, Zeroable};
+use seiza_stretch::LayeredMaps;
 use seiza_stretch::{ColorStrategy, ResolvedCurve};
+use std::sync::Arc;
 
 /// The most layers one draw combines.
 pub const MAX_LAYERS: usize = 24;
@@ -59,6 +61,9 @@ const COMBINED_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// The local passes' measurements and means. Full floats: a window's
 /// variance is the difference of two means, which half floats would lose.
 const LOCAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
+/// The most layers with a layered stretch one draw stretches on the GPU;
+/// another is drawn with its curve alone and named in `left_out`.
+pub const MAX_LAYERED: usize = 4;
 /// The most Tone steps one draw reads neighborhoods for; another is drawn
 /// with each pixel alone and named in `left_out`.
 pub const MAX_LOCAL_TONES: usize = 4;
@@ -128,6 +133,9 @@ pub struct GpuScene {
     masks: Vec<Vec<GpuSegment>>,
     /// The weights of the picture's luminance, from its working space.
     luma: [f32; 3],
+    /// Each layered stretch the layers read: its constants as the shader
+    /// reads them, and its maps.
+    layered: Vec<([f32; 24], Arc<LayeredMaps>)>,
     /// What the GPU cannot draw of the picture, by name.
     pub left_out: Vec<String>,
 }
@@ -135,13 +143,128 @@ pub struct GpuScene {
 /// A transfer as a stretch-table row: entry `i` is the transfer of the
 /// sample `(i / (width - 1))² × scale`, so a row is indexed by the square
 /// root of a texel, where a stretch is steepest.
-fn transfer_row(read: &InputRead, scale: f32) -> Vec<f32> {
+///
+/// With `before_layered`, the row stops before a layered stage: the shader
+/// does the layered stretch itself, reading its maps.
+fn transfer_row(read: &InputRead, scale: f32, before_layered: bool) -> Vec<f32> {
     let last = (STRETCH_TABLE_WIDTH - 1) as f32;
     let mut samples: Vec<f32> = (0..STRETCH_TABLE_WIDTH)
         .map(|index| (index as f32 / last).powi(2) * scale)
         .collect();
-    read.transfer.apply(&mut samples);
+    if before_layered {
+        let stages = read
+            .transfer
+            .stages
+            .iter()
+            .take_while(|stage| !matches!(stage, TransferStage::Layered(_)))
+            .cloned();
+        Transfer::of(stages).apply(&mut samples);
+    } else {
+        read.transfer.apply(&mut samples);
+    }
     samples
+}
+
+/// A transfer's layered stage, if it has one.
+fn layered_stage(read: &InputRead) -> Option<&LayeredStage> {
+    read.transfer.stages.iter().find_map(|stage| match stage {
+        TransferStage::Layered(stage) => Some(stage),
+        _ => None,
+    })
+}
+
+/// A layered stage's constants as the shader reads them; see `LayeredStep`
+/// in `globals.wgsl`.
+fn layered_constants(stage: &LayeredStage, map_layer: usize) -> [f32; 24] {
+    let layered = &stage.layered;
+    let curve = layered.curve;
+    let maps = &stage.maps;
+    let hdr = layered.hdr.unwrap_or_default();
+    let mut constants = [0.0_f32; 24];
+    constants[0] = curve.black;
+    constants[1] = curve.median as f32;
+    constants[2] = curve.target as f32;
+    constants[3] = layered.median as f32;
+    constants[4] = layered.noise as f32;
+    constants[5] = layered.params.contrast_recovery as f32;
+    constants[6] = layered.slope(layered.median) as f32;
+    constants[7] = if maps.core.is_empty() { 0.0 } else { 1.0 };
+    constants[8] = (hdr.core_threshold + seiza_stretch::CORE_FLOOR).ln() as f32;
+    constants[9] = hdr.core_compression as f32;
+    constants[10] = seiza_stretch::CORE_FLOOR as f32;
+    constants[11] = seiza_stretch::CORE_KNEE_WIDTH as f32;
+    if let Some(tail) = stage.tail() {
+        constants[12] = 1.0;
+        constants[13] = tail.black as f32;
+        constants[14] = tail.knee_input as f32;
+        constants[15] = tail.knee_light as f32;
+        constants[16] = tail.slope as f32;
+        constants[17] = tail.power as f32;
+        constants[18] = tail.relax as f32;
+    }
+    constants[19] = stage.peak();
+    constants[20] = map_layer as f32;
+    constants[21] = if maps.large.is_empty() { 0.0 } else { 1.0 };
+    constants[22] = maps.width as f32;
+    constants[23] = maps.height as f32;
+    constants
+}
+
+/// A texture of `width` by `height` texels with a layer for each layered
+/// stretch's maps.
+fn layered_maps_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("compose layered maps"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: MAX_LAYERED as u32,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rg32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    })
+}
+
+/// What every pass shares: the globals, the sampler, the stretch table and
+/// the layered maps.
+fn common_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    globals: &wgpu::Buffer,
+    sampler: &wgpu::Sampler,
+    stretch_view: &wgpu::TextureView,
+    layered_maps: &wgpu::Texture,
+) -> wgpu::BindGroup {
+    let maps = layered_maps.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    });
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("compose globals and sampler"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: globals.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(stretch_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(&maps),
+            },
+        ],
+    })
 }
 
 /// A curve as a stretch-table row of a picture's values from 0 to 1.
@@ -171,23 +294,31 @@ impl GpuScene {
         // row depends only on the transfer and the input's scale, so reads
         // that share both share a row, as a layer and a mask that reads
         // its input do.
-        let mut row_keys: Vec<(u32, Transfer)> = Vec::new();
-        let mut row_of = |scene: &mut Self, read: &InputRead| -> Option<usize> {
-            let place = input(read)?;
-            let scale = place.scale.to_bits();
-            if let Some(row) = row_keys
-                .iter()
-                .position(|(known, transfer)| *known == scale && *transfer == read.transfer)
-            {
-                return Some(row);
-            }
-            if scene.rows.len() == MAX_LAYERS {
-                return None;
-            }
-            row_keys.push((scale, read.transfer.clone()));
-            scene.rows.push(transfer_row(read, place.scale));
-            Some(scene.rows.len() - 1)
-        };
+        let mut row_keys: Vec<(u32, bool, Transfer)> = Vec::new();
+        let mut row_of =
+            |scene: &mut Self, read: &InputRead, before_layered: bool| -> Option<usize> {
+                let place = input(read)?;
+                let scale = place.scale.to_bits();
+                if let Some(row) = row_keys.iter().position(|(known, before, transfer)| {
+                    *known == scale && *before == before_layered && *transfer == read.transfer
+                }) {
+                    return Some(row);
+                }
+                if scene.rows.len() == MAX_LAYERS {
+                    return None;
+                }
+                if !before_layered && layered_stage(read).is_some() {
+                    scene.left_out.push(
+                    "a layered stretch a mask or luminance layer reads, drawn with its curve alone"
+                        .to_string(),
+                );
+                }
+                row_keys.push((scale, before_layered, read.transfer.clone()));
+                scene
+                    .rows
+                    .push(transfer_row(read, place.scale, before_layered));
+                Some(scene.rows.len() - 1)
+            };
         let band = |read: &InputRead| -> [f32; 3] {
             let layer = input(read).map_or(-1.0, |input| input.layer as f32);
             let (blended, amount) = read
@@ -218,9 +349,18 @@ impl GpuScene {
             slot[14] = mask_index(layer.mask);
             slot[15] = if layer.own { 1.0 } else { 0.0 };
             slot[16] = computed;
+            slot[17] = -1.0;
             match &layer.kind {
                 LayerKind::Input { read, color, curve } => {
-                    let Some(row) = row_of(&mut scene, read) else {
+                    // A layered stretch is drawn by the shader, past its
+                    // row, while there is room for its constants and maps.
+                    let layered = layered_stage(read).filter(|_| scene.layered.len() < MAX_LAYERED);
+                    if layered_stage(read).is_some() && layered.is_none() {
+                        scene.left_out.push(format!(
+                            "layer {index}'s layered stretch past the GPU's {MAX_LAYERED}, drawn with its curve alone"
+                        ));
+                    }
+                    let Some(row) = row_of(&mut scene, read, layered.is_some()) else {
                         // Kept in its place, hidden, so heals and masks keep
                         // their layers.
                         scene
@@ -230,6 +370,13 @@ impl GpuScene {
                         scene.layers.push(slot);
                         continue;
                     };
+                    if let Some(stage) = layered {
+                        let map_layer = scene.layered.len();
+                        scene
+                            .layered
+                            .push((layered_constants(stage, map_layer), stage.maps.clone()));
+                        slot[17] = map_layer as f32;
+                    }
                     let [layer_band, blended, amount] = band(read);
                     slot[..3].copy_from_slice(color);
                     slot[4] = row as f32;
@@ -260,7 +407,7 @@ impl GpuScene {
                     };
                     slot[8] = -1.0;
                     if let Some(read) = read {
-                        let Some(row) = row_of(&mut scene, read) else {
+                        let Some(row) = row_of(&mut scene, read, false) else {
                             scene
                                 .left_out
                                 .push(format!("layer {index}, with no stretch row left"));
@@ -290,7 +437,7 @@ impl GpuScene {
                 .zip(mask.reads.iter().take(2).map(Some).chain([None, None]))
             {
                 let values = match read {
-                    Some(read) => match row_of(&mut scene, read) {
+                    Some(read) => match row_of(&mut scene, read, false) {
                         Some(row) => {
                             let [layer_band, blended, amount] = band(read);
                             [layer_band, blended, amount, row as f32]
@@ -471,6 +618,7 @@ struct Globals {
     local: [f32; 4],
     area: [f32; 4],
     luma: [f32; 4],
+    layered: [[f32; 24]; MAX_LAYERED],
 }
 
 /// Where the picture sits in the area drawn.
@@ -591,7 +739,15 @@ pub struct GpuCompositor {
     finished_format: wgpu::TextureFormat,
     globals: wgpu::Buffer,
     common: wgpu::BindGroup,
+    /// What the shared bind group is made of, to make it again when the
+    /// layered maps' texture changes size.
+    common_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    stretch_view: wgpu::TextureView,
     stretch_table: wgpu::Texture,
+    /// The layered stretches' maps, a layer each: the core compression's
+    /// base in red and the large-scale layer in green.
+    layered_maps: wgpu::Texture,
     tile_layout: wgpu::BindGroupLayout,
     masks_layout: wgpu::BindGroupLayout,
     finish_layout: wgpu::BindGroupLayout,
@@ -673,6 +829,16 @@ impl GpuCompositor {
                     count: None,
                 },
                 texture_entry(2, wgpu::TextureViewDimension::D2),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let tile_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -909,24 +1075,15 @@ impl GpuCompositor {
             view_formats: &[],
         });
         let stretch_view = stretch_table.create_view(&wgpu::TextureViewDescriptor::default());
-        let common = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("compose globals and sampler"),
-            layout: &common_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: globals.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&stretch_view),
-                },
-            ],
-        });
+        let layered_maps = layered_maps_texture(device, 1, 1);
+        let common = common_group(
+            device,
+            &common_layout,
+            &globals,
+            &sampler,
+            &stretch_view,
+            &layered_maps,
+        );
         let tile_instances = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("compose tile instances"),
             size: MAX_TILE_INSTANCES * size_of::<TileInstance>() as u64,
@@ -941,7 +1098,11 @@ impl GpuCompositor {
             finished_format,
             globals,
             common,
+            common_layout,
+            sampler,
+            stretch_view,
             stretch_table,
+            layered_maps,
             tile_layout,
             masks_layout,
             finish_layout,
@@ -1276,7 +1437,11 @@ impl GpuCompositor {
             ],
             area: area.map(|value| value as f32),
             luma: [scene.luma[0], scene.luma[1], scene.luma[2], 0.0],
+            layered: [[0.0; 24]; MAX_LAYERED],
         };
+        for (slot, (constants, _)) in globals.layered.iter_mut().zip(&scene.layered) {
+            *slot = *constants;
+        }
         for (slot, layer) in globals.layers.iter_mut().zip(&scene.layers) {
             *slot = *layer;
         }
@@ -1314,7 +1479,77 @@ impl GpuCompositor {
             .write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
     }
 
-    fn upload_tables(&self, scene: &GpuScene) {
+    /// The layered stretches' maps, into a layer each of the maps texture,
+    /// which grows to the largest. A layer's unused texels are never read.
+    fn upload_layered_maps(&mut self, scene: &GpuScene) {
+        let width = scene
+            .layered
+            .iter()
+            .map(|(_, maps)| maps.width)
+            .max()
+            .unwrap_or(1)
+            .max(1) as u32;
+        let height = scene
+            .layered
+            .iter()
+            .map(|(_, maps)| maps.height)
+            .max()
+            .unwrap_or(1)
+            .max(1) as u32;
+        let size = self.layered_maps.size();
+        if size.width < width || size.height < height {
+            self.layered_maps =
+                layered_maps_texture(&self.device, width.max(size.width), height.max(size.height));
+            self.common = common_group(
+                &self.device,
+                &self.common_layout,
+                &self.globals,
+                &self.sampler,
+                &self.stretch_view,
+                &self.layered_maps,
+            );
+        }
+        for (layer, (_, maps)) in scene.layered.iter().enumerate() {
+            if maps.width == 0 || maps.height == 0 {
+                continue;
+            }
+            let pixels = maps.width * maps.height;
+            let texels: Vec<[f32; 2]> = (0..pixels)
+                .map(|at| {
+                    [
+                        maps.core.get(at).copied().unwrap_or(0.0),
+                        maps.large.get(at).copied().unwrap_or(0.0),
+                    ]
+                })
+                .collect();
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.layered_maps,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: layer as u32,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytemuck::cast_slice(&texels),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(maps.width as u32 * 8),
+                    rows_per_image: None,
+                },
+                wgpu::Extent3d {
+                    width: maps.width as u32,
+                    height: maps.height as u32,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+    }
+
+    fn upload_tables(&mut self, scene: &GpuScene) {
+        self.upload_layered_maps(scene);
         let mut bits = vec![0u16; STRETCH_TABLE_WIDTH * STRETCH_TABLE_ROWS];
         let finish_rows = scene
             .finish_rows

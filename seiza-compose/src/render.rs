@@ -367,7 +367,8 @@ impl Plan {
                     .collect(),
                 None => plane(read.input).to_vec(),
             };
-            read.transfer.apply(&mut samples);
+            read.transfer
+                .apply_at(&mut samples, [padded.x, padded.y], padded.width);
             samples
         };
         // Where every input the picture reads is covered.
@@ -542,7 +543,8 @@ impl LayerPlanes {
                         &masks[heal.mask],
                     );
                 }
-                read.transfer.apply(&mut healed);
+                read.transfer
+                    .apply_at(&mut healed, [padded.x, padded.y], padded.width);
                 if curve != 0.0 {
                     healed
                         .iter_mut()

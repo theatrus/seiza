@@ -12,6 +12,8 @@
 struct TileVertex {
     @builtin(position) position: vec4f,
     @location(0) uv: vec2f,
+    // Where the fragment is in the picture, in picture pixels.
+    @location(1) doc: vec2f,
 }
 
 @vertex
@@ -25,7 +27,126 @@ fn tile_vertex(
     var out: TileVertex;
     out.position = vec4f(doc * globals.view.xy + globals.view.zw, 0.0, 1.0);
     out.uv = mix(uv_rect.xy, uv_rect.zw, corner);
+    out.doc = doc;
     return out;
+}
+
+// ---- The layered stretch, as `seiza_stretch::ResolvedLayered` gives it.
+
+// The value on the extended sRGB curve of linear light.
+fn layered_encode(light: f32) -> f32 {
+    if light <= 0.0031308 {
+        return 12.92 * max(light, 0.0);
+    }
+    return 1.055 * pow(light, 1.0 / 2.4) - 0.055;
+}
+
+// The median anchor curve, and its slope.
+fn anchor_rescaled(value: f32, curve: vec4f) -> f32 {
+    return clamp((value - curve.x) / (1.0 - curve.x), 0.0, 1.0);
+}
+
+fn anchor_curve(value: f32, curve: vec4f) -> f32 {
+    let r = anchor_rescaled(value, curve);
+    let m = curve.y;
+    let t = curve.z;
+    let denominator = m * (t + r - 1.0) - t * r;
+    if abs(denominator) <= 1.1920929e-7 {
+        return r;
+    }
+    return (m - 1.0) * t * r / denominator;
+}
+
+fn anchor_slope(value: f32, curve: vec4f) -> f32 {
+    let r = anchor_rescaled(value, curve);
+    let m = curve.y;
+    let t = curve.z;
+    let denominator = m * (t + r - 1.0) - t * r;
+    return (m - 1.0) * (t - 1.0) * m * t / (denominator * denominator * (1.0 - curve.x));
+}
+
+// The curve, continued into the headroom above its knee when there is a tail.
+fn layered_curve(value: f32, step: LayeredStep) -> f32 {
+    if step.tail.x > 0.5 {
+        let above = value - step.tail.y;
+        if above > step.tail.z {
+            let u = log(above / step.tail.z);
+            let light = step.tail.w + step.turn.y * u
+                + (step.turn.x - step.turn.y) * step.turn.z * (1.0 - exp(-u / step.turn.z));
+            return clamp(layered_encode(exp(light)), 0.0, step.turn.w);
+        }
+    }
+    return anchor_curve(value, step.curve);
+}
+
+// One map of a layered stretch at picture position `doc`, interpolated
+// between the centres of the map pixels around it; a NaN texel has no
+// weight. NaN where all four are.
+fn layered_map(step: LayeredStep, doc: vec2f, channel: i32) -> f32 {
+    let size = step.maps.zw;
+    let at = clamp(doc / 4.0 - 0.5, vec2f(0.0), size - 1.0);
+    let low = vec2i(floor(at));
+    let high = min(low + 1, vec2i(size) - 1);
+    let t = at - vec2f(low);
+    let layer = i32(step.maps.x);
+    var sum = 0.0;
+    var weight = 0.0;
+    let corners = array<vec2i, 4>(low, vec2i(high.x, low.y), vec2i(low.x, high.y), high);
+    let weights = array<f32, 4>(
+        (1.0 - t.x) * (1.0 - t.y),
+        t.x * (1.0 - t.y),
+        (1.0 - t.x) * t.y,
+        t.x * t.y,
+    );
+    for (var corner = 0; corner < 4; corner++) {
+        let value = textureLoad(layered_maps, corners[corner], layer, 0)[channel];
+        if value == value && weights[corner] > 0.0 {
+            sum += value * weights[corner];
+            weight += weights[corner];
+        }
+    }
+    if weight > 0.0 {
+        return sum / weight;
+    }
+    return bitcast<f32>(0x7fc00000u);
+}
+
+// Layer `index`'s layered stretch of `value` at picture position `doc`, or
+// `value` as it is when the layer has none.
+fn layered(value: f32, index: i32, doc: vec2f) -> f32 {
+    let at = i32(globals.layers[index].more.y);
+    if at < 0 {
+        return value;
+    }
+    let step = globals.layered[at];
+    var read = value;
+    // The core compression: the part above the background scaled by one
+    // smooth gain from the base.
+    if step.detail.w > 0.5 {
+        let base = layered_map(step, doc, 0);
+        if base == base {
+            let over = (base - step.core.x) / step.core.w;
+            var soft = step.core.w * over;
+            if over <= 20.0 {
+                soft = step.core.w * log(1.0 + exp(over));
+            }
+            let gain = exp(-step.core.y * soft);
+            read = step.curve.w + (value - step.curve.w) * gain;
+        }
+    }
+    var out = layered_curve(read, step);
+    // Contrast recovery: the detail around the large-scale layer keeps more
+    // of the background's slope.
+    if step.maps.y > 0.5 && step.detail.y > 0.0 {
+        let large = layered_map(step, doc, 1);
+        if large == large {
+            let level = min(large, read);
+            let gain = min(pow(step.detail.z / anchor_slope(level, step.curve), step.detail.y / 2.0), 4.0);
+            let base = layered_curve(large, step);
+            out = base + (out - base) * gain;
+        }
+    }
+    return clamp(out, 0.0, step.turn.w);
 }
 
 // A layer's stretch of a band's sample. The stretch itself is resolved by
@@ -304,11 +425,14 @@ fn luminance_target(color: vec3f, value: f32, has: bool, replace: bool, cover: f
     return mix(color, scaled, cover);
 }
 
-fn healed_value(index: i32, pixel: vec2i) -> f32 {
+fn healed_value(index: i32, pixel: vec2i, doc: vec2f) -> f32 {
     let layer = globals.layers[index];
     let place = i32(layer.stretch.y);
     let size = vec2i(globals.screen.xy);
-    var value = layer_curve(stretched(healed_sample(index, place, pixel), layer.stretch.x), layer.stretch.w);
+    var value = layer_curve(
+        layered(stretched(healed_sample(index, place, pixel), layer.stretch.x), index, doc),
+        layer.stretch.w,
+    );
     let count = i32(globals.counts.z);
     for (var at = 0; at < count; at++) {
         let heal = globals.heals[at];
@@ -317,8 +441,11 @@ fn healed_value(index: i32, pixel: vec2i) -> f32 {
         }
         let source = pixel + vec2i(heal.offset.xy);
         if all(source >= vec2i(0)) && all(source < size) {
-            let copy = layer_curve(stretched(healed_sample(index, place, source), layer.stretch.x), layer.stretch.w)
-                + heal.what.w;
+            // The maps are smooth, so the copy reads them where it lands.
+            let copy = layer_curve(
+                layered(stretched(healed_sample(index, place, source), layer.stretch.x), index, doc),
+                layer.stretch.w,
+            ) + heal.what.w;
             value = mix(value, copy, textureLoad(layer_masks, pixel, i32(heal.what.z), 0).r);
         }
     }
@@ -415,10 +542,10 @@ fn tile_fragment(in: TileVertex) -> @location(0) vec4f {
         }
         var value = 0.0;
         if layer.stretch.y >= 0.0 {
-            value = healed_value(index, pixel);
+            value = healed_value(index, pixel, in.doc);
         } else {
             let sample = band_sample(in.uv, layer.select.x, layer.select.z, layer.select.w);
-            value = layer_curve(stretched(sample, layer.stretch.x), layer.stretch.w);
+            value = layer_curve(layered(stretched(sample, layer.stretch.x), index, in.doc), layer.stretch.w);
         }
         own = layer.color.rgb * value;
         own_band = true;

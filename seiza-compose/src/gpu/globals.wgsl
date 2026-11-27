@@ -23,6 +23,29 @@ struct Layer {
     more: vec4f,
 }
 
+// A layered stretch, as `seiza_stretch::ResolvedLayered` with its maps and
+// HDR tail; `layered_constants` in Rust packs it.
+struct LayeredStep {
+    // The median anchor curve: black, median, target; then the background
+    // median of luminance.
+    curve: vec4f,
+    // x: luminance noise. y: contrast recovery. z: the curve's slope at the
+    // background median. w: 1 when the maps hold a core compression base.
+    detail: vec4f,
+    // The core compression: x the log of its threshold, y how much it takes
+    // out, z the floor under the log, w the knee's width.
+    core: vec4f,
+    // The HDR tail: x 1 when there is one, y the curve's black, z the input
+    // above it where the tail starts, w the log of the light there.
+    tail: vec4f,
+    // The tail: x the curve's slope at the knee, y its own, z how quickly it
+    // turns; w the brightest value the stretch gives.
+    turn: vec4f,
+    // x: the maps' layer. y: 1 when the maps hold a large-scale layer.
+    // zw: the maps' width and height.
+    maps: vec4f,
+}
+
 // One step of the Finish stage.
 struct FinishStep {
     // x: 1 curves, 2 saturation, 3 heal, 4 stretch, 5 tone and color.
@@ -99,6 +122,8 @@ struct Globals {
     area: vec4f,
     // xyz: the weights of the luminance, from the picture's working space.
     luma: vec4f,
+    // The layered stretches the layers read.
+    layered: array<LayeredStep, 4>,
 }
 
 @group(0) @binding(0) var<uniform> globals: Globals;
@@ -107,6 +132,9 @@ struct Globals {
 // square root of the band's sample, so the dark end, where a stretch is
 // steepest, gets most of the entries.
 @group(0) @binding(2) var stretch_table: texture_2d<f32>;
+// The layered stretches' maps, at a quarter of the picture's resolution, a
+// layer each: red the core compression's base, green the large-scale layer.
+@group(0) @binding(3) var layered_maps: texture_2d_array<f32>;
 
 // An S-shaped contrast curve for a positive amount, and a flattening one for
 // a negative amount. 0 leaves x unchanged.

@@ -7,7 +7,10 @@
 //! `combine_*` functions build pictures of this kind; a host with a document
 //! of its own, such as PSF Studio, builds its own.
 
-use seiza_stretch::{HdrTail, ResolvedCurve, ResolvedSampleDomain, StretchPlan};
+use seiza_stretch::{
+    HdrTail, LayeredMaps, ResolvedCurve, ResolvedLayered, ResolvedSampleDomain, StretchPlan,
+};
+use std::sync::Arc;
 
 /// One stage of a [`Transfer`].
 #[derive(Clone, Debug, PartialEq)]
@@ -29,6 +32,52 @@ pub enum TransferStage {
     /// knee: values above 1 are on the extended sRGB curve, up to the
     /// tail's peak.
     TailedCurve { curve: ResolvedCurve, tail: HdrTail },
+    /// Seiza's layered stretch of the sample, read as luminance: its curve,
+    /// with the core compression, HDR tail and contrast recovery its maps
+    /// call for. It reads the maps at the sample's place in the picture.
+    Layered(LayeredStage),
+}
+
+/// A layered stretch as a transfer stage: the resolved stretch, its maps
+/// measured from the whole picture, and the HDR tail they give it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayeredStage {
+    pub layered: ResolvedLayered,
+    pub maps: Arc<LayeredMaps>,
+    tail: Option<HdrTail>,
+}
+
+impl LayeredStage {
+    /// The stage of `layered` with `maps`, measured by
+    /// [`ResolvedLayered::measure`] from the whole picture.
+    pub fn new(layered: ResolvedLayered, maps: Arc<LayeredMaps>) -> Self {
+        let tail = layered.tail(&maps);
+        Self {
+            layered,
+            maps,
+            tail,
+        }
+    }
+
+    /// The HDR tail the stage continues its curve with, if any.
+    pub fn tail(&self) -> Option<&HdrTail> {
+        self.tail.as_ref()
+    }
+
+    /// The brightest value the stage gives.
+    pub fn peak(&self) -> f32 {
+        self.layered.peak(self.tail.as_ref())
+    }
+
+    /// The stage of a sample at picture pixel `(x, y)`; with no place, of a
+    /// sample alone, which reads no maps.
+    fn map(&self, value: f32, at: Option<(usize, usize)>) -> f32 {
+        let sample = at.map_or_else(Default::default, |(x, y)| self.maps.sample(x, y));
+        (self
+            .layered
+            .stretch_luminance(value, sample, self.tail.as_ref()) as f32)
+            .clamp(0.0, self.peak())
+    }
 }
 
 /// How an input's samples become a layer's values: its stages, in order. No
@@ -52,8 +101,20 @@ impl Transfer {
     }
 
     /// Applies the transfer to every sample of `samples`. A non-finite
-    /// sample stays non-finite.
+    /// sample stays non-finite. A layered stage reads no maps, as for a
+    /// sample alone; [`Self::apply_at`] gives the samples their places.
     pub fn apply(&self, samples: &mut [f32]) {
+        self.apply_placed(samples, None);
+    }
+
+    /// Applies the transfer to `samples`, the rows of a rectangle `width`
+    /// samples wide whose first sample is at picture pixel `origin`; a place
+    /// outside the picture reads the maps at its nearest edge.
+    pub fn apply_at(&self, samples: &mut [f32], origin: [i64; 2], width: usize) {
+        self.apply_placed(samples, Some((origin, width)));
+    }
+
+    fn apply_placed(&self, samples: &mut [f32], placed: Option<([i64; 2], usize)>) {
         for stage in &self.stages {
             match stage {
                 TransferStage::Scale(factor) => {
@@ -87,6 +148,20 @@ impl Transfer {
                             *sample = tail.map(*curve, *sample);
                         }
                     })
+                }
+                TransferStage::Layered(stage) => {
+                    for (index, sample) in samples.iter_mut().enumerate() {
+                        if !sample.is_finite() {
+                            continue;
+                        }
+                        let at = placed.map(|([x, y], width)| {
+                            (
+                                (x + (index % width.max(1)) as i64).max(0) as usize,
+                                (y + (index / width.max(1)) as i64).max(0) as usize,
+                            )
+                        });
+                        *sample = stage.map(*sample, at);
+                    }
                 }
             }
         }

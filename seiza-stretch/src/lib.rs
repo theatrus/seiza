@@ -22,7 +22,10 @@ use seiza_stats::NORMAL_MAD_SCALE;
 mod hdr_tail;
 mod layered;
 pub use hdr_tail::{HdrTail, HdrTailParams, extended_srgb_decode, extended_srgb_encode};
-pub use layered::{LayeredHdr, LayeredHdrParams, LayeredParams, ResolvedLayered};
+pub use layered::{
+    CORE_FLOOR, CORE_KNEE_WIDTH, LayeredHdr, LayeredHdrParams, LayeredMaps, LayeredParams,
+    MAP_REDUCTION, MAX_DETAIL_GAIN, MapSample, ResolvedLayered, reduce_luminance,
+};
 
 const LUMA_RED: f64 = 0.2126;
 const LUMA_GREEN: f64 = 0.7152;
