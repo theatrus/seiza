@@ -319,6 +319,12 @@ Next (under way, 2026-11-26):
   version 3: the fit's estimate drawn with smooth wings past a trusted ring
   (the runtime's fit to do the same), halos and rings from the faint ones
   measured up, and each composite's halos' and spikes' light kept apart.
+  The wings are most of a draw's cost: the field's shape (FWHM and β) is
+  read at a star in about 1 ms, and it was read for 34,000 of a deep
+  stack's 77,000 stars to give 6,300 of them wings. A bound on each star's
+  light on the trusted ring now passes over the rest before their shapes
+  are read: the same estimate to the bit, in 40% less time. The runtime's
+  fit is to do the same.
 - X3 (`fit`) and X4 (`image`), as X1 and X2 on the new banks, with X1 and
   X2 measured again on the new validation bank beside them.
 - Where a star buries the sky's noise, the starless image is given noise

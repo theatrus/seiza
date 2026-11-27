@@ -65,6 +65,9 @@ BANK_VERSION = 3
 PLANES = ("input", "starless", "fit_starless", "fit_model", "noise", "valid", "points", "halos", "spikes")
 # A window is kept where at least this share of it is valid.
 VALID_SHARE = 0.8
+# Stacks are cut this many times the workers ahead of the one being stored,
+# so one large stack does not leave the other workers idle.
+AHEAD = 8
 
 # A composite holds between these shares of the stars the clean-sky pass
 # took out of its stack.
@@ -418,10 +421,10 @@ def prepared(store_root: str, scratch: str | None, product: dict[str, Any], *, d
         fwhm = float(summary.get("fwhm_px") or 3.0)
         clip = summary.get("clip_level")
         found = []
+        noise_sky = image_sigma(sky).astype(np.float32)
         for draw in range(draws):
             rng = np.random.default_rng([seed, int(hashlib.sha256(product["id"].encode()).hexdigest()[:8], 16), draw])
             telescope = source_telescope(store, product, rng, fwhm)
-            noise_sky = image_sigma(sky).astype(np.float32)
             made = composite(sky, table, summary, telescope, rng, noise_sky)
             noise = image_sigma(made["input"]).astype(np.float32)
             fit = fitted(made, noise, clip, fwhm)
@@ -470,7 +473,7 @@ def cut(store: Store, products: list[dict[str, Any]], *, work: Path, draws: int 
     from .noise_model import in_order
 
     began = time.monotonic()
-    for done, result in enumerate(in_order(task, products, workers), start=1):
+    for done, result in enumerate(in_order(task, products, workers, ahead=AHEAD), start=1):
         if result["status"] != "cut":
             dropped.append({"product": result["product"], "error": result.get("error")})
         for window in result["windows"]:

@@ -324,22 +324,32 @@ def winged(sky: np.ndarray, model: np.ndarray, fitted: Sequence[Any], field: Any
     centre = mono(field.stamp_at((width - 1) / 2, (height - 1) / 2))
     ring_at_middle = np.abs(np.hypot(offsets[None, :], offsets[:, None]) - start) <= 1.0
     typical = max(float(np.max(np.abs(centre[ring_at_middle]))), 1e-12)
+    # A wing reaches past the trusted ring only where the star's light on it
+    # times the Moffat's value at the ring's middle over the Moffat's mean on
+    # it tops the floor. That ratio is at most ((start + 1) / start)^(2β), the
+    # ring holding no pixel past start + 1, so a star short of the floor by
+    # more is passed over before its shape is read: reading it is the slow
+    # step, and most stars stop here.
+    margin = ((start + 1.0) / start) ** (2.0 * WING_BETA[1])
     count = 0
     for st in fitted:
         flux = st.flux[0]
         floor = WING_FADE * local_noise(noise, st.x, st.y)
         if not (flux > 0) or not (flux * 4.0 * typical > floor):
             continue
+        column, row, stamp = fit_stamp(field, st.x, st.y)
+        local = np.hypot(offsets[None, :] + column - st.x, offsets[:, None] + row - st.y)
+        ring = np.abs(local - start) <= 1.0
+        light = max(0.0, float(stamp[ring].mean()))
+        if not (flux * light * margin > floor):
+            continue
         shape = field.shape_at(st.x, st.y)
         if shape is None or not np.isfinite(shape.fwhm) or not np.isfinite(shape.beta):
             continue
         beta = float(np.clip(shape.beta, *WING_BETA))
         alpha = moffat_alpha(float(shape.fwhm), beta)
-        column, row, stamp = fit_stamp(field, st.x, st.y)
-        local = np.hypot(offsets[None, :] + column - st.x, offsets[:, None] + row - st.y)
         moffat_local = (1.0 + local**2 / alpha**2) ** -beta
-        ring = np.abs(local - start) <= 1.0
-        level = max(0.0, float(stamp[ring].mean())) / float(moffat_local[ring].mean())
+        level = light / float(moffat_local[ring].mean())
         if not (level > 0):
             continue
         over = flux * level / floor

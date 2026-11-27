@@ -563,10 +563,11 @@ def banked_pair(
 CHECKPOINT_SECONDS = 60.0
 
 
-def in_order(function: Any, items: list[Any], workers: int) -> Any:
+def in_order(function: Any, items: list[Any], workers: int, ahead: int = 2) -> Any:
     """`function` of each of `items`, in their order: with `workers` above 1,
-    that many at once in processes of their own, at most twice as many
-    ahead of the one yielded."""
+    that many at once in processes of their own, at most `ahead` times as
+    many ahead of the one yielded (more keeps the others busy while one
+    item takes long, and holds more results)."""
     if workers <= 1:
         yield from map(function, items)
         return
@@ -577,7 +578,7 @@ def in_order(function: Any, items: list[Any], workers: int) -> Any:
         pending: deque = deque()
         for item in items:
             pending.append(pool.submit(function, item))
-            if len(pending) > 2 * workers:
+            if len(pending) > ahead * workers:
                 yield pending.popleft().result()
         while pending:
             yield pending.popleft().result()
