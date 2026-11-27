@@ -586,6 +586,7 @@ objects = [
 "seiza-image-io::save_display" = { none = "the C ABI writes images through seiza-parallax and seiza-stacking, which write through seiza-image-io" }
 "seiza-image-io::save_f32" = { none = "the C ABI writes images through seiza-parallax and seiza-stacking, which write through seiza-image-io" }
 "seiza-image-io::save_f32_with_profile" = { none = "the C ABI writes images through seiza-parallax and seiza-stacking, which write through seiza-image-io; a host that embeds a profile is a Rust host" }
+"seiza-image-io::save_float_tiff" = { none = "the C ABI writes images through seiza-parallax and seiza-stacking, which write through seiza-image-io; a host that exports float color is a Rust host" }
 "seiza-image-io::save_hdr_avif" = { none = "the C ABI writes images through seiza-parallax and seiza-stacking, which write through seiza-image-io; HDR pictures come from the compositor, which Rust hosts drive" }
 "seiza-image-io::pq_encode" = { none = "the C ABI writes images through seiza-parallax and seiza-stacking, which write through seiza-image-io; HDR pictures come from the compositor, which Rust hosts drive" }
 "seiza-image-io::save_images" = { none = "multi-image files hold distributed stacking's partial stacks, which hosts will write through the pipeline's own calls" }

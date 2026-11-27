@@ -11,6 +11,9 @@ Open and save images by their file extension, the same way across Seiza.
   files declare the 0 to 1 range when the samples lie in it.
 - `save_f32_with_profile` saves as `save_f32` does, with an ICC profile in
   a PNG or TIFF naming the color space its samples are in.
+- `save_float_tiff` writes red, green and blue to a TIFF as 32-bit floats,
+  not clamped, so an HDR picture's values above 1 are kept, with an ICC
+  profile when one is given.
 - With the `avif` feature, `save_hdr_avif` writes linear Rec. 2020 samples,
   where 1 is SDR reference white (203 cd/m²), as a 10-bit HDR AVIF: the PQ
   transfer, Rec. 2020 primaries and matrix, full range, full-resolution

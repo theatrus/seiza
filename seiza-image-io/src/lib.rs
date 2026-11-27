@@ -1044,6 +1044,50 @@ fn save_raster(path: &Path, image: &DynamicImage, format: ImageFormat) -> Result
     write_raster_atomic(path, |writer| image.write_to(writer, format))
 }
 
+/// Writes red, green and blue to a TIFF at `path` as 32-bit floats, as they
+/// are: not clamped, so an HDR picture's values above 1 are kept, with
+/// `profile` embedded when there is one. Planar samples are interleaved on
+/// the way. A gray image is refused: a float TIFF here holds color.
+/// Written atomically.
+pub fn save_float_tiff(
+    path: &Path,
+    width: usize,
+    height: usize,
+    pixels: F32ImageData<'_>,
+    profile: Option<&[u8]>,
+) -> Result<(), Error> {
+    let samples: Vec<f32> = match pixels {
+        F32ImageData::Mono(_) => {
+            return Err(Error::save(path, "a float TIFF holds red, green and blue"));
+        }
+        F32ImageData::RgbInterleaved(samples) => samples.to_vec(),
+        F32ImageData::RgbPlanar(samples) => {
+            let plane = samples.len() / 3;
+            (0..plane)
+                .flat_map(|index| {
+                    [
+                        samples[index],
+                        samples[plane + index],
+                        samples[2 * plane + index],
+                    ]
+                })
+                .collect()
+        }
+    };
+    check_size(width, height, 3, samples.len()).map_err(|message| Error::save(path, message))?;
+    let (width, height) = (
+        u32::try_from(width).map_err(|_| Error::save(path, "it is too wide"))?,
+        u32::try_from(height).map_err(|_| Error::save(path, "it is too tall"))?,
+    );
+    let image = DynamicImage::ImageRgb32F(
+        Rgb32FImage::from_raw(width, height, samples).expect("checked size"),
+    );
+    match profile {
+        Some(profile) => save_raster_with_profile(path, &image, Format::Tiff, profile),
+        None => save_raster(path, &image, ImageFormat::Tiff),
+    }
+}
+
 /// A PNG or TIFF with `profile` embedded.
 fn save_raster_with_profile(
     path: &Path,
@@ -2125,5 +2169,31 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn a_float_tiff_keeps_its_samples_above_one() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("picture.tif");
+        // Values a 16-bit TIFF would round or clip: a fine step and HDR.
+        let rgb = [0.25_f32, 0.250_001, 3.5, 0.0, 1.0, 12.75];
+        save_float_tiff(&path, 2, 1, F32ImageData::RgbInterleaved(&rgb), None).unwrap();
+        let read = image::open(&path).unwrap().into_rgb32f();
+        assert_eq!(read.as_raw().as_slice(), &rgb[..]);
+        // With a profile, the profile is in the file's ICC field.
+        let profile: Vec<u8> = (0..64).collect();
+        save_float_tiff(
+            &path,
+            2,
+            1,
+            F32ImageData::RgbInterleaved(&rgb),
+            Some(&profile),
+        )
+        .unwrap();
+        assert_eq!(
+            tiff_field(&std::fs::read(&path).unwrap(), 34675),
+            Some(profile)
+        );
+        assert!(save_float_tiff(&path, 2, 1, F32ImageData::Mono(&rgb[..2]), None).is_err());
     }
 }
