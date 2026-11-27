@@ -144,6 +144,12 @@ struct Globals {
     // the staged picture, which a step that reads neighbors made of the
     // layers beneath; 0 when it starts from black.
     stage: vec4f,
+    // What one layers pass writes and where its stage starts: x: 0 the
+    // picture so far, 1 to 4 what is beneath the group at that depth, 5 the
+    // cover of the step that ends the stage. y: how many groups the stage
+    // starts inside. z: how many groups past the deepest kept are open
+    // there.
+    outputs: vec4f,
 }
 
 @group(0) @binding(0) var<uniform> globals: Globals;

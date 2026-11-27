@@ -830,6 +830,31 @@ fn steps_that_read_neighbors_match_the_cpu_in_the_stack() {
                     shift: [0.0; 3],
                 })
             },
+            // A group in the group, with a heal limited by a clip and a
+            // computed mask, and a local Tone step at half strength.
+            Layer::new(LayerKind::GroupBegin),
+            Layer::added(read(2), [0.3, 0.5, 0.9]),
+            Layer {
+                mask: Some(2),
+                clip: Some(1),
+                computed: Some(0),
+                ..step(FinishKind::Heal {
+                    offset: [9, -14],
+                    shift: [0.02, 0.0, -0.01],
+                })
+            },
+            Layer {
+                opacity: 0.5,
+                computed: Some(0),
+                ..step(FinishKind::Tone(Tone {
+                    clarity: 0.6,
+                    ..Tone::default()
+                }))
+            },
+            Layer {
+                blend: seiza_compose::picture::Blend::Add,
+                ..Layer::new(LayerKind::GroupEnd)
+            },
             step(FinishKind::Tone(Tone {
                 clarity: 0.5,
                 ..Tone::default()
@@ -841,9 +866,14 @@ fn steps_that_read_neighbors_match_the_cpu_in_the_stack() {
                 ..Layer::new(LayerKind::GroupEnd)
             },
         ],
+        computed: vec![seiza_compose::picture::ComputedMask::foraxx(
+            vec![read(0), read(2)],
+            0.0,
+        )],
         masks: vec![
             common::stroke([60.0, 50.0], [150.0, 120.0], 18.0),
             common::stroke([300.0, 200.0], [380.0, 260.0], 22.0),
+            common::stroke([200.0, 150.0], [320.0, 230.0], 30.0),
         ],
         ..Picture::default()
     };

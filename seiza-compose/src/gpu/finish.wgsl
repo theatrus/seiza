@@ -4,6 +4,9 @@
 
 @group(1) @binding(0) var combined: texture_2d<f32>;
 @group(1) @binding(1) var masks: texture_2d_array<f32>;
+// The cover of a step in the stack that reads neighbors, as the layers pass
+// works it out: its opacity, its masks, its clip and its computed mask.
+@group(1) @binding(2) var step_cover: texture_2d<f32>;
 
 // The local passes. A window pass reads `local_source`. A later step's
 // measurements and the Finish pass read what they measured, one layer per
@@ -29,8 +32,13 @@ fn coverage(pixel: vec2i, mask_layer: f32) -> f32 {
     return textureLoad(masks, pixel, i32(mask_layer), 0).r;
 }
 
-// How much of a step applies at a pixel: its opacity, within its mask.
+// How much of a step applies at a pixel: its opacity, within its mask. A
+// step in the stack that reads neighbors (mask -2) has its whole cover in
+// `step_cover`.
 fn applies(pixel: vec2i, step: FinishStep) -> f32 {
+    if step.kind.z < -1.5 {
+        return textureLoad(step_cover, pixel, 0).r;
+    }
     return coverage(pixel, step.kind.z) * step.kind.w;
 }
 

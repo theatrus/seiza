@@ -11,9 +11,9 @@
 // The picture a step in the stack made of the layers beneath it, which a
 // later stage of the layers starts from.
 @group(2) @binding(3) var staged: texture_2d<f32>;
-// What was beneath the group the step is in, at the step, which a later
-// stage restores when its group ends.
-@group(2) @binding(4) var staged_beneath: texture_2d<f32>;
+// What was beneath each group the step is in, at the step, outermost first,
+// which a later stage restores as its groups end.
+@group(2) @binding(4) var staged_beneath: texture_2d_array<f32>;
 
 struct TileVertex {
     @builtin(position) position: vec4f,
@@ -521,36 +521,50 @@ fn healed_value(index: i32, pixel: vec2i, doc: vec2f, uv: vec2f) -> f32 {
     return value;
 }
 
-// The layers of one stage blended: the picture so far, and what is beneath
-// the group the last of them is in.
-struct Stacked {
-    @location(0) color: vec4f,
-    @location(1) beneath: vec4f,
+// How much of layer `index` applies at a pixel: its opacity, within its
+// mask, the mask of the layer it is clipped to, and its computed mask.
+fn layer_cover(index: i32, uv: vec2f, pixel: vec2i) -> f32 {
+    let layer = globals.layers[index];
+    var cover = layer.color.a;
+    if layer.adjust.z >= 0.0 {
+        cover *= textureLoad(layer_masks, pixel, i32(layer.adjust.z), 0).r;
+    }
+    if layer.stretch.z >= 0.0 {
+        cover *= textureLoad(layer_masks, pixel, i32(layer.stretch.z), 0).r;
+    }
+    if layer.more.x >= 0.0 {
+        cover *= computed_mask(i32(layer.more.x), uv, pixel);
+    }
+    return cover;
 }
 
+// The layers of one stage blended. `globals.outputs.x` says what the pass
+// writes: 0 the picture so far, 1 to 4 what is beneath the group at that
+// depth, 5 the cover of the step that ends the stage.
 @fragment
 fn tile_fragment(in: TileVertex) -> @location(0) vec4f {
-    return blend_stack(in).color;
-}
-
-// A stage that ends at a step inside a group also keeps what is beneath the
-// group, for the stage after the step.
-@fragment
-fn staged_tile_fragment(in: TileVertex) -> Stacked {
-    return blend_stack(in);
-}
-
-fn blend_stack(in: TileVertex) -> Stacked {
     let pixel = vec2i(in.position.xy);
+    let output = i32(globals.outputs.x);
+    if output == 5 {
+        return vec4f(layer_cover(i32(globals.stage.y), in.uv, pixel), 0.0, 0.0, 1.0);
+    }
     // The layers blended so far: from black, or from what a step in the
     // stack made of the layers beneath this stage.
     var color = vec3f(0.0);
-    // The layers beneath a group, kept while the group's members blend on
-    // their own.
-    var beneath = vec3f(0.0);
+    // The picture beneath each group the layers are in, outermost first,
+    // kept while the group's members blend on their own.
+    var beneath = array<vec3f, 4>(vec3f(0.0), vec3f(0.0), vec3f(0.0), vec3f(0.0));
+    var depth = 0;
+    // Groups nested past the deepest kept, whose members blend into the
+    // group around them.
+    var flattened = 0;
     if globals.stage.z > 0.5 {
         color = textureLoad(staged, pixel, 0).rgb;
-        beneath = textureLoad(staged_beneath, pixel, 0).rgb;
+        depth = i32(globals.outputs.y);
+        flattened = i32(globals.outputs.z);
+        for (var level = 0; level < depth; level++) {
+            beneath[level] = textureLoad(staged_beneath, pixel, level, 0).rgb;
+        }
     }
     // The last band layer or group, which waits to be blended until its own
     // adjustments have been applied to it.
@@ -565,18 +579,7 @@ fn blend_stack(in: TileVertex) -> Stacked {
     let end = min(i32(globals.counts.x), i32(globals.stage.y));
     for (var index = i32(globals.stage.x); index < end; index++) {
         let layer = globals.layers[index];
-        // How much of the layer applies here: its opacity, within its mask
-        // and within the mask of the layer it is clipped to.
-        var cover = layer.color.a;
-        if layer.adjust.z >= 0.0 {
-            cover *= textureLoad(layer_masks, pixel, i32(layer.adjust.z), 0).r;
-        }
-        if layer.stretch.z >= 0.0 {
-            cover *= textureLoad(layer_masks, pixel, i32(layer.stretch.z), 0).r;
-        }
-        if layer.more.x >= 0.0 {
-            cover *= computed_mask(i32(layer.more.x), in.uv, pixel);
-        }
+        let cover = layer_cover(index, in.uv, pixel);
         let kind = layer.adjust.x;
         if kind > 14.5 {
             // A step of the Finish stage here in the stack, on what is
@@ -624,19 +627,30 @@ fn blend_stack(in: TileVertex) -> Stacked {
             continue;
         }
         if kind > 10.5 {
-            // The end of a group: its members' blend is one layer now.
-            own = color;
-            own_band = false;
-            own_cover = cover;
-            own_mode = layer.select.y;
-            waiting = true;
-            color = beneath;
+            // The end of a group: its members' blend is one layer now. The
+            // end of a flattened group, or of none, does nothing.
+            if flattened > 0 {
+                flattened -= 1;
+            } else if depth > 0 {
+                own = color;
+                own_band = false;
+                own_cover = cover;
+                own_mode = layer.select.y;
+                waiting = true;
+                depth -= 1;
+                color = beneath[depth];
+            }
             continue;
         }
         if kind > 9.5 {
             // The start of a group: its members blend from nothing.
-            beneath = color;
-            color = vec3f(0.0);
+            if depth == 4 {
+                flattened += 1;
+            } else {
+                beneath[depth] = color;
+                depth += 1;
+                color = vec3f(0.0);
+            }
             continue;
         }
         if kind > 0.5 {
@@ -661,10 +675,10 @@ fn blend_stack(in: TileVertex) -> Stacked {
     if waiting {
         color = flush(color, own, own_cover, own_mode, own_band, own_tint, own_value);
     }
-    var stacked: Stacked;
-    stacked.color = vec4f(color, 1.0);
-    stacked.beneath = vec4f(beneath, 1.0);
-    return stacked;
+    if output > 0 {
+        return vec4f(beneath[min(output - 1, 3)], 1.0);
+    }
+    return vec4f(color, 1.0);
 }
 
 struct StrokeVertex {

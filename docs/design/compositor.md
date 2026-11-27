@@ -31,8 +31,10 @@ A `Picture` lists:
   tables from them.
 - **Layers,** bottom first: an input in a color, with an opacity and a blend;
   a solid color; the start and end of a group; or an adjustment of what is
-  beneath. A layer can be limited by a painted mask, by the mask of the layer
-  it is clipped to, and by a computed mask.
+  beneath. Groups nest up to `MAX_GROUP_DEPTH` (4) deep; a group deeper than
+  that is flattened, its members blending into the group around it. A layer
+  can be limited by a painted mask, by the mask of the layer it is clipped
+  to, and by a computed mask.
 - **Blends:** normal, screen, add, multiply, lighten, darken, luminance, and
   two that LRGB needs: *luminance ratio*, which scales the colors beneath so
   their Rec. 709 luminance becomes the layer's (opacity is LRGB's weight), and
@@ -239,17 +241,20 @@ drawn with each pixel alone, without Dehaze, and named in `left_out`.
 A step in the stack that maps each pixel alone is drawn by the layers
 pass itself, from its entry after the Finish steps in their table. One
 that reads neighbors, a heal or a Tone step with local controls, ends a
-stage: the layers pass draws the layers beneath it into the combined
-texture, and what is beneath the step's group into a second texture, the step pass (`step_fragment`, with the local passes
-first for a Tone step) reads that texture around each pixel into the staged
-texture, and the next layers pass starts from the staged texture and the
-picture beneath the group, so a step inside a group works on the group's
-members alone, as on the CPU. A pass
-reads the globals as they are at the next submit, so each stage's range
-(`stage`) and the step's place in the Finish table (`counts.y` and
-`counts.w`) are written after the passes before it are submitted. A heal
-with a clip or a computed mask is left out and named in `left_out`, and a
-local Tone step with one is drawn with each pixel alone. The combined and staged textures are full
+stage, in a group or not. The layers pass draws the layers beneath it into
+the combined texture; further passes of the same layers write what is
+beneath each group the step is in (a layer of an array per depth) and the
+step's whole cover: its opacity, masks, clip and computed mask. One pass
+may write only so many bytes a pixel, so each is a pass of its own, chosen
+by `outputs.x`. The step pass (`step_fragment`, with the local passes first
+for a Tone step) reads the combined texture around each pixel and the
+cover into the staged texture, and the next layers pass starts from the
+staged texture and the pictures beneath its groups, so a step inside a
+group works on the group's members alone, as on the CPU. A pass reads the
+globals as they are at the next submit, so each stage's range (`stage`),
+what it writes and the groups it starts in (`outputs`), and the step's
+place in the Finish table (`counts.y` and `counts.w`) are written after the
+passes before it are submitted. The combined and staged textures are full
 floats: with half floats, a heal and two local Tone steps in the stack were
 three times further from the CPU, from the extra rounding at each stage.
 `tests/gpu.rs` renders the same picture both ways and bounds the gap; on

@@ -430,3 +430,92 @@ fn steps_in_the_stack_do_not_depend_on_tiling() {
         );
     }
 }
+
+/// A heal inside a group copies the group's members from beside it, before
+/// the group is blended over what is beneath: a small region of a large
+/// picture, so the copy comes from the margin around it.
+#[test]
+fn a_heal_inside_a_group_copies_its_members() {
+    use seiza_compose::picture::{Blend, FinishKind};
+    let inputs = [plane(200, 120, 1, true), plane(200, 120, 2, false)];
+    let images: Vec<&LinearImage> = inputs.iter().collect();
+    let read = |input: usize| InputRead::new(input, Transfer::identity());
+    let picture = |healed: bool| Picture {
+        layers: [
+            vec![
+                Layer::added(read(0), [0.3, 0.3, 0.3]),
+                Layer::new(LayerKind::GroupBegin),
+                Layer::added(read(1), [1.0, 1.0, 1.0]),
+            ],
+            healed
+                .then(|| Layer {
+                    mask: Some(0),
+                    ..Layer::new(LayerKind::Step(FinishKind::Heal {
+                        offset: [20, 0],
+                        shift: [0.0; 3],
+                    }))
+                })
+                .into_iter()
+                .collect(),
+            vec![Layer {
+                blend: Blend::Screen,
+                ..Layer::new(LayerKind::GroupEnd)
+            }],
+        ]
+        .concat(),
+        masks: vec![common::stroke([100.0, 60.0], [100.0, 60.0], 9.0)],
+        ..Picture::default()
+    };
+    let region = ReferenceRegion {
+        x: 96,
+        y: 56,
+        width: 8,
+        height: 8,
+    };
+    let plain = render(&picture(false), &images, region, 256);
+    let healed = render(&picture(true), &images, region, 256);
+    let gap = plain
+        .iter()
+        .zip(&healed)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0_f32, f32::max);
+    assert!(gap > 1e-3, "the heal changed nothing");
+}
+
+/// Groups nest: added groups in added groups make the same sum as the
+/// layers added flat, and so does a group nested past the deepest kept,
+/// whose members blend into the group around it.
+#[test]
+fn nested_groups_blend_as_their_members() {
+    use seiza_compose::picture::{Blend, MAX_GROUP_DEPTH};
+    let inputs = [plane(60, 40, 1, true), plane(60, 40, 2, false)];
+    let images: Vec<&LinearImage> = inputs.iter().collect();
+    let read = |input: usize| InputRead::new(input, Transfer::identity());
+    let added = |input: usize, color: [f32; 3]| Layer::added(read(input), color);
+    let end = || Layer {
+        blend: Blend::Add,
+        ..Layer::new(LayerKind::GroupEnd)
+    };
+    let flat = Picture {
+        layers: vec![added(0, [0.4, 0.2, 0.1]), added(1, [0.1, 0.3, 0.5])],
+        ..Picture::default()
+    };
+    for depth in [1, 2, MAX_GROUP_DEPTH + 2] {
+        let mut layers = vec![added(0, [0.4, 0.2, 0.1])];
+        layers.extend((0..depth).map(|_| Layer::new(LayerKind::GroupBegin)));
+        layers.push(added(1, [0.1, 0.3, 0.5]));
+        layers.extend((0..depth).map(|_| end()));
+        let nested = Picture {
+            layers,
+            ..Picture::default()
+        };
+        let a = render(&flat, &images, whole(&inputs[0]), 256);
+        let b = render(&nested, &images, whole(&inputs[0]), 256);
+        let gap = a
+            .iter()
+            .zip(&b)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(gap < 1e-6, "{depth} groups deep: {gap}");
+    }
+}

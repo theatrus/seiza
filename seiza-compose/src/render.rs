@@ -743,12 +743,17 @@ fn computed_mask(
 }
 
 /// What the layers blended so far leave at one pixel, at a step in the
-/// stack or at the top: the blend, and the picture beneath the group it is
-/// in, if it is in one.
+/// stack or at the top: the blend, and the picture beneath each group it is
+/// in, outermost first.
 #[derive(Clone, Copy, Debug, Default)]
 struct Blended {
     color: [f32; 3],
-    beneath: [f32; 3],
+    beneath: [[f32; 3]; crate::picture::MAX_GROUP_DEPTH],
+    /// How many groups the layers so far are inside.
+    depth: usize,
+    /// How many groups past [`crate::picture::MAX_GROUP_DEPTH`] are open;
+    /// their members blend into the group around them.
+    flattened: usize,
 }
 
 /// How much of a layer applies at one pixel of the padded area: its
@@ -787,6 +792,8 @@ fn combine(
     let peak = picture.peak();
     let mut color = from.color;
     let mut beneath = from.beneath;
+    let mut depth = from.depth;
+    let mut flattened = from.flattened;
     let mut waiting = false;
     let mut own = [0.0_f32; 3];
     let mut own_cover = 0.0_f32;
@@ -839,15 +846,24 @@ fn combine(
                 own_mode = layer.blend;
                 waiting = true;
             }
-            LayerKind::GroupEnd => {
+            // A group nested past the deepest kept is flattened: its
+            // members blend into the group around it, and its end does
+            // nothing.
+            LayerKind::GroupEnd if flattened > 0 => flattened -= 1,
+            LayerKind::GroupEnd if depth > 0 => {
                 own = color;
                 own_cover = cover;
                 own_mode = layer.blend;
                 waiting = true;
-                color = beneath;
+                depth -= 1;
+                color = beneath[depth];
             }
+            // An end with no start ends nothing.
+            LayerKind::GroupEnd => {}
+            LayerKind::GroupBegin if depth == crate::picture::MAX_GROUP_DEPTH => flattened += 1,
             LayerKind::GroupBegin => {
-                beneath = color;
+                beneath[depth] = color;
+                depth += 1;
                 color = [0.0; 3];
             }
             LayerKind::Adjustment(adjustment) => {
@@ -877,7 +893,12 @@ fn combine(
     if waiting {
         color = flush(color, own, own_cover, own_mode, own_parts);
     }
-    Blended { color, beneath }
+    Blended {
+        color,
+        beneath,
+        depth,
+        flattened,
+    }
 }
 
 /// A step in the stack over the padded area's picture, `rgb`, applied as

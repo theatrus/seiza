@@ -331,7 +331,9 @@ pub enum LayerKind {
     /// One color everywhere.
     Solid { color: [f32; 3] },
     /// The start of a group: the entries up to its end blend together on
-    /// their own, starting from black.
+    /// their own, starting from black. Groups nest up to
+    /// [`MAX_GROUP_DEPTH`] deep; a group deeper than that is flattened, its
+    /// members blending into the group around it.
     GroupBegin,
     /// The end of a group: the members' blend becomes one layer with this
     /// entry's opacity, blend and masks.
@@ -353,6 +355,9 @@ pub enum LayerKind {
     /// adjustment's do; a heal's stroke is its mask.
     Step(FinishKind),
 }
+
+/// How deep groups nest. A group inside this many others is flattened.
+pub const MAX_GROUP_DEPTH: usize = 4;
 
 /// One layer of a picture.
 #[derive(Clone, Debug, PartialEq)]
