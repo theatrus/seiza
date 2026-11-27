@@ -715,3 +715,77 @@ fn screen_keeps_values_above_sdr_white_in_order() {
         "mean {mean:e}, p99 {p99:e}, max {largest:e}"
     );
 }
+
+/// Steps in the stack that map each pixel alone are drawn by the layers
+/// pass, as the CPU draws them. One that reads neighbors is drawn with each
+/// pixel alone on the GPU, and named.
+#[test]
+fn steps_in_the_stack_match_the_cpu() {
+    use seiza_compose::gpu::{GpuInput, GpuScene};
+    use seiza_compose::picture::{
+        FinishKind, InputRead, Layer, LayerKind, Transfer, TransferStage,
+    };
+    use seiza_compose::tone::Tone;
+    use seiza_stretch::ResolvedCurve;
+    let inputs = inputs();
+    let images: Vec<&LinearImage> = inputs.iter().collect();
+    let curve = ResolvedCurve::Mtf {
+        shadows: 0.0,
+        midtone: 0.3,
+        highlights: 1.0,
+    };
+    let read = |input: usize| InputRead::new(input, Transfer::of([TransferStage::Curve(curve)]));
+    let step = |kind| Layer::new(LayerKind::Step(kind));
+    let picture = Picture {
+        layers: vec![
+            Layer::added(read(0), [1.0, 0.2, 0.1]),
+            step(FinishKind::Curves(0.5)),
+            Layer::added(read(1), [0.1, 0.9, 0.3]),
+            Layer {
+                opacity: 0.6,
+                ..step(FinishKind::Saturation(0.2))
+            },
+            Layer::new(LayerKind::GroupBegin),
+            Layer::added(read(2), [0.2, 0.1, 0.8]),
+            step(FinishKind::Tone(Tone {
+                exposure: 0.4,
+                contrast: 0.3,
+                vibrance: 0.2,
+                ..Tone::default()
+            })),
+            Layer {
+                blend: seiza_compose::picture::Blend::Screen,
+                ..Layer::new(LayerKind::GroupEnd)
+            },
+        ],
+        ..Picture::default()
+    };
+    let Some((cpu, gpu)) = both(&picture, &images) else {
+        eprintln!("no GPU: the GPU compositor was not checked");
+        return;
+    };
+    let (mean, p99, largest) = gap(&cpu, &gpu);
+    eprintln!("steps in the stack: mean {mean:e}, p99 {p99:e}, max {largest:e}");
+    assert!(
+        mean < 1e-3 && p99 < 5e-3,
+        "mean {mean:e}, p99 {p99:e}, max {largest:e}"
+    );
+    let places: Vec<GpuInput> = (0..3).map(|layer| GpuInput { layer, scale: 1.0 }).collect();
+    let mut local = picture.clone();
+    local.layers.insert(
+        2,
+        step(FinishKind::Tone(Tone {
+            clarity: 0.5,
+            ..Tone::default()
+        })),
+    );
+    let scene = GpuScene::new(&local, &places);
+    assert!(
+        scene
+            .left_out
+            .iter()
+            .any(|what| what.contains("drawn with each pixel alone")),
+        "{:?}",
+        scene.left_out
+    );
+}

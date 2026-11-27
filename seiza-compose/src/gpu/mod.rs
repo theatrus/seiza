@@ -126,6 +126,9 @@ pub struct GpuScene {
     layers: Vec<[f32; 20]>,
     computed: Vec<([f32; 16], f32)>,
     finish: Vec<([f32; 20], Option<[i64; 2]>)>,
+    /// How many of [`Self::finish`] are the Finish stage's: the steps in
+    /// the stack follow them.
+    finish_count: usize,
     /// The Finish steps whose neighborhoods the local passes measure, in
     /// order: each one's layer in the local textures is its place here.
     local: Vec<usize>,
@@ -473,6 +476,8 @@ impl GpuScene {
                     slot[12] = kind;
                     slot[13] = amount;
                 }
+                // Its entry in the Finish steps is set once they are packed.
+                LayerKind::Step(_) => slot[12] = 15.0,
                 LayerKind::Luminance { read, target } => {
                     slot[12] = match target {
                         LuminanceTarget::Replace => 13.0,
@@ -579,81 +584,37 @@ impl GpuScene {
                 ));
                 continue;
             }
-            let mut slot = [0.0_f32; 20];
-            slot[2] = mask_index(step.mask);
-            slot[3] = step.opacity.clamp(0.0, 1.0);
-            let first_row = (LAYER_ROWS + 3 * scene.finish_rows.len()) as f32;
-            let mut offset = None;
-            match &step.kind {
-                FinishKind::Curves(amount) => {
-                    slot[0] = 1.0;
-                    slot[1] = *amount;
-                }
-                FinishKind::Saturation(amount) => {
-                    slot[0] = 2.0;
-                    slot[1] = *amount;
-                }
-                FinishKind::Heal { offset: by, shift } => {
-                    slot[0] = 3.0;
-                    slot[8..11].copy_from_slice(shift);
-                    offset = Some(*by);
-                }
-                FinishKind::Stretch(plan) => {
-                    let curves = plan.curves();
-                    let rows: [Vec<f32>; 3] = match plan.color_strategy() {
-                        ColorStrategy::Unlinked => std::array::from_fn(|channel| {
-                            curve_row(curves[channel.min(curves.len() - 1)])
-                        }),
-                        _ => std::array::from_fn(|_| curve_row(curves[0])),
-                    };
-                    slot[0] = 4.0;
-                    slot[6] = first_row;
-                    slot[7] = if plan.color_strategy() == ColorStrategy::LuminancePreserving {
-                        1.0
-                    } else {
-                        0.0
-                    };
-                    scene.finish_rows.push(rows);
-                }
-                FinishKind::Tone(tone) => {
-                    let held = tone.held();
-                    slot[0] = 5.0;
-                    slot[1] = held.exposure;
-                    slot[4..8].copy_from_slice(&[
-                        held.contrast,
-                        held.highlights,
-                        held.shadows,
-                        held.whites,
-                    ]);
-                    slot[8..12].copy_from_slice(&[
-                        held.blacks,
-                        held.texture,
-                        held.clarity,
-                        held.dehaze,
-                    ]);
-                    slot[12] = held.vibrance;
-                    slot[13] = held.saturation;
-                    slot[15] = tone.detail_edge();
-                    slot[16] = tone.peak();
-                    // Up to MAX_LOCAL_TONES steps a draw reads
-                    // neighborhoods for, each with its own layer, counted
-                    // from 1; another is drawn with each pixel alone.
-                    if tone.is_local() {
-                        if scene.local.len() < MAX_LOCAL_TONES {
-                            scene.local.push(scene.finish.len());
-                            slot[14] = scene.local.len() as f32;
-                        } else {
-                            // Drawn with each pixel alone, where a veil is the
-                            // pixel's own darkest channel: Dehaze is left out.
-                            slot[11] = 0.0;
-                            scene.left_out.push(format!(
-                                "the neighborhoods of finishing step {index}, past the GPU's {MAX_LOCAL_TONES}"
-                            ));
-                        }
-                    }
-                }
+            let packed =
+                scene.pack_step(&step.kind, mask_index(step.mask), step.opacity, true, index);
+            scene.finish.push(packed);
+        }
+        scene.finish_count = scene.finish.len();
+        // The steps in the stack follow the Finish steps in their table: a
+        // layer points at its step there. A step that reads neighbors is
+        // drawn with each pixel alone, and a heal is left out, until the
+        // compositor draws the stack in stages.
+        for at in 0..scene.layers.len() {
+            let Some(LayerKind::Step(kind)) = picture.layers.get(at).map(|layer| &layer.kind)
+            else {
+                continue;
+            };
+            let kind = picture.rendered_kind(kind);
+            if scene.finish.len() == MAX_FINISH_STEPS || matches!(kind, FinishKind::Heal { .. }) {
+                scene.left_out.push(match kind {
+                    FinishKind::Heal { .. } => format!("layer {at}, a heal in the stack"),
+                    _ => format!("layer {at}, a step past the GPU's {MAX_FINISH_STEPS}"),
+                });
+                scene.layers[at][3] = 0.0;
+                continue;
             }
-            scene.finish.push((slot, offset));
+            if matches!(&kind, FinishKind::Tone(tone) if tone.is_local()) {
+                scene.left_out.push(format!(
+                    "the neighborhoods of layer {at}'s Tone step in the stack, drawn with each pixel alone"
+                ));
+            }
+            let packed = scene.pack_step(&kind, -1.0, 1.0, false, at);
+            scene.layers[at][13] = scene.finish.len() as f32;
+            scene.finish.push(packed);
         }
         scene.masks = picture
             .masks
@@ -662,6 +623,97 @@ impl GpuScene {
             .map(|segments| segments.iter().map(GpuSegment::from).collect())
             .collect();
         scene
+    }
+    /// One step packed as the shaders read it, with a heal's offset.
+    /// `local` says whether its neighborhoods can be measured: a Finish
+    /// step's can, while there is room.
+    fn pack_step(
+        &mut self,
+        kind: &FinishKind,
+        mask: f32,
+        opacity: f32,
+        local: bool,
+        index: usize,
+    ) -> ([f32; 20], Option<[i64; 2]>) {
+        let mut slot = [0.0_f32; 20];
+        slot[2] = mask;
+        slot[3] = opacity.clamp(0.0, 1.0);
+        let first_row = (LAYER_ROWS + 3 * self.finish_rows.len()) as f32;
+        let mut offset = None;
+        match kind {
+            FinishKind::Curves(amount) => {
+                slot[0] = 1.0;
+                slot[1] = *amount;
+            }
+            FinishKind::Saturation(amount) => {
+                slot[0] = 2.0;
+                slot[1] = *amount;
+            }
+            FinishKind::Heal { offset: by, shift } => {
+                slot[0] = 3.0;
+                slot[8..11].copy_from_slice(shift);
+                offset = Some(*by);
+            }
+            FinishKind::Stretch(plan) => {
+                let curves = plan.curves();
+                let rows: [Vec<f32>; 3] = match plan.color_strategy() {
+                    ColorStrategy::Unlinked => std::array::from_fn(|channel| {
+                        curve_row(curves[channel.min(curves.len() - 1)])
+                    }),
+                    _ => std::array::from_fn(|_| curve_row(curves[0])),
+                };
+                slot[0] = 4.0;
+                slot[6] = first_row;
+                slot[7] = if plan.color_strategy() == ColorStrategy::LuminancePreserving {
+                    1.0
+                } else {
+                    0.0
+                };
+                self.finish_rows.push(rows);
+            }
+            FinishKind::Tone(tone) => {
+                let held = tone.held();
+                slot[0] = 5.0;
+                slot[1] = held.exposure;
+                slot[4..8].copy_from_slice(&[
+                    held.contrast,
+                    held.highlights,
+                    held.shadows,
+                    held.whites,
+                ]);
+                slot[8..12].copy_from_slice(&[
+                    held.blacks,
+                    held.texture,
+                    held.clarity,
+                    held.dehaze,
+                ]);
+                slot[12] = held.vibrance;
+                slot[13] = held.saturation;
+                slot[15] = tone.detail_edge();
+                slot[16] = tone.peak();
+                // Up to MAX_LOCAL_TONES steps a draw reads
+                // neighborhoods for, each with its own layer, counted
+                // from 1; another is drawn with each pixel alone.
+                if tone.is_local() && !local {
+                    // In the stack each pixel is drawn alone, where a
+                    // veil is the pixel's own darkest channel.
+                    slot[11] = 0.0;
+                } else if tone.is_local() {
+                    if self.local.len() < MAX_LOCAL_TONES {
+                        self.local.push(self.finish.len());
+                        slot[14] = self.local.len() as f32;
+                    } else {
+                        // Drawn with each pixel alone, where a veil is the
+                        // pixel's own darkest channel: Dehaze is left out.
+                        slot[11] = 0.0;
+                        self.left_out.push(format!(
+                            "the neighborhoods of finishing step {index}, past the GPU's {MAX_LOCAL_TONES}"
+                        ));
+                    }
+                }
+            }
+        }
+        (slot, offset)
     }
 }
 
@@ -1493,7 +1545,7 @@ impl GpuCompositor {
             ],
             counts: [
                 scene.layers.len() as f32,
-                scene.finish.len() as f32,
+                scene.finish_count as f32,
                 scene.heals.len() as f32,
                 0.0,
             ],

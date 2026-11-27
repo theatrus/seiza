@@ -345,6 +345,13 @@ pub enum LayerKind {
         read: Option<InputRead>,
         target: LuminanceTarget,
     },
+    /// What a Finish step does, here in the stack: to the group's members
+    /// beneath it inside a group, and to every layer beneath it at the
+    /// top. A step that reads neighboring pixels, such as a local Tone step
+    /// or a heal, reads the picture beneath as the layers below it leave
+    /// it. The layer's opacity and masks limit where it applies, as an
+    /// adjustment's do; a heal's stroke is its mask.
+    Step(FinishKind),
 }
 
 /// One layer of a picture.
@@ -525,7 +532,26 @@ impl Picture {
             return crate::tone::extended_srgb_encode(stops.exp2());
         }
         let mut peak = 1.0_f32;
-        for step in &self.finish {
+        // The steps in the stack at the top level, then the Finish steps;
+        // one in a group changes only the group.
+        let mut depth = 0_usize;
+        let mut stacked = Vec::new();
+        for layer in &self.layers {
+            match &layer.kind {
+                LayerKind::GroupBegin => depth += 1,
+                LayerKind::GroupEnd => depth = depth.saturating_sub(1),
+                LayerKind::Step(kind) if depth == 0 => stacked.push(FinishStep {
+                    kind: kind.clone(),
+                    opacity: layer.opacity,
+                    mask: layer
+                        .mask
+                        .or(layer.clip)
+                        .or(layer.computed.map(|_| usize::MAX)),
+                }),
+                _ => {}
+            }
+        }
+        for step in stacked.iter().chain(&self.finish) {
             let whole = step.mask.is_none() && step.opacity >= 1.0;
             match &step.kind {
                 FinishKind::Tone(tone) if whole => peak = tone.peak(),
@@ -535,6 +561,19 @@ impl Picture {
             }
         }
         peak
+    }
+
+    /// A step as the picture renders it: with headroom, a Tone step is an
+    /// HDR one with the picture's headroom.
+    pub(crate) fn rendered_kind(&self, kind: &FinishKind) -> FinishKind {
+        match kind {
+            FinishKind::Tone(tone) if self.headroom > 0.0 => FinishKind::Tone(crate::tone::Tone {
+                hdr: true,
+                headroom: self.headroom,
+                ..*tone
+            }),
+            other => other.clone(),
+        }
     }
 
     /// The Finish steps as the picture renders them: with headroom, each

@@ -256,3 +256,177 @@ fn a_painted_mask_on_its_own_is_the_layer_s_mask() {
         assert!((rendered[at * 3] - cover).abs() < 1e-6, "pixel {at}");
     }
 }
+
+/// Three planes and a read of each through a midtones curve.
+fn stacked_inputs() -> ([LinearImage; 3], impl Fn(usize) -> InputRead) {
+    use seiza_compose::picture::TransferStage;
+    use seiza_stretch::ResolvedCurve;
+    let (width, height) = (240, 180);
+    let curve = ResolvedCurve::Mtf {
+        shadows: 0.0,
+        midtone: 0.3,
+        highlights: 1.0,
+    };
+    (
+        [
+            plane(width, height, 1, false),
+            plane(width, height, 2, false),
+            plane(width, height, 3, false),
+        ],
+        move |input: usize| InputRead::new(input, Transfer::of([TransferStage::Curve(curve)])),
+    )
+}
+
+fn close(a: &[f32], b: &[f32], tolerance: f32) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| (a - b).abs() <= tolerance)
+}
+
+fn step(kind: seiza_compose::picture::FinishKind) -> Layer {
+    Layer::new(LayerKind::Step(kind))
+}
+
+/// Steps at the top of the stack do what the same steps in the Finish stage
+/// do, sample for sample: the stack is the one place to adjust.
+#[test]
+fn steps_on_top_of_the_stack_are_finish_steps() {
+    use seiza_compose::picture::{FinishKind, FinishStep};
+    use seiza_compose::tone::Tone;
+    let (inputs, read) = stacked_inputs();
+    let images: Vec<&LinearImage> = inputs.iter().collect();
+    let kinds = [
+        FinishKind::Curves(0.4),
+        FinishKind::Tone(Tone {
+            shadows: 0.5,
+            clarity: 0.6,
+            texture: 0.3,
+            dehaze: 0.2,
+            ..Tone::default()
+        }),
+        FinishKind::Saturation(1.3),
+    ];
+    let layers = vec![
+        Layer::added(read(0), [1.0, 0.2, 0.1]),
+        Layer::added(read(1), [0.1, 0.9, 0.3]),
+    ];
+    let finished = Picture {
+        layers: layers.clone(),
+        finish: kinds
+            .iter()
+            .map(|kind| FinishStep {
+                kind: kind.clone(),
+                opacity: 1.0,
+                mask: None,
+            })
+            .collect(),
+        ..Picture::default()
+    };
+    let stacked = Picture {
+        layers: layers
+            .into_iter()
+            .chain(kinds.iter().cloned().map(step))
+            .collect(),
+        ..Picture::default()
+    };
+    let region = whole(&inputs[0]);
+    let a = render(&finished, &images, region, 4096);
+    let b = render(&stacked, &images, region, 4096);
+    assert!(a.iter().zip(&b).all(|(a, b)| a.to_bits() == b.to_bits()));
+}
+
+/// A step in the stack changes the layers beneath it, and the layers above
+/// it are blended onto its result; inside a group it changes the group's
+/// members beneath it only.
+#[test]
+fn a_step_changes_only_what_is_beneath_it() {
+    use seiza_compose::picture::FinishKind;
+    let (inputs, read) = stacked_inputs();
+    let images: Vec<&LinearImage> = inputs.iter().collect();
+    let region = whole(&inputs[0]);
+    let gray = || step(FinishKind::Saturation(0.0));
+    let red = || Layer::added(read(0), [1.0, 0.2, 0.1]);
+    let green = || Layer::added(read(1), [0.1, 0.9, 0.3]);
+    let picture = |layers: Vec<Layer>| Picture {
+        layers,
+        ..Picture::default()
+    };
+    let both = render(
+        &picture(vec![red(), gray(), green()]),
+        &images,
+        region,
+        4096,
+    );
+    let beneath = render(&picture(vec![red(), gray()]), &images, region, 4096);
+    let above = render(&picture(vec![green()]), &images, region, 4096);
+    let sum: Vec<f32> = beneath.iter().zip(&above).map(|(a, b)| a + b).collect();
+    assert!(close(&both, &sum, 1e-6));
+    // The red layer is gray beneath the step, and the green one keeps its
+    // color above it.
+    assert!((beneath[0] - beneath[1]).abs() < 1e-6 && (beneath[1] - beneath[2]).abs() < 1e-6);
+
+    // In a group, the layers beneath the group keep their color.
+    let grouped = render(
+        &picture(vec![
+            green(),
+            Layer::new(LayerKind::GroupBegin),
+            red(),
+            gray(),
+            Layer {
+                blend: seiza_compose::picture::Blend::Add,
+                ..Layer::new(LayerKind::GroupEnd)
+            },
+        ]),
+        &images,
+        region,
+        4096,
+    );
+    let sum: Vec<f32> = above.iter().zip(&beneath).map(|(a, b)| a + b).collect();
+    assert!(close(&grouped, &sum, 1e-6));
+}
+
+/// Steps in the stack that read neighboring pixels, a local Tone step and
+/// a heal, give the same pixels in any tiling: a tile reads far enough
+/// around it for each.
+#[test]
+fn steps_in_the_stack_do_not_depend_on_tiling() {
+    use seiza_compose::picture::FinishKind;
+    use seiza_compose::tone::Tone;
+    let (inputs, read) = stacked_inputs();
+    let images: Vec<&LinearImage> = inputs.iter().collect();
+    let picture = Picture {
+        layers: vec![
+            Layer::added(read(0), [1.0, 0.2, 0.1]),
+            step(FinishKind::Tone(Tone {
+                clarity: 0.7,
+                texture: 0.4,
+                dehaze: 0.3,
+                ..Tone::default()
+            })),
+            Layer::added(read(1), [0.1, 0.9, 0.3]),
+            Layer {
+                mask: Some(0),
+                ..step(FinishKind::Heal {
+                    offset: [21, -13],
+                    shift: [0.0; 3],
+                })
+            },
+            Layer::added(read(2), [0.2, 0.1, 0.8]),
+            step(FinishKind::Tone(Tone {
+                clarity: -0.4,
+                highlights: 0.3,
+                ..Tone::default()
+            })),
+        ],
+        masks: vec![common::stroke([60.0, 50.0], [150.0, 120.0], 18.0)],
+        ..Picture::default()
+    };
+    let one = render(&picture, &images, whole(&inputs[0]), 4096);
+    for tile in [32, 90] {
+        let tiled = render(&picture, &images, whole(&inputs[0]), tile);
+        assert!(
+            one.iter()
+                .zip(&tiled)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "tiles of {tile} differ from one tile"
+        );
+    }
+}

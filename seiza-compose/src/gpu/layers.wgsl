@@ -549,6 +549,17 @@ fn tile_fragment(in: TileVertex) -> @location(0) vec4f {
             cover *= computed_mask(i32(layer.more.x), in.uv, pixel);
         }
         let kind = layer.adjust.x;
+        if kind > 14.5 {
+            // A step of the Finish stage here in the stack, on what is
+            // beneath it: its entry in the Finish steps is adjust.y.
+            if waiting {
+                color = flush(color, own, own_cover, own_mode, own_band, own_tint, own_value);
+                waiting = false;
+            }
+            let step = globals.finish[i32(layer.adjust.y)];
+            color = mix(color, step_alone(color, step), cover);
+            continue;
+        }
         if kind > 0.5 && kind < 9.5 && layer.adjust.w > 0.5 {
             // An adjustment of the waiting layer or group alone.
             if waiting {

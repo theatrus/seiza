@@ -15,17 +15,6 @@
 @group(2) @binding(2) var local_means: texture_2d_array<f32>;
 @group(2) @binding(3) var detail_means: texture_2d_array<f32>;
 
-// The constants of `seiza_compose::tone`, which says what each one is.
-const SHIFT: f32 = 0.14;
-const WHITE_REACH: f32 = 0.3;
-const BLACK_REACH: f32 = 0.1;
-const LOCAL_EDGE: f32 = 0.0025;
-const CLARITY_GAIN: f32 = 1.0;
-const TEXTURE_GAIN: f32 = 1.5;
-const DEHAZE_STRENGTH: f32 = 0.95;
-const HAZE: f32 = 0.5;
-const SHOULDER_START: f32 = 0.8;
-
 @vertex
 fn finish_vertex(@builtin(vertex_index) index: u32) -> @builtin(position) vec4f {
     let corner = vec2f(f32((index << 1u) & 2u), f32(index & 2u));
@@ -45,153 +34,9 @@ fn applies(pixel: vec2i, step: FinishStep) -> f32 {
     return coverage(pixel, step.kind.z) * step.kind.w;
 }
 
-// One row of the stretch table at a value from 0 to 1. A row is indexed by
-// the square root of the value, as a layer's row is.
-fn table_value(value: f32, row: f32) -> f32 {
-    let size = vec2f(textureDimensions(stretch_table));
-    let at = vec2f(
-        (sqrt(clamp(value, 0.0, 1.0)) * (size.x - 1.0) + 0.5) / size.x,
-        (row + 0.5) / size.y,
-    );
-    return textureSampleLevel(stretch_table, linear_sampler, at, 0.0).r;
-}
-
-// A stretch of the picture. Its three rows map red, green and blue. With
-// luminance, the first row maps the Rec. 709 luminance and the pixel is
-// scaled by one factor, kept in gamut, as Seiza's luminance-preserving
-// strategy applies a curve.
-fn stretch_picture(color: vec3f, step: FinishStep) -> vec3f {
-    let row = step.heal.z;
-    if step.heal.w < 0.5 {
-        return vec3f(
-            table_value(color.r, row),
-            table_value(color.g, row + 1.0),
-            table_value(color.b, row + 2.0),
-        );
-    }
-    let luminance = dot(color, globals.luma.xyz);
-    let mapped = table_value(luminance, row);
-    if luminance <= 1.0e-8 {
-        return vec3f(mapped);
-    }
-    var scale = mapped / luminance;
-    let maximum = max(max(color.r, color.g), max(color.b, 0.0));
-    if maximum * scale > 1.0 {
-        scale = 1.0 / maximum;
-    }
-    return clamp(color * scale, vec3f(0.0), vec3f(1.0));
-}
-
 // Whether a step maps each pixel alone: everything but a heal.
 fn maps_pixels(step: FinishStep) -> bool {
     return step.kind.x < 2.5 || step.kind.x > 3.5;
-}
-
-// Vibrance and saturation, each from -1 to 1. Vibrance changes a muted
-// color more than a vivid one. The CPU render's `colorfulness` is the same.
-fn colorfulness(color: vec3f, vibrance: f32, saturation: f32) -> vec3f {
-    let luminance = dot(color, globals.luma.xyz);
-    let high = max(max(color.r, color.g), color.b);
-    let low = min(min(color.r, color.g), color.b);
-    var vivid = 0.0;
-    if high > 1.0e-6 {
-        vivid = clamp((high - low) / high, 0.0, 1.0);
-    }
-    let gain = (1.0 + saturation) * (1.0 + vibrance * (1.0 - vivid));
-    return max(vec3f(luminance) + (color - vec3f(luminance)) * gain, vec3f(0.0));
-}
-
-// Tone and color with the means over a pixel's windows, as
-// `Tone::apply_around` applies it. `measured` is the luminance the means
-// were measured with at this pixel.
-fn tone(start: vec3f, measured: f32, local: vec4f, detail: vec2f, step: FinishStep) -> vec3f {
-    let exposure = step.kind.y;
-    let contrast = step.heal.x;
-    let highlights = step.heal.y;
-    let shadows = step.heal.z;
-    let whites = step.heal.w;
-    let blacks = step.shift.x;
-    let texture = step.shift.y;
-    let clarity = step.shift.z;
-    let dehaze = step.shift.w;
-    let mean = local.x;
-    let variance = max(local.y - mean * mean, 0.0);
-    let edge = variance / (variance + LOCAL_EDGE);
-    var base = mean + edge * (measured - mean);
-    let guided = (local.w - mean * local.z) / (variance + LOCAL_EDGE);
-    let veil = clamp(min(local.z + guided * (measured - mean), local.z), 0.0, 1.0);
-    let fine_variance = max(detail.y - detail.x * detail.x, 0.0);
-    let detailed = fine_variance / (fine_variance + step.local.w);
-    var fine = detail.x;
-
-    var color = start;
-    var own = dot(color, globals.luma.xyz);
-    var scale = 1.0;
-    var offset = 0.0;
-    if dehaze > 0.0 {
-        let lifted = DEHAZE_STRENGTH * dehaze * veil;
-        scale = 1.0 / (1.0 - lifted);
-        offset = -lifted * scale;
-    } else if dehaze < 0.0 {
-        let toward = HAZE * -dehaze;
-        scale = 1.0 - toward;
-        offset = toward * base;
-    }
-    if dehaze != 0.0 {
-        color = max(fma(vec3f(scale), color, vec3f(offset)), vec3f(0.0));
-        own = fma(scale, own, offset);
-        base = fma(scale, base, offset);
-        fine = fma(scale, fine, offset);
-    }
-
-    let gain = exp2(exposure);
-    let white = 1.0 - WHITE_REACH * whites;
-    let black = -BLACK_REACH * blacks;
-    let pixel = (max(own, 0.0) * gain - black) / (white - black);
-    let around = (max(base, 0.0) * gain - black) / (white - black);
-    let small = (max(fine, 0.0) * gain - black) / (white - black);
-    let toned = clamp(around, 0.0, 1.0);
-    let lifted = toned + SHIFT * shadows * 6.75 * toned * (1.0 - toned) * (1.0 - toned);
-    let moved = lifted + SHIFT * highlights * 6.75 * lifted * lifted * (1.0 - lifted);
-    var value = pixel + (moved - toned);
-    value += clarity * CLARITY_GAIN * (pixel - around) * 4.0 * toned * (1.0 - toned);
-    value += texture * TEXTURE_GAIN * detailed * (pixel - small);
-    let peak = step.range.x;
-    var mapped = contrast_curve(clamp(value, 0.0, 1.0), contrast);
-    // An HDR picture's shoulder above SDR white, as `hdr_shoulder`.
-    let room = peak - 1.0;
-    if room > 0.0 && value > 1.0 {
-        let over = value - 1.0;
-        let straight = SHOULDER_START * room;
-        if over <= straight {
-            mapped += over;
-        } else {
-            let rest = room - straight;
-            mapped += straight + rest * (1.0 - exp(-(over - straight) / rest));
-        }
-    }
-
-    let luminance = dot(color, globals.luma.xyz);
-    var scaled = vec3f(mapped);
-    if luminance > 1.0e-8 {
-        var factor = mapped / luminance;
-        let maximum = max(max(color.r, color.g), max(color.b, 0.0));
-        if maximum * factor > peak {
-            factor = peak / maximum;
-        }
-        scaled = clamp(color * factor, vec3f(0.0), vec3f(peak));
-    }
-    return min(colorfulness(scaled, step.local.x, step.local.y), vec3f(peak));
-}
-
-// The local and detail means of a pixel alone.
-fn alone(color: vec3f) -> array<vec4f, 2> {
-    let luminance = dot(color, globals.luma.xyz);
-    let darkest = min(min(color.r, color.g), color.b);
-    return array<vec4f, 2>(
-        vec4f(luminance, luminance * luminance, darkest, luminance * darkest),
-        vec4f(luminance, luminance * luminance, 0.0, 0.0),
-    );
 }
 
 // A step that maps each pixel alone, or a Tone step that reads the windows
@@ -208,21 +53,8 @@ fn adjust(color: vec3f, step: FinishStep, pixel: vec2i) -> vec3f {
                 step,
             );
         }
-        let means = alone(color);
-        return tone(color, means[0].x, means[0], means[1].xy, step);
     }
-    if step.kind.x > 3.5 {
-        return stretch_picture(color, step);
-    }
-    if step.kind.x < 1.5 {
-        return vec3f(
-            contrast_curve(color.r, step.kind.y),
-            contrast_curve(color.g, step.kind.y),
-            contrast_curve(color.b, step.kind.y),
-        );
-    }
-    let luminance = dot(color, globals.luma.xyz);
-    return max(mix(vec3f(luminance), color, step.kind.y), vec3f(0.0));
+    return step_alone(color, step);
 }
 
 // The combined color at a pixel after the steps before `upto`, leaving heals

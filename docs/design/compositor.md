@@ -45,6 +45,18 @@ A `Picture` lists:
   of an input, a layer or the whole picture.
 - **Finish steps** on the combined picture: output stretches (Seiza stretch
   plans), Tone and color, curves and saturation, heals.
+- **Steps in the stack** (`LayerKind::Step`): any Finish step as a layer,
+  which changes what is beneath it: inside a group, the group's members
+  beneath it; at the top, every layer beneath it. Its opacity, masks and
+  clipping limit it as an adjustment's do, and a heal's stroke is its mask.
+  The layers above it blend onto its result. Steps on top of the stack give
+  what the same Finish steps give, sample for sample, so a host can keep
+  one list of adjustments.
+
+The CPU render blends the layers up to each step over a tile and its
+margin, applies the step to that blend, and goes on from there. A step that
+reads neighbors reads the blend beneath it, so a tile's margin grows by each
+local Tone step's window and adds each heal's reach.
 
 ## Tone and color
 
@@ -224,6 +236,12 @@ past about five times, a window is capped at 256 drawn pixels either side.
 Up to four Tone steps per draw read neighborhoods, each measured into its
 own layer of the local textures after the steps before it; a fifth is
 drawn with each pixel alone, without Dehaze, and named in `left_out`.
+A step in the stack that maps each pixel alone is drawn by the layers
+pass itself, from its entry after the Finish steps in their table; one that
+reads neighbors is not yet: a local Tone step in the stack is drawn with
+each pixel alone, without Dehaze, and a heal in the stack is left out, both
+named in `left_out`. Drawing the stack in stages at such steps would draw
+them exactly.
 `tests/gpu.rs` renders the same picture both ways and bounds the gap; on
 Apple silicon the mean difference is about 1e-4 and the 99th percentile
 under 1e-3, smoothing included. A planted shader change fails

@@ -302,6 +302,30 @@ impl Plan {
                     .unwrap_or(0)
             })
             .sum::<u64>();
+        // The steps in the stack, then the Finish steps.
+        let stacked: Vec<&FinishKind> = picture
+            .layers
+            .iter()
+            .filter_map(|layer| match &layer.kind {
+                LayerKind::Step(kind) => Some(kind),
+                _ => None,
+            })
+            .collect();
+        let steps = || {
+            stacked
+                .iter()
+                .copied()
+                .chain(picture.finish.iter().map(|step| &step.kind))
+        };
+        // A heal in the stack reads the picture an earlier one changed, so
+        // their reaches add; the Finish steps' heals read the same picture.
+        let stacked_heals: u64 = stacked
+            .iter()
+            .filter_map(|kind| match kind {
+                FinishKind::Heal { offset, .. } => Some(reach(*offset)),
+                _ => None,
+            })
+            .sum();
         let finish_heals = picture
             .finish
             .iter()
@@ -310,13 +334,12 @@ impl Plan {
                 _ => None,
             })
             .max()
-            .unwrap_or(0);
+            .unwrap_or(0)
+            + stacked_heals;
         // A Tone step that reads neighborhoods reads that far around, in
         // a picture an earlier such step already read around.
-        let local = picture
-            .finish
-            .iter()
-            .filter(|step| matches!(&step.kind, FinishKind::Tone(tone) if tone.is_local()))
+        let local = steps()
+            .filter(|kind| matches!(kind, FinishKind::Tone(tone) if tone.is_local()))
             .count()
             * crate::tone::LOCAL_RADIUS;
         Self {
@@ -389,16 +412,51 @@ impl Plan {
             .map(|mask| computed_mask(mask, &padded, &masks, &covered, &read))
             .collect();
         let layers = LayerPlanes::new(picture, &padded, &masks, plane);
-        let mut combined = vec![0.0_f32; padded.pixels() * 3];
-        combined
-            .par_chunks_mut(padded.width * 3)
+        // The layers blend up to each step in the stack, which then works on
+        // what they made over the whole padded area, and on from there.
+        let mut state = vec![Blended::default(); padded.pixels()];
+        let mut start = 0;
+        let ends = picture
+            .layers
+            .iter()
             .enumerate()
-            .for_each(|(y, line)| {
-                for (x, pixel) in line.as_chunks_mut::<3>().0.iter_mut().enumerate() {
-                    let at = y * padded.width + x;
-                    *pixel = combine(picture, &layers, &masks, &computed, at);
-                }
+            .filter(|(_, layer)| matches!(layer.kind, LayerKind::Step(_)))
+            .map(|(index, _)| index)
+            .chain([picture.layers.len()]);
+        for end in ends {
+            let range = start..end;
+            state.par_iter_mut().enumerate().for_each(|(at, blended)| {
+                *blended = combine(
+                    picture,
+                    &layers,
+                    &masks,
+                    &computed,
+                    at,
+                    range.clone(),
+                    *blended,
+                );
             });
+            if let Some(layer) = picture.layers.get(end)
+                && let LayerKind::Step(kind) = &layer.kind
+            {
+                let cover: Vec<f32> = (0..padded.pixels())
+                    .map(|at| layer_cover(layer, &masks, &computed, at))
+                    .collect();
+                let mut rgb: Vec<f32> = state.iter().flat_map(|blended| blended.color).collect();
+                apply_step(
+                    &picture.rendered_kind(kind),
+                    &cover,
+                    &mut rgb,
+                    &padded,
+                    picture.space,
+                );
+                for (blended, color) in state.iter_mut().zip(rgb.as_chunks::<3>().0) {
+                    blended.color = *color;
+                }
+            }
+            start = end + 1;
+        }
+        let combined: Vec<f32> = state.iter().flat_map(|blended| blended.color).collect();
         let finished = finish(picture, &padded, &masks, combined);
         let mut out = Vec::with_capacity(tile.width * tile.height * 3);
         for row in 0..tile.height {
@@ -684,22 +742,51 @@ fn computed_mask(
     shape
 }
 
-/// The layers blended at one pixel of the padded area.
+/// What the layers blended so far leave at one pixel, at a step in the
+/// stack or at the top: the blend, and the picture beneath the group it is
+/// in, if it is in one.
+#[derive(Clone, Copy, Debug, Default)]
+struct Blended {
+    color: [f32; 3],
+    beneath: [f32; 3],
+}
+
+/// How much of a layer applies at one pixel of the padded area: its
+/// opacity, within its mask, the mask of the layer it is clipped to and its
+/// computed mask.
+fn layer_cover(
+    layer: &crate::picture::Layer,
+    masks: &[Vec<f32>],
+    computed: &[Vec<f32>],
+    at: usize,
+) -> f32 {
+    let painted = |mask: Option<usize>| {
+        mask.and_then(|mask| masks.get(mask))
+            .map_or(1.0, |mask| mask[at])
+    };
+    let mut cover = layer.opacity.clamp(0.0, 1.0) * painted(layer.mask) * painted(layer.clip);
+    if let Some(mask) = layer.computed.and_then(|mask| computed.get(mask)) {
+        cover *= mask[at];
+    }
+    cover
+}
+
+/// The layers in `range` blended at one pixel of the padded area, onto what
+/// the layers before them left. A step ends a range, so nothing waits to be
+/// blended past its end.
 fn combine(
     picture: &Picture,
     layers: &LayerPlanes,
     masks: &[Vec<f32>],
     computed: &[Vec<f32>],
     at: usize,
-) -> [f32; 3] {
+    range: std::ops::Range<usize>,
+    from: Blended,
+) -> Blended {
     let space = picture.space;
     let peak = picture.peak();
-    let painted = |mask: Option<usize>| {
-        mask.and_then(|mask| masks.get(mask))
-            .map_or(1.0, |mask| mask[at])
-    };
-    let mut color = [0.0_f32; 3];
-    let mut beneath = [0.0_f32; 3];
+    let mut color = from.color;
+    let mut beneath = from.beneath;
     let mut waiting = false;
     let mut own = [0.0_f32; 3];
     let mut own_cover = 0.0_f32;
@@ -724,11 +811,14 @@ fn combine(
             _ => cover_mix(color, blend(mode, color, own, space, peak), cover),
         }
     };
-    for (index, layer) in picture.layers.iter().enumerate() {
-        let mut cover = layer.opacity.clamp(0.0, 1.0) * painted(layer.mask) * painted(layer.clip);
-        if let Some(mask) = layer.computed.and_then(|mask| computed.get(mask)) {
-            cover *= mask[at];
-        }
+    for (index, layer) in picture
+        .layers
+        .iter()
+        .enumerate()
+        .take(range.end)
+        .skip(range.start)
+    {
+        let cover = layer_cover(layer, masks, computed, at);
         if let LayerKind::Adjustment(adjustment) = layer.kind
             && layer.own
         {
@@ -763,6 +853,8 @@ fn combine(
             LayerKind::Adjustment(adjustment) => {
                 color = cover_mix(color, adjusted(color, *adjustment, space), cover);
             }
+            // A step works on the whole area at the end of a range.
+            LayerKind::Step(_) => {}
             LayerKind::Luminance { read, target } => {
                 let value = read
                     .as_ref()
@@ -785,7 +877,73 @@ fn combine(
     if waiting {
         color = flush(color, own, own_cover, own_mode, own_parts);
     }
-    color
+    Blended { color, beneath }
+}
+
+/// A step in the stack over the padded area's picture, `rgb`, applied as
+/// far as `cover` says at each pixel. A heal copies, and a local Tone step
+/// measures, the picture as the layers beneath left it.
+fn apply_step(
+    kind: &FinishKind,
+    cover: &[f32],
+    rgb: &mut [f32],
+    padded: &Padded,
+    space: WorkingSpace,
+) {
+    match kind {
+        FinishKind::Heal { offset, shift } => {
+            let from = rgb.to_vec();
+            for y in 0..padded.height as i64 {
+                for x in 0..padded.width as i64 {
+                    let at = y as usize * padded.width + x as usize;
+                    if cover[at] <= 0.0 {
+                        continue;
+                    }
+                    if let Some(source) = padded.at(x + offset[0], y + offset[1]) {
+                        for channel in 0..3 {
+                            let copied = from[source * 3 + channel] + shift[channel];
+                            rgb[at * 3 + channel] = mix(rgb[at * 3 + channel], copied, cover[at]);
+                        }
+                    }
+                }
+            }
+        }
+        FinishKind::Tone(tone) if tone.is_local() => {
+            let around = crate::tone::neighborhoods(rgb, padded.width, padded.height, space);
+            let measured: Vec<f32> = rgb
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|pixel| {
+                    if pixel.iter().all(|channel| channel.is_finite()) {
+                        space.luma(*pixel)
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            rgb.as_chunks_mut::<3>()
+                .0
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(at, pixel)| {
+                    let toned = tone.apply_around(*pixel, measured[at], &around[at], space);
+                    *pixel = cover_mix(*pixel, toned, cover[at]);
+                });
+        }
+        kind => {
+            let adjusted = adjust_finish(kind, rgb, space);
+            for (at, (pixel, new)) in rgb
+                .as_chunks_mut::<3>()
+                .0
+                .iter_mut()
+                .zip(adjusted.as_chunks::<3>().0)
+                .enumerate()
+            {
+                *pixel = cover_mix(*pixel, *new, cover[at]);
+            }
+        }
+    }
 }
 
 /// A new luminance for `color`, its chromaticity kept, as LRGB composes.
