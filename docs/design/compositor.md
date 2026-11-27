@@ -136,7 +136,7 @@ compression. `seiza_stretch` itself stretches a whole image the same way.
 reads the maps at each sample's place, and the GPU reads them from a
 texture array, interpolating between map pixels as the CPU does, and works
 out the curve, core gain, HDR tail and detail gain in the shader. Up to
-four layers per draw take a layered stretch; another is drawn with its
+twelve layers per draw take a layered stretch; another is drawn with its
 curve alone and named in `left_out`, as is a layered stretch a computed
 mask or a luminance layer reads. A host measures the maps again only when
 a setting that moves them changes (the core compression's scale, or the

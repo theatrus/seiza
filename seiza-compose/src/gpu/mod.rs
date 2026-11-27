@@ -45,10 +45,13 @@ pub const MAX_HEALED_LAYERS: usize = 4;
 pub const MAX_COMPUTED_MASKS: usize = 8;
 /// The entries in one row of the stretch table.
 pub const STRETCH_TABLE_WIDTH: usize = 4096;
-/// The rows of the stretch table: one per transfer a layer or a computed
-/// mask reads through, then three per Finish step that maps the picture
-/// through curves.
-const STRETCH_TABLE_ROWS: usize = MAX_LAYERS + 3 * MAX_FINISH_STEPS;
+/// The stretch table's rows for layers: one per transfer a layer or a
+/// computed mask reads through, and one per layered stretch for what
+/// follows it.
+pub const LAYER_ROWS: usize = MAX_LAYERS + MAX_LAYERED;
+/// The rows of the stretch table: the layers', then three per Finish step
+/// that maps the picture through curves.
+const STRETCH_TABLE_ROWS: usize = LAYER_ROWS + 3 * MAX_FINISH_STEPS;
 /// The mask layer that holds the overlay.
 const OVERLAY_LAYER: u32 = MAX_MASKS as u32;
 
@@ -63,7 +66,7 @@ const COMBINED_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const LOCAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
 /// The most layers with a layered stretch one draw stretches on the GPU;
 /// another is drawn with its curve alone and named in `left_out`.
-pub const MAX_LAYERED: usize = 4;
+pub const MAX_LAYERED: usize = 12;
 /// The most Tone steps one draw reads neighborhoods for; another is drawn
 /// with each pixel alone and named in `left_out`.
 pub const MAX_LOCAL_TONES: usize = 4;
@@ -362,7 +365,7 @@ impl GpuScene {
                 }) {
                     return Some(row);
                 }
-                if scene.rows.len() == MAX_LAYERS {
+                if scene.rows.len() == LAYER_ROWS {
                     return None;
                 }
                 if !before_layered && layered_stage(read).is_some() {
@@ -435,7 +438,7 @@ impl GpuScene {
                         // of its own over the stretch's range.
                         constants[33] = -1.0;
                         if let Some(after) = after_layered_row(read, stage.peak()) {
-                            if scene.rows.len() < MAX_LAYERS {
+                            if scene.rows.len() < LAYER_ROWS {
                                 scene.rows.push(after);
                                 constants[33] = (scene.rows.len() - 1) as f32;
                             } else {
@@ -579,7 +582,7 @@ impl GpuScene {
             let mut slot = [0.0_f32; 20];
             slot[2] = mask_index(step.mask);
             slot[3] = step.opacity.clamp(0.0, 1.0);
-            let first_row = (MAX_LAYERS + 3 * scene.finish_rows.len()) as f32;
+            let first_row = (LAYER_ROWS + 3 * scene.finish_rows.len()) as f32;
             let mut offset = None;
             match &step.kind {
                 FinishKind::Curves(amount) => {
@@ -1630,12 +1633,12 @@ impl GpuCompositor {
                 curves
                     .iter()
                     .enumerate()
-                    .map(move |(channel, curve)| (MAX_LAYERS + 3 * table + channel, curve))
+                    .map(move |(channel, curve)| (LAYER_ROWS + 3 * table + channel, curve))
             });
         let rows = scene
             .rows
             .iter()
-            .take(MAX_LAYERS)
+            .take(LAYER_ROWS)
             .enumerate()
             .chain(finish_rows);
         for (row, table) in rows {

@@ -136,7 +136,7 @@ struct Globals {
     // w: the picture's peak, which screen works up to.
     luma: vec4f,
     // The layered stretches the layers read.
-    layered: array<LayeredStep, 4>,
+    layered: array<LayeredStep, 12>,
 }
 
 @group(0) @binding(0) var<uniform> globals: Globals;

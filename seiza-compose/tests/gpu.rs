@@ -105,7 +105,7 @@ fn smoothed_masks_stay_close_to_the_cpu() {
 /// that finds no row left is named, not dropped without a word.
 #[test]
 fn reads_share_stretch_rows_and_one_without_a_row_is_named() {
-    use seiza_compose::gpu::{GpuInput, GpuScene, MAX_LAYERS};
+    use seiza_compose::gpu::{GpuInput, GpuScene, LAYER_ROWS, MAX_LAYERS};
     use seiza_compose::picture::{ComputedMask, InputRead, Layer, Transfer, TransferStage};
     let read = |row: usize| InputRead::new(0, Transfer::of([TransferStage::Scale(row as f32)]));
     let place = [GpuInput {
@@ -127,13 +127,22 @@ fn reads_share_stretch_rows_and_one_without_a_row_is_named() {
         GpuScene::new(&picture, &place).left_out,
         Vec::<String>::new()
     );
-    // A mask through a transfer no layer uses needs a row of its own.
-    picture
-        .computed
-        .push(ComputedMask::foraxx(vec![read(MAX_LAYERS)], 0.0));
+    // A mask through a transfer no layer uses needs a row of its own: the
+    // rows left after the layers' take masks until none is left.
+    let spare = LAYER_ROWS - MAX_LAYERS;
+    for mask in 0..=spare / 2 {
+        let first = MAX_LAYERS + 2 * mask;
+        picture.computed.push(ComputedMask::foraxx(
+            vec![read(first), read(first + 1)],
+            0.0,
+        ));
+    }
     let left_out = GpuScene::new(&picture, &place).left_out;
-    assert_eq!(left_out.len(), 1, "{left_out:?}");
-    assert!(left_out[0].contains("computed mask 1"), "{left_out:?}");
+    let named = format!("computed mask {}", spare / 2 + 1);
+    assert!(
+        left_out.iter().any(|line| line.contains(&named)),
+        "{left_out:?}"
+    );
 }
 
 /// Two Tone steps that read neighborhoods, each over the picture the one
@@ -408,6 +417,76 @@ fn a_stretch_after_a_layered_hdr_one_keeps_the_headroom_on_the_gpu() {
         mean < 2e-3 && p99 < 1e-2,
         "mean {mean:e}, p99 {p99:e}, max {largest:e}"
     );
+}
+
+#[test]
+fn a_frame_draws_more_than_four_layered_stretches() {
+    use seiza_compose::picture::{
+        InputRead, Layer, LayerKind, LayeredStage, Transfer, TransferStage,
+    };
+    use seiza_stretch::{
+        ColorStrategy, LayeredHdr, LayeredHdrParams, LayeredParams, ResolvedCurve, StretchConfig,
+        StretchModel, reduce_luminance,
+    };
+    use std::sync::Arc;
+    let inputs = inputs();
+    let images: Vec<&LinearImage> = inputs.iter().collect();
+    let image = &inputs[0];
+    let config = StretchConfig {
+        model: StretchModel::LayeredHdr(LayeredHdrParams {
+            layered: LayeredParams {
+                contrast_recovery: 0.6,
+                scale_separation: 64,
+                ..LayeredParams::default()
+            },
+            hdr: LayeredHdr {
+                headroom: 2.0,
+                core_threshold: 60.0,
+                core_compression: 0.3,
+                core_scale: 8.0,
+                ..LayeredHdr::default()
+            },
+        }),
+        color_strategy: ColorStrategy::Linked,
+        max_analysis_samples: 200_000,
+    };
+    let finite: Vec<f32> = image
+        .data
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .collect();
+    let plan = config.resolve_for(&finite, 1).unwrap();
+    let ResolvedCurve::Layered(layered) = plan.curves()[0] else {
+        panic!("not a layered curve");
+    };
+    let (reduced, width, height) = reduce_luminance(&image.data, image.width, image.height);
+    let maps = Arc::new(layered.measure(&reduced, width, height));
+    assert!(!maps.core.is_empty() && !maps.large.is_empty());
+    let stage = LayeredStage::new(layered, maps);
+    // Six bands, each with its layered stretch, as a narrowband picture
+    // with RGB stars has.
+    let picture = Picture {
+        layers: (0..6)
+            .map(|_| {
+                Layer::new(LayerKind::Input {
+                    read: InputRead::new(0, Transfer::of([TransferStage::Layered(stage.clone())])),
+                    color: [1.0, 1.0, 1.0],
+                    curve: 0.0,
+                })
+            })
+            .collect(),
+        headroom: 2.0,
+        ..Picture::default()
+    };
+    let place: Vec<seiza_compose::gpu::GpuInput> = (0..3)
+        .map(|layer| seiza_compose::gpu::GpuInput { layer, scale: 1.0 })
+        .collect();
+    assert_eq!(
+        seiza_compose::gpu::GpuScene::new(&picture, &place).left_out,
+        Vec::<String>::new()
+    );
+    let _ = images;
 }
 
 /// The same stretch with a sky floor: the sky goes to black on the GPU as
