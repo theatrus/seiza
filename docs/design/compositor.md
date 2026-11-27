@@ -139,8 +139,9 @@ past about five times, a window is capped at 256 drawn pixels either side.
 Up to four Tone steps per draw read neighborhoods, each measured into its
 own layer of the local textures after the steps before it; a fifth is
 drawn with each pixel alone, without Dehaze, and named in `left_out`.
-`tests/gpu.rs` renders the same picture both ways and bounds the gap; on Apple silicon the mean difference is about 1e-4 and the 99th
-percentile under 1e-3, smoothing included. A planted shader change fails
+`tests/gpu.rs` renders the same picture both ways and bounds the gap; on
+Apple silicon the mean difference is about 1e-4 and the 99th percentile
+under 1e-3, smoothing included. A planted shader change fails
 it. Without a GPU the tests pass without checking.
 
 PSF Studio keeps only what belongs to an interactive canvas: streaming tiles

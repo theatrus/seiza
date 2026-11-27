@@ -124,6 +124,24 @@ pub fn render_image(
     sink.into_image()
 }
 
+/// A painted mask over `region`, row after row, from 0 to 1: its strokes
+/// drawn as the compositor draws them, each segment in order. A host uses
+/// it to know where a step applies, such as a histogram of a masked step's
+/// area.
+pub fn paint_mask(segments: &[Segment], region: ReferenceRegion) -> Vec<f32> {
+    let padded = Padded {
+        x: region.x as i64,
+        y: region.y as i64,
+        width: region.width,
+        height: region.height,
+    };
+    let mut mask = vec![0.0_f32; padded.pixels()];
+    for segment in segments {
+        draw_segment(&mut mask, &padded, segment);
+    }
+    mask
+}
+
 /// A [`Source`] over images already in memory, one per input.
 pub struct ImageSource<'a> {
     images: Vec<&'a LinearImage>,

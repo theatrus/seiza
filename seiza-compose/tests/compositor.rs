@@ -216,3 +216,43 @@ fn a_region_past_the_inputs_is_refused() {
     };
     assert!(render_image(&picture, &source, region, &RenderOptions::default()).is_err());
 }
+
+/// A mask painted on its own is the mask a layer is limited by: where a
+/// masked layer shows, the painted mask is 1, and it is 0 where it does not.
+#[test]
+fn a_painted_mask_on_its_own_is_the_layer_s_mask() {
+    use seiza_compose::render::paint_mask;
+    let stroke = [Segment {
+        from: [30.0, 40.0],
+        to: [70.0, 40.0],
+        radius: 8.0,
+        hardness: 1.0,
+        value: 1.0,
+    }];
+    let region = ReferenceRegion {
+        x: 20,
+        y: 30,
+        width: 60,
+        height: 20,
+    };
+    let mask = paint_mask(&stroke, region);
+    assert_eq!(mask.len(), 60 * 20);
+    // On the stroke's line, inside it: covered. Its region's corner, more
+    // than a radius away: not.
+    assert!(mask[10 * 60 + 30] > 0.99, "{}", mask[10 * 60 + 30]);
+    assert_eq!(mask[0], 0.0);
+    // The same pixels as the compositor's: a picture of the mask alone.
+    let input = plane(100, 100, 1, false);
+    let picture = Picture {
+        layers: vec![Layer {
+            mask: Some(0),
+            ..Layer::new(LayerKind::Solid { color: [1.0; 3] })
+        }],
+        masks: vec![stroke.to_vec()],
+        ..Picture::default()
+    };
+    let rendered = render(&picture, &[&input], region, 4096);
+    for (at, cover) in mask.iter().enumerate() {
+        assert!((rendered[at * 3] - cover).abs() < 1e-6, "pixel {at}");
+    }
+}

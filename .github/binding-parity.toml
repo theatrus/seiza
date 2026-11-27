@@ -585,6 +585,7 @@ objects = [
 "seiza-image-io::save" = { none = "the C ABI writes images through seiza-parallax and seiza-stacking, which write through seiza-image-io" }
 "seiza-image-io::save_display" = { none = "the C ABI writes images through seiza-parallax and seiza-stacking, which write through seiza-image-io" }
 "seiza-image-io::save_f32" = { none = "the C ABI writes images through seiza-parallax and seiza-stacking, which write through seiza-image-io" }
+"seiza-image-io::save_f32_with_profile" = { none = "the C ABI writes images through seiza-parallax and seiza-stacking, which write through seiza-image-io; a host that embeds a profile is a Rust host" }
 "seiza-image-io::save_images" = { none = "multi-image files hold distributed stacking's partial stacks, which hosts will write through the pipeline's own calls" }
 "seiza-image-io::read_astronomy_named" = { none = "multi-image files hold distributed stacking's partial stacks, which hosts will read through the pipeline's own calls" }
 "seiza-image-io::read_named_header" = { none = "multi-image files hold distributed stacking's partial stacks, which hosts will read through the pipeline's own calls" }
@@ -608,6 +609,7 @@ objects = [
 "seiza-compose::covered_region" = { none = "crop_report gives the region and more; the C ABI calls crop_report" }
 "seiza-compose::render::render" = { none = "the hosts that build pictures of their own, PSF Guard and PSF Studio, are Rust hosts; C and Python hosts reach the compositor through the combine_* exports, which build their pictures in the core. A picture-level C and Python API waits for a host that needs one" }
 "seiza-compose::gpu::render_gpu" = { none = "the hosts that build pictures of their own, PSF Guard and PSF Studio, are Rust hosts; C and Python hosts reach the compositor through the combine_* exports, which build their pictures in the core. A picture-level C and Python API waits for a host that needs one" }
+"seiza-compose::render::paint_mask" = { none = "a painted mask belongs to a picture, which only Rust hosts build; C and Python hosts reach the compositor through the combine_* exports" }
 "seiza-compose::tone::neighborhoods" = { none = "a step of the compositor's Tone, which C and Python hosts reach as the compositor itself: through the Rust hosts that build pictures" }
 "seiza-compose::tone::luminance_noise" = { none = "the measurement a host gives Tone for Texture; C and Python hosts reach Tone only through the compositor, which Rust hosts drive" }
 
