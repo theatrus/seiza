@@ -167,6 +167,32 @@ fn transfer_row(read: &InputRead, scale: f32, before_layered: bool) -> Vec<f32> 
     samples
 }
 
+/// The stages after a transfer's layered stage as a stretch-table row over
+/// the stage's range: entry `i` is their transfer of `i / (width - 1) ×
+/// peak`. `None` when nothing follows but a clamp to that range.
+fn after_layered_row(read: &InputRead, peak: f32) -> Option<Vec<f32>> {
+    let after: Vec<TransferStage> = read
+        .transfer
+        .stages
+        .iter()
+        .skip_while(|stage| !matches!(stage, TransferStage::Layered(_)))
+        .skip(1)
+        .cloned()
+        .collect();
+    let trivial = after.iter().all(
+        |stage| matches!(stage, TransferStage::Clamp { low, high } if *low <= 0.0 && *high >= peak),
+    );
+    if trivial {
+        return None;
+    }
+    let last = (STRETCH_TABLE_WIDTH - 1) as f32;
+    let mut samples: Vec<f32> = (0..STRETCH_TABLE_WIDTH)
+        .map(|index| index as f32 / last * peak)
+        .collect();
+    Transfer::of(after).apply(&mut samples);
+    Some(samples)
+}
+
 /// A transfer's layered stage, if it has one.
 fn layered_stage(read: &InputRead) -> Option<&LayeredStage> {
     read.transfer.stages.iter().find_map(|stage| match stage {
@@ -404,10 +430,21 @@ impl GpuScene {
                     };
                     if let Some(stage) = layered {
                         let map_layer = scene.layered.len();
-                        scene.layered.push((
-                            layered_constants(stage, map_layer, inputs),
-                            stage.maps.clone(),
-                        ));
+                        let mut constants = layered_constants(stage, map_layer, inputs);
+                        // What follows the layered stretch, read from a row
+                        // of its own over the stretch's range.
+                        constants[33] = -1.0;
+                        if let Some(after) = after_layered_row(read, stage.peak()) {
+                            if scene.rows.len() < MAX_LAYERS {
+                                scene.rows.push(after);
+                                constants[33] = (scene.rows.len() - 1) as f32;
+                            } else {
+                                scene.left_out.push(format!(
+                                    "the stretch after layer {index}'s layered one, with no stretch row left"
+                                ));
+                            }
+                        }
+                        scene.layered.push((constants, stage.maps.clone()));
                         slot[17] = map_layer as f32;
                     }
                     let [layer_band, blended, amount] = band(read);

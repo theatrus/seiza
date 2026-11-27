@@ -144,7 +144,11 @@ stretch's background statistics), so a slider redraws at once. Its sky
 floor, a stretched level from 0 to 0.5, goes to black after the star
 cores, with the range above it stretched to reach the peak again, so sky a
 background model left uneven, such as narrowband blobs, can be taken to
-black without clipping the bright end. The plain
+black without clipping the bright end. Stages after a layered stage, such as a second
+stretch, are drawn by the GPU from a stretch-table row of their own over 0
+to the stage's peak, read at the end of the shader's layered stretch.
+`TransferStage::BelowWhite` is such a stretch for an HDR picture: its curve
+shapes the range up to SDR white and values above it pass as they are. The plain
 layered stage can also read guide inputs at the same pixel: `luminance`, a
 plane of the luminance of red, green and blue stretched together, which
 the channel then follows as the whole-image stretch's colour does, and

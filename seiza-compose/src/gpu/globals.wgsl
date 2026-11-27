@@ -52,7 +52,9 @@ struct LayeredStep {
     // curve they are pulled toward, w its knee. z: the curve's black, for
     // a channel that follows a luminance.
     cores: vec4f,
-    // x: the sky floor, the stretched level that becomes black.
+    // x: the sky floor, the stretched level that becomes black. y: the
+    // stretch-table row of what follows the layered stretch, over 0 to its
+    // peak, or -1 for nothing.
     floor: vec4f,
 }
 

@@ -193,7 +193,18 @@ fn layered(value: f32, index: i32, doc: vec2f, uv: vec2f) -> f32 {
             out = max(1.0 + (own - base) / max(base, floor), 0.0) * out;
         }
     }
-    return clamp(out, 0.0, step.turn.w);
+    let peak = step.turn.w;
+    out = clamp(out, 0.0, peak);
+    // A stretch after the layered one, tabulated over 0 to the peak.
+    if step.floor.y >= 0.0 && peak > 0.0 {
+        let size = vec2f(textureDimensions(stretch_table));
+        let at = vec2f(
+            (clamp(out / peak, 0.0, 1.0) * (size.x - 1.0) + 0.5) / size.x,
+            (step.floor.y + 0.5) / size.y,
+        );
+        out = textureSampleLevel(stretch_table, linear_sampler, at, 0.0).r;
+    }
+    return out;
 }
 
 // A layer's stretch of a band's sample. The stretch itself is resolved by

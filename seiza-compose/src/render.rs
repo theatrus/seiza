@@ -1089,6 +1089,21 @@ mod tests {
     use super::screen;
 
     #[test]
+    fn below_white_curves_up_to_white_and_passes_the_headroom() {
+        use crate::picture::{Transfer, TransferStage};
+        let curve = seiza_stretch::ResolvedCurve::Mtf {
+            shadows: 0.0,
+            midtone: 0.25,
+            highlights: 1.0,
+        };
+        let mut samples = [0.0, 0.25, 1.0, 1.5, 2.0];
+        Transfer::of([TransferStage::BelowWhite(curve)]).apply(&mut samples);
+        assert_eq!(samples[0], 0.0);
+        assert!((samples[1] - 0.5).abs() < 1e-6, "{samples:?}");
+        assert_eq!(&samples[2..], &[1.0, 1.5, 2.0]);
+    }
+
+    #[test]
     fn screen_works_up_to_the_peak_and_is_the_usual_screen_at_one() {
         // At a peak of 1 it is 1 - (1 - a)(1 - b).
         assert!((screen(0.5, 0.5, 1.0) - 0.75).abs() < 1e-6);

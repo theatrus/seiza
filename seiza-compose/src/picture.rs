@@ -28,6 +28,10 @@ pub enum TransferStage {
     Domain(ResolvedSampleDomain),
     /// One of Seiza's resolved stretch curves.
     Curve(ResolvedCurve),
+    /// A resolved curve over 0 to 1, with values above SDR white passing as
+    /// they are: a stretch after an HDR one shapes the range up to white
+    /// and keeps the headroom, where [`Self::Curve`] would clip it.
+    BelowWhite(ResolvedCurve),
     /// A resolved curve continued into an HDR picture's headroom above its
     /// knee: values above 1 are on the extended sRGB curve, up to the
     /// tail's peak.
@@ -207,6 +211,11 @@ impl Transfer {
                 }
                 TransferStage::Curve(curve) => samples.iter_mut().for_each(|sample| {
                     if sample.is_finite() {
+                        *sample = curve.map(*sample);
+                    }
+                }),
+                TransferStage::BelowWhite(curve) => samples.iter_mut().for_each(|sample| {
+                    if sample.is_finite() && *sample <= 1.0 {
                         *sample = curve.map(*sample);
                     }
                 }),
