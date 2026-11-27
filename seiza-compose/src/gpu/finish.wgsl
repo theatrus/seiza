@@ -20,7 +20,6 @@ const SHIFT: f32 = 0.14;
 const WHITE_REACH: f32 = 0.3;
 const BLACK_REACH: f32 = 0.1;
 const LOCAL_EDGE: f32 = 0.0025;
-const DETAIL_EDGE: f32 = 0.0009;
 const CLARITY_GAIN: f32 = 1.0;
 const TEXTURE_GAIN: f32 = 1.5;
 const DEHAZE_STRENGTH: f32 = 0.95;
@@ -121,8 +120,8 @@ fn tone(start: vec3f, measured: f32, local: vec4f, detail: vec2f, step: FinishSt
     let guided = (local.w - mean * local.z) / (variance + LOCAL_EDGE);
     let veil = clamp(min(local.z + guided * (measured - mean), local.z), 0.0, 1.0);
     let fine_variance = max(detail.y - detail.x * detail.x, 0.0);
-    let detailed = fine_variance / (fine_variance + DETAIL_EDGE);
-    var fine = detail.x + detailed * (measured - detail.x);
+    let detailed = fine_variance / (fine_variance + step.local.w);
+    var fine = detail.x;
 
     var color = start;
     var own = dot(color, LUMA);

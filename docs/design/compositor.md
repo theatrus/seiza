@@ -57,7 +57,7 @@ rather than every pixel of one brightness alike:
 |---|---|
 | Highlights, Shadows | Move the tones of the local base, a pixel's surroundings, and keep the detail above it. A star in a lifted field stays as far above the field. |
 | Clarity | Raises or lowers the detail around the local base, most in the midtones. |
-| Texture | Raises or lowers the detail around a base of a few pixels, where there is more of it than noise. |
+| Texture | Raises or lowers the detail around the mean of a few pixels, as far as the window holds more than noise. A host measures the picture's noise with `tone::luminance_noise` and gives it to the step; unmeasured, a fixed level stands in. |
 | Dehaze | Takes away a veil estimated from the darkest channel nearby, so a gray sky glow goes and a colored nebula stays. Negative adds a veil. |
 
 A neighborhood is the means of the luminance, its square, the darkest

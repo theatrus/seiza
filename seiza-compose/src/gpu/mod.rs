@@ -402,6 +402,7 @@ impl GpuScene {
                     ]);
                     slot[12] = held.vibrance;
                     slot[13] = held.saturation;
+                    slot[15] = tone.detail_edge();
                     // One Tone step a draw reads neighborhoods for; another
                     // is drawn with each pixel alone.
                     if tone.is_local() {

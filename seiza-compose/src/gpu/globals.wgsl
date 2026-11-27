@@ -38,7 +38,8 @@ struct FinishStep {
     // and color: blacks, texture, clarity, dehaze.
     shift: vec4f,
     // For tone and color, x: vibrance, y: saturation, z: 1 when the step
-    // reads the neighborhoods the local passes measured.
+    // reads the neighborhoods the local passes measured, w: the variance of
+    // fine detail Texture treats as half noise.
     local: vec4f,
 }
 

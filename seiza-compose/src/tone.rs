@@ -42,6 +42,11 @@ pub struct Tone {
     pub dehaze: f32,
     pub vibrance: f32,
     pub saturation: f32,
+    /// The standard deviation of the noise in the luminance the step
+    /// works on, as [`luminance_noise`] measures it: detail at this level
+    /// is what Texture leaves alone. Not a control; a host measures it. 0
+    /// is not measured.
+    pub noise: f32,
 }
 
 /// Each control: its field name, its label, and its range, in Camera Raw's
@@ -78,8 +83,11 @@ const BLACK_REACH: f32 = 0.1;
 /// the pixel. A standard deviation of 0.05.
 const LOCAL_EDGE: f32 = 0.0025;
 /// The same over [`DETAIL_RADIUS`], a standard deviation of 0.03: detail
-/// smaller than this, such as noise in a flat sky, is left as it is.
+/// smaller than this is left as it is when the noise is not measured.
 const DETAIL_EDGE: f32 = 0.0009;
+/// How many times the measured noise Texture leaves alone: a window whose
+/// detail varies by less than this is taken for noise.
+const NOISE_REACH: f32 = 3.0;
 /// How much Clarity at 1 adds of the detail around the local base.
 const CLARITY_GAIN: f32 = 1.0;
 /// How much Texture at 1 adds of the detail around the fine base.
@@ -123,6 +131,50 @@ fn sample(color: [f32; 3]) -> [f32; 2] {
     } else {
         [0.0; 2]
     }
+}
+
+/// The standard deviation of the noise in the luminance of a picture of
+/// `width` by `height` pixels, red, green and blue interleaved, by
+/// Immerkær's method: the mean absolute response to a Laplacian difference
+/// that cancels smooth structure, scaled to a standard deviation. A pixel
+/// whose 3 × 3 square is not covered is left out. 0 for a picture smaller
+/// than 3 × 3.
+pub fn luminance_noise(rgb: &[f32], width: usize, height: usize) -> f32 {
+    if width < 3 || height < 3 || rgb.len() < width * height * 3 {
+        return 0.0;
+    }
+    let luminance: Vec<f32> = rgb
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|pixel| {
+            if pixel.iter().all(|channel| channel.is_finite()) {
+                luma(*pixel)
+            } else {
+                f32::NAN
+            }
+        })
+        .collect();
+    const KERNEL: [[f64; 3]; 3] = [[1.0, -2.0, 1.0], [-2.0, 4.0, -2.0], [1.0, -2.0, 1.0]];
+    let (mut sum, mut count) = (0.0_f64, 0_usize);
+    for y in 1..height - 1 {
+        for x in 1..width - 1 {
+            let mut response = 0.0_f64;
+            for (dy, row) in KERNEL.iter().enumerate() {
+                for (dx, weight) in row.iter().enumerate() {
+                    response += weight * f64::from(luminance[(y + dy - 1) * width + x + dx - 1]);
+                }
+            }
+            if response.is_finite() {
+                sum += response.abs();
+                count += 1;
+            }
+        }
+    }
+    if count == 0 {
+        return 0.0;
+    }
+    ((std::f64::consts::FRAC_PI_2).sqrt() * sum / (6.0 * count as f64)) as f32
 }
 
 /// Each pixel's [`Neighborhood`] in a picture of `width` by `height`
@@ -220,7 +272,20 @@ impl Tone {
             dehaze: hold(self.dehaze, 8),
             vibrance: hold(self.vibrance, 9),
             saturation: hold(self.saturation, 10),
+            noise: if self.noise.is_finite() {
+                self.noise.max(0.0)
+            } else {
+                0.0
+            },
         }
+    }
+
+    /// The variance of fine detail Texture treats as half noise: the
+    /// measured noise's, widened by [`NOISE_REACH`], and no less than
+    /// [`DETAIL_EDGE`].
+    pub fn detail_edge(&self) -> f32 {
+        let reach = NOISE_REACH * self.held().noise;
+        DETAIL_EDGE.max(reach * reach)
     }
 
     /// Whether the step reads each pixel's neighborhood: whether a control
@@ -265,8 +330,10 @@ impl Tone {
             .clamp(0.0, 1.0);
         let [fine_mean, fine_squared] = around.detail;
         let fine_variance = (fine_squared - fine_mean * fine_mean).max(0.0);
-        let detailed = fine_variance / (fine_variance + DETAIL_EDGE);
-        let mut fine = fine_mean + detailed * (luminance - fine_mean);
+        let detailed = fine_variance / (fine_variance + tone.detail_edge());
+        // Texture raises the detail around the fine window's mean, as far as
+        // the window holds more than noise.
+        let mut fine = fine_mean;
 
         let mut color = color;
         let mut own = luma(color);
@@ -306,7 +373,7 @@ impl Tone {
         let moved = lifted + SHIFT * tone.highlights * 6.75 * lifted * lifted * (1.0 - lifted);
         let mut value = pixel + (moved - toned);
         // Clarity scales the detail around the local base, most in the
-        // midtones; Texture the detail around the fine base, where there is
+        // midtones; Texture the detail around the fine mean, where there is
         // more of it than noise.
         value += tone.clarity * CLARITY_GAIN * (pixel - local) * 4.0 * toned * (1.0 - toned);
         value += tone.texture * TEXTURE_GAIN * detailed * (pixel - range(fine));
@@ -513,6 +580,69 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Noise of standard deviation about `sigma`, from a fixed sequence:
+    /// the sum of twelve uniform draws, less six.
+    fn noise_at(index: usize, sigma: f32) -> f32 {
+        let mut state = (index as u64)
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let mut sum = 0.0;
+        for _ in 0..12 {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            sum += (state >> 40) as f32 / (1u64 << 24) as f32;
+        }
+        (sum - 6.0) * sigma
+    }
+
+    #[test]
+    fn the_noise_estimate_finds_the_noise_and_not_the_gradient() {
+        let (width, height) = (200, 150);
+        let (rgb, _) = gray(width, height, |x, y| {
+            0.2 + 0.4 * x as f32 / 200.0 + noise_at(y * width + x, 0.02)
+        });
+        let noise = luminance_noise(&rgb, width, height);
+        assert!((noise - 0.02).abs() < 0.002, "{noise}");
+        let (smooth, _) = gray(width, height, |x, y| 0.2 + 0.3 * (x + y) as f32 / 350.0);
+        assert!(luminance_noise(&smooth, width, height) < 1e-4);
+    }
+
+    #[test]
+    fn texture_leaves_measured_noise_alone_and_raises_detail() {
+        // A noisy flat sky on the left, a sharp ripple on the right.
+        let (width, height) = (160, 40);
+        let (rgb, around) = gray(width, height, |x, y| {
+            let ripple = if x >= 80 && x % 4 < 2 { 0.15 } else { 0.0 };
+            0.3 + ripple + noise_at(y * width + x, 0.04)
+        });
+        let noise = luminance_noise(&rgb[..], width, height);
+        let texture = |noise: f32| Tone {
+            texture: 1.0,
+            noise,
+            ..Tone::default()
+        };
+        // How far Texture moves pixels, on average, in a band of columns.
+        let change = |tone: &Tone, columns: std::ops::Range<usize>| {
+            let mut sum = 0.0;
+            for x in columns.clone() {
+                let at_ = 20 * width + x;
+                sum += (at(tone, &rgb, &around, at_)[0] - rgb[at_ * 3]).abs();
+            }
+            sum / columns.len() as f32
+        };
+        let unmeasured = change(&texture(0.0), 10..70);
+        let measured = change(&texture(noise), 10..70);
+        assert!(
+            measured < unmeasured * 0.5,
+            "the sky's noise: {measured} against {unmeasured}"
+        );
+        assert!(
+            change(&texture(noise), 90..150) > 0.03,
+            "the ripple is still raised"
+        );
     }
 
     #[test]
