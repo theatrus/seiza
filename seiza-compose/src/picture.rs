@@ -44,6 +44,15 @@ pub enum TransferStage {
 pub struct LayeredStage {
     pub layered: ResolvedLayered,
     pub maps: Arc<LayeredMaps>,
+    /// The input that holds the luminance the stretch reads, as the stretch
+    /// reads it (0 to 1 over its range): for red, green and blue stretched
+    /// together, so each channel follows their luminance. `None` reads the
+    /// sample itself as luminance.
+    pub luminance: Option<usize>,
+    /// The input that holds that luminance blurred by
+    /// `seiza_stretch::fine_luminance`, for star-core compression. `None`
+    /// compresses no star cores.
+    pub fine: Option<usize>,
     tail: Option<HdrTail>,
 }
 
@@ -55,7 +64,19 @@ impl LayeredStage {
         Self {
             layered,
             maps,
+            luminance: None,
+            fine: None,
             tail,
+        }
+    }
+
+    /// The stage reading its luminance from input `luminance`, and the
+    /// star-core compression's blur of it from input `fine`.
+    pub fn with_guides(self, luminance: Option<usize>, fine: Option<usize>) -> Self {
+        Self {
+            luminance,
+            fine,
+            ..self
         }
     }
 
@@ -69,14 +90,32 @@ impl LayeredStage {
         self.layered.peak(self.tail.as_ref())
     }
 
-    /// The stage of a sample at picture pixel `(x, y)`; with no place, of a
-    /// sample alone, which reads no maps.
-    fn map(&self, value: f32, at: Option<(usize, usize)>) -> f32 {
+    /// The stage of a sample at picture pixel `(x, y)`, with the values of
+    /// its guide inputs there; with no place, of a sample alone, which
+    /// reads no maps.
+    pub fn map(
+        &self,
+        value: f32,
+        at: Option<(usize, usize)>,
+        luminance: Option<f32>,
+        fine: Option<f32>,
+    ) -> f32 {
         let sample = at.map_or_else(Default::default, |(x, y)| self.maps.sample(x, y));
-        (self
+        let read = luminance.unwrap_or(value);
+        let mut stretched = self
             .layered
-            .stretch_luminance(value, sample, self.tail.as_ref()) as f32)
-            .clamp(0.0, self.peak())
+            .stretch_luminance(read, sample, self.tail.as_ref());
+        if let Some(fine) = fine {
+            stretched = self.layered.star_cores(stretched, read, fine);
+        }
+        let peak = f64::from(self.peak());
+        let out = match luminance {
+            Some(luminance) => self
+                .layered
+                .colour_channel(value, luminance, stretched, peak),
+            None => stretched.clamp(0.0, peak),
+        };
+        out as f32
     }
 }
 
@@ -104,17 +143,45 @@ impl Transfer {
     /// sample stays non-finite. A layered stage reads no maps, as for a
     /// sample alone; [`Self::apply_at`] gives the samples their places.
     pub fn apply(&self, samples: &mut [f32]) {
-        self.apply_placed(samples, None);
+        self.apply_placed(samples, None, &|_| None);
     }
 
     /// Applies the transfer to `samples`, the rows of a rectangle `width`
     /// samples wide whose first sample is at picture pixel `origin`; a place
     /// outside the picture reads the maps at its nearest edge.
     pub fn apply_at(&self, samples: &mut [f32], origin: [i64; 2], width: usize) {
-        self.apply_placed(samples, Some((origin, width)));
+        self.apply_placed(samples, Some((origin, width)), &|_| None);
     }
 
-    fn apply_placed(&self, samples: &mut [f32], placed: Option<([i64; 2], usize)>) {
+    /// [`Self::apply_at`], with `planes` giving another input's samples
+    /// over the same rectangle, for a layered stage's guides.
+    pub fn apply_guided<'a>(
+        &self,
+        samples: &mut [f32],
+        origin: [i64; 2],
+        width: usize,
+        planes: &dyn Fn(usize) -> Option<&'a [f32]>,
+    ) {
+        self.apply_placed(samples, Some((origin, width)), planes);
+    }
+
+    /// The inputs a layered stage reads besides the sample.
+    pub fn guides(&self) -> impl Iterator<Item = usize> + '_ {
+        self.stages
+            .iter()
+            .flat_map(|stage| match stage {
+                TransferStage::Layered(stage) => [stage.luminance, stage.fine],
+                _ => [None, None],
+            })
+            .flatten()
+    }
+
+    fn apply_placed<'a>(
+        &self,
+        samples: &mut [f32],
+        placed: Option<([i64; 2], usize)>,
+        planes: &dyn Fn(usize) -> Option<&'a [f32]>,
+    ) {
         for stage in &self.stages {
             match stage {
                 TransferStage::Scale(factor) => {
@@ -150,6 +217,8 @@ impl Transfer {
                     })
                 }
                 TransferStage::Layered(stage) => {
+                    let luminance = stage.luminance.and_then(planes);
+                    let fine = stage.fine.and_then(planes);
                     for (index, sample) in samples.iter_mut().enumerate() {
                         if !sample.is_finite() {
                             continue;
@@ -160,7 +229,9 @@ impl Transfer {
                                 (y + (index / width.max(1)) as i64).max(0) as usize,
                             )
                         });
-                        *sample = stage.map(*sample, at);
+                        let guide =
+                            |plane: Option<&[f32]>| plane.and_then(|p| p.get(index).copied());
+                        *sample = stage.map(*sample, at, guide(luminance), guide(fine));
                     }
                 }
             }
@@ -486,6 +557,7 @@ impl Picture {
             if let Some((other, _)) = read.blended {
                 inputs.push(other);
             }
+            inputs.extend(read.transfer.guides());
         };
         for layer in &self.layers {
             match &layer.kind {

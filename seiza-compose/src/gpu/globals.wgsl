@@ -44,6 +44,14 @@ struct LayeredStep {
     // x: the maps' layer. y: 1 when the maps hold a large-scale layer.
     // zw: the maps' width and height.
     maps: vec4f,
+    // The guides, each a layer of the input tiles (-1 for none) and the
+    // value a texel of 1 stands for: x, y the luminance a channel follows;
+    // z, w its fine blur for star cores.
+    guides: vec4f,
+    // Star cores: x how far they are compressed, y the end slope of the
+    // curve they are pulled toward, w its knee. z: the curve's black, for
+    // a channel that follows a luminance.
+    cores: vec4f,
 }
 
 // One step of the Finish stage.

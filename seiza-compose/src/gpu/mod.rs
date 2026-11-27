@@ -135,7 +135,7 @@ pub struct GpuScene {
     luma: [f32; 3],
     /// Each layered stretch the layers read: its constants as the shader
     /// reads them, and its maps.
-    layered: Vec<([f32; 24], Arc<LayeredMaps>)>,
+    layered: Vec<([f32; 32], Arc<LayeredMaps>)>,
     /// What the GPU cannot draw of the picture, by name.
     pub left_out: Vec<String>,
 }
@@ -175,12 +175,12 @@ fn layered_stage(read: &InputRead) -> Option<&LayeredStage> {
 
 /// A layered stage's constants as the shader reads them; see `LayeredStep`
 /// in `globals.wgsl`.
-fn layered_constants(stage: &LayeredStage, map_layer: usize) -> [f32; 24] {
+fn layered_constants(stage: &LayeredStage, map_layer: usize, inputs: &[GpuInput]) -> [f32; 32] {
     let layered = &stage.layered;
     let curve = layered.curve;
     let maps = &stage.maps;
     let hdr = layered.hdr.unwrap_or_default();
-    let mut constants = [0.0_f32; 24];
+    let mut constants = [0.0_f32; 32];
     constants[0] = curve.black;
     constants[1] = curve.median as f32;
     constants[2] = curve.target as f32;
@@ -207,6 +207,26 @@ fn layered_constants(stage: &LayeredStage, map_layer: usize) -> [f32; 24] {
     constants[21] = if maps.large.is_empty() { 0.0 } else { 1.0 };
     constants[22] = maps.width as f32;
     constants[23] = maps.height as f32;
+    // The guides: the luminance a channel follows, and its fine blur for
+    // star cores, each a layer of the input tiles and the value a texel of
+    // 1 stands for.
+    let guide = |input: Option<usize>| {
+        input
+            .and_then(|input| inputs.get(input))
+            .map_or([-1.0, 0.0], |place| [place.layer as f32, place.scale])
+    };
+    let [luminance_layer, luminance_scale] = guide(stage.luminance);
+    let [fine_layer, fine_scale] = guide(stage.fine);
+    constants[24] = luminance_layer;
+    constants[25] = luminance_scale;
+    constants[26] = fine_layer;
+    constants[27] = fine_scale;
+    if layered.compresses_star_cores() && stage.fine.is_some() {
+        constants[28] = layered.params.dynamic_range_compression as f32;
+    }
+    constants[29] = seiza_stretch::STAR_CORE_END_SLOPE as f32;
+    constants[30] = curve.black;
+    constants[31] = seiza_stretch::DRC_KNEE as f32;
     constants
 }
 
@@ -372,9 +392,10 @@ impl GpuScene {
                     };
                     if let Some(stage) = layered {
                         let map_layer = scene.layered.len();
-                        scene
-                            .layered
-                            .push((layered_constants(stage, map_layer), stage.maps.clone()));
+                        scene.layered.push((
+                            layered_constants(stage, map_layer, inputs),
+                            stage.maps.clone(),
+                        ));
                         slot[17] = map_layer as f32;
                     }
                     let [layer_band, blended, amount] = band(read);
@@ -618,7 +639,7 @@ struct Globals {
     local: [f32; 4],
     area: [f32; 4],
     luma: [f32; 4],
-    layered: [[f32; 24]; MAX_LAYERED],
+    layered: [[f32; 32]; MAX_LAYERED],
 }
 
 /// Where the picture sits in the area drawn.
@@ -1437,7 +1458,7 @@ impl GpuCompositor {
             ],
             area: area.map(|value| value as f32),
             luma: [scene.luma[0], scene.luma[1], scene.luma[2], 0.0],
-            layered: [[0.0; 24]; MAX_LAYERED],
+            layered: [[0.0; 32]; MAX_LAYERED],
         };
         for (slot, (constants, _)) in globals.layered.iter_mut().zip(&scene.layered) {
             *slot = *constants;

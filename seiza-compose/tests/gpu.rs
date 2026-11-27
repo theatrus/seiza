@@ -321,3 +321,75 @@ fn a_layered_stretch_matches_the_cpu() {
         "mean {mean:e}, p99 {p99:e}, max {largest:e}"
     );
 }
+
+/// A layered stretch that follows another input's luminance and compresses
+/// star cores against that luminance's fine blur draws on the GPU as the
+/// CPU renders it.
+#[test]
+fn a_layered_stretch_with_guides_matches_the_cpu() {
+    use seiza_compose::picture::{
+        InputRead, Layer, LayerKind, LayeredStage, Transfer, TransferStage,
+    };
+    use seiza_stretch::{
+        ColorStrategy, LayeredParams, ResolvedCurve, StretchConfig, StretchModel, fine_luminance,
+        reduce_luminance,
+    };
+    use std::sync::Arc;
+    let [first, luminance, third] = inputs();
+    let fine = LinearImage::new(
+        luminance.width,
+        luminance.height,
+        1,
+        fine_luminance(&luminance.data, luminance.width, luminance.height),
+    )
+    .unwrap();
+    let all = [first, luminance, third, fine];
+    let images: Vec<&LinearImage> = all.iter().collect();
+    let guide = &all[1];
+    let config = StretchConfig {
+        model: StretchModel::Layered(LayeredParams {
+            dynamic_range_compression: 0.8,
+            contrast_recovery: 0.4,
+            scale_separation: 64,
+            ..LayeredParams::default()
+        }),
+        color_strategy: ColorStrategy::Linked,
+        max_analysis_samples: 200_000,
+    };
+    let finite: Vec<f32> = guide
+        .data
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .collect();
+    let plan = config.resolve_for(&finite, 1).unwrap();
+    let ResolvedCurve::Layered(layered) = plan.curves()[0] else {
+        panic!("not a layered curve");
+    };
+    assert!(layered.compresses_star_cores());
+    let (reduced, width, height) = reduce_luminance(&guide.data, guide.width, guide.height);
+    let maps = Arc::new(layered.measure(&reduced, width, height));
+    let stage = LayeredStage::new(layered, maps).with_guides(Some(1), Some(3));
+    let picture = Picture {
+        layers: vec![Layer::new(LayerKind::Input {
+            read: InputRead::new(0, Transfer::of([TransferStage::Layered(stage)])),
+            color: [1.0, 0.0, 0.0],
+            curve: 0.0,
+        })],
+        ..Picture::default()
+    };
+    assert_eq!(picture.inputs(), vec![0, 1, 3]);
+    let Some((cpu, gpu)) = both(&picture, &images) else {
+        eprintln!("no GPU: the GPU compositor was not checked");
+        return;
+    };
+    let (mean, p99, largest) = gap(&cpu, &gpu);
+    eprintln!("guided: mean {mean:e}, p99 {p99:e}, max {largest:e}");
+    // No speck where the luminance is at the black point: a channel that
+    // follows it divides by at least one noise sigma.
+    assert!(largest < 0.1, "max {largest:e}");
+    assert!(
+        mean < 2e-3 && p99 < 1e-2,
+        "mean {mean:e}, p99 {p99:e}, max {largest:e}"
+    );
+}

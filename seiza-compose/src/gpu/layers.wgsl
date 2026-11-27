@@ -111,15 +111,38 @@ fn layered_map(step: LayeredStep, doc: vec2f, channel: i32) -> f32 {
     return bitcast<f32>(0x7fc00000u);
 }
 
-// Layer `index`'s layered stretch of `value` at picture position `doc`, or
-// `value` as it is when the layer has none.
-fn layered(value: f32, index: i32, doc: vec2f) -> f32 {
+// The soft-knee highlight curve star cores are pulled toward.
+fn star_core_curve(value: f32, knee: f32, end_slope: f32) -> f32 {
+    if value <= knee {
+        return value;
+    }
+    let width = 1.0 - knee;
+    let t = min((value - knee) / width, 1.0);
+    let t2 = t * t;
+    let t3 = t2 * t;
+    return knee + width * ((t3 - 2.0 * t2 + t) + (-2.0 * t3 + 3.0 * t2) + end_slope * (t3 - t2));
+}
+
+// A guide input's value at `uv`, from its layer of the input tiles.
+fn layered_guide(uv: vec2f, layer: f32, scale: f32) -> f32 {
+    return textureSampleLevel(tile, linear_sampler, uv, i32(layer), 0.0).r * scale;
+}
+
+// Layer `index`'s layered stretch of `value` at picture position `doc` and
+// tile position `uv`, or `value` as it is when the layer has none.
+fn layered(value: f32, index: i32, doc: vec2f, uv: vec2f) -> f32 {
     let at = i32(globals.layers[index].more.y);
     if at < 0 {
         return value;
     }
     let step = globals.layered[at];
-    var read = value;
+    // The luminance the stretch reads: a guide's, which the channel then
+    // follows, or the sample's own.
+    var luminance = value;
+    if step.guides.x >= 0.0 {
+        luminance = layered_guide(uv, step.guides.x, step.guides.y);
+    }
+    var read = luminance;
     // The core compression: the part above the background scaled by one
     // smooth gain from the base.
     if step.detail.w > 0.5 {
@@ -131,7 +154,7 @@ fn layered(value: f32, index: i32, doc: vec2f) -> f32 {
                 soft = step.core.w * log(1.0 + exp(over));
             }
             let gain = exp(-step.core.y * soft);
-            read = step.curve.w + (value - step.curve.w) * gain;
+            read = step.curve.w + (luminance - step.curve.w) * gain;
         }
     }
     var out = layered_curve(read, step);
@@ -144,6 +167,25 @@ fn layered(value: f32, index: i32, doc: vec2f) -> f32 {
             let gain = min(pow(step.detail.z / anchor_slope(level, step.curve), step.detail.y / 2.0), 4.0);
             let base = layered_curve(large, step);
             out = base + (out - base) * gain;
+        }
+    }
+    // Star cores, against the luminance's fine blur.
+    if step.cores.x > 0.0 && step.guides.z >= 0.0 {
+        let fine = layered_guide(uv, step.guides.z, step.guides.w);
+        let noise = max(step.detail.x, 1.0e-6);
+        let mask = smoothstep(0.0, 1.0, clamp((luminance - fine - 3.0 * noise) / (12.0 * noise), 0.0, 1.0));
+        out += step.cores.x * mask * (star_core_curve(out, step.cores.w, step.cores.y) - out);
+    }
+    // A channel that follows a luminance: its own value less the black,
+    // scaled as the luminance was.
+    if step.guides.x >= 0.0 {
+        let black = step.cores.z;
+        let base = max((luminance - black) / (1.0 - black), 0.0);
+        if base > 1.0e-6 {
+            // No less than one noise sigma, as `colour_floor` gives it.
+            let floor = step.detail.x / (1.0 - black);
+            let own = max((value - black) / (1.0 - black), 0.0);
+            out = max(1.0 + (own - base) / max(base, floor), 0.0) * out;
         }
     }
     return clamp(out, 0.0, step.turn.w);
@@ -425,12 +467,12 @@ fn luminance_target(color: vec3f, value: f32, has: bool, replace: bool, cover: f
     return mix(color, scaled, cover);
 }
 
-fn healed_value(index: i32, pixel: vec2i, doc: vec2f) -> f32 {
+fn healed_value(index: i32, pixel: vec2i, doc: vec2f, uv: vec2f) -> f32 {
     let layer = globals.layers[index];
     let place = i32(layer.stretch.y);
     let size = vec2i(globals.screen.xy);
     var value = layer_curve(
-        layered(stretched(healed_sample(index, place, pixel), layer.stretch.x), index, doc),
+        layered(stretched(healed_sample(index, place, pixel), layer.stretch.x), index, doc, uv),
         layer.stretch.w,
     );
     let count = i32(globals.counts.z);
@@ -443,7 +485,7 @@ fn healed_value(index: i32, pixel: vec2i, doc: vec2f) -> f32 {
         if all(source >= vec2i(0)) && all(source < size) {
             // The maps are smooth, so the copy reads them where it lands.
             let copy = layer_curve(
-                layered(stretched(healed_sample(index, place, source), layer.stretch.x), index, doc),
+                layered(stretched(healed_sample(index, place, source), layer.stretch.x), index, doc, uv),
                 layer.stretch.w,
             ) + heal.what.w;
             value = mix(value, copy, textureLoad(layer_masks, pixel, i32(heal.what.z), 0).r);
@@ -542,10 +584,10 @@ fn tile_fragment(in: TileVertex) -> @location(0) vec4f {
         }
         var value = 0.0;
         if layer.stretch.y >= 0.0 {
-            value = healed_value(index, pixel, in.doc);
+            value = healed_value(index, pixel, in.doc, in.uv);
         } else {
             let sample = band_sample(in.uv, layer.select.x, layer.select.z, layer.select.w);
-            value = layer_curve(layered(stretched(sample, layer.stretch.x), index, in.doc), layer.stretch.w);
+            value = layer_curve(layered(stretched(sample, layer.stretch.x), index, in.doc, in.uv), layer.stretch.w);
         }
         own = layer.color.rgb * value;
         own_band = true;

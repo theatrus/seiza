@@ -23,8 +23,9 @@ mod hdr_tail;
 mod layered;
 pub use hdr_tail::{HdrTail, HdrTailParams, extended_srgb_decode, extended_srgb_encode};
 pub use layered::{
-    CORE_FLOOR, CORE_KNEE_WIDTH, LayeredHdr, LayeredHdrParams, LayeredMaps, LayeredParams,
-    MAP_REDUCTION, MAX_DETAIL_GAIN, MapSample, ResolvedLayered, reduce_luminance,
+    CORE_FLOOR, CORE_KNEE_WIDTH, DRC_KNEE, LayeredHdr, LayeredHdrParams, LayeredMaps,
+    LayeredParams, MAP_REDUCTION, MAX_DETAIL_GAIN, MapSample, ResolvedLayered, STAR_CORE_END_SLOPE,
+    fine_luminance, reduce_luminance,
 };
 
 const LUMA_RED: f64 = 0.2126;
@@ -52,7 +53,7 @@ pub type Result<T> = std::result::Result<T, StretchError>;
 /// crate or in a crate it calls. A new model or option whose default leaves
 /// the output alone does not move it. `tests/output_version.rs` fails when
 /// its fixtures' output changes, and `AGENTS.md` gives the steps.
-pub const OUTPUT_VERSION: &str = "0.3.0";
+pub const OUTPUT_VERSION: &str = "0.5.0";
 
 /// Default lower percentile used to map physical linear samples into the
 /// unit-linear domain expected by display stretches.

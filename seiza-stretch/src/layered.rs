@@ -152,7 +152,7 @@ pub const MAX_DETAIL_GAIN: f64 = 4.0;
 /// Blur sigma in pixels of the fine layer that finds star cores.
 const FINE_SIGMA: f64 = 2.0;
 /// Knee of the highlight curve the compression pulls toward.
-const DRC_KNEE: f64 = 0.5;
+pub const DRC_KNEE: f64 = 0.5;
 /// Below this, a pixel's rescaled luminance is too dark to carry colour.
 const COLOUR_EPSILON: f64 = 1.0e-6;
 
@@ -515,6 +515,56 @@ impl ResolvedLayered {
         tail.map_or(1.0, HdrTail::peak)
     }
 
+    /// Whether the stretch compresses star cores: the plain layered stretch
+    /// with an amount above 0. The HDR one compresses bright cores instead.
+    pub fn compresses_star_cores(&self) -> bool {
+        self.params.dynamic_range_compression > 0.0 && self.hdr.is_none()
+    }
+
+    /// `stretched`, a pixel's stretched luminance, with its star core
+    /// compressed: pulled toward a soft-knee highlight curve as far as the
+    /// pixel's luminance `value` stands above `fine`, its blur by
+    /// [`fine_luminance`], in noise sigmas.
+    pub fn star_cores(&self, stretched: f64, value: f32, fine: f32) -> f64 {
+        if !self.compresses_star_cores() || !value.is_finite() || !fine.is_finite() {
+            return stretched;
+        }
+        let noise = self.noise.max(1.0e-6);
+        let detail = f64::from(value) - f64::from(fine);
+        let mask = smoothstep(((detail - 3.0 * noise) / (12.0 * noise)).clamp(0.0, 1.0));
+        let end_slope = STAR_CORE_END_SLOPE;
+        stretched
+            + self.params.dynamic_range_compression
+                * mask
+                * (compress_highlights(stretched, DRC_KNEE, end_slope) - stretched)
+    }
+
+    /// One colour channel of a pixel whose luminance is `luminance` and
+    /// whose stretched luminance is `stretched`: the channel's `sample`,
+    /// less the black point, scaled as the luminance was, within `peak`.
+    /// The whole-image stretch also brings a pixel whose brightest channel
+    /// passes the peak back by that channel; one channel alone is held at
+    /// the peak.
+    pub fn colour_channel(&self, sample: f32, luminance: f32, stretched: f64, peak: f64) -> f64 {
+        let black = f64::from(self.curve.black);
+        let rescale = |value: f32| ((f64::from(value) - black) / (1.0 - black)).max(0.0);
+        let base = rescale(luminance);
+        if !base.is_finite() || base <= COLOUR_EPSILON {
+            return stretched.clamp(0.0, peak);
+        }
+        let ratio = 1.0 + (rescale(sample) - base) / base.max(self.colour_floor());
+        (ratio.max(0.0) * stretched).clamp(0.0, peak)
+    }
+
+    /// The least a pixel's luminance above the black point divides a
+    /// channel's difference from it by, when its colour follows the stretch:
+    /// one noise sigma. Below it a pixel is mostly noise, and dividing by
+    /// less would turn the noise of the darkest sky into bright specks. A
+    /// grey pixel keeps the stretched luminance in every channel.
+    pub fn colour_floor(&self) -> f64 {
+        self.noise / (1.0 - f64::from(self.curve.black))
+    }
+
     /// The stretched luminance of one pixel whose luminance is `value` and
     /// whose maps are `at`, before star-core compression and colour: the
     /// core compressed, the curve (with `tail` above its knee), and the
@@ -570,21 +620,15 @@ pub(crate) fn apply(layered: &ResolvedLayered, data: &[f32], shape: ImageShape) 
         })
         .collect();
 
-    if params.dynamic_range_compression > 0.0 && layered.hdr.is_none() {
-        let fine = blur(&luminance, width, height, FINE_SIGMA);
-        let noise = layered.noise.max(1.0e-6);
-        let end_slope = 1.0 + HDR_MAX_EXTRA_SLOPE;
-        let amount = params.dynamic_range_compression;
+    if layered.compresses_star_cores() {
+        let fine = fine_luminance(&luminance, width, height);
         stretched
             .par_iter_mut()
             .zip(luminance.par_iter().zip(&fine))
             .for_each(|(out, (&value, &smooth))| {
-                if !value.is_finite() {
-                    return;
+                if value.is_finite() {
+                    *out = layered.star_cores(*out, value, smooth);
                 }
-                let detail = f64::from(value) - f64::from(smooth);
-                let mask = smoothstep(((detail - 3.0 * noise) / (12.0 * noise)).clamp(0.0, 1.0));
-                *out += amount * mask * (compress_highlights(*out, DRC_KNEE, end_slope) - *out);
             });
     }
 
@@ -613,7 +657,14 @@ pub(crate) fn apply(layered: &ResolvedLayered, data: &[f32], shape: ImageShape) 
                 if !luma.is_finite() {
                     continue;
                 }
-                let mut rgb = colour(pixel, luma, value.clamp(0.0, peak), black, peak);
+                let mut rgb = colour(
+                    pixel,
+                    luma,
+                    value.clamp(0.0, peak),
+                    black,
+                    peak,
+                    layered.colour_floor(),
+                );
                 if params.saturation_amount > 0.0 {
                     saturate(&mut rgb, params);
                 }
@@ -647,22 +698,31 @@ fn luminance(data: &[f32], channels: usize) -> Vec<f32> {
         .collect()
 }
 
+/// The slope at 1 of the highlight curve star cores are pulled toward.
+pub const STAR_CORE_END_SLOPE: f64 = 1.0 + HDR_MAX_EXTRA_SLOPE;
+
+/// Luminance blurred by the star-core compression's fine scale: what
+/// [`ResolvedLayered::star_cores`] measures a pixel's detail against. A
+/// host that draws the layered stretch measures it once per image.
+pub fn fine_luminance(luminance: &[f32], width: usize, height: usize) -> Vec<f32> {
+    blur(luminance, width, height, FINE_SIGMA)
+}
+
 /// Give a pixel the stretched luminance `value`: its RGB, less the black
 /// point, scaled by one factor so its luminance does the same, and brought
 /// back within `peak` by its largest channel.
-fn colour(pixel: &[f32], luma: f32, value: f64, black: f64, peak: f64) -> [f64; 3] {
+fn colour(pixel: &[f32], luma: f32, value: f64, black: f64, peak: f64, floor: f64) -> [f64; 3] {
     let span = 1.0 - black;
     let rescale = |sample: f32| ((f64::from(sample) - black) / span).max(0.0);
     let base = rescale(luma);
     if base <= COLOUR_EPSILON {
         return [value; 3];
     }
-    let scale = value / base;
-    let mut rgb = [
-        rescale(pixel[0]) * scale,
-        rescale(pixel[1]) * scale,
-        rescale(pixel[2]) * scale,
-    ];
+    // Each channel's difference from the luminance, over at least one
+    // noise sigma, so the darkest sky's noise does not become specks.
+    let divisor = base.max(floor);
+    let mut rgb = [pixel[0], pixel[1], pixel[2]]
+        .map(|sample| (1.0 + (rescale(sample) - base) / divisor).max(0.0) * value);
     let maximum = rgb[0].max(rgb[1]).max(rgb[2]);
     if maximum > peak {
         for channel in &mut rgb {

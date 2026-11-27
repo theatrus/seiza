@@ -136,8 +136,16 @@ curve alone and named in `left_out`, as is a layered stretch a computed
 mask or a luminance layer reads. A host measures the maps again only when
 a setting that moves them changes (the core compression's scale, or the
 stretch's background statistics), so a slider redraws at once. The plain
-layered stretch's star-core compression needs full resolution and is not
-drawn by the compositor. When the core compression leaves the white below
+layered stage can also read guide inputs at the same pixel: `luminance`, a
+plane of the luminance of red, green and blue stretched together, which
+the channel then follows as the whole-image stretch's colour does, and
+`fine`, that luminance blurred by `fine_luminance`, for the plain layered
+stretch's star-core compression. A host computes such planes once from
+the whole image, at full resolution. A channel that follows a luminance
+divides its difference from it by at least one noise sigma, so the
+darkest sky's noise does not become bright specks; a grey pixel keeps the
+stretched luminance. One channel alone is held at the peak, where the
+whole-image stretch brings a pixel back by its brightest channel. When the core compression leaves the white below
 the knee, the knee comes down to 80 % of the white's curve value, so the
 brightest structure still reaches the top of the headroom.
 
