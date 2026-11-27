@@ -313,7 +313,7 @@ widest halos with a smooth patch a little darker than the sky about it, and
 put the sky's noise there into the stars layer: where a star buries the
 sky's noise, a network trained to the median gives none back.
 
-Next (under way, 2026-11-26):
+Then (2026-11-26; results under Second runs):
 
 - Clean skies of version 3 (bright stars' glows masked) and banks of
   version 3: the fit's estimate drawn with smooth wings past a trusted ring
@@ -344,6 +344,43 @@ Next (under way, 2026-11-26):
 - Later: a halo layer and a spikes layer from the network, for halo
   reduction as a setting and spikes as their own image; then the wider
   network.
+
+### Second runs (2026-11-27)
+
+The version 3 banks: 8,024 train windows from 511 stacks (one dropped,
+too few stars for a PSF field), 3,908 with the stack's own stars and 4,116
+with made ones, and 560 validation windows from 140 held-out stacks. X3
+(`fit`) and X4 (`image`) were trained as X1 and X2 were, 10 minutes each.
+All four were measured on 128 windows of the new validation bank, the
+network's output and the same with matched noise drawn (`filled`).
+Medians over windows, in noise units:
+
+| | stars, rms | sky, rms | cores, mean | stars, stretched | noise kept |
+|---|---|---|---|---|---|
+| the fit's estimate alone | 0.829 | 0.060 | 0.072 | 0.076 | 1.064 |
+| X1, fit-first (v2 bank) | 0.443 | 0.066 | 0.055 | 0.059 | 0.976 |
+| X3, fit-first | 0.455 | 0.068 | -0.003 | 0.060 | 0.971 |
+| X3, noise filled | 0.459 | 0.069 | -0.003 | 0.060 | 0.973 |
+| X2, image only (v2 bank) | 0.560 | 0.125 | 0.033 | 0.080 | 0.919 |
+| X4, image only | 0.552 | 0.114 | 0.042 | 0.078 | 0.915 |
+| X4, noise filled | 0.574 | 0.118 | 0.037 | 0.080 | 0.935 |
+
+- No run leaves a square on the new bank: the fit's estimate has none to
+  learn, and X1, which learned the old one's, has none to copy.
+- X3 is level with X1 and fills cores at the right level (its mean error
+  there is 0, X1's +0.055). X4 is a little ahead of X2, most on the sky.
+- About the brightest stars, the image-only runs do better. The fit's wing
+  is round, so a pupil's spikes past the trusted ring are left to the
+  network, and both fit-first runs leave them in part, X3 more than X1.
+  12 to 40 px from the six brightest stars of the windows measured, X3
+  leaves +0.02 to +0.41 noise of halo light on average, X1 -0.02 to +0.14,
+  X2 and X4 within ±0.1.
+- The drawn noise raises the grain kept where stars were (X4 0.915 to
+  0.935); being noise of its own, not the truth's, it raises the rms a
+  little.
+- All four runs' validation losses flatten by 7,750 steps, as the one-cycle
+  learning rate falls away; whether more steps or a wider network buy more
+  is still to be seen.
 
 ## Order of work
 
