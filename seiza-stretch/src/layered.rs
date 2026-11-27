@@ -5,13 +5,24 @@
 //! The large layer takes the global curve; detail keeps the curve's change
 //! across it, with more gain where the curve flattens on bright structure.
 //! Star cores can be compressed on their own, and colour follows luminance.
+//!
+//! The HDR layered stretch, [`LayeredHdrParams`], adds two steps for a
+//! picture shown above SDR white. Before the curve, bright structure's
+//! large-scale range is compressed in the log of luminance while its detail
+//! is kept, as PixInsight's HDR multiscale transform does; luminance carries
+//! one gain to every channel, so colour is kept. Above a knee the curve then
+//! continues into the headroom, reaching its top at the image's brightest
+//! large-scale luminance. The brightest object, such as a planetary
+//! nebula's core, keeps its structure, and the sky and faint halo are as
+//! the plain layered stretch makes them.
 
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    HDR_MAX_EXTRA_SLOPE, ImageShape, LUMA_BLUE, LUMA_GREEN, LUMA_RED, MedianAnchorParams,
-    ResolvedMedianAnchor, Result, RobustStatistics, StretchError, compress_highlights,
+    HDR_MAX_EXTRA_SLOPE, HdrTail, HdrTailParams, ImageShape, LUMA_BLUE, LUMA_GREEN, LUMA_RED,
+    MedianAnchorParams, ResolvedCurve, ResolvedMedianAnchor, Result, RobustStatistics,
+    StretchError, compress_highlights,
 };
 
 /// Parameters for the layered stretch.
@@ -68,6 +79,71 @@ impl Default for LayeredParams {
     }
 }
 
+/// What the HDR layered stretch adds to the layered stretch: how far above
+/// SDR white it reaches, and how bright structure's range is compressed.
+///
+/// With `z` luminance above the background median in robust sigmas, the
+/// gain on `z` is `exp(−core_compression · w · softplus((B − ln(T + 3)) / w))`,
+/// where `B` is a blur of `core_scale` pixels of `ln(z + 3)`, `T` is
+/// `core_threshold` and `w` is half a natural-log unit. Structure smaller than
+/// the blur keeps its contrast. The curve's output above `knee` continues
+/// on the extended sRGB curve as [`HdrTail`] does, reaching 2 to the
+/// `headroom` times SDR white's light at the image's brightest luminance
+/// after the compression, blurred by a pixel.
+///
+/// In JSON every field may be left out and takes its default.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LayeredHdr {
+    /// How far above SDR white the brightest structure reaches, in stops,
+    /// from 0 through 4 (default 2). At 0 the curve rolls off to white.
+    pub headroom: f64,
+    /// The curve's output where it starts to continue into the headroom,
+    /// from 0.3 through 0.95 (default 0.75).
+    pub knee: f64,
+    /// How much of bright structure's large-scale range in the log of
+    /// luminance is taken out, in `[0, 1]` (default 0.7). 0 compresses
+    /// nothing.
+    pub core_compression: f64,
+    /// Where compression starts, in robust sigmas of luminance above the
+    /// background (default 100).
+    pub core_threshold: f64,
+    /// The size of the large-scale structure that is compressed, as a blur
+    /// in pixels, from 1 through 256 (default 12). About a third of the
+    /// bright object's radius.
+    pub core_scale: f64,
+}
+
+impl Default for LayeredHdr {
+    fn default() -> Self {
+        Self {
+            headroom: 2.0,
+            knee: 0.75,
+            core_compression: 0.7,
+            core_threshold: 100.0,
+            core_scale: 12.0,
+        }
+    }
+}
+
+/// Parameters for the HDR layered stretch: the layered stretch's, and what
+/// HDR adds. The layered stretch's dynamic range compression of star cores
+/// is not used: the core compression takes its place.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LayeredHdrParams {
+    #[serde(flatten)]
+    pub layered: LayeredParams,
+    #[serde(flatten)]
+    pub hdr: LayeredHdr,
+}
+
+/// The floor under `z` in the log, in robust sigmas, so noise near the
+/// background has no log to speak of.
+const CORE_FLOOR: f64 = 3.0;
+/// The width of the compression's knee, in natural-log units.
+const CORE_KNEE_WIDTH: f64 = 0.5;
+
 /// The most contrast recovery multiplies detail by.
 const MAX_DETAIL_GAIN: f64 = 4.0;
 /// Blur sigma in pixels of the fine layer that finds star cores.
@@ -88,6 +164,9 @@ pub struct ResolvedLayered {
     pub median: f64,
     /// Robust luminance noise, from the lower half of the samples.
     pub noise: f64,
+    /// What the HDR layered stretch adds, or none for the layered stretch.
+    #[serde(default)]
+    pub hdr: Option<LayeredHdr>,
 }
 
 impl ResolvedLayered {
@@ -95,8 +174,12 @@ impl ResolvedLayered {
         statistics: RobustStatistics,
         noise: f64,
         params: LayeredParams,
+        hdr: Option<LayeredHdr>,
     ) -> Result<Self> {
         validate(params)?;
+        if let Some(hdr) = hdr {
+            validate_hdr(hdr)?;
+        }
         let curve = ResolvedMedianAnchor::new(
             statistics,
             noise,
@@ -114,11 +197,13 @@ impl ResolvedLayered {
             curve,
             median: statistics.median,
             noise,
+            hdr,
         })
     }
 
     pub(crate) fn is_valid(&self) -> bool {
         validate(self.params).is_ok()
+            && self.hdr.is_none_or(|hdr| validate_hdr(hdr).is_ok())
             && self.curve.is_valid()
             && self.median.is_finite()
             && self.noise.is_finite()
@@ -170,6 +255,82 @@ fn validate(params: LayeredParams) -> Result<()> {
     Ok(())
 }
 
+fn validate_hdr(hdr: LayeredHdr) -> Result<()> {
+    let within =
+        |value: f64, low: f64, high: f64| value.is_finite() && (low..=high).contains(&value);
+    if !within(hdr.headroom, 0.0, 4.0) {
+        return Err(StretchError::Invalid(
+            "headroom must be from 0 through 4 stops".into(),
+        ));
+    }
+    if !within(hdr.knee, 0.3, 0.95) {
+        return Err(StretchError::Invalid(
+            "the knee must be from 0.3 through 0.95".into(),
+        ));
+    }
+    if !within(hdr.core_compression, 0.0, 1.0) {
+        return Err(StretchError::Invalid(
+            "core compression must be between 0 and 1".into(),
+        ));
+    }
+    if !(hdr.core_threshold.is_finite() && hdr.core_threshold > 0.0) {
+        return Err(StretchError::Invalid(
+            "the core threshold must be above 0".into(),
+        ));
+    }
+    if !within(hdr.core_scale, 1.0, 256.0) {
+        return Err(StretchError::Invalid(
+            "the core scale must be from 1 through 256 pixels".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Luminance with bright structure's large-scale range compressed, as
+/// [`LayeredHdr`] gives it: the part above the background median scaled by
+/// one smooth gain, so the background and anything below the threshold stay
+/// as they are.
+fn compress_cores(
+    luminance: &[f32],
+    width: usize,
+    height: usize,
+    background: f64,
+    noise: f64,
+    hdr: LayeredHdr,
+) -> Vec<f32> {
+    let noise = noise.max(1.0e-9);
+    let logs: Vec<f32> = luminance
+        .par_iter()
+        .map(|&value| {
+            if value.is_finite() {
+                ((f64::from(value) - background).max(0.0) / noise + CORE_FLOOR).ln() as f32
+            } else {
+                f32::NAN
+            }
+        })
+        .collect();
+    let base = blur(&logs, width, height, hdr.core_scale);
+    let threshold = (hdr.core_threshold + CORE_FLOOR).ln();
+    luminance
+        .par_iter()
+        .zip(&base)
+        .map(|(&value, &base)| {
+            if !value.is_finite() || !base.is_finite() {
+                return value;
+            }
+            let over = (f64::from(base) - threshold) / CORE_KNEE_WIDTH;
+            let soft = if over > 20.0 {
+                CORE_KNEE_WIDTH * over
+            } else {
+                CORE_KNEE_WIDTH * over.exp().ln_1p()
+            };
+            let gain = (-hdr.core_compression * soft).exp();
+            let above = f64::from(value) - background;
+            (background + above * gain) as f32
+        })
+        .collect()
+}
+
 /// Run the layered stretch over a mono or RGB image, already checked
 /// against `shape`. Non-finite samples come out 0.
 pub(crate) fn apply(layered: &ResolvedLayered, data: &[f32], shape: ImageShape) -> Vec<f32> {
@@ -180,24 +341,62 @@ pub(crate) fn apply(layered: &ResolvedLayered, data: &[f32], shape: ImageShape) 
     } = shape;
     let luminance = luminance(data, channels);
     let params = layered.params;
-    let curve = |value: f32| layered.curve.map(f64::from(value));
+    // The HDR layered stretch compresses bright structure first, and
+    // continues the curve above its knee to the brightest of what is left.
+    let (compressed, tail) = match layered.hdr {
+        Some(hdr) => {
+            let compressed = if hdr.core_compression > 0.0 {
+                compress_cores(
+                    &luminance,
+                    width,
+                    height,
+                    layered.median,
+                    layered.noise,
+                    hdr,
+                )
+            } else {
+                luminance.clone()
+            };
+            let white = blur(&compressed, width, height, 1.0)
+                .into_iter()
+                .filter(|value| value.is_finite())
+                .fold(0.0_f32, f32::max);
+            let tail = HdrTail::resolve(
+                ResolvedCurve::MedianAnchor(layered.curve),
+                HdrTailParams {
+                    knee: hdr.knee,
+                    headroom: hdr.headroom,
+                    white: f64::from(white),
+                    ..HdrTailParams::default()
+                },
+            );
+            (Some(compressed), tail)
+        }
+        None => (None, None),
+    };
+    let peak = tail.map_or(1.0, |tail| f64::from(tail.peak()));
+    let curve = |value: f32| match tail {
+        Some(tail) => f64::from(tail.map(ResolvedCurve::MedianAnchor(layered.curve), value)),
+        None => layered.curve.map(f64::from(value)),
+    };
+    // What the curve reads: luminance, compressed for HDR. Colour still
+    // follows each pixel's own luminance.
+    let read = compressed.as_ref().unwrap_or(&luminance);
 
     let mut stretched = if params.contrast_recovery == 0.0 {
-        luminance
-            .par_iter()
+        read.par_iter()
             .map(|&value| if value.is_finite() { curve(value) } else { 0.0 })
             .collect::<Vec<_>>()
     } else {
         let large = blur(
-            &luminance,
+            read,
             width,
             height,
             f64::from(params.scale_separation) / 4.0,
         );
         let half = params.contrast_recovery / 2.0;
         let background_slope = layered.slope(layered.median);
-        luminance
-            .par_iter()
+        read.par_iter()
             .zip(&large)
             .map(|(&value, &base)| {
                 if !value.is_finite() {
@@ -216,7 +415,7 @@ pub(crate) fn apply(layered: &ResolvedLayered, data: &[f32], shape: ImageShape) 
             .collect()
     };
 
-    if params.dynamic_range_compression > 0.0 {
+    if params.dynamic_range_compression > 0.0 && layered.hdr.is_none() {
         let fine = blur(&luminance, width, height, FINE_SIGMA);
         let noise = layered.noise.max(1.0e-6);
         let end_slope = 1.0 + HDR_MAX_EXTRA_SLOPE;
@@ -237,7 +436,7 @@ pub(crate) fn apply(layered: &ResolvedLayered, data: &[f32], shape: ImageShape) 
     if channels == 1 {
         return stretched
             .into_par_iter()
-            .map(|value| value.clamp(0.0, 1.0) as f32)
+            .map(|value| value.clamp(0.0, peak) as f32)
             .collect();
     }
 
@@ -259,12 +458,12 @@ pub(crate) fn apply(layered: &ResolvedLayered, data: &[f32], shape: ImageShape) 
                 if !luma.is_finite() {
                     continue;
                 }
-                let mut rgb = colour(pixel, luma, value.clamp(0.0, 1.0), black);
+                let mut rgb = colour(pixel, luma, value.clamp(0.0, peak), black, peak);
                 if params.saturation_amount > 0.0 {
                     saturate(&mut rgb, params);
                 }
                 for (output, value) in output.iter_mut().zip(rgb) {
-                    *output = value.clamp(0.0, 1.0) as f32;
+                    *output = value.clamp(0.0, peak) as f32;
                 }
             }
         });
@@ -295,8 +494,8 @@ fn luminance(data: &[f32], channels: usize) -> Vec<f32> {
 
 /// Give a pixel the stretched luminance `value`: its RGB, less the black
 /// point, scaled by one factor so its luminance does the same, and brought
-/// back in gamut by its largest channel.
-fn colour(pixel: &[f32], luma: f32, value: f64, black: f64) -> [f64; 3] {
+/// back within `peak` by its largest channel.
+fn colour(pixel: &[f32], luma: f32, value: f64, black: f64, peak: f64) -> [f64; 3] {
     let span = 1.0 - black;
     let rescale = |sample: f32| ((f64::from(sample) - black) / span).max(0.0);
     let base = rescale(luma);
@@ -310,9 +509,9 @@ fn colour(pixel: &[f32], luma: f32, value: f64, black: f64) -> [f64; 3] {
         rescale(pixel[2]) * scale,
     ];
     let maximum = rgb[0].max(rgb[1]).max(rgb[2]);
-    if maximum > 1.0 {
+    if maximum > peak {
         for channel in &mut rgb {
-            *channel /= maximum;
+            *channel *= peak / maximum;
         }
     }
     rgb
@@ -330,7 +529,7 @@ fn saturate(rgb: &mut [f64; 3], params: LayeredParams) {
     let saturation = (value - minimum) / value;
     let mut amount = params.saturation_amount;
     if params.lightness_mask {
-        amount *= value;
+        amount *= value.min(1.0);
     }
     let exponent = 2.0 * (1.0 - params.saturation_boost);
     let lifted = (saturation + amount * (1.0 - saturation) * saturation.powf(exponent)).min(1.0);
@@ -549,7 +748,8 @@ mod tests {
             mad: 0.004,
             count: 1000,
         };
-        let layered = ResolvedLayered::new(statistics, 0.006, LayeredParams::default()).unwrap();
+        let layered =
+            ResolvedLayered::new(statistics, 0.006, LayeredParams::default(), None).unwrap();
         for x in [0.04, 0.05, 0.1, 0.3, 0.7, 0.95] {
             let step = 1.0e-6;
             let numeric =

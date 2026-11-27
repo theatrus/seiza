@@ -22,7 +22,7 @@ use seiza_stats::NORMAL_MAD_SCALE;
 mod hdr_tail;
 mod layered;
 pub use hdr_tail::{HdrTail, HdrTailParams, extended_srgb_decode, extended_srgb_encode};
-pub use layered::{LayeredParams, ResolvedLayered};
+pub use layered::{LayeredHdr, LayeredHdrParams, LayeredParams, ResolvedLayered};
 
 const LUMA_RED: f64 = 0.2126;
 const LUMA_GREEN: f64 = 0.7152;
@@ -426,6 +426,11 @@ pub enum StretchModel {
     /// and fine structure apart; see [`LayeredParams`]. It needs the image's
     /// width and height, so it runs only through the `*_image` methods.
     Layered(LayeredParams),
+    /// The layered stretch for a picture shown above SDR white: bright
+    /// structure's range compressed, and the curve continued into the
+    /// headroom; see [`LayeredHdrParams`]. Like the layered stretch, it
+    /// runs only through the `*_image` methods.
+    LayeredHdr(LayeredHdrParams),
 }
 
 /// Why a shape-less method refuses a layered stage.
@@ -702,10 +707,12 @@ fn apply_stack_f32(
     match shape {
         Some(shape) => shape.validate(data)?,
         None => {
-            if let Some(index) = stages
-                .iter()
-                .position(|config| matches!(config.model, StretchModel::Layered(_)))
-            {
+            if let Some(index) = stages.iter().position(|config| {
+                matches!(
+                    config.model,
+                    StretchModel::Layered(_) | StretchModel::LayeredHdr(_)
+                )
+            }) {
                 return Err(StretchError::Invalid(format!(
                     "stretch stage {}/{}: {LAYERED_NEEDS_SHAPE}",
                     index + 1,
@@ -804,8 +811,12 @@ impl StretchConfig {
                 "maximum analysis samples must be greater than zero".into(),
             ));
         }
-        if let StretchModel::Layered(params) = self.model {
-            return self.resolve_layered(analysis, params);
+        match self.model {
+            StretchModel::Layered(params) => return self.resolve_layered(analysis, params, None),
+            StretchModel::LayeredHdr(params) => {
+                return self.resolve_layered(analysis, params.layered, Some(params.hdr));
+            }
+            _ => {}
         }
         let distributions = match self.color_strategy {
             ColorStrategy::Linked => vec![&analysis.linked],
@@ -842,6 +853,7 @@ impl StretchConfig {
         &self,
         analysis: &StretchAnalysis,
         params: LayeredParams,
+        hdr: Option<LayeredHdr>,
     ) -> Result<StretchPlan> {
         if self.color_strategy == ColorStrategy::Unlinked {
             return Err(StretchError::Invalid(
@@ -865,6 +877,7 @@ impl StretchConfig {
             distribution.statistics,
             distribution.lower_half_noise(),
             params,
+            hdr,
         )?);
         StretchPlan::from_resolved(analysis.channel_count, self.color_strategy, vec![curve])
     }
@@ -1801,6 +1814,7 @@ impl StretchModel {
                 | Self::AutoMtf(_)
                 | Self::MedianAnchor(_)
                 | Self::Layered(_)
+                | Self::LayeredHdr(_)
         )
     }
 
@@ -1892,7 +1906,8 @@ impl StretchModel {
             Self::PercentileAsinh { .. }
             | Self::AutoMtf(_)
             | Self::MedianAnchor(_)
-            | Self::Layered(_) => {
+            | Self::Layered(_)
+            | Self::LayeredHdr(_) => {
                 return Err(StretchError::Invalid(
                     "data-driven stretch model requires image analysis".into(),
                 ));
@@ -4032,6 +4047,104 @@ mod tests {
             .apply_f32_image(data, field_shape(channels))
             .unwrap()
             .data
+    }
+
+    /// A planetary nebula: a noisy sky, a faint halo, and a core thousands
+    /// of times brighter with a dark ring inside it, 160 pixels square, in
+    /// colour: the core is greener than the halo.
+    fn nebula() -> (Vec<f32>, ImageShape) {
+        let size = 160;
+        let mut data = Vec::with_capacity(size * size * 3);
+        for y in 0..size {
+            for x in 0..size {
+                let (dx, dy) = (x as f64 - 80.0, y as f64 - 80.0);
+                let r = (dx * dx + dy * dy).sqrt();
+                let noise = 0.0004 * (((x * 7919 + y * 104_729) % 1000) as f64 / 1000.0 - 0.5);
+                let halo = 0.003 * (-r / 40.0).exp();
+                let ring = 1.0 - 0.6 * (-((r - 6.0) / 2.0).powi(2)).exp();
+                let core = 0.9 * (-(r / 10.0).powi(2)).exp() * ring;
+                let sky = 0.01 + noise + halo;
+                data.extend([sky + 0.6 * core, sky + core, sky + 0.8 * core].map(|v| v as f32));
+            }
+        }
+        (
+            data,
+            ImageShape {
+                width: size,
+                height: size,
+                channels: 3,
+            },
+        )
+    }
+
+    fn stretched(data: &[f32], shape: ImageShape, model: StretchModel) -> Vec<f32> {
+        StretchStack::single(StretchConfig {
+            model,
+            color_strategy: ColorStrategy::Linked,
+            max_analysis_samples: 200_000,
+        })
+        .apply_f32_image(data, shape)
+        .unwrap()
+        .data
+    }
+
+    /// The green value at a pixel, and the contrast between the core's
+    /// centre and its dark ring.
+    fn green(output: &[f32], x: usize, y: usize) -> f32 {
+        output[(y * 160 + x) * 3 + 1]
+    }
+
+    #[test]
+    fn the_hdr_layered_stretch_keeps_the_core_and_leaves_the_sky() {
+        let (data, shape) = nebula();
+        let plain = stretched(
+            &data,
+            shape,
+            StretchModel::Layered(LayeredParams::default()),
+        );
+        let hdr = LayeredHdrParams {
+            hdr: LayeredHdr {
+                headroom: 3.0,
+                core_scale: 4.0,
+                core_threshold: 50.0,
+                ..LayeredHdr::default()
+            },
+            ..LayeredHdrParams::default()
+        };
+        let lifted = stretched(&data, shape, StretchModel::LayeredHdr(hdr));
+        // The sky and the halo are as the layered stretch makes them.
+        for (x, y) in [(5, 5), (150, 20), (80, 130), (40, 80)] {
+            assert!(
+                (green(&lifted, x, y) - green(&plain, x, y)).abs() < 2e-3,
+                "({x}, {y}): {} for {}",
+                green(&lifted, x, y),
+                green(&plain, x, y)
+            );
+        }
+        // The layered stretch flattens the core; the HDR one keeps its dark
+        // ring apart from its centre, above SDR white, within the peak.
+        let peak = crate::extended_srgb_encode(8.0);
+        let ring = |output: &[f32]| green(output, 80, 80) - green(output, 86, 80);
+        assert!(ring(&plain) < 0.02, "{}", ring(&plain));
+        assert!(ring(&lifted) > 0.1, "{}", ring(&lifted));
+        assert!(green(&lifted, 80, 80) > 1.0);
+        assert!(lifted.iter().all(|value| *value <= peak + 1e-4));
+        // The core keeps its colour: one gain for every channel.
+        let at = (80 * 160 + 80) * 3;
+        let (r, g, b) = (lifted[at], lifted[at + 1], lifted[at + 2]);
+        assert!(g > b && b > r, "{r} {g} {b}");
+    }
+
+    #[test]
+    fn the_hdr_layered_stretch_reads_from_json_with_defaults() {
+        let model: StretchModel =
+            serde_json::from_str(r#"{"type": "layered-hdr", "headroom": 3}"#).unwrap();
+        let StretchModel::LayeredHdr(params) = model else {
+            panic!("{model:?}");
+        };
+        assert_eq!(params.hdr.headroom, 3.0);
+        assert_eq!(params.hdr.knee, 0.75);
+        assert_eq!(params.layered, LayeredParams::default());
     }
 
     /// Mean step between neighbouring pixels inside the plateau, where the
