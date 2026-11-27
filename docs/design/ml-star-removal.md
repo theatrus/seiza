@@ -395,17 +395,50 @@ Medians over windows, in noise units:
   learning rate falls away; whether more steps or a wider network buy more
   is still to be seen.
 
-### Third runs (under way, 2026-11-27)
+### Third runs (2026-11-27)
 
 X5 (`fit`) and X6 (`image`) are X3 and X4 with the halo and spike layers,
-on the same banks, width and steps, so the starless image can be set
-beside theirs like for like: whether being told where the halos and spikes
-are helps the network take them out, above all the fit-first design, which
-left the spikes past the trusted ring. Beside the starless measures, each
-layer is measured where its truth tops the noise: the error's rms, how much
+on the same banks, width and steps (11 minutes each), so the starless
+image can be set beside theirs like for like. Beside the starless
+measures, each layer is measured where its truth tops the noise: how much
 of the truth it holds (the scale of the truth that best meets it, 1 all, 0
 none), and the error where the truth holds under a tenth of the noise,
-light put in the layer that is not its own.
+light put in the layer that is not its own. Medians over the same 128
+windows, in noise units:
+
+| | stars, rms | sky, rms | cores, mean | halos found | spikes found |
+|---|---|---|---|---|---|
+| X3, fit-first | 0.455 | 0.068 | -0.003 | | |
+| X5, fit-first, layers | 0.463 | 0.084 | 0.016 | 0.75 | 0.003 |
+| X4, image only | 0.552 | 0.114 | 0.042 | | |
+| X6, image only, layers | 0.562 | 0.124 | 0.050 | 0.68 | 0.003 |
+
+- The halo layer works: 70 to 75% of the halos' light found, and next to
+  none put where there is no halo (0.007 to 0.009 noise rms).
+- The spike layer learned nothing. Its penalty stayed at its zero-output
+  baseline through both runs, and a run on the train bank's 327 windows
+  with spikes above the noise alone moved it by about a tenth, while the
+  halos and the starless image learned.
+- The starless image is a little behind X3's and X4's, most on the sky.
+- Every bank so far moved its made stars into place by Fourier transform,
+  which rings along the row and the column through a core narrower than
+  its sampling: every bright star carries a dotted cross along the pixel
+  axes that no telescope makes, counted as the star's light. On composites
+  cut alike but for this, the light 20 to 60 px from the brightest stars
+  is 7 to 18 times as great along the axes as off them; moved by
+  Lanczos-3, 0.4 to 2.6 (more than 1 where a spike runs near an axis). The
+  cross is often brighter than a pupil's own spikes. The starless image
+  need not tell the two apart, as both go; the spike layer must, and the
+  cross is on every bright star, spikes on some, so a layer trained to the
+  median that cannot yet tell them apart stays at zero. That is likely,
+  not yet shown, to be why the spikes were not learned.
+- The fit draws its stars by Lanczos-3, as `seiza.StarFit` does, so its
+  estimate kept the crosses and the fit-first runs left part of them: some
+  of what the second runs read as spikes left past the trusted ring was
+  this cross.
+- Banks of version 4 move made stars by Lanczos-3 (`starless_bank
+  .add_star`), as the fit draws them; they are being cut. The spike layer
+  is to be tried on them before more runs.
 
 ## Order of work
 
