@@ -1175,6 +1175,11 @@ fn adjusted(color: [f32; 3], adjustment: Adjustment, space: WorkingSpace) -> [f3
         Adjustment::Exposure(stops) => color.map(|channel| channel * stops.exp2()),
         Adjustment::Curves(amount) => color.map(|channel| contrast_curve(channel, amount)),
         Adjustment::Saturation(amount) => saturated(color, amount, space),
+        Adjustment::GreenReduction(amount) => {
+            let [red, green, blue] = color;
+            let excess = (green - red.max(blue)).max(0.0);
+            [red, green - amount.clamp(0.0, 1.0) * excess, blue]
+        }
     }
 }
 

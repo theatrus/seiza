@@ -743,6 +743,12 @@ fn steps_in_the_stack_match_the_cpu() {
                 opacity: 0.6,
                 ..step(FinishKind::Saturation(0.2))
             },
+            Layer {
+                opacity: 0.8,
+                ..Layer::new(LayerKind::Adjustment(
+                    seiza_compose::picture::Adjustment::GreenReduction(0.7),
+                ))
+            },
             Layer::new(LayerKind::GroupBegin),
             Layer::added(read(2), [0.2, 0.1, 0.8]),
             step(FinishKind::Tone(Tone {

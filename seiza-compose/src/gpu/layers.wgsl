@@ -261,8 +261,13 @@ fn adjusted(color: vec3f, adjust: vec4f) -> vec3f {
             contrast_curve(color.b, adjust.y),
         );
     }
-    let luminance = dot(color, globals.luma.xyz);
-    return max(mix(vec3f(luminance), color, adjust.y), vec3f(0.0));
+    if adjust.x < 3.5 {
+        let luminance = dot(color, globals.luma.xyz);
+        return max(mix(vec3f(luminance), color, adjust.y), vec3f(0.0));
+    }
+    // Green reduction: green toward the brighter of red and blue.
+    let excess = max(color.g - max(color.r, color.b), 0.0);
+    return vec3f(color.r, color.g - adjust.y * excess, color.b);
 }
 
 // A band's sample in a tile, blended with its second band.

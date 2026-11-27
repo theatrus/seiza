@@ -519,3 +519,45 @@ fn nested_groups_blend_as_their_members() {
         assert!(gap < 1e-6, "{depth} groups deep: {gap}");
     }
 }
+
+/// The balance stage gives a channel the curve Seiza's narrowband balance
+/// resolves for it: applied to OIII, it matches the balanced image.
+#[test]
+fn the_balance_stage_matches_the_narrowband_balance() {
+    use seiza_compose::picture::TransferStage;
+    use seiza_compose::{NarrowbandBalanceOptions, balance_narrowband};
+    let (width, height) = (160, 120);
+    // H-alpha bright, OIII faint, SII between, each with structure.
+    let data: Vec<f32> = (0..width * height)
+        .flat_map(|at| {
+            let (x, y) = ((at % width) as f32, (at / width) as f32);
+            let wave = ((x * 0.07).sin() * (y * 0.05).cos()).max(0.0);
+            let grain = ((at * 7919) % 101) as f32 / 101.0 * 0.01;
+            [
+                0.15 + 0.6 * wave + grain,
+                0.10 + 0.15 * wave + grain,
+                0.12 + 0.3 * wave + grain,
+            ]
+        })
+        .collect();
+    let original = LinearImage::new(width, height, 3, data).unwrap();
+    let mut balanced = original.clone();
+    let report = balance_narrowband(&mut balanced, &NarrowbandBalanceOptions::default()).unwrap();
+    let oiii = &report.channels[1];
+    let (Some(background), Some(midtone)) = (oiii.background, oiii.midtone) else {
+        panic!("OIII was not balanced: {report:?}");
+    };
+    let transfer = Transfer::of([TransferStage::Balance {
+        background: background as f32,
+        midtone: midtone as f32,
+    }]);
+    for (pixel, after) in original
+        .data
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .zip(balanced.data.as_chunks::<3>().0)
+    {
+        assert!((transfer.map(pixel[1]) - after[1]).abs() < 1e-5);
+    }
+}

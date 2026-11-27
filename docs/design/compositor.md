@@ -35,6 +35,12 @@ A `Picture` lists:
   that is flattened, its members blending into the group around it. A layer
   can be limited by a painted mask, by the mask of the layer it is clipped
   to, and by a computed mask.
+- **Adjustments:** exposure, a contrast curve, saturation, and green
+  reduction (green toward the brighter of red and blue where it is above
+  both, as `seiza_stacking::reduce_green_excess`). A transfer can end with
+  a narrowband channel's balance (`TransferStage::Balance`), the curve
+  `balance_narrowband` resolves for it, so a host can draw the balance
+  live from a channel's statistics.
 - **Blends:** normal, screen, add, multiply, lighten, darken, luminance, and
   two that LRGB needs: *luminance ratio*, which scales the colors beneath so
   their Rec. 709 luminance becomes the layer's (opacity is LRGB's weight), and

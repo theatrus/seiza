@@ -36,6 +36,11 @@ pub enum TransferStage {
     /// knee: values above 1 are on the extended sRGB curve, up to the
     /// tail's peak.
     TailedCurve { curve: ResolvedCurve, tail: HdrTail },
+    /// A narrowband channel matched to H-alpha, as
+    /// [`crate::balance_narrowband`] resolves it: above `background`, the
+    /// midtones curve of `midtone` over the range from there to 1; below,
+    /// the sample as it is.
+    Balance { background: f32, midtone: f32 },
     /// Seiza's layered stretch of the sample, read as luminance: its curve,
     /// with the core compression, HDR tail and contrast recovery its maps
     /// call for. It reads the maps at the sample's place in the picture.
@@ -219,6 +224,21 @@ impl Transfer {
                         *sample = curve.map(*sample);
                     }
                 }),
+                TransferStage::Balance {
+                    background,
+                    midtone,
+                } => samples.iter_mut().for_each(|sample| {
+                    if sample.is_finite() && *sample > *background {
+                        let range = (1.0 - background).max(f32::MIN_POSITIVE);
+                        let along = f64::from(((*sample - background) / range).min(1.0));
+                        *sample = background
+                            + range
+                                * seiza_stretch::midtones_transfer_function(
+                                    f64::from(*midtone),
+                                    along,
+                                ) as f32;
+                    }
+                }),
                 TransferStage::TailedCurve { curve, tail } => {
                     samples.iter_mut().for_each(|sample| {
                         if sample.is_finite() {
@@ -316,6 +336,11 @@ pub enum Adjustment {
     Curves(f32),
     /// Saturation; 1 leaves the color as it is.
     Saturation(f32),
+    /// Takes green down toward the brighter of red and blue where it is
+    /// above both, by this much from 0 to 1: the green excess a
+    /// narrowband palette leaves, as `seiza_stacking::reduce_green_excess`
+    /// takes it out.
+    GreenReduction(f32),
 }
 
 /// What one entry in a picture's list of layers is.

@@ -497,6 +497,7 @@ impl GpuScene {
                         Adjustment::Exposure(stops) => (1.0, *stops),
                         Adjustment::Curves(amount) => (2.0, *amount),
                         Adjustment::Saturation(amount) => (3.0, *amount),
+                        Adjustment::GreenReduction(amount) => (4.0, amount.clamp(0.0, 1.0)),
                     };
                     slot[12] = kind;
                     slot[13] = amount;
