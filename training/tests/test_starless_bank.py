@@ -94,6 +94,30 @@ def redrawn(made, telescope, noise, *, without=()):
     return light
 
 
+def test_a_sharp_star_moved_within_its_pixel_leaves_no_cross_and_keeps_its_light():
+    # A core narrower than its sampling, as a well-focused pupil's: moved by
+    # Fourier transform it rings along its row and column far past its
+    # light; moved as the fit draws it, by Lanczos-3, it does not.
+    stamp = stars.moffat_stamp(101, 1.2, 3.0)
+    light = np.zeros((201, 201))
+    bank.add_star(light, stamp, 100.3, 99.6, 1e6)
+    assert light.sum() == pytest.approx(1e6 * stamp.sum(), rel=1e-6)
+    fourier = np.zeros((201, 201))
+    fourier[50:151, 50:151] = 1e6 * ss.placed(stamp, 100.3, 99.6)
+    yy, xx = np.mgrid[0:201, 0:201]
+    distance = np.hypot(xx - 100.3, yy - 99.6)
+    along = ((np.abs(yy - 100) <= 1) | (np.abs(xx - 100) <= 1)) & (distance > 20) & (distance < 45)
+    off = ~along & (distance > 20) & (distance < 45)
+
+    def cross(plane):
+        """The most light along the row and column 20-45 px out, over the
+        most off them at those distances (the Moffat's own wing)."""
+        return np.abs(plane[along]).max() / np.abs(plane[off]).max()
+
+    assert cross(fourier) > 5.0
+    assert cross(light) < 1.5
+
+
 def test_the_brightest_stars_carry_halos_wider_than_their_stamps():
     plain = stars.moffat_stamp(bank.WIDE_STAMP, 4.0, 3.0)
     telescope = bank.Telescope(stamp=plain, fwhm=4.0)

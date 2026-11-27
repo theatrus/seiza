@@ -51,8 +51,9 @@ from .store import Store
 # Raised with the bank's layout or what it holds, so a bank of another is cut
 # anew. 3: the fit's estimate carries bright stars past their stamps, fainter
 # made halos and rings, the halos' and spikes' own light, on clean skies of
-# version 3.
-BANK_VERSION = 3
+# version 3. 4: stars are moved into place by Lanczos-3, not by Fourier
+# transform (`add_star`).
+BANK_VERSION = 4
 # A bank's planes, a window each: the composite; its starless truth; the
 # catalogue fit's starless estimate and its stars' model; the noise map a
 # network reads, made from the input alone (`image_sigma`); where the loss
@@ -268,10 +269,14 @@ def pupil_telescope(rng: np.random.Generator, fwhm: float) -> Telescope:
 
 def add_star(light: np.ndarray, stamp: np.ndarray, x: float, y: float, flux: float) -> None:
     """Add `flux` × `stamp`, centred at (x, y), to `light`, clipped at its
-    edges."""
+    edges: moved within its pixel by Lanczos-3, as the fit draws a star
+    (`starless_sky.lanczos_shifted`). A shift by Fourier transform rings
+    along the row and the column through a core narrower than its
+    sampling, a dotted cross no telescope makes, many times the noise
+    beside a bright star."""
     half = stamp.shape[0] // 2
     column, row = int(round(x)), int(round(y))
-    moved = starless_sky.placed(stamp, x, y) * flux
+    moved = starless_sky.lanczos_shifted(stamp, x - column, y - row) * flux
     height, width = light.shape
     top, left = row - half, column - half
     a0, b0 = max(0, top), max(0, left)
