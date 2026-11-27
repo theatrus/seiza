@@ -19,7 +19,9 @@ use thiserror::Error;
 
 use seiza_stats::NORMAL_MAD_SCALE;
 
+mod hdr_tail;
 mod layered;
+pub use hdr_tail::{HdrTail, HdrTailParams, extended_srgb_decode, extended_srgb_encode};
 pub use layered::{LayeredParams, ResolvedLayered};
 
 const LUMA_RED: f64 = 0.2126;

@@ -59,7 +59,7 @@ rather than every pixel of one brightness alike:
 | Clarity | Raises or lowers the detail around the local base, most in the midtones. |
 | Texture | Raises or lowers the detail around the mean of a few pixels, as far as the window holds more than noise. A host measures the picture's noise with `tone::luminance_noise` and gives it to the step; unmeasured, a fixed level stands in. |
 | Dehaze | Takes away a veil estimated from the darkest channel nearby, so a gray sky glow goes and a colored nebula stays. Negative adds a veil. |
-| HDR, headroom | With HDR on, the brightest areas rise above SDR white, 1, instead of clipping at it, on a shoulder that starts with slope 1. Values above 1 continue on the extended sRGB curve that macOS's extended color spaces use, so the peak is the encoded value of 2 to the headroom (up to four stops) times SDR white's light: about 1.82 for two stops. Exposure and Whites push areas there; Vibrance and Saturation never push a channel past the peak. Below SDR white nothing changes. |
+| HDR, headroom | With HDR on, the brightest areas rise above SDR white, 1, instead of clipping at it: values pass as they are through the first 80 % of the headroom, then a shoulder that starts with slope 1 flattens toward the peak, so a core an HDR stretch already placed in the headroom keeps its contrast. Values above 1 continue on the extended sRGB curve that macOS's extended color spaces use, so the peak is the encoded value of 2 to the headroom (up to four stops) times SDR white's light: about 1.82 for two stops. Exposure and Whites push areas there; Vibrance and Saturation never push a channel past the peak. Below SDR white nothing changes. |
 
 A neighborhood is the means of the luminance, its square, the darkest
 channel and their product over a square window: 97 pixels across for the
@@ -94,6 +94,20 @@ A host shows the picture on a display through
 color the display cannot show inside its gamut by desaturating it toward
 the gray of its own luminance until no channel is negative. That keeps the
 color's luminance and hue. Values above 1, HDR's highlights, are kept.
+
+## HDR stretches
+
+A stretch curve flattens toward 1, so the brightest part of an image, such
+as a planetary nebula's core, loses its structure before Tone can lift it.
+`TransferStage::TailedCurve` continues a resolved curve above a knee
+(encoded 0.75 by default) into the headroom: the display light rises as a
+power of the input above the curve's black, starting with the curve's own
+slope and relaxing toward the power that reaches 2 to the headroom times
+SDR white's light at the white. The curve and its slope match at the knee,
+so the sky and faint halo are as the curve made them. `seiza_stretch::
+HdrTail` resolves and maps it; a host sets the headroom to its HDR Tone
+step's. On the Cat's Eye (NGC 6543) the tail alone keeps about a quarter of
+the core's fine contrast at 3 stops, where the plain curve and Tone keep 1 %.
 
 ## The recipes as pictures
 

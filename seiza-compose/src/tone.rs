@@ -109,6 +109,10 @@ const TEXTURE_GAIN: f32 = 1.5;
 const DEHAZE_STRENGTH: f32 = 0.95;
 /// How far Dehaze at -1 draws each pixel toward its local base.
 const HAZE: f32 = 0.5;
+/// The share of an HDR picture's headroom above SDR white that values pass
+/// through as they are; the shoulder rolls off only the rest, so a core an
+/// HDR stretch has already placed in the headroom keeps its contrast.
+const SHOULDER_START: f32 = 0.8;
 
 /// Means over the square windows around one pixel of a picture: over
 /// [`LOCAL_RADIUS`], of the luminance, its square, the darkest channel and
@@ -443,36 +447,24 @@ impl Tone {
     }
 }
 
-/// The value on the extended sRGB curve of `light`, linear light as a
-/// multiple of SDR white's: the sRGB curve, continued past 1.
-pub fn extended_srgb_encode(light: f32) -> f32 {
-    if light <= 0.003_130_8 {
-        12.92 * light.max(0.0)
-    } else {
-        1.055 * light.powf(1.0 / 2.4) - 0.055
-    }
-}
-
-/// The light of `value` on the extended sRGB curve: the inverse of
-/// [`extended_srgb_encode`].
-pub fn extended_srgb_decode(value: f32) -> f32 {
-    if value <= 0.040_45 {
-        value.max(0.0) / 12.92
-    } else {
-        ((value + 0.055) / 1.055).powf(2.4)
-    }
-}
+pub use seiza_stretch::{extended_srgb_decode, extended_srgb_encode};
 
 /// The luminance above SDR white in an HDR picture: `sdr`, the curve's
-/// value within 0 to 1, plus a shoulder for the part of `value` above 1
-/// that rises with slope 1 and flattens toward `peak`. With a peak of 1,
-/// `sdr` alone.
+/// value within 0 to 1, plus the part of `value` above 1: as it is through
+/// [`SHOULDER_START`] of the headroom, then a shoulder that starts with
+/// slope 1 and flattens toward `peak`. With a peak of 1, `sdr` alone.
 fn hdr_shoulder(sdr: f32, value: f32, peak: f32) -> f32 {
     let room = peak - 1.0;
     if room <= 0.0 || value <= 1.0 {
         return sdr;
     }
-    sdr + room * (1.0 - (-(value - 1.0) / room).exp())
+    let over = value - 1.0;
+    let straight = SHOULDER_START * room;
+    if over <= straight {
+        return sdr + over;
+    }
+    let rest = room - straight;
+    sdr + straight + rest * (1.0 - (-(over - straight) / rest).exp())
 }
 
 /// Vibrance and saturation, each from -1 to 1. Vibrance changes a muted
@@ -771,14 +763,26 @@ mod tests {
         for x in [0.0_f32, 0.02, 0.05, 0.1] {
             assert!((sdr.curve(x) - hdr.curve(x)).abs() < 1e-6, "{x}");
         }
-        // Above it SDR clips at 1; HDR rises, never past its peak, and
-        // keeps rising with the input.
+        // Above it SDR clips at 1; HDR rises with the input until it meets
+        // its peak, and never passes it.
         let mut last = 1.0;
-        for x in [0.4_f32, 0.6, 0.8, 1.0, 2.0] {
+        for x in [0.4_f32, 0.6, 0.8, 1.0] {
             assert!(sdr.curve(x) <= 1.0, "{x}");
             let lifted = hdr.curve(x);
             assert!(lifted > last && lifted < peak, "{x}: {lifted}");
             last = lifted;
+        }
+        assert!(hdr.curve(2.0) <= peak);
+        // Through most of the headroom a value passes as it is, so an HDR
+        // stretch's highlights keep their contrast.
+        let plain = Tone {
+            hdr: true,
+            headroom: 2.0,
+            ..Tone::default()
+        };
+        for value in [1.1_f32, 1.3, 1.6] {
+            let toned = plain.apply([value; 3], SRGB);
+            assert!((toned[0] - value).abs() < 1e-5, "{value}: {toned:?}");
         }
         // A colored highlight keeps its color, within the peak.
         let color = hdr.apply([0.9, 0.5, 0.2], SRGB);

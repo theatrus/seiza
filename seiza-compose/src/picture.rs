@@ -7,7 +7,7 @@
 //! `combine_*` functions build pictures of this kind; a host with a document
 //! of its own, such as PSF Studio, builds its own.
 
-use seiza_stretch::{ResolvedCurve, ResolvedSampleDomain, StretchPlan};
+use seiza_stretch::{HdrTail, ResolvedCurve, ResolvedSampleDomain, StretchPlan};
 
 /// One stage of a [`Transfer`].
 #[derive(Clone, Debug, PartialEq)]
@@ -25,6 +25,10 @@ pub enum TransferStage {
     Domain(ResolvedSampleDomain),
     /// One of Seiza's resolved stretch curves.
     Curve(ResolvedCurve),
+    /// A resolved curve continued into an HDR picture's headroom above its
+    /// knee: values above 1 are on the extended sRGB curve, up to the
+    /// tail's peak.
+    TailedCurve { curve: ResolvedCurve, tail: HdrTail },
 }
 
 /// How an input's samples become a layer's values: its stages, in order. No
@@ -77,6 +81,13 @@ impl Transfer {
                         *sample = curve.map(*sample);
                     }
                 }),
+                TransferStage::TailedCurve { curve, tail } => {
+                    samples.iter_mut().for_each(|sample| {
+                        if sample.is_finite() {
+                            *sample = tail.map(*curve, *sample);
+                        }
+                    })
+                }
             }
         }
     }

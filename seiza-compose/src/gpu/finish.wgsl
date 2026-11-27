@@ -24,6 +24,7 @@ const CLARITY_GAIN: f32 = 1.0;
 const TEXTURE_GAIN: f32 = 1.5;
 const DEHAZE_STRENGTH: f32 = 0.95;
 const HAZE: f32 = 0.5;
+const SHOULDER_START: f32 = 0.8;
 
 @vertex
 fn finish_vertex(@builtin(vertex_index) index: u32) -> @builtin(position) vec4f {
@@ -160,7 +161,14 @@ fn tone(start: vec3f, measured: f32, local: vec4f, detail: vec2f, step: FinishSt
     // An HDR picture's shoulder above SDR white, as `hdr_shoulder`.
     let room = peak - 1.0;
     if room > 0.0 && value > 1.0 {
-        mapped += room * (1.0 - exp(-(value - 1.0) / room));
+        let over = value - 1.0;
+        let straight = SHOULDER_START * room;
+        if over <= straight {
+            mapped += over;
+        } else {
+            let rest = room - straight;
+            mapped += straight + rest * (1.0 - exp(-(over - straight) / rest));
+        }
     }
 
     let luminance = dot(color, globals.luma.xyz);
