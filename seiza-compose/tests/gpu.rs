@@ -135,3 +135,42 @@ fn reads_share_stretch_rows_and_one_without_a_row_is_named() {
     assert_eq!(left_out.len(), 1, "{left_out:?}");
     assert!(left_out[0].contains("computed mask 1"), "{left_out:?}");
 }
+
+/// Two Tone steps that read neighborhoods, each over the picture the one
+/// before left: the GPU measures each in its own layer, as the CPU does.
+#[test]
+fn two_local_tone_steps_match_the_cpu() {
+    use seiza_compose::picture::{FinishKind, FinishStep};
+    use seiza_compose::tone::Tone;
+    let inputs = inputs();
+    let images: Vec<&LinearImage> = inputs.iter().collect();
+    let mut picture = everything();
+    picture.computed[0].smoothing = 0.0;
+    picture.finish.push(FinishStep {
+        kind: FinishKind::Tone(Tone {
+            clarity: -0.6,
+            highlights: 0.5,
+            dehaze: -0.4,
+            ..Tone::default()
+        }),
+        opacity: 0.8,
+        mask: None,
+    });
+    let place: Vec<seiza_compose::gpu::GpuInput> = (0..3)
+        .map(|layer| seiza_compose::gpu::GpuInput { layer, scale: 1.0 })
+        .collect();
+    assert_eq!(
+        seiza_compose::gpu::GpuScene::new(&picture, &place).left_out,
+        Vec::<String>::new()
+    );
+    let Some((cpu, gpu)) = both(&picture, &images) else {
+        eprintln!("no GPU: the GPU compositor was not checked");
+        return;
+    };
+    let (mean, p99, largest) = gap(&cpu, &gpu);
+    eprintln!("two local steps: mean {mean:e}, p99 {p99:e}, max {largest:e}");
+    assert!(
+        mean < 1e-3 && p99 < 5e-3,
+        "mean {mean:e}, p99 {p99:e}, max {largest:e}"
+    );
+}

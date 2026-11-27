@@ -136,9 +136,10 @@ black. A Tone step's windows are cut at the edge of the picture drawn,
 within the scissor, and are measured in drawn pixels: zoomed out, a window
 covers the same part of the picture at the canvas's resolution; zoomed in
 past about five times, a window is capped at 256 drawn pixels either side.
-One Tone step per draw reads neighborhoods; another is drawn with each pixel
-alone, without Dehaze, and named in `left_out`. `tests/gpu.rs` renders the same picture both ways and bounds the
-gap; on Apple silicon the mean difference is about 1e-4 and the 99th
+Up to four Tone steps per draw read neighborhoods, each measured into its
+own layer of the local textures after the steps before it; a fifth is
+drawn with each pixel alone, without Dehaze, and named in `left_out`.
+`tests/gpu.rs` renders the same picture both ways and bounds the gap; on Apple silicon the mean difference is about 1e-4 and the 99th
 percentile under 1e-3, smoothing included. A planted shader change fails
 it. Without a GPU the tests pass without checking.
 

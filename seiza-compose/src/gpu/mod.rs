@@ -57,6 +57,9 @@ const COMBINED_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// The local passes' measurements and means. Full floats: a window's
 /// variance is the difference of two means, which half floats would lose.
 const LOCAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
+/// The most Tone steps one draw reads neighborhoods for; another is drawn
+/// with each pixel alone and named in `left_out`.
+pub const MAX_LOCAL_TONES: usize = 4;
 /// The widest a local window is drawn, in drawn pixels either side, however
 /// far the view is zoomed in.
 const MAX_WINDOW_RADIUS: f64 = 256.0;
@@ -113,8 +116,9 @@ pub struct GpuScene {
     layers: Vec<[f32; 20]>,
     computed: Vec<([f32; 16], f32)>,
     finish: Vec<([f32; 16], Option<[i64; 2]>)>,
-    /// The Finish step whose neighborhoods the local passes measure.
-    local: Option<usize>,
+    /// The Finish steps whose neighborhoods the local passes measure, in
+    /// order: each one's layer in the local textures is its place here.
+    local: Vec<usize>,
     healed: Vec<[f32; 4]>,
     heals: Vec<([f32; 8], [i64; 2])>,
     rows: Vec<Vec<f32>>,
@@ -403,18 +407,19 @@ impl GpuScene {
                     slot[12] = held.vibrance;
                     slot[13] = held.saturation;
                     slot[15] = tone.detail_edge();
-                    // One Tone step a draw reads neighborhoods for; another
-                    // is drawn with each pixel alone.
+                    // Up to MAX_LOCAL_TONES steps a draw reads
+                    // neighborhoods for, each with its own layer, counted
+                    // from 1; another is drawn with each pixel alone.
                     if tone.is_local() {
-                        if scene.local.is_none() {
-                            scene.local = Some(scene.finish.len());
-                            slot[14] = 1.0;
+                        if scene.local.len() < MAX_LOCAL_TONES {
+                            scene.local.push(scene.finish.len());
+                            slot[14] = scene.local.len() as f32;
                         } else {
                             // Drawn with each pixel alone, where a veil is the
                             // pixel's own darkest channel: Dehaze is left out.
                             slot[11] = 0.0;
                             scene.left_out.push(format!(
-                                "the neighborhoods of finishing step {index}, past the GPU's one"
+                                "the neighborhoods of finishing step {index}, past the GPU's {MAX_LOCAL_TONES}"
                             ));
                         }
                     }
@@ -532,19 +537,28 @@ pub struct GpuTargets {
     pub finished: wgpu::Texture,
     finished_view: wgpu::TextureView,
     /// The local passes' textures, made the first time a draw has a Tone
-    /// step that reads neighborhoods.
-    local: std::sync::OnceLock<LocalTargets>,
+    /// step that reads neighborhoods, and again when a draw has more such
+    /// steps than they have layers for.
+    local: std::sync::Mutex<Option<std::sync::Arc<LocalTargets>>>,
 }
 
-/// What the local passes draw into, the size of the targets: the
-/// measurements, a mean across, and the local and detail means. Each is
-/// bound as a window pass reads it, and all three as Finish reads them.
+/// What the local passes draw into, the size of the targets. One step's
+/// passes draw its measurements, a mean across and each mean into single
+/// textures, which are copied into the step's layer of three arrays: the
+/// measurements, the local means and the detail means. A later step's
+/// measurements and Finish read the arrays.
 struct LocalTargets {
-    measured: wgpu::TextureView,
+    /// The layers each array holds.
+    layers: u32,
+    measured: wgpu::Texture,
+    local_means: wgpu::Texture,
+    detail_means: wgpu::Texture,
+    scratch: wgpu::Texture,
+    scratch_view: wgpu::TextureView,
     across: wgpu::TextureView,
-    local_means: wgpu::TextureView,
-    detail_means: wgpu::TextureView,
-    from_measured: wgpu::BindGroup,
+    means: wgpu::Texture,
+    means_view: wgpu::TextureView,
+    from_scratch: wgpu::BindGroup,
     from_across: wgpu::BindGroup,
     finish_inputs: wgpu::BindGroup,
 }
@@ -687,9 +701,17 @@ impl GpuCompositor {
             label: Some("compose local window source"),
             entries: &[unfiltered(0)],
         });
+        let layered = |binding: u32| wgpu::BindGroupLayoutEntry {
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled: false,
+            },
+            ..unfiltered(binding)
+        };
         let local_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("compose local finish inputs"),
-            entries: &[unfiltered(1), unfiltered(2), unfiltered(3)],
+            entries: &[layered(1), layered(2), layered(3)],
         });
         const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
             wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4];
@@ -851,7 +873,10 @@ impl GpuCompositor {
                     usage: wgpu::TextureUsages::TEXTURE_BINDING,
                     view_formats: &[],
                 })
-                .create_view(&wgpu::TextureViewDescriptor::default());
+                .create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::D2Array),
+                    ..Default::default()
+                });
             local_finish_inputs(device, &local_layout, [&zero, &zero, &zero])
         };
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -1051,35 +1076,50 @@ impl GpuCompositor {
             smoothed_sources,
             finished,
             finished_view,
-            local: std::sync::OnceLock::new(),
+            local: std::sync::Mutex::new(None),
         }
     }
 
-    /// The local passes' textures for targets of `width` by `height`.
-    fn local_targets(&self, width: u32, height: u32) -> LocalTargets {
-        let view = |label: &str| {
-            self.device
-                .create_texture(&wgpu::TextureDescriptor {
-                    label: Some(label),
-                    size: wgpu::Extent3d {
-                        width,
-                        height,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: LOCAL_FORMAT,
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                        | wgpu::TextureUsages::TEXTURE_BINDING,
-                    view_formats: &[],
-                })
-                .create_view(&wgpu::TextureViewDescriptor::default())
+    /// The local passes' textures for targets of `width` by `height`, with
+    /// `layers` layers in each array.
+    fn local_targets(&self, width: u32, height: u32, layers: u32) -> LocalTargets {
+        let texture = |label: &str, layers: u32, usage: wgpu::TextureUsages| {
+            self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: layers,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: LOCAL_FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | usage,
+                view_formats: &[],
+            })
         };
-        let measured = view("compose local measurements");
-        let across = view("compose local means across");
-        let local_means = view("compose local means");
-        let detail_means = view("compose detail means");
+        let single = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC;
+        let array = |label: &str| texture(label, layers, wgpu::TextureUsages::COPY_DST);
+        let array_view = |texture: &wgpu::Texture| {
+            texture.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            })
+        };
+        let measured = array("compose local measurements");
+        let local_means = array("compose local means");
+        let detail_means = array("compose detail means");
+        let scratch = texture("compose one step's measurements", 1, single);
+        let scratch_view = scratch.create_view(&wgpu::TextureViewDescriptor::default());
+        let across = texture(
+            "compose local means across",
+            1,
+            wgpu::TextureUsages::RENDER_ATTACHMENT,
+        )
+        .create_view(&wgpu::TextureViewDescriptor::default());
+        let means = texture("compose one step's means", 1, single);
+        let means_view = means.create_view(&wgpu::TextureViewDescriptor::default());
         let source = |view: &wgpu::TextureView| {
             self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("compose local window source"),
@@ -1090,19 +1130,28 @@ impl GpuCompositor {
                 }],
             })
         };
-        let from_measured = source(&measured);
+        let from_scratch = source(&scratch_view);
         let from_across = source(&across);
         let finish_inputs = local_finish_inputs(
             &self.device,
             &self.local_layout,
-            [&measured, &local_means, &detail_means],
+            [
+                &array_view(&measured),
+                &array_view(&local_means),
+                &array_view(&detail_means),
+            ],
         );
         LocalTargets {
+            layers,
             measured,
-            across,
             local_means,
             detail_means,
-            from_measured,
+            scratch,
+            scratch_view,
+            across,
+            means,
+            means_view,
+            from_scratch,
             from_across,
             finish_inputs,
         }
@@ -1211,7 +1260,7 @@ impl GpuCompositor {
             heals: [[0.0; 8]; MAX_HEALS],
             computed: [[0.0; 16]; MAX_COMPUTED_MASKS],
             local: [
-                scene.local.map_or(-1.0, |step| step as f32),
+                scene.local.first().map_or(-1.0, |step| *step as f32),
                 window(crate::tone::LOCAL_RADIUS),
                 window(crate::tone::DETAIL_RADIUS),
                 0.0,
@@ -1436,61 +1485,98 @@ impl GpuCompositor {
         // The local passes: the measurements of the picture before the
         // local Tone step, then their means over the local window and over
         // the detail window, each across then down.
-        let local = scene.local.map(|_| {
-            targets
-                .local
-                .get_or_init(|| self.local_targets(targets.width, targets.height))
+        let local = (!scene.local.is_empty()).then(|| {
+            let mut kept = targets.local.lock().expect("the local targets");
+            let needed = scene.local.len() as u32;
+            match kept.as_ref() {
+                Some(local) if local.layers >= needed => local.clone(),
+                _ => {
+                    let made = std::sync::Arc::new(self.local_targets(
+                        targets.width,
+                        targets.height,
+                        needed,
+                    ));
+                    *kept = Some(made.clone());
+                    made
+                }
+            }
         });
-        if let Some(local) = local {
-            let mut pass_into =
-                |label: &str,
-                 target: &wgpu::TextureView,
-                 pipeline: &wgpu::RenderPipeline,
-                 groups: &[(u32, &wgpu::BindGroup)]| {
-                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some(label),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: target,
-                            depth_slice: None,
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        ..Default::default()
-                    });
-                    within(&mut pass);
-                    pass.set_pipeline(pipeline);
-                    pass.set_bind_group(0, &self.common, &[]);
-                    for (index, group) in groups {
-                        pass.set_bind_group(*index, *group, &[]);
-                    }
-                    pass.draw(0..3, 0..1);
-                };
-            pass_into(
-                "compose local measurements",
-                &local.measured,
-                &self.local_measure_pipeline,
-                &[(1, &targets.finish_inputs), (2, &self.no_local)],
-            );
-            let [local_across, local_down, detail_across, detail_down] = &self.window_pipelines;
-            for (across, down, means) in [
-                (local_across, local_down, &local.local_means),
-                (detail_across, detail_down, &local.detail_means),
-            ] {
-                pass_into(
-                    "compose local window",
-                    &local.across,
-                    across,
-                    &[(2, &local.from_measured)],
+        if let Some(local) = &local {
+            for (layer, step) in scene.local.iter().enumerate() {
+                // The measure pass reads which step it measures before from
+                // the globals. A write reaches the GPU at the next submit, so
+                // the passes so far go first.
+                if layer > 0 {
+                    let done = std::mem::replace(
+                        encoder,
+                        self.device
+                            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default()),
+                    );
+                    self.queue.submit([done.finish()]);
+                }
+                self.queue.write_buffer(
+                    &self.globals,
+                    std::mem::offset_of!(Globals, local) as u64,
+                    bytemuck::bytes_of(&(*step as f32)),
                 );
+                let pass_into =
+                    |encoder: &mut wgpu::CommandEncoder,
+                     label: &str,
+                     target: &wgpu::TextureView,
+                     pipeline: &wgpu::RenderPipeline,
+                     groups: &[(u32, &wgpu::BindGroup)]| {
+                        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some(label),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: target,
+                                depth_slice: None,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            ..Default::default()
+                        });
+                        within(&mut pass);
+                        pass.set_pipeline(pipeline);
+                        pass.set_bind_group(0, &self.common, &[]);
+                        for (index, group) in groups {
+                            pass.set_bind_group(*index, *group, &[]);
+                        }
+                        pass.draw(0..3, 0..1);
+                    };
+                // The measurements run the steps before this one, the local
+                // ones among them reading the layers already filled.
                 pass_into(
-                    "compose local window",
-                    means,
-                    down,
-                    &[(2, &local.from_across)],
+                    encoder,
+                    "compose local measurements",
+                    &local.scratch_view,
+                    &self.local_measure_pipeline,
+                    &[(1, &targets.finish_inputs), (2, &local.finish_inputs)],
                 );
+                let [local_across, local_down, detail_across, detail_down] = &self.window_pipelines;
+                for (across, down, array) in [
+                    (local_across, local_down, &local.local_means),
+                    (detail_across, detail_down, &local.detail_means),
+                ] {
+                    pass_into(
+                        encoder,
+                        "compose local window",
+                        &local.across,
+                        across,
+                        &[(2, &local.from_scratch)],
+                    );
+                    pass_into(
+                        encoder,
+                        "compose local window",
+                        &local.means_view,
+                        down,
+                        &[(2, &local.from_across)],
+                    );
+                    copy_into_layer(encoder, &local.means, array, layer as u32);
+                }
+                copy_into_layer(encoder, &local.scratch, &local.measured, layer as u32);
             }
         }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1516,7 +1602,9 @@ impl GpuCompositor {
         pass.set_bind_group(1, &targets.finish_inputs, &[]);
         pass.set_bind_group(
             2,
-            local.map_or(&self.no_local, |local| &local.finish_inputs),
+            local
+                .as_ref()
+                .map_or(&self.no_local, |local| &local.finish_inputs),
             &[],
         );
         pass.draw(0..3, 0..1);
@@ -1565,6 +1653,29 @@ fn picture_area(
         high[0].saturating_sub(low[0]).max(1),
         high[1].saturating_sub(low[1]).max(1),
     ]
+}
+
+/// Copies a single texture into one layer of an array of its size.
+fn copy_into_layer(
+    encoder: &mut wgpu::CommandEncoder,
+    from: &wgpu::Texture,
+    into: &wgpu::Texture,
+    layer: u32,
+) {
+    encoder.copy_texture_to_texture(
+        from.as_image_copy(),
+        wgpu::TexelCopyTextureInfo {
+            texture: into,
+            mip_level: 0,
+            origin: wgpu::Origin3d {
+                x: 0,
+                y: 0,
+                z: layer,
+            },
+            aspect: wgpu::TextureAspect::All,
+        },
+        from.size(),
+    );
 }
 
 /// Finish's bind group of the local passes' measurements and means.

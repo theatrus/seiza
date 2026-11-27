@@ -37,8 +37,9 @@ struct FinishStep {
     // rgb: for a heal, the brightness added to the copied color. For tone
     // and color: blacks, texture, clarity, dehaze.
     shift: vec4f,
-    // For tone and color, x: vibrance, y: saturation, z: 1 when the step
-    // reads the neighborhoods the local passes measured, w: the variance of
+    // For tone and color, x: vibrance, y: saturation, z: the step's layer in
+    // the local passes' textures counted from 1, or 0 when it reads none,
+    // w: the variance of
     // fine detail Texture treats as half noise.
     local: vec4f,
 }
@@ -86,8 +87,8 @@ struct Globals {
     healed: array<vec4f, 4>,
     heals: array<LayerHeal, 16>,
     computed: array<ComputedMask, 8>,
-    // x: the Finish step whose neighborhoods the local passes measure, or
-    // -1. y: the half-width of the local window, z: of the detail window,
+    // x: the Finish step whose neighborhoods the local passes are
+    // measuring, or -1. y: the half-width of the local window, z: of the detail window,
     // both in surface pixels.
     local: vec4f,
     // The part of the targets this draw fills: x, y, width and height. A

@@ -5,14 +5,15 @@
 @group(1) @binding(0) var combined: texture_2d<f32>;
 @group(1) @binding(1) var masks: texture_2d_array<f32>;
 
-// The local passes. A window pass reads `local_source`. The Finish pass
-// reads what they measured: per pixel, the luminance and darkest channel
-// of the picture as the steps before the local Tone step leave it, and the
-// means over the local and detail windows.
+// The local passes. A window pass reads `local_source`. A later step's
+// measurements and the Finish pass read what they measured, one layer per
+// local Tone step: per pixel, the luminance and darkest channel of the
+// picture as the steps before that step leave it, and the means over the
+// local and detail windows.
 @group(2) @binding(0) var local_source: texture_2d<f32>;
-@group(2) @binding(1) var local_measured: texture_2d<f32>;
-@group(2) @binding(2) var local_means: texture_2d<f32>;
-@group(2) @binding(3) var detail_means: texture_2d<f32>;
+@group(2) @binding(1) var local_measured: texture_2d_array<f32>;
+@group(2) @binding(2) var local_means: texture_2d_array<f32>;
+@group(2) @binding(3) var detail_means: texture_2d_array<f32>;
 
 const LUMA: vec3f = vec3f(0.2126, 0.7152, 0.0722);
 // The constants of `seiza_compose::tone`, which says what each one is.
@@ -185,11 +186,12 @@ fn alone(color: vec3f) -> array<vec4f, 2> {
 fn adjust(color: vec3f, step: FinishStep, pixel: vec2i) -> vec3f {
     if step.kind.x > 4.5 {
         if step.local.z > 0.5 {
+            let layer = i32(step.local.z) - 1;
             return tone(
                 color,
-                textureLoad(local_measured, pixel, 0).x,
-                textureLoad(local_means, pixel, 0),
-                textureLoad(detail_means, pixel, 0).xy,
+                textureLoad(local_measured, pixel, layer, 0).x,
+                textureLoad(local_means, pixel, layer, 0),
+                textureLoad(detail_means, pixel, layer, 0).xy,
                 step,
             );
         }
