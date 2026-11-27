@@ -770,10 +770,12 @@ fn steps_in_the_stack_match_the_cpu() {
         mean < 1e-3 && p99 < 5e-3,
         "mean {mean:e}, p99 {p99:e}, max {largest:e}"
     );
+    // Inside a group, a Tone step that reads neighborhoods is drawn with
+    // each pixel alone, and named.
     let places: Vec<GpuInput> = (0..3).map(|layer| GpuInput { layer, scale: 1.0 }).collect();
     let mut local = picture.clone();
     local.layers.insert(
-        2,
+        6,
         step(FinishKind::Tone(Tone {
             clarity: 0.5,
             ..Tone::default()
@@ -787,5 +789,74 @@ fn steps_in_the_stack_match_the_cpu() {
             .any(|what| what.contains("drawn with each pixel alone")),
         "{:?}",
         scene.left_out
+    );
+}
+
+/// Steps in the stack that read neighbors, a heal and Tone steps with
+/// local controls, are drawn in stages: the layers beneath each first, the
+/// step on what they made, and the layers above from there. The GPU then
+/// matches the CPU, which works the same way.
+#[test]
+fn steps_that_read_neighbors_match_the_cpu_in_the_stack() {
+    use seiza_compose::gpu::{GpuInput, GpuScene};
+    use seiza_compose::picture::{
+        FinishKind, InputRead, Layer, LayerKind, Transfer, TransferStage,
+    };
+    use seiza_compose::tone::Tone;
+    use seiza_stretch::ResolvedCurve;
+    let inputs = inputs();
+    let images: Vec<&LinearImage> = inputs.iter().collect();
+    let curve = ResolvedCurve::Mtf {
+        shadows: 0.0,
+        midtone: 0.3,
+        highlights: 1.0,
+    };
+    let read = |input: usize| InputRead::new(input, Transfer::of([TransferStage::Curve(curve)]));
+    let step = |kind| Layer::new(LayerKind::Step(kind));
+    let picture = Picture {
+        layers: vec![
+            Layer::added(read(0), [1.0, 0.2, 0.1]),
+            step(FinishKind::Tone(Tone {
+                clarity: 0.7,
+                texture: 0.4,
+                dehaze: 0.3,
+                ..Tone::default()
+            })),
+            Layer::added(read(1), [0.1, 0.9, 0.3]),
+            Layer {
+                mask: Some(0),
+                ..step(FinishKind::Heal {
+                    offset: [21, -13],
+                    shift: [0.0; 3],
+                })
+            },
+            Layer::added(read(2), [0.2, 0.1, 0.8]),
+            Layer {
+                opacity: 0.7,
+                ..step(FinishKind::Tone(Tone {
+                    clarity: -0.4,
+                    highlights: 0.3,
+                    ..Tone::default()
+                }))
+            },
+            step(FinishKind::Curves(0.3)),
+        ],
+        masks: vec![common::stroke([60.0, 50.0], [150.0, 120.0], 18.0)],
+        ..Picture::default()
+    };
+    let places: Vec<GpuInput> = (0..3).map(|layer| GpuInput { layer, scale: 1.0 }).collect();
+    assert_eq!(
+        GpuScene::new(&picture, &places).left_out,
+        Vec::<String>::new()
+    );
+    let Some((cpu, gpu)) = both(&picture, &images) else {
+        eprintln!("no GPU: the GPU compositor was not checked");
+        return;
+    };
+    let (mean, p99, largest) = gap(&cpu, &gpu);
+    eprintln!("neighbors in the stack: mean {mean:e}, p99 {p99:e}, max {largest:e}");
+    assert!(
+        mean < 1e-3 && p99 < 5e-3,
+        "mean {mean:e}, p99 {p99:e}, max {largest:e}"
     );
 }

@@ -8,6 +8,9 @@
 @group(2) @binding(1) var healed_layers: texture_2d_array<f32>;
 // The computed masks that are smoothed, in surface pixels.
 @group(2) @binding(2) var smoothed_masks: texture_2d_array<f32>;
+// The picture a step in the stack made of the layers beneath it, which a
+// later stage of the layers starts from.
+@group(2) @binding(3) var staged: texture_2d<f32>;
 
 struct TileVertex {
     @builtin(position) position: vec4f,
@@ -517,8 +520,13 @@ fn healed_value(index: i32, pixel: vec2i, doc: vec2f, uv: vec2f) -> f32 {
 
 @fragment
 fn tile_fragment(in: TileVertex) -> @location(0) vec4f {
-    // The layers blended so far.
+    let pixel = vec2i(in.position.xy);
+    // The layers blended so far: from black, or from what a step in the
+    // stack made of the layers beneath this stage.
     var color = vec3f(0.0);
+    if globals.stage.z > 0.5 {
+        color = textureLoad(staged, pixel, 0).rgb;
+    }
     // The layers beneath a group, kept while the group's members blend on
     // their own.
     var beneath = vec3f(0.0);
@@ -532,9 +540,8 @@ fn tile_fragment(in: TileVertex) -> @location(0) vec4f {
     var own_value = 0.0;
     var own_cover = 0.0;
     var own_mode = 0.0;
-    let pixel = vec2i(in.position.xy);
-    let count = i32(globals.counts.x);
-    for (var index = 0; index < count; index++) {
+    let end = min(i32(globals.counts.x), i32(globals.stage.y));
+    for (var index = i32(globals.stage.x); index < end; index++) {
         let layer = globals.layers[index];
         // How much of the layer applies here: its opacity, within its mask
         // and within the mask of the layer it is clipped to.

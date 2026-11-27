@@ -58,9 +58,14 @@ const OVERLAY_LAYER: u32 = MAX_MASKS as u32;
 const MASK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
 const SMOOTHED_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
 const HEALED_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
-/// The combined picture, before the Finish steps. Float, so a sum is not
-/// clipped before a step that brings it back into range.
-const COMBINED_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// The combined picture, before the Finish steps, and what a step in the
+/// stack makes of the layers beneath it. Float, so a sum is not clipped
+/// before a step that brings it back into range; full floats, so the steps
+/// that read it, and each stage of a stack drawn in stages, add no rounding
+/// of half floats (a heal and two local Tone steps in the stack were three
+/// times further from the CPU with half floats). Only loaded, never
+/// filtered.
+const COMBINED_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
 /// The local passes' measurements and means. Full floats: a window's
 /// variance is the difference of two means, which half floats would lose.
 const LOCAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
@@ -132,6 +137,9 @@ pub struct GpuScene {
     /// The Finish steps whose neighborhoods the local passes measure, in
     /// order: each one's layer in the local textures is its place here.
     local: Vec<usize>,
+    /// The steps in the stack that read neighbors, in order: the layers
+    /// are drawn in stages that end at each.
+    stages: Vec<StackStage>,
     healed: Vec<[f32; 4]>,
     heals: Vec<([f32; 8], [i64; 2])>,
     rows: Vec<Vec<f32>>,
@@ -146,6 +154,19 @@ pub struct GpuScene {
     layered: Vec<([f32; LAYERED_CONSTANTS], Arc<LayeredMaps>)>,
     /// What the GPU cannot draw of the picture, by name.
     pub left_out: Vec<String>,
+}
+
+/// A step in the stack that reads neighbors: a heal, or a Tone step that
+/// reads neighborhoods. The layers beneath it are drawn first, then the
+/// step on them, and the layers above it start from what it made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StackStage {
+    /// The step's layer.
+    layer: usize,
+    /// Its place in the Finish steps' table.
+    step: usize,
+    /// Its layer in the local textures, for a Tone step.
+    local: Option<usize>,
 }
 
 /// A transfer as a stretch-table row: entry `i` is the transfer of the
@@ -590,26 +611,62 @@ impl GpuScene {
         }
         scene.finish_count = scene.finish.len();
         // The steps in the stack follow the Finish steps in their table: a
-        // layer points at its step there. A step that reads neighbors is
-        // drawn with each pixel alone, and a heal is left out, until the
-        // compositor draws the stack in stages.
+        // layer points at its step there. A step outside any group that
+        // reads neighbors ends a stage of the layers: the layers beneath it
+        // are drawn first, and the step reads what they made. Inside a
+        // group, a Tone step is drawn with each pixel alone and a heal is
+        // left out.
+        let mut depth = 0_usize;
         for at in 0..scene.layers.len() {
-            let Some(LayerKind::Step(kind)) = picture.layers.get(at).map(|layer| &layer.kind)
-            else {
+            let Some(layer) = picture.layers.get(at) else {
                 continue;
             };
-            let kind = picture.rendered_kind(kind);
-            if scene.finish.len() == MAX_FINISH_STEPS || matches!(kind, FinishKind::Heal { .. }) {
-                scene.left_out.push(match kind {
-                    FinishKind::Heal { .. } => format!("layer {at}, a heal in the stack"),
-                    _ => format!("layer {at}, a step past the GPU's {MAX_FINISH_STEPS}"),
-                });
+            let kind = match &layer.kind {
+                LayerKind::GroupBegin => {
+                    depth += 1;
+                    continue;
+                }
+                LayerKind::GroupEnd => {
+                    depth = depth.saturating_sub(1);
+                    continue;
+                }
+                LayerKind::Step(kind) => picture.rendered_kind(kind),
+                _ => continue,
+            };
+            let heal = matches!(kind, FinishKind::Heal { .. });
+            let local = matches!(&kind, FinishKind::Tone(tone) if tone.is_local());
+            // A staged step is limited by its painted mask and opacity; a
+            // clip or a computed mask is not drawn for one.
+            let staged =
+                (heal || local) && depth == 0 && layer.clip.is_none() && layer.computed.is_none();
+            if scene.finish.len() == MAX_FINISH_STEPS || (heal && !staged) {
+                scene
+                    .left_out
+                    .push(if scene.finish.len() == MAX_FINISH_STEPS {
+                        format!("layer {at}, a step past the GPU's {MAX_FINISH_STEPS}")
+                    } else if depth > 0 {
+                        format!("layer {at}, a heal inside a group")
+                    } else {
+                        format!("layer {at}, a heal with a clip or a computed mask")
+                    });
                 scene.layers[at][3] = 0.0;
                 continue;
             }
-            if matches!(&kind, FinishKind::Tone(tone) if tone.is_local()) {
+            if staged {
+                let packed =
+                    scene.pack_step(&kind, mask_index(layer.mask), layer.opacity, true, at);
+                let local = (packed.0[14] > 0.5).then(|| packed.0[14] as usize - 1);
+                scene.stages.push(StackStage {
+                    layer: at,
+                    step: scene.finish.len(),
+                    local,
+                });
+                scene.finish.push(packed);
+                continue;
+            }
+            if local {
                 scene.left_out.push(format!(
-                    "the neighborhoods of layer {at}'s Tone step in the stack, drawn with each pixel alone"
+                    "the neighborhoods of layer {at}'s Tone step, drawn with each pixel alone"
                 ));
             }
             let packed = scene.pack_step(&kind, -1.0, 1.0, false, at);
@@ -744,6 +801,7 @@ struct Globals {
     area: [f32; 4],
     luma: [f32; 4],
     layered: [[f32; LAYERED_CONSTANTS]; MAX_LAYERED],
+    stage: [f32; 4],
 }
 
 /// Where the picture sits in the area drawn.
@@ -809,6 +867,8 @@ pub struct GpuTargets {
     width: u32,
     height: u32,
     combined: wgpu::TextureView,
+    /// What a step in the stack made of the layers beneath it.
+    staged: wgpu::TextureView,
     mask_layers: Vec<wgpu::TextureView>,
     finish_inputs: wgpu::BindGroup,
     layer_masks: wgpu::BindGroup,
@@ -892,6 +952,7 @@ pub struct GpuCompositor {
     blur_pipelines: [wgpu::RenderPipeline; 2],
     stroke_pipeline: wgpu::RenderPipeline,
     finish_pipeline: wgpu::RenderPipeline,
+    step_pipeline: wgpu::RenderPipeline,
     tile_instances: wgpu::Buffer,
     masks: StrokeBuffer,
     mask_ranges: Vec<(u32, u32)>,
@@ -976,12 +1037,32 @@ impl GpuCompositor {
                 texture_entry(0, wgpu::TextureViewDimension::D2Array),
                 texture_entry(1, wgpu::TextureViewDimension::D2Array),
                 texture_entry(2, wgpu::TextureViewDimension::D2Array),
+                // The staged picture, which is only loaded.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let finish_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("compose finish inputs"),
             entries: &[
-                texture_entry(0, wgpu::TextureViewDimension::D2),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
                 texture_entry(1, wgpu::TextureViewDimension::D2Array),
             ],
         });
@@ -1129,6 +1210,16 @@ impl GpuCompositor {
             false,
             &[Some(finished_format.into())],
         );
+        // A step in the stack that reads neighbors, into the staged picture.
+        let step_pipeline = pipeline(
+            "compose step in the stack",
+            &finish_shader,
+            Some(&finish_layout),
+            Some(&local_layout),
+            ("finish_vertex", "step_fragment"),
+            false,
+            &[Some(COMBINED_FORMAT.into())],
+        );
         // The measurements run the Finish steps before the local one, whose
         // code can read the local inputs: they are bound, empty.
         let local_measure_pipeline = pipeline(
@@ -1242,6 +1333,7 @@ impl GpuCompositor {
             blur_pipelines,
             stroke_pipeline,
             finish_pipeline,
+            step_pipeline,
             tile_instances,
             mask_ranges: Vec::new(),
             tables_version: None,
@@ -1296,6 +1388,8 @@ impl GpuCompositor {
             })
         };
         let combined = texture("compose combined", COMBINED_FORMAT, 1)
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let staged = texture("compose staged", COMBINED_FORMAT, 1)
             .create_view(&wgpu::TextureViewDescriptor::default());
         let masks = texture("compose masks", MASK_FORMAT, MAX_MASKS as u32 + 1);
         let mask_layers = layers_of(&masks, MAX_MASKS as u32 + 1);
@@ -1354,6 +1448,10 @@ impl GpuCompositor {
                     binding: 2,
                     resource: wgpu::BindingResource::TextureView(&smoothed_sets[0].1),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&staged),
+                },
             ],
         });
         let finished = texture("compose finished", self.finished_format, 1);
@@ -1363,6 +1461,7 @@ impl GpuCompositor {
             width,
             height,
             combined,
+            staged,
             mask_layers,
             finish_inputs,
             layer_masks,
@@ -1563,6 +1662,8 @@ impl GpuCompositor {
             area: area.map(|value| value as f32),
             luma: [scene.luma[0], scene.luma[1], scene.luma[2], scene.peak],
             layered: [[0.0; LAYERED_CONSTANTS]; MAX_LAYERED],
+            // Every layer, from black; a stack drawn in stages sets each.
+            stage: [0.0, scene.layers.len() as f32, 0.0, 0.0],
         };
         for (slot, (constants, _)) in globals.layered.iter_mut().zip(&scene.layered) {
             *slot = *constants;
@@ -1728,6 +1829,99 @@ impl GpuCompositor {
             .collect();
     }
 
+    /// The local passes of one Tone step that reads neighborhoods, into its
+    /// `layer` of the local textures: the measurements of the picture as the
+    /// steps before `step` leave it, then their means over the local window
+    /// and over the detail window, each across then down.
+    fn measure_local(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        targets: &GpuTargets,
+        local: &LocalTargets,
+        (layer, step): (usize, usize),
+        (rect, scissor): ([u32; 4], [u32; 4]),
+    ) {
+        // The measure pass reads which step it measures before from the
+        // globals. A write reaches the GPU at the next submit, so the passes
+        // so far go first.
+        let done = std::mem::replace(
+            encoder,
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor::default()),
+        );
+        self.queue.submit([done.finish()]);
+        self.queue.write_buffer(
+            &self.globals,
+            std::mem::offset_of!(Globals, local) as u64,
+            bytemuck::bytes_of(&(step as f32)),
+        );
+        let pass_into = |encoder: &mut wgpu::CommandEncoder,
+                         label: &str,
+                         target: &wgpu::TextureView,
+                         pipeline: &wgpu::RenderPipeline,
+                         groups: &[(u32, &wgpu::BindGroup)]| {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some(label),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            pass.set_viewport(
+                rect[0] as f32,
+                rect[1] as f32,
+                rect[2] as f32,
+                rect[3] as f32,
+                0.0,
+                1.0,
+            );
+            pass.set_scissor_rect(scissor[0], scissor[1], scissor[2], scissor[3]);
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &self.common, &[]);
+            for (index, group) in groups {
+                pass.set_bind_group(*index, *group, &[]);
+            }
+            pass.draw(0..3, 0..1);
+        };
+        // The measurements run the steps before this one, the local ones
+        // among them reading the layers already filled.
+        pass_into(
+            encoder,
+            "compose local measurements",
+            &local.scratch_view,
+            &self.local_measure_pipeline,
+            &[(1, &targets.finish_inputs), (2, &local.finish_inputs)],
+        );
+        let [local_across, local_down, detail_across, detail_down] = &self.window_pipelines;
+        for (across, down, array) in [
+            (local_across, local_down, &local.local_means),
+            (detail_across, detail_down, &local.detail_means),
+        ] {
+            pass_into(
+                encoder,
+                "compose local window",
+                &local.across,
+                across,
+                &[(2, &local.from_scratch)],
+            );
+            pass_into(
+                encoder,
+                "compose local window",
+                &local.means_view,
+                down,
+                &[(2, &local.from_across)],
+            );
+            copy_into_layer(encoder, &local.means, array, layer as u32);
+        }
+        copy_into_layer(encoder, &local.scratch, &local.measured, layer as u32);
+    }
+
     /// Every pass of one draw: the masks, the layers, then the Finish steps
     /// into the finished picture.
     #[allow(clippy::too_many_arguments)]
@@ -1838,29 +2032,6 @@ impl GpuCompositor {
                 pass.draw(0..3, 0..1);
             }
         }
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("compose layers"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &targets.combined,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-            within(&mut pass);
-            pass.set_pipeline(&self.tile_pipeline);
-            pass.set_bind_group(0, &self.common, &[]);
-            pass.set_bind_group(2, &targets.layer_masks, &[]);
-            draw_tiles(&mut pass);
-        }
-        // The local passes: the measurements of the picture before the
-        // local Tone step, then their means over the local window and over
-        // the detail window, each across then down.
         let local = (!scene.local.is_empty()).then(|| {
             let mut kept = targets.local.lock().expect("the local targets");
             let needed = scene.local.len() as u32;
@@ -1877,82 +2048,118 @@ impl GpuCompositor {
                 }
             }
         });
+        // A pass reads the globals as they are at the next submit, so the
+        // passes so far go first whenever a pass needs them changed.
+        let set = |encoder: &mut wgpu::CommandEncoder, offset: usize, bytes: &[u8]| {
+            let done = std::mem::replace(
+                encoder,
+                self.device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor::default()),
+            );
+            self.queue.submit([done.finish()]);
+            self.queue.write_buffer(&self.globals, offset as u64, bytes);
+        };
+        let counts = |finish_end: usize, first: usize| {
+            [
+                scene.layers.len() as f32,
+                finish_end as f32,
+                scene.heals.len() as f32,
+                first as f32,
+            ]
+        };
+        // The layers, in stages that end at each step in the stack that
+        // reads neighbors: the step reads what the layers beneath it made,
+        // into the staged picture the next stage starts from.
+        let mut first_layer = 0;
+        for stage in scene.stages.iter().map(Some).chain([None]) {
+            let end = stage.map_or(scene.layers.len(), |stage| stage.layer);
+            if !scene.stages.is_empty() {
+                let range = [
+                    first_layer as f32,
+                    end as f32,
+                    f32::from(first_layer > 0),
+                    0.0,
+                ];
+                set(
+                    encoder,
+                    std::mem::offset_of!(Globals, stage),
+                    bytemuck::bytes_of(&range),
+                );
+            }
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("compose layers"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &targets.combined,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                });
+                within(&mut pass);
+                pass.set_pipeline(&self.tile_pipeline);
+                pass.set_bind_group(0, &self.common, &[]);
+                pass.set_bind_group(2, &targets.layer_masks, &[]);
+                draw_tiles(&mut pass);
+            }
+            let Some(stage) = stage else {
+                break;
+            };
+            // The step alone: the Finish steps from it to it.
+            set(
+                encoder,
+                std::mem::offset_of!(Globals, counts),
+                bytemuck::bytes_of(&counts(stage.step + 1, stage.step)),
+            );
+            if let (Some(layer), Some(local)) = (stage.local, &local) {
+                self.measure_local(
+                    encoder,
+                    targets,
+                    local,
+                    (layer, stage.step),
+                    (rect, scissor),
+                );
+            }
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("compose step in the stack"),
+                    color_attachments: &[Some(clear(&targets.staged))],
+                    ..Default::default()
+                });
+                within(&mut pass);
+                pass.set_pipeline(&self.step_pipeline);
+                pass.set_bind_group(0, &self.common, &[]);
+                pass.set_bind_group(1, &targets.finish_inputs, &[]);
+                pass.set_bind_group(
+                    2,
+                    local
+                        .as_ref()
+                        .map_or(&self.no_local, |local| &local.finish_inputs),
+                    &[],
+                );
+                pass.draw(0..3, 0..1);
+            }
+            first_layer = end + 1;
+        }
+        if !scene.stages.is_empty() {
+            set(
+                encoder,
+                std::mem::offset_of!(Globals, counts),
+                bytemuck::bytes_of(&counts(scene.finish_count, 0)),
+            );
+        }
+        // The local passes of the Finish steps: the measurements of the
+        // picture before the local Tone step, then their means over the
+        // local window and over the detail window, each across then down.
         if let Some(local) = &local {
             for (layer, step) in scene.local.iter().enumerate() {
-                // The measure pass reads which step it measures before from
-                // the globals. A write reaches the GPU at the next submit, so
-                // the passes so far go first.
-                if layer > 0 {
-                    let done = std::mem::replace(
-                        encoder,
-                        self.device
-                            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default()),
-                    );
-                    self.queue.submit([done.finish()]);
+                if *step < scene.finish_count {
+                    self.measure_local(encoder, targets, local, (layer, *step), (rect, scissor));
                 }
-                self.queue.write_buffer(
-                    &self.globals,
-                    std::mem::offset_of!(Globals, local) as u64,
-                    bytemuck::bytes_of(&(*step as f32)),
-                );
-                let pass_into =
-                    |encoder: &mut wgpu::CommandEncoder,
-                     label: &str,
-                     target: &wgpu::TextureView,
-                     pipeline: &wgpu::RenderPipeline,
-                     groups: &[(u32, &wgpu::BindGroup)]| {
-                        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                            label: Some(label),
-                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                view: target,
-                                depth_slice: None,
-                                resolve_target: None,
-                                ops: wgpu::Operations {
-                                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                                    store: wgpu::StoreOp::Store,
-                                },
-                            })],
-                            ..Default::default()
-                        });
-                        within(&mut pass);
-                        pass.set_pipeline(pipeline);
-                        pass.set_bind_group(0, &self.common, &[]);
-                        for (index, group) in groups {
-                            pass.set_bind_group(*index, *group, &[]);
-                        }
-                        pass.draw(0..3, 0..1);
-                    };
-                // The measurements run the steps before this one, the local
-                // ones among them reading the layers already filled.
-                pass_into(
-                    encoder,
-                    "compose local measurements",
-                    &local.scratch_view,
-                    &self.local_measure_pipeline,
-                    &[(1, &targets.finish_inputs), (2, &local.finish_inputs)],
-                );
-                let [local_across, local_down, detail_across, detail_down] = &self.window_pipelines;
-                for (across, down, array) in [
-                    (local_across, local_down, &local.local_means),
-                    (detail_across, detail_down, &local.detail_means),
-                ] {
-                    pass_into(
-                        encoder,
-                        "compose local window",
-                        &local.across,
-                        across,
-                        &[(2, &local.from_scratch)],
-                    );
-                    pass_into(
-                        encoder,
-                        "compose local window",
-                        &local.means_view,
-                        down,
-                        &[(2, &local.from_across)],
-                    );
-                    copy_into_layer(encoder, &local.means, array, layer as u32);
-                }
-                copy_into_layer(encoder, &local.scratch, &local.measured, layer as u32);
             }
         }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

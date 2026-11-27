@@ -116,8 +116,9 @@ struct Globals {
     // x, y: surface size in pixels. z: strength of the stroke overlay.
     // w: the mask layer that holds the overlay.
     screen: vec4f,
-    // x: number of layers. y: number of finish steps. z: number of heals
-    // of single layers.
+    // x: number of layers. y: the Finish steps a pass applies end before
+    // this one. z: number of heals of single layers. w: the first Finish
+    // step a pass applies.
     counts: vec4f,
     layers: array<Layer, 24>,
     finish: array<FinishStep, 8>,
@@ -138,6 +139,11 @@ struct Globals {
     luma: vec4f,
     // The layered stretches the layers read.
     layered: array<LayeredStep, 12>,
+    // The layers one layers pass blends, for a stack drawn in stages: x:
+    // the first, y: the one it stops before. z: 1 when the pass starts from
+    // the staged picture, which a step that reads neighbors made of the
+    // layers beneath; 0 when it starts from black.
+    stage: vec4f,
 }
 
 @group(0) @binding(0) var<uniform> globals: Globals;

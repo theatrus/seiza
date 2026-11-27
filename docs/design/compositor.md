@@ -237,14 +237,23 @@ Up to four Tone steps per draw read neighborhoods, each measured into its
 own layer of the local textures after the steps before it; a fifth is
 drawn with each pixel alone, without Dehaze, and named in `left_out`.
 A step in the stack that maps each pixel alone is drawn by the layers
-pass itself, from its entry after the Finish steps in their table; one that
-reads neighbors is not yet: a local Tone step in the stack is drawn with
-each pixel alone, without Dehaze, and a heal in the stack is left out, both
-named in `left_out`. Drawing the stack in stages at such steps would draw
-them exactly.
+pass itself, from its entry after the Finish steps in their table. One
+that reads neighbors, a heal or a Tone step with local controls, outside
+any group, ends a stage: the layers pass draws the layers beneath it into
+the combined texture, the step pass (`step_fragment`, with the local passes
+first for a Tone step) reads that texture around each pixel into the staged
+texture, and the next layers pass starts from the staged texture. A pass
+reads the globals as they are at the next submit, so each stage's range
+(`stage`) and the step's place in the Finish table (`counts.y` and
+`counts.w`) are written after the passes before it are submitted. Inside
+a group, a local Tone step is drawn with each pixel alone, without Dehaze,
+and a heal is left out, both named in `left_out`; so is a staged heal with
+a clip or a computed mask. The combined and staged textures are full
+floats: with half floats, a heal and two local Tone steps in the stack were
+three times further from the CPU, from the extra rounding at each stage.
 `tests/gpu.rs` renders the same picture both ways and bounds the gap; on
-Apple silicon the mean difference is about 1e-4 and the 99th percentile
-under 1e-3, smoothing included. A planted shader change fails
+Apple silicon the mean difference is under 1e-4 and the 99th percentile
+under 1e-3, smoothing and steps in the stack included. A planted shader change fails
 it. Without a GPU the tests pass without checking.
 
 PSF Studio keeps only what belongs to an interactive canvas: streaming tiles

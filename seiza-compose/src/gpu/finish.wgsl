@@ -61,7 +61,7 @@ fn adjust(color: vec3f, step: FinishStep, pixel: vec2i) -> vec3f {
 // out. A heal copies this from its source pixel.
 fn before(pixel: vec2i, upto: i32) -> vec3f {
     var color = textureLoad(combined, pixel, 0).rgb;
-    for (var index = 0; index < upto; index++) {
+    for (var index = i32(globals.counts.w); index < upto; index++) {
         let step = globals.finish[index];
         if maps_pixels(step) {
             color = mix(color, adjust(color, step, pixel), applies(pixel, step));
@@ -119,13 +119,13 @@ fn detail_down_fragment(@builtin(position) position: vec4f) -> @location(0) vec4
     return window_mean(vec2i(position.xy), false, i32(globals.local.z));
 }
 
-@fragment
-fn finish_fragment(@builtin(position) position: vec4f) -> @location(0) vec4f {
-    let pixel = vec2i(position.xy);
+// The combined color at a pixel after the steps from `counts.w` up to
+// `counts.y`.
+fn finished(pixel: vec2i) -> vec3f {
     let size = vec2i(globals.screen.xy);
     var color = textureLoad(combined, pixel, 0).rgb;
     let count = i32(globals.counts.y);
-    for (var index = 0; index < count; index++) {
+    for (var index = i32(globals.counts.w); index < count; index++) {
         let step = globals.finish[index];
         let covered = applies(pixel, step);
         if maps_pixels(step) {
@@ -138,6 +138,20 @@ fn finish_fragment(@builtin(position) position: vec4f) -> @location(0) vec4f {
             }
         }
     }
+    return color;
+}
+
+// A step in the stack that reads neighbors, on the layers beneath it: the
+// staged picture the next stage of the layers starts from.
+@fragment
+fn step_fragment(@builtin(position) position: vec4f) -> @location(0) vec4f {
+    return vec4f(finished(vec2i(position.xy)), 1.0);
+}
+
+@fragment
+fn finish_fragment(@builtin(position) position: vec4f) -> @location(0) vec4f {
+    let pixel = vec2i(position.xy);
+    var color = finished(pixel);
     let overlay = textureLoad(masks, pixel, i32(globals.screen.w), 0).r * globals.screen.z;
     color = mix(color, vec3f(1.0, 0.25, 0.2), overlay * 0.45);
     return vec4f(color, 1.0);
