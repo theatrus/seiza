@@ -527,6 +527,73 @@ quadratic up to 0.25 and weighed four times (`--spike-quadratic 0.25
 - Next for spikes: the eased penalty, with windows with spikes drawn as a
   share of every batch, enough for some 40,000 of them in a run.
 
+### Sixth runs (2026-11-27)
+
+X11 (`fit`) and X12 (`image`) are X9 and X10 with a quarter of every batch
+drawn from the train bank's 397 windows with spikes over the noise
+(`--spike-share 0.25`, `starless_model.spiky_windows`), some 40,000 of them
+a run. Medians over the same 128 windows:
+
+| | stars, rms | sky, rms | cores, mean | halos found | spikes found | spikes stray |
+|---|---|---|---|---|---|---|
+| X9, fit-first | 0.420 | 0.060 | 0.014 | 0.79 | 0.056 | 0.017 |
+| X11, fit-first, windows with spikes | 0.422 | 0.053 | 0.030 | 0.83 | 0.18 | 0.022 |
+| X10, image only | 0.539 | 0.105 | 0.024 | 0.69 | 0.045 | 0.014 |
+| X12, image only, windows with spikes | 0.544 | 0.107 | 0.009 | 0.53 | 0.56 | 0.020 |
+
+The layers add back to the input as the truth's do, so each layer's error,
+projected on the spike truth, shares out the spikes' light. Over the
+validation bank's 19 windows with spikes:
+
+| | spike layer | left in the starless image | halo layer | stars layer |
+|---|---|---|---|---|
+| X7 | 0.01 | 0.13 | 0.47 | 0.39 |
+| X9 | 0.10 | 0.11 | 0.54 | 0.25 |
+| X11 | 1.03 | -0.01 | 0.08 | -0.10 |
+| X8 | 0.00 | 0.04 | 0.37 | 0.59 |
+| X10 | 0.05 | 0.04 | 0.49 | 0.42 |
+| X12 | 0.88 | 0.02 | 0.14 | -0.05 |
+
+- The spike layer is learned. X11 puts all the spikes' light in it and none
+  in the starless image; X12 nearly all. The medians over windows are
+  lower (0.18 and 0.56), as most windows' spikes are faint; their means are
+  0.36 and 0.47.
+- Before, the halo layer took about half of the spikes' light, so its
+  share found read higher than it was. X12's halo layer finds less now
+  (0.53 over all windows, 0.72 on a pupil's).
+- The starless image is as good as before: X11 has the best sky yet
+  (0.053), its stars level with X9's, its cores a little brighter (0.030).
+
+### Whole images (2026-11-27)
+
+X11 and X12 were run over four whole validation stacks, real stars with
+no truth: the Elephant's Trunk in Hα (C925, 4176 × 6248, its brightest
+star G 4.7), Sh2 230 in Hα, and NGC 6820 in Hα and in R (Ultracat, 6388 ×
+9576, 165,000 to 590,000 catalogue stars). Each was fitted at its
+catalogue stars' places as a bank fits a composite (12 s for the C925
+stack, 1 to 3 minutes for the Ultracat ones), then read in 512 px tiles.
+A whole Ultracat stack takes about 20 s through either network.
+
+- The stars are gone and the nebula runs on through where they were, the
+  brightest included, in Hα and in the dense R field. The fit's estimate
+  alone leaves dark and bright marks at every bright star; the network
+  heals them. X11 leaves a faint ring at the Trunk's brightest double star,
+  where X12 leaves none.
+- Tiles read about their own level and noise, as in training, disagree a
+  little where they meet. Kept hard-edged (the middle 384 px of each),
+  they leave steps of up to 0.7 noise (the 99.9th percentile of two
+  offset tilings' difference). Overlapped by half and blended by
+  raised-cosine weights, 0.27 to 0.29, 0.025 rms. Read about the whole
+  image's level and noise, the blend leaves 0.03, but the starless image
+  changes by 0.4 to 0.7 noise rms in bright nebula (10 to 50 noise over
+  the image's median), as no tile read that way in training. The examples
+  use the blend about each tile's own level; a runtime wants one level for
+  the image, which training with the level moved at random would allow.
+- The C925's stars throw no spikes, yet the spike layer puts a small dip
+  in their cores, about 1% of the stars' light, balanced by as much spread
+  thin about them. It adds back with the stars; it would go with
+  vane-less pupils' bright stars weighed up in the banks.
+
 ## Order of work
 
 1. The clean skies: Gaia fits with the PSF field, and checks that what is
