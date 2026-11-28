@@ -440,6 +440,64 @@ windows, in noise units:
   .add_star`), as the fit draws them; they are being cut. The spike layer
   is to be tried on them before more runs.
 
+### Fourth runs (2026-11-27)
+
+The version 4 banks are cut from the same stacks and draws as version 3
+(8,024 train windows from 511 stacks, 560 validation windows), with made
+stars moved by Lanczos-3. X7 (`fit`) and X8 (`image`) are X5 and X6 trained
+on them, alike in all else (11 minutes each). All six runs so far with
+these settings were measured on 128 windows of the version 4 validation
+bank. Medians over windows, in noise units:
+
+| | stars, rms | sky, rms | cores, mean | stars, stretched | halos found | spikes found |
+|---|---|---|---|---|---|---|
+| the fit's estimate alone | 0.617 | 0.047 | 0.023 | 0.069 | | |
+| X3, fit-first (v3 bank) | 0.441 | 0.061 | 0.005 | 0.058 | | |
+| X5, fit-first, layers (v3 bank) | 0.447 | 0.077 | 0.009 | 0.057 | 0.69 | 0.002 |
+| X7, fit-first, layers | 0.415 | 0.066 | 0.018 | 0.054 | 0.82 | 0.003 |
+| X4, image only (v3 bank) | 0.545 | 0.111 | 0.045 | 0.075 | | |
+| X6, image only, layers (v3 bank) | 0.554 | 0.118 | 0.060 | 0.075 | 0.70 | 0.003 |
+| X8, image only, layers | 0.544 | 0.102 | 0.030 | 0.075 | 0.70 | 0.003 |
+
+- The fit's own estimate is much nearer the truth on the new bank (stars
+  0.62 against 0.83 on version 3): it draws stars as the bank now does, so
+  it has no cross to leave.
+- X7 is the best run so far: the least error where stars were, plain and
+  stretched, and 82% of the halos' light found. About the six brightest
+  stars measured, 12 to 40 px out, it leaves 0.15 to 0.33 noise rms of
+  error, mean -0.08 to +0.17, where X3 leaves 0.22 to 0.53, mean +0.03 to
+  +0.42. The fit-first design is now level with the image-only runs about
+  bright stars (X4 and X8 0.18 to 0.28), as well as ahead everywhere else.
+- X8 is ahead of X6 on the sky and the cores, and level with X4 on the
+  stars. Its mean over windows is worse than its median: a few windows of
+  the stacks' own stars pull its mean stars error to 0.66 (X4 0.62).
+- The spike layer still learned nothing (0.3% found). The cross was not
+  the reason, or not the only one. Looked into on the train bank's 396
+  windows with spikes over the noise, with a small network (width 16,
+  800 steps), measured on the validation bank's 19 such windows:
+  - The data holds. The spikes stand out in the stars' light, the spike
+    truth lies on them, and the light less the truth is round.
+  - On those windows the visible spikes carry 3.7% of the loss's weight
+    and a third of the spike penalty a zero output pays; the dip the
+    spikes leave in the core a quarter; light under the noise the rest. A
+    run with the loss as it is gains 18% on the dip, 14% on the faint
+    light and under 1% on the visible spikes, finding 0.4% of their light.
+  - The spike channel trained alone finds 6.5% by the same penalty, 21%
+    by squared error.
+  - In the whole loss, the spike channel's penalty changed: squared error
+    finds 13%, four times weighted 15%; a Charbonnier penalty quadratic up
+    to 0.25 (about 1.3 noise), four times weighted, 12%, with the least
+    light put where there are no spikes (0.035 noise rms, against 0.056
+    for squared error and 0.023 for the loss as it is).
+  - So two things hold the spikes back. The penalty seeks the median, so a
+    pixel near a bright star stays at zero until the network can tell
+    where spikes run, as it learns to only by first leaning toward them.
+    And the spike channel's share of the loss is small beside the starless
+    image's. That penalty suits the starless image, whose edges it keeps,
+    but not a sparse layer.
+- Next for spikes: the spike channel's penalty quadratic near zero and
+  weighted up, perhaps with windows with spikes drawn more often.
+
 ## Order of work
 
 1. The clean skies: Gaia fits with the PSF field, and checks that what is
