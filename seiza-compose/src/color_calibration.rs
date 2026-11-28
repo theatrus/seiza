@@ -266,7 +266,7 @@ pub fn apply_color_gains(samples: &mut [f32], gains: [f32; 3], offsets: [f32; 3]
 }
 
 /// Render neutral the pixels a stack's clipped raw samples reached, as
-/// [`crate::LiveStacker::clipped_fraction`] gives them: each pixel's
+/// [`seiza_stacking::LiveStacker::clipped_fraction`] gives them: each pixel's
 /// channels rise toward its brightest channel by a smooth step of its
 /// clipped fraction, from none at [`CLIPPED_FADE`]'s first fraction to all
 /// the way at its second. A clipped sample records only that the sky was at

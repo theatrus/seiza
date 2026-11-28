@@ -10,13 +10,12 @@
 use rayon::ThreadPoolBuilder;
 use seiza_fits::HeaderValue;
 use seiza_stacking::{
-    BatchStackOptions, CalibrationMasters, CfaIntegration, ColorOptions, Continue,
-    DarkLevelScreening, DrizzleOptions, FitsFrame, FrameWeighting, ImpulseFilterOptions,
-    Interpolation, LinearImage, LiveStacker, MasterBuildOptions, MasterFrameKind,
-    NormalizationMode, PipelineOptions, RegistrationModel, RejectionMode, SimilarityTransform,
-    StackOptions, StackSnapshot, build_master_from_fits_with_scratch, combine_rgb, frame_noise,
-    integrate_registered_frames, measure_depth, reference_score, resample_to_reference,
-    suppress_impulses,
+    BatchStackOptions, CalibrationMasters, CfaIntegration, Continue, DarkLevelScreening,
+    DrizzleOptions, FitsFrame, FrameWeighting, ImpulseFilterOptions, Interpolation, LinearImage,
+    LiveStacker, MasterBuildOptions, MasterFrameKind, NormalizationMode, PipelineOptions,
+    RegistrationModel, RejectionMode, SimilarityTransform, StackOptions, StackSnapshot,
+    build_master_from_fits_with_scratch, frame_noise, integrate_registered_frames, measure_depth,
+    reference_score, resample_to_reference, suppress_impulses,
 };
 use std::path::{Path, PathBuf};
 
@@ -428,8 +427,9 @@ fn run(pool: &rayon::ThreadPool, inputs: &Inputs) -> Vec<(&'static str, Vec<u32>
     });
     results.push(("single frame", single));
 
-    // Registered frames integrated as a batch, and composed into colour.
-    let (batch_bits, colour) = pool.install(|| {
+    // Registered frames integrated as a batch, and one resampled. Composing
+    // into color is seiza-compose's, and its tests hold it to the pool.
+    let (batch_bits, resampled) = pool.install(|| {
         let frames = lights
             .iter()
             .map(|path| FitsFrame::open(path).unwrap().image)
@@ -442,15 +442,10 @@ fn run(pool: &rayon::ThreadPool, inputs: &Inputs) -> Vec<(&'static str, Vec<u32>
         let shifted =
             resample_to_reference(&frames[1], WIDTH, HEIGHT, SimilarityTransform::IDENTITY)
                 .unwrap();
-        let colour =
-            combine_rgb(&frames[0], &shifted, &frames[2], &ColorOptions::default()).unwrap();
-        (
-            snapshot_bits(&integrated.snapshot),
-            bits(&colour.image.data),
-        )
+        (snapshot_bits(&integrated.snapshot), bits(&shifted.data))
     });
     results.push(("batch", batch_bits));
-    results.push(("colour", colour));
+    results.push(("resampled", resampled));
     results
 }
 

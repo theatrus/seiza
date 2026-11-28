@@ -25,24 +25,27 @@ use seiza::downloads::{CachePolicy, CatalogManager, CatalogSet, Dataset, Downloa
 use seiza::field_objects::{FieldObject, FieldObjects, FieldOutline};
 use seiza::prior::SolveSource;
 use seiza_background::{BackgroundConfig, BackgroundFit, CorrectionMode, fit_background_masked};
+use seiza_compose::{
+    ChannelCoverage, ChannelSamples, ColorComposition, ColorCrop, ColorNormalization, ColorOptions,
+    CropReport, ForaxxOptions, LrgbLuminance, NarrowbandMatrix, NarrowbandMix, NarrowbandPalette,
+    RgbLuminance, combine_lrgb, combine_narrowband, combine_narrowband_matrix, combine_rgb,
+    combine_super_lrgb, combine_super_rgb, crop_report, write_color_fits_f32,
+};
 use seiza_deconvolution::{DeconvolutionConfig, deconvolve, deconvolve_masked};
 use seiza_fits::{FitsImage, HeaderValue, RgbImage16, Statistics, StretchParams};
 use seiza_stacking::{
-    CancelSignal, ChannelCoverage, ChannelSamples, ColorComposition, ColorCrop, ColorNormalization,
-    ColorOptions, CropReport, DarkLevelScreening, ExternalParameterKind, ExternalParameterValue,
+    CancelSignal, DarkLevelScreening, ExternalParameterKind, ExternalParameterValue,
     ExternalToolRequest, ExternalToolSchema, FitsFrame, FlatStarMaskingOptions,
-    FlatStarMaskingStatistics, ForaxxOptions, FrameAcceptanceCriteria, FrameDiagnostics,
-    FrameDisposition, FrameInputMode, FrameSourceRole, ImpulseFilterOptions, LinearImage,
-    LiveStacker, LrgbLuminance, MasterBuildOptions, MasterDark, MasterFrame, MasterFrameKind,
-    MasterRejectionOptions, MlDenoiseLocalSupport, MlDenoiseModel, MlDenoiseOptions,
-    MlDenoisePrecision, NarrowbandMatrix, NarrowbandMix, NarrowbandPalette, PixInsight, RcAstroCli,
-    ReferenceRegion, RegisteredFrameMapping, RgbLuminance,
+    FlatStarMaskingStatistics, FrameAcceptanceCriteria, FrameDiagnostics, FrameDisposition,
+    FrameInputMode, FrameSourceRole, ImpulseFilterOptions, LinearImage, LiveStacker,
+    MasterBuildOptions, MasterDark, MasterFrame, MasterFrameKind, MasterRejectionOptions,
+    MlDenoiseLocalSupport, MlDenoiseModel, MlDenoiseOptions, MlDenoisePrecision, PixInsight,
+    RcAstroCli, ReferenceRegion, RegisteredFrameMapping,
     StackExportSnapshot as RustStackExportSnapshot, StackOptions,
     StackSnapshot as RustStackSnapshot, build_master_from_fits,
-    build_master_from_fits_with_scratch, checkpoint_depths as rust_checkpoint_depths, combine_lrgb,
-    combine_narrowband, combine_narrowband_matrix, combine_rgb, combine_super_lrgb,
-    combine_super_rgb, crop_report, path_identity, paths_refer_to_same_file, write_color_fits_f32,
-    write_fits_f32, write_master_fits_f32, write_stack_export_fits_f32,
+    build_master_from_fits_with_scratch, checkpoint_depths as rust_checkpoint_depths,
+    path_identity, paths_refer_to_same_file, write_fits_f32, write_master_fits_f32,
+    write_stack_export_fits_f32,
 };
 use seiza_stretch::{
     ImageShape, ResolvedSampleDomain, SampleDomain, StretchAnalysis, StretchConfig, StretchPlan,
@@ -1664,6 +1667,17 @@ pub extern "C" fn seiza_stacking_output_version() -> *const c_char {
     static_c_string(&TEXT, seiza_stacking::OUTPUT_VERSION)
 }
 
+/// The `seiza-compose` crate version, not the Seiza release, whose color
+/// composition, color calibration, narrowband balance and star layer output
+/// this library reproduces. Key cached color pictures on it as well as on
+/// `seiza_stacking_output_version`; it moves only when that output changes.
+/// The string is static and is never freed.
+#[unsafe(no_mangle)]
+pub extern "C" fn seiza_compose_output_version() -> *const c_char {
+    static TEXT: OnceLock<CString> = OnceLock::new();
+    static_c_string(&TEXT, seiza_compose::OUTPUT_VERSION)
+}
+
 /// The `seiza-stretch` crate version, not the Seiza release, whose stretch
 /// output this library reproduces. Key cached stretched images on it; it
 /// moves only when that output changes.
@@ -2396,8 +2410,8 @@ pub unsafe extern "C" fn seiza_color_balance_narrowband_json(
         } else {
             parse_request(options_json, "narrowband balance")?
         };
-        let defaults = seiza_stacking::NarrowbandBalanceOptions::default();
-        let options = seiza_stacking::NarrowbandBalanceOptions {
+        let defaults = seiza_compose::NarrowbandBalanceOptions::default();
+        let options = seiza_compose::NarrowbandBalanceOptions {
             has_sii: options.has_sii.unwrap_or(defaults.has_sii),
             shadow_protection: options
                 .shadow_protection
@@ -2410,8 +2424,8 @@ pub unsafe extern "C" fn seiza_color_balance_narrowband_json(
         let samples = unsafe { required_f32_slice_mut(data, length, "narrowband image")? };
         let mut image = LinearImage::new(width, height, channels, samples.to_vec())
             .map_err(color_request_error)?;
-        let report = seiza_stacking::balance_narrowband(&mut image, &options)
-            .map_err(color_request_error)?;
+        let report =
+            seiza_compose::balance_narrowband(&mut image, &options).map_err(color_request_error)?;
         let result = owned_json(&report)?;
         samples.copy_from_slice(&image.data);
         Ok(result)
@@ -2457,7 +2471,7 @@ pub unsafe extern "C" fn seiza_color_screen_rgb_stars(
         let samples = unsafe { required_f32_slice_mut(nebula, length, "starless nebula")? };
         let mut image =
             LinearImage::new(width, height, 3, samples.to_vec()).map_err(color_request_error)?;
-        seiza_stacking::screen_rgb_stars(&mut image, &original, &starless)
+        seiza_compose::screen_rgb_stars(&mut image, &original, &starless)
             .map_err(color_request_error)?;
         samples.copy_from_slice(&image.data);
         Ok(())
@@ -2502,7 +2516,7 @@ pub unsafe extern "C" fn seiza_color_screen_rgb_stars_reduced(
         let samples = unsafe { required_f32_slice_mut(nebula, length, "starless nebula")? };
         let mut image =
             LinearImage::new(width, height, 3, samples.to_vec()).map_err(color_request_error)?;
-        seiza_stacking::screen_rgb_stars_reduced(&mut image, &original, &starless, reduction)
+        seiza_compose::screen_rgb_stars_reduced(&mut image, &original, &starless, reduction)
             .map_err(color_request_error)?;
         samples.copy_from_slice(&image.data);
         Ok(())
@@ -2546,7 +2560,7 @@ pub unsafe extern "C" fn seiza_color_stretch_rgb_stars(
             unsafe { required_f32_slice(starless, length, "linear starless RGB")? }.to_vec(),
         )
         .map_err(color_request_error)?;
-        let image = seiza_stacking::stretch_rgb_stars(&original, &starless, amount)
+        let image = seiza_compose::stretch_rgb_stars(&original, &starless, amount)
             .map_err(color_request_error)?;
         unsafe { required_f32_slice_mut(output, length, "display stars output")? }
             .copy_from_slice(&image.data);
@@ -2584,7 +2598,7 @@ pub unsafe extern "C" fn seiza_color_screen_rgb_star_layer(
         let samples = unsafe { required_f32_slice_mut(nebula, length, "display nebula")? };
         let mut image =
             LinearImage::new(width, height, 3, samples.to_vec()).map_err(color_request_error)?;
-        seiza_stacking::screen_rgb_star_layer(&mut image, &stars, reduction)
+        seiza_compose::screen_rgb_star_layer(&mut image, &stars, reduction)
             .map_err(color_request_error)?;
         samples.copy_from_slice(&image.data);
         Ok(())
@@ -3019,8 +3033,8 @@ struct ColorCalibrationJson {
 }
 
 impl GaiaSourceJson {
-    fn source(&self) -> seiza_stacking::GaiaColorSource {
-        seiza_stacking::GaiaColorSource {
+    fn source(&self) -> seiza_compose::GaiaColorSource {
+        seiza_compose::GaiaColorSource {
             ra: self.ra,
             dec: self.dec,
             pmra: self.pmra,
@@ -3044,9 +3058,9 @@ impl ColorCalibrationOptionsJson {
             .map_err(|error| format!("invalid colour calibration options: {error}"))
     }
 
-    fn calibration_options(&self) -> seiza_stacking::ColorCalibrationOptions {
-        let defaults = seiza_stacking::ColorCalibrationOptions::default();
-        seiza_stacking::ColorCalibrationOptions {
+    fn calibration_options(&self) -> seiza_compose::ColorCalibrationOptions {
+        let defaults = seiza_compose::ColorCalibrationOptions::default();
+        seiza_compose::ColorCalibrationOptions {
             white_bp_rp: self.white_bp_rp.unwrap_or(defaults.white_bp_rp),
             fit_bp_rp_range: self
                 .fit_bp_rp_range
@@ -3065,8 +3079,8 @@ impl ColorCalibrationOptionsJson {
 }
 
 impl ColorCalibrationJson {
-    fn new(calibration: &seiza_stacking::ColorCalibration) -> Self {
-        let fit = |fit: &seiza_stacking::ColorFit| ColorFitJson {
+    fn new(calibration: &seiza_compose::ColorCalibration) -> Self {
+        let fit = |fit: &seiza_compose::ColorFit| ColorFitJson {
             intercept: fit.intercept,
             slope: fit.slope,
             scatter: fit.scatter,
@@ -3108,7 +3122,7 @@ struct ColorCalibrationOutcomeJson {
     schema_version: u32,
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<seiza_stacking::ColorCalibrationSkipReason>,
+    reason: Option<seiza_compose::ColorCalibrationSkipReason>,
     #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3116,16 +3130,16 @@ struct ColorCalibrationOutcomeJson {
 }
 
 impl ColorCalibrationOutcomeJson {
-    fn new(outcome: &seiza_stacking::ColorCalibrationOutcome) -> Self {
+    fn new(outcome: &seiza_compose::ColorCalibrationOutcome) -> Self {
         match outcome {
-            seiza_stacking::ColorCalibrationOutcome::Calibrated(calibration) => Self {
+            seiza_compose::ColorCalibrationOutcome::Calibrated(calibration) => Self {
                 schema_version: 1,
                 status: "calibrated",
                 reason: None,
                 detail: None,
                 calibration: Some(ColorCalibrationJson::new(calibration)),
             },
-            seiza_stacking::ColorCalibrationOutcome::Skipped(skip) => Self {
+            seiza_compose::ColorCalibrationOutcome::Skipped(skip) => Self {
                 schema_version: 1,
                 status: "skipped",
                 reason: Some(skip.reason),
@@ -3166,7 +3180,7 @@ struct AffineTransformJson {
 /// come from.
 struct GaiaColorInputs {
     wcs: Option<seiza::Wcs>,
-    sources: Option<Vec<seiza_stacking::GaiaColorSource>>,
+    sources: Option<Vec<seiza_compose::GaiaColorSource>>,
     catalog_path: Option<PathBuf>,
     options: ColorCalibrationOptionsJson,
 }
@@ -3202,13 +3216,13 @@ impl GaiaColorInputs {
         })
     }
 
-    fn gaia(&self) -> seiza_stacking::GaiaColors<'_> {
+    fn gaia(&self) -> seiza_compose::GaiaColors<'_> {
         match &self.sources {
-            Some(sources) => seiza_stacking::GaiaColors::Sources {
+            Some(sources) => seiza_compose::GaiaColors::Sources {
                 sources,
                 epoch: self.options.observation_epoch,
             },
-            None => seiza_stacking::GaiaColors::CatalogPath(self.catalog_path.as_deref()),
+            None => seiza_compose::GaiaColors::CatalogPath(self.catalog_path.as_deref()),
         }
     }
 }
@@ -3392,7 +3406,7 @@ pub unsafe extern "C" fn seiza_color_calibrate_json(
                 .map_err(|error| format!("Gaia sources must be a JSON array: {error}"))?;
         let options = ColorCalibrationOptionsJson::parse(options_json)?;
         let sources = gaia.iter().map(GaiaSourceJson::source).collect::<Vec<_>>();
-        let stars = seiza_stacking::place_gaia_sources(
+        let stars = seiza_compose::place_gaia_sources(
             &wcs,
             width,
             height,
@@ -3400,7 +3414,7 @@ pub unsafe extern "C" fn seiza_color_calibrate_json(
             &sources,
         );
         let calibration =
-            seiza_stacking::calibrate_color(&image, &stars, &options.calibration_options())
+            seiza_compose::calibrate_color(&image, &stars, &options.calibration_options())
                 .map_err(|error| error.to_string())?;
         owned_json(&ColorCalibrationJson::new(&calibration))
     })
@@ -3432,7 +3446,7 @@ pub unsafe extern "C" fn seiza_color_calibration_apply(
         let gains = unsafe { gains.cast::<[f32; 3]>().read_unaligned() };
         let offsets = unsafe { offsets.cast::<[f32; 3]>().read_unaligned() };
         let data = unsafe { std::slice::from_raw_parts_mut(data, length) };
-        seiza_stacking::apply_color_gains(data, gains, offsets).map_err(|error| error.to_string())
+        seiza_compose::apply_color_gains(data, gains, offsets).map_err(|error| error.to_string())
     })
     .is_some()
 }
@@ -3468,7 +3482,7 @@ pub unsafe extern "C" fn seiza_color_neutralize_clipped(
         let (samples, mut image) = unsafe { rgb_image_from_ffi(data, length, width, height)? };
         let clipped = unsafe { clipped_map_from_ffi(clipped, clipped_width, clipped_height)? }
             .ok_or("a clipped map is required")?;
-        seiza_stacking::neutralize_clipped(&mut image, &clipped)
+        seiza_compose::neutralize_clipped(&mut image, &clipped)
             .map_err(|error| error.to_string())?;
         samples.copy_from_slice(&image.data);
         Ok(())
@@ -3546,7 +3560,7 @@ pub unsafe extern "C" fn seiza_color_calibrate_image_json(
     ffi_result(error_out, || {
         let (samples, mut image) = unsafe { rgb_image_from_ffi(data, length, width, height)? };
         let inputs = GaiaColorInputs::parse(wcs_json, gaia_json, catalog_path, options_json)?;
-        let outcome = seiza_stacking::calibrate_color_image(
+        let outcome = seiza_compose::calibrate_color_image(
             &mut image,
             inputs.wcs.as_ref(),
             inputs.gaia(),
@@ -3645,7 +3659,7 @@ pub unsafe extern "C" fn seiza_color_calibrate_and_stretch_clipped_json(
         let stretch: StretchConfigRequest =
             serde_json::from_str(&required_str(stretch_json, "stretch")?)
                 .map_err(|error| format!("invalid stretch: {error}"))?;
-        let result = seiza_stacking::calibrate_and_stretch(
+        let result = seiza_compose::calibrate_and_stretch(
             image,
             inputs.wcs.as_ref(),
             inputs.gaia(),
@@ -3699,7 +3713,7 @@ pub unsafe extern "C" fn seiza_wcs_transform_json(
         let transform: AffineTransformJson =
             serde_json::from_str(&required_str(transform_json, "transform")?)
                 .map_err(|error| format!("invalid transform: {error}"))?;
-        let wcs = seiza_stacking::transform_wcs(
+        let wcs = seiza_compose::transform_wcs(
             &request.wcs()?,
             seiza_stacking::AffineTransform {
                 matrix: transform.matrix,
@@ -11128,6 +11142,10 @@ mod tests {
         assert_eq!(
             read(seiza_stretch_output_version()),
             seiza_stretch::OUTPUT_VERSION
+        );
+        assert_eq!(
+            read(seiza_compose_output_version()),
+            seiza_compose::OUTPUT_VERSION
         );
         assert_eq!(
             seiza_external_exchange_version(),

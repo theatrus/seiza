@@ -26,8 +26,13 @@
 //! them. [`save`] writes them top-down with a `ROWORDER` card saying so,
 //! which PixInsight and Siril follow.
 
+#[cfg(feature = "avif")]
+mod hdr_avif;
 mod master;
 pub mod raster;
+
+#[cfg(feature = "avif")]
+pub use hdr_avif::{HdrAvifOptions, SDR_WHITE_NITS, pq_encode, save_hdr_avif};
 
 pub use master::{MasterInfo, Recorded, master_info, read_master_info};
 
@@ -856,6 +861,20 @@ pub fn save_f32(
     pixels: F32ImageData<'_>,
     options: &SaveOptions<'_>,
 ) -> Result<(), Error> {
+    save_f32_with_profile(path, width, height, pixels, options, None)
+}
+
+/// [`save_f32`], with an ICC profile embedded in a PNG or TIFF to name the
+/// color space its samples are in. FITS and XISF files are written without
+/// one.
+pub fn save_f32_with_profile(
+    path: &Path,
+    width: usize,
+    height: usize,
+    pixels: F32ImageData<'_>,
+    options: &SaveOptions<'_>,
+    profile: Option<&[u8]>,
+) -> Result<(), Error> {
     let samples = match pixels {
         F32ImageData::Mono(samples)
         | F32ImageData::RgbInterleaved(samples)
@@ -911,7 +930,10 @@ pub fn save_f32(
                     )
                 }
             };
-            save_raster(path, &image, format.raster().expect("a raster format"))
+            match profile {
+                None => save_raster(path, &image, format.raster().expect("a raster format")),
+                Some(profile) => save_raster_with_profile(path, &image, format, profile),
+            }
         }
         Format::Fits => {
             let mut headers = options.headers.to_vec();
@@ -1020,6 +1042,85 @@ pub fn save_display(path: &Path, image: &DynamicImage) -> Result<(), Error> {
 // Keep the destination intact until encoding, flushing and syncing all succeed.
 fn save_raster(path: &Path, image: &DynamicImage, format: ImageFormat) -> Result<(), Error> {
     write_raster_atomic(path, |writer| image.write_to(writer, format))
+}
+
+/// Writes red, green and blue to a TIFF at `path` as 32-bit floats, as they
+/// are: not clamped, so an HDR picture's values above 1 are kept, with
+/// `profile` embedded when there is one. Planar samples are interleaved on
+/// the way. A gray image is refused: a float TIFF here holds color.
+/// Written atomically.
+pub fn save_float_tiff(
+    path: &Path,
+    width: usize,
+    height: usize,
+    pixels: F32ImageData<'_>,
+    profile: Option<&[u8]>,
+) -> Result<(), Error> {
+    let samples: Vec<f32> = match pixels {
+        F32ImageData::Mono(_) => {
+            return Err(Error::save(path, "a float TIFF holds red, green and blue"));
+        }
+        F32ImageData::RgbInterleaved(samples) => samples.to_vec(),
+        F32ImageData::RgbPlanar(samples) => {
+            let plane = samples.len() / 3;
+            (0..plane)
+                .flat_map(|index| {
+                    [
+                        samples[index],
+                        samples[plane + index],
+                        samples[2 * plane + index],
+                    ]
+                })
+                .collect()
+        }
+    };
+    check_size(width, height, 3, samples.len()).map_err(|message| Error::save(path, message))?;
+    let (width, height) = (
+        u32::try_from(width).map_err(|_| Error::save(path, "it is too wide"))?,
+        u32::try_from(height).map_err(|_| Error::save(path, "it is too tall"))?,
+    );
+    let image = DynamicImage::ImageRgb32F(
+        Rgb32FImage::from_raw(width, height, samples).expect("checked size"),
+    );
+    match profile {
+        Some(profile) => save_raster_with_profile(path, &image, Format::Tiff, profile),
+        None => save_raster(path, &image, ImageFormat::Tiff),
+    }
+}
+
+/// A PNG or TIFF with `profile` embedded.
+fn save_raster_with_profile(
+    path: &Path,
+    image: &DynamicImage,
+    format: Format,
+    profile: &[u8],
+) -> Result<(), Error> {
+    use image::ImageEncoder;
+    write_raster_atomic(path, |writer| {
+        let unsupported =
+            |error: image::error::UnsupportedError| image::ImageError::Unsupported(error);
+        if format == Format::Png {
+            let mut encoder = image::codecs::png::PngEncoder::new(writer);
+            encoder
+                .set_icc_profile(profile.to_vec())
+                .map_err(unsupported)?;
+            image.write_with_encoder(encoder)
+        } else {
+            let mut encoder = image::codecs::tiff::TiffEncoder::new(writer);
+            encoder
+                .set_icc_profile(profile.to_vec())
+                .map_err(unsupported)?;
+            image.write_with_encoder(encoder)
+        }
+    })
+}
+
+/// Writes `bytes` to `path` atomically.
+#[cfg_attr(not(feature = "avif"), allow(dead_code))]
+fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<(), Error> {
+    write_raster_atomic(path, |writer| {
+        std::io::Write::write_all(writer, bytes).map_err(image::ImageError::IoError)
+    })
 }
 
 fn write_raster_atomic(
@@ -2011,5 +2112,88 @@ mod tests {
         let error = open_astronomy(&directory.path().join("image.png")).unwrap_err();
         assert!(error.to_string().contains("not a FITS or XISF"), "{error}");
         assert_eq!(error.path(), directory.path().join("image.png"));
+    }
+
+    /// The bytes of field `tag` in a little-endian TIFF's first directory,
+    /// for a field of bytes stored beyond the entry.
+    fn tiff_field(bytes: &[u8], tag: u16) -> Option<Vec<u8>> {
+        let u16_at = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]);
+        let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+        assert_eq!(&bytes[..2], b"II");
+        let directory = u32_at(4);
+        (0..u16_at(directory) as usize).find_map(|entry| {
+            let at = directory + 2 + 12 * entry;
+            (u16_at(at) == tag).then(|| {
+                let (count, offset) = (u32_at(at + 4), u32_at(at + 8));
+                bytes[offset..offset + count].to_vec()
+            })
+        })
+    }
+
+    #[test]
+    fn a_png_or_tiff_carries_the_profile_it_is_given() {
+        use image::ImageDecoder;
+        let folder = tempfile::tempdir().unwrap();
+        // Any bytes: the writer embeds the profile; it does not read it.
+        let profile: Vec<u8> = (0..=255).collect();
+        let rgb = [0.1_f32, 0.5, 0.9, 0.2, 0.4, 0.6];
+        for name in ["picture.png", "picture.tif"] {
+            let path = folder.path().join(name);
+            save_f32_with_profile(
+                &path,
+                2,
+                1,
+                F32ImageData::RgbInterleaved(&rgb),
+                &SaveOptions::default(),
+                Some(&profile),
+            )
+            .unwrap();
+            let embedded = if name.ends_with(".png") {
+                image::ImageReader::open(&path)
+                    .unwrap()
+                    .with_guessed_format()
+                    .unwrap()
+                    .into_decoder()
+                    .unwrap()
+                    .icc_profile()
+                    .unwrap()
+            } else {
+                // The TIFF decoder does not give the profile back; read the
+                // first directory's ICC field (34675) directly.
+                tiff_field(&std::fs::read(&path).unwrap(), 34675)
+            };
+            assert_eq!(embedded, Some(profile.clone()), "{name}");
+            // The samples are the same as without a profile.
+            assert!(
+                (open(&path).unwrap().samples[1] - 0.5).abs() < 1e-4,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_float_tiff_keeps_its_samples_above_one() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("picture.tif");
+        // Values a 16-bit TIFF would round or clip: a fine step and HDR.
+        let rgb = [0.25_f32, 0.250_001, 3.5, 0.0, 1.0, 12.75];
+        save_float_tiff(&path, 2, 1, F32ImageData::RgbInterleaved(&rgb), None).unwrap();
+        let read = image::open(&path).unwrap().into_rgb32f();
+        assert_eq!(read.as_raw().as_slice(), &rgb[..]);
+        // With a profile, the profile is in the file's ICC field.
+        let profile: Vec<u8> = (0..64).collect();
+        save_float_tiff(
+            &path,
+            2,
+            1,
+            F32ImageData::RgbInterleaved(&rgb),
+            Some(&profile),
+        )
+        .unwrap();
+        assert_eq!(
+            tiff_field(&std::fs::read(&path).unwrap(), 34675),
+            Some(profile)
+        );
+        assert!(save_float_tiff(&path, 2, 1, F32ImageData::Mono(&rgb[..2]), None).is_err());
     }
 }

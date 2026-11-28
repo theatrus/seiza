@@ -2470,6 +2470,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "seiza-compose"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "half",
+ "pollster",
+ "rayon",
+ "seiza",
+ "seiza-fits",
+ "seiza-imgproc",
+ "seiza-stacking",
+ "seiza-stats",
+ "seiza-stretch",
+ "serde",
+ "wgpu",
+]
+
+[[package]]
 name = "seiza-core"
 version = "0.3.0"
 
@@ -2617,6 +2635,7 @@ dependencies = [
  "seiza-analysis",
  "seiza-background",
  "seiza-calibration",
+ "seiza-compose",
  "seiza-deconvolution",
  "seiza-fits",
  "seiza-image-io",

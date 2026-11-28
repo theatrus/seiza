@@ -5,13 +5,24 @@
 //! The large layer takes the global curve; detail keeps the curve's change
 //! across it, with more gain where the curve flattens on bright structure.
 //! Star cores can be compressed on their own, and colour follows luminance.
+//!
+//! The HDR layered stretch, [`LayeredHdrParams`], adds two steps for a
+//! picture shown above SDR white. Before the curve, bright structure's
+//! large-scale range is compressed in the log of luminance while its detail
+//! is kept, as PixInsight's HDR multiscale transform does; luminance carries
+//! one gain to every channel, so colour is kept. Above a knee the curve then
+//! continues into the headroom, reaching its top at the image's brightest
+//! large-scale luminance. The brightest object, such as a planetary
+//! nebula's core, keeps its structure, and the sky and faint halo are as
+//! the plain layered stretch makes them.
 
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    HDR_MAX_EXTRA_SLOPE, ImageShape, LUMA_BLUE, LUMA_GREEN, LUMA_RED, MedianAnchorParams,
-    ResolvedMedianAnchor, Result, RobustStatistics, StretchError, compress_highlights,
+    HDR_MAX_EXTRA_SLOPE, HdrTail, HdrTailParams, ImageShape, LUMA_BLUE, LUMA_GREEN, LUMA_RED,
+    MedianAnchorParams, ResolvedCurve, ResolvedMedianAnchor, Result, RobustStatistics,
+    StretchError, compress_highlights,
 };
 
 /// Parameters for the layered stretch.
@@ -43,6 +54,11 @@ pub struct LayeredParams {
     /// How much of the background's slope detail on bright structure keeps,
     /// in `[0, 1]` (default 0).
     pub contrast_recovery: f64,
+    /// The stretched level, from 0 to 0.5, that becomes black, with the
+    /// range above it stretched to fill again up to the brightest value
+    /// (default 0, none). Sky a background model could not flatten, such
+    /// as faint blobs left in narrowband, goes to black with it.
+    pub sky_floor: f64,
     /// Saturation lift, in `[0, 1]` (default 0).
     pub saturation_amount: f64,
     /// How much the lift favours weakly coloured pixels, in `[0, 1]`
@@ -61,6 +77,7 @@ impl Default for LayeredParams {
             dynamic_range_compression: 0.0,
             scale_separation: 256,
             contrast_recovery: 0.0,
+            sky_floor: 0.0,
             saturation_amount: 0.0,
             saturation_boost: 0.5,
             lightness_mask: true,
@@ -68,12 +85,100 @@ impl Default for LayeredParams {
     }
 }
 
+/// What the HDR layered stretch adds to the layered stretch: how far above
+/// SDR white it reaches, and how bright structure's range is compressed.
+///
+/// With `z` luminance above the background median in robust sigmas, the
+/// gain on `z` is `exp(−core_compression · w · softplus((B − ln(T + 3)) / w))`,
+/// where `B` is a blur of `core_scale` pixels of `ln(z + 3)`, `T` is
+/// `core_threshold` and `w` is half a natural-log unit. Structure smaller than
+/// the blur keeps its contrast. The curve's output above `knee` continues
+/// on the extended sRGB curve as [`HdrTail`] does, reaching 2 to the
+/// `headroom` times SDR white's light at the image's brightest luminance
+/// after the compression, blurred by a pixel.
+///
+/// In JSON every field may be left out and takes its default.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LayeredHdr {
+    /// How far above SDR white the brightest structure reaches, in stops,
+    /// from 0 through 4 (default 2). At 0 the curve rolls off to white.
+    pub headroom: f64,
+    /// The curve's output where it starts to continue into the headroom,
+    /// from 0.3 through 0.95 (default 0.75).
+    pub knee: f64,
+    /// How much of bright structure's large-scale range in the log of
+    /// luminance is taken out, in `[0, 1]` (default 0.7). 0 compresses
+    /// nothing.
+    pub core_compression: f64,
+    /// Where compression starts, in robust sigmas of luminance above the
+    /// background (default 100).
+    pub core_threshold: f64,
+    /// The size of the large-scale structure that is compressed, as a blur
+    /// in pixels, from 1 through 256 (default 12). About a third of the
+    /// bright object's radius.
+    pub core_scale: f64,
+}
+
+impl Default for LayeredHdr {
+    fn default() -> Self {
+        Self {
+            headroom: 2.0,
+            knee: 0.75,
+            core_compression: 0.7,
+            core_threshold: 100.0,
+            core_scale: 12.0,
+        }
+    }
+}
+
+/// Parameters for the HDR layered stretch: the layered stretch's, and what
+/// HDR adds. The layered stretch's dynamic range compression of star cores
+/// is not used: the core compression takes its place.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LayeredHdrParams {
+    #[serde(flatten)]
+    pub layered: LayeredParams,
+    #[serde(flatten)]
+    pub hdr: LayeredHdr,
+}
+
+/// The floor under `z` in the log, in robust sigmas, so noise near the
+/// background has no log to speak of.
+pub const CORE_FLOOR: f64 = 3.0;
+
+/// The log a core compression blurs: `value` above the background `median`
+/// in `noise` sigmas, with [`CORE_FLOOR`] under it.
+pub(crate) fn core_log(value: f64, median: f64, noise: f64) -> f64 {
+    ((value - median).max(0.0) / noise.max(1.0e-9) + CORE_FLOOR).ln()
+}
+
+/// The gain a core compression puts on a value above the background where
+/// its blurred log is `base`: `exp(−amount · w · softplus((base − ln(T +
+/// floor)) / w))` with `T` the `threshold` in sigmas and `w`
+/// [`CORE_KNEE_WIDTH`].
+pub(crate) fn core_gain(base: f64, amount: f64, threshold: f64) -> f64 {
+    let over = (base - (threshold + CORE_FLOOR).ln()) / CORE_KNEE_WIDTH;
+    let soft = if over > 20.0 {
+        CORE_KNEE_WIDTH * over
+    } else {
+        CORE_KNEE_WIDTH * over.exp().ln_1p()
+    };
+    (-amount * soft).exp()
+}
+/// The width of the compression's knee, in natural-log units.
+pub const CORE_KNEE_WIDTH: f64 = 0.5;
+/// The most of the white's curve value the HDR tail's knee may be, so the
+/// tail has room to rise to the top of the headroom.
+const KNEE_BELOW_WHITE: f64 = 0.8;
+
 /// The most contrast recovery multiplies detail by.
-const MAX_DETAIL_GAIN: f64 = 4.0;
+pub const MAX_DETAIL_GAIN: f64 = 4.0;
 /// Blur sigma in pixels of the fine layer that finds star cores.
 const FINE_SIGMA: f64 = 2.0;
 /// Knee of the highlight curve the compression pulls toward.
-const DRC_KNEE: f64 = 0.5;
+pub const DRC_KNEE: f64 = 0.5;
 /// Below this, a pixel's rescaled luminance is too dark to carry colour.
 const COLOUR_EPSILON: f64 = 1.0e-6;
 
@@ -88,6 +193,9 @@ pub struct ResolvedLayered {
     pub median: f64,
     /// Robust luminance noise, from the lower half of the samples.
     pub noise: f64,
+    /// What the HDR layered stretch adds, or none for the layered stretch.
+    #[serde(default)]
+    pub hdr: Option<LayeredHdr>,
 }
 
 impl ResolvedLayered {
@@ -95,8 +203,12 @@ impl ResolvedLayered {
         statistics: RobustStatistics,
         noise: f64,
         params: LayeredParams,
+        hdr: Option<LayeredHdr>,
     ) -> Result<Self> {
         validate(params)?;
+        if let Some(hdr) = hdr {
+            validate_hdr(hdr)?;
+        }
         let curve = ResolvedMedianAnchor::new(
             statistics,
             noise,
@@ -114,11 +226,13 @@ impl ResolvedLayered {
             curve,
             median: statistics.median,
             noise,
+            hdr,
         })
     }
 
     pub(crate) fn is_valid(&self) -> bool {
         validate(self.params).is_ok()
+            && self.hdr.is_none_or(|hdr| validate_hdr(hdr).is_ok())
             && self.curve.is_valid()
             && self.median.is_finite()
             && self.noise.is_finite()
@@ -127,7 +241,7 @@ impl ResolvedLayered {
 
     /// The global curve's slope `S'(x)`, from its rational form. Outside the
     /// black point and 1, the slope at the nearer end.
-    fn slope(&self, value: f64) -> f64 {
+    pub fn slope(&self, value: f64) -> f64 {
         let black = f64::from(self.curve.black);
         let rescaled = ((value - black) / (1.0 - black)).clamp(0.0, 1.0);
         let (m, t) = (self.curve.median, self.curve.target);
@@ -153,6 +267,7 @@ fn validate(params: LayeredParams) -> Result<()> {
             "dynamic range compression",
         ),
         (params.contrast_recovery, "contrast recovery"),
+        (params.sky_floor * 2.0, "twice the sky floor"),
         (params.saturation_amount, "saturation amount"),
         (params.saturation_boost, "saturation boost"),
     ] {
@@ -170,6 +285,344 @@ fn validate(params: LayeredParams) -> Result<()> {
     Ok(())
 }
 
+fn validate_hdr(hdr: LayeredHdr) -> Result<()> {
+    let within =
+        |value: f64, low: f64, high: f64| value.is_finite() && (low..=high).contains(&value);
+    if !within(hdr.headroom, 0.0, 4.0) {
+        return Err(StretchError::Invalid(
+            "headroom must be from 0 through 4 stops".into(),
+        ));
+    }
+    if !within(hdr.knee, 0.3, 0.95) {
+        return Err(StretchError::Invalid(
+            "the knee must be from 0.3 through 0.95".into(),
+        ));
+    }
+    if !within(hdr.core_compression, 0.0, 1.0) {
+        return Err(StretchError::Invalid(
+            "core compression must be between 0 and 1".into(),
+        ));
+    }
+    if !(hdr.core_threshold.is_finite() && hdr.core_threshold > 0.0) {
+        return Err(StretchError::Invalid(
+            "the core threshold must be above 0".into(),
+        ));
+    }
+    if !within(hdr.core_scale, 1.0, 256.0) {
+        return Err(StretchError::Invalid(
+            "the core scale must be from 1 through 256 pixels".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// How many times smaller than the image the layered stretch's large-scale
+/// maps are along each side. The structure they hold is smooth, so a
+/// quarter of the resolution keeps it, and a host can measure the maps of a
+/// whole image fast enough to follow a slider.
+pub const MAP_REDUCTION: usize = 4;
+
+/// The large-scale structure a layered stretch reads, measured once from the
+/// whole image at [`MAP_REDUCTION`] times less resolution: what makes the
+/// stretch depend on more than each pixel. Each map pixel stands for the
+/// mean of a square of image pixels; between them a reader interpolates.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LayeredMaps {
+    /// The maps' width and height in map pixels.
+    pub width: usize,
+    pub height: usize,
+    /// For the HDR layered stretch's core compression: the blurred log of
+    /// luminance above the background, in noise sigmas. Empty when the
+    /// stretch compresses nothing.
+    pub core: Vec<f32>,
+    /// For contrast recovery: the large-scale layer of luminance, after the
+    /// core compression. Empty without contrast recovery.
+    pub large: Vec<f32>,
+    /// The brightest large-scale luminance after the core compression: the
+    /// HDR tail's white. 0 for the plain layered stretch.
+    pub white: f32,
+}
+
+/// A layered stretch's maps at one image pixel: the core compression's base
+/// and the large-scale layer, each `None` where the stretch has no such map.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MapSample {
+    pub core: Option<f32>,
+    pub large: Option<f32>,
+}
+
+impl LayeredMaps {
+    /// The maps at image pixel `(x, y)`, interpolated between the centres
+    /// of the map pixels around it.
+    pub fn sample(&self, x: usize, y: usize) -> MapSample {
+        let at = |plane: &[f32]| {
+            (!plane.is_empty()).then(|| bilinear(plane, self.width, self.height, x, y))
+        };
+        MapSample {
+            core: at(&self.core),
+            large: at(&self.large),
+        }
+    }
+}
+
+/// Luminance with every `MAP_REDUCTION` square of pixels averaged, its
+/// finite samples only; a square with none is NaN. Returns the reduced
+/// width and height too.
+pub fn reduce_luminance(
+    luminance: &[f32],
+    width: usize,
+    height: usize,
+) -> (Vec<f32>, usize, usize) {
+    let (reduced_width, reduced_height) = (
+        width.div_ceil(MAP_REDUCTION),
+        height.div_ceil(MAP_REDUCTION),
+    );
+    let reduced = (0..reduced_width * reduced_height)
+        .into_par_iter()
+        .map(|at| {
+            let (column, row) = (at % reduced_width, at / reduced_width);
+            let (mut sum, mut count) = (0.0_f64, 0_u32);
+            for y in row * MAP_REDUCTION..((row + 1) * MAP_REDUCTION).min(height) {
+                for x in column * MAP_REDUCTION..((column + 1) * MAP_REDUCTION).min(width) {
+                    let value = luminance[y * width + x];
+                    if value.is_finite() {
+                        sum += f64::from(value);
+                        count += 1;
+                    }
+                }
+            }
+            if count == 0 {
+                f32::NAN
+            } else {
+                (sum / f64::from(count)) as f32
+            }
+        })
+        .collect();
+    (reduced, reduced_width, reduced_height)
+}
+
+/// `plane`, `width` by `height` map pixels, at image pixel `(x, y)`: each
+/// map pixel's centre is at the middle of the square it averages. A NaN
+/// neighbour has no weight.
+fn bilinear(plane: &[f32], width: usize, height: usize, x: usize, y: usize) -> f32 {
+    let scale = MAP_REDUCTION as f64;
+    let fx = ((x as f64 + 0.5) / scale - 0.5).clamp(0.0, (width - 1) as f64);
+    let fy = ((y as f64 + 0.5) / scale - 0.5).clamp(0.0, (height - 1) as f64);
+    let (x0, y0) = (fx.floor() as usize, fy.floor() as usize);
+    let (x1, y1) = ((x0 + 1).min(width - 1), (y0 + 1).min(height - 1));
+    let (tx, ty) = (fx - x0 as f64, fy - y0 as f64);
+    let (mut sum, mut weight) = (0.0, 0.0);
+    for (px, py, w) in [
+        (x0, y0, (1.0 - tx) * (1.0 - ty)),
+        (x1, y0, tx * (1.0 - ty)),
+        (x0, y1, (1.0 - tx) * ty),
+        (x1, y1, tx * ty),
+    ] {
+        let value = plane[py * width + px];
+        if value.is_finite() && w > 0.0 {
+            sum += f64::from(value) * w;
+            weight += w;
+        }
+    }
+    if weight > 0.0 {
+        (sum / weight) as f32
+    } else {
+        f32::NAN
+    }
+}
+
+impl ResolvedLayered {
+    /// The stretch's maps, measured from `reduced`: luminance averaged by
+    /// [`reduce_luminance`], `width` by `height` map pixels.
+    pub fn measure(&self, reduced: &[f32], width: usize, height: usize) -> LayeredMaps {
+        let scale = MAP_REDUCTION as f64;
+        let compressing = self.hdr.filter(|hdr| hdr.core_compression > 0.0);
+        let core = match compressing {
+            Some(hdr) => {
+                let logs: Vec<f32> = reduced
+                    .par_iter()
+                    .map(|&value| {
+                        if value.is_finite() {
+                            self.core_log(f64::from(value)) as f32
+                        } else {
+                            f32::NAN
+                        }
+                    })
+                    .collect();
+                blur(&logs, width, height, (hdr.core_scale / scale).max(0.25))
+            }
+            None => Vec::new(),
+        };
+        let compressed: Vec<f32> = if core.is_empty() {
+            reduced.to_vec()
+        } else {
+            reduced
+                .par_iter()
+                .zip(&core)
+                .map(|(&value, &base)| self.compress(value, Some(base)))
+                .collect()
+        };
+        let white = if self.hdr.is_some() {
+            compressed
+                .iter()
+                .copied()
+                .filter(|value| value.is_finite())
+                .fold(0.0_f32, f32::max)
+        } else {
+            0.0
+        };
+        let large = if self.params.contrast_recovery > 0.0 {
+            blur(
+                &compressed,
+                width,
+                height,
+                (f64::from(self.params.scale_separation) / 4.0 / scale).max(0.25),
+            )
+        } else {
+            Vec::new()
+        };
+        LayeredMaps {
+            width,
+            height,
+            core,
+            large,
+            white,
+        }
+    }
+
+    /// The log the core compression blurs: luminance above the background
+    /// in noise sigmas, with a floor.
+    pub fn core_log(&self, value: f64) -> f64 {
+        core_log(value, self.median, self.noise)
+    }
+
+    /// `value` with bright structure's range compressed, given the core
+    /// compression's base at its pixel; as it is without one.
+    pub fn compress(&self, value: f32, base: Option<f32>) -> f32 {
+        let (Some(hdr), Some(base)) = (self.hdr, base) else {
+            return value;
+        };
+        if !value.is_finite() || !base.is_finite() || hdr.core_compression <= 0.0 {
+            return value;
+        }
+        let gain = core_gain(f64::from(base), hdr.core_compression, hdr.core_threshold);
+        (self.median + (f64::from(value) - self.median) * gain) as f32
+    }
+
+    /// The HDR tail the stretch continues its curve with, for the white its
+    /// maps found; none for the plain layered stretch. When the curve gives
+    /// the white less than the knee, as after strong core compression, the
+    /// knee comes down below it, so the brightest structure still reaches
+    /// the top of the headroom.
+    pub fn tail(&self, maps: &LayeredMaps) -> Option<HdrTail> {
+        let hdr = self.hdr?;
+        let curve = ResolvedCurve::MedianAnchor(self.curve);
+        let at_white = f64::from(curve.map(maps.white));
+        let knee = hdr.knee.min(KNEE_BELOW_WHITE * at_white);
+        HdrTail::resolve(
+            curve,
+            HdrTailParams {
+                knee,
+                headroom: hdr.headroom,
+                white: f64::from(maps.white),
+                ..HdrTailParams::default()
+            },
+        )
+    }
+
+    /// The brightest value the stretch gives: the tail's peak, or 1.
+    pub fn peak(&self, tail: Option<&HdrTail>) -> f32 {
+        tail.map_or(1.0, HdrTail::peak)
+    }
+
+    /// Whether the stretch compresses star cores: the plain layered stretch
+    /// with an amount above 0. The HDR one compresses bright cores instead.
+    pub fn compresses_star_cores(&self) -> bool {
+        self.params.dynamic_range_compression > 0.0 && self.hdr.is_none()
+    }
+
+    /// `stretched`, a pixel's stretched luminance, with its star core
+    /// compressed: pulled toward a soft-knee highlight curve as far as the
+    /// pixel's luminance `value` stands above `fine`, its blur by
+    /// [`fine_luminance`], in noise sigmas.
+    pub fn star_cores(&self, stretched: f64, value: f32, fine: f32) -> f64 {
+        if !self.compresses_star_cores() || !value.is_finite() || !fine.is_finite() {
+            return stretched;
+        }
+        let noise = self.noise.max(1.0e-6);
+        let detail = f64::from(value) - f64::from(fine);
+        let mask = smoothstep(((detail - 3.0 * noise) / (12.0 * noise)).clamp(0.0, 1.0));
+        let end_slope = STAR_CORE_END_SLOPE;
+        stretched
+            + self.params.dynamic_range_compression
+                * mask
+                * (compress_highlights(stretched, DRC_KNEE, end_slope) - stretched)
+    }
+
+    /// One colour channel of a pixel whose luminance is `luminance` and
+    /// whose stretched luminance is `stretched`: the channel's `sample`,
+    /// less the black point, scaled as the luminance was, within `peak`.
+    /// The whole-image stretch also brings a pixel whose brightest channel
+    /// passes the peak back by that channel; one channel alone is held at
+    /// the peak.
+    pub fn colour_channel(&self, sample: f32, luminance: f32, stretched: f64, peak: f64) -> f64 {
+        let black = f64::from(self.curve.black);
+        let rescale = |value: f32| ((f64::from(value) - black) / (1.0 - black)).max(0.0);
+        let base = rescale(luminance);
+        if !base.is_finite() || base <= COLOUR_EPSILON {
+            return stretched.clamp(0.0, peak);
+        }
+        let ratio = 1.0 + (rescale(sample) - base) / base.max(self.colour_floor());
+        (ratio.max(0.0) * stretched).clamp(0.0, peak)
+    }
+
+    /// `stretched` with the sky floor taken to black and the range above it
+    /// stretched to reach `peak` again: `(stretched − floor) · peak / (peak −
+    /// floor)`, never below 0. Without a floor it is `stretched`.
+    pub fn sky_floor(&self, stretched: f64, peak: f64) -> f64 {
+        let floor = self.params.sky_floor.clamp(0.0, 0.5);
+        if floor <= 0.0 || peak <= floor {
+            return stretched;
+        }
+        ((stretched - floor) * peak / (peak - floor)).max(0.0)
+    }
+
+    /// The least a pixel's luminance above the black point divides a
+    /// channel's difference from it by, when its colour follows the stretch:
+    /// one noise sigma. Below it a pixel is mostly noise, and dividing by
+    /// less would turn the noise of the darkest sky into bright specks. A
+    /// grey pixel keeps the stretched luminance in every channel.
+    pub fn colour_floor(&self) -> f64 {
+        self.noise / (1.0 - f64::from(self.curve.black))
+    }
+
+    /// The stretched luminance of one pixel whose luminance is `value` and
+    /// whose maps are `at`, before star-core compression and colour: the
+    /// core compressed, the curve (with `tail` above its knee), and the
+    /// detail around the large-scale layer kept.
+    pub fn stretch_luminance(&self, value: f32, at: MapSample, tail: Option<&HdrTail>) -> f64 {
+        let curve = |value: f32| match tail {
+            Some(tail) => f64::from(tail.map(ResolvedCurve::MedianAnchor(self.curve), value)),
+            None => self.curve.map(f64::from(value)),
+        };
+        let read = self.compress(value, at.core);
+        match at.large.filter(|large| large.is_finite()) {
+            Some(large) if self.params.contrast_recovery > 0.0 => {
+                // Detail darker than its surroundings takes the slope at its
+                // own level, so background beside bright structure is not
+                // pushed toward black.
+                let level = f64::from(large.min(read));
+                let gain = (self.slope(self.median) / self.slope(level))
+                    .powf(self.params.contrast_recovery / 2.0)
+                    .min(MAX_DETAIL_GAIN);
+                let base = curve(large);
+                base + (curve(read) - base) * gain
+            }
+            _ => curve(read),
+        }
+    }
+}
+
 /// Run the layered stretch over a mono or RGB image, already checked
 /// against `shape`. Non-finite samples come out 0.
 pub(crate) fn apply(layered: &ResolvedLayered, data: &[f32], shape: ImageShape) -> Vec<f32> {
@@ -180,64 +633,45 @@ pub(crate) fn apply(layered: &ResolvedLayered, data: &[f32], shape: ImageShape) 
     } = shape;
     let luminance = luminance(data, channels);
     let params = layered.params;
-    let curve = |value: f32| layered.curve.map(f64::from(value));
+    // The large-scale structure, measured at a quarter of the resolution,
+    // as a host measures it for an interactive canvas.
+    let (reduced, reduced_width, reduced_height) = reduce_luminance(&luminance, width, height);
+    let maps = layered.measure(&reduced, reduced_width, reduced_height);
+    let tail = layered.tail(&maps);
+    let peak = f64::from(layered.peak(tail.as_ref()));
+    let mut stretched: Vec<f64> = luminance
+        .par_iter()
+        .enumerate()
+        .map(|(at, &value)| {
+            if value.is_finite() {
+                layered.stretch_luminance(value, maps.sample(at % width, at / width), tail.as_ref())
+            } else {
+                0.0
+            }
+        })
+        .collect();
 
-    let mut stretched = if params.contrast_recovery == 0.0 {
-        luminance
-            .par_iter()
-            .map(|&value| if value.is_finite() { curve(value) } else { 0.0 })
-            .collect::<Vec<_>>()
-    } else {
-        let large = blur(
-            &luminance,
-            width,
-            height,
-            f64::from(params.scale_separation) / 4.0,
-        );
-        let half = params.contrast_recovery / 2.0;
-        let background_slope = layered.slope(layered.median);
-        luminance
-            .par_iter()
-            .zip(&large)
-            .map(|(&value, &base)| {
-                if !value.is_finite() {
-                    return 0.0;
-                }
-                // Detail darker than its surroundings takes the slope at its
-                // own level, so background beside bright structure is not
-                // pushed toward black.
-                let level = f64::from(base.min(value));
-                let gain = (background_slope / layered.slope(level))
-                    .powf(half)
-                    .min(MAX_DETAIL_GAIN);
-                let base_value = curve(base);
-                base_value + (curve(value) - base_value) * gain
-            })
-            .collect()
-    };
-
-    if params.dynamic_range_compression > 0.0 {
-        let fine = blur(&luminance, width, height, FINE_SIGMA);
-        let noise = layered.noise.max(1.0e-6);
-        let end_slope = 1.0 + HDR_MAX_EXTRA_SLOPE;
-        let amount = params.dynamic_range_compression;
+    if layered.compresses_star_cores() {
+        let fine = fine_luminance(&luminance, width, height);
         stretched
             .par_iter_mut()
             .zip(luminance.par_iter().zip(&fine))
             .for_each(|(out, (&value, &smooth))| {
-                if !value.is_finite() {
-                    return;
+                if value.is_finite() {
+                    *out = layered.star_cores(*out, value, smooth);
                 }
-                let detail = f64::from(value) - f64::from(smooth);
-                let mask = smoothstep(((detail - 3.0 * noise) / (12.0 * noise)).clamp(0.0, 1.0));
-                *out += amount * mask * (compress_highlights(*out, DRC_KNEE, end_slope) - *out);
             });
+    }
+    if layered.params.sky_floor > 0.0 {
+        stretched
+            .par_iter_mut()
+            .for_each(|out| *out = layered.sky_floor(*out, peak));
     }
 
     if channels == 1 {
         return stretched
             .into_par_iter()
-            .map(|value| value.clamp(0.0, 1.0) as f32)
+            .map(|value| value.clamp(0.0, peak) as f32)
             .collect();
     }
 
@@ -259,12 +693,19 @@ pub(crate) fn apply(layered: &ResolvedLayered, data: &[f32], shape: ImageShape) 
                 if !luma.is_finite() {
                     continue;
                 }
-                let mut rgb = colour(pixel, luma, value.clamp(0.0, 1.0), black);
+                let mut rgb = colour(
+                    pixel,
+                    luma,
+                    value.clamp(0.0, peak),
+                    black,
+                    peak,
+                    layered.colour_floor(),
+                );
                 if params.saturation_amount > 0.0 {
                     saturate(&mut rgb, params);
                 }
                 for (output, value) in output.iter_mut().zip(rgb) {
-                    *output = value.clamp(0.0, 1.0) as f32;
+                    *output = value.clamp(0.0, peak) as f32;
                 }
             }
         });
@@ -293,26 +734,35 @@ fn luminance(data: &[f32], channels: usize) -> Vec<f32> {
         .collect()
 }
 
+/// The slope at 1 of the highlight curve star cores are pulled toward.
+pub const STAR_CORE_END_SLOPE: f64 = 1.0 + HDR_MAX_EXTRA_SLOPE;
+
+/// Luminance blurred by the star-core compression's fine scale: what
+/// [`ResolvedLayered::star_cores`] measures a pixel's detail against. A
+/// host that draws the layered stretch measures it once per image.
+pub fn fine_luminance(luminance: &[f32], width: usize, height: usize) -> Vec<f32> {
+    blur(luminance, width, height, FINE_SIGMA)
+}
+
 /// Give a pixel the stretched luminance `value`: its RGB, less the black
 /// point, scaled by one factor so its luminance does the same, and brought
-/// back in gamut by its largest channel.
-fn colour(pixel: &[f32], luma: f32, value: f64, black: f64) -> [f64; 3] {
+/// back within `peak` by its largest channel.
+fn colour(pixel: &[f32], luma: f32, value: f64, black: f64, peak: f64, floor: f64) -> [f64; 3] {
     let span = 1.0 - black;
     let rescale = |sample: f32| ((f64::from(sample) - black) / span).max(0.0);
     let base = rescale(luma);
     if base <= COLOUR_EPSILON {
         return [value; 3];
     }
-    let scale = value / base;
-    let mut rgb = [
-        rescale(pixel[0]) * scale,
-        rescale(pixel[1]) * scale,
-        rescale(pixel[2]) * scale,
-    ];
+    // Each channel's difference from the luminance, over at least one
+    // noise sigma, so the darkest sky's noise does not become specks.
+    let divisor = base.max(floor);
+    let mut rgb = [pixel[0], pixel[1], pixel[2]]
+        .map(|sample| (1.0 + (rescale(sample) - base) / divisor).max(0.0) * value);
     let maximum = rgb[0].max(rgb[1]).max(rgb[2]);
-    if maximum > 1.0 {
+    if maximum > peak {
         for channel in &mut rgb {
-            *channel /= maximum;
+            *channel *= peak / maximum;
         }
     }
     rgb
@@ -330,7 +780,7 @@ fn saturate(rgb: &mut [f64; 3], params: LayeredParams) {
     let saturation = (value - minimum) / value;
     let mut amount = params.saturation_amount;
     if params.lightness_mask {
-        amount *= value;
+        amount *= value.min(1.0);
     }
     let exponent = 2.0 * (1.0 - params.saturation_boost);
     let lifted = (saturation + amount * (1.0 - saturation) * saturation.powf(exponent)).min(1.0);
@@ -375,7 +825,7 @@ fn box_radii(sigma: f64) -> [usize; 3] {
 /// then along columns, each a running sum, so the cost does not grow with
 /// the radius. Non-finite samples and the space past the edges carry no
 /// weight; the result is divided by the weight that remains.
-fn blur(values: &[f32], width: usize, height: usize, sigma: f64) -> Vec<f32> {
+pub(crate) fn blur(values: &[f32], width: usize, height: usize, sigma: f64) -> Vec<f32> {
     let radii = box_radii(sigma);
     let any_missing = values.par_iter().any(|value| !value.is_finite());
     let filled = values
@@ -492,6 +942,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_sky_floor_goes_to_black_and_the_peak_stays_the_peak() {
+        let finite: Vec<f32> = (0..4096).map(|i| 0.01 + (i % 97) as f32 * 1e-4).collect();
+        let plan = crate::StretchConfig {
+            model: crate::StretchModel::Layered(LayeredParams {
+                sky_floor: 0.1,
+                ..LayeredParams::default()
+            }),
+            color_strategy: crate::ColorStrategy::Linked,
+            max_analysis_samples: 10_000,
+        }
+        .resolve_for(&finite, 1)
+        .unwrap();
+        let ResolvedCurve::Layered(layered) = plan.curves()[0] else {
+            panic!("not a layered curve");
+        };
+        assert_eq!(layered.sky_floor(0.05, 1.0), 0.0);
+        assert_eq!(layered.sky_floor(0.1, 1.0), 0.0);
+        assert!((layered.sky_floor(1.0, 1.0) - 1.0).abs() < 1e-12);
+        assert!((layered.sky_floor(1.8, 1.8) - 1.8).abs() < 1e-12);
+        assert!((layered.sky_floor(0.55, 1.0) - 0.5).abs() < 1e-12);
+        // No floor leaves the stretch as it was.
+        let mut plain = layered;
+        plain.params.sky_floor = 0.0;
+        assert_eq!(plain.sky_floor(0.05, 1.0), 0.05);
+        // A floor past half the range is refused.
+        let config = crate::StretchConfig {
+            model: crate::StretchModel::Layered(LayeredParams {
+                sky_floor: 0.6,
+                ..LayeredParams::default()
+            }),
+            color_strategy: crate::ColorStrategy::Linked,
+            max_analysis_samples: 10_000,
+        };
+        assert!(config.resolve_for(&finite, 1).is_err());
+    }
+
+    #[test]
     fn box_radii_approximate_the_requested_gaussian() {
         for sigma in [2.0, 8.0, 64.0, 256.0] {
             let variance = box_radii(sigma)
@@ -549,7 +1036,8 @@ mod tests {
             mad: 0.004,
             count: 1000,
         };
-        let layered = ResolvedLayered::new(statistics, 0.006, LayeredParams::default()).unwrap();
+        let layered =
+            ResolvedLayered::new(statistics, 0.006, LayeredParams::default(), None).unwrap();
         for x in [0.04, 0.05, 0.1, 0.3, 0.7, 0.95] {
             let step = 1.0e-6;
             let numeric =

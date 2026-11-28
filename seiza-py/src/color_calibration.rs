@@ -4,7 +4,7 @@ use numpy::{PyArrayDyn, PyReadonlyArrayDyn};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use seiza_stacking::{
+use seiza_compose::{
     ColorCalibration, ColorCalibrationOptions, ColorCalibrationOutcome, ColorFit, GaiaColorSource,
     GaiaColors, SOLAR_BP_RP, calibrate_and_stretch as rust_calibrate_and_stretch,
     calibrate_color as rust_calibrate_color, calibrate_color_image as rust_calibrate_color_image,
@@ -633,7 +633,7 @@ fn neutralize_clipped<'py>(
 ) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
     let mut image = linear_image(image)?;
     let clipped = linear_image(clipped)?;
-    py.detach(|| seiza_stacking::neutralize_clipped(&mut image, &clipped))
+    py.detach(|| seiza_compose::neutralize_clipped(&mut image, &clipped))
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
     image_array(py, &image)
 }

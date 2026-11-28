@@ -260,18 +260,18 @@ core = "seiza-stacking::ChannelMatch"
 core = "seiza-stacking::SnrSample"
 
 [rust.ChannelCoverageResponse]
-core = "seiza-stacking::ChannelCoverage"
+core = "seiza-compose::ChannelCoverage"
 
 [rust.CropReportResponse]
-core = "seiza-stacking::CropReport"
+core = "seiza-compose::CropReport"
 grid_width = { c = "grid" }
 grid_height = { c = "grid" }
 
 [rust.NarrowbandMatrixRequest]
-core = "seiza-stacking::NarrowbandMatrix"
+core = "seiza-compose::NarrowbandMatrix"
 
 [rust.NarrowbandMixRequest]
-core = "seiza-stacking::NarrowbandMix"
+core = "seiza-compose::NarrowbandMix"
 
 [rust.ExpandedLensResponse]
 core = "seiza-stacking::ExpandedLens"
@@ -280,16 +280,16 @@ core = "seiza-stacking::ExpandedLens"
 core = "seiza-stacking::PoolPipelineMemory"
 
 [rust.ColorFitJson]
-core = "seiza-stacking::ColorFit"
+core = "seiza-compose::ColorFit"
 
 [rust.ColorCalibrationJson]
-core = "seiza-stacking::ColorCalibration"
+core = "seiza-compose::ColorCalibration"
 
 [rust.ColorStarMeasurementJson]
-core = "seiza-stacking::ColorStarMeasurement"
+core = "seiza-compose::ColorStarMeasurement"
 
 [rust.ColorCalibrationOptionsJson]
-core = "seiza-stacking::ColorCalibrationOptions"
+core = "seiza-compose::ColorCalibrationOptions"
 
 [rust.GaiaSourceJson]
 core = "seiza-sources::GaiaPhotometry"
@@ -444,6 +444,7 @@ core = "seiza-satellites::PixelSegment"
 "seiza-stacking::calibration_files::verify_sources" = { none = "source verification reached through the C calibration-files workflow and Python CalibrationFiles.verify" }
 "seiza-stacking::FileCalibration::*" = { none = "native coordinator methods are reached through seiza_calibration_files_json and bound directly by Python CalibrationFiles" }
 
+"seiza-compose::cross_erosion" = { none = "the erosion step of screen_rgb_stars_reduced, which C and Python reach through their reduced RGB star exports; public for Rust hosts that reduce stars on a canvas" }
 "seiza-stacking::measure_flat_stability" = { none = "C and Python offer both file and cached-image measurement; this native hybrid accepts a loaded master and streams file sources through the same algorithm" }
 objects = [
     "seiza-download::OnnxRuntimeInstaller",
@@ -454,7 +455,7 @@ objects = [
     "seiza-parallax::Parallax",
     "seiza-stacking::LiveStacker",
     "seiza-background::BackgroundFit",
-    "seiza-stacking::ColorCalibration",
+    "seiza-compose::ColorCalibration",
     "seiza-pipeline::PartialStack",
     "seiza-pipeline::SessionStep",
     "seiza-stars::PsfField",
@@ -585,6 +586,10 @@ objects = [
 "seiza-image-io::save" = { none = "the C ABI writes images through seiza-parallax and seiza-stacking, which write through seiza-image-io" }
 "seiza-image-io::save_display" = { none = "the C ABI writes images through seiza-parallax and seiza-stacking, which write through seiza-image-io" }
 "seiza-image-io::save_f32" = { none = "the C ABI writes images through seiza-parallax and seiza-stacking, which write through seiza-image-io" }
+"seiza-image-io::save_f32_with_profile" = { none = "the C ABI writes images through seiza-parallax and seiza-stacking, which write through seiza-image-io; a host that embeds a profile is a Rust host" }
+"seiza-image-io::save_float_tiff" = { none = "the C ABI writes images through seiza-parallax and seiza-stacking, which write through seiza-image-io; a host that exports float color is a Rust host" }
+"seiza-image-io::save_hdr_avif" = { none = "the C ABI writes images through seiza-parallax and seiza-stacking, which write through seiza-image-io; HDR pictures come from the compositor, which Rust hosts drive" }
+"seiza-image-io::pq_encode" = { none = "the C ABI writes images through seiza-parallax and seiza-stacking, which write through seiza-image-io; HDR pictures come from the compositor, which Rust hosts drive" }
 "seiza-image-io::save_images" = { none = "multi-image files hold distributed stacking's partial stacks, which hosts will write through the pipeline's own calls" }
 "seiza-image-io::read_astronomy_named" = { none = "multi-image files hold distributed stacking's partial stacks, which hosts will read through the pipeline's own calls" }
 "seiza-image-io::read_named_header" = { none = "multi-image files hold distributed stacking's partial stacks, which hosts will read through the pipeline's own calls" }
@@ -603,8 +608,22 @@ objects = [
 "seiza-parallax::parse_label" = { none = "the CLI's text form of a label; the C ABI takes labels as JSON" }
 "seiza-parallax::parse_frame_size" = { none = "the C ABI reads sizes through parse_frame_size_or_shape" }
 
+# compose
+"seiza-compose::ColorCalibration::apply" = { none = "C hosts keep only the gains and offsets, so seiza_color_calibration_apply calls apply_color_gains, which apply uses, on the caller's buffer" }
+"seiza-compose::covered_region" = { none = "crop_report gives the region and more; the C ABI calls crop_report" }
+"seiza-compose::render::render" = { none = "the hosts that build pictures of their own, PSF Guard and PSF Studio, are Rust hosts; C and Python hosts reach the compositor through the combine_* exports, which build their pictures in the core. A picture-level C and Python API waits for a host that needs one" }
+"seiza-compose::gpu::render_gpu" = { none = "the hosts that build pictures of their own, PSF Guard and PSF Studio, are Rust hosts; C and Python hosts reach the compositor through the combine_* exports, which build their pictures in the core. A picture-level C and Python API waits for a host that needs one" }
+"seiza-compose::render::paint_mask" = { none = "a painted mask belongs to a picture, which only Rust hosts build; C and Python hosts reach the compositor through the combine_* exports" }
+"seiza-compose::tone::neighborhoods" = { none = "a step of the compositor's Tone, which C and Python hosts reach as the compositor itself: through the Rust hosts that build pictures" }
+"seiza-stretch::rgb_luminance" = { none = "the luminance weights an interactive host combines red, green and blue with to give the layered stretch a guide; C and Python callers stretch an RGB image whole, which weighs the channels itself" }
+"seiza-stretch::fine_luminance" = { none = "the star-core blur an interactive host measures once per image for the layered stretch; C and Python callers run the layered stretch whole through the stretch functions, which blur it themselves" }
+"seiza-stretch::reduce_luminance" = { none = "the first step of measuring a layered stretch's maps for an interactive host; C and Python callers run the layered stretch whole through the stretch functions, which measure the maps themselves" }
+"seiza-stretch::extended_srgb_encode" = { none = "the curve Tone's HDR values are on, for Rust hosts that present and save them; C and Python hosts reach Tone only through the compositor, which Rust hosts drive" }
+"seiza-stretch::extended_srgb_decode" = { none = "the inverse of extended_srgb_encode, for Rust hosts that present and save HDR values; C and Python hosts reach Tone only through the compositor, which Rust hosts drive" }
+"seiza-compose::space::within_gamut" = { none = "the gamut step of WorkingSpace::map_to_display, which Rust hosts use to present a picture; C and Python hosts reach color spaces only through the compositor, which Rust hosts drive" }
+"seiza-compose::tone::luminance_noise" = { none = "the measurement a host gives Tone for Texture; C and Python hosts reach Tone only through the compositor, which Rust hosts drive" }
+
 # stacking
-"seiza-stacking::ColorCalibration::apply" = { none = "C hosts keep only the gains and offsets, so seiza_color_calibration_apply calls apply_color_gains, which apply uses, on the caller's buffer" }
 "seiza-stacking::LiveStacker::effective_maximum_drift_pixels" = { none = "part of registration" }
 "seiza-stacking::LiveStacker::with_expanding_reference" = { none = "the C ABI opens from paths (open_fits_expanding)" }
 "seiza-stacking::LiveStacker::open_fits_with_reference_image" = { none = "the C ABI's call uses open_fits_with_reference_image_candidates, with one candidate" }
@@ -619,7 +638,6 @@ objects = [
 "seiza-stacking::drizzle_reference_headers" = { none = "the C drizzle result carries its reference headers already" }
 "seiza-stacking::rescaled_reference_headers" = { none = "binned stacks and full-resolution reintegrations carry their reference headers already rescaled" }
 "seiza-stacking::integrate_registered_frames" = { none = "integrate_registered_frames_banded, which both bindings call, falls back to it when the system temporary directory cannot hold the frames" }
-"seiza-stacking::covered_region" = { none = "crop_report gives the region and more; the C ABI calls crop_report" }
 "seiza-stacking::reference_score" = { none = "choose_reference scores each frame; the C ABI calls choose_reference" }
 "seiza-stacking::resample_to_reference" = { none = "a registration building block the stacker uses" }
 "seiza-stacking::resample_to_reference_affine" = { none = "a registration building block the stacker uses" }
@@ -1045,6 +1063,7 @@ seiza_cancel_signal_free = { none = "frees a C handle; Python's garbage collecto
 seiza_string_free = { none = "frees a string the C ABI returned; Python manages its own memory" }
 seiza_core_version = "__version__"
 seiza_stacking_output_version = "STACKING_OUTPUT_VERSION"
+seiza_compose_output_version = "COMPOSE_OUTPUT_VERSION"
 seiza_stretch_output_version = "STRETCH_OUTPUT_VERSION"
 seiza_external_exchange_version = "EXTERNAL_EXCHANGE_VERSION"
 

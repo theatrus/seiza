@@ -27,6 +27,7 @@ seiza-parallax = { workspace = true }
 seiza-pipeline = { workspace = true }
 seiza-satellites.workspace = true
 seiza-xisf = { workspace = true }
+seiza-compose.workspace = true
 seiza-stacking = { workspace = true, features = ["schema"] }
 schemars.workspace = true
 seiza-sources = { workspace = true }

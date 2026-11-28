@@ -14,8 +14,14 @@ categories = ["science", "multimedia::images"]
 [features]
 # EXIF JPEG fixture builders for other crates' tests; not a public API.
 test-support = []
+# HDR AVIF: save_hdr_avif writes PQ, Rec. 2020 pictures through rav1e.
+avif = ["dep:rav1e", "dep:avif-serialize"]
 
 [dependencies]
+# HDR AVIF, with the `avif` feature: rav1e without its assembly, so no
+# assembler is needed to build it.
+rav1e = { version = "0.8", default-features = false, features = ["threading"], optional = true }
+avif-serialize = { version = "0.8", optional = true }
 chrono.workspace = true
 image = { workspace = true, features = ["png", "jpeg", "tiff"] }
 kamadak-exif.workspace = true

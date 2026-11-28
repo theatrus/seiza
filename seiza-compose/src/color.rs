@@ -1,4 +1,8 @@
 use crate::crop::{ChannelSamples, ColorCrop, CropReport, crop_report};
+use crate::picture::{
+    ComputedMask, InputRead, Layer, LayerKind, LuminanceTarget, Picture, Transfer, TransferStage,
+};
+use crate::render::{ImageSource, RenderOptions, render_image};
 use crate::{Error, LinearImage, ReferenceRegion, Result};
 use rayon::prelude::*;
 use seiza_stretch::{ResolvedCurve, StretchConfig, StretchParams};
@@ -362,22 +366,36 @@ pub fn combine_rgb(
         prepare_channel(green, options.normalization, window)?,
         prepare_channel(blue, options.normalization, window)?,
     ];
-    let mut data = vec![0.0; grid.pixel_count() * 3];
-    data.par_chunks_mut(3)
-        .enumerate()
-        .for_each(|(index, output)| {
-            let source = window.source_index(index);
-            if channels.iter().any(|channel| !channel.valid(source)) {
-                output.fill(f32::NAN);
-                return;
-            }
-            output.copy_from_slice(&[
-                channels[0].sample(source),
-                channels[1].sample(source),
-                channels[2].sample(source),
-            ]);
-        });
+    let picture = Picture {
+        layers: primaries(&channels),
+        ..Picture::default()
+    };
+    let data = render_recipe(&picture, &[red, green, blue], window)?;
     grid.compose(data, options.input_transfer)
+}
+
+/// Red, green and blue layers of three prepared channels, inputs 0 to 2,
+/// added.
+fn primaries(channels: &[PreparedChannel<'_>; 3]) -> Vec<Layer> {
+    [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+        .into_iter()
+        .zip(channels)
+        .enumerate()
+        .map(|(input, (color, channel))| {
+            Layer::added(InputRead::new(input, channel.transfer()), color)
+        })
+        .collect()
+}
+
+/// Renders a recipe's picture of `images` over the window: the one
+/// compositor every composition draws through.
+fn render_recipe(
+    picture: &Picture,
+    images: &[&LinearImage],
+    window: ChannelWindow,
+) -> Result<Vec<f32>> {
+    let source = ImageSource::new(images.to_vec())?;
+    Ok(render_image(picture, &source, window.region, &RenderOptions::default())?.data)
 }
 
 /// Combine aligned L, R, G, and B stacks in linear-light RGB.
@@ -487,37 +505,25 @@ fn combine_lrgb_with_target(
         prepare_channel(green, options.normalization, window)?,
         prepare_channel(blue, options.normalization, window)?,
     ];
-    let mut data = vec![0.0; grid.pixel_count() * 3];
-    data.par_chunks_mut(3)
-        .enumerate()
-        .for_each(|(index, output)| {
-            let source = window.source_index(index);
-            if l.as_ref().is_some_and(|l| !l.valid(source))
-                || rgb.iter().any(|channel| !channel.valid(source))
-            {
-                output.fill(f32::NAN);
-                return;
-            }
-            let r = rgb[0].sample(source);
-            let g = rgb[1].sample(source);
-            let b = rgb[2].sample(source);
-            let rgb_luminance = crate::image::rec709_luma(r, g, b);
-            let target_luminance = match (target, &l) {
-                (LrgbTarget::Replace { luminance_weight }, Some(l)) => (1.0 - luminance_weight)
-                    .mul_add(rgb_luminance, luminance_weight * l.sample(source)),
-                (LrgbTarget::Super, Some(l)) => l.sample(source) + r + g + b,
-                (LrgbTarget::SyntheticSum, _) => r + g + b,
-                // The public wrappers always pair an L-consuming target with
-                // a supplied luminance stack.
-                (LrgbTarget::Replace { .. } | LrgbTarget::Super, None) => f32::NAN,
-            };
-            if rgb_luminance > 1.0e-8 && target_luminance.is_finite() {
-                let scale = target_luminance / rgb_luminance;
-                output.copy_from_slice(&[r * scale, g * scale, b * scale]);
-            } else {
-                output.copy_from_slice(&[target_luminance; 3]);
-            }
-        });
+    let mut layers = primaries(&rgb);
+    let (target, weight) = match target {
+        LrgbTarget::Replace { luminance_weight } => (LuminanceTarget::Replace, luminance_weight),
+        LrgbTarget::Super | LrgbTarget::SyntheticSum => (LuminanceTarget::Super, 1.0),
+    };
+    layers.push(Layer {
+        opacity: weight,
+        ..Layer::new(LayerKind::Luminance {
+            read: l.as_ref().map(|l| InputRead::new(3, l.transfer())),
+            target,
+        })
+    });
+    let picture = Picture {
+        layers,
+        ..Picture::default()
+    };
+    let mut images = vec![red, green, blue];
+    images.extend(luminance);
+    let data = render_recipe(&picture, &images, window)?;
     grid.compose(data, options.input_transfer)
 }
 
@@ -553,7 +559,13 @@ pub fn combine_narrowband(
         .transpose()?;
 
     if let Some(matrix) = palette.matrix() {
-        return combine_prepared_matrix(grid, h, o, s, matrix, options.input_transfer);
+        return combine_prepared_matrix(
+            grid,
+            [(ha, h), (oiii, o)],
+            sii.zip(s),
+            matrix,
+            options.input_transfer,
+        );
     }
 
     validate_foraxx_mask_smoothing(foraxx)?;
@@ -574,137 +586,61 @@ pub fn combine_narrowband(
             s.map(|_| ResolvedCurve::Identity),
         ),
     };
-    let uses_o_factor = matches!(palette, NarrowbandPalette::ForaxxSho);
-    let covered = |source: usize| {
-        h.valid(source) && o.valid(source) && s.is_none_or(|channel| channel.valid(source))
+    // Foraxx as a picture: each term of each channel is a display-prepared
+    // input added under its blend factor, a computed mask of those inputs.
+    let display = |input: usize, channel: &PreparedChannel<'_>, curve: ResolvedCurve| {
+        let mut transfer = channel.transfer();
+        transfer.stages.push(TransferStage::Curve(curve));
+        InputRead::new(input, transfer)
     };
-    let smoothed = (foraxx.mask_smoothing > 0.0).then(|| {
-        let region = window.region;
-        let mut green_factors = vec![0.0_f32; grid.pixel_count()];
-        let mut o_factors = vec![0.0_f32; if uses_o_factor { grid.pixel_count() } else { 0 }];
-        let mut weights = vec![0.0_f32; grid.pixel_count()];
-        green_factors
-            .par_iter_mut()
-            .zip(weights.par_iter_mut())
-            .enumerate()
-            .for_each(|(index, (green_factor, weight))| {
-                let source = window.source_index(index);
-                if covered(source) {
-                    let h = h_display.map(h.sample(source));
-                    let o = o_display.map(o.sample(source));
-                    *green_factor = foraxx_green_factor(h, o);
-                    *weight = 1.0;
-                }
-            });
-        o_factors
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(index, o_factor)| {
-                let source = window.source_index(index);
-                if covered(source) {
-                    *o_factor = foraxx_o_factor(o_display.map(o.sample(source)));
-                }
-            });
-        let any_uncovered = weights.par_iter().any(|weight| *weight == 0.0);
-        let blurred_weights = any_uncovered.then(|| {
-            blur_factor_plane(&weights, region.width, region.height, foraxx.mask_smoothing)
-        });
-        // Each plane is a whole image, so free one once its blur exists.
-        drop(weights);
-        let smooth = |factors: Vec<f32>| {
-            if factors.is_empty() {
-                return factors;
-            }
-            let mut blurred =
-                blur_factor_plane(&factors, region.width, region.height, foraxx.mask_smoothing);
-            drop(factors);
-            match &blurred_weights {
-                // Uncovered pixels entered the blur as zero with zero weight,
-                // so dividing by the blurred weights leaves the weighted mean
-                // of the covered neighbours.
-                Some(blurred_weights) => {
-                    blurred
-                        .par_iter_mut()
-                        .zip(blurred_weights)
-                        .for_each(|(factor, weight)| {
-                            *factor = if *weight > 0.0 {
-                                (*factor / *weight).clamp(0.0, 1.0)
-                            } else {
-                                0.0
-                            };
-                        })
-                }
-                None => blurred
-                    .par_iter_mut()
-                    .for_each(|factor| *factor = factor.clamp(0.0, 1.0)),
-            }
-            blurred
-        };
-        (smooth(green_factors), smooth(o_factors))
+    let h_read = display(0, &h, h_display);
+    let o_read = display(1, &o, o_display);
+    let smoothing = foraxx.mask_smoothing;
+    let mut computed = vec![ComputedMask::foraxx(
+        vec![h_read.clone(), o_read.clone()],
+        smoothing,
+    )];
+    let masked = |read: &InputRead, color: [f32; 3], mask: usize| Layer {
+        computed: Some(mask),
+        ..Layer::added(read.clone(), color)
+    };
+    // The green factor's mask, and its inverse for OIII's share.
+    computed.push(ComputedMask {
+        inverted: true,
+        ..computed[0].clone()
     });
-    let mut data = vec![0.0; grid.pixel_count() * 3];
-    data.par_chunks_mut(3)
-        .enumerate()
-        .for_each(|(index, output)| {
-            let source = window.source_index(index);
-            if !covered(source) {
-                output.fill(f32::NAN);
-                return;
-            }
-            let h = h_display.map(h.sample(source));
-            let o = o_display.map(o.sample(source));
-            let green_factor = match &smoothed {
-                Some((green_factors, _)) => green_factors[index],
-                None => foraxx_green_factor(h, o),
-            };
-            let green = green_factor.mul_add(h, (1.0 - green_factor) * o);
-            let red = match palette {
-                NarrowbandPalette::ForaxxHoo => h,
-                NarrowbandPalette::ForaxxSho => {
-                    let o_factor = match &smoothed {
-                        Some((_, o_factors)) => o_factors[index],
-                        None => foraxx_o_factor(o),
-                    };
-                    o_factor.mul_add(
-                        s_display
-                            .expect("SII was validated")
-                            .map(s.expect("SII was validated").sample(source)),
-                        (1.0 - o_factor) * h,
-                    )
-                }
-                _ => unreachable!("static palettes returned above"),
-            };
-            output.copy_from_slice(&[red, green, o]);
-        });
+    // Each channel's terms in the order Foraxx sums them: the share of the
+    // second input, then the factor's share of the first, fused.
+    let mut layers = vec![
+        masked(&o_read, [0.0, 1.0, 0.0], 1),
+        masked(&h_read, [0.0, 1.0, 0.0], 0),
+        Layer::added(o_read.clone(), [0.0, 0.0, 1.0]),
+    ];
+    let mut images = vec![ha, oiii];
+    match palette {
+        NarrowbandPalette::ForaxxHoo => layers.push(Layer::added(h_read.clone(), [1.0, 0.0, 0.0])),
+        NarrowbandPalette::ForaxxSho => {
+            let (sii_image, sii) = sii.zip(s.as_ref()).expect("SII was validated");
+            let s_read = display(2, sii, s_display.expect("SII was validated"));
+            // The red factor is OIII's alone.
+            computed.push(ComputedMask::foraxx(vec![o_read.clone()], smoothing));
+            computed.push(ComputedMask {
+                inverted: true,
+                ..computed[2].clone()
+            });
+            layers.push(masked(&h_read, [1.0, 0.0, 0.0], 3));
+            layers.push(masked(&s_read, [1.0, 0.0, 0.0], 2));
+            images.push(sii_image);
+        }
+        _ => unreachable!("static palettes returned above"),
+    }
+    let picture = Picture {
+        layers,
+        computed,
+        ..Picture::default()
+    };
+    let data = render_recipe(&picture, &images, window)?;
     grid.compose(data, palette.transfer())
-}
-
-/// Foraxx's green blend factor for one pixel of display-referred H-alpha and
-/// OIII.
-fn foraxx_green_factor(h: f32, o: f32) -> f32 {
-    let product = (o * h).clamp(0.0, 1.0);
-    product.powf(1.0 - product)
-}
-
-/// Foraxx-SHO's red blend factor for one pixel of display-referred OIII.
-fn foraxx_o_factor(o: f32) -> f32 {
-    o.powf(1.0 - o)
-}
-
-/// Gaussian blur of one plane of blend factors or of their weights.
-///
-/// The kernel spans four standard deviations each way. Past the edges the
-/// plane is mirrored, so a constant plane stays constant.
-fn blur_factor_plane(plane: &[f32], width: usize, height: usize, sigma: f32) -> Vec<f32> {
-    let sigma = f64::from(sigma);
-    seiza_imgproc::blur::gaussian_blur_f32(
-        plane,
-        width,
-        height,
-        seiza_imgproc::blur::auto_ksize_f32(sigma),
-        sigma,
-        seiza_imgproc::BorderMode::Reflect,
-    )
 }
 
 /// Apply a custom linear narrowband mixing matrix.
@@ -737,40 +673,46 @@ pub fn combine_narrowband_matrix(
     let s = sii
         .map(|image| prepare_channel(image, options.normalization, window))
         .transpose()?;
-    combine_prepared_matrix(grid, h, o, s, matrix, options.input_transfer)
+    combine_prepared_matrix(
+        grid,
+        [(ha, h), (oiii, o)],
+        sii.zip(s),
+        matrix,
+        options.input_transfer,
+    )
 }
 
 fn combine_prepared_matrix(
     grid: CompositionGrid,
-    ha: PreparedChannel<'_>,
-    oiii: PreparedChannel<'_>,
-    sii: Option<PreparedChannel<'_>>,
+    channels: [(&LinearImage, PreparedChannel<'_>); 2],
+    sii: Option<(&LinearImage, PreparedChannel<'_>)>,
     matrix: NarrowbandMatrix,
     transfer: ColorTransfer,
 ) -> Result<ColorComposition> {
     let window = grid.window();
-    let mut data = vec![0.0; grid.pixel_count() * 3];
-    data.par_chunks_mut(3)
-        .enumerate()
-        .for_each(|(index, output)| {
-            let source = window.source_index(index);
-            if !ha.valid(source)
-                || !oiii.valid(source)
-                || sii.is_some_and(|channel| !channel.valid(source))
-            {
-                output.fill(f32::NAN);
-                return;
-            }
-            let h = ha.sample(source);
-            let o = oiii.sample(source);
-            let s = sii.map_or(0.0, |channel| channel.sample(source));
-            for (target, mix) in output
-                .iter_mut()
-                .zip([matrix.red, matrix.green, matrix.blue])
-            {
-                *target = mix.sii.mul_add(s, mix.ha.mul_add(h, mix.oiii * o));
-            }
-        });
+    let [(ha_image, ha), (oiii_image, oiii)] = channels;
+    let column = |weight: fn(&NarrowbandMix) -> f32| {
+        [matrix.red, matrix.green, matrix.blue].map(|mix| weight(&mix))
+    };
+    // OIII, then H-alpha, then SII, added: each a weighted column of the
+    // matrix.
+    let mut layers = vec![
+        Layer::added(InputRead::new(1, oiii.transfer()), column(|mix| mix.oiii)),
+        Layer::added(InputRead::new(0, ha.transfer()), column(|mix| mix.ha)),
+    ];
+    let mut images = vec![ha_image, oiii_image];
+    if let Some((sii_image, sii)) = &sii {
+        layers.push(Layer::added(
+            InputRead::new(2, sii.transfer()),
+            column(|mix| mix.sii),
+        ));
+        images.push(sii_image);
+    }
+    let picture = Picture {
+        layers,
+        ..Picture::default()
+    };
+    let data = render_recipe(&picture, &images, window)?;
     grid.compose(data, transfer)
 }
 
@@ -849,10 +791,6 @@ impl CompositionGrid {
         self.window
     }
 
-    fn pixel_count(&self) -> usize {
-        self.window.pixel_count()
-    }
-
     fn compose(self, data: Vec<f32>, transfer: ColorTransfer) -> Result<ColorComposition> {
         let region = self.window.region;
         Ok(ColorComposition {
@@ -906,6 +844,22 @@ impl PreparedChannel<'_> {
             .filter(|source| self.valid(*source))
             .map(|source| self.sample(source))
             .collect()
+    }
+}
+
+impl PreparedChannel<'_> {
+    /// The channel's normalization as a transfer of its raw samples.
+    fn transfer(&self) -> Transfer {
+        match self.transform {
+            ChannelTransform::Identity => Transfer::identity(),
+            ChannelTransform::Percentile {
+                black,
+                reciprocal_range,
+            } => Transfer::of([TransferStage::Normalize {
+                black,
+                reciprocal_range,
+            }]),
+        }
     }
 }
 
@@ -1270,7 +1224,8 @@ mod tests {
         let result =
             combine_super_rgb(&mono(&[r]), &mono(&[g]), &mono(&[b]), &raw_options()).unwrap();
         let pixel = &result.image.data;
-        let output_luminance = crate::image::rec709_luma(pixel[0], pixel[1], pixel[2]);
+        let output_luminance =
+            crate::space::WorkingSpace::Srgb.luma([pixel[0], pixel[1], pixel[2]]);
         assert!((output_luminance - (r + g + b)).abs() < 1.0e-6);
         assert!((pixel[0] / pixel[1] - r / g).abs() < 1.0e-6);
         assert!((pixel[2] / pixel[1] - b / g).abs() < 1.0e-6);

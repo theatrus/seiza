@@ -262,6 +262,10 @@ enum StretchModelArgs {
         /// keeps, from 0 through 1
         #[arg(long, default_value_t = 0.0)]
         contrast_recovery: f64,
+        /// The stretched level that becomes black, from 0 through 0.5, with
+        /// the range above stretched to fill again
+        #[arg(long, default_value_t = 0.0)]
+        sky_floor: f64,
         /// Saturation lift, from 0 through 1
         #[arg(long, default_value_t = 0.0)]
         saturation_amount: f64,
@@ -361,6 +365,7 @@ impl StretchModelArgs {
                 dynamic_range_compression,
                 scale_separation,
                 contrast_recovery,
+                sky_floor,
                 saturation_amount,
                 saturation_boost,
                 no_lightness_mask,
@@ -370,6 +375,7 @@ impl StretchModelArgs {
                 dynamic_range_compression,
                 scale_separation,
                 contrast_recovery,
+                sky_floor,
                 saturation_amount,
                 saturation_boost,
                 lightness_mask: !no_lightness_mask,
@@ -443,11 +449,12 @@ impl StretchModelArgs {
                 dynamic_range_compression,
                 scale_separation,
                 contrast_recovery,
+                sky_floor,
                 saturation_amount,
                 saturation_boost,
                 no_lightness_mask,
             } => format!(
-                "layered target background {target_background}, aggressiveness {aggressiveness}, dynamic range compression {dynamic_range_compression}, scale separation {scale_separation} px, contrast recovery {contrast_recovery}, saturation {saturation_amount} (boost {saturation_boost}{})",
+                "layered target background {target_background}, aggressiveness {aggressiveness}, dynamic range compression {dynamic_range_compression}, scale separation {scale_separation} px, contrast recovery {contrast_recovery}, sky floor {sky_floor}, saturation {saturation_amount} (boost {saturation_boost}{})",
                 if no_lightness_mask {
                     ", no lightness mask"
                 } else {

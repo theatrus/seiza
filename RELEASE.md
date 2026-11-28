@@ -22,7 +22,7 @@ PyPI**. They are cut from a single "Release `<version>`" PR followed by two tags
   At the time of writing that is `seiza-analysis`, `seiza-background`, `seiza-calibration`,
   `seiza-core`, `seiza-deconvolution`, `seiza-download`, `seiza-draw`, `seiza-fits`,
   `seiza-image-io`, `seiza-image-ser`, `seiza-imgproc`, `seiza-model`, `seiza-parallax`, `seiza-pipeline`,
-  `seiza-satellites`, `seiza-sources`, `seiza-stacking`, `seiza-stars`,
+  `seiza-satellites`, `seiza-sources`, `seiza-stacking`, `seiza-compose`, `seiza-stars`,
   `seiza-stats`, `seiza-stretch`, and `seiza-xisf`. A list written down goes
   stale the first time a crate is added, which is how `seiza-calibration`,
   `seiza-stats`, `seiza-stretch`, `seiza-background` and
@@ -102,12 +102,15 @@ waits for the index):
 seiza-stats  →  seiza-stretch  →  seiza-imgproc  →  seiza-fits  →  seiza-xisf
 →  seiza-image-ser  →  seiza-core  →  seiza-image-io  →  seiza-background
 →  seiza-calibration  →  seiza-sources  →  seiza-download  →  seiza
-→  seiza-satellites  →  seiza-stacking  →  seiza-pipeline  →  seiza-stars
+→  seiza-satellites  →  seiza-stacking  →  seiza-compose  →  seiza-pipeline  →  seiza-stars
 →  seiza-deconvolution  →  seiza-draw  →  seiza-parallax  →  seiza-analysis
 →  seiza-model  →  seiza-cabi  →  seiza-cli
 ```
 
 `seiza-model` sits before `seiza-cabi` and `seiza-cli`, which run its models.
+
+`seiza-compose` sits after `seiza-stacking`, whose `LinearImage` it composes, and
+before `seiza-cabi` and `seiza-cli`, which call it.
 
 `seiza-deconvolution` sits after `seiza-stars`, whose `PsfField` its
 field-varying deconvolution takes.
@@ -179,10 +182,11 @@ git push origin py-v<version>
 - **`seiza-py` version == `seiza`/workspace version, always.** The Python package
   and the Rust crates are one release; the `v<version>` and `py-v<version>` tags
   carry the same `<version>`.
-- **`OUTPUT_VERSION` moves only with output.** `seiza-stacking` and
-  `seiza-stretch` each export their own crate version whose output they
-  reproduce: a crate version, not a Seiza release. PSF Guard keys its
-  cached stacks, masters and previews on it. A release that leaves it alone
+- **`OUTPUT_VERSION` moves only with output.** `seiza-stacking`,
+  `seiza-stretch`, `seiza-pipeline` and `seiza-compose` each export their own
+  crate version whose output they reproduce: a crate version, not a Seiza
+  release. PSF Guard keys its cached stacks, masters, color pictures and
+  previews on it. A release that leaves it alone
   keeps those caches; moving it makes every user rebuild every stack.
   - **The PR that changes output** sets it to the crate's next minor version,
     and records the new summary in the crate's `tests/output_version.rs`,
@@ -195,7 +199,7 @@ git push origin py-v<version>
     a patch, so published stacking and stretch releases that require it by
     caret cannot pick it up unseen. It ships with a release of each crate
     whose output it changes, which moves `OUTPUT_VERSION` and raises the pin.
-  - **Before tagging,** run both crates' `tests/output_version.rs` once more:
+  - **Before tagging,** run each of those crates' `tests/output_version.rs` once more:
     a failure means a merged PR changed output without moving the version.
 - The `v` tag and the `py-v` tag are **separate** — pushing one does not publish
   the other.

@@ -3344,6 +3344,7 @@ dependencies = [
  "seiza-analysis",
  "seiza-background",
  "seiza-calibration",
+ "seiza-compose",
  "seiza-deconvolution",
  "seiza-fits",
  "seiza-image-io",
@@ -3399,6 +3400,7 @@ dependencies = [
  "seiza-analysis",
  "seiza-background",
  "seiza-calibration",
+ "seiza-compose",
  "seiza-deconvolution",
  "seiza-download",
  "seiza-draw",
@@ -3423,6 +3425,27 @@ dependencies = [
  "windows-sys 0.61.2",
  "winresource",
  "zstd",
+]
+
+[[package]]
+name = "seiza-compose"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "half",
+ "naga",
+ "pollster",
+ "rayon",
+ "seiza",
+ "seiza-fits",
+ "seiza-imgproc",
+ "seiza-stacking",
+ "seiza-stats",
+ "seiza-stretch",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "wgpu",
 ]
 
 [[package]]
@@ -3488,9 +3511,11 @@ dependencies = [
 name = "seiza-image-io"
 version = "0.14.0"
 dependencies = [
+ "avif-serialize",
  "chrono",
  "image",
  "kamadak-exif",
+ "rav1e",
  "seiza-core",
  "seiza-fits",
  "seiza-xisf",

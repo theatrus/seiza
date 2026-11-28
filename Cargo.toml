@@ -7,6 +7,7 @@ members = [
     "seiza-calibration",
     "seiza-cabi",
     "seiza-cli",
+    "seiza-compose",
     "seiza-core",
     "seiza-deconvolution",
     "seiza-download",
@@ -40,6 +41,7 @@ seiza = { path = "seiza", version = "0.57.0" }
 seiza-analysis = { path = "seiza-analysis", version = "0.12.0" }
 seiza-background = { path = "seiza-background", version = "0.4.0" }
 seiza-calibration = { path = "seiza-calibration", version = "0.12.2" }
+seiza-compose = { path = "seiza-compose", version = "0.1.0" }
 seiza-core = { path = "seiza-core", version = "0.3.0" }
 seiza-deconvolution = { path = "seiza-deconvolution", version = "0.3.0" }
 seiza-download = { path = "seiza-download", version = "0.12.1" }

@@ -117,24 +117,27 @@ stub stays a true account of Python's surface.
 
 ## Output versions: revise and test, every time
 
-`seiza_stacking::OUTPUT_VERSION`, `seiza_stretch::OUTPUT_VERSION` and
-`seiza_pipeline::OUTPUT_VERSION` give the version of that crate, not the Seiza
-release, whose output a build reproduces. PSF Guard keys its cached stacks,
-masters and previews on them, and distributed stacking's step keys hold
+`seiza_stacking::OUTPUT_VERSION`, `seiza_stretch::OUTPUT_VERSION`,
+`seiza_pipeline::OUTPUT_VERSION` and `seiza_compose::OUTPUT_VERSION` give the
+version of that crate, not the Seiza release, whose output a build
+reproduces. PSF Guard keys its cached stacks, masters, color pictures and
+previews on them, and distributed stacking's step keys hold
 them. A wrong value is worse than none: if output
 changes and the value stays put, users keep stale stacks and are never told.
 So these steps are not optional, and a PR that skips them is not done.
 
-1. **Before you change anything in `seiza-stacking`, `seiza-stretch` or
-   `seiza-pipeline`, or in a crate one of them calls** (calibration,
-   registration, resampling, rejection, normalization, weighting,
-   demosaicing, drizzle, defect or impulse repair, masters, mosaic canvases,
-   any stretch model, partial stack combination), run:
+1. **Before you change anything in `seiza-stacking`, `seiza-stretch`,
+   `seiza-pipeline` or `seiza-compose`, or in a crate one of them calls**
+   (calibration, registration, resampling, rejection, normalization,
+   weighting, demosaicing, drizzle, defect or impulse repair, masters, mosaic
+   canvases, any stretch model, partial stack combination, color
+   composition, color calibration, star layers, blurs), run:
 
    ```sh
    cargo test -p seiza-stacking --test output_version
    cargo test -p seiza-stretch --test output_version
    cargo test -p seiza-pipeline --test output_version
+   cargo test -p seiza-compose --test output_version
    ```
 
 2. **Check that a case covers what you are changing, in the mode you are
@@ -158,8 +161,8 @@ So these steps are not optional, and a PR that skips them is not done.
 4. **Never** re-record a summary without moving `OUTPUT_VERSION`, loosen
    `TOLERANCE` to make a case pass, or drop a case because it fails.
    `OUTPUT_VERSION` only moves forward: from "0.40.0" for stacking, "0.3.0"
-   for stretching and "0.1.0" for the pipeline, each change sets the release
-   that ships it.
+   for stretching, "0.1.0" for the pipeline and "0.1.0" for composition,
+   each change sets the release that ships it.
 
 `seiza_stacking::EXTERNAL_EXCHANGE_VERSION` does the same for the map that
 puts an image on the 0 to 1 external tools work on and takes their result

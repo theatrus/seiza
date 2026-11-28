@@ -47,14 +47,11 @@ mod calibration;
 pub mod calibration_files;
 pub use calibration_files::FileCalibration;
 mod calibration_plan;
-mod color;
-mod color_calibration;
 mod context;
 mod continuum;
 mod cosmetic;
 mod experimental_flat;
 pub use experimental_flat::{ExperimentalFlatPreprocessingOptions, preprocess_flat_spatial};
-mod crop;
 mod defects;
 mod drizzle;
 mod emission;
@@ -72,7 +69,6 @@ mod gpu_options;
 mod linear_match;
 mod mapping;
 mod master;
-mod narrowband_balance;
 mod normalization;
 mod orientation;
 mod paths;
@@ -96,8 +92,6 @@ mod sessions;
 pub use sessions::FileCalibrationSession;
 mod snr;
 mod stack;
-mod star_stretch;
-pub use star_stretch::{screen_rgb_star_layer, stretch_rgb_stars};
 mod tasks;
 
 pub use acquisition::Acquisition;
@@ -110,19 +104,6 @@ pub use calibration_plan::{
     CalibrationExclusion, CalibrationExclusionReason, CalibrationPlan, CalibrationPlanKind,
     CalibrationPlanRequest, CalibrationRecord, FrameProbe, plan_calibration, probe_frame,
 };
-pub use color::{
-    ColorComposition, ColorNormalization, ColorOptions, ColorTransfer, ForaxxOptions,
-    LrgbLuminance, NarrowbandMatrix, NarrowbandMix, NarrowbandPalette, RgbLuminance, combine_lrgb,
-    combine_narrowband, combine_narrowband_matrix, combine_rgb, combine_super_lrgb,
-    combine_super_rgb,
-};
-pub use color_calibration::{
-    CalibratedStretch, ColorCalibration, ColorCalibrationOptions, ColorCalibrationOutcome,
-    ColorCalibrationSkip, ColorCalibrationSkipReason, ColorFit, ColorReferenceStar,
-    ColorStarMeasurement, GaiaColorSource, GaiaColors, SOLAR_BP_RP, apply_color_gains,
-    calibrate_and_stretch, calibrate_color, calibrate_color_image, neutralize_clipped,
-    place_gaia_sources, transform_wcs,
-};
 pub use continuum::{
     ContinuumDiagnostics, ContinuumFitOptions, ContinuumFitOutcome, ContinuumOrigin,
     ContinuumPhotometry, ContinuumPhotometryOptions, ContinuumPixelValidation, ContinuumPlan,
@@ -131,9 +112,6 @@ pub use continuum::{
     measure_and_fit_continuum, measure_and_fit_continuum_masked, subtract_continuum,
 };
 pub use cosmetic::{ImpulseFilterOptions, suppress_impulses};
-pub use crop::{
-    ChannelCoverage, ChannelSamples, ColorCrop, CropReport, covered_region, crop_report,
-};
 pub use defects::{DefectDetectionOptions, DefectMap, detect_defects};
 pub use drizzle::{DrizzleOptions, DrizzleResult};
 pub use emission::{
@@ -147,7 +125,7 @@ pub use external::{
 };
 pub use fits::{
     FitsFrame, FrameCalibrationState, FrameMetadata, FrameSourceRole, drizzle_reference_headers,
-    rescaled_reference_headers, write_color_fits_f32, write_drizzle_fits_f32, write_fits_f32,
+    rescaled_reference_headers, write_drizzle_fits_f32, write_fits_f32,
     write_linear_image_fits_f32, write_master_fits_f32, write_processed_image_fits_f32,
     write_stack_export_fits_f32,
 };
@@ -160,10 +138,6 @@ pub use master::{
     MasterBuildOptions, MasterBuildProgress, MasterBuildStage, MasterFrame, MasterFrameKind,
     MasterInputStatistics, MasterProgress, MasterRejectionMethod, MasterRejectionOptions,
     build_master_from_fits, build_master_from_fits_with_scratch, screen_dark_levels,
-};
-pub use narrowband_balance::{
-    NarrowbandBalanceOptions, NarrowbandBalanceReport, NarrowbandChannelBalance,
-    balance_narrowband, screen_rgb_stars, screen_rgb_stars_reduced,
 };
 pub use normalization::{NormalizationMap, NormalizationMode};
 pub use orientation::{SKY_ORIENTATION_NAME, SKY_ORIENTATION_VERSION, SkyOrientationPlan};
@@ -244,9 +218,9 @@ pub const EXTERNAL_EXCHANGE_VERSION: u32 = 4;
 /// or registration produces for the same inputs and options, in any mode and
 /// not only the defaults, sets it to this crate's next minor version, whether
 /// the change is in this crate or in a crate it calls. A new option whose
-/// default leaves the output alone does not move it. Colour calibration
-/// ([`calibrate_color_image`], [`calibrate_and_stretch`]) is outside it: no
-/// fixture holds that output yet. `tests/output_version.rs` fails when its
+/// default leaves the output alone does not move it. Color composition,
+/// color calibration and star layers are in `seiza-compose`, whose own
+/// `OUTPUT_VERSION` covers them. `tests/output_version.rs` fails when its
 /// fixtures' output changes, and `AGENTS.md` gives the steps.
 ///
 /// One known difference: on an expanded canvas with a lens or quadratic

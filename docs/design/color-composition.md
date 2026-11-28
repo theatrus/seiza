@@ -1,5 +1,5 @@
 > Implementation status: `balance_narrowband` and `screen_rgb_stars` are
-> implemented in `seiza-stacking`, the C ABI, Python and the CLI. Both operate
+> implemented in `seiza-compose`, the C ABI, Python and the CLI. Both operate
 > on prepared display samples; hosts own alignment, calibration and external
 > star separation. Linear continuum fitting, measurement and signed subtraction
 > are also implemented across all four surfaces. Combined LRGB+SHO composition
@@ -512,7 +512,7 @@ fallback when sources, tools or separation results are unusable.
 
 ### Bindings, versions and validation before release
 
-Put behavior in `seiza-stacking`, reusing `seiza-stretch`'s MTF machinery and
+Put behavior in `seiza-compose`, reusing `seiza-stretch`'s MTF machinery and
 shared photometry where their contracts match. Do not add another host copy
 of the algorithm. Ship each public Rust operation with C ABI JSON and Python
 twins, Python stubs/docs/tests, generated C headers and binding-parity entries.
