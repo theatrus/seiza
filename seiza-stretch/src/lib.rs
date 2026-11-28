@@ -27,7 +27,7 @@ pub use hdr_tail::{HdrTail, HdrTailParams, extended_srgb_decode, extended_srgb_e
 pub use layered::{
     CORE_FLOOR, CORE_KNEE_WIDTH, DRC_KNEE, LayeredHdr, LayeredHdrParams, LayeredMaps,
     LayeredParams, MAP_REDUCTION, MAX_DETAIL_GAIN, MapSample, ResolvedLayered, STAR_CORE_END_SLOPE,
-    core_gain, core_log, fine_luminance, reduce_luminance,
+    fine_luminance, reduce_luminance,
 };
 
 /// The luminance the stretches read from red, green and blue, as Rec.709

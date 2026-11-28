@@ -96,6 +96,8 @@ fn stretch_config(
             saturation_amount,
             saturation_boost,
             lightness_mask,
+            // The C ABI does not take a sky floor either; both keep none.
+            ..LayeredParams::default()
         }),
         _ => {
             return Err(PyValueError::new_err(

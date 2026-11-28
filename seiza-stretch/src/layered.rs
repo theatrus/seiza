@@ -150,7 +150,7 @@ pub const CORE_FLOOR: f64 = 3.0;
 
 /// The log a core compression blurs: `value` above the background `median`
 /// in `noise` sigmas, with [`CORE_FLOOR`] under it.
-pub fn core_log(value: f64, median: f64, noise: f64) -> f64 {
+pub(crate) fn core_log(value: f64, median: f64, noise: f64) -> f64 {
     ((value - median).max(0.0) / noise.max(1.0e-9) + CORE_FLOOR).ln()
 }
 
@@ -158,7 +158,7 @@ pub fn core_log(value: f64, median: f64, noise: f64) -> f64 {
 /// its blurred log is `base`: `exp(−amount · w · softplus((base − ln(T +
 /// floor)) / w))` with `T` the `threshold` in sigmas and `w`
 /// [`CORE_KNEE_WIDTH`].
-pub fn core_gain(base: f64, amount: f64, threshold: f64) -> f64 {
+pub(crate) fn core_gain(base: f64, amount: f64, threshold: f64) -> f64 {
     let over = (base - (threshold + CORE_FLOOR).ln()) / CORE_KNEE_WIDTH;
     let soft = if over > 20.0 {
         CORE_KNEE_WIDTH * over
