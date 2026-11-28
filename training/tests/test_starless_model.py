@@ -210,19 +210,69 @@ def test_a_share_of_each_batch_can_be_drawn_from_the_windows_with_spikes(small_b
     for pixels in (1, sm.SPIKY_PIXELS):
         np.testing.assert_array_equal(sm.spiky_windows(found, pixels),
                                       [index for index, count in enumerate(over) if count >= pixels])
+    # The windows with bright stars and no spikes: none of their spike
+    # truth over the noise, their stars' light peaking high enough.
+    plain = [index for index, count in enumerate(over) if not count
+             and float((np.asarray(found.planes["input"][index]) - np.asarray(found.planes["starless"][index])).max())
+             >= 5.0 * float(np.median(found.planes["noise"][index]))]
+    np.testing.assert_array_equal(sm.spikeless_windows(found, 5.0), plain)
     # With no share, a batch is drawn as before; with a quarter, four of
-    # sixteen come from the windows with spikes.
-    spiky = np.array([3, 7])
-    np.testing.assert_array_equal(sm.drawn(100, spiky, 0.0, 16, np.random.default_rng(5)),
-                                  np.random.default_rng(5).integers(0, 100, 16))
-    picked = sm.drawn(100, spiky, 0.25, 16, np.random.default_rng(5))
+    # sixteen come from the windows with spikes, and with another eighth,
+    # two from those without.
+    spiky, spikeless = np.array([3, 7]), np.array([11, 13])
+    before = np.random.default_rng(5).integers(0, 100, 16)
+    np.testing.assert_array_equal(sm.drawn(100, [(spiky, 0.0)], 16, np.random.default_rng(5)), before)
+    np.testing.assert_array_equal(sm.drawn(100, [], 16, np.random.default_rng(5)), before)
+    picked = sm.drawn(100, [(spiky, 0.25)], 16, np.random.default_rng(5))
     assert len(picked) == 16 and set(picked[-4:]) <= {3, 7}
-    np.testing.assert_array_equal(sm.drawn(100, np.zeros(0, np.int64), 0.25, 16, np.random.default_rng(5)),
-                                  np.random.default_rng(5).integers(0, 100, 16))
+    picked = sm.drawn(100, [(spiky, 0.25), (spikeless, 0.125)], 16, np.random.default_rng(5))
+    assert len(picked) == 16 and set(picked[-6:-2]) <= {3, 7} and set(picked[-2:]) <= {11, 13}
+    np.testing.assert_array_equal(sm.drawn(100, [(np.zeros(0, np.int64), 0.25)], 16, np.random.default_rng(5)),
+                                  before)
+    with pytest.raises(ValueError):
+        sm.drawn(100, [(spiky, 0.75), (spikeless, 0.5)], 16, np.random.default_rng(5))
     store, _ = small_bank
     with pytest.raises(ValueError):
         sm.train(store, name="no-layers", bank=directory, validation_bank=None,
                  settings=sm.Settings(way="image", tile=64, width=8, levels=3), steps=1, spike_share=0.25)
+    with pytest.raises(ValueError):
+        sm.train(store, name="too-much", bank=directory, validation_bank=None,
+                 settings=sm.Settings(way="image", tile=64, width=8, levels=3, layers=True), steps=1,
+                 spike_share=0.75, spikeless_share=0.5)
+
+
+def test_a_tile_can_be_read_about_a_level_moved_from_its_own(small_bank):
+    _, directory = small_bank
+    found = sm.Bank(directory)
+    planes = {name: np.asarray(found.planes[name][0, :64, :64], dtype=np.float32) for name in found.planes}
+    _, level, scale = sm.network_reads(planes, "image")
+    assert level == pytest.approx(float(np.nanmedian(planes["input"])))
+    # Read about a level and noise given, the input is read less that level
+    # in that noise, and the noise map as its ratio to it.
+    given = (level - 20.0 * scale, 1.3 * scale)
+    given_read, at, by = sm.network_reads(planes, "image", *given)
+    assert (at, by) == pytest.approx(given)
+    np.testing.assert_allclose(given_read[0], sm.compressed(planes["input"], *given), rtol=1e-6)
+    np.testing.assert_allclose(given_read[1], planes["noise"] / given[1], rtol=1e-6)
+    # The moves: most below the tile's own level, some near it, a few above,
+    # none past 60 noise; the noise a little either side.
+    rng = np.random.default_rng(4)
+    moves = np.array([sm.jittered(0.0, 1.0, rng) for _ in range(4000)])
+    assert 0.3 < np.mean(moves[:, 0] < -1.5) < 0.6 and np.mean(moves[:, 0] > 1.0) > 0.1
+    assert moves[:, 0].min() >= -60.0 and moves[:, 0].max() <= 12.0
+    assert 0.8 < np.median(moves[:, 1]) < 1.2
+    # A run with jitter draws its tiles so; one without, as before.
+    plain = sm.Settings(way="image", tile=64, width=8, levels=3)
+    moved = sm.Settings(way="image", tile=64, width=8, levels=3, level_jitter=True)
+    a = sm.example(found, 0, plain, np.random.default_rng(9))
+    b = sm.example(found, 0, moved, np.random.default_rng(9))
+    assert not np.allclose(a["planes"][0], b["planes"][0])
+    # Its layers come back the same at any level given to a model that
+    # does nothing (a residual of zero), as `layers` releases about it.
+    model = ResidualUNet(inputs=len(sm.READS["image"]), outputs=moved.outputs, width=8, levels=3)
+    own = sm.layers(model, planes, moved)
+    other = sm.layers(model, planes, moved, level=level - 30.0 * scale, scale=scale)
+    np.testing.assert_allclose(other["starless"], own["starless"], rtol=1e-4, atol=1e-3 * scale)
 
 
 def test_a_short_layered_run_finds_the_spikes(small_bank):

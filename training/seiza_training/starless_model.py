@@ -43,7 +43,16 @@ squared error up to an error of its own (`Settings.spike_quadratic`, as the
 Charbonnier penalty's epsilon) and weighed up (`Settings.spike_weight`).
 Few windows show spikes over the noise, and the layer learns only once it
 has seen some tens of thousands of them, so a share of every batch can be
-drawn from those that do (`train`'s `spike_share`, `spiky_windows`).
+drawn from those that do (`train`'s `spike_share`, `spiky_windows`), and
+another from windows with bright stars and no spikes, so that a core with
+no spikes about it is given no spikes' dip (`spikeless_share`,
+`spikeless_windows`).
+
+Each tile is read about its own median and noise. A runtime reading a whole
+image in tiles wants one level and noise for all of them, or the tiles
+disagree where they meet; with `Settings.level_jitter` each tile is read
+about a level and noise moved from its own as far as a whole image's are
+from its tiles' (`jittered`).
 """
 
 from __future__ import annotations
@@ -83,6 +92,9 @@ LAYER_WEIGHT = 1.0
 # A window shows spikes when its spike truth tops the noise over this many
 # pixels.
 SPIKY_PIXELS = 500
+# A window without spikes has a bright star when its stars' light peaks this
+# many times its noise.
+BRIGHT_PEAK = 500.0
 
 
 @dataclass(frozen=True)
@@ -91,8 +103,9 @@ class Settings:
     network's width and levels, whether it gives the halos and spikes as
     layers of their own (`LAYERS`), and with them the spike layer's penalty:
     quadratic up to an error of `spike_quadratic` (compressed) and
-    `spike_weight` times as heavy as the starless image's. The defaults are
-    the penalty every other part has."""
+    `spike_weight` times as heavy as the starless image's (the defaults are
+    the penalty every other part has), and whether a tile is read about a
+    level and noise moved from its own in training (`jittered`)."""
 
     way: str = "fit"
     tile: int = 256
@@ -101,6 +114,7 @@ class Settings:
     layers: bool = False
     spike_quadratic: float = CHARBONNIER
     spike_weight: float = LAYER_WEIGHT
+    level_jitter: bool = False
 
     @property
     def outputs(self) -> int:
@@ -138,13 +152,15 @@ def released(plane: np.ndarray, level: float, scale: float) -> np.ndarray:
     return (np.sinh(plane) * scale * ASINH + level).astype(np.float32)
 
 
-def network_reads(planes: dict[str, np.ndarray], way: str) -> tuple[list[np.ndarray], float, float]:
+def network_reads(planes: dict[str, np.ndarray], way: str, level: float | None = None,
+                  scale: float | None = None) -> tuple[list[np.ndarray], float, float]:
     """The planes a way's network reads, and the level and scale they are
-    read on: the input's median, as a runtime knows it with no mask, and
-    the noise map's median. A plane with sky is read less the level, a
-    plane without (`SKYLESS`) as it is, both compressed."""
-    level = float(np.nanmedian(planes["input"]))
-    scale = float(np.median(planes["noise"])) or 1.0
+    read on: by default the input's median, as a runtime knows it with no
+    mask, and the noise map's median, or those given (a whole image's). A
+    plane with sky is read less the level, a plane without (`SKYLESS`) as
+    it is, both compressed."""
+    level = float(np.nanmedian(planes["input"])) if level is None else float(level)
+    scale = (float(np.median(planes["noise"])) or 1.0) if scale is None else float(scale)
     read = []
     for name in READS[way]:
         if name == "noise":
@@ -156,10 +172,29 @@ def network_reads(planes: dict[str, np.ndarray], way: str) -> tuple[list[np.ndar
     return read, level, scale
 
 
+def jittered(level: float, scale: float, rng: np.random.Generator) -> tuple[float, float]:
+    """A tile's `level` and `scale` (its median and noise) moved as a whole
+    image's are from its tiles': over a nebula's bright parts the image's
+    median lies up to tens of noise below a tile's own, in dark lanes a few
+    above, and its noise a little either side. In noise units: two times
+    in five near the tile's own (normal, 1.5), nine in twenty below it
+    (1.5 to 60, evenly in the log), three in twenty above (1 to 8); the
+    noise times a log-normal of 0.15."""
+    pick = rng.random()
+    if pick < 0.4:
+        offset = rng.normal(0.0, 1.5)
+    elif pick < 0.85:
+        offset = -math.exp(rng.uniform(math.log(1.5), math.log(60.0)))
+    else:
+        offset = math.exp(rng.uniform(0.0, math.log(8.0)))
+    return level + offset * scale, scale * math.exp(rng.normal(0.0, 0.15))
+
+
 def example(bank: Bank, index: int, settings: Settings, rng: np.random.Generator) -> dict[str, np.ndarray]:
     """A tile of window `index`: the network's planes, the baseline and the
     truth compressed, the loss's weights, and with `layers` each of `LAYERS`
-    compressed about zero; flipped and turned at random."""
+    compressed about zero; flipped and turned at random, and with
+    `level_jitter` read about a level and noise moved from its own."""
     side = bank.planes["input"].shape[1]
     tile = settings.tile
     top, left = (int(rng.integers(0, side - tile + 1)) for _ in range(2))
@@ -167,6 +202,8 @@ def example(bank: Bank, index: int, settings: Settings, rng: np.random.Generator
     planes = {name: np.asarray(bank.planes[name][cut], dtype=np.float32) for name in bank.planes}
     valid = planes["valid"] > 0
     read, level, scale = network_reads(planes, settings.way)
+    if settings.level_jitter:
+        read, level, scale = network_reads(planes, settings.way, *jittered(level, scale, rng))
     baseline = compressed(planes[BASELINE[settings.way]], level, scale)
     truth = compressed(planes["starless"], level, scale)
     weight = valid.astype(np.float32) * (1.0 + (STAR_WEIGHT - 1.0)
@@ -198,13 +235,32 @@ def spiky_windows(bank: Bank, pixels: int = SPIKY_PIXELS) -> np.ndarray:
                      >= pixels], dtype=np.int64)
 
 
-def drawn(count: int, spiky: np.ndarray, share: float, batch: int, rng: np.random.Generator) -> np.ndarray:
-    """A batch's windows: `share` of them (rounded) from `spiky`, the rest
-    from all `count`; with no share, as every run before drew them."""
-    some = round(share * batch) if len(spiky) else 0
+def spikeless_windows(bank: Bank, peak: float = BRIGHT_PEAK) -> np.ndarray:
+    """The windows of `bank` whose spike truth nowhere tops the noise and
+    whose stars' light peaks at least `peak` times the window's noise (its
+    median), in order: bright stars with no spikes."""
+    found = []
+    for index in range(bank.count):
+        noise = np.asarray(bank.planes["noise"][index])
+        if (np.asarray(bank.planes["spikes"][index]) > noise).any():
+            continue
+        light = np.asarray(bank.planes["input"][index]) - np.asarray(bank.planes["starless"][index])
+        if float(light.max()) >= peak * float(np.median(noise)):
+            found.append(index)
+    return np.array(found, dtype=np.int64)
+
+
+def drawn(count: int, picks: list[tuple[np.ndarray, float]], batch: int, rng: np.random.Generator) -> np.ndarray:
+    """A batch's windows: of each of `picks`, (windows, share), that share
+    of the batch (rounded) from those windows, the rest from all `count`;
+    with no shares, as every run before drew them."""
+    some = [(windows, round(share * batch)) for windows, share in picks if len(windows) and round(share * batch)]
     if not some:
         return rng.integers(0, count, batch)
-    return np.concatenate([rng.integers(0, count, batch - some), rng.choice(spiky, some)])
+    rest = batch - sum(n for _, n in some)
+    if rest < 0:
+        raise ValueError(f"shares of {[share for _, share in picks]} take more than a batch of {batch}")
+    return np.concatenate([rng.integers(0, count, rest)] + [rng.choice(windows, n) for windows, n in some])
 
 
 def loss_of(model: torch.nn.Module, batch: dict[str, torch.Tensor], settings: Settings | None = None
@@ -253,20 +309,28 @@ def run_directory(store: Store, name: str) -> Path:
 def train(store: Store, *, name: str, bank: Path, validation_bank: Path | None, settings: Settings,
           steps: int = 10_000, batch: int = 8, learning_rate: float = 3e-4, seed: int = 0, log_every: int = 250,
           checkpoint_every: int = 1000, validation_batches: int = 8, where: torch.device | None = None,
-          init_from: str | None = None, spike_share: float = 0.0) -> dict[str, Any]:
+          init_from: str | None = None, spike_share: float = 0.0, spikeless_share: float = 0.0
+          ) -> dict[str, Any]:
     """Train a starless run on `bank` and keep it under
     `STORE/models/starless/<name>/`: its weights, its configuration and
     its log of the loss, the validation loss and the baseline's. With
     `spike_share`, that share of every batch is drawn from the windows that
-    show spikes (`spiky_windows`)."""
-    if not 0.0 <= spike_share <= 1.0 or (spike_share and not settings.layers):
-        raise ValueError(f"a share of {spike_share} of windows with spikes is not one for this run")
+    show spikes (`spiky_windows`); with `spikeless_share`, that share from
+    those with bright stars and no spikes (`spikeless_windows`)."""
+    for share in (spike_share, spikeless_share):
+        if not 0.0 <= share <= 1.0 or (share and not settings.layers):
+            raise ValueError(f"a share of {share} of windows is not one for this run")
+    if spike_share + spikeless_share > 1.0:
+        raise ValueError(f"shares of {spike_share} and {spikeless_share} take more than a batch")
     where = where or device()
     torch.manual_seed(seed)
     train_bank = Bank(bank)
     spiky = spiky_windows(train_bank) if spike_share else np.zeros(0, dtype=np.int64)
-    if spike_share and not len(spiky):
-        raise ValueError(f"{bank} has no windows with spikes to draw a share from")
+    spikeless = spikeless_windows(train_bank) if spikeless_share else np.zeros(0, dtype=np.int64)
+    for share, windows, kind in ((spike_share, spiky, "with spikes"), (spikeless_share, spikeless,
+                                                                         "with bright stars and no spikes")):
+        if share and not len(windows):
+            raise ValueError(f"{bank} has no windows {kind} to draw a share from")
     held = Bank(validation_bank) if validation_bank else None
     model = ResidualUNet(inputs=len(READS[settings.way]), outputs=settings.outputs, width=settings.width,
                          levels=settings.levels).to(where)
@@ -282,7 +346,8 @@ def train(store: Store, *, name: str, bank: Path, validation_bank: Path | None, 
               "learning_rate": learning_rate, "seed": seed, "init_from": init_from, "reads": READS[settings.way],
               "asinh": ASINH, "star_weight": STAR_WEIGHT, "windows": train_bank.count,
               "layers": list(LAYERS) if settings.layers else [], "layer_weight": LAYER_WEIGHT,
-              "spike_share": spike_share, "spiky_windows": len(spiky),
+              "spike_share": spike_share, "spiky_windows": len(spiky), "spikeless_share": spikeless_share,
+              "spikeless_windows": len(spikeless),
               "parameters": sum(p.numel() for p in model.parameters())}
     (directory / "config.json").write_text(json.dumps(config, indent=2))
     checks = []
@@ -306,7 +371,8 @@ def train(store: Store, *, name: str, bank: Path, validation_bank: Path | None, 
     running: dict[str, float] = {}
     for step in range(1, steps + 1):
         rng = np.random.default_rng([seed, step])
-        found = batch_from(train_bank, drawn(train_bank.count, spiky, spike_share, batch, rng), settings, rng)
+        chosen = drawn(train_bank.count, [(spiky, spike_share), (spikeless, spikeless_share)], batch, rng)
+        found = batch_from(train_bank, chosen, settings, rng)
         moved = {key: value.to(where) for key, value in found.items()}
         run_loss, base_loss, parts = loss_of(model, moved, settings)
         optimizer.zero_grad(set_to_none=True)
@@ -349,13 +415,15 @@ def starless(model: torch.nn.Module, planes: dict[str, np.ndarray], settings: Se
 
 
 def layers(model: torch.nn.Module, planes: dict[str, np.ndarray], settings: Settings,
-           where: torch.device | None = None) -> dict[str, np.ndarray]:
+           where: torch.device | None = None, level: float | None = None,
+           scale: float | None = None) -> dict[str, np.ndarray]:
     """A window's four layers from a trained `model`, which add back to its
     input: the starless image, the halos and rings, the diffraction spikes
     (both none from a run without `layers`), and the stars' cores and wings
-    (`stars`, what is left, with the stars' photon noise)."""
+    (`stars`, what is left, with the stars' photon noise). Read about the
+    window's own level and noise, or those given (`network_reads`)."""
     where = where or next(model.parameters()).device
-    read, level, scale = network_reads(planes, settings.way)
+    read, level, scale = network_reads(planes, settings.way, level, scale)
     baseline = compressed(planes[BASELINE[settings.way]], level, scale)
     with torch.no_grad():
         out = model(torch.from_numpy(np.stack(read)[None].astype(np.float32)).to(where))[0].cpu().numpy()

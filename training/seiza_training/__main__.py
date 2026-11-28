@@ -242,6 +242,10 @@ def main(argv: list[str] | None = None) -> int:
                         "this many times the starless image's (by default as the halos')")
     trains.add_argument("--spike-share", type=float, default=0.0, help="with --layers, draw this share of "
                         "every batch from the windows whose spikes top the noise")
+    trains.add_argument("--spikeless-share", type=float, default=0.0, help="with --layers, draw this share "
+                        "of every batch from the windows with bright stars and no spikes")
+    trains.add_argument("--level-jitter", action="store_true", help="read each tile about a level and noise "
+                        "moved from its own, as a whole image's are, so a runtime can read an image about one")
     trains.add_argument("--steps", type=int, default=10_000)
     trains.add_argument("--batch", type=int, default=8)
     trains.add_argument("--learning-rate", type=float, default=3e-4)
@@ -960,12 +964,14 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
         spike = {key: value for key, value in (("spike_quadratic", arguments.spike_quadratic),
                                                ("spike_weight", arguments.spike_weight)) if value is not None}
         settings = starless_model.Settings(way=arguments.way, tile=arguments.tile, width=arguments.width,
-                                           levels=arguments.levels, layers=arguments.layers, **spike)
+                                           levels=arguments.levels, layers=arguments.layers,
+                                           level_jitter=arguments.level_jitter, **spike)
         record = starless_model.train(store, name=arguments.name, bank=arguments.bank,
                                       validation_bank=arguments.validation_bank, settings=settings,
                                       steps=arguments.steps, batch=arguments.batch,
                                       learning_rate=arguments.learning_rate, seed=arguments.seed,
-                                      init_from=arguments.init_from, spike_share=arguments.spike_share)
+                                      init_from=arguments.init_from, spike_share=arguments.spike_share,
+                                      spikeless_share=arguments.spikeless_share)
         return {"name": arguments.name, "last": record["history"][-1] if record["history"] else None}
 
     if arguments.command == "evaluate-starless":
