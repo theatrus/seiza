@@ -591,8 +591,67 @@ A whole Ultracat stack takes about 20 s through either network.
   the image, which training with the level moved at random would allow.
 - The C925's stars throw no spikes, yet the spike layer puts a small dip
   in their cores, about 1% of the stars' light, balanced by as much spread
-  thin about them. It adds back with the stars; it would go with
-  vane-less pupils' bright stars weighed up in the banks.
+  thin about them. It adds back with the stars. X11 and X12 do the same on
+  the composites' spike-free stars (0.8 to 1.1% of their light, X7 0.1%),
+  so it comes of how the spike layer was trained, not of real stars.
+
+### Galaxies
+
+A galaxy is not a star. Small ones look like stars, and a large one's
+nucleus does. They are kept in the starless image by default; a setting
+moves them to an output of their own (`galaxies`), as the halos' share is
+a setting, and the layers still add back to the input.
+
+The runs so far take them out. Two test-split stacks the runs never saw,
+the Coma Cluster (Ultracat, G, 254 frames; 395 galaxies in the object
+catalogue over it) and the field of M51 (C925, L, 125 frames), share of
+each galaxy's light (inside its catalogue ellipse, over the median about
+it) left in the starless image:
+
+| | size, px | X11 keeps | X12 keeps |
+|---|---|---|---|
+| eight of Coma's smallest | 8 | 0.16 to 0.98 | about 0 |
+| NGC 4889, elliptical | 52 × 34 | 0.25 | 0.03 |
+| NGC 4874, elliptical | 46 × 40 | 0.40 | 0.12 |
+| NGC 4921, spiral | 39 × 36 | 0.64 | 0.78 |
+| IC 4278 | 39 × 37 | 0.99 | 0.16 |
+| IC 4277, edge on | 62 × 7 | 0.99 | 0 |
+
+- The image-only run takes nearly every compact galaxy out with the stars.
+- The fit-first run keeps more, but where Gaia lists a galaxy's nucleus as
+  a source the fit takes it out as a star, and the network leaves the hole:
+  NGC 4874's and NGC 4889's cores, and the nuclei of M51 and NGC 5195.
+- Seiza's deep catalogue is Gaia DR3's sources to G 20, with no class, so
+  it lists compact galaxies and galaxies' nuclei. The clean skies took them
+  out as stars too, so the truth lacks them, and the point plane marks them.
+- The made stars fall anywhere, and the clean skies are mostly the Milky
+  Way's nebulae, so the networks have seldom seen a compact source to keep.
+
+The plan:
+
+1. **Which sources are galaxies.** The object catalogue lists galaxies
+   with their ellipses (`seiza.field_objects`), down to 8 px on the
+   Ultracat, and a runtime has it. A catalogue source within a galaxy's
+   ellipse is the galaxy's, unless it is a star before it: point-like in
+   the first fit and away from the galaxy's middle. Gaia's own galaxy
+   candidates and astrometry could make this surer later, in the deep
+   catalogue's bundles.
+2. **Clean skies keep galaxies.** The galaxies' sources are not taken out,
+   so the truth keeps them, and each stack's galaxies are kept with it.
+3. **The point plane marks stars only**, and the fit leaves the galaxies'
+   sources out, in the banks and at runtime alike.
+4. **Made galaxies.** Composites get galaxies as well as stars: a bulge and
+   a disc, 2 to 60 px across, of any shape and angle, the smallest as
+   small as the stars, at the brightnesses of the stack's own. A
+   `galaxies` truth plane holds them; the starless truth keeps them.
+   Within the real galaxies' ellipses, the galaxy layer is not penalised
+   (their own light is not known apart from the sky's).
+5. **A galaxy layer.** The network gives `galaxies` beside the halos and
+   spikes. By default it stays in the starless image; a share kept (`kept`)
+   moves the rest to the galaxies output.
+6. **Measures.** On composites, the made galaxies' light kept in the
+   starless image and found in the layer. On the Coma Cluster and M51
+   above, the catalogue galaxies' light kept.
 
 ## Order of work
 
