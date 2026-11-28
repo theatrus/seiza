@@ -41,6 +41,9 @@ pixel at zero until the network can tell where spikes run, which it learns
 only by first leaning toward them, so the spike layer can be penalised as
 squared error up to an error of its own (`Settings.spike_quadratic`, as the
 Charbonnier penalty's epsilon) and weighed up (`Settings.spike_weight`).
+Few windows show spikes over the noise, and the layer learns only once it
+has seen some tens of thousands of them, so a share of every batch can be
+drawn from those that do (`train`'s `spike_share`, `spiky_windows`).
 """
 
 from __future__ import annotations
@@ -77,6 +80,9 @@ VALIDATION_STREAM = 1 << 20
 # penalty weighs against the starless image's.
 LAYERS = ("halos", "spikes")
 LAYER_WEIGHT = 1.0
+# A window shows spikes when its spike truth tops the noise over this many
+# pixels.
+SPIKY_PIXELS = 500
 
 
 @dataclass(frozen=True)
@@ -184,6 +190,23 @@ def batch_from(bank: Bank, indices: np.ndarray, settings: Settings, rng: np.rand
     return {key: torch.from_numpy(np.stack([found[key] for found in examples])) for key in examples[0]}
 
 
+def spiky_windows(bank: Bank, pixels: int = SPIKY_PIXELS) -> np.ndarray:
+    """The windows of `bank` whose spike truth tops the noise over at least
+    `pixels` pixels, in order."""
+    return np.array([index for index in range(bank.count)
+                     if int((np.asarray(bank.planes["spikes"][index]) > np.asarray(bank.planes["noise"][index])).sum())
+                     >= pixels], dtype=np.int64)
+
+
+def drawn(count: int, spiky: np.ndarray, share: float, batch: int, rng: np.random.Generator) -> np.ndarray:
+    """A batch's windows: `share` of them (rounded) from `spiky`, the rest
+    from all `count`; with no share, as every run before drew them."""
+    some = round(share * batch) if len(spiky) else 0
+    if not some:
+        return rng.integers(0, count, batch)
+    return np.concatenate([rng.integers(0, count, batch - some), rng.choice(spiky, some)])
+
+
 def loss_of(model: torch.nn.Module, batch: dict[str, torch.Tensor], settings: Settings | None = None
             ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
     """The run's loss on `batch`, its baseline's (the residual 0, and no
@@ -230,13 +253,20 @@ def run_directory(store: Store, name: str) -> Path:
 def train(store: Store, *, name: str, bank: Path, validation_bank: Path | None, settings: Settings,
           steps: int = 10_000, batch: int = 8, learning_rate: float = 3e-4, seed: int = 0, log_every: int = 250,
           checkpoint_every: int = 1000, validation_batches: int = 8, where: torch.device | None = None,
-          init_from: str | None = None) -> dict[str, Any]:
+          init_from: str | None = None, spike_share: float = 0.0) -> dict[str, Any]:
     """Train a starless run on `bank` and keep it under
     `STORE/models/starless/<name>/`: its weights, its configuration and
-    its log of the loss, the validation loss and the baseline's."""
+    its log of the loss, the validation loss and the baseline's. With
+    `spike_share`, that share of every batch is drawn from the windows that
+    show spikes (`spiky_windows`)."""
+    if not 0.0 <= spike_share <= 1.0 or (spike_share and not settings.layers):
+        raise ValueError(f"a share of {spike_share} of windows with spikes is not one for this run")
     where = where or device()
     torch.manual_seed(seed)
     train_bank = Bank(bank)
+    spiky = spiky_windows(train_bank) if spike_share else np.zeros(0, dtype=np.int64)
+    if spike_share and not len(spiky):
+        raise ValueError(f"{bank} has no windows with spikes to draw a share from")
     held = Bank(validation_bank) if validation_bank else None
     model = ResidualUNet(inputs=len(READS[settings.way]), outputs=settings.outputs, width=settings.width,
                          levels=settings.levels).to(where)
@@ -252,6 +282,7 @@ def train(store: Store, *, name: str, bank: Path, validation_bank: Path | None, 
               "learning_rate": learning_rate, "seed": seed, "init_from": init_from, "reads": READS[settings.way],
               "asinh": ASINH, "star_weight": STAR_WEIGHT, "windows": train_bank.count,
               "layers": list(LAYERS) if settings.layers else [], "layer_weight": LAYER_WEIGHT,
+              "spike_share": spike_share, "spiky_windows": len(spiky),
               "parameters": sum(p.numel() for p in model.parameters())}
     (directory / "config.json").write_text(json.dumps(config, indent=2))
     checks = []
@@ -275,7 +306,7 @@ def train(store: Store, *, name: str, bank: Path, validation_bank: Path | None, 
     running: dict[str, float] = {}
     for step in range(1, steps + 1):
         rng = np.random.default_rng([seed, step])
-        found = batch_from(train_bank, rng.integers(0, train_bank.count, batch), settings, rng)
+        found = batch_from(train_bank, drawn(train_bank.count, spiky, spike_share, batch, rng), settings, rng)
         moved = {key: value.to(where) for key, value in found.items()}
         run_loss, base_loss, parts = loss_of(model, moved, settings)
         optimizer.zero_grad(set_to_none=True)

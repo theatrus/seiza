@@ -200,6 +200,31 @@ def test_the_spike_penalty_is_a_setting_that_defaults_to_every_part_s(small_bank
     assert sm.Settings(**kept_before) == sm.Settings(layers=True)
 
 
+def test_a_share_of_each_batch_can_be_drawn_from_the_windows_with_spikes(small_bank):
+    _, directory = small_bank
+    found = sm.Bank(directory)
+    # The windows with spikes are those whose truth tops the noise over
+    # enough pixels.
+    over = [int((np.asarray(found.planes["spikes"][index]) > np.asarray(found.planes["noise"][index])).sum())
+            for index in range(found.count)]
+    for pixels in (1, sm.SPIKY_PIXELS):
+        np.testing.assert_array_equal(sm.spiky_windows(found, pixels),
+                                      [index for index, count in enumerate(over) if count >= pixels])
+    # With no share, a batch is drawn as before; with a quarter, four of
+    # sixteen come from the windows with spikes.
+    spiky = np.array([3, 7])
+    np.testing.assert_array_equal(sm.drawn(100, spiky, 0.0, 16, np.random.default_rng(5)),
+                                  np.random.default_rng(5).integers(0, 100, 16))
+    picked = sm.drawn(100, spiky, 0.25, 16, np.random.default_rng(5))
+    assert len(picked) == 16 and set(picked[-4:]) <= {3, 7}
+    np.testing.assert_array_equal(sm.drawn(100, np.zeros(0, np.int64), 0.25, 16, np.random.default_rng(5)),
+                                  np.random.default_rng(5).integers(0, 100, 16))
+    store, _ = small_bank
+    with pytest.raises(ValueError):
+        sm.train(store, name="no-layers", bank=directory, validation_bank=None,
+                 settings=sm.Settings(way="image", tile=64, width=8, levels=3), steps=1, spike_share=0.25)
+
+
 def test_a_short_layered_run_finds_the_spikes(small_bank):
     store, directory = small_bank
     record = sm.train(store, name="tiny-layers", bank=directory, validation_bank=directory,
