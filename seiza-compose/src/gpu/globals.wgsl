@@ -20,8 +20,11 @@ struct Layer {
     // z: the mask layer that limits the layer, or -1 for everywhere.
     // w: 1 for an adjustment of the band layer before it alone.
     adjust: vec4f,
-    // x: the computed mask that limits the layer, or -1 for none.
+    // x: the computed mask that limits the layer, or -1 for none. y: the
+    // layer's layered maps, or -1.
     more: vec4f,
+    // The range mask by brightness: x low, y high, z feather, -1 for none.
+    range: vec4f,
 }
 
 // A layered stretch, as `seiza_stretch::ResolvedLayered` with its maps and
@@ -79,8 +82,28 @@ struct FinishStep {
     // fine detail Texture treats as half noise.
     local: vec4f,
     // For tone and color, x: the brightest value it gives, as a multiple
-    // of SDR white: 1 for SDR.
+    // of SDR white: 1 for SDR. y, z, w: the range mask by the luminance of
+    // the picture beneath the step: low, high and feather, -1 for none.
     range: vec4f,
+}
+
+// How much of a layer or step a range mask lets apply at a brightness:
+// fully from `low` to `high`, fading over `feather` beyond each. A negative
+// feather is no range mask. As `RangeMask::weight` in Rust.
+fn range_weight(low: f32, high: f32, feather: f32, value: f32) -> f32 {
+    if feather < 0.0 {
+        return 1.0;
+    }
+    let soft = max(feather, 1.0e-6);
+    let rise = clamp(1.0 + (value - low) / soft, 0.0, 1.0);
+    let fall = clamp(1.0 + (high - value) / soft, 0.0, 1.0);
+    return rise * fall;
+}
+
+// The weight of layer `index`'s range mask at a brightness.
+fn layer_range(index: i32, value: f32) -> f32 {
+    let range = globals.layers[index].range;
+    return range_weight(range.x, range.y, range.z, value);
 }
 
 // A heal of one layer.

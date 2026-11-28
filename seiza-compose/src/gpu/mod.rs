@@ -124,11 +124,23 @@ impl From<&Segment> for GpuSegment {
     }
 }
 
+/// The floats of one layer as the shaders read it: six vec4s.
+const LAYER_FLOATS: usize = 24;
+
+/// A range mask as the shaders read it: low, high and feather, then 1; no
+/// mask has a feather of -1.
+fn range_slots(range: Option<crate::picture::RangeMask>) -> [f32; 4] {
+    match range {
+        Some(range) => [range.low, range.high, range.feather.max(0.0), 1.0],
+        None => [0.0, 0.0, -1.0, 0.0],
+    }
+}
+
 /// A picture packed for the GPU: its entries as the shaders read them, the
 /// rows of its stretch table, and its masks' segments.
 #[derive(Clone, Debug, Default)]
 pub struct GpuScene {
-    layers: Vec<[f32; 20]>,
+    layers: Vec<[f32; LAYER_FLOATS]>,
     computed: Vec<([f32; 16], f32)>,
     finish: Vec<([f32; 20], Option<[i64; 2]>)>,
     /// How many of [`Self::finish`] are the Finish stage's: the steps in
@@ -429,7 +441,7 @@ impl GpuScene {
                 .computed
                 .filter(|mask| *mask < picture.computed.len().min(MAX_COMPUTED_MASKS))
                 .map_or(-1.0, |mask| mask as f32);
-            let mut slot = [0.0_f32; 20];
+            let mut slot = [0.0_f32; LAYER_FLOATS];
             slot[3] = layer.opacity.clamp(0.0, 1.0);
             slot[5] = -1.0;
             slot[6] = mask_index(layer.clip);
@@ -439,6 +451,8 @@ impl GpuScene {
             slot[15] = if layer.own { 1.0 } else { 0.0 };
             slot[16] = computed;
             slot[17] = -1.0;
+            // The range mask: low, high and feather; a feather of -1 is none.
+            slot[20..24].copy_from_slice(&range_slots(layer.range));
             match &layer.kind {
                 LayerKind::Input { read, color, curve } => {
                     // A layered stretch is drawn by the shader, past its
@@ -610,8 +624,14 @@ impl GpuScene {
                 ));
                 continue;
             }
-            let packed =
-                scene.pack_step(&step.kind, mask_index(step.mask), step.opacity, true, index);
+            let packed = scene.pack_step(
+                &step.kind,
+                mask_index(step.mask),
+                step.opacity,
+                step.range,
+                true,
+                index,
+            );
             scene.finish.push(packed);
         }
         scene.finish_count = scene.finish.len();
@@ -655,7 +675,7 @@ impl GpuScene {
             let heal = matches!(kind, FinishKind::Heal { .. });
             let local = matches!(&kind, FinishKind::Tone(tone) if tone.is_local());
             if heal || local {
-                let packed = scene.pack_step(&kind, -2.0, 1.0, true, at);
+                let packed = scene.pack_step(&kind, -2.0, 1.0, layer.range, true, at);
                 let local = (packed.0[14] > 0.5).then(|| packed.0[14] as usize - 1);
                 scene.stages.push(StackStage {
                     layer: at,
@@ -667,7 +687,7 @@ impl GpuScene {
                 scene.finish.push(packed);
                 continue;
             }
-            let packed = scene.pack_step(&kind, -1.0, 1.0, false, at);
+            let packed = scene.pack_step(&kind, -1.0, 1.0, layer.range, false, at);
             scene.layers[at][13] = scene.finish.len() as f32;
             scene.finish.push(packed);
         }
@@ -682,17 +702,21 @@ impl GpuScene {
     /// One step packed as the shaders read it, with a heal's offset.
     /// `local` says whether its neighborhoods can be measured: a Finish
     /// step's can, while there is room.
+    #[allow(clippy::too_many_arguments)]
     fn pack_step(
         &mut self,
         kind: &FinishKind,
         mask: f32,
         opacity: f32,
+        range: Option<crate::picture::RangeMask>,
         local: bool,
         index: usize,
     ) -> ([f32; 20], Option<[i64; 2]>) {
         let mut slot = [0.0_f32; 20];
         slot[2] = mask;
         slot[3] = opacity.clamp(0.0, 1.0);
+        // The range mask after the step's own range.x: low, high, feather.
+        slot[17..20].copy_from_slice(&range_slots(range)[..3]);
         let first_row = (LAYER_ROWS + 3 * self.finish_rows.len()) as f32;
         let mut offset = None;
         match kind {
@@ -790,7 +814,7 @@ struct Globals {
     view: [f32; 4],
     screen: [f32; 4],
     counts: [f32; 4],
-    layers: [[f32; 20]; MAX_LAYERS],
+    layers: [[f32; LAYER_FLOATS]; MAX_LAYERS],
     finish: [[f32; 20]; MAX_FINISH_STEPS],
     healed: [[f32; 4]; MAX_HEALED_LAYERS],
     heals: [[f32; 8]; MAX_HEALS],
@@ -1709,7 +1733,7 @@ impl GpuCompositor {
                 scene.heals.len() as f32,
                 0.0,
             ],
-            layers: [[0.0; 20]; MAX_LAYERS],
+            layers: [[0.0; LAYER_FLOATS]; MAX_LAYERS],
             finish: [[0.0; 20]; MAX_FINISH_STEPS],
             healed: [[-1.0, -1.0, 0.0, 0.0]; MAX_HEALED_LAYERS],
             heals: [[0.0; 8]; MAX_HEALS],

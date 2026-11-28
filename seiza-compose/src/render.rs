@@ -15,7 +15,7 @@
 
 use crate::picture::{
     Adjustment, Blend, ComputedMask, FinishKind, InputRead, LayerKind, LuminanceTarget, Picture,
-    Segment,
+    RangeMask, Segment,
 };
 use crate::space::WorkingSpace;
 use crate::{Error, LinearImage, ReferenceRegion, Result};
@@ -439,10 +439,15 @@ impl Plan {
             if let Some(layer) = picture.layers.get(end)
                 && let LayerKind::Step(kind) = &layer.kind
             {
-                let cover: Vec<f32> = (0..padded.pixels())
-                    .map(|at| layer_cover(layer, &masks, &computed, at))
-                    .collect();
                 let mut rgb: Vec<f32> = state.iter().flat_map(|blended| blended.color).collect();
+                // A range mask reads the picture beneath the step.
+                let cover: Vec<f32> = (0..padded.pixels())
+                    .map(|at| {
+                        let beneath = [rgb[at * 3], rgb[at * 3 + 1], rgb[at * 3 + 2]];
+                        layer_cover(layer, &masks, &computed, at)
+                            * RangeMask::weight_of(layer.range, picture.space.luma(beneath))
+                    })
+                    .collect();
                 apply_step(
                     &picture.rendered_kind(kind),
                     &cover,
@@ -830,6 +835,7 @@ fn combine(
             && layer.own
         {
             if waiting {
+                let cover = cover * RangeMask::weight_of(layer.range, space.luma(own));
                 own = cover_mix(own, adjusted(own, adjustment, space), cover);
                 own_parts = None;
             }
@@ -852,7 +858,7 @@ fn combine(
             LayerKind::GroupEnd if flattened > 0 => flattened -= 1,
             LayerKind::GroupEnd if depth > 0 => {
                 own = color;
-                own_cover = cover;
+                own_cover = cover * RangeMask::weight_of(layer.range, space.luma(color));
                 own_mode = layer.blend;
                 waiting = true;
                 depth -= 1;
@@ -867,6 +873,7 @@ fn combine(
                 color = [0.0; 3];
             }
             LayerKind::Adjustment(adjustment) => {
+                let cover = cover * RangeMask::weight_of(layer.range, space.luma(color));
                 color = cover_mix(color, adjusted(color, *adjustment, space), cover);
             }
             // A step works on the whole area at the end of a range.
@@ -876,6 +883,8 @@ fn combine(
                     .as_ref()
                     .and_then(|_| layers.values[index].as_ref())
                     .map(|values| values[at]);
+                let cover =
+                    cover * value.map_or(1.0, |value| RangeMask::weight_of(layer.range, value));
                 color = luminance(color, value, *target, cover, space);
             }
             LayerKind::Input { color: tint, .. } => {
@@ -884,7 +893,7 @@ fn combine(
                     .map_or(0.0, |values| values[at]);
                 own = tint.map(|channel| channel * value);
                 own_parts = Some((*tint, value));
-                own_cover = cover;
+                own_cover = cover * RangeMask::weight_of(layer.range, value);
                 own_mode = layer.blend;
                 waiting = true;
             }
@@ -1005,12 +1014,21 @@ fn finish(picture: &Picture, padded: &Padded, masks: &[Vec<f32>], combined: Vec<
     let mut out = combined.clone();
     let mut plain = combined;
     for step in picture.finish_steps().iter() {
+        // A range mask reads the picture as the steps before left it.
+        let ranged: Option<Vec<f32>> = step.range.map(|range| {
+            out.as_chunks::<3>()
+                .0
+                .iter()
+                .map(|pixel| range.weight(picture.space.luma(*pixel)))
+                .collect()
+        });
         let cover = |at: usize| {
             step.opacity.clamp(0.0, 1.0)
                 * step
                     .mask
                     .and_then(|mask| masks.get(mask))
                     .map_or(1.0, |mask| mask[at])
+                * ranged.as_ref().map_or(1.0, |weights| weights[at])
         };
         match &step.kind {
             FinishKind::Heal { offset, shift } => {

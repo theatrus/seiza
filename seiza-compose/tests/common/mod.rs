@@ -82,11 +82,13 @@ pub fn everything() -> Picture {
         },
         opacity: 1.0,
         mask: Some(1),
+        range: None,
     }];
     finish.push(FinishStep {
         kind: FinishKind::Stretch(plan),
         opacity: 0.5,
         mask: None,
+        range: None,
     });
     finish.push(FinishStep {
         kind: FinishKind::Tone(Tone {
@@ -104,6 +106,7 @@ pub fn everything() -> Picture {
         }),
         opacity: 1.0,
         mask: None,
+        range: None,
     });
     // A heal after the Tone step copies the toned picture, each source
     // pixel toned with its own neighborhood.
@@ -114,6 +117,7 @@ pub fn everything() -> Picture {
         },
         opacity: 1.0,
         mask: Some(1),
+        range: None,
     });
     Picture {
         layers: vec![

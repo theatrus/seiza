@@ -135,7 +135,8 @@ fn finished(pixel: vec2i) -> vec3f {
     let count = i32(globals.counts.y);
     for (var index = i32(globals.counts.w); index < count; index++) {
         let step = globals.finish[index];
-        let covered = applies(pixel, step);
+        let covered = applies(pixel, step)
+            * range_weight(step.range.y, step.range.z, step.range.w, dot(color, globals.luma.xyz));
         if maps_pixels(step) {
             color = mix(color, adjust(color, step, pixel), covered);
         } else {

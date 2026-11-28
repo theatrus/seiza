@@ -164,6 +164,7 @@ fn two_local_tone_steps_match_the_cpu() {
         }),
         opacity: 0.8,
         mask: None,
+        range: None,
     });
     let place: Vec<seiza_compose::gpu::GpuInput> = (0..3)
         .map(|layer| seiza_compose::gpu::GpuInput { layer, scale: 1.0 })
@@ -894,6 +895,77 @@ fn steps_that_read_neighbors_match_the_cpu_in_the_stack() {
     };
     let (mean, p99, largest) = gap(&cpu, &gpu);
     eprintln!("neighbors in the stack: mean {mean:e}, p99 {p99:e}, max {largest:e}");
+    assert!(
+        mean < 1e-3 && p99 < 5e-3,
+        "mean {mean:e}, p99 {p99:e}, max {largest:e}"
+    );
+}
+
+/// Range masks by brightness, on an input layer (its value), an adjustment
+/// and a step in the stack (the picture beneath), a group (what its members
+/// made), a step that reads neighbors, and a Finish step: the GPU weighs
+/// each as the CPU does.
+#[test]
+fn range_masks_match_the_cpu() {
+    use seiza_compose::picture::{
+        Adjustment, FinishKind, FinishStep, InputRead, Layer, LayerKind, RangeMask, Transfer,
+        TransferStage,
+    };
+    use seiza_compose::tone::Tone;
+    use seiza_stretch::ResolvedCurve;
+    let inputs = inputs();
+    let images: Vec<&LinearImage> = inputs.iter().collect();
+    let curve = ResolvedCurve::Mtf {
+        shadows: 0.0,
+        midtone: 0.3,
+        highlights: 1.0,
+    };
+    let read = |input: usize| InputRead::new(input, Transfer::of([TransferStage::Curve(curve)]));
+    let range = |low, high, feather| Some(RangeMask { low, high, feather });
+    let picture = Picture {
+        layers: vec![
+            Layer::added(read(0), [1.0, 0.2, 0.1]),
+            Layer {
+                range: range(0.3, 0.8, 0.1),
+                ..Layer::added(read(1), [0.1, 0.9, 0.3])
+            },
+            Layer {
+                range: range(0.0, 0.35, 0.15),
+                ..Layer::new(LayerKind::Adjustment(Adjustment::Exposure(0.8)))
+            },
+            Layer {
+                range: range(0.4, 2.0, 0.0),
+                ..Layer::new(LayerKind::Step(FinishKind::Curves(0.6)))
+            },
+            Layer::new(LayerKind::GroupBegin),
+            Layer::added(read(2), [0.2, 0.1, 0.8]),
+            Layer {
+                blend: seiza_compose::picture::Blend::Screen,
+                range: range(0.1, 0.5, 0.2),
+                ..Layer::new(LayerKind::GroupEnd)
+            },
+            Layer {
+                range: range(0.2, 0.6, 0.1),
+                ..Layer::new(LayerKind::Step(FinishKind::Tone(Tone {
+                    clarity: 0.5,
+                    ..Tone::default()
+                })))
+            },
+        ],
+        finish: vec![FinishStep {
+            kind: FinishKind::Saturation(1.8),
+            opacity: 1.0,
+            mask: None,
+            range: range(0.5, 1.0, 0.25),
+        }],
+        ..Picture::default()
+    };
+    let Some((cpu, gpu)) = both(&picture, &images) else {
+        eprintln!("no GPU: the GPU compositor was not checked");
+        return;
+    };
+    let (mean, p99, largest) = gap(&cpu, &gpu);
+    eprintln!("range masks: mean {mean:e}, p99 {p99:e}, max {largest:e}");
     assert!(
         mean < 1e-3 && p99 < 5e-3,
         "mean {mean:e}, p99 {p99:e}, max {largest:e}"

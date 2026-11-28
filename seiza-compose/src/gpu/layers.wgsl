@@ -594,13 +594,15 @@ fn tile_fragment(in: TileVertex) -> @location(0) vec4f {
                 waiting = false;
             }
             let step = globals.finish[i32(layer.adjust.y)];
-            color = mix(color, step_alone(color, step), cover);
+            let ranged = cover * layer_range(index, dot(color, globals.luma.xyz));
+            color = mix(color, step_alone(color, step), ranged);
             continue;
         }
         if kind > 0.5 && kind < 9.5 && layer.adjust.w > 0.5 {
             // An adjustment of the waiting layer or group alone.
             if waiting {
-                own = mix(own, adjusted(own, layer.adjust), cover);
+                let ranged = cover * layer_range(index, dot(own, globals.luma.xyz));
+                own = mix(own, adjusted(own, layer.adjust), ranged);
                 own_band = false;
             }
             continue;
@@ -619,7 +621,11 @@ fn tile_fragment(in: TileVertex) -> @location(0) vec4f {
                     layer.stretch.x,
                 );
             }
-            color = luminance_target(color, value, has, kind < 13.5, cover);
+            var ranged = cover;
+            if has {
+                ranged *= layer_range(index, value);
+            }
+            color = luminance_target(color, value, has, kind < 13.5, ranged);
             continue;
         }
         if kind > 11.5 {
@@ -639,7 +645,7 @@ fn tile_fragment(in: TileVertex) -> @location(0) vec4f {
             } else if depth > 0 {
                 own = color;
                 own_band = false;
-                own_cover = cover;
+                own_cover = cover * layer_range(index, dot(color, globals.luma.xyz));
                 own_mode = layer.select.y;
                 waiting = true;
                 depth -= 1;
@@ -659,7 +665,8 @@ fn tile_fragment(in: TileVertex) -> @location(0) vec4f {
             continue;
         }
         if kind > 0.5 {
-            color = mix(color, adjusted(color, layer.adjust), cover);
+            let ranged = cover * layer_range(index, dot(color, globals.luma.xyz));
+            color = mix(color, adjusted(color, layer.adjust), ranged);
             continue;
         }
         var value = 0.0;
@@ -673,7 +680,7 @@ fn tile_fragment(in: TileVertex) -> @location(0) vec4f {
         own_band = true;
         own_tint = layer.color.rgb;
         own_value = value;
-        own_cover = cover;
+        own_cover = cover * layer_range(index, value);
         own_mode = layer.select.y;
         waiting = true;
     }

@@ -402,6 +402,11 @@ pub struct Layer {
     /// For an adjustment: whether it changes only the layer or group just
     /// before it.
     pub own: bool,
+    /// A mask by brightness that limits the layer: for a layer that shows an
+    /// input, its own value; for an adjustment, a step in the stack or a
+    /// group, the luminance of what it changes or of what the group made.
+    /// A layer of one color everywhere ignores it.
+    pub range: Option<RangeMask>,
 }
 
 impl Layer {
@@ -415,6 +420,7 @@ impl Layer {
             clip: None,
             computed: None,
             own: false,
+            range: None,
         }
     }
 
@@ -428,6 +434,40 @@ impl Layer {
                 curve: 0.0,
             })
         }
+    }
+}
+
+/// A mask that selects pixels by brightness: fully between `low` and
+/// `high`, fading to nothing over `feather` beyond each, linearly. With a
+/// `feather` of 0 the edges are hard. `low` above `high` selects nothing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RangeMask {
+    pub low: f32,
+    pub high: f32,
+    pub feather: f32,
+}
+
+impl RangeMask {
+    /// The softest edge kept, so a hard edge is still a ramp and the CPU and
+    /// GPU agree on it.
+    pub const SHARPEST: f32 = 1.0e-6;
+
+    /// How much of a layer or step applies to a pixel of this brightness,
+    /// from 0 to 1. A value that is not a number selects nothing.
+    pub fn weight(&self, value: f32) -> f32 {
+        if !value.is_finite() {
+            return 0.0;
+        }
+        let feather = self.feather.max(Self::SHARPEST);
+        // Measured from the edges themselves, so a value on one is exact.
+        let rise = (1.0 + (value - self.low) / feather).clamp(0.0, 1.0);
+        let fall = (1.0 + (self.high - value) / feather).clamp(0.0, 1.0);
+        rise * fall
+    }
+
+    /// The weight of an optional mask: 1 when there is none.
+    pub fn weight_of(range: Option<RangeMask>, value: f32) -> f32 {
+        range.map_or(1.0, |range| range.weight(value))
     }
 }
 
@@ -523,6 +563,8 @@ pub struct FinishStep {
     pub opacity: f32,
     /// A painted mask that limits the step. A heal's is its stroke.
     pub mask: Option<usize>,
+    /// A mask by the luminance of the picture as the steps before left it.
+    pub range: Option<RangeMask>,
 }
 
 /// A color picture: what [`crate::render`] renders.
@@ -577,12 +619,13 @@ impl Picture {
                         .mask
                         .or(layer.clip)
                         .or(layer.computed.map(|_| usize::MAX)),
+                    range: layer.range,
                 }),
                 _ => {}
             }
         }
         for step in stacked.iter().chain(&self.finish) {
-            let whole = step.mask.is_none() && step.opacity >= 1.0;
+            let whole = step.mask.is_none() && step.range.is_none() && step.opacity >= 1.0;
             match &step.kind {
                 FinishKind::Tone(tone) if whole => peak = tone.peak(),
                 FinishKind::Tone(tone) => peak = peak.max(tone.peak()),
@@ -668,7 +711,32 @@ mod tests {
             kind,
             opacity,
             mask,
+            range: None,
         }
+    }
+
+    #[test]
+    fn a_range_mask_selects_between_its_edges_and_fades_over_its_feather() {
+        let range = RangeMask {
+            low: 0.2,
+            high: 0.6,
+            feather: 0.1,
+        };
+        assert_eq!(range.weight(0.4), 1.0);
+        assert_eq!(range.weight(0.2), 1.0);
+        assert!((range.weight(0.15) - 0.5).abs() < 1e-5);
+        assert!((range.weight(0.65) - 0.5).abs() < 1e-5);
+        assert_eq!(range.weight(0.05), 0.0);
+        assert_eq!(range.weight(0.9), 0.0);
+        assert_eq!(range.weight(f32::NAN), 0.0);
+        // A hard edge.
+        let hard = RangeMask {
+            feather: 0.0,
+            ..range
+        };
+        assert_eq!(hard.weight(0.2), 1.0);
+        assert_eq!(hard.weight(0.19), 0.0);
+        assert_eq!(RangeMask::weight_of(None, 0.0), 1.0);
     }
 
     #[test]

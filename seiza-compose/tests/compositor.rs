@@ -90,6 +90,7 @@ fn a_tone_step_s_neighborhoods_do_not_depend_on_tiling() {
             }),
             opacity: 1.0,
             mask: None,
+            range: None,
         }],
         ..Picture::default()
     };
@@ -103,6 +104,7 @@ fn a_tone_step_s_neighborhoods_do_not_depend_on_tiling() {
         }),
         opacity: 1.0,
         mask: None,
+        range: None,
     });
     for picture in [&picture, &twice] {
         let one = render(picture, &[&input], whole(&input), 4096);
@@ -316,6 +318,7 @@ fn steps_on_top_of_the_stack_are_finish_steps() {
                 kind: kind.clone(),
                 opacity: 1.0,
                 mask: None,
+                range: None,
             })
             .collect(),
         ..Picture::default()
