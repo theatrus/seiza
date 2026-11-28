@@ -678,6 +678,32 @@ same 128 windows:
 - The spikes' false dip halves with the training: 0.6% of the stars' light
   below zero for both, from 1.1%.
 
+On whole images, the long fit-first run keeps galaxies, though it has seen
+none made. Coma and M51 with the clean skies that leave the galaxies'
+sources out of the catalogue's stars (the same for every run here), share
+of each galaxy's light kept in the starless image, and the share of the
+light taken out where no star is listed:
+
+| | Coma's small galaxies | NGC 4889 | NGC 4874 | Coma, unlisted | M51, unlisted |
+|---|---|---|---|---|---|
+| X11, fit-first | 0.28 to 0.98 | 0.19 | 0.41 | 3.1% | 12% |
+| X13, level moved | 0.14 to 0.30 | 0.05 | 0.14 | 4.6% | 15% |
+| X19, four times as long | 0.71 to 1.01 | 0.97 | 0.99 | 1.2% | 1.5% |
+| X12, image only | about 0 | 0.03 | 0.12 | 5.4% | 25% |
+| X20, four times as long | about 0 | 0.55 | 0.62 | 5.0% | 25% |
+
+- At 40,000 steps the fit-first network takes out what the catalogue lists
+  and little else: the stars around Coma's ellipticals go, the compact
+  galaxies among them stay, and M51's and NGC 5195's cores and the knots of
+  M51's arms are left whole. At 10,000 steps it took much of them out.
+- The image-only runs have no list to go by and take out every compact
+  thing, longer trained or not, and tear holes in M51's and NGC 5195's
+  cores. The marks and made galaxies of the next runs are for them.
+- On the four nebula stacks, the light taken out where no star is listed
+  falls to 0.3% to 0.6% for X19 (X11 0.4% to 0.9%).
+- Stars fainter than the catalogue's limit stay in the starless image, as
+  they stay in the clean skies the runs learn from.
+
 ### Galaxies
 
 A galaxy is not a star. Small ones look like stars, and a large one's
