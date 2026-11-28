@@ -498,6 +498,35 @@ bank. Medians over windows, in noise units:
 - Next for spikes: the spike channel's penalty quadratic near zero and
   weighted up, perhaps with windows with spikes drawn more often.
 
+### Fifth runs (2026-11-27)
+
+X9 (`fit`) and X10 (`image`) are X7 and X8 with the spike layer's penalty
+quadratic up to 0.25 and weighed four times (`--spike-quadratic 0.25
+--spike-weight 4`), alike in all else. Medians over the same 128 windows:
+
+| | stars, rms | sky, rms | cores, mean | halos found | spikes found | spikes stray |
+|---|---|---|---|---|---|---|
+| X7, fit-first | 0.415 | 0.066 | 0.018 | 0.82 | 0.003 | 0.004 |
+| X9, fit-first, spikes eased | 0.420 | 0.060 | 0.014 | 0.79 | 0.056 | 0.017 |
+| X8, image only | 0.544 | 0.102 | 0.030 | 0.70 | 0.003 | 0.004 |
+| X10, image only, spikes eased | 0.539 | 0.105 | 0.024 | 0.69 | 0.045 | 0.014 |
+
+- The spike layer moved, from 0.3% of the spikes' light found to 5%, 5 to
+  15% on the windows with the most spikes, but it is far from taking them.
+  The starless image is as before: every run still leaves most of a
+  pupil's spikes in it, and the halo layer takes some of their light.
+- The windows with spikes over the noise are 5% of the train bank (396 of
+  8,024), so a run of 10,000 batches of 16 sees about 8,000 of them. On
+  those windows alone (a width 16 network, batches of 8), with the eased
+  penalty the spike layer finds about 10% up to 2,000 steps, then 78% at
+  2,500 and 69 to 86% to 4,000, with 0.04 noise rms put where there are no
+  spikes; by squared error it climbs sooner (35% at 2,000) to 78% at 2,500
+  but falls back to 47% by 4,000, with more stray light (0.05 to 0.07).
+  The layer learns once it has seen some 20,000 windows with spikes, so
+  the fifth runs stopped short of it.
+- Next for spikes: the eased penalty, with windows with spikes drawn as a
+  share of every batch, enough for some 40,000 of them in a run.
+
 ## Order of work
 
 1. The clean skies: Gaia fits with the PSF field, and checks that what is
