@@ -606,6 +606,46 @@ A whole Ultracat stack takes about 20 s through either network.
   compact source as a star. A plane of where any star is marked (`marks`)
   and the made galaxies, compact and kept, answer that.
 
+### Seventh runs (2026-11-27)
+
+X13 (`fit`) and X14 (`image`) are X11 and X12 with each training tile read
+about a level and noise moved from its own as far as a whole image's are
+from its tiles' (`--level-jitter`, `starless_model.jittered`): nine times
+in twenty 1.5 to 60 noise below, two in five near, three in twenty above.
+X15 and X16 add a quarter of every batch from windows with bright stars
+and no spikes (`--spikeless-share 0.25`), against the spikes' false dip.
+Medians over the same 128 windows, each read about its own level:
+
+| | stars, rms | sky, rms | cores, mean | halos found | spikes found |
+|---|---|---|---|---|---|
+| X11, fit-first | 0.422 | 0.053 | 0.030 | 0.83 | 0.18 |
+| X13, level moved | 0.432 | 0.061 | 0.028 | 0.78 | 0.19 |
+| X15, and bright spike-free windows | 0.434 | 0.059 | 0.065 | 0.77 | 0.14 |
+| X12, image only | 0.544 | 0.107 | 0.009 | 0.53 | 0.56 |
+| X14, level moved | 0.568 | 0.108 | 0.049 | 0.56 | 0.56 |
+| X16, and bright spike-free windows | 0.567 | 0.101 | 0.079 | 0.67 | 0.61 |
+
+Read about a level moved from the window's own, as a whole image read
+about one moves it, the stars' rms (48 windows):
+
+| | own level | 3 noise below | 10 below | 30 below |
+|---|---|---|---|---|
+| X11 | 0.453 | 0.589 | 0.994 | 3.55 |
+| X13 | 0.478 | 0.484 | 0.510 | 0.652 |
+| X12 | 0.543 | 0.972 | 2.30 | 3.75 |
+| X14 | 0.567 | 0.584 | 0.616 | 0.736 |
+
+- Trained about their own level only, the runs fall apart read about
+  another: two to eight times the error 10 to 30 noise off, as a bright
+  nebula's tiles are from a whole image's median. Trained with the level
+  moved, they hold, for about 5% more error about their own. A runtime
+  that reads an image about one level, with no seams between its tiles,
+  needs this.
+- The spikes are learned as before.
+- The bright spike-free windows leave the false dip as it was (1.1% of the
+  stars' light below zero with or without, 0.9% for X16), so it is not for
+  want of seeing such stars; they are not kept.
+
 ### Galaxies
 
 A galaxy is not a star. Small ones look like stars, and a large one's
