@@ -104,7 +104,7 @@ fn smoothed_masks_stay_close_to_the_cpu() {
 /// a mask that reads what its layers show takes no row of its own. A read
 /// that finds no row left is named, not dropped without a word.
 #[test]
-fn reads_share_stretch_rows_and_one_without_a_row_is_named() {
+fn reads_share_stretch_rows_and_more_than_the_rows_hold_go_in_batches() {
     use seiza_compose::gpu::{GpuInput, GpuScene, LAYER_ROWS, MAX_LAYERS};
     use seiza_compose::picture::{ComputedMask, InputRead, Layer, Transfer, TransferStage};
     let read = |row: usize| InputRead::new(0, Transfer::of([TransferStage::Scale(row as f32)]));
@@ -137,12 +137,15 @@ fn reads_share_stretch_rows_and_one_without_a_row_is_named() {
             0.0,
         ));
     }
-    let left_out = GpuScene::new(&picture, &place).left_out;
-    let named = format!("computed mask {}", spare / 2 + 1);
-    assert!(
-        left_out.iter().any(|line| line.contains(&named)),
-        "{left_out:?}"
-    );
+    // Each layer limited by one of them, so every mask is needed.
+    for mask in 1..picture.computed.len() {
+        picture.layers[mask].computed = Some(mask);
+    }
+    // More rows than one draw holds: the layers are drawn in batches, and
+    // nothing is left out.
+    let scene = GpuScene::new(&picture, &place);
+    assert!(scene.batches() > 1, "drawn in one batch");
+    assert_eq!(scene.left_out, Vec::<String>::new());
 }
 
 /// Two Tone steps that read neighborhoods, each over the picture the one
@@ -1251,10 +1254,10 @@ fn a_shared_row_after_a_layered_stretch_s_own_row_is_the_right_one() {
     );
 }
 
-/// What the GPU cannot draw as the CPU does is named, and a layer whose
-/// mask it cannot hold is hidden rather than drawn everywhere.
+/// What the GPU cannot draw as the CPU does is named; a mask past one
+/// draw's room is drawn in a batch of its own.
 #[test]
-fn what_the_gpu_cannot_hold_is_named_and_not_drawn_unmasked() {
+fn what_the_gpu_cannot_draw_is_named_and_what_it_cannot_hold_is_batched() {
     use seiza_compose::gpu::{GpuInput, GpuScene};
     use seiza_compose::picture::{
         CoreStage, InputRead, Layer, LayerHeal, LayerKind, LuminanceTarget, Transfer, TransferStage,
@@ -1284,15 +1287,9 @@ fn what_the_gpu_cannot_hold_is_named_and_not_drawn_unmasked() {
         masks: vec![stroke.clone(); 16],
         ..Picture::default()
     };
+    // A batch holds only the masks its layers use: nothing is left out.
     let scene = GpuScene::new(&masked, &place);
-    assert!(
-        scene
-            .left_out
-            .iter()
-            .any(|words| words.contains("mask is past")),
-        "{:?}",
-        scene.left_out
-    );
+    assert_eq!(scene.left_out, Vec::<String>::new());
     // A heal of a luminance layer, which only the CPU heals.
     let luminance = Picture {
         layers: vec![Layer::new(LayerKind::Luminance {
@@ -1342,5 +1339,128 @@ fn what_the_gpu_cannot_hold_is_named_and_not_drawn_unmasked() {
             .any(|words| words.contains("second stage that reads maps")),
         "{:?}",
         scene.left_out
+    );
+}
+
+/// A picture with more than one draw holds of everything (layers, painted
+/// and computed masks, steps, Finish steps) and a group open across a
+/// batch's end: the GPU draws it in batches, leaves nothing out and matches
+/// the CPU.
+#[test]
+fn a_picture_past_every_limit_is_drawn_in_batches_as_the_cpu_draws_it() {
+    use seiza_compose::gpu::{
+        GpuInput, GpuScene, MAX_COMPUTED_MASKS, MAX_FINISH_STEPS, MAX_LAYERS, MAX_MASKS,
+    };
+    use seiza_compose::picture::{
+        Blend, ComputedMask, FinishKind, FinishStep, InputRead, Layer, LayerKind, Transfer,
+        TransferStage,
+    };
+    use seiza_stretch::ResolvedCurve;
+    let inputs = inputs();
+    let images: Vec<&LinearImage> = inputs.iter().collect();
+    let read = |input: usize, midtone: f64| {
+        InputRead::new(
+            input,
+            Transfer::of([TransferStage::Curve(ResolvedCurve::Mtf {
+                shadows: 0.0,
+                midtone,
+                highlights: 1.0,
+            })]),
+        )
+    };
+    let count = MAX_LAYERS * 2;
+    let mut layers = Vec::new();
+    let mut masks = Vec::new();
+    let mut computed = Vec::new();
+    // A group open across the first batch's end.
+    layers.push(Layer::new(LayerKind::GroupBegin));
+    for at in 0..count {
+        let input = at % 3;
+        let midtone = 0.1 + 0.8 * at as f64 / count as f64;
+        let mut layer = Layer {
+            opacity: 0.08,
+            blend: if at % 2 == 0 {
+                Blend::Add
+            } else {
+                Blend::Screen
+            },
+            ..Layer::added(read(input, midtone), [0.9, 0.5 + 0.01 * at as f32, 0.3])
+        };
+        // Painted masks past the GPU's room for them.
+        if at < MAX_MASKS + 6 {
+            let x = 20.0 + 18.0 * at as f32;
+            masks.push(common::stroke([x, 40.0], [x + 30.0, 300.0], 25.0));
+            layer.mask = Some(masks.len() - 1);
+        }
+        // Computed masks past the GPU's room for them.
+        if (MAX_MASKS + 6..MAX_MASKS + 6 + MAX_COMPUTED_MASKS + 3).contains(&at) {
+            computed.push(ComputedMask::foraxx(vec![read((input + 1) % 3, 0.3)], 0.0));
+            layer.computed = Some(computed.len() - 1);
+        }
+        layers.push(layer);
+        if at == MAX_LAYERS + 3 {
+            layers.push(Layer {
+                blend: Blend::Screen,
+                ..Layer::new(LayerKind::GroupEnd)
+            });
+        }
+        // Steps in the stack past the GPU's room for them.
+        if at % 5 == 4 {
+            layers.push(Layer {
+                opacity: 0.5,
+                ..Layer::new(LayerKind::Step(FinishKind::Curves(0.2)))
+            });
+        }
+        // Steps that draw in stages, in later batches: a local Tone step and
+        // a heal, each on a picture a batch before it carried on.
+        if at == MAX_LAYERS + 10 {
+            layers.push(Layer::new(LayerKind::Step(FinishKind::Tone(
+                seiza_compose::tone::Tone {
+                    clarity: 0.4,
+                    ..seiza_compose::tone::Tone::default()
+                },
+            ))));
+        }
+        if at == count - 6 {
+            masks.push(common::stroke([150.0, 150.0], [220.0, 180.0], 20.0));
+            layers.push(Layer {
+                mask: Some(masks.len() - 1),
+                ..Layer::new(LayerKind::Step(FinishKind::Heal {
+                    offset: [40, -25],
+                    shift: [0.0; 3],
+                }))
+            });
+        }
+    }
+    let picture = Picture {
+        layers,
+        masks,
+        computed,
+        finish: (0..MAX_FINISH_STEPS + 3)
+            .map(|at| FinishStep {
+                kind: FinishKind::Saturation(1.0 + 0.02 * at as f32),
+                opacity: 1.0,
+                mask: None,
+                range: None,
+            })
+            .collect(),
+        ..Picture::default()
+    };
+    let place: Vec<GpuInput> = (0..3).map(|layer| GpuInput { layer, scale: 1.0 }).collect();
+    let scene = GpuScene::new(&picture, &place);
+    assert!(scene.batches() > 2, "{} batches", scene.batches());
+    assert_eq!(scene.left_out, Vec::<String>::new());
+    let Some((cpu, gpu)) = both(&picture, &images) else {
+        eprintln!("no GPU: the GPU compositor was not checked");
+        return;
+    };
+    let (mean, p99, largest) = gap(&cpu, &gpu);
+    eprintln!(
+        "batched ({} batches): mean {mean:e}, p99 {p99:e}, max {largest:e}",
+        scene.batches()
+    );
+    assert!(
+        mean < 2e-3 && p99 < 1e-2,
+        "mean {mean:e}, p99 {p99:e}, max {largest:e}"
     );
 }
