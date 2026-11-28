@@ -18,7 +18,8 @@ from seiza_training.unet import ResidualUNet  # noqa: E402
 
 @pytest.fixture(scope="module")
 def small_bank(tmp_path_factory):
-    """A bank of composites of one synthetic clean sky, pupil telescopes."""
+    """A bank of composites of one synthetic clean sky, pupil telescopes of
+    four vanes, with made galaxies."""
     tmp_path = tmp_path_factory.mktemp("starless")
     rng = np.random.default_rng(12)
     size = (512, 512)
@@ -28,7 +29,7 @@ def small_bank(tmp_path_factory):
     count = 300
     table = np.zeros((count, len(ss.STAR_COLUMNS)))
     col = {name: index for index, name in enumerate(ss.STAR_COLUMNS)}
-    magnitudes = rng.uniform(13.0, 17.0, count)
+    magnitudes = rng.uniform(11.0, 17.0, count)
     table[:, col["magnitude"]], table[:, col["flux"]] = magnitudes, 10 ** (-0.4 * (magnitudes - 25.0))
     table[:, col["flux_error"]] = table[:, col["flux"]] / 1000.0
     store = Store(tmp_path / "store", tmp_path / "scratch")
@@ -39,13 +40,13 @@ def small_bank(tmp_path_factory):
     np.savez_compressed(here / "stars.npz", stars=table, columns=np.array(ss.STAR_COLUMNS))
     (here / "sky.json").write_text(json.dumps({"fwhm_px": 4.0, "photon_term": 0.5, "clip_level": 40000.0,
                                                "version": ss.CLEAN_SKY_VERSION}))
-    original = bank.PUPIL_SHARE
-    bank.PUPIL_SHARE = 1.0
+    original = bank.PUPIL_SHARE, bank.VANES
+    bank.PUPIL_SHARE, bank.VANES = 1.0, (4,)
     try:
         done = bank.cut(store, [{"id": "syn/deep"}], work=tmp_path / "banks", draws=2, windows=4, side=128,
                         seed=1, workers=1)
     finally:
-        bank.PUPIL_SHARE = original
+        bank.PUPIL_SHARE, bank.VANES = original
     return store, tmp_path / "banks" / done["name"]
 
 
@@ -78,10 +79,11 @@ def test_the_stars_model_is_read_about_zero_and_the_images_about_the_sky(small_b
     read, level, scale = sm.network_reads(planes, "fit")
     by_name = dict(zip(sm.READS["fit"], read))
     starless = np.abs(planes["input"] - planes["starless"]) < planes["noise"]
-    # Where no star is, the image and the fit's estimate read near zero, and
-    # so does the stars model, which holds no sky.
+    # Where no star is, the image and the fit's estimate read near zero (the
+    # level is the window's median, which its stars raise a little over the
+    # sky's), and so does the stars model, which holds no sky.
     for name in ("input", "fit_starless", "fit_model"):
-        assert abs(float(np.median(by_name[name][starless]))) < 0.2, name
+        assert abs(float(np.median(by_name[name][starless]))) < 0.3, name
     assert level > 50.0 * scale / sm.ASINH
 
 
@@ -376,3 +378,54 @@ def test_a_smooth_fill_gets_noise_of_the_image_s_grain_and_the_layers_still_add_
     # A grain read from white noise is near none.
     white = rng.standard_normal((200, 200))
     assert max(sm.grain(white, np.ones(white.shape, bool))) < 0.05
+
+
+def test_a_galaxy_run_gives_their_layer_within_the_starless_image(small_bank):
+    _, directory = small_bank
+    found = sm.Bank(directory)
+    with pytest.raises(ValueError):
+        sm.Settings(galaxies=True)
+    settings = sm.Settings(way="image", tile=64, width=8, levels=3, layers=True, galaxies=True, marks=True)
+    assert settings.channels == (*sm.LAYERS, sm.GALAXY) and settings.outputs == 2 + len(sm.LAYERS)
+    assert settings.reads == (*sm.READS["image"], sm.MARKS)
+    model = ResidualUNet(inputs=len(settings.reads), outputs=settings.outputs, width=8, levels=3)
+    torch.nn.init.normal_(model.last.weight, std=0.05)
+    batch = sm.batch_from(found, np.array([0, 5]), settings, np.random.default_rng(2))
+    assert batch["planes"].shape[1] == len(settings.reads) and batch[sm.GALAXY].shape == (2, 64, 64)
+    # With none of the clean sky's own galaxies, the galaxies' layer is
+    # weighed as the rest.
+    np.testing.assert_array_equal(batch["galaxy_weight"].numpy(), batch["weight"].numpy())
+    _, _, parts = sm.loss_of(model, batch, settings)
+    assert set(parts) == {f"{name}{part}" for name in ("starless", *settings.channels) for part in ("", "_baseline")}
+    planes = {name: np.asarray(found.planes[name][5, :64, :64], dtype=np.float32) for name in found.planes}
+    # The marks are where the points plane marks any star.
+    read, _, _ = sm.network_reads(planes, "image", marks=True)
+    np.testing.assert_array_equal(read[-1], (planes["points"] > 0).astype(np.float32))
+    layers = sm.layers(model, planes, settings)
+    # The galaxies are within the starless image: the stars are what the
+    # starless image, halos and spikes leave, and a share of the galaxies
+    # taken out still adds back.
+    np.testing.assert_allclose(layers["stars"], planes["input"] - layers["starless"] - layers["halos"]
+                               - layers["spikes"], atol=1e-3)
+    for halo_kept, galaxy_kept in ((0.0, 1.0), (0.3, 0.4), (1.0, 0.0)):
+        taken = sm.kept(layers, halo_kept, galaxy_kept)
+        np.testing.assert_allclose(taken["starless"] + taken["stars"] + taken["spikes"] + taken[sm.GALAXY],
+                                   planes["input"], atol=1e-2)
+        np.testing.assert_allclose(taken[sm.GALAXY], (1.0 - galaxy_kept) * layers[sm.GALAXY], atol=1e-6)
+    # A run without galaxies gives none, and keeps them all.
+    plain = sm.Settings(way="image", tile=64, width=8, levels=3, layers=True)
+    old = ResidualUNet(inputs=len(plain.reads), outputs=plain.outputs, width=8, levels=3)
+    assert not sm.layers(old, planes, plain)[sm.GALAXY].any()
+    assert not sm.kept(sm.layers(old, planes, plain), 0.0)[sm.GALAXY].any()
+
+
+def test_the_galaxies_kept_read_the_truth_as_all_and_its_sky_as_none(small_bank):
+    _, directory = small_bank
+    found = sm.Bank(directory)
+    index = next(i for i in range(found.count)
+                 if (np.asarray(found.planes[sm.GALAXY][i]) > np.asarray(found.planes["noise"][i])).sum() > 20)
+    planes = {name: np.asarray(found.planes[name][index], dtype=np.float32) for name in found.planes}
+    assert sm.measures(planes["starless"], planes)["galaxies_kept"] == pytest.approx(1.0, abs=1e-3)
+    kept_none = sm.measures(planes["starless"] - planes[sm.GALAXY], planes)["galaxies_kept"]
+    assert kept_none == pytest.approx(0.0, abs=1e-3)
+    assert sm.measures(planes["starless"], planes)["real_galaxies_rms"] is None

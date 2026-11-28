@@ -29,7 +29,9 @@ def clean_sky_case(rng, size=(400, 400), count=150, faintest=19.0):
     return sky, table, summary, np.full(size, noise_level, np.float32)
 
 
-def test_a_composite_s_layers_add_back_and_its_stars_are_the_stack_s_kind():
+def test_a_composite_s_layers_add_back_and_its_stars_are_the_stack_s_kind(monkeypatch):
+    # Without galaxies, the starless truth is the clean sky.
+    monkeypatch.setattr(bank, "GALAXY_DENSITY", (0.0, 0.0))
     rng = np.random.default_rng(5)
     sky, table, summary, noise = clean_sky_case(rng)
     telescope = bank.Telescope(stamp=stars.moffat_stamp(bank.WIDE_STAMP, 4.0, 3.0), fwhm=4.0)
@@ -224,7 +226,7 @@ def test_a_composite_is_fitted_at_the_places_its_stars_were_put():
     telescope = bank.Telescope(stamp=stars.moffat_stamp(bank.WIDE_STAMP, 4.0, 3.0), fwhm=4.0)
     made = bank.composite(sky, table, summary, telescope, rng, noise)
     fit = bank.fitted(made, noise, summary["clip_level"], 4.0)
-    assert fit["stars"].shape[0] == len(made["placed"])
+    assert fit["stars"].shape[0] == len(made["placed"]) + len(made["listed"])
     kept = ~fit["mask"][20:-20, 20:-20]
     left = (fit["sky"] - made["starless"])[20:-20, 20:-20][kept]
     # The fit takes most of the stars out: what is left is near the noise.
@@ -246,6 +248,7 @@ def test_a_bank_holds_windows_whose_truth_adds_back_and_whose_mask_is_the_clean_
     from seiza_training.store import Store
 
     monkeypatch.setattr(bank, "PUPIL_SHARE", 1.0)
+    monkeypatch.setattr(bank, "GALAXY_DENSITY", (0.0, 0.0))
     rng = np.random.default_rng(11)
     sky, table, summary, noise = clean_sky_case(rng, size=(500, 500), count=260, faintest=17.0)
     mask = np.zeros(sky.shape, bool)
@@ -349,3 +352,67 @@ def test_a_composite_keeps_its_halos_and_spikes_light_apart():
     # A telescope without vanes leaves the spikes' plane empty.
     plain = bank.Telescope(stamp=stars.moffat_stamp(bank.WIDE_STAMP, 4.0, 3.0), fwhm=4.0)
     assert not bank.composite(sky, table, summary, plain, np.random.default_rng(16), noise)["spikes"].any()
+
+
+def test_a_made_galaxy_is_of_unit_light_centred_and_as_long_as_asked():
+    stamp = stars.galaxy_stamp(61, 5.0, 1.0, 0.3, 0.3, 0.9, 30.0)
+    assert stamp.sum() == pytest.approx(1.0) and stamp.min() >= 0.0
+    yy, xx = np.mgrid[0:61, 0:61].astype(np.float64) - 30.0
+    assert float((stamp * xx).sum()) == pytest.approx(0.0, abs=1e-6)
+    assert float((stamp * yy).sum()) == pytest.approx(0.0, abs=1e-6)
+    # Its long axis lies at the angle asked, and it is as flattened.
+    cov = np.array([[(stamp * xx * xx).sum(), (stamp * xx * yy).sum()],
+                    [(stamp * xx * yy).sum(), (stamp * yy * yy).sum()]])
+    values, vectors = np.linalg.eigh(cov)
+    angle = math.degrees(math.atan2(vectors[1, 1], vectors[0, 1])) % 180.0
+    assert angle == pytest.approx(30.0, abs=3.0)
+    assert math.sqrt(values[0] / values[1]) < 0.6
+    # A galaxy under a pixel keeps its light, sampled finer.
+    assert stars.galaxy_stamp(15, 0.3, 0.1, 0.5, 0.5, 0.8, 0.0).sum() == pytest.approx(1.0)
+
+
+def test_a_composite_keeps_its_galaxies_in_the_starless_truth(monkeypatch):
+    monkeypatch.setattr(bank, "GALAXY_DENSITY", (1500.0, 1500.0))
+    rng = np.random.default_rng(21)
+    sky, table, summary, noise = clean_sky_case(rng, count=150)
+    telescope = bank.Telescope(stamp=stars.moffat_stamp(bank.WIDE_STAMP, 4.0, 3.0), fwhm=4.0)
+    made = bank.composite(sky, table, summary, telescope, rng, noise)
+    galaxies = made["galaxies"].astype(np.float64)
+    assert galaxies.sum() > 0 and galaxies.min() >= 0.0
+    # The starless truth is the sky with the galaxies and their photon
+    # noise; the stars layer, the composite less it, is the stars' alone.
+    unclipped = made["input"] < summary["clip_level"]
+    left = (made["starless"] - sky - galaxies)[unclipped]
+    assert abs(float(left.mean())) < 0.05
+    bright = (galaxies > 200.0) & unclipped & (made["light"] < 1e-3)
+    if bright.sum() > 100:
+        ratio = np.var((made["starless"] - sky - galaxies)[bright]) / np.mean(summary["photon_term"] * galaxies[bright])
+        assert ratio == pytest.approx(1.0, rel=0.3)
+    np.testing.assert_allclose(made["starless"] + made["stars"], made["input"], atol=1e-3)
+    away = (made["light"] < 1e-6) & unclipped
+    assert float(np.abs(made["stars"][away]).max()) < 1e-5 * float(np.abs(made["input"][away]).max()) + 1e-3
+    # Some of them carry a catalogue source, fitted and marked as a star.
+    count = int(round(400 * 400 / 1e6 * 1500.0))
+    assert 0.15 * count < len(made["listed"]) < 0.45 * count
+    assert bank.catalogued(made).shape == (len(made["placed"]) + len(made["listed"]), 4)
+    plane = bank.points_plane(bank.catalogued(made), sky.shape)
+    x, y = made["listed"][0, :2]
+    assert plane[int(round(y)), int(round(x))] > 0
+
+
+def test_a_galaxy_s_sources_are_left_and_a_star_before_it_is_not():
+    galaxies = np.array([[100.0, 100.0, 40.0, 20.0, 0.0]])
+    x = np.array([100.0, 120.0, 120.0, 100.0, 104.0, 130.0, 300.0])
+    y = np.array([100.0, 100.0, 100.0, 110.0, 100.0, 100.0, 300.0])
+    chi2 = np.array([50.0, 0.9, 8.0, 0.95, 0.9, np.nan, 30.0])
+    # The nucleus, a poorly fitted source and one at the middle are the
+    # galaxy's; a point-like one off the middle is a star before it; one
+    # outside every galaxy is a star.
+    np.testing.assert_array_equal(ss.galaxy_sources(galaxies, x, y, chi2),
+                                  [True, False, True, False, True, True, False])
+    out = ss.within_galaxies(galaxies, x, y)
+    assert out[0] == 0.0 and out[1] == pytest.approx(0.5) and out[3] == pytest.approx(0.5) and np.isinf(out[6])
+    mask = ss.galaxy_mask(galaxies, (200, 200))
+    assert mask.sum() == pytest.approx(math.pi * 40.0 * 20.0, rel=0.03)
+    assert mask[100, 139] and not mask[100, 141] and mask[119, 100] and not mask[121, 100]
+    assert not ss.galaxy_mask(np.zeros((0, 5)), (20, 20)).any()

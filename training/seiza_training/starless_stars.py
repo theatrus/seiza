@@ -18,6 +18,10 @@ a Moffat profile of a low β, holding a share of the star's light), and the
 rings a filter's or a corrector's reflections throw (`reflection_ring`, an
 annulus of a given radius and width, a little off the star where the
 reflection is not centred), each a stamp of unit light to be scaled.
+
+A galaxy is not a star, and the small ones look like stars: a disc and a
+bulge (`galaxy_stamp`, Sérsic profiles of index 1 and 4) of unit light,
+blurred by the telescope as its stars are.
 """
 
 from __future__ import annotations
@@ -140,6 +144,39 @@ def halo_wings(size: int, fwhm: float, beta: float = 1.5) -> np.ndarray:
     """A bright star's wide wings: a Moffat profile of a low β, of unit
     light, to be scaled by the share of the star's light they hold."""
     return moffat_stamp(size, fwhm, beta)
+
+
+def sersic(radius: np.ndarray, effective: float, index: float) -> np.ndarray:
+    """A Sérsic profile of `index` with half its light within `effective`,
+    1 there (`b` by Ciotti and Bertin's series)."""
+    b = 2.0 * index - 1.0 / 3.0 + 4.0 / (405.0 * index) + 46.0 / (25515.0 * index**2)
+    return np.exp(-b * ((radius / effective) ** (1.0 / index) - 1.0))
+
+
+def galaxy_stamp(size: int, disc: float, bulge: float, bulge_share: float, disc_ratio: float,
+                 bulge_ratio: float, angle_deg: float, oversample: int = OVERSAMPLE) -> np.ndarray:
+    """A galaxy of unit light on a size × size stamp, centred on its middle
+    pixel, before the telescope's blur: an exponential disc (Sérsic 1) of
+    half-light radius `disc` px and axis ratio `disc_ratio`, and a bulge
+    (Sérsic 4) of `bulge` px and `bulge_ratio` holding `bulge_share` of the
+    light, both at `angle_deg`. Sampled `oversample` times finer than the
+    pixels and averaged down, so one under a pixel is not lost between
+    samples."""
+    fine = size * oversample
+    centre = (fine - 1) / 2.0
+    yy, xx = (np.mgrid[0:fine, 0:fine].astype(np.float64) - centre) / oversample
+    angle = math.radians(angle_deg)
+    along = xx * math.cos(angle) + yy * math.sin(angle)
+    across = -xx * math.sin(angle) + yy * math.cos(angle)
+    light = np.zeros((fine, fine))
+    for share, radius, ratio, index in ((1.0 - bulge_share, disc, disc_ratio, 1.0),
+                                        (bulge_share, bulge, bulge_ratio, 4.0)):
+        if share <= 0.0:
+            continue
+        profile = sersic(np.hypot(along, across / ratio), radius, index)
+        light += share * profile / profile.sum()
+    pixels = light.reshape(size, oversample, size, oversample).sum(axis=(1, 3))
+    return pixels / pixels.sum()
 
 
 def reflection_ring(size: int, radius: float, width: float, x: float = 0.0, y: float = 0.0) -> np.ndarray:

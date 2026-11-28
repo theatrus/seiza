@@ -48,6 +48,16 @@ another from windows with bright stars and no spikes, so that a core with
 no spikes about it is given no spikes' dip (`spikeless_share`,
 `spikeless_windows`).
 
+A galaxy is not a star. A bank's starless truth keeps them, real and made,
+and with `Settings.galaxies` the network gives the galaxies' light as a
+layer within the starless image (`GALAXY`), penalised where the bank knows
+it (the made ones') and not within the clean sky's own galaxies, whose
+light is not known apart from the sky's; a share of it moves to an output
+of its own (`kept`). The points plane marks each catalogue star by its
+light's share of the brightest's, so a faint star's mark is all but none;
+with `Settings.marks` the network also reads where any star is marked
+(`MARKS`), so an unmarked compact source can be told from a star.
+
 Each tile is read about its own median and noise. A runtime reading a whole
 image in tiles wants one level and noise for all of them, or the tiles
 disagree where they meet; with `Settings.level_jitter` each tile is read
@@ -89,6 +99,11 @@ VALIDATION_STREAM = 1 << 20
 # penalty weighs against the starless image's.
 LAYERS = ("halos", "spikes")
 LAYER_WEIGHT = 1.0
+# The galaxies' layer: their light within the starless image, the
+# network's last plane after `LAYERS`.
+GALAXY = "galaxies"
+# A plane read from the points plane: 1 wherever a star is marked.
+MARKS = "marks"
 # A window shows spikes when its spike truth tops the noise over this many
 # pixels.
 SPIKY_PIXELS = 500
@@ -104,8 +119,10 @@ class Settings:
     layers of their own (`LAYERS`), and with them the spike layer's penalty:
     quadratic up to an error of `spike_quadratic` (compressed) and
     `spike_weight` times as heavy as the starless image's (the defaults are
-    the penalty every other part has), and whether a tile is read about a
-    level and noise moved from its own in training (`jittered`)."""
+    the penalty every other part has), whether a tile is read about a
+    level and noise moved from its own in training (`jittered`), whether it
+    gives the galaxies' light as a layer (`GALAXY`), and whether it reads
+    where stars are marked (`MARKS`)."""
 
     way: str = "fit"
     tile: int = 256
@@ -115,18 +132,33 @@ class Settings:
     spike_quadratic: float = CHARBONNIER
     spike_weight: float = LAYER_WEIGHT
     level_jitter: bool = False
+    galaxies: bool = False
+    marks: bool = False
 
     @property
     def outputs(self) -> int:
-        """The planes the network gives: the starless image's residual, and
-        each of `LAYERS` with `layers`."""
-        return 1 + (len(LAYERS) if self.layers else 0)
+        """The planes the network gives: the starless image's residual, each
+        of `LAYERS` with `layers`, and the galaxies' with `galaxies`."""
+        return 1 + len(self.channels)
+
+    @property
+    def channels(self) -> tuple[str, ...]:
+        """The layers the network gives after the starless image's residual,
+        in order."""
+        return (LAYERS if self.layers else ()) + ((GALAXY,) if self.galaxies else ())
+
+    @property
+    def reads(self) -> tuple[str, ...]:
+        """The planes the network reads, in order."""
+        return READS[self.way] + ((MARKS,) if self.marks else ())
 
     def __post_init__(self) -> None:
         if self.way not in READS:
             raise ValueError(f"a starless run reads one of {sorted(READS)}, not {self.way}")
         if self.tile % 2 ** (self.levels - 1):
             raise ValueError(f"a tile of {self.tile} is not a multiple of {2 ** (self.levels - 1)}")
+        if self.galaxies and not self.layers:
+            raise ValueError("a galaxies' layer is given with the stars' layers")
         if self.spike_quadratic <= 0.0 or self.spike_weight < 0.0:
             raise ValueError(f"a spike penalty quadratic to {self.spike_quadratic} and weighed "
                              f"{self.spike_weight} times is not one")
@@ -153,12 +185,13 @@ def released(plane: np.ndarray, level: float, scale: float) -> np.ndarray:
 
 
 def network_reads(planes: dict[str, np.ndarray], way: str, level: float | None = None,
-                  scale: float | None = None) -> tuple[list[np.ndarray], float, float]:
+                  scale: float | None = None, marks: bool = False) -> tuple[list[np.ndarray], float, float]:
     """The planes a way's network reads, and the level and scale they are
     read on: by default the input's median, as a runtime knows it with no
     mask, and the noise map's median, or those given (a whole image's). A
     plane with sky is read less the level, a plane without (`SKYLESS`) as
-    it is, both compressed."""
+    it is, both compressed. With `marks`, where the points plane marks a
+    star, 1, after them (`MARKS`)."""
     level = float(np.nanmedian(planes["input"])) if level is None else float(level)
     scale = (float(np.median(planes["noise"])) or 1.0) if scale is None else float(scale)
     read = []
@@ -169,6 +202,8 @@ def network_reads(planes: dict[str, np.ndarray], way: str, level: float | None =
             read.append(planes["points"])
         else:
             read.append(compressed(planes[name], 0.0 if name in SKYLESS else level, scale))
+    if marks:
+        read.append((planes["points"] > 0).astype(np.float32))
     return read, level, scale
 
 
@@ -201,16 +236,24 @@ def example(bank: Bank, index: int, settings: Settings, rng: np.random.Generator
     cut = (index, slice(top, top + tile), slice(left, left + tile))
     planes = {name: np.asarray(bank.planes[name][cut], dtype=np.float32) for name in bank.planes}
     valid = planes["valid"] > 0
-    read, level, scale = network_reads(planes, settings.way)
+    read, level, scale = network_reads(planes, settings.way, marks=settings.marks)
     if settings.level_jitter:
-        read, level, scale = network_reads(planes, settings.way, *jittered(level, scale, rng))
+        read, level, scale = network_reads(planes, settings.way, *jittered(level, scale, rng),
+                                           marks=settings.marks)
     baseline = compressed(planes[BASELINE[settings.way]], level, scale)
     truth = compressed(planes["starless"], level, scale)
-    weight = valid.astype(np.float32) * (1.0 + (STAR_WEIGHT - 1.0)
-                                         * (np.abs(planes["input"] - planes["starless"]) > planes["noise"]))
+    # Weighed up where stars were, and where galaxies are, made or the clean
+    # sky's own: what a network must tell apart.
+    heavy = np.abs(planes["input"] - planes["starless"]) > planes["noise"]
+    if GALAXY in planes:
+        heavy |= (planes[GALAXY] > planes["noise"]) | (planes["galaxy_mask"] > 0)
+    weight = valid.astype(np.float32) * (1.0 + (STAR_WEIGHT - 1.0) * heavy)
     extras = {"baseline": baseline, "truth": truth, "weight": weight}
     if settings.layers:
         extras.update({name: compressed(planes[name], 0.0, scale) for name in LAYERS})
+    if settings.galaxies:
+        extras[GALAXY] = compressed(planes[GALAXY], 0.0, scale)
+        extras["galaxy_weight"] = (weight * (planes["galaxy_mask"] == 0)).astype(np.float32)
     stacked = np.stack(read + list(extras.values()))
     turns = int(rng.integers(0, 4))
     stacked = np.rot90(stacked, turns, axes=(1, 2))
@@ -267,27 +310,30 @@ def loss_of(model: torch.nn.Module, batch: dict[str, torch.Tensor], settings: Se
             ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
     """The run's loss on `batch`, its baseline's (the residual 0, and no
     halos or spikes), and their parts, detached: the starless image's
-    penalty and, with layers, each of `LAYERS`' (before its weight), each
-    beside its baseline's (`<part>_baseline`). The spike layer's penalty
-    and weight are `settings`' (the others' without)."""
+    penalty and, with layers, each of its `channels`' (before its weight),
+    each beside its baseline's (`<part>_baseline`). The spike layer's
+    penalty and weight are `settings`' (the others' without); the galaxies'
+    layer is penalised by its own weights (`galaxy_weight`)."""
     settings = settings or Settings()
     out = model(batch["planes"])
-    weight = batch["weight"]
-    total = weight.sum().clamp_min(1.0)
 
-    def penalty(estimate: torch.Tensor, truth: torch.Tensor, quadratic: float = CHARBONNIER) -> torch.Tensor:
+    def penalty(estimate: torch.Tensor, truth: torch.Tensor, quadratic: float = CHARBONNIER,
+                weight: torch.Tensor = batch["weight"]) -> torch.Tensor:
         # Charbonnier, quadratic up to `quadratic`; less its own floor and
         # plus the usual one, so every part reads from the same floor.
-        return (weight * (torch.sqrt((estimate - truth) ** 2 + quadratic**2) - quadratic + CHARBONNIER)).sum() / total
+        return ((weight * (torch.sqrt((estimate - truth) ** 2 + quadratic**2) - quadratic + CHARBONNIER)).sum()
+                / weight.sum().clamp_min(1.0))
 
     run = penalty(batch["baseline"] + out[:, 0], batch["truth"])
     base = penalty(batch["baseline"], batch["truth"]).detach()
     parts = {"starless": run.detach(), "starless_baseline": base}
-    for channel, name in enumerate(LAYERS[:out.shape[1] - 1], start=1):
+    names = settings.channels if settings.outputs == out.shape[1] else LAYERS[:out.shape[1] - 1]
+    for channel, name in enumerate(names, start=1):
         quadratic, heavy = ((settings.spike_quadratic, settings.spike_weight) if name == "spikes"
                             else (CHARBONNIER, LAYER_WEIGHT))
-        part = penalty(out[:, channel], batch[name], quadratic)
-        part_base = penalty(torch.zeros_like(batch[name]), batch[name], quadratic).detach()
+        weight = batch["galaxy_weight"] if name == GALAXY else batch["weight"]
+        part = penalty(out[:, channel], batch[name], quadratic, weight)
+        part_base = penalty(torch.zeros_like(batch[name]), batch[name], quadratic, weight).detach()
         parts[name], parts[f"{name}_baseline"] = part.detach(), part_base
         run = run + heavy * part
         base = base + heavy * part_base
@@ -332,7 +378,7 @@ def train(store: Store, *, name: str, bank: Path, validation_bank: Path | None, 
         if share and not len(windows):
             raise ValueError(f"{bank} has no windows {kind} to draw a share from")
     held = Bank(validation_bank) if validation_bank else None
-    model = ResidualUNet(inputs=len(READS[settings.way]), outputs=settings.outputs, width=settings.width,
+    model = ResidualUNet(inputs=len(settings.reads), outputs=settings.outputs, width=settings.width,
                          levels=settings.levels).to(where)
     directory = run_directory(store, name)
     directory.mkdir(parents=True, exist_ok=True)
@@ -343,9 +389,9 @@ def train(store: Store, *, name: str, bank: Path, validation_bank: Path | None, 
                                                    pct_start=0.05)
     config = {"name": name, "settings": asdict(settings), "bank": str(bank),
               "validation_bank": str(validation_bank) if validation_bank else None, "steps": steps, "batch": batch,
-              "learning_rate": learning_rate, "seed": seed, "init_from": init_from, "reads": READS[settings.way],
+              "learning_rate": learning_rate, "seed": seed, "init_from": init_from, "reads": settings.reads,
               "asinh": ASINH, "star_weight": STAR_WEIGHT, "windows": train_bank.count,
-              "layers": list(LAYERS) if settings.layers else [], "layer_weight": LAYER_WEIGHT,
+              "layers": list(settings.channels), "layer_weight": LAYER_WEIGHT,
               "spike_share": spike_share, "spiky_windows": len(spiky), "spikeless_share": spikeless_share,
               "spikeless_windows": len(spikeless),
               "parameters": sum(p.numel() for p in model.parameters())}
@@ -392,7 +438,7 @@ def train(store: Store, *, name: str, bank: Path, validation_bank: Path | None, 
                 entry.update(validation())
             history.append(entry)
             shown = "".join(f", {part} {entry[f'validation_{part}']:.4f} ({entry[f'validation_{part}_baseline']:.4f})"
-                            for part in ("starless", *LAYERS)) if settings.layers and checks else ""
+                            for part in ("starless", *settings.channels)) if settings.layers and checks else ""
             print(f"starless {name}: step {step} loss {entry['loss']:.4f} (baseline {entry['baseline']:.4f})"
                   + (f", validation {entry['validation']:.4f} (baseline {entry['validation_baseline']:.4f})"
                      if checks else "") + shown + f" ({entry['seconds']:.0f} s)", flush=True)
@@ -417,34 +463,42 @@ def starless(model: torch.nn.Module, planes: dict[str, np.ndarray], settings: Se
 def layers(model: torch.nn.Module, planes: dict[str, np.ndarray], settings: Settings,
            where: torch.device | None = None, level: float | None = None,
            scale: float | None = None) -> dict[str, np.ndarray]:
-    """A window's four layers from a trained `model`, which add back to its
-    input: the starless image, the halos and rings, the diffraction spikes
-    (both none from a run without `layers`), and the stars' cores and wings
-    (`stars`, what is left, with the stars' photon noise). Read about the
-    window's own level and noise, or those given (`network_reads`)."""
+    """A window's layers from a trained `model`, which add back to its input:
+    the starless image, the halos and rings, the diffraction spikes (both
+    none from a run without `layers`), and the stars' cores and wings
+    (`stars`, what is left, with the stars' photon noise); and of the
+    starless image, the galaxies' light (`GALAXY`, none from a run without
+    `galaxies`). Read about the window's own level and noise, or those given
+    (`network_reads`)."""
     where = where or next(model.parameters()).device
-    read, level, scale = network_reads(planes, settings.way, level, scale)
+    read, level, scale = network_reads(planes, settings.way, level, scale, marks=settings.marks)
     baseline = compressed(planes[BASELINE[settings.way]], level, scale)
     with torch.no_grad():
         out = model(torch.from_numpy(np.stack(read)[None].astype(np.float32)).to(where))[0].cpu().numpy()
     found = {"starless": released(baseline + out[0], level, scale)}
-    for channel, name in enumerate(LAYERS, start=1):
-        found[name] = (released(out[channel], 0.0, scale) if channel < out.shape[0]
+    for name in (*LAYERS, GALAXY):
+        channel = 1 + settings.channels.index(name) if name in settings.channels else None
+        found[name] = (released(out[channel], 0.0, scale) if channel is not None
                        else np.zeros_like(found["starless"]))
     found["stars"] = (planes["input"] - found["starless"] - sum(found[name] for name in LAYERS)).astype(np.float32)
     return found
 
 
-def kept(found: dict[str, np.ndarray], halo_kept: float) -> dict[str, np.ndarray]:
-    """`layers`' four as a user takes them, with `halo_kept` (0 to 1) of
-    the halos left in the starless image and the rest with the stars: the
-    starless image, the stars (cores, wings and the halos' other share) and
-    the spikes, which still add back to the input."""
-    if not 0.0 <= halo_kept <= 1.0:
-        raise ValueError(f"the share of the halos kept is between 0 and 1, not {halo_kept}")
-    return {"starless": (found["starless"] + halo_kept * found["halos"]).astype(np.float32),
+def kept(found: dict[str, np.ndarray], halo_kept: float, galaxy_kept: float = 1.0) -> dict[str, np.ndarray]:
+    """`layers`' as a user takes them, with `halo_kept` (0 to 1) of the
+    halos left in the starless image and the rest with the stars, and
+    `galaxy_kept` of the galaxies left in it and the rest an output of their
+    own: the starless image, the stars (cores, wings and the halos' other
+    share), the spikes and the galaxies taken out, which still add back to
+    the input."""
+    for share, what in ((halo_kept, "halos"), (galaxy_kept, "galaxies")):
+        if not 0.0 <= share <= 1.0:
+            raise ValueError(f"the share of the {what} kept is between 0 and 1, not {share}")
+    galaxies = found.get(GALAXY, np.zeros_like(found["starless"]))
+    return {"starless": (found["starless"] + halo_kept * found["halos"]
+                         - (1.0 - galaxy_kept) * galaxies).astype(np.float32),
             "stars": (found["stars"] + (1.0 - halo_kept) * found["halos"]).astype(np.float32),
-            "spikes": found["spikes"]}
+            "spikes": found["spikes"], GALAXY: ((1.0 - galaxy_kept) * galaxies).astype(np.float32)}
 
 
 def load_run(store: Store, name: str, where: torch.device | None = None) -> tuple[ResidualUNet, Settings]:
@@ -452,7 +506,7 @@ def load_run(store: Store, name: str, where: torch.device | None = None) -> tupl
     directory = run_directory(store, name)
     config = json.loads((directory / "config.json").read_text())
     settings = Settings(**config["settings"])
-    model = ResidualUNet(inputs=len(READS[settings.way]), outputs=settings.outputs, width=settings.width,
+    model = ResidualUNet(inputs=len(settings.reads), outputs=settings.outputs, width=settings.width,
                          levels=settings.levels)
     model.load_state_dict(torch.load(directory / "weights.pt", map_location="cpu"))
     return model.to(where or device()).eval(), settings
@@ -579,7 +633,11 @@ def measures(estimate: np.ndarray, planes: dict[str, np.ndarray]) -> dict[str, f
     the mean absolute error as the trainer reads images (`network_reads`'
     asinh, closer to a stretched image's eye) where stars were and on the
     sky; and how much of the truth's noise the estimate keeps where stars
-    were (its local noise over the truth's: under 1 a smooth fill)."""
+    were (its local noise over the truth's: under 1 a smooth fill). Where a
+    bank holds galaxies: how much of the made galaxies' light the estimate
+    keeps (the scale of their light that best meets what it holds over the
+    truth without them, where their light tops the noise; 1 all, 0 none),
+    and the error's root mean square within the clean sky's own galaxies."""
     scale = float(np.median(planes["noise"])) or 1.0
     level = float(np.nanmedian(planes["input"]))
     valid = planes["valid"] > 0
@@ -603,13 +661,22 @@ def measures(estimate: np.ndarray, planes: dict[str, np.ndarray]) -> dict[str, f
         if truth_noise > 0:
             kept = math.sqrt(float(np.mean(local_noise(np.nan_to_num(estimate.astype(np.float64)), 3)[stars]))
                              / truth_noise)
-    return {"stars_rms": rms(stars), "sky_rms": rms(sky),
-            "cores_mean": float(error[cores].mean()) if cores.any() else None,
-            "light_left": float((error[stars] * scale).sum()) / total if total > 0 else None,
-            "stars_stretched": stretched(stars), "sky_stretched": stretched(sky), "noise_kept": kept}
+    out = {"stars_rms": rms(stars), "sky_rms": rms(sky),
+           "cores_mean": float(error[cores].mean()) if cores.any() else None,
+           "light_left": float((error[stars] * scale).sum()) / total if total > 0 else None,
+           "stars_stretched": stretched(stars), "sky_stretched": stretched(sky), "noise_kept": kept}
+    if GALAXY in planes:
+        galaxies = planes[GALAXY].astype(np.float64)
+        made = valid & (galaxies > planes["noise"]) & (planes["galaxy_mask"] == 0)
+        held = estimate.astype(np.float64) - (planes["starless"] - galaxies)
+        power = float((galaxies[made] ** 2).sum())
+        out["galaxies_kept"] = float((held[made] * galaxies[made]).sum()) / power if made.any() else None
+        out["real_galaxies_rms"] = rms(valid & (planes["galaxy_mask"] > 0))
+    return out
 
 
-def layer_measures(found: dict[str, np.ndarray], planes: dict[str, np.ndarray]) -> dict[str, float | None]:
+def layer_measures(found: dict[str, np.ndarray], planes: dict[str, np.ndarray],
+                   names: tuple[str, ...] = LAYERS) -> dict[str, float | None]:
     """How a run's halos and spikes (`layers`) meet the bank's, in units of
     the noise map's median, over the valid pixels: for each, the error's
     root mean square where the truth's light tops the noise; how much of
@@ -619,11 +686,14 @@ def layer_measures(found: dict[str, np.ndarray], planes: dict[str, np.ndarray]) 
     not its own: the sky, the nebula or the stars'). A spike's light is
     signed, as the vanes take from the core the light they throw out along
     the spikes; the dip at the core is not what shows, and is read by
-    neither."""
+    neither. `names` are the layers read; the galaxies' is read away from
+    the clean sky's own galaxies."""
     scale = float(np.median(planes["noise"])) or 1.0
-    valid = planes["valid"] > 0
     out: dict[str, float | None] = {}
-    for name in LAYERS:
+    for name in names:
+        valid = planes["valid"] > 0
+        if name == GALAXY:
+            valid &= planes["galaxy_mask"] == 0
         truth = planes[name].astype(np.float64)
         estimate = found[name].astype(np.float64)
         inside = valid & (truth > planes["noise"])
@@ -673,7 +743,7 @@ def evaluate(store: Store, name: str, bank: Path, *, count: int = 64, sheet_rows
         stars = stars - found["halos"] - found["spikes"]
         measured = measures(estimate, planes)
         if settings.layers:
-            measured.update(layer_measures(found, planes))
+            measured.update(layer_measures(found, planes, settings.channels))
         kind = held.records[index].get("telescope_kind", "all")
         for group in ("all", kind):
             results.setdefault(f"{group}/run", []).append(measured)
@@ -683,6 +753,8 @@ def evaluate(store: Store, name: str, bank: Path, *, count: int = 64, sheet_rows
             tiles = [planes["input"], baseline, estimate, fill, planes["starless"], stars]
             if settings.layers:
                 tiles += [found["halos"], planes["halos"], found["spikes"], planes["spikes"]]
+            if settings.galaxies:
+                tiles += [found[GALAXY], planes[GALAXY]]
             rows.append((held.records[index], tiles))
     summary = {"run": name, "bank": str(bank), "windows": int(len(indices)),
                "measures": {key: mean_of(found) for key, found in sorted(results.items())}}
@@ -698,7 +770,7 @@ def evaluate(store: Store, name: str, bank: Path, *, count: int = 64, sheet_rows
 # A sheet's columns: the starless images, then the layers of the stars'
 # light, which a layered run adds.
 SHEET_IMAGES = ("input", "baseline", "network", "network, noise filled", "truth")
-SHEET_LAYERS = ("stars", "halos", "halos, truth", "spikes", "spikes, truth")
+SHEET_LAYERS = ("stars", "halos", "halos, truth", "spikes", "spikes, truth", "galaxies", "galaxies, truth")
 
 
 def write_sheet(path: Path, rows: list[tuple[dict[str, Any], list[np.ndarray]]], way: str) -> None:

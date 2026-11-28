@@ -11,7 +11,12 @@ For a product:
    catalogue over it listed (Seiza's deep Gaia catalogue, or the one named,
    such as the one to G 20); with them, the stars the PSF pass's detector
    finds that the catalogue lacks, fainter ones, given magnitudes on the
-   catalogue's scale.
+   catalogue's scale. A galaxy is not a star, and is kept: the catalogue
+   lists compact galaxies and galaxies' nuclei among its stars, so a source
+   within a galaxy of the object catalogue (`seiza.field_objects`, its
+   ellipse) is the galaxy's unless it is a star before it, point-like in a
+   first fit and away from the galaxy's middle (`GALAXY_*`), and a detector's
+   star within one is left too. The galaxies are kept with the clean sky.
 2. The fit. Its PSF field measured on it, with its clip level
    (`seiza.PsfField`), every star fitted with it at once, positions refined
    (`seiza.StarFit`), and subtracted.
@@ -46,8 +51,10 @@ For a product:
 
 Records go under `STORE/starless/<product id>/`: `sky.npy` (float32, NaN
 where the image is NaN), `mask.npy` (bool, True where left out), `stars.npz`
-(the fitted stars, `STAR_COLUMNS`), and `sky.json` with the summary, written
-last, which marks a product done. The manifest is only read. A pass stopped
+(the fitted stars, `STAR_COLUMNS`), `galaxies.npz` (the object catalogue's
+galaxies over it, `GALAXY_COLUMNS`, and the catalogue sources left as
+theirs), and `sky.json` with the summary, written last, which marks a
+product done. The manifest is only read. A pass stopped
 part way goes on with the products not yet done.
 """
 
@@ -68,8 +75,9 @@ from .manifest import Manifest
 from .store import Store, versions
 
 # Raised with the records' layout or what they hold, so older ones are made
-# again. 3: bright stars' glows masked (`GLOW_*`).
-CLEAN_SKY_VERSION = 3
+# again. 3: bright stars' glows masked (`GLOW_*`). 4: galaxies' sources left
+# in the sky, and the galaxies kept (`GALAXY_*`).
+CLEAN_SKY_VERSION = 4
 
 # The products the pass cleans, as the sharpening bank's known-kernel
 # windows come from.
@@ -83,6 +91,18 @@ SPLITS = ("train", "validation")
 STAR_COLUMNS = ("x", "y", "magnitude", "flux", "flux_error", "background", "chi2", "clipped", "core_left",
                 "reasons")
 REASONS = ("clipped", "poor fit", "hole", "left", "dipole", "glow")
+
+# The object catalogue's galaxies: centre, semi-axes (px) and the major
+# axis's angle (degrees). A catalogue source inside one is the galaxy's when
+# its first fit's reduced chi-squared is over `GALAXY_POINT_CHI2` (a field's
+# stars fit at about 1, a galaxy's nucleus at 40 to 70 and a small galaxy's
+# source at 5 to 25, on the Coma Cluster and M51), or it lies within
+# `GALAXY_MIDDLE` of the way out from the middle.
+GALAXY_COLUMNS = ("x", "y", "semi_major", "semi_minor", "angle")
+GALAXY_POINT_CHI2 = 2.0
+GALAXY_MIDDLE = 0.15
+# An ellipse is never taken as under this many px across its axes.
+GALAXY_LEAST = 2.0
 
 # A detector's star within this many pixels of a catalogue star is that star.
 SAME_STAR_PX = 3.0
@@ -624,11 +644,72 @@ def clean_sky(image: np.ndarray, stars: Sequence[tuple[float, float, float]], *,
     return {"sky": sky, "model": model, "mask": mask, "stars": table, "summary": summary}
 
 
+def galaxies_over(wcs: Any, width: int, height: int) -> np.ndarray:
+    """The object catalogue's galaxies over an image of `width` × `height`
+    with `wcs`, as `GALAXY_COLUMNS`."""
+    import seiza
+
+    found = seiza.field_objects(wcs, width, height)
+    rows = [(o.x, o.y, max(o.semi_major_pixels, GALAXY_LEAST), max(o.semi_minor_pixels, GALAXY_LEAST),
+             o.angle_deg or 0.0) for o in getattr(found, "objects", found) if o.kind == "galaxy"]
+    return np.array(rows, dtype=np.float64).reshape(-1, len(GALAXY_COLUMNS))
+
+
+def within_galaxies(galaxies: np.ndarray, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """For each place, how far out it lies in the galaxy it lies deepest in
+    (0 the middle, 1 the ellipse's edge), or infinity outside them all."""
+    x, y = np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64)
+    out = np.full(x.shape, np.inf)
+    for gx, gy, a, b, angle in galaxies:
+        theta = math.radians(angle)
+        u = (x - gx) * math.cos(theta) + (y - gy) * math.sin(theta)
+        v = -(x - gx) * math.sin(theta) + (y - gy) * math.cos(theta)
+        out = np.minimum(out, np.sqrt((u / a) ** 2 + (v / b) ** 2))
+    out[out > 1.0] = np.inf
+    return out
+
+
+def galaxy_sources(galaxies: np.ndarray, x: np.ndarray, y: np.ndarray, chi2: np.ndarray) -> np.ndarray:
+    """Which catalogue sources are galaxies' rather than stars: within a
+    galaxy's ellipse, and fitted poorly as a star or near its middle
+    (`GALAXY_POINT_CHI2`, `GALAXY_MIDDLE`). A star before a galaxy is
+    point-like and off its middle."""
+    out = within_galaxies(galaxies, x, y)
+    poor = ~(np.asarray(chi2, dtype=np.float64) <= GALAXY_POINT_CHI2)
+    return (out <= 1.0) & (poor | (out < GALAXY_MIDDLE))
+
+
+def galaxy_mask(galaxies: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+    """Where `galaxies` lie on an image of `shape`: True inside an ellipse."""
+    mask = np.zeros(shape, dtype=bool)
+    height, width = shape
+    for gx, gy, a, b, angle in galaxies:
+        reach = int(math.ceil(max(a, b))) + 1
+        y0, y1 = max(0, int(gy) - reach), min(height, int(gy) + reach + 1)
+        x0, x1 = max(0, int(gx) - reach), min(width, int(gx) + reach + 1)
+        if y0 >= y1 or x0 >= x1:
+            continue
+        yy, xx = np.mgrid[y0:y1, x0:x1]
+        mask[y0:y1, x0:x1] |= within_galaxies(np.array([[gx, gy, a, b, angle]]), xx, yy) <= 1.0
+    return mask
+
+
+def galaxies_of(here: Path) -> np.ndarray:
+    """A cleaned product's galaxies (`GALAXY_COLUMNS`), none where its
+    record holds none."""
+    path = here / "galaxies.npz"
+    if not path.exists():
+        return np.zeros((0, len(GALAXY_COLUMNS)))
+    return np.load(path)["galaxies"].reshape(-1, len(GALAXY_COLUMNS))
+
+
 def listed_stars(image: np.ndarray, centre: tuple[float, float], scale_arcsec_px: float,
-                 catalog_path: str | None = None) -> tuple[list[tuple[float, float, float]], dict[str, Any]]:
+                 catalog_path: str | None = None) -> tuple[list[tuple[float, float, float]], dict[str, Any],
+                                                           np.ndarray]:
     """The catalogue's stars over `image` as (x, y, magnitude), from a solve
-    of its own stars about `centre` (degrees) at `scale_arcsec_px`, and what
-    the solve found."""
+    of its own stars about `centre` (degrees) at `scale_arcsec_px`, what the
+    solve found, and the object catalogue's galaxies over it
+    (`galaxies_over`)."""
     import seiza
 
     height, width = image.shape
@@ -644,7 +725,7 @@ def listed_stars(image: np.ndarray, centre: tuple[float, float], scale_arcsec_px
             stars.append((float(pixel[0]), float(pixel[1]), float(magnitude)))
     solved = {"matched": solution.matched_stars, "rms_px": round(solution.rms_arcsec / scale_arcsec_px, 3),
               "ra": solution.ra, "dec": solution.dec}
-    return stars, solved
+    return stars, solved, galaxies_over(solution.wcs, width, height)
 
 
 # Products with their sets' place and scale.
@@ -698,8 +779,8 @@ def measure(store: Store, product: dict[str, Any], catalog_path: str | None = No
     started = time.monotonic()
     image = psf_fields.load_image(store, product)
     noise = image_sigma(image).astype(np.float32)
-    listed, solved = listed_stars(image, (product["ra_deg"], product["dec_deg"]), product["pixel_scale_arcsec"],
-                                  catalog_path)
+    listed, solved, galaxies = listed_stars(image, (product["ra_deg"], product["dec_deg"]),
+                                            product["pixel_scale_arcsec"], catalog_path)
     import seiza
 
     found, clip, _ = psf_fields.detections(image)
@@ -711,9 +792,17 @@ def measure(store: Store, product: dict[str, Any], catalog_path: str | None = No
     measured_snr = {star: (np.inf if st.saturated else st.flux[0] / st.flux_error[0])
                     for star, st in zip(listed, first.stars)
                     if st.saturated or (np.isfinite(st.flux[0]) and st.flux_error[0] > 0)}
-    shown = [star for star in listed if measured_snr.get(star, 0.0) >= TAKE_OUT_SNR]
+    # A galaxy's sources stay in the sky with it.
+    places = np.array([(x, y) for x, y, _ in listed], dtype=np.float64).reshape(-1, 2)
+    chi2 = np.array([st.reduced_chi_squared for st in first.stars], dtype=np.float64)
+    theirs = galaxy_sources(galaxies, places[:, 0], places[:, 1], chi2)
+    left = [(star, float(fit_chi2)) for star, fit_chi2, is_theirs in zip(listed, chi2, theirs) if is_theirs]
+    shown = [star for star, is_theirs in zip(listed, theirs)
+             if not is_theirs and measured_snr.get(star, 0.0) >= TAKE_OUT_SNR]
     stars = list(shown)
     scale = magnitude_scale(first.stars)
+    extra = [(x, y, flux) for x, y, flux in extra
+             if not (within_galaxies(galaxies, np.array([x]), np.array([y]))[0] <= 1.0)]
     if extra and scale is not None:
         slope, zero = scale
         stars += [(x, y, (-2.5 * math.log10(flux) - zero) / slope) for x, y, flux in extra]
@@ -727,8 +816,11 @@ def measure(store: Store, product: dict[str, Any], catalog_path: str | None = No
     np.save(target / "sky.npy", made["sky"])
     np.save(target / "mask.npy", made["mask"])
     np.savez_compressed(target / "stars.npz", stars=made["stars"], columns=np.array(STAR_COLUMNS))
+    np.savez_compressed(target / "galaxies.npz", galaxies=galaxies, columns=np.array(GALAXY_COLUMNS),
+                        sources=np.array([(x, y, m, c) for (x, y, m), c in left], dtype=np.float64).reshape(-1, 4))
     record = {"version": CLEAN_SKY_VERSION, "product": product["id"], "catalogue": catalog_path or "default",
               "catalogue_stars": len(listed), "shown": len(shown), "detected_only": len(stars) - len(shown),
+              "galaxies": len(galaxies), "galaxy_sources": len(left),
               "solve": solved,
               **made["summary"], "seconds": round(time.monotonic() - started, 1), "versions": versions()}
     (target / "sky.json").write_text(json.dumps(record, indent=2))

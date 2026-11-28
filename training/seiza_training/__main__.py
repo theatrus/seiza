@@ -246,6 +246,9 @@ def main(argv: list[str] | None = None) -> int:
                         "of every batch from the windows with bright stars and no spikes")
     trains.add_argument("--level-jitter", action="store_true", help="read each tile about a level and noise "
                         "moved from its own, as a whole image's are, so a runtime can read an image about one")
+    trains.add_argument("--galaxies", action="store_true", help="with --layers, also give the galaxies' light, "
+                        "kept within the starless image, as a layer (a bank of version 5)")
+    trains.add_argument("--marks", action="store_true", help="also read where the points plane marks any star")
     trains.add_argument("--steps", type=int, default=10_000)
     trains.add_argument("--batch", type=int, default=8)
     trains.add_argument("--learning-rate", type=float, default=3e-4)
@@ -965,7 +968,8 @@ def run_sharpen(arguments: argparse.Namespace, store: Store) -> dict:
                                                ("spike_weight", arguments.spike_weight)) if value is not None}
         settings = starless_model.Settings(way=arguments.way, tile=arguments.tile, width=arguments.width,
                                            levels=arguments.levels, layers=arguments.layers,
-                                           level_jitter=arguments.level_jitter, **spike)
+                                           level_jitter=arguments.level_jitter, galaxies=arguments.galaxies,
+                                           marks=arguments.marks, **spike)
         record = starless_model.train(store, name=arguments.name, bank=arguments.bank,
                                       validation_bank=arguments.validation_bank, settings=settings,
                                       steps=arguments.steps, batch=arguments.batch,

@@ -15,10 +15,23 @@ A composite is a stack's clean sky (`starless_sky`) with stars put back:
 - clipped where the stack clips, and with their own photon noise, at the
   stack's photon term.
 
-Its truth: the starless image is the clean sky, the stars layer the
-composite less it (the stars' light as the image shows it, clipped, with
-their photon noise), so the two add back to the input exactly. The sky
-noise stays with the starless image.
+And galaxies, which are not stars and are kept: a disc and a bulge each
+(`starless_stars.galaxy_stamp`), blurred by the telescope as its stars are
+(a pupil's without its vanes), the smallest as small as the stars, at the
+stack's stars' brightnesses or fainter (`made_galaxies`). Some carry a
+catalogue source at their middle, as a catalogue lists compact galaxies
+and galaxies' nuclei among its stars: those are fitted as stars and marked
+on the points plane, so that a network learns to give back what the fit
+takes out of a galaxy.
+
+Its truth: the starless image is the clean sky with the galaxies (their
+light and its photon noise), the stars layer the composite less it (the
+stars' light as the image shows it, clipped, with their photon noise), so
+the two add back to the input exactly. The sky noise stays with the
+starless image. The galaxies' own light, noise-free, is kept apart as the
+halos' and spikes' are (`galaxies`), and where the clean sky's own
+catalogue galaxies are (`galaxy_mask`), whose light is not known apart
+from the sky's.
 
 So that a network can be trained to heal what the catalogue fit leaves, each
 composite is also fitted as the runtime fits an image: its stars, listed at
@@ -52,8 +65,10 @@ from .store import Store
 # anew. 3: the fit's estimate carries bright stars past their stamps, fainter
 # made halos and rings, the halos' and spikes' own light, on clean skies of
 # version 3. 4: stars are moved into place by Lanczos-3, not by Fourier
-# transform (`add_star`).
-BANK_VERSION = 4
+# transform (`add_star`). 5: made galaxies, kept in the starless truth, and
+# the clean sky's galaxies' ellipses, on clean skies of version 4 (galaxies'
+# sources not taken out).
+BANK_VERSION = 5
 # A bank's planes, a window each: the composite; its starless truth; the
 # catalogue fit's starless estimate and its stars' model; the noise map a
 # network reads, made from the input alone (`image_sigma`); where the loss
@@ -62,8 +77,13 @@ BANK_VERSION = 4
 # their diffraction spikes do (a pupil's PSF less the same optics' without
 # vanes or hexagon; 0 for a stack's own field, of refractors and SCTs with no
 # spider), so that halos can be kept in part and spikes given a layer of
-# their own: the stars layer less these is the stars' cores and wings.
-PLANES = ("input", "starless", "fit_starless", "fit_model", "noise", "valid", "points", "halos", "spikes")
+# their own: the stars layer less these is the stars' cores and wings. Then
+# the made galaxies' light, noise-free, which the starless truth holds, and
+# where the clean sky's own catalogue galaxies lie (1 inside an ellipse).
+PLANES = ("input", "starless", "fit_starless", "fit_model", "noise", "valid", "points", "halos", "spikes",
+          "galaxies", "galaxy_mask")
+# Planes kept as bytes.
+MASKS = ("valid", "galaxy_mask")
 # A window is kept where at least this share of it is valid.
 VALID_SHARE = 0.8
 # Stacks are cut this many times the workers ahead of the one being stored,
@@ -107,6 +127,28 @@ HALO_WIDTH = (3.0, 8.0)
 RING_SHARE = 0.3
 RING_LIGHT = (0.002, 0.02)
 RING_RADIUS = (6.0, 20.0)
+# Made galaxies: so many a million pixels, drawn evenly in the logarithm;
+# a disc of half-light radius `GALAXY_DISC` star widths (evenly in the
+# logarithm, the smallest under a star's width), a bulge `GALAXY_BULGE` of
+# the disc's, holding any share of the light; the disc's axis ratio
+# `GALAXY_RATIO`, the bulge's `GALAXY_BULGE_RATIO`; magnitudes drawn from
+# the stack's stars' and `GALAXY_FAINTER` fainter. `GALAXY_LISTED` of them
+# carry a catalogue source at their middle, `GALAXY_CORE` magnitudes fainter
+# than the galaxy, fitted as a star and marked on the points plane. A
+# galaxy's stamp reaches `GALAXY_REACH` disc radii, and the telescope's
+# blur `GALAXY_BLUR` star widths, and is sampled `starless_stars
+# .OVERSAMPLE` times finer under `GALAXY_FINE` px of disc radius.
+GALAXY_DENSITY = (5.0, 60.0)
+GALAXY_DISC = (0.25, 6.0)
+GALAXY_BULGE = (0.1, 0.5)
+GALAXY_RATIO = (0.15, 1.0)
+GALAXY_BULGE_RATIO = (0.6, 1.0)
+GALAXY_FAINTER = (0.0, 2.0)
+GALAXY_LISTED = 0.3
+GALAXY_CORE = (0.5, 2.0)
+GALAXY_REACH = 6.0
+GALAXY_BLUR = 3.0
+GALAXY_FINE = 2.0
 
 
 def log_uniform(rng: np.random.Generator, bounds: tuple[float, float]) -> float:
@@ -267,6 +309,54 @@ def pupil_telescope(rng: np.random.Generator, fwhm: float) -> Telescope:
                                  f"diffraction {diffraction:.2f} px seeing {seeing:.2f} px")
 
 
+def blur_for(telescope: Telescope, x: float, y: float) -> np.ndarray:
+    """The telescope's blur at (x, y) for a galaxy, of unit light: a field's
+    stamp there, or a pupil's PSF without its vanes (a galaxy's spikes are
+    faint and not the spikes' plane's)."""
+    if telescope.field is not None:
+        source = np.asarray(telescope.field.stamp_at(x, y), dtype=np.float64)
+    else:
+        source = np.asarray(telescope.plain if telescope.plain is not None else telescope.stamp, dtype=np.float64)
+    source = np.clip(source, 0.0, None)
+    return source / source.sum()
+
+
+def made_galaxies(shape: tuple[int, int], finite: np.ndarray, magnitudes: np.ndarray, scale: tuple[float, float],
+                  telescope: Telescope, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
+    """Galaxies for a composite of `shape` (the module's `GALAXY_*`): their
+    light, noise-free, and the catalogue sources some carry, as (x, y,
+    magnitude, flux)."""
+    height, width = shape
+    light = np.zeros(shape, dtype=np.float64)
+    listed: list[tuple[float, float, float, float]] = []
+    if GALAXY_DENSITY[1] <= 0.0 or not len(magnitudes):
+        return light, np.zeros((0, 4))
+    slope, zero = scale
+    fwhm = telescope.fwhm
+    count = int(round(height * width / 1e6 * log_uniform(rng, GALAXY_DENSITY)))
+    for _ in range(count):
+        x, y = rng.uniform(0, width - 1), rng.uniform(0, height - 1)
+        magnitude = float(rng.choice(magnitudes)) + rng.uniform(*GALAXY_FAINTER)
+        disc = fwhm * log_uniform(rng, GALAXY_DISC)
+        bulge = disc * rng.uniform(*GALAXY_BULGE)
+        shares = (rng.uniform(0.0, 1.0), rng.uniform(*GALAXY_RATIO), rng.uniform(*GALAXY_BULGE_RATIO),
+                  rng.uniform(0.0, 180.0))
+        is_listed = rng.random() < GALAXY_LISTED
+        core = magnitude + rng.uniform(*GALAXY_CORE)
+        if not finite[int(round(y)), int(round(x))]:
+            continue
+        half = min(WIDE_STAMP // 2, int(math.ceil(GALAXY_REACH * disc + GALAXY_BLUR * fwhm)))
+        size = 2 * max(half, 7) + 1
+        shape_light = stars.galaxy_stamp(size, disc, bulge, *shares,
+                                         oversample=stars.OVERSAMPLE if disc < GALAXY_FINE else 1)
+        blurred = np.clip(stars.convolved(shape_light, cropped(blur_for(telescope, x, y), size)), 0.0, None)
+        flux = 10 ** (-0.4 * (slope * magnitude + zero))
+        add_star(light, blurred / blurred.sum(), x, y, flux)
+        if is_listed:
+            listed.append((x, y, core, 10 ** (-0.4 * (slope * core + zero))))
+    return light, np.array(listed, dtype=np.float64).reshape(-1, 4)
+
+
 def add_star(light: np.ndarray, stamp: np.ndarray, x: float, y: float, flux: float) -> None:
     """Add `flux` × `stamp`, centred at (x, y), to `light`, clipped at its
     edges: moved within its pixel by Lanczos-3, as the fit draws a star
@@ -288,10 +378,12 @@ def add_star(light: np.ndarray, stamp: np.ndarray, x: float, y: float, flux: flo
 
 def composite(sky: np.ndarray, table: np.ndarray, summary: dict[str, Any], telescope: Telescope,
               rng: np.random.Generator, noise: np.ndarray) -> dict[str, Any]:
-    """`sky` with stars put back (the module's list): the input, both
-    truths, the stars' noise-free light and, of it, the halos' and rings'
-    (`halos`) and the diffraction spikes' (`spikes`), and the stars as (x, y,
-    magnitude, flux) in the order they were put."""
+    """`sky` with stars and galaxies put back (the module's list): the input,
+    both truths, the stars' noise-free light and, of it, the halos' and
+    rings' (`halos`) and the diffraction spikes' (`spikes`), the stars as (x,
+    y, magnitude, flux) in the order they were put, the galaxies' light
+    (`galaxies`, in the starless truth) and the catalogue sources some carry
+    (`listed`, as the stars)."""
     height, width = sky.shape
     col = {name: index for index, name in enumerate(starless_sky.STAR_COLUMNS)}
     scale = magnitude_light(table)
@@ -336,17 +428,24 @@ def composite(sky: np.ndarray, table: np.ndarray, summary: dict[str, Any], teles
                 for target in (light, halo_light):
                     add_star(target, ring, x, y, ring_flux)
         placed.append((x, y, float(magnitude), flux))
+    galaxies, listed = made_galaxies((height, width), finite, magnitudes, (slope, zero), telescope, rng)
     photon = float(summary.get("photon_term") or 0.0)
     shot = rng.standard_normal((height, width)) * np.sqrt(photon * np.clip(light, 0, None))
-    image = sky.astype(np.float64) + light + shot
+    starless = sky.astype(np.float64)
+    if galaxies.any():
+        starless = starless + galaxies + rng.standard_normal((height, width)) * np.sqrt(
+            photon * np.clip(galaxies, 0, None))
+    image = starless + light + shot
     clip = summary.get("clip_level")
     if clip:
         image = np.minimum(image, float(clip))
+        starless = np.minimum(starless, float(clip))
     image = np.where(finite, image, np.nan).astype(np.float32)
-    starless = sky.astype(np.float32)
+    starless = starless.astype(np.float32)
     return {"input": image, "starless": starless, "stars": (image - starless).astype(np.float32),
             "light": light.astype(np.float32), "halos": halo_light.astype(np.float32),
-            "spikes": spike_light.astype(np.float32), "placed": np.array(placed, dtype=np.float64).reshape(-1, 4)}
+            "spikes": spike_light.astype(np.float32), "placed": np.array(placed, dtype=np.float64).reshape(-1, 4),
+            "galaxies": galaxies.astype(np.float32), "listed": listed}
 
 
 def fitted(made: dict[str, Any], noise: np.ndarray, clip: float | None, fwhm: float) -> dict[str, Any]:
@@ -356,12 +455,20 @@ def fitted(made: dict[str, Any], noise: np.ndarray, clip: float | None, fwhm: fl
     the noise of a Gaussian's effective area, 4π σ², for its `fwhm`), with
     the field measured on it and bright stars carried on past its stamps,
     so no square edge is left in the estimate (`starless_sky.clean_sky`,
-    `wings`)."""
-    listed = [(float(x), float(y), float(m)) for x, y, m, _ in made["placed"]]
-    fluxes = made["placed"][:, 3] if listed else np.zeros(0)
+    `wings`). The galaxies' catalogue sources are fitted with them, as a
+    catalogue lists them among its stars."""
+    sources = catalogued(made)
+    listed = [(float(x), float(y), float(m)) for x, y, m, _ in sources]
+    fluxes = sources[:, 3] if listed else np.zeros(0)
     footprint = float(np.nanmedian(noise)) * math.sqrt(4.0 * math.pi) * fwhm / 2.3548
     refine = [bool(flux >= starless_sky.REFINE_SNR * footprint) for flux in fluxes]
     return starless_sky.clean_sky(made["input"], listed, noise=noise, clip=clip, refine=refine, wings=True)
+
+
+def catalogued(made: dict[str, Any]) -> np.ndarray:
+    """A composite's sources as a catalogue lists them, (x, y, magnitude,
+    flux): its stars, then the galaxies' sources."""
+    return np.concatenate([made["placed"], made.get("listed", np.zeros((0, 4)))]).reshape(-1, 4)
 
 
 def points_plane(placed: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
@@ -425,6 +532,7 @@ def prepared(store_root: str, scratch: str | None, product: dict[str, Any], *, d
         summary = json.loads((here / "sky.json").read_text())
         fwhm = float(summary.get("fwhm_px") or 3.0)
         clip = summary.get("clip_level")
+        galaxy_mask = starless_sky.galaxy_mask(starless_sky.galaxies_of(here), sky.shape)
         found = []
         noise_sky = image_sigma(sky).astype(np.float32)
         for draw in range(draws):
@@ -437,10 +545,11 @@ def prepared(store_root: str, scratch: str | None, product: dict[str, Any], *, d
             # truth is not to be trusted; where the fit fails is where healing
             # is learned.
             valid = np.isfinite(made["input"]) & np.isfinite(sky) & ~mask
-            plane = points_plane(made["placed"], sky.shape)
+            plane = points_plane(catalogued(made), sky.shape)
             full = {"input": made["input"], "starless": made["starless"], "fit_starless": fit["sky"],
                     "fit_model": fit["model"], "noise": noise, "valid": valid.astype(np.uint8), "points": plane,
-                    "halos": made["halos"], "spikes": made["spikes"]}
+                    "halos": made["halos"], "spikes": made["spikes"], "galaxies": made["galaxies"],
+                    "galaxy_mask": galaxy_mask.astype(np.uint8)}
             for top, left in window_corners(valid, side, windows, rng):
                 cut = (slice(top, top + side), slice(left, left + side))
                 found.append({"planes": {name: np.nan_to_num(full[name][cut]) for name in PLANES},
@@ -470,7 +579,7 @@ def cut(store: Store, products: list[dict[str, Any]], *, work: Path, draws: int 
     directory.mkdir(parents=True, exist_ok=True)
     capacity = max(1, len(products) * draws * windows)
     arrays = {plane: np.lib.format.open_memmap(directory / f"{plane}.npy", mode="w+",
-                                               dtype=np.uint8 if plane == "valid" else np.float32,
+                                               dtype=np.uint8 if plane in MASKS else np.float32,
                                                shape=(capacity, side, side)) for plane in PLANES}
     records, dropped, count = [], [], 0
     task = functools.partial(prepared, str(store.root), str(store.scratch), draws=draws, windows=windows, side=side,
