@@ -594,6 +594,17 @@ A whole Ultracat stack takes about 20 s through either network.
   thin about them. It adds back with the stars. X11 and X12 do the same on
   the composites' spike-free stars (0.8 to 1.1% of their light, X7 0.1%),
   so it comes of how the spike layer was trained, not of real stars.
+- Both take some nebula out. Of the light each takes out of a stack, the
+  share taken where no catalogue star is (outside a disc about every
+  source the clean-sky pass lists, 3 star widths, wider for bright ones):
+  X12 0.6 to 1.5% on the four nebulae, X11 0.4 to 0.9%. X12 dims bright
+  nebula ridges and takes compact knots; X11 took a small bright shell
+  about a listed star in Sh2 230 for its halo (43% in the halo layer, 53%
+  in the stars). The points plane marks a star by its light's share of the
+  brightest's, so a G 20 star's mark is a few millionths: in training most
+  faint stars look unmarked, and a network learns to take an unmarked
+  compact source as a star. A plane of where any star is marked (`marks`)
+  and the made galaxies, compact and kept, answer that.
 
 ### Galaxies
 
