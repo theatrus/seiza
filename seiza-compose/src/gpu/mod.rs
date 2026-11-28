@@ -457,6 +457,14 @@ impl GpuScene {
             mask.filter(|mask| *mask < picture.masks.len().min(MAX_MASKS))
                 .map_or(-1.0, |mask| mask as f32)
         };
+        // A mask the picture has but the GPU has no room for: what it limits
+        // is left out, not drawn everywhere, since the CPU still applies it.
+        let painted_past = |mask: Option<usize>| {
+            mask.is_some_and(|mask| mask >= MAX_MASKS && mask < picture.masks.len())
+        };
+        let computed_past = |mask: Option<usize>| {
+            mask.is_some_and(|mask| mask >= MAX_COMPUTED_MASKS && mask < picture.computed.len())
+        };
         // Each read through its transfer is a row of the stretch table. A
         // row depends only on the transfer and the input's scale, so reads
         // that share both share a row, as a layer and a mask that reads
@@ -518,12 +526,34 @@ impl GpuScene {
             slot[10] = -1.0;
             slot[14] = mask_index(layer.mask);
             slot[15] = if layer.own { 1.0 } else { 0.0 };
+            if painted_past(layer.mask) || painted_past(layer.clip) || computed_past(layer.computed)
+            {
+                scene.left_out.push(format!(
+                    "layer {index}, whose mask is past the GPU's {MAX_MASKS} painted or \
+                     {MAX_COMPUTED_MASKS} computed masks"
+                ));
+                slot[3] = 0.0;
+            }
             slot[16] = computed;
             slot[17] = -1.0;
             // The range mask: low, high and feather; a feather of -1 is none.
             slot[20..24].copy_from_slice(&range_slots(layer.range));
             match &layer.kind {
                 LayerKind::Input { read, color, curve } => {
+                    // One stage that reads maps is drawn; another after it
+                    // would be tabulated without them.
+                    if read
+                        .transfer
+                        .stages
+                        .iter()
+                        .filter(|stage| reads_maps(stage))
+                        .count()
+                        > 1
+                    {
+                        scene.left_out.push(format!(
+                            "layer {index}'s second stage that reads maps, drawn without them"
+                        ));
+                    }
                     // A layered stretch is drawn by the shader, past its
                     // row, while there is room for its constants and maps.
                     let layered = layered_stage(read).filter(|_| scene.layered.len() < MAX_LAYERED);
@@ -613,6 +643,11 @@ impl GpuScene {
             scene.layers.push(slot);
         }
         for (index, mask) in picture.computed.iter().take(MAX_COMPUTED_MASKS).enumerate() {
+            if painted_past(mask.added) || painted_past(mask.removed) {
+                scene.left_out.push(format!(
+                    "computed mask {index}'s touch-ups, past the GPU's {MAX_MASKS} masks"
+                ));
+            }
             if mask.reads.len() > 2 {
                 scene
                     .left_out
@@ -653,6 +688,12 @@ impl GpuScene {
             let Some(LayerKind::Input { read, .. }) =
                 picture.layers.get(heal.layer).map(|layer| &layer.kind)
             else {
+                // The CPU heals a luminance layer too; the GPU heals only a
+                // layer that shows an input.
+                scene.left_out.push(format!(
+                    "a heal of layer {}, which is not an input's",
+                    heal.layer
+                ));
                 continue;
             };
             if heal.layer >= scene.layers.len()
@@ -693,10 +734,16 @@ impl GpuScene {
                 ));
                 continue;
             }
+            let past = painted_past(step.mask);
+            if past {
+                scene.left_out.push(format!(
+                    "finishing step {index}, whose mask is past the GPU's {MAX_MASKS}"
+                ));
+            }
             let packed = scene.pack_step(
                 &step.kind,
                 mask_index(step.mask),
-                step.opacity,
+                if past { 0.0 } else { step.opacity },
                 step.range,
                 true,
                 index,

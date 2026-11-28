@@ -1250,3 +1250,97 @@ fn a_shared_row_after_a_layered_stretch_s_own_row_is_the_right_one() {
         "mean {mean:e}, p99 {p99:e}, max {largest:e}"
     );
 }
+
+/// What the GPU cannot draw as the CPU does is named, and a layer whose
+/// mask it cannot hold is hidden rather than drawn everywhere.
+#[test]
+fn what_the_gpu_cannot_hold_is_named_and_not_drawn_unmasked() {
+    use seiza_compose::gpu::{GpuInput, GpuScene};
+    use seiza_compose::picture::{
+        CoreStage, InputRead, Layer, LayerHeal, LayerKind, LuminanceTarget, Transfer, TransferStage,
+    };
+    use seiza_stretch::{CoreCompression, LayeredMaps, ResolvedCore};
+    use std::sync::Arc;
+    let place: Vec<GpuInput> = (0..3).map(|layer| GpuInput { layer, scale: 1.0 }).collect();
+    let input = |read: Transfer| {
+        Layer::new(LayerKind::Input {
+            read: InputRead::new(0, read),
+            color: [1.0; 3],
+            curve: 0.0,
+        })
+    };
+    let curve = seiza_stretch::ResolvedCurve::Mtf {
+        shadows: 0.0,
+        midtone: 0.3,
+        highlights: 1.0,
+    };
+    // Sixteen painted masks; a layer limited by the sixteenth.
+    let stroke = common::stroke([10.0, 10.0], [20.0, 20.0], 4.0);
+    let masked = Picture {
+        layers: vec![Layer {
+            mask: Some(15),
+            ..input(Transfer::of([TransferStage::Curve(curve)]))
+        }],
+        masks: vec![stroke.clone(); 16],
+        ..Picture::default()
+    };
+    let scene = GpuScene::new(&masked, &place);
+    assert!(
+        scene
+            .left_out
+            .iter()
+            .any(|words| words.contains("mask is past")),
+        "{:?}",
+        scene.left_out
+    );
+    // A heal of a luminance layer, which only the CPU heals.
+    let luminance = Picture {
+        layers: vec![Layer::new(LayerKind::Luminance {
+            read: Some(InputRead::new(
+                0,
+                Transfer::of([TransferStage::Curve(curve)]),
+            )),
+            target: LuminanceTarget::Replace,
+        })],
+        masks: vec![stroke],
+        heals: vec![LayerHeal {
+            layer: 0,
+            before_transfer: true,
+            offset: [5, 0],
+            shift: 0.0,
+            mask: 0,
+        }],
+        ..Picture::default()
+    };
+    let scene = GpuScene::new(&luminance, &place);
+    assert!(
+        scene
+            .left_out
+            .iter()
+            .any(|words| words.contains("a heal of layer 0")),
+        "{:?}",
+        scene.left_out
+    );
+    // Two stages that read maps in one transfer.
+    let core = CoreStage::new(
+        ResolvedCore::new(CoreCompression::default(), 0.1, 0.01).unwrap(),
+        Arc::new(LayeredMaps::default()),
+    );
+    let twice = Picture {
+        layers: vec![input(Transfer::of([
+            TransferStage::Core(core.clone()),
+            TransferStage::Core(core),
+            TransferStage::Curve(curve),
+        ]))],
+        ..Picture::default()
+    };
+    let scene = GpuScene::new(&twice, &place);
+    assert!(
+        scene
+            .left_out
+            .iter()
+            .any(|words| words.contains("second stage that reads maps")),
+        "{:?}",
+        scene.left_out
+    );
+}
