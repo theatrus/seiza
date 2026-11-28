@@ -1061,3 +1061,192 @@ fn core_compression_before_any_curve_matches_the_cpu() {
         "mean {mean:e}, p99 {p99:e}, max {largest:e}"
     );
 }
+
+/// A core-compressed layer between two layered stretches: each layer reads
+/// its own constants and maps on the GPU, as on the CPU.
+#[test]
+fn core_compression_beside_layered_stretches_matches_the_cpu() {
+    use seiza_compose::picture::{
+        Blend, CoreStage, InputRead, Layer, LayerKind, LayeredStage, Transfer, TransferStage,
+    };
+    use seiza_stretch::{
+        ColorStrategy, CoreCompression, LayeredHdr, LayeredHdrParams, LayeredParams, ResolvedCore,
+        ResolvedCurve, StretchAnalysis, StretchConfig, StretchModel, reduce_luminance,
+    };
+    use std::sync::Arc;
+    let inputs = inputs();
+    let images: Vec<&LinearImage> = inputs.iter().collect();
+    let layered_of = |image: &LinearImage| {
+        let finite: Vec<f32> = image
+            .data
+            .iter()
+            .copied()
+            .filter(|v| v.is_finite())
+            .collect();
+        let config = StretchConfig {
+            model: StretchModel::LayeredHdr(LayeredHdrParams {
+                layered: LayeredParams::default(),
+                hdr: LayeredHdr {
+                    headroom: 1.0,
+                    core_compression: 0.0,
+                    ..LayeredHdr::default()
+                },
+            }),
+            color_strategy: ColorStrategy::Linked,
+            max_analysis_samples: 200_000,
+        };
+        let plan = config.resolve_for(&finite, 1).unwrap();
+        let ResolvedCurve::Layered(layered) = plan.curves()[0] else {
+            panic!("not layered");
+        };
+        let (reduced, width, height) = reduce_luminance(&image.data, image.width, image.height);
+        let maps = Arc::new(layered.measure(&reduced, width, height));
+        TransferStage::Layered(LayeredStage::new(layered, maps))
+    };
+    let core_of = |image: &LinearImage| {
+        let finite: Vec<f32> = image
+            .data
+            .iter()
+            .copied()
+            .filter(|v| v.is_finite())
+            .collect();
+        let analysis = StretchAnalysis::analyze(&finite, 1, 200_000).unwrap();
+        let core = ResolvedCore::from_analysis(
+            CoreCompression {
+                amount: 0.7,
+                threshold: 15.0,
+                scale: 8.0,
+            },
+            &analysis,
+        )
+        .unwrap();
+        let (reduced, width, height) = reduce_luminance(&image.data, image.width, image.height);
+        let maps = Arc::new(core.measure(&reduced, width, height));
+        TransferStage::Core(CoreStage::new(core, maps))
+    };
+    let curve = ResolvedCurve::Mtf {
+        shadows: 0.0,
+        midtone: 0.2,
+        highlights: 1.0,
+    };
+    let layer = |input: usize, transfer: Transfer, color: [f32; 3], blend: Blend| Layer {
+        blend,
+        ..Layer::new(LayerKind::Input {
+            read: InputRead::new(input, transfer),
+            color,
+            curve: 0.0,
+        })
+    };
+    let picture = Picture {
+        layers: vec![
+            layer(
+                0,
+                Transfer::of([layered_of(&inputs[0])]),
+                [1.0, 0.2, 0.1],
+                Blend::Add,
+            ),
+            layer(
+                1,
+                Transfer::of([core_of(&inputs[1]), TransferStage::Curve(curve)]),
+                [0.1, 1.0, 0.2],
+                Blend::Add,
+            ),
+            layer(
+                2,
+                Transfer::of([layered_of(&inputs[2])]),
+                [0.1, 0.2, 1.0],
+                Blend::Screen,
+            ),
+        ],
+        headroom: 1.0,
+        ..Picture::default()
+    };
+    let Some((cpu, gpu)) = both(&picture, &images) else {
+        eprintln!("no GPU: the GPU compositor was not checked");
+        return;
+    };
+    let (mean, p99, largest) = gap(&cpu, &gpu);
+    eprintln!("core beside layered: mean {mean:e}, p99 {p99:e}, max {largest:e}");
+    assert!(
+        mean < 2e-3 && p99 < 1e-2,
+        "mean {mean:e}, p99 {p99:e}, max {largest:e}"
+    );
+}
+
+/// Two layers that share a row made after a layered stretch's own row: the
+/// second reads the shared row, not the one before it.
+#[test]
+fn a_shared_row_after_a_layered_stretch_s_own_row_is_the_right_one() {
+    use seiza_compose::picture::{
+        Blend, InputRead, Layer, LayerKind, LayeredStage, Transfer, TransferStage,
+    };
+    use seiza_stretch::{
+        ColorStrategy, LayeredParams, ResolvedCurve, StretchConfig, StretchModel, reduce_luminance,
+    };
+    use std::sync::Arc;
+    let inputs = inputs();
+    let images: Vec<&LinearImage> = inputs.iter().collect();
+    let image = &inputs[0];
+    let finite: Vec<f32> = image
+        .data
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .collect();
+    let config = StretchConfig {
+        model: StretchModel::Layered(LayeredParams::default()),
+        color_strategy: ColorStrategy::Linked,
+        max_analysis_samples: 200_000,
+    };
+    let plan = config.resolve_for(&finite, 1).unwrap();
+    let ResolvedCurve::Layered(layered) = plan.curves()[0] else {
+        panic!("not layered");
+    };
+    let (reduced, width, height) = reduce_luminance(&image.data, image.width, image.height);
+    let maps = Arc::new(layered.measure(&reduced, width, height));
+    // A curve after the layered stretch, which takes a row of its own.
+    let after = ResolvedCurve::Mtf {
+        shadows: 0.0,
+        midtone: 0.3,
+        highlights: 1.0,
+    };
+    let shared = Transfer::of([TransferStage::Curve(ResolvedCurve::Mtf {
+        shadows: 0.0,
+        midtone: 0.1,
+        highlights: 1.0,
+    })]);
+    let layer = |input: usize, transfer: Transfer, color: [f32; 3]| Layer {
+        blend: Blend::Add,
+        ..Layer::new(LayerKind::Input {
+            read: InputRead::new(input, transfer),
+            color,
+            curve: 0.0,
+        })
+    };
+    let picture = Picture {
+        layers: vec![
+            layer(
+                0,
+                Transfer::of([
+                    TransferStage::Layered(LayeredStage::new(layered, maps)),
+                    TransferStage::Curve(after),
+                ]),
+                [0.5, 0.0, 0.0],
+            ),
+            // The row these two share comes after the layered stretch's own.
+            layer(1, shared.clone(), [0.0, 0.5, 0.0]),
+            layer(2, shared, [0.0, 0.0, 0.5]),
+        ],
+        ..Picture::default()
+    };
+    let Some((cpu, gpu)) = both(&picture, &images) else {
+        eprintln!("no GPU: the GPU compositor was not checked");
+        return;
+    };
+    let (mean, p99, largest) = gap(&cpu, &gpu);
+    eprintln!("shared row: mean {mean:e}, p99 {p99:e}, max {largest:e}");
+    assert!(
+        mean < 2e-3 && p99 < 1e-2,
+        "mean {mean:e}, p99 {p99:e}, max {largest:e}"
+    );
+}

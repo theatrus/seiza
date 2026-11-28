@@ -461,15 +461,17 @@ impl GpuScene {
         // row depends only on the transfer and the input's scale, so reads
         // that share both share a row, as a layer and a mask that reads
         // its input do.
-        let mut row_keys: Vec<(u32, bool, Transfer)> = Vec::new();
+        // Each key keeps the row it made: rows a layered stretch adds after
+        // itself have no key, so a key's place in this list is not its row.
+        let mut row_keys: Vec<(u32, bool, Transfer, usize)> = Vec::new();
         let mut row_of =
             |scene: &mut Self, read: &InputRead, before_layered: bool| -> Option<usize> {
                 let place = input(read)?;
                 let scale = place.scale.to_bits();
-                if let Some(row) = row_keys.iter().position(|(known, before, transfer)| {
+                if let Some((.., row)) = row_keys.iter().find(|(known, before, transfer, _)| {
                     *known == scale && *before == before_layered && *transfer == read.transfer
                 }) {
-                    return Some(row);
+                    return Some(*row);
                 }
                 if scene.rows.len() == LAYER_ROWS {
                     return None;
@@ -480,11 +482,12 @@ impl GpuScene {
                         .to_string(),
                 );
                 }
-                row_keys.push((scale, before_layered, read.transfer.clone()));
                 scene
                     .rows
                     .push(transfer_row(read, place.scale, before_layered));
-                Some(scene.rows.len() - 1)
+                let row = scene.rows.len() - 1;
+                row_keys.push((scale, before_layered, read.transfer.clone(), row));
+                Some(row)
             };
         let band = |read: &InputRead| -> [f32; 3] {
             let layer = input(read).map_or(-1.0, |input| input.layer as f32);
