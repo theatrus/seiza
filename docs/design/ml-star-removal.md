@@ -646,6 +646,32 @@ about one moves it, the stars' rms (48 windows):
   stars' light below zero with or without, 0.9% for X16), so it is not for
   want of seeing such stars; they are not kept.
 
+### Eighth runs (2026-11-27)
+
+X17 to X20 are X13 and X14 with twice the channels (64; X17, X18) or four
+times the steps (40,000; X19, X20), all else the same. Medians over the
+same 128 windows:
+
+| | stars, rms | sky, rms | halos found | spikes found |
+|---|---|---|---|---|
+| X13, fit-first | 0.432 | 0.061 | 0.78 | 0.19 |
+| X17, wider | 0.468 | 0.079 | 0.35 | 0.07 |
+| X19, four times as long | 0.405 | 0.044 | 0.83 | 0.68 |
+| X14, image only | 0.568 | 0.108 | 0.56 | 0.56 |
+| X18, wider | 0.542 | 0.106 | 0.65 | 0.70 |
+| X20, four times as long | 0.504 | 0.095 | 0.71 | 0.77 |
+
+- Training longer is the gain. X19 is the best run so far: 6% less error
+  on the stars than X13 and 29% less on the sky, and the fit-first run now
+  finds the spikes (0.68, from 0.19), which were still being learned at
+  10,000 steps. X20 has 11% less error than X14. Both level off by 36,000
+  steps (validation 0.0769 at 30,000, 0.0754 at 40,000 for X19).
+- The wider fit-first run stalls: its validation loss holds at 0.089 from
+  step 2,000 on, the halos' grows, and it finds few spikes. The wider
+  image-only run has 5% less error than X14, less than X20 gains.
+- Fit-first stays ahead: 20% less error on the stars than image-only, at
+  either length.
+
 ### Galaxies
 
 A galaxy is not a star. Small ones look like stars, and a large one's
