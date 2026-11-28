@@ -79,7 +79,17 @@ pub fn render_gpu(
             region.width, region.height, region.x, region.y
         )));
     }
-    let plan = Plan::new(picture);
+    // Finish steps past what one draw holds are drawn as steps on the
+    // stack, whose reaches add up, so a tile takes the larger margin.
+    let plan = {
+        let finish = Plan::new(picture);
+        let stacked = Plan::new(&super::stack_finish(picture));
+        if stacked.margin > finish.margin {
+            stacked
+        } else {
+            finish
+        }
+    };
     // Each input's largest sample in the region: what a texel of 1 stands
     // for.
     let mut scales = vec![f32::MIN_POSITIVE; plan.inputs.len()];

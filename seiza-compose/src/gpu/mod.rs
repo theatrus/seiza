@@ -455,8 +455,11 @@ fn curve_row(curve: ResolvedCurve) -> Vec<f32> {
         .collect()
 }
 
-/// `picture` with its Finish steps as steps on top of the stack, which
-/// draw the same, so batches of layers hold them.
+/// `picture` with its Finish steps as steps on top of the stack, so batches
+/// of layers hold them. This is for Finish steps past what one draw holds:
+/// on the stack, a heal copies from the picture the steps before it healed,
+/// and a local Tone step measures it, where a Finish step reads the picture
+/// without heals.
 fn stack_finish(picture: &Picture) -> Picture {
     let mut stacked = picture.clone();
     let finish = std::mem::take(&mut stacked.finish);
@@ -470,9 +473,17 @@ fn stack_finish(picture: &Picture) -> Picture {
 }
 
 /// The layers `range` of `picture` as a picture of their own, with only
-/// the masks, computed masks and heals they use, renumbered.
-fn batch_picture(picture: &Picture, range: std::ops::Range<usize>) -> Picture {
+/// the masks, computed masks and heals they use, renumbered; with the
+/// picture's Finish steps when `finish`. `shell` is `picture` without its
+/// layers, masks, computed masks, heals and Finish steps, made once.
+fn batch_picture(
+    picture: &Picture,
+    shell: &Picture,
+    range: std::ops::Range<usize>,
+    finish: bool,
+) -> Picture {
     let layers = &picture.layers[range.clone()];
+    let steps: &[crate::picture::FinishStep] = if finish { &picture.finish } else { &[] };
     let heals: Vec<&crate::picture::LayerHeal> = picture
         .heals
         .iter()
@@ -487,7 +498,7 @@ fn batch_picture(picture: &Picture, range: std::ops::Range<usize>) -> Picture {
             computed.push(mask);
         }
     }
-    // The painted masks the layers, heals and computed masks use.
+    // The painted masks the layers, heals, computed masks and steps use.
     let mut painted: Vec<usize> = Vec::new();
     let mut note = |mask: Option<usize>| {
         if let Some(mask) = mask.filter(|mask| *mask < picture.masks.len())
@@ -506,6 +517,9 @@ fn batch_picture(picture: &Picture, range: std::ops::Range<usize>) -> Picture {
     for mask in &computed {
         note(picture.computed[*mask].added);
         note(picture.computed[*mask].removed);
+    }
+    for step in steps {
+        note(step.mask);
     }
     let painted_at =
         |mask: Option<usize>| mask.and_then(|mask| painted.iter().position(|kept| *kept == mask));
@@ -544,8 +558,39 @@ fn batch_picture(picture: &Picture, range: std::ops::Range<usize>) -> Picture {
                 ..**heal
             })
             .collect(),
-        finish: Vec::new(),
-        ..picture.clone()
+        finish: steps
+            .iter()
+            .map(|step| crate::picture::FinishStep {
+                mask: painted_at(step.mask),
+                ..step.clone()
+            })
+            .collect(),
+        ..shell.clone()
+    }
+}
+
+/// How a batch names what it leaves out: by the place in the whole picture
+/// of its layers, which start at `first` in the stacked picture, where the
+/// picture's Finish steps start at `finish_from` when they are stacked.
+#[derive(Clone, Copy)]
+struct Naming {
+    first: usize,
+    finish_from: Option<usize>,
+}
+
+impl Naming {
+    const WHOLE: Self = Self {
+        first: 0,
+        finish_from: None,
+    };
+
+    /// The batch's layer `index`, as a person finds it in the picture.
+    fn layer(self, index: usize) -> String {
+        let at = self.first + index;
+        match self.finish_from {
+            Some(from) if at >= from => format!("finishing step {}", at - from),
+            _ => format!("layer {at}"),
+        }
     }
 }
 
@@ -569,42 +614,98 @@ impl GpuScene {
     /// Packs `picture` for the GPU, with each of its inputs at `inputs[i]`.
     ///
     /// A picture with more than one draw holds (layers, masks, stretches,
-    /// steps or heals past the GPU's limits) is drawn in batches: its
-    /// Finish steps become steps on top of the stack, which draw the same,
-    /// and its layers are split into runs that each fit. Each batch starts
-    /// from what the one before it drew. What the GPU cannot draw at all (a
-    /// computed mask of more than two inputs, say) is left out and named
-    /// in [`Self::left_out`].
+    /// steps or heals past the GPU's limits) is drawn in batches: its layers
+    /// are split into runs that each fit, and each batch starts from what
+    /// the one before it drew. Its Finish steps stay Finish steps, in the
+    /// last batch, when one draw holds them; past that they are drawn as
+    /// steps on top of the stack, and when that changes what a heal or a
+    /// local Tone step reads, [`Self::left_out`] says so. What the GPU
+    /// cannot draw at all (a computed mask of more than two inputs, say) is
+    /// left out and named there too.
     pub fn new(picture: &Picture, inputs: &[GpuInput]) -> Self {
-        let whole = Self::pack(picture, inputs, (0, 0));
+        let whole = Self::pack(picture, inputs, (0, 0), Naming::WHOLE);
         if !whole.overflow {
             return whole;
         }
-        let stacked = stack_finish(picture);
-        let count = stacked.layers.len();
+        let shell = Picture {
+            layers: Vec::new(),
+            computed: Vec::new(),
+            masks: Vec::new(),
+            heals: Vec::new(),
+            finish: Vec::new(),
+            ..picture.clone()
+        };
+        let ends = picture.layers.len();
+        // The Finish steps stay Finish steps when a draw of them alone fits.
+        let keep_finish = !picture.finish.is_empty()
+            && !Self::pack(
+                &batch_picture(picture, &shell, ends..ends, true),
+                inputs,
+                (0, 0),
+                Naming::WHOLE,
+            )
+            .overflow;
+        let stacked = if keep_finish || picture.finish.is_empty() {
+            None
+        } else {
+            Some(stack_finish(picture))
+        };
+        let layered = stacked.as_ref().unwrap_or(picture);
+        let finish_from = stacked.as_ref().map(|_| ends);
+        let count = layered.layers.len();
         let mut batches: Vec<GpuScene> = Vec::new();
         let (mut from, mut open) = (0_usize, (0_usize, 0_usize));
-        while from < count {
-            let fits =
-                |to: usize| !Self::pack(&batch_picture(&stacked, from..to), inputs, open).overflow;
-            // The most layers from `from` that fit, found by halving; one
-            // layer goes alone however much it needs.
-            let (mut low, mut high) = (from + 1, count);
-            if fits(high) {
-                low = high;
+        // The kept Finish steps go with the last run of layers, or in a
+        // batch of their own after it when they do not fit beside it.
+        let mut finish_pending = keep_finish;
+        while from < count || finish_pending {
+            let naming = Naming {
+                first: from,
+                finish_from,
+            };
+            let packed = |to: usize, finish: bool| {
+                Self::pack(
+                    &batch_picture(layered, &shell, from..to, finish),
+                    inputs,
+                    open,
+                    naming,
+                )
+            };
+            let (low, finish) = if from == count {
+                // The Finish steps alone, after the last run.
+                (count, true)
             } else {
-                while high - low > 1 {
-                    let middle = low + (high - low) / 2;
-                    if fits(middle) {
-                        low = middle;
-                    } else {
-                        high = middle;
+                let with_finish = |to: usize| keep_finish && to == count;
+                let fits = |to: usize| !packed(to, with_finish(to)).overflow;
+                // The most layers from `from` that fit, found by halving;
+                // one layer goes alone however much it needs.
+                let (mut low, mut high) = (from + 1, count);
+                if fits(high) {
+                    low = high;
+                } else {
+                    while high - low > 1 {
+                        let middle = low + (high - low) / 2;
+                        if fits(middle) {
+                            low = middle;
+                        } else {
+                            high = middle;
+                        }
                     }
                 }
+                // An adjustment of the layer or group just before it
+                // changes that layer in the draw that blends it, so the two
+                // are never split.
+                while low < count && low > from + 1 && layered.layers[low].own {
+                    low -= 1;
+                }
+                (low, with_finish(low) && fits(low))
+            };
+            if finish {
+                finish_pending = false;
             }
-            let mut batch = Self::pack(&batch_picture(&stacked, from..low), inputs, open);
+            let mut batch = packed(low, finish);
             batch.carried = (from > 0).then_some(open);
-            open = open_groups(&stacked.layers[from..low], open);
+            open = open_groups(&layered.layers[from..low], open);
             batch.carry_out = open;
             // Screen works up to the whole picture's peak, in every batch.
             batch.peak = whole.peak;
@@ -612,12 +713,26 @@ impl GpuScene {
             from = low;
         }
         let mut left_out: Vec<String> = Vec::new();
+        let reads_before = picture.finish.iter().any(|step| match &step.kind {
+            FinishKind::Heal { .. } => true,
+            FinishKind::Tone(tone) => tone.is_local(),
+            _ => false,
+        });
+        if stacked.is_some() && reads_before && picture.finish.len() > 1 {
+            left_out.push(format!(
+                "the finishing steps, past the GPU's {MAX_FINISH_STEPS}, drawn as steps on the \
+                 stack, where a heal or a local Tone step reads the steps before it"
+            ));
+        }
         for batch in &batches {
             for words in &batch.left_out {
                 if !left_out.contains(words) {
                     left_out.push(words.clone());
                 }
             }
+        }
+        if batches.is_empty() {
+            return whole;
         }
         let mut first = batches.remove(0);
         first.left_out = left_out;
@@ -632,7 +747,7 @@ impl GpuScene {
 
     /// One draw's packing of `picture`, whose first layer starts inside
     /// `start` groups, kept and flattened.
-    fn pack(picture: &Picture, inputs: &[GpuInput], start: (usize, usize)) -> Self {
+    fn pack(picture: &Picture, inputs: &[GpuInput], start: (usize, usize), naming: Naming) -> Self {
         let mut scene = Self {
             luma: picture.space.luma_weights(),
             peak: picture.peak(),
@@ -694,10 +809,12 @@ impl GpuScene {
             [layer, blended, amount]
         };
         for (index, layer) in picture.layers.iter().enumerate() {
+            // The layer as a person finds it in the whole picture.
+            let named = naming.layer(index);
             if scene.layers.len() == MAX_LAYERS {
                 scene
                     .left_out
-                    .push(format!("layer {index}, past the GPU's {MAX_LAYERS}"));
+                    .push(format!("{named}, past the GPU's {MAX_LAYERS}"));
                 scene.overflow = true;
                 continue;
             }
@@ -716,7 +833,7 @@ impl GpuScene {
             if painted_past(layer.mask) || painted_past(layer.clip) || computed_past(layer.computed)
             {
                 scene.left_out.push(format!(
-                    "layer {index}, whose mask is past the GPU's {MAX_MASKS} painted or \
+                    "{named}, whose mask is past the GPU's {MAX_MASKS} painted or \
                      {MAX_COMPUTED_MASKS} computed masks"
                 ));
                 scene.overflow = true;
@@ -739,7 +856,7 @@ impl GpuScene {
                         > 1
                     {
                         scene.left_out.push(format!(
-                            "layer {index}'s second stage that reads maps, drawn without them"
+                            "{named}'s second stage that reads maps, drawn without them"
                         ));
                     }
                     // A layered stretch is drawn by the shader, past its
@@ -747,7 +864,7 @@ impl GpuScene {
                     let layered = layered_stage(read).filter(|_| scene.layered.len() < MAX_LAYERED);
                     if layered_stage(read).is_some() && layered.is_none() {
                         scene.left_out.push(format!(
-                            "layer {index}'s layered stretch past the GPU's {MAX_LAYERED}, drawn with its curve alone"
+                            "{named}'s layered stretch past the GPU's {MAX_LAYERED}, drawn with its curve alone"
                         ));
                         scene.overflow = true;
                     }
@@ -756,7 +873,7 @@ impl GpuScene {
                         // their layers.
                         scene
                             .left_out
-                            .push(format!("layer {index}, with no stretch row left"));
+                            .push(format!("{named}, with no stretch row left"));
                         scene.overflow = true;
                         slot[3] = 0.0;
                         scene.layers.push(slot);
@@ -774,7 +891,7 @@ impl GpuScene {
                                 constants[33] = (scene.rows.len() - 1) as f32;
                             } else {
                                 scene.left_out.push(format!(
-                                    "the stretch after layer {index}'s layered one, with no stretch row left"
+                                    "the stretch after {named}'s layered one, with no stretch row left"
                                 ));
                                 scene.overflow = true;
                             }
@@ -818,7 +935,7 @@ impl GpuScene {
                         let Some(row) = row_of(&mut scene, read, false) else {
                             scene
                                 .left_out
-                                .push(format!("layer {index}, with no stretch row left"));
+                                .push(format!("{named}, with no stretch row left"));
                             scene.overflow = true;
                             slot[3] = 0.0;
                             scene.layers.push(slot);
@@ -885,8 +1002,8 @@ impl GpuScene {
                 // The CPU heals a luminance layer too; the GPU heals only a
                 // layer that shows an input.
                 scene.left_out.push(format!(
-                    "a heal of layer {}, which is not an input's",
-                    heal.layer
+                    "a heal of {}, which is not an input's",
+                    naming.layer(heal.layer)
                 ));
                 continue;
             };
@@ -897,7 +1014,7 @@ impl GpuScene {
             {
                 scene
                     .left_out
-                    .push(format!("a heal of layer {}", heal.layer));
+                    .push(format!("a heal of {}", naming.layer(heal.layer)));
                 scene.overflow = true;
                 continue;
             }
@@ -980,7 +1097,8 @@ impl GpuScene {
             };
             if scene.finish.len() == MAX_FINISH_STEPS {
                 scene.left_out.push(format!(
-                    "layer {at}, a step past the GPU's {MAX_FINISH_STEPS}"
+                    "{}, a step past the GPU's {MAX_FINISH_STEPS}",
+                    naming.layer(at)
                 ));
                 scene.overflow = true;
                 scene.layers[at][3] = 0.0;
@@ -1960,7 +2078,9 @@ impl GpuCompositor {
 
     /// Draws `scene` into `area` of `targets` from `tiles`, and submits the
     /// work. `version` names the scene's tables and masks: a draw of the same
-    /// version uploads them only once; `None` always uploads. `overlay` is a
+    /// version uploads them only once; `None` always uploads. A scene drawn
+    /// in batches ([`GpuScene::batches`]) uploads each batch's tables, masks
+    /// and maps on every draw. `overlay` is a
     /// stroke shown over the finished picture at `overlay_strength`. With
     /// `first`, the draw clears the finished picture before drawing.
     #[allow(clippy::too_many_arguments)]
@@ -2369,7 +2489,6 @@ impl GpuCompositor {
 
     /// Every pass of one draw: the masks, the layers, then the Finish steps
     /// into the finished picture.
-    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     fn passes(
         &self,

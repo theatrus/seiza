@@ -156,9 +156,10 @@ compression. `seiza_stretch` itself stretches a whole image the same way.
 reads the maps at each sample's place, and the GPU reads them from a
 texture array, interpolating between map pixels as the CPU does, and works
 out the curve, core gain, HDR tail and detail gain in the shader. Up to
-twelve layers per draw take a layered stretch; another is drawn with its
-curve alone and named in `left_out`, as is a layered stretch a computed
-mask or a luminance layer reads. A host measures the maps again only when
+twelve layers per draw take a layered stretch; a picture with more is
+drawn in batches (see the GPU section). A layered stretch that a computed
+mask or a luminance layer reads is drawn with its curve alone and named in
+`left_out`. A host measures the maps again only when
 a setting that moves them changes (the core compression's scale, or the
 stretch's background statistics), so a slider redraws at once. Its sky
 floor, a stretched level from 0 to 0.5, goes to black after the star
@@ -242,8 +243,8 @@ within the scissor, and are measured in drawn pixels: zoomed out, a window
 covers the same part of the picture at the canvas's resolution; zoomed in
 past about five times, a window is capped at 256 drawn pixels either side.
 Up to four Tone steps per draw read neighborhoods, each measured into its
-own layer of the local textures after the steps before it; a fifth is
-drawn with each pixel alone, without Dehaze, and named in `left_out`.
+own layer of the local textures after the steps before it; a picture with
+more is drawn in batches.
 A step in the stack that maps each pixel alone is drawn by the layers
 pass itself, from its entry after the Finish steps in their table. One
 that reads neighbors, a heal or a Tone step with local controls, ends a
@@ -267,6 +268,27 @@ three times further from the CPU, from the extra rounding at each stage.
 Apple silicon the mean difference is under 1e-4 and the 99th percentile
 under 1e-3, smoothing and steps in the stack included. A planted shader change fails
 it. Without a GPU the tests pass without checking.
+
+One draw holds 24 layers, 8 Finish steps, 15 painted and 8 computed masks,
+16 heals of 4 layers, 12 layered stretches and the stretch-table rows they
+read. `GpuScene::new` draws a picture with more in batches: it splits the
+layers into the longest runs that each pack, found by halving, and each
+batch starts from what the one before it drew. A batch before the last
+copies its combined picture and what lies beneath each open group into the
+staged textures, and the next batch starts from them with the groups still
+open, so a group may span batches. A layer and the adjustment of it alone
+(`own`) are never split, because the shader applies that adjustment before
+it blends the layer. The Finish steps stay Finish steps in the last batch,
+or in a batch of their own after it, when one draw holds them. Past that
+they become steps on top of the stack, where a heal copies from the
+picture the steps before it healed and a local Tone step measures it, so
+`left_out` says so when the picture has either; the headless render then
+gives each tile the margin of the steps in the stack. A single layer that
+still does not fit, such as one with more heals than a draw holds, is
+drawn without what does not fit, named in `left_out` by its place in the
+whole picture. A batched scene uploads each batch's tables, masks and maps
+on every draw, so a canvas pays for that on each frame; packing a picture
+of 300 layers takes about 80 ms.
 
 PSF Studio keeps only what belongs to an interactive canvas: streaming tiles
 from its pyramid, panes and the wipe divider, the brush overlay's strokes,
