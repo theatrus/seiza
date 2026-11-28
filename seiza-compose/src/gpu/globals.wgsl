@@ -58,7 +58,8 @@ struct LayeredStep {
     cores: vec4f,
     // x: the sky floor, the stretched level that becomes black. y: the
     // stretch-table row of what follows the layered stretch, over 0 to its
-    // peak, or -1 for nothing.
+    // peak, or -1 for nothing. z: 1 for core compression alone, before any
+    // stretch: the sample compressed, and the stretch left to row y.
     floor: vec4f,
 }
 

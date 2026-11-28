@@ -163,7 +163,11 @@ fn layered(value: f32, index: i32, doc: vec2f, uv: vec2f) -> f32 {
             read = step.curve.w + (luminance - step.curve.w) * gain;
         }
     }
-    var out = layered_curve(read, step);
+    // Core compression alone (floor.z) leaves the stretch to the row after
+    // it; a layered stretch goes on with its own curve.
+    var out = read;
+    if step.floor.z < 0.5 {
+    out = layered_curve(read, step);
     // Contrast recovery: the detail around the large-scale layer keeps more
     // of the background's slope.
     if step.maps.y > 0.5 && step.detail.y > 0.0 {
@@ -198,6 +202,7 @@ fn layered(value: f32, index: i32, doc: vec2f, uv: vec2f) -> f32 {
             let own = max((value - black) / (1.0 - black), 0.0);
             out = max(1.0 + (own - base) / max(base, floor), 0.0) * out;
         }
+    }
     }
     let peak = step.turn.w;
     out = clamp(out, 0.0, peak);

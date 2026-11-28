@@ -201,7 +201,7 @@ fn transfer_row(read: &InputRead, scale: f32, before_layered: bool) -> Vec<f32> 
             .transfer
             .stages
             .iter()
-            .take_while(|stage| !matches!(stage, TransferStage::Layered(_)))
+            .take_while(|stage| !reads_maps(stage))
             .cloned();
         Transfer::of(stages).apply(&mut samples);
     } else {
@@ -218,7 +218,7 @@ fn after_layered_row(read: &InputRead, peak: f32) -> Option<Vec<f32>> {
         .transfer
         .stages
         .iter()
-        .skip_while(|stage| !matches!(stage, TransferStage::Layered(_)))
+        .skip_while(|stage| !reads_maps(stage))
         .skip(1)
         .cloned()
         .collect();
@@ -236,12 +236,78 @@ fn after_layered_row(read: &InputRead, peak: f32) -> Option<Vec<f32>> {
     Some(samples)
 }
 
-/// A transfer's layered stage, if it has one.
-fn layered_stage(read: &InputRead) -> Option<&LayeredStage> {
+/// Whether a stage reads maps of the whole picture, which the shader draws
+/// itself: a layered stretch, or core compression.
+fn reads_maps(stage: &TransferStage) -> bool {
+    matches!(stage, TransferStage::Layered(_) | TransferStage::Core(_))
+}
+
+/// A transfer's stage that reads maps, which the shader draws past the row
+/// of the stages before it.
+#[derive(Clone, Copy)]
+enum Mapped<'a> {
+    Layered(&'a LayeredStage),
+    Core(&'a crate::picture::CoreStage),
+}
+
+impl Mapped<'_> {
+    fn maps(&self) -> Arc<seiza_stretch::LayeredMaps> {
+        match self {
+            Mapped::Layered(stage) => stage.maps.clone(),
+            Mapped::Core(stage) => stage.maps.clone(),
+        }
+    }
+
+    /// The brightest value the stage gives: what the row after it covers.
+    fn peak(&self) -> f32 {
+        match self {
+            Mapped::Layered(stage) => stage.peak(),
+            // Compression lowers values, so the range it was given remains.
+            Mapped::Core(_) => 1.0,
+        }
+    }
+
+    fn constants(&self, map_layer: usize, inputs: &[GpuInput]) -> [f32; LAYERED_CONSTANTS] {
+        match self {
+            Mapped::Layered(stage) => layered_constants(stage, map_layer, inputs),
+            Mapped::Core(stage) => core_constants(stage, map_layer),
+        }
+    }
+}
+
+/// A transfer's stage that reads maps, if it has one.
+fn layered_stage(read: &InputRead) -> Option<Mapped<'_>> {
     read.transfer.stages.iter().find_map(|stage| match stage {
-        TransferStage::Layered(stage) => Some(stage),
+        TransferStage::Layered(stage) => Some(Mapped::Layered(stage)),
+        TransferStage::Core(stage) => Some(Mapped::Core(stage)),
         _ => None,
     })
+}
+
+/// Core compression's constants, as `LayeredStep` holds them: the
+/// background median and noise, the compression's threshold, amount and
+/// knee, its map, and the flag that has the shader compress alone, leaving
+/// the stretch to the row after it.
+fn core_constants(stage: &crate::picture::CoreStage, map_layer: usize) -> [f32; LAYERED_CONSTANTS] {
+    let core = &stage.core;
+    let maps = &stage.maps;
+    let mut constants = [0.0_f32; LAYERED_CONSTANTS];
+    constants[3] = core.median as f32;
+    constants[4] = core.noise as f32;
+    constants[7] = if maps.core.is_empty() { 0.0 } else { 1.0 };
+    constants[8] = (core.params.threshold + seiza_stretch::CORE_FLOOR).ln() as f32;
+    constants[9] = core.params.amount as f32;
+    constants[10] = seiza_stretch::CORE_FLOOR as f32;
+    constants[11] = seiza_stretch::CORE_KNEE_WIDTH as f32;
+    constants[19] = 1.0;
+    constants[20] = map_layer as f32;
+    constants[22] = maps.width as f32;
+    constants[23] = maps.height as f32;
+    // No guides: the sample is compressed by its own value.
+    constants[24] = -1.0;
+    constants[26] = -1.0;
+    constants[34] = 1.0;
+    constants
 }
 
 /// A layered stage's constants as the shader reads them; see `LayeredStep`
@@ -475,7 +541,7 @@ impl GpuScene {
                     };
                     if let Some(stage) = layered {
                         let map_layer = scene.layered.len();
-                        let mut constants = layered_constants(stage, map_layer, inputs);
+                        let mut constants = stage.constants(map_layer, inputs);
                         // What follows the layered stretch, read from a row
                         // of its own over the stretch's range.
                         constants[33] = -1.0;
@@ -489,7 +555,7 @@ impl GpuScene {
                                 ));
                             }
                         }
-                        scene.layered.push((constants, stage.maps.clone()));
+                        scene.layered.push((constants, stage.maps()));
                         slot[17] = map_layer as f32;
                     }
                     let [layer_band, blended, amount] = band(read);

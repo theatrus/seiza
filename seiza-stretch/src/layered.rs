@@ -147,6 +147,26 @@ pub struct LayeredHdrParams {
 /// The floor under `z` in the log, in robust sigmas, so noise near the
 /// background has no log to speak of.
 pub const CORE_FLOOR: f64 = 3.0;
+
+/// The log a core compression blurs: `value` above the background `median`
+/// in `noise` sigmas, with [`CORE_FLOOR`] under it.
+pub fn core_log(value: f64, median: f64, noise: f64) -> f64 {
+    ((value - median).max(0.0) / noise.max(1.0e-9) + CORE_FLOOR).ln()
+}
+
+/// The gain a core compression puts on a value above the background where
+/// its blurred log is `base`: `exp(−amount · w · softplus((base − ln(T +
+/// floor)) / w))` with `T` the `threshold` in sigmas and `w`
+/// [`CORE_KNEE_WIDTH`].
+pub fn core_gain(base: f64, amount: f64, threshold: f64) -> f64 {
+    let over = (base - (threshold + CORE_FLOOR).ln()) / CORE_KNEE_WIDTH;
+    let soft = if over > 20.0 {
+        CORE_KNEE_WIDTH * over
+    } else {
+        CORE_KNEE_WIDTH * over.exp().ln_1p()
+    };
+    (-amount * soft).exp()
+}
 /// The width of the compression's knee, in natural-log units.
 pub const CORE_KNEE_WIDTH: f64 = 0.5;
 /// The most of the white's curve value the HDR tail's knee may be, so the
@@ -473,7 +493,7 @@ impl ResolvedLayered {
     /// The log the core compression blurs: luminance above the background
     /// in noise sigmas, with a floor.
     pub fn core_log(&self, value: f64) -> f64 {
-        ((value - self.median).max(0.0) / self.noise.max(1.0e-9) + CORE_FLOOR).ln()
+        core_log(value, self.median, self.noise)
     }
 
     /// `value` with bright structure's range compressed, given the core
@@ -485,14 +505,7 @@ impl ResolvedLayered {
         if !value.is_finite() || !base.is_finite() || hdr.core_compression <= 0.0 {
             return value;
         }
-        let threshold = (hdr.core_threshold + CORE_FLOOR).ln();
-        let over = (f64::from(base) - threshold) / CORE_KNEE_WIDTH;
-        let soft = if over > 20.0 {
-            CORE_KNEE_WIDTH * over
-        } else {
-            CORE_KNEE_WIDTH * over.exp().ln_1p()
-        };
-        let gain = (-hdr.core_compression * soft).exp();
+        let gain = core_gain(f64::from(base), hdr.core_compression, hdr.core_threshold);
         (self.median + (f64::from(value) - self.median) * gain) as f32
     }
 
@@ -812,7 +825,7 @@ fn box_radii(sigma: f64) -> [usize; 3] {
 /// then along columns, each a running sum, so the cost does not grow with
 /// the radius. Non-finite samples and the space past the edges carry no
 /// weight; the result is divided by the weight that remains.
-fn blur(values: &[f32], width: usize, height: usize, sigma: f64) -> Vec<f32> {
+pub(crate) fn blur(values: &[f32], width: usize, height: usize, sigma: f64) -> Vec<f32> {
     let radii = box_radii(sigma);
     let any_missing = values.par_iter().any(|value| !value.is_finite());
     let filled = values

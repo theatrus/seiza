@@ -19,13 +19,15 @@ use thiserror::Error;
 
 use seiza_stats::NORMAL_MAD_SCALE;
 
+mod core_compression;
 mod hdr_tail;
 mod layered;
+pub use core_compression::{CoreCompression, ResolvedCore};
 pub use hdr_tail::{HdrTail, HdrTailParams, extended_srgb_decode, extended_srgb_encode};
 pub use layered::{
     CORE_FLOOR, CORE_KNEE_WIDTH, DRC_KNEE, LayeredHdr, LayeredHdrParams, LayeredMaps,
     LayeredParams, MAP_REDUCTION, MAX_DETAIL_GAIN, MapSample, ResolvedLayered, STAR_CORE_END_SLOPE,
-    fine_luminance, reduce_luminance,
+    core_gain, core_log, fine_luminance, reduce_luminance,
 };
 
 /// The luminance the stretches read from red, green and blue, as Rec.709

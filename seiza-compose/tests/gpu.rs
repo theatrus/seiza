@@ -971,3 +971,93 @@ fn range_masks_match_the_cpu() {
         "mean {mean:e}, p99 {p99:e}, max {largest:e}"
     );
 }
+
+/// Core compression before an ordinary curve: the GPU compresses with the
+/// map as the CPU does, then reads the curve from the row after it.
+#[test]
+fn core_compression_before_any_curve_matches_the_cpu() {
+    use seiza_compose::picture::{CoreStage, InputRead, Layer, LayerKind, Transfer, TransferStage};
+    use seiza_stretch::{
+        CoreCompression, ResolvedCore, ResolvedCurve, StretchAnalysis, reduce_luminance,
+    };
+    use std::sync::Arc;
+    let inputs = inputs();
+    let images: Vec<&LinearImage> = inputs.iter().collect();
+    let image = &inputs[0];
+    let finite: Vec<f32> = image
+        .data
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .collect();
+    let analysis = StretchAnalysis::analyze(&finite, 1, 200_000).unwrap();
+    let core = ResolvedCore::from_analysis(
+        CoreCompression {
+            amount: 0.6,
+            threshold: 20.0,
+            scale: 8.0,
+        },
+        &analysis,
+    )
+    .unwrap();
+    let (reduced, width, height) = reduce_luminance(&image.data, image.width, image.height);
+    let maps = Arc::new(core.measure(&reduced, width, height));
+    assert!(!maps.core.is_empty());
+    let curve = ResolvedCurve::Mtf {
+        shadows: 0.0,
+        midtone: 0.2,
+        highlights: 1.0,
+    };
+    let compressed = Transfer::of([
+        TransferStage::Core(CoreStage::new(core, maps)),
+        TransferStage::Curve(curve),
+    ]);
+    let picture = Picture {
+        layers: vec![Layer::new(LayerKind::Input {
+            read: InputRead::new(0, compressed),
+            color: [1.0, 0.8, 0.6],
+            curve: 0.0,
+        })],
+        ..Picture::default()
+    };
+    let place: Vec<seiza_compose::gpu::GpuInput> = (0..3)
+        .map(|layer| seiza_compose::gpu::GpuInput { layer, scale: 1.0 })
+        .collect();
+    assert_eq!(
+        seiza_compose::gpu::GpuScene::new(&picture, &place).left_out,
+        Vec::<String>::new()
+    );
+    // The compression changes the picture: the plain curve gives more.
+    let plain = Picture {
+        layers: vec![Layer::new(LayerKind::Input {
+            read: InputRead::new(0, Transfer::of([TransferStage::Curve(curve)])),
+            color: [1.0, 0.8, 0.6],
+            curve: 0.0,
+        })],
+        ..Picture::default()
+    };
+    let source = ImageSource::new(images.clone()).unwrap();
+    let options = RenderOptions::default();
+    let with = render_image(&picture, &source, whole(image), &options)
+        .unwrap()
+        .data;
+    let without = render_image(&plain, &source, whole(image), &options)
+        .unwrap()
+        .data;
+    let lowered = with
+        .iter()
+        .zip(&without)
+        .filter(|(a, b)| a.is_finite() && b.is_finite() && **b - **a > 1e-3)
+        .count();
+    assert!(lowered > 50, "core compression lowered {lowered} samples");
+    let Some((cpu, gpu)) = both(&picture, &images) else {
+        eprintln!("no GPU: the GPU compositor was not checked");
+        return;
+    };
+    let (mean, p99, largest) = gap(&cpu, &gpu);
+    eprintln!("core compression: mean {mean:e}, p99 {p99:e}, max {largest:e}");
+    assert!(
+        mean < 2e-3 && p99 < 1e-2,
+        "mean {mean:e}, p99 {p99:e}, max {largest:e}"
+    );
+}

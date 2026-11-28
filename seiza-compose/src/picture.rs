@@ -8,7 +8,8 @@
 //! of its own, such as PSF Studio, builds its own.
 
 use seiza_stretch::{
-    HdrTail, LayeredMaps, ResolvedCurve, ResolvedLayered, ResolvedSampleDomain, StretchPlan,
+    HdrTail, LayeredMaps, ResolvedCore, ResolvedCurve, ResolvedLayered, ResolvedSampleDomain,
+    StretchPlan,
 };
 use std::sync::Arc;
 
@@ -45,6 +46,33 @@ pub enum TransferStage {
     /// with the core compression, HDR tail and contrast recovery its maps
     /// call for. It reads the maps at the sample's place in the picture.
     Layered(LayeredStage),
+    /// Core compression before a stretch: the sample brought toward the
+    /// background by the blurred log of the image at its place, so any
+    /// stretch after it sees a bright core's broad glow lowered. A transfer
+    /// has at most one stage that reads maps: this or [`Self::Layered`].
+    Core(CoreStage),
+}
+
+/// Core compression as a transfer stage: the resolved compression and the
+/// blurred log it reads, measured from the whole picture by
+/// [`ResolvedCore::measure`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct CoreStage {
+    pub core: ResolvedCore,
+    pub maps: Arc<LayeredMaps>,
+}
+
+impl CoreStage {
+    pub fn new(core: ResolvedCore, maps: Arc<LayeredMaps>) -> Self {
+        Self { core, maps }
+    }
+
+    /// A sample at picture pixel `(x, y)` compressed; with no place, a
+    /// sample alone, which reads no map and stays as it is.
+    pub fn map(&self, value: f32, at: Option<(usize, usize)>) -> f32 {
+        let base = at.and_then(|(x, y)| self.maps.sample(x, y).core);
+        self.core.compress(value, base)
+    }
 }
 
 /// A layered stretch as a transfer stage: the resolved stretch, its maps
@@ -245,6 +273,20 @@ impl Transfer {
                             *sample = tail.map(*curve, *sample);
                         }
                     })
+                }
+                TransferStage::Core(stage) => {
+                    for (index, sample) in samples.iter_mut().enumerate() {
+                        if !sample.is_finite() {
+                            continue;
+                        }
+                        let at = placed.map(|([x, y], width)| {
+                            (
+                                (x + (index % width.max(1)) as i64).max(0) as usize,
+                                (y + (index / width.max(1)) as i64).max(0) as usize,
+                            )
+                        });
+                        *sample = stage.map(*sample, at);
+                    }
                 }
                 TransferStage::Layered(stage) => {
                     let luminance = stage.luminance.and_then(planes);
