@@ -34,6 +34,13 @@ to it (`layers`): the starless image, the halos, the spikes, and the stars'
 cores and wings, which is what is left and carries their photon noise. Of
 the halos, a chosen share goes back into the starless image and the rest
 with the stars (`kept`), so halo reduction is a setting.
+
+The spikes are sparse: a pixel near a bright star holds one on some
+telescopes and not on most. A penalty that seeks the median leaves such a
+pixel at zero until the network can tell where spikes run, which it learns
+only by first leaning toward them, so the spike layer can be penalised as
+squared error up to an error of its own (`Settings.spike_quadratic`, as the
+Charbonnier penalty's epsilon) and weighed up (`Settings.spike_weight`).
 """
 
 from __future__ import annotations
@@ -75,14 +82,19 @@ LAYER_WEIGHT = 1.0
 @dataclass(frozen=True)
 class Settings:
     """What a run reads and how: `way` (`READS`), the tile's side, the
-    network's width and levels, and whether it gives the halos and spikes
-    as layers of their own (`LAYERS`)."""
+    network's width and levels, whether it gives the halos and spikes as
+    layers of their own (`LAYERS`), and with them the spike layer's penalty:
+    quadratic up to an error of `spike_quadratic` (compressed) and
+    `spike_weight` times as heavy as the starless image's. The defaults are
+    the penalty every other part has."""
 
     way: str = "fit"
     tile: int = 256
     width: int = 32
     levels: int = 5
     layers: bool = False
+    spike_quadratic: float = CHARBONNIER
+    spike_weight: float = LAYER_WEIGHT
 
     @property
     def outputs(self) -> int:
@@ -95,6 +107,9 @@ class Settings:
             raise ValueError(f"a starless run reads one of {sorted(READS)}, not {self.way}")
         if self.tile % 2 ** (self.levels - 1):
             raise ValueError(f"a tile of {self.tile} is not a multiple of {2 ** (self.levels - 1)}")
+        if self.spike_quadratic <= 0.0 or self.spike_weight < 0.0:
+            raise ValueError(f"a spike penalty quadratic to {self.spike_quadratic} and weighed "
+                             f"{self.spike_weight} times is not one")
 
 
 class Bank:
@@ -169,28 +184,34 @@ def batch_from(bank: Bank, indices: np.ndarray, settings: Settings, rng: np.rand
     return {key: torch.from_numpy(np.stack([found[key] for found in examples])) for key in examples[0]}
 
 
-def loss_of(model: torch.nn.Module, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor,
-                                                                              dict[str, torch.Tensor]]:
+def loss_of(model: torch.nn.Module, batch: dict[str, torch.Tensor], settings: Settings | None = None
+            ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
     """The run's loss on `batch`, its baseline's (the residual 0, and no
     halos or spikes), and their parts, detached: the starless image's
-    penalty and, with layers, each of `LAYERS`' (before `LAYER_WEIGHT`),
-    each beside its baseline's (`<part>_baseline`)."""
+    penalty and, with layers, each of `LAYERS`' (before its weight), each
+    beside its baseline's (`<part>_baseline`). The spike layer's penalty
+    and weight are `settings`' (the others' without)."""
+    settings = settings or Settings()
     out = model(batch["planes"])
     weight = batch["weight"]
     total = weight.sum().clamp_min(1.0)
 
-    def penalty(estimate: torch.Tensor, truth: torch.Tensor) -> torch.Tensor:
-        return (weight * torch.sqrt((estimate - truth) ** 2 + CHARBONNIER**2)).sum() / total
+    def penalty(estimate: torch.Tensor, truth: torch.Tensor, quadratic: float = CHARBONNIER) -> torch.Tensor:
+        # Charbonnier, quadratic up to `quadratic`; less its own floor and
+        # plus the usual one, so every part reads from the same floor.
+        return (weight * (torch.sqrt((estimate - truth) ** 2 + quadratic**2) - quadratic + CHARBONNIER)).sum() / total
 
     run = penalty(batch["baseline"] + out[:, 0], batch["truth"])
     base = penalty(batch["baseline"], batch["truth"]).detach()
     parts = {"starless": run.detach(), "starless_baseline": base}
     for channel, name in enumerate(LAYERS[:out.shape[1] - 1], start=1):
-        part = penalty(out[:, channel], batch[name])
-        part_base = penalty(torch.zeros_like(batch[name]), batch[name]).detach()
+        quadratic, heavy = ((settings.spike_quadratic, settings.spike_weight) if name == "spikes"
+                            else (CHARBONNIER, LAYER_WEIGHT))
+        part = penalty(out[:, channel], batch[name], quadratic)
+        part_base = penalty(torch.zeros_like(batch[name]), batch[name], quadratic).detach()
         parts[name], parts[f"{name}_baseline"] = part.detach(), part_base
-        run = run + LAYER_WEIGHT * part
-        base = base + LAYER_WEIGHT * part_base
+        run = run + heavy * part
+        base = base + heavy * part_base
     return run, base, parts
 
 
@@ -244,7 +265,7 @@ def train(store: Store, *, name: str, bank: Path, validation_bank: Path | None, 
         with torch.no_grad():
             for found in checks:
                 moved = {key: value.to(where) for key, value in found.items()}
-                run_loss, base_loss, parts = loss_of(model, moved)
+                run_loss, base_loss, parts = loss_of(model, moved, settings)
                 for key, value in [("validation", float(run_loss)), ("validation_baseline", float(base_loss))] \
                         + [(f"validation_{part}", float(value)) for part, value in parts.items()]:
                     totals[key] = totals.get(key, 0.0) + value / len(checks)
@@ -256,7 +277,7 @@ def train(store: Store, *, name: str, bank: Path, validation_bank: Path | None, 
         rng = np.random.default_rng([seed, step])
         found = batch_from(train_bank, rng.integers(0, train_bank.count, batch), settings, rng)
         moved = {key: value.to(where) for key, value in found.items()}
-        run_loss, base_loss, parts = loss_of(model, moved)
+        run_loss, base_loss, parts = loss_of(model, moved, settings)
         optimizer.zero_grad(set_to_none=True)
         run_loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)

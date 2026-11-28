@@ -156,6 +156,50 @@ def test_a_layered_run_starts_with_no_halos_or_spikes_and_its_layers_add_back(sm
         sm.kept(layers, 1.5)
 
 
+def test_the_spike_penalty_is_a_setting_that_defaults_to_every_part_s(small_bank):
+    _, directory = small_bank
+    found = sm.Bank(directory)
+    plain = sm.Settings(way="image", tile=64, width=8, levels=3, layers=True)
+    eased = sm.Settings(way="image", tile=64, width=8, levels=3, layers=True, spike_quadratic=0.25,
+                        spike_weight=4.0)
+    torch.manual_seed(3)
+    model = ResidualUNet(inputs=len(sm.READS["image"]), outputs=plain.outputs, width=8, levels=3)
+    torch.nn.init.normal_(model.last.weight, std=0.05)
+    batch = sm.batch_from(found, np.array([0, 1]), plain, np.random.default_rng(2))
+    with torch.no_grad():
+        out = model(batch["planes"])
+        run, _, parts = sm.loss_of(model, batch, plain)
+        weight, total = batch["weight"], batch["weight"].sum()
+
+        def charbonnier(estimate, truth, quadratic):
+            return float((weight * (torch.sqrt((estimate - truth) ** 2 + quadratic**2) - quadratic
+                                    + sm.CHARBONNIER)).sum() / total)
+
+        # By default, the spikes are penalised as the starless image and the
+        # halos are, and weigh as the halos do; without settings, alike.
+        assert float(parts["spikes"]) == pytest.approx(charbonnier(out[:, 2], batch["spikes"], sm.CHARBONNIER))
+        assert float(run) == pytest.approx(float(parts["starless"]) + sm.LAYER_WEIGHT
+                                           * (float(parts["halos"]) + float(parts["spikes"])))
+        assert float(sm.loss_of(model, batch)[0]) == pytest.approx(float(run))
+        # Eased, only the spikes' part changes: quadratic to 0.25, from the
+        # same floor (a perfect estimate pays the usual epsilon), weighed four
+        # times.
+        run_eased, _, parts_eased = sm.loss_of(model, batch, eased)
+        assert float(parts_eased["starless"]) == pytest.approx(float(parts["starless"]))
+        assert float(parts_eased["halos"]) == pytest.approx(float(parts["halos"]))
+        assert float(parts_eased["spikes"]) == pytest.approx(charbonnier(out[:, 2], batch["spikes"], 0.25))
+        assert float(parts_eased["spikes"]) < float(parts["spikes"])
+        assert charbonnier(batch["spikes"], batch["spikes"], 0.25) == pytest.approx(
+            float((weight * sm.CHARBONNIER).sum() / total))
+        assert float(run_eased) == pytest.approx(float(parts["starless"]) + sm.LAYER_WEIGHT * float(parts["halos"])
+                                                 + 4.0 * float(parts_eased["spikes"]))
+    with pytest.raises(ValueError):
+        sm.Settings(layers=True, spike_quadratic=0.0)
+    # A run kept before the setting reads as the default penalty.
+    kept_before = {"way": "fit", "tile": 256, "width": 32, "levels": 5, "layers": True}
+    assert sm.Settings(**kept_before) == sm.Settings(layers=True)
+
+
 def test_a_short_layered_run_finds_the_spikes(small_bank):
     store, directory = small_bank
     record = sm.train(store, name="tiny-layers", bank=directory, validation_bank=directory,
