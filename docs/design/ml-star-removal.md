@@ -671,6 +671,12 @@ same 128 windows:
   image-only run has 5% less error than X14, less than X20 gains.
 - Fit-first stays ahead: 20% less error on the stars than image-only, at
   either length.
+- The long runs hold about a moved level better too. Stars' rms (48
+  windows) at their own level, then 3, 10 and 30 noise below: X19 0.417,
+  0.423, 0.449, 0.496 (X13 0.478 to 0.652); X20 0.499, 0.509, 0.514, 0.570
+  (X14 0.567 to 0.736).
+- The spikes' false dip halves with the training: 0.6% of the stars' light
+  below zero for both, from 1.1%.
 
 ### Galaxies
 
